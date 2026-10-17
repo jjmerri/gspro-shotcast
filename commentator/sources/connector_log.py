@@ -69,6 +69,9 @@ class ConnectorLogSource(ShotSource):
         self._offsets: dict[str, int] = {}
         self._bufs: dict[str, str] = {}
         self._primed = False
+        # When (monotonic) GSPconnect last wrote a message, heartbeats included: it writes one about
+        # every second while it's running, so a quiet log means it isn't the feed GSPro is using.
+        self.heard_at: float | None = None
 
     _ROLLOVER = re.compile(r".*\.txt(\.\d+)?$")
 
@@ -157,6 +160,8 @@ class ConnectorLogSource(ShotSource):
                 log.warning("Can't read %s: %s", self.path, e)
                 await asyncio.sleep(0.5)
                 continue
+            if any('"ShotNumber"' in ln for ln in lines):
+                self.heard_at = time.monotonic()
             try:
                 fresh = self.new_messages("\n".join(lines)) if lines else []
             except Exception:

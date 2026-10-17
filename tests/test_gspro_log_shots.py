@@ -51,6 +51,48 @@ def test_connector_log_falls_back_to_the_gspro_log(tmp_path):
     assert type(build_source(cfg)).__name__ == "GsproLogShotSource"
     (tmp_path / "GSPC").mkdir()
     (tmp_path / "GSPC" / "ConnectDebug.txt").write_text("")
-    assert type(build_source(cfg)).__name__ == "ConnectorLogSource"
+    assert type(build_source(cfg)).__name__ == "ConnectorWithLogFallback"
     cfg.source.type = "gspro_log"
     assert type(build_source(cfg)).__name__ == "GsproLogShotSource"
+
+
+class _Feed:
+    """A shot feed that yields the given (delay, event) pairs, then stays open like a live tail."""
+
+    def __init__(self, items, heard_at=None):
+        self.items, self.heard_at = items, heard_at
+
+    async def events(self):
+        for delay, ev in self.items:
+            await asyncio.sleep(delay)
+            yield ev
+        await asyncio.sleep(3600)
+
+
+def _take(src, n):
+    async def run():
+        out = []
+        async for ev in src.events():
+            out.append(ev)
+            if len(out) == n:
+                return out
+    return asyncio.run(asyncio.wait_for(run(), 2))
+
+
+def test_a_quiet_gspconnect_log_hands_shots_to_gsprolog():
+    import time
+
+    from commentator.sources.fallback import ConnectorWithLogFallback
+    drive = shot_from_launch(parse_launch(DRIVE))
+    from commentator.models import ShotEvent
+    # A leftover ConnectDebug.txt nobody writes: GSPro's log is the feed.
+    src = ConnectorWithLogFallback(_Feed([]), _Feed([(0, ShotEvent(shot=drive))]))
+    assert _take(src, 1)[0].shot is drive and src.using_log
+    # GSPconnect heartbeating: its shot is the one kept, the log's copy of it dropped.
+    conn = _Feed([(0.05, ShotEvent(shot=drive))], heard_at=time.monotonic())
+    log_copy = shot_from_launch(parse_launch(PUTT))
+    src = ConnectorWithLogFallback(conn, _Feed([(0, ShotEvent(shot=log_copy))]))
+    assert [e.shot for e in _take(src, 1)] == [drive] and not src.using_log
+    # Quiet for longer than the window: the log's shot is taken.
+    src = ConnectorWithLogFallback(_Feed([], heard_at=time.monotonic() - 60), _Feed([(0, ShotEvent(shot=log_copy))]))
+    assert _take(src, 1)[0].shot is log_copy

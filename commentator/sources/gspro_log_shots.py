@@ -52,8 +52,9 @@ def shot_from_launch(vals: dict[str, float]) -> Shot:
 class GsproLogShotSource(ShotSource):
     """Tails output_log.txt from its end and yields a shot for each `LaunchExt Vars` line."""
 
-    def __init__(self, path: str, poll_seconds: float = 0.1) -> None:
+    def __init__(self, path: str, poll_seconds: float = 0.1, backup: bool = False) -> None:
         self.path = path
+        self.backup = backup   # standing in for GSPconnect only while it's silent (sources/fallback.py)
         self.poll = poll_seconds
         self._offset: int | None = None
         self._buf = ""
@@ -79,7 +80,8 @@ class GsproLogShotSource(ShotSource):
         return parts[:-1]
 
     async def events(self) -> AsyncIterator[ShotEvent | HoleChangeEvent]:
-        log.info("Shot feed: GSPro's log %s (ball data only; no club data)", self.path)
+        log.info("%s: GSPro's log %s (ball data only; no club data)",
+                 "Backup shot feed, while GSPconnect is silent" if self.backup else "Shot feed", self.path)
         if not os.path.exists(self.path):
             log.warning("%s doesn't exist yet; waiting for GSPro to write it", self.path)
         while True:

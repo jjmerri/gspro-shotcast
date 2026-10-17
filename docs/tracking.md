@@ -40,7 +40,10 @@ The shot feeds:
 - **`connector_log`** (default): tails `ConnectDebug.txt`, where GSPro's GSPconnect logs every
   message from the launch monitor. Built and tested with a **Uneekor EYE XO2**. Other monitors
   that connect through GSPconnect likely log there too, but that's untested. If the file isn't
-  there at all, Shotcast falls back to `gspro_log` on its own (the booth log says so).
+  there at all, Shotcast uses `gspro_log` instead. If it's there but GSPconnect has gone quiet
+  (it writes a heartbeat about every second while running, so 30 s of silence means it isn't
+  the feed, e.g. a leftover file from an old setup or another connector in use), shots are taken
+  from GSPro's log until GSPconnect speaks again. The booth log notes each switch.
 - **`gspro_log`**: reads each shot from GSPro's own log, which records the ball data GSPro
   played (`LaunchExt Vars: sp 138.37, el 15.21, ...`) whatever sent it. Its numbers matched the
   Uneekor feed shot for shot, but it hasn't been run with other monitors yet. Use it if your

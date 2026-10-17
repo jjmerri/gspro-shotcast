@@ -22,8 +22,11 @@ def build_source(cfg: Config) -> ShotSource:
         return ReplaySource(cfg.source.replay_file, cfg.source.replay_speed)
     if cfg.source.type == "connector_log" and _connector_log_present(cfg.source.connector_log):
         from .connector_log import ConnectorLogSource
+        from .fallback import ConnectorWithLogFallback
+        from .gspro_log_shots import GsproLogShotSource
 
-        return ConnectorLogSource(cfg.source.connector_log)
+        return ConnectorWithLogFallback(ConnectorLogSource(cfg.source.connector_log),
+                                        GsproLogShotSource(cfg.source.gspro_log, backup=True))
     if cfg.source.type in ("connector_log", "gspro_log"):
         if cfg.source.type == "connector_log":
             log.warning("No GSPconnect log at %s; reading shots from GSPro's own log instead "

@@ -4484,9 +4484,10 @@ class Engine:
         last ran clean against (a change raises a warning a clean round clears)."""
         h = self.health
         files = {}
-        if self._log_truth:
+        feed = type(self.source).__name__
+        if self._log_truth or feed in ("GsproLogShotSource", "ConnectorWithLogFallback"):
             files["GSPro log"] = self.cfg.source.gspro_log
-        if type(self.source).__name__ == "ConnectorLogSource":   # not when it fell back to GSPro's log
+        if feed in ("ConnectorLogSource", "ConnectorWithLogFallback"):   # not GSPro's log alone
             files["connector log"] = self.cfg.source.connector_log
         check_files(h, files)
         if self._log_truth:
