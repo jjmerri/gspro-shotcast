@@ -240,7 +240,15 @@ function mine() {
   state.mine = { key, loading: true };
   getJSON(`v/${site.version}/player/${state.ctx || "all"}/${p.file}.json`).then(
     data => { if (state.mine.key === key) { state.mine = { key, data }; render(); } },
-    e => { if (state.mine.key === key) { state.mine = { key, error: e.message }; render(); } });
+    async e => {
+      if (state.mine.key !== key) return;
+      // Open across a couple of publishes: this version is gone, so reload onto the newest.
+      const latest = await getJSON("latest.json", { cache: "no-store" }).catch(() => null);
+      if (state.mine.key !== key) return;
+      if (latest && latest.version !== site.version) { state.mine = null; load(); return; }
+      state.mine = { key, error: e.message };
+      render();
+    });
   return state.mine;
 }
 
@@ -257,7 +265,7 @@ const meTitle = (t) => state.me ? `${t} · ${esc(state.me)}` : t;
 
 function writeHash() {
   const q = new URLSearchParams();
-  if (state.me) q.set("player", state.me);
+  q.set("player", state.me);   // empty = Everyone, so the link doesn't fall back to the recipient's pick
   if (state.ctx) q.set("ctx", state.ctx);
   if (state.tab === "shots") for (const k of SHOT_LINK_KEYS) if (state.shotFilter[k]) q.set(k, state.shotFilter[k]);
   const h = "#" + state.tab + (q.toString() ? "?" + q : "");
@@ -382,9 +390,12 @@ function renderPlayers() {
     <td>${dash(p.sand_pct, "%")} <span class="sub">${frac(p.sand)}</span></td>
     <td>${dash(p.putts_per_hole)}</td><td>${dash(p.birdie_pct, "%")}</td>
     <td>${dash(p.avg_drive, " yd")}</td><td>${dash(p.longest_drive, " yd")}</td></tr>`;
-  let html = `<h2>Players</h2>` + sortable("players", d.players, cols, row, { key: "avg_to_par_9" });
-  const p = d.players.find(p => p.name === state.player)
-    || [...d.players].sort((a, b) => b.rounds - a.rounds || b.holes - a.holes)[0];
+  if (state.me && !d.players.some(p => p.name === state.me))
+    return `<h2>${meTitle("Players")}</h2><p class="empty">${esc(state.me)} has no rounds in this view.</p>`;
+  const shown = state.me ? d.players.filter(p => p.name === state.me) : d.players;
+  let html = `<h2>${meTitle("Players")}</h2>` + sortable("players", shown, cols, row, { key: "avg_to_par_9" });
+  const p = shown.find(p => p.name === (state.me || state.player))
+    || [...shown].sort((a, b) => b.rounds - a.rounds || b.holes - a.holes)[0];
   if (p) { state.player = p.name; html += renderPlayer(p); }
   return html;
 }
