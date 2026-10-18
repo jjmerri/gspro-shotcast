@@ -9,7 +9,8 @@ Shot tracking, season stats and an AI broadcast booth for **GSPro 3.1.x** simula
   putts, scrambling). It all goes into one local SQLite file. No cloud services, accounts or API
   keys needed.
 - **Stats web page.** Strokes gained, club gapping, approach and putting by distance, scorecards,
-  every shot, and season highlights, in a local page over that file.
+  every shot, and season highlights, in a local page over that file. Optionally published online
+  after every round, behind a password, so the whole league can check their numbers from a phone.
 - **The booth.** Two AI commentators call your round live through the speakers. They know the
   launch numbers, the course, your league's standings and storylines, and what you did last
   week. Bring your own league: put your roster, schedule and storylines in a league file and the
@@ -36,6 +37,12 @@ where it finished and what it scored, plus each round's card and stats. The stat
 strokes gained, club gapping, approach and putting by distance, scorecards, every shot, and
 season highlights. Works with any launch monitor GSPro supports; see
 [what's recorded with yours](docs/tracking.md#launch-monitors).
+
+**Share it with your league.** The booth can publish the stats page as a password-protected
+website (your own AWS account: S3 behind CloudFront, pennies a month or free) and update it on its
+own after every round. Each player can pick themselves to see just their rounds, shots and records,
+and send a link to exactly what they're looking at. Setup is one CloudFormation stack; see
+[Sharing the stats page](docs/tracking.md#sharing-the-stats-page).
 
 ## The booth
 
