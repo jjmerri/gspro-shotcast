@@ -7,7 +7,8 @@ speaks again, its shots (with club data) win and the log's copies are dropped as
 
 GSPconnect can also skip a single shot while it keeps heartbeating (GSPro played it; ConnectDebug.txt
 never logged it). So each log shot is held for two seconds: one GSPconnect sends too (the same
-ball speed) is dropped, and one it never sends is taken from the log.
+ball speed) is dropped, and one it never sends is taken from the log. Copies pair one to one, and a
+GSPconnect copy that turns up after its shot was taken from the log is dropped too.
 """
 
 import asyncio
@@ -23,6 +24,7 @@ log = logging.getLogger(__name__)
 QUIET_SECONDS = 30.0
 MISSED_AFTER = 2.0      # a log shot GSPconnect hasn't sent by now, it skipped (both feeds see a shot within a second)
 SAME_SPEED = 0.05       # mph: the log rounds ball speed to two decimals
+CAPTURE_AFTER = 0.5     # a held shot's impact state is taken this soon: the ball is still in the air
 MATCH_WINDOW = 30.0     # how far apart the two copies of one shot can arrive
 
 
@@ -38,6 +40,9 @@ class ConnectorWithLogFallback(ShotSource):
         self.quiet_seconds = quiet_seconds
         self.missed_after = missed_after
         self.using_log = False
+        # Called with a held log shot while its ball is still in the air, so the booth can snapshot
+        # its impact-time state (counters, hole, the screen) for when it airs late.
+        self.on_impact = None
 
     def connector_live(self) -> bool:
         heard = self.connector.heard_at
@@ -59,43 +64,75 @@ class ConnectorWithLogFallback(ShotSource):
         tasks = [asyncio.create_task(pump("connector", self.connector), name="feed-connector"),
                  asyncio.create_task(pump("gspro_log", self.gspro_log), name="feed-gspro-log")]
         done = 0
-        sent: list[tuple[float, float]] = []      # (when, ball speed) of GSPconnect's recent shots
-        held: list[tuple[float, object]] = []     # (deadline, event): log shots GSPconnect should send
+        # Each physical shot reaches both feeds; copies are paired one to one, oldest first.
+        sent: list[tuple[float, float]] = []       # GSPconnect shots whose log copy hasn't come yet
+        filled: list[tuple[float, float]] = []     # log shots aired as skipped, in case GSPconnect was just late
+        held: list[list] = []                      # [arrived, event, captured]: log shots GSPconnect should send
 
-        def match(speed: float | None, now: float) -> bool:
-            return speed is not None and any(now - t < MATCH_WINDOW and abs(s - speed) <= SAME_SPEED
-                                             for t, s in sent)
+        def take(pool: list, speed: float | None, now: float) -> bool:
+            pool[:] = [x for x in pool if now - x[0] < MATCH_WINDOW]
+            if speed is not None:
+                for x in pool:
+                    if abs(x[1] - speed) <= SAME_SPEED:
+                        pool.remove(x)
+                        return True
+            return False
+
+        def next_wake() -> float | None:
+            times = [h[0] + (self.missed_after if h[2] else min(CAPTURE_AFTER, self.missed_after)) for h in held]
+            return min(times) if times else None
         try:
             while done < len(tasks) or held:
                 now = time.monotonic()
-                for item in [h for h in held if h[0] <= now]:
-                    held.remove(item)
+                for h in held:
+                    if not h[2] and now - h[0] >= min(CAPTURE_AFTER, self.missed_after):
+                        h[2] = True
+                        if self.on_impact is not None:
+                            self.on_impact(h[1])   # the booth's state while this shot is in the air
+                for h in [h for h in held if now - h[0] >= self.missed_after]:
+                    held.remove(h)
                     log.warning("GSPconnect skipped a shot GSPro played (ball speed %s): taking it from "
-                                "GSPro's log (ball data only)", _speed(item[1]))
-                    yield item[1]
+                                "GSPro's log (ball data only)", _speed(h[1]))
+                    if (speed := _speed(h[1])) is not None:
+                        filled.append((h[0], speed))
+                    yield h[1]
                 if done >= len(tasks) and not held:
                     break
                 try:
-                    timeout = max(0.0, min(h[0] for h in held) - now) if held else None
+                    wake = next_wake()
+                    timeout = max(0.0, wake - now) if wake is not None else None
                     name, ev = await asyncio.wait_for(queue.get(), timeout)
                 except asyncio.TimeoutError:
                     continue
                 if ev is None:
                     done += 1
                     continue
+                now = time.monotonic()
                 if name == "connector":
                     if self.using_log:
                         self.using_log = False
                         log.info("GSPconnect is back: taking shots from it again")
                     if (speed := _speed(ev)) is not None:
-                        now = time.monotonic()
-                        sent[:] = [x for x in sent if now - x[0] < MATCH_WINDOW] + [(now, speed)]
-                        held[:] = [h for h in held if abs((_speed(h[1]) or -1) - speed) > SAME_SPEED]
+                        # Shots already aired from the log are older than any still held.
+                        if take(filled, speed, now):
+                            log.warning("GSPconnect sent a shot late (ball speed %s), after it was taken from "
+                                        "GSPro's log: dropped", speed)
+                            continue
+                        twin = next((h for h in held if abs((_speed(h[1]) or -1) - speed) <= SAME_SPEED), None)
+                        if twin is not None:
+                            held.remove(twin)
+                            if twin[2] and isinstance(ev, ShotEvent):
+                                # Late enough that the booth already took the impact state: keep it.
+                                ev.impact_at = twin[1].impact_at
+                                ev.impact_state = twin[1].impact_state
+                                ev.impact_read = twin[1].impact_read
+                        else:
+                            sent.append((now, speed))
                     yield ev
                 elif self.connector_live():
                     # GSPconnect normally has this shot too, with club data; hold it in case it doesn't.
-                    if isinstance(ev, ShotEvent) and not match(_speed(ev), time.monotonic()):
-                        held.append((time.monotonic() + self.missed_after, ev))
+                    if isinstance(ev, ShotEvent) and not take(sent, _speed(ev), now):
+                        held.append([now, ev, False])
                     continue
                 else:
                     if not self.using_log:

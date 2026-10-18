@@ -128,6 +128,10 @@ class ShotEvent:
     impact_image: bytes | None = None
     # Wall-clock time the shot feed wrote the message, when it says (GSPconnect's log does).
     logged_at: float | None = None
+    # A feed that delivers a shot late fills these in at impact (monotonic time, the booth's snapshot).
+    impact_at: float | None = None
+    impact_state: Any = None
+    impact_read: Any = None     # the booth's screen read at impact (a task)
 
 
 @dataclass

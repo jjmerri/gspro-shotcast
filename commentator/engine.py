@@ -263,6 +263,8 @@ class Engine:
         self._follower: GsproLogFollower | None = None
         self.league = league
         self.source = source
+        if hasattr(source, "on_impact"):
+            source.on_impact = self._capture_impact
         self.live_llm = live_llm
         self.segment_llm = segment_llm
         self.flight_llm = flight_llm or live_llm
@@ -2256,14 +2258,7 @@ class Engine:
 
     # ---- the shot -------------------------------------------------------------------------
 
-    async def handle_shot(self, event: ShotEvent) -> None:
-        if self._on_range():
-            log.info("Range shot ignored (club %s, carry %.1f)", event.shot.club, event.shot.carry or 0)
-            return
-        impact = time.monotonic()
-        self._last_activity = impact
-        self._cancel_preshot()
-        self._shot_id = None  # set once this shot is recorded; mid-flight lines come before that
+    def _impact_state(self) -> tuple:
         # Snapshot this player's per-index log state at impact, BEFORE _follow_shot advances the log to
         # the next shot's setup. Used to resolve the previous shot's finishing distance (this shot's
         # setup distance is where the previous ball came to rest) and to baseline this putt's outcome.
@@ -2277,10 +2272,57 @@ class Engine:
         fires0 = gs.fires   # GSPro's shot counter at impact, to find this shot's putting/regular mode
         setups0 = dict(gs.setups_by)   # each player's setups so far: the next one settles this shot
         lies0 = dict(gs.lie_by)   # each ball's logged surface going into this shot
+        return impact_snap, fires0, setups0, lies0
+
+    async def _read_impact_hud(self, tag: str) -> tuple:
+        """The screen at impact: the player box still describes this shot (who, shot number,
+        distance to the pin), the minimap still shows the lie it was hit from, and CARRY (raw) has
+        just appeared."""
+        ocr = self.cfg.screen.ocr
+        wants_image = self.cfg.screen.send_images and self.flight_llm.cfg.vision and self.commentary_on
+        # Only what the reaction and the carry model actually use. Slope isn't read here (unused
+        # once the ball is struck). The club box: with local-CPU TTS (Kokoro) it's skipped and we
+        # fall back to the loft-guessed club, to keep OCR off the synth's back; with cloud audio
+        # nothing contends for the cores, so read GSPro's own club box (it beats the loft guess,
+        # which misfired as "driver" on a mishit).
+        regions = ["player_name", "player_box", "lie", "tiles", "tiles_left"]
+        if self.cfg.tts.provider != "kokoro":
+            regions.append("club")
+        before, impact_image = await asyncio.gather(
+            self.screen.read_hud_async(regions) if ocr else asyncio.sleep(0, Hud()),
+            self.screen.snapshot_jpeg() if wants_image else asyncio.sleep(0, None),
+        )
+        if ocr and before.lie and before.name_sig not in (None, NAME_DARK):
+            # The regions are grabbed one after another, not from one frame: if the name cell
+            # changed by the end of the read, the lie may be the next player's ball.
+            after = await self.screen.read_hud_async(["player_name"])
+            if name_sig_changed(before.name_sig, after.name_sig):
+                log.info("%s the player box changed during the impact read; lie %s dropped", tag, before.lie)
+                before.lie = None
+        return before, impact_image
+
+    def _capture_impact(self, event: ShotEvent) -> None:
+        event.impact_at = time.monotonic()
+        event.impact_state = (self._impact_state(), self.state.current_hole, self.current_par)
+        # Read the screen now, while it still shows this shot's player, lie and tiles.
+        if self.screen is not None and event.hud_hint is None:
+            event.impact_read = asyncio.ensure_future(self._read_impact_hud("[held shot]"))
+
+    async def handle_shot(self, event: ShotEvent) -> None:
+        if self._on_range():
+            log.info("Range shot ignored (club %s, carry %.1f)", event.shot.club, event.shot.carry or 0)
+            return
+        # A shot the feed held back (GSPconnect skipped it) carries its impact time and state.
+        impact = event.impact_at or time.monotonic()
+        self._last_activity = time.monotonic()
+        self._cancel_preshot()
+        self._shot_id = None  # set once this shot is recorded; mid-flight lines come before that
+        held = event.impact_state
+        impact_snap, fires0, setups0, lies0 = held[0] if held else self._impact_state()
         self._apply_log_corrections()
         # The reaction runs in the background and may finish after the hole has changed; pin the
         # hole and par to this shot so a late reaction still talks about the right hole.
-        shot_hole, shot_par = self.state.current_hole, self.current_par
+        shot_hole, shot_par = held[1:] if held else (self.state.current_hole, self.current_par)
         shot = event.shot
         self._shot_seq += 1
         my_seq = self._shot_seq   # this shot's order, to keep concurrent handlers from reordering finish
@@ -2334,26 +2376,8 @@ class Engine:
         before = event.impact_hud_hint or Hud()
         impact_image = event.impact_image
         if use_screen:
-            wants_image = self.cfg.screen.send_images and self.flight_llm.cfg.vision and self.commentary_on
-            # Only what the reaction and the carry model actually use. Slope isn't read here (unused
-            # once the ball is struck). The club box: with local-CPU TTS (Kokoro) it's skipped and we
-            # fall back to the loft-guessed club, to keep OCR off the synth's back; with cloud audio
-            # nothing contends for the cores, so read GSPro's own club box (it beats the loft guess,
-            # which misfired as "driver" on a mishit).
-            regions = ["player_name", "player_box", "lie", "tiles", "tiles_left"]
-            if self.cfg.tts.provider != "kokoro":
-                regions.append("club")
-            before, impact_image = await asyncio.gather(
-                self.screen.read_hud_async(regions) if ocr else asyncio.sleep(0, Hud()),
-                self.screen.snapshot_jpeg() if wants_image else asyncio.sleep(0, None),
-            )
-            if ocr and before.lie and before.name_sig not in (None, NAME_DARK):
-                # The regions are grabbed one after another, not from one frame: if the name cell
-                # changed by the end of the read, the lie may be the next player's ball.
-                after = await self.screen.read_hud_async(["player_name"])
-                if name_sig_changed(before.name_sig, after.name_sig):
-                    log.info("%s the player box changed during the impact read; lie %s dropped", tag, before.lie)
-                    before.lie = None
+            read = getattr(event, "impact_read", None)
+            before, impact_image = await (read if read is not None else self._read_impact_hud(tag))
             self._use_setup_lie(before, tag)
         player = self._player(before.player_text, event.player_hint)
         # GSPro's own club box beats guessing the club from loft.
