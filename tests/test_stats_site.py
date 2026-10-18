@@ -176,12 +176,17 @@ def test_shots_are_put_in_the_round_that_ended_next_on_their_course(tmp_path):
     next_round = shot(2, 150, "Riviera")
     shot(2, 400, "Riviera")                                                       # after the last round: none
     riviera = side(2, 200, "Riviera", "Ann")
+    abandoned = shot(2, 1000, "Kapalua")                                          # a round never recorded...
+    kapalua_shot = shot(2, 2 * 86400, "Kapalua")
+    kapalua = side(2, 2 * 86400 + 100, "KAPALUA", "Ann")                          # ...days before this one
     db.commit()
     with closing(stats_web.connect(path)) as ro:
-        assert stats_web.shot_rounds(ro) == {before_restart: ann, after_restart: ann, next_round: riviera}
-        assert {r["id"]: r["round"] for r in stats_web.rounds(ro)} == {ann: ann, bob: ann, riviera: riviera}
+        got = stats_web.shot_rounds(ro)
+        assert abandoned not in got and got.pop(kapalua_shot) == kapalua
+        assert got == {before_restart: ann, after_restart: ann, next_round: riviera}
+        assert {r["id"]: r["round"] for r in stats_web.rounds(ro) if r["id"] != kapalua} == {ann: ann, bob: ann, riviera: riviera}
         # Bob's side counts as his round even with no tracked shots; Ann's shots put her in both sides' rounds
-        assert {r["id"]: r["players"] for r in stats_web.rounds(ro)} == {ann: ["Ann"], bob: ["Ann", "Bob"], riviera: ["Ann"]}
+        assert {r["id"]: r["players"] for r in stats_web.rounds(ro) if r["id"] != kapalua} == {ann: ["Ann"], bob: ["Ann", "Bob"], riviera: ["Ann"]}
     db.close()
     site = tmp_path / "site"
     vdir = site / "v" / stats_site.build(path, site)

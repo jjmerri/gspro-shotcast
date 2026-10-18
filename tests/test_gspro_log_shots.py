@@ -179,7 +179,7 @@ def test_the_booth_snapshots_a_held_shot_at_impact(tmp_path):
     ev = ShotEvent(shot=shot_from_launch(parse_launch(PUTT)))
     src.on_impact(ev)
     engine.gspro.hole_outs_by[0] = engine.gspro.hole_outs_by.get(0, 0) + 1   # it drops during the hold
-    (snap, *_), hole, _par = ev.impact_state
+    (snap, *_), hole, _par, _round, _seq = ev.impact_state
     assert ev.impact_at is not None and snap[2].get(0, 0) == engine.gspro.hole_outs_by[0] - 1
     assert hole == engine.state.current_hole
 

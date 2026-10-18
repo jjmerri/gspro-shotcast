@@ -152,6 +152,9 @@ def test_player_matching_tolerates_ocr_noise():
     assert league.match_player("MikeD") == "Mike"
     assert league.match_player("Player: SarahK  Hcp 9.4") == "Sarah"
     assert league.match_player("Big T") == "Tony"
+    both = League({"teams": [{"name": "A", "players": [{"name": "Dan"}, {"name": "Daniel"}]}]})
+    assert both.match_player("Daniel E Shot 1 350 yds") == "Daniel"
+    assert both.match_player("Dan E Shot 1 350 yds") == "Dan"
     assert league.match_player("Priyaa") == "Priya"
     assert league.match_player("Nobody") is None
     # GSPro lists the other players under the active one; the first name is the one hitting.
@@ -1366,6 +1369,23 @@ def test_a_stroke_played_on_is_not_holed(tmp_path):
     ace = rec(1, "7I", hole="Hole 16, par 3, 150 yards", outcome="holed")
     rec(1, "7I", hole="Hole 16, par 3, 150 yards")
     assert outcome(ace) == "holed"
+
+
+def test_a_scramble_shot_isnt_finished_from_the_next_stroke(tmp_path):
+    from commentator.hud import Hud
+    from commentator.models import Shot
+    from commentator.store import Store
+
+    s = Store(str(tmp_path / "s.db"))
+
+    def rec(n, club, yards):
+        return s.record_shot(player="Josh", hole="Hole 1, par 4, 400 yards", shot=Shot(club=club),
+                             before=Hud(lie="fairway", shot_number=n), after=Hud(), tags=[], carry_game_yards=None,
+                             total_yards=None, offline_yards=None, to_pin_yards=yards, fmt="scramble")
+
+    approach = rec(2, "8I", 150)
+    rec(3, "PT", 2)   # played from the partner's ball, not where Josh's approach finished
+    assert s.db.execute("SELECT finish_yards FROM shots WHERE id = ?", (approach,)).fetchone()[0] is None
 
 
 def test_a_shot_finishes_where_the_next_stroke_starts(tmp_path):

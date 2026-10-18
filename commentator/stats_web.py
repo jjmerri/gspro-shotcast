@@ -70,6 +70,7 @@ def _counts(complete, played) -> bool:
 
 
 ROUND_GAP_SECONDS = 30   # a round's sides are stored a moment apart; separate rounds are minutes apart
+ROUND_SPAN_SECONDS = 8 * 3600   # no round takes longer: an older shot was in a round never recorded
 
 
 def round_groups(db: sqlite3.Connection) -> tuple[list[dict[str, Any]], dict[int, int]]:
@@ -91,14 +92,17 @@ def round_groups(db: sqlite3.Connection) -> tuple[list[dict[str, Any]], dict[int
 
 def shot_rounds(db: sqlite3.Connection) -> dict[int, int]:
     """Each shot's round: shots aren't stored with one, so it's the round that ended next after the
-    shot (and after the round before it), when that round was on the shot's course. Shots of a round
-    that was never finished and recorded have none."""
+    shot (and after the round before it), when that round was on the shot's course and ended within a
+    round's length of it (a booth restart mid-round keeps its shots). Shots of a round that was never
+    finished and recorded have none."""
     groups, _ = round_groups(db)
     ends = [g["end"] for g in groups]
     out = {}
     for sid, ts, course in db.execute("SELECT id, ts, course FROM shots"):
         i = bisect.bisect_left(ends, ts)
-        if i < len(groups) and groups[i]["course"] == course:
+        # (a course name read off the scorecard is in capitals)
+        if i < len(groups) and (groups[i]["course"] or "").casefold() == (course or "").casefold() \
+                and groups[i]["end"] - ts <= ROUND_SPAN_SECONDS:
             out[sid] = groups[i]["round"]
     return out
 

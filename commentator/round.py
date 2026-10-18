@@ -511,7 +511,9 @@ class Round:
             conceded = score - numbers[-1] if score is not None and numbers and score > numbers[-1] \
                 and not picked else 0
             putts = len(putt_recs) + (conceded if on_green else 0)
-            if putts and self.format != "scramble":
+            # Holed from off the green (a chip-in, an ace): the card ends on a tracked full shot.
+            holed_off = not putt_recs and bool(numbers) and score == numbers[-1] and all(r.lie_before for r in recs)
+            if (putts or holed_off) and self.format != "scramble":
                 stats.putts += putts
                 stats.putt_holes += 1
                 stats.one_putts += putts == 1
@@ -601,7 +603,9 @@ class Round:
             conceded = score - numbers[-1] if score is not None and numbers and score > numbers[-1] \
                 and not picked else 0
             putts = len(putt_recs) + (conceded if on_green else 0)
-            if putts and self.format != "scramble":
+            # Holed from off the green (a chip-in, an ace): the card ends on a tracked full shot.
+            holed_off = not putt_recs and bool(numbers) and score == numbers[-1] and all(r.lie_before for r in recs)
+            if (putts or holed_off) and self.format != "scramble":
                 stats.putts += putts
                 stats.putt_holes += 1
                 stats.one_putts += putts == 1

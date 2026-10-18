@@ -88,10 +88,11 @@ class League:
         if lowered in self._aliases:
             return self._aliases[lowered]
         # The active player's name comes first; other players can follow in the same text.
-        found = [(lowered.find(alias), name) for alias, name in self._aliases.items()
+        # At the same spot the longest name wins ("Daniel" over "Dan").
+        found = [(lowered.find(alias), -len(alias), name) for alias, name in self._aliases.items()
                  if len(alias) >= 3 and alias in lowered]
         if found:
-            return min(found)[1]
+            return min(found)[2]
         close = difflib.get_close_matches(lowered, list(self._aliases), n=1, cutoff=0.75)
         return self._aliases[close[0]] if close else None
 

@@ -1091,6 +1091,12 @@ class Engine:
         for text in texts:
             if name := self.league.match_player(text):
                 return name
+        # Not on the league roster (no league file, or a guest): the round's own GSPro names.
+        r = self.round
+        if r and not r.ended and texts and texts[0]:
+            raw = re.split(r"\s+(?:E|[+-]\d+|Shot)\b", texts[0].strip(), maxsplit=1)[0].strip().casefold()
+            if name := next((n for n in r.roster if n and n.casefold() == raw), None):
+                return name
         return next((t for t in texts[1:] if t), None)
 
     def _anonymous(self, player: str | None) -> bool:
@@ -2301,9 +2307,15 @@ class Engine:
                 before.lie = None
         return before, impact_image
 
+    def _impact_hole(self) -> tuple:
+        """(hole, par, round, the round's hole number) the shot was struck on: a hole change while
+        its handler is still reading mustn't move it to the next hole."""
+        r = self.round if self.round and not self.round.ended else None
+        return self.state.current_hole, self.current_par, r, r.seq if r else None
+
     def _capture_impact(self, event: ShotEvent) -> None:
         event.impact_at = time.monotonic()
-        event.impact_state = (self._impact_state(), self.state.current_hole, self.current_par)
+        event.impact_state = (self._impact_state(), *self._impact_hole())
         # Read the screen now, while it still shows this shot's player, lie and tiles.
         if self.screen is not None and event.hud_hint is None:
             event.impact_read = asyncio.ensure_future(self._read_impact_hud("[held shot]"))
@@ -2322,7 +2334,7 @@ class Engine:
         self._apply_log_corrections()
         # The reaction runs in the background and may finish after the hole has changed; pin the
         # hole and par to this shot so a late reaction still talks about the right hole.
-        shot_hole, shot_par = held[1:] if held else (self.state.current_hole, self.current_par)
+        shot_hole, shot_par, shot_round, round_hole = held[1:] if held else self._impact_hole()
         shot = event.shot
         self._shot_seq += 1
         my_seq = self._shot_seq   # this shot's order, to keep concurrent handlers from reordering finish
@@ -2490,7 +2502,10 @@ class Engine:
             game = correct_for_elevation(carry_game, before.elevation_yards, to_yards(before.to_pin), learn_carry)
             self.carry.observe(before.lie, learn_carry, game, self.current_course, shot.vla, learn_base)
         if flight_task:
-            await flight_task  # bounded by the flight deadline; keeps the call ahead of the reaction
+            try:
+                await flight_task  # bounded by the flight deadline; keeps the call ahead of the reaction
+            except Exception:   # a failed call mustn't cost the shot its record
+                log.warning("%s mid-flight call failed", tag, exc_info=True)
 
         prior = self.state.player_shots(player or "unknown")
         score, tags = score_shot(shot, prior, hud)
@@ -2556,10 +2571,10 @@ class Engine:
             before = replace(before, lie=played_from)
         if not shot.is_putt and "in_water" not in tags and self._shot_wet(player, since=impact):
             tags = [*tags, "in_water"]   # the GSPro log saw the splash: the wrap can say where it went
-        r = self.round if self.round and not self.round.ended else None
+        r = shot_round
         rec = ShotRecord(
             player or "unknown", shot, shot_hole, hud, tags,
-            round_id=r.id if r else None, hole_seq=r.seq if r else None, par=shot_par,
+            round_id=r.id if r else None, hole_seq=round_hole, par=shot_par,
             lie_before=before.lie, shot_number=before.shot_number, to_pin_before=before.to_pin,
         )
         self.state.record_shot(rec)

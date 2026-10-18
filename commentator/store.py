@@ -209,13 +209,15 @@ class Store:
         return cur.lastrowid
 
     _FINISH_COLS = "id, session_id, player, hole, shot_number, is_putt, outcome, mulligan, attributed, " \
-                   "to_pin_yards, finish_yards, gimme_yards"
+                   "to_pin_yards, finish_yards, gimme_yards, fmt"
 
     def _finish_from_next(self, prev: sqlite3.Row, nxt: sqlite3.Row) -> float | None:
         """Where a full shot finished, read off the same player's next stroke: that stroke's distance to
         the pin, or the gimme radius when it's the conceded tap-in. Only for the very next stroke on the
         same hole (a penalty in between means the next was played from a drop, not where the ball lay)."""
         if prev["is_putt"] or prev["mulligan"] or prev["finish_yards"] is not None or prev["outcome"] == "gimme":
+            return None
+        if prev["fmt"] == "scramble":   # the next stroke may be from a partner's ball
             return None
         if not self._same_hole_next(prev, nxt) or nxt["shot_number"] != prev["shot_number"] + 1:
             return None

@@ -1819,6 +1819,23 @@ def test_a_tee_shot_conceded_inside_the_gimme_is_a_one_putt_hole():
     assert st.putts == 1 and st.putt_holes == 1
 
 
+def test_a_chip_in_is_a_zero_putt_hole():
+    r = Round(league=LEAGUE, gspro_players=["Mike"], course="X", scheduled_format=None, holes=2)
+    r.par = {1: 4, 2: 4}
+    r.card_scores = {"Mike": {1: 3, 2: 4}}
+    r.scorecard_seen = True
+    shots = [rec("Mike", 1, 4, 1, "tee", "fairway", "DR"), rec("Mike", 1, 4, 2, "fairway", "rough", "8I"),
+             rec("Mike", 1, 4, 3, "rough", "green", "SW"),   # chipped in
+             rec("Mike", 2, 4, 1, "tee", "fairway", "DR"), rec("Mike", 2, 4, 2, "fairway", "green", "8I"),
+             rec("Mike", 2, 4, 3, "green", "green", "PT"), rec("Mike", 2, 4, 4, "green", "green", "PT")]
+    for s in shots:
+        s.round_id = r.id
+    st = r.player_stats("Mike", shots)
+    assert st.putts == 2 and st.putt_holes == 2
+    side = r.side_stats(r.sides[0], shots)
+    assert side.putts == 2 and side.putt_holes == 2
+
+
 def _solo(card, pars, holes=1):
     r = Round(league=LEAGUE, gspro_players=["Mike"], course="X", scheduled_format=None, holes=holes)
     r.par = pars
@@ -2098,3 +2115,13 @@ async def test_setup_shamble_stops_the_log_calling_it_a_scramble(tmp_path):
     e.gspro.teammates.add(frozenset((0, 1)))
     e._apply_log_corrections()
     assert r.no_scramble and r.format is None
+
+
+def test_without_a_league_the_shot_goes_to_the_rounds_gspro_name(tmp_path):
+    from commentator.league import League
+    e = _engine(tmp_path)
+    e.league = League.load(None)
+    assert e._player("Alex E Shot 1 350 yds", None) is None          # no round yet
+    e._start_round(e._build_round(["Alex", "Sam"], "Somewhere", {"hole_count": 9}, is_league=False))
+    assert e._player("Alex E Shot 1 350 yds", None) == "Alex"
+    assert e._player("SAM +1 Shot 2 120 yds", None) == "Sam"
