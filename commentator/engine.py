@@ -3911,16 +3911,18 @@ class Engine:
                 slot_order, slot_cache, gate_cache = [], {}, {}
                 continue
             p = self._pending_opening
+            held = False
             if p is not None:
                 if time.monotonic() - p.created > c.preround_ttl_seconds:
                     log.info("Prepared opener expired unused; resuming the setup watch")
                     self._pending_opening, self._opener_prepared_for = None, frozenset()
                 elif not p.awaiting_load:
-                    # Already aired over the load (league) or held for the tee (practice): don't re-read
-                    # the setup screen (and burn OCR) through the load. A front-loaded opener still
-                    # waiting for the load screen (awaiting_load) falls through and keeps polling.
+                    # Already aired over the load (league) or held for the tee (practice): only watch the
+                    # Play button (OCR'd only when its pixels change), not the roster, through the load.
+                    # If it's back, the player backed out to set up again, so that opener is stale. A
+                    # front-loaded opener still waiting for the load screen (awaiting_load) keeps polling.
                     seen_setup, course, roster, slot_order, slot_cache = False, None, [], [], {}
-                    continue
+                    held = True
             probed = callable(getattr(self.screen, "setup_frame", None)) and callable(
                 getattr(self.screen, "region_tones", None))
             tones: dict = {}
@@ -3944,7 +3946,15 @@ class Engine:
             except Exception:
                 log.exception("Setup-screen read failed")
                 continue
-            if play_course := _play_button_course(gate.get("setup_course", "")):
+            play_course = _play_button_course(gate.get("setup_course", ""))
+            if held:
+                if not play_course:
+                    continue
+                log.info("Back on the setup screen (%r) after the %s opener for %r: dropping it and "
+                         "reading the new setup", play_course, "aired" if p.aired else "held", p.course)
+                self._opener_gen += 1
+                self._pending_opening, self._opener_prepared_for = None, frozenset()
+            if play_course:
                 to_read = slots
                 if probed:
                     fresh = not seen_setup or play_course != course

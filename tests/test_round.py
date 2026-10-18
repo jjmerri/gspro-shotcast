@@ -1145,6 +1145,25 @@ async def test_setup_watcher_includes_a_guest_with_league_players(tmp_path):
     assert "setup_slot_4" not in scr.ocred                          # an empty slot is never OCR'd
 
 
+async def test_backing_out_after_an_opener_aired_reads_the_next_setup(tmp_path):
+    # An opener airs over the Augusta load; the player backs out before the tee, sets up Pebble Beach
+    # and presses Play. Pebble gets its own opener (the watch didn't stay parked on Augusta's).
+    augusta = _players_tab("Augusta National", {1: "MikeD", 2: "Sarah"})
+    pebble = _players_tab("Pebble Beach", {1: "MikeD", 2: "Sarah"})
+    loading = {"load_course": "Augusta National"}
+    e = _engine(tmp_path)
+    scr = _PixelSetupScreen([augusta, augusta, loading, loading, {}, {}, pebble, pebble,
+                             {"load_course": "Pebble Beach"}])
+    aired = []
+
+    def until(p):
+        if p is not None and p.aired and p.course not in aired:
+            aired.append(p.course)
+        return "Pebble Beach" in aired
+    p = await _run_setup_watch(e, None, screen=scr, until=until)
+    assert aired == ["Augusta National", "Pebble Beach"] and p.aired
+
+
 async def test_setup_watcher_fires_the_opener_with_no_league(tmp_path):
     from commentator.league import League
 
