@@ -3728,6 +3728,10 @@ class Engine:
                  + self._league_facts(r))
         return opener_prompt(facts=facts, recent_lines=self.state.recent_lines)
 
+    def _same_course(self, x: str | None, y: str | None) -> bool:
+        a, b = self._canonical_course(x), self._canonical_course(y)
+        return bool(a and b and (a.lower() == b.lower() or course_match_score(a, b) >= 0.6))
+
     def _pending_mismatch(self, p: PendingOpening, is_league: bool, course: str | None,
                           names: list[str]) -> str | None:
         """Why a prepared opener (league or practice) doesn't fit this tee, or None when it does.
@@ -3735,8 +3739,7 @@ class Engine:
         so the GSPro setup name and the HUD name agree), and the same set of league players."""
         if p.is_league != is_league:
             return f"prepared {'league' if p.is_league else 'practice'}, tee reads {'league' if is_league else 'practice'}"
-        a, b = self._canonical_course(p.course), self._canonical_course(course)
-        if not (a and b and (a.lower() == b.lower() or course_match_score(a, b) >= 0.6)):
+        if not self._same_course(p.course, course):
             return f"course {p.course!r} != tee {course!r}"
         tee_players = frozenset(pl for n in names if (pl := self.league.match_player(n)))
         if p.players != tee_players:
@@ -3788,9 +3791,12 @@ class Engine:
         course = self.current_course or hud.course
         entry, practice = self._classify_round(names, course)
         is_league = practice is None
-        # Peek at an opener that already played over the load, before the match below consumes it.
-        aired_players = (self._pending_opening.players if self._pending_opening
-                         and self._pending_opening.aired else None)
+        # Peek at an opener that already played over the load, before the match below consumes it. Only
+        # one for this course, and recent, stands in for this round's: an opener that aired for a
+        # course the player then backed out of (or long ago) doesn't.
+        p = self._pending_opening
+        aired_players = (p.players if p and p.aired and self._same_course(p.course, course)
+                         and time.monotonic() - p.created <= c.preround_ttl_seconds else None)
         # An opener prepared off the setup screen airs now, with no tee-time model or grounding wait,
         # when the tee confirms the same course and the same league team(s). Else it's made here.
         if (pending := self._take_matching_pending(is_league, course, names)) is not None:

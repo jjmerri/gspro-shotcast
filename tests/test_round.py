@@ -816,6 +816,22 @@ async def test_no_second_opener_when_an_occluded_tee_drops_a_partner(tmp_path):
     assert len(e.live_llm.prompts) == prompts_before_tee  # no second opener at the tee
 
 
+async def test_an_opener_aired_for_another_course_does_not_stand_in_at_the_tee(tmp_path):
+    from commentator.models import RoundStartEvent
+
+    e = _engine(tmp_path)
+    e.current_par = 4
+    # An opener airs over the Pebble Beach load, then the player backs out and tees off somewhere else.
+    await e._prepare_speculative_round("Pebble Beach", ["MikeD", "Sarah"])
+    assert e._pending_opening is not None and e._pending_opening.aired
+    prompts_before_tee = len(e.live_llm.prompts)
+    e.current_course = "Kapalua - Plantation Course"
+    tee = Hud(player_text="MikeD E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards")
+    await e.handle_round_start(RoundStartEvent(hud=tee))
+    assert e._pending_opening is None
+    assert len(e.live_llm.prompts) > prompts_before_tee  # this course gets its own opener
+
+
 async def test_preround_opener_is_set_aside_when_the_tee_differs(tmp_path):
     from commentator.models import RoundStartEvent
 
