@@ -31,7 +31,7 @@ Then:
    for local models and voices and [docs/tracking.md](docs/tracking.md#launch-monitors) for other
    launch monitors.
 4. Bring it up step by step: `check`, `say "Testing"`, `run --replay data/sample_shots.jsonl`,
-   then calibrate the screen with `screen-check.bat`.
+   then check the screen read with `screen-check.bat` (on a hole and on each setup tab).
 
 `config.yaml`, `.env`, `data/league.json`, `data/history.json` and `logs/` are all gitignored, so
 `git pull` never touches your league or your settings.
@@ -57,8 +57,9 @@ Two batch files in the repo root:
 
 - **`start-booth.bat`** launches the booth minimized in a window titled "Golf Booth". Double-click
   it for a league night; close that window to stop.
-- **`screen-check.bat`** runs `calibrate` then `ocr-test` into `logs\screen-check.txt`. Use it to
-  confirm the OCR regions still line up after a GSPro update or a resolution change.
+- **`screen-check.bat`** counts down 8 s (bring GSPro to the front), then runs `screen-check` into
+  `logs\screen-check.txt` and shows it. Use it to confirm the screen read still lines up after a
+  GSPro update or a resolution change; `screen-check.bat --fix` writes moved boxes to `config.yaml`.
 
 ### Remote administration (optional)
 
@@ -66,7 +67,7 @@ If you manage the PC over SSH (Windows OpenSSH server):
 
 - SSH sessions run Windows `cmd`, so quote-heavy `python -c` one-liners get mangled. Ship a script
   file and run it instead.
-- Screen capture (`calibrate`, `ocr-test`, `screen-check.bat`) does **not** work over a plain SSH
+- Screen capture (`screen-check`, `calibrate`, `ocr-test`) does **not** work over a plain SSH
   session, because the capture APIs need an interactive desktop. Run it from a logged-in session,
   or from a scheduled task created with `schtasks /it`.
 - The PC may be asleep and SSH may time out. Retry or wake it before assuming something failed.
@@ -94,7 +95,7 @@ and is the option for third-party connectors that don't go through GSPconnect's 
 ```
 gspro-shotcast\
   start-booth.bat        launch the booth (minimized)
-  screen-check.bat       calibrate + ocr-test into logs\screen-check.txt
+  screen-check.bat       screen-check into logs\screen-check.txt
   config.yaml            your config (gitignored). Secrets are NOT here
   config.example.yaml    the template, kept in sync with the code
   .env                   secrets only (gitignored)

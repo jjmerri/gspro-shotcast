@@ -40,19 +40,44 @@ python -m commentator say "Testing, one two."   # voices work
 python -m commentator run --replay data/sample_shots.jsonl   # whole pipeline, fake shots
 ```
 
-Then calibrate the screen (`calibrate` draws the OCR regions on a screenshot, `ocr-test` prints
-what each region parsed; `screen.ocr` is on by default), and go live with `python -m commentator run`.
+Then check the screen read with `screen-check` (below; `screen.ocr` is on by default), and go live
+with `python -m commentator run`.
+
+## Checking the screen read
+
+`python -m commentator screen-check` reads whatever GSPro screen is up (a hole, the scorecard, or
+the setup screen's Players, Match Settings or Holes tab) and lists what the booth got from it:
+
+```
+Screen 1920x1080: a hole (the HUD)
+  OK   player                 Alex E Shot 1 391.5 YDS 27.1YDS
+  OK   par / length           par 4, 392 yards
+  FIX  lie                    (nothing read)  -> with moved boxes: tee
+  --   data tiles             (nothing read)  (blank until a shot is hit on this hole)
+```
+
+It also finds each panel by the labels GSPro draws on it ("PAR 4", "CARRY (game)", "CLUB",
+"MATCH SETTINGS", ...) and works out where the boxes belong on your screen. A `FIX` line is a
+read that comes back once the boxes are moved there; `screen-check --fix` writes those boxes to
+`screen.regions` in `config.yaml` (the old file is kept as `config.yaml.bak`). Run it on a hole
+and on each setup tab, since each screen places its own boxes. `logs/screen-check.png` shows the
+boxes: green read, red are off their panel, yellow is where `--fix` puts them.
+
+Use `--delay 10` to switch to GSPro before the grab, and `--image <png>` to check a saved
+screenshot. `--bundle` saves the boxes' crops and the report under `logs/screen-check/` to attach
+to an issue; they show player names, so look them over first.
 
 ## Troubleshooting
 
 - **HUD misreads (wrong lie, missing tiles, wrong player).** The built-in OCR boxes fit GSPro's
-  default HUD and adjust to the screen's shape (checked on 16:10 and 16:9). Run `calibrate` with
-  GSPro on screen and open `logs/calibrate.png`: each green box should surround its panel. Move
-  any that don't under `screen.regions` in `config.yaml` (fractions of the screen; only list the
-  ones you change), then confirm with `ocr-test`. A region you list is used exactly as written.
+  default HUD and adjust to the screen's shape (checked on 16:10 and 16:9). Run `screen-check`
+  on a hole, and `screen-check --fix` if it offers to move boxes. To place one by hand, run
+  `calibrate` and open `logs/calibrate.png` (a pixel grid with each box drawn), then set it under
+  `screen.regions` in `config.yaml` (fractions of the screen; only list the ones you change) and
+  confirm with `ocr-test`. A region you list is used exactly as written.
 - **Players not picked up from the setup screen.** Those boxes adjust to the screen's shape too
-  (checked on 16:10 and 16:9). With GSPro's setup screen up, run `calibrate --out setup` and
-  adjust the `setup_*` regions the same way.
+  (checked on 16:10 and 16:9). Run `screen-check` with the Players tab up (and the Match
+  Settings and Holes tabs), or `calibrate --out setup` to place the `setup_*` regions by hand.
 - **Nothing reads at all, or the ON AIR badge doesn't show.** GSPro must be windowed or
   borderless, not exclusive fullscreen, and on the primary monitor (`screen.monitor`). A window
   over the HUD (the booth's own console, a notification, the taskbar) is read as part of it.
@@ -97,6 +122,7 @@ pushed again for 12 hours, and a "resolved" push follows once they clear (`notif
 |---|---|
 | `run` | Start the booth (live, or `--replay <file>`; `--no-commentary` records without talking) |
 | `sniff` | Print raw GSPro Open Connect messages (needs Npcap + Administrator) |
+| `screen-check` | Check what the booth reads from the GSPro screen that's up; `--fix` moves boxes that are off their panels |
 | `calibrate` | Save a screenshot with the OCR regions drawn on it |
 | `ocr-test` | Read the HUD once and print what was parsed |
 | `fixture check` / `fixture save <name>` | Compare GSPro's log and screen to the regression fixtures, or save new ones |

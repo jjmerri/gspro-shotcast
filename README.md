@@ -83,7 +83,8 @@ League file + Squabbit ─────────► standings, handicaps, stor
 ## Requirements
 
 - A Windows PC running **GSPro 3.1.x**, windowed or borderless (not exclusive fullscreen).
-  Shotcast runs on the same PC.
+  Shotcast runs on the same PC. It reads GSPro's screen; checked on 16:10 (3450×2160) and 16:9
+  (1920×1080) screens, and `screen-check --fix` fits it to others.
 - Any launch monitor GSPro supports. Built and tested with a **Uneekor EYE XO2**; others record
   the same shots and scores, with club data only when the monitor sends it
   ([Launch monitors](docs/tracking.md#launch-monitors)).
@@ -102,10 +103,10 @@ League file + Squabbit ─────────► standings, handicaps, stor
    pip install -e ".[capture]"
    copy config.example.yaml config.yaml
    ```
-2. Start GSPro, get to a hole, and run `python -m commentator ocr-test`: the hole, tiles and lie
-   should read correctly (the screen read tells Shotcast who's up). If not, see
-   [Troubleshooting](docs/setup.md#troubleshooting). The first run downloads the OCR models once
-   (about 30 MB); after that nothing leaves the PC.
+2. Start GSPro, get to a hole, and run `python -m commentator screen-check`: every line should
+   say OK (the screen read tells Shotcast who's up). If some say FIX, run it again with `--fix`;
+   see [Checking the screen read](docs/setup.md#checking-the-screen-read). The first run
+   downloads the OCR models once (about 30 MB); after that nothing leaves the PC.
 3. `python -m commentator run --no-commentary` and play. Every shot and round goes into
    `logs/season.db`. If shots don't show up, see [Launch monitors](docs/tracking.md#launch-monitors).
 4. `python -m commentator stats-web` opens the stats page. To browse on another computer (Mac
@@ -121,7 +122,7 @@ league and practice rounds and get net scores.
 2. `copy .env.example .env` and put both API keys in it.
 3. `python -m commentator check` (every configured model answers), then
    `python -m commentator say "Testing."` (you hear both voices).
-4. Check the screen read with `ocr-test` as above.
+4. Check the screen read with `screen-check` as above.
 5. `python -m commentator run` (or `start-booth.bat`) and play. Click the ON AIR badge over GSPro
    to go off air (recording continues) and back.
 

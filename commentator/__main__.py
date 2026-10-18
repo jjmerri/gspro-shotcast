@@ -272,6 +272,49 @@ def cmd_fixture(cfg: Config, args) -> None:
         sys.exit(1)
 
 
+def cmd_screen_check(cfg: Config, args) -> None:
+    import time
+
+    from . import fixtures, screencheck
+    from .screen import Screen
+
+    if args.delay and not args.image:
+        for n in range(int(args.delay), 0, -1):
+            print(f"Checking in {n}s... (bring the GSPro screen you want to the front)", end="\r", flush=True)
+            time.sleep(1)
+        print(" " * 70, end="\r")
+    screen = Screen(cfg.screen)
+    img = _load_image(args.image)
+    if img is None:
+        img = screen.grab()
+    print("Reading the screen (one full OCR pass, a few seconds)...")
+    rep = screencheck.run(screen, img)
+    print(screencheck.format_report(rep))
+    out_dir = Path(cfg.log_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if rep.kind:
+        pic = out_dir / "screen-check.png"
+        marked = screencheck.annotate(img, screen, rep)
+        marked.thumbnail((1920, 1920))
+        marked.save(pic)
+        print(f"Saved {pic}: green boxes read, red ones are off their panel, yellow is where --fix moves them.")
+    if args.bundle and rep.kind:
+        name = f"{rep.kind}-{img.width}x{img.height}-{time.strftime('%Y%m%d-%H%M%S')}"
+        out = fixtures.save_screen(img, screen, name, {}, root=out_dir / "screen-check", kind=rep.kind)
+        (out / "report.txt").write_text(screencheck.format_report(rep) + "\n", encoding="utf-8")
+        print(f"Saved {out} (the boxes' crops and what they read). They show player names; look them over "
+              "before attaching them to an issue.")
+    if args.fix:
+        if not rep.moves:
+            print("Nothing to fix from this screen.")
+            return
+        path = Path(args.config)
+        backup = screencheck.write_regions(path, rep.moves)
+        print(f"Wrote {len(rep.moves)} region(s) to {path} under screen.regions"
+              + (f" (old file kept as {backup})" if backup else "")
+              + ". Restart the booth to use them, and run screen-check on the other GSPro screens too.")
+
+
 def cmd_ocr_test(cfg: Config, args) -> None:
     from dataclasses import asdict
 
@@ -671,6 +714,13 @@ def main() -> None:
     p.add_argument("--image", help="Use a saved screenshot instead of the live screen")
     p.add_argument("--out", help="Output name stem (e.g. 'setup' -> logs/setup.png), default 'calibrate'")
     p.add_argument("--delay", type=int, default=0, help="Countdown seconds before grabbing, to bring a screen to the front")
+    p = sub.add_parser("screen-check", help="Check what the booth reads from the GSPro screen that's up, "
+                                            "and move boxes that are off their panels (--fix)")
+    p.add_argument("--image", help="Use a saved screenshot instead of the live screen")
+    p.add_argument("--delay", type=int, default=0, help="Countdown seconds before grabbing, to bring GSPro to the front")
+    p.add_argument("--fix", action="store_true", help="Write boxes that read better moved to config.yaml (screen.regions)")
+    p.add_argument("--bundle", action="store_true",
+                   help="Also save the boxes' crops and the report under logs/screen-check/, for a bug report")
     p = sub.add_parser("ocr-test", help="Read the HUD once and print what was parsed")
     p.add_argument("--image", help="Use a saved screenshot instead of the live screen")
 
@@ -749,7 +799,7 @@ def main() -> None:
         logging.warning("%s not found; using defaults", args.config)
 
     handlers = {
-        "run": cmd_run, "sniff": cmd_sniff, "calibrate": cmd_calibrate, "ocr-test": cmd_ocr_test, "fixture": cmd_fixture, "notify-test": cmd_notify_test,
+        "run": cmd_run, "sniff": cmd_sniff, "calibrate": cmd_calibrate, "ocr-test": cmd_ocr_test, "screen-check": cmd_screen_check, "fixture": cmd_fixture, "notify-test": cmd_notify_test,
         "say": cmd_say, "banter": cmd_banter, "check": cmd_check, "eval": cmd_eval, "stats": cmd_stats,
         "stats-web": cmd_stats_web,
         "review": cmd_review,

@@ -1,10 +1,11 @@
 @echo off
-rem Check the OCR regions still line up (after a GSPro update or resolution change).
-rem Run from a logged-in desktop session, not over SSH: screen capture needs an interactive desktop.
+rem Check the screen read lines up (after a GSPro update or resolution change): bring GSPro to the
+rem front during the countdown. Run from a logged-in desktop session, not over SSH: screen capture
+rem needs an interactive desktop. Add --fix to write moved boxes to config.yaml.
 cd /d "%~dp0"
 if not exist logs mkdir logs
-(
-  .venv\Scripts\python.exe -m commentator calibrate
-  .venv\Scripts\python.exe -m commentator ocr-test
-) > logs\screen-check.txt 2>&1
-echo Wrote logs\screen-check.txt (regions drawn on logs\calibrate.png)
+echo Bring GSPro to the front: checking the screen in 8 seconds...
+.venv\Scripts\python.exe -m commentator screen-check --delay 8 %* > logs\screen-check.txt 2>&1
+type logs\screen-check.txt
+echo Wrote logs\screen-check.txt (boxes drawn on logs\screen-check.png)
+pause
