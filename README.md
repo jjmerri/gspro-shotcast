@@ -114,41 +114,34 @@ beyond that is supported on paper but not yet run live:
 It's a personal project shared as is. Issues are welcome, but fixes for other setups aren't
 promised.
 
-## Quick start: track shots (no API keys)
+## Quick start
 
-1. Install Python 3.12 or 3.13, then clone and install with only the capture extra:
-   ```
-   git clone https://github.com/jjmerri/gspro-shotcast.git
-   cd gspro-shotcast
-   py -3.13 -m venv .venv
-   .venv\Scripts\activate
-   pip install -e ".[capture]"
-   copy config.example.yaml config.yaml
-   ```
-2. Start GSPro, get to a hole, and run `python -m commentator screen-check`: every line should
-   say OK (the screen read tells Shotcast who's up). If some say FIX, run it again with `--fix`;
-   see [Checking the screen read](docs/setup.md#checking-the-screen-read). The first run
-   downloads the OCR models once (about 30 MB); after that nothing leaves the PC.
-3. `python -m commentator run --no-commentary` and play. Every shot and round goes into
-   `logs/season.db`. If shots don't show up, see [Launch monitors](docs/tracking.md#launch-monitors).
-4. `python -m commentator stats-web` opens the stats page. To browse on another computer (Mac
-   too), copy `logs/season.db` into a checkout there and run the same command; it only needs
-   Python and `pip install -e .`.
+1. On GitHub, **Code → Download ZIP**, and unzip it somewhere it can stay (for example
+   `Documents\gspro-shotcast`). Or `git clone https://github.com/jjmerri/gspro-shotcast.git`.
+2. Double-click **`install.bat`**. It finds Python 3.12 or 3.13 (or offers to install 3.13),
+   asks whether you want **shot tracking only** (no API keys, nothing leaves the PC) or
+   **tracking plus the booth**, installs everything into the folder, creates `config.yaml` and
+   `.env`, asks for the booth's API keys, and offers desktop shortcuts. Re-run it any time, for
+   example to add the booth later; it never overwrites your settings.
+3. Start GSPro, get to a hole, and double-click **`screen-check.bat`** (bring GSPro to the front
+   during the countdown). Every line should say OK: the screen read tells Shotcast who's up. If
+   some say FIX, run `screen-check.bat --fix` from a command prompt in the folder; see
+   [Checking the screen read](docs/setup.md#checking-the-screen-read).
+4. Double-click **`start-booth.bat`** (the Shotcast shortcut) and play. Every shot and round goes
+   into `logs\season.db`; with the booth on, click the ON AIR badge over GSPro to go off air
+   (recording continues) and back. If shots don't show up, see
+   [Launch monitors](docs/tracking.md#launch-monitors).
+5. **`stats.bat`** (Shotcast Stats) opens the stats page. To browse on another computer (Mac
+   too), copy `logs/season.db` into a checkout there and run `python -m commentator stats-web`;
+   it only needs Python and `pip install -e .`.
 
-No league file is needed; players are recorded under their GSPro names. Add one later to split
-league and practice rounds and get net scores.
+**`update.bat`** updates to the latest version (`git pull`, or a fresh download if you used the
+ZIP) and keeps your `config.yaml`, `.env`, league file and `logs`.
 
-## Quick start: the booth
-
-1. Install with the cloud extra too: `pip install -e ".[capture,cloud]"`.
-2. `copy .env.example .env` and put both API keys in it.
-3. `python -m commentator check` (every configured model answers), then
-   `python -m commentator say "Testing."` (you hear both voices).
-4. Check the screen read with `screen-check` as above.
-5. `python -m commentator run` (or `start-booth.bat`) and play. Click the ON AIR badge over GSPro
-   to go off air (recording continues) and back.
-
-No league file is needed to start; add one later for standings and storylines.
+No league file is needed; players are recorded and called by their GSPro names. Add one later to
+split league and practice rounds and get standings, net scores and storylines
+([Leagues](docs/leagues.md)). To install by hand instead, see
+[Setup](docs/setup.md#setup-fresh-machine).
 
 ## Documentation
 

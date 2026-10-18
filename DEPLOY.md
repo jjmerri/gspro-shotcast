@@ -8,7 +8,8 @@ gitignored. Keep personal notes there, not here.
 
 ## Install
 
-From a terminal on the sim PC:
+`install.bat` (double-click it in a clone or an unzipped download) does the install below and
+asks for the keys; see the [README](README.md#quick-start). By hand, from a terminal on the sim PC:
 
 ```
 git clone https://github.com/jjmerri/gspro-shotcast.git
@@ -38,6 +39,8 @@ Then:
 
 ## Update
 
+`update.bat` does this (or downloads the latest ZIP when the folder isn't a git clone). By hand:
+
 ```
 cd gspro-shotcast
 git pull
@@ -53,13 +56,15 @@ When `config.example.yaml` changes, diff it against your `config.yaml` for new s
 
 ## Running the booth
 
-Two batch files in the repo root:
+Batch files in the repo root (`install.bat` and `update.bat` are under [Install](#install) and
+[Update](#update)):
 
 - **`start-booth.bat`** launches the booth minimized in a window titled "Golf Booth". Double-click
   it for a league night; close that window to stop.
 - **`screen-check.bat`** counts down 8 s (bring GSPro to the front), then runs `screen-check` into
   `logs\screen-check.txt` and shows it. Use it to confirm the screen read still lines up after a
   GSPro update or a resolution change; `screen-check.bat --fix` writes moved boxes to `config.yaml`.
+- **`stats.bat`** opens the stats page over `logs\season.db`; close its window to stop it.
 
 ### Remote administration (optional)
 
@@ -94,7 +99,10 @@ and is the option for third-party connectors that don't go through GSPconnect's 
 
 ```
 gspro-shotcast\
+  install.bat            first install (re-run to add the booth or new keys)
+  update.bat             update to the latest version, keeping your settings
   start-booth.bat        launch the booth (minimized)
+  stats.bat              open the stats page
   screen-check.bat       screen-check into logs\screen-check.txt
   config.yaml            your config (gitignored). Secrets are NOT here
   config.example.yaml    the template, kept in sync with the code

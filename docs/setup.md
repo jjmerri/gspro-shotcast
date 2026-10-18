@@ -4,6 +4,9 @@
 
 ## Setup (fresh machine)
 
+`install.bat` does steps 1, 3, 5 and 7 for you (see the [README](../README.md#quick-start)). By
+hand:
+
 1. **Python 3.12 or 3.13.**
 2. For the `gspro_sniffer` source only: **Npcap** with "Support loopback traffic" ticked
    (https://npcap.com). Not needed for the default `connector_log` source.
@@ -28,8 +31,8 @@
    match the name GSPro shows to your roster.
 7. `copy .env.example .env` and fill in the API keys you use. `.env` is never committed.
 
-Your `config.yaml`, `.env`, `data/league.json` and `logs/` are gitignored, so `git pull` updates
-the code without touching your league or settings. See [DEPLOY.md](../DEPLOY.md) for updating
+Your `config.yaml`, `.env`, `data/league.json` and `logs/` are gitignored, so `git pull` (or
+`update.bat`) updates the code without touching your league or settings. See [DEPLOY.md](../DEPLOY.md) for updating
 and running on the sim PC (`start-booth.bat`, `screen-check.bat`).
 
 ## Bring-up, one step at a time
