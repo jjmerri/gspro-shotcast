@@ -162,3 +162,12 @@ overlay:
   left: 0.595          # top-left corner, as fractions of the primary screen
   top: 0.008
   scale: 1.0
+
+# Put the stats page online for the league, behind a password, after every round
+# (docs/tracking.md#sharing-the-stats-page). Needs `pip install -e ".[publish]"` and the upload
+# keys in .env.
+publish:
+  enabled: false
+  # bucket: shotcast-stats-bucket-xxxx   # the stack's BucketName output
+  # region: us-east-1
+  # delay_seconds: 180                   # after the round ends, so the sign-off is in it

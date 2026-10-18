@@ -1,8 +1,5 @@
 import json
 import sqlite3
-import threading
-import urllib.error
-import urllib.request
 
 import pytest
 
@@ -169,28 +166,22 @@ def test_booth_phrases_shot_log_and_transcript(db):
     assert [x["id"] for x in A.broadcasts(db)] == [1]
 
 
-def test_server_serves_shots_and_transcripts(db):
+def test_published_site_has_the_summary_shots_and_transcripts(db, tmp_path):
+    from commentator import stats_site
+
     shot(db, hole="Hole 1, par 4, 400 yards", shot_number=1, club="DR", lie_before="tee", to_pin_yards=400)
     db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text) VALUES (1, 0, 'opener', 'pbp', 'Hello.')")
     db.commit()
-    server = stats_web.make_server(db.path, port=0, names={"pbp": "Nigel"})
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    base = f"http://127.0.0.1:{server.server_address[1]}"
-    try:
-        shots = json.loads(urllib.request.urlopen(base + "/api/shots?player=Ann&club=DR").read())
-        assert [s["club"] for s in shots] == ["DR"]
-        t = json.loads(urllib.request.urlopen(base + "/api/transcript?session=1").read())
-        assert t[0]["name"] == "Nigel"
-        for bad in ("abc", "%C2%B2", "99999999999999999999"):
-            with pytest.raises(urllib.error.HTTPError) as e:
-                urllib.request.urlopen(base + "/api/transcript?session=" + bad)
-            assert e.value.code == 404
-        body = json.loads(urllib.request.urlopen(base + "/api/summary").read())
-        assert {"courses", "highlights", "booth", "broadcasts", "filters"} <= set(body)
-        assert body["players"][0]["gapping"] is not None and "trend" in body["players"][0]
-    finally:
-        server.shutdown()
-        server.server_close()
+    vdir = tmp_path / "site" / "v" / stats_site.build(db.path, tmp_path / "site", {"pbp": "Nigel"})
+    pub = sqlite3.connect(vdir / "stats.db")
+    sql, args = stats_site.shot_query(None, {"player": "Ann", "club": "DR"})
+    assert [json.loads(r[0])["club"] for r in pub.execute(sql, args)] == ["DR"]
+    t = json.loads(pub.execute("SELECT json FROM pub_transcript WHERE session_id = 1").fetchone()[0])
+    assert t[0]["name"] == "Nigel"
+    pub.close()
+    body = json.loads((vdir / "summary-all.json").read_text())
+    assert {"courses", "highlights", "booth", "broadcasts", "filters"} <= set(body)
+    assert body["players"][0]["gapping"] is not None and "trend" in body["players"][0]
 
 
 def test_closest_approaches_leave_out_chips_and_par_4_tee_shots(db):

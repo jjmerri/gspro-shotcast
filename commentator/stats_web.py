@@ -1,7 +1,7 @@
 """A small local web page for browsing the season database (`stats-web`).
 
-Standard library only: one read-only SQLite connection per request, a JSON endpoint, and a static
-page (stats_web.html). Stats follow the booth's own rules (store.py): mulligans and unattributed
+The stats themselves (summary() and friends) are computed here; stats_site.py builds them into the
+static site that this module serves locally and `publish` uploads. The page is stats_web.html. Stats follow the booth's own rules (store.py): mulligans and unattributed
 shots are left out, and scoring, GIR, scrambling, sand and putting come from individual-ball rounds
 only, since a scramble or alternate-shot score isn't one player's.
 """
@@ -9,16 +9,16 @@ only, since a scramble or alternate-shot score isn't one player's.
 import json
 import re
 import sqlite3
-from contextlib import closing
+import tempfile
+import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import unquote, urlparse
 
 from . import season_analytics as A
 
-PAGE = Path(__file__).with_name("stats_web.html")
 SHARED_BALL = ("scramble", "alternate")
 # Putt length buckets in feet (to_pin_yards is stored in yards).
 PUTT_BUCKETS = [(0, 3), (3, 6), (6, 10), (10, 20), (20, 40), (40, None)]
@@ -224,45 +224,68 @@ def summary(db: sqlite3.Connection, context: str | None = None,
             "booth": A.booth(db, names), "broadcasts": A.broadcasts(db), "filters": filters}
 
 
-def make_server(db_path: str | Path, port: int = 8765,
-                names: dict[str, str] | None = None) -> ThreadingHTTPServer:
-    """A server on localhost only (port 0 picks a free one). `names` maps persona keys to on-air names."""
+def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | None = None,
+                site: str | Path | None = None) -> ThreadingHTTPServer:
+    """Serve the stats page on localhost only (port 0 picks a free one), the same static site that
+    `publish` uploads (stats_site.py), built into `site` (a temp folder by default) and rebuilt when
+    the database changes. `names` maps persona keys to on-air names."""
+    from . import stats_site
+
     db_path = Path(db_path)
+    site = Path(site) if site else Path(tempfile.mkdtemp(prefix="shotcast-stats-"))
+    lock = threading.Lock()
+    built = {"mtime": None}
+
+    def refresh() -> None:
+        with lock:
+            mtime = db_path.stat().st_mtime
+            if built["mtime"] != mtime:
+                stats_site.build(db_path, site, names)
+                built["mtime"] = mtime
+
+    refresh()
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
-            url = urlparse(self.path)
-            if url.path in ("/", "/index.html"):
-                return self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
-            if not url.path.startswith("/api/"):
-                return self._send(404, b"not found", "text/plain")
-            q = {k: v[0] for k, v in parse_qs(url.query).items() if v and v[0]}
-            context = q.get("context") if q.get("context") in ("league", "practice") else None
-            try:
-                with closing(connect(db_path)) as db:
-                    if url.path == "/api/summary":
-                        body: Any = summary(db, context, names)
-                        body["db"] = {"path": str(db_path), "modified": db_path.stat().st_mtime}
-                    elif url.path == "/api/shots":
-                        body = A.shot_log(db, context, player=q.get("player"), date=q.get("date"),
-                                          course=q.get("course"), club=q.get("club"), lie=q.get("lie"))
-                    elif url.path == "/api/transcript" and re.fullmatch(r"[0-9]{1,15}", q.get("session", "")):
-                        body = A.transcript(db, int(q["session"]), names)
-                    else:
-                        return self._send(404, b"not found", "text/plain")
-            except sqlite3.Error as e:
-                return self._send(500, json.dumps({"error": f"{db_path}: {e}"}).encode(), "application/json")
-            self._send(200, json.dumps(body).encode(), "application/json")
+        def do_HEAD(self):  # noqa: N802
+            self._file(head=True)
 
-        def _send(self, code: int, body: bytes, kind: str) -> None:
+        def do_GET(self):  # noqa: N802
+            self._file(head=False)
+
+        def _file(self, head: bool) -> None:
+            rel = unquote(urlparse(self.path).path).lstrip("/") or "index.html"
+            if rel == "latest.json":
+                try:
+                    refresh()
+                except (OSError, sqlite3.Error) as e:
+                    return self._send(500, json.dumps({"error": f"{db_path}: {e}"}).encode(), "application/json", head)
+            path = (site / rel).resolve()
+            if not path.is_file() or site.resolve() not in path.parents:
+                return self._send(404, b"not found", "text/plain", head)
+            data = path.read_bytes()
+            kind = stats_site.CONTENT_TYPES.get(path.suffix, "application/octet-stream")
+            m = re.fullmatch(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+            if m and int(m.group(1)) < len(data):
+                start = int(m.group(1))
+                end = min(int(m.group(2)) if m.group(2) else len(data) - 1, len(data) - 1)
+                return self._send(206, data[start:end + 1], kind, head,
+                                  {"Content-Range": f"bytes {start}-{end}/{len(data)}"})
+            self._send(200, data, kind, head)
+
+        def _send(self, code: int, body: bytes, kind: str, head: bool = False,
+                  extra: dict[str, str] | None = None) -> None:
             self.send_response(code)
             self.send_header("Content-Type", kind)
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Length", str(len(body)))
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
             self.end_headers()
-            self.wfile.write(body)
+            if not head:
+                self.wfile.write(body)
 
-        def log_message(self, *args):
+        def log_message(self, *args):  # quiet: the worker makes many small range requests
             pass
 
     return ThreadingHTTPServer(("127.0.0.1", port), Handler)

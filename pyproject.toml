@@ -26,6 +26,8 @@ cloud = ["anthropic"]
 jev = ["typesafe-sdk>=0.7"]
 # Optional: voices on the PC's own CPU (Kokoro) instead of the OpenAI voices.
 local = ["kokoro-onnx>=0.4"]
+# Uploading the stats page to S3 (`publish`).
+publish = ["boto3"]
 # Importing the league's yearly spreadsheets.
 league = ["openpyxl>=3.1"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
@@ -37,7 +39,7 @@ shotcast = "commentator.__main__:main"
 include = ["commentator*"]
 
 [tool.setuptools.package-data]
-commentator = ["*.html"]
+commentator = ["*.html", "stats_vendor/*/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

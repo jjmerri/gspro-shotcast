@@ -493,6 +493,19 @@ class PuttReadConfig(BaseModel):
     slope_px: float = 0.7
 
 
+class PublishConfig(BaseModel):
+    # Put the stats page online (docs/tracking.md#sharing-the-stats-page): `publish` builds the static
+    # site and uploads it to this S3 bucket, served through CloudFront with the league password. The
+    # upload keys go in .env (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY), never here.
+    enabled: bool = False
+    bucket: str | None = None
+    prefix: str = ""
+    region: str | None = None
+    # Publish on its own after every round, this long after it ends (so the sign-off is in it).
+    after_round: bool = True
+    delay_seconds: float = 180.0
+
+
 class Config(BaseModel):
     # Optional. None = no league: every round is practice, players go by their GSPro names.
     league_file: str | None = None
@@ -516,6 +529,7 @@ class Config(BaseModel):
     notify: NotifyConfig = Field(default_factory=NotifyConfig)
     minimap: MinimapConfig = Field(default_factory=MinimapConfig)
     putt_read: PuttReadConfig = Field(default_factory=PuttReadConfig)
+    publish: PublishConfig = Field(default_factory=PublishConfig)
     log_dir: str = "logs"
     # Season history: every shot and line. Replays and evals never write to it.
     db_path: str = "logs/season.db"

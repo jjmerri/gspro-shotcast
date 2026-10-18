@@ -3,6 +3,7 @@ import json
 import logging
 import random
 import re
+import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, field, replace
@@ -338,6 +339,8 @@ class Engine:
         self.plan: FlightPlan | None = None
         # In-memory unless the caller passes the season database; replays use made-up shots.
         self.store = store or Store(None)
+        self._publish_task: asyncio.Task | None = None
+        self._publish_lock = asyncio.Lock()
         # Every 6-word phrase said this season, so a line can't come back weeks later.
         self._season_phrases: set[tuple[str, ...]] = set()
         for text in self.store.spoken_lines():
@@ -4440,11 +4443,13 @@ class Engine:
                 self._closer_task.cancel()
             self._closer_branches = self._wrap_branches = None
             self._record_round_stats(r, event.reason, complete=False)
+            self._schedule_publish()
             log.info("Round %s over (%s) after %s of %s holes: no closer", r.id, event.reason, r.seq, r.holes)
             return
         if stats_obj := getattr(self.speech, "audio_stats", None):
             log.info("%s", audio_summary(stats_obj))
         stats = self._record_round_stats(r, event.reason)
+        self._schedule_publish()
         season = {s.key: self.store.season_rounds(s.key) for s in r.sides}
         facts = (r.closing_facts(self.state.shots, season, week_ctp=self._closer_week_ctp(r))
                  + self._league_facts(r, closing=True))
@@ -4465,6 +4470,52 @@ class Engine:
         # variant so a league round's sign-off keeps its stakes framing.
         await self._speak("closer", self.closer_llm, user, facts_text, [], mode="round",
                           system=self._system_league if r.is_league else self._system_practice)
+
+    # ---- publishing the stats page --------------------------------------------------------
+
+    def _schedule_publish(self) -> None:
+        """Publish the stats page a while after a round (so the sign-off is in it). A round that ends
+        before the last one's publish ran replaces it."""
+        p = self.cfg.publish
+        if not (p.enabled and p.after_round and p.bucket) or self.cfg.source.type == "replay":
+            return
+        if self._publish_task and not self._publish_task.done() and not self._publish_lock.locked():
+            self._publish_task.cancel()   # still waiting: this round's publish covers both
+        self._publish_task = asyncio.create_task(self._publish_after(p.delay_seconds))
+
+    async def _publish_after(self, delay: float) -> None:
+        await asyncio.sleep(delay)
+        async with self._publish_lock:
+            try:
+                await self._publish()
+            except Exception:
+                log.exception("Stats page publish failed")
+
+    async def _publish(self) -> None:
+        p = self.cfg.publish
+        names = {key: persona.name for key, persona in self.cfg.personas.items()}
+        cmd = [sys.executable, "-m", "commentator.stats_site", "--db", str(self.cfg.db_path),
+               "--site", str(Path(self.cfg.log_dir) / "stats-site"), "--bucket", p.bucket, "--prefix", p.prefix,
+               "--names", json.dumps(names)] + (["--region", p.region] if p.region else [])
+        # Its own process, so building the stats never holds up the booth during the next round.
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.STDOUT)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=600)
+        except asyncio.TimeoutError:
+            proc.kill()
+            out, code = b"timed out after 10 minutes", -1
+        else:
+            code = proc.returncode
+        text = out.decode("utf-8", "replace").strip()
+        if code == 0:
+            log.info("Stats page: %s", text.splitlines()[-1] if text else "published")
+            self.health.clear("publish.failed", why="published")
+        else:
+            last = text.splitlines()[-1] if text else f"exit {code}"
+            log.warning("Stats page publish failed: %s", text[-2000:])
+            if self.cfg.health.enabled:
+                self.health.raise_issue("publish.failed", "warn", f"Couldn't publish the stats page: {last}")
 
     # ---- health checks --------------------------------------------------------------------
 

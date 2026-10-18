@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import threading
+import urllib.error
 import urllib.request
 
 import pytest
@@ -94,16 +95,28 @@ def test_server_serves_the_page_and_summary(tmp_path):
                " VALUES (1, 0, '2026-10-16', 'Pebble', 'Ann', 9, 37, ?, ?, 0)",
                (json.dumps({"1": 5, "2": 4}), json.dumps(PARS)))
     db.commit()
-    server = stats_web.make_server(path, port=0)
+    server = stats_web.make_server(path, port=0, site=tmp_path / "site")   # season.db is next to site/
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
     try:
         assert b"Season stats" in urllib.request.urlopen(base + "/").read()
-        body = json.loads(urllib.request.urlopen(base + "/api/summary?context=practice").read())
+        version = json.loads(urllib.request.urlopen(base + "/latest.json").read())["version"]
+        body = json.loads(urllib.request.urlopen(f"{base}/v/{version}/summary-practice.json").read())
         assert body["context"] == "practice"
         r = body["rounds"][0]
         assert (r["gross"], r["to_par"], r["played"]) == (9, 1, 9)
         assert [h["hole"] for h in r["card"]] == [1, 2]
+        # The browser's SQLite reads stats.db in pieces: HEAD for the size, then byte ranges.
+        url = f"{base}/v/{version}/stats.db"
+        head = urllib.request.urlopen(urllib.request.Request(url, method="HEAD"))
+        size = int(head.headers["Content-Length"])
+        assert head.headers["Accept-Ranges"] == "bytes" and size > 1024
+        part = urllib.request.urlopen(urllib.request.Request(url, headers={"Range": "bytes=0-99"}))
+        assert part.status == 206 and part.headers["Content-Range"] == f"bytes 0-99/{size}"
+        assert part.read().startswith(b"SQLite format 3\x00")
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(base + "/../season.db")
+        assert e.value.code == 404
     finally:
         server.shutdown()
         server.server_close()

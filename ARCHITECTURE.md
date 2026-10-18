@@ -95,10 +95,15 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
   season bests, rebuilds the per-lie carry factors at startup, backs `stats`. In-memory for
   replays/evals so fake shots never persist.
 - **`stats_web.py`** / **`stats_web.html`** / **`season_analytics.py`** the `stats-web` viewer: a
-  localhost-only, standard-library server that opens `season.db` read-only (its own connection;
+  localhost-only server that opens `season.db` read-only (its own connection;
   `Store` would insert a session row) and a single-page UI. `season_analytics.py` holds the
   heavier season reads: strokes gained, gapping, recovery, trends, courses, highlights, booth
   stats, the shot log and broadcast transcripts. The booth itself doesn't import them.
+- **`stats_site.py`** builds the stats page as a static site (per-context summary JSON plus a small
+  `stats.db` of shots and transcripts that the page queries in the browser with the vendored
+  sql.js-httpvfs over HTTP range requests) and uploads it to S3 (`publish`; the booth runs it in a
+  subprocess after each round). `stats-web` serves the same site locally.
+  `tools/aws/stats-site.yaml` is the S3 + CloudFront + password stack.
 - **`state.py`** small in-session state (`ShotRecord`, `SessionState`).
 - **`league.py`** the league file model (teams, players, `gspro_name`/`aliases`, handicaps,
   schedule, storylines) and the course-name matcher.

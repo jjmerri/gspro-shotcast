@@ -123,8 +123,10 @@ for browsing the database. Its tabs:
 
 Strokes gained is measured against an approximate PGA Tour baseline (Broadie-style expected
 strokes by lie and distance), so negative numbers are normal; it's for comparing players and
-nights. Click a column header to sort a table. It filters league, practice or all rounds (the filter and the league/practice tags only show once the database has a league round). It uses only the standard library, opens the file read-only, and follows the
-booth's own stat rules: mulligans are left out, and scoring, GIR, scrambling, sand and putting
+nights. Click a column header to sort a table. It filters league, practice or all rounds (the filter and the league/practice tags only show once the database has a league round). It's the same static page that
+[gets published](#sharing-the-stats-page): the local server opens the database read-only, builds
+the page's files into a temp folder (again whenever the database changes) and serves them. It
+follows the booth's own stat rules: mulligans are left out, and scoring, GIR, scrambling, sand and putting
 come from individual-ball rounds. To look at
 the season on another machine, copy the booth PC's `logs/season.db` into this checkout's `logs/`
 (or pass `--db PATH`). `logs/` and `*.db` files are gitignored, so the copy is never committed.
@@ -152,6 +154,78 @@ SELECT club, COUNT(*) AS shots, ROUND(AVG(carry_game_yards)) AS avg_carry, ROUND
 FROM shots WHERE player = 'Toby Hale' AND NOT is_putt AND club IS NOT NULL
 GROUP BY club ORDER BY avg_carry DESC;
 ```
+
+## Sharing the stats page
+
+The stats page can go online for the league behind one shared username and password, updated on
+its own after every round. It's a static site in a private S3 bucket, served by CloudFront; a
+CloudFront Function checks the password before anything is served, and the booth PC uploads with
+keys that can only write to that bucket. For a league it costs pennies a month or nothing (S3
+uploads are free to send in, and CloudFront's free tier is 1 TB out a month).
+
+What gets published (`python -m commentator publish --build-only` builds it into `logs/stats-site`
+to look at):
+
+- `index.html` and the browser SQLite library ([sql.js-httpvfs](https://github.com/phiresky/sql.js-httpvfs),
+  vendored in `commentator/stats_vendor`).
+- `v/<version>/summary-{all,league,practice}.json`: the season tables, strokes gained, cards,
+  highlights and booth stats, computed on the PC.
+- `v/<version>/stats.db`: the shots and broadcast transcripts. The Shots and Broadcasts tabs query it
+  in the browser, which reads only the parts of the file a query needs, so a season of 90,000 shots
+  (a 90 MB file) still opens the Shots tab with about half a megabyte.
+- `latest.json`, uploaded last: which version the page reads. A page that's open during a publish
+  keeps the version it loaded; the two newest versions are kept.
+
+It holds every player's shots, scores and the booth's lines, and nothing else from the PC (no
+config, keys or logs).
+
+### Setting it up
+
+You need an AWS account and the [AWS CLI](https://aws.amazon.com/cli/) signed in as an admin, on
+any computer. The template, [`tools/aws/stats-site.yaml`](../tools/aws/stats-site.yaml), makes the
+bucket, the CloudFront distribution, the password check and an upload-only IAM user.
+
+1. Create the stack (pick the password you'll give the league; 8+ characters, letters, digits and
+   `._~!@#%^*+=-`):
+
+   ```sh
+   aws cloudformation deploy --stack-name shotcast-stats --template-file tools/aws/stats-site.yaml \
+     --capabilities CAPABILITY_IAM --parameter-overrides SiteUser=league SitePassword='...'
+   aws cloudformation describe-stacks --stack-name shotcast-stats --query "Stacks[0].Outputs"
+   ```
+
+   The outputs are the page's URL, the bucket, the region and the upload user. CloudFront takes a
+   few minutes to come up.
+2. Make the upload user's keys and put them in the booth PC's `.env`:
+
+   ```sh
+   aws iam create-access-key --user-name <UploadUser>
+   ```
+
+   ```
+   AWS_ACCESS_KEY_ID=...
+   AWS_SECRET_ACCESS_KEY=...
+   ```
+3. On the booth PC, install the uploader (`.venv\Scripts\python.exe -m pip install -e ".[publish]"`)
+   and turn it on in `config.yaml`:
+
+   ```yaml
+   publish:
+     enabled: true
+     bucket: <BucketName>
+     region: <Region>
+   ```
+4. Publish once by hand to check it: `.venv\Scripts\python.exe -m commentator publish`. Open the
+   URL, sign in, and click into the Shots and Broadcasts tabs.
+
+From then on the booth publishes three minutes after each round ends (`publish.delay_seconds`, so
+the sign-off is in it), in its own process so it never holds up the next round. A failed upload
+is in the log and, with health checks on, raised as a health warning (a phone push too, if
+[phone pushes](setup.md#phone-pushes) are set up). Replays never publish.
+
+To change the password, run the `deploy` command again with the new one. To take it all down, empty
+the bucket (`aws s3 rm s3://<BucketName> --recursive`), delete the upload user's access key, and
+`aws cloudformation delete-stack --stack-name shotcast-stats`.
 
 ## Recording only
 

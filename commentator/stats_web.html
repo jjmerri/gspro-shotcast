@@ -87,6 +87,7 @@
   <div class="meta" id="meta"></div>
 </header>
 <main id="main"></main>
+<script src="vendor/sql.js-httpvfs-0.8.12/index.js"></script>
 <script>
 const TABS = [["players", "Players"], ["versus", "Head-to-head"], ["rounds", "Rounds"], ["courses", "Courses"],
               ["shots", "Shots"], ["broadcasts", "Broadcasts"], ["highlights", "Highlights"], ["booth", "Booth"]];
@@ -106,22 +107,56 @@ const COLOR_KEYS = new Set(["color"]);
 const KIND_LABEL = { banter: "News banter", closer: "Sign-off", flight: "Ball in flight", opener: "Opening", preshot: "Pre-shot",
                      reaction: "Reaction", segment: "Between shots", shot: "Shot call" };
 
-async function getJSON(url) {
-  const r = await fetch(url);
+async function getJSON(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
   const body = await r.json();
   if (body && body.error) throw new Error(body.error);
   return body;
 }
 
+// The site (stats_site.py): latest.json names the version; its summary-<context>.json holds the
+// season stats, and its stats.db the shots and transcripts, read a few pages at a time.
+const LIB = "vendor/sql.js-httpvfs-0.8.12/";
+let site = null;   // { version, db }
+async function query(sql, args) {
+  if (!site.db) {
+    const abs = (u) => new URL(u, location.href).toString();
+    site.db = createDbWorker([{ from: "inline", config: { serverMode: "full", url: abs(`v/${site.version}/stats.db`),
+                                                          requestChunkSize: 1024 } }],
+                             abs(LIB + "sqlite.worker.js"), abs(LIB + "sql-wasm.wasm"));
+  }
+  const w = await site.db;
+  return w.db.query(sql, args);
+}
+
+// The same SQL as stats_site.shot_query: newest first, up to 500.
+const SHOT_FILTERS = ["date", "player", "course", "club", "lie"];
+async function queryShots(ctx, f) {
+  const where = [], args = [];
+  if (ctx === "league" || ctx === "practice") { where.push("s.is_league = ?"); args.push(ctx === "league" ? 1 : 0); }
+  for (const key of SHOT_FILTERS) if (f[key]) { where.push(`s.${key} = ?`); args.push(f[key]); }
+  const sql = "SELECT j.json FROM pub_shot s JOIN pub_shot_json j ON j.ord = s.ord"
+    + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY s.ord LIMIT 500";
+  return (await query(sql, args)).map(r => JSON.parse(r.json));
+}
+
+async function queryTranscript(id) {
+  const rows = await query("SELECT json FROM pub_transcript WHERE session_id = ?", [Number(id)]);
+  return rows.length ? JSON.parse(rows[0].json) : [];
+}
+
 async function load() {
   $("#main").innerHTML = '<p class="sub">Loading…</p>';
   try {
-    const body = await getJSON("/api/summary?context=" + state.ctx);
+    const latest = await getJSON("latest.json", { cache: "no-store" });
+    if (!site || site.version !== latest.version) { site = { version: latest.version, db: null }; state.session = null; }
+    const body = await getJSON(`v/${site.version}/summary-${state.ctx || "all"}.json`);
     state.data = body;
     state.shots = null;
     $("#ctx").style.display = body.has_league ? "" : "none";
     const mod = new Date(body.db.modified * 1000).toLocaleString();
-    $("#meta").textContent = `${body.db.path} · copied ${mod} · last session ${body.last_session || "–"}`;
+    $("#meta").textContent = `${body.db.name} · updated ${mod} · last session ${body.last_session || "–"}`;
     render();
   } catch (e) {
     $("#main").innerHTML = `<div class="err">Couldn't read the database: ${esc(e.message)}</div>`;
@@ -418,10 +453,10 @@ function renderCourses() {
 }
 
 async function loadShots() {
-  const f = state.shotFilter, q = new URLSearchParams({ context: state.ctx, ...f });
+  const f = state.shotFilter;
   state.shots = "loading";
   render();
-  try { state.shots = await getJSON("/api/shots?" + q); } catch (e) { state.shots = { error: e.message }; }
+  try { state.shots = await queryShots(state.ctx, f); } catch (e) { state.shots = { error: e.message }; }
   render();
 }
 
@@ -474,7 +509,7 @@ async function loadTranscript(id) {
   state.session = id;
   state.transcript = "loading";
   render();
-  try { state.transcript = await getJSON("/api/transcript?session=" + id); } catch (e) { state.transcript = { error: e.message }; }
+  try { state.transcript = await queryTranscript(id); } catch (e) { state.transcript = { error: e.message }; }
   render();
 }
 

@@ -687,6 +687,27 @@ def cmd_stats_web(cfg: Config, args) -> None:
           names={key: persona.name for key, persona in cfg.personas.items()})
 
 
+def cmd_publish(cfg: Config, args) -> None:
+    from . import stats_site
+
+    path = Path(args.db or cfg.db_path)
+    if not path.exists():
+        sys.exit(f"No season database at {path}.")
+    site = Path(args.out or Path(cfg.log_dir) / "stats-site")
+    names = {key: persona.name for key, persona in cfg.personas.items()}
+    if args.build_only:
+        version = stats_site.build(path, site, names)
+        print(f"Built {version} in {site}")
+        return
+    if not cfg.publish.bucket:
+        sys.exit("Set publish.bucket in config.yaml first (docs/tracking.md#sharing-the-stats-page).")
+    try:
+        version = stats_site.publish(path, site, cfg.publish.bucket, cfg.publish.prefix, cfg.publish.region, names)
+    except ImportError:
+        sys.exit('Publishing needs boto3: pip install -e ".[publish]"')
+    print(f"Published {version} to s3://{cfg.publish.bucket}/{cfg.publish.prefix}")
+
+
 def cmd_cost(cfg: Config, args) -> None:
     from .usage import summarize
 
@@ -762,6 +783,11 @@ def main() -> None:
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--no-browser", action="store_true", help="Don't open a browser tab")
 
+    p = sub.add_parser("publish", help="Upload the stats page to S3 (publish: in config.yaml)")
+    p.add_argument("--db", help="Database file (default: db_path, logs/season.db)")
+    p.add_argument("--out", help="Where to build the site (default: logs/stats-site)")
+    p.add_argument("--build-only", action="store_true", help="Build the site but don't upload it")
+
     p = sub.add_parser("review", help="A session's log as a timeline plus a per-shot summary")
     p.add_argument("--date", help="YYYY-MM-DD, default today")
     p.add_argument("--summary", action="store_true", help="Only the per-shot table")
@@ -805,6 +831,7 @@ def main() -> None:
         "run": cmd_run, "sniff": cmd_sniff, "calibrate": cmd_calibrate, "ocr-test": cmd_ocr_test, "screen-check": cmd_screen_check, "fixture": cmd_fixture, "notify-test": cmd_notify_test,
         "say": cmd_say, "banter": cmd_banter, "check": cmd_check, "eval": cmd_eval, "stats": cmd_stats,
         "stats-web": cmd_stats_web,
+        "publish": cmd_publish,
         "review": cmd_review,
         "cost": cmd_cost, "import-league": cmd_import_league, "squabbit": cmd_squabbit,
     }

@@ -133,7 +133,8 @@ promised.
    [Launch monitors](docs/tracking.md#launch-monitors).
 5. **`stats.bat`** (Shotcast Stats) opens the stats page. To browse on another computer (Mac
    too), copy `logs/season.db` into a checkout there and run `python -m commentator stats-web`;
-   it only needs Python and `pip install -e .`.
+   it only needs Python and `pip install -e .`. To put it online for the league behind a password,
+   updated after every round, see [Sharing the stats page](docs/tracking.md#sharing-the-stats-page).
 
 **`update.bat`** updates to the latest version (`git pull`, or a fresh download if you used the
 ZIP) and keeps your `config.yaml`, `.env`, league file and `logs`.
