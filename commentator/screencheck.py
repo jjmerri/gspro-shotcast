@@ -344,47 +344,97 @@ def _region_line(name: str, r: Region, indent: str) -> str:
             f"height: {r.height:.4f}}}  # screen-check")
 
 
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _content(line: str) -> bool:
+    return bool(line.strip()) and not line.lstrip().startswith("#")
+
+
 def write_regions(path: Path, moves: dict[str, Region]) -> Path | None:
     """Put `moves` under screen.regions in the YAML config at `path`, keeping the rest of the file (and
-    its comments) as it is. Regions already listed there are replaced line by line. Returns the backup
-    of the old file (None if there was no file)."""
+    its comments) as it is. Regions already listed there are replaced in place. Returns the backup of
+    the old file (None if there was no file). Raises RuntimeError, changing nothing, if the result
+    wouldn't read back as the old config plus exactly these moves."""
     text = path.read_text(encoding="utf-8") if path.exists() else ""
-    backup = None
-    if path.exists():
-        backup = path.with_name(path.name + ".bak")
-        shutil.copyfile(path, backup)
     lines = text.splitlines()
-    top = re.compile(r"^\S")
     s = next((i for i, ln in enumerate(lines) if re.match(r"^screen:\s*(#.*)?$", ln)), None)
     if s is None:
         lines += ["", "screen:", "  regions:"] + [_region_line(n, r, "    ") for n, r in moves.items()]
     else:
-        end = next((i for i in range(s + 1, len(lines)) if top.match(lines[i])), len(lines))
-        rg = next((i for i in range(s + 1, end) if re.match(r"^  regions:\s*(#.*)?$", lines[i])), None)
+        end = next((i for i in range(s + 1, len(lines)) if _content(lines[i]) and _indent(lines[i]) == 0),
+                   len(lines))
+        child = next((" " * _indent(lines[i]) for i in range(s + 1, end) if _content(lines[i])), "  ")
+        rg = next((i for i in range(s + 1, end)
+                   if re.match(rf"^{child}regions:(\s|$)", lines[i])), None)
         if rg is None:
             at = end
             while at > s + 1 and not lines[at - 1].strip():
                 at -= 1
-            lines[at:at] = ["  regions:"] + [_region_line(n, r, "    ") for n, r in moves.items()]
+            lines[at:at] = [f"{child}regions:"] + [_region_line(n, r, child * 2) for n, r in moves.items()]
         else:
-            rend = rg + 1
-            while rend < end and (not lines[rend].strip() or lines[rend].startswith("   ")):
-                rend += 1
-            block = lines[rg + 1:rend]
-            tail = []
-            while block and not block[-1].strip():
-                tail.append(block.pop())
-            for n, r in moves.items():
-                idx = next((i for i, ln in enumerate(block) if re.match(rf"^\s+{re.escape(n)}:", ln)), None)
-                if idx is None:
-                    block.append(_region_line(n, r, "    "))
-                else:
-                    block[idx] = _region_line(n, r, re.match(r"^\s+", block[idx]).group(0))
-            lines[rg + 1:rend] = block + tail
+            inline = re.match(rf"^{child}regions:\s*(.*?)\s*$", lines[rg]).group(1)
+            if inline and not inline.startswith("#"):
+                # `regions: {...}` on one line: rewrite it as a block, keeping its entries.
+                try:
+                    existing = yaml.safe_load(inline) or {}
+                    if not isinstance(existing, dict):
+                        raise ValueError(inline)
+                    existing = {n: Region(**v) for n, v in existing.items()}
+                except Exception:
+                    raise RuntimeError(f"Couldn't read screen.regions in {path} to add to it; nothing "
+                                       "changed. Write it as one region per line and try again.")
+                existing.update(moves)
+                lines[rg:rg + 1] = [f"{child}regions:"] + [_region_line(n, r, child * 2)
+                                                            for n, r in existing.items()]
+            else:
+                rend = rg + 1
+                while rend < end and (not _content(lines[rend]) or _indent(lines[rend]) > len(child)):
+                    rend += 1
+                block = lines[rg + 1:rend]
+                tail = []
+                while block and not block[-1].strip():
+                    tail.append(block.pop())
+                entry = next((" " * _indent(ln) for ln in block if _content(ln)), child * 2)
+                for n, r in moves.items():
+                    idx = next((i for i, ln in enumerate(block)
+                                if re.match(rf"^{entry}{re.escape(n)}:", ln)), None)
+                    if idx is None:
+                        block.append(_region_line(n, r, entry))
+                        continue
+                    stop = idx + 1   # a region written over several lines: drop its old lines too
+                    while stop < len(block) and (not _content(block[stop]) or _indent(block[stop]) > len(entry)):
+                        stop += 1
+                    while stop > idx + 1 and not block[stop - 1].strip():
+                        stop -= 1
+                    block[idx:stop] = [_region_line(n, r, entry)]
+                lines[rg + 1:rend] = block + tail
     new = "\n".join(lines) + "\n"
-    loaded = (yaml.safe_load(new) or {}).get("screen", {}).get("regions", {})
-    for n, r in moves.items():   # never leave a config the booth would read differently than intended
-        if Region(**loaded.get(n, {})) != r:
-            raise RuntimeError(f"Couldn't write {n} into {path} cleanly; nothing changed.")
+    # Never leave a config the booth would read differently than intended: the new file must load as
+    # the old one with only these regions changed.
+    try:
+        old_cfg = yaml.safe_load(text) or {}
+        new_cfg = yaml.safe_load(new) or {}
+        old_regions = dict((old_cfg.get("screen") or {}).get("regions") or {})
+        new_regions = dict((new_cfg.get("screen") or {}).get("regions") or {})
+        ok = (all(Region(**new_regions.get(n, {})) == r for n, r in moves.items())
+              and {n: v for n, v in new_regions.items() if n not in moves}
+              == {n: v for n, v in old_regions.items() if n not in moves})
+        for cfg in (old_cfg, new_cfg):
+            if isinstance(cfg.get("screen"), dict):
+                cfg["screen"] = {k: v for k, v in cfg["screen"].items() if k != "regions"}
+        ok = ok and {k: v for k, v in new_cfg.items() if k != "screen" or v} \
+            == {k: v for k, v in old_cfg.items() if k != "screen" or v}
+    except Exception:
+        ok = False
+    if not ok:
+        raise RuntimeError(f"Couldn't write the moved boxes into {path} cleanly; nothing changed. "
+                           "Add them under screen: regions: by hand: " + ", ".join(
+                               _region_line(n, r, "").strip() for n, r in moves.items()))
+    backup = None
+    if path.exists():
+        backup = path.with_name(path.name + ".bak")
+        shutil.copyfile(path, backup)
     path.write_text(new, encoding="utf-8")
     return backup

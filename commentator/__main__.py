@@ -309,7 +309,10 @@ def cmd_screen_check(cfg: Config, args) -> None:
             print("Nothing to fix from this screen.")
             return
         path = Path(args.config)
-        backup = screencheck.write_regions(path, rep.moves)
+        try:
+            backup = screencheck.write_regions(path, rep.moves)
+        except RuntimeError as exc:
+            sys.exit(str(exc))
         print(f"Wrote {len(rep.moves)} region(s) to {path} under screen.regions"
               + (f" (old file kept as {backup})" if backup else "")
               + ". Restart the booth to use them, and run screen-check on the other GSPro screens too.")

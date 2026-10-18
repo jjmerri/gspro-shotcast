@@ -122,3 +122,45 @@ def test_fix_adds_a_screen_section_when_there_is_none(tmp_path):
     r = sc.Region(left=0.1, top=0.2, width=0.3, height=0.1)
     sc.write_regions(cfg, {"hole_box": r})
     assert load_config(cfg).screen.regions["hole_box"] == r and load_config(cfg).log_dir == "logs"
+
+
+def test_fix_keeps_inline_regions(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("screen:\n  ocr: true\n  regions: {club: {left: 0.1, top: 0.1, width: 0.1, height: 0.1}}\n"
+                   "other: 1\n", encoding="utf-8")
+    lie = sc.Region(left=0.8, top=0.4, width=0.15, height=0.5)
+    sc.write_regions(cfg, {"lie": lie})
+    loaded = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    assert loaded["screen"]["regions"]["club"] == {"left": 0.1, "top": 0.1, "width": 0.1, "height": 0.1}
+    assert sc.Region(**loaded["screen"]["regions"]["lie"]) == lie
+    assert loaded["screen"]["ocr"] is True and loaded["other"] == 1
+
+
+def test_fix_replaces_a_multiline_region_and_follows_four_space_indent(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("screen:\n    ocr: true\n    regions:\n        lie:\n            left: 0.84\n"
+                   "            top: 0.45\n            width: 0.16\n            height: 0.53\n"
+                   "        club: {left: 0.1, top: 0.1, width: 0.1, height: 0.1}\n"
+                   "commentary:\n    enabled: true\n", encoding="utf-8")
+    lie = sc.Region(left=0.8, top=0.4, width=0.15, height=0.5)
+    hole = sc.Region(left=0.5, top=0.0, width=0.2, height=0.1)
+    sc.write_regions(cfg, {"lie": lie, "hole_box": hole})
+    loaded = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    regions = loaded["screen"]["regions"]
+    assert sc.Region(**regions["lie"]) == lie and sc.Region(**regions["hole_box"]) == hole
+    assert regions["club"]["left"] == 0.1 and loaded["commentary"] == {"enabled": True}
+
+    cfg.write_text("screen:\n    ocr: true\ncommentary:\n    enabled: true\n", encoding="utf-8")
+    sc.write_regions(cfg, {"lie": lie})
+    loaded = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    assert sc.Region(**loaded["screen"]["regions"]["lie"]) == lie and loaded["screen"]["ocr"] is True
+
+
+def test_fix_that_cant_be_written_cleanly_changes_nothing(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    original = "screen:\n  regions: {club: {left: 0.1,\n    top: 0.1, width: 0.1, height: 0.1}}\n"
+    cfg.write_text(original, encoding="utf-8")
+    with pytest.raises(RuntimeError, match="nothing changed"):
+        sc.write_regions(cfg, {"lie": sc.Region(left=0.8, top=0.4, width=0.15, height=0.5)})
+    assert cfg.read_text(encoding="utf-8") == original
+    assert not (tmp_path / "config.yaml.bak").exists()
