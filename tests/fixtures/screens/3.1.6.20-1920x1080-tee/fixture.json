@@ -1,0 +1,112 @@
+{
+ "captured": "2026-10-17 21:43:00",
+ "kind": "shot",
+ "gspro_version": "3.1.6.20",
+ "course": "Paynes Valley",
+ "size": [
+  1920,
+  1080
+ ],
+ "regions": {
+  "player_box": {
+   "left": 0.0,
+   "top": 0.0,
+   "width": 0.32,
+   "height": 0.086,
+   "anchor": "top",
+   "aspect": 1.6
+  },
+  "hole_box": {
+   "left": 0.76,
+   "top": 0.0,
+   "width": 0.22,
+   "height": 0.1,
+   "anchor": "top",
+   "aspect": 1.6
+  },
+  "tiles": {
+   "left": 0.85,
+   "top": 0.08,
+   "width": 0.15,
+   "height": 0.4,
+   "anchor": "top",
+   "aspect": 1.6
+  },
+  "tiles_left": {
+   "left": 0.0,
+   "top": 0.08,
+   "width": 0.16,
+   "height": 0.4,
+   "anchor": "top",
+   "aspect": 1.6
+  },
+  "lie": {
+   "left": 0.84,
+   "top": 0.45,
+   "width": 0.16,
+   "height": 0.53,
+   "anchor": "bottom",
+   "aspect": 1.6
+  },
+  "club": {
+   "left": 0.0,
+   "top": 0.84,
+   "width": 0.1,
+   "height": 0.14,
+   "anchor": "bottom",
+   "aspect": 1.6
+  }
+ },
+ "boxes": {
+  "player_box": [
+   0,
+   0,
+   614,
+   103
+  ],
+  "hole_box": [
+   1459,
+   0,
+   422,
+   120
+  ],
+  "tiles": [
+   1632,
+   96,
+   288,
+   480
+  ],
+  "tiles_left": [
+   0,
+   96,
+   307,
+   480
+  ],
+  "lie": [
+   1613,
+   420,
+   307,
+   636
+  ],
+  "club": [
+   0,
+   888,
+   192,
+   168
+  ]
+ },
+ "expected": {
+  "player_text": "Alex E Shot 1 391.5 YDS  27.1YDS",
+  "shot_number": 1,
+  "to_pin": "391.5 yards",
+  "score_to_par": "E",
+  "course": "Paynes Valley",
+  "par": 4,
+  "hole_length": "392 yards",
+  "hole_number": null,
+  "lie": "tee",
+  "club": "DR",
+  "handed": "RH",
+  "tiles": {}
+ }
+}

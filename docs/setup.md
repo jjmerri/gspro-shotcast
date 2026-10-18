@@ -50,9 +50,9 @@ what each region parsed; `screen.ocr` is on by default), and go live with `pytho
   GSPro on screen and open `logs/calibrate.png`: each green box should surround its panel. Move
   any that don't under `screen.regions` in `config.yaml` (fractions of the screen; only list the
   ones you change), then confirm with `ocr-test`. A region you list is used exactly as written.
-- **Players not picked up from the setup screen.** Those boxes are only checked on a 16:10
-  screen. With GSPro's setup screen up, run `calibrate --out setup` and adjust the `setup_*`
-  regions the same way.
+- **Players not picked up from the setup screen.** Those boxes adjust to the screen's shape too
+  (checked on 16:10 and 16:9). With GSPro's setup screen up, run `calibrate --out setup` and
+  adjust the `setup_*` regions the same way.
 - **Nothing reads at all, or the ON AIR badge doesn't show.** GSPro must be windowed or
   borderless, not exclusive fullscreen, and on the primary monitor (`screen.monitor`). A window
   over the HUD (the booth's own console, a notification, the taskbar) is read as part of it.

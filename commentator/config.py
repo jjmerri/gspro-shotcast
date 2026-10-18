@@ -73,35 +73,37 @@ DEFAULT_REGIONS = {
     # mid-height); calibrate it tighter to your resolution with `calibrate` / `ocr-test`.
     "score_banner": Region(left=0.25, top=0.40, width=0.50, height=0.26, anchor="middle", aspect=HUD_ASPECT),
     # --- GSPro setup screen (pre-round), read for the early opener (commentary.preround). Calibrated
-    # to 3450x2160 (fractional, so resolution-independent, but only checked on a 16:10 screen); recheck
-    # with `calibrate --out setup` if your screen shape or HUD scale differs. The course is in the bottom-right "Play <course>!" button (which also
+    # to 3450x2160 and checked at 1920x1080; recheck with `calibrate --out setup` if your screen shape
+    # or HUD scale differs. The course is in the bottom-right "Play <course>!" button (which also
     # marks that the setup screen is up); players fill a 4x2 grid of name slots, slot 1 starting with
     # your name. Boxes are kept tight to each name pill: OCR returns nothing from a box that also
-    # swallows the pill border or the dropdown chevron.
+    # swallows the pill border or the dropdown chevron. GSPro scales this screen with the screen's
+    # width, pinned to the top (the Play button to the bottom), so the boxes adjust to other screen
+    # shapes the way the HUD boxes do.
     # An empty slot shows a centered "+" add-player button (not the name pill), so the boxes are kept
     # tight to the top-of-card pill and the watcher drops any read without a letter (see _watch_setup).
-    "setup_course": Region(left=0.797, top=0.922, width=0.165, height=0.064),
-    "setup_slot_1": Region(left=0.070, top=0.254, width=0.139, height=0.050),
-    "setup_slot_2": Region(left=0.305, top=0.254, width=0.139, height=0.050),
-    "setup_slot_3": Region(left=0.540, top=0.254, width=0.139, height=0.050),
-    "setup_slot_4": Region(left=0.778, top=0.252, width=0.135, height=0.054),
-    "setup_slot_5": Region(left=0.070, top=0.518, width=0.139, height=0.050),
-    "setup_slot_6": Region(left=0.305, top=0.518, width=0.139, height=0.050),
-    "setup_slot_7": Region(left=0.540, top=0.518, width=0.139, height=0.050),
-    "setup_slot_8": Region(left=0.772, top=0.518, width=0.139, height=0.050),
+    "setup_course": Region(left=0.797, top=0.922, width=0.165, height=0.064, anchor="bottom", aspect=HUD_ASPECT),
+    "setup_slot_1": Region(left=0.070, top=0.254, width=0.139, height=0.050, aspect=HUD_ASPECT),
+    "setup_slot_2": Region(left=0.305, top=0.254, width=0.139, height=0.050, aspect=HUD_ASPECT),
+    "setup_slot_3": Region(left=0.540, top=0.254, width=0.139, height=0.050, aspect=HUD_ASPECT),
+    "setup_slot_4": Region(left=0.778, top=0.252, width=0.135, height=0.054, aspect=HUD_ASPECT),
+    "setup_slot_5": Region(left=0.070, top=0.518, width=0.139, height=0.050, aspect=HUD_ASPECT),
+    "setup_slot_6": Region(left=0.305, top=0.518, width=0.139, height=0.050, aspect=HUD_ASPECT),
+    "setup_slot_7": Region(left=0.540, top=0.518, width=0.139, height=0.050, aspect=HUD_ASPECT),
+    "setup_slot_8": Region(left=0.772, top=0.518, width=0.139, height=0.050, aspect=HUD_ASPECT),
     # The PLAYERS tab header. It's a solid white pill only while that tab is selected, so its brightness
     # says the slot boxes hold player names (not Match Settings / Holes labels). Pixel check, no OCR.
-    "setup_players_tab": Region(left=0.305, top=0.105, width=0.130, height=0.045),
+    "setup_players_tab": Region(left=0.305, top=0.105, width=0.130, height=0.045, aspect=HUD_ASPECT),
     # The HOLES tab header (a white pill while selected) and the FRONT 9 / BACK 9 checkboxes on that
     # tab (white when checked, an outline when not). Pixel checks, no OCR: they say which nines are in
     # the round.
-    "setup_holes_tab": Region(left=0.570, top=0.108, width=0.120, height=0.040),
+    "setup_holes_tab": Region(left=0.570, top=0.108, width=0.120, height=0.040, aspect=HUD_ASPECT),
     # The MATCH SETTINGS tab header (a white pill while selected) and its GAME MODE value. Only a
     # SCRAMBLE is read from it: leagues leave GSPro on stroke play for their other formats.
-    "setup_match_tab": Region(left=0.440, top=0.108, width=0.120, height=0.040),
-    "setup_game_mode": Region(left=0.360, top=0.285, width=0.170, height=0.042),
-    "setup_front9_box": Region(left=0.074, top=0.221, width=0.018, height=0.028),
-    "setup_back9_box": Region(left=0.074, top=0.491, width=0.018, height=0.028),
+    "setup_match_tab": Region(left=0.440, top=0.108, width=0.120, height=0.040, aspect=HUD_ASPECT),
+    "setup_game_mode": Region(left=0.360, top=0.285, width=0.170, height=0.042, aspect=HUD_ASPECT),
+    "setup_front9_box": Region(left=0.074, top=0.221, width=0.018, height=0.028, aspect=HUD_ASPECT),
+    "setup_back9_box": Region(left=0.074, top=0.491, width=0.018, height=0.028, aspect=HUD_ASPECT),
     # GSPro's course-load screen shows the course name big and centered up top. The watcher fires the
     # opener when this matches the course that was set up (a positive "Play was pressed and it's
     # loading" signal), so a window popping up over the setup screen can't trigger a spurious opener.

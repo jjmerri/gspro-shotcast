@@ -1,0 +1,62 @@
+{
+ "captured": "2026-10-17 21:42:54",
+ "kind": "setup_match",
+ "gspro_version": "3.1.6.20",
+ "course": "Paynes Valley",
+ "size": [
+  1920,
+  1080
+ ],
+ "regions": {
+  "setup_course": {
+   "left": 0.797,
+   "top": 0.922,
+   "width": 0.165,
+   "height": 0.064,
+   "anchor": "bottom",
+   "aspect": 1.6
+  },
+  "setup_match_tab": {
+   "left": 0.44,
+   "top": 0.108,
+   "width": 0.12,
+   "height": 0.04,
+   "anchor": "top",
+   "aspect": 1.6
+  },
+  "setup_game_mode": {
+   "left": 0.36,
+   "top": 0.285,
+   "width": 0.17,
+   "height": 0.042,
+   "anchor": "top",
+   "aspect": 1.6
+  }
+ },
+ "boxes": {
+  "setup_course": [
+   1530,
+   986,
+   317,
+   77
+  ],
+  "setup_match_tab": [
+   845,
+   130,
+   230,
+   48
+  ],
+  "setup_game_mode": [
+   691,
+   342,
+   326,
+   50
+  ]
+ },
+ "expected": {
+  "course": "PAYNES VALLEY",
+  "match_tab": true,
+  "mode_read": true,
+  "scramble": false
+ }
+}

@@ -1,0 +1,78 @@
+{
+ "captured": "2026-10-17 21:42:58",
+ "kind": "setup_holes",
+ "gspro_version": "3.1.6.20",
+ "course": "Paynes Valley",
+ "size": [
+  1920,
+  1080
+ ],
+ "regions": {
+  "setup_course": {
+   "left": 0.797,
+   "top": 0.922,
+   "width": 0.165,
+   "height": 0.064,
+   "anchor": "bottom",
+   "aspect": 1.6
+  },
+  "setup_holes_tab": {
+   "left": 0.57,
+   "top": 0.108,
+   "width": 0.12,
+   "height": 0.04,
+   "anchor": "top",
+   "aspect": 1.6
+  },
+  "setup_front9_box": {
+   "left": 0.074,
+   "top": 0.221,
+   "width": 0.018,
+   "height": 0.028,
+   "anchor": "top",
+   "aspect": 1.6
+  },
+  "setup_back9_box": {
+   "left": 0.074,
+   "top": 0.491,
+   "width": 0.018,
+   "height": 0.028,
+   "anchor": "top",
+   "aspect": 1.6
+  }
+ },
+ "boxes": {
+  "setup_course": [
+   1530,
+   986,
+   317,
+   77
+  ],
+  "setup_holes_tab": [
+   1094,
+   130,
+   230,
+   48
+  ],
+  "setup_front9_box": [
+   142,
+   265,
+   35,
+   34
+  ],
+  "setup_back9_box": [
+   142,
+   589,
+   35,
+   34
+  ]
+ },
+ "expected": {
+  "course": "PAYNES VALLEY",
+  "holes_tab": true,
+  "picked": [
+   1,
+   18
+  ]
+ }
+}
