@@ -1079,7 +1079,7 @@ class Engine:
     async def _drain_shot_tasks(self, timeout: float) -> None:
         """Wait (bounded) for in-flight shot handlers to finish, so a hole's last reaction is queued
         before the wrap is, instead of the two talking over each other."""
-        pending = {t for t in self._shot_tasks if not t.done()}
+        pending = {t for t in self._shot_tasks if not t.done() and t is not asyncio.current_task()}
         if pending:
             await asyncio.wait(pending, timeout=timeout)
 
@@ -2878,7 +2878,7 @@ class Engine:
             angle=self.rng.choice(ANGLES),
             big=score >= c.big_moment_threshold,
         )
-        await self._speak("shot", self.live_llm, user, facts_text, [], must=must)
+        await self._speak("shot", self.live_llm, user, facts_text, [], must=must, shot_id=shot_id)
 
     @staticmethod
     def _idx_snap(snap: tuple, idx: int) -> dict:
@@ -4484,6 +4484,10 @@ class Engine:
         r = self.round
         if not r or r.ended:
             return
+        # The last shot's handler may still be reading: its record goes into the round's totals.
+        await self._drain_shot_tasks(self.cfg.commentary.wrap_wait_seconds)
+        if r.ended:
+            return
         r.ended = True
         self._round_ended_at = time.monotonic()
         self.hole_number = None  # the next round starts its own count
@@ -4790,22 +4794,25 @@ class Engine:
                 self.stats["dropped_after_retry"] += len(still_bad)
         return lines
 
-    def _air_lines(self, kind: str, lines: list[Line]) -> None:
+    def _air_lines(self, kind: str, lines: list[Line], shot_id: int | None = None) -> None:
         if not lines:
             return
         self.state.record_lines(lines)
         self.speech.say(lines)
-        self._write_transcript(lines, kind)
+        self._write_transcript(lines, kind, shot_id)
 
     async def _speak(
         self, kind: str, llm: LLMClient, user: str, facts_text: str, images: list[bytes], mode: str = "result",
-        system: str | None = None, must: str | None = None,
+        system: str | None = None, must: str | None = None, shot_id: int | None = None,
     ) -> None:
         self._air_lines(kind, await self._compose(kind, llm, user, facts_text, images, mode, system=system,
-                                                  must=must))
+                                                  must=must), shot_id)
 
-    def _write_transcript(self, lines: list[Line], kind: str = "shot") -> None:
-        self.store.record_lines(kind, lines, self._shot_id if kind in ("shot", "flight") else None)
+    def _write_transcript(self, lines: list[Line], kind: str = "shot", shot_id: int | None = None) -> None:
+        # The handler's own shot id beats the shared one, which the next shot may have moved on.
+        if shot_id is None and kind in ("shot", "flight"):
+            shot_id = self._shot_id
+        self.store.record_lines(kind, lines, shot_id)
         for line in lines:
             self._season_phrases |= ngrams(line.text, 6)
             for player, keys in self._note_keys.items():

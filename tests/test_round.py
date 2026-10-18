@@ -2125,3 +2125,27 @@ def test_without_a_league_the_shot_goes_to_the_rounds_gspro_name(tmp_path):
     e._start_round(e._build_round(["Alex", "Sam"], "Somewhere", {"hole_count": 9}, is_league=False))
     assert e._player("Alex E Shot 1 350 yds", None) == "Alex"
     assert e._player("SAM +1 Shot 2 120 yds", None) == "Sam"
+
+
+async def test_a_round_ends_after_its_last_shot_is_recorded(tmp_path):
+    import asyncio
+
+    from commentator.models import RoundEndEvent
+    e = _engine(tmp_path)
+    e._start_round(e._build_round(["MikeD"], "Somewhere", {"hole_count": 9}, is_league=False))
+    seen = []
+
+    async def last_shot():
+        await asyncio.sleep(0.2)
+        seen.append(e.round.ended)
+    e._shot_tasks.add(asyncio.create_task(last_shot()))
+    await e.handle_round_end(RoundEndEvent(reason="final scorecard", abandoned=True))
+    assert seen == [False] and e.round.ended
+
+
+def test_a_reaction_links_to_its_own_shot(tmp_path):
+    from commentator.models import Line
+    e = _engine(tmp_path)
+    e._shot_id = 99   # the next shot's handler has moved on
+    e._write_transcript([Line(e.speakers[0], "Found the fairway.")], "shot", shot_id=7)
+    assert [r[0] for r in e.store.db.execute("SELECT shot_id FROM lines")] == [7]
