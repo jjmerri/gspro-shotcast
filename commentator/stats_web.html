@@ -191,12 +191,16 @@ async function queryTranscript(id) {
   return rows.length ? JSON.parse(rows[0].json) : [];
 }
 
+let loading = 0;   // only the latest load() may show its data (a slow older one can finish last)
 async function load() {
+  const mine = ++loading;
   $("#main").innerHTML = '<p class="sub">Loading…</p>';
   try {
     const latest = await getJSON("latest.json", { cache: "no-store" });
+    if (mine !== loading) return;
     if (!site || site.version !== latest.version) { site = { version: latest.version, db: null }; state.session = null; }
     const body = await getJSON(`v/${site.version}/summary-${state.ctx || "all"}.json`);
+    if (mine !== loading) return;
     state.data = body;
     state.shots = null;
     document.querySelectorAll("#ctx button").forEach(b => b.classList.toggle("on", b.dataset.ctx === state.ctx));
@@ -210,7 +214,7 @@ async function load() {
       + `<button class="link" data-share title="Copy a link to exactly this view">Copy link</button>`;
     render();
   } catch (e) {
-    $("#main").innerHTML = `<div class="err">Couldn't read the database: ${esc(e.message)}</div>`;
+    if (mine === loading) $("#main").innerHTML = `<div class="err">Couldn't read the database: ${esc(e.message)}</div>`;
   }
 }
 
