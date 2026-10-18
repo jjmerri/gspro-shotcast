@@ -43,7 +43,10 @@ The shot feeds:
   there at all, Shotcast uses `gspro_log` instead. If it's there but GSPconnect has gone quiet
   (it writes a heartbeat about every second while running, so 30 s of silence means it isn't
   the feed, e.g. a leftover file from an old setup or another connector in use), shots are taken
-  from GSPro's log until GSPconnect speaks again. The booth log notes each switch.
+  from GSPro's log until GSPconnect speaks again. The booth log notes each switch. GSPconnect
+  can also skip a single shot while it's running; a shot in GSPro's log that GSPconnect hasn't
+  sent within two seconds (matched by ball speed) is taken from GSPro's log, without club data
+  ("GSPconnect skipped a shot" in the booth log).
 - **`gspro_log`**: reads each shot from GSPro's own log, which records the ball data GSPro
   played (`LaunchExt Vars: sp 138.37, el 15.21, ...`) whatever sent it. Its numbers matched the
   Uneekor feed shot for shot, but it hasn't been run with other monitors yet. Use it if your

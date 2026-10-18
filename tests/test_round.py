@@ -1979,6 +1979,24 @@ def test_a_hole_recap_names_a_putt_for_birdie():
     assert recap[2].startswith("Mike: putt for birdie") and recap[3] == "Mike: putt"
 
 
+def test_a_hole_recap_counts_the_conceded_tap_in_as_a_putt():
+    from commentator.state import SessionState
+
+    st = SessionState()
+    # Drive, wedge, a missed 24-footer, then a 12-footer left inside the gimme: three putts on the card.
+    st.shots = [rec("Mike", 1, 4, 1, "tee", "rough", "DR"), rec("Mike", 1, 4, 2, "rough", "green"),
+                rec("Mike", 1, 4, 3, "green", "green", "PT"), rec("Mike", 1, 4, 4, "green", "green", "PT")]
+    for s in st.shots:
+        s.hole = "hole 1"
+    st.shots[2].outcome, st.shots[3].outcome = "missed", "conceded"
+    recap = st.hole_recap("hole 1")
+    assert recap[2].endswith(", missed")
+    assert recap[3] == "Mike: putt, stopped inside the gimme circle"
+    assert recap[4] == "Mike: conceded tap-in (counts as a putt)" and len(recap) == 5
+    st.shots[3].outcome = "holed"
+    assert st.hole_recap("hole 1")[3].endswith(", holed") and len(st.hole_recap("hole 1")) == 4
+
+
 def test_classify_round_calls_a_second_round_on_a_posted_week_practice(tmp_path, monkeypatch):
     e = _engine(tmp_path)
     monkeypatch.setattr(e.store, "league_round_courses", lambda team: [])

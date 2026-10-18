@@ -26,6 +26,7 @@ class ShotRecord:
     mulligan: bool = False   # GSPro took it back: kept for the record, left out of the round's stats
     to_pin_before: str | None = None   # the HUD's distance to the pin when the swing was set up
     shot_id: int | None = None   # its row in the store
+    outcome: str | None = None   # how it ended, from GSPro's log: holed / missed / conceded (inside the gimme)
 
 
 @dataclass
@@ -68,7 +69,14 @@ class SessionState:
             desc = f"{name(r.player)}: {what}"
             if r.shot.carry and not r.shot.is_putt:
                 desc += f", carried {round(r.shot.carry)}"
-            if r.hud.lie:
+            if r.outcome == "conceded":
+                desc += ", stopped inside the gimme circle"
+            elif r.hud.lie:
                 desc += f", finished in the {r.hud.lie}"
+            if r.outcome == "holed" or (r.shot.is_putt and r.outcome == "missed"):
+                desc += f", {r.outcome}"
             out.append(desc)
+            if r.outcome == "conceded":
+                # GSPro counts the tap-in nobody hits: a stroke and a putt on the card
+                out.append(f"{name(r.player)}: conceded tap-in (counts as a putt)")
         return out

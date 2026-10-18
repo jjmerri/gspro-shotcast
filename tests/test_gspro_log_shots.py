@@ -96,3 +96,21 @@ def test_a_quiet_gspconnect_log_hands_shots_to_gsprolog():
     # Quiet for longer than the window: the log's shot is taken.
     src = ConnectorWithLogFallback(_Feed([], heard_at=time.monotonic() - 60), _Feed([(0, ShotEvent(shot=log_copy))]))
     assert _take(src, 1)[0].shot is log_copy
+
+
+def test_a_shot_gspconnect_skips_while_heartbeating_comes_from_gspros_log():
+    import dataclasses
+    import time
+
+    from commentator.models import ShotEvent
+    from commentator.sources.fallback import ConnectorWithLogFallback
+    drive = shot_from_launch(parse_launch(DRIVE))
+    wedge = dataclasses.replace(drive, ball_speed=98.55)
+    putt = shot_from_launch(parse_launch(PUTT))
+    conn_drive = dataclasses.replace(drive, ball_speed=drive.ball_speed + 0.004)   # GSPconnect's unrounded copy
+    # GSPconnect sends the drive (after the log's copy) and the putt (before it), but never the wedge.
+    conn = _Feed([(0.05, ShotEvent(shot=conn_drive)), (0.3, ShotEvent(shot=putt))], heard_at=time.monotonic())
+    gl = _Feed([(0, ShotEvent(shot=drive)), (0.1, ShotEvent(shot=wedge)), (0.3, ShotEvent(shot=putt))])
+    src = ConnectorWithLogFallback(conn, gl, missed_after=0.15)
+    got = [e.shot for e in _take(src, 3)]
+    assert got == [conn_drive, wedge, putt] and not src.using_log

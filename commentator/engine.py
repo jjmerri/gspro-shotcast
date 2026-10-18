@@ -2634,9 +2634,9 @@ class Engine:
                              tag, c.hole_result_window_seconds)
                     self._bg(self._late_result(shot_id, idx, base_outs, base_gim, base_shot, tag, True,
                                                self._pending_prediction.pop(player, None), shot_hole,
-                                               base_hole=base_hole, base_setup=base_setup))
+                                               base_hole=base_hole, base_setup=base_setup, rec=rec))
                 else:
-                    self._record_result(shot_id, outcome, tag, putt=True)
+                    self._record_result(shot_id, outcome, tag, putt=True, rec=rec)
                     holed = outcome == "holed"
                     log.info("%s putt outcome from GSPro log: %s (%.1fs after impact)", tag, outcome,
                              time.monotonic() - impact)
@@ -3162,6 +3162,8 @@ class Engine:
         any stroke that ended inside the gimme circle also gets a row for the conceded putt GSPro
         counts but nobody hits, so putting stats (putts per hole, three-putts) see every putt on the
         card. A full shot that ended inside the circle finished on the green, whatever the HUD read."""
+        if rec is not None:
+            rec.outcome = outcome
         if putt or outcome == "holed":
             self.store.set_shot_result(shot_id, outcome=outcome)
         if outcome == "conceded" and shot_id is not None:
