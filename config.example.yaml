@@ -28,7 +28,7 @@ personas:
 
 llm:
   # Each kind of call gets the model that fits its latency and quality budget (docs/booth.md,
-  # "Models and voices"). `effort: none` skips GPT's reasoning for the lowest latency, and
+  # "Models and voices"). `effort: none` skips the model's reasoning (GPT) or thinking (Claude) for the lowest latency, and
   # `service_tier: fast` trims latency further for ~2x a tiny per-token price.
   # The spoken pre-shot line, reactions, and between-hole segments.
   live:    { provider: openai, model: gpt-6-luna, effort: none, service_tier: fast, max_tokens: 400 }

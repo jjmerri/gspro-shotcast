@@ -126,8 +126,9 @@ class LLMConfig(BaseModel):
     temperature: float | None = 0.9
     # Reasoning effort, for providers that take it. Anthropic (not Haiku 4.5): low/medium/high, and
     # xhigh/max on Haiku 5.5 and the 5-series. OpenAI reasoning models (gpt-6): none/low/medium/high/
-    # xhigh, where "none" skips reasoning for the lowest latency. Higher effort trades latency for
-    # quality; for the booth's short commentary the fast settings ("low", or "none" on OpenAI) win.
+    # xhigh, where "none" skips reasoning for the lowest latency. On Claude, "none" turns thinking off
+    # (or falls back to "low" where a model can't). Higher effort trades latency for quality; for the
+    # booth's short commentary the fast settings ("none" or "low") win.
     effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = "none"
     # Ollama only. Thinking models (Qwen3, Gemma 4) otherwise spend the whole token budget
     # reasoning and return nothing. Harmless on models without a thinking mode.
