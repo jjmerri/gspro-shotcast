@@ -17,6 +17,11 @@ Shot tracking, season stats and an AI broadcast booth for **GSPro 3.1.x** simula
 
 Use the tracking on its own, or turn the booth on for the full broadcast.
 
+https://github.com/user-attachments/assets/a3582249-23be-48c9-bf14-c5d1197671f8
+
+*The booth calling a hole at Kapalua (sound on): the opener during course load, calls in flight,
+a mulligan, and the hole wrap-up.*
+
 ## Shot tracking and stats
 
 ![Players: season table, strokes gained, night-by-night trends, club gapping](docs/screenshots/players.png)
