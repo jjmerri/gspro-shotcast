@@ -501,7 +501,8 @@ class PublishConfig(BaseModel):
     bucket: str | None = None
     prefix: str = ""
     region: str | None = None
-    # Publish on its own after every round, this long after it ends (so the sign-off is in it).
+    # Publish on its own after every round, as soon as the sign-off has aired; delay_seconds after the
+    # round ends is the backup, in case the sign-off never finishes.
     after_round: bool = True
     delay_seconds: float = 180.0
 

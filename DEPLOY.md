@@ -66,7 +66,7 @@ Batch files in the repo root (`install.bat` and `update.bat` are under [Install]
   GSPro update or a resolution change; `screen-check.bat --fix` writes moved boxes to `config.yaml`.
 - **`stats.bat`** opens the stats page over `logs\season.db`; close its window to stop it.
 - **Publishing the stats page** (optional): with `publish.enabled` and the AWS keys in `.env`, the
-  booth uploads the page a few minutes after each round
+  booth uploads the page right after each round's sign-off
   ([Sharing the stats page](docs/tracking.md#sharing-the-stats-page)); install the uploader once with
   `.venv\Scripts\pip install -e ".[publish]"`.
 

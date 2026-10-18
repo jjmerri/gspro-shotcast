@@ -136,3 +136,17 @@ async def test_publish_after_a_round_only_when_set_up_and_once_for_rounds_close_
     assert first.cancelled()
     await eng._publish_task
     assert ran == [1]
+
+
+async def test_publish_goes_out_once_the_sign_off_has_aired_with_the_timer_as_a_backup(tmp_path):
+    eng, ran = _engine(tmp_path, enabled=True, bucket="bkt", delay_seconds=60)
+    talking = [True]
+    eng.speech.is_idle = lambda: not talking[0]
+    eng._schedule_publish()                                # round over: the backup timer
+    backup = eng._publish_task
+    eng._schedule_publish(after_speech=True)               # sign-off queued
+    await asyncio.sleep(0.3)
+    assert backup.cancelled() and ran == []                # still voicing the sign-off
+    talking[0] = False
+    await asyncio.wait_for(eng._publish_task, 2)
+    assert ran == [1]

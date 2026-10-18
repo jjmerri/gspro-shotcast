@@ -170,4 +170,4 @@ publish:
   enabled: false
   # bucket: shotcast-stats-bucket-xxxx   # the stack's BucketName output
   # region: us-east-1
-  # delay_seconds: 180                   # after the round ends, so the sign-off is in it
+  # delay_seconds: 180                   # it publishes once the sign-off has aired; this is the backup

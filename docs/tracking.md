@@ -218,8 +218,9 @@ bucket, the CloudFront distribution, the password check and an upload-only IAM u
 4. Publish once by hand to check it: `.venv\Scripts\python.exe -m commentator publish`. Open the
    URL, sign in, and click into the Shots and Broadcasts tabs.
 
-From then on the booth publishes three minutes after each round ends (`publish.delay_seconds`, so
-the sign-off is in it), in its own process so it never holds up the next round. A failed upload
+From then on the booth publishes after each round as soon as the sign-off has aired (if it never
+finishes, `publish.delay_seconds`, 3 minutes, after the round ends instead), in its own process so
+it never holds up the next round. A failed upload
 is in the log and, with health checks on, raised as a health warning (a phone push too, if
 [phone pushes](setup.md#phone-pushes) are set up). Replays never publish.
 

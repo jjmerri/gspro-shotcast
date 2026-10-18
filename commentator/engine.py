@@ -4443,13 +4443,17 @@ class Engine:
                 self._closer_task.cancel()
             self._closer_branches = self._wrap_branches = None
             self._record_round_stats(r, event.reason, complete=False)
-            self._schedule_publish()
+            self._schedule_publish(after_speech=True)
             log.info("Round %s over (%s) after %s of %s holes: no closer", r.id, event.reason, r.seq, r.holes)
             return
         if stats_obj := getattr(self.speech, "audio_stats", None):
             log.info("%s", audio_summary(stats_obj))
         stats = self._record_round_stats(r, event.reason)
-        self._schedule_publish()
+        self._schedule_publish()   # the backup, if the sign-off never finishes
+        await self._sign_off(r, stats)
+        self._schedule_publish(after_speech=True)
+
+    async def _sign_off(self, r: Round, stats: dict) -> None:
         season = {s.key: self.store.season_rounds(s.key) for s in r.sides}
         facts = (r.closing_facts(self.state.shots, season, week_ctp=self._closer_week_ctp(r))
                  + self._league_facts(r, closing=True))
@@ -4473,18 +4477,24 @@ class Engine:
 
     # ---- publishing the stats page --------------------------------------------------------
 
-    def _schedule_publish(self) -> None:
-        """Publish the stats page a while after a round (so the sign-off is in it). A round that ends
-        before the last one's publish ran replaces it."""
+    def _schedule_publish(self, after_speech: bool = False) -> None:
+        """Publish the stats page after a round, once the sign-off has aired (its lines are stored
+        as they're queued, so they're in it). Without `after_speech`, it's the backup timer
+        (publish.delay_seconds) in case the sign-off never finishes. A publish that's still waiting
+        is replaced by the newer one."""
         p = self.cfg.publish
         if not (p.enabled and p.after_round and p.bucket) or self.cfg.source.type == "replay":
             return
         if self._publish_task and not self._publish_task.done() and not self._publish_lock.locked():
-            self._publish_task.cancel()   # still waiting: this round's publish covers both
-        self._publish_task = asyncio.create_task(self._publish_after(p.delay_seconds))
+            self._publish_task.cancel()   # still waiting: this one covers it
+        self._publish_task = asyncio.create_task(self._publish_after(0 if after_speech else p.delay_seconds,
+                                                                     drain=after_speech))
 
-    async def _publish_after(self, delay: float) -> None:
+    async def _publish_after(self, delay: float, drain: bool = False) -> None:
         await asyncio.sleep(delay)
+        if drain:
+            # Not while the sign-off is still being voiced: building the site takes CPU.
+            await self._drain_speech(120)
         async with self._publish_lock:
             try:
                 await self._publish()
