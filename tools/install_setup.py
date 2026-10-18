@@ -86,6 +86,9 @@ def setup_env(booth: bool) -> bool:
         else:
             print(f"Skipped. Add {key}= to .env later.")
     env.write_text(text, encoding="utf-8")
+    if env_value(text, "ANTHROPIC_API_KEY") and not env_value(text, "OPENAI_API_KEY"):
+        print("\nNo OpenAI key: the booth can run on Claude alone with voices on this PC. See\n"
+              "docs/booth.md, \"Choosing a setup\" (the \"one key\" blocks in config.yaml + Kokoro).")
     return all(env_value(text, key) for key, _, _ in KEYS)
 
 

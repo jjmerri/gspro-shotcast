@@ -102,7 +102,8 @@ League file + Squabbit ─────────► standings, handicaps, stor
   ([Launch monitors](docs/tracking.md#launch-monitors)).
 - **Python 3.12 or 3.13.**
 - For the booth only: speakers, and an **OpenAI API key** and an **Anthropic API key** for the
-  default setup ([Cost](docs/booth.md#cost)). Fully local models and voices need no keys.
+  default setup ([Cost](docs/booth.md#cost)). An Anthropic key alone works with voices on the PC,
+  and fully local models and voices need no keys ([Choosing a setup](docs/booth.md#choosing-a-setup)).
 
 ## Tested on, and known limits
 

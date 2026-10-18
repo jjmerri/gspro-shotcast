@@ -1,7 +1,9 @@
 # Copy to config.yaml and edit. This is the cloud setup the booth was built and tuned on: GPT for
 # the fast calls, Claude for the pre-shot look and the round wraps, OpenAI voices. It needs
 # OPENAI_API_KEY and ANTHROPIC_API_KEY in .env. Every call is one `provider`/`model` setting, so
-# running a model or the voices on the PC itself instead is a line change (see the local blocks).
+# running a model or the voices on the PC itself instead is a line change (see the alternative
+# blocks: Claude only with voices on the PC, or everything on the PC). docs/booth.md, "Choosing a
+# setup", compares them.
 
 # Optional league file. Leave it unset to run without a league: every round is practice and players
 # go by the names on GSPro's setup screen. To add league features (roster, schedule, standings,
@@ -42,6 +44,13 @@ llm:
   closer:  { provider: anthropic, model: claude-opus-5-5, effort: medium, max_tokens: 2000 }
   # segment: { ... }   # between-hole segments; omit to reuse `live`
 
+  # --- Alternative: one key (Anthropic) -------------------------------------
+  # Claude for every call, with Kokoro voices on the PC (set `tts: provider: kokoro` below), so
+  # .env needs only ANTHROPIC_API_KEY. Replace `live` and `flight` above with these; `effort: none`
+  # turns Claude's thinking off, which these short replies need to come back fast and whole.
+  # live:   { provider: anthropic, model: claude-haiku-5-5, effort: none, max_tokens: 400 }
+  # flight: { provider: anthropic, model: claude-haiku-5-5, effort: none, max_tokens: 900 }
+
   # --- Local alternative: models on the PC itself (no per-token cost) --------
   # Install Ollama (https://ollama.com), `ollama pull qwen3:8b`, then replace the blocks above.
   # Quality and speed are well below the cloud mix; the pre-shot hazard look needs a vision model
@@ -56,8 +65,8 @@ tts:
     pbp: fable
     color: ballad
   speed: 1.05
-  # Local alternative: provider: kokoro, after `pip install -e ".[local]"` and downloading the two
-  # model files into models/ (docs/setup.md, Setup).
+  # Voices on the PC instead (no key, no per-line cost, plainer delivery): provider: kokoro, after
+  # `pip install -e ".[local]"` and downloading the two model files into models/ (docs/setup.md).
   # voices:             # Kokoro voice ids
   #   pbp: bm_george
   #   color: am_michael

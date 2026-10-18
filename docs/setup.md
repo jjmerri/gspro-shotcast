@@ -29,7 +29,10 @@ hand:
    `config.yaml`. Only `teams[].players[].name` is required; everything else is free-form
    context the commentators use. Give each player a `gspro_name` (and `aliases`) so the booth can
    match the name GSPro shows to your roster.
-7. `copy .env.example .env` and fill in the API keys you use. `.env` is never committed.
+7. `copy .env.example .env` and fill in the API keys you use. `.env` is never committed. The
+   default needs OpenAI and Anthropic keys; with only an Anthropic key, use the "one key" blocks in
+   `config.yaml` and Kokoro voices (steps 3-4). [Choosing a setup](booth.md#choosing-a-setup)
+   compares the options.
 
 Your `config.yaml`, `.env`, `data/league.json` and `logs/` are gitignored, so `git pull` (or
 `update.bat`) updates the code without touching your league or settings. See [DEPLOY.md](../DEPLOY.md) for updating

@@ -43,7 +43,8 @@ The booth itself always runs on the sim PC; the models and voices it calls can b
 (the default) or run on the PC itself. Everything swappable lives behind one config setting, so
 the same code runs fully cloud, hybrid, or fully local. `config.example.yaml` ships a **per-call
 model mix**: each kind of call gets the model that fits its latency and quality budget, and it
-needs an OpenAI and an Anthropic API key. Audio generation (TTS), not the text calls, is the
+needs an OpenAI and an Anthropic API key (an Anthropic key alone works too; see
+[Choosing a setup](#choosing-a-setup)). Audio generation (TTS), not the text calls, is the
 real cost.
 
 | Call | Default model | Why |
@@ -56,10 +57,21 @@ real cost.
 | `closer` | `claude-opus-5-5`, max_tokens 2000 | Pre-fetched on the last hole, so latency is hidden; use the richest model |
 | Voices (`tts`) | OpenAI `gpt-4o-mini-tts` (`fable` / `ballad`) | The dominant cost; see [Cost](#cost) |
 
-**Fully local** is an option, commented out in `config.example.yaml`: Ollama (`qwen3:8b`) for
-the brain and Kokoro (ONNX, CPU) for voices, both with no per-token cost and no API keys, but
-slower and plainer on a typical sim PC. Moving between local, hybrid, and cloud is only editing
-`provider`/`model` lines.
+### Choosing a setup
+
+Four setups, from best to cheapest. Each is a few `provider`/`model` lines in `config.yaml`, so
+you can start with one and switch later.
+
+| Setup | Keys in `.env` | Per round | Trade-offs |
+|---|---|---|---|
+| **Quality and speed** (what the author runs): the default mix above plus `minimap.provider: jev` | OpenAI, Anthropic, TypeSafe | ~$1.25-2 plus Jev | Fastest calls and the most expressive voices. Jev reads the minimap in ~0.3 s instead of ~4 s, and adds water carries, green front/back and bunker yardages for sharper setup lines. Three accounts and the highest bill; `service_tier: fast` roughly doubles the (small) GPT token cost for steadier latency |
+| **Default** (`config.example.yaml` as shipped) | OpenAI, Anthropic | ~$1.25-2 | Same calls and voices; Claude reads hazards off a screenshot, slower and less detailed than Jev |
+| **One key: Claude + local voices** (the commented "one key" block, plus `tts.provider: kokoro`) | Anthropic | text calls only | One account, and no voice bill, which is most of the default's cost. Kokoro voices are plainer (no delivery direction) and run on the PC's CPU next to GSPro. Claude Haiku on the fast calls kept every deadline in a scripted test round (flight branches ~2-3 s, mid-flight lines ~1 s); it hasn't had the default's live mileage |
+| **Fully local**: Ollama (`qwen3:8b`) + Kokoro | none | $0 | Nothing leaves the PC, but slower and plainer on a typical sim PC; a vision model for the hazard read needs ~8-10 GB of free VRAM next to GSPro, or go without it |
+
+The voices are where the money goes, so the "one key" setup is the cheap cloud option, and it
+is the least to sign up for. Keeping OpenAI for voices only (Claude for the text) works too: put
+just the `tts` block back on `openai`.
 
 ## Cost
 
@@ -77,12 +89,12 @@ logging, at the providers' prices when it was written; check current pricing.
 
 Keeping spend in check:
 
-- **Set a monthly spending limit** in both the OpenAI and the Anthropic consoles before you start.
+- **Set a monthly spending limit** in each provider's console (OpenAI, Anthropic) before you start.
   A bug or a booth left running then can't run up a surprise bill.
 - **Click the ON AIR badge** (or `run --no-commentary`) when you don't want commentary: off air
   makes no model or voice calls, and shots are still recorded.
-- **Go local** for $0 per round: Ollama and Kokoro run on the PC (see
-  [Models and voices](#models-and-voices)).
+- **Voice on the PC**: Kokoro voices cost nothing per line, which removes most of the bill
+  (see [Choosing a setup](#choosing-a-setup)); Ollama for the text too makes it $0.
 - **See what you actually spent.** The booth log ends each session with an "Audio this session"
   line (voice minutes and estimated cost), and `cost` totals the text-model calls per night:
 
@@ -98,7 +110,7 @@ to talk: player names, shot and score data, and the league file's context (notes
 The pre-shot hazard look also sends a screenshot of GSPro to the vision model (Claude by default;
 turn it off with `screen.send_images: false`). With `minimap.provider: jev`, a crop of the minimap
 goes to TypeSafe's Jev instead. Every spoken line's text goes to OpenAI to be
-voiced. Nothing else leaves the PC: the shot database, transcripts and logs stay in `logs/`. The
+voiced (unless the voices run on the PC with Kokoro). Nothing else leaves the PC: the shot database, transcripts and logs stay in `logs/`. The
 fully local setup (Ollama and Kokoro) sends nothing at all. Optional features that reach out are
 off by default: Squabbit handicaps (`squabbit.enabled`) and golf news (`news.enabled`).
 
