@@ -92,6 +92,28 @@ League file + Squabbit ─────────► standings, handicaps, stor
 - For the booth only: speakers, and an **OpenAI API key** and an **Anthropic API key** for the
   default setup ([Cost](docs/booth.md#cost)). Fully local models and voices need no keys.
 
+## Tested on, and known limits
+
+Shotcast has run a season of weekly league nights on one setup: a Windows PC with GSPro 3.1.x
+on a 3450×2160 (16:10) screen and a Uneekor EYE XO2 through GSPconnect. Anything
+beyond that is supported on paper but not yet run live:
+
+- **Other launch monitors.** Shots should come through GSPconnect or GSPro's own log for any
+  monitor, but only the EYE XO2 has been used ([Launch monitors](docs/tracking.md#launch-monitors)).
+- **Other screen sizes.** At 1920×1080 (16:9) the setup screen and the tee HUD have been checked
+  live; the shot data tiles, the other lies, the scorecard and the ON AIR badge have not.
+  Ultrawide and 4:3 screens are untested. Run `screen-check` first on any screen.
+- **GSPro must stay visible.** The screen is read live, so GSPro has to be on screen and not
+  covered. A GSPro window smaller than the screen is only tested on saved screenshots.
+- **English and yards.** The screen and log reads expect GSPro's English labels, yards and mph.
+  Metres or another language will likely misread.
+- **GSPro updates.** Built against 3.1.x. A release that moves the HUD or changes the log can
+  break reads until the code catches up; `screen-check` shows which boxes stopped reading.
+- **Windows only** for tracking and the booth. The stats page runs anywhere with Python.
+
+It's a personal project shared as is. Issues are welcome, but fixes for other setups aren't
+promised.
+
 ## Quick start: track shots (no API keys)
 
 1. Install Python 3.12 or 3.13, then clone and install with only the capture extra:
