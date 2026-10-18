@@ -97,12 +97,13 @@ screen:
   follow_poll_seconds: 0.3   # how often the HUD is read while following a shot
   follow_max_seconds: 25
   send_images: true       # screenshots for the vision call (the pre-shot hazard look)
-  ocr: true               # check the regions with `calibrate` + `ocr-test` first
+  ocr: true               # check the screen read with `screen-check` first
   # Boxes around the GSPro HUD, as fractions of the screen. The built-in defaults fit the 3.1.x
   # release HUD (player box, hole box, both tile panels, minimap lie and slope, club box) and
   # adjust themselves to the screen's shape (16:10, 16:9, ...), so only list a region here to move
-  # it; anything not listed keeps its default. Check with `calibrate` and `ocr-test`. A region you
-  # list is used exactly as written, measured on your screen.
+  # it; anything not listed keeps its default. `screen-check` shows which boxes read, and
+  # `screen-check --fix` writes the ones that need moving here. A region you list is used exactly
+  # as written, measured on your screen.
   # regions:
   #   lie: {left: 0.84, top: 0.45, width: 0.16, height: 0.53}
 
