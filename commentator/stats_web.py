@@ -106,10 +106,18 @@ def shot_rounds(db: sqlite3.Connection) -> dict[int, int]:
 def rounds(db: sqlite3.Connection, context: str | None = None) -> list[dict[str, Any]]:
     out = []
     _, of_row = round_groups(db)
+    who: dict[int, set] = {}
+    named = dict(db.execute("SELECT id, player FROM shots WHERE player IS NOT NULL AND player != 'unknown'").fetchall())
+    for sid, rnd in shot_rounds(db).items():
+        if sid in named:
+            who.setdefault(rnd, set()).add(named[sid])
     for r in db.execute("SELECT * FROM rounds WHERE 1=1" + _ctx(context) + " ORDER BY ended_at DESC, id DESC"):
         card = _card(_json(r["scores"]), _json(r["hole_pars"]))
         out.append({
-            "id": r["id"], "round": of_row.get(r["id"], r["id"]), "date": r["date"], "course": r["course"], "format": r["format"] or "individual",
+            "id": r["id"], "round": of_row.get(r["id"], r["id"]), "ended": r["ended_at"], "date": r["date"],
+            "course": r["course"],
+            # who played in it (a team side's players too), so the page can show one player's rounds
+            "players": sorted(who.get(of_row.get(r["id"], r["id"]), set()) | ({r["side"]} if r["side"] else set())), "format": r["format"] or "individual",
             "side": r["side"], "team": r["team"], "holes": r["holes"],
             "played": r["holes_played"] if r["holes_played"] is not None else r["holes"],
             "complete": bool(r["complete"]), "league": bool(r["is_league"]),
@@ -220,14 +228,16 @@ def predictions(db: sqlite3.Connection, names: dict[str, str] | None = None) -> 
                                 "WHERE correct IS NOT NULL GROUP BY commentator ORDER BY commentator")]
 
 
-def records(db: sqlite3.Connection, context: str | None = None) -> dict[str, Any]:
-    base = " AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0" + _ctx(context)
+def records(db: sqlite3.Connection, context: str | None = None, player: str | None = None) -> dict[str, Any]:
+    base = (" AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0" + _ctx(context)
+            + (" AND player = ?" if player else ""))
+    args = (player,) if player else ()
     drive = db.execute(f"SELECT player, {_DRIVE} AS v, course, hole FROM shots WHERE {_TEE_DRIVER} AND {_DRIVE} IS NOT NULL"
-                       + base + " ORDER BY v DESC LIMIT 1").fetchone()
+                       + base + " ORDER BY v DESC LIMIT 1", args).fetchone()
     approach = db.execute(f"SELECT player, finish_yards AS v, club, outcome, course, hole FROM shots WHERE {A.APPROACH_SQL}"
-                          " AND finish_yards IS NOT NULL" + base + " ORDER BY v LIMIT 1").fetchone()
+                          " AND finish_yards IS NOT NULL" + base + " ORDER BY v LIMIT 1", args).fetchone()
     putt = db.execute("SELECT player, to_pin_yards AS v, course, hole FROM shots WHERE is_putt = 1 AND outcome = 'holed'"
-                      " AND to_pin_yards IS NOT NULL" + base + " ORDER BY v DESC LIMIT 1").fetchone()
+                      " AND to_pin_yards IS NOT NULL" + base + " ORDER BY v DESC LIMIT 1", args).fetchone()
     return {"longest_drive": dict(drive) if drive else None, "closest_approach": dict(approach) if approach else None,
             "longest_putt": dict(putt) if putt else None}
 

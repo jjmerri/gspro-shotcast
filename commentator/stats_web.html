@@ -77,6 +77,18 @@
   .moment { display:flex; gap:12px; padding:8px 0; border-bottom:1px solid var(--line); }
   .moment .kind { min-width:90px; color:var(--eagle); font-weight:600; text-transform:capitalize; }
   .versus td.win { color:var(--accent); font-weight:600; }
+  #me { border-color:var(--accent); }
+  .tag.new { border-color:var(--eagle); color:var(--eagle); }
+  .meta button.link { font-size:12px; margin-left:10px; }
+  @media (max-width: 800px) {
+    header { position:static; padding:10px 12px; gap:8px 10px; }
+    header .meta { margin-left:0; width:100%; }
+    main { padding:10px 12px 40px; }
+    table { display:block; overflow-x:auto; }
+    .grid2 { grid-template-columns:1fr; }
+    .line { grid-template-columns:80px 1fr; }
+    .sg { grid-template-columns:90px 1fr 50px; }
+  }
 </style>
 </head>
 <body>
@@ -88,6 +100,7 @@
     <button data-ctx="league">League</button>
     <button data-ctx="practice">Practice</button>
   </div>
+  <select id="me" data-me title="Show one player's rounds, shots and stats (remembered on this device)"></select>
   <div class="meta" id="meta"></div>
 </header>
 <main id="main"></main>
@@ -95,10 +108,20 @@
 <script>
 const TABS = [["players", "Players"], ["versus", "Head-to-head"], ["rounds", "Rounds"], ["courses", "Courses"],
               ["shots", "Shots"], ["broadcasts", "Broadcasts"], ["highlights", "Highlights"], ["booth", "Booth"]];
-const hashTab = location.hash.slice(1);
+// A link holds the view: #tab?player=…&ctx=…&round=…&from=…; see writeHash().
+const [hashTab, hashQuery] = location.hash.slice(1).split("?");
+const linkQ = new URLSearchParams(hashQuery || "");
+const store = { get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
+                set: (k, v) => { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} } };
+const SHOT_LINK_KEYS = ["round", "from", "to", "course", "club", "lie"];
 const state = { tab: TABS.some(t => t[0] === hashTab) ? hashTab : "players", ctx: "", data: null, player: null,
+                me: linkQ.get("player") ?? store.get("shotcast.me") ?? "", mine: null,
+                seen: Number(store.get("shotcast.seen")) || 0,
                 round: null, sort: {}, course: null, versus: [null, null], shotFilter: {}, shots: null, shotOpen: null,
                 session: null, transcript: null };
+if (["league", "practice"].includes(linkQ.get("ctx"))) state.ctx = linkQ.get("ctx");
+for (const k of SHOT_LINK_KEYS) if (linkQ.get(k)) state.shotFilter[k] = linkQ.get(k);
+if (state.me) { state.player = state.me; state.versus[0] = state.me; }
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const dash = (v, suffix = "") => v === null || v === undefined ? "–" : v + suffix;
@@ -176,13 +199,75 @@ async function load() {
     const body = await getJSON(`v/${site.version}/summary-${state.ctx || "all"}.json`);
     state.data = body;
     state.shots = null;
+    document.querySelectorAll("#ctx button").forEach(b => b.classList.toggle("on", b.dataset.ctx === state.ctx));
+    showMe();
+    markSeen();
     $("#ctx").style.display = body.has_league ? "" : "none";
     const mod = new Date(body.db.modified * 1000).toLocaleString();
-    $("#meta").textContent = `${body.db.name} · updated ${mod} · last session ${body.last_session || "–"}`;
+    const fresh = state.seen ? body.rounds.filter(r => r.ended > state.seen && (!state.me || r.players.includes(state.me))).length : 0;
+    $("#meta").innerHTML = `${esc(body.db.name)} · updated ${esc(mod)} · last session ${esc(body.last_session || "–")}`
+      + (fresh ? ` · <b class="good">${fresh} new round${fresh > 1 ? "s" : ""} since your last visit</b>` : "")
+      + `<button class="link" data-share title="Copy a link to exactly this view">Copy link</button>`;
     render();
   } catch (e) {
     $("#main").innerHTML = `<div class="err">Couldn't read the database: ${esc(e.message)}</div>`;
   }
+}
+
+// The picked player ("me"): every tab narrows to them. Remembered on this device.
+function showMe() {
+  const names = state.data.players.map(p => p.name);
+  if (state.me && !names.includes(state.me)) names.push(state.me);
+  $("#me").innerHTML = `<option value="">Everyone</option>` + names.map(n => `<option${n === state.me ? " selected" : ""}>${esc(n)}</option>`).join("");
+}
+
+function setMe(name) {
+  state.me = name;
+  store.set("shotcast.me", name || null);
+  delete state.shotFilter.player;
+  state.shots = null;
+  state.session = null;
+  if (name) { state.player = name; state.versus[0] = name; if (state.versus[1] === name) state.versus[1] = null; }
+  load();
+}
+
+// One player's courses, highlights and records (v/<version>/player/<ctx>/<key>.json), fetched when needed.
+function mine() {
+  const p = state.data.players.find(p => p.name === state.me);
+  if (!p || !p.file) return { none: true };
+  const key = `${site.version}|${state.ctx}|${p.file}`;
+  if (state.mine && state.mine.key === key) return state.mine;
+  state.mine = { key, loading: true };
+  getJSON(`v/${site.version}/player/${state.ctx || "all"}/${p.file}.json`).then(
+    data => { if (state.mine.key === key) { state.mine = { key, data }; render(); } },
+    e => { if (state.mine.key === key) { state.mine = { key, error: e.message }; render(); } });
+  return state.mine;
+}
+
+// For tabs that need the player file: its data, or the page to show while it loads.
+function withMine(title, fn) {
+  const m = mine();
+  if (m.none) return `<h2>${title}</h2><p class="empty">${esc(state.me)} has nothing in this view.</p>`;
+  if (m.loading) return `<h2>${title}</h2><p class="sub">Loading…</p>`;
+  if (m.error) return `<h2>${title}</h2><div class="err">${esc(m.error)}</div>`;
+  return fn(m.data);
+}
+
+const meTitle = (t) => state.me ? `${t} · ${esc(state.me)}` : t;
+
+function writeHash() {
+  const q = new URLSearchParams();
+  if (state.me) q.set("player", state.me);
+  if (state.ctx) q.set("ctx", state.ctx);
+  if (state.tab === "shots") for (const k of SHOT_LINK_KEYS) if (state.shotFilter[k]) q.set(k, state.shotFilter[k]);
+  const h = "#" + state.tab + (q.toString() ? "?" + q : "");
+  if (location.hash !== h) history.replaceState(null, "", h);
+}
+
+// Rounds that ended after this device's last visit are tagged new; the mark moves on once seen.
+function markSeen() {
+  const newest = Math.max(0, ...state.data.rounds.map(r => r.ended || 0));
+  if (newest > (Number(store.get("shotcast.seen")) || 0)) store.set("shotcast.seen", String(newest));
 }
 
 const shownSort = {};   // each table's sort as drawn, defaults included, so a header click flips it
@@ -434,7 +519,8 @@ function renderRounds() {
   ];
   const row = r => {
     const open = state.round === r.id;
-    const tags = (!state.data.has_league ? "" : r.league ? '<span class="tag">league</span>' : '<span class="tag">practice</span>') + (r.complete ? "" : '<span class="tag">quit early</span>');
+    const tags = (!state.data.has_league ? "" : r.league ? '<span class="tag">league</span>' : '<span class="tag">practice</span>') + (r.complete ? "" : '<span class="tag">quit early</span>')
+      + (state.seen && r.ended > state.seen ? '<span class="tag new">new</span>' : "");
     return `<tr class="click" data-round="${r.id}"><td>${esc(r.date)}</td><td class="l">${esc(r.course)}</td>
       <td class="l">${esc(r.side)}${r.team && r.team !== r.side ? ` <span class="sub">${esc(r.team)}</span>` : ""}</td>
       <td class="l">${esc(r.format.replace("_", " "))}${tags}</td><td>${r.played}/${r.holes}</td><td>${dash(r.gross)}</td>
@@ -443,12 +529,19 @@ function renderRounds() {
         <p class="sub">Scrambling ${frac(r.scramble)} · Sand saves ${frac(r.sand)} · Penalties ${dash(r.penalties)}${r.longest_drive ? ` · Longest drive ${Math.round(r.longest_drive)} yd` : ""}</p>
         <p><button class="link" data-roundshots="${r.round}">Every shot of this round →</button></p></td></tr>` : "");
   };
-  return `<h2>Rounds</h2>` + sortable("rounds", d.rounds, cols, row) + `<p class="sub">Click a round for its scorecard and its shots.</p>`;
+  const rows = state.me ? d.rounds.filter(r => r.players.includes(state.me)) : d.rounds;
+  return `<h2>${meTitle("Rounds")}</h2>` + sortable("rounds", rows, cols, row, { empty: "No rounds in this view." })
+    + `<p class="sub">Click a round for its scorecard and its shots.${state.me ? " Includes team rounds they played in." : ""}</p>`;
 }
 
 function renderCourses() {
-  const cs = state.data.courses;
-  if (!cs.length) return '<p class="empty">No courses yet.</p>';
+  if (!state.me) return coursesView(state.data.courses, null);
+  return withMine(meTitle("Courses"), m => coursesView(m.courses, state.data.courses));
+}
+
+// field: everyone's courses, to compare the picked player's holes against.
+function coursesView(cs, field) {
+  if (!cs.length) return `<h2>${meTitle("Courses")}</h2><p class="empty">No courses yet.</p>`;
   const c = cs.find(c => c.course === state.course) || cs[0];
   state.course = c.course;
   const list = sortable("courses", cs, [
@@ -458,10 +551,14 @@ function renderCourses() {
     { key: "last_played", label: "Last played" }],
     x => `<tr class="click${x.course === c.course ? " sel" : ""}" data-course="${esc(x.course)}"><td><b>${esc(x.course)}</b></td><td>${x.rounds}</td>
       <td class="l">${esc(x.players.join(", "))}</td><td>${x.best ? `${toPar(x.best.to_par_9)} <span class="sub">${esc(x.best.player)}</span>` : "–"}</td><td>${esc(x.last_played)}</td></tr>`);
+  const fc = field && field.find(x => x.course === c.course);
+  const fieldHole = n => { const h = fc && fc.holes.find(h => h.hole === n); return h ? h.to_par : null; };
   const maxAbs = Math.max(0.5, ...c.holes.map(h => Math.abs(h.to_par)));
   const holes = sortable("courseholes", c.holes, [
     { key: "hole", label: "Hole" }, { key: "par", label: "Par" }, { key: "n", label: "Played" },
     { key: "avg", label: "Average" }, { key: "to_par", label: "To par" }, { key: "bar", label: "", val: h => h.to_par },
+    ...(field ? [{ key: "field", label: "Everyone", title: "Everyone's average to par on this hole", val: h => fieldHole(h.hole) },
+                 { key: "vs", label: "vs everyone", title: "Below zero: they play it better than the field", val: h => fieldHole(h.hole) === null ? null : h.to_par - fieldHole(h.hole) }] : []),
     { key: "birdie_pct", label: "Birdie+" }, { key: "bogey_plus_pct", label: "Bogey+" }, { key: "best", label: "Best" }, { key: "worst", label: "Worst" }],
     h => {
       const w = Math.abs(h.to_par) / maxAbs * 50;
@@ -469,17 +566,18 @@ function renderCourses() {
       const tag = h.hole === c.hardest ? '<span class="tag">hardest</span>' : h.hole === c.easiest ? '<span class="tag">easiest</span>' : "";
       return `<tr><td>${h.hole}${tag}</td><td>${h.par}</td><td>${h.n}</td><td>${h.avg.toFixed(2)}</td><td>${signed(h.to_par)}</td>
         <td style="width:160px"><div class="sgbar"><span class="mid"></span><i style="${style}"></i></div></td>
+        ${field ? (f => `<td>${f === null ? "–" : signed(f)}</td><td class="${f !== null && h.to_par < f ? "good" : ""}">${f === null ? "–" : signed(h.to_par - f)}</td>`)(fieldHole(h.hole)) : ""}
         <td>${h.birdie_pct}%</td><td>${h.bogey_plus_pct}%</td><td>${h.best}</td><td>${h.worst}</td></tr>`;
     }, { key: "hole" });
-  return `<h2>Courses</h2>${list}<h2>${esc(c.course)}: hole by hole</h2>${holes}
-    <p class="sub">Every individual-ball card on this course. ${c.best ? `Best nine: ${esc(c.best.player)}, ${toPar(c.best.to_par)} over ${c.best.holes} holes on ${esc(c.best.date)}.` : ""}</p>`;
+  return `<h2>${meTitle("Courses")}</h2>${list}<h2>${esc(c.course)}: hole by hole</h2>${holes}
+    <p class="sub">${field ? `${esc(state.me)}'s individual-ball cards on this course, against everyone's.` : "Every individual-ball card on this course."} ${c.best ? `Best nine: ${esc(c.best.player)}, ${toPar(c.best.to_par)} over ${c.best.holes} holes on ${esc(c.best.date)}.` : ""}</p>`;
 }
 
 async function loadShots() {
   const f = state.shotFilter;
   state.shots = "loading";
   render();
-  try { state.shots = await queryShots(state.ctx, f); } catch (e) { state.shots = { error: e.message }; }
+  try { state.shots = await queryShots(state.ctx, state.me ? { ...f, player: state.me } : f); } catch (e) { state.shots = { error: e.message }; }
   render();
 }
 
@@ -491,12 +589,13 @@ function renderShots() {
   const day = (key, label) => `<label class="sub">${label} <input type="date" data-shotf="${key}" value="${esc(f[key] || "")}" min="${lo}" max="${hi}"></label>`;
   const chip = f.round ? `<span class="chip">Round: ${esc(roundLabel(+f.round))} <button data-unround title="Show all rounds">✕</button></span>` : "";
   const any = Object.keys(f).length ? '<button class="link" data-clearshots>Clear filters</button>' : "";
-  const controls = `<div class="controls">${chip}${sel("player", "Player", d.players.map(p => p.name))}
+  const who = `<select data-me><option value="">Player: all</option>${d.players.map(p => `<option${p.name === state.me ? " selected" : ""}>${esc(p.name)}</option>`).join("")}</select>`;
+  const controls = `<div class="controls">${chip}${who}
     ${sel("course", "Course", d.filters.courses)}${sel("club", "Club", d.filters.clubs)}${sel("lie", "Lie", d.filters.lies)}
     ${day("from", "From")}${day("to", "to")}${any}</div>`;
-  if (state.shots === null) { loadShots(); return `<h2>Shots</h2>${controls}<p class="sub">Loading…</p>`; }
-  if (state.shots === "loading") return `<h2>Shots</h2>${controls}<p class="sub">Loading…</p>`;
-  if (state.shots.error) return `<h2>Shots</h2>${controls}<div class="err">${esc(state.shots.error)}</div>`;
+  if (state.shots === null) { loadShots(); return `<h2>${meTitle("Shots")}</h2>${controls}<p class="sub">Loading…</p>`; }
+  if (state.shots === "loading") return `<h2>${meTitle("Shots")}</h2>${controls}<p class="sub">Loading…</p>`;
+  if (state.shots.error) return `<h2>${meTitle("Shots")}</h2>${controls}<div class="err">${esc(state.shots.error)}</div>`;
   const yd = v => v === null || v === undefined ? "–" : v + " yd";
   const ft = v => v === null || v === undefined ? "–" : Math.round(v * 3) + " ft";
   const row = s => {
@@ -524,7 +623,7 @@ function renderShots() {
     { key: "carry", label: "Carry", val: s => s.is_putt ? null : s.carry }, { key: "result", label: "Result", cls: "l", val: s => s.outcome || s.lie_after },
     { key: "said", label: "💬", val: s => s.lines.length }],
     row, { key: "order", dir: f.round ? -1 : 1, empty: "No shots match." });
-  return `<h2>Shots</h2>${controls}${table}
+  return `<h2>${meTitle("Shots")}</h2>${controls}${table}
     <p class="sub">${f.round ? "In the order they were played" : "Newest first, up to 500"}. Click a column to sort; click a shot for its launch numbers and what the booth said.</p>`;
 }
 
@@ -548,14 +647,14 @@ async function loadTranscript(id) {
 }
 
 function renderBroadcasts() {
-  const bs = state.data.broadcasts;
-  if (!bs.length) return '<p class="empty">No broadcasts recorded yet.</p>';
-  if (state.session === null) { loadTranscript(bs[0].id); }
+  const bs = state.me ? state.data.broadcasts.filter(b => b.players.includes(state.me)) : state.data.broadcasts;
+  if (!bs.length) return `<h2>${meTitle("Broadcasts")}</h2><p class="empty">No broadcasts recorded yet.</p>`;
+  if (state.session === null || !bs.some(b => b.id === state.session)) { state.session = bs[0].id; loadTranscript(bs[0].id); }
   const label = b => `${b.date} · ${b.courses.join(", ") || "no course"} · ${b.players.join(", ")} (${b.lines} lines)`;
   const pick = `<div class="controls"><select data-session>${bs.map(b => `<option value="${b.id}"${b.id === state.session ? " selected" : ""}>${esc(label(b))}</option>`).join("")}</select></div>`;
   const t = state.transcript;
-  if (!t || t === "loading") return `<h2>Broadcasts</h2>${pick}<p class="sub">Loading…</p>`;
-  if (t.error) return `<h2>Broadcasts</h2>${pick}<div class="err">${esc(t.error)}</div>`;
+  if (!t || t === "loading") return `<h2>${meTitle("Broadcasts")}</h2>${pick}<p class="sub">Loading…</p>`;
+  if (t.error) return `<h2>${meTitle("Broadcasts")}</h2>${pick}<div class="err">${esc(t.error)}</div>`;
   let lastCtx = null;
   const body = t.map(l => {
     const ctx = l.player ? `${l.player} · ${holeName(l.hole)}${l.shot_number ? ` · stroke ${l.shot_number}` : ""}${l.club ? ` · ${l.club}` : ""}` : (l.kind === "opener" ? "Opening" : l.kind === "closer" ? "Sign-off" : null);
@@ -564,17 +663,22 @@ function renderBroadcasts() {
     const kind = !l.player && !["opener", "closer"].includes(l.kind) ? ` <span class="tag">${esc(KIND_LABEL[l.kind] || l.kind)}</span>` : "";
     return head + `<div class="line"><div class="who ${COLOR_KEYS.has(l.speaker) ? "color" : ""}">${esc(l.name)}</div><div>${esc(l.text)}${kind}</div></div>`;
   }).join("");
-  return `<h2>Broadcasts</h2>${pick}<div>${body || '<p class="empty">Nothing said in this session.</p>'}</div>`;
+  return `<h2>${meTitle("Broadcasts")}</h2>${pick}<div>${body || '<p class="empty">Nothing said in this session.</p>'}</div>`;
 }
 
 function renderHighlights() {
-  const r = state.data.records, h = state.data.highlights, ft = y => Math.round(y * 3);
+  if (!state.me) return highlightsView(state.data.records, state.data.highlights);
+  return withMine(meTitle("Season records"), m => highlightsView(m.records, m.highlights));
+}
+
+function highlightsView(r, h) {
+  const ft = y => Math.round(y * 3);
   const where = x => [x.course, holeName(x.hole)].filter(Boolean).join(" · ");
   const card = (k, x, v) => `<div class="card"><div class="k">${k}</div>${x ? `<div class="v">${v(x)}</div><div class="sub">${esc(x.player)} · ${esc(where(x))}</div>` : '<div class="empty">None yet</div>'}</div>`;
   const top = (title, rows, fmt) => `<div><h3>${title}</h3><table><tbody>${rows.length ? rows.map((x, i) =>
     `<tr><td class="wrap">${i + 1}. <b>${esc(x.player)}</b><br><span class="sub">${esc(x.date)} · ${esc(where(x))}</span></td><td>${fmt(x)}</td></tr>`).join("")
     : '<tr><td class="empty">None yet</td></tr>'}</tbody></table></div>`;
-  return `<h2>Season records</h2><div class="cards">
+  return `<h2>${meTitle("Season records")}</h2><div class="cards">
     ${card("Longest drive", r.longest_drive, x => Math.round(x.v) + " yd")}
     ${card("Closest approach", r.closest_approach, x => `${x.outcome === "holed" ? "holed" : ft(x.v) + " ft"} <span class="sub">${esc(x.club || "")}</span>`)}
     ${card("Longest putt holed", r.longest_putt, x => ft(x.v) + " ft")}
@@ -637,6 +741,7 @@ const RENDER = { players: renderPlayers, versus: renderVersus, rounds: renderRou
 function render() {
   if (!state.data) return;
   $("#main").innerHTML = RENDER[state.tab]();
+  writeHash();
 }
 
 function showTabs() {
@@ -645,13 +750,15 @@ function showTabs() {
 
 document.addEventListener("click", (e) => {
   const t = e.target.closest("[data-tab],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
-                             + "[data-roundshots],[data-unround],[data-clearshots]");
+                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share]");
   if (!t) return;
-  if (t.dataset.roundshots) {   // drill into a round: just its shots
+  if (t.dataset.share !== undefined) {
+    const done = ok => { t.textContent = ok ? "Link copied" : "Copy the address bar"; setTimeout(() => (t.textContent = "Copy link"), 2000); };
+    navigator.clipboard ? navigator.clipboard.writeText(location.href).then(() => done(true), () => done(false)) : done(false);
+  } else if (t.dataset.roundshots) {   // drill into a round: just its shots
     state.shotFilter = { round: t.dataset.roundshots };
     delete state.sort.shots;
     state.tab = "shots";
-    history.replaceState(null, "", "#shots");
     showTabs();
     loadShots();
   } else if (t.dataset.unround !== undefined || t.dataset.clearshots !== undefined) {
@@ -660,7 +767,6 @@ document.addEventListener("click", (e) => {
     loadShots();
   } else if (t.dataset.tab) {
     state.tab = t.dataset.tab;
-    history.replaceState(null, "", "#" + state.tab);
     showTabs();
     render();
   } else if (t.dataset.ctx !== undefined) {
@@ -689,7 +795,9 @@ document.addEventListener("click", (e) => {
 
 document.addEventListener("change", (e) => {
   const t = e.target;
-  if (t.dataset.versus !== undefined) {
+  if (t.dataset.me !== undefined) {
+    setMe(t.value);
+  } else if (t.dataset.versus !== undefined) {
     state.versus[+t.dataset.versus] = t.value;
     render();
   } else if (t.dataset.shotf) {
@@ -699,6 +807,9 @@ document.addEventListener("change", (e) => {
     loadTranscript(+t.value);
   }
 });
+
+// A link pasted into an open page: start over from it.
+window.addEventListener("hashchange", () => location.reload());
 
 showTabs();
 load();

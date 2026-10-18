@@ -8,6 +8,7 @@ query needs over HTTP range requests, so the page stays fast however long the se
     index.html                      the page
     vendor/sql.js-httpvfs-<v>/      the browser SQLite library
     v/<version>/summary-<ctx>.json  ctx: all, league, practice
+    v/<version>/player/<ctx>/<key>.json   one player's courses, highlights and records
     v/<version>/stats.db            shots and transcripts
     latest.json                     {"version": ...}: which v/ the page reads
 
@@ -16,6 +17,7 @@ round is published keeps reading the old files until it's refreshed.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 import shutil
@@ -39,6 +41,18 @@ KEEP_VERSIONS = 2  # the newest, plus the one before for pages opened just befor
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                  ".json": "application/json", ".wasm": "application/wasm",
                  ".db": "application/vnd.sqlite3", ".txt": "text/plain; charset=utf-8"}
+
+
+def player_key(name: str) -> str:
+    """A player's file name: stable, and safe whatever the name."""
+    return hashlib.sha1(name.encode("utf-8")).hexdigest()[:12]
+
+
+def player_file(src: sqlite3.Connection, name: str, context: str | None, holes: list[dict]) -> dict[str, Any]:
+    """What the page shows for one picked player beyond the summary: their courses (hole by hole),
+    highlights and records."""
+    return {"name": name, "courses": A.courses(src, context, name),
+            "highlights": A.highlights(src, holes, context, name), "records": stats_web.records(src, context, name)}
 
 
 def new_version() -> str:
@@ -110,6 +124,13 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
         for name, context in CONTEXTS.items():
             body: dict[str, Any] = stats_web.summary(src, context, names)
             body["db"] = {"name": db_path.name, "modified": db_path.stat().st_mtime, "published": time.time()}
+            pdir = vdir / "player" / name
+            pdir.mkdir(parents=True, exist_ok=True)
+            holes = A.holes_played(src, context)
+            for p in body["players"]:
+                p["file"] = player_key(p["name"])
+                (pdir / f"{p['file']}.json").write_text(
+                    json.dumps(player_file(src, p["name"], context, holes), separators=(",", ":")), encoding="utf-8")
             (vdir / f"summary-{name}.json").write_text(json.dumps(body, separators=(",", ":")), encoding="utf-8")
         build_data_db(src, vdir / "stats.db", names)
     shutil.copyfile(PAGE, site / "index.html")

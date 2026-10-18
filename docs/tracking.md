@@ -124,6 +124,15 @@ for browsing the database. Its tabs:
   a par-4/5 tee shot (a par-3 tee shot counts); a chip is from 50 yd and in, off the green.
 - **Booth**: lines and words per commentator, signature phrases, and putt-call accuracy by night.
 
+The **player picker** at the top (Everyone, or one name) narrows every tab to that player:
+their row on Players, them on the left of Head-to-head, only rounds they played in (team rounds
+too), their own hole-by-hole averages on Courses next to everyone's, only their shots, only nights
+they were on air, and their own records and highlights. The browser remembers the pick. The
+address bar always holds the view (tab, player, league/practice, and the Shots filters, e.g.
+`#shots?player=Ann&club=DR`), so **Copy link** gives a link that opens exactly that. A player can
+bookmark `#rounds?player=Their+Name`. Rounds that ended since this browser's last visit are tagged
+**new**, with a count in the header. On a phone, the tabs wrap and wide tables scroll sideways.
+
 Strokes gained is measured against an approximate PGA Tour baseline (Broadie-style expected
 strokes by lie and distance), so negative numbers are normal; it's for comparing players and
 nights. Click a column header to sort a table. It filters league, practice or all rounds (the filter and the league/practice tags only show once the database has a league round). It's the same static page that
@@ -173,6 +182,8 @@ to look at):
   vendored in `commentator/stats_vendor`).
 - `v/<version>/summary-{all,league,practice}.json`: the season tables, strokes gained, cards,
   highlights and booth stats, computed on the PC.
+- `v/<version>/player/<all|league|practice>/<key>.json`: one player's courses, highlights and
+  records, fetched when they're picked (a few KB each).
 - `v/<version>/stats.db`: the shots and broadcast transcripts. The Shots and Broadcasts tabs query it
   in the browser, which reads only the parts of the file a query needs, so a season of 90,000 shots
   (a 90 MB file) still opens the Shots tab with about half a megabyte.

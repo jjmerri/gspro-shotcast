@@ -180,9 +180,38 @@ def test_shots_are_put_in_the_round_that_ended_next_on_their_course(tmp_path):
     with closing(stats_web.connect(path)) as ro:
         assert stats_web.shot_rounds(ro) == {before_restart: ann, after_restart: ann, next_round: riviera}
         assert {r["id"]: r["round"] for r in stats_web.rounds(ro)} == {ann: ann, bob: ann, riviera: riviera}
+        # Bob's side counts as his round even with no tracked shots; Ann's shots put her in both sides' rounds
+        assert {r["id"]: r["players"] for r in stats_web.rounds(ro)} == {ann: ["Ann"], bob: ["Ann", "Bob"], riviera: ["Ann"]}
     db.close()
     site = tmp_path / "site"
     vdir = site / "v" / stats_site.build(path, site)
     with closing(sqlite3.connect(vdir / "stats.db")) as pub:
         sql, args = stats_site.shot_query(None, {"round": str(ann)})
         assert sorted(json.loads(r[0])["id"] for r in pub.execute(sql, args)) == [before_restart, after_restart]
+
+
+def test_each_player_gets_a_file_of_just_their_courses_highlights_and_records(tmp_path):
+    path = _season(tmp_path)
+    db = sqlite3.connect(path)
+    for who, strokes in (("Ann", 4), ("Bob", 5)):
+        db.execute("INSERT INTO player_rounds (session_id, ended_at, player, course, scores, hole_pars, is_league)"
+                   " VALUES (1, 50, ?, 'Pebble', ?, ?, 0)",
+                   (who, json.dumps({h: strokes for h in range(1, 10)}), json.dumps({h: 4 for h in range(1, 10)})))
+    db.execute("UPDATE shots SET total_yards = 200 + ts WHERE club = 'DR'")
+    db.commit()
+    db.close()
+    site = tmp_path / "site"
+    vdir = site / "v" / stats_site.build(path, site)
+    body = json.loads((vdir / "summary-all.json").read_text())
+    files = {p["name"]: p["file"] for p in body["players"]}
+    assert set(files) == {"Ann", "Bob"} and files["Ann"] == stats_site.player_key("Ann") != files["Bob"]
+    ann = json.loads((vdir / "player" / "all" / f"{files['Ann']}.json").read_text())
+    with closing(stats_web.connect(path)) as src:
+        assert ann == stats_site.player_file(src, "Ann", None, A.holes_played(src, None))
+        everyone = stats_web.records(src, None)
+    assert ann["name"] == "Ann" and [c["players"] for c in ann["courses"]] == [["Ann"]]
+    assert {h["avg"] for h in ann["courses"][0]["holes"]} == {4}
+    assert all(x["player"] == "Ann" for x in ann["highlights"]["drives"]) and ann["highlights"]["drives"]
+    assert ann["records"]["longest_drive"]["player"] == "Ann"
+    assert everyone["longest_drive"]["player"] == "Bob"   # the last shots are Bob's: the longest drives
+    assert (vdir / "player" / "league").is_dir() and (vdir / "player" / "practice").is_dir()
