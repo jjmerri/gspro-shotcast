@@ -112,9 +112,12 @@ for browsing the database. Its tabs:
   around the green, putting), night-by-night trends, club gapping with each club's typical flight
   (from full swings only, so chips don't shrink a wedge), approach by club, putting by length, and
   recovery from rough and sand.
-- **Head-to-head**, **Rounds** (hole-by-hole cards), **Courses** (each hole's scoring average,
+- **Head-to-head**, **Rounds** (hole-by-hole cards, and a link to every shot of the round), **Courses** (each hole's scoring average,
   hardest and easiest, best nine).
-- **Shots**: every shot, filterable, with its launch data and what the booth said about it.
+- **Shots**: every shot, filterable by player, course, club, lie and a date range (or one round,
+  from the Rounds tab), with its launch data and what the booth said about it. A shot's round is
+  the round that ended next after it on its course, so a round the booth restarted during keeps
+  all its shots; shots from a round that never ended (or was quit before a hole was done) have none.
 - **Broadcasts**: a night's full transcript, in order.
 - **Highlights**: records, aces, eagles, hole-outs, birdie streaks, bounce-backs, blow-ups, and
   top-five drives, approaches, chips and putts. An approach is a full shot from 51-250 yd that isn't

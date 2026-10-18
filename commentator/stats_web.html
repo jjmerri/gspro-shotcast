@@ -54,6 +54,10 @@
   .empty { color:var(--dim); padding:10px 0; }
   .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:8px 0 14px; }
   select { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; }
+  input[type=date] { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:5px 6px; font:inherit; color-scheme:dark; }
+  button.link { background:none; border:none; color:var(--accent); cursor:pointer; font:inherit; padding:0; }
+  .chip { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--accent); border-radius:999px; padding:4px 6px 4px 12px; background:#1d2c27; }
+  .chip button { background:none; border:none; color:var(--dim); cursor:pointer; font:inherit; padding:0 4px; }
   .charts { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:12px; }
   .chart { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
   .chart svg { width:100%; height:auto; max-height:170px; display:block; }
@@ -147,11 +151,13 @@ async function runQuery(sql, args) {
 }
 
 // The same SQL as stats_site.shot_query: newest first, up to 500.
-const SHOT_FILTERS = ["date", "player", "course", "club", "lie"];
+const SHOT_FILTERS = ["date", "player", "course", "club", "lie", "round"];
+const SHOT_RANGE = { from: ">=", to: "<=" };
 async function queryShots(ctx, f) {
   const where = [], args = [];
   if (ctx === "league" || ctx === "practice") { where.push("s.is_league = ?"); args.push(ctx === "league" ? 1 : 0); }
-  for (const key of SHOT_FILTERS) if (f[key]) { where.push(`s.${key} = ?`); args.push(f[key]); }
+  for (const key of SHOT_FILTERS) if (f[key]) { where.push(`s.${key} = ?`); args.push(key === "round" ? Number(f[key]) : f[key]); }
+  for (const [key, op] of Object.entries(SHOT_RANGE)) if (f[key]) { where.push(`s.date ${op} ?`); args.push(f[key]); }
   const sql = "SELECT j.json FROM pub_shot s JOIN pub_shot_json j ON j.ord = s.ord"
     + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY s.ord LIMIT 500";
   return (await query(sql, args)).map(r => JSON.parse(r.json));
@@ -434,9 +440,10 @@ function renderRounds() {
       <td class="l">${esc(r.format.replace("_", " "))}${tags}</td><td>${r.played}/${r.holes}</td><td>${dash(r.gross)}</td>
       <td>${toPar(r.to_par)}</td><td>${frac(r.fir)}</td><td>${frac(r.gir)}</td><td>${dash(r.putts)}</td></tr>` +
       (open ? `<tr class="detail"><td colspan="${cols.length}">${scorecard(r.card)}
-        <p class="sub">Scrambling ${frac(r.scramble)} · Sand saves ${frac(r.sand)} · Penalties ${dash(r.penalties)}${r.longest_drive ? ` · Longest drive ${Math.round(r.longest_drive)} yd` : ""}</p></td></tr>` : "");
+        <p class="sub">Scrambling ${frac(r.scramble)} · Sand saves ${frac(r.sand)} · Penalties ${dash(r.penalties)}${r.longest_drive ? ` · Longest drive ${Math.round(r.longest_drive)} yd` : ""}</p>
+        <p><button class="link" data-roundshots="${r.round}">Every shot of this round →</button></p></td></tr>` : "");
   };
-  return `<h2>Rounds</h2>` + sortable("rounds", d.rounds, cols, row) + `<p class="sub">Click a round for its scorecard.</p>`;
+  return `<h2>Rounds</h2>` + sortable("rounds", d.rounds, cols, row) + `<p class="sub">Click a round for its scorecard and its shots.</p>`;
 }
 
 function renderCourses() {
@@ -480,8 +487,13 @@ function renderShots() {
   const d = state.data, f = state.shotFilter;
   const sel = (key, label, values) => `<select data-shotf="${key}"><option value="">${label}: all</option>${values.map(v =>
     `<option${f[key] === v ? " selected" : ""}>${esc(v)}</option>`).join("")}</select>`;
-  const controls = `<div class="controls">${sel("player", "Player", d.players.map(p => p.name))}${sel("date", "Night", d.filters.dates)}
-    ${sel("course", "Course", d.filters.courses)}${sel("club", "Club", d.filters.clubs)}${sel("lie", "Lie", d.filters.lies)}</div>`;
+  const dates = d.filters.dates, lo = dates[dates.length - 1] || "", hi = dates[0] || "";
+  const day = (key, label) => `<label class="sub">${label} <input type="date" data-shotf="${key}" value="${esc(f[key] || "")}" min="${lo}" max="${hi}"></label>`;
+  const chip = f.round ? `<span class="chip">Round: ${esc(roundLabel(+f.round))} <button data-unround title="Show all rounds">✕</button></span>` : "";
+  const any = Object.keys(f).length ? '<button class="link" data-clearshots>Clear filters</button>' : "";
+  const controls = `<div class="controls">${chip}${sel("player", "Player", d.players.map(p => p.name))}
+    ${sel("course", "Course", d.filters.courses)}${sel("club", "Club", d.filters.clubs)}${sel("lie", "Lie", d.filters.lies)}
+    ${day("from", "From")}${day("to", "to")}${any}</div>`;
   if (state.shots === null) { loadShots(); return `<h2>Shots</h2>${controls}<p class="sub">Loading…</p>`; }
   if (state.shots === "loading") return `<h2>Shots</h2>${controls}<p class="sub">Loading…</p>`;
   if (state.shots.error) return `<h2>Shots</h2>${controls}<div class="err">${esc(state.shots.error)}</div>`;
@@ -511,9 +523,15 @@ function renderShots() {
     { key: "to_pin", label: "To pin" },
     { key: "carry", label: "Carry", val: s => s.is_putt ? null : s.carry }, { key: "result", label: "Result", cls: "l", val: s => s.outcome || s.lie_after },
     { key: "said", label: "💬", val: s => s.lines.length }],
-    row, { key: "order", empty: "No shots match." });
+    row, { key: "order", dir: f.round ? -1 : 1, empty: "No shots match." });
   return `<h2>Shots</h2>${controls}${table}
-    <p class="sub">Newest first, up to 500. Click a column to sort; click a shot for its launch numbers and what the booth said.</p>`;
+    <p class="sub">${f.round ? "In the order they were played" : "Newest first, up to 500"}. Click a column to sort; click a shot for its launch numbers and what the booth said.</p>`;
+}
+
+function roundLabel(id) {
+  const sides = state.data.rounds.filter(r => r.round === id);
+  if (!sides.length) return "not in this view";
+  return `${sides[0].date} · ${sides[0].course} · ${[...new Set(sides.map(r => r.side))].join(", ")}`;
 }
 
 function nameOf(key) {
@@ -626,9 +644,21 @@ function showTabs() {
 }
 
 document.addEventListener("click", (e) => {
-  const t = e.target.closest("[data-tab],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot]");
+  const t = e.target.closest("[data-tab],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
+                             + "[data-roundshots],[data-unround],[data-clearshots]");
   if (!t) return;
-  if (t.dataset.tab) {
+  if (t.dataset.roundshots) {   // drill into a round: just its shots
+    state.shotFilter = { round: t.dataset.roundshots };
+    delete state.sort.shots;
+    state.tab = "shots";
+    history.replaceState(null, "", "#shots");
+    showTabs();
+    loadShots();
+  } else if (t.dataset.unround !== undefined || t.dataset.clearshots !== undefined) {
+    if (t.dataset.unround !== undefined) delete state.shotFilter.round; else state.shotFilter = {};
+    delete state.sort.shots;
+    loadShots();
+  } else if (t.dataset.tab) {
     state.tab = t.dataset.tab;
     history.replaceState(null, "", "#" + state.tab);
     showTabs();

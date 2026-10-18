@@ -6,6 +6,7 @@ shots are left out, and scoring, GIR, scrambling, sand and putting come from ind
 only, since a scramble or alternate-shot score isn't one player's.
 """
 
+import bisect
 import json
 import re
 import sqlite3
@@ -68,12 +69,47 @@ def _counts(complete, played) -> bool:
     return bool(complete) or (played or 0) >= 9
 
 
+ROUND_GAP_SECONDS = 30   # a round's sides are stored a moment apart; separate rounds are minutes apart
+
+
+def round_groups(db: sqlite3.Connection) -> tuple[list[dict[str, Any]], dict[int, int]]:
+    """The rounds as played: one per end of a round, whatever its number of sides (one row each in
+    `rounds`). Returns them oldest first ({round, end, course}; `round` is the lowest row id) and
+    each row's round."""
+    groups: list[dict[str, Any]] = []
+    of_row: dict[int, int] = {}
+    for r in db.execute("SELECT id, session_id, ended_at, course FROM rounds ORDER BY ended_at, id"):
+        g = groups[-1] if groups else None
+        if not (g and g["session"] == r["session_id"] and g["course"] == r["course"]
+                and r["ended_at"] - g["end"] <= ROUND_GAP_SECONDS):
+            g = {"round": r["id"], "end": r["ended_at"], "course": r["course"], "session": r["session_id"]}
+            groups.append(g)
+        g["end"] = r["ended_at"]
+        of_row[r["id"]] = g["round"]
+    return groups, of_row
+
+
+def shot_rounds(db: sqlite3.Connection) -> dict[int, int]:
+    """Each shot's round: shots aren't stored with one, so it's the round that ended next after the
+    shot (and after the round before it), when that round was on the shot's course. Shots of a round
+    that was never finished and recorded have none."""
+    groups, _ = round_groups(db)
+    ends = [g["end"] for g in groups]
+    out = {}
+    for sid, ts, course in db.execute("SELECT id, ts, course FROM shots"):
+        i = bisect.bisect_left(ends, ts)
+        if i < len(groups) and groups[i]["course"] == course:
+            out[sid] = groups[i]["round"]
+    return out
+
+
 def rounds(db: sqlite3.Connection, context: str | None = None) -> list[dict[str, Any]]:
     out = []
+    _, of_row = round_groups(db)
     for r in db.execute("SELECT * FROM rounds WHERE 1=1" + _ctx(context) + " ORDER BY ended_at DESC, id DESC"):
         card = _card(_json(r["scores"]), _json(r["hole_pars"]))
         out.append({
-            "id": r["id"], "date": r["date"], "course": r["course"], "format": r["format"] or "individual",
+            "id": r["id"], "round": of_row.get(r["id"], r["id"]), "date": r["date"], "course": r["course"], "format": r["format"] or "individual",
             "side": r["side"], "team": r["team"], "holes": r["holes"],
             "played": r["holes_played"] if r["holes_played"] is not None else r["holes"],
             "complete": bool(r["complete"]), "league": bool(r["is_league"]),

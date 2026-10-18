@@ -31,7 +31,8 @@ from . import stats_web
 PAGE = Path(__file__).with_name("stats_web.html")
 VENDOR = Path(__file__).with_name("stats_vendor")
 CONTEXTS = {"all": None, "league": "league", "practice": "practice"}
-SHOT_FILTERS = ("date", "player", "course", "club", "lie")   # the page's filter keys, in pub_shot
+SHOT_FILTERS = ("date", "player", "course", "club", "lie", "round")   # the page's exact-match filters
+SHOT_RANGE = {"from": ">=", "to": "<="}                               # and its date range (YYYY-MM-DD)
 PAGE_SIZE = 1024   # small pages: a lookup fetches little more than the rows it needs
 KEEP_VERSIONS = 2  # the newest, plus the one before for pages opened just before a publish
 
@@ -52,19 +53,20 @@ def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | No
     tmp.unlink(missing_ok=True)
     shots = A.shot_log(src, None, limit=-1)
     league = {r[0]: r[1] for r in src.execute("SELECT id, is_league FROM shots")}
+    round_of = stats_web.shot_rounds(src)
     sessions = [r[0] for r in src.execute("SELECT DISTINCT session_id FROM lines WHERE session_id IS NOT NULL")]
     with closing(sqlite3.connect(tmp)) as db:
         db.execute(f"PRAGMA page_size = {PAGE_SIZE}")
         db.execute("PRAGMA journal_mode = DELETE")
         db.executescript("""
             CREATE TABLE pub_shot (ord INTEGER PRIMARY KEY, id INTEGER, is_league INTEGER, date TEXT,
-                                   player TEXT, course TEXT, club TEXT, lie TEXT);
+                                   player TEXT, course TEXT, club TEXT, lie TEXT, round INTEGER);
             CREATE TABLE pub_shot_json (ord INTEGER PRIMARY KEY, json TEXT NOT NULL);
             CREATE TABLE pub_transcript (session_id INTEGER PRIMARY KEY, json TEXT NOT NULL);
         """)
-        db.executemany("INSERT INTO pub_shot VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        db.executemany("INSERT INTO pub_shot VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                        [(i, s["id"], league.get(s["id"]), s["date"], s["player"], s["course"], s["club"],
-                         s["lie_before"]) for i, s in enumerate(shots)])
+                         s["lie_before"], round_of.get(s["id"])) for i, s in enumerate(shots)])
         db.executemany("INSERT INTO pub_shot_json VALUES (?, ?)",
                        [(i, json.dumps(s, separators=(",", ":"))) for i, s in enumerate(shots)])
         db.executemany("INSERT INTO pub_transcript VALUES (?, ?)",
@@ -88,6 +90,10 @@ def shot_query(context: str | None, filters: dict[str, str], limit: int = 500) -
     for key in SHOT_FILTERS:
         if filters.get(key):
             where.append(f"s.{key} = ?")
+            args.append(int(filters[key]) if key == "round" else filters[key])
+    for key, op in SHOT_RANGE.items():
+        if filters.get(key):
+            where.append(f"s.date {op} ?")
             args.append(filters[key])
     sql = ("SELECT j.json FROM pub_shot s JOIN pub_shot_json j ON j.ord = s.ord"
            + (" WHERE " + " AND ".join(where) if where else "") + f" ORDER BY s.ord LIMIT {int(limit)}")

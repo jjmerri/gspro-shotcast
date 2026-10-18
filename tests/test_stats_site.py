@@ -44,6 +44,11 @@ def test_published_shots_and_transcripts_match_the_live_queries(tmp_path):
             sql, args = stats_site.shot_query(context, f, limit=5)
             got = [json.loads(r[0]) for r in pub.execute(sql, args)]
             assert got == A.shot_log(src, context, limit=5, **f), (context, f)
+        everything = A.shot_log(src, None, limit=-1)
+        for lo, hi in (("2026-10-17", None), (None, "2026-10-16"), ("2026-10-17", "2026-10-17"), ("2027-01-01", None)):
+            sql, args = stats_site.shot_query(None, {"from": lo, "to": hi}, limit=-1)
+            want = [s["id"] for s in everything if (not lo or s["date"] >= lo) and (not hi or s["date"] <= hi)]
+            assert [json.loads(r[0])["id"] for r in pub.execute(sql, args)] == want, (lo, hi)
         for sid in (1, 2):
             got = json.loads(pub.execute("SELECT json FROM pub_transcript WHERE session_id = ?", (sid,)).fetchone()[0])
             assert got == A.transcript(src, sid, names) and got[0]["name"] == "Nigel"
@@ -150,3 +155,34 @@ async def test_publish_goes_out_once_the_sign_off_has_aired_with_the_timer_as_a_
     talking[0] = False
     await asyncio.wait_for(eng._publish_task, 2)
     assert ran == [1]
+
+
+def test_shots_are_put_in_the_round_that_ended_next_on_their_course(tmp_path):
+    path = tmp_path / "season.db"
+    Store(str(path)).close()
+    db = sqlite3.connect(path)
+    db.execute("INSERT INTO sessions (id, started_at, date) VALUES (2, 50, '2026-10-14')")
+
+    def shot(sid, ts, course):
+        return db.execute("INSERT INTO shots (session_id, ts, player, course, is_putt, attributed, mulligan, is_league)"
+                          " VALUES (?, ?, 'Ann', ?, 0, 1, 0, 0)", (sid, ts, course)).lastrowid
+
+    def side(sid, ended, course, who):
+        return db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, gross, is_league)"
+                          " VALUES (?, ?, '2026-10-14', ?, ?, 9, 40, 0)", (sid, ended, course, who)).lastrowid
+
+    before_restart, after_restart = shot(1, 10, "Pebble"), shot(2, 60, "Pebble")   # the booth restarted mid-round
+    ann, bob = side(2, 100, "Pebble", "Ann"), side(2, 100.01, "Pebble", "Bob")       # one round, two sides
+    next_round = shot(2, 150, "Riviera")
+    shot(2, 400, "Riviera")                                                       # after the last round: none
+    riviera = side(2, 200, "Riviera", "Ann")
+    db.commit()
+    with closing(stats_web.connect(path)) as ro:
+        assert stats_web.shot_rounds(ro) == {before_restart: ann, after_restart: ann, next_round: riviera}
+        assert {r["id"]: r["round"] for r in stats_web.rounds(ro)} == {ann: ann, bob: ann, riviera: riviera}
+    db.close()
+    site = tmp_path / "site"
+    vdir = site / "v" / stats_site.build(path, site)
+    with closing(sqlite3.connect(vdir / "stats.db")) as pub:
+        sql, args = stats_site.shot_query(None, {"round": str(ann)})
+        assert sorted(json.loads(r[0])["id"] for r in pub.execute(sql, args)) == [before_restart, after_restart]
