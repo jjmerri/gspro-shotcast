@@ -292,8 +292,8 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
 
 
 def serve(db_path: str | Path, port: int = 8765, open_browser: bool = True,
-          names: dict[str, str] | None = None) -> None:
-    server = make_server(db_path, port, names)
+          names: dict[str, str] | None = None, site: str | Path | None = None) -> None:
+    server = make_server(db_path, port, names, site)
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"Season stats from {db_path} at {url} (Ctrl+C to stop)")
     if open_browser:

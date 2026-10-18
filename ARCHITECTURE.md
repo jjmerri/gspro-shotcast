@@ -24,7 +24,7 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
 
 ### Core pipeline
 - **`__main__.py`** CLI entry and subcommands (`run`, `sniff`, `calibrate`, `ocr-test`, `say`,
-  `banter`, `check`, `eval`, `review`, `stats`, `stats-web`, `import-league`, `cost`, `squabbit`,
+  `banter`, `check`, `eval`, `review`, `stats`, `stats-web`, `publish`, `import-league`, `cost`, `squabbit`,
   `fixture`, `notify-test`).
 - **`engine.py`** the orchestrator, and by far the largest file. Owns the live loop: the
   three-way pre-shot split, the impact carry/offline projection, follow-to-rest, reactions,

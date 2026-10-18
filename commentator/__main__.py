@@ -683,8 +683,10 @@ def cmd_stats_web(cfg: Config, args) -> None:
     path = Path(args.db or cfg.db_path)
     if not path.exists():
         sys.exit(f"No season database at {path}: copy the booth's logs/season.db there (or pass --db).")
+    # A fixed folder, so a window closed without cleanup doesn't leave a copy behind each time.
     serve(path, port=args.port, open_browser=not args.no_browser,
-          names={key: persona.name for key, persona in cfg.personas.items()})
+          names={key: persona.name for key, persona in cfg.personas.items()},
+          site=Path(cfg.log_dir) / "stats-web-site")
 
 
 def cmd_publish(cfg: Config, args) -> None:

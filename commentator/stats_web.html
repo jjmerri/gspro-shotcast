@@ -120,6 +120,22 @@ async function getJSON(url, opts) {
 const LIB = "vendor/sql.js-httpvfs-0.8.12/";
 let site = null;   // { version, db }
 async function query(sql, args) {
+  const tried = site;
+  try {
+    return await runQuery(sql, args);
+  } catch (e) {
+    // Open across a couple of publishes: this version's stats.db is gone, so move to the newest
+    // (once, even when several queries fail together).
+    if (site === tried) {
+      const latest = await getJSON("latest.json", { cache: "no-store" });
+      if (latest.version === tried.version) throw e;
+      if (site === tried) site = { version: latest.version, db: null };
+    }
+    return await runQuery(sql, args);
+  }
+}
+
+async function runQuery(sql, args) {
   if (!site.db) {
     const abs = (u) => new URL(u, location.href).toString();
     site.db = createDbWorker([{ from: "inline", config: { serverMode: "full", url: abs(`v/${site.version}/stats.db`),

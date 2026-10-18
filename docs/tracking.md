@@ -125,7 +125,7 @@ Strokes gained is measured against an approximate PGA Tour baseline (Broadie-sty
 strokes by lie and distance), so negative numbers are normal; it's for comparing players and
 nights. Click a column header to sort a table. It filters league, practice or all rounds (the filter and the league/practice tags only show once the database has a league round). It's the same static page that
 [gets published](#sharing-the-stats-page): the local server opens the database read-only, builds
-the page's files into a temp folder (again whenever the database changes) and serves them. It
+the page's files into `logs/stats-web-site` (again whenever the database changes) and serves them. It
 follows the booth's own stat rules: mulligans are left out, and scoring, GIR, scrambling, sand and putting
 come from individual-ball rounds. To look at
 the season on another machine, copy the booth PC's `logs/season.db` into this checkout's `logs/`
@@ -173,8 +173,9 @@ to look at):
 - `v/<version>/stats.db`: the shots and broadcast transcripts. The Shots and Broadcasts tabs query it
   in the browser, which reads only the parts of the file a query needs, so a season of 90,000 shots
   (a 90 MB file) still opens the Shots tab with about half a megabyte.
-- `latest.json`, uploaded last: which version the page reads. A page that's open during a publish
-  keeps the version it loaded; the two newest versions are kept.
+- `latest.json`, uploaded last: which version the page reads. The two newest versions are kept, so
+  a page that's open during a publish keeps working; one left open longer moves to the newest
+  version the next time it looks up shots or a broadcast (refresh for the newest season tables).
 
 It holds every player's shots, scores and the booth's lines, and nothing else from the PC (no
 config, keys or logs).
