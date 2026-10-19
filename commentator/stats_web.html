@@ -450,7 +450,7 @@ function renderPlayer(p) {
         { key: "pct", label: "%" }, { key: "bar", label: "", cls: "l", val: b => b.pct }],
         b => `<tr><td>${b.range}</td><td>${b.attempts ? `${b.made}/${b.attempts}` : "–"}</td><td>${dash(b.pct, "%")}</td>
         <td class="l"><div class="bar"><i style="width:${Math.min(100, b.pct || 0)}%"></i></div></td></tr>`, { key: "order" })}
-      <p class="sub">Putts with a known result; conceded gimmes left out.</p></div>
+      <p class="sub">Putts with a known result. Gimmes (inside GSPro's 4 ft circle) are conceded, not putted, so they're left out.</p></div>
   </div>
   <h2>Recovery</h2>
   ${sortable("rec", p.recovery, [

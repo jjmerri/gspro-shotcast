@@ -59,6 +59,7 @@ def test_shot_stats_skip_mulligans_and_long_tee_shots_aren_t_approaches(tmp_path
     _shot(db, "Ann", club="PT", is_putt=1, to_pin_yards=2.5, outcome="holed")    # 7.5 ft
     _shot(db, "Ann", club="PT", is_putt=1, to_pin_yards=2.0, outcome="missed")   # 6 ft
     _shot(db, "Ann", club="PT", is_putt=1, to_pin_yards=0.5, outcome="gimme")
+    _shot(db, "Ann", club="PT", is_putt=1, to_pin_yards=1.0, outcome="holed")    # 3 ft, gimmes off
     db.commit()
     with stats_web.connect(path) as ro:
         p = stats_web.player(ro, "Ann")
@@ -67,7 +68,7 @@ def test_shot_stats_skip_mulligans_and_long_tee_shots_aren_t_approaches(tmp_path
     assert p["clubs"] == [{"club": "3W", "n": 1, "avg_finish": 20.0, "best_finish": 20.0, "avg_from": 230.0}]
     six_ten = next(b for b in p["putting"] if b["range"] == "6-10 ft")
     assert (six_ten["made"], six_ten["attempts"]) == (1, 2)
-    assert next(b for b in p["putting"] if b["range"] == "0-3 ft")["attempts"] == 0
+    assert p["putting"][0]["range"] == "4-6 ft" and (p["putting"][0]["made"], p["putting"][0]["attempts"]) == (1, 1)
     assert rec["longest_drive"]["v"] == 250 and rec["longest_putt"]["v"] == 2.5
 
 

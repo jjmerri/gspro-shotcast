@@ -21,8 +21,10 @@ from urllib.parse import unquote, urlparse
 from . import season_analytics as A
 
 SHARED_BALL = ("scramble", "alternate")
-# Putt length buckets in feet (to_pin_yards is stored in yards).
-PUTT_BUCKETS = [(0, 3), (3, 6), (6, 10), (10, 20), (20, 40), (40, None)]
+# Putt length buckets in feet (to_pin_yards is stored in yards). They start at GSPro's 4 ft gimme
+# circle: anything inside it is conceded, never struck, so the first bucket also takes the rare putt
+# struck from closer (gimmes switched off) rather than show a bucket that's always empty.
+PUTT_BUCKETS = [(4, 6), (6, 10), (10, 20), (20, 40), (40, None)]
 # Approach-by-club only counts shots from this close, so a 3-wood off a par-5 tee isn't an "approach".
 APPROACH_MAX_YARDS = 250
 _DRIVE = "COALESCE(total_yards, carry_game_yards, carry_raw)"
@@ -209,7 +211,7 @@ def player(db: sqlite3.Connection, name: str, context: str | None = None) -> dic
     for lo, hi in PUTT_BUCKETS:
         r = db.execute("SELECT COUNT(*) n, SUM(outcome = 'holed') made FROM shots WHERE is_putt = 1"
                        " AND outcome IS NOT NULL AND outcome != 'gimme' AND to_pin_yards >= ? AND to_pin_yards < ?"
-                       + shots, (lo / 3.0, (hi or 10_000) / 3.0, name)).fetchone()
+                       + shots, (0 if lo == PUTT_BUCKETS[0][0] else lo / 3.0, (hi or 10_000) / 3.0, name)).fetchone()
         p["putting"].append({"range": f"{lo}-{hi} ft" if hi else f"{lo}+ ft", "attempts": r["n"],
                              "made": r["made"] or 0, "pct": _pct(r["made"] or 0, r["n"])})
     return p
