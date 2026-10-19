@@ -334,6 +334,14 @@ class CommentaryConfig(BaseModel):
     # GSPro's hole-result banner appears ~1-1.5s after a putt settles (during the hole-end
     # transition) and stays up ~2s, so the booth polls for it across this window to confirm a make.
     hole_result_window_seconds: float = 3.0
+    # A putt from at least this far (feet) also gets a pre-voiced "gimme" line, always played when it
+    # stops inside the gimme circle: a lag to tap-in range from here is worth a word. Amateurs leave a
+    # 30-footer around 5-6 ft on average, so inside 4 ft is a good lag; shorter ends in the circle
+    # routinely. 0 turns it off.
+    gimme_lag_feet: float = 30.0
+    # Such a long putt can still be rolling when hole_result_window_seconds runs out, so its result
+    # is watched this long instead, letting the pre-written line play the moment it stops.
+    lag_result_window_seconds: float = 8.0
     # A mid-flight line that can't start speaking this soon after impact is dropped: the ball
     # has usually landed by then, and "needs legs" after it lands sounds broken.
     flight_deadline_seconds: float = 3.0

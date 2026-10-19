@@ -1984,6 +1984,8 @@ class Engine:
                  + (putt.facts(self.cfg.putt_read, slope=putt_elevation_inches(hud) is None) if putt else []))
         who, team = self._who(player)
         second = self.speakers[1] if len(self.speakers) > 1 else None
+        lag_feet = self.cfg.commentary.gimme_lag_feet
+        lag = is_putt and lag_feet > 0 and (to_yards(hud.to_pin) or 0) * 3 >= lag_feet
         line_user, facts_text = preshot_line_prompt(
             player=who, team=team, hole=self.state.current_hole, facts=facts,
             recent_lines=self.state.recent_lines, speaker=self.speakers[0], second=second, is_putt=is_putt,
@@ -1991,7 +1993,7 @@ class Engine:
         branch_user, _ = preshot_branch_prompt(
             player=who, team=team, hole=self.state.current_hole, facts=facts,
             recent_lines=self.state.recent_lines, speaker=self.speakers[0], second=second, is_putt=is_putt,
-            named=minimap.named(to_yards(hud.to_pin)) if minimap else None,
+            named=minimap.named(to_yards(hud.to_pin)) if minimap else None, lag=lag,
         )
         # Three concurrent calls: the spoken line (live_llm, text) and the branches (flight_llm, text)
         # always run; the hazard read (preshot_llm, vision) runs only for a full shot with an image to
@@ -2000,7 +2002,7 @@ class Engine:
         calls: dict[str, Any] = {
             "line": self._complete("preshot-line", self.live_llm, line_user, [], preshot_line_schema(self.speakers)),
             "branches": self._complete("preshot-branches", self.flight_llm, branch_user, [],
-                                       preshot_branch_schema(self.speakers, is_putt)),
+                                       preshot_branch_schema(self.speakers, is_putt, lag)),
         }
         if minimap is not None:
             calls["hazards"] = self._done(json.dumps({"hazards": [
@@ -2244,7 +2246,7 @@ class Engine:
         out: dict[str, str] = {}
         recent = [l.text for l in self.state.recent_lines]
         for outcome, text in (data.get("reaction_lines") or {}).items():
-            if outcome not in reaction_outcomes(is_putt) or not text:
+            if outcome not in reaction_outcomes(is_putt, lag=True) or not text:
                 continue
             parsed = parse_lines(json.dumps({"lines": [{"speaker": self.speakers[0], "text": text}]}),
                                  self.speakers, self.cfg.commentary.max_words_per_line, self._persona_names)
@@ -2665,8 +2667,14 @@ class Engine:
                 base_shot = impact_snap[6].get(idx, self.gspro.shot_number(idx))  # baselined AT IMPACT
                 base_hole = impact_snap[1].get(idx)
                 base_setup = setups0.get(idx, 0)
+                # A long putt with a gimme line can still be rolling when the usual window closes;
+                # watch it to rest so its pre-written result plays the moment it stops.
+                lag_plan = bool(c.pre_reactions and shot_plan and shot_plan.is_putt
+                                and shot_plan.player in (None, player) and shot_plan.reactions.get("gimme"))
+                window = max(c.hole_result_window_seconds, c.lag_result_window_seconds) if lag_plan \
+                    else c.hole_result_window_seconds
                 outcome = await self._wait_putt_result(idx, base_outs, base_gim, base_shot,
-                                                       c.hole_result_window_seconds, base_hole=base_hole,
+                                                       window, base_hole=base_hole,
                                                        base_setup=base_setup)
                 if outcome == "unknown":
                     # The settle window passed with no log signal (holed/conceded/stroke-advance): a long
@@ -2675,7 +2683,7 @@ class Engine:
                     # there, rather than leave the putt with no outcome.
                     holed = None
                     log.info("%s putt outcome not in the log after %.1fs; watching for it in the background",
-                             tag, c.hole_result_window_seconds)
+                             tag, window)
                     self._bg(self._late_result(shot_id, idx, base_outs, base_gim, base_shot, tag, True,
                                                self._pending_prediction.pop(player, None), shot_hole,
                                                base_hole=base_hole, base_setup=base_setup, rec=rec))
@@ -2779,12 +2787,15 @@ class Engine:
         # (if any) is done. Not a putt: the next putt, or the hole's wrap, is right behind it.
         self._news_moment = {"seq": my_seq, "tags": list(tags), "routine": not notable and not shot.is_putt}
         too_soon = time.time() - self.state.last_comment_at < c.min_seconds_between_comments
-        # A makeable putt always gets a word (make or miss), skipping the routine dice but still
-        # yielding to too_soon so it never talks over the last line.
+        # A makeable putt always gets a word (make or miss), and so does a long lag that stopped in the
+        # gimme circle (its pre-voiced "gimme" line), skipping the routine dice but still yielding to
+        # too_soon so it never talks over the last line.
+        lag_gimme = bool(shot.is_putt and outcome == "conceded" and shot_plan
+                         and shot_plan.player in (None, player) and shot_plan.reactions.get("gimme"))
         if not notable:
             if too_soon:
                 return
-            if self.rng.random() > c.routine_comment_rate and "makeable_putt" not in tags:
+            if self.rng.random() > c.routine_comment_rate and "makeable_putt" not in tags and not lag_gimme:
                 return
 
         # Routine shots take the pre-written result line (voiced at setup, played now with no model
@@ -2793,11 +2804,12 @@ class Engine:
         # the worst thing to react to late or miss, and a live call here can lag or drop.
         # An "unknown" putt (no log signal in the window) must NOT take the pre-written line: with no
         # result we can't say short vs holed, so fall through to the grounded live reaction instead.
-        if c.pre_reactions and outcome != "unknown" and (not notable or (shot.is_putt and holed)) and shot_plan \
+        if c.pre_reactions and outcome != "unknown" and (not notable or (shot.is_putt and holed) or lag_gimme) \
+                and shot_plan \
                 and time.monotonic() - shot_plan_made_at < 180 \
                 and shot_plan.player in (None, player) and shot_plan.is_putt == shot.is_putt:
             picked = pick_reaction(shot_plan, after_lie=hud.lie, start_yards=to_yards(before.to_pin),
-                                   roll_yards=roll_yards, holed=holed)
+                                   roll_yards=roll_yards, holed=holed, conceded=outcome == "conceded")
             if picked:
                 outcome, text = picked
                 line = Line(speaker=self.speakers[0], text=text)

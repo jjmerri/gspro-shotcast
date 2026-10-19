@@ -11,7 +11,9 @@
    slope from the drift of GSPro's green-grid dots over a quick burst of frames), and the full set of
    pre-written branches (`flight`): a mid-flight line for on-target / short / long / left /
    right / toward-water, and a resting-lie reaction for every finish (fairway, green, each
-   rough severity, sand, pine straw, cart path, structure, water).
+   rough severity, sand, pine straw, cart path, structure, water). A putt gets holed / short /
+   past instead, plus a "gimme" line from `commentary.gimme_lag_feet` (30 ft) or longer, which
+   always plays when the lag stops inside the gimme circle.
 2. **Impact.** No model call. Code projects carry against the pin and the drift from start line
    and spin axis. The launch monitor's carry is first scaled to what GSPro will allow: a course
    baseline (altitude and conditions, learned from tee and fairway shots) times a per-lie

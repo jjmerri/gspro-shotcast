@@ -1923,6 +1923,40 @@ def test_pick_reaction_maps_lies_and_putt_rolls():
     assert pick_reaction(putt, "green", None, 9.8) is None          # no start distance -> fallback
 
 
+def test_a_long_putt_in_the_gimme_circle_takes_its_gimme_line():
+    from commentator.flight_pick import FlightPlan, pick_reaction
+    from commentator.prompts import preshot_branch_prompt, preshot_branch_schema
+
+    lag = FlightPlan(player="Dan", to_pin="61 feet", is_putt=True,
+                     reactions={"holed": "drained it", "short": "left short", "past": "ran by", "gimme": "lag to tap-in"})
+    assert pick_reaction(lag, "green", 20.3, 19.0, holed=False, conceded=True) == ("gimme", "lag to tap-in")
+    assert pick_reaction(lag, "green", 20.3, 19.0, holed=False)[0] == "short"   # a plain miss: not a gimme
+    short = FlightPlan(player="Dan", to_pin="8 feet", is_putt=True, reactions={"short": "left short"})
+    assert pick_reaction(short, "green", 2.7, 2.5, conceded=True) == ("short", "left short")  # no gimme line
+    reacts = lambda **k: preshot_branch_schema(["pbp"], True, **k)["properties"]["reaction_lines"]["required"]
+    assert "gimme" in reacts(lag=True) and "gimme" not in reacts()
+    kw = dict(player="Dan", team=None, hole="Hole 1", facts=[], recent_lines=[], speaker="pbp", is_putt=True)
+    assert "gimme (" in preshot_branch_prompt(**kw, lag=True)[0] and "gimme" not in preshot_branch_prompt(**kw)[0]
+
+
+async def test_only_a_putt_past_the_lag_distance_asks_for_a_gimme_line(tmp_path):
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.tts.console_simulate_duration = False
+    llm = FakeLLM(cfg.llm.live)
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=llm, segment_llm=None,
+                    speech=SpeechQueue(cfg, ConsoleTTS()), screen=_SetupScreen(), rng=random.Random(0))
+    engine.flight_llm = llm
+    for to_pin, asked in (("35 feet", True), ("25 feet", False)):
+        llm.prompts.clear()
+        await engine.handle_preshot(PreShotEvent(hud=Hud(player_text=f"Toby 2nd Shot 2 {to_pin}", shot_number=2,
+                                                         lie="green", to_pin=to_pin)))
+        branch = next(p for p in llm.prompts if "PRE-PUTT BRANCHES" in p)
+        assert ("gimme (" in branch) is asked, to_pin
+    assert engine._build_reactions({"reaction_lines": {"gimme": "Great lag, tap-in par."}}, True) == \
+        {"gimme": "Great lag, tap-in par."}
+
+
 async def test_run_loop_cancel_keeps_the_current_setups_plan(tmp_path):
     # The run loop calls _cancel_preshot() right before handle_preshot for a new setup. That must
     # not cancel the model call _emit_setup started for this same setup, or no plan gets built.

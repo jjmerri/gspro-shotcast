@@ -296,10 +296,14 @@ RESULT_OUTCOMES = (
     "green", "fairway", "semi rough", "rough", "deep rough", "pine straw", "sand", "cart path", "structure", "water",
 )
 PUTT_RESULT_OUTCOMES = ("holed", "short", "past")
+# A long putt (CommentaryConfig.gimme_lag_feet) also gets a line for stopping inside the gimme circle.
+LAG_PUTT_OUTCOMES = PUTT_RESULT_OUTCOMES + ("gimme",)
 
 
-def reaction_outcomes(is_putt: bool) -> tuple[str, ...]:
-    return PUTT_RESULT_OUTCOMES if is_putt else RESULT_OUTCOMES
+def reaction_outcomes(is_putt: bool, lag: bool = False) -> tuple[str, ...]:
+    if is_putt:
+        return LAG_PUTT_OUTCOMES if lag else PUTT_RESULT_OUTCOMES
+    return RESULT_OUTCOMES
 
 
 # One per RESULT_OUTCOMES key, so the model writes a distinct reaction for each finish. Shared by the
@@ -352,12 +356,12 @@ def preshot_hazard_schema() -> dict[str, Any]:
     }
 
 
-def preshot_branch_schema(speakers: list[str], is_putt: bool = False) -> dict[str, Any]:
+def preshot_branch_schema(speakers: list[str], is_putt: bool = False, lag: bool = False) -> dict[str, Any]:
     """The pre-rendered branches: a mid-flight line per ball flight and a reaction per finish. Needed
     only once the ball is moving, so it runs as a separate (text-only) call that can't block or
     truncate the swing-critical setup line."""
     nullable_str = {"type": ["string", "null"]}
-    reactions = reaction_outcomes(is_putt)
+    reactions = reaction_outcomes(is_putt, lag)
     reaction_lines = {
         "type": "object",
         "properties": {k: nullable_str for k in reactions},
@@ -431,7 +435,7 @@ def preshot_hazard_prompt(*, player, hole, facts: list[str], speaker: str) -> tu
 
 def preshot_branch_prompt(
     *, player, team, hole, facts: list[str], recent_lines, speaker: str,
-    second: str | None = None, is_putt: bool = False, named: dict[str, str] | None = None,
+    second: str | None = None, is_putt: bool = False, named: dict[str, str] | None = None, lag: bool = False,
 ) -> tuple[str, str]:
     """The pre-rendered branches (mid-flight line per flight, reaction per finish), written now so the
     call is instant once the ball moves. Text-only: it runs beside the setup call, so there's no image
@@ -447,6 +451,8 @@ def preshot_branch_prompt(
             + '" makes the instant the ball stops, at most 12 words each, written now for each way it can finish. '
             "Match the putt number in the facts (a made first putt is a one-putt, a made second putt is a two-putt, "
             "and so on). holed (it drops), short (left short of the hole), past (misses and runs past or by)."
+            + (" gimme (a long lag that stops inside the gimme circle, conceded as a tap-in: credit the lag "
+               "and say what score it leaves, without claiming it dropped)." if lag else "")
         )
         return prompt, facts_text
     trouble = ('left_trouble / right_trouble: the ball drifting toward trouble on that side while STILL IN THE '
