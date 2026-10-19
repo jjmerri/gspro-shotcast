@@ -124,9 +124,6 @@ beyond that is supported on paper but not yet run live:
   break reads until the code catches up; `screen-check` shows which boxes stopped reading.
 - **Windows only** for tracking and the booth. The stats page runs anywhere with Python.
 
-It's a personal project shared as is. Issues are welcome, but fixes for other setups aren't
-promised.
-
 ## Quick start
 
 1. On GitHub, **Code → Download ZIP**, and unzip it somewhere it can stay (for example
