@@ -992,7 +992,7 @@ def _timeline(start: float, end: float) -> list[Hud]:
     return huds
 
 
-async def _follow(frames: list[Hud], before: Hud, tmp_path, max_seconds: float = 25):
+async def _follow(frames: list[Hud], before: Hud, tmp_path, max_seconds: float = 25, roll_seconds: float = 8):
     reads = iter(frames)
 
     class VideoScreen:
@@ -1002,6 +1002,7 @@ async def _follow(frames: list[Hud], before: Hud, tmp_path, max_seconds: float =
     cfg = Config(log_dir=str(tmp_path))
     cfg.screen.follow_poll_seconds = 0.05
     cfg.screen.follow_max_seconds = max_seconds
+    cfg.screen.follow_roll_seconds = roll_seconds
     engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
                     live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=VideoScreen())
     return await engine._follow_shot(before)
@@ -1024,6 +1025,32 @@ async def test_follow_shot_on_real_gspro_putt(tmp_path):
     before = Hud(player_text="Mixtape_Golf", shot_number=3, to_pin="10 feet 8 inches", lie="green")
     hud, landed = await _follow(_timeline(101.3, 107), before, tmp_path)
     assert landed and hud.shot_number == 3 and hud.lie == "green" and hud.tiles["total length"] == "3.5"
+
+
+async def test_follow_shot_keeps_following_a_long_roll_after_touchdown(tmp_path):
+    # A long drive lands late and is still rolling at follow_max_seconds: the follow runs on, up to
+    # follow_roll_seconds after touchdown, and reads the lie where it stops.
+    def f(lie, carry, total):
+        return Hud(player_text="P", shot_number=1, lie=lie,
+                   tiles={"carry (game)": str(carry), "total length": str(total)})
+    frames = [f("fairway", 200, 200), f("fairway", 224, 224), f("fairway", 224, 226)]
+    frames += [f("fairway", 224, 226 + i) for i in range(1, 25)]    # ~1.2 s of roll at 0.05 s polls
+    frames += [f("fairway", 224, 250)] * 5
+    before = Hud(player_text="P", shot_number=1, lie="tee")
+    reads = iter(frames)
+
+    class VideoScreen:
+        async def read_hud_async(self, parts):
+            return next(reads)
+
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.screen.follow_poll_seconds = 0.05
+    cfg.screen.follow_max_seconds = 0.3
+    cfg.screen.follow_roll_seconds = 5
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=VideoScreen())
+    hud, landed = await engine._follow_shot(before)
+    assert landed and hud.lie == "fairway" and hud.tiles["total length"] == "250"
 
 
 async def test_follow_shot_reads_the_resting_lie_not_the_landing_lie(tmp_path):
@@ -1234,7 +1261,7 @@ async def test_follow_shot_still_learns_when_touchdown_seen_but_rest_times_out(t
     climbing = [_ct("fairway", 170, 170), _ct("fairway", 185, 180), _ct("rough", 200, 195)]
     rolling = [_ct("rough", 200, 200 + 10 * i) for i in range(1, 14)]   # carry frozen, total never steady
     hud, landed = await _follow(climbing + rolling, Hud(player_text="P", shot_number=1, lie="tee"),
-                                tmp_path, max_seconds=0.5)
+                                tmp_path, max_seconds=0.5, roll_seconds=0.3)
     assert landed and hud.tiles["carry (game)"] == "200"
 
 
@@ -2366,6 +2393,24 @@ def test_the_next_shot_corrects_where_the_last_one_finished(tmp_path):
     assert e.store.db.execute("SELECT lie_after FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "green"
     e._correct_last_finish(0, ({}, {0: 13}, {}, {}, {(0, 13): 1}, 13, {}), "rough")   # after a drop: no
     assert rec.hud.lie == "green"
+
+
+def test_a_tee_shot_is_corrected_though_the_log_still_named_the_last_hole(tmp_path):
+    # GSPro's log moves to a new hole only once its tee shot is logged, so the tee shot's snapshot
+    # names the hole before (12) and the second shot's names this one (13).
+    e = _mini_engine(tmp_path)
+    r = _log_round(e)
+    sid, rec = _row(e, r, 7, 1, "tee", hole=13, seq=14)
+    rec.hud = Hud(lie=None)                     # the screen never saw it come to rest
+    e._last_row[0] = (sid, rec, 12, 0, 0)
+    snap = ({0: 94.0}, {0: 13}, {}, {}, {}, 13, {0: 2})
+    e._correct_last_finish(0, snap, "rough", "Hole 14", 3)             # stroke 3: a penalty came between
+    assert rec.hud.lie is None
+    e._correct_last_finish(0, snap, "fairway", "Hole 14", 2, "scramble")   # maybe a partner's ball
+    assert rec.hud.lie is None
+    e._correct_last_finish(0, snap, "fairway", "Hole 14", 2)
+    assert rec.hud.lie == "fairway"
+    assert e.store.db.execute("SELECT lie_after FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "fairway"
 
 
 def test_a_full_shot_inside_the_gimme_finished_on_the_green(tmp_path):

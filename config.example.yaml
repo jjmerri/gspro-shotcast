@@ -104,7 +104,8 @@ screen:
   window_title: GSPro        # but forces a synchronous render each grab and can freeze the game
   ocr_threads: 6             # cap OCR cores so it can't starve GSPro (null = all cores)
   follow_poll_seconds: 0.3   # how often the HUD is read while following a shot
-  follow_max_seconds: 25
+  # follow_max_seconds: 12   # give up following a shot after this (a lost or wet ball never stops)
+  # follow_roll_seconds: 8   # but once it lands, keep following at least this long for it to stop
   send_images: true       # screenshots for the vision call (the pre-shot hazard look)
   ocr: true               # check the screen read with `screen-check` first
   # Boxes around the GSPro HUD, as fractions of the screen. The built-in defaults fit the 3.1.x

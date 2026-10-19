@@ -247,9 +247,12 @@ class ScreenConfig(BaseModel):
     # After impact the HUD is polled to follow the ball: CARRY (game) counts up until touchdown,
     # Total Length until it stops, and about 1-2 s later GSPro moves on to the next shot.
     follow_poll_seconds: float = 0.3
-    # A normal shot's flight and roll finish well inside this; the cap only bites on odd outcomes
-    # (a water penalty, a lost ball) where the stop is never cleanly seen, so keep it short.
+    # How long to follow a shot from impact. The cap bites on odd outcomes (a water penalty, a lost
+    # ball) where the stop is never cleanly seen, so keep it short.
     follow_max_seconds: float = 12.0
+    # Once the ball has landed, keep following at least this long after touchdown for it to roll out
+    # and stop. A long drive lands 6-8 s in and can still be rolling at follow_max_seconds.
+    follow_roll_seconds: float = 8.0
     # Saves a small screenshot at impact and at the final reading of every shot under
     # log_dir/shots/, for checking what the booth read against what was on screen. ~150 KB each.
     save_review_images: bool = False

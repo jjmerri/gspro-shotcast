@@ -233,6 +233,11 @@ def _distance_text(yards: float) -> str:
     return f"{feet} feet {inches} inches" if inches else f"{feet} feet"
 
 
+def _hole_key(label: str | None) -> str:
+    """A hole label without its number, which can be read late ('par 4, 257 yards')."""
+    return re.sub(r"^Hole \d+,\s*", "", label or "")
+
+
 class Engine:
     """Three moments per shot: a setup line while the player addresses the ball, a call
     while it's in the air, and a reaction once it stops."""
@@ -2601,7 +2606,7 @@ class Engine:
         if in_order:
             self._finish_seq[idx] = my_seq
             self._resolve_pending_finish(idx, impact_snap)
-            self._correct_last_finish(idx, impact_snap, before.lie)
+            self._correct_last_finish(idx, impact_snap, before.lie, shot_hole, before.shot_number, fmt)
         shot_id = self.store.record_shot(
             player=player, hole=shot_hole, shot=shot, before=before, after=hud, tags=tags,
             carry_game_yards=carry_game, total_yards=tile_yards("total length"), offline_yards=tile_yards("offline (raw)"),
@@ -3145,7 +3150,8 @@ class Engine:
         name = r.league.match_player(order[idx]) or order[idx]
         return [f"The team picked {name}'s ball from the last round of shots; everyone plays from there."]
 
-    def _correct_last_finish(self, idx: int, snap: tuple, lie: str | None) -> None:
+    def _correct_last_finish(self, idx: int, snap: tuple, lie: str | None, hole_label: str | None = None,
+                             shot_number: int | None = None, fmt: str | None = None) -> None:
         """Where the player's previous shot came to rest is where this one was played from. Corrects
         that shot's resting lie (the HUD's read at rest misses, e.g. a tee shot onto the green read as
         fairway) when it's the same hole, no penalty came between (a drop), and it wasn't taken back."""
@@ -3154,7 +3160,14 @@ class Engine:
             return
         shot_id, rec, hole, pen, dropped = prev
         now = self._idx_snap(snap, idx)
-        if rec.mulligan or hole is None or now["hole"] != hole or now["pen"] != pen or now["dropped"] != dropped:
+        same = hole is not None and now["hole"] == hole and now["pen"] == pen
+        # GSPro's log moves to a new hole only once its tee shot is logged, so a tee shot's snapshot
+        # still names the hole before. The HUD's strokes (1, then 2: no penalty between) on the same
+        # hole say it's this ball. Not in a scramble, where the second shot may be a partner's ball.
+        tee_then_second = (rec.shot_number == 1 and shot_number == 2 and hole_label is not None
+                           and _hole_key(rec.hole) == _hole_key(hole_label) and now["pen"] == 0
+                           and fmt != "scramble")
+        if rec.mulligan or not (same or tee_then_second) or now["dropped"] != dropped:
             return   # (a scramble that picked another ball: this shot is played from the team's ball)
         if (rec.hud.lie or "").lower() != lie:
             log.info("Shot %s finished on the %s (the HUD read %s)", shot_id, lie, rec.hud.lie)
@@ -3337,7 +3350,8 @@ class Engine:
         # Poll `lie`, the `player_name` cell (a pixel compare, no OCR) and `tiles`, in that order: the
         # name is grabbed AFTER the lie, so an unchanged name proves the lie was captured before any
         # switch to the next player.
-        while time.monotonic() - started < max_seconds:
+        deadline = max_seconds
+        while time.monotonic() - started < deadline:
             reads += 1
             hud = await self.screen.read_hud_async(["lie", "player_name", "tiles"])
             if who is None and hud.name_sig not in (None, NAME_DARK):
@@ -3358,6 +3372,7 @@ class Engine:
             mine = mine or rose or turned_over
             if touchdown is None and (rose or turned_over) and game and game == prev_game:
                 touchdown = time.monotonic() - started
+                deadline = max(max_seconds, touchdown + self.cfg.screen.follow_roll_seconds)
                 landing, steady = hud, 0  # landing read; kept only as a fallback if the HUD moves on
                 log.info("%s touchdown ~%.1fs into the follow; following to rest", tag, touchdown)
             prev_game = game
@@ -3390,7 +3405,7 @@ class Engine:
             await asyncio.sleep(poll)
         # Timed out without a confirmed rest. If touchdown was seen, CARRY (game) is already final, so
         # the carry is still learnable (landed=True); only an unconfirmed touchdown skips learning.
-        log.info("%s ball not seen to come to rest within %.0fs (touchdown=%s)", tag, max_seconds, touchdown is not None)
+        log.info("%s ball not seen to come to rest within %.0fs (touchdown=%s)", tag, deadline, touchdown is not None)
         return last or landing or Hud(), touchdown is not None
 
     def _save_review_image(self, tag: str, moment: str) -> None:
