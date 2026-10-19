@@ -52,6 +52,11 @@ while it's in the air, react to where it finished, read putts, open and close th
 track your league's standings, closest-to-the-pin and net scores. About $1-2 per 18-hole round
 with the default cloud models, or $0 fully local.
 
+If your league scores in [Squabbit](https://squabbit.com), the booth can sign in (read-only) to
+pull each player's live handicap, give strokes exactly as Squabbit does, and know what the other
+teams have posted this week and where the season standings sit; see
+[Leagues, formats and handicaps](docs/leagues.md#rounds-formats-and-handicaps).
+
 Excerpts from real league nights. The opener:
 
 > **Nigel:** Good evening, and welcome to the Tuesday Night Sim League, week six, the back nine at Cabot Cliffs.<br>
