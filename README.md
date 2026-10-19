@@ -32,7 +32,7 @@ a mulligan, and the hole wrap-up.*
 | ![Rounds: hole-by-hole scorecards](docs/screenshots/rounds.png) | ![Highlights: season records and top shots](docs/screenshots/highlights.png) |
 | ![Shots: every shot, filterable](docs/screenshots/shots.png) | ![Broadcasts: a night's commentary, shot by shot](docs/screenshots/broadcasts.png) |
 
-*(Sample data, player names changed.)* Every swing goes into `logs/season.db` with its launch data,
+Every swing goes into `logs/season.db` with its launch data,
 where it finished and what it scored, plus each round's card and stats. The stats page shows
 strokes gained, club gapping, approach and putting by distance, scorecards, every shot, and
 season highlights. Works with any launch monitor GSPro supports; see
@@ -52,7 +52,7 @@ while it's in the air, react to where it finished, read putts, open and close th
 track your league's standings, closest-to-the-pin and net scores. About $1-2 per 18-hole round
 with the default cloud models, or $0 fully local.
 
-Excerpts from real league nights (names changed). The opener:
+Excerpts from real league nights. The opener:
 
 > **Nigel:** Good evening, and welcome to the Tuesday Night Sim League, week six, the back nine at Cabot Cliffs.<br>
 > **Nigel:** Two titles in a row for that pair, and both have a habit of winning closest-to-the-pin prizes.<br>
