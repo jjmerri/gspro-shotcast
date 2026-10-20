@@ -61,8 +61,15 @@ MAP = ("`map` is GSPro's overhead minimap of a golf hole. The ball is the small 
 HALF = ("`{side}` is part of GSPro's overhead minimap of a golf hole; the grey area is masked out, ignore it. "
         f"{WATER}; bunkers and sandy waste areas are pale tan or grey-white patches; a solid white line is an "
         f"out-of-bounds boundary; {PENALTY}.")
-WATER_Q = ("Is there open water (a lake, pond, creek, canal or the sea) in `{side}`? Answer no if all there is "
-           "is a red line around grass, scrub, bushes, rocks or sand: that's a penalty area, not water.")
+# Describing what water looks like nearly doubled Jev's hits on 33 saved frames (18 -> 33 of 44 water sides) with
+# no new false alarms; the "not water" lines keep dark woods and gorse from reading as a pond or the sea.
+WATER_Q = ("Water in GSPro's minimap looks like: a black or very dark navy pond or lake; a light blue-grey canal "
+           "or river with fine ripples; or the sea along a coastline, a large pale silvery-grey or white-flecked "
+           "shimmering area, often beyond a beach. A pond or lake is smooth and uniform with a crisp shoreline. "
+           "Not water: dark woods or deep-shaded rough (lumpy, made of tree crowns, dark green rather than navy or "
+           "black, with no smooth shoreline), or rocky, scrubby or gorse-covered ground (brown-grey and clumpy, not "
+           "shimmering). Is there any water in `{side}`, even just at its edge? Answer no if all there is is a red "
+           "line around grass, scrub, bushes, rocks or sand.")
 # A red or white boundary further than this off the line of play all the way along isn't part of the hole.
 SIDE_LINE_MAX_YARDS = 60
 LINE_MIN_SPAN = 0.08   # of the map's height: digits, dots and the ball are smaller
