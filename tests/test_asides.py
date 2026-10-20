@@ -233,3 +233,43 @@ async def test_an_expired_check_in_doesnt_block_an_update(tmp_path):
     e._news_bits[0].topic = "nhl:5"
     await e._prepare_score(r)
     assert any(b.kind == "score" and b.expires > time.monotonic() for b in e._news_bits)
+
+
+async def test_an_aside_picked_for_a_hole_doesnt_air_once_the_hole_has_moved_on(tmp_path):
+    import asyncio
+
+    e = _engine(tmp_path)
+    e.cfg.news.banter_rate = 1.0
+    e.round = SimpleNamespace(holes=18, seq=17, ended=False, is_league=False)
+    e.hole_number, e._shot_seq = 17, 1
+    e._news_bits = [_bit("trivia", hole=17)]
+    e.speech.is_idle = lambda: True
+    task = asyncio.create_task(e._news_after_shot({"seq": 1, "tags": [], "routine": True}))
+    await asyncio.sleep(0.3)
+    e.round.seq, e.hole_number = 18, 18
+    assert await task is False and e._news_bits
+
+
+def test_a_tournament_going_final_is_news_even_with_the_same_leaders():
+    live = {"events": [{"id": "9", "name": "Zozo", "endDate": "2026-10-20T04:00Z",
+                        "competitions": [{"status": {"period": 4, "type": {"state": "in", "detail": "Round 4"}},
+                                          "competitors": [_player("A B", "-12", 1, 18, "-5")]}]}]}
+    final = json.loads(json.dumps(live))
+    final["events"][0]["competitions"][0]["status"]["type"] = {"state": "post", "detail": "Final"}
+    assert parse_tour(live, "pga", NOW)[0].version != parse_tour(final, "pga", NOW)[0].version
+
+
+async def test_last_nights_results_come_from_yesterdays_board(monkeypatch):
+    import httpx
+
+    from commentator.scores import LiveScores
+
+    asked = []
+
+    async def get(self, url, params=None):
+        asked.append(params)
+        body = _game("post", NOW - timedelta(hours=10), "Final", 3, 2) if params else {"events": []}
+        return httpx.Response(200, json=body, request=httpx.Request("GET", url))
+    monkeypatch.setattr(httpx.AsyncClient, "get", get)
+    items = await LiveScores([], {"nhl": ["BOS"]}).fetch(now=NOW)
+    assert {"dates": "20261019"} in asked and [i.key for i in items] == ["nhl:5"]

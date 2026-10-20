@@ -139,7 +139,7 @@ def parse_tour(body: dict, tour: str, now: datetime, top: int = 5) -> list[Score
             when = "today" if last_day == now.date() else "yesterday"
             head = f"{TOURS.get(tour, tour)}: the {name} finished {when}. Final leaderboard:"
         fact = f"{head} " + (f"Leaderboard as of {_clock(now)}: " if state == "in" else "") + "; ".join(parts) + "."
-        version = ",".join(f"{n}{s}{h}" for s, n, h, _d in leaders[:3])
+        version = f"{state}:{label}:" + ",".join(f"{n}{s}{h}" for s, n, h, _d in leaders[:3])
         out.append(ScoreItem(f"{tour}:{event.get('id')}", "tour", state, fact, version))
     return out
 
@@ -217,21 +217,26 @@ class LiveScores:
 
     async def fetch(self, now: datetime | None = None) -> list[ScoreItem]:
         now = now or datetime.now().astimezone()
-        jobs = [(f"golf/{t}", lambda b, t=t: parse_tour(b, t, now)) for t in self.tours]
-        jobs += [(LEAGUES[lg], lambda b, lg=lg, ts=ts: parse_games(b, lg, ts, now)) for lg, ts in self.teams.items()]
+        jobs = [(f"golf/{t}", {}, lambda b, t=t: parse_tour(b, t, now)) for t in self.tours]
+        # The default board is today's slate only; last night's results are on yesterday's (ESPN takes
+        # a single date here, not a range).
+        yesterday = (now - timedelta(days=1)).strftime("%Y%m%d")
+        jobs += [(LEAGUES[lg], q, lambda b, lg=lg, ts=ts: parse_games(b, lg, ts, now))
+                 for lg, ts in self.teams.items() for q in ({}, {"dates": yesterday})]
         if not jobs:
             return []
         async with httpx.AsyncClient(timeout=self.timeout, headers={"User-Agent": _UA}) as client:
-            async def one(path, parse):
+            async def one(path, params, parse):
                 try:
-                    resp = await client.get(f"{_BASE}/{path}/scoreboard")
+                    resp = await client.get(f"{_BASE}/{path}/scoreboard", params=params)
                     resp.raise_for_status()
                     return parse(resp.json())
                 except Exception as e:  # a down board must never take the booth off air
                     log.warning("Scoreboard %s failed: %s", path, e)
                     return []
-            results = await asyncio.gather(*(one(p, f) for p, f in jobs))
-        items = [i for r in results for i in r]
+            results = await asyncio.gather(*(one(p, q, f) for p, q, f in jobs))
+        seen: set[str] = set()
+        items = [i for r in results for i in r if not (i.key in seen or seen.add(i.key))]
         items.sort(key=lambda i: i.rank)
         return items
 

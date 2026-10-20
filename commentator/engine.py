@@ -1324,11 +1324,16 @@ class Engine:
         if (pick := self._news_pick(moment)) is None:
             return False
         bit, on_trigger = pick
+        r, seq, hole = self.round, self.round.seq, self.hole_number
         deadline = time.monotonic() + 8.0
         while not self.speech.is_idle() and time.monotonic() < deadline and self._shot_seq == moment["seq"]:
             await asyncio.sleep(0.2)
         await asyncio.sleep(0.8)   # a beat after the call, so the aside doesn't run straight on from it
         if not self.speech.is_idle() or self._shot_seq != moment["seq"] or bit not in self._news_bits:
+            return False
+        # The hole can end in the wait (a conceded putt, the round's last hole) without another shot.
+        if self.round is not r or r.ended or r.seq != seq or self.hole_number != hole \
+                or (bit.expires is not None and bit.expires <= time.monotonic()):
             return False
         first = (bit.tie, bit.tie_audio) if on_trigger else (bit.lines[0], bit.audio[0])
         items = [first, (bit.lines[1], bit.audio[1])]
