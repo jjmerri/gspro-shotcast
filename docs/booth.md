@@ -19,7 +19,10 @@
    scrambling, birdie looks, each beside the player's season figure. It's optional colour; the booth
    picks a pattern if one is worth saying. Once it uses one, the sheet rests for two holes, and
    it's told which angles it already used this round and leaned on in the player's last few rounds
-   (`form_mentions` in the database), so it doesn't settle into a refrain.
+   (`form_mentions` in the database), so it doesn't settle into a refrain. Length is judged only
+   against the player's own game: once a player has 5 drives (tee shots with 250+ yards to the pin)
+   or 5 full swings with a club in the season, the setup and the reaction get their usual length and
+   how this shot compared. Without that, the booth is told not to call a shot short or long at all.
 2. **Impact.** No model call. Code projects carry against the pin and the drift from start line
    and spin axis. The launch monitor's carry is first scaled to what GSPro will allow: a course
    baseline (altitude and conditions, learned from tee and fairway shots) times a per-lie

@@ -1955,6 +1955,39 @@ class Engine:
             guide += f" Angles the booth leaned on for {side.label} in recent rounds: {', '.join(recent)}; prefer something fresher."
         return [f"Round so far for {side.label} (completed holes only). {guide}\n" + "\n".join("  " + x for x in rows)]
 
+    LENGTH_NORM_MIN_SHOTS = 5
+
+    @staticmethod
+    def _is_drive(hud: Hud) -> bool:
+        """A tee shot on a hole too long to reach (as the season's drive norm counts them)."""
+        on_tee = hud.shot_number == 1 or (hud.lie or "").lower() == "tee"
+        return on_tee and (to_yards(hud.to_pin) or 0) >= 250
+
+    def _length_norm_facts(self, player: str | None, club: str | None, tee: bool,
+                           total: float | None = None) -> list[str]:
+        """The player's usual length (drives off a par-4/5 tee, else this club's full swings), so the
+        booth judges a shot against this player's game, not a long hitter's. With `total` (after the
+        shot), how this one compared. Nothing until there's a sample; the prompt then says to leave
+        length alone."""
+        if not player or player == "unknown" or self._anonymous(player):
+            return []
+        who = self._display(player)
+        if tee:
+            norm, what = self.store.length_norm(player), "drives"
+        elif club:
+            norm, what = self.store.length_norm(player, club), f"full {club_name(club)} shots"
+        else:
+            return []
+        if (norm.get("n") or 0) < self.LENGTH_NORM_MIN_SHOTS or not norm.get("avg_total"):
+            return []
+        avg = norm["avg_total"]
+        fact = f"{who}'s {what} usually go about {avg:.0f} yards in total."
+        if total:
+            d = total - avg
+            fact += (" This one was about that, a normal length for them: nothing to remark on." if abs(d) <= max(10, 0.1 * avg)
+                     else f" This one went {abs(d):.0f} yards {'further' if d > 0 else 'shorter'} than that.")
+        return [fact]
+
     def _finish_correction_facts(self, hud: Hud, player: str | None) -> list[str]:
         """The setup screen shows where the last ball really stopped. The result call reads the lie while
         the ball may still be rolling (a read takes over a second), so a ball that trickled off the green
@@ -2277,6 +2310,7 @@ class Engine:
                  + self._stakes_facts(hud, player) + self._team_score_facts(player)
                  + self._finish_correction_facts(hud, player)
                  + self._round_form_facts(player, is_putt, hud)
+                 + ([] if is_putt else self._length_norm_facts(player, hud.club, self._is_drive(hud)))
                  + (self._bunker_facts(player) if (hud.lie or "").lower() in ("sand", "bunker")
                     and self.rng.random() < 0.5 else [])
                  + (self._hole_field_facts(player) if hud.shot_number == 1 else [])
@@ -3190,6 +3224,10 @@ class Engine:
         # on an ordinary one, so it stays a spice.
         club = club_delivery_facts(shot) if use_delivery else []
         self._delivery_last = bool(club)
+        if not shot.is_putt:
+            club += self._length_norm_facts(
+                player, shot.club, self._is_drive(before),
+                tile_yards("total length") if landed and "total length" in hud.tiles else None)
         sand_theme = (self._bunker_facts(player) if (hud.lie or "").lower() in ("sand", "bunker")
                       and not shot.is_putt else [])
         facts = (lead + replay_facts + flight + club + result + sand_theme

@@ -2457,3 +2457,32 @@ def test_form_topics_needs_a_stat_and_a_subject():
     assert form_topics("He's hit five of six fairways so far.") == ["fairways"]
     assert form_topics("Two three-putts today, he'll want this one close.") == ["three-putts", "putting"]
     assert form_topics("His approaches are averaging twelve feet from the hole.") == ["approach leaves"]
+
+
+def test_length_norm_judges_a_shot_against_the_players_own_game(tmp_path):
+    from commentator.hud import Hud
+    from commentator.models import Shot
+    from commentator.prompts import system_prompt
+
+    eng = _engine(tmp_path)
+    tee = Hud(lie="tee", to_pin="400 yards", shot_number=1)
+    assert eng._length_norm_facts("Kathy", "DR", True, 117) == []      # no sample yet: nothing to judge by
+    for total in (100, 110, 105, 115, 95):
+        eng.store.record_shot(player="Kathy", hole="Hole 1, par 4, 400 yards", shot=Shot(club="DR"), before=tee,
+                              after=Hud(), tags=[], carry_game_yards=None, total_yards=total, offline_yards=None,
+                              to_pin_yards=400)
+    for total in (60, 62, 58, 61, 59):   # full 7-irons, the green out of reach
+        eng.store.record_shot(player="Kathy", hole="Hole 2", shot=Shot(club="7I"), before=Hud(lie="fairway"),
+                              after=Hud(), tags=[], carry_game_yards=None, total_yards=total, offline_yards=None,
+                              to_pin_yards=150)
+    eng.store.record_shot(player="Kathy", hole="Hole 2", shot=Shot(club="7I"), before=Hud(lie="fairway"),
+                          after=Hud(), tags=[], carry_game_yards=None, total_yards=20, offline_yards=None,
+                          to_pin_yards=21)   # a partial: the pin was in reach, not her full 7-iron
+    assert eng._is_drive(tee) and not eng._is_drive(Hud(lie="tee", to_pin="140 yards", shot_number=1))
+    assert eng._length_norm_facts("Kathy", "DR", True, 112) == [
+        "Kathy's drives usually go about 105 yards in total. This one was about that, a normal length for them: nothing to remark on."]
+    assert eng._length_norm_facts("Kathy", "DR", True, 80) == [
+        "Kathy's drives usually go about 105 yards in total. This one went 25 yards shorter than that."]
+    assert eng._length_norm_facts("Kathy", "7I", False) == ["Kathy's full 7-iron shots usually go about 60 yards in total."]
+    assert eng._length_norm_facts("Kathy", None, False) == []
+    assert "Judge distance only against this player's own game" in system_prompt(eng.cfg, LEAGUE)

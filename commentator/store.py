@@ -594,6 +594,20 @@ class Store:
         ).fetchone()
         return {k: r[k] for k in r.keys()}
 
+    def length_norm(self, player: str, club: str | None = None) -> dict[str, Any]:
+        """How far this player usually hits it: drives (from the tee with 250+ yards to the pin), or one
+        club's full swings (the pin out of its reach, so the shot wasn't a partial). Total length, as
+        GSPro measured it after the ball stopped."""
+        where = "AND club = ? AND to_pin_yards > total_yards * 1.15" if club else \
+            "AND lie_before = 'tee' AND to_pin_yards >= 250"
+        r = self.db.execute(
+            f"""SELECT COUNT(*) AS n, AVG(total_yards) AS avg_total FROM shots
+                WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 0
+                      AND total_yards IS NOT NULL AND total_yards > 0 {where}""",
+            (player, club) if club else (player,),
+        ).fetchone()
+        return {k: r[k] for k in r.keys()}
+
     def shot_lengths(self, shot_ids: list[int]) -> dict[int, float]:
         """GSPro's total length for these shots, where the HUD showed it."""
         ids = [i for i in shot_ids if i is not None]
