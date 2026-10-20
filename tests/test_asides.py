@@ -273,3 +273,17 @@ async def test_last_nights_results_come_from_yesterdays_board(monkeypatch):
     monkeypatch.setattr(httpx.AsyncClient, "get", get)
     items = await LiveScores([], {"nhl": ["BOS"]}).fetch(now=NOW)
     assert {"dates": "20261019"} in asked and [i.key for i in items] == ["nhl:5"]
+
+
+def test_a_withdrawn_leader_isnt_the_winner():
+    body = {"events": [{"id": "1", "name": "The Memorial Tournament", "endDate": "2026-10-20T04:00Z",
+                        "competitions": [{"status": {"period": 4, "type": {"state": "post", "detail": "Final"}},
+                                          "competitors": [_player("Jon Rahm", "-18", 116, 18, "-8"),
+                                                          _player("Patrick Cantlay", "-13", 1, 18, "-1"),
+                                                          _player("Scottie Scheffler", "-11", 2, 18, "-2")]}]}]}
+    for c in body["events"][0]["competitions"][0]["competitors"]:
+        for ls in c["linescores"]:
+            ls["value"] = 70
+    [item] = parse_tour(body, "pga", NOW)
+    assert "the Memorial Tournament finished" in item.fact and "Rahm" not in item.fact
+    assert "1. Patrick Cantlay -13" in item.fact and "2. Scottie Scheffler -11" in item.fact

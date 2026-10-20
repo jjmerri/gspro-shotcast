@@ -108,7 +108,14 @@ def parse_tour(body: dict, tour: str, now: datetime, top: int = 5) -> list[Score
             rows.append((score, c.get("order") or 999, name, holes, today.get("displayValue")))
         if not rows:
             continue
-        rows.sort(key=lambda r: (r[0], r[1]))
+        # ESPN's order is the official leaderboard. A player out of step with it (a better total listed
+        # below worse ones) withdrew or missed the cut on that total, so isn't in the running.
+        rows.sort(key=lambda r: (r[1], r[0]))
+        kept = []
+        for row in rows:
+            if not kept or row[0] >= kept[-1][0]:
+                kept.append(row)
+        rows = kept
         leaders = []
         for score, _o, name, holes, day in rows:
             if len(leaders) >= top and score != leaders[-1][0]:
@@ -131,7 +138,8 @@ def parse_tour(body: dict, tour: str, now: datetime, top: int = 5) -> list[Score
                               else f"{day} in their last round" if playoff else f"{day} today")
             parts.append(f"{'T' if tied else ''}{pos}. {name} {_par_text(score)}"
                          + (f" ({', '.join(detail)})" if detail else ""))
-        name = event.get("name") or "the tournament"
+        name = event.get("name") or "tournament"
+        name = name[4:] if name.lower().startswith("the ") else name
         if state == "in":
             head = f"{TOURS.get(tour, tour)}, live: the {name}, {label}." if label else \
                 f"{TOURS.get(tour, tour)}, live: the {name}."
