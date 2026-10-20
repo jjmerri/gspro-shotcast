@@ -180,6 +180,9 @@ def parse_games(body: dict, league: str, teams: list[str], now: datetime) -> lis
             continue
         if state not in ("pre", "in", "post"):
             continue
+        # "post" also covers a game that never finished: postponed, cancelled, suspended.
+        if state == "post" and not kind.get("completed", True):
+            continue
 
         def team(s):
             t = s.get("team") or {}

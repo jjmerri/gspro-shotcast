@@ -1332,6 +1332,8 @@ class Engine:
         if not self.speech.is_idle() or self._shot_seq != moment["seq"] or bit not in self._news_bits:
             return False
         # The hole can end in the wait (a conceded putt, the round's last hole) without another shot.
+        if not self.commentary_on or self.speech.muted:
+            return False    # off air: keep it, since nobody would hear it
         if self.round is not r or r.ended or r.seq != seq or self.hole_number != hole \
                 or (bit.expires is not None and bit.expires <= time.monotonic()):
             return False

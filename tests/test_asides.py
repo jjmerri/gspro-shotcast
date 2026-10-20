@@ -287,3 +287,17 @@ def test_a_withdrawn_leader_isnt_the_winner():
     [item] = parse_tour(body, "pga", NOW)
     assert "the Memorial Tournament finished" in item.fact and "Rahm" not in item.fact
     assert "1. Patrick Cantlay -13" in item.fact and "2. Scottie Scheffler -11" in item.fact
+
+
+async def test_off_air_an_aside_is_kept_and_a_postponed_game_is_no_result(tmp_path):
+    e = _engine(tmp_path)
+    e.cfg.news.banter_rate = 1.0
+    e.round = SimpleNamespace(holes=9, seq=4, ended=False, is_league=False)
+    e._shot_seq = 1
+    e._news_bits = [_bit("trivia")]
+    e.speech.is_idle = lambda: True
+    e.speech.muted = True
+    assert await e._news_after_shot({"seq": 1, "tags": [], "routine": True}) is False and e._news_bits
+    postponed = _game("post", NOW - timedelta(hours=3), "Postponed")
+    postponed["events"][0]["status"]["type"]["completed"] = False
+    assert parse_games(postponed, "nhl", ["BOS"], NOW) == []
