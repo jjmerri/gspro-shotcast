@@ -1824,6 +1824,7 @@ class Engine:
         each beside the player's season number. The booth finds the pattern, if there is one; the sheet
         only says what happened. It's held back for two holes after the booth uses it, and comes with the
         angles already used this round and in recent rounds, so the booth doesn't settle into a refrain."""
+        self._form_pending = None   # a line is only credited to the sheet its own setup was given
         r, after = self.round, self.cfg.commentary.round_form_after_holes
         side = r.side_for(player) if r and not r.ended and player and after > 0 else None
         if side is None:
@@ -1891,7 +1892,9 @@ class Engine:
             rows.append(f"Birdie putts from inside {self.FORM_BIRDIE_LOOK_FEET} feet: {made_looks} of {looks} converted.")
 
         leaves: dict[tuple, list[float | None]] = {}
-        for i, x in enumerate(recs):
+        # In a scramble every partner hits each stroke and the next record is usually a partner's shot,
+        # not this ball's next one, so a finish can't be paired with its approach.
+        for i, x in enumerate(recs if r.format != "scramble" else []):
             if x.shot.is_putt or (y := to_yards(x.to_pin_before)) is None \
                     or (x.shot_number == 1 and (x.par or r.par.get(x.hole_seq) or 0) >= 4):
                 continue
@@ -1963,7 +1966,7 @@ class Engine:
         on_tee = hud.shot_number == 1 or (hud.lie or "").lower() == "tee"
         return on_tee and (to_yards(hud.to_pin) or 0) >= 250
 
-    def _length_norm_facts(self, player: str | None, club: str | None, tee: bool,
+    def _length_norm_facts(self, player: str | None, club: str | None, tee: bool, to_pin: float | None,
                            total: float | None = None) -> list[str]:
         """The player's usual length (drives off a par-4/5 tee, else this club's full swings), so the
         booth judges a shot against this player's game, not a long hitter's. With `total` (after the
@@ -1981,6 +1984,8 @@ class Engine:
         if (norm.get("n") or 0) < self.LENGTH_NORM_MIN_SHOTS or not norm.get("avg_total"):
             return []
         avg = norm["avg_total"]
+        if not tee and (to_pin is None or to_pin <= avg * 1.15):
+            return []   # a partial or a shot at the green: a full swing's length says nothing about it
         fact = f"{who}'s {what} usually go about {avg:.0f} yards in total."
         if total:
             d = total - avg
@@ -1992,6 +1997,8 @@ class Engine:
         """The setup screen shows where the last ball really stopped. The result call reads the lie while
         the ball may still be rolling (a read takes over a second), so a ball that trickled off the green
         got called on it. When the same ball's next setup shows a different lie, own it in a few words."""
+        if self.round and not self.round.ended and self.round.format == "scramble":
+            return []   # the next shot may be from a partner's picked ball, not this one
         recs = self.state.player_shots(player or "unknown")
         last = recs[-1] if recs else None
         if (last is None or last.shot.is_putt or last.mulligan or last.shot_id in self._lie_corrected
@@ -2310,7 +2317,8 @@ class Engine:
                  + self._stakes_facts(hud, player) + self._team_score_facts(player)
                  + self._finish_correction_facts(hud, player)
                  + self._round_form_facts(player, is_putt, hud)
-                 + ([] if is_putt else self._length_norm_facts(player, hud.club, self._is_drive(hud)))
+                 + ([] if is_putt else self._length_norm_facts(player, hud.club, self._is_drive(hud),
+                                                                       to_yards(hud.to_pin)))
                  + (self._bunker_facts(player) if (hud.lie or "").lower() in ("sand", "bunker")
                     and self.rng.random() < 0.5 else [])
                  + (self._hole_field_facts(player) if hud.shot_number == 1 else [])
@@ -3226,7 +3234,7 @@ class Engine:
         self._delivery_last = bool(club)
         if not shot.is_putt:
             club += self._length_norm_facts(
-                player, shot.club, self._is_drive(before),
+                player, shot.club, self._is_drive(before), to_yards(before.to_pin),
                 tile_yards("total length") if landed and "total length" in hud.tiles else None)
         sand_theme = (self._bunker_facts(player) if (hud.lie or "").lower() in ("sand", "bunker")
                       and not shot.is_putt else [])
@@ -5216,6 +5224,10 @@ class Engine:
         topics = sorted({t for line in lines for t in form_topics(line.text)})
         if not topics or not self.round or self.round.id != round_id:
             return
+        side = next((x for x in self.round.sides if x.key == side_key), None)
+        names = {n.split()[0].casefold() for n in players if n} | ({side.label.casefold()} if side else set())
+        if not any(n in line.text.casefold() for line in lines for n in names):
+            return   # not about the side the sheet went to
         self._form_said.setdefault((round_id, side_key), []).append((seq, topics))
         self.store.record_form_mentions(players, topics)
         self._form_pending = None
