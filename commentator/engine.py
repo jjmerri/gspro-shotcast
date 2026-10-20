@@ -233,6 +233,36 @@ def _distance_text(yards: float) -> str:
     return f"{feet} feet {inches} inches" if inches else f"{feet} feet"
 
 
+SHORT_MISS_FEET = 10
+_ROUGH = {"rough", "deep rough", "semi rough", "first cut"}
+
+
+def _lie_family(lie: str) -> str:
+    """Lies that count as the same place for a correction: OCR flips rough and deep rough, and the
+    fringe is "on the green" in a call."""
+    return "rough" if lie in _ROUGH else "green" if lie in ("green", "fringe") else lie
+
+
+def _lie_prep(lie: str) -> str:
+    return "on" if lie in ("green", "fringe", "fairway", "tee") else "in"
+
+
+def _short_miss_fact(before: Hud, par: int | None) -> str | None:
+    """A short putt that missed and was conceded: the model heard only "inside the gimme circle" and
+    called a missed four-footer for par "a gentle touch". Say it was a miss and what it cost."""
+    feet = (to_yards(before.to_pin) or 0) * 3
+    if not feet or feet > SHORT_MISS_FEET:
+        return None
+    fact = f"This was a short putt, about {feet:.0f} feet, and it MISSED"
+    if before.shot_number and par:
+        was_for, ends = SCORE_NAMES.get(before.shot_number - par), SCORE_NAMES.get(before.shot_number + 1 - par)
+        if was_for:
+            fact += f": it was for {was_for.split(' ', 1)[1]}"
+        if ends:
+            fact += f", so the hole goes down as {ends}"
+    return fact + ". Call it plainly as a missed short putt that cost a stroke, never as good touch or a fine lag."
+
+
 def _hole_key(label: str | None) -> str:
     """A hole label without its number, which can be read late ('par 4, 257 yards')."""
     return re.sub(r"^Hole \d+,\s*", "", label or "")
@@ -386,6 +416,7 @@ class Engine:
         self._pickups_seen = 0   # GSPro pick-ups (score capped at the maximum) already applied
         self._pick_gimmes_seen = 0   # scramble picks inside the gimme circle already credited
         self._conceded_ids: set[int] = set()   # shots whose conceded putt row is stored
+        self._lie_corrected: set[int | None] = set()   # shots whose called finish the booth has corrected
         self._mulligans_called: set[int] = set()   # id() of swings already announced as taken back
         # Each index's last recorded shot (shot_id, ShotRecord, log hole, penalties then), so the next
         # shot's lie (where it was played from) can correct where that one came to rest.
@@ -1749,6 +1780,26 @@ class Engine:
             facts.append(cf)
         return facts
 
+    def _finish_correction_facts(self, hud: Hud, player: str | None) -> list[str]:
+        """The setup screen shows where the last ball really stopped. The result call reads the lie while
+        the ball may still be rolling (a read takes over a second), so a ball that trickled off the green
+        got called on it. When the same ball's next setup shows a different lie, own it in a few words."""
+        recs = self.state.player_shots(player or "unknown")
+        last = recs[-1] if recs else None
+        if (last is None or last.shot.is_putt or last.mulligan or last.shot_id in self._lie_corrected
+                or last.hole != self.state.current_hole or not hud.shot_number or not last.shot_number
+                or hud.shot_number != last.shot_number + 1):
+            return []
+        called, now = (last.hud.lie or "").lower(), (hud.lie or "").lower()
+        if not called or not now or now == "tee" or _lie_family(called) == _lie_family(now):
+            return []
+        self._lie_corrected.add(last.shot_id)
+        hud._lie_correction = True
+        log.info("Last call had shot %s finishing on the %s; the setup shows %s", last.shot_id, called, now)
+        return [f"Correction: the last shot's call read the ball {_lie_prep(called)} the {called} while it was "
+                f"still moving, but it finished {_lie_prep(now)} the {now}. If the booth said {called}, set it "
+                f"straight in a few words (it trickled off into the {now}, say) before the setup."]
+
     def _team_score_facts(self, player: str | None) -> list[str]:
         """Best ball: the team's running gross score beside each partner's own. GSPro's HUD score is the
         individual's, and with no team number the booth credited a partner's or team's figure to one
@@ -2049,6 +2100,7 @@ class Engine:
                  + self._format_facts() + self._ctp_facts(hud.shot_number, hud, player)
                  + self._profile_facts(player, is_putt, hud) + self._prediction_facts(player, is_putt, hud)
                  + self._stakes_facts(hud, player) + self._team_score_facts(player)
+                 + self._finish_correction_facts(hud, player)
                  + (self._bunker_facts(player) if (hud.lie or "").lower() in ("sand", "bunker")
                     and self.rng.random() < 0.5 else [])
                  + (self._hole_field_facts(player) if hud.shot_number == 1 else [])
@@ -2205,8 +2257,9 @@ class Engine:
         pin_yd = to_yards(event.hud.to_pin)
         if is_putt or (pin_yd is not None and pin_yd <= 40):
             rate = max(rate, 0.9)
-        if getattr(event.hud, "_mulligan", False):
-            rate = 1.0   # a mulligan always gets its word
+        correction = getattr(event.hud, "_lie_correction", False)
+        if getattr(event.hud, "_mulligan", False) or correction:
+            rate = 1.0   # a mulligan, or a wrong call to set straight, always gets its word
         # The opening tee shot skips the spoken setup line (the opener just set the round up, and a
         # line here would land late), but still pre-voices the flight and result branches below so the
         # first shot's calls are ready at impact like every other shot's.
@@ -2231,7 +2284,7 @@ class Engine:
             if self.speech.is_idle():
                 self.speech.say(good)
                 aired(good)
-            elif is_putt or (pin_yd is not None and pin_yd <= 40):
+            elif is_putt or correction or (pin_yd is not None and pin_yd <= 40):
                 task = asyncio.create_task(self._air_setup_when_idle(good, self._shot_seq, PRESHOT_IDLE_WAIT_SECONDS, aired))
                 task.add_done_callback(lambda t: t.cancelled() or t.exception())
 
@@ -2908,6 +2961,8 @@ class Engine:
         if shot.is_putt and outcome == "conceded":
             result = ["The putt didn't drop, but it stopped inside the gimme circle: the next one is conceded, "
                       "so the hole is over. No more putting is needed."]
+            if (miss := _short_miss_fact(before, shot_par)):
+                result.append(miss)
         if full_result == "holed":
             result = ["The ball went in the hole: holed out without a putt."]
         elif full_result == "conceded":

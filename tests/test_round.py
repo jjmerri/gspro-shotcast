@@ -2364,3 +2364,36 @@ def test_team_gross_only_for_best_ball():
     assert r.team_gross("Aces") is None
     solo = Round(league=LEAGUE, gspro_players=["MikeD"], course="X", scheduled_format="best_ball", holes=3)
     assert solo.team_gross("Aces") is None
+
+
+def test_short_missed_putt_is_called_a_miss_not_good_touch():
+    from commentator.engine import _short_miss_fact
+    from commentator.hud import Hud
+
+    fact = _short_miss_fact(Hud(to_pin="4 feet 1 inches", shot_number=4), par=4)
+    assert "about 4 feet, and it MISSED: it was for par, so the hole goes down as a bogey" in fact
+    assert "never as good touch" in fact
+    assert _short_miss_fact(Hud(to_pin="31 feet 11 inches", shot_number=3), par=4) is None   # a lag
+
+
+def test_setup_corrects_a_ball_called_on_the_green_that_rolled_off(tmp_path):
+    from commentator.hud import Hud
+
+    eng = _engine(tmp_path)
+    eng.state.current_hole = "hole 1"
+    called = rec("Josh", 1, 4, 2, "rough", "green")
+    called.shot_id = 796
+    eng.state.record_shot(called)
+    setup = Hud(lie="rough", shot_number=3)
+    facts = eng._finish_correction_facts(setup, "Josh")
+    assert facts and "finished in the rough" in facts[0] and "If the booth said green" in facts[0]
+    assert setup._lie_correction
+    assert eng._finish_correction_facts(Hud(lie="rough", shot_number=3), "Josh") == []   # once only
+    # Same family (OCR's rough vs deep rough), a penalty between, or a new hole: nothing to correct.
+    other = rec("Dan", 1, 4, 2, "fairway", "rough")
+    other.shot_id = 797
+    eng.state.record_shot(other)
+    assert eng._finish_correction_facts(Hud(lie="deep rough", shot_number=3), "Dan") == []
+    assert eng._finish_correction_facts(Hud(lie="green", shot_number=4), "Dan") == []
+    eng.state.current_hole = "hole 2"
+    assert eng._finish_correction_facts(Hud(lie="green", shot_number=3), "Dan") == []
