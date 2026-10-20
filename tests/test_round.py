@@ -2515,3 +2515,16 @@ def test_length_norm_judges_a_shot_against_the_players_own_game(tmp_path):
     assert eng._length_norm_facts("Kathy", "7I", False, 30, 20) == []   # a bump-and-run isn't a short 7-iron
     assert eng._length_norm_facts("Kathy", None, False, 150) == []
     assert "Judge distance only against this player's own game" in system_prompt(eng.cfg, LEAGUE)
+
+
+def test_in_round_prompts_know_the_day_and_time():
+    from datetime import datetime
+
+    from commentator.prompts import clock_fact, shot_prompt
+
+    assert clock_fact(datetime(2026, 10, 20, 17, 31)) == (
+        "Local time: Tuesday evening, 5:31 pm. Background only: a day or time-of-day remark now and then at most.")
+    assert clock_fact(datetime(2026, 10, 24, 9, 5)).startswith("Local time: Saturday morning, 9:05 am.")
+    _, facts_text = shot_prompt(player="Mike", team=None, facts=["Club: driver."], hole="Hole 1", recent_lines=[],
+                                routine=True, has_images=False)
+    assert "Local time:" in facts_text

@@ -132,7 +132,7 @@ def shot_prompt(
         header.append("Player: not identified. Don't use a name, and don't call them unknown.")
     if hole:
         header.append(f"Hole: {hole}")
-    facts_text = "\n".join(header + facts)
+    facts_text = "\n".join(header + facts + [clock_fact()])
     if routine:
         guidance = "This was a routine shot: one short line at most, or an empty list if there's nothing worth saying."
     elif big:
@@ -171,6 +171,7 @@ def segment_prompt(*, previous_hole: str | None, current_hole: str, recap: list[
         + (result or [])
         + ["Shots on the finished hole:"]
         + [f"- {r}" for r in recap or ["(none recorded)"]]
+        + [clock_fact()]
     )
     prompt = (
         "FACTS:\n" + facts_text
@@ -190,7 +191,7 @@ def wrap_recap_prompt(*, finished_hole: str | None, result: list[str], recap: li
     it up here, the next tee's own setup line does that."""
     facts_text = "\n".join(
         [f"Finished hole: {finished_hole}"] + result + ["Shots on the hole:"]
-        + [f"- {r}" for r in recap or ["(none recorded)"]]
+        + [f"- {r}" for r in recap or ["(none recorded)"]] + [clock_fact()]
     )
     prompt = (
         "FACTS:\n" + facts_text
@@ -253,7 +254,7 @@ def news_prompt(*, topic: str, openings=()) -> tuple[str, str]:
 
 def hole_intro_prompt(*, hole: str, recent_lines, extra: list[str] | None = None) -> tuple[str, str]:
     """Tee up the hole that's starting (used when the recap played pre-made and didn't include it)."""
-    facts_text = "\n".join([f"This hole: {hole}"] + (extra or []))
+    facts_text = "\n".join([f"This hole: {hole}"] + (extra or []) + [clock_fact()])
     prompt = (
         "FACTS:\n" + facts_text
         + "\n\nRecent lines (don't repeat these):\n" + "\n".join(_recent(recent_lines) or ["(none yet)"])
@@ -273,7 +274,7 @@ def _header(player: str | None, team: str | None, hole: str | None) -> list[str]
 
 
 def flight_prompt(*, player, team, hole, facts: list[str], recent_lines, speaker: str, has_image: bool) -> tuple[str, str]:
-    facts_text = "\n".join(_header(player, team, hole) + facts)
+    facts_text = "\n".join(_header(player, team, hole) + facts + [clock_fact()])
     look = (" The screenshot was taken at impact: use it to see trouble near the ball's line (water, bunkers, "
             "trees) and call it if the ball is heading that way." if has_image else "")
     prompt = (
@@ -399,7 +400,7 @@ def preshot_line_prompt(
     second: str | None = None, is_putt: bool = False,
 ) -> tuple[str, str]:
     """The swing-critical spoken line. Text-only on a fast model, so it's ready before the swing."""
-    facts_text = "\n".join(_header(player, team, hole) + facts)
+    facts_text = "\n".join(_header(player, team, hole) + facts + [clock_fact()])
     recent = "\n\nRecent lines (don't repeat these):\n" + "\n".join(_recent(recent_lines) or ["(none yet)"])
     if is_putt:
         prompt = (
@@ -449,7 +450,7 @@ def preshot_branch_prompt(
     and the trouble lines name a side, not a specific hazard (the setup call owns hazard detection).
     The exception is `named` (side -> hazard kind, from the minimap read): that side's trouble line
     names that one hazard, and impact plays it only when that hazard is the one in play."""
-    facts_text = "\n".join(_header(player, team, hole) + facts)
+    facts_text = "\n".join(_header(player, team, hole) + facts + [clock_fact()])
     recent = "\n\nRecent lines (don't repeat these):\n" + "\n".join(_recent(recent_lines) or ["(none yet)"])
     if is_putt:
         prompt = (
@@ -491,6 +492,15 @@ def preshot_branch_prompt(
         + ". Keep the reaction honest to each result; don't claim a number or a distance."
     )
     return prompt, facts_text
+
+
+def clock_fact(now: datetime | None = None) -> str:
+    """The day and time for in-round lines: background colour (a late finish, a Tuesday-night league),
+    not something to work into every line."""
+    now = now or datetime.now()
+    part = "morning" if now.hour < 12 else "afternoon" if now.hour < 17 else "evening"
+    return (f"Local time: {now.strftime('%A')} {part}, {now.strftime('%I:%M %p').lstrip('0').lower()}. "
+            "Background only: a day or time-of-day remark now and then at most.")
 
 
 def time_of_day_fact(now: datetime | None = None) -> str:
