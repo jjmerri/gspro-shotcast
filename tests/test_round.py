@@ -2224,6 +2224,11 @@ async def test_log_scores_end_a_complete_round_without_waiting_for_end_round(tmp
     assert e._events.get_nowait().reason == "final scorecard"
     # The finished round's last green, read as a setup before the sign-off, isn't a shot to call.
     assert e._after_round(Hud(shot_number=3)) and not e._after_round(Hud(shot_number=1))
+    # Ended, and long past the quiet window: still quiet until GSPro logs a new shot.
+    r.ended, e._round_ended_at, e._shots_at_round_end = True, -1e9, g.fires
+    assert e._after_round(Hud(shot_number=4, to_pin="4349 feet 9 inches"))
+    g.fires += 1
+    assert not e._after_round(Hud(shot_number=4))
 
 
 async def test_an_ended_rounds_log_scores_survive_the_end_round_reset(tmp_path):

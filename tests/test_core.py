@@ -1986,7 +1986,10 @@ async def test_emit_setup_ignores_the_finished_rounds_stale_hud(tmp_path):
     engine._round_ended_at = _time.monotonic()
     await engine._emit_setup(Hud(player_text="Toby Shot 4 0 FT 2", shot_number=4, to_pin="0 feet 2 inches"))
     assert screen.reads == [] and engine._events.empty()
-    engine._round_ended_at -= 1000   # long after: a setup is commentary again
+    engine._round_ended_at -= 1000   # long after, but nothing hit since: still the stale HUD
+    await engine._emit_setup(Hud(player_text="Toby Shot 4 4349 FT 9", shot_number=4, to_pin="4349 feet 9 inches"))
+    assert screen.reads == [] and engine._events.empty()
+    engine.gspro.fires += 1          # GSPro logged a new shot: a setup is commentary again
     await engine._emit_setup(Hud(player_text="Toby Shot 2 150 YDS", shot_number=2, to_pin="150 yards"))
     assert isinstance(await engine._events.get(), PreShotEvent)
 

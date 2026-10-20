@@ -234,6 +234,7 @@ def _distance_text(yards: float) -> str:
 
 
 SHORT_MISS_FEET = 10
+SHORT_GAME_YARDS = 40
 _ROUGH = {"rough", "deep rough", "semi rough", "first cut"}
 
 
@@ -467,6 +468,7 @@ class Engine:
         self._putted_on_last_hole = False
         self._round_end_queued = False
         self._round_ended_at = 0.0
+        self._shots_at_round_end = 0
         self._fixture_saved_at: dict[str, float] = {}
         self._strategy_hole: str | None = None   # the hole a where-to-miss read was last offered on
         # GSPro log counters already acted on (round ends / completions), and whether the range quiet
@@ -755,6 +757,10 @@ class Engine:
         if not r.ended:
             return r.log_complete
         if self._log_rounds and self.gspro.mode == "menu":
+            return True
+        # Nothing hit since the round ended: whatever GSPro shows now (a 1,450-yard "putt" on a hole
+        # past the end of the round got a line three minutes after the sign-off) isn't a shot to call.
+        if self._log_rounds and self.gspro.fires <= self._shots_at_round_end:
             return True
         return time.monotonic() - self._round_ended_at < AFTER_ROUND_QUIET_SECONDS
 
@@ -2856,9 +2862,15 @@ class Engine:
             near = (hud.lie or "").lower() in ("", "green", "fringe")
             base_hole = impact_snap[1].get(idx)
             base_setup = setups0.get(idx, 0)
-            full_result = await self._wait_putt_result(idx, *base, 1.5, base_hole=base_hole,
-                                                       base_setup=base_setup) \
-                if near and landed else "unknown"
+            # A short chip or splash that drops often ends the follow before touchdown is seen (GSPro
+            # moves straight on to the next hole), so it counts as near without `landed`, with a longer
+            # window: the hole-out reaches the log a few seconds later. A chip that stays out resolves
+            # as soon as GSPro sets the player up again, so the wait costs a miss almost nothing.
+            short = (start_yards := to_yards(before.to_pin)) is not None and start_yards <= SHORT_GAME_YARDS
+            watch = near and (landed or short)
+            full_result = await self._wait_putt_result(idx, *base, 1.5 if landed else 5.0,
+                                                       base_hole=base_hole, base_setup=base_setup) \
+                if watch else "unknown"
             if full_result in ("holed", "conceded"):
                 self._record_result(shot_id, full_result, tag, putt=False, rec=rec)
                 log.info("%s full shot %s (GSPro log, %.1fs after impact)", tag,
@@ -2868,7 +2880,6 @@ class Engine:
             elif full_result == "unknown":
                 self._bg(self._late_result(shot_id, idx, *base, tag, False, rec=rec, base_hole=base_hole,
                                            base_setup=base_setup))
-            start_yards = to_yards(before.to_pin)
             if near and landed and start_yards and start_yards >= c.close_approach_from_yards:
                 if full_result == "conceded":
                     score = max(score, c.big_moment_threshold)
@@ -4666,6 +4677,7 @@ class Engine:
             return
         r.ended = True
         self._round_ended_at = time.monotonic()
+        self._shots_at_round_end = self.gspro.fires
         self.hole_number = None  # the next round starts its own count
         if self.cfg.health.enabled and self.cfg.source.type != "replay":
             try:
