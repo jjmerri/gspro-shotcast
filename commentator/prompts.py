@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Any
 
 from .config import Config
@@ -486,13 +487,23 @@ def preshot_branch_prompt(
     return prompt, facts_text
 
 
-def opener_prompt(*, facts: list[str], recent_lines) -> tuple[str, str]:
-    facts_text = "\n".join(facts)
+def time_of_day_fact(now: datetime | None = None) -> str:
+    """The local time, so a greeting fits it: the prompts' "tonight" had every opener say good evening,
+    mid-morning included."""
+    now = now or datetime.now()
+    part = "morning" if now.hour < 12 else "afternoon" if now.hour < 17 else "evening"
+    words = {"morning": "this morning", "afternoon": "this afternoon", "evening": "tonight"}[part]
+    return (f"It's {now.strftime('%A')} {part}, {now.strftime('%I:%M').lstrip('0')} local time: any greeting is "
+            f"good {part}, and the session is \"{words}\" (not \"tonight\" before the evening).")
+
+
+def opener_prompt(*, facts: list[str], recent_lines, now: datetime | None = None) -> tuple[str, str]:
+    facts_text = "\n".join([*facts, time_of_day_fact(now)])
     prompt = (
         "THE ROUND IS ABOUT TO START. FACTS:\n" + facts_text
         + "\n\nRecent lines (don't repeat these):\n" + "\n".join(_recent(recent_lines) or ["(none yet)"])
         + "\n\nOpen the broadcast: three or four lines, alternating between the two commentators. Welcome "
-        "everyone, say what tonight's format means for these players, pick one storyline, rivalry or "
+        "everyone, say what the round's format means for these players, pick one storyline, rivalry or "
         "prediction worth watching, and send us to the opening hole: name the hole and its par (from a "
         "'First hole' fact) and who is first on the tee (from a 'First on the tee' fact), but only when "
         "the facts include them, and never invent a starter or a hole. Introduce each player by first and "
@@ -503,16 +514,16 @@ def opener_prompt(*, facts: list[str], recent_lines) -> tuple[str, str]:
     return prompt, facts_text
 
 
-def closer_prompt(*, facts: list[str], recent_lines) -> tuple[str, str]:
-    facts_text = "\n".join(facts)
+def closer_prompt(*, facts: list[str], recent_lines, now: datetime | None = None) -> tuple[str, str]:
+    facts_text = "\n".join([*facts, time_of_day_fact(now)])
     prompt = (
         "THE ROUND IS OVER. FACTS:\n" + facts_text
         + "\n\nRecent lines (don't repeat these):\n" + "\n".join(_recent(recent_lines) or ["(none yet)"])
         + "\n\nWrap up the round: a short conversation of four to six lines between the two commentators. "
-        "Tell the story of the night, don't recite the stats: pick the two or three threads that matter most "
+        "Tell the story of the round, don't recite the stats: pick the two or three threads that matter most "
         "and connect them (a player who kept missing fairways but still found greens, a hot putter that saved "
         "a round, one bad hole that undid a good card). Judge every score against the handicap: the net score "
-        "says whether it was a good night, not the gross. Finish with the team result if there is one, then "
+        "says whether it was a good round, not the gross. Finish with the team result if there is one, then "
         "sign off. At most one number per line."
     )
     return prompt, facts_text

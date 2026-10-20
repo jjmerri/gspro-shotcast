@@ -661,7 +661,7 @@ class Round:
     def format_facts(self) -> list[str]:
         if not self.format:
             return []
-        facts = [f"Tonight's format: {FORMAT_NAMES[self.format]}. {FORMATS[self.format]}"]
+        facts = [f"This round's format: {FORMAT_NAMES[self.format]}. {FORMATS[self.format]}"]
         if self.anonymous_players():
             facts.append("Never credit a shot to one player by name; talk about the team, or say \"they\".")
         return facts

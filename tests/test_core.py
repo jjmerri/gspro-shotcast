@@ -2796,3 +2796,14 @@ def test_gspro_revealing_a_scramble_makes_the_round_one(tmp_path):
     assert not r.anonymous_players()
     assert e.store.db.execute("SELECT fmt FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "scramble"
     assert any("Sam's ball" in f for f in e._format_facts())
+
+
+def test_the_opener_and_closer_greet_for_the_time_of_day():
+    from datetime import datetime
+
+    from commentator.prompts import closer_prompt, opener_prompt
+
+    _, morning = opener_prompt(facts=["Playing: Dan"], recent_lines=[], now=datetime(2026, 10, 20, 10, 39))
+    assert "Tuesday morning, 10:39" in morning and "good morning" in morning
+    _, evening = closer_prompt(facts=[], recent_lines=[], now=datetime(2026, 10, 20, 19, 5))
+    assert "good evening" in evening and '"tonight"' in evening

@@ -7,7 +7,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
-from .config import Region, ScreenConfig
+from .config import HUD_ASPECT, Region, ScreenConfig
 from .hud import (
     Hud, NAME_DARK, OcrItem, arrow_direction, parse_club, parse_elevation, parse_hole_box, parse_lie, parse_others,
     parse_player_box, parse_score_banner, parse_scorecard, parse_slope, parse_tiles,
@@ -53,12 +53,62 @@ def _group_lines(items: list[OcrItem]) -> list[str]:
     return [" ".join(i.text for i in sorted(ln, key=lambda i: i.left)).strip() for ln in lines]
 
 
+# GSPro's lefty layout (a per-player setting, not every lefty's) swaps the bottom corners: the minimap
+# with its lie header and slope bar goes bottom-left, the club and hand boxes bottom-right.
+MIRRORED = ("lie", "club", "minimap", "slope")
+# Just inside the slope bar, past where the club boxes end: a dark grey panel with white text on the
+# minimap's side, the course on the other. Sampled on both sides to say which side the minimap is on.
+_MIRROR_PROBE = Region(left=0.10, top=0.955, width=0.04, height=0.03, anchor="bottom", aspect=HUD_ASPECT)
+
+
+def mirrored_region(region: Region) -> Region:
+    """The same box on the other side of the screen (fractional regions only)."""
+    if max(region.left, region.top, region.width, region.height) > 1:
+        return region
+    return region.model_copy(update={"left": round(1 - region.left - region.width, 4)})
+
+
+def _slope_bar(img: Image.Image) -> bool:
+    """The slope bar's look: dark, colourless, with bright text in it (the course is colourful or flat)."""
+    from PIL import ImageStat
+
+    st = ImageStat.Stat(img.convert("RGB"))
+    mean, spread = st.mean, sum(st.stddev) / 3
+    return sum(mean) / 3 < 90 and max(mean) - min(mean) < 25 and spread > 35
+
+
 class Screen:
     def __init__(self, cfg: ScreenConfig) -> None:
         self.cfg = cfg
         self._ocr: Any = None
         self.last_read_seconds = 0.0
         self.last_capture_seconds = 0.0
+        self.mirrored = False   # the current player's HUD is in GSPro's lefty layout (see MIRRORED)
+
+    def detect_mirror(self, base: "Image.Image | None" = None) -> bool:
+        """Check which side the minimap is on, from `base` (a full frame) or two tiny grabs. A frame
+        where neither side (or both) looks like the slope bar (a putt's view, a scorecard) keeps the
+        last answer."""
+        right = mirrored_region(_MIRROR_PROBE)
+        try:
+            left_img, right_img = ((self.crop(base, _MIRROR_PROBE), self.crop(base, right)) if base is not None
+                                   else (self.grab(_MIRROR_PROBE), self.grab(right)))
+        except Exception:
+            log.exception("Mirrored-layout probe failed")
+            return self.mirrored
+        on_left, on_right = _slope_bar(left_img), _slope_bar(right_img)
+        if on_left != on_right and on_left != self.mirrored:
+            self.mirrored = on_left
+            log.info("GSPro HUD layout: %s", "mirrored (minimap bottom-left, club bottom-right)"
+                     if on_left else "standard (minimap bottom-right, club bottom-left)")
+        return self.mirrored
+
+    def region(self, name: str) -> Region | None:
+        """A HUD region, moved to the other side when the layout is mirrored."""
+        region = self.cfg.regions.get(name)
+        if region is not None and self.mirrored and name in MIRRORED:
+            return mirrored_region(region)
+        return region
 
     def _setup_frame(self) -> Image.Image:
         """Full frame for the pre-round setup read."""
@@ -217,8 +267,10 @@ class Screen:
         _c = time.perf_counter()
         base = image if image is not None else self._hud_base()
         self.last_capture_seconds = time.perf_counter() - _c
+        if any(n in MIRRORED for n in parts):
+            self.detect_mirror(base)
         for name in parts:
-            region = self.cfg.regions.get(name)
+            region = self.region(name)
             if region is None:
                 continue
             try:

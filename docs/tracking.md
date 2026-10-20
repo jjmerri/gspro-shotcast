@@ -18,6 +18,9 @@ what GSPro scored. Shotcast puts three feeds together (see `commentator/sources/
 3. **Screen OCR** (`screen.ocr`, on by default). RapidOCR/ONNX on the CPU reads GSPro's HUD: who
    is up, the club, the carry/total/offline tiles, the minimap and the slope. Nothing leaves the
    PC (with the booth on, the pre-shot hazard look also sends a screenshot to the vision model).
+   GSPro's mirrored (lefty) HUD, with the minimap bottom-left and the club box bottom-right, is
+   a per-player setting; each read checks which side the slope bar is on and swaps the lie, club,
+   minimap and slope regions to match.
 
 Player names are matched against the league file (each player's `gspro_name` and `aliases`),
 tolerating small OCR errors; without one, players are recorded under their GSPro names.

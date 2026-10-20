@@ -634,7 +634,8 @@ class Engine:
         return JevMinimap(self.cfg.minimap)
 
     async def _read_minimap(self, to_pin: float | None) -> MinimapRead:
-        region = self.cfg.screen.regions["minimap"]
+        await asyncio.to_thread(self.screen.detect_mirror)
+        region = self.screen.region("minimap")
         # Full resolution: the downscaled vision snapshot leaves the minimap's numbers too small to read.
         img = await asyncio.to_thread(self.screen.grab, region)
         return await self.minimap.read(img, to_pin)
