@@ -417,6 +417,7 @@ class Engine:
         self._pickups_seen = 0   # GSPro pick-ups (score capped at the maximum) already applied
         self._pick_gimmes_seen = 0   # scramble picks inside the gimme circle already credited
         self._conceded_ids: set[int] = set()   # shots whose conceded putt row is stored
+        self._form_sent: dict[tuple[str, str], int] = {}   # (side, stat) -> hole of the round it was last offered
         self._lie_corrected: set[int | None] = set()   # shots whose called finish the booth has corrected
         self._mulligans_called: set[int] = set()   # id() of swings already announced as taken back
         # Each index's last recorded shot (shot_id, ShotRecord, log hole, penalties then), so the next
@@ -1786,6 +1787,104 @@ class Engine:
             facts.append(cf)
         return facts
 
+    FORM_SHORT_PUTT_FEET = 10
+    FORM_BIRDIE_LOOK_FEET = 15
+    FORM_APPROACH_FROM_YARDS = 50
+
+    def _round_form_facts(self, player: str | None, is_putt: bool, hud: Hud) -> list[str]:
+        """How the round is going, as optional colour: nothing for the first few holes, then only stats
+        with a real sample that sit well off the player's norm (season, else a typical club golfer's),
+        and only on the shot they're about (putting on a putt, approach stats on an approach, fairways
+        on the tee). Each stat is offered at most every other hole, so it can't become a refrain."""
+        r, after = self.round, self.cfg.commentary.round_form_after_holes
+        side = r.side_for(player) if r and not r.ended and player and after > 0 else None
+        if side is None:
+            return []
+        done = {q for q in range(1, r.holes + 1) if r.card_score(side, q) is not None}
+        if len(done) < after:
+            return []
+        recs = sorted((x for x in self.state.shots if x.round_id == r.id and not x.mulligan
+                       and x.hole_seq in done and (x.player in side.players or x.player in side.gspro)),
+                      key=lambda x: x.shot.timestamp or 0)
+        stats = r.side_stats(side, recs)
+        who, solo = side.label, len(side.players) == 1
+        name = side.players[0] if solo else None
+        holes = f"through {len(done)} holes"
+
+        def ft(x) -> float | None:
+            y = to_yards(x.to_pin_before)
+            return None if y is None else y * 3
+
+        candidates: list[tuple[str, str]] = []
+        par_now = self.current_par or 4
+        approach = not is_putt and (hud.shot_number != 1 or par_now == 3) \
+            and (to_yards(hud.to_pin) or 0) >= self.FORM_APPROACH_FROM_YARDS
+        if is_putt:
+            short = [x for x in recs if x.shot.is_putt and x.outcome in ("holed", "missed", "conceded")
+                     and (f := ft(x)) is not None and f <= self.FORM_SHORT_PUTT_FEET]
+            if len(short) >= 3:
+                made = sum(x.outcome == "holed" for x in short)
+                base = self.store.short_putt_rate(name, self.FORM_SHORT_PUTT_FEET) if name else {}
+                norm = base["made"] / base["attempts"] if (base.get("attempts") or 0) >= 10 else 0.5
+                if abs(made / len(short) - norm) >= 0.3:
+                    candidates.append(("short_putts", f"{who} has holed {made} of {len(short)} putts from "
+                                       f"{self.FORM_SHORT_PUTT_FEET} feet or closer {holes} "
+                                       f"(usually about {round(100 * norm)}%)."))
+            looks = made_looks = 0
+            for q in done:
+                first = next((x for x in recs if x.hole_seq == q and x.lie_before == "green"), None)
+                par = r.par.get(q)
+                if first and par and first.shot_number and first.shot_number <= par - 1 \
+                        and (f := ft(first)) is not None and f <= self.FORM_BIRDIE_LOOK_FEET:
+                    looks += 1
+                    made_looks += stats.scores.get(q, 99) <= par - 1
+            if looks >= 3 and (made_looks == 0 or made_looks / looks >= 0.67):
+                candidates.append(("birdie_looks", f"{who} has had {looks} birdie putts from inside "
+                                   f"{self.FORM_BIRDIE_LOOK_FEET} feet {holes} and converted {made_looks}."))
+            if stats.three_putts >= 2:
+                candidates.append(("three_putts", f"{who} has {stats.three_putts} three-putts {holes}."))
+        elif approach:
+            leaves = []
+            for i, x in enumerate(recs):
+                if x.shot.is_putt or (y := to_yards(x.to_pin_before)) is None or y < self.FORM_APPROACH_FROM_YARDS:
+                    continue
+                if x.outcome in ("holed", "conceded"):
+                    leaves.append(0.0 if x.outcome == "holed" else 3.0)
+                elif (nxt := next(iter(recs[i + 1:i + 2]), None)) and nxt.hole_seq == x.hole_seq \
+                        and nxt.lie_before == "green" and (f := ft(nxt)) is not None:
+                    leaves.append(f)
+            if len(leaves) >= 3:
+                avg = sum(leaves) / len(leaves)
+                base = self.store.approach_leave(name, self.FORM_APPROACH_FROM_YARDS) if name else {}
+                norm = base["avg_finish_yards"] * 3 if (base.get("n") or 0) >= 10 else 30.0
+                if abs(avg - norm) >= max(8.0, 0.35 * norm):
+                    candidates.append(("approach_leave", f"{who}'s approaches that found the green {holes} "
+                                       f"have finished an average of {avg:.0f} feet from the hole "
+                                       f"(usually about {norm:.0f})."))
+            hit, tries = stats.gir
+            if tries >= 3:
+                base = self.store.player_broadcast_stats(name) if name else {}
+                norm = (base["gir_hit"] or 0) / base["gir_tries"] if (base.get("gir_tries") or 0) >= 18 else 0.4
+                if abs(hit / tries - norm) >= 0.3:
+                    candidates.append(("gir", f"{who} has hit {hit} of {tries} greens in regulation {holes} "
+                                       f"(usually about {round(100 * norm)}%)."))
+        elif hud.shot_number == 1 and par_now >= 4:
+            hit, tries = stats.fir
+            if tries >= 3:
+                base = self.store.fairways_hit(name) if name else {}
+                norm = (base["hit"] or 0) / base["tries"] if (base.get("tries") or 0) >= 12 else 0.5
+                if abs(hit / tries - norm) >= 0.3:
+                    candidates.append(("fir", f"{who} has hit {hit} of {tries} fairways {holes} "
+                                       f"(usually about {round(100 * norm)}%)."))
+        facts = []
+        for key, text in candidates:
+            last = self._form_sent.get((side.key, key))
+            if last is not None and r.seq - last < 2:
+                continue
+            self._form_sent[(side.key, key)] = r.seq
+            facts.append(f"Round so far, optional colour (use only if it fits the moment): {text}")
+        return facts
+
     def _finish_correction_facts(self, hud: Hud, player: str | None) -> list[str]:
         """The setup screen shows where the last ball really stopped. The result call reads the lie while
         the ball may still be rolling (a read takes over a second), so a ball that trickled off the green
@@ -2107,6 +2206,7 @@ class Engine:
                  + self._profile_facts(player, is_putt, hud) + self._prediction_facts(player, is_putt, hud)
                  + self._stakes_facts(hud, player) + self._team_score_facts(player)
                  + self._finish_correction_facts(hud, player)
+                 + self._round_form_facts(player, is_putt, hud)
                  + (self._bunker_facts(player) if (hud.lie or "").lower() in ("sand", "bunker")
                     and self.rng.random() < 0.5 else [])
                  + (self._hole_field_facts(player) if hud.shot_number == 1 else [])

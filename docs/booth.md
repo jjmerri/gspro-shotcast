@@ -13,7 +13,12 @@
    right / toward-water, and a resting-lie reaction for every finish (fairway, green, each
    rough severity, sand, pine straw, cart path, structure, water). A putt gets holed / short /
    past instead, plus a "gimme" line from `commentary.gimme_lag_feet` (30 ft) or longer, which
-   always plays when the lag stops inside the gimme circle.
+   always plays when the lag stops inside the gimme circle. From hole
+   `commentary.round_form_after_holes` (3; 0 turns it off) the setup line may also get
+   round-so-far stats as optional colour, only those relevant to the shot and well off the
+   player's season norm: putts from 10 ft or closer, birdie putts inside 15 ft, three-putts (on a
+   putt); average approach leave and greens in regulation (on an approach); fairways (on a par-4/5
+   tee). Each is offered at most every other hole.
 2. **Impact.** No model call. Code projects carry against the pin and the drift from start line
    and spin axis. The launch monitor's carry is first scaled to what GSPro will allow: a course
    baseline (altitude and conditions, learned from tee and fairway shots) times a per-lie

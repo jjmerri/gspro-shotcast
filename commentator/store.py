@@ -560,6 +560,31 @@ class Store:
         ).fetchone()
         return {k: r[k] for k in r.keys()}
 
+    def approach_leave(self, player: str, min_yards: float = 50.0) -> dict[str, Any]:
+        """Season baseline for the round-so-far approach stat: how far from the hole this player's
+        approaches (full shots from `min_yards` or more) finish when they reach the green, before today."""
+        r = self.db.execute(
+            """SELECT COUNT(*) AS n, AVG(finish_yards) AS avg_finish_yards
+               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 0
+                     AND to_pin_yards >= ? AND finish_yards IS NOT NULL
+                     AND (lie_after = 'green' OR outcome IN ('holed', 'conceded'))
+                     AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))""",
+            (player, min_yards, self.session_id),
+        ).fetchone()
+        return {k: r[k] for k in r.keys()}
+
+    def short_putt_rate(self, player: str, max_feet: float) -> dict[str, Any]:
+        """Season baseline for the round-so-far putting stat: putts from `max_feet` or closer, before
+        today. Conceded misses count as misses; the never-struck tap-ins ('gimme') don't count."""
+        r = self.db.execute(
+            """SELECT COUNT(*) AS attempts, SUM(CASE WHEN outcome = 'holed' THEN 1 ELSE 0 END) AS made
+               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 1
+                     AND outcome IS NOT NULL AND outcome != 'gimme' AND to_pin_yards <= ?
+                     AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))""",
+            (player, max_feet / 3.0, self.session_id),
+        ).fetchone()
+        return {k: r[k] for k in r.keys()}
+
     def fairways_hit(self, player: str, context: str | None = None) -> dict[str, Any]:
         """Driving accuracy: of this player's driver tee shots this season, how many found the fairway.
         A per-player SHOT stat, so it works in a TWO-ball scramble too; it's empty only for the shared-

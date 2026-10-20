@@ -339,6 +339,10 @@ class CommentaryConfig(BaseModel):
     # 30-footer around 5-6 ft on average, so inside 4 ft is a good lag; shorter ends in the circle
     # routinely. 0 turns it off.
     gimme_lag_feet: float = 30.0
+    # Round-so-far stats (short putts, approach leave, birdie chances, greens, fairways, three-putts)
+    # as optional colour, from this many finished holes on, and only those well off the player's norm.
+    # 0 turns them off.
+    round_form_after_holes: int = 3
     # Such a long putt can still be rolling when hole_result_window_seconds runs out, so its result
     # is watched this long instead, letting the pre-written line play the moment it stops.
     lag_result_window_seconds: float = 8.0

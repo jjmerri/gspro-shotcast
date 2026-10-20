@@ -2402,3 +2402,41 @@ def test_setup_corrects_a_ball_called_on_the_green_that_rolled_off(tmp_path):
     assert eng._finish_correction_facts(Hud(lie="green", shot_number=4), "Dan") == []
     eng.state.current_hole = "hole 2"
     assert eng._finish_correction_facts(Hud(lie="green", shot_number=3), "Dan") == []
+
+
+def test_round_form_waits_three_holes_then_offers_only_what_stands_out(tmp_path):
+    from commentator.hud import Hud
+
+    eng = _engine(tmp_path)
+    r = Round(league=LEAGUE, gspro_players=["MikeD"], course="X", scheduled_format=None, holes=9, is_league=False)
+    r.par = {q: 4 for q in range(1, 10)}
+    eng.round, eng.current_par = r, 4
+
+    def hole(seq, approach_from, putts):   # an approach to the green, then putts (feet, outcome)
+        a = rec("Mike", seq, 4, 2, "fairway", "green", round_id=r.id)
+        a.to_pin_before = f"{approach_from} yards"
+        eng.state.record_shot(a)
+        for i, (feet, outcome) in enumerate(putts):
+            p = rec("Mike", seq, 4, 3 + i, "green", "green", "PT", round_id=r.id)
+            p.to_pin_before, p.outcome = f"{feet} feet", outcome
+            eng.state.record_shot(p)
+
+    hole(1, 150, [(4, "conceded")])
+    hole(2, 140, [(9, "conceded")])
+    putt = Hud(lie="green", to_pin="12 feet", shot_number=3)
+    r.set_log_scores("MikeD", {1: 4, 2: 4})
+    assert eng._round_form_facts("Mike", True, putt) == []          # two holes: too early
+    hole(3, 130, [(9, "conceded")])
+    r.set_log_scores("MikeD", {1: 4, 2: 4, 3: 4})
+    r.seq = 4
+    facts = "\n".join(eng._round_form_facts("Mike", True, putt))
+    assert "Mike has holed 0 of 3 putts from 10 feet or closer through 3 holes (usually about 50%)" in facts
+    assert "birdie putts from inside 15 feet through 3 holes and converted 0" in facts
+    assert facts.startswith("Round so far, optional colour")
+    assert eng._round_form_facts("Mike", True, putt) == []          # not again on the same hole
+    approach = Hud(lie="fairway", to_pin="150 yards", shot_number=2)
+    facts = "\n".join(eng._round_form_facts("Mike", False, approach))
+    assert "putts" not in facts                                     # only what the shot is about
+    assert "3 of 3 greens in regulation" in facts                   # 100% against a 40% norm
+    assert "finished an average of 7 feet from the hole (usually about 30)" in facts
+    assert eng._round_form_facts("Mike", False, Hud(lie="tee", to_pin="400 yards", shot_number=1)) == []
