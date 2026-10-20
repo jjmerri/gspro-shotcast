@@ -1852,8 +1852,7 @@ class Engine:
             return f"{lo}-{hi} {unit}" if hi is not None else f"over {lo} {unit}"
 
         rows = []
-        par = sum(r.par.get(q, 0) for q in done)
-        to_par = stats.gross - par if par else None
+        to_par = stats.gross - sum(r.par[q] for q in done) if all(r.par.get(q) for q in done) else None
         counts = {}
         for q in done:
             if (sc := stats.scores.get(q)) is not None and r.par.get(q):
@@ -5221,13 +5220,33 @@ class Engine:
         if not self._form_pending:
             return
         round_id, side_key, players, seq = self._form_pending
-        topics = sorted({t for line in lines for t in form_topics(line.text)})
-        if not topics or not self.round or self.round.id != round_id:
+        if not self.round or self.round.id != round_id:
             return
-        side = next((x for x in self.round.sides if x.key == side_key), None)
-        names = {n.split()[0].casefold() for n in players if n} | ({side.label.casefold()} if side else set())
-        if not any(n in line.text.casefold() for line in lines for n in names):
-            return   # not about the side the sheet went to
+
+        def names(side) -> set[str]:
+            return {n.split()[0].casefold() for n in side.players if n} | {side.label.casefold()}
+
+        ours = next((x for x in self.round.sides if x.key == side_key), None)
+        if ours is None:
+            return
+        mine = names(ours)
+        others = set().union(*(names(x) for x in self.round.sides if x.key != side_key),
+                             {n.split()[0].casefold() for n in self.league.player_info if n}) - mine
+
+        def says(text: str, words: set[str]) -> bool:
+            return any(re.search(rf"\b{re.escape(w)}\b", text, re.I) for w in words)
+
+        # Each line's subject is whoever it names, else the line before's; only stat lines about the
+        # side the sheet went to count (a line naming them and another about someone else don't add up).
+        subject, topics = None, set()
+        for line in lines:
+            me, them = says(line.text, mine), says(line.text, others)
+            subject = None if me and them else "ours" if me else "theirs" if them else subject
+            if subject == "ours":
+                topics |= set(form_topics(line.text))
+        topics = sorted(topics)
+        if not topics:
+            return
         self._form_said.setdefault((round_id, side_key), []).append((seq, topics))
         self.store.record_form_mentions(players, topics)
         self._form_pending = None

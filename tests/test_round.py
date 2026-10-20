@@ -2459,12 +2459,19 @@ def test_round_sheet_waits_three_holes_then_gives_the_booth_the_numbers(tmp_path
     assert eng.store.recent_form_mentions("Mike") == []             # today's don't count as a recent round
     eng._write_transcript([Line("color", "Sarah's driving has been excellent today.")], "live")
     assert [r[0] for r in eng.store.db.execute("SELECT player FROM form_mentions")] == ["Mike"]   # not credited to Mike
+    eng._form_pending = (r.id, r.side_for("Mike").key, ["Mike"], r.seq)
+    eng._write_transcript([Line("pbp", "Mike is up next."), Line("color", "Sarah's putting has been excellent today.")], "live")
+    eng._write_transcript([Line("pbp", "Mike and Sarah: three of four fairways today, the pair of them.")], "live")
+    assert eng.store.db.execute("SELECT COUNT(*) FROM form_mentions").fetchone()[0] == 1          # neither is Mike's
     eng._round_form_facts("Nobody", True, putt)                     # another player's setup clears the pending sheet
     eng._write_transcript([Line("color", "Mike's fairways so far: all of them.")], "live")
     assert eng.store.db.execute("SELECT COUNT(*) FROM form_mentions").fetchone()[0] == 1
     r.format = "scramble"
     (sheet,) = eng._round_form_facts("Mike", True, putt)
     assert "Approaches:" not in sheet                               # a partner's shot isn't this ball's finish
+    del r.par[2]
+    (sheet,) = eng._round_form_facts("Mike", True, putt)
+    assert "Score:" not in sheet                                    # a missing par would read as a birdie-free +4
 
 
 def test_form_topics_needs_a_stat_and_a_subject():
@@ -2493,14 +2500,18 @@ def test_length_norm_judges_a_shot_against_the_players_own_game(tmp_path):
                               after=Hud(), tags=[], carry_game_yards=None, total_yards=total, offline_yards=None,
                               to_pin_yards=150)
     eng.store.record_shot(player="Kathy", hole="Hole 2", shot=Shot(club="7I"), before=Hud(lie="fairway"),
-                          after=Hud(), tags=[], carry_game_yards=None, total_yards=20, offline_yards=None,
-                          to_pin_yards=21)   # a partial: the pin was in reach, not her full 7-iron
+                          after=Hud(), tags=[], carry_game_yards=None, total_yards=50, offline_yards=None,
+                          to_pin_yards=55)   # a partial: the pin was in reach, not her full 7-iron
+    for _ in range(2):   # mishits from well out still count: a full swing is judged by the pin, not the result
+        eng.store.record_shot(player="Kathy", hole="Hole 2", shot=Shot(club="7I"), before=Hud(lie="fairway"),
+                              after=Hud(), tags=[], carry_game_yards=None, total_yards=20, offline_yards=None,
+                              to_pin_yards=150)
     assert eng._is_drive(tee) and not eng._is_drive(Hud(lie="tee", to_pin="140 yards", shot_number=1))
     assert eng._length_norm_facts("Kathy", "DR", True, 400, 112) == [
         "Kathy's drives usually go about 105 yards in total. This one was about that, a normal length for them: nothing to remark on."]
     assert eng._length_norm_facts("Kathy", "DR", True, 400, 80) == [
         "Kathy's drives usually go about 105 yards in total. This one went 25 yards shorter than that."]
-    assert eng._length_norm_facts("Kathy", "7I", False, 150) == ["Kathy's full 7-iron shots usually go about 60 yards in total."]
+    assert eng._length_norm_facts("Kathy", "7I", False, 150) == ["Kathy's full 7-iron shots usually go about 59 yards in total."]
     assert eng._length_norm_facts("Kathy", "7I", False, 30, 20) == []   # a bump-and-run isn't a short 7-iron
     assert eng._length_norm_facts("Kathy", None, False, 150) == []
     assert "Judge distance only against this player's own game" in system_prompt(eng.cfg, LEAGUE)

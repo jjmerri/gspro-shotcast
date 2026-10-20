@@ -147,6 +147,14 @@ def _ctx_sql(context: str | None) -> str:
     return ""
 
 
+def _median(xs: list[float]) -> float | None:
+    xs = sorted(xs)
+    if not xs:
+        return None
+    m = len(xs) // 2
+    return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
+
+
 class Store:
     def __init__(self, path: str | None) -> None:
         self.db = sqlite3.connect(path or ":memory:")
@@ -595,18 +603,22 @@ class Store:
         return {k: r[k] for k in r.keys()}
 
     def length_norm(self, player: str, club: str | None = None) -> dict[str, Any]:
-        """How far this player usually hits it: drives (from the tee with 250+ yards to the pin), or one
-        club's full swings (the pin out of its reach, so the shot wasn't a partial). Total length, as
-        GSPro measured it after the ball stopped."""
-        where = "AND club = ? AND to_pin_yards > total_yards * 1.15" if club else \
-            "AND lie_before = 'tee' AND to_pin_yards >= 250"
-        r = self.db.execute(
-            f"""SELECT COUNT(*) AS n, AVG(total_yards) AS avg_total FROM shots
-                WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 0
-                      AND total_yards IS NOT NULL AND total_yards > 0 {where}""",
-            (player, club) if club else (player,),
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        """How far this player usually hits it (median total length, as GSPro measured it): drives (from
+        the tee with 250+ yards to the pin), or one club's full swings. Which swings count as full never
+        depends on how far that swing went (that would drop the good ones and keep the mishits): first
+        the club's typical length over everything but chips, then only shots whose pin was well beyond
+        that, so the player wasn't hitting a partial."""
+        base = """SELECT total_yards, to_pin_yards FROM shots
+                  WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 0
+                        AND total_yards IS NOT NULL AND total_yards > 0"""
+        if club is None:
+            rows = self.db.execute(base + " AND lie_before = 'tee' AND to_pin_yards >= 250", (player,)).fetchall()
+            totals = [r["total_yards"] for r in rows]
+        else:
+            rows = self.db.execute(base + " AND club = ? AND to_pin_yards >= 40", (player, club)).fetchall()
+            rough = _median([r["total_yards"] for r in rows])
+            totals = [r["total_yards"] for r in rows if rough and r["to_pin_yards"] > rough * 1.15]
+        return {"n": len(totals), "avg_total": _median(totals)}
 
     def shot_lengths(self, shot_ids: list[int]) -> dict[int, float]:
         """GSPro's total length for these shots, where the HUD showed it."""
