@@ -264,6 +264,32 @@ def _short_miss_fact(before: Hud, par: int | None) -> str | None:
     return fact + ". Call it plainly as a missed short putt that cost a stroke, never as good touch or a fine lag."
 
 
+_FORM_MARK = re.compile(
+    r"\b(\d+|zero|none|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(of|for|from)\s+"
+    r"(his|her|their|the)?\s*(last\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b"
+    r"|averag|\bso far\b|\bthis round\b|\btoday\b|\btonight\b|per ?cent|%|\bseason\b|\bstart\b|\bstory\b"
+    r"|\btrend\b|\ball (day|round)\b|\blately\b|\bof late\b|\bform\b|\brun of\b", re.I)
+_FORM_TOPICS = (
+    ("three-putts", r"three[- ]putt|3[- ]putt"),
+    ("birdie looks", r"birdie (look|chance|putt|try|tries)"),
+    ("approach leaves", r"approach|iron play|irons|leav|from the (hole|pin|cup)|proximity"),
+    ("putting", r"putt|footer|from \w+ feet|inside \w+ feet|flat ?stick|\btouch\b|on the greens"),
+    ("greens", r"greens in reg|\bGIR\b|\b(of|from|for) \w+ greens\b|\bgreens (hit|found)\b|\bfound \w+ greens\b"),
+    ("fairways", r"\bfairways\b"),
+    ("driving", r"\bdriv|off the tee"),
+    ("scrambling", r"scrambl|up[- ]and[- ]down"),
+    ("sand saves", r"sand save|bunker save"),
+)
+
+
+def form_topics(text: str) -> list[str]:
+    """The round-sheet angles a spoken line used: a stat marker (a count like 'two of six', an average,
+    'so far', 'this round') plus the subject it's about."""
+    if not _FORM_MARK.search(text):
+        return []
+    return [name for name, pat in _FORM_TOPICS if re.search(pat, text, re.I)]
+
+
 def _hole_key(label: str | None) -> str:
     """A hole label without its number, which can be read late ('par 4, 257 yards')."""
     return re.sub(r"^Hole \d+,\s*", "", label or "")
@@ -417,7 +443,8 @@ class Engine:
         self._pickups_seen = 0   # GSPro pick-ups (score capped at the maximum) already applied
         self._pick_gimmes_seen = 0   # scramble picks inside the gimme circle already credited
         self._conceded_ids: set[int] = set()   # shots whose conceded putt row is stored
-        self._form_sent: dict[tuple[str, str], int] = {}   # (side, stat) -> hole of the round it was last offered
+        self._form_said: dict[tuple, list[tuple[int, list[str]]]] = {}   # (round, side) -> [(hole of round, angles)]
+        self._form_pending: tuple | None = None   # (round, side, players, hole of round) the sheet last went to
         self._lie_corrected: set[int | None] = set()   # shots whose called finish the booth has corrected
         self._mulligans_called: set[int] = set()   # id() of swings already announced as taken back
         # Each index's last recorded shot (shot_id, ShotRecord, log hole, penalties then), so the next
@@ -1787,15 +1814,16 @@ class Engine:
             facts.append(cf)
         return facts
 
-    FORM_SHORT_PUTT_FEET = 10
+    FORM_PUTT_BANDS = ((0, 5), (5, 10), (10, 15), (15, 25), (25, None))     # feet
+    FORM_APPROACH_BANDS = ((50, 100), (100, 150), (150, 250))               # yards
     FORM_BIRDIE_LOOK_FEET = 15
-    FORM_APPROACH_FROM_YARDS = 50
 
     def _round_form_facts(self, player: str | None, is_putt: bool, hud: Hud) -> list[str]:
-        """How the round is going, as optional colour: nothing for the first few holes, then only stats
-        with a real sample that sit well off the player's norm (season, else a typical club golfer's),
-        and only on the shot they're about (putting on a putt, approach stats on an approach, fairways
-        on the tee). Each stat is offered at most every other hole, so it can't become a refrain."""
+        """The round so far as a stat sheet, from `round_form_after_holes` finished holes on: putting by
+        distance, approach leaves by distance, greens, fairways, driving, scrambling, birdie looks,
+        each beside the player's season number. The booth finds the pattern, if there is one; the sheet
+        only says what happened. It's held back for two holes after the booth uses it, and comes with the
+        angles already used this round and in recent rounds, so the booth doesn't settle into a refrain."""
         r, after = self.round, self.cfg.commentary.round_form_after_holes
         side = r.side_for(player) if r and not r.ended and player and after > 0 else None
         if side is None:
@@ -1803,87 +1831,129 @@ class Engine:
         done = {q for q in range(1, r.holes + 1) if r.card_score(side, q) is not None}
         if len(done) < after:
             return []
+        said = self._form_said.get((r.id, side.key), [])
+        if any(r.seq - seq < 2 for seq, _ in said):
+            return []
         recs = sorted((x for x in self.state.shots if x.round_id == r.id and not x.mulligan
                        and x.hole_seq in done and (x.player in side.players or x.player in side.gspro)),
                       key=lambda x: x.shot.timestamp or 0)
         stats = r.side_stats(side, recs)
-        who, solo = side.label, len(side.players) == 1
-        name = side.players[0] if solo else None
-        holes = f"through {len(done)} holes"
+        name = side.players[0] if len(side.players) == 1 else None   # season numbers only for one player
 
-        def ft(x) -> float | None:
+        def feet(x) -> float | None:
             y = to_yards(x.to_pin_before)
             return None if y is None else y * 3
 
-        candidates: list[tuple[str, str]] = []
-        par_now = self.current_par or 4
-        approach = not is_putt and (hud.shot_number != 1 or par_now == 3) \
-            and (to_yards(hud.to_pin) or 0) >= self.FORM_APPROACH_FROM_YARDS
-        if is_putt:
-            short = [x for x in recs if x.shot.is_putt and x.outcome in ("holed", "missed", "conceded")
-                     and (f := ft(x)) is not None and f <= self.FORM_SHORT_PUTT_FEET]
-            if len(short) >= 3:
-                made = sum(x.outcome == "holed" for x in short)
-                base = self.store.short_putt_rate(name, self.FORM_SHORT_PUTT_FEET) if name else {}
-                norm = base["made"] / base["attempts"] if (base.get("attempts") or 0) >= 10 else 0.5
-                if abs(made / len(short) - norm) >= 0.3:
-                    candidates.append(("short_putts", f"{who} has holed {made} of {len(short)} putts from "
-                                       f"{self.FORM_SHORT_PUTT_FEET} feet or closer {holes} "
-                                       f"(usually about {round(100 * norm)}%)."))
-            looks = made_looks = 0
-            for q in done:
-                first = next((x for x in recs if x.hole_seq == q and x.lie_before == "green"), None)
-                par = r.par.get(q)
-                if first and par and first.shot_number and first.shot_number <= par - 1 \
-                        and (f := ft(first)) is not None and f <= self.FORM_BIRDIE_LOOK_FEET:
-                    looks += 1
-                    made_looks += stats.scores.get(q, 99) <= par - 1
-            if looks >= 3 and (made_looks == 0 or made_looks / looks >= 0.67):
-                candidates.append(("birdie_looks", f"{who} has had {looks} birdie putts from inside "
-                                   f"{self.FORM_BIRDIE_LOOK_FEET} feet {holes} and converted {made_looks}."))
-            if stats.three_putts >= 2:
-                candidates.append(("three_putts", f"{who} has {stats.three_putts} three-putts {holes}."))
-        elif approach:
-            leaves = []
-            for i, x in enumerate(recs):
-                if x.shot.is_putt or (y := to_yards(x.to_pin_before)) is None or y < self.FORM_APPROACH_FROM_YARDS:
-                    continue
-                if x.outcome in ("holed", "conceded"):
-                    leaves.append(0.0 if x.outcome == "holed" else 3.0)
-                elif (nxt := next(iter(recs[i + 1:i + 2]), None)) and nxt.hole_seq == x.hole_seq \
-                        and nxt.lie_before == "green" and (f := ft(nxt)) is not None:
-                    leaves.append(f)
-            if len(leaves) >= 3:
-                avg = sum(leaves) / len(leaves)
-                base = self.store.approach_leave(name, self.FORM_APPROACH_FROM_YARDS) if name else {}
-                norm = base["avg_finish_yards"] * 3 if (base.get("n") or 0) >= 10 else 30.0
-                if abs(avg - norm) >= max(8.0, 0.35 * norm):
-                    candidates.append(("approach_leave", f"{who}'s approaches that found the green {holes} "
-                                       f"have finished an average of {avg:.0f} feet from the hole "
-                                       f"(usually about {norm:.0f})."))
-            hit, tries = stats.gir
-            if tries >= 3:
-                base = self.store.player_broadcast_stats(name) if name else {}
-                norm = (base["gir_hit"] or 0) / base["gir_tries"] if (base.get("gir_tries") or 0) >= 18 else 0.4
-                if abs(hit / tries - norm) >= 0.3:
-                    candidates.append(("gir", f"{who} has hit {hit} of {tries} greens in regulation {holes} "
-                                       f"(usually about {round(100 * norm)}%)."))
-        elif hud.shot_number == 1 and par_now >= 4:
-            hit, tries = stats.fir
-            if tries >= 3:
-                base = self.store.fairways_hit(name) if name else {}
-                norm = (base["hit"] or 0) / base["tries"] if (base.get("tries") or 0) >= 12 else 0.5
-                if abs(hit / tries - norm) >= 0.3:
-                    candidates.append(("fir", f"{who} has hit {hit} of {tries} fairways {holes} "
-                                       f"(usually about {round(100 * norm)}%)."))
-        facts = []
-        for key, text in candidates:
-            last = self._form_sent.get((side.key, key))
-            if last is not None and r.seq - last < 2:
+        def rate(a, b) -> str:
+            return f" (season {round(100 * a / b)}%)" if b else ""
+
+        def band(lo, hi, unit) -> str:
+            return f"{lo}-{hi} {unit}" if hi is not None else f"over {lo} {unit}"
+
+        rows = []
+        par = sum(r.par.get(q, 0) for q in done)
+        to_par = stats.gross - par if par else None
+        counts = {}
+        for q in done:
+            if (sc := stats.scores.get(q)) is not None and r.par.get(q):
+                d = sc - r.par[q]
+                key = "eagles or better" if d <= -2 else "birdies" if d == -1 else "pars" if d == 0 \
+                    else "bogeys" if d == 1 else "doubles or worse"
+                counts[key] = counts.get(key, 0) + 1
+        if to_par is not None:
+            rows.append(f"Score: {_fmt_to_par(to_par)} through {len(done)} holes ("
+                        + ", ".join(f"{n} {k}" for k, n in counts.items()) + ").")
+
+        putts = [x for x in recs if x.shot.is_putt and x.outcome in ("holed", "missed", "conceded")
+                 and feet(x) is not None]
+        cells = []
+        for lo, hi in self.FORM_PUTT_BANDS:
+            got = [x for x in putts if lo < feet(x) <= (hi if hi is not None else 1e9)]
+            if not got:
                 continue
-            self._form_sent[(side.key, key)] = r.seq
-            facts.append(f"Round so far, optional colour (use only if it fits the moment): {text}")
-        return facts
+            base = self.store.putt_band_rate(name, lo, hi) if name else {}
+            season = rate(base.get("made") or 0, base["attempts"]) if (base.get("attempts") or 0) >= 10 else ""
+            cells.append(f"{band(lo, hi, 'ft')} {sum(x.outcome == 'holed' for x in got)} of {len(got)}{season}")
+        if cells:
+            rows.append("Putts holed by length: " + "; ".join(cells) + ".")
+        if stats.putt_holes:
+            rows.append(f"Putting: {stats.putts} putts on {stats.putt_holes} holes, {stats.one_putts} one-putts, "
+                        f"{stats.three_putts} three-putts.")
+        looks = made_looks = 0
+        for q in done:
+            first = next((x for x in recs if x.hole_seq == q and x.lie_before == "green"), None)
+            hole_par = r.par.get(q)
+            if first and hole_par and first.shot_number and first.shot_number <= hole_par - 1 \
+                    and (f := feet(first)) is not None and f <= self.FORM_BIRDIE_LOOK_FEET:
+                looks += 1
+                made_looks += stats.scores.get(q, 99) <= hole_par - 1
+        if looks:
+            rows.append(f"Birdie putts from inside {self.FORM_BIRDIE_LOOK_FEET} feet: {made_looks} of {looks} converted.")
+
+        leaves: dict[tuple, list[float | None]] = {}
+        for i, x in enumerate(recs):
+            if x.shot.is_putt or (y := to_yards(x.to_pin_before)) is None \
+                    or (x.shot_number == 1 and (x.par or r.par.get(x.hole_seq) or 0) >= 4):
+                continue
+            for lo, hi in self.FORM_APPROACH_BANDS:
+                if lo <= y < (hi if hi is not None else 1e9):
+                    nxt = recs[i + 1] if i + 1 < len(recs) else None
+                    if x.outcome in ("holed", "conceded"):
+                        leaves.setdefault((lo, hi), []).append(0.0 if x.outcome == "holed" else 3.0)
+                    elif nxt and nxt.hole_seq == x.hole_seq and nxt.lie_before == "green" \
+                            and (f := feet(nxt)) is not None:
+                        leaves.setdefault((lo, hi), []).append(f)
+                    else:
+                        leaves.setdefault((lo, hi), []).append(None)
+        cells = []
+        for (lo, hi), got in leaves.items():
+            on = [f for f in got if f is not None]
+            base = self.store.approach_leave(name, lo, hi) if name else {}
+            season = f", season {base['avg_finish_yards'] * 3:.0f} ft" if (base.get("n") or 0) >= 10 else ""
+            avg = f", average {sum(on) / len(on):.0f} ft from the hole{season}" if on else ""
+            cells.append(f"from {band(lo, hi, 'yd')} {len(on)} of {len(got)} on the green{avg}")
+        if cells:
+            rows.append("Approaches: " + "; ".join(cells) + ".")
+
+        season = self.store.player_broadcast_stats(name) if name else {}
+        hit, tries = stats.gir
+        if tries:
+            rows.append(f"Greens in regulation: {hit} of {tries}"
+                        f"{rate(season.get('gir_hit') or 0, season['gir_tries']) if (season.get('gir_tries') or 0) >= 18 else ''}.")
+        hit, tries = stats.fir
+        if tries:
+            fw = self.store.fairways_hit(name) if name else {}
+            rows.append(f"Fairways: {hit} of {tries}"
+                        f"{rate(fw.get('hit') or 0, fw['tries']) if (fw.get('tries') or 0) >= 12 else ''}.")
+        tees = [x for x in recs if x.shot_number == 1 and (x.par or r.par.get(x.hole_seq) or 0) >= 4]
+        lengths = list(self.store.shot_lengths([x.shot_id for x in tees]).values())
+        if lengths:
+            rows.append(f"Drives on par 4s and 5s: average {sum(lengths) / len(lengths):.0f} yards over {len(lengths)}"
+                        + (f", longest {stats.longest_drive:.0f}" if stats.longest_drive else "") + ".")
+        hit, tries = stats.scramble
+        if tries:
+            rows.append(f"Up and down after missing the green: {hit} of {tries}"
+                        f"{rate(season.get('scr_hit') or 0, season['scr_tries']) if (season.get('scr_tries') or 0) >= 10 else ''}.")
+        hit, tries = stats.sand
+        if tries:
+            rows.append(f"Sand saves: {hit} of {tries}.")
+        if stats.penalties:
+            rows.append(f"Penalty strokes: {stats.penalties}.")
+        if len(rows) <= 1:
+            return []
+        self._form_pending = (r.id, side.key, list(side.players), r.seq)
+
+        used_now = sorted({t for _, topics in said for t in topics})
+        recent = [] if name is None else self.store.recent_form_mentions(name)
+        guide = ("Optional colour, not a script: most shots need none of it. If something here is genuinely "
+                 "telling (a strength or weakness today, a contrast with the season, something that matters for "
+                 "this shot) you may work in one point, in your own words. A count of one or two is not a "
+                 "pattern. Season figures are in brackets.")
+        if used_now:
+            guide += f" Already used this round: {', '.join(used_now)}; find a different angle or skip it."
+        if recent:
+            guide += f" Angles the booth leaned on for {side.label} in recent rounds: {', '.join(recent)}; prefer something fresher."
+        return [f"Round so far for {side.label} (completed holes only). {guide}\n" + "\n".join("  " + x for x in rows)]
 
     def _finish_correction_facts(self, hud: Hud, player: str | None) -> list[str]:
         """The setup screen shows where the last ball really stopped. The result call reads the lie while
@@ -5100,11 +5170,24 @@ class Engine:
         self._air_lines(kind, await self._compose(kind, llm, user, facts_text, images, mode, system=system,
                                                   must=must), shot_id)
 
+    def _note_form_mentions(self, lines: list[Line]) -> None:
+        """Which round-sheet angles a line just used, for the side the sheet last went to."""
+        if not self._form_pending:
+            return
+        round_id, side_key, players, seq = self._form_pending
+        topics = sorted({t for line in lines for t in form_topics(line.text)})
+        if not topics or not self.round or self.round.id != round_id:
+            return
+        self._form_said.setdefault((round_id, side_key), []).append((seq, topics))
+        self.store.record_form_mentions(players, topics)
+        self._form_pending = None
+
     def _write_transcript(self, lines: list[Line], kind: str = "shot", shot_id: int | None = None) -> None:
         # The handler's own shot id beats the shared one, which the next shot may have moved on.
         if shot_id is None and kind in ("shot", "flight"):
             shot_id = self._shot_id
         self.store.record_lines(kind, lines, shot_id)
+        self._note_form_mentions(lines)
         for line in lines:
             self._season_phrases |= ngrams(line.text, 6)
             for player, keys in self._note_keys.items():

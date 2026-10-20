@@ -2404,8 +2404,9 @@ def test_setup_corrects_a_ball_called_on_the_green_that_rolled_off(tmp_path):
     assert eng._finish_correction_facts(Hud(lie="green", shot_number=3), "Dan") == []
 
 
-def test_round_form_waits_three_holes_then_offers_only_what_stands_out(tmp_path):
+def test_round_sheet_waits_three_holes_then_gives_the_booth_the_numbers(tmp_path):
     from commentator.hud import Hud
+    from commentator.models import Line
 
     eng = _engine(tmp_path)
     r = Round(league=LEAGUE, gspro_players=["MikeD"], course="X", scheduled_format=None, holes=9, is_league=False)
@@ -2426,17 +2427,33 @@ def test_round_form_waits_three_holes_then_offers_only_what_stands_out(tmp_path)
     putt = Hud(lie="green", to_pin="12 feet", shot_number=3)
     r.set_log_scores("MikeD", {1: 4, 2: 4})
     assert eng._round_form_facts("Mike", True, putt) == []          # two holes: too early
-    hole(3, 130, [(9, "conceded")])
+    hole(3, 130, [(18, "missed"), (2, "holed")])
     r.set_log_scores("MikeD", {1: 4, 2: 4, 3: 4})
     r.seq = 4
-    facts = "\n".join(eng._round_form_facts("Mike", True, putt))
-    assert "Mike has holed 0 of 3 putts from 10 feet or closer through 3 holes (usually about 50%)" in facts
-    assert "birdie putts from inside 15 feet through 3 holes and converted 0" in facts
-    assert facts.startswith("Round so far, optional colour")
-    assert eng._round_form_facts("Mike", True, putt) == []          # not again on the same hole
-    approach = Hud(lie="fairway", to_pin="150 yards", shot_number=2)
-    facts = "\n".join(eng._round_form_facts("Mike", False, approach))
-    assert "putts" not in facts                                     # only what the shot is about
-    assert "3 of 3 greens in regulation" in facts                   # 100% against a 40% norm
-    assert "finished an average of 7 feet from the hole (usually about 30)" in facts
-    assert eng._round_form_facts("Mike", False, Hud(lie="tee", to_pin="400 yards", shot_number=1)) == []
+    (sheet,) = eng._round_form_facts("Mike", True, putt)
+    assert sheet.startswith("Round so far for Mike")
+    assert "Score: even par through 3 holes (3 pars)" in sheet
+    assert "0-5 ft 1 of 2; 5-10 ft 0 of 1; 15-25 ft 0 of 1" in sheet
+    assert "Birdie putts from inside 15 feet: 0 of 2 converted" in sheet
+    assert ("from 150-250 yd 1 of 1 on the green, average 4 ft from the hole; "
+            "from 100-150 yd 2 of 2 on the green, average 14 ft from the hole") in sheet
+    assert "Greens in regulation: 3 of 3" in sheet
+    assert "Already used" not in sheet
+    # the same sheet whatever the shot: the booth picks what fits
+    assert eng._round_form_facts("Mike", False, Hud(lie="tee", to_pin="400 yards", shot_number=1)) == [sheet]
+
+    eng._write_transcript([Line("color", "Nothing today from inside ten feet, nought for three.")], "live")
+    assert eng._round_form_facts("Mike", True, putt) == []          # just used: rests this hole and the next
+    r.seq = 6
+    (sheet,) = eng._round_form_facts("Mike", True, putt)
+    assert "Already used this round: putting" in sheet
+    assert eng.store.recent_form_mentions("Mike") == []             # today's don't count as a recent round
+
+
+def test_form_topics_needs_a_stat_and_a_subject():
+    from commentator.engine import form_topics
+
+    assert form_topics("Finds the fairway, lovely.") == []
+    assert form_topics("He's hit five of six fairways so far.") == ["fairways"]
+    assert form_topics("Two three-putts today, he'll want this one close.") == ["three-putts", "putting"]
+    assert form_topics("His approaches are averaging twelve feet from the hole.") == ["approach leaves"]

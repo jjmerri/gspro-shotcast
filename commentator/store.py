@@ -61,6 +61,13 @@ CREATE TABLE IF NOT EXISTS lines (
     speaker TEXT NOT NULL,
     text TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS form_mentions (           -- round-sheet angles the booth used, per player
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES sessions(id),
+    ts REAL NOT NULL,
+    player TEXT NOT NULL,
+    topic TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS rounds (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES sessions(id),
@@ -560,30 +567,60 @@ class Store:
         ).fetchone()
         return {k: r[k] for k in r.keys()}
 
-    def approach_leave(self, player: str, min_yards: float = 50.0) -> dict[str, Any]:
-        """Season baseline for the round-so-far approach stat: how far from the hole this player's
-        approaches (full shots from `min_yards` or more) finish when they reach the green, before today."""
+    _BEFORE_TODAY = "session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))"
+
+    def approach_leave(self, player: str, lo_yards: float, hi_yards: float | None = None) -> dict[str, Any]:
+        """Season baseline for the round sheet, before today: how far from the hole this player's full
+        shots from `lo_yards` up to `hi_yards` finish when they reach the green (holed = 0)."""
         r = self.db.execute(
-            """SELECT COUNT(*) AS n, AVG(finish_yards) AS avg_finish_yards
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 0
-                     AND to_pin_yards >= ? AND finish_yards IS NOT NULL
-                     AND (lie_after = 'green' OR outcome IN ('holed', 'conceded'))
-                     AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))""",
-            (player, min_yards, self.session_id),
+            f"""SELECT COUNT(*) AS n,
+                       AVG(CASE WHEN outcome = 'holed' THEN 0 ELSE finish_yards END) AS avg_finish_yards
+                FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 0
+                      AND to_pin_yards >= ? AND to_pin_yards < ? AND finish_yards IS NOT NULL
+                      AND (lie_after = 'green' OR outcome IN ('holed', 'conceded')) AND {self._BEFORE_TODAY}""",
+            (player, lo_yards, hi_yards if hi_yards is not None else 1e9, self.session_id),
         ).fetchone()
         return {k: r[k] for k in r.keys()}
 
-    def short_putt_rate(self, player: str, max_feet: float) -> dict[str, Any]:
-        """Season baseline for the round-so-far putting stat: putts from `max_feet` or closer, before
-        today. Conceded misses count as misses; the never-struck tap-ins ('gimme') don't count."""
+    def putt_band_rate(self, player: str, lo_feet: float, hi_feet: float | None = None) -> dict[str, Any]:
+        """Season baseline for the round sheet, before today: putts from over `lo_feet` up to `hi_feet`.
+        Conceded misses count as misses; the never-struck tap-ins ('gimme') don't count."""
         r = self.db.execute(
-            """SELECT COUNT(*) AS attempts, SUM(CASE WHEN outcome = 'holed' THEN 1 ELSE 0 END) AS made
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 1
-                     AND outcome IS NOT NULL AND outcome != 'gimme' AND to_pin_yards <= ?
-                     AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))""",
-            (player, max_feet / 3.0, self.session_id),
+            f"""SELECT COUNT(*) AS attempts, SUM(CASE WHEN outcome = 'holed' THEN 1 ELSE 0 END) AS made
+                FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 1
+                      AND outcome IS NOT NULL AND outcome != 'gimme' AND to_pin_yards > ? AND to_pin_yards <= ?
+                      AND {self._BEFORE_TODAY}""",
+            (player, lo_feet / 3.0, (hi_feet if hi_feet is not None else 1e9) / 3.0, self.session_id),
         ).fetchone()
         return {k: r[k] for k in r.keys()}
+
+    def shot_lengths(self, shot_ids: list[int]) -> dict[int, float]:
+        """GSPro's total length for these shots, where the HUD showed it."""
+        ids = [i for i in shot_ids if i is not None]
+        if not ids:
+            return {}
+        rows = self.db.execute(
+            f"SELECT id, total_yards FROM shots WHERE total_yards IS NOT NULL AND id IN ({','.join('?' * len(ids))})", ids)
+        return {r["id"]: r["total_yards"] for r in rows}
+
+    def record_form_mentions(self, players: list[str], topics: list[str]) -> None:
+        """Round-sheet angles the booth used on these players, so later rounds can steer it elsewhere."""
+        now = time.time()
+        self.db.executemany("INSERT INTO form_mentions (session_id, ts, player, topic) VALUES (?, ?, ?, ?)",
+                            [(self.session_id, now, p, t) for p in players for t in topics])
+        self.db.commit()
+
+    def recent_form_mentions(self, player: str, sessions: int = 3) -> list[str]:
+        """Angles used on this player in their last few sessions before today, most used first."""
+        rows = self.db.execute(
+            f"""SELECT topic, COUNT(*) AS n FROM form_mentions
+                WHERE player = ? AND {self._BEFORE_TODAY} AND session_id IN (
+                    SELECT DISTINCT session_id FROM form_mentions WHERE player = ? AND {self._BEFORE_TODAY}
+                    ORDER BY session_id DESC LIMIT ?)
+                GROUP BY topic ORDER BY n DESC, topic""",
+            (player, self.session_id, player, self.session_id, sessions),
+        ).fetchall()
+        return [r["topic"] for r in rows]
 
     def fairways_hit(self, player: str, context: str | None = None) -> dict[str, Any]:
         """Driving accuracy: of this player's driver tee shots this season, how many found the fairway.

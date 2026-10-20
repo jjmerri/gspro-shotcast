@@ -14,11 +14,12 @@
    rough severity, sand, pine straw, cart path, structure, water). A putt gets holed / short /
    past instead, plus a "gimme" line from `commentary.gimme_lag_feet` (30 ft) or longer, which
    always plays when the lag stops inside the gimme circle. From hole
-   `commentary.round_form_after_holes` (3; 0 turns it off) the setup line may also get
-   round-so-far stats as optional colour, only those relevant to the shot and well off the
-   player's season norm: putts from 10 ft or closer, birdie putts inside 15 ft, three-putts (on a
-   putt); average approach leave and greens in regulation (on an approach); fairways (on a par-4/5
-   tee). Each is offered at most every other hole.
+   `commentary.round_form_after_holes` (3; 0 turns it off) the setup line also gets the round so far
+   as a stat sheet: putts holed by length, approach leaves by distance, greens, fairways, driving,
+   scrambling, birdie looks, each beside the player's season figure. It's optional colour; the booth
+   picks a pattern if one is worth saying. Once it uses one, the sheet rests for two holes, and
+   it's told which angles it already used this round and leaned on in the player's last few rounds
+   (`form_mentions` in the database), so it doesn't settle into a refrain.
 2. **Impact.** No model call. Code projects carry against the pin and the drift from start line
    and spin axis. The launch monitor's carry is first scaled to what GSPro will allow: a course
    baseline (altitude and conditions, learned from tee and fairway shots) times a per-lie
