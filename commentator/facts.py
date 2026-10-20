@@ -148,7 +148,7 @@ def ordinal(n: int) -> str:
 def history_facts(player: str | None, prior: list[ShotRecord]) -> list[str]:
     who = player or "This player"
     whose = who + ("'" if who.endswith("s") else "'s")
-    facts = [f"This is {whose} {ordinal(len(prior) + 1)} shot tonight."]
+    facts = [f"This is {whose} {ordinal(len(prior) + 1)} shot today."]
     full = [r for r in prior if not r.shot.is_putt]
     if full:
         last = full[-1].shot

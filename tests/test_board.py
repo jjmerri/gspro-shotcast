@@ -208,7 +208,7 @@ def test_ctp_facts_name_the_group_and_where_the_mark_came_from(tmp_path):
     assert any("Mike's tee shot finished on the green, 22 feet" in f for f in green)
     # The closer measures tonight's best against the week's earlier rounds.
     closing = " ".join(r.closing_facts([], {}, week_ctp=e._closer_week_ctp(r)))
-    assert ("Closest to the pin tonight on hole 12: Sarah, 9 feet 2 inches from the hole. That's the closest on "
+    assert ("Closest to the pin today on hole 12: Sarah, 9 feet 2 inches from the hole. That's the closest on "
             "this hole this week so far, inside Tony's 12 feet from an earlier round.") in closing
 
 

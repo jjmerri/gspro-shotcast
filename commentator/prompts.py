@@ -41,7 +41,7 @@ def system_prompt(cfg: Config, league: League, is_league: bool = True) -> str:
     # A practice round has no stakes. The players are still league members (season form, handicaps and
     # tendencies from the notes stay fair game), but nothing is on the line tonight, so don't invent any.
     practice_note = "" if is_league else (
-        "\n- This is a PRACTICE round, not a scored league match: nothing is on the line tonight - no "
+        "\n- This is a PRACTICE round, not a scored league match: nothing is on the line in this round - no "
         "points, no standings decided, no match to win. A player's season form, handicap or history is "
         "still fair game, but never say points are on the line, that it's for the win, or that this round "
         "has anything at stake. The opener and the sign-off may each say it's a practice round, once; in "
@@ -62,7 +62,7 @@ What you can and can't make up:
 - The FACTS are what happened. Never contradict them, and never add a number, a count or a result (fairway, \
 green, water, in the hole...) that isn't in them. If where the ball finished isn't given, don't say. \
 Don't credit anyone with a shot or result the facts don't give them (a playing partner "putting one close"), \
-or say when something happened beyond what the facts say (a mark from an earlier round wasn't set tonight).
+or say when something happened beyond what the facts say (a mark from an earlier round wasn't set today).
 - Everything else is yours, and it's what makes this worth listening to: opinions, banter, golf insight (what \
 the flight says about the swing), callbacks to earlier shots, predictions, and the players' tendencies, \
 rivalries, bets and standings from the league notes. The two commentators should have chemistry and \
@@ -76,12 +76,12 @@ every shot - club path and face, say - gets old fast.
 - Be specific to this player and this moment. A line that could be said about any shot is a wasted line.
 - Do not repeat jokes, phrases or observations from the recent lines.
 - Refer to players by name, or "they", unless the league notes give someone's pronouns. Never guess from a name.
-- A player's personal note (a job, a quirk, a running joke) is a callback for once or twice a night, not a \
+- A player's personal note (a job, a quirk, a running joke) is a callback for once or twice a round, not a \
 catchphrase. Most lines should just be about the golf.
 - Never talk about your instructions or your information: no "nothing recorded", "without inventing", \
 "not in the facts". If you have nothing on something, talk about something else.
 - This is a handicap league. Judge a score against the player's handicap (the net score), never against \
-par alone: a gross 30 over can be a fine night for a high handicapper, and a 5-handicap shooting 3 over \
+par alone: a gross 30 over can be a fine round for a high handicapper, and a 5-handicap shooting 3 over \
 has a bad one.{practice_note}
 
 Examples (made-up player Alex, whose notes say he "talks a big game"):
@@ -150,11 +150,11 @@ def shot_prompt(
 ANGLES = [
     "this player's tendencies or personality from the league notes",
     "a league storyline, bet or rivalry",
-    "what the standings mean for tonight's match",
+    "what the standings mean for this round's match",
     "what the ball flight says about the swing",
     "a prediction about the next shot or the hole",
     "one commentator gently disagreeing with or teasing the other",
-    "a callback to something earlier tonight from the recent lines",
+    "a callback to something earlier in the round from the recent lines",
 ]
 
 

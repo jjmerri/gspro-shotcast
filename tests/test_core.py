@@ -624,13 +624,13 @@ def test_facts_describe_flight_and_count_streaks():
     prior = [ShotRecord("Tony", Shot(club="DR", hla=4.1, carry=248), None, Hud(), []),
              ShotRecord("Tony", Shot(club="5I", hla=3.0, carry=180), None, Hud(), [])]
     hist = " ".join(history_facts("Tony", prior))
-    assert "Tony's 3rd shot tonight" in hist and "last 2 full shots before this one all started right" in hist
+    assert "Tony's 3rd shot today" in hist and "last 2 full shots before this one all started right" in hist
 
 
 def test_grounding_rejects_invented_numbers_counts_and_outcomes():
     from commentator.grounding import check_line
 
-    facts = "Player: Tony\nClub: 7-iron. Carry: 96 yards.\nWhere the ball finished: not known.\nThis is Tony's 2nd shot tonight."
+    facts = "Player: Tony\nClub: 7-iron. Carry: 96 yards.\nWhere the ball finished: not known.\nThis is Tony's 2nd shot today."
     league = "points: 31\nhandicap: 12.0"
     assert check_line("Tony carries it 96, and his team sits on 31 points.", facts, league).ok
     assert not check_line("A long putt from 25 feet.", facts, league).ok

@@ -521,6 +521,20 @@ def test_round_seeds_par_and_index_from_the_course_card():
     assert r.par[1] == 3 and r.index[1] == 10 and r.par[2] == 5 and r.index[2] == 2
 
 
+def test_a_late_start_keeps_only_the_holes_the_round_plays():
+    from commentator.course_card import CourseCard
+
+    card = CourseCard(name="Riviera", par={h: 4 for h in range(1, 19)} | {16: 3, 17: 5},
+                      index={h: h for h in range(1, 19)})
+    r = Round(league=LEAGUE, gspro_players=["MikeD"], course="Riviera", scheduled_format="individual", holes=18)
+    r.apply_course_card(card)
+    r.start_hole, r.start_hole_assumed = 16, False
+    r.apply_course_card(card)
+    r.set_holes(3)
+    assert r.par == {1: 3, 2: 5, 3: 4} and sorted(r.index) == [1, 2, 3]
+    assert {r.hole_number(q) for q in r.par} == {16, 17, 18}
+
+
 def test_abandoned_round_does_not_block_a_new_start(tmp_path):
     import time
 
@@ -1483,7 +1497,7 @@ def test_ctp_hole_is_flagged_and_tee_shot_finish_recorded(tmp_path):
     facts = e._ctp_facts(2, Hud(lie="green", to_pin="14 feet 2 inches"), "Mike")
     assert "14 feet 2 inches" in facts[0]
     e._ctp_facts(2, Hud(lie="green", to_pin="31 feet"), "Sarah")
-    assert "Closest to the pin tonight on hole 3: Mike, 14 feet 2 inches" in " ".join(e.round.closing_facts([], {}))
+    assert "Closest to the pin today on hole 3: Mike, 14 feet 2 inches" in " ".join(e.round.closing_facts([], {}))
     e.round.seq = 2
     assert e._ctp_facts(1) == []
 
@@ -2245,3 +2259,79 @@ def test_a_scramble_takes_the_logged_team_score_and_a_reopened_hole_forgets_its_
     assert r.player_stats("Sarah", []).scores == {1: 6, 2: 4}   # each partner scores the team's
     r.set_log_scores("MikeD", {1: 6})                     # hole 2's holed putt taken back
     assert r.card_score(side, 2) is None and not r.complete()   # the partner's card row went with it
+
+
+def _last_hole_pair(tmp_path):
+    e = _engine(tmp_path)
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="Wynn", scheduled_format="best ball")
+    r.holes, r.start_hole, r.start_hole_assumed, r.seq = 2, 1, False, 2
+    r.par = {1: 4, 2: 3}
+    e.round = r
+    kicks = []
+    e._kick_closer_branches = lambda key, scores, fixed=None: kicks.append((key, scores, fixed))
+    return e, r, kicks
+
+
+def test_a_group_pre_builds_the_closer_once_one_side_is_left_on_the_last_hole(tmp_path):
+    e, r, kicks = _last_hole_pair(tmp_path)
+    r.set_log_scores("MikeD", {1: 5})
+    r.set_log_scores("Sarah", {1: 4})
+    e._kick_group_closer(r)
+    assert kicks == []                                  # both still playing the last hole
+    r.set_log_scores("MikeD", {1: 5, 2: 3})
+    e._kick_group_closer(r)
+    sarah = next(s for s in r.sides if "Sarah" in s.gspro)
+    mike = next(s for s in r.sides if "MikeD" in s.gspro)
+    assert kicks == [(sarah.key, [2, 3, 4, 5], {mike.key: 3})]
+
+
+async def test_a_group_closer_plays_only_if_the_others_finished_as_written(tmp_path):
+    from commentator.models import Line
+
+    e, r, _ = _last_hole_pair(tmp_path)
+    r.set_log_scores("MikeD", {1: 5, 2: 3})
+    r.set_log_scores("Sarah", {1: 4, 2: 4})
+    sarah = next(s for s in r.sides if "Sarah" in s.gspro)
+    mike = next(s for s in r.sides if "MikeD" in s.gspro)
+    played = []
+    e._play_prepared_closer = lambda strokes, key: played.append((strokes, key)) or True
+    branch = {"side": sarah.key, "by_score": {4: ([Line(e.speakers[0], "x")], [b""])}}
+
+    async def run(fixed):
+        played.clear()
+        e._closer_branches = {**branch, "fixed": fixed}
+        stats = {s.key: r.side_stats(s, []) for s in r.sides}
+        await e._sign_off(r, stats)
+        return list(played)
+
+    assert await run({mike.key: 3}) == [(4, sarah.key)]
+    assert await run({mike.key: 4}) == []        # Mike's hole changed after the branches were written
+
+
+def test_a_scramble_pick_inside_the_gimme_circle_records_the_teams_conceded_putt(tmp_path):
+    from commentator.hud import Hud
+    from commentator.models import Shot
+    from commentator.state import ShotRecord
+
+    e = _engine(tmp_path)
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="Wynn", scheduled_format="scramble")
+    e.round = r
+
+    def putt(who):
+        sid = e.store.record_shot(player=who, hole="Hole 2, par 4", shot=Shot(club="PT"),
+                                  before=Hud(lie="green", shot_number=4), after=Hud(lie="green"), tags=[],
+                                  carry_game_yards=None, total_yards=None, offline_yards=None, course="Wynn",
+                                  to_pin_yards=4.0, gimme_yards=1.2, fmt="scramble", attributed=True,
+                                  outcome="missed", is_league=False)
+        return sid, ShotRecord(who, Shot(club="PT"), "Hole 2, par 4", Hud(), [], round_id=r.id,
+                               hole_seq=2, shot_number=4, shot_id=sid, outcome="missed")
+
+    (a, ra), (b, rb) = putt("MikeD"), putt("Sarah")
+    e._fire_rows = {10: (a, ra, 0, 1), 11: (b, rb, 1, 1)}
+    e.gspro.pick_gimmes.append((0, 1))           # GSPro picked MikeD's (first) putt, inside the circle
+    e._apply_log_corrections()
+    e._apply_log_corrections()                     # idempotent
+    rows = e.store.db.execute("SELECT player, shot_number, outcome FROM shots ORDER BY id").fetchall()
+    assert [tuple(x) for x in rows] == [("MikeD", 4, "conceded"), ("Sarah", 4, "missed"), ("MikeD", 5, "gimme")]
+    e._record_result(a, "missed", "[late watch]", putt=True, rec=ra)   # a late watch can't undo it
+    assert ra.outcome == "conceded"

@@ -594,3 +594,25 @@ def test_a_hole_finished_before_the_booth_started_can_still_reopen(tmp_path):
     f._prime()
     f.state.apply(LogEvent("state", player=0, hole=0, score=1, strokes=-1))   # or taken back explicitly
     assert f.state.hole_scores == {}
+
+
+def test_a_scramble_pick_inside_the_gimme_circle_concedes_the_picked_balls_stroke():
+    # Pine Valley, 10/20: both partners putt, then GSPro picks player 0's ball (the first putt), which
+    # sits inside the circle. That putt's own watch had long since settled as a miss.
+    s = _replay(
+        _line(1, 1, 3, player=0) + "Putt Out Mode\n* ------- Shot Fired! ------- *\n"
+        + _line(1, 1, 3, player=1)
+        + "Selecting shot for player: 0\n"
+        "Logging tdist: 0.2899483 and ActiveGameGimmieDistance: 1.22\n"
+        "Select Shot - active user ball is within Gimmie distance\n"
+        + _line(1, 1, 4, player=0)
+        + "SelectShotCopyScoreToTeammates = true\nSelect Shot - Marking teamats as gimmie distance\n"
+        + _line(1, 1, 4, player=1)
+    )
+    assert s.pick_gimmes == [(0, 1)]
+
+
+def test_an_ordinary_gimmie_is_not_a_pick():
+    s = _replay(FIRE + _line(1, 1, 3) + "Logging tdist: 0.5 and ActiveGameGimmieDistance: 1.22\n"
+                "Select Shot - active user ball is within Gimmie distance\n" + _line(1, 1, 4))
+    assert s.gimmies_by == {0: 1} and s.pick_gimmes == []

@@ -69,12 +69,15 @@ def mirrored_region(region: Region) -> Region:
 
 
 def _slope_bar(img: Image.Image) -> bool:
-    """The slope bar's look: dark, colourless, with bright text in it (the course is colourful or flat)."""
+    """The slope bar's look: GSPro's dark teal panel (blue level with green, both above red), either
+    with the slope's white text in it or, on the green where no slope is shown, empty and flat. Grass,
+    sand and trees have far less blue than green; a black loading screen or a scorecard has no teal."""
     from PIL import ImageStat
 
     st = ImageStat.Stat(img.convert("RGB"))
-    mean, spread = st.mean, sum(st.stddev) / 3
-    return sum(mean) / 3 < 90 and max(mean) - min(mean) < 25 and spread > 35
+    (r, g, b), spread = st.mean, sum(st.stddev) / 3
+    teal = r < 60 and g - r >= 5 and b - r >= 4 and abs(g - b) <= 8
+    return teal and (spread > 35 or spread < 6)
 
 
 class Screen:
@@ -86,9 +89,9 @@ class Screen:
         self.mirrored = False   # the current player's HUD is in GSPro's lefty layout (see MIRRORED)
 
     def detect_mirror(self, base: "Image.Image | None" = None) -> bool:
-        """Check which side the minimap is on, from `base` (a full frame) or two tiny grabs. A frame
-        where neither side (or both) looks like the slope bar (a putt's view, a scorecard) keeps the
-        last answer."""
+        """Check which side the minimap is on, from `base` (a full frame) or two tiny grabs. Runs on
+        every read, since a player's layout can change between shots. A frame where neither side (or
+        both) shows the slope bar (a loading screen, a scorecard) keeps the last answer."""
         right = mirrored_region(_MIRROR_PROBE)
         try:
             left_img, right_img = ((self.crop(base, _MIRROR_PROBE), self.crop(base, right)) if base is not None

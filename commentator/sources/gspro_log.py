@@ -244,6 +244,11 @@ class GsproState:
     # modes the score lines repeat for other reasons). A pick-up adds (index, hole) to `pickups`.
     mulligan_fires: dict = field(default_factory=dict)
     pickups: list = field(default_factory=list)
+    # A scramble's pick that landed inside the gimme circle: (index, hole) of the picked ball, whose
+    # stroke is conceded. Its player putted before a teammate, so that putt's own watch had already
+    # settled as a miss by the time GSPro picked it. Append-only, like `pickups`.
+    pick_gimmes: list = field(default_factory=list)
+    _since_select: bool = False
     _undo: dict = field(default_factory=dict)         # index -> (hole, penalties then, fire taken back)
     _picked: set = field(default_factory=set)          # (index, hole) capped at the maximum
     team_scores: bool = False   # GSPro copied a score between teammates this round (a shared-ball format)
@@ -323,6 +328,7 @@ class GsproState:
                 self.setups_by[self.active_player] = self.setups_by.get(self.active_player, 0) + 1
         elif ev.kind == "select":
             self.active_player = self.selected = ev.player
+            self._since_select = True
             if ev.player is not None:
                 self.players_seen.add(ev.player)
                 self._attach_lie(ev.player)
@@ -353,6 +359,8 @@ class GsproState:
                 self._fire_info[self.fires]["penalty"] = ev.surface
         elif ev.kind == "gimmie":
             self.gimmies += 1
+            if self._since_select and self.active_player is not None and self.active_player == self.selected:
+                self.pick_gimmes.append((self.active_player, self.hole_by.get(self.active_player, self.current_hole)))
             if self.active_player is not None:
                 self._end_for.add(self.active_player)
                 self._gimmie_since_state[self.active_player] = True
@@ -430,6 +438,7 @@ class GsproState:
 
     def _apply_state(self, ev: LogEvent) -> None:
         self.active_player, self.current_hole = ev.player, ev.hole
+        self._since_select = False
         if self.first_hole is None:
             self.first_hole = ev.hole
         if ev.player is None:

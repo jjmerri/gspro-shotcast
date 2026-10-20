@@ -384,6 +384,8 @@ class Engine:
         self._fire_rows: dict[int, tuple] = {}
         self._mulligans_done: set[int] = set()
         self._pickups_seen = 0   # GSPro pick-ups (score capped at the maximum) already applied
+        self._pick_gimmes_seen = 0   # scramble picks inside the gimme circle already credited
+        self._conceded_ids: set[int] = set()   # shots whose conceded putt row is stored
         self._mulligans_called: set[int] = set()   # id() of swings already announced as taken back
         # Each index's last recorded shot (shot_id, ShotRecord, log hole, penalties then), so the next
         # shot's lie (where it was played from) can correct where that one came to rest.
@@ -819,6 +821,8 @@ class Engine:
             self._apply_log_holes(r)
             if not self._round_end_queued:   # once it's ending, End Round's reset mustn't wipe the scores
                 self._sync_log_scores(r)
+                if self.commentary_on and self.cfg.commentary.closer:
+                    self._kick_group_closer(r)
         if g.round_completes != self._log_round_completes:
             self._log_round_completes = g.round_completes
             if live and not r.log_complete:
@@ -1168,7 +1172,7 @@ class Engine:
                 facts.append(f"Not playing this round: {', '.join(absent)}. A passing mention is fine, but "
                              f"never describe them hitting, putting or having a shot here.")
         if spent := self._spent_notes():
-            facts.append(f"Already used enough tonight, leave alone: the league notes about {', '.join(spent)}.")
+            facts.append(f"Already used enough today, leave alone: the league notes about {', '.join(spent)}.")
         return facts
 
     _HOLE_TERMS = {-3: "albatross", -2: "eagle", -1: "birdie", 0: "par", 1: "bogey",
@@ -1279,10 +1283,12 @@ class Engine:
         log.info("Wrap: pre-made branch played for %s strokes, no model call", strokes)
         return True
 
-    def _kick_closer_branches(self, side_key: str, scores: list[int]) -> None:
+    def _kick_closer_branches(self, side_key: str, scores: list[int], fixed: dict[str, int] | None = None) -> None:
         """(Re)start the background pre-build of the round closer on the last hole, branched by the
         deciding side's possible final `scores`, so the sign-off is ready to play the instant the
-        round ends with no model call (lets the closer use a rich, slower model with no felt latency)."""
+        round ends with no model call (lets the closer use a rich, slower model with no felt latency).
+        In a group the deciding side is the last one still on the last hole; `fixed` holds the other
+        sides' last-hole scores the branches were written with, checked again before one plays."""
         # Only on cloud TTS: pre-voicing several branches is a network call there, but on local Kokoro
         # it's CPU-bound and would starve the OCR poller during the last putts. On Kokoro the closer
         # just runs on demand at round end (same as before).
@@ -1292,10 +1298,27 @@ class Engine:
             return  # already built for this round; don't rebuild on every late putt
         if self._closer_task and not self._closer_task.done():
             self._closer_task.cancel()
-        self._closer_task = asyncio.create_task(self._prepare_closer_branches(side_key, scores))
+        self._closer_task = asyncio.create_task(self._prepare_closer_branches(side_key, scores, fixed or {}))
         self._closer_task.add_done_callback(lambda t: t.cancelled() or t.exception())
 
-    async def _prepare_closer_branches(self, side_key: str, scores: list[int]) -> None:
+    def _kick_group_closer(self, r: Round) -> None:
+        """A group on the last hole: once every side but one has finished it, pre-build the closer
+        branched on that last side's score (par -1 to +2), with the others' scores fixed."""
+        if len(r.sides) < 2 or r.ended or r.seq < r.holes or self._closer_branches \
+                or (self._closer_task and not self._closer_task.done()):
+            return
+        if any(r.card_score(s, q) is None for s in r.sides for q in range(1, r.holes)):
+            return   # an earlier hole isn't scored yet: the closer's totals would be wrong
+        remaining = [s for s in r.sides if r.card_score(s, r.holes) is None]
+        par = r.par.get(r.holes) or self.current_par
+        if len(remaining) != 1 or not par:
+            return
+        fixed = {s.key: r.card_score(s, r.holes) for s in r.sides if s is not remaining[0]}
+        log.info("Closer: pre-building for %s's finish on the last hole (others done: %s)",
+                 remaining[0].label, fixed)
+        self._kick_closer_branches(remaining[0].key, [p for p in (par - 1, par, par + 1, par + 2) if p > 0], fixed)
+
+    async def _prepare_closer_branches(self, side_key: str, scores: list[int], fixed: dict[str, int]) -> None:
         r = self.round
         if not r or r.ended or not self.cfg.commentary.closer or not scores:
             return
@@ -1330,7 +1353,7 @@ class Engine:
             voiced = [await self.speech.prepare_exchange(l) for l in written.values()]
         branches: dict[int, tuple] = {k: v for k, v in zip(written, voiced) if v[0]}
         if not r.ended and branches:
-            self._closer_branches = {"side": side_key, "by_score": branches}
+            self._closer_branches = {"side": side_key, "by_score": branches, "fixed": fixed}
             log.info("Closer: pre-voiced branches for %s (%s)", sorted(branches), side.label)
 
     def _play_prepared_closer(self, final_strokes: int | None, side_key: str) -> bool:
@@ -3241,6 +3264,19 @@ class Engine:
                 r.picked_up.add((row[1].player, row[1].hole_seq))
                 log.info("%s picked up on hole %s of the round: scored at the maximum", row[1].player,
                          row[1].hole_seq)
+        # A scramble pick inside the gimme circle concedes the picked ball's stroke. Its player usually
+        # hit before a teammate, so that stroke's watch had already settled (as a miss) when GSPro
+        # picked it, and the team's conceded putt went unrecorded.
+        while self._pick_gimmes_seen < len(g.pick_gimmes):
+            idx, hole = g.pick_gimmes[self._pick_gimmes_seen]
+            self._pick_gimmes_seen += 1
+            if not r or r.format != "scramble":
+                continue
+            row = next((v for v in reversed(self._fire_rows.values())
+                        if v[2] == idx and v[3] == hole and not v[1].mulligan), None)
+            if row and row[0] is not None and row[1].round_id == r.id and row[1].outcome in (None, "missed"):
+                self._record_result(row[0], "conceded", f"[shot {row[0]}] (scramble pick)",
+                                    putt=row[1].shot.is_putt, rec=row[1])
 
     def _record_result(self, shot_id: int | None, outcome: str, tag: str, putt: bool,
                        rec: ShotRecord | None = None) -> None:
@@ -3248,11 +3284,14 @@ class Engine:
         any stroke that ended inside the gimme circle also gets a row for the conceded putt GSPro
         counts but nobody hits, so putting stats (putts per hole, three-putts) see every putt on the
         card. A full shot that ended inside the circle finished on the green, whatever the HUD read."""
+        if shot_id in self._conceded_ids:
+            return   # a scramble pick already conceded it; a later watch can't undo or repeat that
         if rec is not None:
             rec.outcome = outcome
         if putt or outcome == "holed":
             self.store.set_shot_result(shot_id, outcome=outcome)
         if outcome == "conceded" and shot_id is not None:
+            self._conceded_ids.add(shot_id)
             self.store.record_gimme(shot_id)
             log.info("%s conceded putt recorded", tag)
             if not putt:
@@ -4443,6 +4482,8 @@ class Engine:
             log.info("Scorecard didn't match the round's players (%s): rows %s", list(r.roster), list(event.card.scores))
             return
         log.info("Round %s scorecard: %s", r.id, {g: dict(sorted(v.items())) for g, v in r.card_scores.items()})
+        if self.commentary_on and self.cfg.commentary.closer:
+            self._kick_group_closer(r)
         if self.cfg.commentary.segments_on_hole_change and self.state.current_hole \
                 and self._wrapped_hole != self.state.current_hole:
             # In a group, the moment the second-to-last side holes out (one side left to putt), pre-
@@ -4569,16 +4610,20 @@ class Engine:
                  + self._league_facts(r, closing=True))
         if not self.cfg.commentary.closer:
             return
-        # A closer pre-built on the last hole plays instantly when its branch matches the actual final
-        # score (solo rounds); any mismatch or absence falls through to the on-demand closer below.
-        if len(r.sides) == 1 and self._closer_branches:
-            side = r.sides[0]
+        # A closer pre-built on the last hole plays instantly when its branch matches the deciding side's
+        # actual final score and every other side finished as it was written; any mismatch or absence
+        # falls through to the on-demand closer below.
+        cb = self._closer_branches
+        side = next((s for s in r.sides if cb and s.key == cb["side"]), None)
+        if side is not None and side.key in stats and all(
+                stats[k].scores.get(r.holes) == v for k, v in cb.get("fixed", {}).items() if k in stats):
             # The last hole's prepared wrap fires just before this with no yield between them; let it
             # finish airing (bounded) before the closer, so the sign-off follows the wrap instead of
             # its say_prepared_sequence interrupt cutting the wrap off mid-exchange.
             await self._drain_speech(self.cfg.commentary.wrap_wait_seconds + 20)
             if self._play_prepared_closer(stats[side.key].scores.get(r.holes), side.key):
                 return
+        self._closer_branches = None
         user, facts_text = closer_prompt(facts=facts, recent_lines=self.state.recent_lines)
         # r.ended is set above, so the `system` property would pick practice; pass the round's own
         # variant so a league round's sign-off keeps its stakes framing.

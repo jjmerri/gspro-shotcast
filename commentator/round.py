@@ -310,11 +310,21 @@ class Round:
                 self.par[seq] = card.par[hole]
             if hole in card.index:
                 self.index[seq] = card.index[hole]
+        self._trim_to_holes()
         self._allocate_hole_strokes()
+
+    def _trim_to_holes(self) -> None:
+        # A card first applied for 18 holes from hole 1, then cut to a 3-hole round from 16, left
+        # seqs 4-18 behind, which were stored as par for "holes 19-33".
+        for seq in [q for q in self.par if not 1 <= q <= self.holes]:
+            del self.par[seq]
+        for seq in [q for q in self.index if not 1 <= q <= self.holes]:
+            del self.index[seq]
 
     def set_holes(self, holes: int) -> None:
         """Correct the round's length (the configured count is a guess until GSPro says otherwise)."""
         self.holes = holes
+        self._trim_to_holes()
         if self.course_card:
             self.apply_course_card(self.course_card)
         elif self.week_card:
@@ -670,7 +680,7 @@ class Round:
         facts = []
         if not self.is_league:
             facts.append("This is a practice round, not a league match: no points, standings, handicap strokes "
-                         "or closest-to-the-pin tonight, just the golf. Say it's practice once, in passing, "
+                         "or closest-to-the-pin in this round, just the golf. Say it's practice once, in passing, "
                          "not repeatedly. League history and past results are still fair game for color.")
         if self.course:
             facts.append(f"Course: {self.course}.")
@@ -692,7 +702,7 @@ class Round:
         facts += self.format_facts()
         if self.is_league:
             facts.append("This is a handicap league: a round is judged on the net score (gross minus handicap "
-                         "strokes), so a big gross number can still be a good night.")
+                         "strokes), so a big gross number can still be a good round.")
         for side in self.sides:
             line = f"Playing: {self.describe_side(side)}"
             if side.strokes is not None:
@@ -720,7 +730,7 @@ class Round:
         facts += self._team_facts(all_stats)
         for seq, results in sorted(self.ctp_results.items()):
             who, distance = min(results.items(), key=lambda kv: to_yards(kv[1]) or 999)
-            fact = f"Closest to the pin tonight on {self.hole_name(seq)}: {who}, {distance} from the hole"
+            fact = f"Closest to the pin today on {self.hole_name(seq)}: {who}, {distance} from the hole"
             mine = to_yards(distance)
             if week_ctp is None or mine is None:
                 facts.append(fact + " (it's up against the rest of the league's tee shots this week).")
@@ -798,7 +808,7 @@ class Round:
                    else "right around" if diff <= 0.5 else "a little worse than" if diff < 2 else "well worse than")
         return (f"{side.label} plays off a {index:g} handicap index, which predicts about "
                 f"{to_par(round(expected))} over {self.holes} holes; {to_par(s.gross - s.par)} is {verdict} that, "
-                f"a gauge of form. There's no net score or match tonight, so don't announce one.")
+                f"a gauge of form. There's no net score or match in this round, so don't announce one.")
 
     def _side_facts(self, side: Side, s: SideStats, season: dict | None) -> list[str]:
         who = side.label
