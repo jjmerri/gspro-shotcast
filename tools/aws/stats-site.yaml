@@ -17,6 +17,19 @@ Parameters:
     AllowedPattern: "[A-Za-z0-9._~!@#%^*+=-]+"
     ConstraintDescription: 8+ characters; letters, digits and ._~!@#%^*+=- only.
     Description: Password for the stats page (shared with the league).
+  DomainName:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional custom domain (e.g. thegolfshed.app). Needs CertificateArn. Every other host, the
+      www name and the cloudfront.net address included, redirects to it.
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: ACM certificate in us-east-1 covering DomainName and www.DomainName.
+
+Conditions:
+  HasDomain: !Not [!Equals [!Ref DomainName, ""]]
 
 Resources:
   Bucket:
@@ -56,6 +69,15 @@ Resources:
       FunctionCode: !Sub
         - |
           function handler(event) {
+            var domain = "${Domain}";
+            var host = event.request.headers.host ? event.request.headers.host.value : "";
+            if (domain && host !== domain) {
+              return {
+                statusCode: 301,
+                statusDescription: "Moved Permanently",
+                headers: { location: { value: "https://" + domain + event.request.uri } }
+              };
+            }
             var auth = event.request.headers.authorization;
             if (auth && auth.value === "Basic ${Token}") {
               return event.request;
@@ -68,6 +90,7 @@ Resources:
           }
         - Token: !Base64
             Fn::Sub: "${SiteUser}:${SitePassword}"
+          Domain: !Ref DomainName
 
   Distribution:
     Type: AWS::CloudFront::Distribution
@@ -78,6 +101,16 @@ Resources:
         DefaultRootObject: index.html
         HttpVersion: http2and3
         PriceClass: PriceClass_100
+        Aliases: !If
+          - HasDomain
+          - [!Ref DomainName, !Sub "www.${DomainName}"]
+          - !Ref AWS::NoValue
+        ViewerCertificate: !If
+          - HasDomain
+          - AcmCertificateArn: !Ref CertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - !Ref AWS::NoValue
         Origins:
           - Id: site
             DomainName: !GetAtt Bucket.RegionalDomainName
@@ -132,7 +165,13 @@ Resources:
 Outputs:
   Url:
     Description: The stats page
-    Value: !Sub "https://${Distribution.DomainName}/"
+    Value: !If
+      - HasDomain
+      - !Sub "https://${DomainName}/"
+      - !Sub "https://${Distribution.DomainName}/"
+  DistributionDomain:
+    Description: "With DomainName: the CNAME target for the domain and www (DNS only, not proxied)"
+    Value: !GetAtt Distribution.DomainName
   BucketName:
     Description: "config.yaml: publish.bucket"
     Value: !Ref Bucket

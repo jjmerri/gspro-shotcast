@@ -245,6 +245,23 @@ it never holds up the next round. A failed upload
 is in the log and, with health checks on, raised as a health warning (a phone push too, if
 [phone pushes](setup.md#phone-pushes) are set up). Replays never publish.
 
+**Your own domain (optional).** Request a certificate for the domain and its `www` name in
+`us-east-1` (CloudFront only uses certificates from there) and add its validation records at your
+DNS host:
+
+```sh
+aws acm request-certificate --region us-east-1 --domain-name example.com \
+  --subject-alternative-names www.example.com --validation-method DNS
+aws acm describe-certificate --region us-east-1 --certificate-arn <arn> \
+  --query "Certificate.DomainValidationOptions[].ResourceRecord"
+```
+
+Once it shows `ISSUED`, run the `deploy` command again with
+`DomainName=example.com CertificateArn=<arn>`. Then point `example.com` and `www.example.com` with a
+CNAME at the `DistributionDomain` output. On Cloudflare, set both records to DNS only (grey cloud),
+not proxied. Every other address, `www` and the `cloudfront.net` one included, redirects to the
+domain.
+
 To change the password, run the `deploy` command again with the new one. To take it all down, empty
 the bucket (`aws s3 rm s3://<BucketName> --recursive`), delete the upload user's access key, and
 `aws cloudformation delete-stack --stack-name shotcast-stats`.
