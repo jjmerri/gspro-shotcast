@@ -455,7 +455,8 @@ class NewsConfig(BaseModel):
     # start, then held for a quiet moment, or for the kind of shot its story is about.
     per_nine: int = 2
     # Chance, on an ordinary shot the booth would otherwise skip, of playing an aside that isn't
-    # waiting on a particular kind of shot (one every three holes at most either way).
+    # waiting on a particular kind of shot (one every three holes at most either way). Shared by every
+    # aside: news, live scores and course trivia are one bucket, picked from at random.
     banter_rate: float = 0.35
 
 
@@ -499,8 +500,6 @@ class TriviaConfig(BaseModel):
     per_round: int = 2
     # GSPro course name -> Wikipedia article title, for courses the search can't place on its own.
     pages: dict[str, str] = Field(default_factory=lambda: {"The Ancient Course": "Old Course at St Andrews"})
-    # Chance, on an ordinary shot, of playing one that isn't waiting on its hole.
-    banter_rate: float = 0.35
 
 
 class MinimapConfig(BaseModel):

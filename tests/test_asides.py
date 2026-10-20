@@ -75,30 +75,41 @@ def _bit(kind, hole=None, expires=None, trigger=None):
                         hole=hole, expires=expires, topic=kind)
 
 
-def test_a_live_score_goes_first_and_the_holes_before_it_are_kept_clear(tmp_path):
+def test_news_trivia_and_scores_are_one_bucket_picked_at_random(tmp_path):
     e = _engine(tmp_path)
     e.rng = random.Random(0)
-    e.cfg.news.banter_rate = e.cfg.trivia.banter_rate = 1.0
+    e.cfg.news.banter_rate = 1.0
     e.round = SimpleNamespace(holes=9, seq=3, ended=False, is_league=False)
     routine = {"tags": [], "routine": True}
-    news = _bit("news")
-    e._news_bits = [news]
-    e._score_holes = [5]
-    assert e._news_pick(routine) is None                          # hole 5's score check-in is coming
-    e._score_holes = []
-    trivia = _bit("trivia")
-    e._news_bits = [news, trivia]
-    assert e._news_pick(routine) == (trivia, False)                # the course before the news
-    score = _bit("score", expires=time.monotonic() + 60)
+    news, trivia, score = _bit("news"), _bit("trivia"), _bit("score", expires=time.monotonic() + 60)
     e._news_bits = [news, trivia, score]
-    assert e._news_pick(routine) == (score, False)
+    picks = {e._news_pick(routine)[0].kind for _ in range(60)}
+    assert picks == {"news", "trivia", "score"}
     assert e._news_pick({"tags": [], "routine": False}) is None    # never over a notable shot
+    e.cfg.news.banter_rate = 0.0
+    assert e._news_pick(routine) is None                           # the one dice roll covers them all
+    e.cfg.news.banter_rate = 1.0
     e._news_bits = [_bit("score", expires=time.monotonic() - 1)]
     assert e._news_pick(routine) is None and e._news_bits == []    # gone stale: dropped
 
 
+async def test_a_score_check_in_moves_past_a_recent_aside(tmp_path):
+    e = _engine(tmp_path)
+    e.scores = _Scores([])
+    r = SimpleNamespace(holes=9, seq=4, ended=False, is_league=False)
+    e.round, e._score_holes, e._news_aired = r, [4], [3]
+    e._score_hole_started(r)
+    assert e._score_holes == [6] and not e._aside_tasks           # written when it can actually play
+    r.seq = 6
+    e._score_hole_started(r)
+    assert e._score_holes == [] and e._aside_tasks
+    for t in list(e._aside_tasks):
+        await t
+
+
 def test_a_story_about_one_hole_plays_on_that_hole_even_late(tmp_path):
     e = _engine(tmp_path)
+    e.cfg.news.banter_rate = 1.0
     e.round = SimpleNamespace(holes=18, seq=17, ended=False, is_league=False)
     seventeen = _bit("trivia", hole=17)
     e._news_bits = [seventeen]
@@ -168,6 +179,7 @@ async def test_nothing_on_tonight_means_no_score_holes(tmp_path):
 async def test_course_trivia_is_written_from_the_article_and_remembers_what_aired(tmp_path):
     e = _engine(tmp_path)
     e.closer_llm = llm = _AsideLLM(hole=17)
+    e.cfg.news.banter_rate = 1.0
 
     class _Trivia:
         async def article(self, course):
@@ -195,3 +207,29 @@ def test_teams_can_be_named_and_listed_without_their_leagues():
     assert LiveScores([], ["Bruins", "Patriots"]).teams == {lg: ["Bruins", "Patriots"]
                                                            for lg in ("nhl", "nba", "mlb", "nfl")}
     assert LiveScores([], {"mls": ["Revolution"], "xfl": ["x"]}).teams == {"mls": ["Revolution"]}
+
+
+def test_a_playoff_names_its_winner_and_keeps_the_final_rounds_score():
+    def finisher(name, order, final, playoff):
+        return {"order": order, "athlete": {"displayName": name}, "score": "-11",
+                "linescores": [{"period": 4, "value": 73 if final == "+1" else 66, "displayValue": final},
+                               {"period": 5, "value": playoff, "displayValue": "E"}]}
+    body = {"events": [{"id": "1", "name": "Masters Tournament", "endDate": "2026-10-20T04:00Z",
+                        "competitions": [{"status": {"period": 5, "type": {"state": "post", "detail": "Final"}},
+                                          "competitors": [finisher("Justin Rose", 2, "-6", 5),
+                                                          finisher("Rory McIlroy", 1, "+1", 4)]}]}]}
+    [item] = parse_tour(body, "pga", NOW)
+    assert ("1. Rory McIlroy -11 (won the playoff, +1 in the final round); "
+            "2. Justin Rose -11 (lost in the playoff, -6 in the final round)") in item.fact
+
+
+async def test_an_expired_check_in_doesnt_block_an_update(tmp_path):
+    e = _engine(tmp_path)
+    e.closer_llm = _AsideLLM()
+    e.scores = _Scores([ScoreItem("nhl:5", "team", "in", "NHL: Bruins 2, Stars 1.", "2-1")])
+    r = SimpleNamespace(holes=9, seq=4, ended=False, is_league=False)
+    e.round = r
+    e._news_bits = [_bit("score", expires=time.monotonic() - 1)]
+    e._news_bits[0].topic = "nhl:5"
+    await e._prepare_score(r)
+    assert any(b.kind == "score" and b.expires > time.monotonic() for b in e._news_bits)

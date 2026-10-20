@@ -89,14 +89,22 @@ def parse_tour(body: dict, tour: str, now: datetime, top: int = 5) -> list[Score
         if state == "post" and (last_day is None or not 0 <= (now.date() - last_day).days <= 1):
             continue
         period = status.get("period") or 0
+        label = (status.get("type") or {}).get("detail") or ""
+        # A playoff is its own "period" of a hole or three: the day's numbers are the last full round's.
+        playoff = "playoff" in label.lower()
         rows = []
         for c in comp.get("competitors") or []:
             score = _to_par(c.get("score"))
             name = ((c.get("athlete") or {}).get("displayName") or "").strip()
             if score is None or not name:
                 continue
-            today = next((ls for ls in c.get("linescores") or [] if ls.get("period") == period), {})
-            holes = sum(1 for h in today.get("linescores") or [] if h.get("value") is not None)
+            rounds = c.get("linescores") or []
+            if state == "post" or playoff:
+                full = [ls for ls in rounds if (ls.get("value") or 0) >= 50]   # strokes for a whole round
+                today, holes = (full[-1], 18) if full else ({}, 0)
+            else:
+                today = next((ls for ls in rounds if ls.get("period") == period), {})
+                holes = sum(1 for h in today.get("linescores") or [] if h.get("value") is not None)
             rows.append((score, c.get("order") or 999, name, holes, today.get("displayValue")))
         if not rows:
             continue
@@ -106,18 +114,23 @@ def parse_tour(body: dict, tour: str, now: datetime, top: int = 5) -> list[Score
             if len(leaders) >= top and score != leaders[-1][0]:
                 break
             leaders.append((score, name, holes, day))
+        # Finished level at the top means a playoff, and ESPN's order has its winner first.
+        won_playoff = state == "post" and len(rows) > 1 and rows[0][0] == rows[1][0]
         parts = []
-        for score, name, holes, day in leaders:
+        for i, (score, name, holes, day) in enumerate(leaders):
             pos = 1 + sum(1 for r in rows if r[0] < score)
             tied = sum(1 for r in rows if r[0] == score) > 1
             detail = []
-            if state == "in" and 0 < holes < 18:
+            if won_playoff and score == rows[0][0]:
+                pos, tied = (1, False) if i == 0 else (2, sum(1 for r in rows if r[0] == score) > 2)
+                detail.append("won the playoff" if i == 0 else "lost in the playoff")
+            if state == "in" and not playoff and 0 < holes < 18:
                 detail.append(f"thru {holes}")
             if day and holes:
-                detail.append(f"{day} today" if state == "in" else f"{day} in the final round")
+                detail.append(f"{day} in the final round" if state == "post"
+                              else f"{day} in their last round" if playoff else f"{day} today")
             parts.append(f"{'T' if tied else ''}{pos}. {name} {_par_text(score)}"
                          + (f" ({', '.join(detail)})" if detail else ""))
-        label = (status.get("type") or {}).get("detail") or ""
         name = event.get("name") or "the tournament"
         if state == "in":
             head = f"{TOURS.get(tour, tour)}, live: the {name}, {label}." if label else \

@@ -58,15 +58,16 @@ on the first hole or the last two, and only after an ordinary shot, so the round
 - **Live scores** (`scores`): a tour leaderboard and your local teams. Which holes get a check-in is
   decided at round start, and only if something is live, just finished or on later tonight. The scores
   themselves are fetched as that hole starts and the check-in is written then, so it's minutes old on
-  air; one that hasn't found a quiet moment within `max_age_minutes` is dropped. The holes just before
-  a check-in are kept clear of other asides. A game the booth already mentioned comes back only as an
-  update, once its score has moved.
+  air; one that hasn't found a quiet moment within `max_age_minutes` is dropped. If another aside
+  aired too recently for it to play, the check-in moves to the first hole it can. A game the booth
+  already mentioned comes back only as an update, once its score has moved.
 - **Course trivia** (`trivia`): a bit of the real course's history from its Wikipedia article. A story
   about one hole (the Road Hole, the island green) waits for that hole, even late in the round. What
   aired is remembered, so a course played again gets different stories.
 - **Golf news** (`news`): a real current headline; see `news` in `config.example.yaml`.
 
-With more than one on, a live score goes first (it's going stale), then trivia, then news.
+With more than one on, they're one bucket: when an ordinary shot gets an aside (`news.banter_rate`),
+it's picked at random from those ready.
 
 ## Models and voices
 

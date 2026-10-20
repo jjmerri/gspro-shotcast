@@ -1051,6 +1051,10 @@ class Engine:
         if self.news is None and self.cfg.news.enabled:
             self.news = GolfNews(self.cfg.news.feeds, self.cfg.news.limit)
             asyncio.create_task(self._news_loop(), name="news")
+        w = self.cfg.weather
+        if self.weather is None and w.enabled and (w.location or (w.latitude is not None and w.longitude is not None)):
+            self.weather = Weather(w.latitude, w.longitude, w.place, location=w.location, country=w.country)
+            asyncio.create_task(self._weather_loop(), name="weather")
         if self.scores is None and self.cfg.scores.enabled:
             self.scores = LiveScores(self.cfg.scores.tours, self.cfg.scores.teams)
         if self.trivia is None and self.cfg.trivia.enabled:
@@ -1245,14 +1249,24 @@ class Engine:
 
     def _score_hole_started(self, r) -> None:
         due = [h for h in self._score_holes if h <= r.seq]
-        if due and self.scores is not None:
-            self._score_holes = [h for h in self._score_holes if h > r.seq]
-            self._aside_task(self._prepare_score(r), "scores-prep")
+        if not due or self.scores is None:
+            return
+        self._score_holes = [h for h in self._score_holes if h > r.seq]
+        # An aside aired too recently for this one to play on this hole: move it to the first hole it
+        # can, rather than write up a score that will go stale waiting.
+        if self._news_aired and r.seq - self._news_aired[-1] < 3:
+            later = self._news_aired[-1] + 3
+            if later <= r.holes - 2 and later not in self._score_holes:
+                self._score_holes = sorted(self._score_holes + [later])
+                log.info("Scores: check-in moved to round hole %s (an aside just aired)", later)
+            return
+        self._aside_task(self._prepare_score(r), "scores-prep")
 
     async def _prepare_score(self, r) -> None:
         """Fetch the scores now, as the hole starts, and write and voice a check-in on the best one."""
         items = await self.scores.fetch()
-        pending = {b.topic for b in self._news_bits if b.kind == "score"}
+        now = time.monotonic()
+        pending = {b.topic for b in self._news_bits if b.kind == "score" and (b.expires or now + 1) > now}
         # Nothing already waiting to air, and nothing unchanged since it was last written up.
         fresh = [i for i in items if i.key not in pending and f"{i.key}@{i.version}" not in self._score_written]
         # Something the booth hasn't touched tonight first; then an update on one that's moved.
@@ -1276,45 +1290,33 @@ class Engine:
         log.info("Scores: check-in on %s ready for hole %s: %s", item.key, r.seq, item.fact)
 
     def _news_pick(self, moment: dict) -> tuple[PreparedNews, bool] | None:
-        """The aside to play after this shot, if any, and whether it airs on its trigger. At most one
-        every three holes, never on the first hole or the last two, and only on an ordinary shot
-        unless it was waiting for this kind of shot. A live score goes first (it's going stale), and
-        the holes before one are kept clear for it. A trivia story about one hole plays on that hole,
-        wherever it falls (two holes after the last aside at least). A held news aside waits for its
-        moment until the round is well along, then takes any quiet one."""
+        """The aside to play after this shot, if any, and whether it airs on its trigger. News, trivia
+        and live scores are one bucket: on an ordinary shot, one picked at random from those ready. At
+        most one every three holes, never on the first hole or the last two. A news aside held for a
+        kind of shot plays on that shot, and waits for it until the round is well along. A trivia
+        story about one hole is only ready on that hole, wherever it falls (two holes after the last
+        aside at least)."""
         r = self.round
         if not self._news_bits or r is None or r.ended or not r.seq:
             return None
         now = time.monotonic()
         self._news_bits = [b for b in self._news_bits if b.expires is None or b.expires > now]
         gap = r.seq - self._news_aired[-1] if self._news_aired else r.seq + 99
-        routine = moment["routine"]
-        if routine and gap >= 2:
-            for bit in self._news_bits:
-                if bit.hole is not None and bit.hole == self.hole_number:
-                    return bit, False
-        if r.seq < 2 or r.holes - r.seq < 2 or gap < 3:
-            return None
-        if routine:
-            for bit in self._news_bits:
-                if bit.kind == "score":
-                    return bit, False
-        if any(0 <= h - r.seq <= 2 for h in self._score_holes):
-            return None
+        open_hole = r.seq >= 2 and r.holes - r.seq >= 2 and gap >= 3
         tags = set(moment["tags"])
-        for bit in self._news_bits:
-            if bit.trigger and tags & NEWS_TRIGGER_TAGS[bit.trigger]:
-                return bit, True
-        if not routine:
+        if open_hole:
+            for bit in self._news_bits:
+                if bit.trigger and tags & NEWS_TRIGGER_TAGS[bit.trigger]:
+                    return bit, True
+        if not moment["routine"]:
             return None
         late = r.seq >= -(-r.holes * 3 // 5)
-        ready = [b for b in self._news_bits if b.hole is None and b.kind != "score" and (b.trigger is None or late)]
-        # Trivia before news: it's about where they are tonight.
-        for kind, rate in (("trivia", self.cfg.trivia.banter_rate), ("news", self.cfg.news.banter_rate)):
-            bit = next((b for b in ready if b.kind == kind), None)
-            if bit is not None and self.rng.random() <= rate:
-                return bit, False
-        return None
+        pool = [b for b in self._news_bits
+                if (b.hole is not None and b.hole == self.hole_number and gap >= 2)
+                or (b.hole is None and open_hole and (b.trigger is None or late))]
+        if not pool or self.rng.random() > self.cfg.news.banter_rate:
+            return None
+        return self.rng.choice(pool), False
 
     async def _news_after_shot(self, moment: dict) -> bool:
         """Play a prepared aside once this shot's call is done, if one suits the moment. Returns

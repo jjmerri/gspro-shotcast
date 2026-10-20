@@ -52,3 +52,30 @@ def test_a_town_or_postal_code_is_enough_to_turn_the_weather_on(tmp_path):
                  speech=SpeechQueue(cfg, ConsoleTTS()))
     assert eng.weather is not None and eng.weather.location == "03290" and eng.weather.country == "US"
     assert eng.weather.latitude is None          # looked up on the first refresh
+
+
+async def test_the_weather_starts_when_a_recording_booth_goes_on_air(tmp_path):
+    from commentator.config import Config
+    from commentator.engine import Engine
+    from commentator.speech import SpeechQueue
+    from commentator.tts.console_tts import ConsoleTTS
+    from tests.test_core import FakeLLM
+    from tests.test_round import LEAGUE
+
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.commentary.enabled = False
+    cfg.weather.enabled, cfg.weather.latitude, cfg.weather.longitude = True, 43.1, -71.1
+    llm = FakeLLM(cfg.llm.live)
+    eng = Engine(cfg=cfg, league=LEAGUE, source=None, live_llm=llm, segment_llm=llm,
+                 speech=SpeechQueue(cfg, ConsoleTTS()))
+    assert eng.weather is None
+
+    async def no_fetch(self):
+        return None
+    import commentator.weather as wmod
+    orig, wmod.Weather.refresh = wmod.Weather.refresh, no_fetch
+    try:
+        eng.set_commentary(True)
+        assert eng.weather is not None and eng.weather.latitude == 43.1
+    finally:
+        wmod.Weather.refresh = orig
