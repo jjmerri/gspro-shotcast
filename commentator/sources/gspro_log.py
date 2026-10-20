@@ -247,6 +247,16 @@ class GsproState:
     _undo: dict = field(default_factory=dict)         # index -> (hole, penalties then, fire taken back)
     _picked: set = field(default_factory=set)          # (index, hole) capped at the maximum
     team_scores: bool = False   # GSPro copied a score between teammates this round (a shared-ball format)
+    # Finished holes, (index, hole) -> GSPro's final score, the same number its scorecard shows. A hole
+    # ends on a ball holed or conceded: the score line that follows ("Hole out" names no player, so the
+    # next line, the shooter's; a gimmie is the active player's) carries the final count. A picked-up
+    # hole is final once the player has moved on to another, or the round is over. A stroke taken back
+    # reopens the hole. Only the finisher's own index is recorded: in a scramble the round takes the
+    # side's score from whichever partner has one (a shamble's partners finish on their own balls).
+    hole_scores: dict = field(default_factory=dict)
+    last_hole_scores: dict = field(default_factory=dict)   # the last ended round's, kept past its reset
+    _end_next: bool = False
+    _end_for: set = field(default_factory=set)
     # A scramble's picks. GSPro logs "Selecting shot for player: N" once everyone has hit (and on other
     # rounds too, so alone it proves nothing), then copies that ball onto each teammate. `pick` is the
     # chosen ball's (index, hole), `teammates` the pairs a copy linked, and `dropped_by` counts, per
@@ -287,6 +297,8 @@ class GsproState:
         elif ev.kind == "end_round":
             self.mode = "menu"
             self.round_ends += 1
+            self._finish_picked()
+            self.last_hole_scores = dict(self.hole_scores)   # for the booth to settle the round with
             self._reset_round()             # the next round, even on this same course, starts clean
             self.shots_since_course, self.first_hole, self.starts_late = 0, None, False
         elif ev.kind == "skip_hole":
@@ -294,6 +306,7 @@ class GsproState:
                 self.starts_late = True
         elif ev.kind == "round_complete":
             self.round_completes += 1
+            self._finish_picked()
         elif ev.kind == "layout":
             self.pars = ev.pars or []
             if ev.active:
@@ -341,10 +354,12 @@ class GsproState:
         elif ev.kind == "gimmie":
             self.gimmies += 1
             if self.active_player is not None:
+                self._end_for.add(self.active_player)
                 self._gimmie_since_state[self.active_player] = True
                 self.gimmies_by[self.active_player] = self.gimmies_by.get(self.active_player, 0) + 1
         elif ev.kind == "hole_out":
             self.hole_outs += 1
+            self._end_next = True
             if self._unowned_fire is not None:
                 self._unowned_outs += 1    # the shooter's score line, next, says whose ball dropped
             elif self.active_player is not None:
@@ -368,8 +383,9 @@ class GsproState:
         for d in (self.players_seen, self.lie_by, self.to_pin_by, self.gimme_by, self.hole_by,
                   self.hole_outs_by, self.gimmies_by, self._score, self._penalties,
                   self._shot_since_state, self._gimmie_since_state, self._wet_since_shot, self._wet_at,
-                  self._undo, self._picked, self.dropped_by):
+                  self._undo, self._picked, self.dropped_by, self.hole_scores, self._end_for):
             d.clear()
+        self._end_next = False
         self.teammates.clear()
         self.selected = self.pick = None
         self._pending_lie = None
@@ -425,6 +441,9 @@ class GsproState:
         if ev.player in self.hole_by and self.hole_by[ev.player] != ev.hole:
             self._wet_since_shot.pop(ev.player, None)
             self._wet_at.pop(ev.player, None)
+            left = (ev.player, self.hole_by[ev.player])
+            if left in self._picked and left in self._score:
+                self._finish(left, self._score[left])
         self.hole_by[ev.player] = ev.hole
         self._attach_lie(ev.player)
         if self._unowned_fire is not None:
@@ -452,6 +471,7 @@ class GsproState:
             fires = self._fires_by.get(ev.player) or [None]
             self._undo[ev.player] = (ev.hole, self._penalties.get(key, 0), prev - ev.score, fires[-1])
             self._score[key] = ev.score
+            self.hole_scores.pop(key, None)
         elif undo and prev is not None and ev.score > prev and not shot:
             # The capped score written straight in after every stroke was taken back: a pick-up. Not a
             # penalty, and neither is the conceding stroke GSPro adds next.
@@ -474,8 +494,10 @@ class GsproState:
             # A shot was fired but the score didn't move: GSPro took the previous one back (a mulligan
             # logged with no negative line), and this shot replaced it.
             fires = self._fires_by.get(ev.player) or []
-            if len(fires) >= 2 and not self.team_scores:
-                self.mulligan_fires.setdefault(fires[-2], "repeat")
+            if not self.team_scores:
+                if len(fires) >= 2:
+                    self.mulligan_fires.setdefault(fires[-2], "repeat")
+                self.hole_scores.pop(key, None)   # a holed shot replayed: settled again if this one ends it
         elif prev is not None and ev.score > prev:
             # A score increase with no shot fired and no gimmie since THIS player's last score line is a
             # penalty stroke (a ball in the water or out of bounds, scored before the drop is played).
@@ -488,12 +510,27 @@ class GsproState:
         elif prev is not None and ev.score < prev:
             self._penalties.pop(key, None)   # the hole is being replayed (a round restart on this course)
             self._score[key] = ev.score
+            self.hole_scores.pop(key, None)
             self._wet_since_shot.pop(ev.player, None)   # the replayed hole starts dry
             self._wet_at.pop(ev.player, None)
         else:
             self._score[key] = max(prev or 0, ev.score)
         self._shot_since_state[ev.player] = False
         self._gimmie_since_state[ev.player] = False
+        if self._end_next or ev.player in self._end_for:
+            self._end_next = False
+            self._end_for.discard(ev.player)
+            if key not in self._picked:
+                self._finish(key, self._score[key])
+
+    def _finish(self, key: tuple, score: int) -> None:
+        self.hole_scores[key] = score
+
+    def _finish_picked(self) -> None:
+        """Settle any picked-up hole still open: the round is over, so no move to another hole will."""
+        for key in self._picked:
+            if key not in self.hole_scores and key in self._score:
+                self._finish(key, self._score[key])
 
     def strokes_before(self, player: int | None = None) -> int:
         """Strokes already taken on the hole by this player (penalties included). Uses the player's own
@@ -607,6 +644,8 @@ class GsproLogFollower:
         s = self.state
         s.mode, s.shots_since_course, s.first_hole = past.mode, past.shots_since_course, past.first_hole
         s.starts_late = past.starts_late
+        s.hole_scores = dict(past.hole_scores)   # holes already finished in a round being joined
+        s._score.update({k: past._score[k] for k in past.hole_scores if k in past._score})   # so they can reopen
         s.current_hole = past.current_hole if past.shots_since_course else None
         s.version, s.kinds, s.unparsed = past.version, Counter(past.kinds), list(past.unparsed)
         self.primed = True

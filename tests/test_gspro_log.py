@@ -511,3 +511,86 @@ def test_a_solo_select_line_is_not_a_scramble():
     s = _replay("Selecting shot for player: 0\nLogging tdist: 100 and ActiveGameGimmieDistance: 1.22\n"
                 + FIRE + _line(0, 1, 0))
     assert not s.team_scores and s.pick is None and not s.dropped_by
+
+
+def _round_scores(path):
+    """Each ended round's finished-hole scores, (course, {(index, 1-based hole): strokes})."""
+    s, out = GsproState(), []
+    for ev in parse_events(open(path, errors="replace").read()):
+        s.apply(ev)
+        if ev.kind == "end_round":
+            out.append((s.course, {(i, h + 1): v for (i, h), v in s.last_hole_scores.items()}))
+    return out
+
+
+def test_finished_holes_are_scored_from_the_log_as_gspro_counts_them():
+    # Real rounds (trimmed to the lines the parser reads), checked against GSPro's own final cards.
+    # The scorecard OCR missed a cell on each of these: the conceded 6 on Riviera's 16 (and the
+    # picked-up 9 on 17), and the 6 on Cabot's 11.
+    riviera, pine, cabot = _round_scores("tests/data/gspro_log_hole_scores.txt")
+    assert riviera[0] == "riviera_gsp"
+    assert [riviera[1][(1, h)] for h in (16, 17, 18)] == [6, 9, 8]   # a gimmie, a pick-up, a gimmie
+    assert [riviera[1][(0, h)] for h in (16, 17, 18)] == [4, 6, 8]
+    # A scramble: the team score once the ball drops (not the teammate-check lines after it), on the
+    # index whose line followed; the round takes the side's score from either partner.
+    team = {h: v for (_, h), v in pine[1].items()}
+    assert sorted(team) == list(range(1, 10)) and len(pine[1]) == 9 and sum(team.values()) == 36
+    # Best ball, mulligans re-hit with the score line repeated.
+    assert [cabot[1][(0, h)] for h in range(10, 19)] == [4, 6, 3, 4, 4, 6, 4, 4, 9]
+    assert sum(v for (i, _), v in cabot[1].items() if i == 1) == 39
+
+
+def test_a_stroke_taken_back_reopens_a_finished_hole():
+    s = GsproState()
+    for ev in [LogEvent("state", player=0, hole=0, score=0, strokes=0), LogEvent("shot_fired"),
+               LogEvent("state", player=0, hole=0, score=1, strokes=1), LogEvent("shot_fired"),
+               LogEvent("hole_out"), LogEvent("state", player=0, hole=0, score=2, strokes=1)]:
+        s.apply(ev)
+    assert s.hole_scores == {(0, 0): 2}
+    s.apply(LogEvent("state", player=0, hole=0, score=1, strokes=-1))   # a mulligan of the holed putt
+    assert s.hole_scores == {}
+    for ev in [LogEvent("shot_fired"), LogEvent("state", player=0, hole=0, score=2, strokes=1),
+               LogEvent("gimmie"), LogEvent("state", player=0, hole=0, score=3, strokes=1)]:
+        s.apply(ev)
+    assert s.hole_scores == {(0, 0): 3}
+    s.apply(LogEvent("end_round"))
+    assert s.hole_scores == {} and s.last_hole_scores == {(0, 0): 3}
+
+
+def test_a_pick_up_on_the_last_hole_is_settled_when_the_round_completes():
+    s = GsproState()
+    for ev in [LogEvent("state", player=0, hole=8, score=0, strokes=0)] + [
+            e for n in range(1, 9) for e in (LogEvent("shot_fired"), LogEvent("state", player=0, hole=8, score=n, strokes=1))] + [
+            LogEvent("state", player=0, hole=8, score=0, strokes=-8), LogEvent("state", player=0, hole=8, score=8, strokes=8),
+            LogEvent("state", player=0, hole=8, score=9, strokes=1)]:
+        s.apply(ev)
+    assert s.picked_up(0, 8) and s.hole_scores == {}
+    s.apply(LogEvent("round_complete"))
+    assert s.hole_scores == {(0, 8): 9}
+
+
+def test_a_holed_shot_replayed_with_the_score_repeated_reopens_the_hole():
+    s = GsproState()
+    for ev in [LogEvent("state", player=0, hole=0, score=0, strokes=0), LogEvent("shot_fired"),
+               LogEvent("state", player=0, hole=0, score=1, strokes=1), LogEvent("shot_fired"),
+               LogEvent("hole_out"), LogEvent("state", player=0, hole=0, score=2, strokes=1),
+               LogEvent("shot_fired"), LogEvent("state", player=0, hole=0, score=2, strokes=1)]:
+        s.apply(ev)
+    assert s.hole_scores == {}
+
+
+def test_a_hole_finished_before_the_booth_started_can_still_reopen(tmp_path):
+    path = tmp_path / "output_log.txt"
+    path.write_text("Selected Course: x_gsp\nActivePlayer: 0  currentHole: 0  strokes: 0  Previous Score: 0\n"
+                    " * ------- Shot Fired! ------- *\nActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 0\n"
+                    " * ------- Shot Fired! ------- *\nHole out !!! \n"
+                    "ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 1\n")
+    f = GsproLogFollower(str(path))
+    f._prime()
+    assert f.state.hole_scores == {(0, 0): 2}
+    for ev in [LogEvent("shot_fired"), LogEvent("state", player=0, hole=0, score=2, strokes=1)]:
+        f.state.apply(ev)                                  # replayed with the score repeated
+    assert f.state.hole_scores == {}
+    f._prime()
+    f.state.apply(LogEvent("state", player=0, hole=0, score=1, strokes=-1))   # or taken back explicitly
+    assert f.state.hole_scores == {}

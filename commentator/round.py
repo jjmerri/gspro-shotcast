@@ -131,6 +131,9 @@ class Round:
         # The course's static card (par, stroke index per hole), read from GSPro's files; authoritative.
         self.course_card = None
         self.card_scores: dict[str, dict[int, int]] = {}  # GSPro name -> hole of the round -> strokes
+        # The same, from GSPro's log: its own count of each finished hole, which beats a screen read (a
+        # scorecard cell OCR can miss). The on-screen card fills any hole the log didn't settle.
+        self.log_scores: dict[str, dict[int, int]] = {}
         self.scorecard_seen = False
         self.ended = False
         # GSPro's log said every hole in the round is holed out ("Round Is Complete"). With the log
@@ -357,6 +360,10 @@ class Round:
                 seq = hole - self.start_hole + 1
                 if 1 <= seq <= self.holes:
                     self.card_scores.setdefault(g, {})[seq] = strokes
+                    logged = self.log_scores.get(g, {}).get(seq)
+                    if logged is not None and logged != strokes:
+                        log.warning("Round %s: the scorecard read %s on hole %s for %s, GSPro's log says %s; "
+                                    "keeping the log's", self.id, strokes, hole, g, logged)
         # The static course card is authoritative; the on-screen card only fills gaps.
         for seq in range(1, self.holes + 1):
             hole = self.hole_number(seq)
@@ -381,11 +388,39 @@ class Round:
                 continue
             side.hole_strokes = handicap.allocate(side.strokes, order)
 
+    def set_log_scores(self, gspro: str, scores: dict[int, int]) -> None:
+        """The holes GSPro's log has this player finished, by hole of the round: the whole set, so a hole
+        reopened (a holed putt taken back as a mulligan) drops out again."""
+        scores = {seq: v for seq, v in scores.items() if 1 <= seq <= self.holes}
+        had = self.log_scores.get(gspro, {})
+        if scores == had:
+            return
+        for seq in sorted(set(had) | set(scores)):
+            if seq not in scores:   # a card read of it is stale too, the partner's row in a shared ball
+                side = self.side_for(gspro) if self.format in TEAM_BALL else None
+                for g in (side.gspro if side else [gspro]):
+                    self.card_scores.get(g, {}).pop(seq, None)
+            if had.get(seq) != scores.get(seq):
+                log.info("Round %s: %s %s on %s (GSPro's log)", self.id, gspro,
+                         f"scored {scores[seq]}" if seq in scores else "reopened", self.hole_name(seq))
+        self.log_scores[gspro] = scores
+
+    def score_of(self, gspro: str, seq: int) -> int | None:
+        """One GSPro player's score on a hole of the round: GSPro's log, else the on-screen card."""
+        logged = self.log_scores.get(gspro, {}).get(seq)
+        return logged if logged is not None else self.card_scores.get(gspro, {}).get(seq)
+
+    def _score_source(self) -> str:
+        return "log" if self.log_scores else "scorecard" if self.scorecard_seen else "shots"
+
     def card_score(self, side: Side, seq: int) -> int | None:
-        values = [self.card_scores[g][seq] for g in side.gspro if seq in self.card_scores.get(g, {})]
-        if not values:
-            return None
-        return min(values) if self.format in TEAM_BALL else values[0]
+        # The log first across the whole side: in a scramble only the partner whose line followed the
+        # ball dropping has a logged score, and the other's card read mustn't undercut it.
+        for source in (self.log_scores, self.card_scores):
+            values = [source[g][seq] for g in side.gspro if seq in source.get(g, {})]
+            if values:
+                return min(values) if self.format in TEAM_BALL else values[0]
+        return None
 
     def was_picked_up(self, names: list[str], seq: int) -> bool:
         return any((n, seq) in self.picked_up for n in names)
@@ -398,7 +433,7 @@ class Round:
     def side_stats(self, side: Side, records: list, final_override: int | None = None) -> SideStats:
         mine = [r for r in records if r.round_id == self.id and not r.mulligan
                 and (r.player in side.players or r.player in side.gspro)]
-        stats = SideStats(source="scorecard" if self.scorecard_seen else "shots")
+        stats = SideStats(source=self._score_source())
         fir, fir_tries, gir, gir_tries = 0, 0, 0, 0
         scr, scr_tries, sand, sand_tries = 0, 0, 0, 0
         for seq in range(1, (self.stats_through or self.holes) + 1):
@@ -408,8 +443,8 @@ class Round:
             green = [r for r in recs if r.lie_before == "green"]
             score = self.card_score(side, seq)
             picked = self.was_picked_up([*side.gspro, *side.players], seq)
-            if score is None and green and numbers:
-                score = numbers[-1]  # the last putt seen is taken as holed
+            if score is None:
+                score = _score_from_shots(recs, numbers, green)
             # The closer is pre-built before the final putt drops, branched by the score this side
             # might finish the last hole on; `final_override` supplies that hypothetical last-hole
             # score so the branch's whole-round totals are right for it.
@@ -533,7 +568,7 @@ class Round:
         gates all three to those formats; FIR (one's own tee shot) is genuine per-player in any format.
         The hole loop mirrors side_stats."""
         mine = [r for r in records if r.round_id == self.id and not r.mulligan and r.player == player]
-        stats = SideStats(source="scorecard" if self.scorecard_seen else "shots")
+        stats = SideStats(source=self._score_source())
         # card_scores is keyed by the raw GSPro name; ShotRecord.player is the ROSTER name (match_player),
         # or the raw GSPro text on a match miss. Map through self.roster {gspro: roster} to this player's
         # GSPro name(s), so the card row is actually found (g == player covers the match-miss fallback).
@@ -545,10 +580,12 @@ class Round:
             par = self.par.get(seq) or next((r.par for r in recs if r.par), None)
             numbers = sorted({r.shot_number for r in recs if r.shot_number})
             green = [r for r in recs if r.lie_before == "green"]
-            score = next((self.card_scores[g][seq] for g in gspro if seq in self.card_scores.get(g, {})), None)
+            score = next((v for g in gspro if (v := self.score_of(g, seq)) is not None), None)
+            if self.format in TEAM_BALL and (side := self.side_for(player)):
+                score = self.card_score(side, seq)   # a shared ball: everyone's score is the team's
             picked = self.was_picked_up([*gspro, player], seq)
-            if score is None and green and numbers:
-                score = numbers[-1]  # no card row: the last putt seen is taken as holed
+            if score is None:
+                score = _score_from_shots(recs, numbers, green)
             if score is not None:
                 stats.scores[seq] = score
                 stats.gross += score
@@ -902,6 +939,21 @@ def _drive_yards(rec) -> float | None:
         metric = (rec.hud.to_pin or "").endswith("metres")
         return float(value.group(0)) * (1.0936 if metric else 1)
     return _carry_yards(rec)
+
+
+def _score_from_shots(recs: list, numbers: list, green: list) -> int | None:
+    """A hole's score with no card or log number for it, from the strokes seen. The last one's outcome
+    (from GSPro's log) settles it: holed, or a conceded tap-in after it, which GSPro counts but nobody
+    hits. Without one, the last putt seen is taken as holed."""
+    if not numbers:
+        return None
+    last = max((r for r in recs if r.shot_number), key=lambda r: r.shot_number)
+    outcome = getattr(last, "outcome", None)
+    if outcome == "conceded":
+        return numbers[-1] + 1
+    if outcome == "holed" or green:
+        return numbers[-1]
+    return None
 
 
 def _green_reached_at(recs: list) -> int | None:

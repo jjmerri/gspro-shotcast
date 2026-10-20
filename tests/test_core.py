@@ -1932,7 +1932,8 @@ def test_a_long_putt_in_the_gimme_circle_takes_its_gimme_line():
     assert pick_reaction(lag, "green", 20.3, 19.0, holed=False, conceded=True) == ("gimme", "lag to tap-in")
     assert pick_reaction(lag, "green", 20.3, 19.0, holed=False)[0] == "short"   # a plain miss: not a gimme
     short = FlightPlan(player="Dan", to_pin="8 feet", is_putt=True, reactions={"short": "left short"})
-    assert pick_reaction(short, "green", 2.7, 2.5, conceded=True) == ("short", "left short")  # no gimme line
+    assert pick_reaction(short, "green", 2.7, 2.5, conceded=True) is None   # no gimme line: the live call
+    assert pick_reaction(short, "green", 2.7, 3.5, conceded=True) is None   # never "past, another putt"
     reacts = lambda **k: preshot_branch_schema(["pbp"], True, **k)["properties"]["reaction_lines"]["required"]
     assert "gimme" in reacts(lag=True) and "gimme" not in reacts()
     kw = dict(player="Dan", team=None, hole="Hole 1", facts=[], recent_lines=[], speaker="pbp", is_putt=True)

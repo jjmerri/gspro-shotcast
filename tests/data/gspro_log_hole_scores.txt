@@ -1,0 +1,774 @@
+Selected Course: riviera_gsp
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 15  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 27.48529 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 15  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 75.14535 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 15  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Logging tdist: 31.82379 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 15  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 26.59559 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 15  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 8.844168 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 15  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 4.250661 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 15  strokes: 1  Previous Score: 3
+Selecting shot for player: 1
+Logging tdist: 3.027257 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 15  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Logging tdist: 0.2777015 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 0  currentHole: 15  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 15  strokes: 1  Previous Score: 4
+Selecting shot for player: 1
+Logging tdist: 0.4180772 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 1  currentHole: 15  strokes: 1  Previous Score: 5
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 16  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 275.5565 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 16  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 398.2845 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 16  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Logging tdist: 326.7962 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 16  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 243.9722 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 16  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 162.7221 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 16  strokes: 1  Previous Score: 3
+Selecting shot for player: 1
+Logging tdist: 192.8889 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 16  strokes: 1  Previous Score: 4
+Selecting shot for player: 1
+Logging tdist: 129.362 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 16  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Logging tdist: 58.1368 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 16  strokes: 1  Previous Score: 3
+Selecting shot for player: 0
+Logging tdist: 5.018187 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 16  strokes: 1  Previous Score: 5
+Selecting shot for player: 1
+Logging tdist: 27.56457 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 16  strokes: 1  Previous Score: 6
+Selecting shot for player: 1
+Logging tdist: 12.91681 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 16  strokes: 1  Previous Score: 7
+Selecting shot for player: 1
+Logging tdist: 10.08294 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 16  strokes: -8  Previous Score: 8
+ActivePlayer: 1  currentHole: 16  strokes: 8  Previous Score: 0
+ActivePlayer: 1  currentHole: 16  strokes: 1  Previous Score: 8
+Selecting shot for player: 1
+Logging tdist: 5.618346 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 16  strokes: 1  Previous Score: 4
+Selecting shot for player: 0
+Logging tdist: 0.6669125 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 0  currentHole: 16  strokes: 1  Previous Score: 5
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 218.6202 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 17  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 191.7236 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 165.4588 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 17  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 228.5105 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 17  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Logging tdist: 127.9479 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Logging tdist: 91.54387 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 17  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 120.7968 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 17  strokes: 1  Previous Score: 3
+Selecting shot for player: 1
+Logging tdist: 77.78385 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 3
+Selecting shot for player: 0
+Logging tdist: 6.9595 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 17  strokes: 1  Previous Score: 4
+Selecting shot for player: 1
+Logging tdist: 41.207 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 17  strokes: 1  Previous Score: 5
+Selecting shot for player: 1
+Logging tdist: 4.557754 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 4
+Selecting shot for player: 0
+Logging tdist: 4.803777 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 5
+Selecting shot for player: 0
+Logging tdist: 1.972623 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 17  strokes: 1  Previous Score: 6
+Selecting shot for player: 1
+Logging tdist: 0.5738434 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 1  currentHole: 17  strokes: 1  Previous Score: 7
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 6
+Selecting shot for player: 0
+Logging tdist: 0.2770196 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 7
+Round Is Complete
+End Round Button Click
+Selected Course: pinevalley_v1_gsp
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 0  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 177.1715 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 0  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 20.28066 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 2
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 0  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 5.985785 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 0
+ * ------- Shot Fired! ------- *
+Hole out !!! 
+ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 3
+ActivePlayer: 1  currentHole: 0  strokes: 1  Previous Score: 3
+PlayerMadePuttHandleTeammateCheck: updating teammate score: 1  score: System.Int32[]
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 1  strokes: 1  Previous Score: 0
+ActivePlayer: 1  currentHole: 1  strokes: 1  Previous Score: 1
+ActivePlayer: 1  currentHole: 1  strokes: -2  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 304.1414 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 1  strokes: 1  Previous Score: 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 125.5532 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 1  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Logging tdist: 24.11432 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 2
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 1  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Logging tdist: 4.126524 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 1  strokes: 1  Previous Score: 3
+Selecting shot for player: 0
+Logging tdist: 0.2899483 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 4
+ActivePlayer: 1  currentHole: 1  strokes: 1  Previous Score: 4
+1333 SelectShot Updating teammate score: player 1  score: System.Int32[]
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 2  strokes: 1  Previous Score: 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 2  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 23.52859 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 2  strokes: 1  Previous Score: 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 2  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 1.426029 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 1
+ * ------- Shot Fired! ------- *
+Hole out !!! 
+ActivePlayer: 0  currentHole: 2  strokes: 1  Previous Score: 2
+ActivePlayer: 1  currentHole: 2  strokes: 1  Previous Score: 2
+PlayerMadePuttHandleTeammateCheck: updating teammate score: 1  score: System.Int32[]
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 3  strokes: 1  Previous Score: 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 3  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 256.9122 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 3  strokes: 1  Previous Score: 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 3  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 34.20048 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 3  strokes: 1  Previous Score: 2
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 3  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 13.00651 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 3  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 3  strokes: 1  Previous Score: 3
+Selecting shot for player: 1
+Logging tdist: 0.4016479 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 1  currentHole: 3  strokes: 1  Previous Score: 4
+ActivePlayer: 0  currentHole: 3  strokes: 1  Previous Score: 4
+1333 SelectShot Updating teammate score: player 0  score: System.Int32[]
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 4  strokes: 1  Previous Score: 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 4  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 26.45498 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 4  strokes: 1  Previous Score: 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 4  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Logging tdist: 5.627241 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 4  strokes: 1  Previous Score: 2
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 4  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 0.3623332 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 1  currentHole: 4  strokes: 1  Previous Score: 3
+ActivePlayer: 0  currentHole: 4  strokes: 1  Previous Score: 3
+1333 SelectShot Updating teammate score: player 0  score: System.Int32[]
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 5  strokes: 1  Previous Score: 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 5  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 134.8373 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 5  strokes: 1  Previous Score: 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 5  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Logging tdist: 5.237986 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 5  strokes: 1  Previous Score: 2
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 5  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 0.3764132 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 1  currentHole: 5  strokes: 1  Previous Score: 3
+ActivePlayer: 0  currentHole: 5  strokes: 1  Previous Score: 3
+1333 SelectShot Updating teammate score: player 0  score: System.Int32[]
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 6  strokes: 1  Previous Score: 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 6  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 273.9149 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 6  strokes: 1  Previous Score: 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 6  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 45.81425 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 6  strokes: 1  Previous Score: 2
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 6  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Logging tdist: 2.780612 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 6  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 6  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+Hole out !!! 
+ActivePlayer: 1  currentHole: 6  strokes: 1  Previous Score: 3
+ActivePlayer: 0  currentHole: 6  strokes: 1  Previous Score: 4
+PlayerMadePuttHandleTeammateCheck: updating teammate score: 0  score: System.Int32[]
+ActivePlayer: 1  currentHole: 6  strokes: 1  Previous Score: 4
+PlayerMadePuttHandleTeammateCheck: updating teammate score: 1  score: System.Int32[]
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 7  strokes: 1  Previous Score: 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 7  strokes: 1  Previous Score: 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 7  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 64.08655 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 7  strokes: 1  Previous Score: 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 7  strokes: 1  Previous Score: 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 7  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 5.036264 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 7  strokes: 1  Previous Score: 2
+ * ------- Shot Fired! ------- *
+Hole out !!! 
+ActivePlayer: 1  currentHole: 7  strokes: 1  Previous Score: 2
+ActivePlayer: 0  currentHole: 7  strokes: 1  Previous Score: 3
+PlayerMadePuttHandleTeammateCheck: updating teammate score: 0  score: System.Int32[]
+ActivePlayer: 1  currentHole: 7  strokes: 1  Previous Score: 3
+PlayerMadePuttHandleTeammateCheck: updating teammate score: 1  score: System.Int32[]
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 8  strokes: 1  Previous Score: 0
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 8  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 127.668 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 8  strokes: 1  Previous Score: 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 8  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 3.059474 and ActiveGameGimmieDistance: 1.22
+Standard Teammate Result Copy
+1503 SelectShot Updating teammate score: player 1
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 8  strokes: 1  Previous Score: 2
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 8  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Logging tdist: 0.5444805 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 0  currentHole: 8  strokes: 1  Previous Score: 3
+ActivePlayer: 1  currentHole: 8  strokes: 1  Previous Score: 3
+1333 SelectShot Updating teammate score: player 1  score: System.Int32[]
+Round Is Complete
+End Round Button Click
+Selected Course: cabotcliffs_gsp
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 9  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 270.0949 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 9  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 287.8011 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 9  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Logging tdist: 145.4934 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 9  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 76.63725 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 9  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 5.453269 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 9  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Logging tdist: 3.951838 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 9  strokes: 1  Previous Score: 3
+Selecting shot for player: 1
+Logging tdist: 0.7144622 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 1  currentHole: 9  strokes: 1  Previous Score: 4
+ * ------- Shot Fired! ------- *
+Hole out !!! 
+ActivePlayer: 0  currentHole: 9  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 10  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 158.881 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 10  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 160.7393 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 10  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 190.6611 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 10  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 148.8186 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 10  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 76.72535 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 10  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Logging tdist: 22.93464 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 10  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Logging tdist: 13.92644 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 10  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 3.570434 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 10  strokes: 1  Previous Score: 3
+Selecting shot for player: 0
+Logging tdist: 3.435475 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 10  strokes: 1  Previous Score: 4
+Selecting shot for player: 0
+Logging tdist: 0.2386861 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 0  currentHole: 10  strokes: 1  Previous Score: 5
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 10  strokes: 1  Previous Score: 3
+Selecting shot for player: 1
+Logging tdist: 1.52567 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+Hole out !!! 
+ActivePlayer: 1  currentHole: 10  strokes: 1  Previous Score: 4
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 11  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 39.54296 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 11  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 65.27178 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 11  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 20.76572 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 11  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Logging tdist: 4.1303 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 11  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 1.461362 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 11  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 0.2777984 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 1  currentHole: 11  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+Hole out !!! 
+ActivePlayer: 0  currentHole: 11  strokes: 1  Previous Score: 2
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 12  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 77.82319 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 12  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 105.8008 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 12  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Logging tdist: 12.75209 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 12  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 7.713223 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 12  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 2.796135 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 12  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Logging tdist: 1.039463 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 0  currentHole: 12  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+Hole out !!! 
+ActivePlayer: 1  currentHole: 12  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 13  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 21.63079 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 13  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 2.352299 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 13  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 5.378042 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 13  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Logging tdist: 1.364954 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+Hole out !!! 
+ActivePlayer: 0  currentHole: 13  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 13  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Logging tdist: 0.6888269 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 1  currentHole: 13  strokes: 1  Previous Score: 2
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 14  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 271.5393 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 14  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 288.7243 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 14  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 231.1665 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 14  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Logging tdist: 91.96011 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 14  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 29.06961 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 14  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 3.744924 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 14  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Logging tdist: 1.502939 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 14  strokes: 1  Previous Score: 3
+Selecting shot for player: 1
+Logging tdist: 0.3146883 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 1  currentHole: 14  strokes: 1  Previous Score: 4
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 14  strokes: 1  Previous Score: 3
+Selecting shot for player: 0
+Logging tdist: 1.483199 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 14  strokes: 1  Previous Score: 4
+Selecting shot for player: 0
+Logging tdist: 0.873813 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 0  currentHole: 14  strokes: 1  Previous Score: 5
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 15  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 15.46142 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 15  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 11.16527 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 15  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Logging tdist: 2.321132 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 15  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 6.075122 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 15  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Logging tdist: 1.001405 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 0  currentHole: 15  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 15  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 0.5614017 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 1  currentHole: 15  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 16  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 84.46113 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 16  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 17.29301 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 16  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Logging tdist: 8.384015 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 16  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 3.633451 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 16  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 0.7691718 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 1  currentHole: 16  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 16  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Logging tdist: 1.007647 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 0  currentHole: 16  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 17  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Logging tdist: 222.1088 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 0
+ActivePlayer: 0  currentHole: 17  strokes: -1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 415.1978 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Logging tdist: 205.4454 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 17  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Logging tdist: 48.28029 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 204.4593 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 204.4683 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Logging tdist: 175.1287 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Logging tdist: 167.2302 and ActiveGameGimmieDistance: 1.22
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 4
+Selecting shot for player: 0
+Logging tdist: 56.88139 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 5
+Selecting shot for player: 0
+Logging tdist: 8.366606 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 17  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Logging tdist: 10.77084 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 1  currentHole: 17  strokes: 1  Previous Score: 3
+Selecting shot for player: 1
+Logging tdist: 1.785333 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+Hole out !!! 
+ActivePlayer: 1  currentHole: 17  strokes: 1  Previous Score: 4
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 6
+Selecting shot for player: 0
+Logging tdist: 1.668323 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 7
+Selecting shot for player: 0
+Logging tdist: 0.5285701 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 0  currentHole: 17  strokes: 1  Previous Score: 8
+Round Is Complete
+Round Is Complete
+Round Is Complete
+Round Is Complete
+End Round Button Click

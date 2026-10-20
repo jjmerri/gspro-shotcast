@@ -87,12 +87,14 @@ def pick_reaction(plan: FlightPlan, after_lie: str | None, start_yards: float | 
     call. Full shots key off the final lie. A putt is "holed" ONLY when GSPro's log or the hole-result
     banner said so (`holed` True); otherwise it's short or past by the roll, never a guessed make (a
     putt that stops a few feet short rolls nearly the full distance). A `conceded` putt (stopped in the
-    gimme circle) takes the "gimme" line when a long putt has one, else short/past like any miss."""
+    gimme circle) takes the "gimme" line when a long putt has one; with none it falls back too, since a
+    short or past line can say another putt is needed when the next one is conceded."""
     if plan.is_putt:
         if holed:
             outcome = "holed"
-        elif conceded and (gimme := plan.reactions.get("gimme")) and gimme.strip().lower() != "null":
-            return "gimme", gimme
+        elif conceded:
+            gimme = plan.reactions.get("gimme")
+            return ("gimme", gimme) if gimme and gimme.strip().lower() != "null" else None
         elif start_yards and roll_yards is not None:
             # Compare the roll to the distance to the hole: clearly further than the hole is past,
             # otherwise short.

@@ -47,9 +47,11 @@ file by hand.
   score line, the hole layout at "Round Is Complete").
 - **Par and stroke index** come from GSPro's own course files under `source.gspro_courses_dirs`,
   matched by name, so scoring never waits on OCR. Course altitude is in those files too.
-- **Scores** come from GSPro's between-hole scorecard (exact hole scores, which hole the round
-  started on), falling back to the last putt seen.
-- **Wrap-up.** When the scorecard shows every hole, or the last green goes quiet for
+- **Scores** come from GSPro's log: the score line after each ball holed or conceded is GSPro's
+  own count for the hole. Its between-hole scorecard fills any hole the log didn't settle (and
+  says which hole the round started on), then the strokes seen (the last putt holed, or one more
+  for a conceded tap-in).
+- **Wrap-up.** When every hole is scored and GSPro says the round is complete, or the last green goes quiet for
   `round_end_idle_seconds`, the booth talks through the round: net against handicap, fairways,
   greens in regulation, putts, penalties, and the team result.
 - **Formats** come from the league file `schedule` (today's entry) or `commentary.round_format`:

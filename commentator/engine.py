@@ -654,7 +654,7 @@ class Engine:
         so it's kicked off the moment the lie is known and runs while the slope (and, on the tee, the
         other players) are still being read, rather than after. The frame it sees is grabbed once."""
         if self._after_round(hud):
-            log.info("Setup ignored: round %s is over and this isn't a new tee (shot %s)",
+            log.info("Setup ignored: round %s is complete and this isn't a new tee (shot %s)",
                      self.round.id, hud.shot_number)
             return
         # The minimap read starts first so it runs during the HUD read below. It's cancelled for a putt.
@@ -713,10 +713,13 @@ class Engine:
         """The HUD still showing the finished round's last green: after the sign-off, GSPro's stale HUD
         read as a fresh setup and aired "a tap-in for par on eighteen" over the end of the show. Only a
         new opening tee (shot 1) counts once a round is over, for a couple of minutes or until GSPro
-        leaves the menus."""
+        leaves the menus. The same goes from the moment GSPro's log says every hole is holed out: the
+        sign-off can be a minute off, and a setup read meanwhile is the last green, not a shot to come."""
         r = self.round
-        if r is None or not r.ended or hud.shot_number == 1:
+        if r is None or hud.shot_number == 1:
             return False
+        if not r.ended:
+            return r.log_complete
         if self._log_rounds and self.gspro.mode == "menu":
             return True
         return time.monotonic() - self._round_ended_at < AFTER_ROUND_QUIET_SECONDS
@@ -813,6 +816,8 @@ class Engine:
             self._events.put_nowait(RoundEndEvent(reason="GSPro went to the range", abandoned=True))
         if live:
             self._apply_log_holes(r)
+            if not self._round_end_queued:   # once it's ending, End Round's reset mustn't wipe the scores
+                self._sync_log_scores(r)
         if g.round_completes != self._log_round_completes:
             self._log_round_completes = g.round_completes
             if live and not r.log_complete:
@@ -836,6 +841,19 @@ class Engine:
                     self._events.put_nowait(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
             # Back to the menus: a fresh tee is a new round, and the setup watcher takes over.
             self._holes_played, self._holes_played_at = 0, 0.0
+
+    def _sync_log_scores(self, r: Round) -> None:
+        """Copy each finished hole's score from GSPro's log into the round, where it beats the scorecard
+        read. Once End Round has reset the log state (and the booth hasn't acted on it yet), the ended
+        round's scores are the ones kept from before the reset."""
+        g = self.gspro
+        if r.start_hole_assumed:
+            return
+        scores = g.last_hole_scores if g.round_ends != self._log_round_ends else g.hole_scores
+        for name in r.roster:
+            idx = self._gspro_idx(name)
+            if idx is not None:   # the log's holes are 0-based
+                r.set_log_scores(name, {hole + 2 - r.start_hole: v for (i, hole), v in scores.items() if i == idx})
 
     def _apply_log_holes(self, r: Round) -> None:
         """Where the round starts and how long it is, from GSPro's log. The league schedule's start and
@@ -2832,6 +2850,9 @@ class Engine:
         # The HUD can't tell us whether a putt dropped, and "on the green" plus the roll length
         # just got misread as distance left. Pace, line and the starting distance are enough.
         result = [] if shot.is_putt else describe(hud, units)
+        if shot.is_putt and outcome == "conceded":
+            result = ["The putt didn't drop, but it stopped inside the gimme circle: the next one is conceded, "
+                      "so the hole is over. No more putting is needed."]
         if full_result == "holed":
             result = ["The ball went in the hole: holed out without a putt."]
         elif full_result == "conceded":

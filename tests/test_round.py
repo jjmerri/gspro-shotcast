@@ -2149,3 +2149,99 @@ def test_a_reaction_links_to_its_own_shot(tmp_path):
     e._shot_id = 99   # the next shot's handler has moved on
     e._write_transcript([Line(e.speakers[0], "Found the fairway.")], "shot", shot_id=7)
     assert [r[0] for r in e.store.db.execute("SELECT shot_id FROM lines")] == [7]
+
+
+def test_log_scores_beat_the_scorecard_read_which_fills_the_gaps(caplog):
+    r = Round(league=LEAGUE, gspro_players=["MikeD"], course="Pebble Beach", scheduled_format=None)
+    r.holes, r.start_hole, r.start_hole_assumed = 3, 1, False
+    r.par = {1: 4, 2: 4, 3: 4}
+    r.set_log_scores("MikeD", {1: 6, 9: 6})              # hole 9 is outside the round: ignored
+    assert not r.complete()
+    r.apply_scorecard(Scorecard(holes=[1, 2, 3], scores={"MikeD": {1: 5, 2: 4}}))
+    assert "the scorecard read 5 on hole 1" in caplog.text
+    side = r.sides[0]
+    assert [r.card_score(side, s) for s in (1, 2, 3)] == [6, 4, None]
+    r.set_log_scores("MikeD", {1: 6, 3: 4})
+    assert r.complete()
+    st = r.side_stats(side, [])
+    assert st.gross == 14 and st.source == "log"
+
+
+def test_a_hole_with_no_card_score_counts_the_conceded_tap_in():
+    r = Round(league=LEAGUE, gspro_players=["MikeD"], course="Pebble Beach", scheduled_format=None)
+    r.holes, r.par = 1, {1: 4}
+    a = rec("Mike", 1, 4, 1, "tee", None, club="DR", round_id=r.id)
+    b = rec("Mike", 1, 4, 2, None, None, round_id=r.id)
+    c = rec("Mike", 1, 4, 3, None, None, club="PT", round_id=r.id)
+    c.outcome = "conceded"                              # the lies weren't read (a lefty's flipped HUD)
+    assert r.side_stats(r.sides[0], [a, b, c]).scores == {1: 4}
+    c.outcome = "holed"
+    assert r.side_stats(r.sides[0], [a, b, c]).scores == {1: 3}
+    c.outcome = None                                    # no outcome and no green lie: unknown
+    assert r.side_stats(r.sides[0], [a, b, c]).scores == {}
+
+
+async def test_log_scores_end_a_complete_round_without_waiting_for_end_round(tmp_path):
+    from commentator.models import RoundStartEvent
+
+    e = _engine(tmp_path)
+    e.cfg.source.gspro_log_truth = True
+    e.current_par = 4
+    e.current_course = "Pebble Beach"
+    tee = Hud(player_text="Sarah E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards",
+              others=[OtherPlayer("MikeD", "400 yards", "E")])
+    await e.handle_round_start(RoundStartEvent(hud=tee))
+    r = e.round
+    r.set_holes(2)
+    g = e.gspro
+    g.first_hole = 0
+    g.hole_scores = {(0, 0): 5, (1, 0): 4, (0, 1): 3}
+    while not e._events.empty():
+        e._events.get_nowait()
+    e._check_log_round()
+    assert r.log_scores == {"Sarah": {1: 5, 2: 3}, "MikeD": {1: 4}}
+    g.hole_scores.pop((0, 1))                             # a mulligan of the holed putt reopens it
+    e._check_log_round()
+    assert r.log_scores["Sarah"] == {1: 5}
+    g.hole_scores[(0, 1)], g.hole_scores[(1, 1)] = 4, 6
+    g.round_completes += 1                                # "Round Is Complete": no End Round yet
+    e._check_log_round()
+    assert r.log_complete and r.complete()
+    assert e._events.get_nowait().reason == "final scorecard"
+    # The finished round's last green, read as a setup before the sign-off, isn't a shot to call.
+    assert e._after_round(Hud(shot_number=3)) and not e._after_round(Hud(shot_number=1))
+
+
+async def test_an_ended_rounds_log_scores_survive_the_end_round_reset(tmp_path):
+    from commentator.models import RoundStartEvent
+    from commentator.sources.gspro_log import LogEvent
+
+    e = _engine(tmp_path)
+    e.cfg.source.gspro_log_truth = True
+    e.current_par = 4
+    e.current_course = "Pebble Beach"
+    tee = Hud(player_text="Sarah E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards",
+              others=[OtherPlayer("MikeD", "400 yards", "E")])
+    await e.handle_round_start(RoundStartEvent(hud=tee))
+    g = e.gspro
+    g.first_hole = 0
+    e._check_log_round()
+    g.hole_scores = {(0, 0): 5}
+    g.apply(LogEvent("end_round"))                        # applied before the booth looked
+    assert g.hole_scores == {}
+    e._check_log_round()
+    e._check_log_round()                                  # polled again while the round end is handled
+    assert e.round.log_scores == {"Sarah": {1: 5}}
+
+
+def test_a_scramble_takes_the_logged_team_score_and_a_reopened_hole_forgets_its_card_read():
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="Pebble Beach", scheduled_format="scramble")
+    r.holes, r.start_hole, r.start_hole_assumed = 2, 1, False
+    side = r.side_for("Mike")
+    assert r.format == "scramble" and set(side.gspro) == {"MikeD", "Sarah"}
+    r.apply_scorecard(Scorecard(holes=[1, 2], scores={"MikeD": {1: 6, 2: 4}, "Sarah": {1: 5, 2: 4}}))
+    r.set_log_scores("MikeD", {1: 6, 2: 4})               # only the finisher's index is logged
+    assert r.card_score(side, 1) == 6                     # not the partner's lower card read
+    assert r.player_stats("Sarah", []).scores == {1: 6, 2: 4}   # each partner scores the team's
+    r.set_log_scores("MikeD", {1: 6})                     # hole 2's holed putt taken back
+    assert r.card_score(side, 2) is None and not r.complete()   # the partner's card row went with it
