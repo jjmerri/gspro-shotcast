@@ -33,11 +33,13 @@ from .prompts import (
     preshot_line_prompt, preshot_line_schema, preshot_hazard_prompt, preshot_hazard_schema,
     news_prompt, news_schema, preshot_branch_prompt, preshot_branch_schema,
     reaction_outcomes, retry_prompt, segment_prompt, shot_prompt, system_prompt,
-    wrap_recap_prompt, hole_intro_prompt,
+    wrap_recap_prompt, hole_intro_prompt, scores_prompt, trivia_prompt, trivia_schema,
 )
 from .board import Board, place
 from .history import History
 from .news import GolfNews
+from .scores import LiveScores
+from .trivia import CourseTrivia
 from .weather import Weather
 from .round import FORMAT_NAMES, TEAM_BALL, Round, normalize_format, to_par
 from .screen import Screen
@@ -175,6 +177,10 @@ class PreparedNews:
     audio: list
     tie: Line | None = None        # replaces lines[0] when it airs on its trigger
     tie_audio: object = None
+    kind: str = "news"             # "news", "trivia" (the course's history) or "score" (a live score)
+    hole: int | None = None        # a course hole number a trivia aside waits for
+    expires: float | None = None   # monotonic time a score aside goes stale and is dropped
+    topic: str = ""                # the course, or the score's event key
 
 
 # Shot tags that set off each news trigger.
@@ -353,13 +359,22 @@ class Engine:
         # Live golf headlines for occasional between-shots banter; None when the feature is off.
         self.news = GolfNews(cfg.news.feeds, cfg.news.limit) if cfg.news.enabled and self.commentary_on else None
         w = cfg.weather
-        self.weather = Weather(w.latitude, w.longitude, w.place) if (
-            w.enabled and self.commentary_on and w.latitude is not None and w.longitude is not None) else None
+        self.weather = Weather(w.latitude, w.longitude, w.place, location=w.location, country=w.country) if (
+            w.enabled and self.commentary_on
+            and (w.location or (w.latitude is not None and w.longitude is not None))) else None
         self._news_bits: list[PreparedNews] = []    # this round's asides, written and voiced at the start
         self._news_task: asyncio.Task | None = None
         self._news_aired: list[int] = []            # round hole seqs an aside played on
         self._news_used: set[str] = set()           # stories already used this session
         self._news_moment: dict | None = None       # the last shot, for the aside that may follow it
+        # Live scores and course trivia: more asides, sharing the news asides' slots and spacing.
+        self.scores = LiveScores(cfg.scores.tours, cfg.scores.teams) if cfg.scores.enabled and self.commentary_on \
+            else None
+        self.trivia = CourseTrivia(cfg.trivia.pages) if cfg.trivia.enabled and self.commentary_on else None
+        self._score_holes: list[int] = []           # round hole seqs a live score is written for as they start
+        self._score_said: dict[str, list[str]] = {}  # event key -> what the booth said about it, this session
+        self._score_written: set[str] = set()       # "key@version": scores already written up, this session
+        self._aside_tasks: set[asyncio.Task] = set()
         self.speakers = list(cfg.personas)
         self._persona_names = [p.name for p in cfg.personas.values()]  # for stripping leaked speaker labels
         self.schema = output_schema(self.speakers)
@@ -1008,7 +1023,7 @@ class Engine:
 
     async def _shot_then_news(self, event: ShotEvent) -> None:
         await self.handle_shot(event)
-        if self.news is not None and (m := self._news_moment) and m["seq"] == self._shot_seq:
+        if self._asides_on() and (m := self._news_moment) and m["seq"] == self._shot_seq:
             self._bg(self._news_after_shot(m))
 
     def _on_shot_task_done(self, task: asyncio.Task) -> None:
@@ -1036,6 +1051,10 @@ class Engine:
         if self.news is None and self.cfg.news.enabled:
             self.news = GolfNews(self.cfg.news.feeds, self.cfg.news.limit)
             asyncio.create_task(self._news_loop(), name="news")
+        if self.scores is None and self.cfg.scores.enabled:
+            self.scores = LiveScores(self.cfg.scores.tours, self.cfg.scores.teams)
+        if self.trivia is None and self.cfg.trivia.enabled:
+            self.trivia = CourseTrivia(self.cfg.trivia.pages)
 
     def _cancel_preshot(self) -> None:
         # Only the plan-building task. The model call it awaits is NOT cancelled here: the run loop
@@ -1094,12 +1113,11 @@ class Engine:
         log.info("News: %d of %d asides ready for this round: %s", len(self._news_bits), len(picks),
                  "; ".join(f"{b.title!r} ({b.trigger or 'any quiet moment'})" for b in self._news_bits))
 
-    async def _prepare_story(self, h, openings: list[str] = ()) -> PreparedNews | None:
-        user, facts_text = news_prompt(topic=h.as_fact(), openings=openings)
-        prompt, data, good = user, {}, []
+    async def _write_aside(self, label: str, user: str, facts_text: str, schema: dict) -> tuple[list[Line], dict]:
+        """A two-line exchange from the closer's model, checked against its facts; ([], {}) if none."""
+        prompt, data = user, {}
         for _ in range(2):
-            raw = await self._complete("news", self.closer_llm, prompt, [], schema=news_schema(self.speakers),
-                                       system=self.system)
+            raw = await self._complete("news", self.closer_llm, prompt, [], schema=schema, system=self.system)
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
@@ -1111,11 +1129,20 @@ class Engine:
             elif len(good[1].text.split()) < 6:
                 problems = problems + ["the reply must give a take of its own, in at least one full sentence"]
             if not problems:
-                break
+                return good, data
             self.stats["retries"] += 1
             prompt = retry_prompt(user, problems)
-        else:
-            log.info("News aside on %r dropped: no usable exchange (%s)", h.title, "; ".join(problems))
+        log.info("%s dropped: no usable exchange (%s)", label, "; ".join(problems))
+        return [], {}
+
+    def _aside_openings(self) -> list[str]:
+        return [b.lines[0].text for b in self._news_bits]
+
+    async def _prepare_story(self, h, openings: list[str] = ()) -> PreparedNews | None:
+        user, facts_text = news_prompt(topic=h.as_fact(), openings=openings)
+        good, data = await self._write_aside(f"News aside on {h.title!r}", user, facts_text,
+                                             news_schema(self.speakers))
+        if not good:
             return None
         trigger = data.get("trigger") if data.get("trigger") in NEWS_TRIGGERS else None
         tie = None
@@ -1135,24 +1162,157 @@ class Engine:
             trigger = None   # no bridge to play, so it airs on any quiet moment instead
         return PreparedNews(h.title, trigger, kept, audio, tie, tie_audio)
 
+    # ---- course trivia and live scores --------------------------------------------------
+
+    def _asides_on(self) -> bool:
+        return self.news is not None or self.scores is not None or self.trivia is not None
+
+    def _aside_task(self, coro, name: str) -> None:
+        task = asyncio.create_task(coro, name=name)
+        self._aside_tasks.add(task)
+        task.add_done_callback(lambda t: (self._aside_tasks.discard(t), t.cancelled() or t.exception()))
+
+    def _start_round_asides(self, r) -> None:
+        """Cancel the last round's trivia and score work, then start this round's."""
+        for task in list(self._aside_tasks):
+            task.cancel()
+        self._score_holes = []
+        if self.trivia is not None:
+            self._aside_task(self._prepare_trivia(r), "trivia-prep")
+        if self.scores is not None:
+            self._aside_task(self._plan_scores(r), "scores-plan")
+
+    async def _prepare_trivia(self, r) -> None:
+        """Write and voice this round's course-trivia asides up front, from the real course's article,
+        steering clear of what earlier rounds here already told."""
+        course = r.course or self.current_course
+        found = await self.trivia.article(course)
+        if not found or self.round is not r:
+            return
+        title, article = found
+        told = self.store.recent_asides("trivia", title)
+        made = 0
+        for _ in range(max(0, self.cfg.trivia.per_round)):
+            user, facts_text = trivia_prompt(course=course, title=title, article=article, told=told,
+                                             openings=self._aside_openings())
+            try:
+                good, data = await self._write_aside(f"Trivia on {title!r}", user, facts_text,
+                                                     trivia_schema(self.speakers))
+            except Exception as e:
+                log.warning("Trivia on %r failed: %r", title, e)
+                continue
+            if not good:
+                continue
+            told = told + [" ".join(l.text for l in good)]
+            kept, audio = await self.speech.prepare_exchange(good)
+            if len(kept) != 2 or self.round is not r:
+                continue
+            try:
+                hole = int(data.get("hole") or 0)
+            except (TypeError, ValueError):
+                hole = 0
+            self._news_bits.append(PreparedNews(title, None, kept, audio, kind="trivia",
+                                                hole=hole if 1 <= hole <= 18 else None, topic=title))
+            made += 1
+        log.info("Trivia: %d asides ready on %r: %s", made, title,
+                 "; ".join(f"hole {b.hole}" if b.hole else "any quiet moment"
+                           for b in self._news_bits if b.kind == "trivia"))
+
+    async def _plan_scores(self, r) -> None:
+        """Pick the holes a live score is written for, if anything's on tonight. Only the plan is made
+        now: each score is fetched as its hole starts, so it isn't stale by the time it airs."""
+        items = await self.scores.fetch()
+        if not items or self.round is not r:
+            log.info("Scores: nothing live or on tonight; no score asides this round")
+            return
+        n = max(0, self.cfg.scores.per_nine) * max(1, -(-r.holes // 9))
+        first, last = 2, r.holes - 2          # the asides' window: not the first hole or the last two
+        if n == 0 or last < first:
+            return
+        # One hole from each equal stretch of the window, so two check-ins aren't back to back.
+        span = (last - first + 1) / n
+        holes = []
+        for i in range(n):
+            lo, hi = int(first + i * span), int(first + (i + 1) * span) - 1
+            if i < n - 1:
+                hi -= 2       # room before the next stretch's hole
+            hole = self.rng.randint(lo, max(lo, hi))
+            if not holes or hole - holes[-1] >= 3:
+                holes.append(hole)
+        self._score_holes = holes
+        log.info("Scores: %d on tonight (%s); a check-in on round hole(s) %s", len(items),
+                 "; ".join(i.key for i in items), holes)
+
+    def _score_hole_started(self, r) -> None:
+        due = [h for h in self._score_holes if h <= r.seq]
+        if due and self.scores is not None:
+            self._score_holes = [h for h in self._score_holes if h > r.seq]
+            self._aside_task(self._prepare_score(r), "scores-prep")
+
+    async def _prepare_score(self, r) -> None:
+        """Fetch the scores now, as the hole starts, and write and voice a check-in on the best one."""
+        items = await self.scores.fetch()
+        pending = {b.topic for b in self._news_bits if b.kind == "score"}
+        # Nothing already waiting to air, and nothing unchanged since it was last written up.
+        fresh = [i for i in items if i.key not in pending and f"{i.key}@{i.version}" not in self._score_written]
+        # Something the booth hasn't touched tonight first; then an update on one that's moved.
+        fresh.sort(key=lambda i: (i.key in self._score_said, i.rank))
+        if not fresh or self.round is not r:
+            log.info("Scores: nothing new to check in on at hole %s", r.seq)
+            return
+        item = fresh[0]
+        earlier = self._score_said.get(item.key, [])
+        user, facts_text = scores_prompt(item=item.fact, earlier=earlier, openings=self._aside_openings())
+        good, _ = await self._write_aside(f"Score check-in on {item.key}", user, facts_text,
+                                          output_schema(self.speakers))
+        if not good:
+            return
+        kept, audio = await self.speech.prepare_exchange(good)
+        if len(kept) != 2 or self.round is not r:
+            return
+        self._score_written.add(f"{item.key}@{item.version}")
+        self._news_bits.append(PreparedNews(item.key, None, kept, audio, kind="score", topic=item.key,
+                                            expires=time.monotonic() + self.cfg.scores.max_age_minutes * 60))
+        log.info("Scores: check-in on %s ready for hole %s: %s", item.key, r.seq, item.fact)
+
     def _news_pick(self, moment: dict) -> tuple[PreparedNews, bool] | None:
         """The aside to play after this shot, if any, and whether it airs on its trigger. At most one
-        every three holes, never on the first hole or the last two. A held aside waits for its moment
-        until the round is well along, then takes any quiet one."""
+        every three holes, never on the first hole or the last two, and only on an ordinary shot
+        unless it was waiting for this kind of shot. A live score goes first (it's going stale), and
+        the holes before one are kept clear for it. A trivia story about one hole plays on that hole,
+        wherever it falls (two holes after the last aside at least). A held news aside waits for its
+        moment until the round is well along, then takes any quiet one."""
         r = self.round
         if not self._news_bits or r is None or r.ended or not r.seq:
             return None
-        if r.seq < 2 or r.holes - r.seq < 2 or (self._news_aired and r.seq - self._news_aired[-1] < 3):
+        now = time.monotonic()
+        self._news_bits = [b for b in self._news_bits if b.expires is None or b.expires > now]
+        gap = r.seq - self._news_aired[-1] if self._news_aired else r.seq + 99
+        routine = moment["routine"]
+        if routine and gap >= 2:
+            for bit in self._news_bits:
+                if bit.hole is not None and bit.hole == self.hole_number:
+                    return bit, False
+        if r.seq < 2 or r.holes - r.seq < 2 or gap < 3:
+            return None
+        if routine:
+            for bit in self._news_bits:
+                if bit.kind == "score":
+                    return bit, False
+        if any(0 <= h - r.seq <= 2 for h in self._score_holes):
             return None
         tags = set(moment["tags"])
         for bit in self._news_bits:
             if bit.trigger and tags & NEWS_TRIGGER_TAGS[bit.trigger]:
                 return bit, True
-        if not moment["routine"] or self.rng.random() > self.cfg.news.banter_rate:
+        if not routine:
             return None
         late = r.seq >= -(-r.holes * 3 // 5)
-        for bit in self._news_bits:
-            if bit.trigger is None or late:
+        ready = [b for b in self._news_bits if b.hole is None and b.kind != "score" and (b.trigger is None or late)]
+        # Trivia before news: it's about where they are tonight.
+        for kind, rate in (("trivia", self.cfg.trivia.banter_rate), ("news", self.cfg.news.banter_rate)):
+            bit = next((b for b in ready if b.kind == kind), None)
+            if bit is not None and self.rng.random() <= rate:
                 return bit, False
         return None
 
@@ -1176,7 +1336,15 @@ class Engine:
         self.state.record_lines(lines)
         self.speech.say_prepared_sequence(items)
         self._write_transcript(lines, "banter")
-        log.info("News aside%s: %r", f" on a {bit.trigger.replace('_', ' ')}" if on_trigger else "", bit.title)
+        if bit.kind == "trivia":
+            self.store.record_aside("trivia", bit.topic, " ".join(l.text for l in lines))
+            log.info("Trivia aside%s: %r", f" on hole {bit.hole}" if bit.hole else "", bit.title)
+        elif bit.kind == "score":
+            self._score_said.setdefault(bit.topic, []).append(" ".join(l.text for l in lines))
+            self.store.record_aside("score", bit.topic, " ".join(l.text for l in lines))
+            log.info("Score check-in: %r", bit.title)
+        else:
+            log.info("News aside%s: %r", f" on a {bit.trigger.replace('_', ' ')}" if on_trigger else "", bit.title)
         return True
 
     async def _drain_speech(self, timeout: float | None = None) -> None:
@@ -3875,6 +4043,7 @@ class Engine:
             if self.current_par:
                 r.par.setdefault(r.seq, self.current_par)
             log.info("Round %s: hole %s of %s", r.id, r.seq, r.holes)
+            self._score_hole_started(r)
             if r.seq > r.holes:
                 if self._log_rounds and not r.log_complete:
                     self._extend_round(r)
@@ -4159,6 +4328,7 @@ class Engine:
         if self.news is not None:
             self._news_task = asyncio.create_task(self._prepare_news(r), name="news-prep")
             self._news_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        self._start_round_asides(r)
         # Per-round live state must not carry into a new round (a reused (idx, hole) would suppress a
         # real penalty call, a streak would continue, a stale call would be graded against a new putt).
         self._narrated_pen.clear()

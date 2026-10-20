@@ -48,6 +48,26 @@ Every line passes a checker (`grounding.py`) before it is spoken: numbers must c
 facts, nothing may claim where a ball still in the air will land, and course features need a
 screenshot to back them up.
 
+## Asides: news, scores and course trivia
+
+On an ordinary shot the booth would otherwise pass on, it sometimes drifts into a two-line side
+conversation instead. Each one is written by the closer's model (the richest one) and voiced ahead of
+time, so it plays instantly and whole. They all share one budget: at most one every three holes, never
+on the first hole or the last two, and only after an ordinary shot, so the round's own calls come first.
+
+- **Live scores** (`scores`): a tour leaderboard and your local teams. Which holes get a check-in is
+  decided at round start, and only if something is live, just finished or on later tonight. The scores
+  themselves are fetched as that hole starts and the check-in is written then, so it's minutes old on
+  air; one that hasn't found a quiet moment within `max_age_minutes` is dropped. The holes just before
+  a check-in are kept clear of other asides. A game the booth already mentioned comes back only as an
+  update, once its score has moved.
+- **Course trivia** (`trivia`): a bit of the real course's history from its Wikipedia article. A story
+  about one hole (the Road Hole, the island green) waits for that hole, even late in the round. What
+  aired is remembered, so a course played again gets different stories.
+- **Golf news** (`news`): a real current headline; see `news` in `config.example.yaml`.
+
+With more than one on, a live score goes first (it's going stale), then trivia, then news.
+
 ## Models and voices
 
 The booth itself always runs on the sim PC; the models and voices it calls can be cloud APIs
@@ -123,8 +143,10 @@ turn it off with `screen.send_images: false`). With `minimap.provider: jev`, a c
 goes to TypeSafe's Jev instead. Every spoken line's text goes to OpenAI to be
 voiced (unless the voices run on the PC with Kokoro). Nothing else leaves the PC: the shot database, transcripts and logs stay in `logs/`. The
 fully local setup (Ollama and Kokoro) sends nothing at all. Optional features that reach out are
-off by default: Squabbit handicaps (`squabbit.enabled`) and golf news (`news.enabled`), and the local weather (`weather.enabled`), which
-sends only the shed's latitude and longitude to Open-Meteo every 30 minutes. The weather is colour for
+off by default: Squabbit handicaps (`squabbit.enabled`) and golf news (`news.enabled`), live scores (`scores.enabled`: ESPN's public scoreboards
+for a tour leaderboard and your local teams), course trivia (`trivia.enabled`: the course's name to
+Wikipedia), and the local weather (`weather.enabled`), which sends only the shed's location (looked up
+once from `weather.location`) to Open-Meteo every 30 minutes. The weather is colour for
 the opener, the closer and the odd between-holes line; the booth also knows the day and time.
 
 ## ON AIR badge

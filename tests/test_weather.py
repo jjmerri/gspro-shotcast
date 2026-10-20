@@ -35,3 +35,20 @@ def test_engine_gives_the_opener_the_weather_but_not_every_segment(tmp_path):
     eng.weather.current = parse(BODY, now=time.time())
     assert eng._weather_facts()[0].startswith("Outside the shed in Nottingham")
     assert sum(bool(eng._weather_facts(0.2)) for _ in range(200)) < 80
+
+
+def test_a_town_or_postal_code_is_enough_to_turn_the_weather_on(tmp_path):
+    from commentator.config import Config
+    from commentator.engine import Engine
+    from commentator.speech import SpeechQueue
+    from commentator.tts.console_tts import ConsoleTTS
+    from tests.test_core import FakeLLM
+    from tests.test_round import LEAGUE
+
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.weather.enabled, cfg.weather.location = True, "03290"
+    llm = FakeLLM(cfg.llm.live)
+    eng = Engine(cfg=cfg, league=LEAGUE, source=None, live_llm=llm, segment_llm=llm,
+                 speech=SpeechQueue(cfg, ConsoleTTS()))
+    assert eng.weather is not None and eng.weather.location == "03290" and eng.weather.country == "US"
+    assert eng.weather.latitude is None          # looked up on the first refresh

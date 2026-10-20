@@ -463,12 +463,44 @@ class WeatherConfig(BaseModel):
     # The current weather outside, as colour ("a wet one out there, dry in the shed"). Open-Meteo,
     # free and keyless; needs the shed's latitude and longitude. Off by default.
     enabled: bool = False
-    place: str = ""            # how the booth names it, e.g. "Nottingham"
+    # Where the shed is: a town or postal code ("03290", "Nottingham, NH"), looked up at startup. Or
+    # give latitude and longitude instead, which win when set.
+    location: str = ""
+    country: str = "US"        # ISO country code the location is in ("" searches everywhere)
+    place: str = ""            # how the booth names it, e.g. "Nottingham" (defaults to the looked-up town)
     latitude: float | None = None
     longitude: float | None = None
     refresh_minutes: float = 30.0
     # The opener and the sign-off always get it; a between-holes exchange this often.
     between_holes_rate: float = 0.2
+
+
+class ScoresConfig(BaseModel):
+    # Live scores as a between-shots aside: a tour leaderboard ("Scheffler's at -12 thru 14") and the
+    # home teams' games (live, just finished, or later tonight), from ESPN's public scoreboards, no key.
+    # Which holes get one is set at round start; the scores are fetched as that hole starts and the
+    # aside is written (closer's model) and voiced then, so what's said is minutes old. Off by default.
+    enabled: bool = False
+    tours: list[str] = Field(default_factory=lambda: ["pga"])   # pga, lpga, eur, champions-tour
+    # The local teams, by name or ESPN abbreviation: a list ([Bruins, Celtics, Red Sox, Patriots]) is
+    # looked for in the NHL, NBA, MLB and NFL; or per league ({nhl: [BOS], mls: [Revolution]}) for the
+    # others (wnba, mls) or to pin a name down.
+    teams: list[str] | dict[str, list[str]] = Field(default_factory=list)
+    per_nine: int = 1
+    # A written aside that hasn't found a quiet moment by then is dropped: the score has moved on.
+    max_age_minutes: float = 10.0
+
+
+class TriviaConfig(BaseModel):
+    # Course trivia: the real course behind GSPro's, from its Wikipedia article (found by name; a
+    # course with no confident match gets none). Written (closer's model) and voiced at round start
+    # like the news asides; a story about one hole waits for that hole. Off by default.
+    enabled: bool = False
+    per_round: int = 2
+    # GSPro course name -> Wikipedia article title, for courses the search can't place on its own.
+    pages: dict[str, str] = Field(default_factory=lambda: {"The Ancient Course": "Old Course at St Andrews"})
+    # Chance, on an ordinary shot, of playing one that isn't waiting on its hole.
+    banter_rate: float = 0.35
 
 
 class MinimapConfig(BaseModel):
@@ -554,6 +586,8 @@ class Config(BaseModel):
     commentary: CommentaryConfig = Field(default_factory=CommentaryConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
+    scores: ScoresConfig = Field(default_factory=ScoresConfig)
+    trivia: TriviaConfig = Field(default_factory=TriviaConfig)
     overlay: OverlayConfig = Field(default_factory=OverlayConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     notify: NotifyConfig = Field(default_factory=NotifyConfig)

@@ -155,11 +155,34 @@ commentary:
 # closer, and now and then between holes ("pouring outside, dry in the shed").
 weather:
   enabled: false
-  # place: Nottingham
-  # latitude: 43.1145
+  # location: "03290"         # a town or postal code ("Nottingham, NH" works too), looked up at startup
+  # country: US               # where the location is (a postal code alone is ambiguous)
+  # place: Nottingham         # how the booth names it; defaults to the looked-up town
+  # latitude: 43.1145         # or pin the spot exactly instead of `location`
   # longitude: -71.0998
   # refresh_minutes: 30
   # between_holes_rate: 0.2
+
+# Live scores as between-shots asides, from ESPN's public scoreboards (no key): a tour leaderboard
+# and your local teams (live, just finished, or later tonight). The holes that get one are picked at
+# round start, but the scores are fetched, written (closer's model) and voiced as that hole starts,
+# so they're minutes old on air. They share the news asides' spacing (one every three holes at most).
+scores:
+  enabled: false
+  # tours: [pga]                                  # pga, lpga, eur, champions-tour
+  # teams: [Bruins, Celtics, Red Sox, Patriots]   # names or ESPN abbreviations, found in NHL/NBA/MLB/NFL
+  # teams: {nhl: [BOS], mls: [Revolution]}        # or per league (also wnba, mls)
+  # per_nine: 1
+  # max_age_minutes: 10       # a check-in that hasn't aired by then is dropped as stale
+
+# Course trivia from the real course's Wikipedia article, written (closer's model) and voiced at round
+# start. A story about one hole waits for that hole. Courses with no confident match get none.
+trivia:
+  enabled: false
+  # per_round: 2
+  # pages:                    # GSPro names the search can't place -> Wikipedia article titles
+  #   The Ancient Course: Old Course at St Andrews
+  #   Sheep Ranch: Bandon Dunes Golf Resort
 
 # Where the pre-shot hazard read comes from. llm: the `preshot` vision model above reads a
 # screenshot. jev: TypeSafe's Jev reads just the minimap in about a third of a second and also

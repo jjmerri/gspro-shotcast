@@ -74,12 +74,71 @@ def describe(c: Conditions, place: str, now: datetime | None = None) -> str:
             "line, not every one.")
 
 
+GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+
+
+async def geocode(query: str, country: str = "", timeout: float = 6.0) -> tuple[str, float, float] | None:
+    """(place name, latitude, longitude) for a town or postal code ("03290", "Nottingham, NH") in a
+    country (ISO code; a postal code alone is ambiguous across countries), or None. Open-Meteo's search
+    takes a bare name, so anything after a comma narrows the hits by state/region."""
+    name, _, region = (p.strip() for p in query.partition(","))
+    params = {"name": name, "count": 10, "format": "json"} | ({"countryCode": country.upper()} if country else {})
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(GEOCODE_URL, params=params)
+        resp.raise_for_status()
+    hits = resp.json().get("results") or []
+    if region:
+        want = region.lower()
+        hits = [h for h in hits if want in {str(h.get(k) or "").lower() for k in ("admin1", "country_code", "country")}
+                or want == _STATES.get(str(h.get("admin1") or "").lower())] or hits
+    if not hits:
+        return None
+    h = hits[0]
+    return h.get("name") or name, float(h["latitude"]), float(h["longitude"])
+
+
+_STATES = {"alabama": "al", "alaska": "ak", "arizona": "az", "arkansas": "ar", "california": "ca", "colorado": "co",
+           "connecticut": "ct", "delaware": "de", "florida": "fl", "georgia": "ga", "hawaii": "hi", "idaho": "id",
+           "illinois": "il", "indiana": "in", "iowa": "ia", "kansas": "ks", "kentucky": "ky", "louisiana": "la",
+           "maine": "me", "maryland": "md", "massachusetts": "ma", "michigan": "mi", "minnesota": "mn",
+           "mississippi": "ms", "missouri": "mo", "montana": "mt", "nebraska": "ne", "nevada": "nv",
+           "new hampshire": "nh", "new jersey": "nj", "new mexico": "nm", "new york": "ny", "north carolina": "nc",
+           "north dakota": "nd", "ohio": "oh", "oklahoma": "ok", "oregon": "or", "pennsylvania": "pa",
+           "rhode island": "ri", "south carolina": "sc", "south dakota": "sd", "tennessee": "tn", "texas": "tx",
+           "utah": "ut", "vermont": "vt", "virginia": "va", "washington": "wa", "west virginia": "wv",
+           "wisconsin": "wi", "wyoming": "wy"}
+
+
 class Weather:
-    def __init__(self, latitude: float, longitude: float, place: str = "", timeout: float = 6.0) -> None:
+    """The weather at a fixed point, or at `location` (a town or postal code), looked up on first use."""
+
+    def __init__(self, latitude: float | None, longitude: float | None, place: str = "", timeout: float = 6.0,
+                 location: str = "", country: str = "") -> None:
         self.latitude, self.longitude, self.place, self.timeout = latitude, longitude, place, timeout
+        self.location, self.country = location, country
         self.current: Conditions | None = None
 
+    async def _locate(self) -> bool:
+        if self.latitude is not None and self.longitude is not None:
+            return True
+        if not self.location:
+            return False
+        try:
+            found = await geocode(self.location, self.country, self.timeout)
+        except Exception as e:
+            log.warning("Weather: couldn't look up %r: %r", self.location, e)
+            return False
+        if found is None:
+            log.warning("Weather: no place found for %r", self.location)
+            return False
+        name, self.latitude, self.longitude = found
+        self.place = self.place or name
+        log.info("Weather: %r is %s (%.4f, %.4f)", self.location, name, self.latitude, self.longitude)
+        return True
+
     async def refresh(self) -> Conditions | None:
+        if not await self._locate():
+            return self.current
         params = {
             "latitude": self.latitude, "longitude": self.longitude, "timezone": "auto", "forecast_days": 1,
             "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m,wind_gusts_10m,is_day",

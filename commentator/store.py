@@ -68,6 +68,14 @@ CREATE TABLE IF NOT EXISTS form_mentions (           -- round-sheet angles the b
     player TEXT NOT NULL,
     topic TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS asides (                  -- course trivia and score check-ins that aired
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES sessions(id),
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    text TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS rounds (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES sessions(id),
@@ -635,6 +643,17 @@ class Store:
         self.db.executemany("INSERT INTO form_mentions (session_id, ts, player, topic) VALUES (?, ?, ?, ?)",
                             [(self.session_id, now, p, t) for p in players for t in topics])
         self.db.commit()
+
+    def record_aside(self, kind: str, topic: str, text: str) -> None:
+        self.db.execute("INSERT INTO asides (session_id, ts, kind, topic, text) VALUES (?, ?, ?, ?, ?)",
+                        (self.session_id, time.time(), kind, topic, text))
+        self.db.commit()
+
+    def recent_asides(self, kind: str, topic: str, limit: int = 12) -> list[str]:
+        """What the booth has already told on this topic (a course's trivia), most recent first."""
+        rows = self.db.execute("SELECT text FROM asides WHERE kind = ? AND topic = ? ORDER BY ts DESC LIMIT ?",
+                               (kind, topic, limit)).fetchall()
+        return [r["text"] for r in rows]
 
     def recent_form_mentions(self, player: str, sessions: int = 3) -> list[str]:
         """Angles used on this player in their last few sessions before today, most used first."""

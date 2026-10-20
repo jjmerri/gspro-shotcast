@@ -248,8 +248,64 @@ def news_prompt(*, topic: str, openings=()) -> tuple[str, str]:
         "tie_in: with a trigger, a replacement for the first line (same speaker) that bridges from that "
         "moment into the story in your own words (\"Speaking of big hitters...\"), without describing the "
         "shot itself: who hit it, where it went and how far aren't known yet. Empty with no trigger."
-        + ("\n\nOther asides this round open like this; start yours a different way:\n"
-           + "\n".join(f"- {o}" for o in openings) if openings else "")
+        + _openings(openings)
+    )
+    return prompt, facts_text
+
+
+def _openings(openings) -> str:
+    return ("\n\nOther asides this round open like this; start yours a different way:\n"
+            + "\n".join(f"- {o}" for o in openings)) if openings else ""
+
+
+def scores_prompt(*, item: str, earlier: list[str] = (), openings=()) -> tuple[str, str]:
+    """A check-in on a live score, written as the hole it plays on starts, so it's minutes old on air."""
+    facts_text = f"Live score (real, fetched a minute ago): {item}"
+    prompt = (
+        "FACTS:\n" + facts_text
+        + "\n\nWrite an aside the booth will play in the next few minutes, on a quiet moment between shots: "
+        "the commentators check in on a game or a tournament happening out there tonight. Exactly two lines, "
+        "one from each commentator. It's written ahead of time, so make it good.\n"
+        "One commentator brings it up the way someone glances at their phone between shots, and gives the "
+        "score as it stands as the latest they've seen (it'll be a few minutes old by the time it plays). The "
+        "other answers with a real take of their own - who's in charge, what it'll take, a joke - in at least "
+        "one full sentence.\n"
+        "Don't invent any name, number, score, stat or detail that isn't in the facts. A game later tonight "
+        "is a look ahead, not a result. Don't mention the round being played here, the players or any shot: "
+        "you don't know exactly when this will play."
+        + ("\n\nThe booth already brought this up earlier tonight:\n" + "\n".join(f"- {e}" for e in earlier)
+           + "\nMake this an update on that, not a first mention." if earlier else "")
+        + _openings(openings)
+    )
+    return prompt, facts_text
+
+
+def trivia_schema(speakers: list[str]) -> dict[str, Any]:
+    schema = output_schema(speakers)
+    schema["properties"]["hole"] = {"type": "integer"}
+    schema["required"] = ["lines", "hole"]
+    return schema
+
+
+def trivia_prompt(*, course: str, title: str, article: str, told: list[str] = (), openings=()) -> tuple[str, str]:
+    """A piece of the real course's history, written at round start from its Wikipedia article."""
+    facts_text = (f"The course being played in the simulator, {course}, is GSPro's version of the real "
+                  f"{title}. From its Wikipedia article:\n{article}")
+    prompt = (
+        "FACTS:\n" + facts_text
+        + "\n\nWrite an aside the booth will play later in the round, on a quiet moment between shots: one "
+        "commentator shares a bit of this course's real history or lore, the other reacts. Exactly two lines, "
+        "one from each commentator. It's written ahead of time, so make it good.\n"
+        "Pick ONE thing, specific and worth telling - a famous moment, a winner, a quirk, a nickname, how it "
+        "was built - and tell it the way someone who loves the game drops it into conversation, not a "
+        "recital of the article. The reply gives a real take of its own in at least one full sentence.\n"
+        "Don't invent any name, number, year or detail that isn't in the article; if unsure of a specific, "
+        "stay general. \"Here\" or \"this place\" is fine, but don't mention the players, the round or any shot.\n"
+        "hole: if your story is about one hole of the course, its number, and the aside plays while the "
+        "players are on that hole (so you may say \"this hole\"); otherwise 0."
+        + ("\n\nAlready told on earlier rounds here; pick something else:\n" + "\n".join(f"- {t}" for t in told)
+           if told else "")
+        + _openings(openings)
     )
     return prompt, facts_text
 
