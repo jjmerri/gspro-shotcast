@@ -2514,7 +2514,7 @@ def test_length_norm_judges_a_shot_against_the_players_own_game(tmp_path):
     assert eng._length_norm_facts("Kathy", "7I", False, 150) == ["Kathy's full 7-iron shots usually go about 59 yards in total."]
     assert eng._length_norm_facts("Kathy", "7I", False, 30, 20) == []   # a bump-and-run isn't a short 7-iron
     assert eng._length_norm_facts("Kathy", None, False, 150) == []
-    assert "Judge distance only against this player's own game" in system_prompt(eng.cfg, LEAGUE)
+    assert "Judge a player's distance against their own game" in system_prompt(eng.cfg, LEAGUE)
 
 
 def test_in_round_prompts_know_the_day_and_time():

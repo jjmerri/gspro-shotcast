@@ -151,6 +151,16 @@ commentary:
   # round_format: best ball      # overrides the league file's schedule for tonight
   round_end_idle_seconds: 60
 
+# Real weather outside, from Open-Meteo (free, no key). The booth gets it in the opener and the
+# closer, and now and then between holes ("pouring outside, dry in the shed").
+weather:
+  enabled: false
+  # place: Nottingham
+  # latitude: 43.1145
+  # longitude: -71.0998
+  # refresh_minutes: 30
+  # between_holes_rate: 0.2
+
 # Where the pre-shot hazard read comes from. llm: the `preshot` vision model above reads a
 # screenshot. jev: TypeSafe's Jev reads just the minimap in about a third of a second and also
 # reads the carry over water and the front/back of the green, so the setup line can use them.

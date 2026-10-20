@@ -459,6 +459,18 @@ class NewsConfig(BaseModel):
     banter_rate: float = 0.35
 
 
+class WeatherConfig(BaseModel):
+    # The current weather outside, as colour ("a wet one out there, dry in the shed"). Open-Meteo,
+    # free and keyless; needs the shed's latitude and longitude. Off by default.
+    enabled: bool = False
+    place: str = ""            # how the booth names it, e.g. "Nottingham"
+    latitude: float | None = None
+    longitude: float | None = None
+    refresh_minutes: float = 30.0
+    # The opener and the sign-off always get it; a between-holes exchange this often.
+    between_holes_rate: float = 0.2
+
+
 class MinimapConfig(BaseModel):
     """Where the pre-shot hazard read comes from. "llm" is the preshot vision model reading the whole
     screenshot (needs llm.preshot.vision and screen.send_images); "jev" is TypeSafe's Jev reading just
@@ -541,6 +553,7 @@ class Config(BaseModel):
     squabbit: SquabbitConfig = Field(default_factory=SquabbitConfig)
     commentary: CommentaryConfig = Field(default_factory=CommentaryConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
+    weather: WeatherConfig = Field(default_factory=WeatherConfig)
     overlay: OverlayConfig = Field(default_factory=OverlayConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     notify: NotifyConfig = Field(default_factory=NotifyConfig)

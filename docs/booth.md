@@ -123,7 +123,9 @@ turn it off with `screen.send_images: false`). With `minimap.provider: jev`, a c
 goes to TypeSafe's Jev instead. Every spoken line's text goes to OpenAI to be
 voiced (unless the voices run on the PC with Kokoro). Nothing else leaves the PC: the shot database, transcripts and logs stay in `logs/`. The
 fully local setup (Ollama and Kokoro) sends nothing at all. Optional features that reach out are
-off by default: Squabbit handicaps (`squabbit.enabled`) and golf news (`news.enabled`).
+off by default: Squabbit handicaps (`squabbit.enabled`) and golf news (`news.enabled`), and the local weather (`weather.enabled`), which
+sends only the shed's latitude and longitude to Open-Meteo every 30 minutes. The weather is colour for
+the opener, the closer and the odd between-holes line; the booth also knows the day and time.
 
 ## ON AIR badge
 

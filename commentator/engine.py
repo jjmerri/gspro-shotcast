@@ -38,6 +38,7 @@ from .prompts import (
 from .board import Board, place
 from .history import History
 from .news import GolfNews
+from .weather import Weather
 from .round import FORMAT_NAMES, TEAM_BALL, Round, normalize_format, to_par
 from .screen import Screen
 from .sources.base import ShotSource
@@ -351,6 +352,9 @@ class Engine:
         self.state = SessionState(recent_lines_max=cfg.commentary.recent_lines)
         # Live golf headlines for occasional between-shots banter; None when the feature is off.
         self.news = GolfNews(cfg.news.feeds, cfg.news.limit) if cfg.news.enabled and self.commentary_on else None
+        w = cfg.weather
+        self.weather = Weather(w.latitude, w.longitude, w.place) if (
+            w.enabled and self.commentary_on and w.latitude is not None and w.longitude is not None) else None
         self._news_bits: list[PreparedNews] = []    # this round's asides, written and voiced at the start
         self._news_task: asyncio.Task | None = None
         self._news_aired: list[int] = []            # round hole seqs an aside played on
@@ -534,6 +538,8 @@ class Engine:
             asyncio.create_task(self._warm_ocr())
         if self.news is not None:
             asyncio.create_task(self._news_loop(), name="news")
+        if self.weather is not None:
+            asyncio.create_task(self._weather_loop(), name="weather")
         tasks = [asyncio.create_task(self.speech.run(), name="speech")]
         if self.source is not None:
             tasks.append(asyncio.create_task(self._pump_source(), name="source"))
@@ -1047,6 +1053,17 @@ class Engine:
         except Exception:
             log.debug("OCR warmup read failed", exc_info=True)
 
+    async def _weather_loop(self) -> None:
+        while True:
+            await self.weather.refresh()
+            await asyncio.sleep(max(self.cfg.weather.refresh_minutes, 1.0) * 60)
+
+    def _weather_facts(self, rate: float = 1.0) -> list[str]:
+        """The weather outside, when it's configured, fresh, and (between holes) this exchange's turn."""
+        if self.weather is None or (rate < 1.0 and self.rng.random() >= rate):
+            return []
+        return self.weather.facts()
+
     async def _news_loop(self) -> None:
         """Keep the golf headlines fresh: fetch at startup, then re-fetch on a slow cadence."""
         while True:
@@ -1395,7 +1412,7 @@ class Engine:
         async def gen(strokes):
             facts = (r.closing_facts(self.state.shots, season, final_overrides={side_key: strokes},
                                      week_ctp=self._closer_week_ctp(r))
-                     + self._league_facts(r, closing=True))
+                     + self._league_facts(r, closing=True) + self._weather_facts())
             user, facts_text = closer_prompt(facts=facts, recent_lines=self.state.recent_lines)
             # "round" mode grounding: the closer spans the whole round, so skip the single-lie check.
             system = self._system_league if r.is_league else self._system_practice
@@ -3894,15 +3911,17 @@ class Engine:
             current_hole=event.current,
             recap=self.state.hole_recap(previous, name=lambda p: self._display(p) or p),
             recent_lines=self.state.recent_lines,
-            result=self._hole_score_facts(previous) + self._roster_facts(),
+            result=self._hole_score_facts(previous) + self._roster_facts()
+            + self._weather_facts(self.cfg.weather.between_holes_rate),
         )
         await self._speak("segment", self.segment_llm, user, facts_text + "\n" + "\n".join(self._format_facts()), [])
 
     async def _tee_up(self, current_hole: str) -> None:
         """Introduce the hole that's starting. Used after a pre-made recap, which is recap-only; the
         on-demand wrap already tees up the next hole itself."""
-        user, facts_text = hole_intro_prompt(hole=current_hole, recent_lines=self.state.recent_lines,
-                                             extra=self._roster_facts())
+        user, facts_text = hole_intro_prompt(
+            hole=current_hole, recent_lines=self.state.recent_lines,
+            extra=self._roster_facts() + self._weather_facts(self.cfg.weather.between_holes_rate))
         await self._speak("segment", self.segment_llm, user, facts_text, [], mode="round")
 
     # ---- the round ------------------------------------------------------------------------
@@ -4164,7 +4183,7 @@ class Engine:
         else:
             hole = None if preround else self.state.current_hole
         facts = (r.opening_facts(season, first_up=self._display(first), hole=hole)
-                 + self._league_facts(r))
+                 + self._league_facts(r) + self._weather_facts())
         return opener_prompt(facts=facts, recent_lines=self.state.recent_lines)
 
     def _same_course(self, x: str | None, y: str | None) -> bool:
@@ -4937,7 +4956,7 @@ class Engine:
             if self._play_prepared_closer(stats[side.key].scores.get(r.holes), side.key):
                 return
         self._closer_branches = None
-        user, facts_text = closer_prompt(facts=facts, recent_lines=self.state.recent_lines)
+        user, facts_text = closer_prompt(facts=facts + self._weather_facts(), recent_lines=self.state.recent_lines)
         # r.ended is set above, so the `system` property would pick practice; pass the round's own
         # variant so a league round's sign-off keeps its stakes framing.
         await self._speak("closer", self.closer_llm, user, facts_text, [], mode="round",
