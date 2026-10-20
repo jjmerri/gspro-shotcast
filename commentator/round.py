@@ -786,6 +786,24 @@ class Round:
             total += min(nets) if self.format == "best_ball" else sum(nets)
         return total, len(seqs)
 
+    def team_gross(self, team: str) -> tuple[int, int, list[tuple[Side, int]]] | None:
+        """A best-ball team's running GROSS score to par: (team to par, holes counted, each partner's own
+        to par over those holes). Counts holes every partner in the round has finished, so it sits
+        alongside GSPro's per-player HUD score, which is the individual's. None outside best ball or
+        without at least two partners in the round."""
+        if self.format != "best_ball":
+            return None
+        sides = [s for s in self.sides if s.team == team]
+        if len(sides) < 2:
+            return None
+        seqs = [q for q in range(1, self.holes + 1)
+                if self.par.get(q) and all(self.card_score(s, q) is not None for s in sides)]
+        if not seqs:
+            return 0, 0, [(s, 0) for s in sides]
+        team_total = sum(min(self.card_score(s, q) for s in sides) - self.par[q] for q in seqs)
+        own = [(s, sum(self.card_score(s, q) - self.par[q] for q in seqs)) for s in sides]
+        return team_total, len(seqs), own
+
     def _capped_score(self, side: Side, seq: int) -> int:
         score = self.card_score(side, seq)
         if self.week_card:

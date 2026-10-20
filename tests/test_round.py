@@ -2335,3 +2335,32 @@ def test_a_scramble_pick_inside_the_gimme_circle_records_the_teams_conceded_putt
     assert [tuple(x) for x in rows] == [("MikeD", 4, "conceded"), ("Sarah", 4, "missed"), ("MikeD", 5, "gimme")]
     e._record_result(a, "missed", "[late watch]", putt=True, rec=ra)   # a late watch can't undo it
     assert ra.outcome == "conceded"
+
+
+def test_best_ball_team_gross_beside_each_partners_own_score(tmp_path):
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "SarahK"], course="X", scheduled_format="best_ball",
+              holes=3, is_league=False)
+    r.par = {1: 4, 2: 3, 3: 5}
+    r.set_log_scores("MikeD", {1: 3, 2: 5})     # birdie, double
+    r.set_log_scores("SarahK", {1: 5, 2: 3})    # bogey, par
+    team, holes, own = r.team_gross("Aces")
+    assert (team, holes) == (-1, 2)             # better ball: 3 then 3, against par 7
+    assert {s.label: v for s, v in own} == {"Mike": 1, "Sarah": 1}
+
+    eng = _engine(tmp_path)
+    eng.round = r
+    r.seq = 3
+    r.set_log_scores("SarahK", {1: 5, 2: 3, 3: 4})   # Sarah's birdie already in on the hole in play
+    facts = "\n".join(eng._team_score_facts("Mike"))
+    assert "Team Aces best-ball score through 2 completed holes: -1" in facts
+    assert "Mike on their own is +1; Sarah on their own is +1" in facts
+    assert "never give the team number as one player's score" in facts
+    assert "Sarah has already finished this hole in 4 (a birdie), so the team has 4 here unless Mike beats it." in facts
+
+
+def test_team_gross_only_for_best_ball():
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "SarahK"], course="X", scheduled_format="scramble",
+              holes=3, is_league=False)
+    assert r.team_gross("Aces") is None
+    solo = Round(league=LEAGUE, gspro_players=["MikeD"], course="X", scheduled_format="best_ball", holes=3)
+    assert solo.team_gross("Aces") is None

@@ -1749,6 +1749,37 @@ class Engine:
             facts.append(cf)
         return facts
 
+    def _team_score_facts(self, player: str | None) -> list[str]:
+        """Best ball: the team's running gross score beside each partner's own. GSPro's HUD score is the
+        individual's, and with no team number the booth credited a partner's or team's figure to one
+        player ("keeps Derek at +1" when +1 was the team's)."""
+        r = self.round
+        side = r.side_for(player) if r and not r.ended and player else None
+        tg = r.team_gross(side.team) if side and side.team else None
+        if tg is None:
+            return []
+        team_par, holes, own = tg
+        mine = next(v for s, v in own if s is side)
+        partners = [(s, v) for s, v in own if s is not side]
+        if holes:
+            parts = "; ".join(f"{s.label} on their own is {_fmt_to_par(v)}"
+                              for s, v in [(side, mine)] + partners)
+            facts = [f"Team {side.team} best-ball score through {holes} completed "
+                     f"hole{'s' if holes != 1 else ''}: {_fmt_to_par(team_par)} "
+                     f"(the better ball each hole). {parts}. The player's round score in the other facts is "
+                     f"their own, not the team's: never give the team number as one player's score, or one "
+                     f"player's as the team's."]
+        else:
+            facts = []
+        par = r.par.get(r.seq)
+        for s, _ in partners:
+            if (sc := r.card_score(s, r.seq)) is not None and par:
+                name = SCORE_NAMES.get(sc - par)
+                facts.append(f"{s.label} has already finished this hole in {sc}"
+                             + (f" ({name})" if name else "")
+                             + f", so the team has {sc} here unless {side.label} beats it.")
+        return facts
+
     def _prediction_facts(self, player: str | None, is_putt: bool, hud: Hud) -> list[str]:
         """A commentator calls whether this putt drops (from the player's make-rate, or distance when
         there's no data), to be graded against the result. Puts the commentators in the game and gives
@@ -2017,7 +2048,7 @@ class Engine:
                  + history_facts(self._display(player), self.state.player_shots(player or "unknown"))
                  + self._format_facts() + self._ctp_facts(hud.shot_number, hud, player)
                  + self._profile_facts(player, is_putt, hud) + self._prediction_facts(player, is_putt, hud)
-                 + self._stakes_facts(hud, player)
+                 + self._stakes_facts(hud, player) + self._team_score_facts(player)
                  + (self._bunker_facts(player) if (hud.lie or "").lower() in ("sand", "bunker")
                     and self.rng.random() < 0.5 else [])
                  + (self._hole_field_facts(player) if hud.shot_number == 1 else [])
