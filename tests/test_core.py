@@ -1613,6 +1613,26 @@ def test_prewritten_putt_reactions_may_quote_the_putt_length_only(tmp_path):
     assert out["past"] == "Runs it by."
 
 
+def test_prewritten_putt_reactions_name_the_comeback_for_the_next_score(tmp_path):
+    from commentator.facts import preshot_facts
+    e = _mini_engine(tmp_path)
+    facts = "\n".join(preshot_facts(Hud(shot_number=4, lie="green", to_pin="39 feet 3 inches"), 4))
+    assert "the next putt is for bogey" in facts
+    data = {"reaction_lines": {"holed": "Josh drains it for par!",
+                               "past": "Josh sends it past; the comeback putt for par remains.",
+                               "short": "Leaves it short, with a comeback for bogey.",
+                               "gimme": "That was for par, and it slides by."}}
+    out = e._build_reactions(data, True, facts)
+    assert out["holed"] == "Josh drains it for par!"
+    assert "past" not in out
+    assert out["short"] == "Leaves it short, with a comeback for bogey."
+    assert out["gimme"] == "That was for par, and it slides by."   # the putt just missed
+    from commentator.facts import wrong_putt_score
+    assert wrong_putt_score("The putt for par slides left.", "par", "bogey", holed=False) is None
+    assert wrong_putt_score("Misses for par; a tap-in for bogey remains.", "par", "bogey", holed=False) is None
+    assert wrong_putt_score("Left with a tester for par.", "par", "bogey", holed=False) == "par"
+
+
 async def test_follow_shot_moves_on_at_the_next_player_placeholder(tmp_path):
     # The next player's address HUD shows carry AND total as "--.--" (non-empty tiles, both parse to
     # None). The follow must read that reset as moved-on and return THIS shot's last read, never theirs.
@@ -3346,3 +3366,93 @@ def test_tile_boxes_locate_each_value_in_the_unscaled_crop():
     items = [OcrItem(text="168.5", x=200, y=300, h=40, left=140),
              OcrItem(text="TOTAL LENGTH", x=200, y=350, h=20, left=120)]
     assert _tile_boxes(items, 2.0, 400, 800) == {"total length": (63, 134, 137, 166)}
+
+
+def test_putt_calls_are_rationed_and_never_back_to_back(tmp_path):
+    import random
+    e = _mini_engine(tmp_path)
+    e.rng = random.Random(7)
+    e.current_par = 4
+    birdie = Hud(player_text="Josh", shot_number=2, lie="green", to_pin="10 feet")
+    bogey = Hud(player_text="Josh", shot_number=4, lie="green", to_pin="20 feet")
+    calls = [bool(e._prediction_facts("Josh", True, birdie)) for _ in range(300)]
+    assert not any(a and b for a, b in zip(calls, calls[1:]))       # never two putts in a row
+    assert 0.3 < sum(calls) / len(calls) < 0.5                      # a 10-foot birdie look: often
+    others = [bool(e._prediction_facts("Josh", True, bogey)) for _ in range(300)]
+    assert 0.1 < sum(others) / len(others) < 0.3                    # a 20-foot bogey putt: seldom
+    makes = set()
+    for _ in range(300):
+        if e._prediction_facts("Josh", True, birdie):
+            makes.add(birdie._prediction[1])
+    assert makes == {True, False}                                    # calls go both ways
+
+
+async def test_a_tree_on_the_line_always_gets_its_setup_line(tmp_path, caplog):
+    import logging
+    from commentator.models import PreShotEvent
+
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.tts.console_simulate_duration = False
+    cfg.tts.prevoice = False
+    cfg.commentary.preshot_rate = 0.0
+    e = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+               live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=SpeechQueue(cfg, ConsoleTTS()),
+               screen=None, rng=random.Random(0))
+
+    async def raws():
+        line = {"lines": [{"speaker": "pbp", "text": "Josh has a tree right in his way here."}]}
+        return {"line": json.dumps(line)}, "Hole layout: a tree stands right on the line to the pin."
+
+    def event(stymie):
+        hud = Hud(player_text="Josh", shot_number=2, lie="rough", to_pin="151.8 yards")
+        if stymie:
+            hud._stymie = True
+        return PreShotEvent(hud=hud, model_task=asyncio.ensure_future(raws()))
+
+    with caplog.at_level(logging.INFO, logger="commentator.engine"):
+        await e.handle_preshot(event(stymie=False))
+        assert "Setup line skipped" in caplog.text
+        await e.handle_preshot(event(stymie=True))
+    assert [l.text for l in e.state.recent_lines] == ["Josh has a tree right in his way here."]
+
+
+async def test_an_opener_without_its_welcome_is_written_again(tmp_path):
+    replies = [
+        [{"speaker": "color", "text": "Just one name on the sheet, Nigel."},
+         {"speaker": "pbp", "text": "Quite the pedigree."}],
+        [{"speaker": "pbp", "text": "Good afternoon and welcome to Loudon, everyone."},
+         {"speaker": "color", "text": "I'll be watching those irons, Duke style."},
+         {"speaker": "color", "text": "One name on the sheet, Nigel."}],
+    ]
+
+    class SeqLLM(FakeLLM):
+        async def complete_json(self, system, user, schema, images=None):
+            self.prompts.append(user)
+            return LLMResult(text=json.dumps({"lines": replies[len(self.prompts) - 1]}))
+
+    e = _mini_engine(tmp_path)
+    llm = SeqLLM(e.cfg.llm.live)
+    lines = await e._compose("opener", llm, "THE ROUND IS ABOUT TO START.", "", [], mode="round")
+    assert len(llm.prompts) == 2 and "welcoming everyone" in llm.prompts[1]
+    assert [l.text for l in lines] == ["Good afternoon and welcome to Loudon, everyone.",
+                                       "One name on the sheet, Nigel."]   # Duke naming himself is dropped
+
+
+def test_a_name_run_into_what_is_theirs_is_rejected(tmp_path):
+    from commentator.models import Line
+    from commentator.round import Side
+    e = _mini_engine(tmp_path)
+
+    class R:
+        sides = [Side(key="Josh Merritt", label="Josh Merritt", players=["Josh Merritt"], gspro=["Josh"])]
+        ended = False
+        is_league = False
+
+    e.round = R()
+    facts = "Josh Merritt shot 42."
+    good, problems = e._grounded([Line("pbp", "And that's Josh round in 42 at Loudon.")], facts, mode="round")
+    assert not good and any("needs a possessive" in p for p in problems)
+    good, _ = e._grounded([Line("pbp", "And that's Josh's round in 42 at Loudon.")], facts, mode="round")
+    assert good
+    good, _ = e._grounded([Line("pbp", "Watch Josh drive this one, with Josh putting well.")], facts, mode="round")
+    assert good

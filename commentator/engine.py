@@ -13,8 +13,8 @@ from typing import Any
 from .carry_model import CarryModel, correct_for_elevation
 from .config import Config
 from .facts import (
-    SCORE_NAMES, _fmt_to_par, _to_par_value, club_delivery_facts, club_delivery_notable, club_name, flight_facts,
-    history_facts, ordinal, preshot_facts, putt_elevation_inches, shot_facts, to_yards,
+    PUTT_FOR_FACT, SCORE_NAMES, _fmt_to_par, _to_par_value, club_delivery_facts, club_delivery_notable, club_name, flight_facts,
+    history_facts, ordinal, preshot_facts, putt_elevation_inches, shot_facts, to_yards, wrong_putt_score,
 )
 from .flight_pick import FlightPlan, Hazard, pick_line, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
@@ -311,6 +311,8 @@ def _short_miss_fact(before: Hud, par: int | None) -> str | None:
     return fact + ". Call it plainly as a missed short putt that cost a stroke, never as good touch or a fine lag."
 
 
+WELCOME = re.compile(r"\b(welcome|good (morning|afternoon|evening|day)|hello|evening,? everyone)\b", re.I)
+_OWNED = r"(?:round|card|scorecard|day|night|driver|putter|tee shot|short game|iron play|season)"
 _FORM_MARK = re.compile(
     r"\b(\d+|zero|none|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(of|for|from)\s+"
     r"(his|her|their|the)?\s*(last\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b"
@@ -516,6 +518,7 @@ class Engine:
         # result when the stamped hole matches. Keyed by player so a partner's shot can't bin it.
         self._pending_prediction: dict[str, tuple[str, bool, str | None]] = {}
         self._pred_turn = 0
+        self._pred_rested = True   # False right after a call: the next putt never gets one
         self._plan_made_at = 0.0
         self.current_par: int | None = None
         # Replays at speed deliver the shot instantly, which would cancel every setup line.
@@ -1717,6 +1720,15 @@ class Engine:
         log.info("Closer: pre-made branch played for %s strokes, no model call", final_strokes)
         return True
 
+    def _missing_possessive(self, text: str) -> str | None:
+        """A player's name run straight into what's theirs ("Josh round in 42" for "Josh's round")."""
+        r = self.round
+        names = {n for s in getattr(r, "sides", None) or [] for p in s.players for n in (p, p.split()[0]) if n}
+        for name in names:
+            if m := re.search(rf"\b{re.escape(name)} {_OWNED}\b", text, re.I):
+                return m.group(0)
+        return None
+
     def _banned_names(self) -> list[tuple[list[str], list[str]]]:
         # Naming an individual player is allowed in every format (a scramble can credit a person, a
         # team format can talk about the team; both read fine). Forcing team-only wording rejected a
@@ -2335,11 +2347,23 @@ class Engine:
         feet = dist * 3
         if feet < 3 or feet > 25:
             return []
+        # About one putt in three gets a call, never two in a row, likeliest on a 6-15 foot look
+        # at birdie or par: calling every putt from 3 to 25 feet wore thin within a nine.
+        rested, self._pred_rested = self._pred_rested, True
+        par = self.current_par
+        scoring = bool(hud.shot_number and par and hud.shot_number - par <= 0)
+        chance = 0.6 if scoring and 6 <= feet <= 15 else 0.25
+        if not rested or self.rng.random() >= chance:
+            return []
+        self._pred_rested = False
+        # Call it drop or slide by in proportion to how often it drops (the player's rate at this
+        # length, else a typical amateur's), so the calls vary instead of always "slides by".
         pm = self.store.putting_make_rate(player, feet)
         if (pm.get("attempts") or 0) >= 4 and pm.get("made") is not None:
-            predicted_make = pm["made"] / pm["attempts"] >= 0.5
+            p_make = pm["made"] / pm["attempts"]
         else:
-            predicted_make = feet <= 8
+            p_make = min(0.9, 2.0 / feet ** 0.8)   # ~0.8 at 3 ft, 0.5 at 6, 0.3 at 10, 0.15 at 25
+        predicted_make = self.rng.random() < p_make
         commentator = self.speakers[self._pred_turn % len(self.speakers)]
         self._pred_turn += 1
         # Stash the call on this setup's HUD; handle_preshot commits it only if the line actually airs,
@@ -2582,6 +2606,8 @@ class Engine:
                         "Log to_pin %.1f yd diverges from HUD %.1f yd for idx %s (%r); keeping HUD "
                         "(likely a mis-attributed slot)", tp, ocr_pin, idx, self._display(player))
         minimap = await self._await_minimap(minimap_task, is_putt)
+        if minimap and minimap.stymied(to_yards(hud.to_pin)):
+            hud._stymie = True   # a tree on the line always gets its setup line
         if is_putt and putt_task is None and self.putt_reader:
             putt_task = self._start_putt_read()   # a putt the distance didn't give away (metres)
         putt = await self._await_putt(putt_task, is_putt)
@@ -2600,6 +2626,8 @@ class Engine:
                     and self.rng.random() < 0.5 else [])
                  + (self._hole_field_facts(player) if hud.shot_number == 1 else [])
                  + (minimap.facts(to_yards(hud.to_pin), hud.lie) if minimap else [])
+                 + (["The tree on the line to the pin is the story of this shot: say how it blocks the way."]
+                    if getattr(hud, "_stymie", False) else [])
                  + self._strategy_facts(minimap, hud)
                  + (putt.facts(self.cfg.putt_read, slope=putt_elevation_inches(hud) is None) if putt else []))
         who, team = self._who(player)
@@ -2753,8 +2781,9 @@ class Engine:
         if is_putt or (pin_yd is not None and pin_yd <= 40):
             rate = max(rate, 0.9)
         correction = getattr(event.hud, "_lie_correction", False)
-        if getattr(event.hud, "_mulligan", False) or correction:
-            rate = 1.0   # a mulligan, or a wrong call to set straight, always gets its word
+        stymie = getattr(event.hud, "_stymie", False)
+        if getattr(event.hud, "_mulligan", False) or correction or stymie:
+            rate = 1.0   # a mulligan, a wrong call to set straight, or a tree in the way always gets its word
         # The opening tee shot skips the spoken setup line (the opener just set the round up, and a
         # line here would land late), but still pre-voices the flight and result branches below so the
         # first shot's calls are ready at impact like every other shot's.
@@ -2763,7 +2792,9 @@ class Engine:
         def setup_lines() -> list:
             lines = parse_lines(json.dumps({"lines": data.get("lines") or []}), self.speakers, c.max_words_per_line, self._persona_names)
             # No retry: a setup line that needs a second attempt has usually missed its moment.
-            good, _ = self._grounded(lines, facts_text, mode="preshot", seen_image=False)  # the line call is text-only
+            good, problems = self._grounded(lines, facts_text, mode="preshot", seen_image=False)  # the line call is text-only
+            if not good:
+                log.info("Setup line dropped: %s", "; ".join(problems) or "the model wrote none")
             return good
 
         def aired(good: list) -> None:
@@ -2775,13 +2806,18 @@ class Engine:
             if (pred := getattr(event.hud, "_prediction", None)) is not None:
                 self._pending_prediction[pred[2]] = (pred[0], pred[1], self.state.current_hole)
 
-        if not skip_setup_line and c.preshot and self.rng.random() <= rate and (good := setup_lines()):
+        spoken = not skip_setup_line and c.preshot
+        if spoken and self.rng.random() > rate:
+            log.info("Setup line skipped: not this shot's turn (rate %.0f%%)", rate * 100)
+        elif spoken and (good := setup_lines()):
             if self.speech.is_idle():
                 self.speech.say(good)
                 aired(good)
-            elif is_putt or correction or (pin_yd is not None and pin_yd <= 40):
+            elif is_putt or correction or stymie or (pin_yd is not None and pin_yd <= 40):
                 task = asyncio.create_task(self._air_setup_when_idle(good, self._shot_seq, PRESHOT_IDLE_WAIT_SECONDS, aired))
                 task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            else:
+                log.info("Setup line dropped: the booth was talking")
 
         # Then voice the mid-flight lines while the player sets up. Voicing takes over a second on
         # some CPUs, which would land a wedge call after the ball does. Likeliest outcomes first;
@@ -2868,6 +2904,9 @@ class Engine:
         green" before the ball lands) doesn't apply; only invented numbers and reused phrasing do."""
         out: dict[str, str] = {}
         recent = [l.text for l in self.state.recent_lines]
+        # (this putt's score, the comeback's): a holed reaction may only name the first, a miss or a
+        # conceded lag only the second ("the comeback putt for par" when the comeback was for bogey).
+        putt_for = m.groups() if is_putt and (m := PUTT_FOR_FACT.search(facts_text)) else None
         for outcome, text in (data.get("reaction_lines") or {}).items():
             if outcome not in reaction_outcomes(is_putt, lag=True) or not text:
                 continue
@@ -2888,6 +2927,9 @@ class Engine:
                 continue
             if phrase := repeats(body, [self.system_examples]) or repeats(body, recent):
                 log.info("Dropped the pre-written %s reaction (reuses %r): %r", outcome, phrase, body)
+                continue
+            if putt_for and (named := wrong_putt_score(body, *putt_for, holed=outcome == "holed")):
+                log.info("Dropped the pre-written %s reaction (calls a putt for %s): %r", outcome, named, body)
                 continue
             out[outcome] = body
         return out
@@ -5680,6 +5722,13 @@ class Engine:
             if (meta := meta_talk(line.text)):
                 check.ok = False
                 check.problems.append(f'"{meta}": talks about the booth\'s own rules or data, not the golf')
+            if (own := self.cfg.personas.get(line.speaker)) and own.name and re.search(
+                    rf"\b{re.escape(own.name)}\b", line.text, re.I):
+                check.ok = False
+                check.problems.append(f"{own.name} says his own name; he'd only name the other commentator")
+            if (slip := self._missing_possessive(line.text)):
+                check.ok = False
+                check.problems.append(f'"{slip}" needs a possessive (\'s)')
             if bare_acknowledgement(line.text):
                 check.ok = False
                 check.problems.append("a bare acknowledgement adds nothing")
@@ -5717,21 +5766,34 @@ class Engine:
     ) -> list[Line]:
         """Generate, ground, and retry a line without airing it. `_speak` airs the result now; the
         pre-round opener holds it until the tee confirms the round. `system` forces a round variant.
-        `must` is a word the lines have to say (a mulligan the model would otherwise only hint at)."""
+        `must` is a word the lines have to say (a mulligan the model would otherwise only hint at).
+        An opener must lead with its welcome: with the welcome dropped, the replies that followed it
+        aired as non-sequiturs ("Quite the pedigree." to nothing)."""
         seen = bool(images)
+
+        def needs(lines: list[Line]) -> list[str]:
+            out = []
+            if must and lines and not any(must in l.text.lower() for l in lines):
+                out.append(f'none of the lines says "{must}": say it in so many words')
+            if kind == "opener" and lines and not WELCOME.search(lines[0].text):
+                out.append("the opener has to start with a line welcoming everyone to the broadcast")
+            return out
+
         lines, problems = self._grounded(await self._generate(kind, llm, user, images, system=system),
                                          facts_text, mode, seen)
-        if must and lines and not any(must in l.text.lower() for l in lines):
-            problems = problems + [f'none of the lines says "{must}": say it in so many words']
+        problems = problems + needs(lines)
         if problems:
+            log.info("%s rejected, retrying: %s", kind, "; ".join(problems))
             # One retry with the reasons; a second failure means those lines just aren't said.
             self.stats["retries"] += 1
             retried, still_bad = self._grounded(
                 await self._generate(kind, llm, retry_prompt(user, problems), images, system=system),
                 facts_text, mode, seen
             )
-            if retried:
+            if retried and not (needs(retried) and not needs(lines)):
                 lines = retried
+            if still_bad or needs(lines):
+                log.info("%s retry still had problems: %s", kind, "; ".join(still_bad + needs(lines)))
             if still_bad:
                 self.stats["dropped_after_retry"] += len(still_bad)
         return lines

@@ -364,6 +364,10 @@ class MinimapRead:
                 return None
         return n
 
+    def stymied(self, to_pin: float | None) -> bool:
+        """A tree stands right on the line to the pin (the stymie the facts name)."""
+        return any(t.blocks is not None for t in self._trees(to_pin))
+
     def facts(self, to_pin: float | None = None, lie: str | None = None) -> list[str]:
         """`lie` is the ball's lie from the HUD; a dogleg is only mentioned from the tee, since from the
         rough or a fairway's edge the fairway always sits off the straight line to the pin."""

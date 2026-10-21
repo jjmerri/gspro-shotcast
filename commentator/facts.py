@@ -170,6 +170,30 @@ def history_facts(player: str | None, prior: list[ShotRecord]) -> list[str]:
 
 DIST = re.compile(r"(\d+(?:\.\d+)?)\s*(yards|metres|feet)(?:\s+(\d+)\s+inches)?")
 SCORE_NAMES = {-3: "an albatross", -2: "an eagle", -1: "a birdie", 0: "a par", 1: "a bogey", 2: "a double bogey"}
+PUTT_FOR = {-3: "albatross", -2: "eagle", -1: "birdie", 0: "par", 1: "bogey", 2: "double bogey", 3: "triple bogey"}
+PUTT_FOR_FACT = re.compile(r"This putt is for ([a-z ]+)\. If it misses, the next putt is for ([a-z ]+),")
+_PUTT_FOR_SAID = re.compile(r"\bfor (?:an? )?(albatross|eagle|birdie|par|(?:double |triple )?bogey)\b", re.I)
+
+
+_NEXT_PUTT = re.compile(r"comeback|come-back|\bnext\b|another|second|return|tap-in|left with|leaves|\bleft\b(?= \w+ putt)", re.I)
+_CLAUSE = re.compile(r"[;.!?\u2014\u2013]|,\s|\bbut\b|\band\b")
+
+
+def wrong_putt_score(text: str, this: str, nxt: str, holed: bool) -> str | None:
+    """The score a pre-written putt reaction says a putt is "for" when that's wrong: a holed putt is
+    for `this`; after a miss, the putt just missed is still for `this` ("that was for par, and it
+    slides by") but the one left over is for `nxt` (not "the comeback putt for par" on a bogey putt)."""
+    for m in _PUTT_FOR_SAID.finditer(text):
+        said = m.group(1).lower()
+        if holed:
+            ok = said == this
+        else:
+            # Only the putt this phrase is about: the words before it in its own clause.
+            clause = _CLAUSE.split(text[:m.start()])[-1]
+            ok = said == nxt or (said == this and not _NEXT_PUTT.search(clause))
+        if not ok:
+            return said
+    return None
 
 
 def to_yards(distance: str | None) -> float | None:
@@ -317,4 +341,8 @@ def preshot_facts(hud, hole_par: int | None, handed: str | None = None) -> list[
         if round_par is not None:
             line += f", which takes the round to {_fmt_to_par(round_par + diff)}"
         facts.append(line + ".")
+    # A missed putt's comeback is for the next score, not this one: a pre-written "past" reaction
+    # carried "for par" over to a comeback that was for bogey.
+    if putting and diff is not None and (this := PUTT_FOR.get(diff)) and (nxt := PUTT_FOR.get(diff + 1)):
+        facts.append(f"This putt is for {this}. If it misses, the next putt is for {nxt}, not {this}.")
     return facts

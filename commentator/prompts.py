@@ -520,7 +520,8 @@ def preshot_branch_prompt(
             + '\n\nThe player is over a putt. Reply with "reaction_lines": the call "' + speaker
             + '" makes the instant the ball stops, at most 12 words each, written now for each way it can finish. '
             "Match the putt number in the facts (a made first putt is a one-putt, a made second putt is a two-putt, "
-            "and so on). holed (it drops), short (left short of the hole), past (misses and runs past or by)."
+            "and so on). holed (it drops), short (left short of the hole), past (misses and runs past or by). A missed "
+            "putt's next putt is for the score the facts give for the next putt, never this putt's score."
             + (" gimme (a long lag that stops inside the gimme circle, conceded as a tap-in: credit the lag "
                "and say what score it leaves, without claiming it dropped)." if lag else "")
         )

@@ -322,6 +322,8 @@ def test_tree_facts_stymie_dogleg_and_pin_spot():
                     choices={"pin_side": ("right", 0.9), "fairway": ("right", 0.96)})
     facts = r.facts(152)
     assert "Hole layout: a tree stands right on the line to the pin, about 20 yards ahead." in facts
+    assert r.stymied(152)
+    assert not MinimapRead(threshold=0.7, trees=[Tree("left", 0.5, 0.8, 0.9)]).stymied(152)
     assert "Hole layout: trees close to the left of the line, about 80 to 120 yards out." in facts
     assert not any("40 to 60" in f for f in facts)                 # Jev wasn't sure of that one
     assert not any("dogleg" in f for f in facts)                   # an approach: no dogleg talk
