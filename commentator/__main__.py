@@ -340,6 +340,7 @@ async def cmd_say(cfg: Config, args) -> None:
     if args.voice:  # audition a voice without editing config
         args.speaker = args.speaker or "pbp"
         cfg.tts.openai_voices[args.speaker] = args.voice
+        cfg.tts.google_voices[args.speaker] = args.voice
         cfg.tts.voices[args.speaker] = args.voice
         print(f"Using voice {args.voice!r} for {args.speaker}")
     speech = SpeechQueue(cfg, build_tts(cfg.tts))

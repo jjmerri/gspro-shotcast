@@ -112,6 +112,69 @@ def test_tts_active_voices_follows_the_provider():
     assert TTSConfig(provider="kokoro").active_instructions == {}
     oi = TTSConfig(provider="openai").active_instructions
     assert "British" in oi["pbp"] and "dry" in oi["color"].lower()
+    assert TTSConfig(provider="google").active_voices["pbp"] == "en-GB-Chirp3-HD-Iapetus"
+    assert TTSConfig(provider="google").active_instructions == {}
+
+
+async def test_google_stream_rejoins_split_samples_and_cancels_the_call_when_closed(monkeypatch):
+    pytest.importorskip("google.cloud.texttospeech")
+    from types import SimpleNamespace
+
+    from commentator.config import TTSConfig
+    import numpy as np
+
+    from commentator.tts.google_tts import GoogleTTS
+
+    monkeypatch.setenv("GOOGLE_TTS_API_KEY", "k")
+    pcm = np.array([1000, -2000, 3000, 4000], dtype="<i2").tobytes()
+
+    class Call:
+        cancelled = False
+
+        def __init__(self, chunks):
+            self.chunks = chunks
+
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            for c in self.chunks:
+                yield SimpleNamespace(audio_content=c)
+
+        def cancel(self):
+            Call.cancelled = True
+
+    sent = []
+    connected = asyncio.Event()
+    connected.set()
+
+    class Client:
+        async def streaming_synthesize(self, requests, timeout):
+            sent.extend([r async for r in requests])
+            await connected.wait()
+            return Call([pcm[:3], pcm[3:7], pcm[7:]])   # chunks that split 16-bit samples
+
+    tts = GoogleTTS(TTSConfig(provider="google"))
+    tts._client = Client()
+    blocks = [b async for b in tts.stream("Hello.", "en-GB-Chirp3-HD-Iapetus")]
+    assert np.allclose(np.concatenate(blocks) * 32768, [1000, -2000, 3000, 4000])
+    assert sent[0].streaming_config.voice.language_code == "en-GB" and sent[1].input.text == "Hello."
+    assert Call.cancelled
+
+    # Abandoned while the connection is still coming up: the call is cancelled once it arrives.
+    Call.cancelled = False
+    connected.clear()
+    stream = tts.stream("Hello.", "en-GB-Chirp3-HD-Iapetus")
+    task = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await stream.aclose()
+    assert not Call.cancelled
+    connected.set()
+    await asyncio.sleep(0.01)
+    assert Call.cancelled
 
 
 def test_interest_scoring():

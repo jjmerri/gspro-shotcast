@@ -141,6 +141,7 @@ gspro-shotcast\
 - **`.env` holds only secrets** and is gitignored. Start from `.env.example`. Keys the booth reads:
   - `ANTHROPIC_API_KEY` for Claude calls.
   - `OPENAI_API_KEY` for GPT models and the OpenAI voices.
+  - `GOOGLE_TTS_API_KEY` for the Google voices (`tts.provider: google`).
   - `SQUABBIT_EMAIL` and `SQUABBIT_PASSWORD` for the live-handicap pull (only if
     `squabbit.enabled: true`).
 

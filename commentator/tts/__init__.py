@@ -11,6 +11,10 @@ def build_tts(cfg: TTSConfig) -> TTS:
         from .openai_tts import OpenAITTS
 
         return OpenAITTS(cfg)
+    if cfg.provider == "google":
+        from .google_tts import GoogleTTS
+
+        return GoogleTTS(cfg)
     from .console_tts import ConsoleTTS
 
     return ConsoleTTS()

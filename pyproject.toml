@@ -19,9 +19,9 @@ dependencies = [
 [project.optional-dependencies]
 # Live capture on the GSPro PC: screenshots, OCR and the Open Connect sniffer.
 capture = ["mss>=9", "rapidocr>=3", "onnxruntime>=1.17", "scapy>=2.5"]
-# Claude calls (the default pre-shot look, opener and closer). The GPT calls and the OpenAI voices
-# need no extra package.
-cloud = ["anthropic"]
+# Claude calls (the default pre-shot look, opener and closer) and the Google voices. The GPT calls
+# and the OpenAI voices need no extra package.
+cloud = ["anthropic", "google-cloud-texttospeech>=2.27"]
 # Optional: the fast minimap hazard read by TypeSafe's Jev (minimap.provider: jev).
 jev = ["typesafe-sdk>=0.7"]
 # Optional: voices on the PC's own CPU (Kokoro) instead of the OpenAI voices.

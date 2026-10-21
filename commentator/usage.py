@@ -23,7 +23,9 @@ OPENAI_PRICES = {
 # Cloud TTS (gpt-4o-mini-tts) is billed by generated audio time; OpenAI's own estimate is about this.
 # The tts-1 models bill by input characters instead. Check current pricing before relying on these.
 TTS_USD_PER_MINUTE = 0.015
-TTS_USD_PER_MILLION_CHARS = {"tts-1-hd": 30.0, "tts-1": 15.0}
+# Google Chirp 3 HD bills input characters ($30/M), with the first 1M characters each month free
+# (not reflected here).
+TTS_USD_PER_MILLION_CHARS = {"tts-1-hd": 30.0, "tts-1": 15.0, "google": 30.0}
 
 
 def audio_cost(seconds: float) -> float:

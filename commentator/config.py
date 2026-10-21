@@ -164,12 +164,18 @@ class LLMSection(BaseModel):
 
 
 class TTSConfig(BaseModel):
-    # Cloud voices by default (OPENAI_API_KEY); `kokoro` voices on the PC's CPU instead.
-    provider: Literal["kokoro", "openai", "console"] = "openai"
+    # Cloud voices by default (OPENAI_API_KEY); `google` for Google's Chirp 3 HD voices
+    # (GOOGLE_TTS_API_KEY); `kokoro` voices on the PC's CPU instead.
+    provider: Literal["kokoro", "openai", "google", "console"] = "openai"
     # Persona key -> provider voice id. Each provider has its own voice ids, so they're kept apart:
     # flipping `provider` is then the whole toggle, with no voice edits (and an easy switch back).
     voices: dict[str, str] = Field(default_factory=lambda: {"pbp": "bm_george", "color": "am_michael"})
     openai_voices: dict[str, str] = Field(default_factory=lambda: {"pbp": "fable", "color": "ballad"})
+    # Google Chirp 3 HD voice names; the first five characters are the language code.
+    google_voices: dict[str, str] = Field(default_factory=lambda: {
+        "pbp": "en-GB-Chirp3-HD-Iapetus", "color": "en-US-Chirp3-HD-Orus"})
+    # Google's pace (0.25-2.0). Kept apart from `speed`, which was tuned for the OpenAI voices.
+    google_speaking_rate: float = 1.0
     speed: float = 1.0
     kokoro_model: str = "models/kokoro-v1.0.onnx"
     kokoro_voices: str = "models/voices-v1.0.bin"
@@ -244,7 +250,11 @@ class TTSConfig(BaseModel):
     @property
     def active_voices(self) -> dict[str, str]:
         """The persona->voice map for the provider in use (voice ids differ by provider)."""
-        return self.openai_voices if self.provider == "openai" else self.voices
+        if self.provider == "openai":
+            return self.openai_voices
+        if self.provider == "google":
+            return self.google_voices
+        return self.voices
 
     @property
     def active_instructions(self) -> dict[str, str]:

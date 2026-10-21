@@ -59,12 +59,18 @@ llm:
   # flight: { provider: ollama, model: qwen3:8b, effort: null, service_tier: null, max_tokens: 900 }
 
 tts:
-  # openai (cloud, needs OPENAI_API_KEY) | kokoro (on the PC's CPU) | console (print only)
+  # openai (cloud, needs OPENAI_API_KEY) | google (cloud, GOOGLE_TTS_API_KEY) | kokoro (on the PC's CPU) | console (print only)
   provider: openai
   openai_voices:
     pbp: fable
     color: ballad
   speed: 1.05
+  # Google's Chirp 3 HD voices instead: provider: google (needs the `cloud` extra). Streams with
+  # ~0.2 s to first audio; $30 per 1M characters after 1M free each month.
+  # google_voices:
+  #   pbp: en-GB-Chirp3-HD-Iapetus
+  #   color: en-US-Chirp3-HD-Orus
+  # google_speaking_rate: 1.0
   # Voices on the PC instead (no key, no per-line cost, plainer delivery): provider: kokoro, after
   # `pip install -e ".[local]"` and downloading the two model files into models/ (docs/setup.md).
   # voices:             # Kokoro voice ids
