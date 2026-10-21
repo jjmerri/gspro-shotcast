@@ -52,6 +52,11 @@ while it's in the air, react to where it finished, read putts, open and close th
 track your league's standings, closest-to-the-pin and net scores. About $1-2 per 18-hole round
 with the default cloud models, or $0 fully local.
 
+Between shots they can drop in an aside, kept occasional so the golf stays first: a recent golf
+headline, a live tour leaderboard or your local teams' scores, or a bit of history about the course
+you're playing. They also know the time of day and, if you give a location, the weather outside;
+see [Asides](docs/booth.md#asides-news-scores-and-course-trivia).
+
 If your league scores in [Squabbit](https://squabbit.com), the booth can sign in (read-only) to
 pull each player's live handicap, give strokes exactly as Squabbit does, and know what the other
 teams have posted this week and where the season standings sit; see
