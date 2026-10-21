@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw
 from .config import HUD_ASPECT, Region, ScreenConfig
 from .hud import (
     Hud, NAME_DARK, OcrItem, arrow_direction, parse_club, parse_elevation, parse_hole_box, parse_lie, parse_others,
-    parse_player_box, parse_score_banner, parse_scorecard, parse_slope, parse_tiles,
+    parse_player_box, parse_score_banner, parse_scorecard, parse_slope, parse_tiles, tile_value_items,
 )
 
 log = logging.getLogger(__name__)
@@ -35,6 +35,19 @@ def name_signature(img: Image.Image) -> tuple:
         return NAME_DARK
     mid = (lo + hi) / 2
     return tuple(p > mid for p in px)
+
+def _tile_boxes(items: list[OcrItem], scale: float, width: int, height: int) -> dict[str, tuple[int, int, int, int]]:
+    """Each tile value's box in the unscaled crop, padded so a number that grows a digit ("99.8" to
+    "100.2") still falls inside it. `width`/`height` are the OCR'd (scaled) image's size."""
+    out = {}
+    for label, v in tile_value_items(items).items():
+        pad_x, pad_y = 0.35 * v.h, 0.3 * v.h
+        right = 2 * v.x - v.left
+        box = (max(0.0, v.left - pad_x), max(0.0, v.y - v.h / 2 - pad_y),
+               min(float(width), right + pad_x), min(float(height), v.y + v.h / 2 + pad_y))
+        out[label] = tuple(round(c / scale) for c in box)
+    return out
+
 
 def _group_lines(items: list[OcrItem]) -> list[str]:
     """OCR items grouped into text lines by vertical position: items on roughly the same row join
@@ -296,6 +309,7 @@ class Screen:
                     hud.name_sig = name_signature(img)
                     continue
                 scale = self.cfg.ocr_scale
+                crop_size = img.size
                 if scale and scale != 1.0:
                     img = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))))
                 items = self.ocr_items(img)
@@ -314,6 +328,9 @@ class Screen:
                 hud.lie = parse_lie(texts)
             elif name in ("tiles", "tiles_left"):
                 hud.tiles = {**hud.tiles, **parse_tiles(items)}
+                if name == "tiles":
+                    hud.tile_boxes = _tile_boxes(items, scale or 1.0, img.width, img.height)
+                    hud.tile_crop_size = crop_size
             elif name == "club":
                 for k, v in parse_club(texts).items():
                     setattr(hud, k, v)

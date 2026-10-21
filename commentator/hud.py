@@ -66,6 +66,11 @@ class Hud:
     # Pixel signature of the top row's name cell (who's up), from the `player_name` region, no OCR.
     # None when not read; NAME_DARK when the cell is blank (the screen is fading between players).
     name_sig: "tuple[bool, ...] | None" = None
+    # Where each tile's value sat in the `tiles` crop (left, top, right, bottom pixels), from the OCR.
+    # Following a ball to rest compares just Total Length's number: the rest of the region is the
+    # live 3D scene beside the tile panel, which never holds still.
+    tile_boxes: dict[str, tuple[int, int, int, int]] = field(default_factory=dict)
+    tile_crop_size: tuple[int, int] | None = None   # the `tiles` crop those boxes are in
 
 
 NAME_DARK: tuple = ()
@@ -278,15 +283,19 @@ def parse_tiles(items: list[OcrItem]) -> dict[str, str]:
     Total Length shows "--.--" until the ball is moving; it counts as a value here, or the label
     gets paired with the number from the tile above it.
     """
+    return {label: v.text.strip() for label, v in tile_value_items(items).items()}
+
+
+def tile_value_items(items: list[OcrItem]) -> dict[str, OcrItem]:
+    """Each tile label (lowercase) with the OCR item of its value; see parse_tiles."""
     labels = [i for i in items if re.search(r"[A-Za-z]{3}", i.text)]
     values = [i for i in items if (NUMBER.search(i.text) or PLACEHOLDER.match(i.text))
               and not re.search(r"[A-Za-z]{3}", i.text)]
-    out: dict[str, str] = {}
+    out: dict[str, OcrItem] = {}
     for label in labels:
         above = [v for v in values if 0 < label.y - v.y < 3 * max(label.h, v.h) and abs(v.x - label.x) < 3 * label.h]
         if above:
-            v = min(above, key=lambda v: (label.y - v.y) + abs(v.x - label.x))
-            out[label.text.strip().lower()] = v.text.strip()
+            out[label.text.strip().lower()] = min(above, key=lambda v: (label.y - v.y) + abs(v.x - label.x))
     return out
 
 

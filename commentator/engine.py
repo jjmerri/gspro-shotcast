@@ -1667,7 +1667,7 @@ class Engine:
         side = next((s for s in r.sides if s.key == side_key), None)
         if side is None:
             return
-        season = {s.key: self.store.season_rounds(s.key) for s in r.sides}
+        season = {s.key: self.store.season_rounds(s.key, "league" if r.is_league else "practice") for s in r.sides}
 
         async def gen(strokes):
             facts = (r.closing_facts(self.state.shots, season, final_overrides={side_key: strokes},
@@ -4081,16 +4081,21 @@ class Engine:
         """From touchdown on, watch the HUD's pixels rather than OCR it: a read OCRs the lie and the
         tiles one after the other (1.2-1.5 s), and GSPro shows the ball at rest only a second or so
         before moving the player box on, so the read-until-steady follow rarely saw a drive stop and
-        named the lie from mid-roll. Grabs (a few ms, no OCR) every `poll`: Total Length's tile stops
-        changing when the ball stops, and that grab, taken at rest, is the one OCR'd."""
+        named the lie from mid-roll. Grabs (a few ms, no OCR) every `poll`: Total Length's number
+        stops changing when the ball stops, and the grab taken at rest is the one OCR'd. Only that
+        number is compared (its box from the landing read): the rest of the tiles region is the live
+        scene beside the panel. It must hold for two grab-to-grab comparisons in a row, since a ball
+        creeping on a slope ticks over less often than once a poll (and one did, then rolled off the
+        green). Measured: a stopped drive showed for about a second before GSPro faded the box."""
         parts = ["lie", "player_name", "tiles"]
-        prev = None
+        box = landing.tile_boxes.get("total length")
+        prev, steady = None, 0
         while time.monotonic() - started < deadline:
             try:
                 crops = await asyncio.to_thread(self.screen.grab_regions, parts)
             except Exception:
                 log.warning("%s HUD grab failed while following to rest", tag, exc_info=True)
-                prev = None   # a failed grab can't count toward a steady pair
+                prev, steady = None, 0   # a failed grab can't count toward a steady run
                 await asyncio.sleep(poll)
                 continue
             sig = name_signature(crops["player_name"]) if "player_name" in crops else None
@@ -4099,10 +4104,15 @@ class Engine:
                          tag, time.monotonic() - started, landing.lie)
                 return _unsettled(landing, tag), True
             tiles = crops.get("tiles")
-            if tiles is not None and prev is not None and not _pixels_changed(prev, tiles):
+            # The box only fits a grab the same size as the landing read's crop (a capture fallback or
+            # resolution change moves everything); otherwise compare the whole region.
+            fits = box and tiles is not None and tiles.size == landing.tile_crop_size
+            total = tiles.crop(box) if fits else tiles
+            steady = steady + 1 if total is not None and prev is not None and not _pixels_changed(prev, total) else 0
+            if steady >= 2:
                 hud = await asyncio.to_thread(self.screen.read_hud, parts, None, crops)
-                log.info("%s ball at rest: tiles still %.1fs into the follow, resting lie %s", tag,
-                         time.monotonic() - started, hud.lie)
+                log.info("%s ball at rest: %s still %.1fs into the follow, resting lie %s", tag,
+                         "total length" if fits else "tiles", time.monotonic() - started, hud.lie)
                 if self.cfg.screen.save_review_images:
                     await asyncio.to_thread(self._save_review_image, tag, "final")
                 # The next player's address shows both distance tiles blank ("--.--"): the box moved
@@ -4111,7 +4121,7 @@ class Engine:
                         or _tile_yards(hud.tiles, "total length", "yards") is not None):
                     return hud, True
                 return _unsettled(landing, tag), True
-            prev = tiles
+            prev = total
             await asyncio.sleep(poll)
         log.info("%s ball not seen to come to rest within %.0fs (touchdown=True)", tag, deadline)
         return _unsettled(landing, tag), True
@@ -4532,7 +4542,7 @@ class Engine:
         self._pending_prediction.clear()
 
     def _opener_io(self, r: Round, first: str | None = None, preround: bool = False) -> tuple[str, str]:
-        season = {s.key: self.store.season_rounds(s.key) for s in r.sides}
+        season = {s.key: self.store.season_rounds(s.key, "league" if r.is_league else "practice") for s in r.sides}
         # The opening hole comes from the round's start hole and the course card's par when we know it
         # (league rounds: Front/Back 9 from the schedule). For a pre-round practice build the start is
         # unknown, so leave the first hole out rather than claim the stale HUD hole; a tee-time opener
@@ -5443,7 +5453,7 @@ class Engine:
         self._schedule_publish(after_speech=True)
 
     async def _sign_off(self, r: Round, stats: dict) -> None:
-        season = {s.key: self.store.season_rounds(s.key) for s in r.sides}
+        season = {s.key: self.store.season_rounds(s.key, "league" if r.is_league else "practice") for s in r.sides}
         facts = (r.closing_facts(self.state.shots, season, week_ctp=self._closer_week_ctp(r))
                  + self._league_facts(r, closing=True))
         if not self.cfg.commentary.closer:

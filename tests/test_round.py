@@ -346,14 +346,14 @@ def test_holed_recovery_counts_as_a_scramble_and_sand_save():
 def test_closing_facts_judge_net_and_team_best_ball():
     r, card, shots = _three_hole_round()
     r.apply_scorecard(card)
-    facts = "\n".join(r.closing_facts(shots, {"Mike": {"rounds": 2, "avg_net_to_par": 3.0, "best_net_to_par": -1}}))
+    facts = "\n".join(r.closing_facts(shots, {"Mike": {"rounds": 2, "net_rounds": 2, "avg_net_to_par": 3.0, "best_net_to_par": -1}}))
     # 3 holes: Mike's 12 index is 2 course strokes, 85% of that rounds to 2.
     assert "Mike: gross 14 over 3 holes (2 over par, par 12); with 2 handicap strokes that's a net 12, net even par." in facts
     assert "Mike hit 2 of 2 fairways" in facts and "1 of 3 greens in regulation" in facts
     assert "one three-putt and one one-putt" in facts and "1 penalty stroke" in facts
     assert "1 double bogey (hole 2)" in facts
     # Season averages are per nine; a 3-hole round compares against a third of it.
-    assert "Mike's average in 2 earlier rounds (scaled to 3 holes): net 1 over par." in facts
+    assert "Mike's average in 2 earlier league rounds (scaled to 3 holes): net 1 over par." in facts
     # Best ball net: strokes fall on the hardest holes; hole 3 is index 1.
     assert "Team Aces (best ball): net" in facts
 
@@ -1836,6 +1836,33 @@ def test_season_net_is_per_nine_holes(tmp_path):
     season = s.season_rounds("Mike")
     assert season["rounds"] == 3
     assert season["avg_net_to_par"] == pytest.approx((2 + 0 + 4.5) / 3) and season["best_net_to_par"] == 0
+
+
+def test_season_line_counts_only_rounds_of_this_rounds_kind(tmp_path):
+    from commentator.round import SideStats, _season_facts
+    from commentator.store import Store
+
+    s = Store(str(tmp_path / "s.db"))
+    s.session_id = 1
+
+    def put(gross, net, league, pars=9):
+        st = SideStats(holes_scored=9, gross=gross, par=4 * pars, scores={h: 4 for h in range(1, 10)})
+        s.record_round(course="Pebble", fmt="stroke", side="Josh", team=None, holes=9, stats=st, strokes=None,
+                       net_to_par=net, hole_number=lambda k: k, hole_pars={h: 4 for h in range(1, pars + 1)},
+                       is_league=league)
+
+    put(35, -2, league=False)    # the one practice round a handicap happened to be loaded for
+    put(39, None, league=False)
+    put(37, None, league=False)
+    put(36, None, league=False, pars=8)   # one par unread: 36 on a "par 32" isn't 4 over
+    s.session_id = 2
+    league = s.season_rounds("Josh", "league")
+    assert _season_facts("Josh", league, 9, league=True) == ["Josh has no earlier league rounds recorded this season."]
+    practice = _season_facts("Josh", s.season_rounds("Josh", "practice"), 9, league=False)
+    assert practice[0] == "Josh's earlier practice rounds this season: 4."
+    assert practice[1] == ("Josh's average gross score to par in the 3 with every par known: 1 over par; "
+                           "best: 1 under par.")
+    assert "net" not in " ".join(practice)
 
 
 def _log_engine(tmp_path):

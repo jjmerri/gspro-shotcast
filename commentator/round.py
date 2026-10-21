@@ -718,7 +718,7 @@ class Round:
             if side.strokes is not None:
                 line += f", receiving {side.strokes} handicap strokes over these {self.holes} holes"
             facts.append(line + ".")
-            facts += _season_facts(side.label, season.get(side.key), self.holes)
+            facts += _season_facts(side.label, season.get(side.key), self.holes, self.is_league)
         if first_up:
             facts.append(f"First on the tee: {first_up}.")
         return facts
@@ -898,15 +898,22 @@ class Round:
             facts.append(f"{who} picked up on {self.holes_phrase(picked)}, scored at the maximum the game allows.")
         if s.longest_drive:
             facts.append(f"{possessive(who)} longest drive went {s.longest_drive:.0f} yards.")
-        if season and season.get("rounds") and net is not None:
-            # Season numbers are per nine holes; put them on this round's length to compare.
-            scale = self.holes / 9
+        scale = self.holes / 9   # season numbers are per nine holes; put them on this round's length
+        if season and season.get("net_rounds") and net is not None and self.is_league:
             avg, best = season.get("avg_net_to_par"), season.get("best_net_to_par")
             if best is not None and net < best * scale:
-                facts.append(f"That's {possessive(who)} best net round of the season so far.")
+                facts.append(f"That's {possessive(who)} best net league round of the season so far.")
             elif avg is not None:
-                facts.append(f"{possessive(who)} average in {season['rounds']} earlier rounds"
+                facts.append(f"{possessive(who)} average in {season['net_rounds']} earlier league rounds"
                              f"{_scaled_note(self.holes)}: net {to_par(round(avg * scale))}.")
+        elif (season and season.get("gross_rounds") and not self.is_league and s.par
+              and s.holes_scored >= self.holes and all(seq in self.par for seq in s.scores)):
+            gross, avg, best = s.gross - s.par, season.get("avg_gross_to_par"), season.get("best_gross_to_par")
+            if best is not None and gross < best * scale:
+                facts.append(f"That's {possessive(who)} best practice round of the season so far, against par.")
+            elif avg is not None:
+                facts.append(f"{possessive(who)} average in {season['gross_rounds']} earlier practice rounds"
+                             f"{_scaled_note(self.holes)}: {to_par(round(avg * scale))}.")
         return facts
 
     def _team_facts(self, all_stats: dict[str, SideStats]) -> list[str]:
@@ -958,15 +965,25 @@ def _scaled_note(holes: int) -> str:
     return "" if holes == 9 else f" (scaled to {holes} holes)"
 
 
-def _season_facts(who: str, season: dict | None, holes: int = 9) -> list[str]:
+def _season_facts(who: str, season: dict | None, holes: int = 9, league: bool = True) -> list[str]:
+    """The opener's season line for a side, from season_rounds sliced to this round's kind: league
+    rounds (judged net) for a league round, practice rounds (judged gross) for a practice one."""
+    kind = "league" if league else "practice"
     if not season or not season.get("rounds"):
-        return [f"{who} has no earlier rounds recorded this season."]
-    facts = [f"{possessive(who)} earlier rounds this season: {season['rounds']}."]
-    if season.get("avg_net_to_par") is not None:
-        scale = holes / 9   # season numbers are per nine holes
-        facts.append(f"{possessive(who)} average net score in them{_scaled_note(holes)}: "
-                     f"{to_par(round(season['avg_net_to_par'] * scale))}; "
+        return [f"{who} has no earlier {kind} rounds recorded this season."]
+    facts = [f"{possessive(who)} earlier {kind} rounds this season: {season['rounds']}."]
+    scale = holes / 9   # season numbers are per nine holes
+    if league and season.get("avg_net_to_par") is not None:
+        n = season.get("net_rounds") or season["rounds"]
+        facts.append(f"{possessive(who)} average net score in {'them' if n == season['rounds'] else f'the {n} with a handicap'}"
+                     f"{_scaled_note(holes)}: {to_par(round(season['avg_net_to_par'] * scale))}; "
                      f"best: net {to_par(round(season['best_net_to_par'] * scale))}.")
+    elif not league and season.get("avg_gross_to_par") is not None:
+        n = season.get("gross_rounds") or season["rounds"]
+        facts.append(f"{possessive(who)} average gross score to par in {'them' if n == season['rounds'] else f'the {n} with every par known'}"
+                     f"{_scaled_note(holes)}: "
+                     f"{to_par(round(season['avg_gross_to_par'] * scale))}; "
+                     f"best: {to_par(round(season['best_gross_to_par'] * scale))}.")
     return facts
 
 

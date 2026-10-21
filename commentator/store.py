@@ -133,6 +133,13 @@ CREATE INDEX IF NOT EXISTS shots_lie ON shots(lie_before);
 _COUNTS_AS_ROUND = "(complete = 1 OR COALESCE(holes_played, holes) >= 9)"
 # Net to par per nine holes, so 9- and 18-hole rounds (and a nine inside an abandoned 18) compare.
 _NET_PER_NINE = "(net_to_par * 9.0 / COALESCE(NULLIF(holes_played, 0), holes))"
+# Gross to par per nine holes, only where par was known for every scored hole: `par` sums the known
+# ones, so a missing par would read as strokes over par. NULL otherwise (left out of the averages).
+_PARS_COMPLETE = ("(hole_pars IS NOT NULL AND scores IS NOT NULL AND holes_played > 0"
+                  " AND (SELECT COUNT(*) FROM json_each(scores)) = holes_played"
+                  " AND NOT EXISTS (SELECT 1 FROM json_each(scores) sc"
+                  " WHERE json_extract(hole_pars, '$.\"' || sc.key || '\"') IS NULL))")
+_GROSS_PER_NINE = f"(CASE WHEN {_PARS_COMPLETE} THEN (gross - par) * 9.0 / holes_played END)"
 
 
 # A drive's length: the total distance (carry plus roll) where GSPro's tile was read, else the carry.
@@ -826,13 +833,17 @@ class Store:
 
     def season_rounds(self, side: str, context: str | None = None) -> dict[str, Any]:
         """Earlier rounds for a player or team, before tonight: complete ones, plus a full nine or more
-        from one quit early. The net scores are per nine holes, so a 9 and an 18 compare."""
+        from one quit early, sliced by `context` (see _ctx_sql). `rounds` counts every scored round;
+        `net_rounds` only those with a net score (a handicap known), which the net average and best
+        come from. Scores to par are per nine holes, so a 9 and an 18 compare."""
         r = self.db.execute(
-            f"""SELECT COUNT(*) AS rounds, AVG({_NET_PER_NINE}) AS avg_net_to_par, MIN({_NET_PER_NINE}) AS best_net_to_par,
+            f"""SELECT COUNT(*) AS rounds, COUNT(net_to_par) AS net_rounds,
+                      AVG({_NET_PER_NINE}) AS avg_net_to_par, MIN({_NET_PER_NINE}) AS best_net_to_par,
+                      COUNT({_GROSS_PER_NINE}) AS gross_rounds, AVG({_GROSS_PER_NINE}) AS avg_gross_to_par, MIN({_GROSS_PER_NINE}) AS best_gross_to_par,
                       AVG(1.0 * putts / NULLIF(putt_holes, 0)) AS putts_per_hole,
                       AVG(1.0 * fir_hit / NULLIF(fir_tries, 0)) AS fir_rate,
                       AVG(1.0 * gir_hit / NULLIF(gir_tries, 0)) AS gir_rate
-               FROM rounds WHERE side = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND net_to_par IS NOT NULL
+               FROM rounds WHERE side = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND gross IS NOT NULL
                      AND {_COUNTS_AS_ROUND}""" + _ctx_sql(context),
             (side, self.session_id),
         ).fetchone()

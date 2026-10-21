@@ -3260,18 +3260,24 @@ async def test_after_touchdown_the_follow_reads_the_grab_where_the_ball_stopped(
     from PIL import Image, ImageDraw
 
     # Premonition, 10-21: OCR reads 1.2-1.5 s apart caught the drive mid-roll on the fairway; it ran on
-    # into the rough and GSPro moved on ~1 s after it stopped. Pixel grabs see the stop in time.
+    # into the rough and GSPro moved on ~1 s after it stopped. Pixel grabs see the stop in time. Loudon,
+    # 10-21: the live scene beside the tile panel never holds still, so only Total Length's number is
+    # compared; and a ball creeping on a slope can hold one poll and roll on, so it must hold for two.
     josh = Image.new("RGB", (40, 10), (200, 200, 200))
     next_up = Image.new("RGB", (40, 10), (10, 10, 10))
+    frame = iter(range(1000))
 
     def tiles(total):
-        img = Image.new("RGB", (60, 20))
-        ImageDraw.Draw(img).text((2, 2), str(total), fill=(255, 255, 255))
+        img = Image.new("RGB", (120, 20))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((0, 0, 59, 19), fill=(next(frame) * 97 % 256,) * 3)   # the moving scene
+        draw.text((62, 2), str(total), fill=(255, 255, 255))
         return img
 
-    grabs = [(tiles(t), "fairway") for t in (252.0, 254.5, 256.1)] + [(tiles(258.1), "rough")] * 2
-    grabs += [(tiles(258.1), "next")] * 5
-    ocr = iter([Hud(player_text="P", shot_number=1, lie="fairway",
+    grabs = [(tiles(t), "fairway") for t in (252.0, 254.5, 256.1, 256.1)] + [(tiles(258.1), "rough") for _ in range(3)]
+    grabs += [(tiles(258.1), "next") for _ in range(5)]
+    ocr = iter([Hud(player_text="P", shot_number=1, lie="fairway", tile_boxes={"total length": (60, 0, 120, 20)},
+                    tile_crop_size=(120, 20),
                     tiles={"carry (game)": str(c), "total length": str(c)}) for c in (200.0, 240.0, 243.2, 243.2)])
     names = {"next": next_up}
 
@@ -3330,3 +3336,13 @@ async def test_following_to_rest_never_takes_the_next_players_blank_tiles(tmp_pa
                     live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=Screen())
     hud, landed = await engine._follow_shot(Hud(player_text="P", shot_number=1, lie="tee"))
     assert landed and hud.lie is None and hud.tiles["carry (game)"] == "160.0"
+
+
+def test_tile_boxes_locate_each_value_in_the_unscaled_crop():
+    from commentator.hud import OcrItem
+    from commentator.screen import _tile_boxes
+
+    # OCR'd at 2x: TOTAL LENGTH's value "168.5" centred at (200, 300), 40 tall, 120 wide.
+    items = [OcrItem(text="168.5", x=200, y=300, h=40, left=140),
+             OcrItem(text="TOTAL LENGTH", x=200, y=350, h=20, left=120)]
+    assert _tile_boxes(items, 2.0, 400, 800) == {"total length": (63, 134, 137, 166)}
