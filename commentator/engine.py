@@ -166,6 +166,9 @@ class PendingOpening:
     created: float = field(default_factory=time.monotonic)
     # Everyone on the setup screen, league players and guests alike, for matching the load screen's roster.
     roster_key: frozenset = frozenset()
+    # Composed for the last roster read on an earlier setup screen (this one's PLAYERS tab was never
+    # opened), so the tee must show exactly that roster, guests included, before it airs.
+    guessed: bool = False
 
 
 @dataclass
@@ -497,6 +500,8 @@ class Engine:
         # format in an app. A shamble or alternate shot only stops the log calling it a scramble.
         self._setup_format: str | None = None
         self._opener_prepared_format: str | None = None
+        # The last roster (and slot order) read off a setup screen's PLAYERS tab, for a setup that never shows it.
+        self._last_setup_roster: tuple[list[str], list[str]] | None = None
         self._scramble_pairs: set = set()   # the log's teammate pairs last applied to the round
         self._opener_gen = 0
         # Set when a round opens so the one redundant, late pre-shot on the opening tee shot is skipped.
@@ -4405,6 +4410,8 @@ class Engine:
         tee_players = frozenset(pl for n in names if (pl := self.league.match_player(n)))
         if p.players != tee_players:
             return f"players {sorted(p.players)} != tee {sorted(tee_players)}"
+        if p.guessed and p.roster_key != self._roster_key(names):
+            return f"made for the last roster {sorted(p.roster_key)}, tee reads {sorted(self._roster_key(names))}"
         return None
 
     def _reconcile_slots(self, r: Round, names: list[str]) -> None:
@@ -4666,6 +4673,7 @@ class Engine:
                 if accept:
                     roster = names
                     slot_order = positional
+                    self._last_setup_roster = (list(names), list(positional))
                     if probed and players_tab:
                         self._keep_fixture_frame("setup_players", frame)
                 # Log on first detection and on every accepted roster change, so a live setup read can
@@ -4683,7 +4691,23 @@ class Engine:
             # that Play was pressed): the load-screen title matches the course we set up. A popup over
             # the button reads neither, so we just keep state and wait.
             load_title = gate.get("load_course", "").strip()
-            if seen_setup and course and roster and load_title and course_match_score(load_title, course) >= 0.6:
+            loading = bool(seen_setup and course and load_title and course_match_score(load_title, course) >= 0.6)
+            if loading and not roster and self._last_setup_roster:
+                # Play was pressed without the PLAYERS tab ever being shown, so this setup read no players.
+                # GSPro keeps the players from the last round, so make the opener for the last roster read
+                # and hold it for the tee, which airs it only if it shows exactly those players.
+                guess, guess_order = self._last_setup_roster
+                log.info("Load screen for %r up, but its PLAYERS tab was never read; preparing the opener "
+                         "for the last roster %s, held for the tee", course, guess)
+                self._opener_gen += 1
+                self._pending_opening = None
+                try:
+                    await self._prepare_speculative_round(course, list(guess), air=False, gen=self._opener_gen,
+                                                          slot_names=list(guess_order), guessed=True)
+                except Exception:
+                    log.exception("Preparing the early opener failed")
+                seen_setup, course, roster, slot_order, slot_cache = False, None, [], [], {}
+            elif loading and roster:
                 p = self._pending_opening
                 if p is not None and p.awaiting_load and self._front_loaded_fits(course, roster):
                     # The opener was composed on the setup screen and still fits. Air it over the load,
@@ -4813,13 +4837,15 @@ class Engine:
                 and (self._setup_format != "scramble" or p.round.format == "scramble"))
 
     async def _prepare_speculative_round(self, course: str, names: list[str], air: bool = True,
-                                         gen: int | None = None, slot_names: list[str] | None = None) -> None:
+                                         gen: int | None = None, slot_names: list[str] | None = None,
+                                         guessed: bool = False) -> None:
         """Compose the opener from the setup screen's course and roster. With `air` (the load-screen
         trigger) the opener plays immediately over the load, league or practice alike. Without `air`
         (front-loaded while still on the setup screen; `gen` drops a compose the roster has since moved
         past) it's composed and held with awaiting_load, to be aired when the load screen confirms Play.
         handle_round_start airs any held opener at the tee if it still matches, so even a backed-out
-        round never plays a wrong opener early."""
+        round never plays a wrong opener early. `guessed` (the roster is the last one read, not this
+        setup's) holds it for the tee, never airing it over the load."""
         c = self.cfg.commentary
         if not c.opener:
             return
@@ -4859,11 +4885,11 @@ class Engine:
         # Front-loaded openers (league or practice) wait on the load screen, so the watcher keeps
         # polling and recomposes on a roster change. The load-screen handler airs a league one over
         # the load and commits a practice one to be aired at the tee (never a wrong opener early).
-        awaiting = not air
+        awaiting = not air and not guessed
         self._pending_opening = PendingOpening(course=course, teams=frozenset(r.teams), players=players,
                                                is_league=is_league, round=r, lines=lines,
                                                aired=aired, awaiting_load=awaiting,
-                                               roster_key=self._roster_key(names))
+                                               roster_key=self._roster_key(names), guessed=guessed)
         if aired:
             self._air_lines("opener", lines)  # play over the course load
             log.info("Early opener aired during the load (league) for %s %s: %d line(s)",
@@ -4872,8 +4898,8 @@ class Engine:
             log.info("Opener front-loaded (%s) for %s %s, ready to air/hold on the load: %d line(s)",
                      "league" if is_league else "practice", r.course, sorted(players), len(lines))
         else:
-            log.info("Early opener prepared (practice) for %s %s, held for the tee: %d line(s)",
-                     r.course, sorted(players), len(lines))
+            log.info("Early opener prepared (%s, last roster) for %s %s, held for the tee: %d line(s)",
+                     "league" if is_league else "practice", r.course, sorted(players), len(lines))
 
     def _league_facts(self, r: Round, closing: bool = False) -> list[str]:
         """Each team's league history and standings: Squabbit's when it was read at the round start,

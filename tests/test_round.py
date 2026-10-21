@@ -1190,6 +1190,42 @@ async def test_setup_watcher_fires_the_opener_with_no_league(tmp_path):
     assert p.lines[0].text in next(tmp_path.glob("transcript-*.txt")).read_text()
 
 
+async def test_a_setup_that_never_shows_the_players_tab_uses_the_last_roster_held_for_the_tee(tmp_path):
+    from commentator.models import RoundStartEvent
+
+    # An earlier setup read MikeD + a guest; this one goes straight from another tab to Play, so no
+    # players are read. The opener is made for the last roster and held (not aired over the load).
+    e = _engine(tmp_path)
+    first = _players_tab("Augusta National", {1: "MikeD", 2: "Guesty"})
+    await _run_setup_watch(e, [first, first], until=lambda p: p is not None, polls=100)
+    e._pending_opening, e._opener_prepared_for = None, frozenset()
+    holes_tab = _players_tab("Pebble Beach", {}, tab=_TAB_OFF)
+    p = await _run_setup_watch(e, [holes_tab, {"load_course": "Pebble Beach"}],
+                               until=lambda p: p is not None and p.course == "Pebble Beach")
+    assert p is not None and p.course == "Pebble Beach" and p.guessed
+    assert not p.aired and not p.awaiting_load and p.roster_key == frozenset({"Mike", "Guesty"})
+    prompts = len(e.live_llm.prompts)
+
+    # A different guest on the tee (same league players): the guess doesn't fit, so the tee makes its own.
+    e.current_par, e.current_course = 4, "Pebble Beach"
+    tee = Hud(player_text="MikeD E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards",
+              others=[OtherPlayer("Other", "400 yards", "E")])
+    await e.handle_round_start(RoundStartEvent(hud=tee))
+    assert len(e.live_llm.prompts) > prompts
+
+    # The same roster on the tee airs the held opener with no tee-time call.
+    e2 = _engine(tmp_path / "b")
+    e2._last_setup_roster = (["MikeD", "Guesty"], ["MikeD", "Guesty"])
+    await _run_setup_watch(e2, [holes_tab, {"load_course": "Pebble Beach"}],
+                           until=lambda p: p is not None and p.course == "Pebble Beach")
+    prompts = len(e2.live_llm.prompts)
+    e2.current_par, e2.current_course = 4, "Pebble Beach"
+    tee = Hud(player_text="MikeD E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards",
+              others=[OtherPlayer("Guesty", "400 yards", "E")])
+    await e2.handle_round_start(RoundStartEvent(hud=tee))
+    assert len(e2.live_llm.prompts) == prompts and e2._pending_opening is None
+
+
 async def test_setup_watcher_skips_the_slots_when_the_players_tab_is_off(tmp_path):
     # Match Settings tab: the slot boxes land on lit settings widgets, but the PLAYERS tab is dark, so
     # the slots aren't even OCR'd (no labels as players, and no time spent reading them).
