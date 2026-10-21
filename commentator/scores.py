@@ -5,6 +5,7 @@ is minutes old, never a stale score from round start. A board that fails is skip
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -34,6 +35,12 @@ class ScoreItem:
     @property
     def rank(self) -> int:
         return {"in": 0, "post": 1, "pre": 2}.get(self.state, 3)
+
+
+def _game_time(detail: str) -> str:
+    """ESPN's "1:21 - 2nd Period" is time *left* in the period; say so, or the booth reads it as elapsed."""
+    m = re.fullmatch(r"\s*(\d+:\d{2}(?:\.\d)?)\s*-\s*(.+?)\s*", detail or "")
+    return f"{m.group(1)} left in the {m.group(2)}" if m else detail
 
 
 def _clock(dt: datetime) -> str:
@@ -200,7 +207,7 @@ def parse_games(body: dict, league: str, teams: list[str], now: datetime) -> lis
         else:
             score = f"{ash} {away.get('score', '?')}, {hsh} {home.get('score', '?')}"
             if state == "in":
-                fact = f"{sport}, live as of {_clock(now)}: {matchup}. {score}, {kind.get('detail') or 'in progress'}."
+                fact = f"{sport}, live as of {_clock(now)}: {matchup}. {score}, {_game_time(kind.get('detail')) or 'in progress'}."
             else:
                 fact = f"{sport}, final, {_when(start, now)}: {matchup}. {score}" + (
                     f" ({kind.get('detail')})." if kind.get("detail") not in (None, "", "Final") else ".")

@@ -51,7 +51,7 @@ def _game(state, start, detail="", bos=0, other=0, recap=None):
 def test_the_home_teams_games_live_finished_and_later_tonight():
     [live] = parse_games(_game("in", NOW - timedelta(hours=1), "8:14 - 2nd", 2, 1), "nhl", ["BOS"], NOW)
     assert live.fact == ("NHL, live as of 6:05 pm: Boston Bruins (7-2-0) at Dallas Stars (4-3-1). "
-                         "Bruins 2, Stars 1, 8:14 - 2nd.")
+                         "Bruins 2, Stars 1, 8:14 left in the 2nd.")
     [later] = parse_games(_game("pre", NOW + timedelta(hours=2)), "nhl", ["BOS"], NOW)
     assert later.fact.endswith("starting at 8:05 pm.") and later.rank > live.rank
     assert parse_games(_game("pre", NOW + timedelta(hours=9)), "nhl", ["BOS"], NOW) == []      # not tonight
@@ -148,7 +148,7 @@ class _AsideLLM:
 async def test_scores_are_planned_at_round_start_but_fetched_and_written_as_their_hole_starts(tmp_path):
     e = _engine(tmp_path)
     e.closer_llm = llm = _AsideLLM()
-    item = ScoreItem("nhl:5", "team", "in", "NHL, live as of 6:05 pm: Bruins 2, Stars 1, 8:14 - 2nd.", "2-1")
+    item = ScoreItem("nhl:5", "team", "in", "NHL, live as of 6:05 pm: Bruins 2, Stars 1, 8:14 left in the 2nd.", "2-1")
     e.scores = _Scores([item])
     r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
     e.round = r
@@ -316,3 +316,14 @@ def test_news_is_dated_and_old_stories_are_left_out():
     news.headlines = news._parse(rss, "espn.com")
     assert [h.title for h in news.pick_many(random.Random(0), 5, now=NOW)] == ["Fresh"]
     assert news.headlines[0].as_fact(NOW).endswith("(via espn.com, published on Sunday, 2 days ago)")
+
+
+def test_game_clock_is_labelled_as_time_left():
+    from commentator.scores import _game_time
+
+    assert _game_time("1:21 - 2nd Period") == "1:21 left in the 2nd Period"
+    assert _game_time("5:32 - 3rd Quarter") == "5:32 left in the 3rd Quarter"
+    assert _game_time("0:04.2 - 4th Quarter") == "0:04.2 left in the 4th Quarter"
+    assert _game_time("Halftime") == "Halftime"
+    assert _game_time("Top 5th") == "Top 5th"
+    assert _game_time("End of 2nd Period") == "End of 2nd Period"
