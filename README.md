@@ -36,12 +36,14 @@ Every swing goes into `logs/season.db` with its launch data,
 where it finished and what it scored, plus each round's card and stats. The stats page shows
 strokes gained, club gapping, approach and putting by distance, scorecards, every shot, and
 season highlights. Works with any launch monitor GSPro supports; see
-[what's recorded with yours](docs/tracking.md#launch-monitors).
+[what's recorded with yours](docs/tracking.md#launch-monitors). Lefties who use GSPro's mirrored
+HUD are read too: the layout is detected per player, shot by shot.
 
 **Share it with your league.** The booth can publish the stats page as a password-protected
 website (your own AWS account: S3 behind CloudFront, pennies a month or free) and update it on its
 own after every round. Each player can pick themselves to see just their rounds, shots and records,
-and send a link to exactly what they're looking at. Setup is one CloudFormation stack; see
+and send a link to exactly what they're looking at. It can live on your own domain if you have
+one. Setup is one CloudFormation stack; see
 [Sharing the stats page](docs/tracking.md#sharing-the-stats-page).
 
 ## The booth
@@ -49,13 +51,18 @@ and send a link to exactly what they're looking at. Setup is one CloudFormation 
 Two voices call the action: **Nigel** on play-by-play, a calm British delivery, and **Duke** on
 color, an ex mini-tour grinder who reads the launch numbers like a coach. They call the shot
 while it's in the air, react to where it finished, read putts, open and close the round, and
-track your league's standings, closest-to-the-pin and net scores. About $1-2 per 18-hole round
-with the default cloud models, or $0 fully local.
+track your league's standings, closest-to-the-pin and net scores. Each player is judged against
+their own game, not the longest hitter in the room: a drive is "short" only by that player's
+usual numbers. From a few holes in, the booth also gets a round-so-far stat sheet and picks out
+whatever pattern stands out tonight. About $1-2 per 18-hole round with the default cloud models,
+or $0 fully local.
 
 Between shots they can drop in an aside, kept occasional so the golf stays first: a recent golf
-headline, a live tour leaderboard or your local teams' scores, or a bit of history about the course
-you're playing. They also know the time of day and, if you give a location, the weather outside;
-see [Asides](docs/booth.md#asides-news-scores-and-course-trivia).
+headline, a bit of history about the course you're playing, or a live score check. Name your
+teams and the booth keeps an eye on their games: "Last I saw, the Bruins were up two to one, late
+in the second." It also follows the tour leaderboard while an event is on, and checks back later
+in the round with an update rather than a repeat. The booth knows the time of day too and, given
+a location, the weather outside; see [Asides](docs/booth.md#asides-news-scores-and-course-trivia).
 
 If your league scores in [Squabbit](https://squabbit.com), the booth can sign in (read-only) to
 pull each player's live handicap, give strokes exactly as Squabbit does, and know what the other
