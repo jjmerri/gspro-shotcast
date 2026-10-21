@@ -216,11 +216,12 @@ class TTSConfig(BaseModel):
     # for the whole clip (first audio is ~0.5 s vs ~1.4 s for a full line). Off: whole clips, with the
     # hedge settings below.
     stream: bool = True
-    # Streaming: a request with no audio by this long gets one more sent alongside it (`retries`);
-    # whichever starts first is played and the other is cancelled. A stalled request sends nothing at
-    # all, so it never recovers; a working one answers in ~0.3-0.8 s.
+    # Streaming: each time this long passes with no audio yet, another request is sent alongside the
+    # others, up to `retries` extra; whichever starts first is played and the rest are cancelled. A
+    # stalled request sends nothing at all, so it never recovers; a working one answers in ~0.3-0.8 s.
+    # About 1 in 7 requests stalls, so one retry still loses ~2-6% of lines; two lose well under 1%.
     first_audio_timeout_seconds: float = 1.0
-    retries: int = 1
+    retries: int = 2
     # Deadlines for a cloud voice (openai), whose requests sometimes stall for 30 s+ while the next
     # one answers in ~1 s. A comment is useless once its moment has passed, so lines get a deadline and
     # are dropped, never played late, when they miss it.

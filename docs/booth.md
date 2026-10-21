@@ -40,7 +40,7 @@
 **Voices.** Lines are voiced as soon as they're written, several at once, and played in order. A
 cloud voice streams: a line starts playing at its first audio (about half a second) while the rest
 downloads. Cloud voice requests sometimes stall and send nothing at all, so one with no audio after
-`tts.first_audio_timeout_seconds` (1.0) gets `tts.retries` (1) more sent alongside it, and the first
+`tts.first_audio_timeout_seconds` (1.0) gets `tts.retries` (2) more sent alongside it, and the first
 to start is played. With `tts.stream: false` whole clips are fetched instead, and a request still
 unanswered after `tts.hedge_after_seconds` (2.5) gets another sent alongside it.
 
