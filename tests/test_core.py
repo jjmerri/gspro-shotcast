@@ -647,7 +647,7 @@ async def test_streamed_prepare_gives_up_at_its_deadline_even_while_audio_trickl
     assert tts.active == 0
 
 
-async def test_streamed_clip_plays_as_it_arrives_and_an_interrupt_stops_it(monkeypatch):
+async def test_streamed_clip_plays_as_it_arrives_and_an_interrupt_stops_it(monkeypatch, caplog):
     import asyncio
     import sys
     import time
@@ -658,7 +658,7 @@ async def test_streamed_clip_plays_as_it_arrives_and_an_interrupt_stops_it(monke
     from commentator import speech as speech_mod
     from commentator.tts.base import StreamedAudio
 
-    written, aborted = [], []
+    written, aborted, dry = [], [], set()
 
     class FakeStream:
         def __init__(self, **kw):
@@ -673,6 +673,7 @@ async def test_streamed_clip_plays_as_it_arrives_and_an_interrupt_stops_it(monke
         def write(self, data):
             written.append(len(data))
             time.sleep(0.005)
+            return len(written) in dry   # the card ran dry before this write
 
         def abort(self):
             aborted.append(True)
@@ -681,14 +682,30 @@ async def test_streamed_clip_plays_as_it_arrives_and_an_interrupt_stops_it(monke
     monkeypatch.setattr(speech_mod, "_last_play_end", 0.0)   # long idle: lead silence first
 
     clip = StreamedAudio(100)
+    clip.prebuffer = 0.3
     clip.push(np.zeros(20, dtype="float32"))
     playing = asyncio.create_task(speech_mod.play(clip))
     await asyncio.sleep(0.05)
+    assert written == []   # 0.2 s in hand: still waiting for the 0.3 s head start
+    clip.push(np.zeros(20, dtype="float32"))
+    await asyncio.sleep(0.02)
     clip.push(np.zeros(10, dtype="float32"))   # arrives mid-playback
     clip.finish(True)
     await asyncio.wait_for(playing, 1)
-    assert written == [60, 5, 5, 5, 5, 5, 5] and not aborted   # 0.6 s lead, then 50 ms blocks
-    assert clip.played == 30
+    assert written[:2] == [60, 5] and sum(written) == 110 and not aborted   # 0.6 s lead, then 50 ms blocks
+    assert clip.played == 50
+
+    # A clip shorter than the head start plays once it's all in, and a dry card is counted.
+    written.clear()
+    dry.update({1, 3})   # the first write's flag is the stream starting up, not a gap
+    clip = StreamedAudio(100)
+    clip.prebuffer = 0.3
+    clip.push(np.zeros(15, dtype="float32"))
+    clip.finish(True)
+    with caplog.at_level("INFO", logger="commentator.speech"):
+        await asyncio.wait_for(speech_mod.play(clip), 1)
+    assert sum(written) == 15 and "ran dry 1 time(s)" in caplog.text
+    dry.clear()
 
     written.clear()
     clip = StreamedAudio(100)

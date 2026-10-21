@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 import logging
 import threading
 import time
@@ -51,30 +52,51 @@ async def play(audio: Audio) -> None:
 
 
 async def _play_stream(audio: StreamedAudio, lead: float) -> None:
-    """Play a clip as it downloads, in small blocks so an interrupt cuts it off within ~50 ms."""
+    """Play a clip as it downloads, in small blocks so an interrupt cuts it off within ~50 ms.
+    Playback waits for `audio.prebuffer` seconds of audio (or the whole clip, if shorter): the stream
+    arrives in uneven bursts, and starting on its first block (often a few ms of sound) runs the
+    sound card dry within a few tenths of a second on most lines."""
     import numpy as np
     import sounddevice as sd
 
     stop = threading.Event()
     block = max(1, audio.sample_rate // 20)
+    need = int(audio.prebuffer * audio.sample_rate)
+    underruns = 0
 
     def _run() -> None:
+        nonlocal underruns
+        blocks = audio.blocks(stop)
+        held: list = []
+        for chunk in blocks:
+            held.append(chunk)
+            if sum(len(c) for c in held) >= need:
+                break
+        if stop.is_set() or not held:
+            return
         with sd.OutputStream(samplerate=audio.sample_rate, channels=1, dtype="float32") as out:
             if lead:
                 out.write(np.zeros((int(audio.sample_rate * lead), 1), dtype="float32"))
-            for chunk in audio.blocks(stop):
+            first = True
+            for chunk in itertools.chain(held, blocks):
                 for i in range(0, len(chunk), block):
                     if stop.is_set():
                         out.abort()
                         return
                     piece = chunk[i:i + block]
-                    out.write(piece.reshape(-1, 1))
+                    # write() reports whether the card ran dry since the last write (a gap in the voice).
+                    if out.write(piece.reshape(-1, 1)) and not first:
+                        underruns += 1
+                    first = False
                     audio.played += len(piece)
 
     try:
         await asyncio.to_thread(_run)
     finally:
         stop.set()
+        if underruns:
+            log.info("Streamed clip ran dry %s time(s) while playing (%.1fs of %.1fs played)",
+                     underruns, audio.played / audio.sample_rate, audio.seconds)
 
 
 def _audio_seconds(audio: Audio | None) -> float:
@@ -353,6 +375,7 @@ class SpeechQueue:
         def send() -> None:
             nonlocal last_sent
             clip = StreamedAudio(self.tts.stream_sample_rate)
+            clip.prebuffer = cfg.stream_prebuffer_seconds
             clip.task = asyncio.create_task(
                 self._stream_into(clip, text, voice, instructions, len(attempts) + 1, purpose))
             attempts.append(clip)

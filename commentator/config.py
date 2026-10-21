@@ -222,6 +222,10 @@ class TTSConfig(BaseModel):
     # About 1 in 7 requests stalls, so one retry still loses ~2-6% of lines; two lose well under 1%.
     first_audio_timeout_seconds: float = 1.0
     retries: int = 2
+    # Streaming: audio to have in hand before a line starts playing. The stream comes in uneven bursts
+    # (the first is often a few ms of sound) and fell 0.1-0.45 s behind real time on most measured
+    # lines, so playing from the first byte left gaps near the start.
+    stream_prebuffer_seconds: float = 0.3
     # Deadlines for a cloud voice (openai), whose requests sometimes stall for 30 s+ while the next
     # one answers in ~1 s. A comment is useless once its moment has passed, so lines get a deadline and
     # are dropped, never played late, when they miss it.

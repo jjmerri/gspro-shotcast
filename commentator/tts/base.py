@@ -23,6 +23,7 @@ class StreamedAudio:
         self.parts: list[np.ndarray] = []
         self.ok = False            # the stream ran to its end
         self.played = 0            # samples written to the speakers (by the player thread)
+        self.prebuffer = 0.0       # seconds of audio to have in hand before playback starts
         self.task: asyncio.Task | None = None   # the download
         self._q: queue.Queue = queue.Queue()
         self.started = asyncio.Event()     # first audio arrived

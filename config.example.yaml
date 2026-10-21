@@ -79,6 +79,7 @@ tts:
   # stream: true                      # false: fetch whole clips, hedging slow ones (below)
   # first_audio_timeout_seconds: 1.0  # no audio by then: send another request alongside it
   # retries: 2                        # extra requests per line
+  # stream_prebuffer_seconds: 0.3     # audio in hand before a streamed line starts (smooths bursts)
   # hedge_after_seconds: 2.5          # stream: false only; send a second request if the first hasn't answered
   # prepare_deadline_seconds: 12      # lines voiced ahead (setup branches, wraps, closer) give up after
   # live_deadline_seconds: 5          # a line voiced on demand must be ready within this
