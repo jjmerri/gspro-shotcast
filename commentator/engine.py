@@ -42,6 +42,7 @@ from .scores import LiveScores
 from .trivia import CourseTrivia
 from .weather import Weather
 from .round import FORMAT_NAMES, TEAM_BALL, Round, normalize_format, to_par
+from .round import _join as _join_names
 from .screen import Screen
 from .sources.base import ShotSource
 from .sources.gspro_log import M_TO_YD, MATERIAL_TO_LIE, GsproLogFollower, GsproState
@@ -132,6 +133,31 @@ _MATCH_TAB_LIT = 180
 _NINE_CHECKED = 0.4
 _PILL_MEDIAN = (90, 170)
 _LIST_LIGHT = 0.25
+
+
+def _nines_picked(tones: dict) -> tuple[int, int] | None:
+    """(start hole, count) the HOLES tab's nine boxes show, or None when that tab isn't up or neither
+    nine is checked."""
+    tab = tones.get("setup_holes_tab")
+    front, back = tones.get("setup_front9_box"), tones.get("setup_back9_box")
+    if tab is None or tab.mean < _HOLES_TAB_LIT or front is None or back is None:
+        return None
+    f, b = front.light >= _NINE_CHECKED, back.light >= _NINE_CHECKED
+    return (1, 18) if f and b else (1, 9) if f else (10, 9) if b else None
+
+
+def _unsettled(hud: Hud, tag: str = "") -> Hud:
+    """A follow's last read from before the ball was seen at rest. GSPro often moves the player box on
+    a second or two after touchdown, with the ball still rolling: off the green its lie then named the
+    wrong spot about half the time (fairway for a ball that ran into the rough, rough for one that ran
+    into a bunker), so it's dropped and the reaction names no lie; the next setup and GSPro's log fill
+    in where it stopped. A ball already on the green stays there almost always, and the green read
+    drives the wrap's pre-build, so that one is kept."""
+    lie = (hud.lie or "").lower()
+    if not lie or lie == "green":
+        return hud
+    log.info("%s lie %s read before the ball was at rest; not naming it", tag, hud.lie)
+    return replace(hud, lie=None)
 
 
 def _slot_state(tone) -> str:
@@ -493,6 +519,12 @@ class Engine:
         # default) once the setup screen shows a course, then whatever the HOLES tab's nines say. None
         # when the setup screen wasn't seen (the booth started later): the schedule/config guess applies.
         self._setup_holes: tuple[int, int] | None = None
+        # Whether _setup_holes came off the HOLES tab itself (else it's GSPro's default, unconfirmed), and
+        # when that read's frame was grabbed, so an older sample never undoes a newer read.
+        self._setup_holes_read = False
+        self._setup_holes_at = float("-inf")
+        # (when, (start, count)) of the latest HOLES-tab nines the quick sampler caught (see _sample_setup_tabs).
+        self._holes_snap: tuple[float, tuple[int, int]] | None = None
         self._opener_prepared_holes: tuple[int, int] | None = None
         # GSPro's game mode, off the setup screen's MATCH SETTINGS tab: "scramble", "shamble",
         # "alternate", or None (stroke play, GSPro's default, or a mode that shares no ball). Only a
@@ -504,6 +536,7 @@ class Engine:
         self._last_setup_roster: tuple[list[str], list[str]] | None = None
         # (when, frame, tones) of the latest PLAYERS-tab frame the quick sampler caught (see _sample_players_tab).
         self._players_snap: tuple | None = None
+        self._idle_card_logged: dict | None = None
         self._scramble_pairs: set = set()   # the log's teammate pairs last applied to the round
         self._opener_gen = 0
         # Set when a round opens so the one redundant, late pre-shot on the opening tee shot is skipped.
@@ -929,7 +962,7 @@ class Engine:
         if live and r.log_complete and g.active_holes and g.active_holes != r.holes:
             log.info("Round %s: GSPro's layout has %s holes in the round (was counting %s)", r.id,
                      g.active_holes, r.holes)
-            r.set_holes(g.active_holes)
+            r.set_holes(g.active_holes, confirmed=True)
         if live and r.log_complete and not self._round_end_queued and r.complete():
             self._round_end_queued = True
             self._events.put_nowait(RoundEndEvent(reason="final scorecard"))
@@ -1138,8 +1171,16 @@ class Engine:
                 data = json.loads(raw)
             except json.JSONDecodeError:
                 data = {}
-            lines = parse_lines(raw, self.speakers, self.cfg.commentary.max_words_per_line, self._persona_names)
+            cap = self.cfg.commentary.max_words_per_line
+            lines = parse_lines(raw, self.speakers, cap, self._persona_names)
             good, problems = self._grounded(lines, facts_text, mode="news")
+            # An over-long line is cut back to its last full sentence, which can leave just a teaser
+            # ("Interesting bit of news this morning, Duke.") with the story itself gone.
+            items = data.get("lines") if isinstance(data, dict) else None
+            if long := [i + 1 for i, item in enumerate(items if isinstance(items, list) else [])
+                        if isinstance(item, dict) and len(str(item.get("text", "")).split()) > cap]:
+                problems = problems + [f"line {', '.join(map(str, long))} ran over {cap} words: say each line, "
+                                       f"story included, in at most {cap} words"]
             if len(lines) != 2 or len(good) != 2 or good[0].speaker == good[1].speaker:
                 problems = problems + ["write exactly two lines, one from each commentator"]
             elif len(good[1].text.split()) < 6:
@@ -3127,8 +3168,9 @@ class Engine:
         # Fairways in a row (live): a tee shot on a par 4/5 that finds the fairway extends the streak,
         # a miss resets it. Only called out once it's a run.
         if player and not self._anonymous(player) and not shot.is_putt and before.shot_number == 1 \
-                and (shot_par or 4) >= 4 and after.lie:
-            if after.lie.lower() == "fairway":
+                and (shot_par or 4) >= 4:
+            # A lie not read at rest (None) breaks the run too: better a missed streak than a false one.
+            if (after.lie or "").lower() == "fairway":
                 self._fir_streak[player] = self._fir_streak.get(player, 0) + 1
                 if self._fir_streak[player] >= 3:
                     season_facts.append(f"That's {self._fir_streak[player]} fairways in a row for {player}.")
@@ -3972,7 +4014,7 @@ class Engine:
             elif name_sig_changed(who, hud.name_sig):
                 log.info("%s player box switched after %s reads (%.1fs); using the last this-shot read (lie %s)",
                          tag, reads, time.monotonic() - started, (last or landing or Hud()).lie)
-                return last or landing or Hud(), touchdown is not None
+                return _unsettled(last or landing or Hud(), tag), touchdown is not None
             game = _tile_yards(hud.tiles, "carry (game)", "yards")
             total = _tile_yards(hud.tiles, "total length", "yards")
             # A freeze counts as touchdown only once the tile is known to belong to THIS shot: either
@@ -4019,7 +4061,7 @@ class Engine:
         # Timed out without a confirmed rest. If touchdown was seen, CARRY (game) is already final, so
         # the carry is still learnable (landed=True); only an unconfirmed touchdown skips learning.
         log.info("%s ball not seen to come to rest within %.0fs (touchdown=%s)", tag, deadline, touchdown is not None)
-        return last or landing or Hud(), touchdown is not None
+        return _unsettled(last or landing or Hud(), tag), touchdown is not None
 
     def _save_review_image(self, tag: str, moment: str) -> None:
         folder = Path(self.cfg.log_dir) / "shots" / time.strftime("%Y-%m-%d")
@@ -4364,11 +4406,14 @@ class Engine:
         scheduled = (c.round_format or entry.get("format")) if is_league else None
         start = entry.get("start_hole") or (self.hole_number if use_current_hole and self.hole_number_read else None)
         holes = entry.get("hole_count") or c.round_holes
+        confirmed = bool(entry.get("hole_count"))
         if self._setup_holes:   # what the setup screen showed beats the schedule's or config's guess
             start, holes = self._setup_holes
+            confirmed = self._setup_holes_read or entry.get("hole_count") == holes
         r = Round(league=self.league, gspro_players=names, course=course, scheduled_format=scheduled,
                   holes=holes, start_hole=start, schedule=entry,
                   is_league=is_league, slot_names=slot_names)
+        r.holes_confirmed = confirmed
         self._apply_setup_format(r)
         # GSPro's course folder is named by GSPro's own course name, which the schedule carries as
         # gspro_course when it differs from the league's name (e.g. Balsams Panorama vs Wentworth).
@@ -4404,6 +4449,7 @@ class Engine:
             if loop:
                 loop.create_task(asyncio.to_thread(self._health_checks, "round start"), name="health")
         self._setup_holes = self._opener_prepared_holes = None   # the next round reads its own setup
+        self._setup_holes_read, self._holes_snap = False, None
         self._setup_format = self._opener_prepared_format = None
         self._scramble_pairs = set()
         self._putted_on_last_hole = self._round_end_queued = False
@@ -4599,26 +4645,39 @@ class Engine:
     async def _watch_setup(self) -> None:
         probed = callable(getattr(self.screen, "setup_frame", None)) and callable(
             getattr(self.screen, "region_tones", None)) and callable(getattr(self.screen, "region", None))
-        sampler = asyncio.create_task(self._sample_players_tab()) if probed else None
+        sampler = asyncio.create_task(self._sample_setup_tabs()) if probed else None
         try:
             await self._watch_setup_loop()
         finally:
             if sampler is not None:
                 sampler.cancel()
 
-    async def _sample_players_tab(self) -> None:
-        """Keep the latest frame showing the setup screen's PLAYERS tab with names on it, sampled every
-        quarter second. The watch's own polls are ~2 s apart once a region needs reading, so a player who
-        lands on PLAYERS (GSPro's default tab) and clicks on to MATCH SETTINGS within a second or two
-        would otherwise never have the names read. Only the small tab box is grabbed each time; the full
-        frame only when the tab is lit."""
+    async def _sample_setup_tabs(self) -> None:
+        """Keep the latest frame showing the setup screen's PLAYERS tab with names on it, and the nines
+        last checked on its HOLES tab, sampled every quarter second. The watch's own polls are ~2 s apart
+        once a region needs reading, so a player who lands on PLAYERS (GSPro's default tab) and clicks on
+        to MATCH SETTINGS within a second or two would otherwise never have the names read, and one who
+        unchecks a nine and presses Play just as quickly would get an 18-hole round. Only the small tab
+        boxes are grabbed each time; the full frame only when a tab is lit."""
         slots = [f"setup_slot_{i}" for i in range(1, 9)]
         region = self.screen.region("setup_players_tab")
+        holes_region = self.screen.region("setup_holes_tab")
+        last_nines: tuple[int, int] | None = None
+
+        def lit(r, level):
+            hist = self.screen.grab(r).convert("L").histogram()
+            return sum(v * c for v, c in enumerate(hist)) / (sum(hist) or 1) >= level
+
+        def sample_holes():
+            if not lit(holes_region, _HOLES_TAB_LIT):
+                return None
+            at = time.monotonic()
+            frame = self.screen.setup_frame()
+            return at, _nines_picked(self.screen.region_tones(
+                ["setup_holes_tab", "setup_front9_box", "setup_back9_box"], frame))
 
         def sample():
-            tab = self.screen.grab(region).convert("L")
-            hist = tab.histogram()
-            if sum(v * c for v, c in enumerate(hist)) / (sum(hist) or 1) < _PLAYERS_TAB_LIT:
+            if not lit(region, _PLAYERS_TAB_LIT):
                 return None
             at = time.monotonic()
             frame = self.screen.setup_frame()
@@ -4631,7 +4690,8 @@ class Engine:
         while True:
             await asyncio.sleep(0.25)
             if self.round is not None and not self.round.ended:
-                self._players_snap = None
+                self._players_snap = self._holes_snap = None
+                last_nines = None
                 continue
             # Kept up even with an opener out or held: backing out to set up again is caught the same way.
             try:
@@ -4641,6 +4701,15 @@ class Engine:
                 continue
             if got is not None:
                 self._players_snap = got
+            try:
+                nines = await asyncio.to_thread(sample_holes)
+            except Exception:
+                log.debug("HOLES-tab sample failed", exc_info=True)
+                nines = None
+            # Two samples in a row must agree, so a frame mid-transition can't pass for a pick.
+            if nines and nines[1] and nines[1] == last_nines:
+                self._holes_snap = nines
+            last_nines = nines[1] if nines else None
 
     async def _watch_setup_loop(self) -> None:
         """Between rounds, read GSPro's setup screen for the course and roster, then fire the opener
@@ -4672,8 +4741,11 @@ class Engine:
         mode_cache: dict = {}        # the same for the MATCH SETTINGS game mode
         last_diag = 0.0
         players_read_at = -1e9   # when the latest PLAYERS frame this loop read itself was grabbed
+        frame_at = holes_since = float("-inf")   # this poll's grab; when this setup was first seen to begin
+        seen_play: str | None = None   # the Play button's course on this poll (None off the setup screen)
         while True:
             await asyncio.sleep(max(c.preround_poll_seconds, 0.2))
+            prev_at, frame_at = frame_at, time.monotonic()
             if self.round is not None and not self.round.ended:
                 # Mid-round the setup regions land on the live HUD; nothing to read until it's over.
                 seen_setup, course, roster, self._opener_prepared_for = False, None, [], frozenset()
@@ -4719,6 +4791,7 @@ class Engine:
                 log.exception("Setup-screen read failed")
                 continue
             play_course = _play_button_course(gate.get("setup_course", ""))
+            last_play, seen_play = seen_play, play_course
             if held:
                 if not play_course:
                     continue
@@ -4748,7 +4821,12 @@ class Engine:
                                  time.monotonic() - snap[0])
                 if probed:
                     fresh = not seen_setup or play_course != course
-                    self._read_setup_holes(tones, fresh=fresh)
+                    if fresh:
+                        # A HOLES sample since the last poll that didn't show this setup is this setup's;
+                        # straight from another course's setup, one in between could be either's.
+                        holes_since = frame_at if last_play and last_play != play_course else prev_at
+                    self._read_setup_holes(tones, fresh=fresh, at=grabbed_at)
+                    self._take_holes_sample(holes_since)
                     try:
                         mode_cache = await self._read_setup_format(tones, frame, fresh, mode_cache)
                     except Exception:
@@ -4814,6 +4892,8 @@ class Engine:
             # the button reads neither, so we just keep state and wait.
             load_title = gate.get("load_course", "").strip()
             loading = bool(seen_setup and course and load_title and course_match_score(load_title, course) >= 0.6)
+            if loading and probed:
+                self._take_holes_sample(holes_since)   # nines changed in the moment before Play was pressed
             if loading and not roster and self._last_setup_roster:
                 # Play was pressed without the PLAYERS tab ever being shown, so this setup read no players.
                 # GSPro keeps the players from the last round, so make the opener for the last roster read
@@ -4876,7 +4956,7 @@ class Engine:
             log.info("Round %s: the setup screen changed to %s holes from hole %s after the opener was made",
                      r.id, self._setup_holes[1], self._setup_holes[0])
             r.start_hole, r.start_hole_assumed = self._setup_holes[0], False
-            r.set_holes(self._setup_holes[1])   # re-applies the course card for the new start
+            r.set_holes(self._setup_holes[1], confirmed=self._setup_holes_read)   # re-applies the course card for the new start
 
     def _apply_setup_format(self, r: Round) -> None:
         """A scramble picked on the setup screen: the round is one from the start (two players are one
@@ -4908,25 +4988,36 @@ class Engine:
             self._setup_format = fmt
         return cache
 
-    def _read_setup_holes(self, tones: dict, fresh: bool) -> None:
+    def _read_setup_holes(self, tones: dict, fresh: bool, at: float | None = None) -> None:
         """Which nines the round will play, from the setup screen's HOLES tab: both boxes is 18 from hole
         1, FRONT 9 alone is 9 from 1, BACK 9 alone is 9 from 10. GSPro defaults to all 18, so a setup
-        screen whose HOLES tab is never opened is taken as 18. `fresh` marks a new setup (first seen, or
-        another course), which starts back at that default. Single holes left out aren't tracked."""
+        screen whose HOLES tab is never opened is taken as 18 (unconfirmed). `fresh` marks a new setup
+        (first seen, or another course), which starts back at that default. `at` is when the frame was
+        grabbed. Single holes left out aren't tracked."""
         if fresh:
-            self._setup_holes = (1, 18)
-        tab = tones.get("setup_holes_tab")
-        front, back = tones.get("setup_front9_box"), tones.get("setup_back9_box")
-        if tab is None or tab.mean < _HOLES_TAB_LIT or front is None or back is None:
+            self._setup_holes, self._setup_holes_read, self._setup_holes_at = (1, 18), False, float("-inf")
+        picked = _nines_picked(tones)
+        if picked is None:
             if fresh:
                 log.info("Setup: assuming 18 holes from hole 1 (GSPro's default) unless the HOLES tab says otherwise")
             return
-        f, b = front.light >= _NINE_CHECKED, back.light >= _NINE_CHECKED
-        picked = (1, 18) if f and b else (1, 9) if f else (10, 9) if b else None
-        if picked and (fresh or picked != self._setup_holes):
-            log.info("Setup HOLES tab: %s", {(1, 18): "both nines, 18 holes", (1, 9): "front 9 only",
-                                             (10, 9): "back 9 only"}[picked])
-            self._setup_holes = picked
+        self._set_setup_holes(picked, time.monotonic() if at is None else at)
+
+    def _set_setup_holes(self, picked: tuple[int, int], at: float, how: str = "") -> None:
+        """Take nines read off the HOLES tab at `at`, unless a newer read already stands."""
+        if at < self._setup_holes_at:
+            return
+        self._setup_holes_at = at
+        if picked != self._setup_holes or not self._setup_holes_read:
+            log.info("Setup HOLES tab%s: %s", how, {(1, 18): "both nines, 18 holes", (1, 9): "front 9 only",
+                                                    (10, 9): "back 9 only"}[picked])
+        self._setup_holes, self._setup_holes_read = picked, True
+
+    def _take_holes_sample(self, since: float) -> None:
+        """Apply the quick sampler's HOLES-tab read if it was caught on this setup (after `since`)."""
+        snap = self._holes_snap
+        if snap is not None and snap[0] > since and self._setup_holes is not None:
+            self._set_setup_holes(snap[1], snap[0], " (sampled)")
 
     def _maybe_front_load(self, course: str, roster: list[str], slot_order: list[str] | None = None) -> None:
         """While still on the setup screen, start composing the opener for a confident roster so it's
@@ -5034,6 +5125,14 @@ class Engine:
                 continue
             label = self.league.team_name(team)
             if not closing:
+                here = {p for side in r.sides if side.team == team for p in side.players}
+                if here and (away := [p for p in players if p not in here]):
+                    # A practice round with part of the team: the team's history still counts, but
+                    # the opener read "Corey and I are in the building" off it with Josh alone.
+                    facts.append(f"Only {_join_names(sorted(here))} of {label} is playing this round; "
+                                 f"{_join_names(away)} is not here. The team facts below are the partnership's "
+                                 f"history: credit them to the pair, never say {_join_names(away)} is "
+                                 f"playing, here or in the building.")
                 facts += self.history.team_facts(label, players, r.format, r.course,
                                                  same_course=self._course_test(r))
                 # One season stat per side for opener colour, picked at random among the ones with a
@@ -5159,7 +5258,9 @@ class Engine:
     async def handle_scorecard(self, event: ScorecardEvent) -> None:
         r = self.round
         if not r or r.ended:
-            log.info("Scorecard read with no round in progress: %s", event.card.scores)
+            if event.card.scores != self._idle_card_logged:   # the card stays up after a round: once per change
+                self._idle_card_logged = event.card.scores
+                log.info("Scorecard read with no round in progress: %s", event.card.scores)
             return
         if not r.apply_scorecard(event.card):
             log.info("Scorecard didn't match the round's players (%s): rows %s", list(r.roster), list(event.card.scores))

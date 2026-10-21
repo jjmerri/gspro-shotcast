@@ -331,6 +331,61 @@ async def test_speech_queue_stays_busy_until_playback_finishes():
     assert played == ["x", "x"]
 
 
+async def test_speech_queue_pauses_between_lines_but_not_after_silence():
+    import asyncio
+    import time
+
+    from commentator.models import Line
+    from commentator.tts.base import TTS, Audio
+
+    class QuickTTS(TTS):
+        async def synthesize(self, text, voice, instructions=None):
+            return Audio(samples=text, sample_rate=1)
+
+    spans: list[tuple[str, float, float]] = []
+
+    async def fake_play(audio):
+        start = time.monotonic()
+        await asyncio.sleep(0.02)
+        spans.append((audio.samples, start, time.monotonic()))
+
+    async def drain():
+        while not speech.is_idle():
+            await asyncio.sleep(0.005)
+
+    cfg = Config()
+    cfg.tts.turn_gap_seconds, cfg.tts.line_gap_seconds = 0.2, 0.1
+    speech = SpeechQueue(cfg, QuickTTS(), player=fake_play)
+    task = asyncio.create_task(speech.run())
+    try:
+        speech.say([Line("pbp", "one"), Line("pbp", "two"), Line("color", "three")])
+        await drain()
+        assert [s[0] for s in spans] == ["one", "two", "three"]
+        assert spans[1][1] - spans[0][2] >= 0.1 - 0.005     # same speaker carries on
+        assert spans[2][1] - spans[1][2] >= 0.2 - 0.005     # the other one takes over
+        assert spans[2][1] - spans[1][2] < 0.3
+
+        await asyncio.sleep(0.25)   # longer than either gap: the next line starts at once
+        queued = time.monotonic()
+        speech.say([Line("pbp", "four")])
+        await drain()
+        assert spans[3][1] - queued < 0.05
+
+        # An interrupt doesn't wait out a pending pause.
+        await asyncio.sleep(0.25)
+        speech.say([Line("color", "five")])
+        await asyncio.sleep(0.03)   # "five" is playing
+        speech.say([Line("pbp", "six")])
+        await asyncio.sleep(0.03)   # "five" done; "six" is in its pause
+        cut = time.monotonic()
+        speech.say([Line("color", "seven")], interrupt=True)
+        await drain()
+        assert [s[0] for s in spans[4:]] == ["five", "seven"]
+        assert spans[5][1] - cut < 0.05
+    finally:
+        task.cancel()
+
+
 class _StallingTTS:
     """A remote voice whose listed calls hang (a stalled cloud request); the rest answer at once."""
 
@@ -1095,10 +1150,10 @@ def test_projection_picks_outcomes_for_flight_test_scenarios():
     from commentator.flight_pick import Hazard, project
 
     # A: wedge from 84.8 yards, carrying 86.4 on line -> on target on flat ground; from the rough to a
-    # pin 4.8 yards uphill it's short, which is what happened (carried short, rolled to 10 feet)
+    # pin 4.8 yards uphill it carried short but rolled to 10 feet, so with roll-out it's not "short"
     wedge = Shot(club="GW", carry=86.4, hla=0.8, spin_axis=2)
     assert project(wedge, "84.8 yards", []).outcome == "on_target"
-    assert project(wedge, "84.8 yards", [], carry_factor=0.94, elevation_yards=4.8).outcome == "short"
+    assert project(wedge, "84.8 yards", [], carry_factor=0.94, elevation_yards=4.8).outcome == "on_target"
     # Elevated tee (pin ~16 yards below): a ball whose flat carry reads a touch shy of the
     # elevation-adjusted pin finishes pin high, not short, because a downhill ball runs past its
     # flat carry. The widened dead-band keeps the booth from confidently calling it short.
@@ -1163,8 +1218,9 @@ async def test_impact_uses_preshot_plan_without_a_model_call(tmp_path):
                     speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0), await_preshot=True)
     await engine.run()
     said = (next(tmp_path.glob("transcript-*")).read_text())
-    # Scenario A: rough penalty plus a pin 4.8 yards uphill. GSPro carried it short and it rolled up.
-    assert "Needs 1 legs." in said
+    # Scenario A: rough penalty plus a pin 4.8 yards uphill. GSPro carried it short and it rolled up to
+    # 10 feet, which the roll-out projection now calls on target rather than short.
+    assert "Right at it 1, looks good." in said
     assert "into dangerous country" in said  # scenario B: the left_trouble branch, generic (text-only)
     assert "right now." in said  # scenario C
     assert "IN FLIGHT" not in calls
@@ -1319,8 +1375,21 @@ def test_elevation_changes_the_projection():
 
     wedge = Shot(club="SW", carry=100, hla=0)
     assert project(wedge, "100 yards", []).outcome == "on_target"
-    assert project(wedge, "100 yards", [], elevation_yards=12).outcome == "short"
+    assert project(wedge, "100 yards", [], elevation_yards=18).outcome == "short"
     assert project(wedge, "100 yards", [], elevation_yards=-12).outcome == "long"
+
+
+def test_length_call_counts_roll_out_and_a_softer_uphill():
+    from commentator.flight_pick import project
+
+    # 8-iron, 131.5 carry at a flat 143.5-yard pin: rolled out to 141 and finished 9 feet away.
+    eight = Shot(club="8I", carry=131.5, total_spin=6336, vla=27.8, hla=0)
+    assert project(eight, "143.5 yards", [], elevation_yards=-1.4).outcome == "on_target"
+    # Lob wedge from the rough to a pin 6.1 yards uphill at 66.1: finished on the green 13 feet away.
+    lob = Shot(club="LW", carry=70.8, total_spin=10885, vla=32.9, hla=0)
+    assert project(lob, "66.1 yards", [], carry_factor=0.908, elevation_yards=6.1).outcome == "on_target"
+    # Still short when it's clearly short, roll and all.
+    assert project(Shot(club="7I", carry=130, total_spin=7000, vla=18, hla=0), "160 yards", []).outcome == "short"
 
 
 def test_slope_facts_follow_gspro_definitions():
@@ -1587,6 +1656,21 @@ async def test_follow_shot_stops_when_the_top_name_switches(tmp_path):
               f("rough", 92.0, sig=leo), f("rough", 92.0, sig=leo)]
     hud, landed = await _follow(frames, before, tmp_path)
     assert landed and hud.lie == "green"
+
+
+async def test_a_lie_read_while_the_ball_still_rolls_off_the_green_is_not_named(tmp_path):
+    # Premonition 2, 10-21: the box switched 2 s after touchdown with the ball still running on, read
+    # "fairway"; it stopped in the rough. Off the green that read is dropped, the tiles kept.
+    josh, next_up = (True, False) * 8, (False, True) * 8
+    def f(lie, total, sig=josh, carry=250.0):
+        h = _ct(lie, carry, total)
+        h.name_sig = sig
+        return h
+    frames = [f("fairway", 240.0, carry=240.0), f("fairway", 255.0), f("fairway", 262.0),
+              f("rough", 262.0, sig=next_up)]
+    before = Hud(player_text="Josh", shot_number=1, lie="tee", name_sig=josh)
+    hud, landed = await _follow(frames, before, tmp_path)
+    assert landed and hud.lie is None and hud.tiles["total length"] == "262.0"
 
 
 def test_name_signature_tells_players_apart_and_ignores_brightness():

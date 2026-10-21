@@ -1483,15 +1483,16 @@ def test_golf_news_parses_rss_and_cleans_html():
 class _NewsLLM:
     """Answers the news call with a held, two-line aside."""
 
-    def __init__(self, reply: str = "Fair enough, but a field like that needs a proper villain, Nigel."):
+    def __init__(self, reply: str = "Fair enough, but a field like that needs a proper villain, Nigel.",
+                 opening: str = "I read that Scheffler won by five, and nobody got close."):
         self.prompts: list[str] = []
-        self.reply = reply
+        self.reply, self.opening = reply, opening
         self.provider, self.model = "fake", "fake"
 
     async def complete_json(self, system, user, schema, images=None):
         from commentator.llm.base import LLMResult
         self.prompts.append(user)
-        lines = [{"speaker": "pbp", "text": "I read that Scheffler won by five, and nobody got close."},
+        lines = [{"speaker": "pbp", "text": self.opening},
                  {"speaker": "color", "text": self.reply}]
         return LLMResult(text=json.dumps({"lines": lines, "trigger": "big_drive",
                                           "tie_in": "Speaking of big hitters, Scheffler won by five."}),
@@ -1532,6 +1533,21 @@ async def test_an_empty_reply_is_retried_then_the_aside_dropped(tmp_path):
     e.round = r
     await e._prepare_news(r)
     assert len(llm.prompts) == 2 and e._news_bits == []
+
+
+async def test_a_news_line_too_long_to_air_whole_is_retried_not_cut_to_its_teaser(tmp_path):
+    from types import SimpleNamespace
+
+    # 10-21: cut back to its last full sentence under the word cap, Nigel's line aired as just
+    # "Interesting bit of news this morning, Duke." with the story gone.
+    llm = _NewsLLM(opening="Interesting bit of news this morning, Duke. Scottie Scheffler won by five shots on "
+                           "Sunday and nobody else got close.")
+    e = _news_engine(tmp_path, llm)
+    e.cfg.commentary.max_words_per_line = 18
+    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
+    e.round = r
+    await e._prepare_news(r)
+    assert len(llm.prompts) == 2 and "at most 18 words" in llm.prompts[1] and e._news_bits == []
 
 
 def test_a_held_aside_waits_for_its_shot_and_asides_are_spaced(tmp_path):
@@ -1982,6 +1998,102 @@ async def test_setup_unchecking_a_nine_after_the_opener_was_composed_recomposes_
     # The opener is composed for 18 on the PLAYERS tab, then the back nine is unchecked and Play pressed.
     e, r = await _setup_then_load(tmp_path, [players] * 5 + [_holes_tab(course, True, False)] * 5)
     assert (r.start_hole, r.holes) == (1, 9)
+
+
+async def test_a_quick_holes_tab_visit_between_polls_is_caught_by_the_sampler(tmp_path):
+    import time
+    from PIL import Image
+
+    # Premonition, 10-21: the back nine unchecked and Play pressed within a few seconds, all while the
+    # watch was busy reading the PLAYERS tab, so it never saw HOLES and called the round 18 holes.
+    course = "Beaver Creek"
+    players, nines = _players_tab(course, {1: "Alex", 2: "Jamie"}), _holes_tab(course, True, False)
+    loading = {"load_course": course}
+
+    class Timed(_PixelSetupScreen):
+        def __init__(self):
+            super().__init__([])
+            self.t0, self.slow = time.monotonic(), True
+
+        def setup_frame(self):
+            t = time.monotonic() - self.t0
+            return players if t < 0.3 else nines if t < 1.5 else loading
+
+        def region(self, name):
+            return name
+
+        def grab(self, region):
+            return Image.new("L", (4, 4), int(self.region_tones([region], self.setup_frame())[region].mean))
+
+        def read_region_lines_cached(self, names, image, cache):
+            if self.slow and image is players:
+                self.slow = False
+                time.sleep(1.7)
+            return super().read_region_lines_cached(names, image, cache)
+
+    from commentator.league import League
+
+    e = _engine_with(tmp_path, League({}))
+    p = await _run_setup_watch(e, None, until=lambda p: p is not None and p.aired, polls=400, screen=Timed())
+    assert p is not None and p.aired
+    assert (p.round.start_hole, p.round.holes, p.round.holes_confirmed) == (1, 9, True)
+
+
+async def test_a_holes_sample_from_an_earlier_setup_is_not_used(tmp_path):
+    import time
+
+    e, r = await _setup_then_load(tmp_path, [])
+    assert r.holes == 18 and not r.holes_confirmed   # never on the HOLES tab: GSPro's default, unconfirmed
+    e._pending_opening = None
+    e._holes_snap = (time.monotonic() - 5, (10, 9))   # caught before this setup screen came up
+    library = {"load_course": "COURSE LIBRARY"}
+    p = await _run_setup_watch(e, [library, _players_tab("Beaver Creek", {1: "Alex", 2: "Jamie"}),
+                                   {"load_course": "Beaver Creek"}],
+                               until=lambda p: p is not None and p.aired)
+    assert p is not None and (p.round.start_hole, p.round.holes) == (1, 18)
+
+
+async def test_a_holes_sample_from_the_course_before_is_not_used(tmp_path):
+    import time
+
+    # Straight from course A's setup (HOLES sampled between polls) to course B's: that sample could be
+    # A's, so B keeps GSPro's unconfirmed default.
+    a = _players_tab("Augusta National", {1: "Alex", 2: "Jamie"})
+    b = _players_tab("Beaver Creek", {1: "Alex", 2: "Jamie"})
+    e = _engine(tmp_path)
+
+    class Switch(_PixelSetupScreen):
+        last = 0.0
+
+        def setup_frame(self):
+            frame = super().setup_frame()
+            if frame is b and e._holes_snap is None:
+                e._holes_snap = (self.last + 0.001, (10, 9))
+            self.last = time.monotonic()
+            return frame
+
+    p = await _run_setup_watch(e, None, until=lambda p: p is not None and p.aired,
+                               screen=Switch([a, a, b, b, {"load_course": "Beaver Creek"}]))
+    assert p is not None and (p.round.start_hole, p.round.holes, p.round.holes_confirmed) == (1, 18, False)
+
+
+def test_an_unconfirmed_hole_count_is_not_announced(tmp_path):
+    e = _engine(tmp_path)
+    e._setup_holes = (1, 18)   # the setup screen's default; its HOLES tab was never read
+    r = e._build_round(["MikeD"], "Somewhere", {}, is_league=False)
+    facts = " ".join(r.opening_facts({}, None, None))
+    assert "Holes in this round" not in facts and "don't say a number of holes" in facts
+    e._setup_holes_read = True
+    r = e._build_round(["MikeD"], "Somewhere", {}, is_league=False)
+    assert "Holes in this round: 18." in r.opening_facts({}, None, None)
+
+
+def test_a_practice_round_with_half_a_team_says_who_isnt_here(tmp_path):
+    e = _engine(tmp_path)
+    solo = e._league_facts(e._build_round(["MikeD"], "Somewhere", {}, is_league=False))
+    assert solo[0].startswith("Only Mike of Aces is playing this round; Sarah is not here.")
+    both = e._league_facts(e._build_round(["MikeD", "Sarah"], "Somewhere", {}, is_league=False))
+    assert not any(f.startswith("Only ") for f in both)
 
 
 def test_a_round_takes_the_setup_holes_and_the_next_one_reads_its_own(tmp_path):

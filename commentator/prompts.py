@@ -546,7 +546,9 @@ def preshot_branch_prompt(
         + "\n\nThe player is about to hit. Write the lines now, for each way the shot could go. Reply with two things:\n"
         f'1. "flight_lines": the call "{speaker}" makes while the ball is in the air: at most 10 words, present '
         "tense, no numbers, never where it lands. on_target (dead straight at the target: never the words "
-        '"left" or "right" here, they read as a direction), short (e.g. needs legs), long, left, right, ' + trouble
+        '"left" or "right" here, they read as a direction), short (short of the FLAG, usually still on the green: '
+        '"might be a touch short", "leaves itself a putt from below"; never that it needs more carry to reach or '
+        'won\'t reach the green, unless the green front is clearly beyond this club), long, left, right, ' + trouble
         + ". " + _FLIGHT_WATER + "."
         + '\n2. "reaction_lines": the call "' + speaker + '" makes the instant the ball stops, at most 12 words each, '
         "written now for each place it can finish, judged against what this shot was trying to do (a tee shot wants "

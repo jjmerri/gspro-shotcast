@@ -86,6 +86,8 @@ tts:
   # first_audio_timeout_seconds: 1.0  # no audio by then: send another request alongside it
   # retries: 2                        # extra requests per line
   # stream_prebuffer_seconds: 0.3     # audio in hand before a streamed line starts (smooths bursts)
+  # turn_gap_seconds: 0.4             # pause when the other commentator takes over (0: back to back)
+  # line_gap_seconds: 0.15            # pause when the same commentator carries on
   # hedge_after_seconds: 2.5          # stream: false only; send a second request if the first hasn't answered
   # prepare_deadline_seconds: 12      # lines voiced ahead (setup branches, wraps, closer) give up after
   # live_deadline_seconds: 5          # a line voiced on demand must be ready within this

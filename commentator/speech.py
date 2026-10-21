@@ -181,6 +181,11 @@ class SpeechQueue:
         # Bumped by interrupt(); lines from an older generation are skipped wherever they are.
         self._generation = 0
         self._playing: asyncio.Task | None = None
+        # The pause before a line (tts.turn_gap_seconds / line_gap_seconds), cancelled by interrupt().
+        self._gap: asyncio.Task | None = None
+        # When the last line finished airing and who said it; a line after a longer silence gets no gap.
+        self._last_end: float | None = None
+        self._last_speaker: str | None = None
         # The generation of the prepared sequence (wrap/closer) currently feeding the audio queue, or
         # None when none is. The synth loop and the feeder both park on the maxsize-1 audio queue and
         # would otherwise alternate, splicing a concurrent say() (a late reaction) into the middle of
@@ -541,6 +546,9 @@ class SpeechQueue:
         if self._playing and not self._playing.done():
             self._stop()
             self._playing.cancel()
+        if self._gap and not self._gap.done():
+            self._gap.cancel()
+        self._last_end = None   # what cuts in starts at once, not after a conversational pause
         if self._synth_task and not self._synth_task.done():
             self._synth_task.cancel()
 
@@ -602,11 +610,35 @@ class SpeechQueue:
                 continue
             await self._audio_q.put((item.gen, item.line, audio, item.deadline, item.queued))
 
+    async def _pause_before(self, line: Line) -> None:
+        """Leaves a beat between consecutive lines, longer when the other commentator takes over, so
+        an exchange doesn't sound rapid-fire (streamed clips have almost no trailing silence). Only
+        tops up the silence since the last line ended; a line after a longer silence starts at once."""
+        if self._last_end is None:
+            return
+        tts = self.cfg.tts
+        gap = tts.turn_gap_seconds if line.speaker != self._last_speaker else tts.line_gap_seconds
+        remaining = gap - (time.monotonic() - self._last_end)
+        if remaining <= 0:
+            return
+        self._gap = asyncio.create_task(asyncio.sleep(remaining))
+        try:
+            await self._gap
+        except asyncio.CancelledError:
+            # interrupt() cut the pause short; only a shutdown of this loop should propagate.
+            if asyncio.current_task().cancelling():
+                raise
+        finally:
+            self._gap = None
+
     async def _play_loop(self) -> None:
         while True:
             gen, line, audio, deadline, queued = await self._audio_q.get()
             streamed = isinstance(audio, StreamedAudio)
             try:
+                if gen != self._generation:
+                    continue
+                await self._pause_before(line)
                 if gen != self._generation:
                     continue
                 if deadline is not None and time.monotonic() > deadline:
@@ -637,6 +669,8 @@ class SpeechQueue:
                         raise
                 except Exception:
                     log.exception("Audio playback failed")
+                if gen == self._generation:
+                    self._last_end, self._last_speaker = time.monotonic(), line.speaker
                 if streamed:
                     self._count_spoken(line.text, audio)
                 if audio is not None:

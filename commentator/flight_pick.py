@@ -119,6 +119,30 @@ class Projection:
     lateral: float  # yards, + right / - left
     outcome: str
     in_play: list[Hazard] = field(default_factory=list)   # the hazards behind a *_trouble outcome
+    total: float | None = None   # carry plus the expected roll-out, what the length call is judged on
+
+
+# Roll-out as a share of carry, from total spin: ~360/spin puts an 8-iron at 6300 rpm near 6% (an
+# observed 132 carry rolled 9 yards) and a 10,900 rpm lob wedge near 3%. Clamped so a very low-spin
+# strike doesn't project a runaway. Without spin, a typical share for the club.
+ROLL_SPIN_FACTOR = 360.0
+ROLL_SHARE_MIN, ROLL_SHARE_MAX = 0.02, 0.08
+# A yard of rise plays well under a yard longer: a 6-yard-uphill lob wedge called "short" finished
+# 13 feet away, so rise counts at this rate (a drop still plays yard for yard).
+UPHILL_YARDS_PER_YARD = 0.6
+
+
+def _roll_share(shot: Shot) -> float:
+    if shot.total_spin:
+        return min(ROLL_SHARE_MAX, max(ROLL_SHARE_MIN, ROLL_SPIN_FACTOR / shot.total_spin))
+    club = (shot.club or "").upper()
+    if club in ("PW", "GW", "AW", "SW", "LW"):
+        return 0.035
+    if club.endswith("I"):
+        return 0.06
+    if club.startswith("D") or club.endswith(("W", "H")):
+        return 0.07
+    return 0.05
 
 
 # A hazard that runs down a side has no measured distance off the line, so only a miss well past the
@@ -170,17 +194,18 @@ def project(
     curve = carry * spin * math.sin(math.radians(axis)) * 1.75e-4 if spin else carry * axis * 0.0075
     lateral = carry * math.sin(math.radians(shot.hla or 0)) + curve
     side_tolerance = max(8.0, carry * 0.06)
+    total = carry * (1 + _roll_share(shot))
     side = "right" if lateral > side_tolerance else "left" if lateral < -side_tolerance else None
 
     if side:
         in_play = [h for h in hazards if h.side == side and _in_play(h, carry, lateral)]
         if in_play:
-            return Projection(carry, lateral, f"{side}_trouble", in_play)
+            return Projection(carry, lateral, f"{side}_trouble", in_play, total)
 
     pin = to_yards(to_pin)
     elevated = bool(pin and elevation_yards and abs(elevation_yards) >= 2)
     if elevated:
-        pin += elevation_yards  # rule of thumb: a yard of rise plays about a yard longer
+        pin += elevation_yards * (UPHILL_YARDS_PER_YARD if elevation_yards > 0 else 1.0)
     length = None
     if pin and pin <= carry * 1.25:  # green in range; on a tee shot "short of the pin" means nothing
         # The projection has no real physics, and elevation skews the carry in one direction only:
@@ -191,12 +216,12 @@ def project(
         extra = abs(elevation_yards) * 0.5 if elevated else 0.0
         short_tol = tol + (extra if elevation_yards and elevation_yards < 0 else 0.0)
         long_tol = tol + (extra if elevation_yards and elevation_yards > 0 else 0.0)
-        length = "short" if carry < pin - short_tol else "long" if carry > pin + long_tol else None
+        length = "short" if total < pin - short_tol else "long" if total > pin + long_tol else None
 
     # A big sideways miss matters more than being a few yards long or short.
     if side and (not length or abs(lateral) > side_tolerance * 1.5):
-        return Projection(carry, lateral, side)
-    return Projection(carry, lateral, length or side or "on_target")
+        return Projection(carry, lateral, side, total=total)
+    return Projection(carry, lateral, length or side or "on_target", total=total)
 
 
 def pick_line(

@@ -124,6 +124,9 @@ class Round:
         # a placeholder until the first scorecard shows which hole got the first score.
         self.start_hole = start_hole or 1
         self.start_hole_assumed = start_hole is None
+        # False while the count is only a default (GSPro's setup HOLES tab unread, no schedule): the
+        # opener mustn't announce it.
+        self.holes_confirmed = True
         self.schedule = schedule or {}
         self.seq = 1  # which hole of the round is being played
         self.par: dict[int, int] = {}
@@ -321,9 +324,12 @@ class Round:
         for seq in [q for q in self.index if not 1 <= q <= self.holes]:
             del self.index[seq]
 
-    def set_holes(self, holes: int) -> None:
-        """Correct the round's length (the configured count is a guess until GSPro says otherwise)."""
+    def set_holes(self, holes: int, confirmed: bool | None = None) -> None:
+        """Correct the round's length (the configured count is a guess until GSPro says otherwise).
+        `confirmed` marks the new count as read rather than guessed (None keeps the current mark)."""
         self.holes = holes
+        if confirmed is not None:
+            self.holes_confirmed = confirmed
         self._trim_to_holes()
         if self.course_card:
             self.apply_course_card(self.course_card)
@@ -686,7 +692,11 @@ class Round:
             facts.append(f"Course: {self.course}.")
         if hole:
             facts.append(f"First hole: {hole}.")
-        facts.append(f"Holes in this round: {self.holes}.")
+        if self.holes_confirmed:
+            facts.append(f"Holes in this round: {self.holes}.")
+        else:
+            facts.append("How many holes this round is isn't known yet: don't say a number of holes (no "
+                         "\"eighteen holes\" or \"nine holes\").")
         if self.schedule.get("week"):
             total = self.league.data.get("total_weeks")
             week = f"League week {self.schedule['week']}" + (f" of {total}" if total else "")

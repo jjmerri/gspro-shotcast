@@ -35,7 +35,9 @@
    counts up and freezes at touchdown, Total Length counts until the ball stops, then GSPro
    moves the player box to the next shot. The last reading that still belonged to this shot
    gives the reaction its lie and numbers, so the next player's lie is never credited to this
-   shot. The resting-lie reaction fires as soon as the lie is confirmed.
+   shot. The resting-lie reaction fires as soon as the lie is confirmed. GSPro often moves the
+   box on a second or two after touchdown with the ball still rolling; that read's lie isn't named
+   (except the green), and the next setup and GSPro's log record where the ball stopped.
 
 **Voices.** Lines are voiced as soon as they're written, several at once, and played in order. A
 cloud voice streams: a line starts playing once `tts.stream_prebuffer_seconds` (0.3) of audio has
@@ -44,6 +46,10 @@ start keeps the voice from breaking up. Cloud voice requests sometimes stall and
 `tts.first_audio_timeout_seconds` (1.0) gets `tts.retries` (2) more sent alongside it, and the first
 to start is played. With `tts.stream: false` whole clips are fetched instead, and a request still
 unanswered after `tts.hedge_after_seconds` (2.5) gets another sent alongside it.
+Consecutive lines get a short pause, `tts.turn_gap_seconds` (0.4) when the other commentator
+takes over and `tts.line_gap_seconds` (0.15) when the same one carries on, so an exchange doesn't
+sound rapid-fire. It only tops up the silence since the last line ended: a line after a longer
+quiet spell (a mid-flight call) starts at once, and an interrupt skips it.
 
 Only what airs is voiced (`tts.prevoice: false`, the default): the flight call is voiced at impact,
 the result call when the ball stops, and the wrap, closer and asides as they play. Their text is

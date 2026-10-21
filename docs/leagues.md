@@ -44,8 +44,9 @@ file by hand.
   If the names were never on screen, the opener is made for the last roster read and airs at
   the tee only if the tee shows exactly those players.
 - **Holes in the round** come from the setup screen too: the HOLES tab's FRONT 9 and BACK 9
-  boxes (both is 18 from hole 1, one is that nine). A setup that never opens the HOLES tab is
-  GSPro's default, 18. Without a setup read (the booth started later), the league schedule or
+  boxes (both is 18 from hole 1, one is that nine), sampled every quarter second so a quick
+  visit just before Play still counts. A setup that never opens the HOLES tab is taken as
+  GSPro's default, 18, but unconfirmed: the opener doesn't say how many holes. Without a setup read (the booth started later), the league schedule or
   `round_holes` is the guess. GSPro's log corrects any of these ("Skipping hole 1", the first
   score line, the hole layout at "Round Is Complete").
 - **Par and stroke index** come from GSPro's own course files under `source.gspro_courses_dirs`,

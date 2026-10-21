@@ -232,6 +232,11 @@ class TTSConfig(BaseModel):
     # (the first is often a few ms of sound) and fell 0.1-0.45 s behind real time on most measured
     # lines, so playing from the first byte left gaps near the start.
     stream_prebuffer_seconds: float = 0.3
+    # A beat of silence between consecutive lines: when the other commentator takes over, and when
+    # the same one carries on. Only fills up to this since the last line ended, so a line after a
+    # longer silence (a mid-flight call) starts at once. 0 plays lines back to back.
+    turn_gap_seconds: float = 0.4
+    line_gap_seconds: float = 0.15
     # Deadlines for a cloud voice (openai), whose requests sometimes stall for 30 s+ while the next
     # one answers in ~1 s. A comment is useless once its moment has passed, so lines get a deadline and
     # are dropped, never played late, when they miss it.
