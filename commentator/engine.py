@@ -748,8 +748,9 @@ class Engine:
         so it's kicked off the moment the lie is known and runs while the slope (and, on the tee, the
         other players) are still being read, rather than after. The frame it sees is grabbed once."""
         if self._after_round(hud):
-            log.info("Setup ignored: round %s is complete and this isn't a new tee (shot %s)",
-                     self.round.id, hud.shot_number)
+            log.info("Setup ignored: %s (shot %s)",
+                     "GSPro is in the menus after End Round" if self._log_rounds and self.gspro.mode == "menu"
+                     else f"round {self.round.id} is complete and this isn't a new tee", hud.shot_number)
             return
         # The minimap read starts first so it runs during the HUD read below. It's cancelled for a putt.
         minimap_task = asyncio.create_task(self._read_minimap(to_yards(hud.to_pin))) if self.minimap is not None else None
@@ -808,14 +809,16 @@ class Engine:
         read as a fresh setup and aired "a tap-in for par on eighteen" over the end of the show. Only a
         new opening tee (shot 1) counts once a round is over, for a couple of minutes or until GSPro
         leaves the menus. The same goes from the moment GSPro's log says every hole is holed out: the
-        sign-off can be a minute off, and a setup read meanwhile is the last green, not a shot to come."""
+        sign-off can be a minute off, and a setup read meanwhile is the last green, not a shot to come.
+        Once GSPro's log says End Round, even an opening tee is the quit round's, until a course is
+        picked again: a round started and quit at once aired its first-tee line after the quit."""
         r = self.round
+        if self._log_rounds and self.gspro.mode == "menu" and (r is None or r.ended):
+            return True
         if r is None or hud.shot_number == 1:
             return False
         if not r.ended:
             return r.log_complete
-        if self._log_rounds and self.gspro.mode == "menu":
-            return True
         # Nothing hit since the round ended: whatever GSPro shows now (a 1,450-yard "putt" on a hole
         # past the end of the round got a line three minutes after the sign-off) isn't a shot to call.
         if self._log_rounds and self.gspro.fires <= self._shots_at_round_end:
@@ -4140,7 +4143,9 @@ class Engine:
         try:
             from . import course_card
 
-            return course_card.load(self.cfg.source.gspro_courses_dirs, course)
+            # GSPro's log names the selected course's folder, which settles a name two courses share.
+            folder = self.gspro.course if self._log_truth else None
+            return course_card.load(self.cfg.source.gspro_courses_dirs, course, folder=folder)
         except Exception as e:
             log.warning("Course card load failed (%s); par and index come from the scorecard", e)
             return None
@@ -4297,6 +4302,21 @@ class Engine:
             return course
         entry = self.league.schedule_entry(time.strftime("%Y-%m-%d"), course)
         return entry.get("course") if entry and self._course_matches(entry, course) else course
+
+    def _card_course(self, course: str | None) -> str | None:
+        """The name to find a setup-read course's card folder by: GSPro's own name when the schedule
+        gives one (Balsams Panorama for Wentworth), else the name as read."""
+        sched = self.league.schedule_entry(time.strftime("%Y-%m-%d"), course) if course else None
+        return (sched.get("gspro_course") if sched and self._course_matches(sched, course) else None) or course
+
+    def _refresh_course_card(self, r: Round, course: str | None) -> None:
+        """Re-find a pre-built round's card now that GSPro's log has surely named the selected folder:
+        the setup screen can be read before it does, and a name two courses share took the wrong one."""
+        card = self._load_course_card(self._card_course(course))
+        if card and (r.course_card is None or card.name != r.course_card.name):
+            log.info("Course card for %r is %s, not %s, now GSPro's log names the course", course, card.name,
+                     r.course_card.name if r.course_card else "none")
+            r.apply_course_card(card)
 
     def _build_round(self, names: list[str], course: str | None, entry: dict, is_league: bool,
                      card_course: str | None = None, use_current_hole: bool = True,
@@ -4471,6 +4491,7 @@ class Engine:
         # when the tee confirms the same course and the same league team(s). Else it's made here.
         if (pending := self._take_matching_pending(is_league, course, names)) is not None:
             self._reconcile_slots(pending.round, names)
+            self._refresh_course_card(pending.round, pending.course)
             self._apply_setup_holes(pending.round)
             self._apply_setup_format(pending.round)
             self._apply_log_holes(pending.round)
@@ -4930,7 +4951,7 @@ class Engine:
         elif air:
             log.info("Setup read %s on %r is a practice round (%s); preparing its opener", names, course, practice)
         r = self._build_round(names, sched.get("course") or course, entry if is_league else {}, is_league,
-                              card_course=sched.get("gspro_course") or course, use_current_hole=False,
+                              card_course=self._card_course(course), use_current_hole=False,
                               slot_names=slot_names)   # None (not the filtered roster) is the safe signal
         # The first setup slot (top-left) is first on the tee, EXCEPT in alternate shot, where who tees
         # off isn't fixed to one person, so no starter is named there. An unplaceable practice round's
@@ -4962,8 +4983,8 @@ class Engine:
                                                roster_key=self._roster_key(names), guessed=guessed)
         if aired:
             self._air_lines("opener", lines)  # play over the course load
-            log.info("Early opener aired during the load (league) for %s %s: %d line(s)",
-                     r.course, sorted(players), len(lines))
+            log.info("Early opener aired during the load (%s) for %s %s: %d line(s)",
+                     "league" if is_league else "practice", r.course, sorted(players), len(lines))
         elif awaiting:
             log.info("Opener front-loaded (%s) for %s %s, ready to air/hold on the load: %d line(s)",
                      "league" if is_league else "practice", r.course, sorted(players), len(lines))

@@ -32,9 +32,12 @@ class CourseCard:
     yards: dict[str, dict[int, int]] = field(default_factory=dict)  # tee name -> hole -> yards
 
 
-def load(courses_dirs: str | Path | list, course_name: str | None) -> CourseCard | None:
+def load(courses_dirs: str | Path | list, course_name: str | None, folder: str | None = None) -> CourseCard | None:
     """The card for the GSPro course whose name best matches `course_name`, across one or more
-    course libraries, or None."""
+    course libraries, or None. `folder` is the course folder GSPro's log says was selected: two
+    courses can match a name equally ("Alpine Valley" is in "Swiss Alpine Valley" and in "Alpine
+    Valley - Meadows & Sugar Creek"), and that folder breaks the tie. It never beats a better match:
+    it may still be the last course's, logged before this one was picked."""
     if not course_name:
         return None
     dirs = [courses_dirs] if isinstance(courses_dirs, (str, Path)) else courses_dirs
@@ -43,10 +46,10 @@ def load(courses_dirs: str | Path | list, course_name: str | None) -> CourseCard
         base = Path(d)
         if not base.is_dir():
             continue
-        for name, folder in _index(base).items():
+        for name, path in _index(base).items():
             s = course_match_score(name, course_name)
-            if s > score:
-                best, score = folder, s
+            if s > score or (s == score and folder and path.name.lower() == folder.lower()):
+                best, score = path, s
     if best is None or score < 0.6:
         log.info("No GSPro course matched %r (best score %.2f)", course_name, score)
         return None

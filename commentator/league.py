@@ -204,6 +204,20 @@ def course_match_score(a: str, b: str) -> float:
     if not wa or not wb:
         return 0.0
     overlap = len(wa & wb) / min(len(wa), len(wb))
-    # Only a near-identical spelling counts: "Sand Valley" and "Pine Valley" are 0.73 alike.
-    spelling = difflib.SequenceMatcher(None, " ".join(sorted(wa)), " ".join(sorted(wb))).ratio()
-    return max(overlap, spelling if spelling >= 0.85 else 0.0)
+    # Only a near-identical spelling counts, an OCR slip or two: "Sand Valley" and "Pine Valley" are
+    # 0.73 alike, and "Alpine Valley" is 0.92 like "Pine Valley" but two letters away, a different course.
+    sa, sb = " ".join(sorted(wa)), " ".join(sorted(wb))
+    spelling = difflib.SequenceMatcher(None, sa, sb).ratio()
+    close = spelling >= 0.85 and _edits(sa, sb) <= max(1, min(len(sa), len(sb)) // 10)
+    return max(overlap, spelling if close else 0.0)
+
+
+def _edits(a: str, b: str) -> int:
+    """Levenshtein distance: the single-character inserts, deletes, and swaps between two strings."""
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]

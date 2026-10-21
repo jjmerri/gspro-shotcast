@@ -510,6 +510,42 @@ def test_course_card_from_coursedetails_and_matches_by_name_not_folder(tmp_path)
     assert len(card.index) == 18 and card.index[6] == 1 and card.altitude_ft == 1010
 
 
+def test_course_card_takes_the_folder_gspro_logged_when_two_names_match(tmp_path):
+    from commentator import course_card
+
+    for folder, name in (("Alpine Valley_GSP", "Swiss Alpine Valley"),
+                         ("AlpineValley_Lidar_Scene", "Alpine Valley - Meadows & Sugar Creek")):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "coursedetails.txt").write_text(DETAILS.replace("Test Links", name), encoding="utf-8")
+    assert course_card.load(tmp_path, "ALPINE VALLEY", folder="alpinevalley_lidar_scene").name == \
+        "Alpine Valley - Meadows & Sugar Creek"
+    assert course_card.load(tmp_path, "ALPINE VALLEY", folder="alpine valley_gsp").name == "Swiss Alpine Valley"
+    # A stale folder (the last course's) whose name doesn't match the read is ignored.
+    (tmp_path / "pinevalley_v1_gsp").mkdir()
+    (tmp_path / "pinevalley_v1_gsp" / "coursedetails.txt").write_text(DETAILS.replace("Test Links", "Pine Valley"),
+                                                                       encoding="utf-8")
+    assert "Alpine" in course_card.load(tmp_path, "ALPINE VALLEY", folder="pinevalley_v1_gsp").name
+    # Nor does it beat a better match: the last course was Swiss, this one's full name was read.
+    assert course_card.load(tmp_path, "Alpine Valley - Meadows & Sugar Creek", folder="alpine valley_gsp").name == \
+        "Alpine Valley - Meadows & Sugar Creek"
+
+
+def test_a_prebuilt_rounds_card_is_refound_once_gspro_logs_the_course(tmp_path):
+    for folder, name in (("Alpine Valley_GSP", "Swiss Alpine Valley"),
+                         ("AlpineValley_Lidar_Scene", "Alpine Valley - Meadows & Sugar Creek")):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "coursedetails.txt").write_text(DETAILS.replace("Test Links", name), encoding="utf-8")
+    e = _log_engine(tmp_path)
+    e.cfg.source.gspro_courses_dirs = [str(tmp_path)]
+    r = Round(league=LEAGUE, gspro_players=["MikeD"], course="ALPINE VALLEY", scheduled_format=None)
+    e.gspro.course = "alpine valley_gsp"     # still the last course's: the setup was read before the new one logged
+    r.apply_course_card(e._load_course_card("ALPINE VALLEY"))
+    assert r.course_card.name == "Swiss Alpine Valley"
+    e.gspro.course = "alpinevalley_lidar_scene"
+    e._refresh_course_card(r, "ALPINE VALLEY")
+    assert r.course_card.name == "Alpine Valley - Meadows & Sugar Creek"
+
+
 def test_round_seeds_par_and_index_from_the_course_card():
     from commentator.course_card import CourseCard
 
@@ -1588,6 +1624,8 @@ def test_schedule_week_comes_from_the_course():
     ]})
     assert league.schedule_entry("2026-12-01", "Sand Valley Golf Resort")["week"] == 12
     assert league.schedule_entry("2026-12-01", "Pine Valley GC")["week"] == 5
+    assert league.schedule_entry("2026-12-01", "PINE VALLEV")["week"] == 5          # an OCR slip
+    assert league.schedule_entry("2026-12-01", "ALPINE VALLEY") is None             # a different course
     assert league.schedule_entry("2026-12-01", "St Andrews Old")["week"] == 3
     assert league.schedule_entry("2026-12-01", "Wynn Golf Club") is None
 
@@ -2333,6 +2371,11 @@ async def test_log_scores_end_a_complete_round_without_waiting_for_end_round(tmp
     assert e._after_round(Hud(shot_number=4, to_pin="4349 feet 9 inches"))
     g.fires += 1
     assert not e._after_round(Hud(shot_number=4))
+    # Quit in GSPro (End Round): even an opening tee still on screen is the quit round's, not a shot to call.
+    g.mode = "menu"
+    assert e._after_round(Hud(shot_number=1))
+    g.mode = "course"                                     # a course picked again: its opening tee is live
+    assert not e._after_round(Hud(shot_number=1))
 
 
 async def test_an_ended_rounds_log_scores_survive_the_end_round_reset(tmp_path):
