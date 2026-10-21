@@ -393,6 +393,8 @@ class Engine:
         self.rejections: list[tuple[str, list[str]]] = []
         self.flight_latencies: list[float] = []
         self.usage = UsageLog(cfg.log_dir)
+        if hasattr(self.speech, "usage"):
+            self.speech.usage = self.usage   # per-request voice cost/latency rows
         Path(cfg.log_dir).mkdir(parents=True, exist_ok=True)
         self.transcript = Path(cfg.log_dir) / f"transcript-{time.strftime('%Y-%m-%d')}.txt"
         self._events: asyncio.Queue[ShotEvent | HoleChangeEvent | PreShotEvent | None] = asyncio.Queue()
@@ -1153,13 +1155,13 @@ class Engine:
         if trigger and (text := " ".join(str(data.get("tie_in") or "").split())):
             ok, _ = self._grounded([Line(speaker=good[0].speaker, text=text)], facts_text, mode="news")
             tie = ok[0] if ok else None
-        kept, audio = await self.speech.prepare_exchange(good)
+        kept, audio = await self._voice_ahead(good)
         if len(kept) != 2:
             log.info("News aside on %r dropped: it couldn't be voiced", h.title)
             return None
         tie_audio = None
         if tie is not None:
-            voiced, clips = await self.speech.prepare_exchange([tie])
+            voiced, clips = await self._voice_ahead([tie])
             tie_audio = clips[0] if voiced else None
             tie = tie if voiced else None
         if tie is None:
@@ -1208,7 +1210,7 @@ class Engine:
             if not good:
                 continue
             told = told + [" ".join(l.text for l in good)]
-            kept, audio = await self.speech.prepare_exchange(good)
+            kept, audio = await self._voice_ahead(good)
             if len(kept) != 2 or self.round is not r:
                 continue
             try:
@@ -1281,7 +1283,7 @@ class Engine:
                                           output_schema(self.speakers))
         if not good:
             return
-        kept, audio = await self.speech.prepare_exchange(good)
+        kept, audio = await self._voice_ahead(good)
         if len(kept) != 2 or self.round is not r:
             return
         self._score_written.add(f"{item.key}@{item.version}")
@@ -1343,7 +1345,7 @@ class Engine:
         self._news_aired.append(self.round.seq)
         lines = [line for line, _ in items]
         self.state.record_lines(lines)
-        self.speech.say_prepared_sequence(items)
+        self._air_exchange(items)
         self._write_transcript(lines, "banter")
         if bit.kind == "trivia":
             self.store.record_aside("trivia", bit.topic, " ".join(l.text for l in lines))
@@ -1463,6 +1465,24 @@ class Engine:
         return [self._score_fact(side, s, par, picked=r.was_picked_up([*side.gspro, *side.players], r.seq - 1))
                 for side in r.sides if (s := r.card_score(side, r.seq - 1)) is not None]
 
+    def _prevoicing(self) -> bool:
+        return getattr(self.speech, "prevoicing", True)
+
+    async def _voice_ahead(self, lines: list[Line]) -> tuple[list[Line], list]:
+        """Voice an exchange that may never air (a wrap/closer branch, an aside) now, or with
+        tts.prevoice off on a cloud voice, keep just the text for _air_exchange to voice as it plays."""
+        if self._prevoicing():
+            return await self.speech.prepare_exchange(lines)
+        return list(lines), [None] * len(lines)
+
+    def _air_exchange(self, items: list[tuple[Line, object]]) -> None:
+        """Play an exchange from _voice_ahead: its clips if they were voiced ahead, else voiced now
+        (streamed, line by line) the same way a live line is."""
+        if self._prevoicing():
+            self.speech.say_prepared_sequence(items)
+        else:
+            self.speech.say([line for line, _ in items], interrupt=True)
+
     def _kick_wrap_branches(self, side_key: str, scores: list[int], other_facts: list[str]) -> None:
         """(Re)start the background pre-build of the hole wrap, branched by the one side still to
         finish (`side_key`) over its possible `scores`, with the sides already in fixed in
@@ -1509,16 +1529,17 @@ class Engine:
                 written[strokes] = lines
         # On a network voice, voice every branch (and every line in it) at once; a local CPU voice goes
         # one line at a time. A branch whose opening line couldn't be voiced is left out, so the
-        # on-demand fallback covers it.
+        # on-demand fallback covers it. With tts.prevoice off (cloud), only the text is kept and the
+        # branch that airs is voiced as it plays.
         if getattr(self.speech.tts, "concurrent", False):
-            voiced = await asyncio.gather(*(self.speech.prepare_exchange(l) for l in written.values()))
+            voiced = await asyncio.gather(*(self._voice_ahead(l) for l in written.values()))
         else:
-            voiced = [await self.speech.prepare_exchange(l) for l in written.values()]
+            voiced = [await self._voice_ahead(l) for l in written.values()]
         branches: dict[int, tuple] = {k: v for k, v in zip(written, voiced) if v[0]}
         if self.state.current_hole == finished:  # a new hole hasn't started while we were working
             self._wrap_branches = {"hole": finished, "side": side_key, "by_score": branches} if branches else None
             if branches:
-                log.info("Wrap: pre-voiced branches for %s (%s) on %s", sorted(branches), side.label, finished)
+                log.info("Wrap: branches ready for %s (%s) on %s", sorted(branches), side.label, finished)
 
     def _play_prepared_wrap(self, finished_hole, finished_seq: int) -> bool:
         """Play the pre-made wrap branch for the score the deciding side actually came in on (from the
@@ -1537,7 +1558,7 @@ class Engine:
         self._wrapped_hole = finished_hole
         lines, audio = branch
         self.state.record_lines(lines)
-        self.speech.say_prepared_sequence(list(zip(lines, audio)))
+        self._air_exchange(list(zip(lines, audio)))
         self._write_transcript(lines, "segment")
         log.info("Wrap: pre-made branch played for %s strokes, no model call", strokes)
         return True
@@ -1605,15 +1626,16 @@ class Engine:
                 written[strokes] = lines
         # On a network voice, voice every branch (and every line in it) at once; a local CPU voice goes
         # one line at a time. A branch whose opening line couldn't be voiced is left out, so the
-        # on-demand fallback covers it.
+        # on-demand fallback covers it. With tts.prevoice off (cloud), only the text is kept and the
+        # branch that airs is voiced as it plays.
         if getattr(self.speech.tts, "concurrent", False):
-            voiced = await asyncio.gather(*(self.speech.prepare_exchange(l) for l in written.values()))
+            voiced = await asyncio.gather(*(self._voice_ahead(l) for l in written.values()))
         else:
-            voiced = [await self.speech.prepare_exchange(l) for l in written.values()]
+            voiced = [await self._voice_ahead(l) for l in written.values()]
         branches: dict[int, tuple] = {k: v for k, v in zip(written, voiced) if v[0]}
         if not r.ended and branches:
             self._closer_branches = {"side": side_key, "by_score": branches, "fixed": fixed}
-            log.info("Closer: pre-voiced branches for %s (%s)", sorted(branches), side.label)
+            log.info("Closer: branches ready for %s (%s)", sorted(branches), side.label)
 
     def _play_prepared_closer(self, final_strokes: int | None, side_key: str) -> bool:
         """Play the pre-made closer branch for the score the deciding side actually finished on.
@@ -1628,7 +1650,7 @@ class Engine:
             return False
         lines, audio = branch
         self.state.record_lines(lines)
-        self.speech.say_prepared_sequence(list(zip(lines, audio)))
+        self._air_exchange(list(zip(lines, audio)))
         self._write_transcript(lines, "closer")
         log.info("Closer: pre-made branch played for %s strokes, no model call", final_strokes)
         return True
@@ -2706,6 +2728,8 @@ class Engine:
         voicing = time.monotonic()
         outcomes = sorted(plan.lines, key=lambda o: order.index(o) if o in order else len(order))
         concurrent = getattr(self.speech.tts, "concurrent", False)
+        if not self._prevoicing():
+            return   # cloud voice with tts.prevoice off: the call that airs is voiced at impact/result
         if concurrent:
             # Network TTS: voice every outcome at once so they're all ready in one synth's time,
             # not one-after-another (which would land a trouble call after the ball on a quick swing).

@@ -54,7 +54,7 @@ while it's in the air, react to where it finished, read putts, open and close th
 track your league's standings, closest-to-the-pin and net scores. Each player is judged against
 their own game, not the longest hitter in the room: a drive is "short" only by that player's
 usual numbers. From a few holes in, the booth also gets a round-so-far stat sheet and picks out
-whatever pattern stands out tonight. About $1-2 per 18-hole round with the default cloud models,
+whatever pattern stands out tonight. About $0.40-0.60 per 18-hole round with the default cloud models,
 or $0 fully local.
 
 Between shots they can drop in an aside, kept occasional so the golf stays first: a recent golf

@@ -72,9 +72,14 @@ tts:
   #   color: am_michael
   # kokoro_model: models/kokoro-v1.0.onnx
   # kokoro_voices: models/voices-v1.0.bin
-  # Cloud voice (openai): a slow request gets a second one sent alongside it, and a line that misses
-  # its moment is dropped, never played late.
-  # hedge_after_seconds: 2.5          # send a second request if the first hasn't answered by then
+  # openai_model: gpt-4o-mini-tts     # or pin a snapshot, e.g. gpt-4o-mini-tts-2025-03-20
+  # Cloud voice (openai): only what airs is voiced, streamed so it starts at its first audio; a line
+  # that misses its moment is dropped, never played late (docs/booth.md, "Voices").
+  # prevoice: false                   # true: voice every possible call ahead (instant, ~4x the voice bill)
+  # stream: true                      # false: fetch whole clips, hedging slow ones (below)
+  # first_audio_timeout_seconds: 1.0  # no audio by then: send another request alongside it
+  # retries: 1                        # extra requests per line
+  # hedge_after_seconds: 2.5          # stream: false only; send a second request if the first hasn't answered
   # prepare_deadline_seconds: 12      # lines voiced ahead (setup branches, wraps, closer) give up after
   # live_deadline_seconds: 5          # a line voiced on demand must be ready within this
   # flight_audio_deadline_seconds: 4  # a mid-flight call must start within this of impact

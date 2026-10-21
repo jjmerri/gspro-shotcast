@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .config import Config
 from .models import Line
-from .tts import TTS, Audio
+from .tts import TTS, Audio, StreamedAudio
+from .usage import tts_cost
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +21,10 @@ _last_play_end = 0.0
 # Requests per line, all told (hedges and replacements for errored ones): caps a fast-failing error
 # (bad key, outage) at a handful of calls.
 _MAX_REQUESTS = 5
+# A streamed clip that goes this long without another block after it started is cut off there.
+_STREAM_GAP_SECONDS = 3.0
+# A live line that takes longer than this from being queued to starting to play is logged.
+_SLOW_LINE_SECONDS = 1.5
 
 
 async def play(audio: Audio) -> None:
@@ -27,6 +33,10 @@ async def play(audio: Audio) -> None:
 
     global _last_play_end
     lead = _WAKE_LEAD_SECONDS if time.monotonic() - _last_play_end > _IDLE_GAP_SECONDS else 0.0
+    if isinstance(audio, StreamedAudio):
+        await _play_stream(audio, lead)
+        _last_play_end = time.monotonic()
+        return
     samples = audio.samples
     if lead:
         pad = np.zeros(int(audio.sample_rate * lead), dtype=samples.dtype)
@@ -40,10 +50,39 @@ async def play(audio: Audio) -> None:
     _last_play_end = time.monotonic()
 
 
+async def _play_stream(audio: StreamedAudio, lead: float) -> None:
+    """Play a clip as it downloads, in small blocks so an interrupt cuts it off within ~50 ms."""
+    import numpy as np
+    import sounddevice as sd
+
+    stop = threading.Event()
+    block = max(1, audio.sample_rate // 20)
+
+    def _run() -> None:
+        with sd.OutputStream(samplerate=audio.sample_rate, channels=1, dtype="float32") as out:
+            if lead:
+                out.write(np.zeros((int(audio.sample_rate * lead), 1), dtype="float32"))
+            for chunk in audio.blocks(stop):
+                for i in range(0, len(chunk), block):
+                    if stop.is_set():
+                        out.abort()
+                        return
+                    piece = chunk[i:i + block]
+                    out.write(piece.reshape(-1, 1))
+                    audio.played += len(piece)
+
+    try:
+        await asyncio.to_thread(_run)
+    finally:
+        stop.set()
+
+
 def _audio_seconds(audio: Audio | None) -> float:
     """Playback length of a synthesized clip, for the cost estimate (TTS is billed by audio time)."""
     if audio is None:
         return 0.0
+    if isinstance(audio, StreamedAudio):
+        return audio.seconds
     try:
         return len(audio.samples) / audio.sample_rate
     except Exception:
@@ -59,6 +98,14 @@ def stop_playback() -> None:
         pass
 
 
+def _aired_seconds(audio: Audio | None) -> float:
+    """How much of a clip reached the speakers: a streamed clip cut off mid-line counts only the
+    part played (it may have downloaded all of it)."""
+    if isinstance(audio, StreamedAudio):
+        return audio.played / audio.sample_rate
+    return _audio_seconds(audio)
+
+
 @dataclass
 class _Queued:
     """A live line waiting its turn. On a network voice its synth starts as soon as it's queued, so a
@@ -69,6 +116,21 @@ class _Queued:
     deadline: float | None  # time.monotonic() by which it must be playing, or None
     exchange: int  # lines from one say() call: lose one and the replies after it go too
     task: asyncio.Task | None = None
+    queued: float = field(default_factory=time.monotonic)
+
+
+def _discard(item: _Queued) -> None:
+    """Stop a dropped line's voicing: cancel its synth, or if that already returned a clip that is
+    still streaming, stop the download."""
+    task = item.task
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+    elif not task.cancelled() and task.exception() is None:
+        _, audio = task.result()
+        if isinstance(audio, StreamedAudio):
+            audio.cancel()
 
 
 class SpeechQueue:
@@ -83,7 +145,8 @@ class SpeechQueue:
         self._stop = stopper
         # A line past its deadline is dropped, never played late.
         self._text_q: asyncio.Queue[_Queued] = asyncio.Queue()
-        self._audio_q: asyncio.Queue[tuple[int, Line, Audio | None, float | None]] = asyncio.Queue(maxsize=1)
+        # (generation, line, audio, deadline, when a live line was queued or None for a prepared one)
+        self._audio_q: asyncio.Queue[tuple[int, Line, Audio | None, float | None, float | None]] = asyncio.Queue(maxsize=1)
         # The synth the loop is waiting on; interrupt() cancels it (queued ones are cancelled as they're
         # drained) so a stalled request can't hold up the line that superseded it.
         self._synth_task: asyncio.Task | None = None
@@ -111,6 +174,38 @@ class SpeechQueue:
             "synth_clips": 0, "synth_chars": 0, "synth_seconds": 0.0,
             "spoken_clips": 0, "spoken_chars": 0, "spoken_seconds": 0.0,
         }
+        # Where per-request TTS rows and per-line air rows go (the engine's UsageLog), for the cost and
+        # latency summary (`commentator cost`). None: not recorded.
+        self.usage = None
+
+    def _record(self, row: dict) -> None:
+        if self.usage is None:
+            return
+        try:
+            self.usage.write(row)
+        except Exception as e:
+            log.debug("Usage row not written: %s", e)
+
+    def _record_tts(self, purpose: str, attempt: int, chars: int, outcome: str, started: float,
+                    first: float | None, audio_s: float) -> None:
+        model = self.cfg.tts.openai_model if self.cfg.tts.provider == "openai" else self.cfg.tts.provider
+        self._record({
+            "kind": "tts", "provider": self.cfg.tts.provider, "model": model, "purpose": purpose,
+            "attempt": attempt, "chars": chars, "outcome": outcome,
+            "first_audio_s": round(first, 3) if first is not None else None,
+            "total_s": round(time.monotonic() - started, 3), "audio_s": round(audio_s, 2),
+            "est_cost_usd": round(tts_cost(model, chars, audio_s), 6),
+        })
+
+    @property
+    def _streaming(self) -> bool:
+        return bool(self.cfg.tts.stream and getattr(self.tts, "remote", False) and hasattr(self.tts, "stream"))
+
+    @property
+    def prevoicing(self) -> bool:
+        """Whether lines that might not air (setup branches, wrap/closer branches, asides) should be
+        voiced ahead. Always on a local voice (free); on a cloud voice only with tts.prevoice."""
+        return self.cfg.tts.prevoice or not getattr(self.tts, "remote", False)
 
     def _count_synth(self, text: str, audio: Audio | None) -> None:
         if audio is None:  # console/local-silent providers cost nothing to "synthesize"
@@ -124,7 +219,7 @@ class SpeechQueue:
             return
         self.audio_stats["spoken_clips"] += 1
         self.audio_stats["spoken_chars"] += len(text)
-        self.audio_stats["spoken_seconds"] += _audio_seconds(audio)
+        self.audio_stats["spoken_seconds"] += _aired_seconds(audio)
 
     def say(self, lines: list[Line], interrupt: bool = False, deadline: float | None = None) -> None:
         """Queue lines to voice and play. `deadline` (a time.monotonic()) is when they stop being worth
@@ -153,14 +248,14 @@ class SpeechQueue:
         until = time.monotonic() + self.cfg.tts.live_deadline_seconds
         if item.deadline is not None:
             until = min(until, item.deadline)
-        item.task = asyncio.create_task(self._synthesize(item.line, until))
+        item.task = asyncio.create_task(self._synthesize(item.line, until, live=True))
 
     def _voice_for(self, line: Line) -> tuple[str, str | None]:
         voices = self.cfg.tts.active_voices
         voice = voices.get(line.speaker) or next(iter(voices.values()))
         return voice, self.cfg.tts.active_instructions.get(line.speaker)
 
-    async def _synthesize(self, line: Line, until: float | None = None) -> tuple[bool, Audio | None]:
+    async def _synthesize(self, line: Line, until: float | None = None, live: bool = False) -> tuple[bool, Audio | None]:
         """Voice a line, returning (ok, audio). A cloud voice's requests either answer in a second or
         two or stall for 30 s+, so a request still unanswered after hedge_after_seconds gets a second
         one alongside it (the first isn't killed; a slow one that would have worked still can) and
@@ -181,13 +276,31 @@ class SpeechQueue:
         started = time.monotonic()
         if until is None:
             until = started + cfg.prepare_deadline_seconds
+        if self._streaming:
+            return await self._synthesize_streamed(line, text, voice, instructions, until, live)
         inflight: list[tuple[asyncio.Task, float]] = []  # (request, when it was sent), oldest first
         sent = 0
+        purpose = "live" if live else "ahead"
+
+        async def request(n: int) -> Audio | None:
+            at, outcome, audio = time.monotonic(), "unanswered", None
+            try:
+                audio = await self.tts.synthesize(text, voice, instructions)
+                outcome = "ok"
+                return audio
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                outcome = "error"
+                raise
+            finally:
+                self._record_tts(purpose, n, len(text), outcome, at,
+                                 time.monotonic() - at if outcome == "ok" else None, _audio_seconds(audio))
 
         def send() -> None:
             nonlocal sent
             sent += 1
-            inflight.append((asyncio.create_task(self.tts.synthesize(text, voice, instructions)), time.monotonic()))
+            inflight.append((asyncio.create_task(request(sent)), time.monotonic()))
 
         try:
             while True:
@@ -225,6 +338,109 @@ class SpeechQueue:
         log.warning("TTS gave up after %.1fs (%s requests): %s", time.monotonic() - started, sent, line.text)
         return False, None
 
+    async def _synthesize_streamed(self, line: Line, text: str, voice: str, instructions: str | None,
+                                   until: float, live: bool) -> tuple[bool, Audio | None]:
+        """Stream a line. A request with no audio within first_audio_timeout_seconds (or one that
+        errors) gets `retries` more sent alongside it; the first to start is kept and the rest are
+        cancelled. A live line returns as soon as its audio starts (it plays while it downloads); a
+        line voiced ahead waits for the whole clip. Gives up at `until`."""
+        cfg = self.cfg.tts
+        started = time.monotonic()
+        attempts: list[StreamedAudio] = []
+        last_sent = started
+        purpose = "live" if live else "ahead"
+
+        def send() -> None:
+            nonlocal last_sent
+            clip = StreamedAudio(self.tts.stream_sample_rate)
+            clip.task = asyncio.create_task(
+                self._stream_into(clip, text, voice, instructions, len(attempts) + 1, purpose))
+            attempts.append(clip)
+            last_sent = time.monotonic()
+
+        winner: StreamedAudio | None = None
+        kept = False
+        send()
+        try:
+            while True:
+                winner = next((a for a in attempts if a.started.is_set()), None)
+                now = time.monotonic()
+                if winner is not None or now >= until:
+                    break
+                waiting = [a for a in attempts if not a.finished.is_set()]
+                if len(attempts) <= cfg.retries and (
+                        not waiting or now - last_sent >= cfg.first_audio_timeout_seconds):
+                    log.info("TTS %s after %.1fs; retrying: %s", "no audio" if waiting else "failed",
+                             now - started, line.text)
+                    send()
+                    continue
+                if not waiting:
+                    break   # every request failed and the retries are spent
+                await asyncio.sleep(0.02)
+            if winner is None:
+                log.warning("TTS gave up after %.1fs (%s requests): %s", time.monotonic() - started,
+                            len(attempts), line.text)
+                return False, None
+            if len(attempts) > 1:
+                log.info("TTS started in %.1fs on request %s of %s: %s", time.monotonic() - started,
+                         attempts.index(winner) + 1, len(attempts), line.text)
+            for a in attempts:
+                if a is not winner:
+                    a.cancel()
+            if live:
+                kept = True
+                return True, winner
+            try:
+                await asyncio.wait_for(winner.finished.wait(), max(until - time.monotonic(), 0.0))
+            except TimeoutError:
+                log.warning("TTS clip still downloading at its deadline (%.1fs): %s",
+                            time.monotonic() - started, line.text)
+                return False, None
+            if not winner.ok:
+                log.warning("TTS stream broke off while voicing ahead: %s", line.text)
+                return False, None
+            return True, Audio(samples=winner.samples, sample_rate=winner.sample_rate)
+        finally:
+            for a in attempts:
+                if not (kept and a is winner):
+                    a.cancel()
+
+    async def _stream_into(self, clip: StreamedAudio, text: str, voice: str, instructions: str | None,
+                           attempt: int, purpose: str) -> None:
+        """Download one streamed request into `clip`, recording it as a usage row when it ends."""
+        started = time.monotonic()
+        first: float | None = None
+        outcome = "error"
+        stream = self.tts.stream(text, voice, instructions)
+        try:
+            while True:
+                try:
+                    async with asyncio.timeout(None if first is None else _STREAM_GAP_SECONDS):
+                        block = await anext(stream)
+                except StopAsyncIteration:
+                    outcome = "ok"
+                    break
+                except TimeoutError:
+                    outcome = "broke_off"
+                    log.warning("TTS stream stalled mid-clip after %.1fs of audio: %s", clip.seconds, text)
+                    break
+                if first is None:
+                    first = time.monotonic() - started
+                clip.push(block)
+        except asyncio.CancelledError:
+            outcome = "cut" if first is not None else "unanswered"
+            raise
+        except Exception as e:
+            log.warning("TTS request failed (%s: %s): %s", type(e).__name__, e, text)
+        finally:
+            clip.finish(outcome == "ok")
+            await stream.aclose()
+            if clip.parts:
+                self.audio_stats["synth_clips"] += 1
+                self.audio_stats["synth_chars"] += len(text)
+                self.audio_stats["synth_seconds"] += clip.seconds
+            self._record_tts(purpose, attempt, len(text), outcome, started, first, clip.seconds)
+
     async def prepare_exchange(self, lines: list[Line]) -> tuple[list[Line], list[Audio | None]]:
         """Voice a multi-line exchange ahead of time (a wrap, the closer): in parallel on a network
         voice, in order on a local one. It's cut at the first line that couldn't be voiced, since a
@@ -257,7 +473,7 @@ class SpeechQueue:
         if self.muted:
             return
         self.interrupt()
-        self._audio_q.put_nowait((self._generation, line, audio, None))
+        self._audio_q.put_nowait((self._generation, line, audio, None, None))
         self._pending += 1
 
     def say_prepared_sequence(self, items: list[tuple[Line, Audio | None]]) -> None:
@@ -279,7 +495,7 @@ class SpeechQueue:
                     if gen != self._generation:   # a newer interrupt superseded this sequence
                         self._pending -= (len(items) - i)   # the rest never reach the play loop
                         return
-                    await self._audio_q.put((gen, line, audio, None))
+                    await self._audio_q.put((gen, line, audio, None, None))
             finally:
                 # Release the synth loop, but only if we still own it (a newer sequence that took over
                 # owns the token now and will clear it itself). A plain interrupt bumps the generation
@@ -308,8 +524,10 @@ class SpeechQueue:
     def _drain(self, q: asyncio.Queue) -> None:
         while not q.empty():
             item = q.get_nowait()
-            if isinstance(item, _Queued) and item.task:
-                item.task.cancel()
+            if isinstance(item, _Queued):
+                _discard(item)
+            elif isinstance(item, tuple) and isinstance(item[2], StreamedAudio):
+                item[2].cancel()
             self._pending -= 1
 
     def is_idle(self) -> bool:
@@ -323,8 +541,7 @@ class SpeechQueue:
         while True:
             item = await self._text_q.get()
             if item.gen != self._generation or item.exchange == self._lost_exchange:
-                if item.task:
-                    item.task.cancel()
+                _discard(item)
                 self._pending -= 1
                 continue
             if item.task is None:
@@ -340,37 +557,50 @@ class SpeechQueue:
                 self._synth_task = None
             late = ok and item.deadline is not None and time.monotonic() > item.deadline
             if not ok or late:
+                if isinstance(audio, StreamedAudio):
+                    audio.cancel()
                 if item.gen == self._generation:
                     if late:
                         log.info("Dropped a line voiced %.1fs past its deadline: %s",
                                  time.monotonic() - item.deadline, item.line.text)
                     else:
                         log.info("Dropped a line its voice wasn't ready for in time: %s", item.line.text)
+                    self._record({"kind": "line", "outcome": "dropped", "reason": "late" if late else "no_voice",
+                                  "chars": len(item.line.text)})
                     self._lost_exchange = item.exchange  # its replies go too
                 self._pending -= 1
                 continue
             if item.gen != self._generation or self._sequencing is not None:
                 # Interrupted while synthesizing, or a prepared wrap/closer is airing and this ordinary
                 # line would splice into the middle of it; drop it rather than compete for the queue.
+                if isinstance(audio, StreamedAudio):
+                    audio.cancel()
                 self._pending -= 1
                 continue
-            await self._audio_q.put((item.gen, item.line, audio, item.deadline))
+            await self._audio_q.put((item.gen, item.line, audio, item.deadline, item.queued))
 
     async def _play_loop(self) -> None:
         while True:
-            gen, line, audio, deadline = await self._audio_q.get()
+            gen, line, audio, deadline, queued = await self._audio_q.get()
+            streamed = isinstance(audio, StreamedAudio)
             try:
                 if gen != self._generation:
                     continue
                 if deadline is not None and time.monotonic() > deadline:
                     log.info("Dropped a line that missed its moment by %.1fs: %s",
                              time.monotonic() - deadline, line.text)
+                    self._record({"kind": "line", "outcome": "dropped", "reason": "missed",
+                                  "chars": len(line.text)})
                     continue
                 name = self.cfg.personas[line.speaker].name if line.speaker in self.cfg.personas else line.speaker
                 print(f"  [{name}] {line.text}", flush=True)
                 log.info("Speaking [%s]: %s", name, line.text)
+                wait = time.monotonic() - queued if queued is not None else None
+                if wait is not None and wait > _SLOW_LINE_SECONDS:
+                    log.info("Line started %.1fs after it was queued: %s", wait, line.text)
                 if audio is not None:
-                    self._count_spoken(line.text, audio)
+                    if not streamed:   # a streamed clip is counted once it has finished playing
+                        self._count_spoken(line.text, audio)
                     self._playing = asyncio.create_task(self._play(audio))
                 elif self.cfg.tts.console_simulate_duration:
                     self._playing = asyncio.create_task(asyncio.sleep(len(line.text.split()) / WORDS_PER_SECOND))
@@ -384,5 +614,15 @@ class SpeechQueue:
                         raise
                 except Exception:
                     log.exception("Audio playback failed")
+                if streamed:
+                    self._count_spoken(line.text, audio)
+                if audio is not None:
+                    self._record({"kind": "line", "outcome": "aired",
+                                  "source": "live" if queued is not None else "prepared",
+                                  "streamed": streamed, "chars": len(line.text),
+                                  "wait_s": round(wait, 3) if wait is not None else None,
+                                  "audio_s": round(_aired_seconds(audio), 2)})
             finally:
+                if streamed:
+                    audio.cancel()   # an interrupted clip stops downloading
                 self._pending -= 1

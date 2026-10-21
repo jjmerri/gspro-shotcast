@@ -474,6 +474,286 @@ async def test_prepare_exchange_voices_in_parallel_and_cuts_at_the_first_failure
     assert kept == lines[:1] and len(audio) == 1
 
 
+class _StreamingTTS:
+    """A streaming cloud voice. Per call number: "stall" never sends a byte, "error" fails at once,
+    "gap" sends a block then goes silent; anything else streams three 5-sample blocks."""
+
+    remote = True
+    concurrent = True
+    stream_sample_rate = 10
+
+    def __init__(self, plans=None):
+        self.plans = plans or {}
+        self.calls = 0
+        self.active = 0
+
+    async def synthesize(self, text, voice, instructions=None):
+        raise AssertionError("streaming voice: whole-clip synth shouldn't be used")
+
+    async def stream(self, text, voice, instructions=None):
+        import asyncio
+
+        import numpy as np
+
+        self.calls += 1
+        plan = self.plans.get(self.calls)
+        self.active += 1
+        try:
+            if plan == "stall":
+                await asyncio.sleep(60)
+            if plan == "error":
+                raise RuntimeError("HTTP 500")
+            if plan == "endless":   # keeps trickling audio, never finishes
+                while True:
+                    yield np.full(5, 0.1, dtype="float32")
+                    await asyncio.sleep(0.02)
+            for i in range(3):
+                yield np.full(5, 0.1, dtype="float32")
+                if plan == "gap":
+                    await asyncio.sleep(60)
+                await asyncio.sleep(0.01)
+        finally:
+            self.active -= 1
+
+
+class _Rows:
+    def __init__(self):
+        self.rows = []
+
+    def write(self, row):
+        self.rows.append(row)
+
+
+def _stream_cfg(timeout=0.1, live=1.0, retries=1):
+    cfg = Config()
+    cfg.tts.first_audio_timeout_seconds = timeout
+    cfg.tts.live_deadline_seconds = live
+    cfg.tts.retries = retries
+    return cfg
+
+
+async def test_streamed_line_retries_once_when_the_first_request_sends_no_audio():
+    import asyncio
+    import time
+
+    from commentator.models import Line
+
+    played = []
+
+    async def rec_play(audio):
+        played.append((time.monotonic(), audio))
+        await audio.finished.wait()
+
+    tts = _StreamingTTS({1: "stall"})
+    speech = SpeechQueue(_stream_cfg(), tts, player=rec_play, stopper=lambda: None)
+    speech.usage = rows = _Rows()
+    task = asyncio.create_task(speech.run())
+    started = time.monotonic()
+    speech.say([Line("pbp", "Finds the fairway.")])
+    while not speech.is_idle():
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert tts.calls == 2 and len(played) == 1
+    assert played[0][0] - started < 0.3   # retried at the 0.1 s first-audio timeout, not the 1 s deadline
+    assert played[0][1].seconds == 1.5 and played[0][1].ok   # the whole clip, 3 x 5 samples at 10 Hz
+    await asyncio.sleep(0.01)
+    assert tts.active == 0   # the stalled request was cancelled
+    tts_rows = sorted((r for r in rows.rows if r["kind"] == "tts"), key=lambda r: r["attempt"])
+    assert [(r["attempt"], r["outcome"]) for r in tts_rows] == [(1, "unanswered"), (2, "ok")]
+    assert tts_rows[1]["audio_s"] == 1.5 and tts_rows[1]["first_audio_s"] is not None
+    assert tts_rows[0]["est_cost_usd"] == 0
+    aired = [r for r in rows.rows if r["kind"] == "line"]
+    assert aired[0]["outcome"] == "aired" and aired[0]["streamed"] and aired[0]["wait_s"] < 0.3
+
+
+async def test_streamed_line_gives_up_after_one_retry_and_retries_an_error_at_once():
+    import asyncio
+    import time
+
+    from commentator.models import Line
+
+    # Both requests stall: only one retry is sent, and the line is dropped at its deadline.
+    tts = _StreamingTTS({1: "stall", 2: "stall", 3: "stall"})
+    speech = SpeechQueue(_stream_cfg(timeout=0.05, live=0.3), tts)
+    started = time.monotonic()
+    ok, audio = await speech._synthesize(Line("pbp", "never"), time.monotonic() + 0.3, live=True)
+    assert not ok and audio is None and tts.calls == 2
+    assert time.monotonic() - started < 0.5
+    await asyncio.sleep(0.01)
+    assert tts.active == 0
+
+    # A request that errors is retried straight away, without waiting out the first-audio timeout.
+    tts = _StreamingTTS({1: "error"})
+    speech = SpeechQueue(_stream_cfg(timeout=5), tts)
+    started = time.monotonic()
+    ok, audio = await speech._synthesize(Line("pbp", "retry"), time.monotonic() + 5, live=True)
+    assert ok and tts.calls == 2 and time.monotonic() - started < 0.2
+    await audio.finished.wait()
+
+
+async def test_streamed_prepare_returns_the_whole_clip_and_a_broken_stream_fails():
+    from commentator import speech as speech_mod
+    from commentator.models import Line
+
+    speech = SpeechQueue(_stream_cfg(), _StreamingTTS())
+    audio = await speech.prepare(Line("pbp", "Ahead of time."))
+    assert audio is not None and len(audio.samples) == 15 and audio.sample_rate == 10
+
+    old = speech_mod._STREAM_GAP_SECONDS
+    speech_mod._STREAM_GAP_SECONDS = 0.05
+    try:
+        speech = SpeechQueue(_stream_cfg(), _StreamingTTS({1: "gap"}))
+        assert await speech.prepare(Line("pbp", "Cut short.")) is None
+    finally:
+        speech_mod._STREAM_GAP_SECONDS = old
+
+
+async def test_interrupt_stops_the_downloads_of_streamed_lines_still_queued():
+    import asyncio
+
+    from commentator.models import Line
+
+    async def stuck_play(audio):
+        await asyncio.sleep(60)
+
+    tts = _StreamingTTS({n: "endless" for n in range(1, 10)})
+    speech = SpeechQueue(_stream_cfg(), tts, player=stuck_play, stopper=lambda: None)
+    task = asyncio.create_task(speech.run())
+    speech.say([Line("pbp", "one"), Line("color", "two"), Line("pbp", "three")])
+    await asyncio.sleep(0.1)
+    assert tts.active == 3
+    speech.interrupt()
+    await asyncio.sleep(0.05)
+    assert tts.active == 0 and speech.is_idle()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def test_streamed_prepare_gives_up_at_its_deadline_even_while_audio_trickles_in():
+    import asyncio
+    import time
+
+    from commentator.models import Line
+
+    tts = _StreamingTTS({1: "endless"})
+    speech = SpeechQueue(_stream_cfg(), tts)
+    started = time.monotonic()
+    ok, audio = await speech._synthesize(Line("pbp", "slow"), time.monotonic() + 0.2)
+    assert not ok and audio is None and time.monotonic() - started < 0.4
+    await asyncio.sleep(0.01)
+    assert tts.active == 0
+
+
+async def test_streamed_clip_plays_as_it_arrives_and_an_interrupt_stops_it(monkeypatch):
+    import asyncio
+    import sys
+    import time
+    import types
+
+    import numpy as np
+
+    from commentator import speech as speech_mod
+    from commentator.tts.base import StreamedAudio
+
+    written, aborted = [], []
+
+    class FakeStream:
+        def __init__(self, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def write(self, data):
+            written.append(len(data))
+            time.sleep(0.005)
+
+        def abort(self):
+            aborted.append(True)
+
+    monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(OutputStream=FakeStream))
+    monkeypatch.setattr(speech_mod, "_last_play_end", 0.0)   # long idle: lead silence first
+
+    clip = StreamedAudio(100)
+    clip.push(np.zeros(20, dtype="float32"))
+    playing = asyncio.create_task(speech_mod.play(clip))
+    await asyncio.sleep(0.05)
+    clip.push(np.zeros(10, dtype="float32"))   # arrives mid-playback
+    clip.finish(True)
+    await asyncio.wait_for(playing, 1)
+    assert written == [60, 5, 5, 5, 5, 5, 5] and not aborted   # 0.6 s lead, then 50 ms blocks
+    assert clip.played == 30
+
+    written.clear()
+    clip = StreamedAudio(100)
+    clip.push(np.zeros(10_000, dtype="float32"))   # 100 s of audio
+    playing = asyncio.create_task(speech_mod.play(clip))
+    await asyncio.sleep(0.05)
+    playing.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await playing
+    await asyncio.sleep(0.05)
+    assert aborted and len(written) < 50   # stopped within a block or two, not after 100 s
+    assert speech_mod._aired_seconds(clip) < 1 < clip.seconds   # aired counts only what played
+
+
+async def test_cloud_voice_without_prevoice_keeps_branch_text_and_voices_it_as_it_airs(tmp_path):
+    from commentator.models import Line
+
+    cfg = Config(log_dir=str(tmp_path))
+    speech = SpeechQueue(cfg, _StreamingTTS())
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=speech, screen=None)
+    assert speech.usage is engine.usage
+    lines = [Line("pbp", "one"), Line("color", "two")]
+    said = []
+    speech.say = lambda ls, interrupt=False, deadline=None: said.append((ls, interrupt))
+    speech.say_prepared_sequence = lambda items: said.append(("prepared", items))
+
+    kept, audio = await engine._voice_ahead(lines)
+    assert kept == lines and audio == [None, None] and speech.tts.calls == 0   # nothing voiced yet
+    engine._air_exchange(list(zip(kept, audio)))
+    assert said == [(lines, True)]
+
+    cfg.tts.prevoice = True   # the old behavior: voiced ahead, played as prepared clips
+    kept, audio = await engine._voice_ahead(lines)
+    assert len(audio) == 2 and all(a is not None for a in audio)
+    engine._air_exchange(list(zip(kept, audio)))
+    assert said[-1][0] == "prepared"
+
+
+def test_usage_prices_openai_cached_tokens_and_summarizes_voice_cost_and_latency(tmp_path):
+    from commentator.usage import UsageLog, estimate_cost, summarize, tts_cost
+
+    # OpenAI's prompt_tokens include the cached ones: 1M prompt with 800k cached is 200k full + 800k cached.
+    cost = estimate_cost("gpt-6-luna", {"input_tokens": 1_000_000, "cache_read_tokens": 800_000})
+    assert cost == pytest.approx(0.2 * 0.10 + 0.8 * 0.01)
+    assert tts_cost("gpt-4o-mini-tts", 100, 60) == pytest.approx(0.015)
+    assert tts_cost("gpt-4o-mini-tts", 100, 0) == 0 and tts_cost("kokoro", 100, 60) == 0
+
+    log = UsageLog(str(tmp_path))
+    log.write({"kind": "tts", "provider": "openai", "model": "gpt-4o-mini-tts", "outcome": "ok",
+               "first_audio_s": 0.4, "audio_s": 120, "est_cost_usd": 0.03})
+    log.write({"kind": "tts", "provider": "openai", "model": "gpt-4o-mini-tts", "outcome": "unanswered",
+               "first_audio_s": None, "audio_s": 0, "est_cost_usd": 0})
+    log.write({"kind": "line", "outcome": "aired", "wait_s": 0.6, "audio_s": 60})
+    log.write({"kind": "line", "outcome": "dropped", "reason": "no_voice"})
+    log.write({"kind": "live", "provider": "openai", "model": "gpt-6-luna", "input_tokens": 1_000_000,
+               "cache_read_tokens": 0, "output_tokens": 0, "latency_s": 1.0, "est_cost_usd": 0.0})
+    out = summarize(str(tmp_path), weeks=1)
+    row = out.splitlines()[1]
+    assert "openai $0.10" in row       # recomputed: older OpenAI rows were logged at $0
+    assert "$    0.03" in row and "2.0/1.0" in row and "1/2" in row and "0.40/0.40s" in row
+    assert row.rstrip().endswith("1")  # one dropped line
+    assert "Last night x 1 weeks: $0.13" in out
+
+
 async def test_a_line_past_its_own_deadline_is_dropped():
     import asyncio
     import time

@@ -1,5 +1,5 @@
 from ..config import TTSConfig
-from .base import TTS, Audio
+from .base import TTS, Audio, StreamedAudio
 
 
 def build_tts(cfg: TTSConfig) -> TTS:
@@ -16,4 +16,4 @@ def build_tts(cfg: TTSConfig) -> TTS:
     return ConsoleTTS()
 
 
-__all__ = ["TTS", "Audio", "build_tts"]
+__all__ = ["TTS", "Audio", "StreamedAudio", "build_tts"]

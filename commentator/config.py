@@ -206,6 +206,21 @@ class TTSConfig(BaseModel):
     })
     # Console provider: pause roughly as long as the line would take to say.
     console_simulate_duration: bool = True
+    # Cloud voice (openai) only. Off: a line is voiced when it's about to be said, so only what airs
+    # is paid for. On: every possible flight/result call is voiced at setup, and the wrap, closer and
+    # asides as soon as they're written, so they play with no voicing wait; most of that audio never
+    # airs (about 80% of the TTS bill in practice). A local voice (kokoro) always voices ahead, since
+    # it costs nothing and is slow on CPU.
+    prevoice: bool = False
+    # Cloud voice (openai): stream the audio and start playing at its first bytes instead of waiting
+    # for the whole clip (first audio is ~0.5 s vs ~1.4 s for a full line). Off: whole clips, with the
+    # hedge settings below.
+    stream: bool = True
+    # Streaming: a request with no audio by this long gets one more sent alongside it (`retries`);
+    # whichever starts first is played and the other is cancelled. A stalled request sends nothing at
+    # all, so it never recovers; a working one answers in ~0.3-0.8 s.
+    first_audio_timeout_seconds: float = 1.0
+    retries: int = 1
     # Deadlines for a cloud voice (openai), whose requests sometimes stall for 30 s+ while the next
     # one answers in ~1 s. A comment is useless once its moment has passed, so lines get a deadline and
     # are dropped, never played late, when they miss it.

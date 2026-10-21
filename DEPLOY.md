@@ -126,7 +126,7 @@ gspro-shotcast\
 
 - `booth-YYYY-MM-DD.log` the booth's own debug log (OCR reads, timings, decisions).
 - `transcript-YYYY-MM-DD.txt` every line spoken, timestamped.
-- `usage.jsonl` per-call LLM token counts and estimated cost, for `cost`.
+- `usage.jsonl` per-call LLM token counts, per-request voice timing and audio, per-line wait, with estimated costs, for `cost`.
 - `season.db` the SQLite shot and round database (every shot, round, scorecard and spoken line
   across nights; see [docs/tracking.md](docs/tracking.md)). Back this up: it's the only copy.
 - `calibrate.png`, `setup*.png`, `load*.png` and similar: debug screenshots.

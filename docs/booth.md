@@ -37,9 +37,19 @@
    gives the reaction its lie and numbers, so the next player's lie is never credited to this
    shot. The resting-lie reaction fires as soon as the lie is confirmed.
 
-**Voices.** Lines are voiced as soon as they're written, several at once, and played in order.
-A cloud voice request still unanswered after `tts.hedge_after_seconds` (2.5) gets a second one
-sent alongside it, and the first to answer is used. Every line has a deadline (a flight call
+**Voices.** Lines are voiced as soon as they're written, several at once, and played in order. A
+cloud voice streams: a line starts playing at its first audio (about half a second) while the rest
+downloads. Cloud voice requests sometimes stall and send nothing at all, so one with no audio after
+`tts.first_audio_timeout_seconds` (1.0) gets `tts.retries` (1) more sent alongside it, and the first
+to start is played. With `tts.stream: false` whole clips are fetched instead, and a request still
+unanswered after `tts.hedge_after_seconds` (2.5) gets another sent alongside it.
+
+Only what airs is voiced (`tts.prevoice: false`, the default): the flight call is voiced at impact,
+the result call when the ball stops, and the wrap, closer and asides as they play. Their text is
+still written ahead, so there's no model wait. `tts.prevoice: true` voices every possible flight and
+result call at setup, and every wrap and closer branch, so they play with no voicing wait, but
+most of that audio is never played (about 80% of the voice bill). A local voice (Kokoro) always
+voices ahead, since it's free and slow on CPU. Every line has a deadline (a flight call
 must start within `tts.flight_audio_deadline_seconds` of impact, any other on-demand line within
 `tts.live_deadline_seconds`); one that misses it is dropped, along with the replies to it, never
 played late.
@@ -51,8 +61,8 @@ screenshot to back them up.
 ## Asides: news, scores and course trivia
 
 On an ordinary shot the booth would otherwise pass on, it sometimes drifts into a two-line side
-conversation instead. Each one is written by the closer's model (the richest one) and voiced ahead of
-time, so it plays instantly and whole. They all share one budget: at most one every three holes, never
+conversation instead. Each one is written ahead by the closer's model (the richest one), so it plays
+with no model wait. They all share one budget: at most one every three holes, never
 on the first hole or the last two, and only after an ordinary shot, so the round's own calls come first.
 
 - **Live scores** (`scores`): a tour leaderboard and your local teams. Which holes get a check-in is
@@ -97,8 +107,8 @@ you can start with one and switch later.
 
 | Setup | Keys in `.env` | Per round | Trade-offs |
 |---|---|---|---|
-| **Quality and speed** (what the author runs): the default mix above plus `minimap.provider: jev` | OpenAI, Anthropic, TypeSafe | ~$1.25-2 plus Jev | Fastest calls and the most expressive voices. Jev reads the minimap in ~0.3 s instead of ~4 s, and adds water carries, green front/back and bunker yardages for sharper setup lines. Three accounts and the highest bill; `service_tier: fast` roughly doubles the (small) GPT token cost for steadier latency |
-| **Default** (`config.example.yaml` as shipped) | OpenAI, Anthropic | ~$1.25-2 | Same calls and voices; Claude reads hazards off a screenshot, slower and less detailed than Jev |
+| **Quality and speed** (what the author runs): the default mix above plus `minimap.provider: jev` | OpenAI, Anthropic, TypeSafe | ~$0.40-0.60 plus Jev | Fastest calls and the most expressive voices. Jev reads the minimap in ~0.3 s instead of ~4 s, and adds water carries, green front/back and bunker yardages for sharper setup lines. Three accounts and the highest bill; `service_tier: fast` roughly doubles the (small) GPT token cost for steadier latency |
+| **Default** (`config.example.yaml` as shipped) | OpenAI, Anthropic | ~$0.40-0.60 | Same calls and voices; Claude reads hazards off a screenshot, slower and less detailed than Jev |
 | **One key: Claude + local voices** (the commented "one key" block, plus `tts.provider: kokoro`) | Anthropic | text calls only | One account, and no voice bill, which is most of the default's cost. Kokoro voices are plainer (no delivery direction) and run on the PC's CPU next to GSPro. Claude Haiku on the fast calls kept every deadline in a scripted test round (flight branches ~2-3 s, mid-flight lines ~1 s); it hasn't had the default's live mileage |
 | **Fully local**: Ollama (`qwen3:8b`) + Kokoro | none | $0 | Nothing leaves the PC, but slower and plainer on a typical sim PC; a vision model for the hazard read needs ~8-10 GB of free VRAM next to GSPro, or go without it |
 
@@ -112,12 +122,12 @@ With the default cloud setup, expect roughly (measured on real rounds):
 
 | Round | Voices | Text models | Total |
 |---|---|---|---|
-| 18 holes, 1 player | ~$1.00 | ~$0.15 | **~$1.25** |
-| 18 holes, 2 players | ~$1.80 | ~$0.20 | **~$2.00** |
+| 18 holes, 1 player | ~$0.25 | ~$0.15 | **~$0.40** |
+| 18 holes, 2 players | ~$0.40 | ~$0.20 | **~$0.60** |
 
-Voices are most of it, and they scale with the number of shots. Each shot's possible outcomes
-are voiced before the ball lands so the call is instant, and about 70% of that audio is never
-played. Higher scores mean more shots and more cost. These are estimates from the booth's own
+Voices scale with the number of shots, so higher scores mean more cost. Only what airs is voiced;
+with `tts.prevoice: true` every possible call is voiced ahead and the voice column is about four times
+higher (the voice figures above are scaled from rounds measured that way). These are estimates from the booth's own
 logging, at the providers' prices when it was written; check current pricing.
 
 Keeping spend in check:
@@ -128,12 +138,16 @@ Keeping spend in check:
   makes no model or voice calls, and shots are still recorded.
 - **Voice on the PC**: Kokoro voices cost nothing per line, which removes most of the bill
   (see [Choosing a setup](#choosing-a-setup)); Ollama for the text too makes it $0.
-- **See what you actually spent.** The booth log ends each session with an "Audio this session"
-  line (voice minutes and estimated cost), and `cost` totals the text-model calls per night:
+- **See what you actually spent.** `logs/usage.jsonl` gets a row for every model call, every voice
+  request (`kind: tts`: time to first audio, audio length, outcome, estimated cost) and every line
+  aired or dropped (`kind: line`: how long it waited to start). `cost` totals them per night: text
+  cost by provider, voice cost, minutes voiced vs aired, voice requests that never answered, time to
+  first audio and line wait (median/90th percentile), and lines dropped. The booth log also ends each
+  session with an "Audio this session" line.
 
 ```
-python -m commentator cost                          # text-model usage per night
-python -m commentator cost --as-model claude-sonnet-5-5   # the same calls, repriced on a Claude model
+python -m commentator cost                          # spend and voice latency per night
+python -m commentator cost --as-model claude-sonnet-5-5   # the text calls repriced on a Claude model
 ```
 
 ## Privacy
