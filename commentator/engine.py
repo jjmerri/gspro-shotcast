@@ -4198,14 +4198,14 @@ class Engine:
             recent_lines=self.state.recent_lines,
             speaker=self.speakers[0], has_image=bool(images),
         )
+        budget = max(deadline - (time.monotonic() - impact), 0.1)
         try:
             lines = await asyncio.wait_for(
-                self._generate("flight", self.flight_llm, user, images),
-                timeout=max(deadline - (time.monotonic() - impact), 0.1),
-            )
+                self._generate("flight", self.flight_llm, user, images), timeout=budget)
         except asyncio.TimeoutError:
             self.stats["flight_late"] += 1
-            log.info("Flight call missed the %.1fs deadline", deadline)
+            log.info("Flight call missed the %.1fs deadline (%.1fs of it left when the call went out)",
+                     deadline, budget)
             return
         elapsed = time.monotonic() - impact
         self.flight_latencies.append(elapsed)
@@ -5720,7 +5720,18 @@ class Engine:
             # Every model call funnels through here; with commentary off it answers "nothing to say",
             # so the opener, plans, reactions, wraps and closer all come out empty and are skipped.
             return "{}"
-        result = await llm.complete_json(system or self.system, user, schema or self.schema, images)
+        started = time.monotonic()
+        try:
+            result = await llm.complete_json(system or self.system, user, schema or self.schema, images)
+        except asyncio.CancelledError:
+            # A deadline (the mid-flight call) or a newer shot gave up on it: still time it.
+            log.info("%s call (%s:%s): cancelled after %.1fs", kind, llm.provider, llm.model,
+                     time.monotonic() - started)
+            raise
+        except Exception as e:
+            log.warning("%s call (%s:%s): failed after %.1fs: %s", kind, llm.provider, llm.model,
+                        time.monotonic() - started, e)
+            raise
         self.usage.record(kind, llm, result)
         log.info("%s call (%s:%s): %.1fs, %s in / %s out tokens", kind, llm.provider, llm.model,
                  result.latency_seconds, result.input_tokens, result.output_tokens)

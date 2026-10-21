@@ -3409,6 +3409,28 @@ def test_putt_calls_are_rationed_and_never_back_to_back(tmp_path):
     assert makes == {True, False}                                    # calls go both ways
 
 
+async def test_a_model_call_cut_off_by_its_deadline_or_failing_is_still_timed(tmp_path, caplog):
+    cfg = Config(log_dir=str(tmp_path))
+
+    class SlowLLM(LLMClient):
+        async def complete_json(self, system, user, schema, images=None):
+            if "FAIL" in user:
+                raise RuntimeError("boom")
+            await asyncio.sleep(5)
+
+    llm = SlowLLM(cfg.llm.live)
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"),
+                    source=ReplaySource("data/flight_test.jsonl", speed=1e6), live_llm=llm, segment_llm=llm,
+                    speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0))
+    with caplog.at_level("INFO", logger="commentator.engine"):
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(engine._complete("flight", llm, "IN FLIGHT", []), timeout=0.05)
+        with pytest.raises(RuntimeError):
+            await engine._complete("shot", llm, "FAIL", [])
+    assert re.search(r"flight call \(.+\): cancelled after 0\.\ds", caplog.text)
+    assert re.search(r"shot call \(.+\): failed after 0\.\ds: boom", caplog.text)
+
+
 async def test_a_tree_on_the_line_always_gets_its_setup_line(tmp_path, caplog):
     import logging
     from commentator.models import PreShotEvent
