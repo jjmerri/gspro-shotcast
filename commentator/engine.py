@@ -357,7 +357,7 @@ class Engine:
         self.rng = rng or random.Random()
         self.state = SessionState(recent_lines_max=cfg.commentary.recent_lines)
         # Live golf headlines for occasional between-shots banter; None when the feature is off.
-        self.news = GolfNews(cfg.news.feeds, cfg.news.limit) if cfg.news.enabled and self.commentary_on else None
+        self.news = GolfNews(cfg.news.feeds, cfg.news.limit, max_age_days=cfg.news.max_age_days) if cfg.news.enabled and self.commentary_on else None
         w = cfg.weather
         self.weather = Weather(w.latitude, w.longitude, w.place, location=w.location, country=w.country) if (
             w.enabled and self.commentary_on
@@ -1049,7 +1049,7 @@ class Engine:
         self.speech.muted = False
         asyncio.create_task(self.speech.prepare(Line(self.speakers[0], "Warming up.")))
         if self.news is None and self.cfg.news.enabled:
-            self.news = GolfNews(self.cfg.news.feeds, self.cfg.news.limit)
+            self.news = GolfNews(self.cfg.news.feeds, self.cfg.news.limit, max_age_days=self.cfg.news.max_age_days)
             asyncio.create_task(self._news_loop(), name="news")
         w = self.cfg.weather
         if self.weather is None and w.enabled and (w.location or (w.latitude is not None and w.longitude is not None)):

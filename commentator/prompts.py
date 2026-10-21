@@ -226,7 +226,7 @@ def news_prompt(*, topic: str, openings=()) -> tuple[str, str]:
     """A golf-world aside, written ahead of the round with time to make it good, and played later on a
     quiet moment. The story is real and current (the model's own news is stale, so it's fed in as fact);
     the booth riffs on it but must not invent any detail beyond the text."""
-    facts_text = f"Golf-world story (real and current, from the news feed): {topic}"
+    facts_text = f"Golf-world story (real, from the news feed): {topic}\n{clock_fact()}"
     moments = "\n".join(f'- "{k}": {v}' for k, v in NEWS_TRIGGERS.items())
     prompt = (
         "FACTS:\n" + facts_text
@@ -241,7 +241,10 @@ def news_prompt(*, topic: str, openings=()) -> tuple[str, str]:
         "or \"I did\" is not a reply.\n"
         "Riff with opinion and personality, but do not invent any name, number, result or detail that "
         "isn't in the story; if you're unsure of a specific, stay general. Don't mention the round, the "
-        "players or any shot: you don't know when this will play.\n\n"
+        "players or any shot: you don't know when this will play.\n"
+        "Place the story in time from when it was published and today's date: a story from a day or two "
+        "ago is something they read \"yesterday\" or \"over the weekend\", not something happening now. "
+        "Don't call it today's news or say it's going on right now unless it was published today.\n\n"
         "trigger: only if the story is squarely ABOUT one of these golf moments, name it, and the aside "
         "will be held until that kind of shot happens in the round:\n" + moments + "\n"
         "Otherwise \"none\". Most stories are \"none\"; never stretch.\n"
@@ -299,8 +302,9 @@ def trivia_prompt(*, course: str, title: str, article: str, told: list[str] = ()
         "Pick ONE thing, specific and worth telling - a famous moment, a winner, a quirk, a nickname, how it "
         "was built - and tell it the way someone who loves the game drops it into conversation, not a "
         "recital of the article. The reply gives a real take of its own in at least one full sentence.\n"
-        "Don't invent any name, number, year or detail that isn't in the article; if unsure of a specific, "
-        "stay general. \"Here\" or \"this place\" is fine, but don't mention the players, the round or any shot.\n"
+        "Tell only what the article says: don't invent any name, number, year or detail, and don't join "
+        "two of its facts into a new claim (a nickname isn't a namesake). If unsure of a specific, stay "
+        "general. \"Here\" or \"this place\" is fine, but don't mention the players, the round or any shot.\n"
         "hole: if your story is about one hole of the course, its number, and the aside plays while the "
         "players are on that hole (so you may say \"this hole\"); otherwise 0."
         + ("\n\nAlready told on earlier rounds here; pick something else:\n" + "\n".join(f"- {t}" for t in told)

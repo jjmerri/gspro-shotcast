@@ -64,7 +64,8 @@ on the first hole or the last two, and only after an ordinary shot, so the round
 - **Course trivia** (`trivia`): a bit of the real course's history from its Wikipedia article. A story
   about one hole (the Road Hole, the island green) waits for that hole, even late in the round. What
   aired is remembered, so a course played again gets different stories.
-- **Golf news** (`news`): a real current headline; see `news` in `config.example.yaml`.
+- **Golf news** (`news`): a real headline from the feed, told as of when it came out ("over the
+  weekend"), not as breaking news. Stories older than `news.max_age_days` (3) are left out.
 
 With more than one on, they're one bucket: when an ordinary shot gets an aside (`news.banter_rate`),
 it's picked at random from those ready.

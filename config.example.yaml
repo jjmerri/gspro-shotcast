@@ -163,6 +163,13 @@ weather:
   # refresh_minutes: 30
   # between_holes_rate: 0.2
 
+# Real golf headlines as between-shots asides (ESPN's feed, no key), written at round start.
+news:
+  enabled: false
+  # per_nine: 2
+  # banter_rate: 0.35         # chance, on an ordinary shot, of an aside (news, scores or trivia)
+  # max_age_days: 3           # older stories are left out; newer ones are told as of when they ran
+
 # Live scores as between-shots asides, from ESPN's public scoreboards (no key): a tour leaderboard
 # and your local teams (live, just finished, or later tonight). The holes that get one are picked at
 # round start, but the scores are fetched, written (closer's model) and voiced as that hole starts,

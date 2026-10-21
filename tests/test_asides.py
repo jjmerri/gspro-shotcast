@@ -301,3 +301,18 @@ async def test_off_air_an_aside_is_kept_and_a_postponed_game_is_no_result(tmp_pa
     postponed = _game("post", NOW - timedelta(hours=3), "Postponed")
     postponed["events"][0]["status"]["type"]["completed"] = False
     assert parse_games(postponed, "nhl", ["BOS"], NOW) == []
+
+
+def test_news_is_dated_and_old_stories_are_left_out():
+    from commentator.news import GolfNews
+
+    rss = """<rss><channel>
+      <item><title>Fresh</title><description>Scottie Scheffler won by five shots on Sunday in Texas.</description>
+            <pubDate>Sun, 18 Oct 2026 18:54:19 EST</pubDate></item>
+      <item><title>Stale</title><description>Rory McIlroy won by two shots in Ireland after a long week.</description>
+            <pubDate>Sun, 27 Sep 2026 21:43:33 EST</pubDate></item>
+    </channel></rss>"""
+    news = GolfNews(["x"], max_age_days=3)
+    news.headlines = news._parse(rss, "espn.com")
+    assert [h.title for h in news.pick_many(random.Random(0), 5, now=NOW)] == ["Fresh"]
+    assert news.headlines[0].as_fact(NOW).endswith("(via espn.com, published on Sunday, 2 days ago)")

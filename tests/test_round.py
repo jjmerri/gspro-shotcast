@@ -2528,3 +2528,12 @@ def test_in_round_prompts_know_the_day_and_time():
     _, facts_text = shot_prompt(player="Mike", team=None, facts=["Club: driver."], hole="Hole 1", recent_lines=[],
                                 routine=True, has_images=False)
     assert "Local time:" in facts_text
+
+
+def test_news_and_trivia_prompts_place_the_story_in_time_and_stick_to_the_article():
+    from commentator.prompts import news_prompt, trivia_prompt
+
+    user, facts = news_prompt(topic='"X" (via espn.com, published yesterday)')
+    assert "Local time:" in facts and "not something happening now" in user
+    user, _ = trivia_prompt(course="Riviera", title="Riviera Country Club", article="text")
+    assert "a nickname isn't a namesake" in user

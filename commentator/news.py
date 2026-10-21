@@ -11,6 +11,8 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -35,11 +37,37 @@ def _source(url: str) -> str:
     return m.group(1) if m else url
 
 
+def _published(text: str | None) -> datetime | None:
+    """An RSS pubDate ("Sun, 18 Oct 2026 18:54:19 EST") or an Atom ISO date, timezone-aware, or None."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError):
+        try:
+            when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return when if when.tzinfo else when.astimezone()
+
+
+def age_text(published: datetime, now: datetime) -> str:
+    """When a story came out, the way people say it: "today", "yesterday", "on Sunday, 2 days ago"."""
+    days = (now.date() - published.astimezone(now.tzinfo).date()).days
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    return f"on {published.astimezone(now.tzinfo):%A}, {days} days ago"
+
+
 @dataclass
 class Headline:
     title: str
     summary: str
     source: str
+    published: datetime | None = None
 
     def substantive(self) -> bool:
         """Whether the summary gives the booth something to talk about. A teaser ("What were the keys
@@ -48,16 +76,21 @@ class Headline:
         text = self.summary.strip()
         return len(text.split()) >= 8 and not _LISTICLE.match(text) and not text.rstrip(" \"'”").endswith("?")
 
-    def as_fact(self) -> str:
-        return f'"{self.title}"' + (f" — {self.summary}" if self.summary else "") + f" (via {self.source})"
+    def as_fact(self, now: datetime | None = None) -> str:
+        when = f", published {age_text(self.published, now or datetime.now().astimezone())}" if self.published else ""
+        return f'"{self.title}"' + (f" — {self.summary}" if self.summary else "") + f" (via {self.source}{when})"
+
+    def age_days(self, now: datetime) -> float | None:
+        return (now - self.published).total_seconds() / 86400 if self.published else None
 
 
 class GolfNews:
     """Live golf headlines, refreshed on demand. Safe to use before the first fetch (empty)."""
 
-    def __init__(self, feeds: list[str], limit: int = 12, timeout: float = 10.0) -> None:
+    def __init__(self, feeds: list[str], limit: int = 12, timeout: float = 10.0, max_age_days: float = 3.0) -> None:
         self.feeds = list(feeds)
         self.limit = limit
+        self.max_age_days = max_age_days
         self.timeout = timeout
         self.headlines: list[Headline] = []
 
@@ -96,21 +129,26 @@ class GolfNews:
         for item in root.iter("item"):  # RSS 2.0
             title = _clean(item.findtext("title") or "", 200)
             if title:
-                out.append(Headline(title, _clean(item.findtext("description") or "", 300), source))
+                out.append(Headline(title, _clean(item.findtext("description") or "", 300), source,
+                                    _published(item.findtext("pubDate"))))
         if out:
             return out
         for entry in root.iter(f"{_ATOM}entry"):  # Atom fallback
             title = _clean(entry.findtext(f"{_ATOM}title") or "", 200)
             summary = entry.findtext(f"{_ATOM}summary") or entry.findtext(f"{_ATOM}content") or ""
             if title:
-                out.append(Headline(title, _clean(summary, 300), source))
+                when = entry.findtext(f"{_ATOM}published") or entry.findtext(f"{_ATOM}updated")
+                out.append(Headline(title, _clean(summary, 300), source, _published(when)))
         return out
 
     def pick(self, rng) -> Headline | None:
         return rng.choice(self.headlines) if self.headlines else None
 
-    def pick_many(self, rng, n: int, avoid: set[str] = frozenset()) -> list[Headline]:
-        """Up to n different stories worth a real exchange, none of them in `avoid`."""
-        pool = [h for h in self.headlines if h.substantive() and h.title not in avoid]
+    def pick_many(self, rng, n: int, avoid: set[str] = frozenset(), now: datetime | None = None) -> list[Headline]:
+        """Up to n different stories worth a real exchange, none of them in `avoid` and none older than
+        max_age_days (a story with no date is taken as current)."""
+        now = now or datetime.now().astimezone()
+        pool = [h for h in self.headlines if h.substantive() and h.title not in avoid
+                and ((age := h.age_days(now)) is None or age <= self.max_age_days)]
         rng.shuffle(pool)
         return pool[:n]

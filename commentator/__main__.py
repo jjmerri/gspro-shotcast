@@ -363,7 +363,7 @@ async def cmd_banter(cfg: Config, args) -> None:
     from .speech import SpeechQueue
     from .tts import build_tts
 
-    news = GolfNews(cfg.news.feeds, cfg.news.limit)
+    news = GolfNews(cfg.news.feeds, cfg.news.limit, max_age_days=cfg.news.max_age_days)
     await news.refresh()
     if not news.headlines:
         sys.exit("No headlines fetched (check the feeds and network).")

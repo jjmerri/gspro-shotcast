@@ -458,6 +458,9 @@ class NewsConfig(BaseModel):
     # waiting on a particular kind of shot (one every three holes at most either way). Shared by every
     # aside: news, live scores and course trivia are one bucket, picked from at random.
     banter_rate: float = 0.35
+    # Stories older than this are left out (a feed can carry weeks-old ones); newer ones are told as
+    # of when they came out ("over the weekend"), not as breaking news.
+    max_age_days: float = 3.0
 
 
 class WeatherConfig(BaseModel):
