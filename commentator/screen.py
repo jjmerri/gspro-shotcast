@@ -260,15 +260,26 @@ class Screen:
         """One full frame for the pre-round setup watcher (no OCR)."""
         return self._setup_frame()
 
-    def read_hud(self, parts: list[str], image: Image.Image | None = None) -> Hud:
-        """OCR the named HUD regions, from `image` (a saved frame) or the live screen."""
+    def grab_regions(self, names: list[str]) -> dict[str, Image.Image]:
+        """The named HUD regions as they are right now, no OCR: a few ms, so they're near-simultaneous
+        (read_hud grabs each region as it gets to it, over a second apart with OCR in between)."""
+        base = self._hud_base()
+        out = {}
+        for name in names:
+            if (region := self.region(name)) is not None:
+                out[name] = self.crop(base, region) if base is not None else self.grab(region)
+        return out
+
+    def read_hud(self, parts: list[str], image: Image.Image | None = None,
+                 crops: dict[str, Image.Image] | None = None) -> Hud:
+        """OCR the named HUD regions, from `crops` (grab_regions), `image` (a saved frame) or the live screen."""
         hud = Hud()
         # With a full frame (a saved image, or GSPro's window via WGC) crop each region from it;
         # otherwise (monitor mode, WGC off/stale) grab each small region box on its own, since grabbing
         # the whole 4K screen per read stutters the game. WGC's frame is captured on a background thread,
         # so cropping it here is free and occlusion-proof.
         _c = time.perf_counter()
-        base = image if image is not None else self._hud_base()
+        base = image if image is not None or crops is not None else self._hud_base()
         self.last_capture_seconds = time.perf_counter() - _c
         if any(n in MIRRORED for n in parts):
             self.detect_mirror(base)
@@ -277,7 +288,10 @@ class Screen:
             if region is None:
                 continue
             try:
-                img = self.crop(base, region) if base is not None else self.grab(region)
+                if crops is not None and name in crops:
+                    img = crops[name]
+                else:
+                    img = self.crop(base, region) if base is not None else self.grab(region)
                 if name == "player_name":
                     hud.name_sig = name_signature(img)
                     continue

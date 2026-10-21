@@ -3254,3 +3254,79 @@ def test_the_opener_and_closer_greet_for_the_time_of_day():
     assert "Tuesday morning, 10:39" in morning and "good morning" in morning
     _, evening = closer_prompt(facts=[], recent_lines=[], now=datetime(2026, 10, 20, 19, 5))
     assert "good evening" in evening and '"tonight"' in evening
+
+
+async def test_after_touchdown_the_follow_reads_the_grab_where_the_ball_stopped(tmp_path):
+    from PIL import Image, ImageDraw
+
+    # Premonition, 10-21: OCR reads 1.2-1.5 s apart caught the drive mid-roll on the fairway; it ran on
+    # into the rough and GSPro moved on ~1 s after it stopped. Pixel grabs see the stop in time.
+    josh = Image.new("RGB", (40, 10), (200, 200, 200))
+    next_up = Image.new("RGB", (40, 10), (10, 10, 10))
+
+    def tiles(total):
+        img = Image.new("RGB", (60, 20))
+        ImageDraw.Draw(img).text((2, 2), str(total), fill=(255, 255, 255))
+        return img
+
+    grabs = [(tiles(t), "fairway") for t in (252.0, 254.5, 256.1)] + [(tiles(258.1), "rough")] * 2
+    grabs += [(tiles(258.1), "next")] * 5
+    ocr = iter([Hud(player_text="P", shot_number=1, lie="fairway",
+                    tiles={"carry (game)": str(c), "total length": str(c)}) for c in (200.0, 240.0, 243.2, 243.2)])
+    names = {"next": next_up}
+
+    class Screen:
+        i = 0
+
+        async def read_hud_async(self, parts):
+            return next(ocr)
+
+        def grab_regions(self, parts):
+            img, lie = grabs[min(self.i, len(grabs) - 1)]
+            self.i += 1
+            return {"tiles": img, "player_name": names.get(lie, josh), "lie": lie}
+
+        def read_hud(self, parts, image=None, crops=None):
+            return Hud(lie=crops["lie"], tiles={"carry (game)": "243.2", "total length": "258.1"})
+
+    from commentator.screen import name_signature
+
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.screen.follow_poll_seconds = 0.05
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=Screen())
+    before = Hud(player_text="P", shot_number=1, lie="tee", name_sig=name_signature(josh))
+    hud, landed = await engine._follow_shot(before)
+    assert landed and hud.lie == "rough" and hud.tiles["total length"] == "258.1"
+
+
+async def test_following_to_rest_never_takes_the_next_players_blank_tiles(tmp_path):
+    from PIL import Image
+
+    # No name signature to see the switch: two identical grabs of the next address (tiles "--.--")
+    # mustn't be read as this ball at rest; a failed grab is skipped, not fatal.
+    blank = Image.new("RGB", (60, 20))
+    ocr = iter([Hud(player_text="P", shot_number=1, lie="fairway",
+                    tiles={"carry (game)": str(c), "total length": str(c)}) for c in (150.0, 160.0, 160.0)])
+
+    class Screen:
+        n = 0
+
+        async def read_hud_async(self, parts):
+            return next(ocr)
+
+        def grab_regions(self, parts):
+            self.n += 1
+            if self.n == 1:
+                raise OSError("capture failed")
+            return {"tiles": blank}
+
+        def read_hud(self, parts, image=None, crops=None):
+            return Hud(lie="tee", tiles={"carry (game)": "--.--", "total length": "--.--"})
+
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.screen.follow_poll_seconds = 0.05
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=Screen())
+    hud, landed = await engine._follow_shot(Hud(player_text="P", shot_number=1, lie="tee"))
+    assert landed and hud.lie is None and hud.tiles["carry (game)"] == "160.0"

@@ -35,9 +35,10 @@
    counts up and freezes at touchdown, Total Length counts until the ball stops, then GSPro
    moves the player box to the next shot. The last reading that still belonged to this shot
    gives the reaction its lie and numbers, so the next player's lie is never credited to this
-   shot. The resting-lie reaction fires as soon as the lie is confirmed. GSPro often moves the
-   box on a second or two after touchdown with the ball still rolling; that read's lie isn't named
-   (except the green), and the next setup and GSPro's log record where the ball stopped.
+   shot. From touchdown on, the HUD is grabbed without OCR every poll, and the first grab whose
+   tiles haven't changed since the last (the ball has stopped) is the one read, so GSPro moving
+   on a second later doesn't matter. If the box moves on before the ball is seen at rest, the
+   lie isn't named (except the green); the next setup and GSPro's log record where it stopped.
 
 **Voices.** Lines are voiced as soon as they're written, several at once, and played in order. A
 cloud voice streams: a line starts playing once `tts.stream_prebuffer_seconds` (0.3) of audio has

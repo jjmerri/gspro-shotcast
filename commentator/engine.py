@@ -43,7 +43,7 @@ from .trivia import CourseTrivia
 from .weather import Weather
 from .round import FORMAT_NAMES, TEAM_BALL, Round, normalize_format, to_par
 from .round import _join as _join_names
-from .screen import Screen
+from .screen import Screen, name_signature
 from .sources.base import ShotSource
 from .sources.gspro_log import M_TO_YD, MATERIAL_TO_LIE, GsproLogFollower, GsproState
 from .speech import SpeechQueue
@@ -147,17 +147,28 @@ def _nines_picked(tones: dict) -> tuple[int, int] | None:
 
 
 def _unsettled(hud: Hud, tag: str = "") -> Hud:
-    """A follow's last read from before the ball was seen at rest. GSPro often moves the player box on
-    a second or two after touchdown, with the ball still rolling: off the green its lie then named the
-    wrong spot about half the time (fairway for a ball that ran into the rough, rough for one that ran
-    into a bunker), so it's dropped and the reaction names no lie; the next setup and GSPro's log fill
-    in where it stopped. A ball already on the green stays there almost always, and the green read
+    """A follow's last read from before the ball was seen at rest (GSPro shows the ball at rest only a
+    second or so before moving the player box on, and a read can miss that). Taken mid-roll, its lie
+    named the wrong spot about half the time off the green (fairway for a ball that ran on into the
+    rough, rough for one that ran into a bunker), so it's dropped and the reaction names no lie; the
+    next setup and GSPro's log fill in where it stopped. A ball already on the green stays there almost always, and the green read
     drives the wrap's pre-build, so that one is kept."""
     lie = (hud.lie or "").lower()
     if not lie or lie == "green":
         return hud
     log.info("%s lie %s read before the ball was at rest; not naming it", tag, hud.lie)
     return replace(hud, lie=None)
+
+
+def _pixels_changed(a, b, level: int = 40, count: int = 12) -> bool:
+    """Two grabs of a HUD region differ: more than `count` pixels moved by `level` grey levels (a tenth
+    of a yard ticking over in Total Length changes a few hundred)."""
+    from PIL import ImageChops
+
+    if a.size != b.size:
+        return True
+    hist = ImageChops.difference(a.convert("L"), b.convert("L")).histogram()
+    return sum(hist[level:]) > count
 
 
 def _slot_state(tone) -> str:
@@ -4030,6 +4041,8 @@ class Engine:
                 deadline = max(max_seconds, touchdown + self.cfg.screen.follow_roll_seconds)
                 landing, steady = hud, 0  # landing read; kept only as a fallback if the HUD moves on
                 log.info("%s touchdown ~%.1fs into the follow; following to rest", tag, touchdown)
+                if callable(getattr(self.screen, "grab_regions", None)):
+                    return await self._follow_to_rest(hud, who, tag, started, deadline, poll)
             prev_game = game
             # Moved on to the next player: their address HUD shows carry (game) AND total length both
             # blank or the "--.--" placeholder (both parse to None) - the next shot hasn't been hit. The
@@ -4062,6 +4075,46 @@ class Engine:
         # the carry is still learnable (landed=True); only an unconfirmed touchdown skips learning.
         log.info("%s ball not seen to come to rest within %.0fs (touchdown=%s)", tag, deadline, touchdown is not None)
         return _unsettled(last or landing or Hud(), tag), touchdown is not None
+
+    async def _follow_to_rest(self, landing: Hud, who, tag: str, started: float, deadline: float,
+                              poll: float) -> tuple[Hud, bool]:
+        """From touchdown on, watch the HUD's pixels rather than OCR it: a read OCRs the lie and the
+        tiles one after the other (1.2-1.5 s), and GSPro shows the ball at rest only a second or so
+        before moving the player box on, so the read-until-steady follow rarely saw a drive stop and
+        named the lie from mid-roll. Grabs (a few ms, no OCR) every `poll`: Total Length's tile stops
+        changing when the ball stops, and that grab, taken at rest, is the one OCR'd."""
+        parts = ["lie", "player_name", "tiles"]
+        prev = None
+        while time.monotonic() - started < deadline:
+            try:
+                crops = await asyncio.to_thread(self.screen.grab_regions, parts)
+            except Exception:
+                log.warning("%s HUD grab failed while following to rest", tag, exc_info=True)
+                prev = None   # a failed grab can't count toward a steady pair
+                await asyncio.sleep(poll)
+                continue
+            sig = name_signature(crops["player_name"]) if "player_name" in crops else None
+            if who is not None and name_sig_changed(who, sig):
+                log.info("%s player box switched %.1fs into the follow, before the ball was seen at rest (lie %s)",
+                         tag, time.monotonic() - started, landing.lie)
+                return _unsettled(landing, tag), True
+            tiles = crops.get("tiles")
+            if tiles is not None and prev is not None and not _pixels_changed(prev, tiles):
+                hud = await asyncio.to_thread(self.screen.read_hud, parts, None, crops)
+                log.info("%s ball at rest: tiles still %.1fs into the follow, resting lie %s", tag,
+                         time.monotonic() - started, hud.lie)
+                if self.cfg.screen.save_review_images:
+                    await asyncio.to_thread(self._save_review_image, tag, "final")
+                # The next player's address shows both distance tiles blank ("--.--"): the box moved
+                # on unnoticed (no name signature), so this grab isn't this shot's.
+                if (_tile_yards(hud.tiles, "carry (game)", "yards") is not None
+                        or _tile_yards(hud.tiles, "total length", "yards") is not None):
+                    return hud, True
+                return _unsettled(landing, tag), True
+            prev = tiles
+            await asyncio.sleep(poll)
+        log.info("%s ball not seen to come to rest within %.0fs (touchdown=True)", tag, deadline)
+        return _unsettled(landing, tag), True
 
     def _save_review_image(self, tag: str, moment: str) -> None:
         folder = Path(self.cfg.log_dir) / "shots" / time.strftime("%Y-%m-%d")
