@@ -49,8 +49,8 @@ git pull
 ```
 
 **An update does nothing until the booth is restarted.** Python loads modules once at launch,
-so changed code has no effect on a running booth. Close the "Golf Booth" window and relaunch
-`start-booth.bat`. Don't update mid-round.
+so changed code has no effect on a running booth. Relaunch `start-booth.bat`: it closes the
+running booth (and its window) and starts a fresh one. Don't update mid-round.
 
 When `config.example.yaml` changes, diff it against your `config.yaml` for new settings.
 
@@ -60,7 +60,8 @@ Batch files in the repo root (`install.bat` and `update.bat` are under [Install]
 [Update](#update)):
 
 - **`start-booth.bat`** launches the booth minimized in a window titled "Golf Booth". Double-click
-  it for a league night; close that window to stop.
+  it for a league night; close that window to stop. Running it again restarts the booth: it closes
+  any booth already running, window and all, before starting the new one.
 - **`screen-check.bat`** counts down 8 s (bring GSPro to the front), then runs `screen-check` into
   `logs\screen-check.txt` and shows it. Use it to confirm the screen read still lines up after a
   GSPro update or a resolution change; `screen-check.bat --fix` writes moved boxes to `config.yaml`.
