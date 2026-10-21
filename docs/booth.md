@@ -126,8 +126,11 @@ just the `tts` block back on `openai`.
 
 **Google voices** (`tts.provider: google`, `GOOGLE_TTS_API_KEY`) are another cloud option: Chirp 3
 HD voices (`tts.google_voices`; British Iapetus and American Orus by default), streamed with about
-0.2 s to first audio. Google bills $30 per million characters after the first million each month,
-which covers about 57 two-player nine-hole rounds (~17,000 characters each, only what airs voiced).
+0.2 s to first audio. Google bills $30 per million characters after the first million each month.
+A two-player nine-hole round airs about 14,300 characters (a solo one about 8,300) with only what
+airs voiced, so the free million covers about 70 two-player rounds a month (about 120 solo), then
+about $0.43 a two-player round. `tts.prevoice: true` voices about 64,000 characters a round, so
+the free tier lasts about 15 rounds.
 There's no delivery direction, so `openai_instructions` don't apply. Create a Google Cloud project
 with billing on, enable the Cloud Text-to-Speech API, and make an API key restricted to it.
 
