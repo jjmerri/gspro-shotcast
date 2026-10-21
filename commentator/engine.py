@@ -502,6 +502,8 @@ class Engine:
         self._opener_prepared_format: str | None = None
         # The last roster (and slot order) read off a setup screen's PLAYERS tab, for a setup that never shows it.
         self._last_setup_roster: tuple[list[str], list[str]] | None = None
+        # (when, frame, tones) of the latest PLAYERS-tab frame the quick sampler caught (see _sample_players_tab).
+        self._players_snap: tuple | None = None
         self._scramble_pairs: set = set()   # the log's teammate pairs last applied to the round
         self._opener_gen = 0
         # Set when a round opens so the one redundant, late pre-shot on the opening tee shot is skipped.
@@ -4543,6 +4545,52 @@ class Engine:
                  r.start_hole, self.hole_number, r.seq, r.holes)
 
     async def _watch_setup(self) -> None:
+        probed = callable(getattr(self.screen, "setup_frame", None)) and callable(
+            getattr(self.screen, "region_tones", None)) and callable(getattr(self.screen, "region", None))
+        sampler = asyncio.create_task(self._sample_players_tab()) if probed else None
+        try:
+            await self._watch_setup_loop()
+        finally:
+            if sampler is not None:
+                sampler.cancel()
+
+    async def _sample_players_tab(self) -> None:
+        """Keep the latest frame showing the setup screen's PLAYERS tab with names on it, sampled every
+        quarter second. The watch's own polls are ~2 s apart once a region needs reading, so a player who
+        lands on PLAYERS (GSPro's default tab) and clicks on to MATCH SETTINGS within a second or two
+        would otherwise never have the names read. Only the small tab box is grabbed each time; the full
+        frame only when the tab is lit."""
+        slots = [f"setup_slot_{i}" for i in range(1, 9)]
+        region = self.screen.region("setup_players_tab")
+
+        def sample():
+            tab = self.screen.grab(region).convert("L")
+            hist = tab.histogram()
+            if sum(v * c for v, c in enumerate(hist)) / (sum(hist) or 1) < _PLAYERS_TAB_LIT:
+                return None
+            at = time.monotonic()
+            frame = self.screen.setup_frame()
+            tones = self.screen.region_tones(["setup_players_tab", *slots], frame)
+            states = [_slot_state(tones[n]) for n in slots if n in tones]
+            if tones["setup_players_tab"].mean < _PLAYERS_TAB_LIT or "list" in states or "filled" not in states:
+                return None
+            return at, frame, tones
+
+        while True:
+            await asyncio.sleep(0.25)
+            if self.round is not None and not self.round.ended:
+                self._players_snap = None
+                continue
+            # Kept up even with an opener out or held: backing out to set up again is caught the same way.
+            try:
+                got = await asyncio.to_thread(sample)
+            except Exception:
+                log.debug("PLAYERS-tab sample failed", exc_info=True)
+                continue
+            if got is not None:
+                self._players_snap = got
+
+    async def _watch_setup_loop(self) -> None:
         """Between rounds, read GSPro's setup screen for the course and roster, then fire the opener
         when the course's LOAD screen appears (Play was pressed and it's loading).
 
@@ -4571,6 +4619,7 @@ class Engine:
         gate_cache: dict = {}        # the same for the Play button and load-screen title
         mode_cache: dict = {}        # the same for the MATCH SETTINGS game mode
         last_diag = 0.0
+        players_read_at = -1e9   # when the latest PLAYERS frame this loop read itself was grabbed
         while True:
             await asyncio.sleep(max(c.preround_poll_seconds, 0.2))
             if self.round is not None and not self.round.ended:
@@ -4597,6 +4646,7 @@ class Engine:
             players_tab = False
             try:
                 if probed:
+                    grabbed_at = time.monotonic()
                     frame = await asyncio.to_thread(self.screen.setup_frame)
                     tones = self.screen.region_tones(
                         ["setup_players_tab", "setup_holes_tab", "setup_match_tab", "setup_front9_box",
@@ -4604,6 +4654,8 @@ class Engine:
                         frame)
                     tab = tones.get("setup_players_tab")
                     players_tab = tab is not None and tab.mean >= _PLAYERS_TAB_LIT
+                    if players_tab:
+                        players_read_at = grabbed_at
                     # On the PLAYERS tab only the Play button matters; elsewhere also the load title.
                     gate_names = ["setup_course"] if players_tab else ["setup_course", "load_course"]
                     gate_lines, gate_cache = await asyncio.to_thread(
@@ -4624,6 +4676,24 @@ class Engine:
                 self._pending_opening, self._opener_prepared_for = None, frozenset()
             if play_course:
                 to_read = slots
+                slot_frame = frame
+                if probed and not players_tab and (snap := self._players_snap) is not None \
+                        and snap[0] > players_read_at and time.monotonic() - snap[0] <= 3.0:
+                    # This frame is on another tab, but the sampler caught PLAYERS moments ago: read
+                    # the names off that frame (the settings/holes reads below still use this one), once
+                    # its own Play button shows it's this setup and not the course before.
+                    self._players_snap = None
+                    try:
+                        snap_gate, _ = await asyncio.to_thread(
+                            self.screen.read_region_lines_cached, ["setup_course"], snap[1], {})
+                    except Exception:
+                        log.exception("Setup read of the sampled PLAYERS tab failed")
+                        snap_gate = {}
+                    if _play_button_course(" ".join(snap_gate.get("setup_course", []))) == play_course:
+                        slot_frame, players_tab = snap[1], True
+                        tones = {**tones, **snap[2]}
+                        log.info("Setup: reading the players off the PLAYERS tab seen %.1fs ago",
+                                 time.monotonic() - snap[0])
                 if probed:
                     fresh = not seen_setup or play_course != course
                     self._read_setup_holes(tones, fresh=fresh)
@@ -4651,7 +4721,7 @@ class Engine:
                     # pixel-stable, so an unchanged name is reused and a single swap reads on its own -
                     # catching a quick roster change in ~one slot's time, not all eight.
                     slot_lines, slot_cache = await asyncio.to_thread(
-                        self.screen.read_region_lines_cached, to_read, frame, slot_cache)
+                        self.screen.read_region_lines_cached, to_read, slot_frame, slot_cache)
                 except Exception:
                     log.exception("Setup slot read failed")
                     continue
@@ -4675,7 +4745,7 @@ class Engine:
                     slot_order = positional
                     self._last_setup_roster = (list(names), list(positional))
                     if probed and players_tab:
-                        self._keep_fixture_frame("setup_players", frame)
+                        self._keep_fixture_frame("setup_players", slot_frame)
                 # Log on first detection and on every accepted roster change, so a live setup read can
                 # be watched tracking the picker rather than looking stuck on the first team seen.
                 if (not seen_setup) or (accept and names != logged_roster):

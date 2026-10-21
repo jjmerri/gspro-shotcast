@@ -38,8 +38,11 @@ file by hand.
 - **Opener.** When everyone is on shot 1 at even par, still the full hole away, and nothing has
   been recorded on the course today, the booth opens the broadcast. With the early opener on
   (`commentary.preround`), it reads the course and roster (league players and guests alike) off
-  GSPro's setup screen, from the PLAYERS tab with no player dropdown open, during the
+  GSPro's setup screen, from the PLAYERS tab with no player dropdown open (checked four times a
+  second, so a quick click on to another tab still catches the names), during the
   course load and airs the opener the instant the tee HUD confirms the same course and team.
+  If the names were never on screen, the opener is made for the last roster read and airs at
+  the tee only if the tee shows exactly those players.
 - **Holes in the round** come from the setup screen too: the HOLES tab's FRONT 9 and BACK 9
   boxes (both is 18 from hole 1, one is that nine). A setup that never opens the HOLES tab is
   GSPro's default, 18. Without a setup read (the booth started later), the league schedule or

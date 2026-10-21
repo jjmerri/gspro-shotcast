@@ -1253,6 +1253,74 @@ async def test_setup_watcher_ignores_frames_with_a_player_dropdown_open(tmp_path
     assert p.roster_key == frozenset({"Mike", "Guesty"})
 
 
+async def test_a_players_tab_shown_briefly_between_slow_polls_is_still_read(tmp_path):
+    import time
+
+    from PIL import Image
+
+    # As seen live: the setup screen's first frame is mid fade-in (PLAYERS not lit yet), reading it
+    # takes ~a second, and by the next poll the player has clicked on to MATCH SETTINGS. Only the quick
+    # PLAYERS-tab sampler saw the names; the opener over the load must still be for them.
+    fading = {"setup_course": "Play Pebble Beach", "tones": {"setup_players_tab": Tone(120, 120, 0.0)}}
+    players = _players_tab("Pebble Beach", {1: "MikeD", 2: "Sarah"})
+    match = _players_tab("Pebble Beach", {}, tab=_TAB_OFF, setup_match_tab=_TAB_ON)
+    loading = {"load_course": "Pebble Beach"}
+
+    class Timed(_PixelSetupScreen):
+        def __init__(self):
+            super().__init__([])
+            self.t0, self.slow = time.monotonic(), True
+
+        def setup_frame(self):
+            t = time.monotonic() - self.t0
+            return fading if t < 0.35 else players if t < 0.9 else match if t < 2.0 else loading
+
+        def region(self, name):
+            return name
+
+        def grab(self, region):
+            return Image.new("L", (4, 4), int(self.region_tones([region], self.setup_frame())[region].mean))
+
+        def read_region_lines_cached(self, names, image, cache):
+            if self.slow and image is fading:
+                self.slow = False
+                time.sleep(0.9)
+            return super().read_region_lines_cached(names, image, cache)
+
+    e = _engine(tmp_path)
+    p = await _run_setup_watch(e, None, until=lambda p: p is not None and p.aired, polls=400, screen=Timed())
+    assert p is not None and p.aired and p.roster_key == frozenset({"Mike", "Sarah"})
+
+
+async def test_an_older_players_tab_sample_does_not_undo_a_newer_read(tmp_path):
+    import time
+
+    # The sampler caught MikeD + Sarah; the watch then read the PLAYERS tab itself with Guesty swapped
+    # in, and the player clicked on to another tab. The older sample mustn't put Sarah back.
+    old = _players_tab("Pebble Beach", {1: "MikeD", 2: "Sarah"})
+    new = _players_tab("Pebble Beach", {1: "MikeD", 2: "Guesty"})
+    other = _players_tab("Pebble Beach", {}, tab=_TAB_OFF)
+    e = _engine(tmp_path)
+    e._players_snap = (time.monotonic(), old, old["tones"])
+    p = await _run_setup_watch(e, [new, new, other, other, {"load_course": "Pebble Beach"}],
+                               until=lambda p: p is not None and p.aired)
+    assert p is not None and p.aired and p.roster_key == frozenset({"Mike", "Guesty"})
+
+
+async def test_a_players_tab_sample_from_another_course_is_not_used(tmp_path):
+    import time
+
+    # A sample from the Augusta setup, then a quick switch to Pebble Beach whose PLAYERS tab is never
+    # seen: Augusta's players aren't taken as Pebble's.
+    augusta = _players_tab("Augusta National", {1: "MikeD", 2: "Sarah"})
+    other = _players_tab("Pebble Beach", {}, tab=_TAB_OFF)
+    e = _engine(tmp_path)
+    e._players_snap = (time.monotonic(), augusta, augusta["tones"])
+    p = await _run_setup_watch(e, [other, other, {"load_course": "Pebble Beach"}],
+                               until=lambda p: p is not None and p.aired, polls=150)
+    assert p is None or not p.aired
+
+
 def test_setup_slot_name_rejects_the_empty_slot_entry():
     from commentator.engine import _setup_slot_name, _slot_state
 
