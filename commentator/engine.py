@@ -1448,7 +1448,9 @@ class Engine:
         # Not on the league roster (no league file, or a guest): the round's own GSPro names.
         r = self.round
         if r and not r.ended and texts and texts[0]:
-            raw = re.split(r"\s+(?:E|[+-]\d+|Shot)\b", texts[0].strip(), maxsplit=1)[0].strip().casefold()
+            # Cut at the score or shot marker: "David E Shot 1" on the tee, "David 2nd (E) Shot 2" after.
+            raw = re.split(r"\s+(?:(?:E|[+-]\d+|Shot|\d+(?:st|nd|rd|th))\b|\()", texts[0].strip(),
+                           maxsplit=1)[0].strip().casefold()
             if name := next((n for n in r.roster if n and n.casefold() == raw), None):
                 return name
         return next((t for t in texts[1:] if t), None)
@@ -1489,7 +1491,7 @@ class Engine:
         described hitting (a solo practice round had "a handy look for <absent partner> now"). And any player
         note already used enough this round, so the model doesn't keep reaching for it."""
         r = self.round
-        facts: list[str] = []
+        facts: list[str] = self._outsider_facts(r) if r and not r.ended else []
         if r and r.format not in TEAM_BALL:
             playing = {p for p in r.roster.values() if p}
             teams = {self.league.player_team.get(p) for p in playing} - {None}
@@ -3508,6 +3510,14 @@ class Engine:
                       "so the hole is over. No more putting is needed."]
             if (miss := _short_miss_fact(before, shot_par)):
                 result.append(miss)
+        elif shot.is_putt and outcome == "holed":
+            result = ["The putt went in the hole: holed."]
+        elif shot.is_putt and outcome == "missed":
+            result = ["The putt missed: it did not go in."]
+        elif shot.is_putt:
+            # No log result ("it drops for par" was guessed for a miss): say nothing either way.
+            result = ["Whether the putt went in is not known: don't say it dropped, went in or missed. "
+                      "Talk about the stroke, its pace or its line."]
         if full_result == "holed":
             result = ["The ball went in the hole: holed out without a putt."]
         elif full_result == "conceded":
@@ -4596,6 +4606,8 @@ class Engine:
             hole = None if preround else self.state.current_hole
         facts = (r.opening_facts(season, first_up=self._display(first), hole=hole)
                  + self._league_facts(r) + self._weather_facts())
+        if self._no_members(r):   # the practice-round framing assumes league players
+            facts = [f for f in facts if not f.startswith("This is a practice round, not a league match")]
         return opener_prompt(facts=facts, recent_lines=self.state.recent_lines)
 
     def _same_course(self, x: str | None, y: str | None) -> bool:
@@ -5219,10 +5231,22 @@ class Engine:
             log.info("Early opener prepared (%s, last roster) for %s %s, held for the tee: %d line(s)",
                      "league" if is_league else "practice", r.course, sorted(players), len(lines))
 
+    def _no_members(self, r: Round | None) -> bool:
+        """A practice round with nobody from this season's league roster (a guest playing alone)."""
+        return bool(r and not r.is_league and r.sides and not any(
+            self.league.player_team.get(p) for s in r.sides for p in s.players))
+
+    def _outsider_facts(self, r: Round | None) -> list[str]:
+        if not self._no_members(r):
+            return []
+        return [f"Nobody in this round plays in {self.league.name} this season. Don't welcome anyone to the "
+                "league, and don't mention the league, points, standings or league play: no \"practice "
+                "round\" talk either. It's just a round of golf; call it."]
+
     def _league_facts(self, r: Round, closing: bool = False) -> list[str]:
         """Each team's league history and standings: Squabbit's when it was read at the round start,
         else the imported spreadsheets'. Plus the week so far and the week's closest to the pin."""
-        facts = []
+        facts = self._outsider_facts(r)
         standings = self._board_standings(r) if r.is_league else None
         for team in r.teams:
             players = self.league.team_players.get(team)

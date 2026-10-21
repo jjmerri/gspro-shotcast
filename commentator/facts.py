@@ -175,7 +175,8 @@ PUTT_FOR_FACT = re.compile(r"This putt is for ([a-z ]+)\. If it misses, the next
 _PUTT_FOR_SAID = re.compile(r"\bfor (?:an? )?(albatross|eagle|birdie|par|(?:double |triple )?bogey)\b", re.I)
 
 
-_NEXT_PUTT = re.compile(r"comeback|come-back|\bnext\b|another|second|return|tap-in|left with|leaves|\bleft\b(?= \w+ putt)", re.I)
+_NEXT_PUTT = re.compile(r"comeback|come-back|\bnext\b|another|return|tap-in|left with|"
+                        r"\bleaves (?:himself|herself|themselves|him|her|them|a|an)\b|\bleft\b(?= \w+ putt)", re.I)
 _CLAUSE = re.compile(r"[;.!?\u2014\u2013]|,\s|\bbut\b|\band\b")
 
 
@@ -333,14 +334,20 @@ def preshot_facts(hud, hole_par: int | None, handed: str | None = None) -> list[
         facts.append(f"Player's round score through the holes already completed: {score}. This hole is "
                      "still in progress, so its strokes are not in that number yet.")
     facts += elevation_facts(hud) + slope_facts(hud, handed)
-    # On a short shot or putt, state what holing it scores on the hole and where that leaves the round,
-    # so the booth never calls a score "intact" when the hole in play is about to change it.
+    # On a putt, state what holing it scores on the hole and where that leaves the round, so the booth
+    # never calls a score "intact" when the hole in play is about to change it. Off the green, holing out
+    # is a long shot ("a birdie still available" before a 23-yard chip on a par 4), so the facts give
+    # what getting up and down scores instead.
     diff = (hud.shot_number - hole_par) if (hud.shot_number and hole_par) else None
-    if (pin := to_yards(hud.to_pin)) is not None and pin < 60 and diff is not None and (name := SCORE_NAMES.get(diff)):
-        line = f"If this shot is holed it's {name} on the hole"
+    if putting and diff is not None and (name := SCORE_NAMES.get(diff)):
+        line = f"If this putt is holed it's {name} on the hole"
         if round_par is not None:
             line += f", which takes the round to {_fmt_to_par(round_par + diff)}"
         facts.append(line + ".")
+    elif (pin := to_yards(hud.to_pin)) is not None and pin < 60 and diff is not None \
+            and (name := SCORE_NAMES.get(diff + 1)):
+        facts.append(f"Getting up and down from here (this shot close, then one putt) makes {name} on the "
+                     "hole. Holing this shot is a long shot: don't talk as if it's likely or expected.")
     # A missed putt's comeback is for the next score, not this one: a pre-written "past" reaction
     # carried "for par" over to a comeback that was for bogey.
     if putting and diff is not None and (this := PUTT_FOR.get(diff)) and (nxt := PUTT_FOR.get(diff + 1)):

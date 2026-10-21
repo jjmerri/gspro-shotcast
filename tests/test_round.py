@@ -2123,6 +2123,17 @@ def test_a_practice_round_with_half_a_team_says_who_isnt_here(tmp_path):
     assert not any(f.startswith("Only ") for f in both)
 
 
+def test_a_round_with_no_league_players_drops_the_league_framing(tmp_path):
+    e = _engine(tmp_path)
+    guest = e._build_round(["David"], "Somewhere", {}, is_league=False)
+    e._start_round(guest)
+    _, opener = e._opener_io(guest)
+    assert "plays in" in opener and "This is a practice round, not a league match" not in opener
+    assert any("plays in" in f for f in e._roster_facts())
+    member = e._build_round(["MikeD"], "Somewhere", {}, is_league=False)
+    assert not e._no_members(member) and "This is a practice round" in e._opener_io(member)[1]
+
+
 def test_a_round_takes_the_setup_holes_and_the_next_one_reads_its_own(tmp_path):
     e = _engine(tmp_path)
     e._setup_holes = (10, 9)
@@ -2478,6 +2489,9 @@ def test_without_a_league_the_shot_goes_to_the_rounds_gspro_name(tmp_path):
     e._start_round(e._build_round(["Alex", "Sam"], "Somewhere", {"hole_count": 9}, is_league=False))
     assert e._player("Alex E Shot 1 350 yds", None) == "Alex"
     assert e._player("SAM +1 Shot 2 120 yds", None) == "Sam"
+    # After the tee GSPro adds the stroke ordinal and a bracketed score: "David 2nd (E) Shot 2".
+    assert e._player("Alex 2nd (E) Shot 2 158.3 YDS", None) == "Alex"
+    assert e._player("Sam 3rd (+5) Shot 3 4 FT 7", None) == "Sam"
 
 
 async def test_a_round_ends_after_its_last_shot_is_recorded(tmp_path):

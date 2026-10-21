@@ -636,7 +636,7 @@ def parse_lines(text: str, speakers: list[str], max_words: int, names: list[str]
         body = " ".join(str(item.get("text", "")).split())
         while prefix and (m := prefix.match(body)):
             body = body[m.end():]
-        if not body:
+        if not body or body.strip(" .,:;!?-\"'").lower() in labels:   # just a speaker label ("pbp")
             continue
         words = body.split()
         if len(words) > max_words:

@@ -251,6 +251,9 @@ def test_parse_lines_strips_a_leaked_speaker_label():
     assert lines[1].text == "and he commits to it."
     assert lines[2].text == "double-prefixed somehow."
     assert lines[3].text == "The pbp: label mid-line stays untouched."  # only a leading label is stripped
+    # A "line" that is only the label (a flight line came back as just "pbp") isn't spoken.
+    only = json.dumps({"lines": [{"speaker": "pbp", "text": "pbp"}, {"speaker": "pbp", "text": "Nigel."}]})
+    assert parse_lines(only, ["pbp", "color"], max_words=20, names=["Nigel", "Duke"]) == []
 
 
 class FakeLLM(LLMClient):
@@ -1044,6 +1047,12 @@ def test_facts_describe_flight_and_count_streaks():
 
 def test_grounding_rejects_invented_numbers_counts_and_outcomes():
     from commentator.grounding import check_line
+    # A live putt reaction with no result from the log can't say it dropped.
+    unknown = "Whether the putt went in is not known: don't say it dropped, went in or missed."
+    assert not check_line("A gentle touch, and it drops for par.", unknown, "").ok
+    assert check_line("A gentle touch, and it drops for par.", "The putt went in the hole: holed.", "").ok
+    assert check_line("It drops onto the green.", "The ball is now on the green.", "").ok
+    assert check_line("It rolls in the rough.", "The ball is now in the rough.", "").ok
 
     facts = "Player: Tony\nClub: 7-iron. Carry: 96 yards.\nWhere the ball finished: not known.\nThis is Tony's 2nd shot today."
     league = "points: 31\nhandicap: 12.0"
@@ -1631,6 +1640,9 @@ def test_prewritten_putt_reactions_name_the_comeback_for_the_next_score(tmp_path
     assert wrong_putt_score("The putt for par slides left.", "par", "bogey", holed=False) is None
     assert wrong_putt_score("Misses for par; a tap-in for bogey remains.", "par", "bogey", holed=False) is None
     assert wrong_putt_score("Left with a tester for par.", "par", "bogey", holed=False) == "par"
+    assert wrong_putt_score("Leaves the putt for par short.", "par", "bogey", holed=False) is None
+    assert wrong_putt_score("His second putt for par slides past.", "par", "bogey", holed=False) is None
+    assert wrong_putt_score("Leaves himself a putt for par.", "par", "bogey", holed=False) == "par"
 
 
 async def test_follow_shot_moves_on_at_the_next_player_placeholder(tmp_path):
@@ -2154,6 +2166,16 @@ def test_putt_distance_is_always_stated_in_feet():
     # A full shot keeps the yardage phrasing.
     facts = preshot_facts(Hud(lie="fairway", to_pin="150 yards", shot_number=2), hole_par=4)
     assert any("150 yards" in f for f in facts)
+
+
+def test_a_chip_is_framed_as_up_and_down_not_a_holed_birdie():
+    from commentator.facts import preshot_facts
+
+    # A 23-yard third on a par 4 got "a birdie still available": only a putt gets the holed score.
+    chip = " ".join(preshot_facts(Hud(lie="fairway", to_pin="23.4 yards", shot_number=3, score_to_par="+3"), 4))
+    assert "birdie" not in chip and "up and down" in chip and "makes a par" in chip
+    putt = " ".join(preshot_facts(Hud(lie="green", to_pin="9 feet", shot_number=3, score_to_par="+3"), 4))
+    assert "If this putt is holed it's a birdie on the hole, which takes the round to +2" in putt
 
 
 def test_gimme_circle_fact_flags_a_short_putt_just_outside(tmp_path):
