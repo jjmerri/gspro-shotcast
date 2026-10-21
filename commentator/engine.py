@@ -873,7 +873,7 @@ class Engine:
             log.info("Round-start look-alike while round %s in progress (holes_played=%s, gap=%.0fs): %s",
                      self.round.id, self._holes_played, gap, "new round" if decision else "same round")
             return decision
-        course = self.current_course or hud.course
+        course = self._tee_course(hud)
         if self.round is not None and self.round.ended and self.round.course == course:
             return True  # a finished round here: the next opening tee is a new round
         # No round tracked. A fresh opening tee is a new round unless a just-read scorecard shows
@@ -4309,6 +4309,37 @@ class Engine:
         sched = self.league.schedule_entry(time.strftime("%Y-%m-%d"), course) if course else None
         return (sched.get("gspro_course") if sched and self._course_matches(sched, course) else None) or course
 
+    def _course_test(self, r: Round):
+        """Whether a course name (a past league week's) is this round's course, or None to compare
+        names. With the round's GSPro course known, the name must be that installed course's own
+        (or its schedule alias): "Alpine Valley" is in "Swiss Alpine Valley" by name, but the
+        two are different courses, and a course that isn't installed isn't its nearest namesake."""
+        mine = r.course_card.folder if r.course_card else None
+        if not mine:
+            return None
+        from . import course_card
+
+        dirs = self.cfg.source.gspro_courses_dirs
+        plain = course_card.plain_name
+        # The schedule's own name for a GSPro course (Wentworth by the Sea is Balsams Panorama), but only
+        # by exact name: a near one would turn "Swiss Alpine Valley" into "Alpine Valley".
+        alias = {plain(e["course"]): e["gspro_course"] for e in self.league.data.get("schedule") or []
+                 if e.get("course") and e.get("gspro_course")}
+        return lambda name: (course_card.identify(dirs, alias.get(plain(name), name)) or "").lower() == mine.lower()
+
+    def _tee_course(self, hud: Hud) -> str | None:
+        """The course a round starting at this tee is on. The HUD's read is the short name players
+        know, but it's OCR of whatever is on screen (an open settings menu reads "GAME MENU"); GSPro's
+        log names the course it loaded, so a HUD read that isn't that course gives way to it."""
+        read = self.current_course or hud.course
+        g = self.gspro
+        logged = g.course_display if self._log_truth and g.mode == "course" else None
+        if not logged or (read and self._same_course(read, logged)):
+            return read
+        if read:
+            log.info("Tee course: HUD read %r, but GSPro loaded %r; using GSPro's", read, logged)
+        return logged
+
     def _refresh_course_card(self, r: Round, course: str | None) -> None:
         """Re-find a pre-built round's card now that GSPro's log has surely named the selected folder:
         the setup screen can be read before it does, and a name two courses share took the wrong one."""
@@ -4478,7 +4509,7 @@ class Engine:
         raw = re.split(r"\s+(?:E|[+-]\d+|Shot)\b", (hud.player_text or "").strip(), maxsplit=1)[0].strip()
         first = self.league.match_player(hud.player_text) or raw or None
         names = [n for n in [raw or first] + [o.name for o in hud.others] if n]
-        course = self.current_course or hud.course
+        course = self._tee_course(hud)
         entry, practice = self._classify_round(names, course)
         is_league = practice is None
         # Peek at an opener that already played over the load, before the match below consumes it. Only
@@ -4543,7 +4574,7 @@ class Engine:
         but the start hole and current hole come from GSPro's log, and there's no opener."""
         raw = re.split(r"\s+(?:E|[+-]\d+|Shot)\b", (hud.player_text or "").strip(), maxsplit=1)[0].strip()
         names = [n for n in [raw or self.league.match_player(hud.player_text)] + [o.name for o in hud.others] if n]
-        course = self.current_course or hud.course
+        course = self._tee_course(hud)
         entry, practice = self._classify_round(names, course)
         is_league = practice is None
         if is_league:
@@ -5003,7 +5034,8 @@ class Engine:
                 continue
             label = self.league.team_name(team)
             if not closing:
-                facts += self.history.team_facts(label, players, r.format, r.course)
+                facts += self.history.team_facts(label, players, r.format, r.course,
+                                                 same_course=self._course_test(r))
                 # One season stat per side for opener colour, picked at random among the ones with a
                 # sample so it isn't always the same stat and the opener doesn't read like a stat sheet.
                 side = next((s for s in r.sides if s.team == team), None)

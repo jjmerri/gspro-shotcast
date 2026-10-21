@@ -53,8 +53,11 @@ class History:
     def _entry(season: dict, players: set[str]) -> dict | None:
         return next((t for t in season.get("teams", []) if set(t.get("players", [])) == players), None)
 
-    def team_facts(self, label: str, players: list[str], fmt: str | None = None, course: str | None = None) -> list[str]:
+    def team_facts(self, label: str, players: list[str], fmt: str | None = None, course: str | None = None,
+                   same_course=None) -> list[str]:
+        """`same_course(name)` says whether a past week's course is this round's; without it, by name."""
         pair = set(players)
+        same_course = same_course or (lambda name: _same_course(name, course))
         facts = []
         titles = [s["year"] for s in self.past() if s.get("complete") and (t := self._entry(s, pair)) and t.get("rank") == 1]
         if titles:
@@ -94,7 +97,7 @@ class History:
                 for t in s.get("teams", []):
                     if pair & set(t.get("players", [])):
                         for w in t["weeks"]:
-                            if w.get("course") and _same_course(w["course"], course) and w["place"]:
+                            if w.get("course") and same_course(w["course"]) and w["place"]:
                                 facts.append(f"{t['label'].replace('/', ' and ')} played {w['course']} in {s['year']} (week {w['week']}, "
                                              f"{FORMAT_NAMES.get(w['format'], w['format'])}) and placed "
                                              f"{_place(w['place'], w['tied'])}.")

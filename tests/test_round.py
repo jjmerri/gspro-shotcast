@@ -546,6 +546,64 @@ def test_a_prebuilt_rounds_card_is_refound_once_gspro_logs_the_course(tmp_path):
     assert r.course_card.name == "Alpine Valley - Meadows & Sugar Creek"
 
 
+def test_league_history_at_a_course_needs_the_same_gspro_course_not_a_shared_name(tmp_path, monkeypatch):
+    from commentator.history import History
+
+    for folder, name in (("Alpine Valley_GSP", "Swiss Alpine Valley"),
+                         ("AlpineValley_Lidar_Scene", "Alpine Valley - Meadows & Sugar Creek")):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "coursedetails.txt").write_text(DETAILS.replace("Test Links", name), encoding="utf-8")
+    e = _engine(tmp_path)
+    e.cfg.source.gspro_courses_dirs = [str(tmp_path)]
+    h = History({"current_year": 2026, "seasons": [{"year": 2025, "complete": True, "teams": [
+        {"label": "Alex/Jamie", "players": ["Alex Rivera", "Jamie Avery"], "rank": 3,
+         "weeks": [{"week": 6, "course": "Swiss Alpine Valley", "format": "scramble", "place": 4, "tied": False}]}]}]})
+
+    def facts(course):
+        r = Round(league=LEAGUE, gspro_players=["MikeD"], course=course, scheduled_format=None)
+        r.apply_course_card(e._load_course_card(course))
+        return " ".join(h.team_facts("Alex and Jamie", ["Alex Rivera", "Jamie Avery"], None, r.course,
+                                     same_course=e._course_test(r)))
+
+    assert "Swiss Alpine Valley" not in facts("Alpine Valley - Meadows & Sugar Creek")
+    assert "played Swiss Alpine Valley in 2025" in facts("Swiss Alpine Valley")
+    # Swiss not installed: its week isn't put on the nearest installed namesake, nor through a
+    # schedule alias for a near name.
+    import shutil
+    shutil.rmtree(tmp_path / "Alpine Valley_GSP")
+    monkeypatch.setitem(e.league.data, "schedule", [{"week": 1, "course": "Alpine Valley",
+                                  "gspro_course": "Alpine Valley - Meadows & Sugar Creek"}])
+    assert "Swiss Alpine Valley" not in facts("Alpine Valley - Meadows & Sugar Creek")
+    # A week played under the schedule's name for the course still counts.
+    h.seasons[0]["teams"][0]["weeks"][0]["course"] = "Alpine Valley"
+    assert "played Alpine Valley in 2025" in facts("Alpine Valley - Meadows & Sugar Creek")
+    # No card for the round: by name, as before.
+    assert "played Alpine Valley" in " ".join(
+        h.team_facts("Alex and Jamie", ["Alex Rivera", "Jamie Avery"], None, "Alpine Valley"))
+
+
+def test_a_settings_menu_over_the_tee_doesnt_rename_the_course(tmp_path):
+    e = _log_engine(tmp_path)
+    hud = Hud(player_text="MikeD E Shot 1 400 YDS", shot_number=1, score_to_par="E", course="GAME MENU")
+    e.gspro.mode, e.gspro.course_display = "course", "Alpine Valley - Meadows & Sugar Creek"
+    assert e._tee_course(hud) == "Alpine Valley - Meadows & Sugar Creek"
+    hud.course = "ALPINE VALLEY"   # the HUD's own short name for the loaded course is kept
+    assert e._tee_course(hud) == "ALPINE VALLEY"
+    e.gspro.mode = "menu"          # no course loaded: the HUD read stands
+    hud.course = "GAME MENU"
+    assert e._tee_course(hud) == "GAME MENU"
+
+
+def test_a_new_course_selection_forgets_the_last_courses_loaded_name():
+    from commentator.sources.gspro_log import GsproState, LogEvent
+
+    g = GsproState()
+    g.apply(LogEvent("course", course="pinevalley_v1_gsp"))
+    g.apply(LogEvent("course_display", display="Pine Valley"))
+    g.apply(LogEvent("course", course="alpinevalley_lidar_scene"))
+    assert g.course_display is None
+
+
 def test_round_seeds_par_and_index_from_the_course_card():
     from commentator.course_card import CourseCard
 

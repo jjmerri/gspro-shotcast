@@ -9,6 +9,7 @@ Course folder names are munged ("sandbox_gsp" is "The Sandbox", "giantoaks_gsp" 
 Golf club"), so a course is found by the real name inside these files, not the folder name.
 """
 
+import difflib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -30,30 +31,59 @@ class CourseCard:
     location: str | None = None
     altitude_ft: float | None = None
     yards: dict[str, dict[int, int]] = field(default_factory=dict)  # tee name -> hole -> yards
+    folder: str | None = None   # the GSPro course folder it was read from
 
 
 def load(courses_dirs: str | Path | list, course_name: str | None, folder: str | None = None) -> CourseCard | None:
     """The card for the GSPro course whose name best matches `course_name`, across one or more
-    course libraries, or None. `folder` is the course folder GSPro's log says was selected: two
-    courses can match a name equally ("Alpine Valley" is in "Swiss Alpine Valley" and in "Alpine
-    Valley - Meadows & Sugar Creek"), and that folder breaks the tie. It never beats a better match:
-    it may still be the last course's, logged before this one was picked."""
+    course libraries, or None. See find() for `folder`."""
+    path = find(courses_dirs, course_name, folder)
+    card = _load_folder(path) if path else None
+    if card:
+        card.folder = path.name
+    return card
+
+
+def find(courses_dirs: str | Path | list, course_name: str | None, folder: str | None = None) -> Path | None:
+    """The folder of the GSPro course whose name best matches `course_name`, or None. Names can
+    match equally ("Alpine Valley" is in "Swiss Alpine Valley" and in "Alpine Valley - Meadows &
+    Sugar Creek"): `folder`, the course folder GSPro's log says was selected, breaks that tie, then
+    the closer spelling. It never beats a better match: it may still be the last course's, logged
+    before this one was picked."""
     if not course_name:
         return None
     dirs = [courses_dirs] if isinstance(courses_dirs, (str, Path)) else courses_dirs
-    best, score = None, 0.0
+    best, key = None, (0.0, False, 0.0)
     for d in dirs:
         base = Path(d)
         if not base.is_dir():
             continue
         for name, path in _index(base).items():
-            s = course_match_score(name, course_name)
-            if s > score or (s == score and folder and path.name.lower() == folder.lower()):
-                best, score = path, s
-    if best is None or score < 0.6:
-        log.info("No GSPro course matched %r (best score %.2f)", course_name, score)
+            k = (course_match_score(name, course_name), bool(folder) and path.name.lower() == folder.lower(),
+                 difflib.SequenceMatcher(None, name.lower(), course_name.lower()).ratio())
+            if k > key:
+                best, key = path, k
+    if best is None or key[0] < 0.6:
+        log.info("No GSPro course matched %r (best score %.2f)", course_name, key[0])
         return None
-    return _load_folder(best)
+    return best
+
+
+def identify(courses_dirs: str | Path | list, course_name: str | None) -> str | None:
+    """The folder of the installed GSPro course that is `course_name` itself, give or take case and
+    punctuation, or None. Unlike find(), never a near miss: "Swiss Alpine Valley", when it isn't
+    installed, isn't "Alpine Valley - Meadows & Sugar Creek"."""
+    path = find(courses_dirs, course_name)
+    if path is None:
+        return None
+    name = next((n for d in ([courses_dirs] if isinstance(courses_dirs, (str, Path)) else courses_dirs)
+                 if Path(d).is_dir() for n, p in _index(Path(d)).items() if p == path), "")
+    same = difflib.SequenceMatcher(None, plain_name(name), plain_name(course_name)).ratio() >= 0.9
+    return path.name if same else None
+
+
+def plain_name(name: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", name.lower()))
 
 
 def _index(base: Path) -> dict[str, Path]:

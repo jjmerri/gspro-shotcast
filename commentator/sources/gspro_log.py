@@ -291,6 +291,7 @@ class GsproState:
             if ev.course != self.course:
                 self._reset_round()         # a real course change is a new round; forget the old one
             self.course = ev.course
+            self.course_display = None      # until this course's load names it
             self.mode, self.active_holes = "course", None
             self.shots_since_course, self.first_hole, self.starts_late = 0, None, False
         elif ev.kind == "course_display":
