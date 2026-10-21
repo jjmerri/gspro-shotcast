@@ -327,3 +327,15 @@ def test_game_clock_is_labelled_as_time_left():
     assert _game_time("Halftime") == "Halftime"
     assert _game_time("Top 5th") == "Top 5th"
     assert _game_time("End of 2nd Period") == "End of 2nd Period"
+
+
+def test_news_dates_accept_a_naive_local_now():
+    from commentator.news import GolfNews
+
+    news = GolfNews(["x"])
+    news.headlines = news._parse("""<rss><channel><item><title>T</title>
+      <description>Scottie Scheffler won by five shots on Sunday in Texas this week.</description>
+      <pubDate>Sun, 18 Oct 2026 18:54:19 EST</pubDate></item></channel></rss>""", "espn.com")
+    naive = datetime(2026, 10, 20, 21, 0)
+    assert [h.title for h in news.pick_many(random.Random(0), 5, now=naive)] == ["T"]
+    assert "published on Sunday, 2 days ago" in news.headlines[0].as_fact(naive)

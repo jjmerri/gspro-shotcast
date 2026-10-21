@@ -52,8 +52,14 @@ def _published(text: str | None) -> datetime | None:
     return when if when.tzinfo else when.astimezone()
 
 
-def age_text(published: datetime, now: datetime) -> str:
+def _aware(now: datetime | None) -> datetime:
+    """The given time (local if naive), or now; feed dates are tz-aware and can't be compared with naive ones."""
+    return (now or datetime.now()).astimezone() if not (now and now.tzinfo) else now
+
+
+def age_text(published: datetime, now: datetime | None = None) -> str:
     """When a story came out, the way people say it: "today", "yesterday", "on Sunday, 2 days ago"."""
+    now = _aware(now)
     days = (now.date() - published.astimezone(now.tzinfo).date()).days
     if days <= 0:
         return "today"
@@ -77,11 +83,11 @@ class Headline:
         return len(text.split()) >= 8 and not _LISTICLE.match(text) and not text.rstrip(" \"'”").endswith("?")
 
     def as_fact(self, now: datetime | None = None) -> str:
-        when = f", published {age_text(self.published, now or datetime.now().astimezone())}" if self.published else ""
+        when = f", published {age_text(self.published, now)}" if self.published else ""
         return f'"{self.title}"' + (f" — {self.summary}" if self.summary else "") + f" (via {self.source}{when})"
 
-    def age_days(self, now: datetime) -> float | None:
-        return (now - self.published).total_seconds() / 86400 if self.published else None
+    def age_days(self, now: datetime | None = None) -> float | None:
+        return (_aware(now) - self.published).total_seconds() / 86400 if self.published else None
 
 
 class GolfNews:
@@ -147,7 +153,7 @@ class GolfNews:
     def pick_many(self, rng, n: int, avoid: set[str] = frozenset(), now: datetime | None = None) -> list[Headline]:
         """Up to n different stories worth a real exchange, none of them in `avoid` and none older than
         max_age_days (a story with no date is taken as current)."""
-        now = now or datetime.now().astimezone()
+        now = _aware(now)
         pool = [h for h in self.headlines if h.substantive() and h.title not in avoid
                 and ((age := h.age_days(now)) is None or age <= self.max_age_days)]
         rng.shuffle(pool)
