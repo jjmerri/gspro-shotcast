@@ -156,8 +156,8 @@ Keeping spend in check:
   makes no model or voice calls, and shots are still recorded.
 - **Voice on the PC**: Kokoro voices cost nothing per line, which removes most of the bill
   (see [Choosing a setup](#choosing-a-setup)); Ollama for the text too makes it $0.
-- **See what you actually spent.** `logs/usage.jsonl` gets a row for every model call, every voice
-  request (`kind: tts`: time to first audio, audio length, outcome, estimated cost) and every line
+- **See what you actually spent.** `logs/usage.jsonl` gets a row for every model call (Jev's minimap
+  requests too, as provider `typesafe`), every voice request (`kind: tts`: time to first audio, audio length, outcome, estimated cost) and every line
   aired or dropped (`kind: line`: how long it waited to start). `cost` totals them per night: text
   cost by provider, voice cost, minutes voiced vs aired, voice requests that never answered, time to
   first audio and line wait (median/90th percentile), and lines dropped. The booth log also ends each

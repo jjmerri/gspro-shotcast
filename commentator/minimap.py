@@ -977,8 +977,9 @@ def _centre(box) -> tuple[float, float]:
 
 
 class JevMinimap:
-    def __init__(self, cfg: MinimapConfig, client=None) -> None:
+    def __init__(self, cfg: MinimapConfig, client=None, usage=None) -> None:
         self.cfg = cfg
+        self.usage = usage  # a UsageLog: each request's tokens and estimated cost
         if client is None:
             from typesafe_sdk import AsyncTypeSafeClient
 
@@ -998,8 +999,18 @@ class JevMinimap:
         return None
 
     async def _ask(self, model: str, state: dict, questions: dict):
-        return (await self._client.system_one(state=state, questions=questions, model=model,
-                                              extra_headers=IMAGES_HEADER)).answers
+        started = time.perf_counter()
+        resp = await self._client.system_one(state=state, questions=questions, model=model,
+                                             extra_headers=IMAGES_HEADER)
+        if self.usage is not None:
+            used = getattr(resp, "usage", None)
+            try:
+                self.usage.record_jev("minimap", getattr(resp, "model", None) or model,
+                                      getattr(used, "input_tokens", None), getattr(used, "output_tokens", None),
+                                      time.perf_counter() - started)
+            except Exception:
+                log.exception("Couldn't log the Jev request's usage")
+        return resp.answers
 
     async def read(self, img: Image.Image, to_pin: float | None = None) -> MinimapRead:
         """`to_pin` (yards) sets the map's scale for the bunker search; without it there's none."""

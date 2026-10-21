@@ -12,6 +12,9 @@ PRICES = {
     "claude-haiku-5-5": (0.10, 0.50),
     "claude-sonnet-5-5": (2.0, 10.0),
     "claude-opus-5-5": (4.0, 20.0),
+    # TypeSafe Jev (the minimap read) bills input tokens only; output is free. Published rate, not
+    # confirmed against a TypeSafe bill.
+    "jev": (0.042, 0.0),
 }
 # OpenAI chat models, USD per million tokens: (input, output, cached input). OpenAI's prompt_tokens
 # already include the cached ones (Anthropic's input_tokens don't). Estimates; check current pricing.
@@ -105,6 +108,14 @@ class UsageLog:
             "latency_s": round(result.latency_seconds, 2),
         }
         row["est_cost_usd"] = round(estimate_cost(llm.model, row), 6)
+        self.write(row)
+
+    def record_jev(self, kind: str, model: str, input_tokens: int | None, output_tokens: int | None,
+                   latency_seconds: float) -> None:
+        """One TypeSafe Jev request (the minimap read asks several per shot)."""
+        row = {"kind": kind, "provider": "typesafe", "model": model, "input_tokens": input_tokens,
+               "output_tokens": output_tokens, "latency_s": round(latency_seconds, 2)}
+        row["est_cost_usd"] = round(estimate_cost(model, row), 6)
         self.write(row)
 
 

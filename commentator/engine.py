@@ -393,6 +393,7 @@ class Engine:
         if speech is not None and not self.commentary_on:
             self.speech.muted = True
         self.screen = screen
+        self.usage = UsageLog(cfg.log_dir)
         self.minimap = self._make_minimap()
         self.putt_reader = (self.cfg.putt_read.enabled and self.screen is not None and self.commentary_on
                             and self.cfg.screen.capture == "monitor")
@@ -434,7 +435,6 @@ class Engine:
         self.stats: Counter[str] = Counter()
         self.rejections: list[tuple[str, list[str]]] = []
         self.flight_latencies: list[float] = []
-        self.usage = UsageLog(cfg.log_dir)
         if hasattr(self.speech, "usage"):
             self.speech.usage = self.usage   # per-request voice cost/latency rows
         Path(cfg.log_dir).mkdir(parents=True, exist_ok=True)
@@ -771,7 +771,7 @@ class Engine:
         if why := JevMinimap.available():
             log.warning("minimap.provider is jev but %s; using the preshot vision model for hazards", why)
             return None
-        return JevMinimap(self.cfg.minimap)
+        return JevMinimap(self.cfg.minimap, usage=self.usage)
 
     async def _read_minimap(self, to_pin: float | None) -> MinimapRead:
         await asyncio.to_thread(self.screen.detect_mirror)

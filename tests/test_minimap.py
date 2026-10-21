@@ -111,6 +111,25 @@ async def test_jev_read_splits_the_map_and_reads_numbers():
                             "Green: 150 yards to the front edge, 172 to the back."]
 
 
+async def test_each_jev_request_is_logged_with_its_tokens_and_cost(tmp_path):
+    from commentator.usage import UsageLog, summarize
+
+    class BilledJev(FakeJev):
+        async def system_one(self, *a, **kw):
+            resp = await super().system_one(*a, **kw)
+            return SimpleNamespace(answers=resp.answers, model="jev-1.14",
+                                   usage=SimpleNamespace(input_tokens=2_000, output_tokens=12))
+
+    fake = BilledJev()
+    await JevMinimap(Config().minimap, client=fake, usage=UsageLog(str(tmp_path))).read(Image.new("RGB", (170, 310)))
+    rows = [json.loads(l) for l in (tmp_path / "usage.jsonl").read_text().splitlines()]
+    assert len(rows) == len(fake.calls) == 3
+    assert {(r["kind"], r["provider"], r["model"], r["input_tokens"]) for r in rows} == {
+        ("minimap", "typesafe", "jev-1.14", 2_000)}
+    assert all(r["est_cost_usd"] == pytest.approx(2_000 * 0.042 / 1e6) for r in rows)  # output is free
+    assert "typesafe $0.00" in summarize(str(tmp_path))
+
+
 async def test_jev_read_skips_sides_without_a_confident_ball_and_pin():
     fake = FakeJev(box_conf=0.3)
     r = await JevMinimap(Config().minimap, client=fake).read(Image.new("RGB", (300, 500)))
