@@ -1028,7 +1028,7 @@ def test_read_hud_on_saved_frame():
     from commentator.screen import Screen
 
     cfg = ScreenConfig()
-    hud = Screen(cfg).read_hud(list(cfg.regions), Image.open(frame).convert("RGB"))
+    hud = Screen(cfg).read_hud(["player_box", "hole_box", "tiles", "lie"], Image.open(frame).convert("RGB"))
     assert (hud.shot_number, hud.score_to_par, hud.par, hud.lie) == (4, "-1", 5, "rough")
     assert hud.tiles["total length"] == "222.3"
 

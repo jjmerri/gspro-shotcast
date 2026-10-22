@@ -30,7 +30,7 @@ local = ["kokoro-onnx>=0.4"]
 publish = ["boto3"]
 # Importing the league's yearly spreadsheets.
 league = ["openpyxl>=3.1"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-xdist>=3"]
 
 [project.scripts]
 shotcast = "commentator.__main__:main"
@@ -44,3 +44,4 @@ commentator = ["*.html", "stats_vendor/*/*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "-n auto"   # in parallel, one worker per core; -n0 runs serially (quicker for one test)

@@ -728,6 +728,7 @@ async def test_wrap_fires_on_the_scorecard_not_only_the_hole_change(tmp_path):
     e.state.current_hole = "par 4, 400 yards"
     e._wrap_branches = {"hole": "par 4, 400 yards", "side": r.sides[0].key,
                         "by_score": {4: ([Line("pbp", "Par.")], [b"clip"]), 5: ([Line("pbp", "Bogey.")], [b"clip"])}}
+    e.speech.is_idle = lambda: True  # the opener queued above never plays here: don't wait it out
     # Scorecard posts the score while the hole is still "current" (seq 1), before any hole change.
     assert await e._wrap_after_last_putt("par 4, 400 yards", r.seq) is True
     assert e._wrapped_hole == "par 4, 400 yards"  # the hole change will now skip it

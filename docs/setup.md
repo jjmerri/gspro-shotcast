@@ -152,9 +152,10 @@ pip install -e ".[cloud,dev]"
 pytest
 ```
 
-GitHub Actions runs them on every push (Linux on Python 3.12 and 3.13, and Windows). Tests that
-need the third-party GSPro screenshots (see `data/screens/SOURCES.md`) or the OCR engine skip when
-those aren't present. About 400 tests cover the engine, HUD parsing, rounds and handicaps, the GSPro
+They run in parallel across the CPU's cores (pytest-xdist); `pytest -n0` runs them serially, which
+starts quicker for a single test. GitHub Actions runs them on every push (Linux on Python 3.12 and
+3.13, and Windows). Tests that need the third-party GSPro screenshots (see `data/screens/SOURCES.md`)
+or the OCR engine skip when those aren't present. About 400 tests cover the engine, HUD parsing, rounds and handicaps, the GSPro
 log reader, the season database and stats page, the OCR cache, and model switching. They do not
 cover real GSPro/Uneekor traffic or live screen layouts; use the bring-up steps for those.
 
