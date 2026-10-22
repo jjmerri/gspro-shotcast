@@ -176,8 +176,9 @@ def check_line(
             if re.search(rf"\b{PLACING}\s+(?:\w+\s+){{0,3}}?{re.escape(term)}\b", lowered):
                 problems.append(f'"{term}": says the ball is in it, which can\'t be known yet')
             continue
+        # A round's facts count results in the plural ("two bogeys"), which backs "a bogey" just the same.
         if re.search(rf"\b{re.escape(term)}\b", lowered) and not any(
-            re.search(rf"\b{re.escape(s)}\b", facts_lower) for s in support
+            re.search(rf"\b{re.escape(s)}s?\b", facts_lower) for s in support
         ):
             problems.append(f'"{term}" isn\'t shown in the facts')
 

@@ -41,7 +41,7 @@ llm:
   # The opener is raced against the course load, so it wants a fast model; the closer is fetched
   # on the last hole with its latency hidden, so it can take the richest one.
   opener:  { provider: anthropic, model: claude-sonnet-5-5, effort: low }
-  closer:  { provider: anthropic, model: claude-opus-5-5, effort: medium, max_tokens: 2000 }
+  closer:  { provider: anthropic, model: claude-opus-5-5, effort: low, max_tokens: 2000 }
   # segment: { ... }   # between-hole segments; omit to reuse `live`
 
   # --- Alternative: one key (Anthropic) -------------------------------------

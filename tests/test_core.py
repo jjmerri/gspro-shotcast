@@ -1073,6 +1073,10 @@ def test_grounding_rejects_invented_numbers_counts_and_outcomes():
     assert not check_line("Tony finds the middle of the fairway.", in_rough, league).ok
     assert check_line("Tony finds the rough.", in_rough, league).ok
     assert not check_line("Sarah taps in for par.", facts, league).ok
+    # A round's results are counted in the plural; "a bogey" is backed by "bogeys", not by nothing.
+    card = "Shed Heads: net even. Holes: a birdie (8), bogeys (3, 5, 9)."
+    assert check_line("A birdie on eight, though a bogey at the last.", card, "", mode="round").ok
+    assert not check_line("An eagle on the fourth.", card, "", mode="round").ok
     # Text-only pre-shot line (seen_image=False): a current-lie mention stands by any synonym (facts say
     # "sand", the line "bunker"), but a hazard it never saw is still a guess.
     from_sand = "Player: Tony\nLie: the ball lies in the sand.\nTo the pin: 25 yards."
