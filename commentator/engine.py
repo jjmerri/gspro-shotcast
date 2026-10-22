@@ -180,6 +180,10 @@ def _slot_state(tone) -> str:
     return "filled" if _PILL_MEDIAN[0] <= tone.median <= _PILL_MEDIAN[1] else "empty"
 
 
+# A bookings read this recent (at course select, say) covers the setup screen that follows it.
+BOOKINGS_FRESH_SECONDS = 300.0
+
+
 def _play_button_course(text: str) -> str | None:
     """The course name out of GSPro's bottom-right "Play <course>!" setup button, or None when the
     text isn't that button (so this doubles as "are we on the setup screen?"). GSPro shows its own
@@ -1163,10 +1167,13 @@ class Engine:
             return None
         return Bookings(b.account, b.schedule_id, key, b.type_field, b.slack_minutes)
 
-    def _fetch_bookings(self, why: str) -> None:
-        """Re-read the bookings in the background (at startup, so a restart mid-round knows, and as
-        each setup screen comes up). A fetch already running covers this one."""
+    def _fetch_bookings(self, why: str, fresh_within: float = 0.0) -> None:
+        """Re-read the bookings in the background (at startup, so a restart mid-round knows, and at the
+        course select or setup screen, whichever comes first). A fetch already running covers this one,
+        as does one within `fresh_within` seconds."""
         if self.bookings is None or (self._bookings_task and not self._bookings_task.done()):
+            return
+        if time.monotonic() - self._bookings_fetched < fresh_within:
             return
         self._bookings_fetched = time.monotonic()
         self._bookings_task = asyncio.create_task(self.bookings.refresh(why=why), name="bookings")
@@ -4964,16 +4971,19 @@ class Engine:
                     if players_tab:
                         players_read_at = grabbed_at
                     # On the PLAYERS tab only the Play button matters; elsewhere also the load title.
-                    gate_names = ["setup_course"] if players_tab else ["setup_course", "load_course"]
+                    gate_names = ["setup_course"] if players_tab else ["setup_course", "load_course", "course_select"]
                     gate_lines, gate_cache = await asyncio.to_thread(
                         self.screen.read_region_lines_cached, gate_names, frame, gate_cache)
-                    gate = {n: " ".join(gate_lines.get(n, [])) for n in ("setup_course", "load_course")}
+                    gate = {n: " ".join(gate_lines.get(n, [])) for n in ("setup_course", "load_course", "course_select")}
                 else:
-                    frame, gate = await asyncio.to_thread(self.screen.grab_and_read, ["setup_course", "load_course"])
+                    frame, gate = await asyncio.to_thread(self.screen.grab_and_read,
+                                                          ["setup_course", "load_course", "course_select"])
             except Exception:
                 log.exception("Setup-screen read failed")
                 continue
             play_course = _play_button_course(gate.get("setup_course", ""))
+            if not play_course and "select course" in gate.get("course_select", "").lower():
+                self._fetch_bookings("course select", fresh_within=BOOKINGS_FRESH_SECONDS)
             last_play, seen_play = seen_play, play_course
             if held:
                 if not play_course:
@@ -4984,7 +4994,7 @@ class Engine:
                 self._pending_opening, self._opener_prepared_for = None, frozenset()
             if play_course:
                 if not seen_setup:
-                    self._fetch_bookings("setup screen")
+                    self._fetch_bookings("setup screen", fresh_within=BOOKINGS_FRESH_SECONDS)
                 to_read = slots
                 slot_frame = frame
                 if probed and not players_tab and (snap := self._players_snap) is not None \

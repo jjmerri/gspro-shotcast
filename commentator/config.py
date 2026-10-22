@@ -108,6 +108,9 @@ DEFAULT_REGIONS = {
     # opener when this matches the course that was set up (a positive "Play was pressed and it's
     # loading" signal), so a window popping up over the setup screen can't trigger a spurious opener.
     "load_course": Region(left=0.20, top=0.10, width=0.60, height=0.10, anchor="middle", aspect=HUD_ASPECT),
+    # The SELECT COURSE screen's title, top left: the first screen of a new round, so the booth reads
+    # the SuperSaaS bookings here (or at the setup screen, whichever it sees first).
+    "course_select": Region(left=0.012, top=0.095, width=0.13, height=0.05, aspect=HUD_ASPECT),
 }
 
 

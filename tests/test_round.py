@@ -1294,6 +1294,21 @@ async def _run_setup_watch(e, reads, until, polls=300, screen=None):
     return e._pending_opening
 
 
+async def test_the_course_select_screen_reads_the_bookings_before_setup(tmp_path):
+    e = _engine(tmp_path)
+    fetched = []
+
+    class FakeBookings:
+        async def refresh(self, now=None, why=""):
+            fetched.append(why)
+
+    e.bookings = FakeBookings()
+    reads = [{"course_select": "SELECT COURSE"}] * 3 + [_players_tab("Pebble Beach", {1: "MikeD"})] * 3
+    await _run_setup_watch(e, reads, until=lambda p: False, polls=20)
+    # Fetched once at course select; the setup screen right after counts that read as fresh.
+    assert fetched == ["course select"]
+
+
 def _engine_with(tmp_path, league):
     from commentator.sources.replay import ReplaySource
     from commentator.speech import SpeechQueue
