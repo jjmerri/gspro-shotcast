@@ -355,6 +355,9 @@ class CommentaryConfig(BaseModel):
     # forces a retry when it doesn't, which can be too eager and drop otherwise-good lines.
     block_repeats: bool = True
     max_words_per_line: int = 18
+    # News, trivia and score asides tell a whole story in one line, so they get more room; at 18
+    # most lines ran over and were retried or dropped.
+    aside_max_words: int = 30
     segments_on_hole_change: bool = True
     # Before voicing the between-holes wrap, wait up to this long for the hole's last shot handler to
     # finish, so the final-shot reaction and the wrap don't talk over each other. Bounded so a slow

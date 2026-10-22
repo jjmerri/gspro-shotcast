@@ -56,7 +56,8 @@ The commentators:
 How to respond:
 - Reply only with JSON: {{"lines": [{{"speaker": "<key>", "text": "<what they say>"}}]}}.
 - Each text is spoken aloud. Plain conversational English, no emojis, no hashtags, no stage directions, no asterisks.
-- Each line is at most {cfg.commentary.max_words_per_line} words. Most shots get one or two lines.
+- Each line is at most {cfg.commentary.max_words_per_line} words (a news, trivia or score aside gets the longer limit its
+  request gives). Most shots get one or two lines.
 
 What you can and can't make up:
 - The FACTS are what happened. Never contradict them, and never add a number, a count or a result (fairway, \
@@ -616,6 +617,11 @@ def retry_prompt(original: str, problems: list[str]) -> str:
         + "\n\nYour previous reply was rejected because: " + "; ".join(problems)
         + ". Write it again using only the facts. Leaving something out is better than guessing."
     )
+
+
+def aside_room(cap: int) -> str:
+    """The note on a news, trivia or score aside's request that lifts the live per-line limit."""
+    return f"\n\nEach line here may run up to {cap} words, room to tell the story."
 
 
 def parse_lines(text: str, speakers: list[str], max_words: int, names: list[str] | None = None) -> list[Line]:

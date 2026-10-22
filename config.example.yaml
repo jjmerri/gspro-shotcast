@@ -138,6 +138,7 @@ commentary:
   min_seconds_between_comments: 4
   recent_lines: 30   # shown to the model; a season-wide check catches older repeats
   max_words_per_line: 28
+  aside_max_words: 30   # news, trivia and score asides: room to tell the story in one line
   segments_on_hole_change: true
   max_speech_backlog: 4
   in_flight: true

@@ -360,7 +360,7 @@ async def cmd_banter(cfg: Config, args) -> None:
     from .league import League
     from .llm import build_llm
     from .news import GolfNews
-    from .prompts import news_prompt, news_schema, parse_lines, system_prompt
+    from .prompts import aside_room, news_prompt, news_schema, parse_lines, system_prompt
     from .speech import SpeechQueue
     from .tts import build_tts
 
@@ -375,8 +375,9 @@ async def cmd_banter(cfg: Config, args) -> None:
     league = League.load(cfg.league_file)
     llm = build_llm(cfg.closer_llm)
     user, _ = news_prompt(topic=topic.as_fact())
+    user += aside_room(cfg.commentary.aside_max_words)
     res = await llm.complete_json(system_prompt(cfg, league), user, news_schema(list(cfg.personas)))
-    lines = parse_lines(res.text, list(cfg.personas), cfg.commentary.max_words_per_line)
+    lines = parse_lines(res.text, list(cfg.personas), cfg.commentary.aside_max_words)
     data = json.loads(res.text)
     print(f"Held for: {data.get('trigger')}" + (f"\n  tie-in: {data['tie_in']}" if data.get("tie_in") else ""))
     for ln in lines:

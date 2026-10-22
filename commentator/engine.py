@@ -29,8 +29,8 @@ from .models import (
     HoleChangeEvent, Line, PreShotEvent, RoundEndEvent, RoundStartEvent, ScorecardEvent, Shot, ShotEvent,
 )
 from .prompts import (
-    ANGLES, FLIGHT_OUTCOMES, NEWS_TRIGGERS, closer_prompt, flight_prompt, opener_prompt, output_schema, parse_lines,
-    preshot_line_prompt, preshot_line_schema, preshot_hazard_prompt, preshot_hazard_schema,
+    ANGLES, FLIGHT_OUTCOMES, NEWS_TRIGGERS, aside_room, closer_prompt, flight_prompt, opener_prompt, output_schema,
+    parse_lines, preshot_line_prompt, preshot_line_schema, preshot_hazard_prompt, preshot_hazard_schema,
     news_prompt, news_schema, preshot_branch_prompt, preshot_branch_schema,
     reaction_outcomes, retry_prompt, segment_prompt, shot_prompt, system_prompt,
     wrap_recap_prompt, hole_intro_prompt, scores_prompt, trivia_prompt, trivia_schema,
@@ -1178,6 +1178,9 @@ class Engine:
 
     async def _write_aside(self, label: str, user: str, facts_text: str, schema: dict) -> tuple[list[Line], dict]:
         """A two-line exchange from the closer's model, checked against its facts; ([], {}) if none."""
+        cap = self.cfg.commentary.aside_max_words
+        # The system prompt's shorter per-line limit is for live calls; an aside gets its own.
+        user = user + aside_room(cap)
         prompt, data = user, {}
         for _ in range(2):
             raw = await self._complete("news", self.closer_llm, prompt, [], schema=schema, system=self.system)
@@ -1185,7 +1188,6 @@ class Engine:
                 data = json.loads(raw)
             except json.JSONDecodeError:
                 data = {}
-            cap = self.cfg.commentary.max_words_per_line
             lines = parse_lines(raw, self.speakers, cap, self._persona_names)
             good, problems = self._grounded(lines, facts_text, mode="news")
             # An over-long line is cut back to its last full sentence, which can leave just a teaser

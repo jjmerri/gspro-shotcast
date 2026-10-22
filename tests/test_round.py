@@ -1543,11 +1543,26 @@ async def test_a_news_line_too_long_to_air_whole_is_retried_not_cut_to_its_tease
     llm = _NewsLLM(opening="Interesting bit of news this morning, Duke. Scottie Scheffler won by five shots on "
                            "Sunday and nobody else got close.")
     e = _news_engine(tmp_path, llm)
-    e.cfg.commentary.max_words_per_line = 18
+    e.cfg.commentary.aside_max_words = 18
     r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
     e.round = r
     await e._prepare_news(r)
     assert len(llm.prompts) == 2 and "at most 18 words" in llm.prompts[1] and e._news_bits == []
+
+
+async def test_a_news_aside_gets_more_words_than_a_live_line(tmp_path):
+    from types import SimpleNamespace
+
+    # 23 words: over the 18-word live cap, which retried and dropped most news asides.
+    llm = _NewsLLM(opening="Scottie Scheffler won by five shots on Sunday, Duke, and nobody else got close. "
+                           "Interesting bit of news this morning, I must say.")
+    e = _news_engine(tmp_path, llm)
+    e.cfg.commentary.max_words_per_line = 18
+    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
+    e.round = r
+    await e._prepare_news(r)
+    assert len(llm.prompts) == 1 and "up to 30 words" in llm.prompts[0]
+    assert e._news_bits and e._news_bits[0].lines[0].text.endswith("I must say.")
 
 
 def test_a_held_aside_waits_for_its_shot_and_asides_are_spaced(tmp_path):
