@@ -64,7 +64,7 @@ file by hand.
   for a conceded tap-in).
 - **Wrap-up.** When every hole is scored and GSPro says the round is complete, or the last green goes quiet for
   `round_end_idle_seconds`, the booth talks through the round: net against handicap, fairways,
-  greens in regulation, putts, penalties, and the team result.
+  greens in regulation, scrambling, sand saves, putts, penalties, and the team result.
 - **Formats** come from the league file `schedule` (today's entry) or `commentary.round_format`:
   scramble, best ball, team sum, or alternate shot. One player per team in GSPro is a one-ball
   format, and the checker rejects any line that credits a shared shot to one partner. A scramble

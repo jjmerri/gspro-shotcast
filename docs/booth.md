@@ -83,10 +83,16 @@ on the first hole or the last two, and only after an ordinary shot, so the round
   about one hole (the Road Hole, the island green) waits for that hole, even late in the round. What
   aired is remembered, so a course played again gets different stories.
 - **Golf news** (`news`): a real headline from the feed, told as of when it came out ("over the
-  weekend"), not as breaking news. Stories older than `news.max_age_days` (3) are left out.
+  weekend"), not as breaking news. Stories older than `news.max_age_days` (3) are left out. A story
+  that suits a moment in a round — a long drive, a ball in trouble, a birdie just posted, the turn —
+  is held back and played on that moment, opening with a line that bridges into it instead of its
+  own. Prep waits a few seconds for the round start to settle, and stops if the round is replaced,
+  so a false start costs nothing.
 
 With more than one on, they're one bucket: when an ordinary shot gets an aside (`news.banter_rate`),
-it's picked at random from those ready.
+it's picked at random from those ready. Only as many are written as the round has room for — on an
+18 with all three on, that is one news aside, two trivia and two check-ins — so the booth isn't
+paying its dearest model for asides nobody will hear.
 
 ## Models and voices
 

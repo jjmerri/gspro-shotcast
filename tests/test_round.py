@@ -341,6 +341,31 @@ def test_holed_recovery_counts_as_a_scramble_and_sand_save():
     # chances. Only holes 1-2 are greenside bunkers; hole 3's 90-yd fairway bunker is a scramble but
     # not a sand save (the greenside <=30 yd gate, exercised here independent of shot number).
     assert st.scramble == (2, 3) and st.sand == (1, 2)
+    # Both reach the closer, so a round saved out of the sand can be talked about as one.
+    facts = "\n".join(r.closing_facts(shots, {}))
+    assert "Mike got up and down 2 of 3 times after missing the green." in facts
+    assert "Mike got up and down from a greenside bunker 1 of 2 times." in facts
+
+
+def test_a_sand_save_on_a_bogey_hole_is_not_called_a_par_save():
+    # A sand save is two strokes from a greenside bunker whatever the score, so a card that reads
+    # bogey can still hold one. Calling the stat "saved par" handed the booth a number it could say
+    # out loud as something that never happened.
+    r = Round(league=LEAGUE, gspro_players=["MikeD"], course="Wynn", scheduled_format="best ball", holes=1)
+    splash = rec("Mike", 1, 4, 4, "sand", "green", "SW")
+    splash.hud.to_pin = "15 yards"
+    card = Scorecard(holes=list(range(1, 19)), par={1: 4}, index={1: 5},
+                     scores={"MIKED": {1: 5}, "SCORECARD": {}})
+    shots = [rec("Mike", 1, 4, 1, "tee", "fairway", "DR"), rec("Mike", 1, 4, 2, "fairway", "rough", "7I"),
+             rec("Mike", 1, 4, 3, "rough", "sand", "LW"), splash,
+             rec("Mike", 1, 4, 5, "green", None, "PT")]
+    for s in shots:
+        s.round_id = r.id
+    r.apply_scorecard(card)
+    assert r.side_stats(r.side_for("Mike"), shots).sand == (1, 1)
+    facts = "\n".join(r.closing_facts(shots, {}))
+    assert "got up and down from a greenside bunker 1 of 1 times." in facts
+    assert "saved par" not in facts
 
 
 def test_closing_facts_judge_net_and_team_best_ball():
@@ -350,6 +375,8 @@ def test_closing_facts_judge_net_and_team_best_ball():
     # 3 holes: Mike's 12 index is 2 course strokes, 85% of that rounds to 2.
     assert "Mike: gross 14 over 3 holes (2 over par, par 12); with 2 handicap strokes that's a net 12, net even par." in facts
     assert "Mike hit 2 of 2 fairways" in facts and "1 of 3 greens in regulation" in facts
+    # Two greens missed, one saved: the closer can now talk about scrambling, not just ball-striking.
+    assert "Mike got up and down 1 of 2 times after missing the green." in facts
     assert "one three-putt and one one-putt" in facts and "1 penalty stroke" in facts
     assert "1 double bogey (hole 2)" in facts
     # Season averages are per nine; a 3-hole round compares against a third of it.
@@ -1963,6 +1990,91 @@ def test_season_net_is_per_nine_holes(tmp_path):
     assert season["avg_net_to_par"] == pytest.approx((2 + 0 + 4.5) / 3) and season["best_net_to_par"] == 0
 
 
+def test_first_nine_is_the_nine_played_not_a_prorated_eleven():
+    from commentator.round import Side, SideStats
+
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="Wynn", scheduled_format="best ball", holes=18)
+    r.par = {q: 4 for q in range(1, 19)}
+    # Level through nine, then two bogeys. Two over eleven prorates to 1.6 a nine - a score nobody
+    # shot - where the nine actually finished was level.
+    scores = {**{q: 4 for q in range(1, 10)}, 10: 5, 11: 5}
+    st = SideStats(holes_scored=11, gross=sum(scores.values()), par=44, scores=scores)
+    assert r.first_nine(st) == (0, None)
+    # Only strokes falling inside the nine come off it; the one on hole 10 doesn't.
+    assert r.first_nine(st, {1: 1, 10: 1}) == (0, -1)
+    # Short of nine there is no nine to report, and neither is there without every par.
+    short = SideStats(holes_scored=8, gross=32, par=32, scores={q: 4 for q in range(1, 9)})
+    assert r.first_nine(short) is None
+    del r.par[3]
+    assert r.first_nine(st) is None
+
+
+def test_hole_strokes_are_only_offered_when_a_net_score_is_knowable():
+    from commentator.round import Side
+
+    def side(strokes, hole_strokes=None):
+        return Side(key="k", label="Mike", players=["Mike"], gspro=["MikeD"], strokes=strokes,
+                    hole_strokes=hole_strokes or {})
+
+    assert Round.hole_strokes_for(side(None)) is None        # no handicap at all
+    assert Round.hole_strokes_for(side(3)) is None           # strokes owed, but not allocated
+    assert Round.hole_strokes_for(side(0)) == {}             # scratch: net is gross
+    assert Round.hole_strokes_for(side(2, {1: 1, 5: 1})) == {1: 1, 5: 1}
+
+
+def test_a_round_quit_part_way_is_ranked_by_the_nine_it_finished(tmp_path):
+    from commentator.round import SideStats
+    from commentator.store import Store
+
+    s = Store(str(tmp_path / "s.db"))
+    s.session_id = 1
+    n = 12
+    st = SideStats(holes_scored=n, gross=4 * n + 6, par=4 * n, scores={h: 4 for h in range(1, n + 1)})
+    # Six over twelve holes, but the first nine was only two over.
+    s.record_round(course="Pebble", fmt="stroke", side="Mike", team=None, holes=18, stats=st, strokes=0,
+                   net_to_par=6, hole_number=lambda k: k, hole_pars={h: 4 for h in range(1, n + 1)},
+                   complete=False, first_nine=(2, 2))
+    s.session_id = 2
+    season = s.season_rounds("Mike")
+    # Not 6 * 9 / 12 = 4.5, which is a score nobody shot.
+    assert season["best_net_to_par"] == 2 and season["best_gross_to_par"] == 2
+
+
+def test_a_finished_round_keeps_the_prorated_rate_over_its_own_nine(tmp_path):
+    from commentator.round import SideStats
+    from commentator.store import Store
+
+    s = Store(str(tmp_path / "s.db"))
+    s.session_id = 1
+    st = SideStats(holes_scored=18, gross=76, par=72, scores={h: 4 for h in range(1, 19)})
+    # A finished 18 is a whole number of nines: halving it is a fair rate, so the stored nine from a
+    # part-played round must not be written here even if one is offered.
+    s.record_round(course="Pebble", fmt="stroke", side="Mike", team=None, holes=18, stats=st, strokes=0,
+                   net_to_par=4, hole_number=lambda k: k, hole_pars={h: 4 for h in range(1, 19)},
+                   complete=True, first_nine=(0, 0))
+    s.session_id = 2
+    assert s.season_rounds("Mike")["best_net_to_par"] == 2
+
+
+def test_a_nine_with_a_net_score_is_counted_as_well_as_averaged(tmp_path):
+    from commentator.round import SideStats
+    from commentator.store import Store
+
+    # A part-played round can know its first nine's net without knowing the whole round's: a later
+    # hole's par went unread. Counting net rounds off the raw column while averaging off the stored
+    # nine made the average come from rounds the count said weren't there.
+    s = Store(str(tmp_path / "s.db"))
+    s.session_id = 1
+    st = SideStats(holes_scored=11, gross=4 * 11 + 5, par=4 * 11, scores={h: 4 for h in range(1, 12)})
+    s.record_round(course="Pebble", fmt="stroke", side="Mike", team=None, holes=18, stats=st, strokes=0,
+                   net_to_par=None, hole_number=lambda k: k, hole_pars={h: 4 for h in range(1, 12)},
+                   complete=False, first_nine=(2, 3))
+    s.session_id = 2
+    season = s.season_rounds("Mike")
+    assert season["net_rounds"] == 1 and season["best_net_to_par"] == 3
+    assert s.team_course_history("Mike", "Pebble")["rounds"] == 1
+
+
 def test_season_line_counts_only_rounds_of_this_rounds_kind(tmp_path):
     from commentator.round import SideStats, _season_facts
     from commentator.store import Store
@@ -1986,8 +2098,13 @@ def test_season_line_counts_only_rounds_of_this_rounds_kind(tmp_path):
     practice = _season_facts("Josh", s.season_rounds("Josh", "practice"), 9, league=False)
     assert practice[0] == "Josh's earlier practice rounds this season: 4."
     assert practice[1] == ("Josh's average gross score to par in the 3 with every par known: 1 over par; "
-                           "best: 1 under par.")
+                           "best: 1 under par over nine holes.")
     assert "net" not in " ".join(practice)
+    # The average is a rate and scales to the round's length; the best is one real round, so an
+    # 18-hole setup must not double a 1-under nine into "two under".
+    long = _season_facts("Josh", s.season_rounds("Josh", "practice"), 18, league=False)
+    assert long[1] == ("Josh's average gross score to par in the 3 with every par known (scaled to 18 holes): "
+                       "2 over par; best: 1 under par over nine holes.")
 
 
 def _log_engine(tmp_path):
@@ -2633,6 +2750,76 @@ async def test_a_round_ends_after_its_last_shot_is_recorded(tmp_path):
     e._shot_tasks.add(asyncio.create_task(last_shot()))
     await e.handle_round_end(RoundEndEvent(reason="final scorecard", abandoned=True))
     assert seen == [False] and e.round.ended
+
+
+async def test_a_quit_after_a_full_nine_signs_off_on_the_holes_played(tmp_path):
+    from commentator.models import RoundEndEvent
+    e = _engine(tmp_path)
+    r = e._build_round(["MikeD"], "Somewhere", {"hole_count": 18}, is_league=False)
+    e._start_round(r)
+    r.par = {q: 4 for q in range(1, 19)}
+    r.set_log_scores("MikeD", {q: 4 for q in range(1, 10)})
+    r.seq = 10                      # walked to the tenth tee, then quit
+    signed = []
+
+    async def fake_sign_off(rr, stats):
+        signed.append(max(st.holes_scored for st in stats.values()))
+    e._sign_off = fake_sign_off
+    await e.handle_round_end(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
+    assert signed == [9]
+
+
+async def test_a_quit_before_a_full_nine_still_gets_no_closer(tmp_path):
+    from commentator.models import RoundEndEvent
+    e = _engine(tmp_path)
+    r = e._build_round(["MikeD"], "Somewhere", {"hole_count": 18}, is_league=False)
+    e._start_round(r)
+    r.par = {q: 4 for q in range(1, 19)}
+    r.set_log_scores("MikeD", {q: 4 for q in range(1, 9)})
+    r.seq = 9
+    signed = []
+
+    async def fake_sign_off(rr, stats):
+        signed.append(rr)
+    e._sign_off = fake_sign_off
+    await e.handle_round_end(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
+    assert signed == []
+
+
+async def test_quitting_stops_aside_work_still_being_paid_for(tmp_path):
+    # Asides can't play once the round is over, so a story still being written and voiced is money
+    # spent on nothing: its retries and its voice call are requests made after the quit.
+    import asyncio
+
+    from commentator.models import RoundEndEvent
+
+    e = _engine(tmp_path)
+    r = e._build_round(["MikeD"], "Somewhere", {"hole_count": 18}, is_league=False)
+    e._start_round(r)
+    r.par = {q: 4 for q in range(1, 19)}
+    r.set_log_scores("MikeD", {q: 4 for q in range(1, 5)})
+    r.seq = 5
+
+    async def forever():
+        await asyncio.sleep(3600)
+    e._news_task = asyncio.create_task(forever())
+    e._aside_task(forever(), "trivia-prep")
+    [trivia] = list(e._aside_tasks)
+    await e.handle_round_end(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
+    assert e._news_task.cancelled() or e._news_task.cancelling()
+    assert trivia.cancelled() or trivia.cancelling()
+
+
+def test_closing_facts_say_a_cut_short_round_has_no_finished_score():
+    r = Round(league=LEAGUE, gspro_players=["MikeD"], course="Pebble Beach", scheduled_format=None)
+    r.holes, r.start_hole, r.start_hole_assumed = 18, 1, False
+    r.par = {q: 4 for q in range(1, 19)}
+    r.set_log_scores("MikeD", {q: 4 for q in range(1, 10)})
+    r.stats_through = 9
+    facts = " ".join(r.closing_facts([], {}))
+    assert "ended early, after 9 of 18 holes" in facts and "don't call it a completed round" in facts
+    r.stats_through = None                                   # a finished round says nothing of the sort
+    assert "ended early" not in " ".join(r.closing_facts([], {}))
 
 
 def test_a_reaction_links_to_its_own_shot(tmp_path):

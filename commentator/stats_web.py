@@ -176,7 +176,10 @@ def player(db: sqlite3.Connection, name: str, context: str | None = None) -> dic
                 by_par[h["par"]][0] += d
                 by_par[h["par"]][1] += 1
         if card["played"] and _counts(r["complete"], r["holes_played"] or card["played"]):
-            per_nine = card["to_par"] * 9.0 / card["played"]
+            # A round quit part-way through contributes the nine it finished; prorating the odd holes
+            # onto a nine would rank it by a score nobody shot. Older rows have no stored nine.
+            per_nine = r["nine_to_par"] if "nine_to_par" in r.keys() and r["nine_to_par"] is not None \
+                else card["to_par"] * 9.0 / card["played"]
             nines.append(per_nine)
             history.append({"date": _date(db, r["session_id"]), "course": r["course"], "played": card["played"],
                             "gross": card["gross"], "to_par": card["to_par"]})

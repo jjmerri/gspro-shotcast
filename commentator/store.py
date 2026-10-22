@@ -104,7 +104,10 @@ CREATE TABLE IF NOT EXISTS rounds (
     source TEXT,                                 -- scorecard / shots
     is_league INTEGER NOT NULL DEFAULT 1,        -- 1 = league round, 0 = practice; for the stat context split
     complete INTEGER NOT NULL DEFAULT 1,         -- 0 = quit early in GSPro (holes_played < holes)
-    holes_played INTEGER                         -- holes actually scored (NULL on older rows: use holes)
+    holes_played INTEGER,                        -- holes actually scored (NULL on older rows: use holes)
+    nine_to_par INTEGER,                         -- gross to par over the first nine played, set only on a
+    nine_net_to_par INTEGER                      -- part-played round; the season ranks per nine, and
+                                                 -- prorating eleven holes onto nine invents a score
 );
 CREATE TABLE IF NOT EXISTS predictions (
     id INTEGER PRIMARY KEY,
@@ -130,7 +133,9 @@ CREATE TABLE IF NOT EXISTS player_rounds (
     hole_pars TEXT,                              -- JSON: hole number -> par, for scores-vs-par season stats
     is_league INTEGER NOT NULL DEFAULT 1,        -- 1 = league round, 0 = practice; for the stat context split
     complete INTEGER NOT NULL DEFAULT 1,         -- 0 = quit early in GSPro
-    holes_played INTEGER                         -- holes this player actually scored
+    holes_played INTEGER,                        -- holes this player actually scored
+    nine_to_par INTEGER                          -- gross to par over the first nine played, on a
+                                                 -- part-played round only (see the rounds table)
 );
 CREATE INDEX IF NOT EXISTS shots_player ON shots(player);
 CREATE INDEX IF NOT EXISTS shots_lie ON shots(lie_before);
@@ -139,16 +144,21 @@ CREATE INDEX IF NOT EXISTS shots_lie ON shots(lie_before);
 
 # A round row counts toward the season's round totals (rounds played, average/best net) when it was
 # finished, or quit early after at least a full nine. Older rows have no holes_played: use holes.
-_COUNTS_AS_ROUND = "(complete = 1 OR COALESCE(holes_played, holes) >= 9)"
+COUNTS_AS_ROUND_HOLES = 9   # a quit this far in counts as a round, and earns a sign-off
+_COUNTS_AS_ROUND = f"(complete = 1 OR COALESCE(holes_played, holes) >= {COUNTS_AS_ROUND_HOLES})"
 # Net to par per nine holes, so 9- and 18-hole rounds (and a nine inside an abandoned 18) compare.
-_NET_PER_NINE = "(net_to_par * 9.0 / COALESCE(NULLIF(holes_played, 0), holes))"
+# A round quit part-way through stores the nine it actually finished (nine_net_to_par), because
+# prorating eleven holes onto a nine invents a score nobody shot. Older rows have no nine column.
+_NET_PER_NINE = ("COALESCE(nine_net_to_par,"
+                 " net_to_par * 9.0 / COALESCE(NULLIF(holes_played, 0), holes))")
 # Gross to par per nine holes, only where par was known for every scored hole: `par` sums the known
 # ones, so a missing par would read as strokes over par. NULL otherwise (left out of the averages).
 _PARS_COMPLETE = ("(hole_pars IS NOT NULL AND scores IS NOT NULL AND holes_played > 0"
                   " AND (SELECT COUNT(*) FROM json_each(scores)) = holes_played"
                   " AND NOT EXISTS (SELECT 1 FROM json_each(scores) sc"
                   " WHERE json_extract(hole_pars, '$.\"' || sc.key || '\"') IS NULL))")
-_GROSS_PER_NINE = f"(CASE WHEN {_PARS_COMPLETE} THEN (gross - par) * 9.0 / holes_played END)"
+_GROSS_PER_NINE = (f"(CASE WHEN nine_to_par IS NOT NULL THEN nine_to_par"
+                   f" WHEN {_PARS_COMPLETE} THEN (gross - par) * 9.0 / holes_played END)")
 
 
 # A drive's length: the total distance (carry plus roll) where GSPro's tile was read, else the carry.
@@ -204,7 +214,8 @@ class Store:
         have_rounds = {r["name"] for r in self.db.execute("PRAGMA table_info(rounds)")}
         rounds_added = {"scramble_hit": "INTEGER", "scramble_tries": "INTEGER", "sand_hit": "INTEGER",
                         "sand_tries": "INTEGER", "hole_pars": "TEXT", "is_league": "INTEGER NOT NULL DEFAULT 1",
-                        "complete": "INTEGER NOT NULL DEFAULT 1", "holes_played": "INTEGER"}
+                        "complete": "INTEGER NOT NULL DEFAULT 1", "holes_played": "INTEGER",
+                        "nine_to_par": "INTEGER", "nine_net_to_par": "INTEGER"}
         for col, decl in rounds_added.items():
             if col not in have_rounds:
                 self.db.execute(f"ALTER TABLE rounds ADD COLUMN {col} {decl}")
@@ -213,7 +224,7 @@ class Store:
         have_pr = {r["name"] for r in self.db.execute("PRAGMA table_info(player_rounds)")}
         pr_added = {"putts": "INTEGER", "putt_holes": "INTEGER", "scores": "TEXT", "hole_pars": "TEXT",
                     "is_league": "INTEGER NOT NULL DEFAULT 1", "complete": "INTEGER NOT NULL DEFAULT 1",
-                    "holes_played": "INTEGER"}
+                    "holes_played": "INTEGER", "nine_to_par": "INTEGER"}
         for col, decl in pr_added.items():
             if col not in have_pr:
                 self.db.execute(f"ALTER TABLE player_rounds ADD COLUMN {col} {decl}")
@@ -763,10 +774,13 @@ class Store:
         return {k: r[k] for k in r.keys()}
 
     def record_round(self, *, course, fmt, side, team, holes, stats, strokes, net_to_par, hole_number,
-                     hole_pars=None, is_league: bool = True, complete: bool = True) -> None:
+                     hole_pars=None, is_league: bool = True, complete: bool = True,
+                     first_nine: tuple[int, int | None] | None = None) -> None:
         """One side's round. A round quit early is recorded too (complete=0, holes_played short): its
         per-hole and per-try stats count, but it only counts as a round in the season totals once a
-        full nine was played (see _COUNTS_AS_ROUND), and those totals are scored per nine holes."""
+        full nine was played (see _COUNTS_AS_ROUND), and those totals are scored per nine holes.
+        `first_nine` is (gross to par, net to par) over the first nine holes played, stored only for a
+        part-played round so the season ranks the nine it finished rather than a prorated fraction."""
         # Key per-hole maps by real hole number for cross-round per-hole stats; drop holes whose number
         # is unknown rather than falling back to the round sequence (which would collide with hole 1).
         scores_json = json.dumps({str(h): v for k, v in stats.scores.items() if (h := hole_number(k)) is not None})
@@ -774,17 +788,21 @@ class Store:
         # return None for every seq - so team_hole_stats' `hole_pars IS NOT NULL` skips the empty row.
         pars = {str(h): p for k, p in (hole_pars or {}).items() if (h := hole_number(k)) is not None and p}
         pars_json = json.dumps(pars) if pars else None
+        # Only a part-played round needs its own nine: a finished one is already a whole number of
+        # nines, and halving an 18 is a fair rate, where prorating an 11 is not.
+        nine, nine_net = first_nine if first_nine and not complete else (None, None)
         self.db.execute(
             """INSERT INTO rounds (session_id, ended_at, date, course, format, side, team, holes, gross, par, strokes,
                    net_to_par, fir_hit, fir_tries, gir_hit, gir_tries, scramble_hit, scramble_tries, sand_hit,
                    sand_tries, putts, putt_holes, penalties, longest_drive, scores, hole_pars, source, is_league,
-                   complete, holes_played)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   complete, holes_played, nine_to_par, nine_net_to_par)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (self.session_id, time.time(), time.strftime("%Y-%m-%d"), course, fmt, side, team, holes,
              stats.gross if stats.holes_scored else None, stats.par or None, strokes, net_to_par,
              *stats.fir, *stats.gir, *stats.scramble, *stats.sand,
              stats.putts if stats.putt_holes else None, stats.putt_holes, stats.penalties, stats.longest_drive,
-             scores_json, pars_json, stats.source, int(is_league), int(complete), stats.holes_scored),
+             scores_json, pars_json, stats.source, int(is_league), int(complete), stats.holes_scored,
+             nine, nine_net),
         )
         self.db.commit()
 
@@ -801,24 +819,26 @@ class Store:
         return out
 
     def record_player_round(self, *, player: str, course: str | None, fmt: str | None, stats,
-                            hole_number, hole_pars=None, is_league: bool = True, complete: bool = True) -> None:
+                            hole_number, hole_pars=None, is_league: bool = True, complete: bool = True,
+                            nine_to_par: int | None = None) -> None:
         """One individual player's round for per-player season stats: FIR/GIR/scrambling/sand-save
         counts, putts, and the per-hole scores and pars (keyed by real hole number, like record_round)
         for the scores-vs-par stats. Scrambling/sand and the hole-score stats are only meaningful in an
         individual-ball format; they're stored as computed and gated out for the shared-ball formats at
-        query time by `fmt`."""
+        query time by `fmt`. `nine_to_par` is gross to par over the first nine holes played, stored
+        only for a part-played round (see record_round)."""
         scores_json = json.dumps({str(h): v for k, v in stats.scores.items() if (h := hole_number(k)) is not None})
         pars = {str(h): p for k, p in (hole_pars or {}).items() if (h := hole_number(k)) is not None and p}
         pars_json = json.dumps(pars) if pars else None
         self.db.execute(
             """INSERT INTO player_rounds (session_id, ended_at, player, course, fmt, fir_hit, fir_tries,
                    gir_hit, gir_tries, scramble_hit, scramble_tries, sand_hit, sand_tries,
-                   putts, putt_holes, scores, hole_pars, is_league, complete, holes_played)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   putts, putt_holes, scores, hole_pars, is_league, complete, holes_played, nine_to_par)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (self.session_id, time.time(), player, course, fmt,
              *stats.fir, *stats.gir, *stats.scramble, *stats.sand,
              stats.putts if stats.putt_holes else None, stats.putt_holes, scores_json, pars_json, int(is_league),
-             int(complete), stats.holes_scored),
+             int(complete), stats.holes_scored, None if complete else nine_to_par),
         )
         self.db.commit()
 
@@ -895,9 +915,11 @@ class Store:
         """Earlier rounds for a player or team, before tonight: complete ones, plus a full nine or more
         from one quit early, sliced by `context` (see _ctx_sql). `rounds` counts every scored round;
         `net_rounds` only those with a net score (a handicap known), which the net average and best
-        come from. Scores to par are per nine holes, so a 9 and an 18 compare."""
+        come from - counted off the same expression they average, or a part-played round whose stored
+        nine has a net score the round as a whole doesn't would be averaged in but never counted.
+        Scores to par are per nine holes, so a 9 and an 18 compare."""
         r = self.db.execute(
-            f"""SELECT COUNT(*) AS rounds, COUNT(net_to_par) AS net_rounds,
+            f"""SELECT COUNT(*) AS rounds, COUNT({_NET_PER_NINE}) AS net_rounds,
                       AVG({_NET_PER_NINE}) AS avg_net_to_par, MIN({_NET_PER_NINE}) AS best_net_to_par,
                       COUNT({_GROSS_PER_NINE}) AS gross_rounds, AVG({_GROSS_PER_NINE}) AS avg_gross_to_par, MIN({_GROSS_PER_NINE}) AS best_gross_to_par,
                       AVG(1.0 * putts / NULLIF(putt_holes, 0)) AS putts_per_hole,
@@ -931,7 +953,7 @@ class Store:
             return {"rounds": 0}
         r = self.db.execute(
             f"""SELECT COUNT(*) AS rounds, AVG({_NET_PER_NINE}) AS avg_net_to_par, MIN({_NET_PER_NINE}) AS best_net_to_par
-               FROM rounds WHERE side = ? AND course = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND net_to_par IS NOT NULL
+               FROM rounds WHERE side = ? AND course = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND {_NET_PER_NINE} IS NOT NULL
                      AND {_COUNTS_AS_ROUND}"""
             + _ctx_sql(context),
             (side, course, self.session_id),

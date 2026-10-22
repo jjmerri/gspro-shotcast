@@ -458,6 +458,7 @@ class MinimapRead:
         front = self._number("front", to_pin) or pin - 12
         back = self._number("back", to_pin) or pin + 12
         trouble: dict[str, str] = {}
+        sand_at: dict[str, int] = {}
         if self._yes("water_ahead") or self._yes("island"):
             trouble["short"] = "water"
         for b in self._sand(to_pin):
@@ -465,7 +466,8 @@ class MinimapRead:
             if far < front - GREENSIDE_YARDS or near > back + GREENSIDE_YARDS:
                 continue   # not by the green
             where = "short" if far <= pin - 3 and near < front else "long" if near >= back - 3 else b.side
-            trouble.setdefault(where, "bunkers")
+            if trouble.setdefault(where, "bunkers") == "bunkers":
+                sand_at[where] = sand_at.get(where, 0) + 1   # the blobs are counted, so say how many
         for side in ("left", "right"):
             if penal[side] and not self._yes("island") and self._by_green(side, pin, front):
                 trouble[side] = penal[side]
@@ -482,7 +484,11 @@ class MinimapRead:
             return {"short": "coming up short", "long": "going long"}.get(where, f"missing {where}")
 
         ranked = sorted(trouble, key=lambda w: trouble[w] == "bunkers")   # stroke-costing trouble first
-        parts = [f"{trouble[where]} {spot(where)} the green" for where in ranked[:3]]
+        # One bunker read as one blob is "a bunker", not "bunkers".
+        def named(where: str) -> str:
+            return "a bunker" if trouble[where] == "bunkers" and sand_at.get(where) == 1 else trouble[where]
+
+        parts = [f"{named(where)} {spot(where)} the green" for where in ranked[:3]]
         # Water or a stake line costs a stroke; sand only a harder up-and-down. The worst is the miss to avoid.
         worst = max(trouble, key=lambda w: trouble[w] != "bunkers")
         opposite = {"short": "long", "long": "short", "left": "right", "right": "left"}[worst]

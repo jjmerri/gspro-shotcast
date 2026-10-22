@@ -14,6 +14,7 @@ from . import handicap
 from .facts import to_yards
 from .hud import Scorecard
 from .league import League
+from .store import COUNTS_AS_ROUND_HOLES
 
 log = logging.getLogger(__name__)
 
@@ -731,6 +732,11 @@ class Round:
         facts = self.format_facts()
         if self.course:
             facts.append(f"Course: {self.course}.")
+        if self.stats_through and self.stats_through < self.holes:
+            facts.append(f"The round was ended early, after {self.stats_through} of {self.holes} holes. "
+                         f"Everything here covers only those {self.stats_through}, and there is no finished "
+                         f"{self.holes}-hole score: sign off on the holes that were played and don't call it "
+                         "a completed round.")
         ov = final_overrides or {}
         all_stats = {side.key: self.side_stats(side, records, ov.get(side.key)) for side in self.sides}
         if any(s.source == "shots" for s in all_stats.values()):
@@ -769,6 +775,32 @@ class Round:
         if not all(pars):
             return None
         return sum(stats.scores.values()) - sum(side.hole_strokes.get(seq, 0) for seq in stats.scores) - sum(pars)
+
+    def first_nine(self, stats: SideStats, hole_strokes: dict[int, int] | None = None) \
+            -> tuple[int, int | None] | None:
+        """(gross to par, net to par) over the first nine holes played, in round order. The season
+        ranks rounds per nine; a round quit at eleven holes would otherwise be prorated to a score
+        nobody shot (four over through eleven stored as 3.3), so an early exit contributes the nine
+        it actually finished instead. None when fewer than nine holes were scored, or a par is
+        missing from them. Net is None without `hole_strokes` (see `hole_strokes_for`)."""
+        seqs = sorted(stats.scores)[:COUNTS_AS_ROUND_HOLES]
+        if len(seqs) < COUNTS_AS_ROUND_HOLES:
+            return None
+        pars = [self.par.get(seq) for seq in seqs]
+        if not all(pars):
+            return None
+        gross = sum(stats.scores[seq] for seq in seqs) - sum(pars)
+        if hole_strokes is None:
+            return gross, None
+        return gross, gross - sum(hole_strokes.get(seq, 0) for seq in seqs)
+
+    @staticmethod
+    def hole_strokes_for(side: Side) -> dict[int, int] | None:
+        """A side's per-hole handicap strokes, or None when no net score can be worked out: no
+        handicap at all, or strokes owed with no per-hole allocation. Same rule as net_to_par_played."""
+        if side.strokes is None or (side.strokes and not side.hole_strokes):
+            return None
+        return side.hole_strokes or {}
 
     def team_net(self, team: str) -> tuple[int, int] | None:
         """A league team's net to par so far, the way Squabbit's leaderboard scores it: (net to par,
@@ -883,6 +915,12 @@ class Round:
         hit, tries = s.gir
         if tries:
             facts.append(f"{who} hit {hit} of {tries} greens in regulation.")
+        hit, tries = s.scramble
+        if tries:
+            facts.append(f"{who} got up and down {hit} of {tries} times after missing the green.")
+        hit, tries = s.sand
+        if tries:
+            facts.append(f"{who} got up and down from a greenside bunker {hit} of {tries} times.")
         if s.putt_holes >= max(3, self.holes // 2):
             line = f"{who} took {s.putts} putts over {s.putt_holes} holes"
             extras = [f"{s.three_putts} three-putts" if s.three_putts > 1 else "one three-putt" if s.three_putts else "no three-putts"]
@@ -965,6 +1003,12 @@ def _scaled_note(holes: int) -> str:
     return "" if holes == 9 else f" (scaled to {holes} holes)"
 
 
+def _best_note(best: float, label: str = "") -> str:
+    """A season best is one real round, not a rate: it is never scaled to this round's length, or a
+    five-under nine gets announced as "ten under". Always stated on the per-nine basis it is stored on."""
+    return f"best{label}: {to_par(round(best))} over nine holes"
+
+
 def _season_facts(who: str, season: dict | None, holes: int = 9, league: bool = True) -> list[str]:
     """The opener's season line for a side, from season_rounds sliced to this round's kind: league
     rounds (judged net) for a league round, practice rounds (judged gross) for a practice one."""
@@ -977,13 +1021,13 @@ def _season_facts(who: str, season: dict | None, holes: int = 9, league: bool = 
         n = season.get("net_rounds") or season["rounds"]
         facts.append(f"{possessive(who)} average net score in {'them' if n == season['rounds'] else f'the {n} with a handicap'}"
                      f"{_scaled_note(holes)}: {to_par(round(season['avg_net_to_par'] * scale))}; "
-                     f"best: net {to_par(round(season['best_net_to_par'] * scale))}.")
+                     f"{_best_note(season['best_net_to_par'], ' net')}.")
     elif not league and season.get("avg_gross_to_par") is not None:
         n = season.get("gross_rounds") or season["rounds"]
         facts.append(f"{possessive(who)} average gross score to par in {'them' if n == season['rounds'] else f'the {n} with every par known'}"
                      f"{_scaled_note(holes)}: "
                      f"{to_par(round(season['avg_gross_to_par'] * scale))}; "
-                     f"best: {to_par(round(season['best_gross_to_par'] * scale))}.")
+                     f"{_best_note(season['best_gross_to_par'])}.")
     return facts
 
 

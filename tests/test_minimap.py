@@ -737,14 +737,21 @@ def test_merged_bunker_pieces_keep_the_nearest_distance_off_the_line():
 
 
 def test_strategy_says_where_the_miss_is():
-    # Bunkers short of the green on a 150-yard approach, nothing read long: short is the miss to avoid.
+    # One bunker short of the green on a 150-yard approach, nothing read long: short is the miss to
+    # avoid. The blobs are counted, so one is "a bunker": calling it "bunkers" let a line invent the
+    # rest of them, since the checker takes a plural in the facts as backing a plural on air.
     r = MinimapRead(threshold=0.7, sides=True, seen={"front_shown": 0.9, "back_shown": 0.9},
                     numbers={"front": 140, "back": 165}, sand=[Sand("left", 125 / 150, 138 / 150, 0.95, off=0.02)])
-    assert r.strategy(150, "fairway") == ("Strategy: bunkers short of the green, so coming up short is the miss "
+    assert r.strategy(150, "fairway") == ("Strategy: a bunker short of the green, so coming up short is the miss "
                                           "to avoid; nothing read past the green.")
+    two = MinimapRead(threshold=0.7, sides=True, seen={"front_shown": 0.9, "back_shown": 0.9},
+                      numbers={"front": 140, "back": 165},
+                      sand=[Sand("left", 125 / 150, 138 / 150, 0.95, off=0.02),
+                            Sand("right", 120 / 150, 132 / 150, 0.95, off=0.04)])
+    assert two.strategy(150, "fairway").startswith("Strategy: bunkers short of the green")
     # Water past the green (a red line beyond the pin with water behind it) is worse than the sand short.
     r.past = [Past("penalty area", [(1.15, 0.02), (1.3, 0.4)], water=True)]
-    assert r.strategy(150, "fairway") == ("Strategy: water past the green and bunkers short of the green, so going "
+    assert r.strategy(150, "fairway") == ("Strategy: water past the green and a bunker short of the green, so going "
                                           "long is the miss to avoid; coming up short finds sand at worst.")
     r.past = [Past("penalty area", [(1.5, 0.0)], water=True)]   # 75 yards past: not the green's trouble
     assert "past the green" not in r.strategy(150, "fairway").split(";")[0]

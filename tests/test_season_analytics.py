@@ -200,3 +200,15 @@ def test_closest_approaches_leave_out_chips_and_par_4_tee_shots(db):
     assert [x["club"] for x in h["approaches"]] == ["8I", "9I"]
     assert [(x["club"], x["outcome"]) for x in h["chips"]] == [("SW", "holed"), ("LW", None)]
     assert stats_web.records(db)["closest_approach"]["club"] == "8I"
+
+
+def test_a_season_db_from_before_the_stored_nine_still_opens(db):
+    # Stats browsing and publishing open the database read-only and never migrate it, so a file
+    # copied from the sim PC before the nine columns existed has to fall back to prorating rather
+    # than fail to open at all.
+    player_round(db, "Ann", {h: 4 for h in range(1, 10)})
+    db.execute("ALTER TABLE player_rounds DROP COLUMN nine_to_par")
+    db.commit()
+    p = stats_web.player(db, "Ann")
+    assert p["rounds"] == 1 and p["best_to_par_9"] == 0
+    assert [c["rounds"] for c in A.courses(db)] == [1]

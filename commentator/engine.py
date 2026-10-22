@@ -51,7 +51,7 @@ from .sources.base import ShotSource
 from .sources.gspro_log import M_TO_YD, MATERIAL_TO_LIE, GsproLogFollower, GsproState
 from .speech import SpeechQueue
 from .state import SessionState, ShotRecord
-from .store import Store
+from .store import COUNTS_AS_ROUND_HOLES, Store
 from .usage import UsageLog, audio_summary
 
 log = logging.getLogger(__name__)
@@ -237,7 +237,19 @@ NEWS_TRIGGER_TAGS = {
                 "in_native"},
     "wayward": {"big_miss_left", "big_miss_right", "mishit"},
     "great_approach": {"found_green"},
+    "long_putt": {"long_putt"},
+    "pure_strike": {"pure_strike"},
+    "big_curve": {"big_slice_or_fade", "big_hook_or_draw"},
+    # Tags the round carries rather than the ball (see _round_moment_tags). Golf headlines are mostly
+    # about scoring and the state of a round, not the shape of one shot, so without these almost
+    # every aside falls through to "any quiet moment".
+    "good_hole": {"birdie_posted"},
+    "bad_hole": {"blow_up_posted"},
+    "the_turn": {"at_the_turn"},
 }
+
+# How long news prep waits for a round start to settle before spending on it.
+NEWS_PREP_SETTLE_SECONDS = 20.0
 
 # How long a putt's or short shot's setup line waits for the booth to stop talking before it's dropped.
 PRESHOT_IDLE_WAIT_SECONDS = 5.0
@@ -1208,19 +1220,47 @@ class Engine:
                 log.exception("Golf news refresh failed")
             await asyncio.sleep(max(self.cfg.news.refresh_hours, 0.1) * 3600)
 
+    def _aside_slots(self, holes: int) -> int:
+        """How many asides a round of this length has airtime for. _news_pick plays at most one every
+        three holes, never on the first hole or the last two: five across an 18, two across a nine."""
+        return max(1, len(range(2, max(holes - 1, 3), 3)))
+
+    def _news_wanted(self, r) -> int:
+        """How many golf-news asides to write for this round. Trivia and live scores are drawn from
+        the same bucket and the same airtime (see _news_pick), so a full batch of each leaves most of
+        them unheard - and news is written with the closer's model, so it is the expensive one to
+        waste. News takes the airtime the others haven't claimed, never more than configured."""
+        nines = max(1, -(-r.holes // 9))
+        claimed = ((self.cfg.trivia.per_round if self.trivia is not None else 0)
+                   + (self.cfg.scores.per_nine * nines if self.scores is not None else 0))
+        return max(1, min(self.cfg.news.per_nine * nines, self._aside_slots(r.holes) - claimed))
+
+    async def _news_prep(self, r) -> None:
+        """Wait for the round start to settle, then write its asides. A round start can be superseded
+        seconds later (the course read corrects itself, a setup screen is reopened), and this task is
+        cancelled when it is, so settling first means a false start costs nothing: these are the
+        closer's model, the dearest calls the booth makes, and no aside can play before the second
+        hole anyway."""
+        await asyncio.sleep(NEWS_PREP_SETTLE_SECONDS)
+        if self.round is r and not r.ended:
+            await self._prepare_news(r)
+
     async def _prepare_news(self, r) -> None:
         """Write and voice this round's golf-world asides up front, with the round's richest model, so
         each plays instantly and whole when its moment comes (a live one was thin, and its reply could
         miss its voice deadline and leave the opener hanging)."""
         if not self.news.headlines:
             await self.news.refresh()
-        n = self.cfg.news.per_nine * max(1, -(-r.holes // 9))
+        n = self._news_wanted(r)
         # Nobody hears the same story twice: skip any that someone in this round already heard.
         listeners = self._listeners(r)
         heard = self.store.news_heard(listeners) if listeners else self._news_used
         picks = self.news.pick_many(self.rng, n, heard)
         # One at a time, each shown the openings already written, so they don't all start "did you see".
-        for h in picks:
+        for i, h in enumerate(picks):
+            if self.round is not r or r.ended:   # replaced or quit mid-batch: don't pay for another
+                log.info("News prep stopped after %d of %d asides: the round is over", i, len(picks))
+                return
             try:
                 bit = await self._prepare_story(h, [b.lines[0].text for b in self._news_bits])
             except Exception as e:
@@ -1413,13 +1453,34 @@ class Engine:
                                             expires=time.monotonic() + self.cfg.scores.max_age_minutes * 60))
         log.info("Scores: check-in on %s ready for hole %s: %s", item.key, r.seq, item.fact)
 
+    def _round_moment_tags(self, r) -> set[str]:
+        """Tags for what the ROUND just did, as opposed to what the ball did: a birdie or a blow-up on
+        the hole just finished, and the turn. Golf news is mostly about scoring and the state of a
+        round rather than ball flight, so without these an aside has almost nothing to land on."""
+        tags: set[str] = set()
+        if r is None:
+            return tags
+        if r.holes >= 18 and r.seq == r.holes // 2 + 1:
+            tags.add("at_the_turn")
+        last = r.seq - 1
+        if last < 1 or not (par := r.par.get(last)):
+            return tags
+        for side in r.sides:
+            if (score := r.card_score(side, last)) is None:
+                continue
+            if score - par <= -1:
+                tags.add("birdie_posted")
+            elif score - par >= 2:
+                tags.add("blow_up_posted")
+        return tags
+
     def _news_pick(self, moment: dict) -> tuple[PreparedNews, bool] | None:
         """The aside to play after this shot, if any, and whether it airs on its trigger. News, trivia
         and live scores are one bucket: on an ordinary shot, one picked at random from those ready. At
         most one every three holes, never on the first hole or the last two. A news aside held for a
-        kind of shot plays on that shot, and waits for it until the round is well along. A trivia
-        story about one hole is only ready on that hole, wherever it falls (two holes after the last
-        aside at least)."""
+        kind of shot (or for the state of the round) plays on that moment, and waits for it until the
+        round is well along. A trivia story about one hole is only ready on that hole, wherever it
+        falls (two holes after the last aside at least)."""
         r = self.round
         if not self._news_bits or r is None or r.ended or not r.seq:
             return None
@@ -2542,8 +2603,8 @@ class Engine:
         if (ch.get("rounds") or 0) >= 2 and ch.get("avg_net_to_par") is not None:
             scale = r.holes / 9   # stored per nine holes; put on this round's length
             facts.append(f"{who} on this course: {round(ch['avg_net_to_par'] * scale):+d} net over {ch['rounds']} "
-                         f"rounds this season (best {round(ch['best_net_to_par'] * scale):+d}"
-                         f"{'' if r.holes == 9 else f', scaled to {r.holes} holes'}).")
+                         f"rounds this season{'' if r.holes == 9 else f', scaled to {r.holes} holes'} "
+                         f"(best: {round(ch['best_net_to_par']):+d} net over nine holes).")
         return facts
 
     def _hole_type_fact(self, side, par: int | None) -> str | None:
@@ -3541,7 +3602,8 @@ class Engine:
         notable = score >= c.interest_threshold
         # An ordinary full shot is a quiet moment a prepared golf-world aside can follow, once its call
         # (if any) is done. Not a putt: the next putt, or the hole's wrap, is right behind it.
-        self._news_moment = {"seq": my_seq, "tags": list(tags), "routine": not notable and not shot.is_putt}
+        self._news_moment = {"seq": my_seq, "tags": [*tags, *self._round_moment_tags(r)],
+                             "routine": not notable and not shot.is_putt}
         too_soon = time.time() - self.state.last_comment_at < c.min_seconds_between_comments
         # A makeable putt always gets a word (make or miss), and so does a long lag that stopped in the
         # gimme circle (its pre-voiced "gimme" line), skipping the routine dice but still yielding to
@@ -4717,7 +4779,7 @@ class Engine:
             self._news_task.cancel()
         self._news_bits, self._news_aired, self._news_moment = [], [], None
         if self.news is not None:
-            self._news_task = asyncio.create_task(self._prepare_news(r), name="news-prep")
+            self._news_task = asyncio.create_task(self._news_prep(r), name="news-prep")
             self._news_task.add_done_callback(lambda t: t.cancelled() or t.exception())
         self._start_round_asides(r)
         # Per-round live state must not carry into a new round (a reused (idx, hole) would suppress a
@@ -5620,7 +5682,8 @@ class Engine:
                 self.store.record_round(course=r.course, fmt=r.format, side=side.key, team=side.team, holes=r.holes,
                                         stats=st, strokes=side.strokes, net_to_par=net[side.key],
                                         hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
-                                        complete=complete)
+                                        complete=complete,
+                                        first_nine=r.first_nine(st, r.hole_strokes_for(side)))
         # Per-player FIR/GIR/scrambling/sand-save for individual season stats. Alternate shot isn't
         # attributed to one player, so skip it; otherwise record each individual (distinct names from
         # this round's own shots, so a two-ball team isn't double-counted), skipping any shared-ball
@@ -5632,9 +5695,10 @@ class Engine:
             for name in names:
                 pst = r.player_stats(name, self.state.shots)
                 if pst.holes_scored:
+                    nine = r.first_nine(pst)
                     self.store.record_player_round(player=name, course=r.course, fmt=r.format, stats=pst,
                                                    hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
-                                                   complete=complete)
+                                                   complete=complete, nine_to_par=nine[0] if nine else None)
         return stats
 
     async def handle_round_end(self, event: RoundEndEvent) -> None:
@@ -5647,6 +5711,13 @@ class Engine:
             return
         r.ended = True
         self._round_ended_at = time.monotonic()
+        # Asides can no longer play, so prep still in flight is money spent on nothing. The guards in
+        # _news_prep stop it starting another story; only a cancel stops the one already running from
+        # retrying its lines and voicing them.
+        if self._news_task and not self._news_task.done():
+            self._news_task.cancel()
+        for task in list(self._aside_tasks):
+            task.cancel()
         self._shots_at_round_end = self.gspro.fires
         self.hole_number = None  # the next round starts its own count
         if self.cfg.health.enabled and self.cfg.source.type != "replay":
@@ -5655,15 +5726,24 @@ class Engine:
             except Exception:
                 log.exception("Post-round health checkup failed")
         if event.abandoned:
-            # Quit partway: no sign-off. Pre-built wrap/closer are dropped. The holes played are still
-            # recorded (marked incomplete): their per-hole stats count, and a full nine or more counts
-            # as a round in the season totals, scored per nine.
+            # Quit partway: the wrap and closer prepared for a finished round are dropped. The holes
+            # played are still recorded (marked incomplete): their per-hole stats count, and a full
+            # nine or more counts as a round in the season totals, scored per nine. A quit that far in
+            # earns a sign-off over the holes actually played; a shorter one is left alone.
             if self._closer_task and not self._closer_task.done():
                 self._closer_task.cancel()
             self._closer_branches = self._wrap_branches = None
-            self._record_round_stats(r, event.reason, complete=False)
+            stats = self._record_round_stats(r, event.reason, complete=False)
+            played = max((st.holes_scored for st in stats.values()), default=0)
+            if played < COUNTS_AS_ROUND_HOLES:
+                self._schedule_publish(after_speech=True)
+                log.info("Round %s over (%s) after %s of %s holes: no closer", r.id, event.reason, r.seq, r.holes)
+                return
+            log.info("Round %s over (%s) after %s of %s holes: signing off on the %s played",
+                     r.id, event.reason, r.seq, r.holes, played)
+            self._schedule_publish()   # the backup, if the sign-off never finishes
+            await self._sign_off(r, stats)
             self._schedule_publish(after_speech=True)
-            log.info("Round %s over (%s) after %s of %s holes: no closer", r.id, event.reason, r.seq, r.holes)
             return
         if stats_obj := getattr(self.speech, "audio_stats", None):
             log.info("%s", audio_summary(stats_obj))

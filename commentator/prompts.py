@@ -212,6 +212,12 @@ NEWS_TRIGGERS = {
     "trouble": "a ball in a bunker, the water or the trees",
     "wayward": "a wayward or mishit shot",
     "great_approach": "an approach that finds the green",
+    "long_putt": "a long putt, holed or left for the taking",
+    "pure_strike": "a flushed, perfectly struck shot",
+    "big_curve": "a shot shaped hard left or right",
+    "good_hole": "a birdie or better just posted",
+    "bad_hole": "a double bogey or worse just posted",
+    "the_turn": "the turn, with a nine behind them",
 }
 
 
@@ -246,12 +252,15 @@ def news_prompt(*, topic: str, openings=()) -> tuple[str, str]:
         "Place the story in time from when it was published and today's date: a story from a day or two "
         "ago is something they read \"yesterday\" or \"over the weekend\", not something happening now. "
         "Don't call it today's news or say it's going on right now unless it was published today.\n\n"
-        "trigger: only if the story is squarely ABOUT one of these golf moments, name it, and the aside "
-        "will be held until that kind of shot happens in the round:\n" + moments + "\n"
-        "Otherwise \"none\". Most stories are \"none\"; never stretch.\n"
+        "trigger: if the story connects naturally to one of these moments in a round, name it, and the "
+        "aside will be held until that moment comes:\n" + moments + "\n"
+        "Otherwise \"none\". Pick one whenever the link is real enough that a listener would hear it - "
+        "an aside that lands on its moment is worth far more than one dropped into silence - but don't "
+        "force a story onto a moment it has nothing to do with.\n"
         "tie_in: with a trigger, a replacement for the first line (same speaker) that bridges from that "
-        "moment into the story in your own words (\"Speaking of big hitters...\"), without describing the "
-        "shot itself: who hit it, where it went and how far aren't known yet. Empty with no trigger."
+        "moment into the story in your own words (\"Speaking of big hitters...\"), without claiming any "
+        "detail of what just happened: who it was, the number, and where it went aren't known yet. "
+        "Empty with no trigger."
         + _openings(openings)
     )
     return prompt, facts_text

@@ -151,8 +151,9 @@ the season on another machine, copy the booth PC's `logs/season.db` into this ch
 
 Rounds quit early are stored too, marked incomplete with the holes played. Their holes count
 toward per-hole and per-shot stats (birdies, GIR, scrambling); in round totals (rounds played,
-average and best net), only those with nine or more holes finished count. Net scores are
-compared per nine holes, so a 9 and an 18 line up; the commentary scales them to the round
+average and best net), only those with nine or more holes finished count. A quit that far in also
+earns a sign-off, over the holes actually played; a shorter one ends without a closer. Net scores
+are compared per nine holes, so a 9 and an 18 line up; the commentary scales them to the round
 being played.
 
 The booth uses it too: season bests and streaks in the commentary, the per-lie carry factors

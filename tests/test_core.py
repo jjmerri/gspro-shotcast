@@ -1126,6 +1126,21 @@ def test_flight_and_preshot_modes():
     assert check_line("Sarah's ball is in the sand.", "The ball is now in the sand.", "").ok
 
 
+def test_a_general_plural_of_a_hazard_the_facts_name_once_stands():
+    from commentator.grounding import check_line
+
+    # "Stay out of the trees" or "the bunkers on this course" is ordinary golf talk, not a count, so
+    # one feature in the facts backs the plural on air - and the plural in the facts backs the singular.
+    one = ("Lie: fairway. 145 yards to the pin.\n"
+           "Hole layout: a bunker right, about 20 to 40 yards out; a tree close to the left.")
+    assert check_line("Those bunkers make distance control crucial.", one, "", mode="preshot").ok
+    assert check_line("Keep it out of the trees here.", one, "", mode="preshot").ok
+    assert check_line("Mind that bunker.", "Hole layout: bunkers short of the green.", "", mode="preshot").ok
+    # Still a guess when the facts name no such feature at all.
+    assert not check_line("Keep it out of the trees here.", "Lie: fairway. 145 yards to the pin.", "",
+                          mode="preshot").ok
+
+
 def test_flight_projection_facts():
     from commentator.facts import flight_facts, to_yards
 

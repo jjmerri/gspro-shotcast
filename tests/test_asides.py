@@ -199,6 +199,81 @@ async def test_course_trivia_is_written_from_the_article_and_remembers_what_aire
     assert e.store.recent_asides("trivia", "Old Course at St Andrews")[0].startswith("Had a look")
 
 
+def test_an_aside_lands_on_what_the_round_just_did_not_only_on_ball_flight(tmp_path):
+    e = _engine(tmp_path)
+    e.cfg.news.banter_rate = 1.0
+
+    def _round(holes, seq, scores):
+        side = SimpleNamespace()
+        return SimpleNamespace(holes=holes, seq=seq, ended=False, is_league=False, sides=[side],
+                               par={h: 4 for h in scores}, card_score=lambda s, q: scores.get(q))
+
+    assert e._round_moment_tags(_round(9, 3, {1: 4, 2: 3})) == {"birdie_posted"}
+    assert e._round_moment_tags(_round(9, 3, {1: 4, 2: 6})) == {"blow_up_posted"}
+    assert e._round_moment_tags(_round(9, 3, {1: 3, 2: 5})) == set()     # only the hole just finished
+    assert e._round_moment_tags(_round(9, 1, {})) == set()               # nothing finished yet
+    assert e._round_moment_tags(None) == set()
+    assert e._round_moment_tags(_round(18, 10, {9: 4})) == {"at_the_turn"}
+    assert e._round_moment_tags(_round(9, 5, {4: 4})) == set()           # a nine has no turn
+
+    held = _bit("news", trigger="good_hole")
+    e._news_bits = [held]
+    e.round = _round(9, 3, {1: 4, 2: 3})
+    assert e._news_pick({"tags": [], "routine": False}) is None          # the tag comes with the moment
+    assert e._news_pick({"tags": ["birdie_posted"], "routine": False}) == (held, True)
+
+
+def test_an_aside_held_for_a_long_putt_doesnt_air_on_a_short_one(tmp_path):
+    # "makeable_putt" is a 3-to-12-footer. Firing a story written for a long putt on one would have
+    # the bridge line promise a moment that didn't happen.
+    from commentator.engine import NEWS_TRIGGER_TAGS
+
+    e = _engine(tmp_path)
+    e.cfg.news.banter_rate = 1.0
+    e.round = SimpleNamespace(holes=9, seq=3, ended=False, is_league=False)
+    e._news_bits = [held := _bit("news", trigger="long_putt")]
+    assert "makeable_putt" not in NEWS_TRIGGER_TAGS["long_putt"]
+    assert e._news_pick({"tags": ["putt", "makeable_putt"], "routine": False}) is None
+    assert e._news_pick({"tags": ["putt", "long_putt"], "routine": False}) == (held, True)
+
+
+async def test_news_is_written_to_the_airtime_a_round_actually_has(tmp_path):
+    llm = _AsideLLM()
+    e = _engine(tmp_path)
+    e.closer_llm = llm
+    r = SimpleNamespace(holes=18, seq=1, ended=False, is_league=False)
+    # Five quiet moments across an 18 (one every three holes, never the first or the last two), two
+    # across a nine: that is the whole bucket, not news's own share of it.
+    assert e._aside_slots(18) == 5 and e._aside_slots(9) == 2
+    assert e._news_wanted(r) == 4                                        # nothing else is switched on
+    e.trivia, e.scores = object(), object()
+    e.cfg.trivia.per_round, e.cfg.scores.per_nine = 2, 1
+    assert e._news_wanted(r) == 1                                        # 1 + 2 + 2 fills the 18
+    r.holes = 9
+    assert e._news_wanted(r) == 1                                        # never written down to nothing
+    e.cfg.news.per_nine = 0
+    assert e._news_wanted(r) == 1
+
+
+async def test_a_superseded_round_start_doesnt_pay_for_its_asides(tmp_path):
+    from commentator.engine import NEWS_PREP_SETTLE_SECONDS
+    from tests.test_round import _NewsLLM, _news_engine
+
+    assert NEWS_PREP_SETTLE_SECONDS > 0                  # the window a false start is cancelled inside
+    e = _news_engine(tmp_path, llm := _NewsLLM())
+    e.cfg.news.per_nine = 3
+    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
+    e.round = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)   # already replaced
+    await e._prepare_news(r)
+    assert llm.prompts == [] and e._news_bits == []      # not one call spent on a round that's gone
+
+    # Quitting inside the settle window leaves the round in place but ended: still nothing to write.
+    e.round = r
+    r.ended = True
+    await e._prepare_news(r)
+    assert llm.prompts == [] and e._news_bits == []
+
+
 def test_teams_can_be_named_and_listed_without_their_leagues():
     from commentator.scores import LiveScores
 

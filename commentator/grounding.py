@@ -67,10 +67,10 @@ SCENERY = ("bunker", "bunkers", "sand", "trap", "water", "lake", "pond", "creek"
 def _scenery_support(word: str) -> tuple[str, ...]:
     """The fact words that support a scenery word in a line. A lie word is backed by any of its
     synonyms (sand/bunker/trap are one lie), so a correct current-lie mention isn't rejected on
-    wording; anything else is backed only by itself."""
+    wording; anything else is backed only by itself, singular or plural."""
     bucket = LIE_WORDS.get(word) or LIE_WORDS.get(word.rstrip("s"))
     if bucket is None:
-        return (word,)
+        return (word[:-1],) if word.endswith("s") and word[:-1] in SCENERY else (word,)
     return tuple(k for k, v in LIE_WORDS.items() if v == bucket)
 
 
@@ -191,9 +191,11 @@ def check_line(
         for word in SCENERY:
             # A lie word in the line is supported by any of its synonyms in the facts: the facts say
             # "sand", the line "bunker", both are this one lie, so a correct current-lie mention stands.
+            # Either may be plural: "a bunker left" backs "the bunkers" - a general plural ("stay out of
+            # the trees") is ordinary golf talk, not a count, so it isn't held to the number seen.
             support = _scenery_support(word)
             if re.search(rf"\b{re.escape(word)}\b", lowered) and not any(
-                re.search(rf"\b{re.escape(s)}\b", facts_lower) for s in support
+                re.search(rf"\b{re.escape(s)}s?\b", facts_lower) for s in support
             ):
                 problems.append(f'"{word}": the course layout wasn\'t shown, so this is a guess')
 

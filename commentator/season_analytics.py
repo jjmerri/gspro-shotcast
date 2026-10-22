@@ -332,7 +332,10 @@ def courses(db: sqlite3.Connection, context: str | None = None, player: str | No
         if len(played) >= 9 or r["complete"]:
             c["rounds"] += 1
             to_par = sum(scores[h] - pars[h] for h in played)
-            per9 = to_par * 9 / len(played) if played else None
+            # A round quit part-way through is ranked by the nine it finished; prorating the odd
+            # holes onto a nine would make the best a score nobody shot. Older rows have no stored nine.
+            stored = r["nine_to_par"] if "nine_to_par" in r.keys() else None
+            per9 = stored if stored is not None else (to_par * 9 / len(played) if played else None)
             if per9 is not None and (c["best"] is None or per9 < c["best"]["to_par_9"]):
                 c["best"] = {"player": r["player"], "date": r["date"], "to_par": to_par, "holes": len(played),
                              "to_par_9": round(per9, 1)}
