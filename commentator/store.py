@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS shots (
     lie_before TEXT, slope_updown REAL, slope_side TEXT, slope_side_degrees REAL,
     elevation_yards REAL, to_pin TEXT, score_to_par TEXT,
     lie_after TEXT,
-    carry_raw_tile_yards REAL,                   -- GSPro CARRY (raw): flat-ground, incl. lie and altitude
+    carry_raw_tile_yards REAL,                   -- GSPro CARRY (raw): flat-ground, no lie penalty (~launch monitor carry)
     carry_game_yards REAL, total_yards REAL, offline_yards REAL,   -- GSPro, after landing
     tags TEXT,                                   -- JSON list from the interest scorer
     raw TEXT,                                    -- the Open Connect message

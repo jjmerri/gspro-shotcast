@@ -22,14 +22,14 @@ CLEAN_LIES = ("tee", "fairway")
 NO_PENALTY = ("tee", "fairway", "concrete", "cart path")
 
 # Lie penalty by launch-monitor carry in yards, as (carry, factor) points to interpolate between.
-# Sand and deep rough come from community measurements on GSPro 3.1.x before Physics 2.0
-# (marcusta/sig-gsp liePenalties.ts); rough from the same source and two real frames (0.94-0.96).
-# The sand curve is why a greenside bunker shot plays so much shorter than a fairway bunker one.
+# Measured on the league's own GSPro (397 shots with both raw and game carry tiles, elevation taken
+# out): sand keeps ~0.73 at 30 yards up to ~0.91 at 155, so greenside bunkers play much shorter
+# than fairway ones; rough keeps ~0.90 and deep rough ~0.72 at every distance. Pine straw is a
+# starting guess (too few shots yet). Shots on each course keep refining these per carry band.
 DEFAULT_CURVES: dict[str, list[tuple[float, float]]] = {
-    "sand": [(13, 0.50), (32, 0.62), (55, 0.74), (80, 0.84), (119, 0.93)],
-    "deep rough": [(13, 0.75), (133, 0.75), (152, 0.70), (162, 0.64)],
-    "rough": [(0, 0.94)],
-    # Low penalty per the league; the exact figure is a starting guess for learning to correct.
+    "sand": [(29, 0.73), (55, 0.80), (109, 0.88), (155, 0.91)],
+    "deep rough": [(0, 0.72)],
+    "rough": [(0, 0.90)],
     "pine straw": [(0, 0.97)],
 }
 MIN_SAMPLES = 3

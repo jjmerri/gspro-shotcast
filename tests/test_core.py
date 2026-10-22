@@ -1231,9 +1231,9 @@ async def test_impact_uses_preshot_plan_without_a_model_call(tmp_path):
                     speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0), await_preshot=True)
     await engine.run()
     said = (next(tmp_path.glob("transcript-*")).read_text())
-    # Scenario A: rough penalty plus a pin 4.8 yards uphill. GSPro carried it short and it rolled up to
-    # 10 feet, which the roll-out projection now calls on target rather than short.
-    assert "Right at it 1, looks good." in said
+    # Scenario A: rough plus a pin 4.8 yards uphill. This older-GSPro frame kept 0.96 of its carry and
+    # rolled to 10 feet, but the league's measured rough default (0.90) projects it short.
+    assert "Needs 1 legs." in said
     assert "into dangerous country" in said  # scenario B: the left_trouble branch, generic (text-only)
     assert "right now." in said  # scenario C
     assert "IN FLIGHT" not in calls
@@ -1251,9 +1251,9 @@ def test_carry_model_penalties_depend_on_the_shot():
         m.observe("concrete", raw, raw * 0.8)  # never learned away from no penalty
     assert m.factor("concrete", 155) == 1.0
     # Same Sand surface, very different penalty: a greenside splash vs a full fairway-bunker shot.
-    assert m.factor("sand", 13) == 0.5 and m.factor("sand", 160) == 0.93
-    assert 0.6 < m.factor("sand", 30) < 0.65
-    assert m.factor("deep rough", 100) == 0.75 and m.factor("deep rough", 170) == 0.64
+    assert m.factor("sand", 13) == 0.73 and m.factor("sand", 160) == 0.91
+    assert 0.78 < m.factor("sand", 50) < 0.79  # greenside bunkers play shorter than fairway ones
+    assert m.factor("deep rough", 100) == m.factor("deep rough", 170) == 0.72
     assert CarryModel({"rough": 0.9}).factor("rough", 150) == 0.9  # config override
 
 
@@ -1269,7 +1269,7 @@ def test_carry_model_learns_course_baseline_and_lie_bands():
     for raw in (150, 155, 160):
         m.observe("rough", raw, raw * 0.9 * m.baseline("Hill Top"), "Hill Top", vla=18)
     assert 0.89 < m.penalty("rough", 155, 18) < 0.91
-    assert m.penalty("rough", 250, 10) == 0.94  # other bands keep the default until they have data
+    assert m.penalty("rough", 250, 10) == 0.90  # other bands keep the default until they have data
     assert 0.94 < m.factor("rough", 155, "Hill Top", 18) < 0.97
     m.observe("rough", 150, 20, "Hill Top")  # mis-read tile ignored
     assert 0.89 < m.penalty("rough", 155, 18) < 0.91
