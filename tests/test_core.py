@@ -2471,6 +2471,21 @@ def test_finish_capture_uses_the_next_shots_impact_snapshot(tmp_path):
     engine._resolve_pending_finish(0, ({0: 350.0}, {0: 1}, {0: 1}, {}, {}, 1, {}))   # new hole, +1 hole-out
     assert store.db.execute("SELECT finish_yards FROM shots WHERE id=?", (sid2,)).fetchone()["finish_yards"] == 0.0
 
+    # The log lagging onto a new tee: at the tee shot it still shows the last hole with the ball by the
+    # cup (0.6 m, against the screen's 188.5 yards), and that hole's hole-out lands by the next shot.
+    # That's not this tee shot holing out; the finish is left for the next stroke's distance instead.
+    sid3 = rec()
+    engine._pending_finish[0] = (sid3, {**engine._idx_snap(({0: 0.6}, {0: 0}, {0: 0}, {}, {}, 0, {}), 0),
+                                        "hud_yards": 188.5})
+    engine._resolve_pending_finish(0, ({0: 22.7}, {0: 1}, {0: 1}, {}, {}, 1, {}))
+    assert store.db.execute("SELECT finish_yards FROM shots WHERE id=?", (sid3,)).fetchone()["finish_yards"] is None
+    # The two agreeing is the normal case, and still resolves.
+    sid4 = rec()
+    engine._pending_finish[0] = (sid4, {**engine._idx_snap(({0: 137.16}, {0: 0}, {}, {}, {}, 0, {}), 0),
+                                        "hud_yards": 150.0})
+    engine._resolve_pending_finish(0, ({0: 13.716}, {0: 0}, {}, {}, {}, 0, {}))
+    assert abs(store.db.execute("SELECT finish_yards FROM shots WHERE id=?", (sid4,)).fetchone()["finish_yards"] - 15.0) < 0.1
+
 
 async def test_stakes_facts_fire_late_and_read_the_card(tmp_path):
     from commentator.hud import OtherPlayer

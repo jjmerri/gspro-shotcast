@@ -3434,7 +3434,8 @@ class Engine:
         # Not gated on the screen seeing touchdown: the finish comes from GSPro's log at the next shot,
         # and a water or OB ball is caught there by its penalty. (Gating on it lost half the finishes.)
         if in_order and not shot.is_putt:
-            self._pending_finish[idx] = (shot_id, self._idx_snap(impact_snap, idx))
+            self._pending_finish[idx] = (shot_id, {**self._idx_snap(impact_snap, idx),
+                                                   "hud_yards": to_yards(before.to_pin)})
         if in_order:
             snap = self._idx_snap(impact_snap, idx)
             self._last_row[idx] = (shot_id, rec, snap["hole"], snap["pen"], snap["dropped"])
@@ -3805,6 +3806,11 @@ class Engine:
             return   # a scramble picked another ball: this one's resting spot was never logged
         if before["hole"] is None:
             return   # the shot's hole was unknown (log not tailed yet); can't compare, so don't guess
+        hud, logged = before.get("hud_yards"), before["to_pin_m"]
+        if hud is not None and logged is not None and abs(logged * M_TO_YD - hud) > max(5.0, 0.2 * hud):
+            # The log hadn't caught up to this shot: on a new tee it can still show the last hole, ball
+            # by the cup, so that hole's hole-out landing next would read as this shot holing out.
+            return
         if after["hole"] != before["hole"]:              # the shot ended the hole
             if after["outs"] > before["outs"]:
                 self.store.set_shot_result(prev_id, finish_yards=0.0)                  # holed
