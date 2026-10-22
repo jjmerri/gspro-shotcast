@@ -462,6 +462,7 @@ class Engine:
         # The lie read at each setup, while the player stood over the ball, by _setup_key: the impact
         # read comes ~3 s after the swing, when the lie box may already show where the ball landed.
         self._setup_lies: dict[tuple, str] = {}
+        self._setup_slopes: dict[tuple, tuple] = {}   # (up/down, side, side degrees) by setup key
         # (who, shot) -> whether that stroke's setup showed the distance in yards: GSPro shows yards off
         # the green and feet on it. Kept apart from the distance, which switches to feet when the player
         # changes to putt mode, so a later read in feet can't hide a setup off the green.
@@ -838,6 +839,10 @@ class Engine:
                 del self._setup_lies[next(iter(self._setup_lies))]
         hud.slope_updown, hud.slope_side = extra.slope_updown, extra.slope_side
         hud.slope_side_degrees = extra.slope_side_degrees
+        if (hud.slope_updown is not None or hud.slope_side) and (key := _setup_key(hud)):
+            self._setup_slopes[key] = (hud.slope_updown, hud.slope_side, hud.slope_side_degrees)
+            while len(self._setup_slopes) > 8:
+                del self._setup_slopes[next(iter(self._setup_slopes))]
         if "others" in rest:
             hud.others = extra.others
         player = self._player(hud.player_text, None)
@@ -3757,6 +3762,10 @@ class Engine:
         if (setup_lie := self._setup_lies.get(_setup_key(before))) and setup_lie != before.lie:
             log.info("%s lie %s at setup (the impact read, after the swing, said %s)", tag, setup_lie, before.lie)
             before.lie = setup_lie
+        # The slope box is read only at setup (the impact read skips it): carry it over for the record.
+        if (slope := self._setup_slopes.get(_setup_key(before))) and before.slope_updown is None \
+                and not before.slope_side:
+            before.slope_updown, before.slope_side, before.slope_side_degrees = slope
 
     def _set_up_in_yards(self, before: Hud) -> bool:
         """Whether this stroke was set up off the green: GSPro shows the distance in yards there and in
@@ -4278,6 +4287,7 @@ class Engine:
         self.state.current_hole = event.current
         self._last_hud_shot = {}  # stroke counts start over on a new hole
         self._setup_lies.clear()   # a stroke's key (who, shot, distance) can recur on another hole
+        self._setup_slopes.clear()
         self._setup_yards.clear()
         self.current_course = event.course or self.current_course
         if m := re.search(r"par (\d)", event.current, re.IGNORECASE):

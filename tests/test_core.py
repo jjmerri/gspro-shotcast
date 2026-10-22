@@ -2314,6 +2314,20 @@ async def test_emit_setup_reads_the_hud_before_the_model_and_skips_others_off_th
     raws, facts_text = await event.model_task
     assert "Player:" in facts_text and raws.get("line") and raws.get("branches")  # pre-shot calls ran
     assert engine._events.empty()  # a non-tee setup posts no round-start
+    # The slope is read only here, so it's kept for the shot record, even half a reading (up/down missed).
+    real = screen.read_hud_async
+
+    async def side_only(parts):
+        hud = await real(parts)
+        hud.slope_updown = None
+        return hud
+
+    screen.read_hud_async = side_only
+    await engine._emit_setup(Hud(player_text="Toby 3rd (+1) Shot 3 40 YDS", shot_number=3, score_to_par="+1",
+                                 to_pin="40 yards"))
+    impact = Hud(player_text="Toby 3rd (+1) Shot 3 40 YDS", shot_number=3, to_pin="40 yards")
+    engine._use_setup_lie(impact)
+    assert (impact.slope_updown, impact.slope_side, impact.slope_side_degrees) == (None, "left", 1.0)
 
 
 def test_finish_capture_uses_the_next_shots_impact_snapshot(tmp_path):
@@ -3236,13 +3250,16 @@ def test_a_stroke_set_up_in_yards_is_off_the_green(tmp_path):
 def test_the_impact_lie_is_the_one_read_at_setup(tmp_path):
     e = _mini_engine(tmp_path)
     e._setup_lies[("Josh", 2, "10.8 yards")] = "fairway"
+    e._setup_slopes[("Josh", 2, "10.8 yards")] = (-4.2, "right", 3.2)
     # 3 s after the chip the lie box shows the green it landed on; the setup read the fringe-side fairway.
     hud = Hud(player_text="Josh 2nd (-1) Shot 2 10.8 YDS", shot_number=2, to_pin="10.8 yards", lie="green")
     e._use_setup_lie(hud)
     assert hud.lie == "fairway"
+    assert (hud.slope_updown, hud.slope_side, hud.slope_side_degrees) == (-4.2, "right", 3.2)   # saved with the shot
     other = Hud(player_text="Sam 2nd Shot 2 8.3 YDS", shot_number=2, to_pin="8.3 yards", lie="green")
     e._use_setup_lie(other)
     assert other.lie == "green"   # no setup read for this stroke: the impact read stands
+    assert other.slope_updown is None
 
 
 def test_strategy_fact_is_offered_at_most_once_a_hole(tmp_path):
