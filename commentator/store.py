@@ -431,7 +431,7 @@ class Store:
         # Each player's next stroke (by impact time: rows are written as shot handlers finish, which
         # can be out of order; a mulligan was taken back): if it's the very next
         # stroke on the same hole, its pin elevation, less this one's, is where this ball came to rest
-        # (the pin doesn't move). Not where it may be a partner's ball (a scramble, shamble, alternate shot).
+        # (the pin doesn't move), if it was played from this ball.
         next_of: dict[int, sqlite3.Row] = {}
         last: dict[tuple, sqlite3.Row] = {}
         rows.sort(key=lambda r: (r["ts"] or 0, r["id"]))
@@ -442,8 +442,8 @@ class Store:
             if who in last:
                 next_of[last[who]["id"]] = r
             last[who] = r
-        def own_ball_unsure(r) -> bool:   # either stroke flagged: a team format may show itself late
-            return r["fmt"] == "scramble" or not r["attributed"] or bool(r["shared_ball"])
+        def shared(r) -> bool:   # a team format where GSPro copies balls between teammates
+            return r["fmt"] == "scramble" or bool(r["shared_ball"])
 
         out = []
         for r in rows:
@@ -457,10 +457,14 @@ class Store:
             else:
                 continue
             elev, rest_rise = r["elevation_yards"], None
-            if elev is not None and not r["mulligan"] and not own_ball_unsure(r):
-                nxt = next_of.get(r["id"])
-                if nxt is not None and not own_ball_unsure(nxt) and self._same_hole_next(r, nxt) \
-                        and nxt["shot_number"] == r["shot_number"] + 1:
+            # Either stroke may be the first to show a team format. There, the next stroke is from this
+            # ball only if the team picked it: in a scramble the booth records a finish only for the
+            # picked ball (the store never fills one in), so a finish says so. Alternate shot: no.
+            nxt = next_of.get(r["id"])
+            own_ball = nxt is not None and r["attributed"] and nxt["attributed"] and (
+                not shared(r) and not shared(nxt) or r["fmt"] == "scramble" and r["finish_yards"] is not None)
+            if elev is not None and not r["mulligan"]:
+                if own_ball and self._same_hole_next(r, nxt) and nxt["shot_number"] == r["shot_number"] + 1:
                     if nxt["elevation_yards"] is not None:
                         rest_rise = elev - nxt["elevation_yards"]
                 elif r["finish_yards"] == 0:

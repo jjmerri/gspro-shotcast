@@ -528,7 +528,7 @@ class Engine:
         # how high it came to rest (that stroke's pin elevation, as the pin doesn't move) before it
         # teaches the carry model. Shot handlers can finish out of order, so entries are kept sorted by
         # shot sequence: player -> [[seq, (round, hole, shot number), elevation, to pin, observe args
-        # (None once learned, or for a putt), another ball may follow (scramble)]].
+        # (None once learned, or for a putt), (shared-ball format?, balls dropped so far)]].
         self._carry_trail: dict[str, list] = {}
         # Per player, a commentator's call (commentator key, predicted make?, hole at commit) on that
         # player's current putt, committed only when the pre-shot line airs and graded against the
@@ -3244,16 +3244,20 @@ class Engine:
         if self.gspro.altitude_ft is not None and self.current_course \
                 and self.current_course not in self.cfg.commentary.course_altitude_ft:
             self.carry.altitude[self.current_course] = self.gspro.altitude_ft   # beats the course file's
-        # A team format where GSPro copies balls between teammates: the next stroke may be a partner's ball.
+        # A team format where GSPro copies balls between teammates: the next stroke may be a partner's
+        # ball, unless GSPro dropped none of this player's balls in between (their own was picked).
         shared = bool(shot_round and (shot_round.format == "scramble" or shot_round.no_scramble)
                       or self.gspro.team_scores)
+        unnamed = not player or player == "unknown" or self._anonymous(player)
+        carry_idx = None if unnamed else self._gspro_idx(player)
+        dropped = None if carry_idx is None else impact_snap[7].get(carry_idx, 0)
         learn = None
         if carry_game:
             learn_base, learn_carry = ("gspro", carry_flat) if carry_flat else ("lm", self._raw_yards(shot))
             learn = (before.lie, learn_carry, carry_game, self.current_course, shot.vla, learn_base)
         self._trail_carry(player, (my_seq, (shot_round.id if shot_round else None, shot_hole, before.shot_number),
                                    before.elevation_yards, to_yards(before.to_pin), learn,
-                                   shared or not player or player == "unknown"))
+                                   (shared or unnamed, dropped)))
         if flight_task:
             try:
                 await flight_task  # bounded by the flight deadline; keeps the call ahead of the reaction
@@ -3668,8 +3672,7 @@ class Engine:
 
     def _trail_carry(self, player: str | None, entry: tuple) -> None:
         """Add a stroke to the player's trail in shot order, and teach the carry model from every full
-        shot that now has its next stroke. A scramble's (or unnamed player's) next stroke may be another
-        ball, so those only get the near-pin rule."""
+        shot that now has its next stroke from the same ball; the rest only get the near-pin rule."""
         trail = self._carry_trail.setdefault(player or "unknown", [])
         bisect.insort(trail, list(entry), key=lambda e: e[0])
         # Every shot whose next stroke is in now learns from it. Strokes stay a while after (learned or
@@ -3677,8 +3680,7 @@ class Engine:
         # never shows (a mulligan, a penalty, an unread stroke number) gets the fallback once it ages out.
         for e, nxt in zip(trail, trail[1:]):
             if e[4] and self._next_stroke(e[1], nxt[1]):
-                # Either flagged: a team format may have shown itself only at the next stroke.
-                self._learn_carry(*e[1:4], e[4], *(() if e[5] or nxt[5] else nxt[1:3]))
+                self._learn_carry(*e[1:4], e[4], *(nxt[1:3] if self._own_ball_next(e[5], nxt[5]) else ()))
                 e[4] = None
         while len(trail) > self.CARRY_TRAIL:
             _, key, elev, pin, args, _other = trail.pop(0)
@@ -3686,6 +3688,16 @@ class Engine:
                 self._learn_carry(key, elev, pin, args)
 
     CARRY_TRAIL = 4
+
+    @staticmethod
+    def _own_ball_next(ball: tuple, next_ball: tuple) -> bool:
+        """The next stroke was played from this shot's ball. Each is (shared-ball format?, balls GSPro
+        has dropped for the player so far, None if unknown). Either stroke may be the first to show a
+        team format, so a shared one needs both counts known and equal: no partner's ball was copied
+        onto the player in between (their own was the one picked)."""
+        if not ball[0] and not next_ball[0]:
+            return True
+        return ball[1] is not None and ball[1] == next_ball[1]
 
     @staticmethod
     def _next_stroke(key: tuple, next_key: tuple | None) -> bool:

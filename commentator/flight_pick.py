@@ -127,9 +127,10 @@ class Projection:
 # strike doesn't project a runaway. Without spin, a typical share for the club.
 ROLL_SPIN_FACTOR = 360.0
 ROLL_SHARE_MIN, ROLL_SHARE_MAX = 0.02, 0.08
-# A yard of rise plays well under a yard longer: a 6-yard-uphill lob wedge called "short" finished
-# 13 feet away, so rise counts at this rate (a drop still plays yard for yard).
-UPHILL_YARDS_PER_YARD = 0.6
+# A yard of rise plays a bit under a yard longer: on the league's approaches GSPro's carry lost a
+# median 0.86 yards per yard the pin sat above the ball (36 shots; a 6-yard-uphill lob wedge that
+# finished 13 feet away needs no more than this). A drop plays yard for yard.
+UPHILL_YARDS_PER_YARD = 0.85
 
 
 def _roll_share(shot: Shot) -> float:
