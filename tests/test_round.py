@@ -1565,6 +1565,35 @@ async def test_a_news_aside_gets_more_words_than_a_live_line(tmp_path):
     assert e._news_bits and e._news_bits[0].lines[0].text.endswith("I must say.")
 
 
+async def test_a_news_story_isnt_told_again_to_anyone_who_heard_it(tmp_path):
+    from types import SimpleNamespace
+
+    def _round(*players):
+        return SimpleNamespace(holes=9, seq=1, ended=False, is_league=False,
+                               sides=[SimpleNamespace(players=[p]) for p in players])
+
+    e = _news_engine(tmp_path, llm := _NewsLLM())
+    e.cfg.news.banter_rate = 1.0
+    e.speech.is_idle = lambda: True
+    e.round = r = _round("Tony", "Sarah")
+    await e._prepare_news(r)
+    r.seq, e._shot_seq = 6, 1
+    assert await e._news_after_shot({"seq": 1, "tags": [], "routine": True})
+    assert e.store.news_heard(["Sarah"]) == {"Scheffler wins by five"}
+
+    e.round = r = _round("Tony", "Mike")             # Tony heard it, so nobody in this round gets it
+    await e._prepare_news(r)
+    assert e._news_bits == []
+    e.round = r = _round("Mike", "Dave")             # nobody here has heard it
+    llm.opening, llm.reply = "Scheffler won on Sunday, by five shots.", "Nobody else got near him, Nigel."
+    await e._prepare_news(r)
+    assert [b.title for b in e._news_bits] == ["Scheffler wins by five"]
+    r.seq, e._news_aired = 6, []                       # a new round starts with no asides aired
+    r.sides.append(SimpleNamespace(players=["Sarah"]))   # named mid-round, and she's heard it
+    assert not await e._news_after_shot({"seq": 1, "tags": [], "routine": True})
+    assert e._news_bits == []
+
+
 def test_a_held_aside_waits_for_its_shot_and_asides_are_spaced(tmp_path):
     from types import SimpleNamespace
 

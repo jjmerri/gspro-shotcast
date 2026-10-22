@@ -76,6 +76,13 @@ CREATE TABLE IF NOT EXISTS asides (                  -- course trivia and score 
     topic TEXT NOT NULL,
     text TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS news_heard (              -- golf-news stories that aired, per player in the room
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES sessions(id),
+    ts REAL NOT NULL,
+    player TEXT NOT NULL,
+    title TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS rounds (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES sessions(id),
@@ -655,6 +662,20 @@ class Store:
         self.db.execute("INSERT INTO asides (session_id, ts, kind, topic, text) VALUES (?, ?, ?, ?, ?)",
                         (self.session_id, time.time(), kind, topic, text))
         self.db.commit()
+
+    def record_news_heard(self, players: list[str], title: str) -> None:
+        now = time.time()
+        self.db.executemany("INSERT INTO news_heard (session_id, ts, player, title) VALUES (?, ?, ?, ?)",
+                            [(self.session_id, now, p, title) for p in players])
+        self.db.commit()
+
+    def news_heard(self, players: list[str]) -> set[str]:
+        """Titles of the stories any of these players has already heard from the booth."""
+        if not players:
+            return set()
+        rows = self.db.execute(
+            f"SELECT DISTINCT title FROM news_heard WHERE player IN ({','.join('?' * len(players))})", players)
+        return {r["title"] for r in rows}
 
     def recent_asides(self, kind: str, topic: str, limit: int = 12) -> list[str]:
         """What the booth has already told on this topic (a course's trivia), most recent first."""

@@ -408,7 +408,7 @@ class Engine:
         self._news_bits: list[PreparedNews] = []    # this round's asides, written and voiced at the start
         self._news_task: asyncio.Task | None = None
         self._news_aired: list[int] = []            # round hole seqs an aside played on
-        self._news_used: set[str] = set()           # stories already used this session
+        self._news_used: set[str] = set()           # stories aired this session (for a round with no known players)
         self._news_moment: dict | None = None       # the last shot, for the aside that may follow it
         # Live scores and course trivia: more asides, sharing the news asides' slots and spacing.
         self.scores = LiveScores(cfg.scores.tours, cfg.scores.teams) if cfg.scores.enabled and self.commentary_on \
@@ -1162,8 +1162,10 @@ class Engine:
         if not self.news.headlines:
             await self.news.refresh()
         n = self.cfg.news.per_nine * max(1, -(-r.holes // 9))
-        picks = self.news.pick_many(self.rng, n, self._news_used)
-        self._news_used |= {h.title for h in picks}
+        # Nobody hears the same story twice: skip any that someone in this round already heard.
+        listeners = self._listeners(r)
+        heard = self.store.news_heard(listeners) if listeners else self._news_used
+        picks = self.news.pick_many(self.rng, n, heard)
         # One at a time, each shown the openings already written, so they don't all start "did you see".
         for h in picks:
             try:
@@ -1406,6 +1408,12 @@ class Engine:
         if self.round is not r or r.ended or r.seq != seq or self.hole_number != hole \
                 or (bit.expires is not None and bit.expires <= time.monotonic()):
             return False
+        # The roster can change mid-round (a guest named, a scramble regrouped): recheck who's listening.
+        if bit.kind == "news":
+            listeners = self._listeners(r)
+            if bit.title in (self.store.news_heard(listeners) if listeners else self._news_used):
+                self._news_bits.remove(bit)
+                return False
         first = (bit.tie, bit.tie_audio) if on_trigger else (bit.lines[0], bit.audio[0])
         items = [first, (bit.lines[1], bit.audio[1])]
         self._news_bits.remove(bit)
@@ -1422,8 +1430,15 @@ class Engine:
             self.store.record_aside("score", bit.topic, " ".join(l.text for l in lines))
             log.info("Score check-in: %r", bit.title)
         else:
+            self._news_used.add(bit.title)
+            self.store.record_news_heard(self._listeners(self.round), bit.title)
             log.info("News aside%s: %r", f" on a {bit.trigger.replace('_', ' ')}" if on_trigger else "", bit.title)
         return True
+
+    @staticmethod
+    def _listeners(r) -> list[str]:
+        """Everyone playing this round (both partners on a one-ball team), by roster name."""
+        return sorted({p for side in getattr(r, "sides", None) or [] for p in side.players})
 
     async def _drain_speech(self, timeout: float | None = None) -> None:
         deadline = None if timeout is None else time.monotonic() + timeout
