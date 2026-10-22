@@ -808,6 +808,61 @@ def test_classify_round_separates_league_from_practice(tmp_path):
     assert practice and "Rando" in practice
 
 
+async def test_a_practice_booking_makes_a_league_looking_round_practice(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    import httpx
+
+    from commentator import booking
+    from commentator.booking import Bookings
+
+    rows = [{"start": "2026-10-21T17:00", "finish": "2026-10-21T18:00", "field_1_r": "Practice", "deleted": False},
+            {"start": "2026-10-21T19:00", "finish": "2026-10-21T21:00", "field_1_r": "League Week 1", "deleted": False},
+            {"start": "2026-10-21T18:00", "finish": "2026-10-21T19:00", "field_1_r": "Practice", "deleted": True}]
+    seen = {}
+
+    def handler(request):
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"bookings": rows})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(booking.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    e = _engine(tmp_path)
+    e.bookings = b = Bookings("GolfShed", 792418, "k", slack_minutes=30)
+    await b.refresh(datetime(2026, 10, 21, 17, 30))
+    assert seen["auth"].startswith("Basic ") and len(b.bookings) == 2   # the deleted one is dropped
+
+    monkeypatch.setattr(b, "at", lambda: Bookings.at(b, datetime(2026, 10, 21, 18, 20)))   # just over a practice
+    _, practice = e._classify_round(["MikeD"], "Wynn")
+    assert practice and "booked for practice" in practice
+    monkeypatch.setattr(b, "at", lambda: Bookings.at(b, datetime(2026, 10, 21, 18, 45)))   # nearer the league block
+    entry, practice = e._classify_round(["MikeD"], "Wynn")
+    assert practice is None and entry["week"] == 3
+    monkeypatch.setattr(b, "at", lambda: Bookings.at(b, datetime(2026, 10, 21, 22, 0)))    # no booking: as before
+    assert e._classify_round(["MikeD"], "Wynn")[1] is None
+    e.cfg.commentary.round_week = 3                                     # a forced week beats the booking
+    monkeypatch.setattr(b, "at", lambda: Bookings.at(b, datetime(2026, 10, 21, 17, 30)))
+    assert e._classify_round(["MikeD"], "Wynn")[1] is None
+    e.cfg.commentary.round_week = None
+
+    # A league opener written before the practice booking was read doesn't air over the load.
+    from commentator.engine import PendingOpening
+
+    e._pending_opening = PendingOpening("Wynn", frozenset({"Aces"}), frozenset({"Mike"}), True, None, [],
+                                        awaiting_load=True, roster_key=e._roster_key(["MikeD"]))
+    assert not e._front_loaded_fits("Wynn", ["MikeD"])
+    monkeypatch.setattr(b, "at", lambda: Bookings.at(b, datetime(2026, 10, 21, 22, 0)))
+    assert e._front_loaded_fits("Wynn", ["MikeD"])
+
+    # SuperSaaS unreachable: the last list is dropped, not trusted, so the schedule decides.
+    def down(request):
+        return httpx.Response(503)
+
+    monkeypatch.setattr(booking.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(down), **kw))
+    await b.refresh(datetime(2026, 10, 21, 17, 30))
+    assert b.bookings is None and Bookings.at(b, datetime(2026, 10, 21, 17, 30)) is None
+
+
 def test_classify_round_rejects_a_round_past_its_due_date(tmp_path):
     e = _engine(tmp_path)
     e.league = League({"teams": [{"name": "Aces", "players": [

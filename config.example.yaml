@@ -112,6 +112,16 @@ squabbit:
                           # and "squabbit_invite" in the league file)
   timeout_seconds: 15     # if Squabbit is slow or offline, the league file's handicaps stand
 
+booking:
+  enabled: false          # read the sim's SuperSaaS bookings (needs SUPERSAAS_API_KEY in .env): a
+                          # round in a "Practice" booking is practice; "League Week N" or no booking
+                          # leaves the schedule matching to decide
+  account: ""             # SuperSaaS account name, e.g. GolfShed
+  schedule_id:            # the schedule's ID (end of its Configure page URL), e.g. 792418
+  type_field: field_1_r   # the booking field with the League/Practice dropdown
+  slack_minutes: 30       # a round this long before or after a booking still counts as in it
+  refresh_minutes: 5
+
 screen:
   monitor: 1
   capture: monitor           # framebuffer grab (never stalls GSPro). "window" is occlusion-proof

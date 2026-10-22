@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import re
 import sys
@@ -36,6 +37,7 @@ from .prompts import (
     wrap_recap_prompt, hole_intro_prompt, scores_prompt, trivia_prompt, trivia_schema,
 )
 from .board import Board, place
+from .booking import Bookings
 from .history import History
 from .news import GolfNews
 from .scores import LiveScores
@@ -414,6 +416,7 @@ class Engine:
         self.scores = LiveScores(cfg.scores.tours, cfg.scores.teams) if cfg.scores.enabled and self.commentary_on \
             else None
         self.trivia = CourseTrivia(cfg.trivia.pages) if cfg.trivia.enabled and self.commentary_on else None
+        self.bookings = self._make_bookings()
         self._score_holes: list[int] = []           # round hole seqs a live score is written for as they start
         self._score_said: dict[str, list[str]] = {}  # event key -> what the booth said about it, this session
         self._score_written: set[str] = set()       # "key@version": scores already written up, this session
@@ -611,6 +614,8 @@ class Engine:
             asyncio.create_task(self._news_loop(), name="news")
         if self.weather is not None:
             asyncio.create_task(self._weather_loop(), name="weather")
+        if self.bookings is not None:
+            asyncio.create_task(self._bookings_loop(), name="bookings")
         tasks = [asyncio.create_task(self.speech.run(), name="speech")]
         if self.source is not None:
             tasks.append(asyncio.create_task(self._pump_source(), name="source"))
@@ -1139,6 +1144,22 @@ class Engine:
         while True:
             await self.weather.refresh()
             await asyncio.sleep(max(self.cfg.weather.refresh_minutes, 1.0) * 60)
+
+    def _make_bookings(self) -> Bookings | None:
+        b = self.cfg.booking
+        if not b.enabled:
+            return None
+        key = os.environ.get("SUPERSAAS_API_KEY", "").strip()
+        if not (key and b.account and b.schedule_id):
+            log.warning("SuperSaaS bookings are on but %s; rounds are classified without them",
+                        "SUPERSAAS_API_KEY isn't set" if not key else "booking.account or schedule_id isn't set")
+            return None
+        return Bookings(b.account, b.schedule_id, key, b.type_field, b.slack_minutes)
+
+    async def _bookings_loop(self) -> None:
+        while True:
+            await self.bookings.refresh()
+            await asyncio.sleep(max(self.cfg.booking.refresh_minutes, 1.0) * 60)
 
     def _weather_facts(self, rate: float = 1.0) -> list[str]:
         """The weather outside, when it's configured, fresh, and (between holes) this exchange's turn."""
@@ -4425,6 +4446,9 @@ class Engine:
         if not self.league.data.get("schedule"):
             return {}, None  # no schedule configured: treat any round as the round
         forced = self.league.week_entry(c.round_week) if c.round_week else None
+        # A round in a practice booking is practice, even on this week's course with a full team.
+        if not forced and self.bookings and (b := self.bookings.at()) and b.practice:
+            return {}, f"the sim is booked for practice {b.start:%H:%M}-{b.finish:%H:%M} on SuperSaaS"
         entry = forced
         if not entry:
             # Course only: schedule_entry falls back to a date match, which would wrongly claim an
@@ -5181,7 +5205,9 @@ class Engine:
         return (p.roster_key == self._roster_key(roster) and bool(p.course) and bool(course)
                 and course_match_score(p.course, course) >= 0.6
                 and (self._setup_holes is None or (p.round.start_hole, p.round.holes) == self._setup_holes)
-                and (self._setup_format != "scramble" or p.round.format == "scramble"))
+                and (self._setup_format != "scramble" or p.round.format == "scramble")
+                # Still the same kind of round: a practice booking can turn up after it was written.
+                and (self._classify_round(roster, course)[1] is None) == p.is_league)
 
     async def _prepare_speculative_round(self, course: str, names: list[str], air: bool = True,
                                          gen: int | None = None, slot_names: list[str] | None = None,

@@ -315,6 +315,20 @@ class SquabbitConfig(BaseModel):
     timeout_seconds: float = 15.0
 
 
+class BookingConfig(BaseModel):
+    # The sim's SuperSaaS schedule, read so a round played in a "Practice" booking is practice even
+    # on this week's course with a full team. A "League Week N" booking, or no booking, leaves the
+    # usual schedule matching to decide. Needs SUPERSAAS_API_KEY (the account's API key, Account Info
+    # page) in the booth .env. Off by default.
+    enabled: bool = False
+    account: str = ""            # the SuperSaaS account name, e.g. GolfShed
+    schedule_id: int | None = None   # the number at the end of the schedule's Configure page URL
+    type_field: str = "field_1_r"    # the booking field holding the League/Practice dropdown
+    # A round this close before a booking starts or after it ends still counts as in it.
+    slack_minutes: float = 30.0
+    refresh_minutes: float = 5.0
+
+
 class SourceConfig(BaseModel):
     # connector_log: follow GSPconnect's debug log (Uneekor and other built-in connectors). Falls
     #   back to gspro_log when that log doesn't exist.
@@ -623,6 +637,7 @@ class Config(BaseModel):
     screen: ScreenConfig = Field(default_factory=ScreenConfig)
     source: SourceConfig = Field(default_factory=SourceConfig)
     squabbit: SquabbitConfig = Field(default_factory=SquabbitConfig)
+    booking: BookingConfig = Field(default_factory=BookingConfig)
     commentary: CommentaryConfig = Field(default_factory=CommentaryConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
     weather: WeatherConfig = Field(default_factory=WeatherConfig)

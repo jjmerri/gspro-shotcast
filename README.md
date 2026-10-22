@@ -69,6 +69,11 @@ pull each player's live handicap, give strokes exactly as Squabbit does, and kno
 teams have posted this week and where the season standings sit; see
 [Leagues, formats and handicaps](docs/leagues.md#rounds-formats-and-handicaps).
 
+If the sim is booked through [SuperSaaS](https://www.supersaas.com), the booth can also read its
+bookings (optional, off by default, `booking:` in `config.yaml`, an API key in `.env`). A round
+played in a booking marked "Practice" is called as practice, even on this week's course with a full
+team; any other booking, or none, leaves the usual league matching to decide.
+
 Excerpts from real league nights. The opener:
 
 > **Nigel:** Good evening, and welcome to the Tuesday Night Sim League, week six, the back nine at Cabot Cliffs.<br>
@@ -177,7 +182,7 @@ split league and practice rounds and get standings, net scores and storylines
 |---|---|
 | [Shot tracking and stats](docs/tracking.md) | Where the data comes from, launch monitors, the database tables, the stats page, example queries |
 | [The booth](docs/booth.md) | How a shot is called, models and voices, cost, privacy, the ON AIR badge |
-| [Leagues, formats and handicaps](docs/leagues.md) | The league file, league vs practice, formats, handicaps, Squabbit, closest to the pin |
+| [Leagues, formats and handicaps](docs/leagues.md) | The league file, league vs practice (and SuperSaaS bookings), formats, handicaps, Squabbit, closest to the pin |
 | [Setup, operation and development](docs/setup.md) | Full setup, bring-up, troubleshooting, health checks, phone pushes, commands, tests and tools |
 | [DEPLOY.md](DEPLOY.md) | Installing and updating on the sim PC, and where every file and log lives |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | The module map and data model, for working on the code |
