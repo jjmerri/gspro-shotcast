@@ -13,8 +13,8 @@ What the HUD shows (checked on 3.1.6 gameplay video): CARRY (raw) appears at imp
 GSPro's carry with no lie penalty (from sand: raw 94.4 m at impact, game 86.2 m on a level green).
 CARRY (game) counts up during flight and freezes at touchdown: that one includes the lie
 penalty and the landing elevation. So the penalty is learned as game / raw, and predicted
-from raw at impact. Without the raw tile, the launch monitor's carry stands in for it; the
-course baseline absorbs the difference between the two (and altitude).
+from raw at impact. Like the launch monitor's carry, CARRY (raw) leaves out altitude too (both
+read ~1.00 of each other on every course), so the course baseline carries it for either base.
 """
 
 CLEAN_LIES = ("tee", "fairway")
@@ -22,16 +22,18 @@ CLEAN_LIES = ("tee", "fairway")
 NO_PENALTY = ("tee", "fairway", "concrete", "cart path")
 
 # Lie penalty by launch-monitor carry in yards, as (carry, factor) points to interpolate between.
-# Measured on the league's own GSPro (397 shots with both raw and game carry tiles, elevation taken
-# out): sand keeps ~0.73 at 30 yards up to ~0.91 at 155, so greenside bunkers play much shorter
-# than fairway ones; rough keeps ~0.90 and deep rough ~0.72 at every distance. Pine straw is a
-# starting guess (too few shots yet). Shots on each course keep refining these per carry band.
+# Measured on the league's own GSPro (340 shots with both carry tiles and a known landing height,
+# each course's own carry level taken out): sand keeps ~0.74 at 30 yards up to ~0.90 at 155, so
+# greenside bunkers play much shorter than fairway ones; rough keeps ~0.91 and deep rough ~0.72 at
+# every distance. Pine straw is a starting guess (too few shots yet). Shots on each course keep
+# refining these per carry band.
 DEFAULT_CURVES: dict[str, list[tuple[float, float]]] = {
-    "sand": [(29, 0.73), (55, 0.80), (109, 0.88), (155, 0.91)],
+    "sand": [(29, 0.74), (55, 0.79), (109, 0.87), (155, 0.90)],
     "deep rough": [(0, 0.72)],
-    "rough": [(0, 0.90)],
+    "rough": [(0, 0.91)],
     "pine straw": [(0, 0.97)],
 }
+
 MIN_SAMPLES = 3
 # Exponential average so learned values follow a change in the league's GSPro settings.
 WEIGHT = 0.2
@@ -65,15 +67,23 @@ class _Average:
         self.n += 1
 
 
-def correct_for_elevation(game: float, elevation_yards: float | None, pin_yards: float | None, carry: float) -> float:
-    """Takes the pin's height out of CARRY (game) on shots that land near the pin.
+def correct_for_elevation(
+    game: float, elevation_yards: float | None, pin_yards: float | None, carry: float,
+    rest_rise: float | None = None,
+) -> float | None:
+    """CARRY (game) as if the ball had come down level with where it was hit, or None when how high
+    it came down isn't known (such a shot can't teach the model).
 
-    A green above the ball cuts carry by roughly the rise; on a tee shot the pin's height says
-    nothing about the landing spot, so it's left alone.
+    `rest_rise` is how far above its start the ball came to rest, measured from the HUD: the pin
+    doesn't move, so it's this shot's pin elevation less the next shot's. Without it, the pin's own
+    height stands in, but only on a shot that landed near the pin: a tee shot's pin says nothing
+    about where it came down, and a hilly hole can put that 10 yards above or below the tee.
     """
-    if elevation_yards and pin_yards and pin_yards <= carry * 1.25:
+    if rest_rise is not None:
+        return game + rest_rise
+    if elevation_yards is not None and pin_yards and pin_yards <= carry * 1.25:
         return game + elevation_yards
-    return game
+    return None
 
 
 class CarryModel:
@@ -88,7 +98,7 @@ class CarryModel:
         is "gspro" (the CARRY (raw) tile) or "lm" (launch monitor). `course_altitude_ft` seeds a
         course's launch-monitor baseline before it has shots of its own."""
         self.flat_defaults = defaults or {}
-        self.altitude = course_altitude_ft or {}
+        self.altitude = dict(course_altitude_ft or {})   # a copy: learned ones aren't config
         self.baselines: dict[tuple, _Average] = {}
         self.penalties: dict[tuple, _Average] = {}
         for row in history or []:
@@ -98,9 +108,9 @@ class CarryModel:
         learned = self.baselines.get((course, base))
         if learned and learned.n >= MIN_SAMPLES:
             return learned.value
-        if base == "gspro":
-            return 1.0  # GSPro's own raw carry already includes altitude
-        # About 2% more carry per 1,000 ft: a general rule of thumb, not a published GSPro figure.
+        # About 2% more carry per 1,000 ft, for either base: GSPro's CARRY (raw) leaves altitude out
+        # like the launch monitor does (both read ~1.00 at Wynn, 2,080 ft, where the game carry ran
+        # ~3.7% long). A rule of thumb, not a published GSPro figure.
         return 1 + 0.02 * self.altitude.get(course or "", 0) / 1000
 
     def penalty(self, lie: str | None, carry: float, vla: float | None = None) -> float:

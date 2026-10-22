@@ -1,4 +1,5 @@
 import asyncio
+import bisect
 import json
 import logging
 import os
@@ -523,6 +524,12 @@ class Engine:
         # Each index's last recorded shot (shot_id, ShotRecord, log hole, penalties then), so the next
         # shot's lie (where it was played from) can correct where that one came to rest.
         self._last_row: dict[int, tuple] = {}
+        # Each player's latest strokes, in shot order, so a full shot can wait for the next stroke to say
+        # how high it came to rest (that stroke's pin elevation, as the pin doesn't move) before it
+        # teaches the carry model. Shot handlers can finish out of order, so entries are kept sorted by
+        # shot sequence: player -> [[seq, (round, hole, shot number), elevation, to pin, observe args
+        # (None once learned, or for a putt), another ball may follow (scramble)]].
+        self._carry_trail: dict[str, list] = {}
         # Per player, a commentator's call (commentator key, predicted make?, hole at commit) on that
         # player's current putt, committed only when the pre-shot line airs and graded against the
         # result when the stamped hole matches. Keyed by player so a partner's shot can't bin it.
@@ -3234,10 +3241,19 @@ class Engine:
         # Values read before the ball was seen to stop are partial; they'd teach the model nonsense.
         carry_game = None if shot.is_putt or not landed else tile_yards("carry (game)")
         carry_flat = None if shot.is_putt or not landed else tile_yards("carry (raw)")
+        if self.gspro.altitude_ft is not None and self.current_course \
+                and self.current_course not in self.cfg.commentary.course_altitude_ft:
+            self.carry.altitude[self.current_course] = self.gspro.altitude_ft   # beats the course file's
+        # A team format where GSPro copies balls between teammates: the next stroke may be a partner's ball.
+        shared = bool(shot_round and (shot_round.format == "scramble" or shot_round.no_scramble)
+                      or self.gspro.team_scores)
+        learn = None
         if carry_game:
             learn_base, learn_carry = ("gspro", carry_flat) if carry_flat else ("lm", self._raw_yards(shot))
-            game = correct_for_elevation(carry_game, before.elevation_yards, to_yards(before.to_pin), learn_carry)
-            self.carry.observe(before.lie, learn_carry, game, self.current_course, shot.vla, learn_base)
+            learn = (before.lie, learn_carry, carry_game, self.current_course, shot.vla, learn_base)
+        self._trail_carry(player, (my_seq, (shot_round.id if shot_round else None, shot_hole, before.shot_number),
+                                   before.elevation_yards, to_yards(before.to_pin), learn,
+                                   shared or not player or player == "unknown"))
         if flight_task:
             try:
                 await flight_task  # bounded by the flight deadline; keeps the call ahead of the reaction
@@ -3347,7 +3363,7 @@ class Engine:
             to_pin_yards=to_yards(before.to_pin),
             finish_yards=None,   # filled in on this player's next shot (see _resolve_pending_finish)
             gimme_yards=self.gspro.gimme_of(idx), fmt=fmt, attributed=attributed,
-            is_league=bool(r and r.is_league),
+            is_league=bool(r and r.is_league), shared_ball=shared,
         )
         rec.shot_id = shot_id
         # Not gated on the screen seeing touchdown: the finish comes from GSPro's log at the next shot,
@@ -3649,6 +3665,46 @@ class Engine:
             big=score >= c.big_moment_threshold,
         )
         await self._speak("shot", self.live_llm, user, facts_text, [], must=must, shot_id=shot_id)
+
+    def _trail_carry(self, player: str | None, entry: tuple) -> None:
+        """Add a stroke to the player's trail in shot order, and teach the carry model from every full
+        shot that now has its next stroke. A scramble's (or unnamed player's) next stroke may be another
+        ball, so those only get the near-pin rule."""
+        trail = self._carry_trail.setdefault(player or "unknown", [])
+        bisect.insort(trail, list(entry), key=lambda e: e[0])
+        # Every shot whose next stroke is in now learns from it. Strokes stay a while after (learned or
+        # not) as a slower handler for the stroke before may still need them; a shot whose next stroke
+        # never shows (a mulligan, a penalty, an unread stroke number) gets the fallback once it ages out.
+        for e, nxt in zip(trail, trail[1:]):
+            if e[4] and self._next_stroke(e[1], nxt[1]):
+                # Either flagged: a team format may have shown itself only at the next stroke.
+                self._learn_carry(*e[1:4], e[4], *(() if e[5] or nxt[5] else nxt[1:3]))
+                e[4] = None
+        while len(trail) > self.CARRY_TRAIL:
+            _, key, elev, pin, args, _other = trail.pop(0)
+            if args:
+                self._learn_carry(key, elev, pin, args)
+
+    CARRY_TRAIL = 4
+
+    @staticmethod
+    def _next_stroke(key: tuple, next_key: tuple | None) -> bool:
+        """`next_key` (round, hole, shot number) is the stroke right after `key`'s."""
+        return next_key is not None and key[0] == next_key[0] and key[1] == next_key[1] \
+            and key[2] is not None and next_key[2] == key[2] + 1
+
+    def _learn_carry(self, key: tuple, elevation: float | None, pin_yards: float | None, args: tuple,
+                     next_key: tuple | None = None, next_elevation: float | None = None) -> None:
+        """Teach the carry model one shot, its CARRY (game) put level with where it was hit. The next
+        stroke (same round and hole, one shot on) says how high the ball came to rest; without it,
+        only a shot that landed near the pin can be leveled (see correct_for_elevation)."""
+        lie, carry, game, course, vla, base = args
+        rest_rise = None
+        if elevation is not None and next_elevation is not None and self._next_stroke(key, next_key):
+            rest_rise = elevation - next_elevation
+        level = correct_for_elevation(game, elevation, pin_yards, carry, rest_rise)
+        if level is not None:
+            self.carry.observe(lie, carry, level, course, vla, base)
 
     @staticmethod
     def _idx_snap(snap: tuple, idx: int) -> dict:
@@ -4659,6 +4715,11 @@ class Engine:
         self._fir_streak.clear()
         self._last_hud_shot.clear()
         self._pending_finish.clear()
+        for trail in self._carry_trail.values():   # no next stroke now: near-pin shots still teach
+            for _, key, elev, pin, args, _scramble in trail:
+                if args:
+                    self._learn_carry(key, elev, pin, args)
+        self._carry_trail.clear()
         self._last_row.clear()
         self._mulligans_called.clear()
         self._finish_seq.clear()

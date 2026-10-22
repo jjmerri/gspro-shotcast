@@ -349,6 +349,18 @@ def test_skipping_hole_one_marks_a_late_start_until_the_next_round():
     assert not s.starts_late
 
 
+def test_the_altitude_gspro_plays_at_is_read_from_a_bounce_until_the_course_changes():
+    s = GsproState()
+    bounce = ("magnitude: 10.34195 | yForce 4.88229 | material TVGfairway | SoundMultiplier 0.3370993 | "
+              "SoundForceScale 0.6741985 | elevation 2080\r\n")
+    for ev in parse_events("Selected Course: wynn_gsp\n" + bounce):
+        s.apply(ev)
+    assert s.altitude_ft == 2080.0
+    for ev in parse_events("Selected Course: cabotcliffs_gsp\n"):
+        s.apply(ev)
+    assert s.altitude_ft is None
+
+
 def test_putting_mode_is_read_per_shot_fired():
     import time
     text = ("* ------- Shot Fired! ------- *\nLaunchExt Vars: sp 3.42, el 0\nLaunchExt - Putting Mode\n"

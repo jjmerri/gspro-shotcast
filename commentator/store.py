@@ -50,7 +50,9 @@ CREATE TABLE IF NOT EXISTS shots (
     to_pin_yards REAL, finish_yards REAL, gimme_yards REAL, outcome TEXT, fmt TEXT,
     attributed INTEGER NOT NULL DEFAULT 1,
     is_league INTEGER NOT NULL DEFAULT 1,        -- 1 = league round, 0 = practice; for the stat context split
-    mulligan INTEGER NOT NULL DEFAULT 0          -- 1 = GSPro took the stroke back; excluded from every stat
+    mulligan INTEGER NOT NULL DEFAULT 0,         -- 1 = GSPro took the stroke back; excluded from every stat
+    shared_ball INTEGER NOT NULL DEFAULT 0       -- 1 = a team format where GSPro copies balls between
+                                                 -- teammates, so the next stroke may not be from this ball
 );
 CREATE TABLE IF NOT EXISTS lines (
     id INTEGER PRIMARY KEY,
@@ -194,7 +196,8 @@ class Store:
         have = {r["name"] for r in self.db.execute("PRAGMA table_info(shots)")}
         added = {"to_pin_yards": "REAL", "finish_yards": "REAL", "gimme_yards": "REAL",
                  "outcome": "TEXT", "fmt": "TEXT", "attributed": "INTEGER NOT NULL DEFAULT 1",
-                 "is_league": "INTEGER NOT NULL DEFAULT 1", "mulligan": "INTEGER NOT NULL DEFAULT 0"}
+                 "is_league": "INTEGER NOT NULL DEFAULT 1", "mulligan": "INTEGER NOT NULL DEFAULT 0",
+                 "shared_ball": "INTEGER NOT NULL DEFAULT 0"}
         for col, decl in added.items():
             if col not in have:
                 self.db.execute(f"ALTER TABLE shots ADD COLUMN {col} {decl}")
@@ -222,15 +225,16 @@ class Store:
         course: str | None = None, carry_raw_tile_yards: float | None = None,
         to_pin_yards: float | None = None, finish_yards: float | None = None,
         gimme_yards: float | None = None, outcome: str | None = None, fmt: str | None = None,
-        attributed: bool = True, is_league: bool = True,
+        attributed: bool = True, is_league: bool = True, shared_ball: bool = False,
     ) -> int:
         cur = self.db.execute(
             """INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, ball_speed,
                    launch_angle, start_direction, total_spin, spin_axis, club_speed, carry_raw, units,
                    lie_before, slope_updown, slope_side, slope_side_degrees, elevation_yards, to_pin,
                    score_to_par, lie_after, carry_raw_tile_yards, carry_game_yards, total_yards, offline_yards,
-                   tags, raw, to_pin_yards, finish_yards, gimme_yards, outcome, fmt, attributed, is_league)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   tags, raw, to_pin_yards, finish_yards, gimme_yards, outcome, fmt, attributed, is_league,
+                   shared_ball)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (self.session_id, shot.timestamp, player, course, hole, before.shot_number or after.shot_number, shot.club,
              int(shot.is_putt), shot.ball_speed, shot.vla, shot.hla, shot.total_spin, shot.spin_axis,
              shot.club_speed, shot.carry, shot.units, before.lie, before.slope_updown, before.slope_side,
@@ -238,7 +242,8 @@ class Store:
              before.score_to_par or after.score_to_par, after.lie, carry_raw_tile_yards, carry_game_yards,
              total_yards, offline_yards,
              json.dumps(tags), json.dumps(shot.raw),
-             to_pin_yards, finish_yards, gimme_yards, outcome, fmt, int(attributed), int(is_league)),
+             to_pin_yards, finish_yards, gimme_yards, outcome, fmt, int(attributed), int(is_league),
+             int(shared_ball)),
         )
         self._unhole_if_played_on(cur.lastrowid, later=False)
         self._fill_previous_finish(cur.lastrowid)
@@ -411,19 +416,39 @@ class Store:
 
     def carry_pairs(self) -> list[tuple]:
         """Past full shots for the carry model, oldest first: (lie, base carry yd, game carry yd
-        corrected for pin elevation, course, launch angle, base). Base is GSPro's CARRY (raw) where
-        it was read, else the launch monitor's carry."""
+        corrected for how high the ball came down, course, launch angle, base). Base is GSPro's CARRY
+        (raw) where it was read, else the launch monitor's carry. Shots whose landing height isn't
+        known are left out (see correct_for_elevation)."""
         from .carry_model import correct_for_elevation
         from .facts import to_yards
 
         rows = self.db.execute(
-            """SELECT lie_before, carry_raw, units, carry_raw_tile_yards, carry_game_yards, elevation_yards,
-                      to_pin, course, launch_angle FROM shots
-               WHERE is_putt = 0 AND lie_before IS NOT NULL AND carry_game_yards > 0
-               ORDER BY ts"""
+            """SELECT id, session_id, player, hole, shot_number, is_putt, mulligan, fmt, lie_before, carry_raw,
+                      units, carry_raw_tile_yards, carry_game_yards, elevation_yards, to_pin, course,
+                      launch_angle, finish_yards, ts, attributed, shared_ball
+               FROM shots ORDER BY id"""
         ).fetchall()
+        # Each player's next stroke (by impact time: rows are written as shot handlers finish, which
+        # can be out of order; a mulligan was taken back): if it's the very next
+        # stroke on the same hole, its pin elevation, less this one's, is where this ball came to rest
+        # (the pin doesn't move). Not where it may be a partner's ball (a scramble, shamble, alternate shot).
+        next_of: dict[int, sqlite3.Row] = {}
+        last: dict[tuple, sqlite3.Row] = {}
+        rows.sort(key=lambda r: (r["ts"] or 0, r["id"]))
+        for r in rows:
+            if r["mulligan"] or not r["player"] or r["player"] == "unknown":
+                continue
+            who = (r["session_id"], r["player"])
+            if who in last:
+                next_of[last[who]["id"]] = r
+            last[who] = r
+        def own_ball_unsure(r) -> bool:   # either stroke flagged: a team format may show itself late
+            return r["fmt"] == "scramble" or not r["attributed"] or bool(r["shared_ball"])
+
         out = []
         for r in rows:
+            if r["is_putt"] or not r["lie_before"] or not (r["carry_game_yards"] or 0) > 0:
+                continue
             if r["carry_raw_tile_yards"]:
                 base, carry = "gspro", r["carry_raw_tile_yards"]
             elif r["carry_raw"]:
@@ -431,8 +456,18 @@ class Store:
                 carry = r["carry_raw"] * (1 if (r["units"] or "y").lower().startswith("y") else 1.0936)
             else:
                 continue
-            game = correct_for_elevation(r["carry_game_yards"], r["elevation_yards"], to_yards(r["to_pin"]), carry)
-            out.append((r["lie_before"], carry, game, r["course"], r["launch_angle"], base))
+            elev, rest_rise = r["elevation_yards"], None
+            if elev is not None and not r["mulligan"] and not own_ball_unsure(r):
+                nxt = next_of.get(r["id"])
+                if nxt is not None and not own_ball_unsure(nxt) and self._same_hole_next(r, nxt) \
+                        and nxt["shot_number"] == r["shot_number"] + 1:
+                    if nxt["elevation_yards"] is not None:
+                        rest_rise = elev - nxt["elevation_yards"]
+                elif r["finish_yards"] == 0:
+                    rest_rise = elev   # holed: it rested at the pin
+            game = correct_for_elevation(r["carry_game_yards"], elev, to_yards(r["to_pin"]), carry, rest_rise)
+            if game is not None:
+                out.append((r["lie_before"], carry, game, r["course"], r["launch_angle"], base))
         return out
 
     def season_stats(self, player: str, context: str | None = None) -> dict[str, Any]:

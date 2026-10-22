@@ -56,6 +56,7 @@ class LogEvent:
     active: list[bool] | None = None  # which holes are in the round (from the end-of-round layout)
     putting: bool | None = None       # launch_mode: GSPro had the putter selected for the shot just fired
     strokes: int | None = None        # state: strokes just added to the score (negative = taken back)
+    altitude_ft: float | None = None  # altitude: the course altitude GSPro's ball physics is using
 
 
 # GSPro's `Using Material TVG<surface>` names mapped to the booth's lie vocabulary (commentator/hud.py
@@ -90,6 +91,9 @@ _PENALTY_SURFACE = re.compile(r"^Penalty Surface TVG(\w+),")
 # The driving range loads as its own "course": these lines mark it (and there's no `Selected Course:`).
 _RANGE_MARKERS = ("GSPro Multi Range", "RangeLevelLoaded()")
 _VERSION = re.compile(r"^GSPro Version:\s*(\S+)")
+# Each bounce logs the altitude GSPro's physics is using, in feet. It can differ from the course
+# file's altitude (Cabot Cliffs: 1,700 in the file, 50 here), and some rounds log 0.
+_ALTITUDE = re.compile(rf"^magnitude:.*\|\s*elevation\s+(-?{_NUM})\s*$")
 # Words that start a line the parser depends on. One that carries the word but doesn't parse means
 # GSPro changed its wording (an update): it comes out as an "unparsed" event for the health checks.
 # A season's log had none, so any is worth a look.
@@ -157,6 +161,8 @@ def parse_events(text: str) -> list[LogEvent]:
                     out.append(LogEvent("layout", pars=pars, active=active if len(active) == len(pars) else None))
             elif m := _VERSION.match(line):
                 out.append(LogEvent("version", display=m.group(1)))
+            elif m := _ALTITUDE.match(line):
+                out.append(LogEvent("altitude", altitude_ft=float(m.group(1))))
             elif any(k in line for k in _MARKERS):
                 out.append(LogEvent("unparsed", display=line[:160]))
         except (ValueError, IndexError):
@@ -278,6 +284,7 @@ class GsproState:
     # that never resets, so a round's share is the difference), and the last few lines that carried a
     # marker word but didn't parse.
     version: str | None = None
+    altitude_ft: float | None = None   # the altitude GSPro is playing the current course at, once a ball bounces
     kinds: Counter = field(default_factory=Counter)
     unparsed: list = field(default_factory=list)
 
@@ -287,11 +294,14 @@ class GsproState:
             self.version = ev.display
         elif ev.kind == "unparsed":
             self.unparsed = (self.unparsed + [ev.display])[-5:]
+        elif ev.kind == "altitude":
+            self.altitude_ft = ev.altitude_ft
         elif ev.kind == "course":
             if ev.course != self.course:
                 self._reset_round()         # a real course change is a new round; forget the old one
             self.course = ev.course
             self.course_display = None      # until this course's load names it
+            self.altitude_ft = None
             self.mode, self.active_holes = "course", None
             self.shots_since_course, self.first_hole, self.starts_late = 0, None, False
         elif ev.kind == "course_display":
