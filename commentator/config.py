@@ -326,7 +326,6 @@ class BookingConfig(BaseModel):
     type_field: str = "field_1_r"    # the booking field holding the League/Practice dropdown
     # A round this close before a booking starts or after it ends still counts as in it.
     slack_minutes: float = 30.0
-    refresh_minutes: float = 5.0
 
 
 class SourceConfig(BaseModel):

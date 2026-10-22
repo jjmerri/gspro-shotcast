@@ -35,7 +35,8 @@ file by hand.
 - **League vs practice.** A night is treated as a league round only when a scheduled, in-date
   course is loaded with the right ball count and one registered team. Otherwise it is a
   practice round, and the booth never says points are on the line (opener and closer included).
-  With `booking.enabled: true` the booth also reads the sim's SuperSaaS bookings: a round played
+  With `booking.enabled: true` the booth also reads the sim's SuperSaaS bookings, at startup (so a
+  restart mid-round still knows) and each time a setup screen comes up: a round played
   in (or within `slack_minutes` of) a booking marked "Practice" is practice, even on the week's
   course with a full team. A "League Week N" booking doesn't pin the week (a group may play two in
   one block), so it, no booking, or SuperSaaS being unreachable leaves the matching above to decide.

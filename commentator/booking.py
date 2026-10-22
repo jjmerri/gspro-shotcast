@@ -3,11 +3,12 @@
 Every booking picks "Practice" or "League Week N" from a mandatory dropdown. A round played in a
 practice booking is practice, whatever the course and players. A league booking doesn't say which
 week (a group may play two weeks in one block), so it, and play with no booking at all, is left to
-the usual schedule matching. Read-only, one request every few minutes; while a fetch fails the booth
-decides as it would without bookings.
+the usual schedule matching. Read-only: fetched at startup (so a restart mid-round still knows) and
+as each setup screen comes up. While a fetch fails the booth decides as it would without bookings.
 """
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -39,7 +40,8 @@ class Bookings:
         self.timeout = timeout
         self.bookings: list[Booking] | None = None   # None until the first good fetch
 
-    async def refresh(self, now: datetime | None = None) -> None:
+    async def refresh(self, now: datetime | None = None, why: str = "") -> None:
+        started = time.monotonic()
         day = (now or datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0)
         params = {"from": f"{day - timedelta(days=1):%Y-%m-%d %H:%M:%S}",
                   "to": f"{day + timedelta(days=2):%Y-%m-%d %H:%M:%S}", "limit": 200}
@@ -50,7 +52,8 @@ class Bookings:
                 resp.raise_for_status()
                 rows = resp.json().get("bookings") or []
         except Exception as e:  # SuperSaaS down or the key revoked: never take the booth off air
-            log.warning("SuperSaaS bookings fetch failed: %s", e)
+            log.warning("SuperSaaS bookings fetch%s failed after %.2fs: %s", f" ({why})" if why else "",
+                        time.monotonic() - started, e)
             self.bookings = None    # unknown, not stale: a booking may have changed since the last read
             return
         bookings = []
@@ -63,9 +66,8 @@ class Bookings:
                 continue
             bookings.append(Booking(start, finish, str(row.get(self.type_field) or ""),
                                     str(row.get("full_name") or row.get("created_by") or "").strip()))
-        if self.bookings is None or [(b.start, b.kind) for b in bookings] != [(b.start, b.kind) for b in self.bookings]:
-            log.info("SuperSaaS bookings: %s", "; ".join(
-                f"{b.start:%a %H:%M}-{b.finish:%H:%M} {b.kind or 'no type'}" for b in bookings) or "none")
+        log.info("SuperSaaS bookings%s in %.2fs: %s", f" ({why})" if why else "", time.monotonic() - started,
+                 "; ".join(f"{b.start:%a %H:%M}-{b.finish:%H:%M} {b.kind or 'no type'}" for b in bookings) or "none")
         self.bookings = bookings
 
     def at(self, now: datetime | None = None) -> Booking | None:

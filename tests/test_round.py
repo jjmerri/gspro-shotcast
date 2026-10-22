@@ -808,7 +808,8 @@ def test_classify_round_separates_league_from_practice(tmp_path):
     assert practice and "Rando" in practice
 
 
-async def test_a_practice_booking_makes_a_league_looking_round_practice(tmp_path, monkeypatch):
+async def test_a_practice_booking_makes_a_league_looking_round_practice(tmp_path, monkeypatch, caplog):
+    import logging
     from datetime import datetime
 
     import httpx
@@ -829,8 +830,17 @@ async def test_a_practice_booking_makes_a_league_looking_round_practice(tmp_path
     monkeypatch.setattr(booking.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
     e = _engine(tmp_path)
     e.bookings = b = Bookings("GolfShed", 792418, "k", slack_minutes=30)
-    await b.refresh(datetime(2026, 10, 21, 17, 30))
+    with caplog.at_level(logging.INFO, logger="commentator.booking"):
+        e._fetch_bookings("setup screen")      # in the background, as a setup screen comes up
+        await e._bookings_ready()              # and a round classified now waits for it to land
     assert seen["auth"].startswith("Basic ") and len(b.bookings) == 2   # the deleted one is dropped
+    assert "SuperSaaS bookings (setup screen) in " in caplog.text
+    with caplog.at_level(logging.INFO, logger="commentator.booking"):
+        await e._bookings_ready()              # fresh: no second fetch
+        assert "(round start)" not in caplog.text
+        e._bookings_fetched -= 601             # no setup screen seen in a while (preround off): fetch now
+        await e._bookings_ready()
+    assert "SuperSaaS bookings (round start) in " in caplog.text
 
     monkeypatch.setattr(b, "at", lambda: Bookings.at(b, datetime(2026, 10, 21, 18, 20)))   # just over a practice
     _, practice = e._classify_round(["MikeD"], "Wynn")

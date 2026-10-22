@@ -120,7 +120,7 @@ booking:
   schedule_id:            # the schedule's ID (end of its Configure page URL), e.g. 792418
   type_field: field_1_r   # the booking field with the League/Practice dropdown
   slack_minutes: 30       # a round this long before or after a booking still counts as in it
-  refresh_minutes: 5
+                          # (read at startup and as each setup screen comes up)
 
 screen:
   monitor: 1

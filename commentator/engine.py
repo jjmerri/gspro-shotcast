@@ -417,6 +417,8 @@ class Engine:
             else None
         self.trivia = CourseTrivia(cfg.trivia.pages) if cfg.trivia.enabled and self.commentary_on else None
         self.bookings = self._make_bookings()
+        self._bookings_task: asyncio.Task | None = None
+        self._bookings_fetched = float("-inf")
         self._score_holes: list[int] = []           # round hole seqs a live score is written for as they start
         self._score_said: dict[str, list[str]] = {}  # event key -> what the booth said about it, this session
         self._score_written: set[str] = set()       # "key@version": scores already written up, this session
@@ -615,7 +617,7 @@ class Engine:
         if self.weather is not None:
             asyncio.create_task(self._weather_loop(), name="weather")
         if self.bookings is not None:
-            asyncio.create_task(self._bookings_loop(), name="bookings")
+            self._fetch_bookings("startup")
         tasks = [asyncio.create_task(self.speech.run(), name="speech")]
         if self.source is not None:
             tasks.append(asyncio.create_task(self._pump_source(), name="source"))
@@ -1156,10 +1158,21 @@ class Engine:
             return None
         return Bookings(b.account, b.schedule_id, key, b.type_field, b.slack_minutes)
 
-    async def _bookings_loop(self) -> None:
-        while True:
-            await self.bookings.refresh()
-            await asyncio.sleep(max(self.cfg.booking.refresh_minutes, 1.0) * 60)
+    def _fetch_bookings(self, why: str) -> None:
+        """Re-read the bookings in the background (at startup, so a restart mid-round knows, and as
+        each setup screen comes up). A fetch already running covers this one."""
+        if self.bookings is None or (self._bookings_task and not self._bookings_task.done()):
+            return
+        self._bookings_fetched = time.monotonic()
+        self._bookings_task = asyncio.create_task(self.bookings.refresh(why=why), name="bookings")
+
+    async def _bookings_ready(self, timeout: float = 5.0, stale_after: float = 600.0) -> None:
+        """Let a fetch in flight land before a round is classified, so it decides on fresh bookings.
+        With no fetch for a while (no setup screen seen, e.g. preround off), fetch now."""
+        if self.bookings is not None and time.monotonic() - self._bookings_fetched > stale_after:
+            self._fetch_bookings("round start")
+        if (task := self._bookings_task) and not task.done():
+            await asyncio.wait({task}, timeout=timeout)
 
     def _weather_facts(self, rate: float = 1.0) -> list[str]:
         """The weather outside, when it's configured, fresh, and (between holes) this exchange's turn."""
@@ -4714,6 +4727,7 @@ class Engine:
         first = self.league.match_player(hud.player_text) or raw or None
         names = [n for n in [raw or first] + [o.name for o in hud.others] if n]
         course = self._tee_course(hud)
+        await self._bookings_ready()
         entry, practice = self._classify_round(names, course)
         is_league = practice is None
         # Peek at an opener that already played over the load, before the match below consumes it. Only
@@ -4779,6 +4793,7 @@ class Engine:
         raw = re.split(r"\s+(?:E|[+-]\d+|Shot)\b", (hud.player_text or "").strip(), maxsplit=1)[0].strip()
         names = [n for n in [raw or self.league.match_player(hud.player_text)] + [o.name for o in hud.others] if n]
         course = self._tee_course(hud)
+        await self._bookings_ready()
         entry, practice = self._classify_round(names, course)
         is_league = practice is None
         if is_league:
@@ -4958,6 +4973,8 @@ class Engine:
                 self._opener_gen += 1
                 self._pending_opening, self._opener_prepared_for = None, frozenset()
             if play_course:
+                if not seen_setup:
+                    self._fetch_bookings("setup screen")
                 to_read = slots
                 slot_frame = frame
                 if probed and not players_tab and (snap := self._players_snap) is not None \
@@ -5222,6 +5239,7 @@ class Engine:
         c = self.cfg.commentary
         if not c.opener:
             return
+        await self._bookings_ready()
         entry, practice = self._classify_round(names, course)
         is_league = practice is None
         # Say the league's name for the course, not GSPro's (e.g. Wentworth, not Balsams Panorama), and
