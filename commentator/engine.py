@@ -22,7 +22,7 @@ from .flight_pick import FlightPlan, Hazard, pick_line, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
 from .grounding import SCENERY, bare_acknowledgement, check_line, meta_talk, ngrams, note_keywords, repeats, uses_note
 from .hud import NAME_DARK, Hud, describe, hole_key, name_sig_changed
-from .interest import LONG_HOLED_PUTT_FEET, holed_putt_score, score_shot
+from .interest import holed_putt_score, score_shot
 from .league import League, course_match_score
 from .llm import LLMClient
 from .minimap import JevMinimap, MinimapRead
@@ -2824,7 +2824,7 @@ class Engine:
             player=who, team=team, hole=self.state.current_hole, facts=facts,
             recent_lines=self.state.recent_lines, speaker=self.speakers[0], second=second, is_putt=is_putt,
             named=minimap.named(to_yards(hud.to_pin)) if minimap else None, lag=lag,
-            long_putt=is_putt and (to_yards(hud.to_pin) or 0) * 3 > LONG_HOLED_PUTT_FEET,
+            putt_feet=(to_yards(hud.to_pin) or 0) * 3 if is_putt else None,
         )
         # Three concurrent calls: the spoken line (live_llm, text) and the branches (flight_llm, text)
         # always run; the hazard read (preshot_llm, vision) runs only for a full shot with an image to

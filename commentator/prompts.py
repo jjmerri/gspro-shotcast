@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from .config import Config
+from .interest import holed_putt_cue
 from .league import League
 from .models import Line
 
@@ -520,7 +521,7 @@ def preshot_hazard_prompt(*, player, hole, facts: list[str], speaker: str) -> tu
 def preshot_branch_prompt(
     *, player, team, hole, facts: list[str], recent_lines, speaker: str,
     second: str | None = None, is_putt: bool = False, named: dict[str, str] | None = None, lag: bool = False,
-    long_putt: bool = False,
+    putt_feet: float | None = None,
 ) -> tuple[str, str]:
     """The pre-rendered branches (mid-flight line per flight, reaction per finish), written now so the
     call is instant once the ball moves. Text-only: it runs beside the setup call, so there's no image
@@ -535,8 +536,7 @@ def preshot_branch_prompt(
             + '\n\nThe player is over a putt. Reply with "reaction_lines": the call "' + speaker
             + '" makes the instant the ball stops, at most 12 words each, written now for each way it can finish. '
             "Match the putt number in the facts (a made first putt is a one-putt, a made second putt is a two-putt, "
-            "and so on). holed (it drops" + ("; from this far out that's a big moment, so let the call carry it"
-                                    if long_putt else "") + "), short (left short of the hole), past (misses and runs past or by). A missed "
+            "and so on). holed (it drops" + holed_putt_cue(putt_feet) + "), short (left short of the hole), past (misses and runs past or by). A missed "
             "putt's next putt is for the score the facts give for the next putt, never this putt's score."
             + (" gimme (a long lag that stops inside the gimme circle, conceded as a tap-in: credit the lag "
                "and say what score it leaves, without claiming it dropped)." if lag else "")

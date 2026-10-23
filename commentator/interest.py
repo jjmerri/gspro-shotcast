@@ -85,12 +85,25 @@ def score_shot(shot: Shot, prior: list[ShotRecord], hud: Hud) -> tuple[float, li
     return min(score, 1.0), tags
 
 
-LONG_HOLED_PUTT_FEET = 12   # a putt holed from beyond this is a big moment
+GOOD_HOLED_PUTT_FEET = 12   # holed from beyond this deserves some lift
+LONG_HOLED_PUTT_FEET = 20   # ...a big moment
+MONSTER_HOLED_PUTT_FEET = 40   # ...a monster the booth should erupt over
+
+
+def holed_putt_cue(feet: float | None) -> str:
+    """How much the pre-written "holed" line should make of a putt dropping from this far."""
+    if not feet or feet <= GOOD_HOLED_PUTT_FEET:
+        return ""
+    if feet > MONSTER_HOLED_PUTT_FEET:
+        return "; from this far it's a monster, the kind of putt the booth erupts over"
+    if feet > LONG_HOLED_PUTT_FEET:
+        return "; from this far out that's a big moment, so let the call carry it"
+    return "; not a routine make from this range, so give it some lift"
 
 
 def holed_putt_score(score: float, hud: Hud, tags: list[str], notable: float, big: float) -> float:
     """A putt that drops is never routine: a makeable one always gets a word, and one from outside
-    12 feet (or a fast, long roll when the distance wasn't read) is a big moment. A tap-in stays as is."""
+    20 feet (or a fast, long roll when the distance wasn't read) is a big moment. A tap-in stays as is."""
     feet = _to_feet(hud.to_pin)
     if (feet is not None and feet > LONG_HOLED_PUTT_FEET) or (feet is None and "long_putt" in tags):
         return max(score, big)

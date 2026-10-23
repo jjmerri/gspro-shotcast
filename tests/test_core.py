@@ -205,9 +205,18 @@ def test_a_holed_putt_is_never_routine():
     long_hud = Hud(lie="green", to_pin="32 feet 9 inches")
     assert holed_putt_score(0.1, long_hud, ["putt", "long_putt"], 0.5, 0.9) == 0.9
     assert holed_putt_score(0.1, Hud(lie="green", to_pin="7 feet 2 inches"), [], 0.5, 0.9) == 0.5
+    assert holed_putt_score(0.1, Hud(lie="green", to_pin="15 feet"), [], 0.5, 0.9) == 0.5
     assert holed_putt_score(0.1, Hud(lie="green", to_pin="1 feet 6 inches"), [], 0.5, 0.9) == 0.1  # tap-in
     assert holed_putt_score(0.1, Hud(lie="green"), ["long_putt"], 0.5, 0.9) == 0.9   # distance unread
     assert holed_putt_score(0.1, Hud(lie="green"), [], 0.5, 0.9) == 0.5
+
+
+def test_holed_putt_cue_scales_with_length():
+    from commentator.interest import holed_putt_cue
+    assert holed_putt_cue(8) == "" and holed_putt_cue(None) == ""
+    assert "some lift" in holed_putt_cue(15)
+    assert "big moment" in holed_putt_cue(25)
+    assert "monster" in holed_putt_cue(45)
 
 
 def test_player_matching_tolerates_ocr_noise():
