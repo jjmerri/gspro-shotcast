@@ -372,7 +372,7 @@ function replaySvg(rp) {
       if (s.from && s.to) { const [x1, y1] = P(s.from), [x2, y2] = P(s.to);
         g += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${c}" stroke-width="${s.putt ? 1.5 : 2.5}"><title>${tip}</title></line>`; }
       if (s.from) { const [x, y] = P(s.from); g += `<circle cx="${x}" cy="${y}" r="3.5" fill="${c}" stroke="#111"><title>${tip}</title></circle>`;
-        if (s.club && !s.putt) g += `<text x="${+x + 6}" y="${+y + 3}" fill="${c}" font-size="10">${esc(s.club)}</text>`; }
+        g += `<text x="${+x + 6}" y="${+y + 3}" fill="${c}" font-size="10" paint-order="stroke" stroke="#111" stroke-width="2.5">${s.n ?? ""}${s.club && !s.putt ? " " + esc(s.club) : ""}</text>`; }
     }
   });
   if (rp.pin) { const [x, y] = P(rp.pin);
@@ -381,7 +381,7 @@ function replaySvg(rp) {
   const yd = [10, 25, 50, 100, 150, 200].reduce((a, v) => Math.abs(v - h * 1.0936 / 5) < Math.abs(a - h * 1.0936 / 5) ? v : a);
   const bar = yd / 1.0936 * k;
   g += `<line x1="8" y1="${H - 8}" x2="${(8 + bar).toFixed(1)}" y2="${H - 8}" stroke="#8fa59b" stroke-width="2"/><text x="8" y="${H - 13}" fill="#8fa59b" font-size="10">${yd} yd</text>`;
-  const legend = rp.players.map((pl, i) => `<span style="color:${REPLAY_COLORS[i % REPLAY_COLORS.length]}">● ${esc(pl.name)}</span>`).join(" &nbsp;");
+  const legend = rp.players.map((pl, i) => `<span style="color:${REPLAY_COLORS[i % REPLAY_COLORS.length]}">● ${esc(pl.name)}${pl.strokes ? ` · ${pl.strokes}${pl.gimmes ? ` (incl. ${pl.gimmes} gimme${pl.gimmes > 1 ? "s" : ""})` : ""}` : ""}</span>`).join(" &nbsp;");
   const notes = [rp.pin ? (rp.pin_estimated ? "Pin estimated from the shots' distances." : "") : "Pin position unknown.",
                  rp.players.some(p => p.shots.some(s => s.aim)) ? "Dashed: where the player aimed." : "",
                  rp.map && rp.map.approx ? "Map from another round here; the tee or pin may differ a little." : ""].filter(Boolean).join(" ");

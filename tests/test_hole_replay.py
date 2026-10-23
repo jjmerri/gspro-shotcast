@@ -85,6 +85,20 @@ def test_replay_runs_each_shot_to_the_next_and_the_last_into_the_pin(tmp_path):
     assert math.dist(shots[1]["aim"], want) < 0.1
 
 
+def test_a_replay_counts_the_gimme_it_cant_draw_in_the_score(tmp_path):
+    path, st = _season(tmp_path)
+    st.db.execute("UPDATE shots SET outcome = 'conceded' WHERE shot_number = 3")
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, outcome, raw)"
+                  " VALUES (?, 1004, 'Dan', 'Test Links', 'Hole 1, par 4, 328 yards', 4, 1, 'gimme', '{}')",
+                  (st.session_id,))
+    st.db.commit()
+    log = tmp_path / "output_log.txt"
+    log.write_text(_hole_log())
+    backfill(path, [str(log)])
+    pl = hole_replays(st.db)[(1, 1)]["players"][0]
+    assert (len(pl["shots"]), pl["strokes"], pl["gimmes"]) == (3, 4, 1)
+
+
 def test_a_round_quit_early_estimates_its_pin_from_the_shots_distances(tmp_path):
     path, st = _season(tmp_path)
     st.db.execute("UPDATE shots SET start_x = 10, start_z = 200 WHERE shot_number = 2")

@@ -195,7 +195,11 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row]) -> d
                           "lie": r["lie_before"], "to_pin": r["to_pin_yards"] and round(r["to_pin_yards"], 1),
                           "from": _r(start), "to": _r(end), "aim": _r(aim)})
         if any(s["from"] or s["to"] for s in shots):
-            players.append({"name": name, "shots": shots})
+            # The hole's score counts strokes that are never drawn: a gimme or conceded putt, a penalty.
+            mine_all = [r for r in rows if (r["player"] or "unknown") == name and not r["mulligan"]]
+            strokes = max((r["shot_number"] or 0 for r in mine_all), default=0) or None
+            gimmes = sum(r["outcome"] == "gimme" for r in mine_all)
+            players.append({"name": name, "shots": shots, "strokes": strokes, "gimmes": gimmes})
     if not players:
         return None
     return {"course": first["course"], "hole": hole, "par": par, "tee": _r(tee), "pin": _r(pin),
