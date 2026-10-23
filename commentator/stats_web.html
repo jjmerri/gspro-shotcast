@@ -198,6 +198,12 @@ async function loadReplays(round) {
   let got = {};
   try {
     for (const r of await query("SELECT hole, json FROM pub_replay WHERE round = ?", [Number(round)])) got[r.hole] = JSON.parse(r.json);
+    const ids = [...new Set(Object.values(got).filter(rp => rp.map).map(rp => rp.map.id))];
+    if (ids.length) {
+      const src = {};
+      for (const r of await query(`SELECT id, src FROM pub_hole_image WHERE id IN (${ids.map(() => "?").join(",")})`, ids)) src[r.id] = r.src;
+      for (const rp of Object.values(got)) if (rp.map) { if (src[rp.map.id]) rp.map.src = src[rp.map.id]; else delete rp.map; }
+    }
   } catch (e) { got = {}; }
   state.replays[round] = got;
   render();
@@ -384,7 +390,7 @@ function replaySvg(rp) {
   const legend = rp.players.map((pl, i) => `<span style="color:${REPLAY_COLORS[i % REPLAY_COLORS.length]}">● ${esc(pl.name)}${pl.strokes ? ` · ${pl.strokes}${pl.gimmes ? ` (incl. ${pl.gimmes} gimme${pl.gimmes > 1 ? "s" : ""})` : ""}` : ""}</span>`).join(" &nbsp;");
   const notes = [rp.pin ? (rp.pin_estimated ? "Pin estimated from the shots' distances." : "") : "Pin position unknown.",
                  rp.players.some(p => p.shots.some(s => s.aim)) ? "Dashed: where the player aimed." : "",
-                 rp.map && rp.map.approx ? "Map from another round here; the tee or pin may differ a little." : ""].filter(Boolean).join(" ");
+                 rp.map && rp.map.approx ? "Map from another round here: its tee, pin dot and yardages may differ a little." : ""].filter(Boolean).join(" ");
   return `<div class="replay"><div class="sub">${esc(rp.course)} · hole ${rp.hole}${rp.par ? ` · par ${rp.par}` : ""}</div>
     <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${g}</svg>
     <div class="sub">${legend}</div>${notes ? `<div class="sub">${notes}</div>` : ""}</div>`;

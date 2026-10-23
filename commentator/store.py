@@ -74,8 +74,8 @@ CREATE TABLE IF NOT EXISTS hole_layouts (            -- each hole's geometry, lo
     wp_x REAL, wp_y REAL, wp_z REAL              -- the course designer's aim waypoint (not the player's aim)
 );
 CREATE TABLE IF NOT EXISTS hole_images (             -- GSPro's minimap off the tee, the hole replay's background
-    id INTEGER PRIMARY KEY,
-    session_id INTEGER REFERENCES sessions(id),
+    id INTEGER PRIMARY KEY,                      -- one per course and hole: the map is the same every round
+    session_id INTEGER REFERENCES sessions(id),  -- the session it was taken in
     ts REAL,
     course TEXT NOT NULL,
     hole INTEGER NOT NULL,                       -- the course's hole number
@@ -257,6 +257,13 @@ class Store:
 
     def _migrate(self) -> None:
         """Add columns a pre-existing season.db is missing, so an older file keeps working."""
+        # hole_images was once kept per session: keep each hole's first map with its ball and pin found
+        # (else its first), as record_hole_image does now.
+        self.db.execute("""DELETE FROM hole_images WHERE id NOT IN (
+                               SELECT (SELECT i.id FROM hole_images i
+                                       WHERE i.course = h.course COLLATE NOCASE AND i.hole = h.hole
+                                       ORDER BY i.ball_x IS NULL OR i.pin_x IS NULL, i.id LIMIT 1)
+                               FROM hole_images h)""")
         have = {r["name"] for r in self.db.execute("PRAGMA table_info(shots)")}
         added = {"to_pin_yards": "REAL", "finish_yards": "REAL", "gimme_yards": "REAL",
                  "outcome": "TEXT", "fmt": "TEXT", "attributed": "INTEGER NOT NULL DEFAULT 1",
@@ -364,23 +371,28 @@ class Store:
         self.db.commit()
         return added
 
+    def has_hole_image(self, course: str | None, hole: int | None) -> bool:
+        """Whether the hole's minimap is kept already, with its ball and pin found."""
+        return self.db.execute("SELECT 1 FROM hole_images WHERE course = ? COLLATE NOCASE AND hole = ?"
+                               " AND ball_x IS NOT NULL AND pin_x IS NOT NULL", (course, hole)).fetchone() is not None
+
     def record_hole_image(self, course: str | None, hole: int | None, image: bytes,
                           ball: tuple[float, float] | None, pin: tuple[float, float] | None, *,
-                          session_id: int | None = -1, ts: float | None = None) -> int | None:
-        """Store a hole's minimap snapshot (minimap.snapshot). One per hole per session: a later one for
-        the same hole replaces it only when it found the ball and pin and the stored one didn't.
-        session_id -1 means this booth's session. Returns the row id, or None when nothing was stored."""
+                          session_id: int | None = -1, ts: float | None = None, replace: bool = False) -> int | None:
+        """Store a hole's minimap snapshot (minimap.snapshot). One per course and hole, for every round
+        there: a later one replaces it only when it found the ball and pin and the stored one didn't, or
+        with `replace`. session_id -1 means this booth's session. Returns the row id, or None when
+        nothing was stored."""
         if not course or not hole:
             return None
         sid = self.session_id if session_id == -1 else session_id
         ts = time.time() if ts is None else ts
-        old = self.db.execute("SELECT id, ball_x, pin_x FROM hole_images WHERE session_id IS ? AND course = ?"
-                              " AND hole = ?", (sid, course, hole)).fetchone()
+        old = self.db.execute("SELECT id, ball_x, pin_x FROM hole_images WHERE course = ? COLLATE NOCASE"
+                              " AND hole = ?", (course, hole)).fetchone()
         found = ball is not None and pin is not None
-        if old is not None and (old["ball_x"] is not None and old["pin_x"] is not None or not found):
+        if old is not None and not replace and (old["ball_x"] is not None and old["pin_x"] is not None or not found):
             return None
-        if old is not None:
-            self.db.execute("DELETE FROM hole_images WHERE id = ?", (old["id"],))
+        self.db.execute("DELETE FROM hole_images WHERE course = ? COLLATE NOCASE AND hole = ?", (course, hole))
         b, p = (ball, pin) if found else ((None, None), (None, None))
         cur = self.db.execute("INSERT INTO hole_images (session_id, ts, course, hole, image, ball_x, ball_y,"
                               " pin_x, pin_y) VALUES (?,?,?,?,?,?,?,?,?)", (sid, ts, course, hole, image, *b, *p))

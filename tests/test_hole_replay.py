@@ -1,7 +1,7 @@
 """Hole replays from logged ball positions, and filling older shots' positions from a saved log."""
 import math
 
-from commentator.hole_replay import estimate_pin, hole_replays
+from commentator.hole_replay import estimate_pin, hole_image_sources, hole_replays
 from commentator.log_backfill import backfill
 from commentator.sources.gspro_log import M_TO_YD
 from commentator.store import Store
@@ -127,7 +127,18 @@ def test_the_minimap_snapshot_finds_ball_and_pin_and_backs_this_sessions_replay(
     backfill(path, [str(log)])
     assert st.record_hole_image("Test Links", 1, b"x", None, None) is not None
     assert st.record_hole_image("Test Links", 1, image, ball, pin) is not None   # a found one replaces it
-    assert st.record_hole_image("Test Links", 1, image, ball, pin) is None
+    # One map per course and hole serves every round there: a later session's isn't kept.
+    assert st.record_hole_image("test links", 1, image, ball, pin, session_id=st.session_id + 1) is None
     m = hole_replays(st.db)[(1, 1)]["map"]
-    assert m["src"].startswith("data:image/jpeg;base64,") and not m["approx"]
-    assert m["ball"][1] > m["pin"][1]
+    assert not m["approx"] and m["ball"][1] > m["pin"][1]
+    assert hole_image_sources(st.db, {m["id"]})[m["id"]].startswith("data:image/jpeg;base64,")
+
+
+def test_opening_a_season_keeps_one_map_per_hole_preferring_one_with_the_ball_and_pin(tmp_path):
+    path, st = _season(tmp_path)
+    for sid, spots in ((1, (None, None)), (2, (0.5, 0.9)), (3, (0.5, 0.9))):
+        st.db.execute("INSERT INTO hole_images (session_id, course, hole, image, ball_x, ball_y, pin_x, pin_y)"
+                      " VALUES (?, 'Test Links', 1, x'00', ?, ?, ?, ?)", (sid, *spots, *spots))
+    st.db.commit()
+    db = Store(path, new_session=False).db
+    assert [tuple(r) for r in db.execute("SELECT session_id FROM hole_images")] == [(2,)]

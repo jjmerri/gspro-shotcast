@@ -11,9 +11,10 @@ tee in hole_layouts, from any round on the course. The pin moves round to round,
 from this round's layout; a round quit before the end logged none, and the pin is then estimated from
 the distances to it logged at each shot (estimate_pin).
 
-The background is GSPro's minimap of the hole off the tee (hole_images), drawn so its ball lands on the
-tee and its pin on the pin. One from the same session is exact; failing that, one from another round
-on the course is used, where a different tee box or pin leaves it slightly off ("approx").
+The background is GSPro's minimap of the hole off the tee (hole_images, one per course and hole), drawn
+so its ball lands on the tee and its pin on the pin. For the round it was taken in it's exact; for
+another round there a different tee box or pin leaves it slightly off ("approx"), and its white pin dot
+and yardages are that round's.
 """
 from __future__ import annotations
 
@@ -111,19 +112,24 @@ def _images(db: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def _map_for(images: list[sqlite3.Row], course: str, hole: int, session: int) -> dict[str, Any] | None:
-    """The hole's minimap for the replay background: this session's, else the latest from any round."""
+    """The hole's minimap for the replay background, by id (published once: hole_image_sources)."""
     from PIL import Image
 
     key = (course or "").casefold()
     same = [im for im in images if (im["course"] or "").casefold() == key and im["hole"] == hole]
     if not same:
         return None
-    mine = [im for im in same if im["session_id"] == session]
-    im = (mine or same)[-1]
+    im = same[-1]
     w, h = Image.open(io.BytesIO(im["image"])).size
-    return {"src": "data:image/jpeg;base64," + base64.b64encode(im["image"]).decode(), "w": w, "h": h,
+    return {"id": im["id"], "w": w, "h": h,
             "ball": [round(im["ball_x"] * w, 1), round(im["ball_y"] * h, 1)],
-            "pin": [round(im["pin_x"] * w, 1), round(im["pin_y"] * h, 1)], "approx": not mine}
+            "pin": [round(im["pin_x"] * w, 1), round(im["pin_y"] * h, 1)], "approx": im["session_id"] != session}
+
+
+def hole_image_sources(db: sqlite3.Connection, ids: set[int]) -> dict[int, str]:
+    """The kept minimaps with these ids, as data: URLs for the page."""
+    return {im["id"]: "data:image/jpeg;base64," + base64.b64encode(im["image"]).decode()
+            for im in _images(db) if im["id"] in ids}
 
 
 def _r(p: tuple[float, float] | None) -> list[float] | None:

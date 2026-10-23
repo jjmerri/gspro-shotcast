@@ -837,10 +837,13 @@ class Engine:
         return JevMinimap(self.cfg.minimap, usage=self.usage)
 
     def _snap_hole(self, hud: Hud) -> None:
-        """Keep the hole's minimap off the tee as the hole replay's background, once per hole. On or off
-        air: it's a record, like the shots. Runs in the background so the setup read isn't held up."""
+        """Keep the hole's minimap off the tee as the hole replay's background, once per course and hole.
+        On or off air: it's a record, like the shots. Runs in the background so the setup read isn't held up."""
         course, hole = self.current_course or hud.course, self.hole_number or hud.hole_number
         if self.screen is None or not course or not hole or (course, hole) in self._hole_snaps:
+            return
+        if self.store.has_hole_image(course, hole):   # one map per hole serves every round there
+            self._hole_snaps.add((course, hole))
             return
         self._hole_snaps.add((course, hole))
 

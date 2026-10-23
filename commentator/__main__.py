@@ -720,9 +720,7 @@ def cmd_snap_minimap(cfg: Config, args) -> None:
     if sid is None:
         row = store.db.execute("SELECT MAX(id) FROM sessions").fetchone()
         sid = row[0] if row else None
-    store.db.execute("DELETE FROM hole_images WHERE session_id IS ? AND course = ? AND hole = ?",
-                     (sid, args.course, args.hole))
-    store.record_hole_image(args.course, args.hole, image, ball, pin, session_id=sid)
+    store.record_hole_image(args.course, args.hole, image, ball, pin, session_id=sid, replace=True)
     print(f"Kept the minimap of {args.course} hole {args.hole} for session {sid} ({len(image) // 1024} KB); "
           + ("ball and pin found." if pin else "the ball and pin weren't found, so the replay won't use it."))
 
@@ -833,11 +831,11 @@ def main() -> None:
     p.add_argument("--db", help="Database file (default: db_path, logs/season.db)")
     p.add_argument("--dry-run", action="store_true", help="Count what would be filled without changing the file")
 
-    p = sub.add_parser("snap-minimap", help="Keep GSPro's minimap as a hole replay's background (the booth does "
-                                            "this itself off each tee)")
+    p = sub.add_parser("snap-minimap", help="Keep GSPro's minimap as a hole's replay background, replacing the "
+                                            "one kept (the booth keeps one itself off each tee)")
     p.add_argument("--course", required=True, help="Course name, as the shots have it")
     p.add_argument("--hole", type=int, required=True, help="The course's hole number")
-    p.add_argument("--session", type=int, help="Session to file it under (default: the latest)")
+    p.add_argument("--session", type=int, help="Session it was taken in (default: the latest)")
     p.add_argument("--image", help="Use this full-screen screenshot instead of grabbing the screen")
     p.add_argument("--db", help="Database file (default: db_path, logs/season.db)")
 
