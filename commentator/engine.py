@@ -1615,7 +1615,20 @@ class Engine:
         """(player, team) for a prompt header."""
         if self._anonymous(player):
             return self.round.describe_side(self.round.side_for(player)), None
-        return player, self.league.player_team.get(player or "")
+        team = self.league.player_team.get(player or "")
+        # A team name like "Josh and Corey" on a solo round's every call kept Corey in the booth's mouth.
+        if team and any(p in self.league.team_players.get(team, []) for p in self._absent_partners()):
+            team = None
+        return player, team
+
+    def _absent_partners(self) -> list[str]:
+        """Teammates of someone playing who aren't in this round (never in a one-ball team format)."""
+        r = self.round
+        if not r or r.ended or r.format in TEAM_BALL:
+            return []
+        playing = {p for p in r.roster.values() if p}
+        teams = {self.league.player_team.get(p) for p in playing} - {None}
+        return [p for t in teams for p in self.league.team_players.get(t, []) if p not in playing]
 
     def _delivery_turn(self, notable: bool) -> bool:
         """Whether this reaction gets club-delivery facts: never two in a row."""
@@ -1632,18 +1645,13 @@ class Engine:
         return self.round.format_facts() + self._pick_facts() + self._roster_facts()
 
     def _roster_facts(self) -> list[str]:
-        """Who isn't here: a partner of someone playing may come up in passing, but must never be
-        described hitting (a solo practice round had "a handy look for <absent partner> now"). And any player
+        """Who isn't here: a partner of someone playing is left out entirely (a solo practice round had
+        "a handy look for <absent partner> now", and asides about the partner's absence call after call). And any player
         note already used enough this round, so the model doesn't keep reaching for it."""
         r = self.round
         facts: list[str] = self._outsider_facts(r) if r and not r.ended else []
-        if r and r.format not in TEAM_BALL:
-            playing = {p for p in r.roster.values() if p}
-            teams = {self.league.player_team.get(p) for p in playing} - {None}
-            absent = [p for t in teams for p in self.league.team_players.get(t, []) if p not in playing]
-            if absent:
-                facts.append(f"Not playing this round: {', '.join(absent)}. A passing mention is fine, but "
-                             f"never describe them hitting, putting or having a shot here.")
+        if absent := self._absent_partners():
+            facts.append(f"Not playing this round: {', '.join(absent)}. Leave them out of the commentary.")
         if spent := self._spent_notes():
             facts.append(f"Already used enough today, leave alone: the league notes about {', '.join(spent)}.")
         return facts

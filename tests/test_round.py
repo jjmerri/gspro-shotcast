@@ -2596,10 +2596,12 @@ def test_roster_facts_name_an_absent_partner(tmp_path):
     e._start_round(Round(league=e.league, gspro_players=["Josh"], course="X", scheduled_format=None,
                          is_league=False))
     facts = " ".join(e._roster_facts())
-    assert "Not playing this round: Sam" in facts and "never describe them hitting" in facts
+    assert "Not playing this round: Sam" in facts and "Leave them out" in facts
     assert "Tony" not in facts   # only partners of someone playing
+    assert e._who("Josh") == ("Josh", None)   # no "(Josh and Sam)" team label on every call
     e._start_round(Round(league=e.league, gspro_players=["Josh", "Sam"], course="X", scheduled_format=None))
     assert not any("Not playing" in f for f in e._roster_facts())
+    assert e._who("Josh")[1] is not None
 
 
 def test_club_delivery_never_on_back_to_back_reactions(tmp_path):
