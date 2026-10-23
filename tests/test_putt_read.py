@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 
 from PIL import Image, ImageDraw
 
@@ -151,3 +152,29 @@ def test_a_putt_setup_line_waits_for_the_booth_then_plays_already_voiced():
     # Never once the putt is struck, or if the booth is still talking when the wait runs out.
     assert asyncio.run(run(_Booth(busy=0.6), strike_at=0.2)) == []
     assert asyncio.run(run(_Booth(busy=5.0), limit=0.3)) == []
+
+
+async def test_a_long_holed_putt_gets_the_colour_reply_after_the_call(tmp_path):
+    from commentator.flight_pick import FlightPlan
+
+    engine = _engine(tmp_path)
+    for feet, asked in (("30 feet", True), ("15 feet", False)):
+        engine.live_llm.users.clear()
+        hud = Hud(player_text="Tony", shot_number=3, to_pin=feet, lie="green")
+        await engine._preshot_model(hud, None, [], None, None)
+        assert any("holed_reply" in u for u in engine.live_llm.users) == asked
+
+    reactions = engine._build_reactions({"reaction_lines": {"holed": "Tony drains it!",
+                                                            "holed_reply": "What a putt, Nigel!"}}, True)
+    plan = FlightPlan(player="Tony", to_pin="30 feet", is_putt=True, reactions=reactions,
+                      reaction_audio={"holed": b"a", "holed_reply": b"b"})
+    said = []
+    engine.speech = SimpleNamespace(say_prepared_sequence=lambda items: said.append(("seq", items)),
+                                    say=lambda lines, interrupt=False: said.append(("say", lines)))
+    engine._play_reaction(plan, "holed", reactions["holed"])
+    assert [(line.speaker, line.text, audio) for line, audio in said[0][1]] == \
+        [("pbp", "Tony drains it!", b"a"), ("color", "What a putt, Nigel!", b"b")]
+    # The reply's clip isn't ready: voice both now rather than air the call alone.
+    del plan.reaction_audio["holed_reply"]
+    engine._play_reaction(plan, "holed", reactions["holed"])
+    assert said[1][0] == "say" and [line.speaker for line in said[1][1]] == ["pbp", "color"]

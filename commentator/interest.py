@@ -90,13 +90,18 @@ LONG_HOLED_PUTT_FEET = 20   # ...a big moment
 MONSTER_HOLED_PUTT_FEET = 40   # ...as big as putting gets
 
 
-def holed_putt_cue(feet: float | None) -> str:
-    """How excited the pre-written "holed" line should be. A number, not adjectives, so the model
-    scales its call without echoing the cue's wording."""
+def holed_putt_level(feet: float | None) -> int | None:
+    """How excited (out of 10) the booth should be if a putt from this far drops; None for a routine make."""
     if not feet or feet <= GOOD_HOLED_PUTT_FEET:
-        return ""
-    level = 10 if feet > MONSTER_HOLED_PUTT_FEET else 8 if feet > LONG_HOLED_PUTT_FEET else 6
-    return f"; excitement {level} out of 10 if it drops"
+        return None
+    return 10 if feet > MONSTER_HOLED_PUTT_FEET else 8 if feet > LONG_HOLED_PUTT_FEET else 6
+
+
+def holed_putt_cue(feet: float | None) -> str:
+    """The pre-written "holed" line's excitement cue. A number, not adjectives, so the model scales
+    its call without echoing the cue's wording."""
+    level = holed_putt_level(feet)
+    return f"; excitement {level} out of 10 if it drops" if level else ""
 
 
 def holed_putt_score(score: float, hud: Hud, tags: list[str], notable: float, big: float) -> float:

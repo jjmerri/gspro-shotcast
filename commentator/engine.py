@@ -22,7 +22,7 @@ from .flight_pick import FlightPlan, Hazard, pick_line, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
 from .grounding import SCENERY, bare_acknowledgement, check_line, meta_talk, ngrams, note_keywords, repeats, uses_note
 from .hud import NAME_DARK, Hud, describe, hole_key, name_sig_changed
-from .interest import holed_putt_score, score_shot
+from .interest import LONG_HOLED_PUTT_FEET, holed_putt_score, score_shot
 from .league import League, course_match_score
 from .llm import LLMClient
 from .minimap import JevMinimap, MinimapRead
@@ -2816,6 +2816,9 @@ class Engine:
         second = self.speakers[1] if len(self.speakers) > 1 else None
         lag_feet = self.cfg.commentary.gimme_lag_feet
         lag = is_putt and lag_feet > 0 and (to_yards(hud.to_pin) or 0) * 3 >= lag_feet
+        putt_feet = (to_yards(hud.to_pin) or 0) * 3 if is_putt else None
+        # A long putt that drops gets the colour voice's reply too, so the booth reacts together.
+        reply = bool(putt_feet and putt_feet > LONG_HOLED_PUTT_FEET and second)
         line_user, facts_text = preshot_line_prompt(
             player=who, team=team, hole=self.state.current_hole, facts=facts,
             recent_lines=self.state.recent_lines, speaker=self.speakers[0], second=second, is_putt=is_putt,
@@ -2824,7 +2827,7 @@ class Engine:
             player=who, team=team, hole=self.state.current_hole, facts=facts,
             recent_lines=self.state.recent_lines, speaker=self.speakers[0], second=second, is_putt=is_putt,
             named=minimap.named(to_yards(hud.to_pin)) if minimap else None, lag=lag,
-            putt_feet=(to_yards(hud.to_pin) or 0) * 3 if is_putt else None,
+            putt_feet=putt_feet, reply=reply,
         )
         # Three concurrent calls: the spoken line (live_llm, text) and the branches (flight_llm, text)
         # always run; the hazard read (preshot_llm, vision) runs only for a full shot with an image to
@@ -2833,7 +2836,7 @@ class Engine:
         calls: dict[str, Any] = {
             "line": self._complete("preshot-line", self.live_llm, line_user, [], preshot_line_schema(self.speakers)),
             "branches": self._complete("preshot-branches", self.flight_llm, branch_user, [],
-                                       preshot_branch_schema(self.speakers, is_putt, lag)),
+                                       preshot_branch_schema(self.speakers, is_putt, lag, reply)),
         }
         if minimap is not None:
             calls["hazards"] = self._done(json.dumps({"hazards": [
@@ -3021,12 +3024,13 @@ class Engine:
             # Write each clip into the plan as its own synth finishes, not in one update() after the
             # whole gather: impact cancels this task (_cancel_preshot), and a single post-gather update
             # would throw away every already-finished clip on a quick swing. Per-clip keeps what's done.
-            async def voice_into(target: dict, key: str, text: str) -> None:
-                if (audio := await self.speech.prepare(Line(self.speakers[0], text))) is not None:
+            async def voice_into(target: dict, key: str, text: str, speaker: str) -> None:
+                if (audio := await self.speech.prepare(Line(speaker, text))) is not None:
                     target[key] = audio
             await asyncio.gather(
-                *(voice_into(plan.audio, o, plan.lines[o]) for o in outcomes),
-                *(voice_into(plan.reaction_audio, o, plan.reactions[o]) for o in plan.reactions),
+                *(voice_into(plan.audio, o, plan.lines[o], self.speakers[0]) for o in outcomes),
+                *(voice_into(plan.reaction_audio, o, plan.reactions[o], self._reaction_speaker(o))
+                  for o in plan.reactions),
             )
         else:
             # Local CPU (Kokoro): one at a time, likeliest first, so concurrent synths don't starve OCR.
@@ -3081,6 +3085,33 @@ class Engine:
                  sorted(plan.lines), sorted(plan.reactions))
         return plan
 
+    def _play_reaction(self, plan: FlightPlan, outcome: str, text: str) -> object:
+        """Air a pre-written result line, with the colour reply after it on a long holed putt. Returns
+        the main line's audio (None when it's voiced now)."""
+        line = Line(speaker=self.speakers[0], text=text)
+        lines = [line]
+        audio = plan.reaction_audio.get(outcome)
+        reply = plan.reactions.get("holed_reply") if outcome == "holed" else None
+        if reply:
+            lines.append(Line(speaker=self._reaction_speaker("holed_reply"), text=reply))
+            reply_audio = plan.reaction_audio.get("holed_reply")
+            # A sequence skips a clip with no audio, so voice both now unless both are ready.
+            if audio is not None and reply_audio is not None:
+                self.speech.say_prepared_sequence([(line, audio), (lines[1], reply_audio)])
+            else:
+                self.speech.say(lines, interrupt=True)
+        elif audio is not None:
+            self.speech.say_prepared(line, audio)
+        else:
+            self.speech.say([line], interrupt=True)
+        self.state.record_lines(lines)
+        self._write_transcript(lines, "reaction")
+        return audio
+
+    def _reaction_speaker(self, outcome: str) -> str:
+        """The voice of a pre-written result line: the play-by-play's, except the colour reply to a holed putt."""
+        return self.speakers[1] if outcome == "holed_reply" and len(self.speakers) > 1 else self.speakers[0]
+
     def _build_reactions(self, data: dict, is_putt: bool, facts_text: str = "") -> dict[str, str]:
         """The pre-written result lines. Each is written for one known outcome and is played only
         when that outcome happens, so the usual result-grounding (which would reject "found the
@@ -3091,9 +3122,10 @@ class Engine:
         # conceded lag only the second ("the comeback putt for par" when the comeback was for bogey).
         putt_for = m.groups() if is_putt and (m := PUTT_FOR_FACT.search(facts_text)) else None
         for outcome, text in (data.get("reaction_lines") or {}).items():
-            if outcome not in reaction_outcomes(is_putt, lag=True) or not text:
+            if outcome not in reaction_outcomes(is_putt, lag=True) + (("holed_reply",) if is_putt else ()) \
+                    or not text:
                 continue
-            parsed = parse_lines(json.dumps({"lines": [{"speaker": self.speakers[0], "text": text}]}),
+            parsed = parse_lines(json.dumps({"lines": [{"speaker": self._reaction_speaker(outcome), "text": text}]}),
                                  self.speakers, self.cfg.commentary.max_words_per_line, self._persona_names)
             if not parsed:
                 log.info("Dropped the pre-written %s reaction (unparseable): %r", outcome, text)
@@ -3684,14 +3716,7 @@ class Engine:
                                    roll_yards=roll_yards, holed=holed, conceded=outcome == "conceded")
             if picked:
                 outcome, text = picked
-                line = Line(speaker=self.speakers[0], text=text)
-                self.state.record_lines([line])
-                audio = shot_plan.reaction_audio.get(outcome)
-                if audio is not None:
-                    self.speech.say_prepared(line, audio)
-                else:
-                    self.speech.say([line], interrupt=True)
-                self._write_transcript([line], "reaction")
+                audio = self._play_reaction(shot_plan, outcome, text)
                 self.stats["reaction_planned"] = self.stats.get("reaction_planned", 0) + 1
                 log.info("%s result call (%s) from the plan, audio %s, %.1fs after impact: %r", tag, outcome,
                          "ready" if audio is not None else "voiced now", time.monotonic() - impact, text)

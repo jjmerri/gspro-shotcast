@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from .config import Config
-from .interest import holed_putt_cue
+from .interest import holed_putt_cue, holed_putt_level
 from .league import League
 from .models import Line
 
@@ -441,12 +441,13 @@ def preshot_hazard_schema() -> dict[str, Any]:
     }
 
 
-def preshot_branch_schema(speakers: list[str], is_putt: bool = False, lag: bool = False) -> dict[str, Any]:
+def preshot_branch_schema(speakers: list[str], is_putt: bool = False, lag: bool = False,
+                          reply: bool = False) -> dict[str, Any]:
     """The pre-rendered branches: a mid-flight line per ball flight and a reaction per finish. Needed
     only once the ball is moving, so it runs as a separate (text-only) call that can't block or
     truncate the swing-critical setup line."""
     nullable_str = {"type": ["string", "null"]}
-    reactions = reaction_outcomes(is_putt, lag)
+    reactions = reaction_outcomes(is_putt, lag) + (("holed_reply",) if is_putt and reply else ())
     reaction_lines = {
         "type": "object",
         "properties": {k: nullable_str for k in reactions},
@@ -521,7 +522,7 @@ def preshot_hazard_prompt(*, player, hole, facts: list[str], speaker: str) -> tu
 def preshot_branch_prompt(
     *, player, team, hole, facts: list[str], recent_lines, speaker: str,
     second: str | None = None, is_putt: bool = False, named: dict[str, str] | None = None, lag: bool = False,
-    putt_feet: float | None = None,
+    putt_feet: float | None = None, reply: bool = False,
 ) -> tuple[str, str]:
     """The pre-rendered branches (mid-flight line per flight, reaction per finish), written now so the
     call is instant once the ball moves. Text-only: it runs beside the setup call, so there's no image
@@ -540,6 +541,9 @@ def preshot_branch_prompt(
             "putt's next putt is for the score the facts give for the next putt, never this putt's score."
             + (" gimme (a long lag that stops inside the gimme circle, conceded as a tap-in: credit the lag "
                "and say what score it leaves, without claiming it dropped)." if lag else "")
+            + (f' holed_reply ("{second}" jumps in straight after the holed call, excitement '
+               f"{holed_putt_level(putt_feet) or 6} out of 10 too, with their own reaction rather than a repeat "
+               "of it; at most 12 words)." if reply and second else "")
         )
         return prompt, facts_text
     trouble = ('left_trouble / right_trouble: the ball drifting toward trouble on that side while STILL IN THE '
