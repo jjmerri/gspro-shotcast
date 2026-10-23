@@ -193,7 +193,8 @@ def excerpt(text: str, names: list[str] = ()) -> str:
 
 
 def events_json(text: str) -> list[dict]:
-    return [{k: v for k, v in asdict(e).items() if v is not None} for e in parse_events(text)]
+    # Through JSON and back, so it compares equal to a saved expected.json (tuples become lists).
+    return json.loads(json.dumps([{k: v for k, v in asdict(e).items() if v is not None} for e in parse_events(text)]))
 
 
 def save_log(text: str, name: str, names: list[str] = (), root: Path = ROOT) -> Path:

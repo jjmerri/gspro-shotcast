@@ -60,6 +60,8 @@
   select { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; }
   input[type=date] { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:5px 6px; font:inherit; color-scheme:dark; }
   button.link { background:none; border:none; color:var(--accent); cursor:pointer; font:inherit; padding:0; }
+  .scorecard button.link.on { text-decoration:underline; font-weight:700; }
+  .replay { margin:10px 0; } .replay svg { background:#16241f; border:1px solid var(--line); border-radius:8px; max-width:100%; height:auto; }
   .chip { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--accent); border-radius:999px; padding:4px 6px 4px 12px; background:#1d2c27; }
   .chip button { background:none; border:none; color:var(--dim); cursor:pointer; font:inherit; padding:0 4px; }
   .charts { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:12px; }
@@ -122,7 +124,7 @@ const state = { tab: TABS.some(t => t[0] === hashTab) ? hashTab : "players", ctx
                 me: linkQ.get("player") ?? store.get("shotcast.me") ?? "", mine: null,
                 seen: Number(store.get("shotcast.seen")) || 0,
                 round: null, sort: {}, course: null, versus: [null, null], shotFilter: {}, shots: null, shotOpen: null,
-                session: null, transcript: null };
+                session: null, transcript: null, replays: {}, replayHole: null };
 if (["league", "practice"].includes(linkQ.get("ctx"))) state.ctx = linkQ.get("ctx");
 for (const k of SHOT_LINK_KEYS) if (linkQ.get(k)) state.shotFilter[k] = linkQ.get(k);
 if (state.me) { state.player = state.me; state.versus[0] = state.me; }
@@ -190,6 +192,17 @@ async function queryShots(ctx, f) {
   return (await query(sql, args)).map(r => JSON.parse(r.json));
 }
 
+// A round's hole replays (hole_replay.py), by hole number. A site built before replays has no table.
+async function loadReplays(round) {
+  state.replays[round] = "loading";
+  let got = {};
+  try {
+    for (const r of await query("SELECT hole, json FROM pub_replay WHERE round = ?", [Number(round)])) got[r.hole] = JSON.parse(r.json);
+  } catch (e) { got = {}; }
+  state.replays[round] = got;
+  render();
+}
+
 async function queryTranscript(id) {
   const rows = await query("SELECT json FROM pub_transcript WHERE session_id = ?", [Number(id)]);
   return rows.length ? JSON.parse(rows[0].json) : [];
@@ -202,7 +215,7 @@ async function load() {
   try {
     const latest = await getJSON("latest.json", { cache: "no-store" });
     if (mine !== loading) return;
-    if (!site || site.version !== latest.version) { site = { version: latest.version, db: null }; state.session = null; }
+    if (!site || site.version !== latest.version) { site = { version: latest.version, db: null }; state.session = null; state.replays = {}; }
     const body = await getJSON(`v/${site.version}/summary-${state.ctx || "all"}.json`);
     if (mine !== loading) return;
     state.data = body;
@@ -312,12 +325,60 @@ function scoreCell(score, par) {
   return `<span class="s ${cls}">${score}</span>`;
 }
 
-function scorecard(holes) {
+function scorecard(holes, replays) {
   if (!holes || !holes.length) return '<p class="empty">No hole-by-hole card recorded.</p>';
   const par = holes.reduce((a, h) => a + h.par, 0), gross = holes.reduce((a, h) => a + h.score, 0);
-  return `<table class="scorecard"><tr><th>Hole</th>${holes.map(h => `<th>${h.hole}</th>`).join("")}<th>Tot</th></tr>
+  const head = h => replays && replays[h.hole]
+    ? `<button class="link${state.replayHole === h.hole ? " on" : ""}" data-replay="${h.hole}" title="Replay this hole">${h.hole}</button>` : h.hole;
+  return `<table class="scorecard"><tr><th>Hole</th>${holes.map(h => `<th>${head(h)}</th>`).join("")}<th>Tot</th></tr>
     <tr><td class="sub">Par</td>${holes.map(h => `<td class="sub">${h.par}</td>`).join("")}<td class="sub">${par}</td></tr>
     <tr><td>Score</td>${holes.map(h => `<td>${scoreCell(h.score, h.par)}</td>`).join("")}<td><b>${gross}</b> <span class="sub">${toPar(gross - par)}</span></td></tr></table>`;
+}
+
+// A hole drawn from the logged ball positions, seen from above and turned so the tee is at the bottom
+// and the pin at the top. World units are metres (x, z); an aim is the player's minimap click.
+const REPLAY_COLORS = ["#5fc58a", "#6fb3ff", "#ffb74d", "#e57373", "#ba68c8", "#4dd0e1"];
+function replaySvg(rp) {
+  const pts = [rp.tee, rp.pin, ...rp.players.flatMap(p => p.shots.flatMap(s => [s.from, s.to, s.aim]))].filter(Boolean);
+  if (pts.length < 2) return '<p class="empty">Not enough positions logged to draw this hole.</p>';
+  const a = rp.tee || pts[0], b = rp.pin || pts[pts.length - 1];
+  let fx = b[0] - a[0], fz = b[1] - a[1];
+  const n = Math.hypot(fx, fz) || 1; fx /= n; fz /= n;
+  // Left-handed Unity axes: a player facing (fx, fz) has (fz, -fx) on the right.
+  const loc = p => { const dx = p[0] - a[0], dz = p[1] - a[1]; return [dx * fz - dz * fx, -(dx * fx + dz * fz)]; };
+  const L = pts.map(loc), xs = L.map(p => p[0]), ys = L.map(p => p[1]);
+  const pad = 14, minY = Math.min(...ys) - pad, h = Math.max(...ys) + pad - minY;
+  // At least half as wide as long, centred, so a straight hole isn't a sliver.
+  const w = Math.max(Math.max(...xs) - Math.min(...xs) + 2 * pad, h / 2, 60);
+  const minX = (Math.max(...xs) + Math.min(...xs)) / 2 - w / 2;
+  const k = Math.min(320 / w, 520 / h), W = Math.round(w * k), H = Math.round(h * k);
+  const P = p => { const [x, y] = loc(p); return [((x - minX) * k).toFixed(1), ((y - minY) * k).toFixed(1)]; };
+  let g = "";
+  if (rp.tee) { const [x, y] = P(rp.tee); g += `<rect x="${x - 4}" y="${y - 4}" width="8" height="8" fill="#ddd"><title>Tee</title></rect>`; }
+  rp.players.forEach((pl, i) => {
+    const c = REPLAY_COLORS[i % REPLAY_COLORS.length];
+    for (const s of pl.shots) {
+      const tip = esc(`${pl.name} · shot ${s.n}${s.club ? " · " + s.club : ""}${s.lie ? " from the " + s.lie : ""}${s.to_pin != null ? ` · ${s.to_pin} yd to the pin` : ""}`);
+      if (s.from && s.aim) { const [x1, y1] = P(s.from), [x2, y2] = P(s.aim);
+        g += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${c}" stroke-opacity=".45" stroke-dasharray="3 3"/><circle cx="${x2}" cy="${y2}" r="2.5" fill="none" stroke="${c}" stroke-opacity=".6"><title>${tip} · aim</title></circle>`; }
+      if (s.from && s.to) { const [x1, y1] = P(s.from), [x2, y2] = P(s.to);
+        g += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${c}" stroke-width="${s.putt ? 1.5 : 2.5}"><title>${tip}</title></line>`; }
+      if (s.from) { const [x, y] = P(s.from); g += `<circle cx="${x}" cy="${y}" r="3.5" fill="${c}" stroke="#111"><title>${tip}</title></circle>`;
+        if (s.club && !s.putt) g += `<text x="${+x + 6}" y="${+y + 3}" fill="${c}" font-size="10">${esc(s.club)}</text>`; }
+    }
+  });
+  if (rp.pin) { const [x, y] = P(rp.pin);
+    g += `<line x1="${x}" y1="${y}" x2="${x}" y2="${y - 16}" stroke="#eee" stroke-width="1.5"/><path d="M${x},${y - 16} l10,4 l-10,4z" fill="#e53935"/><circle cx="${x}" cy="${y}" r="2.5" fill="#eee"><title>Pin${rp.pin_estimated ? " (estimated)" : ""}</title></circle>`; }
+  // A scale bar: the round number of yards nearest a fifth of the drawing's length.
+  const yd = [10, 25, 50, 100, 150, 200].reduce((a, v) => Math.abs(v - h * 1.0936 / 5) < Math.abs(a - h * 1.0936 / 5) ? v : a);
+  const bar = yd / 1.0936 * k;
+  g += `<line x1="8" y1="${H - 8}" x2="${(8 + bar).toFixed(1)}" y2="${H - 8}" stroke="#8fa59b" stroke-width="2"/><text x="8" y="${H - 13}" fill="#8fa59b" font-size="10">${yd} yd</text>`;
+  const legend = rp.players.map((pl, i) => `<span style="color:${REPLAY_COLORS[i % REPLAY_COLORS.length]}">● ${esc(pl.name)}</span>`).join(" &nbsp;");
+  const notes = [rp.pin ? (rp.pin_estimated ? "Pin estimated from the shots' distances." : "") : "Pin position unknown.",
+                 rp.players.some(p => p.shots.some(s => s.aim)) ? "Dashed: where the player aimed." : ""].filter(Boolean).join(" ");
+  return `<div class="replay"><div class="sub">${esc(rp.course)} · hole ${rp.hole}${rp.par ? ` · par ${rp.par}` : ""}</div>
+    <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${g}</svg>
+    <div class="sub">${legend}</div>${notes ? `<div class="sub">${notes}</div>` : ""}</div>`;
 }
 
 // A small line chart: one point per night.
@@ -528,6 +589,12 @@ function renderVersus() {
       </tbody></table>` : '<p class="empty">No course in common yet.</p>'}`;
 }
 
+function replayPart(reps) {
+  if (!reps || !Object.keys(reps).length) return "";
+  const rp = reps[state.replayHole];
+  return rp ? replaySvg(rp) : '<p class="sub">Click a hole number for a replay of the hole.</p>';
+}
+
 function renderRounds() {
   const d = state.data;
   const cols = [
@@ -538,13 +605,15 @@ function renderRounds() {
   ];
   const row = r => {
     const open = state.round === r.id;
+    if (open && state.replays[r.round] === undefined) loadReplays(r.round);
+    const reps = open && typeof state.replays[r.round] === "object" ? state.replays[r.round] : null;
     const tags = (!state.data.has_league ? "" : r.league ? '<span class="tag">league</span>' : '<span class="tag">practice</span>') + (r.complete ? "" : '<span class="tag">quit early</span>')
       + (state.seen && r.ended > state.seen ? '<span class="tag new">new</span>' : "");
     return `<tr class="click" data-round="${r.id}"><td>${esc(r.date)}</td><td class="l">${esc(r.course)}</td>
       <td class="l">${esc(r.side)}${r.team && r.team !== r.side ? ` <span class="sub">${esc(r.team)}</span>` : ""}</td>
       <td class="l">${esc(r.format.replace("_", " "))}${tags}</td><td>${r.played}/${r.holes}</td><td>${dash(r.gross)}</td>
       <td>${toPar(r.to_par)}</td><td>${frac(r.fir)}</td><td>${frac(r.gir)}</td><td>${dash(r.putts)}</td></tr>` +
-      (open ? `<tr class="detail"><td colspan="${cols.length}">${scorecard(r.card)}
+      (open ? `<tr class="detail"><td colspan="${cols.length}">${scorecard(r.card, reps)}${replayPart(reps)}
         <p class="sub">Scrambling ${frac(r.scramble)} · Sand saves ${frac(r.sand)} · Penalties ${dash(r.penalties)}${r.longest_drive ? ` · Longest drive ${Math.round(r.longest_drive)} yd` : ""}</p>
         <p><button class="link" data-roundshots="${r.round}">Every shot of this round →</button></p></td></tr>` : "");
   };
@@ -769,11 +838,14 @@ function showTabs() {
 
 document.addEventListener("click", (e) => {
   const t = e.target.closest("[data-tab],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
-                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share]");
+                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay]");
   if (!t) return;
   if (t.dataset.share !== undefined) {
     const done = ok => { t.textContent = ok ? "Link copied" : "Copy the address bar"; setTimeout(() => (t.textContent = "Copy link"), 2000); };
     navigator.clipboard ? navigator.clipboard.writeText(location.href).then(() => done(true), () => done(false)) : done(false);
+  } else if (t.dataset.replay) {
+    state.replayHole = state.replayHole === +t.dataset.replay ? null : +t.dataset.replay;
+    render();
   } else if (t.dataset.roundshots) {   // drill into a round: just its shots
     state.shotFilter = { round: t.dataset.roundshots };
     delete state.sort.shots;
@@ -802,6 +874,7 @@ document.addEventListener("click", (e) => {
     render();
   } else if (t.dataset.round) {
     state.round = state.round === +t.dataset.round ? null : +t.dataset.round;
+    state.replayHole = null;
     render();
   } else if (t.dataset.course) {
     state.course = t.dataset.course;

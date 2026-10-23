@@ -637,6 +637,7 @@ class Engine:
         # has been logged, so each transition is handled once.
         self._log_round_ends = 0
         self._log_round_completes = 0
+        self._log_layouts = 0
         self._range_noted = False
         self._join_tried = False   # joining a round already under way is tried once, at the first setup
         # Shot handlers run in the background (the follow/reaction mustn't block the loop); keep
@@ -1017,9 +1018,15 @@ class Engine:
     def _check_log_round(self) -> None:
         """Act on round-level lines in GSPro's log: a round holed out ("Round Is Complete", with the
         holes it actually covered) or left ("End Round", which before completion means quit early)."""
+        g, r = self.gspro, self.round
+        if g.layouts != self._log_layouts:
+            # The completed round's hole list: each played hole's tee and pin, for the hole replays.
+            self._log_layouts = g.layouts
+            course = self.current_course or g.course_display
+            if (n := self.store.record_hole_layout(course, g.layout_holes)):
+                log.info("Stored the layout of %d holes at %s", n, course)
         if not self._log_rounds:
             return
-        g, r = self.gspro, self.round
         live = r is not None and not r.ended
         if live and g.mode == "range" and not self._round_end_queued:
             # The range loaded with a round still open (it was left without the booth seeing it end).
@@ -3543,6 +3550,8 @@ class Engine:
             finish_yards=None,   # filled in on this player's next shot (see _resolve_pending_finish)
             gimme_yards=self.gspro.gimme_of(idx), fmt=fmt, attributed=attributed,
             is_league=bool(r and r.is_league), shared_ball=shared,
+            # where GSPro's log had the ball for this shot, and the player's minimap aim, for the replay
+            start=self.gspro.fire_info(fire).get("start"), aim=self.gspro.fire_info(fire).get("aim"),
         )
         rec.shot_id = shot_id
         # Not gated on the screen seeing touchdown: the finish comes from GSPro's log at the next shot,

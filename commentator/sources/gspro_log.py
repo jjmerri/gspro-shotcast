@@ -31,6 +31,7 @@ next hole, or a same-course restart).
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -57,6 +58,8 @@ class LogEvent:
     putting: bool | None = None       # launch_mode: GSPro had the putter selected for the shot just fired
     strokes: int | None = None        # state: strokes just added to the score (negative = taken back)
     altitude_ft: float | None = None  # altitude: the course altitude GSPro's ball physics is using
+    pos: tuple | None = None          # position: the ball's world (x, y, z) in metres; aim: the minimap (x, y)
+    holes: list | None = None         # layout: each hole's par and world tee/pin/waypoint (see _layout_holes)
 
 
 # GSPro's `Using Material TVG<surface>` names mapped to the booth's lie vocabulary (commentator/hud.py
@@ -94,6 +97,15 @@ _VERSION = re.compile(r"^GSPro Version:\s*(\S+)")
 # Each bounce logs the altitude GSPro's physics is using, in feet. It can differ from the course
 # file's altitude (Cabot Cliffs: 1,700 in the file, 50 here), and some rounds log 0.
 _ALTITUDE = re.compile(rf"^magnitude:.*\|\s*elevation\s+(-?{_NUM})\s*$")
+_FLOAT = r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
+# Where the ball sits for the shot being set up, in Unity world metres (Y is height), logged in the
+# setup block after "Selecting shot for player". Not logged before a hole's tee shot, nor before a shot
+# handed over without a setup block ("Next Player"), so a shot without one has no start position.
+_POSITION = re.compile(rf"^Data for selected player:\s*X\s*({_FLOAT})\s+Y\s*({_FLOAT})\s+Z\s*({_FLOAT})")
+# A click on the minimap to move the aim: a bare "(x, y, 0.0)" in minimap units, origin at the map's
+# centre. GSPro fits the map so the ball sits near (0, -338) and the pin near (0, +339): y runs up the
+# ball-to-pin line and x to its right, about 677 units for the whole distance (see aim_offset).
+_AIM = re.compile(rf"^\(({_FLOAT}), ({_FLOAT}), 0\.0\)$")
 # Words that start a line the parser depends on. One that carries the word but doesn't parse means
 # GSPro changed its wording (an update): it comes out as an "unparsed" event for the health checks.
 # A season's log had none, so any is worth a look.
@@ -158,7 +170,12 @@ def parse_events(text: str) -> list[LogEvent]:
             elif line.startswith("[{") and '"par"' in line:
                 if pars := [int(p) for p in _PAR.findall(line)]:
                     active = [a == "true" for a in _ACTIVE.findall(line)]
-                    out.append(LogEvent("layout", pars=pars, active=active if len(active) == len(pars) else None))
+                    out.append(LogEvent("layout", pars=pars, active=active if len(active) == len(pars) else None,
+                                        holes=_layout_holes(line)))
+            elif m := _POSITION.match(line):
+                out.append(LogEvent("position", pos=(float(m.group(1)), float(m.group(2)), float(m.group(3)))))
+            elif m := _AIM.match(line):
+                out.append(LogEvent("aim", pos=(float(m.group(1)), float(m.group(2)))))
             elif m := _VERSION.match(line):
                 out.append(LogEvent("version", display=m.group(1)))
             elif m := _ALTITUDE.match(line):
@@ -170,6 +187,42 @@ def parse_events(text: str) -> list[LogEvent]:
             if any(k in line for k in _MARKERS):
                 out.append(LogEvent("unparsed", display=line[:160]))
     return out
+
+
+def _vec(v) -> tuple | None:
+    """A layout vector as (x, y, z), or None for GSPro's all-zero placeholder (a hole not played)."""
+    if not isinstance(v, dict):
+        return None
+    xyz = tuple(float(v.get(k, 0.0)) for k in "xyz")
+    return xyz if any(xyz) else None
+
+
+def _layout_holes(line: str) -> list[dict] | None:
+    """The hole list GSPro logs when a round is complete: per hole, its par, whether it was played, and
+    the world positions of the tee, the pin (as set for this round), and the designer's aim waypoint
+    (ShotWPPos0, a fixed point, not the player's aim). The pin is all zeros on a hole not played."""
+    try:
+        data = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(data, list):
+        return None
+    return [{"par": h.get("par"), "played": bool(h.get("played")), "tee": _vec(h.get("teePos")),
+             "pin": _vec(h.get("pinPos")), "waypoint": _vec(h.get("ShotWPPos0"))}
+            for h in data if isinstance(h, dict)]
+
+
+AIM_MAP_SPAN = 677.0    # minimap units from the ball (y ~ -338) to the pin (y ~ +339)
+AIM_MAP_BALL_Y = -338.0
+
+
+def aim_offset(map_x: float, map_y: float, to_pin_m: float) -> tuple[float, float]:
+    """A minimap aim click as metres (along the ball-to-pin line, right of it), given the distance to
+    the pin then. GSPro scales the map to fit ball and pin whatever the distance, so one map unit is
+    to_pin / 677 metres. Measured on full shots; a long hole whose map stops short of the green, and the
+    putting view, are unverified."""
+    scale = to_pin_m / AIM_MAP_SPAN
+    return (map_y - AIM_MAP_BALL_Y) * scale, map_x * scale
 
 
 @dataclass
@@ -287,6 +340,16 @@ class GsproState:
     altitude_ft: float | None = None   # the altitude GSPro is playing the current course at, once a ball bounces
     kinds: Counter = field(default_factory=Counter)
     unparsed: list = field(default_factory=list)
+    # Where the next shot is struck from and where it was aimed, attached to that shot's fire info
+    # ("start", "aim"). `_pos` is the last setup position, `_pos_fresh` whether no shot has been fired
+    # from it yet: a shot with no setup block of its own gets no start, except in a team format, where
+    # each teammate plays the picked ball from the same spot. `_aim` is the last minimap click.
+    _pos: tuple | None = None
+    _pos_fresh: bool = False
+    _aim: tuple | None = None
+    # The hole list of the latest completed round (see _layout_holes), and how many have been seen.
+    layout_holes: list = field(default_factory=list)
+    layouts: int = 0
 
     def apply(self, ev: LogEvent) -> None:
         self.kinds[ev.kind] += 1
@@ -327,6 +390,13 @@ class GsproState:
             self.pars = ev.pars or []
             if ev.active:
                 self.active_holes = sum(ev.active)
+            if ev.holes:
+                self.layout_holes = ev.holes
+                self.layouts += 1
+        elif ev.kind == "position":
+            self._pos, self._pos_fresh = ev.pos, True
+        elif ev.kind == "aim":
+            self._aim = ev.pos
         elif ev.kind == "material":
             self.lie = self._pending_lie = ev.surface
             if self._unowned_fire is not None and self._unowned_fire in self._fire_info:
@@ -347,7 +417,12 @@ class GsproState:
             self.shots_since_course += 1
             self.fires += 1
             self._fire_at[self.fires] = time.monotonic()
-            self._fire_info[self.fires] = {"player": None}
+            self._fire_info[self.fires] = info = {"player": None}
+            if self._pos is not None and (self._pos_fresh or self.team_scores):
+                info["start"] = self._pos
+            if self._aim is not None:
+                info["aim"] = self._aim
+            self._pos_fresh, self._aim = False, None
             for old in [n for n in self._fire_at if n <= self.fires - 40]:
                 self._fire_at.pop(old, None)
                 self._fire_info.pop(old, None)
@@ -370,6 +445,7 @@ class GsproState:
                 self._fire_info[self.fires]["penalty"] = ev.surface
         elif ev.kind == "gimmie":
             self.gimmies += 1
+            self._pos = None   # the hole is over: the next tee shot has no setup block of its own
             if self._since_select and self.active_player is not None and self.active_player == self.selected:
                 self.pick_gimmes.append((self.active_player, self.hole_by.get(self.active_player, self.current_hole)))
             if self.active_player is not None:
@@ -378,6 +454,7 @@ class GsproState:
                 self.gimmies_by[self.active_player] = self.gimmies_by.get(self.active_player, 0) + 1
         elif ev.kind == "hole_out":
             self.hole_outs += 1
+            self._pos = None
             self._end_next = True
             if self._unowned_fire is not None:
                 self._unowned_outs += 1    # the shooter's score line, next, says whose ball dropped
@@ -408,6 +485,8 @@ class GsproState:
         self.teammates.clear()
         self.selected = self.pick = None
         self._pending_lie = None
+        self._pos = self._aim = None
+        self._pos_fresh = False
         self._unowned_fire = self._unowned_wet = None
         self._unowned_outs = 0
         self.active_player = self.current_hole = self.lie = self.to_pin = self.gimmie = None

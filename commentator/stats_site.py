@@ -27,6 +27,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+from . import hole_replay
 from . import season_analytics as A
 from . import stats_web
 
@@ -77,6 +78,7 @@ def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | No
                                    player TEXT, course TEXT, club TEXT, lie TEXT, round INTEGER);
             CREATE TABLE pub_shot_json (ord INTEGER PRIMARY KEY, json TEXT NOT NULL);
             CREATE TABLE pub_transcript (session_id INTEGER PRIMARY KEY, json TEXT NOT NULL);
+            CREATE TABLE pub_replay (round INTEGER, hole INTEGER, json TEXT NOT NULL, PRIMARY KEY (round, hole));
         """)
         db.executemany("INSERT INTO pub_shot VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                        [(i, s["id"], league.get(s["id"]), s["date"], s["player"], s["course"], s["club"],
@@ -86,6 +88,9 @@ def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | No
         db.executemany("INSERT INTO pub_transcript VALUES (?, ?)",
                        [(sid, json.dumps(A.transcript(src, sid, names), separators=(",", ":")))
                         for sid in sessions])
+        db.executemany("INSERT INTO pub_replay VALUES (?, ?, ?)",
+                       [(rnd, hole, json.dumps(rp, separators=(",", ":")))
+                        for (rnd, hole), rp in hole_replay.hole_replays(src).items()])
         # Each filter walks its own index in the page's order, so the newest matches come first.
         for col in (*SHOT_FILTERS, "is_league"):
             db.execute(f"CREATE INDEX pub_shot_{col} ON pub_shot ({col}, ord)")

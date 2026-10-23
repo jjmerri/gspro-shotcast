@@ -99,6 +99,10 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
   `Store` would insert a session row) and a single-page UI. `season_analytics.py` holds the
   heavier season reads: strokes gained, gapping, recovery, trends, courses, highlights, booth
   stats, the shot log and broadcast transcripts. The booth itself doesn't import them.
+- **`hole_replay.py`** each round's holes as drawn on the Rounds tab: shot lines from the logged
+  ball positions, aims, tee and pin (`hole_layouts`, or the pin fitted to the shots' distances).
+- **`log_backfill.py`** `backfill-log`: matches a saved GSPro log's shots to stored ones in order
+  and fills their positions, aims and the hole layouts.
 - **`stats_site.py`** builds the stats page as a static site (per-context summary JSON plus a small
   `stats.db` of shots and transcripts that the page queries in the browser with the vendored
   sql.js-httpvfs over HTTP range requests) and uploads it to S3 (`publish`; the booth runs it in a
@@ -152,7 +156,8 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
 - `gspro_log_shots.py` the shot feed from GSPro's own log (`LaunchExt Vars` lines): any launch
   monitor, ball data only. `connector_log` falls back to it when `ConnectDebug.txt` is missing.
 - `gspro_sniffer.py` sniffs GSPro Open Connect loopback (scapy, needs Npcap + admin).
-- `gspro_log.py` tails GSPro's `output_log.txt` into a live `GsproState` game-truth model.
+- `gspro_log.py` tails GSPro's `output_log.txt` into a live `GsproState` game-truth model,
+  including each fire's ball position and minimap aim, and the hole list of a completed round.
 - `replay.py` replays a `.jsonl` shot feed offline. `stream.py` is shared async plumbing.
 
 ## Invariants that are easy to break
@@ -209,6 +214,6 @@ HUD, follow, OCR cache),
 `test_round.py` (rounds, formats, handicaps, setup watcher), `test_handicap.py` (Squabbit's
 handicap rules and week cards), `test_board.py` (week results, standings, net and CTP facts), `test_gspro_log.py` (the log
 reader), `test_model_switch.py`, `test_connector.py`, `test_replay.py`, `test_minimap.py`,
-`test_putt_read.py`, `test_gspro_log_shots.py`. They cover logic, not
+`test_putt_read.py`, `test_gspro_log_shots.py`, `test_hole_replay.py`. They cover logic, not
 real GSPro/Uneekor traffic or live screen layouts. `tools/` holds the offline harnesses, an OCR
 thread benchmark and screen-calibration helpers.

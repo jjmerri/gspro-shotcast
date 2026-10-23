@@ -6,7 +6,7 @@ hole-out.
 """
 
 from commentator.sources.gspro_log import (
-    GsproLogFollower, GsproState, LogEvent, _split_trailing, build_state, parse_events,
+    GsproLogFollower, GsproState, LogEvent, _split_trailing, aim_offset, build_state, parse_events,
 )
 
 SAMPLE = "tests/data/gspro_output_log_sample.txt"
@@ -628,3 +628,33 @@ def test_an_ordinary_gimmie_is_not_a_pick():
     s = _replay(FIRE + _line(1, 1, 3) + "Logging tdist: 0.5 and ActiveGameGimmieDistance: 1.22\n"
                 "Select Shot - active user ball is within Gimmie distance\n" + _line(1, 1, 4))
     assert s.gimmies_by == {0: 1} and s.pick_gimmes == []
+
+
+# ---- ball positions, aim clicks and the hole layout ------------------------------------------
+
+SHOT = "* ------- Shot Fired! ------- *\n"
+LAYOUT = ('[{"active":true,"played":true,"par":4,"pinPos":{"x":10.0,"y":1.0,"z":300.0},'
+          '"teePos":{"x":0.0,"y":2.0,"z":0.0},"ShotWPPos0":{"x":5.0,"y":0.0,"z":200.0}},'
+          '{"active":false,"played":false,"par":3,"pinPos":{"x":0.0,"y":0.0,"z":0.0},'
+          '"teePos":{"x":50.0,"y":2.0,"z":0.0},"ShotWPPos0":{"x":0.0,"y":0.0,"z":0.0}}]\n')
+
+
+def test_each_shot_takes_the_position_and_aim_logged_since_the_last():
+    s = _replay(
+        "(12.5, 100.0, 0.0)\n" + SHOT + _line(0, 1, 0)          # the tee shot: aimed, but no setup block
+        + "Selecting shot for player: 0\nData for selected player: X 5.5 Y 1.25 Z 210.0\n"
+        + "Logging tdist: 90.1 and ActiveGameGimmieDistance: 1.22\n" + SHOT + _line(0, 1, 1)
+        + SHOT + _line(0, 1, 2)                                  # a stroke with no fresh setup block
+        + "Data for selected player: X 9.0 Y 1.0 Z 299.0\nHole out !!! \n" + _line(0, 1, 3)
+        + "(0.0, 50.0, 0.0)\n" + SHOT + _line(1, 1, 0) + "Round Is Complete\n" + LAYOUT)
+    assert [s.fire_info(n).get("start") for n in (1, 2, 3, 4)] == [None, (5.5, 1.25, 210.0), None, None]
+    assert [s.fire_info(n).get("aim") for n in (1, 2, 3, 4)] == [(12.5, 100.0), None, None, (0.0, 50.0)]
+    assert s.layouts == 1 and s.layout_holes[0] == {
+        "par": 4, "played": True, "tee": (0.0, 2.0, 0.0), "pin": (10.0, 1.0, 300.0), "waypoint": (5.0, 0.0, 200.0)}
+    assert s.layout_holes[1]["pin"] is None and not s.layout_holes[1]["played"]
+
+
+def test_aim_offset_scales_the_minimap_to_the_distance():
+    assert aim_offset(0.0, -338.0, 150.0) == (0.0, 0.0)          # on the ball
+    along, right = aim_offset(67.7, 339.0, 200.0)                # at the pin, a tenth of the span right
+    assert abs(along - 200.0) < 1e-9 and abs(right - 20.0) < 1e-9

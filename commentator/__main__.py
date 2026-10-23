@@ -691,6 +691,17 @@ def cmd_stats_web(cfg: Config, args) -> None:
           site=Path(cfg.log_dir) / "stats-web-site")
 
 
+def cmd_backfill_log(cfg: Config, args) -> None:
+    from .log_backfill import backfill
+
+    path = Path(args.db or cfg.db_path)
+    if not path.exists():
+        sys.exit(f"No season database at {path}.")
+    got = backfill(str(path), args.log, dry_run=args.dry_run)
+    print(f"{'Would fill' if args.dry_run else 'Filled'}: {got['starts']} shot positions and {got['aims']} aims "
+          f"({got['matched']} of {got['fires']} logged shots matched); {got['layouts']} hole layouts.")
+
+
 def cmd_publish(cfg: Config, args) -> None:
     from . import stats_site
 
@@ -792,6 +803,11 @@ def main() -> None:
     p.add_argument("--out", help="Where to build the site (default: logs/stats-site)")
     p.add_argument("--build-only", action="store_true", help="Build the site but don't upload it")
 
+    p = sub.add_parser("backfill-log", help="Fill older shots' ball positions, aims and hole layouts from saved GSPro logs")
+    p.add_argument("log", nargs="+", help="GSPro output_log.txt files")
+    p.add_argument("--db", help="Database file (default: db_path, logs/season.db)")
+    p.add_argument("--dry-run", action="store_true", help="Count what would be filled without changing the file")
+
     p = sub.add_parser("review", help="A session's log as a timeline plus a per-shot summary")
     p.add_argument("--date", help="YYYY-MM-DD, default today")
     p.add_argument("--summary", action="store_true", help="Only the per-shot table")
@@ -835,7 +851,7 @@ def main() -> None:
         "run": cmd_run, "sniff": cmd_sniff, "calibrate": cmd_calibrate, "ocr-test": cmd_ocr_test, "screen-check": cmd_screen_check, "fixture": cmd_fixture, "notify-test": cmd_notify_test,
         "say": cmd_say, "banter": cmd_banter, "check": cmd_check, "eval": cmd_eval, "stats": cmd_stats,
         "stats-web": cmd_stats_web,
-        "publish": cmd_publish,
+        "publish": cmd_publish, "backfill-log": cmd_backfill_log,
         "review": cmd_review,
         "cost": cmd_cost, "import-league": cmd_import_league, "squabbit": cmd_squabbit,
     }

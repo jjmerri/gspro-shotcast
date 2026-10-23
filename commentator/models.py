@@ -36,6 +36,7 @@ class Shot:
     angle_of_attack: float | None = None
     face_to_target: float | None = None
     path: float | None = None
+    loft: float | None = None   # dynamic loft at impact
     # Strike location on the face, in mm from centre. Only measured when the player has the club
     # markers the EYE XO2 needs (club_measured), so these are present for some players and not others.
     vertical_face_impact: float | None = None
@@ -89,6 +90,7 @@ class Shot:
             angle_of_attack=club.get("AngleOfAttack"),
             face_to_target=club.get("FaceToTarget"),
             path=club.get("Path"),
+            loft=club.get("Loft"),
             vertical_face_impact=club.get("VerticalFaceImpact"),
             horizontal_face_impact=club.get("HorizontalFaceImpact"),
             club_measured=bool((msg.get("ShotDataOptions") or {}).get("ContainsClubData")),

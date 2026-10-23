@@ -1429,6 +1429,34 @@ def test_store_keeps_the_season(tmp_path):
     assert board["player"] == "Mike" and board["fairway_pct"] == 100
 
 
+def test_store_keeps_club_delivery_and_backfills_older_files(tmp_path):
+    from commentator.store import CLUB_COLS, Store
+
+    measured = {"BallData": {"Speed": 106.6, "VLA": 21.0, "CarryDistance": 158.0},
+                "ClubData": {"Speed": 74.9, "AngleOfAttack": -4.2, "FaceToTarget": -0.5, "Path": 1.3,
+                             "VerticalFaceImpact": -7.6, "HorizontalFaceImpact": 8.1, "Loft": 25.7},
+                "ShotDataOptions": {"ContainsBallData": True, "ContainsClubData": True}}
+    # No club markers: the monitor still sends zeros, which must not read as a square face.
+    unmeasured = {**measured, "ClubData": {"Speed": 0.0, "Path": 0.0, "AngleOfAttack": 0.0},
+                  "ShotDataOptions": {"ContainsBallData": True, "ContainsClubData": False}}
+    db = str(tmp_path / "season.db")
+    st = Store(db)
+    for msg in (measured, unmeasured):
+        st.record_shot(player="Mike", hole="Hole 1", shot=Shot.from_gspro(msg), before=Hud(), after=Hud(),
+                       tags=[], carry_game_yards=None, total_yards=None, offline_yards=None)
+    cols = ", ".join(CLUB_COLS)
+    expected = [(1.3, -4.2, -0.5, 25.7, 8.1, -7.6), (None,) * 6]
+    assert [tuple(r) for r in st.db.execute(f"SELECT {cols} FROM shots ORDER BY id")] == expected
+    # A season.db from before these columns existed.
+    st.db.execute("ALTER TABLE shots RENAME TO shots_new")
+    old_cols = [r["name"] for r in st.db.execute("PRAGMA table_info(shots_new)") if r["name"] not in CLUB_COLS]
+    st.db.execute(f"CREATE TABLE shots AS SELECT {', '.join(old_cols)} FROM shots_new")
+    st.db.execute("DROP TABLE shots_new")
+    st.close()
+    reopened = Store(db)
+    assert [tuple(r) for r in reopened.db.execute(f"SELECT {cols} FROM shots ORDER BY id")] == expected
+
+
 def test_driving_records_count_only_tee_shots(tmp_path):
     from commentator.store import Store
 

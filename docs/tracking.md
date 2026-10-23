@@ -75,7 +75,8 @@ What's recorded, and from where:
 
 | Table | One row per | What's in it |
 |---|---|---|
-| `shots` | swing | Player, course, hole, shot number, club; launch monitor ball speed, launch angle, start direction, spin, spin axis, club speed, carry; lie before and after, slope, pin elevation, distance to the pin before and where it finished; GSPro's carry/total/offline; putt or full shot; a putt's result (holed, conceded, missed), or `holed` on a full shot that went in (a stroke the same player hits again on the same hole is never left `holed`: a putt becomes `missed`, a full shot loses its outcome); league or practice; `mulligan = 1` on a stroke GSPro took back. A conceded tap-in gets its own putt row (`outcome = 'gimme'`, no ball data), so every putt on the card is here |
+| `shots` | swing | Player, course, hole, shot number, club; launch monitor ball speed, launch angle, start direction, spin, spin axis, club speed, carry; club path, attack angle, face to target, dynamic loft and strike location on the face, when the monitor reported club data (NULL otherwise); lie before and after, slope, pin elevation, distance to the pin before and where it finished; GSPro's carry/total/offline; putt or full shot; a putt's result (holed, conceded, missed), or `holed` on a full shot that went in (a stroke the same player hits again on the same hole is never left `holed`: a putt becomes `missed`, a full shot loses its outcome); where GSPro had the ball before it (`start_x/y/z`, world metres, from the log's setup block; NULL on a tee shot, which has none) and the player's minimap aim click, if they moved it (`aim_map_x/y`); league or practice; `mulligan = 1` on a stroke GSPro took back. A conceded tap-in gets its own putt row (`outcome = 'gimme'`, no ball data), so every putt on the card is here |
+| `hole_layouts` | hole of a completed round | Each played hole's tee, pin (as set that round) and GSPro's aim waypoint, in world metres, from the hole list GSPro logs when a round is complete (a round quit early logs none) |
 | `rounds` | side per round (a player, or the team in a one-ball format) | Course, format, holes, gross, net to par, hole-by-hole scores and pars, fairways, greens in regulation, scrambling, sand saves, putts, penalties, longest drive (total distance); complete or quit early |
 | `player_rounds` | player per round | The same per-player stats and scores, for team formats where the side is the team |
 | `lines` | spoken line | Every line the booth said, tied to its shot |
@@ -107,6 +108,14 @@ shots are not recorded, only rounds. Practice rounds are recorded and flagged
 can't say which partner hit, so those shots are kept (`attributed = 0`) but left out of
 per-player stats. Replays and evals use an in-memory DB and never touch the file.
 
+Shots recorded before the booth stored positions can get them from a saved GSPro log:
+`python -m commentator backfill-log <output_log.txt>... [--db logs/season.db] [--dry-run]`. The log
+has no timestamps, so its shots are matched to the file's in order, on course, hole and distance to
+the pin; a stretch of the log that mostly doesn't match (a round the booth never recorded) is
+skipped, and only shots with no position yet are filled. GSPro starts `output_log.txt` over at each
+launch, so only the sessions since GSPro was last started can be backfilled. Stop the booth first and
+back the file up.
+
 Back the file up (`logs/season.db`); it's the only copy of your rounds.
 
 ## Stats web page
@@ -118,7 +127,10 @@ for browsing the database. Its tabs:
   around the green, putting), night-by-night trends, club gapping with each club's typical flight
   (from full swings only, so chips don't shrink a wedge), approach by club, putting by length, and
   recovery from rough and sand.
-- **Head-to-head**, **Rounds** (hole-by-hole cards, and a link to every shot of the round), **Courses** (each hole's scoring average,
+- **Head-to-head**, **Rounds** (hole-by-hole cards, and a link to every shot of the round; a hole
+  number that's a link draws the hole from above, tee at the bottom: each player's shots from where
+  GSPro had the ball, dashed lines to where they aimed, and the pin, estimated from the shots'
+  distances to it when the round was quit before GSPro logged it), **Courses** (each hole's scoring average,
   hardest and easiest, best nine).
 - **Shots**: every shot, filterable by player, course, club, lie and a date range (or one round,
   from the Rounds tab), with its launch data and what the booth said about it. A shot's round is

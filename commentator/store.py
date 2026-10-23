@@ -51,8 +51,27 @@ CREATE TABLE IF NOT EXISTS shots (
     attributed INTEGER NOT NULL DEFAULT 1,
     is_league INTEGER NOT NULL DEFAULT 1,        -- 1 = league round, 0 = practice; for the stat context split
     mulligan INTEGER NOT NULL DEFAULT 0,         -- 1 = GSPro took the stroke back; excluded from every stat
-    shared_ball INTEGER NOT NULL DEFAULT 0       -- 1 = a team format where GSPro copies balls between
+    shared_ball INTEGER NOT NULL DEFAULT 0,      -- 1 = a team format where GSPro copies balls between
                                                  -- teammates, so the next stroke may not be from this ball
+    -- Club delivery, in degrees (face impact in mm from centre), only when the monitor reported club
+    -- data for the shot (ContainsClubData); NULL otherwise, never a placeholder zero.
+    club_path REAL, angle_of_attack REAL, face_to_target REAL, dynamic_loft REAL,
+    face_impact_h REAL, face_impact_v REAL,
+    -- From GSPro's log: where the ball sat for this shot, in the course's world metres (y is height;
+    -- NULL for a tee shot, which GSPro sets up without logging it: use hole_layouts' tee), and the
+    -- player's last minimap aim click before it, in minimap units (NULL when the aim wasn't moved).
+    start_x REAL, start_y REAL, start_z REAL, aim_map_x REAL, aim_map_y REAL
+);
+CREATE TABLE IF NOT EXISTS hole_layouts (            -- each hole's geometry, logged by GSPro when a round is complete
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER REFERENCES sessions(id),  -- NULL when backfilled from a log no session matched
+    ts REAL,
+    course TEXT NOT NULL,
+    hole INTEGER NOT NULL,                       -- the course's hole number
+    par INTEGER,
+    tee_x REAL, tee_y REAL, tee_z REAL,          -- world metres, as shots.start_*
+    pin_x REAL, pin_y REAL, pin_z REAL,          -- this round's pin
+    wp_x REAL, wp_y REAL, wp_z REAL              -- the course designer's aim waypoint (not the player's aim)
 );
 CREATE TABLE IF NOT EXISTS lines (
     id INTEGER PRIMARY KEY,
@@ -169,6 +188,25 @@ _DRIVE = "COALESCE(total_yards, carry_game_yards, carry_raw)"
 # so excluding only the current session counted tonight's earlier holes as history.
 
 
+POSITION_COLS = ("start_x", "start_y", "start_z", "aim_map_x", "aim_map_y")
+
+
+def _position_values(start: tuple | None, aim: tuple | None) -> tuple[float | None, ...]:
+    return (*(start if start else (None, None, None)), *(aim if aim else (None, None)))
+
+
+CLUB_COLS = ("club_path", "angle_of_attack", "face_to_target", "dynamic_loft", "face_impact_h", "face_impact_v")
+
+
+def _club_values(shot: Shot) -> tuple[float | None, ...]:
+    """The CLUB_COLS values for a shot: all NULL unless the monitor reported club data, since monitors
+    without it send zeros that would read as a dead-square strike."""
+    if not shot.club_measured:
+        return (None,) * len(CLUB_COLS)
+    return (shot.path, shot.angle_of_attack, shot.face_to_target, shot.loft,
+            shot.horizontal_face_impact, shot.vertical_face_impact)
+
+
 def _ctx_sql(context: str | None) -> str:
     """A WHERE-clause fragment slicing a stat by round context: None = lifetime (league + practice),
     'league' = league rounds only (the 'under pressure' slice), 'practice' = practice rounds only.
@@ -190,12 +228,18 @@ def _median(xs: list[float]) -> float | None:
 
 
 class Store:
-    def __init__(self, path: str | None) -> None:
+    def __init__(self, path: str | None, new_session: bool = True) -> None:
+        """Open (creating or upgrading) the season file. new_session=False opens it for maintenance, such
+        as a backfill, without starting a booth session in it."""
         self.db = sqlite3.connect(path or ":memory:")
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         self._migrate()
         self._backfill_finishes()
+        if not new_session:
+            self.session_id = None
+            self.db.commit()
+            return
         self.session_id = self.db.execute(
             "INSERT INTO sessions (started_at, date) VALUES (?, ?)", (time.time(), time.strftime("%Y-%m-%d"))
         ).lastrowid
@@ -207,10 +251,13 @@ class Store:
         added = {"to_pin_yards": "REAL", "finish_yards": "REAL", "gimme_yards": "REAL",
                  "outcome": "TEXT", "fmt": "TEXT", "attributed": "INTEGER NOT NULL DEFAULT 1",
                  "is_league": "INTEGER NOT NULL DEFAULT 1", "mulligan": "INTEGER NOT NULL DEFAULT 0",
-                 "shared_ball": "INTEGER NOT NULL DEFAULT 0"}
+                 "shared_ball": "INTEGER NOT NULL DEFAULT 0",
+                 **{col: "REAL" for col in CLUB_COLS}, **{col: "REAL" for col in POSITION_COLS}}
         for col, decl in added.items():
             if col not in have:
                 self.db.execute(f"ALTER TABLE shots ADD COLUMN {col} {decl}")
+        if not set(CLUB_COLS) <= have:
+            self._backfill_club_data()
         have_rounds = {r["name"] for r in self.db.execute("PRAGMA table_info(rounds)")}
         rounds_added = {"scramble_hit": "INTEGER", "scramble_tries": "INTEGER", "sand_hit": "INTEGER",
                         "sand_tries": "INTEGER", "hole_pars": "TEXT", "is_league": "INTEGER NOT NULL DEFAULT 1",
@@ -230,6 +277,21 @@ class Store:
                 self.db.execute(f"ALTER TABLE player_rounds ADD COLUMN {col} {decl}")
         self.db.commit()
 
+    def _backfill_club_data(self) -> None:
+        """Fill CLUB_COLS on older rows from the Open Connect message each one kept in `raw`."""
+        updates = []
+        for row in self.db.execute("SELECT id, raw FROM shots WHERE raw IS NOT NULL"):
+            try:
+                msg = json.loads(row["raw"])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(msg, dict) and (vals := _club_values(Shot.from_gspro(msg))) != (None,) * len(CLUB_COLS):
+                updates.append((*vals, row["id"]))
+        sets = ", ".join(f"{c} = ?" for c in CLUB_COLS)
+        self.db.executemany(f"UPDATE shots SET {sets} WHERE id = ?", updates)
+        if updates:
+            log.info("Backfilled club data on %d shots", len(updates))
+
     def record_shot(
         self, *, player: str | None, hole: str | None, shot: Shot, before: Hud, after: Hud, tags: list[str],
         carry_game_yards: float | None, total_yards: float | None, offline_yards: float | None,
@@ -237,6 +299,7 @@ class Store:
         to_pin_yards: float | None = None, finish_yards: float | None = None,
         gimme_yards: float | None = None, outcome: str | None = None, fmt: str | None = None,
         attributed: bool = True, is_league: bool = True, shared_ball: bool = False,
+        start: tuple | None = None, aim: tuple | None = None,
     ) -> int:
         cur = self.db.execute(
             """INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, ball_speed,
@@ -244,8 +307,10 @@ class Store:
                    lie_before, slope_updown, slope_side, slope_side_degrees, elevation_yards, to_pin,
                    score_to_par, lie_after, carry_raw_tile_yards, carry_game_yards, total_yards, offline_yards,
                    tags, raw, to_pin_yards, finish_yards, gimme_yards, outcome, fmt, attributed, is_league,
-                   shared_ball)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   shared_ball, club_path, angle_of_attack, face_to_target, dynamic_loft, face_impact_h,
+                   face_impact_v, start_x, start_y, start_z, aim_map_x, aim_map_y)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                       ?,?,?,?,?)""",
             (self.session_id, shot.timestamp, player, course, hole, before.shot_number or after.shot_number, shot.club,
              int(shot.is_putt), shot.ball_speed, shot.vla, shot.hla, shot.total_spin, shot.spin_axis,
              shot.club_speed, shot.carry, shot.units, before.lie, before.slope_updown, before.slope_side,
@@ -254,12 +319,40 @@ class Store:
              total_yards, offline_yards,
              json.dumps(tags), json.dumps(shot.raw),
              to_pin_yards, finish_yards, gimme_yards, outcome, fmt, int(attributed), int(is_league),
-             int(shared_ball)),
+             int(shared_ball), *_club_values(shot), *_position_values(start, aim)),
         )
         self._unhole_if_played_on(cur.lastrowid, later=False)
         self._fill_previous_finish(cur.lastrowid)
         self.db.commit()
         return cur.lastrowid
+
+    def record_hole_layout(self, course: str | None, holes: list[dict], *, session_id: int | None = -1,
+                           ts: float | None = None) -> int:
+        """Store the geometry of each played hole in a completed round's layout (the log's hole list,
+        see gspro_log._layout_holes; hole numbers are list positions + 1). GSPro logs the list several
+        times over, so a hole already stored with the same pin for this session is skipped. Returns the
+        rows added. session_id -1 means this booth's session."""
+        if not course:
+            return 0
+        live = session_id == -1
+        sid = self.session_id if live else session_id
+        ts = time.time() if live and ts is None else ts
+        added = 0
+        for n, h in enumerate(holes, 1):
+            pin, tee, wp = h.get("pin"), h.get("tee"), h.get("waypoint")
+            if not (h.get("played") and pin):
+                continue
+            if self.db.execute("SELECT 1 FROM hole_layouts WHERE session_id IS ? AND course = ? AND hole = ?"
+                               " AND pin_x = ? AND pin_z = ?", (sid, course, n, pin[0], pin[2])).fetchone():
+                continue
+            none3 = (None, None, None)
+            self.db.execute("INSERT INTO hole_layouts (session_id, ts, course, hole, par, tee_x, tee_y, tee_z,"
+                            " pin_x, pin_y, pin_z, wp_x, wp_y, wp_z) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (sid, ts, course, n, h.get("par"),
+                             *(tee or none3), *pin, *(wp or none3)))
+            added += 1
+        self.db.commit()
+        return added
 
     _FINISH_COLS = "id, session_id, player, hole, shot_number, is_putt, outcome, mulligan, attributed, " \
                    "to_pin_yards, finish_yards, gimme_yards, fmt"
