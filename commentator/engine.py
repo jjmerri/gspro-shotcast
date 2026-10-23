@@ -330,6 +330,20 @@ def _short_miss_fact(before: Hud, par: int | None) -> str | None:
     return fact + ". Call it plainly as a missed short putt that cost a stroke, never as good touch or a fine lag."
 
 
+def _great_shot_fact(start_yards: float | None, where: str, strokes: int | None = None,
+                     par: int | None = None) -> str:
+    """The hype fact for a full shot that holed out or finished by the cup. It states the achievement
+    and asks for excitement without handing over a phrase: "a superb approach, stuffed close" came
+    back as "he's stuffed it" call after call."""
+    fact = f"From {start_yards:.0f} yards out, the ball {where}" if start_yards else f"The ball {where}"
+    name = "a hole in one" if strokes == 1 and where.startswith("went in") else \
+        SCORE_NAMES.get(strokes - par) if strokes and par else None
+    if name:
+        fact += f", which makes {name}"
+    return fact + (". That is an exceptional shot: react with real excitement, in your own words rather "
+                   "than a stock golf phrase.")
+
+
 WELCOME = re.compile(r"\b(welcome|good (morning|afternoon|evening|day)|hello|evening,? everyone)\b", re.I)
 _OWNED = r"(?:round|card|scorecard|day|night|driver|putter|tee shot|short game|iron play|season)"
 _FORM_MARK = re.compile(
@@ -3469,6 +3483,7 @@ class Engine:
         # when it's the only signal an absent banner is 'unknown', not a miss, so a call isn't misgraded.
         holed = None
         close_feet = None
+        long_gimme = False
         roll_yards = tile_yards("total length")
         outcome = full_result = None
         if shot.is_putt and self.screen is not None and ocr:
@@ -3563,6 +3578,7 @@ class Engine:
                                            base_setup=base_setup))
             if near and landed and start_yards and start_yards >= c.close_approach_from_yards:
                 if full_result == "conceded":
+                    long_gimme = True
                     score = max(score, c.big_moment_threshold)
                 elif full_result != "holed":
                     finish = await self._wait_finish_yards(idx, impact_snap[0].get(idx), 1.5)
@@ -3665,12 +3681,17 @@ class Engine:
             result = ["Whether the putt went in is not known: don't say it dropped, went in or missed. "
                       "Talk about the stroke, its pace or its line."]
         if full_result == "holed":
-            result = ["The ball went in the hole: holed out without a putt."]
+            result = ["The ball went in the hole: holed out without a putt.",
+                      _great_shot_fact(to_yards(before.to_pin), "went in the hole", before.shot_number, shot_par)]
         elif full_result == "conceded":
             gimme = self.gspro.gimme_of(idx)
             circle = f"{gimme * 3:.0f}-foot " if gimme else ""
             result = [f"The ball stopped inside the {circle}gimme circle, right by the hole: the putt is "
                       f"conceded, so the hole is over without a putt being struck."]
+            if long_gimme:
+                strokes = before.shot_number + 1 if before.shot_number else None
+                result.append(_great_shot_fact(to_yards(before.to_pin), f"finished inside the {circle}gimme circle",
+                                               strokes, shot_par))
         # On the green in regulation or better: say what the next putt is for, so "ten feet for
         # birdie" is a fact, not a guess (a par 5 in two is an eagle putt).
         next_putt = None
@@ -3679,8 +3700,8 @@ class Engine:
             next_putt = (f"The ball is on the green in {before.shot_number}: the next putt "
                          f"is for {name.split(' ', 1)[1]}.")
         if close_feet is not None:
-            result = result + [f"The ball finished {close_feet:.0f} feet from the hole, from {to_yards(before.to_pin):.0f} "
-                               f"yards out: a superb approach, stuffed close. This is the moment to make a big deal of."]
+            result = result + [_great_shot_fact(to_yards(before.to_pin),
+                                                f"finished {close_feet:.0f} feet from the hole")]
         elif not shot.is_putt and full_result not in ("holed", "conceded"):
             # GSPro's own finishing distance (logged as the ball settles), so the model never reads the
             # starting distance as what's left: "still 102 yards" after a pitch to 8 yards.

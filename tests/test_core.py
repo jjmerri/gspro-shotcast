@@ -3649,3 +3649,16 @@ def test_a_name_run_into_what_is_theirs_is_rejected(tmp_path):
     assert good
     good, _ = e._grounded([Line("pbp", "Watch Josh drive this one, with Josh putting well.")], facts, mode="round")
     assert good
+
+
+def test_a_great_finish_asks_for_excitement_and_names_the_score_without_a_stock_phrase():
+    from commentator.engine import _great_shot_fact
+
+    gimme = _great_shot_fact(200.0, "finished inside the 4-foot gimme circle", strokes=3, par=4)
+    assert gimme.startswith("From 200 yards out, the ball finished inside the 4-foot gimme circle, which makes a birdie.")
+    assert "stuffed" not in gimme and "excitement" in gimme
+    assert "which makes a hole in one" in _great_shot_fact(165.0, "went in the hole", strokes=1, par=3)
+    assert "which makes an eagle" in _great_shot_fact(140.0, "went in the hole", strokes=2, par=4)
+    # A close approach names no score (the next-putt fact does), and an unknown start drops the distance.
+    assert _great_shot_fact(180.0, "finished 6 feet from the hole").startswith("From 180 yards out, the ball finished 6 feet from the hole. ")
+    assert _great_shot_fact(None, "went in the hole", strokes=3, par=4).startswith("The ball went in the hole, which makes a birdie.")
