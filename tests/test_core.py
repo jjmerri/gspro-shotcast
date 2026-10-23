@@ -1,6 +1,7 @@
 import pytest
 import os
 import asyncio
+import time
 import contextlib
 import json
 import random
@@ -1615,6 +1616,30 @@ async def test_follow_shot_keeps_following_a_long_roll_after_touchdown(tmp_path)
                     live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=VideoScreen())
     hud, landed = await engine._follow_shot(before)
     assert landed and hud.lie == "fairway" and hud.tiles["total length"] == "250"
+
+
+async def test_follow_shot_stops_when_the_log_says_the_chip_ended_the_hole(tmp_path):
+    # Dan's chip on Kiawah 15: conceded, GSPro moved on with no touchdown or rest ever seen, and the
+    # follow sat out its 12 s cap. The log's gimmie ends it at once, naming no mid-roll lie.
+    frame = Hud(player_text="P", shot_number=3, lie="deep rough", tiles={"carry (game)": "9.0"})
+    reads = 0
+
+    class StuckScreen:
+        async def read_hud_async(self, parts):
+            nonlocal reads
+            reads += 1
+            return frame
+
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.screen.follow_poll_seconds = 0.05
+    cfg.screen.follow_max_seconds = 12
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=StuckScreen())
+    started = time.monotonic()
+    hud, landed = await engine._follow_shot(Hud(player_text="P", shot_number=3, lie="deep rough"),
+                                            ended=lambda: reads >= 3)
+    assert time.monotonic() - started < 1 and reads == 3
+    assert not landed and hud.lie is None
 
 
 async def test_follow_shot_reads_the_resting_lie_not_the_landing_lie(tmp_path):

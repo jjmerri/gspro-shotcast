@@ -39,6 +39,8 @@
    tiles haven't changed since the last (the ball has stopped) is the one read, so GSPro moving
    on a second later doesn't matter. If the box moves on before the ball is seen at rest, the
    lie isn't named (except the green); the next setup and GSPro's log record where it stopped.
+   A shot that GSPro's log says ended the hole (holed, or stopped inside the gimme circle) stops
+   the follow there, so a chip that ends the hole is called without waiting to see it at rest.
 
 **Voices.** Lines are voiced as soon as they're written, several at once, and played in order. A
 cloud voice streams: a line starts playing once `tts.stream_prebuffer_seconds` (0.3) of audio has

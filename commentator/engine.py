@@ -8,6 +8,7 @@ import re
 import sys
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -3368,7 +3369,18 @@ class Engine:
                      time.monotonic() - impact, text)
 
         await self._read_putter(shot, fires0, impact, tag)
-        after, landed = await self._follow_shot(before, tag, shot.is_putt) if ocr else (Hud(), event.hud_hint is not None)
+        # GSPro's log says a full shot ended the hole (holed, or stopped inside the gimme circle) a second
+        # or two after the ball stops, often before the screen shows it at rest: a chip that ends the hole
+        # can move GSPro straight on with no rest seen, and the follow waited out its whole cap (12 s).
+        end_idx = self._gspro_idx(player) if self._log_truth and not shot.is_putt else None
+
+        def hole_over() -> bool:
+            return end_idx is not None and (
+                self.gspro.hole_outs_of(end_idx) > impact_snap[2].get(end_idx, 0)
+                or self.gspro.gimmies_of(end_idx) > impact_snap[3].get(end_idx, 0))
+
+        after, landed = await self._follow_shot(before, tag, shot.is_putt, hole_over) if ocr \
+            else (Hud(), event.hud_hint is not None)
         if use_screen:
             log.info("%s final reading %.1fs after impact (landed=%s): lie %s, carry %s, total %s, offline %s", tag,
                      time.monotonic() - impact, landed, after.lie, after.tiles.get("carry (game)"),
@@ -3640,7 +3652,7 @@ class Engine:
             # window: the hole-out reaches the log a few seconds later. A chip that stays out resolves
             # as soon as GSPro sets the player up again, so the wait costs a miss almost nothing.
             short = (start_yards := to_yards(before.to_pin)) is not None and start_yards <= SHORT_GAME_YARDS
-            watch = near and (landed or short)
+            watch = near and (landed or short or hole_over())
             full_result = await self._wait_putt_result(idx, *base, 1.5 if landed else 5.0,
                                                        base_hole=base_hole, base_setup=base_setup) \
                 if watch else "unknown"
@@ -4332,7 +4344,8 @@ class Engine:
                 return "unknown"  # window passed with no log signal: not a definitive miss
             await asyncio.sleep(poll)
 
-    async def _follow_shot(self, before: Hud, tag: str = "", is_putt: bool = False) -> tuple[Hud, bool]:
+    async def _follow_shot(self, before: Hud, tag: str = "", is_putt: bool = False,
+                           ended: Callable[[], bool] | None = None) -> tuple[Hud, bool]:
         """Follows the ball through the HUD from impact until it stops.
 
         Checked on gameplay video: CARRY (game) counts up and freezes at touchdown (the lie flips
@@ -4349,6 +4362,8 @@ class Engine:
         just burn an OCR read every poll for the whole cap, learn nothing, and starve the next shot's
         reads (the main cause of late commentary and audio jitter late in a hole). A putt's result
         comes from the score banner in the reaction path, not these tiles, so skip the follow for it.
+
+        `ended` says GSPro's log already shows the shot ended the hole: the follow stops there.
         """
         if is_putt:
             return before, False
@@ -4374,6 +4389,10 @@ class Engine:
         # switch to the next player.
         deadline = max_seconds
         while time.monotonic() - started < deadline:
+            if ended and ended():
+                log.info("%s hole over in the GSPro log %.1fs into the follow; not waiting to see the ball stop",
+                         tag, time.monotonic() - started)
+                return _unsettled(last or landing or Hud(), tag), touchdown is not None
             reads += 1
             hud = await self.screen.read_hud_async(["lie", "player_name", "tiles"])
             if who is None and hud.name_sig not in (None, NAME_DARK):
@@ -4398,7 +4417,7 @@ class Engine:
                 landing, steady = hud, 0  # landing read; kept only as a fallback if the HUD moves on
                 log.info("%s touchdown ~%.1fs into the follow; following to rest", tag, touchdown)
                 if callable(getattr(self.screen, "grab_regions", None)):
-                    return await self._follow_to_rest(hud, who, tag, started, deadline, poll)
+                    return await self._follow_to_rest(hud, who, tag, started, deadline, poll, ended)
             prev_game = game
             # Moved on to the next player: their address HUD shows carry (game) AND total length both
             # blank or the "--.--" placeholder (both parse to None) - the next shot hasn't been hit. The
@@ -4433,7 +4452,7 @@ class Engine:
         return _unsettled(last or landing or Hud(), tag), touchdown is not None
 
     async def _follow_to_rest(self, landing: Hud, who, tag: str, started: float, deadline: float,
-                              poll: float) -> tuple[Hud, bool]:
+                              poll: float, ended: Callable[[], bool] | None = None) -> tuple[Hud, bool]:
         """From touchdown on, watch the HUD's pixels rather than OCR it: a read OCRs the lie and the
         tiles one after the other (1.2-1.5 s), and GSPro shows the ball at rest only a second or so
         before moving the player box on, so the read-until-steady follow rarely saw a drive stop and
@@ -4447,6 +4466,10 @@ class Engine:
         box = landing.tile_boxes.get("total length")
         prev, steady = None, 0
         while time.monotonic() - started < deadline:
+            if ended and ended():
+                log.info("%s hole over in the GSPro log %.1fs into the follow; not waiting to see the ball stop",
+                         tag, time.monotonic() - started)
+                return _unsettled(landing, tag), True
             try:
                 crops = await asyncio.to_thread(self.screen.grab_regions, parts)
             except Exception:
