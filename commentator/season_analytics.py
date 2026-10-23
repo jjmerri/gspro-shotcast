@@ -357,6 +357,10 @@ def courses(db: sqlite3.Connection, context: str | None = None, player: str | No
     return out
 
 
+def _to_par_name(d: int) -> str:
+    return {-3: "albatross", -2: "eagle", -1: "birdie", 1: "bogey", 2: "double"}.get(d, f"+{d}" if d > 0 else f"{d}")
+
+
 def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = None,
                player: str | None = None) -> dict[str, Any]:
     """The season's moments: aces, eagles, chip-ins, birdie streaks, bounce-backs and blow-ups from the
@@ -364,7 +368,7 @@ def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = 
     `player`, that player's own."""
     moments: list[dict] = []
     streaks: list[dict] = []
-    bounce: Counter = Counter()
+    bounce: list[dict] = []
     blowups: list[dict] = []
     args = (player,) if player else ()
     if player:
@@ -390,8 +394,8 @@ def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = 
                                 "text": f"{'Albatross' if d <= -3 else 'Eagle'} {scores[h]} on the par-{pars[h]} {h}th"})
             if d >= 3:
                 blowups.append({**base, "hole": h, "score": scores[h], "par": pars[h], "over": d})
-            if i and played[i - 1] == h - 1 and scores[h - 1] - pars[h - 1] >= 1 and d <= -1:
-                bounce[r["player"]] += 1
+            if i and played[i - 1] == h - 1 and (prev := scores[h - 1] - pars[h - 1]) >= 1 and d <= -1:
+                bounce.append({**base, "holes": [h - 1, h], "from": _to_par_name(prev), "to": _to_par_name(d)})
             if d <= -1 and (not run or run[-1] == h - 1):
                 run.append(h)
             elif d <= -1:
@@ -422,7 +426,7 @@ def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = 
     return {
         "moments": moments,
         "streaks": sorted(streaks, key=lambda s: (-s["length"], s["date"] or ""))[:10],
-        "bounce_backs": [{"player": p, "count": n} for p, n in bounce.most_common()],
+        "bounce_backs": sorted(bounce, key=lambda b: b["date"] or "", reverse=True)[:10],
         "blowups": sorted(blowups, key=lambda b: (-b["over"], b["date"] or ""))[:5],
         "drives": top(f"SELECT player, ROUND({drive}) AS v, course, hole, date{j} WHERE club = 'DR' AND is_putt = 0"
                       f" AND (shot_number = 1 OR lie_before = 'tee') AND {drive} IS NOT NULL{base} ORDER BY v DESC LIMIT 5"),

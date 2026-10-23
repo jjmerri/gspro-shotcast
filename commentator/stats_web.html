@@ -39,6 +39,10 @@
   .card .k { color:var(--dim); font-size:12px; text-transform:uppercase; letter-spacing:.5px; }
   .card .v { font-size:22px; font-weight:600; margin-top:2px; }
   .grid2 { display:grid; grid-template-columns:repeat(auto-fit, minmax(380px, 1fr)); gap:18px; }
+  /* A long course name wraps under the player instead of pushing the panel into its neighbour. */
+  .grid2 > div { min-width:0; }
+  .grid2 td:first-child { white-space:normal; text-align:left; }
+  .hint { cursor:help; text-decoration:underline dotted; text-underline-offset:3px; }
   .scorecard td, .scorecard th, .detail .scorecard td { text-align:center; padding:5px 6px; min-width:30px; }
   .scorecard td:first-child, .scorecard th:first-child, .detail .scorecard td:first-child { text-align:left; }
   .s { display:inline-block; text-align:center; min-width:24px; padding:1px 4px; border-radius:4px; }
@@ -710,8 +714,8 @@ function highlightsView(r, h) {
     <div><h3>Birdie streaks</h3><table><tbody>${h.streaks.length ? h.streaks.map(s =>
       `<tr><td><b>${esc(s.player)}</b> <span class="sub">${esc(s.date)} · ${esc(s.course)} · holes ${s.holes[0]}–${s.holes[s.holes.length - 1]}</span></td><td>${s.length} in a row</td></tr>`).join("")
       : '<tr><td class="empty">No back-to-back birdies yet.</td></tr>'}</tbody></table></div>
-    <div><h3>Bounce-backs</h3><table><tbody>${h.bounce_backs.length ? h.bounce_backs.map(b =>
-      `<tr><td><b>${esc(b.player)}</b></td><td>${b.count}</td></tr>`).join("")
+    <div><h3><span class="hint" title="A birdie or better on the hole straight after a bogey or worse">Bounce-backs</span></h3><table><tbody>${h.bounce_backs.length ? h.bounce_backs.map(b =>
+      `<tr><td><b>${esc(b.player)}</b> <span class="sub">${esc(b.date)} · ${esc(b.course)} · holes ${b.holes[0]}–${b.holes[1]}</span></td><td>${esc(b.from)} → ${esc(b.to)}</td></tr>`).join("")
       : '<tr><td class="empty">No birdie straight after a bogey yet.</td></tr>'}</tbody></table></div>
     <div><h3>Blow-ups</h3><table><tbody>${h.blowups.length ? h.blowups.map(b =>
       `<tr><td><b>${esc(b.player)}</b> <span class="sub">${esc(b.date)} · ${esc(b.course)} · hole ${b.hole} (par ${b.par})</span></td><td>${b.score} <span class="sub">+${b.over}</span></td></tr>`).join("")

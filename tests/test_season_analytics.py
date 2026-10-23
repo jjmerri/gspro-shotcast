@@ -137,7 +137,7 @@ def test_courses_rank_holes_and_highlights_find_streaks_bounce_backs_and_real_ho
     kinds = sorted((m["player"], m["kind"]) for m in h["moments"])
     assert kinds == [("Ann", "eagle"), ("Ann", "holed out"), ("Bob", "ace")]
     assert [(s["player"], s["holes"]) for s in h["streaks"]] == [("Ann", [1, 2])]
-    assert h["bounce_backs"] == [{"player": "Bob", "count": 1}]
+    assert [(b["player"], b["holes"], b["from"], b["to"]) for b in h["bounce_backs"]] == [("Bob", [5, 6], "bogey", "birdie")]
     assert h["blowups"][0]["hole"] == 6 and h["blowups"][0]["over"] == 3
 
 
