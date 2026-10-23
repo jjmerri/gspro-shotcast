@@ -113,7 +113,7 @@ real cost.
 | `preshot` (hazard read, vision) | `claude-haiku-5-5`, vision, max_tokens 900 | Reads the hole minimap for hazards; cheaper and better at it than 4.5 |
 | `minimap` (optional, `provider: jev`) | TypeSafe `jev-latest` (+ `jev-preview` to find the ball and pin) | Reads the minimap in ~0.3 s: water, red-lined penalty areas with no water in them, out of bounds and bunkers left/right of the line to the pin, water to carry, front/back of the green, and bunkers measured off the map's scale (code finds sand-coloured patches near the line, Jev confirms each is a bunker, not a beach or roof), trees near the line and any tree right in the way, which side of the green the pin is on, and doglegs from the tee. Answers below `threshold` (bunkers: `sand_threshold`) are dropped. A side's trouble flight line may then name that side's hazard, and plays only when that hazard is in play. Needs `.[jev]` and `TYPESAFE_API_KEY`. Falls back to `preshot` |
 | `opener` | `claude-sonnet-5-5` | Raced against the course load, so a fast model |
-| `closer` | `claude-opus-5-5`, max_tokens 2000 | Pre-fetched on the last hole (solo: once the ball is on the green; a group: once only one side is left to finish), branched by the final score, so latency is hidden; use the richest model |
+| `closer` | `claude-opus-5-5`, max_tokens 2000 | Pre-fetched on the last hole (solo: once the ball is on the green; a group: once only one side is left to finish), branched by the final score, so latency is hidden; use the richest model. Its lines may run to `closer_max_words` (40) rather than a live call's 18 |
 | Voices (`tts`) | OpenAI `gpt-4o-mini-tts` (`fable` / `ballad`) | The dominant cost; see [Cost](#cost) |
 
 ### Choosing a setup

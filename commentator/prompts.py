@@ -59,8 +59,8 @@ The commentators:
 How to respond:
 - Reply only with JSON: {{"lines": [{{"speaker": "<key>", "text": "<what they say>"}}]}}.
 - Each text is spoken aloud. Plain conversational English, no emojis, no hashtags, no stage directions, no asterisks.
-- Each line is at most {cfg.commentary.max_words_per_line} words (a news, trivia or score aside gets the longer limit its
-  request gives). Most shots get one or two lines.
+- Each line is at most {cfg.commentary.max_words_per_line} words (a news, trivia or score aside, or the round's closer, gets the
+  longer limit its request gives). Most shots get one or two lines.
 
 What you can and can't make up:
 - The FACTS are what happened. Never contradict them, and never add a number, a count or a result (fairway, \
@@ -624,17 +624,19 @@ def opener_prompt(*, facts: list[str], recent_lines, now: datetime | None = None
     return prompt, facts_text
 
 
-def closer_prompt(*, facts: list[str], recent_lines, now: datetime | None = None) -> tuple[str, str]:
+def closer_prompt(*, facts: list[str], recent_lines, now: datetime | None = None,
+                  max_words: int | None = None) -> tuple[str, str]:
     facts_text = "\n".join([*facts, time_of_day_fact(now)])
     prompt = (
         "THE ROUND IS OVER. FACTS:\n" + facts_text
         + _recent_block(recent_lines)
-        + "\n\nWrap up the round: a short conversation of four to six lines between the two commentators. "
+        + "\n\nWrap up the round: a conversation of four to six lines between the two commentators. "
         "Tell the story of the round, don't recite the stats: pick the two or three threads that matter most "
         "and connect them (a player who kept missing fairways but still found greens, a hot putter that saved "
         "a round, one bad hole that undid a good card). Judge every score against the handicap: the net score "
         "says whether it was a good round, not the gross. Finish with the team result if there is one, then "
         "sign off. At most one number per line."
+        + (aside_room(max_words) if max_words else "")
     )
     return prompt, facts_text
 

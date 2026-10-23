@@ -374,6 +374,9 @@ class CommentaryConfig(BaseModel):
     # News, trivia and score asides tell a whole story in one line, so they get more room; at 18
     # most lines ran over and were retried or dropped.
     aside_max_words: int = 30
+    # The round's sign-off isn't racing the next shot, so it gets room for a rich closing conversation;
+    # at 18 its longer lines were cut to a fragment or dropped.
+    closer_max_words: int = 40
     segments_on_hole_change: bool = True
     # Before voicing the between-holes wrap, wait up to this long for the hole's last shot handler to
     # finish, so the final-shot reaction and the wrap don't talk over each other. Bounded so a slow

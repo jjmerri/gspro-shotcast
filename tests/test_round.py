@@ -2985,6 +2985,36 @@ async def test_a_group_closer_plays_only_if_the_others_finished_as_written(tmp_p
     assert await run({mike.key: 4}) == []        # Mike's hole changed after the branches were written
 
 
+async def test_the_closer_keeps_lines_longer_than_a_live_call_gets(tmp_path):
+    import json
+
+    e, r, _ = _last_hole_pair(tmp_path)
+    r.set_log_scores("MikeD", {1: 5, 2: 3})
+    r.set_log_scores("Sarah", {1: 4, 2: 4})
+    sarah = next(s for s in r.sides if "Sarah" in s.gspro)
+    rich = ("That was a proper evening of golf in the shed with friends trading shots and stories "
+            "and nobody wanting it to end before the last putt dropped")
+    assert 18 < len(rich.split()) <= e.cfg.commentary.closer_max_words
+    prompts = []
+
+    async def complete(kind, llm, user, images, system=None, schema=None):
+        prompts.append(user)
+        return json.dumps({"lines": [{"speaker": e.speakers[0], "text": rich}]})
+
+    async def voice(lines):
+        return lines, [b""] * len(lines)
+
+    e._complete, e._voice_ahead = complete, voice
+    await e._prepare_closer_branches(sarah.key, [4], {})
+    assert [l.text for l in e._closer_branches["by_score"][4][0]] == [rich]   # pre-built on the last hole
+    aired = []
+    e._air_lines = lambda kind, lines, shot_id=None: aired.extend(lines)
+    e._closer_branches = None
+    await e._sign_off(r, {s.key: r.side_stats(s, []) for s in r.sides})
+    assert [l.text for l in aired] == [rich]                                   # written at the end
+    assert all(f"up to {e.cfg.commentary.closer_max_words} words" in p for p in prompts)
+
+
 def test_a_scramble_pick_inside_the_gimme_circle_records_the_teams_conceded_putt(tmp_path):
     from commentator.hud import Hud
     from commentator.models import Shot

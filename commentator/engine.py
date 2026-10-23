@@ -1885,10 +1885,11 @@ class Engine:
             facts = (r.closing_facts(self.state.shots, season, final_overrides={side_key: strokes},
                                      week_ctp=self._closer_week_ctp(r))
                      + self._league_facts(r, closing=True) + self._weather_facts())
-            user, facts_text = closer_prompt(facts=facts, recent_lines=self.state.recent_lines)
+            cap = self.cfg.commentary.closer_max_words
+            user, facts_text = closer_prompt(facts=facts, recent_lines=self.state.recent_lines, max_words=cap)
             # "round" mode grounding: the closer spans the whole round, so skip the single-lie check.
             system = self._system_league if r.is_league else self._system_practice
-            return self._grounded(await self._generate("closer", self.closer_llm, user, [], system=system),
+            return self._grounded(await self._generate("closer", self.closer_llm, user, [], system=system, max_words=cap),
                                   facts_text, "round", False)[0]
 
         drafts = await asyncio.gather(*(gen(s) for s in scores), return_exceptions=True)
@@ -5972,11 +5973,13 @@ class Engine:
             if self._play_prepared_closer(stats[side.key].scores.get(r.holes), side.key):
                 return
         self._closer_branches = None
-        user, facts_text = closer_prompt(facts=facts + self._weather_facts(), recent_lines=self.state.recent_lines)
+        cap = self.cfg.commentary.closer_max_words
+        user, facts_text = closer_prompt(facts=facts + self._weather_facts(), recent_lines=self.state.recent_lines,
+                                         max_words=cap)
         # r.ended is set above, so the `system` property would pick practice; pass the round's own
         # variant so a league round's sign-off keeps its stakes framing.
         await self._speak("closer", self.closer_llm, user, facts_text, [], mode="round",
-                          system=self._system_league if r.is_league else self._system_practice)
+                          system=self._system_league if r.is_league else self._system_practice, max_words=cap)
 
     # ---- publishing the stats page --------------------------------------------------------
 
@@ -6172,9 +6175,10 @@ class Engine:
         return result.text
 
     async def _generate(self, kind: str, llm: LLMClient, user: str, images: list[bytes],
-                        system: str | None = None) -> list[Line]:
+                        system: str | None = None, max_words: int | None = None) -> list[Line]:
         raw = await self._complete(kind, llm, user, images, system=system)
-        return parse_lines(raw, self.speakers, self.cfg.commentary.max_words_per_line, self._persona_names)
+        return parse_lines(raw, self.speakers, max_words or self.cfg.commentary.max_words_per_line,
+                           self._persona_names)
 
     def _grounded(
         self, lines: list[Line], facts_text: str, mode: str = "result", seen_image: bool = False
@@ -6231,7 +6235,7 @@ class Engine:
 
     async def _compose(
         self, kind: str, llm: LLMClient, user: str, facts_text: str, images: list[bytes], mode: str = "result",
-        system: str | None = None, must: str | None = None,
+        system: str | None = None, must: str | None = None, max_words: int | None = None,
     ) -> list[Line]:
         """Generate, ground, and retry a line without airing it. `_speak` airs the result now; the
         pre-round opener holds it until the tee confirms the round. `system` forces a round variant.
@@ -6248,7 +6252,8 @@ class Engine:
                 out.append("the opener has to start with a line welcoming everyone to the broadcast")
             return out
 
-        lines, problems = self._grounded(await self._generate(kind, llm, user, images, system=system),
+        lines, problems = self._grounded(await self._generate(kind, llm, user, images, system=system,
+                                                              max_words=max_words),
                                          facts_text, mode, seen)
         problems = problems + needs(lines)
         if problems:
@@ -6256,7 +6261,8 @@ class Engine:
             # One retry with the reasons; a second failure means those lines just aren't said.
             self.stats["retries"] += 1
             retried, still_bad = self._grounded(
-                await self._generate(kind, llm, retry_prompt(user, problems), images, system=system),
+                await self._generate(kind, llm, retry_prompt(user, problems), images, system=system,
+                                     max_words=max_words),
                 facts_text, mode, seen
             )
             if retried and not (needs(retried) and not needs(lines)):
@@ -6277,9 +6283,10 @@ class Engine:
     async def _speak(
         self, kind: str, llm: LLMClient, user: str, facts_text: str, images: list[bytes], mode: str = "result",
         system: str | None = None, must: str | None = None, shot_id: int | None = None,
+        max_words: int | None = None,
     ) -> None:
         self._air_lines(kind, await self._compose(kind, llm, user, facts_text, images, mode, system=system,
-                                                  must=must), shot_id)
+                                                  must=must, max_words=max_words), shot_id)
 
     def _note_form_mentions(self, lines: list[Line]) -> None:
         """Which round-sheet angles a line just used, for the side the sheet last went to."""
