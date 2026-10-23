@@ -23,7 +23,9 @@ from .flight_pick import FlightPlan, Hazard, pick_line, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
 from .grounding import SCENERY, bare_acknowledgement, check_line, meta_talk, ngrams, note_keywords, repeats, uses_note
 from .hud import NAME_DARK, Hud, describe, hole_key, name_sig_changed
-from .interest import LONG_HOLED_PUTT_FEET, holed_putt_score, score_shot, short_game_gimme_level
+from .interest import (LEAGUE_BEST_DRIVE_LEVEL, LONG_HOLED_PUTT_FEET, SEASON_BEST_DRIVE_LEVEL,
+                       approach_gimme_level, holed_out_level, holed_putt_score, score_shot,
+                       short_game_gimme_level, stuffed_level)
 from .league import League, course_match_score
 from .llm import LLMClient
 from .minimap import JevMinimap, MinimapRead
@@ -331,12 +333,19 @@ def _short_miss_fact(before: Hud, par: int | None) -> str | None:
     return fact + ". It was a miss that cost a stroke, not a good lag."
 
 
+def _feet_text(feet: float) -> str:
+    """A tap-in distance as it's said: inches inside two feet ("14 inches"), else feet."""
+    if feet < 2:
+        return f"{max(round(feet * 12), 1)} inches"
+    return f"{feet:.0f} feet"
+
+
 def _great_shot_fact(start_yards: float | None, where: str, strokes: int | None = None,
                      par: int | None = None, lie: str | None = None, level: int | None = None) -> str:
     """The hype fact for a full shot that holed out or finished by the cup. It states the achievement
     and asks for excitement without handing over a phrase: "a superb approach, stuffed close" came
-    back as "he's stuffed it" call after call. A short-game shot names its lie and gets a number (out
-    of 10), as a holed putt does, so a chip from the sand isn't called like a 200-yard approach."""
+    back as "he's stuffed it" call after call. `level` is how big (out of 10, as a holed putt's is), so
+    a chip to the gimme isn't called like a hole in one; a short-game shot also names its lie."""
     lie = (lie or "").lower()
     source = f" {'off' if _lie_prep(lie) == 'on' else 'out of'} the {lie}" if lie else " out"
     fact = f"From {start_yards:.0f} yards{source}, the ball {where}" if start_yards else f"The ball {where}"
@@ -345,8 +354,8 @@ def _great_shot_fact(start_yards: float | None, where: str, strokes: int | None 
     if name:
         fact += f", which makes {name}"
     if level:
-        return fact + (f". That is a fine short-game shot: excitement {level} out of 10, in your own words "
-                       "rather than a stock golf phrase.")
+        return fact + (f". Excitement {level} out of 10: react in your own words rather than a stock golf "
+                       "phrase.")
     return fact + (". That is an exceptional shot: react with real excitement, in your own words rather "
                    "than a stock golf phrase.")
 
@@ -3453,12 +3462,13 @@ class Engine:
                 tags.append("season_best_drive")
                 score = max(score + 0.5, c.big_moment_threshold)
                 season_facts.append(f"That's a new personal best: longer than {player}'s longest drive from "
-                                    f"earlier weeks ({season['longest_drive']:.0f} yards).")
+                                    f"earlier weeks ({season['longest_drive']:.0f} yards). Excitement "
+                                    f"{SEASON_BEST_DRIVE_LEVEL} out of 10.")
             elif (best := self.store.season_longest_drive(context="league")) and drive > best[1]:
                 tags.append("league_best_drive")
                 score = max(score + 0.6, c.big_moment_threshold)
                 season_facts.append(f"That's the longest drive in the league this season, past {best[0]}'s "
-                                    f"{best[1]:.0f} yards.")
+                                    f"{best[1]:.0f} yards. Excitement {LEAGUE_BEST_DRIVE_LEVEL} out of 10.")
         if tee_drive and season.get("avg_drive"):
             season_facts.append(f"{player}'s average drive in earlier weeks: {season['avg_drive']:.0f} yards.")
         idx = self._gspro_idx(player)
@@ -3571,7 +3581,7 @@ class Engine:
         holed = None
         close_feet = None
         long_gimme = False
-        gimme_level = None
+        gimme_level = gimme_feet = None
         roll_yards = tile_yards("total length")
         outcome = full_result = None
         if shot.is_putt and ((self.screen is not None and ocr) or idx is not None):
@@ -3666,15 +3676,22 @@ class Engine:
                 self._bg(self._late_result(shot_id, idx, *base, tag, False, rec=rec, base_hole=base_hole,
                                            base_setup=base_setup))
             if full_result == "conceded" and start_yards:
+                # GSPro logs where the ball stopped (tdist) the line before the gimmie, so it's in by now:
+                # a foot away nearly dropped, four feet is just a gimme.
+                finish = await self._wait_finish_yards(idx, impact_snap[0].get(idx), 0.5)
+                gimme_feet = finish * 3 if finish is not None else None
                 if start_yards >= c.close_approach_from_yards:
                     long_gimme = True
-                    score = max(score, c.big_moment_threshold)
-                elif (gimme_level := short_game_gimme_level(start_yards, before.lie)):
+                    gimme_level = approach_gimme_level(start_yards, gimme_feet)
+                else:
                     # A chip or pitch to tap-in range. The log's "conceded" is proof enough: a short
                     # chip often ends the hole before its touchdown is seen.
+                    gimme_level = short_game_gimme_level(start_yards, before.lie, gimme_feet)
+                if gimme_level:
                     score = max(score, c.big_moment_threshold)
-                    log.info("%s short-game shot to the gimme from %.0f yards (%s): excitement %s",
-                             tag, start_yards, before.lie, gimme_level)
+                    log.info("%s to the gimme from %.0f yards (%s), finished %s feet: excitement %s", tag,
+                             start_yards, before.lie, "?" if gimme_feet is None else f"{gimme_feet:.1f}",
+                             gimme_level)
             elif near and landed and start_yards and start_yards >= c.close_approach_from_yards \
                     and full_result != "holed":
                 finish = await self._wait_finish_yards(idx, impact_snap[0].get(idx), 1.5)
@@ -3770,18 +3787,26 @@ class Engine:
             result = ["Whether the putt went in is not known: don't say it dropped, went in or missed. "
                       "Talk about the stroke, its pace or its line."]
         if full_result == "holed":
+            start = to_yards(before.to_pin)
+            chip = start is not None and start < c.close_approach_from_yards
             result = ["The ball went in the hole: holed out without a putt.",
-                      _great_shot_fact(to_yards(before.to_pin), "went in the hole", before.shot_number, shot_par)]
+                      _great_shot_fact(start, "went in the hole", before.shot_number, shot_par,
+                                       lie=before.lie if chip else None,
+                                       level=holed_out_level(start, before.shot_number, shot_par,
+                                                             c.close_approach_from_yards))]
         elif full_result == "conceded":
             gimme = self.gspro.gimme_of(idx)
             circle = f"{gimme * 3:.0f}-foot " if gimme else ""
+            where = f"finished {_feet_text(gimme_feet)} from the hole, inside the {circle}gimme circle" \
+                if gimme_feet is not None else f"finished inside the {circle}gimme circle"
             result = [f"The ball stopped inside the {circle}gimme circle, right by the hole: the putt is "
                       f"conceded, so the hole is over without a putt being struck."]
-            if long_gimme or gimme_level:
+            if gimme_level:
                 strokes = before.shot_number + 1 if before.shot_number else None
-                result.append(_great_shot_fact(to_yards(before.to_pin), f"finished inside the {circle}gimme circle",
-                                               strokes, shot_par, lie=before.lie if gimme_level else None,
-                                               level=gimme_level))
+                result.append(_great_shot_fact(to_yards(before.to_pin), where, strokes, shot_par,
+                                               lie=None if long_gimme else before.lie, level=gimme_level))
+            elif gimme_feet is not None:
+                result.append(f"It {where}.")
         # On the green in regulation or better: say what the next putt is for, so "ten feet for
         # birdie" is a fact, not a guess (a par 5 in two is an eagle putt).
         next_putt = None
@@ -3791,7 +3816,8 @@ class Engine:
                          f"is for {name.split(' ', 1)[1]}.")
         if close_feet is not None:
             result = result + [_great_shot_fact(to_yards(before.to_pin),
-                                                f"finished {close_feet:.0f} feet from the hole")]
+                                                f"finished {close_feet:.0f} feet from the hole",
+                                                level=stuffed_level(close_feet))]
         elif not shot.is_putt and full_result not in ("holed", "conceded"):
             # GSPro's own finishing distance (logged as the ball settles), so the model never reads the
             # starting distance as what's left: "still 102 yards" after a pitch to 8 yards.

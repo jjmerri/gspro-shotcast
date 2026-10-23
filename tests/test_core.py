@@ -3713,5 +3713,20 @@ def test_a_chip_to_the_gimme_is_scaled_by_its_lie_and_distance():
     fact = _great_shot_fact(16.0, "finished inside the 3-foot gimme circle", 4, 4, lie="deep rough", level=8)
     assert fact.startswith("From 16 yards out of the deep rough, the ball finished inside the 3-foot gimme "
                            "circle, which makes a par.")
-    assert "excitement 8 out of 10" in fact and "exceptional" not in fact
+    assert "Excitement 8 out of 10" in fact and "exceptional" not in fact
     assert "From 60 yards off the fairway," in _great_shot_fact(60.0, "x", lie="fairway", level=7)
+    # Within a foot and a half it nearly dropped: one more, still below a chip-in.
+    assert short_game_gimme_level(16.0, "deep rough", finish_feet=1.2) == 9
+    assert short_game_gimme_level(16.0, "rough", finish_feet=3.7) == 7
+
+
+def test_every_great_shot_has_its_own_excitement_level():
+    from commentator.interest import approach_gimme_level, holed_out_level, stuffed_level
+
+    assert holed_out_level(165.0, 1, 3, 100) == 10        # an ace
+    assert holed_out_level(120.0, 3, 4, 100) == 10        # an approach holed
+    assert holed_out_level(30.0, 3, 5, 100) == 10         # a chip in for eagle
+    assert holed_out_level(30.0, 3, 4, 100) == 9          # a chip in for birdie
+    assert (approach_gimme_level(120.0), approach_gimme_level(160.0)) == (8, 9)
+    assert approach_gimme_level(120.0, finish_feet=0.8) == 9
+    assert (stuffed_level(12.0), stuffed_level(5.1), stuffed_level(5.6)) == (6, 8, 6)   # as it is said

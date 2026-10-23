@@ -108,15 +108,45 @@ _SHORT_GAME_LIE_BONUS = {"bunker": 2, "sand": 2, "deep rough": 2, "fescue": 2, "
                          "rough": 1, "semi rough": 1, "pine straw": 1, "waste area": 1, "waste": 1, "fringe": -1}
 
 
-def short_game_gimme_level(start_yards: float | None, lie: str | None) -> int | None:
+ALMOST_IN_FEET = 1.5   # a ball finishing this close nearly dropped: one more on the scale
+
+
+def short_game_gimme_level(start_yards: float | None, lie: str | None,
+                           finish_feet: float | None = None) -> int | None:
     """How excited (out of 10) the booth should be when a chip or pitch from off the green stops
-    inside the gimme circle: harder from further out and from sand or thick rough. None for one too
-    simple to hype (a short chip off the fringe or fairway). Tops out below a hole-out."""
+    inside the gimme circle: harder from further out and from sand or thick rough, and one more if it
+    nearly dropped. None for one too simple to hype (a short chip off the fringe or fairway). Tops out
+    below a hole-out."""
     lie = (lie or "").lower()
     if not start_yards or lie == "green":
         return None
     level = (5 if start_yards < 10 else 6 if start_yards < 25 else 7) + _SHORT_GAME_LIE_BONUS.get(lie, 0)
-    return min(level, 9) if level >= 6 else None
+    if level < 6:
+        return None
+    return min(level + (finish_feet is not None and finish_feet <= ALMOST_IN_FEET), 9)
+
+
+def approach_gimme_level(start_yards: float, finish_feet: float | None = None) -> int:
+    """An approach (close_approach_from_yards and up) that stopped inside the gimme circle."""
+    return min((9 if start_yards >= 150 else 8) + (finish_feet is not None and finish_feet <= ALMOST_IN_FEET), 9)
+
+
+def stuffed_level(finish_feet: float) -> int:
+    """An approach that finished within close_approach_feet: tap-in range is a bigger call."""
+    return 8 if round(finish_feet) <= 5 else 6
+
+
+def holed_out_level(start_yards: float | None, strokes: int | None, par: int | None,
+                    from_yards: float) -> int:
+    """A full shot that went in: a hole in one, an eagle or better, or an approach from `from_yards`
+    and up is as big as it gets; a chip or pitch in is a 9."""
+    if strokes == 1 or (strokes and par and strokes - par <= -2) or (start_yards or 0) >= from_yards:
+        return 10
+    return 9
+
+
+SEASON_BEST_DRIVE_LEVEL = 7
+LEAGUE_BEST_DRIVE_LEVEL = 8
 
 
 def holed_putt_score(score: float, hud: Hud, tags: list[str], notable: float, big: float) -> float:
