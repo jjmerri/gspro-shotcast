@@ -117,7 +117,9 @@ skipped, and only shots with no position yet are filled. GSPro starts `output_lo
 launch, so only the sessions since GSPro was last started can be backfilled. Stop the booth first and
 back the file up.
 
-A hole replay is drawn over GSPro's minimap of the hole, turned and scaled so the map's ball sits on
+A hole replay plays the shots in turn (every player's nth shot together), each line drawing out
+behind a ball, and ends on the full drawing; ↻ Play again replays it. It's drawn over GSPro's minimap
+of the hole, turned and scaled so the map's ball sits on
 the tee and its pin on the pin. The map is the same every round, so the booth keeps one per course and
 hole, at the first tee setup on a hole that has none, and every round there uses it, older ones too
 (marked as from another round, since its tee, pin dot and yardages may differ a little). To replace a
