@@ -3049,7 +3049,7 @@ def test_short_missed_putt_is_called_a_miss_not_good_touch():
 
     fact = _short_miss_fact(Hud(to_pin="4 feet 1 inches", shot_number=4), par=4)
     assert "about 4 feet, and it MISSED: it was for par, so the hole goes down as a bogey" in fact
-    assert "never as good touch" in fact
+    assert "a miss that cost a stroke, not a good lag" in fact
     assert _short_miss_fact(Hud(to_pin="31 feet 11 inches", shot_number=3), par=4) is None   # a lag
 
 
@@ -3209,3 +3209,26 @@ def test_news_and_trivia_prompts_place_the_story_in_time_and_stick_to_the_articl
     assert "Local time:" in facts and "not something happening now" in user
     user, _ = trivia_prompt(course="Riviera", title="Riviera Country Club", article="text")
     assert "a nickname isn't a namesake" in user
+
+
+def test_streak_facts_name_runs_the_score_line_hides(tmp_path):
+    e = _engine_with(tmp_path, LEAGUE)
+    e._start_round(Round(league=LEAGUE, gspro_players=["Mike"], course="X", scheduled_format=None, holes=9,
+                         is_league=False))
+    r = e.round
+
+    def card(*scores):
+        r.par = {q: 4 for q in range(1, 10)}
+        r.card_scores = {"Mike": dict(enumerate(scores, 1))}
+        r.seq = len(scores) + 1
+
+    card(5, 4, 3, 3)
+    assert e._streak_facts("Mike") == ["Mike has made birdie or better on each of the last 2 holes: 2 in a row."]
+    card(4, 5, 6, 5)
+    assert e._streak_facts("Mike") == ["Mike has dropped a shot on each of the last 3 holes: 3 in a row."]
+    card(5, 4, 4, 3, 4, 4)
+    assert e._streak_facts("Mike") == ["Mike hasn't dropped a shot in the last 5 holes."]
+    card(4, 4, 3, 4, 4, 4)       # clean from the start: the score line already says so
+    assert e._streak_facts("Mike") == []
+    card(4, 3, 4)
+    assert e._streak_facts("Mike") == []

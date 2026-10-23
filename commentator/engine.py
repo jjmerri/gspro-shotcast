@@ -22,7 +22,7 @@ from .flight_pick import FlightPlan, Hazard, pick_line, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
 from .grounding import SCENERY, bare_acknowledgement, check_line, meta_talk, ngrams, note_keywords, repeats, uses_note
 from .hud import NAME_DARK, Hud, describe, hole_key, name_sig_changed
-from .interest import holed_putt_score, score_shot
+from .interest import LONG_HOLED_PUTT_FEET, holed_putt_score, score_shot
 from .league import League, course_match_score
 from .llm import LLMClient
 from .minimap import JevMinimap, MinimapRead
@@ -31,7 +31,7 @@ from .models import (
     HoleChangeEvent, Line, PreShotEvent, RoundEndEvent, RoundStartEvent, ScorecardEvent, Shot, ShotEvent,
 )
 from .prompts import (
-    ANGLES, FLIGHT_OUTCOMES, NEWS_TRIGGERS, aside_room, closer_prompt, flight_prompt, opener_prompt, output_schema,
+    ANGLES, FLIGHT_OUTCOMES, PRACTICE_ANGLES, NEWS_TRIGGERS, aside_room, closer_prompt, flight_prompt, opener_prompt, output_schema,
     parse_lines, preshot_line_prompt, preshot_line_schema, preshot_hazard_prompt, preshot_hazard_schema,
     news_prompt, news_schema, preshot_branch_prompt, preshot_branch_schema,
     reaction_outcomes, retry_prompt, segment_prompt, shot_prompt, system_prompt,
@@ -327,7 +327,7 @@ def _short_miss_fact(before: Hud, par: int | None) -> str | None:
             fact += f": it was for {was_for.split(' ', 1)[1]}"
         if ends:
             fact += f", so the hole goes down as {ends}"
-    return fact + ". Call it plainly as a missed short putt that cost a stroke, never as good touch or a fine lag."
+    return fact + ". It was a miss that cost a stroke, not a good lag."
 
 
 def _great_shot_fact(start_yards: float | None, where: str, strokes: int | None = None,
@@ -2556,6 +2556,33 @@ class Engine:
             facts.append(cf)
         return facts
 
+    def _streak_facts(self, player: str | None) -> list[str]:
+        """On the tee: a run the card shows but the booth can't see in a score total (two birdies in a
+        row, a stretch without a dropped shot, a run of bogeys)."""
+        r = self.round
+        side = r.side_for(player) if r and not r.ended and player else None
+        if side is None:
+            return []
+        diffs = []
+        for q in range(r.seq - 1, 0, -1):
+            if (sc := r.card_score(side, q)) is None or not r.par.get(q):
+                break
+            diffs.append(sc - r.par[q])
+
+        def run(test) -> int:
+            return next((i for i, d in enumerate(diffs) if not test(d)), len(diffs))
+
+        who = side.players[0] if len(side.players) == 1 else side.label
+
+        if (n := run(lambda d: d <= -1)) >= 2:
+            return [f"{who} has made birdie or better on each of the last {n} holes: {n} in a row."]
+        if (n := run(lambda d: d >= 1)) >= 3:
+            return [f"{who} has dropped a shot on each of the last {n} holes: {n} in a row."]
+        # A clean card from the first hole shows in the score line already; this is a run after a slip.
+        if 5 <= (n := run(lambda d: d <= 0)) < len(diffs):
+            return [f"{who} hasn't dropped a shot in the last {n} holes."]
+        return []
+
     def _hole_field_facts(self, player: str | None) -> list[str]:
         """On the first shot of a hole: the hole's difficulty (stroke index), how the league has
         scored it this season, and whether this player gets a handicap stroke here (so the booth can
@@ -2779,7 +2806,7 @@ class Engine:
                                                                        to_yards(hud.to_pin)))
                  + (self._bunker_facts(player) if (hud.lie or "").lower() in ("sand", "bunker")
                     and self.rng.random() < 0.5 else [])
-                 + (self._hole_field_facts(player) if hud.shot_number == 1 else [])
+                 + (self._hole_field_facts(player) + self._streak_facts(player) if hud.shot_number == 1 else [])
                  + (minimap.facts(to_yards(hud.to_pin), hud.lie) if minimap else [])
                  + (["The tree on the line to the pin is the story of this shot: say how it blocks the way."]
                     if getattr(hud, "_stymie", False) else [])
@@ -2797,6 +2824,7 @@ class Engine:
             player=who, team=team, hole=self.state.current_hole, facts=facts,
             recent_lines=self.state.recent_lines, speaker=self.speakers[0], second=second, is_putt=is_putt,
             named=minimap.named(to_yards(hud.to_pin)) if minimap else None, lag=lag,
+            long_putt=is_putt and (to_yards(hud.to_pin) or 0) * 3 > LONG_HOLED_PUTT_FEET,
         )
         # Three concurrent calls: the spoken line (live_llm, text) and the branches (flight_llm, text)
         # always run; the hazard read (preshot_llm, vision) runs only for a full shot with an image to
@@ -3373,13 +3401,14 @@ class Engine:
         if tee_drive and drive and season.get("longest_drive"):
             if drive > season["longest_drive"]:
                 tags.append("season_best_drive")
-                score += 0.5
-                season_facts.append(f"That beats {player}'s longest drive from earlier weeks "
-                                    f"({season['longest_drive']:.0f} yards).")
+                score = max(score + 0.5, c.big_moment_threshold)
+                season_facts.append(f"That's a new personal best: longer than {player}'s longest drive from "
+                                    f"earlier weeks ({season['longest_drive']:.0f} yards).")
             elif (best := self.store.season_longest_drive(context="league")) and drive > best[1]:
                 tags.append("league_best_drive")
-                score += 0.6
-                season_facts.append(f"That's longer than the league's best drive this season ({best[0]}, {best[1]:.0f} yards).")
+                score = max(score + 0.6, c.big_moment_threshold)
+                season_facts.append(f"That's the longest drive in the league this season, past {best[0]}'s "
+                                    f"{best[1]:.0f} yards.")
         if tee_drive and season.get("avg_drive"):
             season_facts.append(f"{player}'s average drive in earlier weeks: {season['avg_drive']:.0f} yards.")
         idx = self._gspro_idx(player)
@@ -3731,6 +3760,8 @@ class Engine:
         # ball in a greenside bunker "three yards, beautifully done". The lie (describe) is read
         # accurately; crediting a stuffed shot belongs on the next setup's exact distance instead.
         flight = shot_facts(shot)
+        if "mishit" in tags:
+            flight.append("The strike was a mishit: well short of what this club normally goes.")
         if "carry (game)" in hud.tiles and not shot.is_putt:
             # GSPro's carry accounts for elevation and conditions; two different carries confuse the model.
             flight = [f for f in flight if not f.startswith("Carry:")]
@@ -3757,7 +3788,7 @@ class Engine:
             recent_lines=self.state.recent_lines,
             routine=not notable,
             has_images=False,
-            angle=self.rng.choice(ANGLES),
+            angle=self.rng.choice(ANGLES if not self.round or self.round.is_league else PRACTICE_ANGLES),
             big=score >= c.big_moment_threshold,
         )
         await self._speak("shot", self.live_llm, user, facts_text, [], must=must, shot_id=shot_id)

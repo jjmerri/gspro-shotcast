@@ -1461,9 +1461,9 @@ async def test_season_best_drive_is_called_out(tmp_path):
     await engine.run()
     reactions = [p for p in llm.prompts if p.startswith("FACTS:")]
     tony = next(p for p in reactions if "Player: Tony" in p and "driver" in p)
-    assert "beats Tony's longest drive from earlier weeks (245 yards)" in tony
+    assert "new personal best: longer than Tony's longest drive from earlier weeks (245 yards)" in tony
     mike = next(p for p in reactions if "Player: Mike" in p and "driver" in p)
-    assert "beats Mike's longest drive from earlier weeks (290 yards)" in mike
+    assert "new personal best: longer than Mike's longest drive from earlier weeks (290 yards)" in mike
 def test_slope_and_elevation_parsing():
     from commentator.hud import parse_elevation, parse_slope
 

@@ -85,11 +85,14 @@ def score_shot(shot: Shot, prior: list[ShotRecord], hud: Hud) -> tuple[float, li
     return min(score, 1.0), tags
 
 
+LONG_HOLED_PUTT_FEET = 12   # a putt holed from beyond this is a big moment
+
+
 def holed_putt_score(score: float, hud: Hud, tags: list[str], notable: float, big: float) -> float:
     """A putt that drops is never routine: a makeable one always gets a word, and one from outside
     12 feet (or a fast, long roll when the distance wasn't read) is a big moment. A tap-in stays as is."""
     feet = _to_feet(hud.to_pin)
-    if (feet is not None and feet > 12) or (feet is None and "long_putt" in tags):
+    if (feet is not None and feet > LONG_HOLED_PUTT_FEET) or (feet is None and "long_putt" in tags):
         return max(score, big)
     if feet is None or feet >= 3:
         return max(score, notable)
