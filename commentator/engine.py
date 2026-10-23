@@ -2839,9 +2839,12 @@ class Engine:
             player=who, team=team, hole=self.state.current_hole, facts=facts,
             recent_lines=self.state.recent_lines, speaker=self.speakers[0], second=second, is_putt=is_putt,
         )
+        # Names, not keys: the branch values are bare strings, and a quoted key ("pbp") gets echoed as the line.
+        name = lambda key: self.cfg.personas[key].name if key in self.cfg.personas else key  # noqa: E731
         branch_user, _ = preshot_branch_prompt(
             player=who, team=team, hole=self.state.current_hole, facts=facts,
-            recent_lines=self.state.recent_lines, speaker=self.speakers[0], second=second, is_putt=is_putt,
+            recent_lines=self.state.recent_lines, speaker=name(self.speakers[0]),
+            second=name(second) if second else None, is_putt=is_putt,
             named=minimap.named(to_yards(hud.to_pin)) if minimap else None, lag=lag,
             putt_feet=putt_feet, reply=reply,
         )

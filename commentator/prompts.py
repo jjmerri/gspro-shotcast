@@ -541,14 +541,15 @@ def preshot_branch_prompt(
     if is_putt:
         prompt = (
             "PRE-PUTT BRANCHES. FACTS:\n" + facts_text + recent
-            + '\n\nThe player is over a putt. Reply with "reaction_lines": the call "' + speaker
-            + '" makes the instant the ball stops, at most 12 words each, written now for each way it can finish. '
+            + '\n\nThe player is over a putt. Reply with "reaction_lines": what ' + speaker
+            + " says the instant the ball stops, at most 12 words each, written now for each way it can finish. "
+            "Each value is the spoken words themselves, never a speaker name or label. "
             "Match the putt number in the facts (a made first putt is a one-putt, a made second putt is a two-putt, "
             "and so on). holed (it drops" + holed_putt_cue(putt_feet) + "), short (left short of the hole), past (misses and runs past or by). A missed "
             "putt's next putt is for the score the facts give for the next putt, never this putt's score."
             + (" gimme (a long lag that stops inside the gimme circle, conceded as a tap-in: credit the lag "
                "and say what score it leaves, without claiming it dropped)." if lag else "")
-            + (f' holed_reply ("{second}" jumps in straight after the holed call, excitement '
+            + (f' holed_reply ({second} jumps in straight after the holed call, excitement '
                f"{holed_putt_level(putt_feet) or 6} out of 10 too, with their own reaction rather than a repeat "
                "of it; at most 12 words)." if reply and second else "")
         )
@@ -571,14 +572,15 @@ def preshot_branch_prompt(
                    f'trouble in play"), no specific feature' if generic else ""))
     prompt = (
         "PRE-SHOT BRANCHES. FACTS:\n" + facts_text + recent
-        + "\n\nThe player is about to hit. Write the lines now, for each way the shot could go. Reply with two things:\n"
-        f'1. "flight_lines": the call "{speaker}" makes while the ball is in the air: at most 10 words, present '
+        + "\n\nThe player is about to hit. Write the lines now, for each way the shot could go. Reply with two things, each value "
+        "the spoken words themselves, never a speaker name or label:\n"
+        f'1. "flight_lines": what {speaker} says while the ball is in the air: at most 10 words, present '
         "tense, no numbers, never where it lands. on_target (dead straight at the target: never the words "
         '"left" or "right" here, they read as a direction), short (short of the FLAG, usually still on the green: '
         '"might be a touch short", "leaves itself a putt from below"; never that it needs more carry to reach or '
         'won\'t reach the green, unless the green front is clearly beyond this club), long, left, right, ' + trouble
         + ". " + _FLIGHT_WATER + "."
-        + '\n2. "reaction_lines": the call "' + speaker + '" makes the instant the ball stops, at most 12 words each, '
+        + '\n2. "reaction_lines": what ' + speaker + ' says the instant the ball stops, at most 12 words each, '
         "written now for each place it can finish, judged against what this shot was trying to do (a tee shot wants "
         "the fairway; an approach wants the green). Write one per outcome: " + _RESULT_GUIDANCE
         + ". Keep the reaction honest to each result; don't claim a number or a distance."
