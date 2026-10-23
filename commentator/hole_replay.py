@@ -10,9 +10,15 @@ A tee shot has no logged start (GSPro sets it up without a setup block), so it c
 tee in hole_layouts, from any round on the course. The pin moves round to round, so it's taken only
 from this round's layout; a round quit before the end logged none, and the pin is then estimated from
 the distances to it logged at each shot (estimate_pin).
+
+The background is GSPro's minimap of the hole off the tee (hole_images), drawn so its ball lands on the
+tee and its pin on the pin. One from the same session is exact; failing that, one from another round
+on the course is used, where a different tee box or pin leaves it slightly off ("approx").
 """
 from __future__ import annotations
 
+import base64
+import io
 import json
 import math
 import re
@@ -96,6 +102,30 @@ def _layout_for(layouts: list[sqlite3.Row], course: str, hole: int, session: int
     return (this_round[0] if this_round else None), (with_tee[-1] if with_tee else None)
 
 
+def _images(db: sqlite3.Connection) -> list[sqlite3.Row]:
+    try:
+        return db.execute("SELECT * FROM hole_images WHERE ball_x IS NOT NULL AND pin_x IS NOT NULL"
+                          " ORDER BY id").fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+
+def _map_for(images: list[sqlite3.Row], course: str, hole: int, session: int) -> dict[str, Any] | None:
+    """The hole's minimap for the replay background: this session's, else the latest from any round."""
+    from PIL import Image
+
+    key = (course or "").casefold()
+    same = [im for im in images if (im["course"] or "").casefold() == key and im["hole"] == hole]
+    if not same:
+        return None
+    mine = [im for im in same if im["session_id"] == session]
+    im = (mine or same)[-1]
+    w, h = Image.open(io.BytesIO(im["image"])).size
+    return {"src": "data:image/jpeg;base64," + base64.b64encode(im["image"]).decode(), "w": w, "h": h,
+            "ball": [round(im["ball_x"] * w, 1), round(im["ball_y"] * h, 1)],
+            "pin": [round(im["pin_x"] * w, 1), round(im["pin_y"] * h, 1)], "approx": not mine}
+
+
 def _r(p: tuple[float, float] | None) -> list[float] | None:
     return [round(p[0], 2), round(p[1], 2)] if p else None
 
@@ -112,12 +142,14 @@ def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]
         m = _HOLE.match(row["hole"] or "")
         if row["id"] in round_of and m:
             groups.setdefault((round_of[row["id"]], int(m.group(1))), []).append(row)
-    layouts = _layouts(db)
+    layouts, images = _layouts(db), _images(db)
     out = {}
     for key, rows in groups.items():
         if not any(r["start_x"] is not None for r in rows):
             continue
         if (rp := _replay(rows, key[1], layouts)) is not None:
+            if rp["tee"] and rp["pin"] and (m := _map_for(images, rp["course"], key[1], rows[0]["session_id"])):
+                rp["map"] = m
             out[key] = rp
     return out
 

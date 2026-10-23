@@ -97,3 +97,23 @@ def test_a_round_quit_early_estimates_its_pin_from_the_shots_distances(tmp_path)
 
 def test_estimate_pin_is_none_when_the_distances_dont_agree():
     assert estimate_pin([((0.0, 0.0), 100.0), ((0.0, 50.0), 10.0)]) is None
+
+
+def test_the_minimap_snapshot_finds_ball_and_pin_and_backs_this_sessions_replay(tmp_path):
+    from PIL import Image
+
+    from commentator.minimap import snapshot
+
+    image, ball, pin = snapshot(Image.open("tests/fixtures/minimap_water_long.jpg"))
+    # The red ball and the white pin on the fixture, below GSPro's trimmed title bar.
+    assert math.dist(ball, (0.495, 0.755)) < 0.01 and math.dist(pin, (0.494, 0.238)) < 0.01
+    path, st = _season(tmp_path)
+    log = tmp_path / "output_log.txt"
+    log.write_text(_hole_log())
+    backfill(path, [str(log)])
+    assert st.record_hole_image("Test Links", 1, b"x", None, None) is not None
+    assert st.record_hole_image("Test Links", 1, image, ball, pin) is not None   # a found one replaces it
+    assert st.record_hole_image("Test Links", 1, image, ball, pin) is None
+    m = hole_replays(st.db)[(1, 1)]["map"]
+    assert m["src"].startswith("data:image/jpeg;base64,") and not m["approx"]
+    assert m["ball"][1] > m["pin"][1]

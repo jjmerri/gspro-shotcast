@@ -73,6 +73,16 @@ CREATE TABLE IF NOT EXISTS hole_layouts (            -- each hole's geometry, lo
     pin_x REAL, pin_y REAL, pin_z REAL,          -- this round's pin
     wp_x REAL, wp_y REAL, wp_z REAL              -- the course designer's aim waypoint (not the player's aim)
 );
+CREATE TABLE IF NOT EXISTS hole_images (             -- GSPro's minimap off the tee, the hole replay's background
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER REFERENCES sessions(id),
+    ts REAL,
+    course TEXT NOT NULL,
+    hole INTEGER NOT NULL,                       -- the course's hole number
+    image BLOB NOT NULL,                         -- JPEG of the map area (title bar trimmed)
+    ball_x REAL, ball_y REAL,                    -- the ball (on the tee) and the pin on it, as fractions of
+    pin_x REAL, pin_y REAL                       -- the image from its top-left; NULL when not found
+);
 CREATE TABLE IF NOT EXISTS lines (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES sessions(id),
@@ -353,6 +363,29 @@ class Store:
             added += 1
         self.db.commit()
         return added
+
+    def record_hole_image(self, course: str | None, hole: int | None, image: bytes,
+                          ball: tuple[float, float] | None, pin: tuple[float, float] | None, *,
+                          session_id: int | None = -1, ts: float | None = None) -> int | None:
+        """Store a hole's minimap snapshot (minimap.snapshot). One per hole per session: a later one for
+        the same hole replaces it only when it found the ball and pin and the stored one didn't.
+        session_id -1 means this booth's session. Returns the row id, or None when nothing was stored."""
+        if not course or not hole:
+            return None
+        sid = self.session_id if session_id == -1 else session_id
+        ts = time.time() if ts is None else ts
+        old = self.db.execute("SELECT id, ball_x, pin_x FROM hole_images WHERE session_id IS ? AND course = ?"
+                              " AND hole = ?", (sid, course, hole)).fetchone()
+        found = ball is not None and pin is not None
+        if old is not None and (old["ball_x"] is not None and old["pin_x"] is not None or not found):
+            return None
+        if old is not None:
+            self.db.execute("DELETE FROM hole_images WHERE id = ?", (old["id"],))
+        b, p = (ball, pin) if found else ((None, None), (None, None))
+        cur = self.db.execute("INSERT INTO hole_images (session_id, ts, course, hole, image, ball_x, ball_y,"
+                              " pin_x, pin_y) VALUES (?,?,?,?,?,?,?,?,?)", (sid, ts, course, hole, image, *b, *p))
+        self.db.commit()
+        return cur.lastrowid
 
     _FINISH_COLS = "id, session_id, player, hole, shot_number, is_putt, outcome, mulligan, attributed, " \
                    "to_pin_yards, finish_yards, gimme_yards, fmt"

@@ -28,7 +28,7 @@ from .interest import (LEAGUE_BEST_DRIVE_LEVEL, LONG_HOLED_PUTT_FEET, SEASON_BES
                        short_game_gimme_level, stuffed_level)
 from .league import League, course_match_score
 from .llm import LLMClient
-from .minimap import JevMinimap, MinimapRead
+from .minimap import JevMinimap, MinimapRead, snapshot as minimap_snapshot
 from .putt_read import REGION as PUTT_REGION, PuttRead, read_break
 from .models import (
     HoleChangeEvent, Line, PreShotEvent, RoundEndEvent, RoundStartEvent, ScorecardEvent, Shot, ShotEvent,
@@ -528,6 +528,7 @@ class Engine:
         self.carry = CarryModel(cfg.commentary.lie_carry_factors, self.store.carry_pairs(),
                                 cfg.commentary.course_altitude_ft)
         self.current_course: str | None = None
+        self._hole_snaps: set[tuple[str, int]] = set()   # (course, hole) minimaps kept this session
         # GSPro reports each player's handedness with their shots; slope talk depends on it.
         self.handed: dict[str, str] = {}
         # Last HUD shot number seen per player on the current hole. GSPro counts a penalty in the
@@ -835,6 +836,31 @@ class Engine:
             return None
         return JevMinimap(self.cfg.minimap, usage=self.usage)
 
+    def _snap_hole(self, hud: Hud) -> None:
+        """Keep the hole's minimap off the tee as the hole replay's background, once per hole. On or off
+        air: it's a record, like the shots. Runs in the background so the setup read isn't held up."""
+        course, hole = self.current_course or hud.course, self.hole_number or hud.hole_number
+        if self.screen is None or not course or not hole or (course, hole) in self._hole_snaps:
+            return
+        self._hole_snaps.add((course, hole))
+
+        def grab():
+            self.screen.detect_mirror()
+            return minimap_snapshot(self.screen.grab(self.screen.region("minimap")))
+
+        async def snap() -> None:
+            image, ball, pin = await asyncio.to_thread(grab)
+            # The store's connection belongs to this thread, so the write happens back here.
+            if self.store.record_hole_image(course, hole, image, ball, pin) is not None:
+                log.info("Kept the minimap of %s hole %s for the replay (ball and pin %s)", course, hole,
+                         "found" if pin else "not found")
+            if pin is None:
+                self._hole_snaps.discard((course, hole))   # try again at the next player's tee shot
+
+        task = asyncio.create_task(snap())
+        task.add_done_callback(lambda t: t.cancelled() or t.exception() and log.warning(
+            "Couldn't keep the minimap of hole %s: %r", hole, t.exception()))
+
     async def _read_minimap(self, to_pin: float | None) -> MinimapRead:
         await asyncio.to_thread(self.screen.detect_mirror)
         region = self.screen.region("minimap")
@@ -861,6 +887,8 @@ class Engine:
                      "GSPro is in the menus after End Round" if self._log_rounds and self.gspro.mode == "menu"
                      else f"round {self.round.id} is complete and this isn't a new tee", hud.shot_number)
             return
+        if hud.shot_number == 1:
+            self._snap_hole(hud)
         # The minimap read starts first so it runs during the HUD read below. It's cancelled for a putt.
         minimap_task = asyncio.create_task(self._read_minimap(to_yards(hud.to_pin))) if self.minimap is not None else None
         if minimap_task is not None:

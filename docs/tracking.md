@@ -77,6 +77,7 @@ What's recorded, and from where:
 |---|---|---|
 | `shots` | swing | Player, course, hole, shot number, club; launch monitor ball speed, launch angle, start direction, spin, spin axis, club speed, carry; club path, attack angle, face to target, dynamic loft and strike location on the face, when the monitor reported club data (NULL otherwise); lie before and after, slope, pin elevation, distance to the pin before and where it finished; GSPro's carry/total/offline; putt or full shot; a putt's result (holed, conceded, missed), or `holed` on a full shot that went in (a stroke the same player hits again on the same hole is never left `holed`: a putt becomes `missed`, a full shot loses its outcome); where GSPro had the ball before it (`start_x/y/z`, world metres, from the log's setup block; NULL on a tee shot, which has none) and the player's minimap aim click, if they moved it (`aim_map_x/y`); league or practice; `mulligan = 1` on a stroke GSPro took back. A conceded tap-in gets its own putt row (`outcome = 'gimme'`, no ball data), so every putt on the card is here |
 | `hole_layouts` | hole of a completed round | Each played hole's tee, pin (as set that round) and GSPro's aim waypoint, in world metres, from the hole list GSPro logs when a round is complete (a round quit early logs none) |
+| `hole_images` | hole per session | GSPro's minimap off the tee (JPEG, title bar trimmed), with where the ball and pin sit on it: the hole replay's background. Kept at the first tee setup on each hole, on or off air |
 | `rounds` | side per round (a player, or the team in a one-ball format) | Course, format, holes, gross, net to par, hole-by-hole scores and pars, fairways, greens in regulation, scrambling, sand saves, putts, penalties, longest drive (total distance); complete or quit early |
 | `player_rounds` | player per round | The same per-player stats and scores, for team formats where the side is the team |
 | `lines` | spoken line | Every line the booth said, tied to its shot |
@@ -115,6 +116,12 @@ the pin; a stretch of the log that mostly doesn't match (a round the booth never
 skipped, and only shots with no position yet are filled. GSPro starts `output_log.txt` over at each
 launch, so only the sessions since GSPro was last started can be backfilled. Stop the booth first and
 back the file up.
+
+A hole replay is drawn over GSPro's minimap of the hole, turned and scaled so the map's ball sits on
+the tee and its pin on the pin. The booth keeps one at each hole's first tee setup; a hole without one
+borrows one from another round on the course (marked as such, since the tee or pin may differ). To keep
+the one on screen now: `python -m commentator snap-minimap --course "Kiawah Ocean Course" --hole 10
+[--session N] [--image screenshot.png]` (run it on the sim PC's desktop session, not over SSH).
 
 Back the file up (`logs/season.db`); it's the only copy of your rounds.
 

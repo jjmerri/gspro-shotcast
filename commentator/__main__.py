@@ -702,6 +702,31 @@ def cmd_backfill_log(cfg: Config, args) -> None:
           f"({got['matched']} of {got['fires']} logged shots matched); {got['layouts']} hole layouts.")
 
 
+def cmd_snap_minimap(cfg: Config, args) -> None:
+    from .minimap import snapshot
+    from .screen import Screen
+    from .store import Store
+
+    path = Path(args.db or cfg.db_path)
+    if not path.exists():
+        sys.exit(f"No season database at {path}.")
+    screen = Screen(cfg.screen)
+    base = _load_image(args.image)
+    screen.detect_mirror(base)
+    region = screen.region("minimap")
+    image, ball, pin = snapshot(screen.crop(base, region) if base is not None else screen.grab(region))
+    store = Store(str(path), new_session=False)
+    sid = args.session
+    if sid is None:
+        row = store.db.execute("SELECT MAX(id) FROM sessions").fetchone()
+        sid = row[0] if row else None
+    store.db.execute("DELETE FROM hole_images WHERE session_id IS ? AND course = ? AND hole = ?",
+                     (sid, args.course, args.hole))
+    store.record_hole_image(args.course, args.hole, image, ball, pin, session_id=sid)
+    print(f"Kept the minimap of {args.course} hole {args.hole} for session {sid} ({len(image) // 1024} KB); "
+          + ("ball and pin found." if pin else "the ball and pin weren't found, so the replay won't use it."))
+
+
 def cmd_publish(cfg: Config, args) -> None:
     from . import stats_site
 
@@ -808,6 +833,14 @@ def main() -> None:
     p.add_argument("--db", help="Database file (default: db_path, logs/season.db)")
     p.add_argument("--dry-run", action="store_true", help="Count what would be filled without changing the file")
 
+    p = sub.add_parser("snap-minimap", help="Keep GSPro's minimap as a hole replay's background (the booth does "
+                                            "this itself off each tee)")
+    p.add_argument("--course", required=True, help="Course name, as the shots have it")
+    p.add_argument("--hole", type=int, required=True, help="The course's hole number")
+    p.add_argument("--session", type=int, help="Session to file it under (default: the latest)")
+    p.add_argument("--image", help="Use this full-screen screenshot instead of grabbing the screen")
+    p.add_argument("--db", help="Database file (default: db_path, logs/season.db)")
+
     p = sub.add_parser("review", help="A session's log as a timeline plus a per-shot summary")
     p.add_argument("--date", help="YYYY-MM-DD, default today")
     p.add_argument("--summary", action="store_true", help="Only the per-shot table")
@@ -851,7 +884,7 @@ def main() -> None:
         "run": cmd_run, "sniff": cmd_sniff, "calibrate": cmd_calibrate, "ocr-test": cmd_ocr_test, "screen-check": cmd_screen_check, "fixture": cmd_fixture, "notify-test": cmd_notify_test,
         "say": cmd_say, "banter": cmd_banter, "check": cmd_check, "eval": cmd_eval, "stats": cmd_stats,
         "stats-web": cmd_stats_web,
-        "publish": cmd_publish, "backfill-log": cmd_backfill_log,
+        "publish": cmd_publish, "backfill-log": cmd_backfill_log, "snap-minimap": cmd_snap_minimap,
         "review": cmd_review,
         "cost": cmd_cost, "import-league": cmd_import_league, "squabbit": cmd_squabbit,
     }

@@ -100,7 +100,8 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
   heavier season reads: strokes gained, gapping, recovery, trends, courses, highlights, booth
   stats, the shot log and broadcast transcripts. The booth itself doesn't import them.
 - **`hole_replay.py`** each round's holes as drawn on the Rounds tab: shot lines from the logged
-  ball positions, aims, tee and pin (`hole_layouts`, or the pin fitted to the shots' distances).
+  ball positions, aims, tee and pin (`hole_layouts`, or the pin fitted to the shots' distances),
+  over the hole's minimap kept off the tee (`hole_images`, `minimap.snapshot`).
 - **`log_backfill.py`** `backfill-log`: matches a saved GSPro log's shots to stored ones in order
   and fills their positions, aims and the hole layouts.
 - **`stats_site.py`** builds the stats page as a static site (per-context summary JSON plus a small

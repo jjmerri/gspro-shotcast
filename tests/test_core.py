@@ -2472,6 +2472,25 @@ def _setup_engine(tmp_path):
     return engine, screen
 
 
+async def test_a_tee_setup_keeps_the_holes_minimap_even_off_air(tmp_path):
+    from PIL import Image
+
+    engine, screen = _setup_engine(tmp_path)
+    engine.set_commentary(False)
+    screen.detect_mirror = lambda: False
+    screen.region = lambda name: None
+    screen.grab = lambda region: Image.open("tests/fixtures/minimap_water_long.jpg")
+    engine.current_course, engine.hole_number = "Test Links", 7
+    await engine._emit_setup(Hud(player_text="Toby 1st (E) Shot 1 400 YDS", shot_number=1, score_to_par="E",
+                                 to_pin="400 yards", lie=None))
+    for _ in range(100):
+        if engine.store.db.execute("SELECT COUNT(*) FROM hole_images").fetchone()[0]:
+            break
+        await asyncio.sleep(0.02)
+    row = engine.store.db.execute("SELECT course, hole, ball_x, pin_x FROM hole_images").fetchone()
+    assert (row["course"], row["hole"]) == ("Test Links", 7) and row["ball_x"] and row["pin_x"]
+
+
 async def test_emit_setup_reads_the_hud_before_the_model_and_skips_others_off_the_tee(tmp_path):
     engine, screen = _setup_engine(tmp_path)
     hud = Hud(player_text="Toby 2nd (+1) Shot 2 150 YDS", shot_number=2, score_to_par="+1",

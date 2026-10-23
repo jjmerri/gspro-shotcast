@@ -354,6 +354,14 @@ function replaySvg(rp) {
   const k = Math.min(320 / w, 520 / h), W = Math.round(w * k), H = Math.round(h * k);
   const P = p => { const [x, y] = loc(p); return [((x - minX) * k).toFixed(1), ((y - minY) * k).toFixed(1)]; };
   let g = "";
+  if (rp.map && rp.tee && rp.pin) {
+    // GSPro's minimap, turned and scaled so its ball sits on the tee and its pin on the pin. Both
+    // frames have y down and the golfer's right to +x, so it's a turn and a scale, never a flip.
+    const m = rp.map, vx = m.pin[0] - m.ball[0], vy = m.pin[1] - m.ball[1];
+    const s = Math.hypot(rp.pin[0] - rp.tee[0], rp.pin[1] - rp.tee[1]) / (Math.hypot(vx, vy) || 1) * k;
+    const turn = -90 - Math.atan2(vy, vx) * 180 / Math.PI, [tx, ty] = P(rp.tee);
+    g += `<image href="${m.src}" width="${m.w}" height="${m.h}" opacity=".8" transform="translate(${tx} ${ty}) rotate(${turn.toFixed(2)}) scale(${s.toFixed(4)}) translate(${-m.ball[0]} ${-m.ball[1]})"/>`;
+  }
   if (rp.tee) { const [x, y] = P(rp.tee); g += `<rect x="${x - 4}" y="${y - 4}" width="8" height="8" fill="#ddd"><title>Tee</title></rect>`; }
   rp.players.forEach((pl, i) => {
     const c = REPLAY_COLORS[i % REPLAY_COLORS.length];
@@ -375,7 +383,8 @@ function replaySvg(rp) {
   g += `<line x1="8" y1="${H - 8}" x2="${(8 + bar).toFixed(1)}" y2="${H - 8}" stroke="#8fa59b" stroke-width="2"/><text x="8" y="${H - 13}" fill="#8fa59b" font-size="10">${yd} yd</text>`;
   const legend = rp.players.map((pl, i) => `<span style="color:${REPLAY_COLORS[i % REPLAY_COLORS.length]}">● ${esc(pl.name)}</span>`).join(" &nbsp;");
   const notes = [rp.pin ? (rp.pin_estimated ? "Pin estimated from the shots' distances." : "") : "Pin position unknown.",
-                 rp.players.some(p => p.shots.some(s => s.aim)) ? "Dashed: where the player aimed." : ""].filter(Boolean).join(" ");
+                 rp.players.some(p => p.shots.some(s => s.aim)) ? "Dashed: where the player aimed." : "",
+                 rp.map && rp.map.approx ? "Map from another round here; the tee or pin may differ a little." : ""].filter(Boolean).join(" ");
   return `<div class="replay"><div class="sub">${esc(rp.course)} · hole ${rp.hole}${rp.par ? ` · par ${rp.par}` : ""}</div>
     <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${g}</svg>
     <div class="sub">${legend}</div>${notes ? `<div class="sub">${notes}</div>` : ""}</div>`;

@@ -978,6 +978,70 @@ def tree_patches(img: Image.Image, ball: tuple[float, float], pin: tuple[float, 
     return sorted(found, key=lambda p: (p[5] is None, p[3]))
 
 
+def map_area(img: Image.Image) -> Image.Image:
+    """The minimap without GSPro's dark title bar ("Tee", the expand and menu icons) and footer: rows
+    that are almost all the panel's flat dark teal are trimmed off the top and bottom."""
+    import numpy as np
+
+    px = np.asarray(img.convert("RGB"), dtype=np.int16)
+    dark = (px.max(axis=2) < 60).mean(axis=1) >= 0.6
+    top, bottom = 0, len(dark)
+    # The title bar carries icons and the lie name, so a row counts when most of it is dark; the
+    # first run of map rows below it is where the map starts.
+    while top < bottom and (dark[top] or top < len(dark) * 0.15 and dark[top:top + 8].any()):
+        top += 1
+    while bottom > top and dark[bottom - 1]:
+        bottom -= 1
+    if bottom - top < img.height * 0.5:
+        return img
+    return img.crop((0, top, img.width, bottom))
+
+
+def locate(img: Image.Image) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """The ball (GSPro's red dot) and the pin (the flat white dot up the map from it) on a minimap, as
+    (x, y) fractions of the image, found in code so the hole snapshot needs no Jev call. None unless
+    both are found. GSPro centres the map on the ball and turns it so the pin is straight up, so the
+    pin must sit above the ball, near its column; the grey shaded dot between them is the aim point."""
+    import numpy as np
+
+    px = np.asarray(img.convert("RGB"), dtype=np.int16)
+    h, w = px.shape[:2]
+    r, g, b = px[..., 0], px[..., 1], px[..., 2]
+
+    def dots(mask, lo, hi):
+        found = []
+        for ys, xs in _components(mask, lo):
+            bw, bh = xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
+            if len(ys) <= hi and 0.7 <= bw / bh <= 1.4 and len(ys) / (bw * bh) >= 0.6:
+                found.append((float(xs.mean()) / w, float(ys.mean()) / h, len(ys)))
+        return found
+
+    size = w * h
+    balls = dots((r > 170) & (g < 90) & (b < 90), max(12, size // 20000), size // 400)
+    if not balls:
+        return None
+    bx, by, _ = max(balls, key=lambda d: (d[2], d[1]))
+    pins = [d for d in dots((r > 235) & (g > 235) & (b > 235), max(12, size // 20000), size // 400)
+            if d[1] < by - 0.05 and abs(d[0] - bx) <= 0.12]
+    if not pins:
+        return None
+    pin = min(pins, key=lambda d: d[1])
+    return (bx, by), (pin[0], pin[1])
+
+
+def snapshot(img: Image.Image, max_width: int = 360) -> tuple[bytes, tuple[float, float] | None,
+                                                               tuple[float, float] | None]:
+    """A hole's minimap for the replay background: the map area as a JPEG, and where the ball and pin
+    are on it (fractions; None when they weren't found)."""
+    area = map_area(img)
+    spots = locate(area)
+    if area.width > max_width:
+        area = area.resize((max_width, round(area.height * max_width / area.width)), Image.LANCZOS)
+    buf = io.BytesIO()
+    area.convert("RGB").save(buf, format="JPEG", quality=82)
+    return buf.getvalue(), *(spots or (None, None))
+
+
 def _centre(box) -> tuple[float, float]:
     return ((box.left + box.right) / 2, (box.top + box.bottom) / 2)
 
