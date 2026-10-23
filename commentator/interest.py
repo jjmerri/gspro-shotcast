@@ -85,20 +85,18 @@ def score_shot(shot: Shot, prior: list[ShotRecord], hud: Hud) -> tuple[float, li
     return min(score, 1.0), tags
 
 
-GOOD_HOLED_PUTT_FEET = 12   # holed from beyond this deserves some lift
+GOOD_HOLED_PUTT_FEET = 12   # holed from beyond this is more than routine
 LONG_HOLED_PUTT_FEET = 20   # ...a big moment
-MONSTER_HOLED_PUTT_FEET = 40   # ...a monster the booth should erupt over
+MONSTER_HOLED_PUTT_FEET = 40   # ...as big as putting gets
 
 
 def holed_putt_cue(feet: float | None) -> str:
-    """How much the pre-written "holed" line should make of a putt dropping from this far."""
+    """How excited the pre-written "holed" line should be. A number, not adjectives, so the model
+    scales its call without echoing the cue's wording."""
     if not feet or feet <= GOOD_HOLED_PUTT_FEET:
         return ""
-    if feet > MONSTER_HOLED_PUTT_FEET:
-        return "; from this far it's a monster, the kind of putt the booth erupts over"
-    if feet > LONG_HOLED_PUTT_FEET:
-        return "; from this far out that's a big moment, so let the call carry it"
-    return "; not a routine make from this range, so give it some lift"
+    level = 10 if feet > MONSTER_HOLED_PUTT_FEET else 8 if feet > LONG_HOLED_PUTT_FEET else 6
+    return f"; excitement {level} out of 10 if it drops"
 
 
 def holed_putt_score(score: float, hud: Hud, tags: list[str], notable: float, big: float) -> float:
