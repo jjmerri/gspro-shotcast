@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .models import Line, Shot
+from .wordwatch import WordWatch
 
 if TYPE_CHECKING:
     from .hud import Hud
@@ -29,6 +30,14 @@ class ShotRecord:
     outcome: str | None = None   # how it ended, from GSPro's log: holed / missed / conceded (inside the gimme)
 
 
+class RecentLines(deque):
+    """The booth's last lines, plus the round's tally of the descriptive words it has leaned on."""
+
+    def __init__(self, *args) -> None:
+        super().__init__(*args)
+        self.words = WordWatch()
+
+
 @dataclass
 class SessionState:
     """What the booth remembers during the night. Rebuilt every run; nothing persists."""
@@ -37,7 +46,7 @@ class SessionState:
     current_hole: str | None = None
     last_comment_at: float = 0.0
     shots: list[ShotRecord] = field(default_factory=list)
-    recent_lines: deque[Line] = field(default_factory=deque)
+    recent_lines: RecentLines = field(default_factory=RecentLines)
 
     def record_shot(self, rec: ShotRecord) -> None:
         self.shots.append(rec)
@@ -45,6 +54,7 @@ class SessionState:
     def record_lines(self, lines: list[Line]) -> None:
         for line in lines:
             self.recent_lines.append(line)
+            self.recent_lines.words.add(line.text)
         while len(self.recent_lines) > self.recent_lines_max:
             self.recent_lines.popleft()
         if lines:

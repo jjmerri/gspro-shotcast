@@ -165,6 +165,7 @@ cover real GSPro/Uneekor traffic or live screen layouts; use the bring-up steps 
 |---|---|
 | `simulate.py` | Drives the whole engine with scripted shots and HUD frames and reports the timeline and any rule it broke (`--real` uses a real model) |
 | `round_demo.py` | Runs made-up rounds (opener, a few shots, wrap-up) through your configured models and prints what the booth says; costs a few cents |
+| `db_replay.py` | Replays a real round from a copy of the season DB (shots, putt results, finishing distances) through your configured models and writes the transcript, to compare prompt changes on the same golf; costs a few cents a run |
 | `replay_connector.py` | Replays a GSPconnect message stream (writing and rotating `ConnectDebug.txt` the way GSPconnect does) through the shot source, and checks every shot is detected once |
 | `fake_gspro.py` | A stand-in GSPro Open Connect server, for testing the sniffer source |
 | `capture_screen.py` | Grabs a full screenshot with a pixel grid, for placing OCR regions on GSPro's setup and course-load screens |

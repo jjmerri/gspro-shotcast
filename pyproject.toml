@@ -14,6 +14,10 @@ dependencies = [
     "numpy>=1.26",
     "pillow>=10",
     "sounddevice>=0.4",   # speaker playback, whichever voice provider
+    # Part-of-speech tagging, so the booth hears which descriptive words it keeps reusing (wordwatch.py).
+    # The English model isn't on PyPI: it's pinned to spaCy's release wheel.
+    "spacy>=3.8,<3.9",
+    "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
 ]
 
 [project.optional-dependencies]

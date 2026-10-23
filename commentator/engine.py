@@ -3555,7 +3555,7 @@ class Engine:
         long_gimme = False
         roll_yards = tile_yards("total length")
         outcome = full_result = None
-        if shot.is_putt and self.screen is not None and ocr:
+        if shot.is_putt and ((self.screen is not None and ocr) or idx is not None):
             base_outs, base_gim = impact_snap[2].get(idx, 0), impact_snap[3].get(idx, 0)
             if idx is not None:
                 # Log-truth: resolve from the log, no banner wait. Holed/conceded fire the instant the
@@ -3612,9 +3612,10 @@ class Engine:
                                              "made" if made else "missed", predicted_make == made)
             # The impact read caught the ball mid-roll; the banner window has let it settle, so re-read
             # the roll and keep whichever travelled further.
-            settled = _tile_yards((await self.screen.read_hud_async(["tiles"])).tiles, "total length", unit)
-            if settled is not None and (roll_yards is None or settled > roll_yards):
-                roll_yards = settled
+            if ocr:
+                settled = _tile_yards((await self.screen.read_hud_async(["tiles"])).tiles, "total length", unit)
+                if settled is not None and (roll_yards is None or settled > roll_yards):
+                    roll_yards = settled
 
         elif not shot.is_putt and idx is not None and self._log_truth:
             # A full shot can end the hole: holed out, or stopped inside the gimme circle (the putt is
@@ -4844,6 +4845,7 @@ class Engine:
 
     def _start_round(self, r: Round) -> None:
         self.round = r
+        self.state.recent_lines.words.reset()
         r.shot_floor = self.store.last_shot_id()
         self._hc = RoundCounters(fires_at_start=self.gspro.fires, kinds_at_start=dict(self.gspro.kinds))
         if self.cfg.health.enabled and self.cfg.source.type != "replay":

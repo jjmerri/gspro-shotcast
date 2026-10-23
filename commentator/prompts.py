@@ -115,6 +115,13 @@ def _recent(state_lines) -> list[str]:
     return [f"{line.speaker}: {line.text}" for line in state_lines]
 
 
+def _recent_block(recent_lines) -> str:
+    """The recent lines, and the descriptive words the booth has leaned on this round, if any."""
+    words = getattr(recent_lines, "words", None)
+    return ("\n\nRecent lines (don't reuse their phrases, jokes or the way they open):\n"
+            + "\n".join(_recent(recent_lines) or ["(none yet)"]) + (words.note() if words else ""))
+
+
 # Appended to the live reaction and between-hole prompts. It trims run-ons without flattening the
 # booth: a long, comma-stapled sentence reads worse aloud than two short ones and takes longer to
 # voice. Kept in the user prompt (not the cached system prompt) so a wording tweak costs no re-cache.
@@ -152,7 +159,7 @@ def shot_prompt(
         guidance += " Screenshots: first at impact, second after the ball came to rest."
     prompt = (
         "FACTS:\n" + facts_text
-        + "\n\nRecent lines (don't reuse their phrases, jokes or the way they open):\n" + "\n".join(_recent(recent_lines) or ["(none yet)"])
+        + _recent_block(recent_lines)
         + f"\n\n{guidance}" + BREVITY
     )
     return prompt, facts_text
@@ -183,7 +190,7 @@ def segment_prompt(*, previous_hole: str | None, current_hole: str, recap: list[
     )
     prompt = (
         "FACTS:\n" + facts_text
-        + "\n\nRecent lines (don't reuse their phrases, jokes or the way they open):\n" + "\n".join(_recent(recent_lines) or ["(none yet)"])
+        + _recent_block(recent_lines)
         + "\n\nBetween holes: a short two-or-three line exchange. Sum up the hole that just finished if there "
         "was anything notable, then bring in the next one however suits the moment (not the same way the "
         "last hole was introduced), using standings or storylines where they fit."
@@ -203,7 +210,7 @@ def wrap_recap_prompt(*, finished_hole: str | None, result: list[str], recap: li
     )
     prompt = (
         "FACTS:\n" + facts_text
-        + "\n\nRecent lines (don't reuse their phrases, jokes or the way they open):\n" + "\n".join(_recent(recent_lines) or ["(none yet)"])
+        + _recent_block(recent_lines)
         + "\n\nThe hole just finished on the score in the facts. Give a short two-line exchange between the "
         "commentators summing up how it played out and the result. Don't mention or tee up the next hole."
     )
@@ -334,7 +341,7 @@ def hole_intro_prompt(*, hole: str, recent_lines, extra: list[str] | None = None
     facts_text = "\n".join([f"This hole: {hole}"] + (extra or []) + [clock_fact()])
     prompt = (
         "FACTS:\n" + facts_text
-        + "\n\nRecent lines (don't reuse their phrases, jokes or the way they open):\n" + "\n".join(_recent(recent_lines) or ["(none yet)"])
+        + _recent_block(recent_lines)
         + "\n\nA new hole is starting: one or two short lines to bring it in, any way you like. The "
         "yardage and par are there if they help, but you needn't lead with them, and the last hole's "
         "intro in the recent lines is the one way NOT to open. Don't recap the previous hole."
@@ -356,7 +363,7 @@ def flight_prompt(*, player, team, hole, facts: list[str], recent_lines, speaker
             "trees) and call it if the ball is heading that way." if has_image else "")
     prompt = (
         "IN FLIGHT. FACTS:\n" + facts_text
-        + "\n\nRecent lines (don't reuse their phrases, jokes or the way they open):\n" + "\n".join(_recent(recent_lines) or ["(none yet)"])
+        + _recent_block(recent_lines)
         + f'\n\nThe ball is in the air. Give exactly one line from "{speaker}", at most 10 words, present tense, '
         "the way a TV commentator calls a shot mid-flight: will it get there (\"needs legs\", \"too much club\"), "
         "is it on line, is it drifting toward trouble. Nobody knows where it lands yet, so never say where it "
@@ -479,7 +486,7 @@ def preshot_line_prompt(
 ) -> tuple[str, str]:
     """The swing-critical spoken line. Text-only on a fast model, so it's ready before the swing."""
     facts_text = "\n".join(_header(player, team, hole) + facts + [clock_fact()])
-    recent = "\n\nRecent lines (don't reuse their phrases, jokes or the way they open):\n" + "\n".join(_recent(recent_lines) or ["(none yet)"])
+    recent = _recent_block(recent_lines)
     if is_putt:
         prompt = (
             "PRE-PUTT LINE. FACTS:\n" + facts_text + recent
@@ -530,7 +537,7 @@ def preshot_branch_prompt(
     The exception is `named` (side -> hazard kind, from the minimap read): that side's trouble line
     names that one hazard, and impact plays it only when that hazard is the one in play."""
     facts_text = "\n".join(_header(player, team, hole) + facts + [clock_fact()])
-    recent = "\n\nRecent lines (don't reuse their phrases, jokes or the way they open):\n" + "\n".join(_recent(recent_lines) or ["(none yet)"])
+    recent = _recent_block(recent_lines)
     if is_putt:
         prompt = (
             "PRE-PUTT BRANCHES. FACTS:\n" + facts_text + recent
@@ -602,7 +609,7 @@ def opener_prompt(*, facts: list[str], recent_lines, now: datetime | None = None
     facts_text = "\n".join([*facts, time_of_day_fact(now)])
     prompt = (
         "THE ROUND IS ABOUT TO START. FACTS:\n" + facts_text
-        + "\n\nRecent lines (don't reuse their phrases, jokes or the way they open):\n" + "\n".join(_recent(recent_lines) or ["(none yet)"])
+        + _recent_block(recent_lines)
         + "\n\nOpen the broadcast: three or four lines, alternating between the two commentators. Welcome "
         "everyone, say what the round's format means for these players, pick one storyline, rivalry or "
         "prediction worth watching, and send us to the opening hole: name the hole and its par (from a "
@@ -619,7 +626,7 @@ def closer_prompt(*, facts: list[str], recent_lines, now: datetime | None = None
     facts_text = "\n".join([*facts, time_of_day_fact(now)])
     prompt = (
         "THE ROUND IS OVER. FACTS:\n" + facts_text
-        + "\n\nRecent lines (don't reuse their phrases, jokes or the way they open):\n" + "\n".join(_recent(recent_lines) or ["(none yet)"])
+        + _recent_block(recent_lines)
         + "\n\nWrap up the round: a short conversation of four to six lines between the two commentators. "
         "Tell the story of the round, don't recite the stats: pick the two or three threads that matter most "
         "and connect them (a player who kept missing fairways but still found greens, a hot putter that saved "
