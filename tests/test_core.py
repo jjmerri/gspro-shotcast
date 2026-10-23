@@ -3671,3 +3671,22 @@ def test_a_great_finish_asks_for_excitement_and_names_the_score_without_a_stock_
     # A close approach names no score (the next-putt fact does), and an unknown start drops the distance.
     assert _great_shot_fact(180.0, "finished 6 feet from the hole").startswith("From 180 yards out, the ball finished 6 feet from the hole. ")
     assert _great_shot_fact(None, "went in the hole", strokes=3, par=4).startswith("The ball went in the hole, which makes a birdie.")
+
+
+def test_a_chip_to_the_gimme_is_scaled_by_its_lie_and_distance():
+    from commentator.engine import _great_shot_fact
+    from commentator.interest import short_game_gimme_level
+
+    # Dan's lob wedge on Kiawah 15: 16 yards out of the deep rough to a conceded foot.
+    assert short_game_gimme_level(16.0, "deep rough") == 8
+    assert short_game_gimme_level(8.0, "bunker") == 7
+    assert short_game_gimme_level(60.0, "fairway") == 7
+    assert short_game_gimme_level(30.0, "bunker") == 9                 # stays below a hole-out
+    assert short_game_gimme_level(6.0, "fringe") is None               # a tap-in chip isn't a moment
+    assert short_game_gimme_level(6.0, "fairway") is None
+    assert short_game_gimme_level(20.0, "green") is None
+    fact = _great_shot_fact(16.0, "finished inside the 3-foot gimme circle", 4, 4, lie="deep rough", level=8)
+    assert fact.startswith("From 16 yards out of the deep rough, the ball finished inside the 3-foot gimme "
+                           "circle, which makes a par.")
+    assert "excitement 8 out of 10" in fact and "exceptional" not in fact
+    assert "From 60 yards off the fairway," in _great_shot_fact(60.0, "x", lie="fairway", level=7)

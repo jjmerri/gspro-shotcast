@@ -22,7 +22,7 @@ from .flight_pick import FlightPlan, Hazard, pick_line, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
 from .grounding import SCENERY, bare_acknowledgement, check_line, meta_talk, ngrams, note_keywords, repeats, uses_note
 from .hud import NAME_DARK, Hud, describe, hole_key, name_sig_changed
-from .interest import LONG_HOLED_PUTT_FEET, holed_putt_score, score_shot
+from .interest import LONG_HOLED_PUTT_FEET, holed_putt_score, score_shot, short_game_gimme_level
 from .league import League, course_match_score
 from .llm import LLMClient
 from .minimap import JevMinimap, MinimapRead
@@ -331,15 +331,21 @@ def _short_miss_fact(before: Hud, par: int | None) -> str | None:
 
 
 def _great_shot_fact(start_yards: float | None, where: str, strokes: int | None = None,
-                     par: int | None = None) -> str:
+                     par: int | None = None, lie: str | None = None, level: int | None = None) -> str:
     """The hype fact for a full shot that holed out or finished by the cup. It states the achievement
     and asks for excitement without handing over a phrase: "a superb approach, stuffed close" came
-    back as "he's stuffed it" call after call."""
-    fact = f"From {start_yards:.0f} yards out, the ball {where}" if start_yards else f"The ball {where}"
+    back as "he's stuffed it" call after call. A short-game shot names its lie and gets a number (out
+    of 10), as a holed putt does, so a chip from the sand isn't called like a 200-yard approach."""
+    lie = (lie or "").lower()
+    source = f" {'off' if _lie_prep(lie) == 'on' else 'out of'} the {lie}" if lie else " out"
+    fact = f"From {start_yards:.0f} yards{source}, the ball {where}" if start_yards else f"The ball {where}"
     name = "a hole in one" if strokes == 1 and where.startswith("went in") else \
         SCORE_NAMES.get(strokes - par) if strokes and par else None
     if name:
         fact += f", which makes {name}"
+    if level:
+        return fact + (f". That is a fine short-game shot: excitement {level} out of 10, in your own words "
+                       "rather than a stock golf phrase.")
     return fact + (". That is an exceptional shot: react with real excitement, in your own words rather "
                    "than a stock golf phrase.")
 
@@ -3553,6 +3559,7 @@ class Engine:
         holed = None
         close_feet = None
         long_gimme = False
+        gimme_level = None
         roll_yards = tile_yards("total length")
         outcome = full_result = None
         if shot.is_putt and ((self.screen is not None and ocr) or idx is not None):
@@ -3646,17 +3653,24 @@ class Engine:
             elif full_result == "unknown":
                 self._bg(self._late_result(shot_id, idx, *base, tag, False, rec=rec, base_hole=base_hole,
                                            base_setup=base_setup))
-            if near and landed and start_yards and start_yards >= c.close_approach_from_yards:
-                if full_result == "conceded":
+            if full_result == "conceded" and start_yards:
+                if start_yards >= c.close_approach_from_yards:
                     long_gimme = True
                     score = max(score, c.big_moment_threshold)
-                elif full_result != "holed":
-                    finish = await self._wait_finish_yards(idx, impact_snap[0].get(idx), 1.5)
-                    if finish is not None and finish * 3 <= c.close_approach_feet:
-                        close_feet = finish * 3
-                        score = max(score, c.big_moment_threshold)
-                        log.info("%s stuffed it: %.0f feet from the hole from %.0f yards (GSPro log)",
-                                 tag, close_feet, start_yards)
+                elif (gimme_level := short_game_gimme_level(start_yards, before.lie)):
+                    # A chip or pitch to tap-in range. The log's "conceded" is proof enough: a short
+                    # chip often ends the hole before its touchdown is seen.
+                    score = max(score, c.big_moment_threshold)
+                    log.info("%s short-game shot to the gimme from %.0f yards (%s): excitement %s",
+                             tag, start_yards, before.lie, gimme_level)
+            elif near and landed and start_yards and start_yards >= c.close_approach_from_yards \
+                    and full_result != "holed":
+                finish = await self._wait_finish_yards(idx, impact_snap[0].get(idx), 1.5)
+                if finish is not None and finish * 3 <= c.close_approach_feet:
+                    close_feet = finish * 3
+                    score = max(score, c.big_moment_threshold)
+                    log.info("%s stuffed it: %.0f feet from the hole from %.0f yards (GSPro log)",
+                             tag, close_feet, start_yards)
 
         # The early splash (above) already aired and was the call for this shot; the shot has now been
         # recorded, so skip every further reaction.
@@ -3751,10 +3765,11 @@ class Engine:
             circle = f"{gimme * 3:.0f}-foot " if gimme else ""
             result = [f"The ball stopped inside the {circle}gimme circle, right by the hole: the putt is "
                       f"conceded, so the hole is over without a putt being struck."]
-            if long_gimme:
+            if long_gimme or gimme_level:
                 strokes = before.shot_number + 1 if before.shot_number else None
                 result.append(_great_shot_fact(to_yards(before.to_pin), f"finished inside the {circle}gimme circle",
-                                               strokes, shot_par))
+                                               strokes, shot_par, lie=before.lie if gimme_level else None,
+                                               level=gimme_level))
         # On the green in regulation or better: say what the next putt is for, so "ten feet for
         # birdie" is a fact, not a guess (a par 5 in two is an eagle putt).
         next_putt = None

@@ -68,7 +68,7 @@ def build_events(rows: list[dict], player: str) -> list[tuple[str, object, dict 
             m = HOLE.match(hole)
             number, par = int(m.group(1)), int(m.group(2))
             out.append(("hole", HoleChangeEvent(previous=None, current=hole, course=r["course"]), None))
-            if number == 1:
+            if number == 1 or len(out) == 1:   # a back nine starts its round on 10
                 out.append(("start", RoundStartEvent(hud=Hud(
                     player_text=f"{player} E Shot 1", shot_number=1, score_to_par="E", to_pin=r["to_pin"],
                     course=r["course"], par=par, hole_number=number)), None))

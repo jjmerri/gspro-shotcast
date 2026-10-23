@@ -104,6 +104,21 @@ def holed_putt_cue(feet: float | None) -> str:
     return f"; excitement {level} out of 10 if it drops" if level else ""
 
 
+_SHORT_GAME_LIE_BONUS = {"bunker": 2, "sand": 2, "deep rough": 2, "fescue": 2, "native": 2, "trees": 2,
+                         "rough": 1, "semi rough": 1, "pine straw": 1, "waste area": 1, "waste": 1, "fringe": -1}
+
+
+def short_game_gimme_level(start_yards: float | None, lie: str | None) -> int | None:
+    """How excited (out of 10) the booth should be when a chip or pitch from off the green stops
+    inside the gimme circle: harder from further out and from sand or thick rough. None for one too
+    simple to hype (a short chip off the fringe or fairway). Tops out below a hole-out."""
+    lie = (lie or "").lower()
+    if not start_yards or lie == "green":
+        return None
+    level = (5 if start_yards < 10 else 6 if start_yards < 25 else 7) + _SHORT_GAME_LIE_BONUS.get(lie, 0)
+    return min(level, 9) if level >= 6 else None
+
+
 def holed_putt_score(score: float, hud: Hud, tags: list[str], notable: float, big: float) -> float:
     """A putt that drops is never routine: a makeable one always gets a word, and one from outside
     20 feet (or a fast, long roll when the distance wasn't read) is a big moment. A tap-in stays as is."""
