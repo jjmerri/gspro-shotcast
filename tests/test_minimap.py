@@ -784,3 +784,18 @@ def _out_of_play_greyed(img, ball, pin):
     from commentator.minimap import _greyed, out_of_play
 
     return _greyed(img, out_of_play(img, ball, pin))
+
+
+def test_locate_takes_a_hidden_ball_from_the_tee_view_only_when_the_pin_is_where_it_puts_it():
+    from PIL import ImageDraw
+
+    from commentator.minimap import TEE_BALL, locate, map_area
+
+    # Kiawah 12 off the tee: GSPro printed "125" over the red ball, but the pin sits where it always does.
+    ball, pin = locate(Image.open("tests/fixtures/minimap_ball_hidden.jpg"))
+    assert ball == TEE_BALL and abs(pin[0] - 0.493) < 0.01 and abs(pin[1] - 0.085) < 0.01
+    # An approach, framed differently: with its ball covered, the standard spots would be wrong.
+    img = map_area(Image.open("tests/fixtures/minimap_water_long.jpg")).convert("RGB")
+    x, y = 0.495 * img.width, 0.755 * img.height
+    ImageDraw.Draw(img).ellipse((x - 12, y - 12, x + 12, y + 12), fill=(90, 90, 90))
+    assert locate(img) is None

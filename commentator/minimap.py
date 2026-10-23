@@ -997,11 +997,19 @@ def map_area(img: Image.Image) -> Image.Image:
     return img.crop((0, top, img.width, bottom))
 
 
+# Where GSPro puts the ball and the pin on the expanded minimap off the tee, as fractions of the map
+# area: the same on every hole of a round on the sim PC (3450x2160), par 3 to par 5.
+TEE_BALL, TEE_PIN, TEE_FRAME_SLACK = (0.493, 0.907), (0.493, 0.083), 0.02
+
+
 def locate(img: Image.Image) -> tuple[tuple[float, float], tuple[float, float]] | None:
     """The ball (GSPro's red dot) and the pin (the flat white dot up the map from it) on a minimap, as
-    (x, y) fractions of the image, found in code so the hole snapshot needs no Jev call. None unless
-    both are found. GSPro centres the map on the ball and turns it so the pin is straight up, so the
-    pin must sit above the ball, near its column; the grey shaded dot between them is the aim point."""
+    (x, y) fractions of the image, found in code so the hole snapshot needs no Jev call. GSPro centres
+    the map on the ball and turns it so the pin is straight up, so the pin must sit above the ball, near
+    its column; the grey shaded dot between them is the aim point. GSPro prints yardages over the map
+    and one can hide either dot, so when only one is found where GSPro's tee view puts it, the other
+    is taken from that view (TEE_BALL, TEE_PIN). None when neither is found, or the one found isn't
+    where the tee view puts it (a different framing, which the standard spots would get wrong)."""
     import numpy as np
 
     px = np.asarray(img.convert("RGB"), dtype=np.int16)
@@ -1016,17 +1024,21 @@ def locate(img: Image.Image) -> tuple[tuple[float, float], tuple[float, float]] 
                 found.append((float(xs.mean()) / w, float(ys.mean()) / h, len(ys)))
         return found
 
+    def standard(d, spot):
+        return math.dist(d[:2], spot) <= TEE_FRAME_SLACK
+
     size = w * h
     balls = dots((r > 170) & (g < 90) & (b < 90), max(12, size // 20000), size // 400)
-    if not balls:
-        return None
-    bx, by, _ = max(balls, key=lambda d: (d[2], d[1]))
-    pins = [d for d in dots((r > 235) & (g > 235) & (b > 235), max(12, size // 20000), size // 400)
-            if d[1] < by - 0.05 and abs(d[0] - bx) <= 0.12]
-    if not pins:
-        return None
-    pin = min(pins, key=lambda d: d[1])
-    return (bx, by), (pin[0], pin[1])
+    whites = dots((r > 235) & (g > 235) & (b > 235), max(12, size // 20000), size // 400)
+    if balls:
+        bx, by, _ = max(balls, key=lambda d: (d[2], d[1]))
+        pins = [d for d in whites if d[1] < by - 0.05 and abs(d[0] - bx) <= 0.12]
+        if pins:
+            pin = min(pins, key=lambda d: d[1])
+            return (bx, by), (pin[0], pin[1])
+        return ((bx, by), TEE_PIN) if standard((bx, by), TEE_BALL) else None
+    pins = [d for d in whites if standard(d, TEE_PIN)]
+    return (TEE_BALL, pins[0][:2]) if pins else None
 
 
 def snapshot(img: Image.Image, max_width: int = 360) -> tuple[bytes, tuple[float, float] | None,
