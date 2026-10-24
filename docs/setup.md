@@ -146,6 +146,7 @@ pushed again for 12 hours, and a "resolved" push follows once they clear (`notif
 | `import-league` | Build the league file and history from the yearly spreadsheets |
 | `cost` | Text-model calls and estimated cost per night (voice cost is in the booth log) |
 | `squabbit` | Read this league's data from Squabbit (needs `.env` credentials) |
+| `tray` | The Windows app: the booth and stats page from a tray icon (`--home` for its folder, default `%LOCALAPPDATA%\Shotcast`; `--self-test`) |
 
 ## Tests
 

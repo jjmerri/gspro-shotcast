@@ -1,0 +1,58 @@
+name: windows-app
+
+# Builds the Windows installer. Run by hand (Actions > windows-app > Run workflow) for a test build
+# to download from the run's artifacts; pushing a tag like v0.2.0 also publishes it as a release,
+# which the app's "Check for updates" offers.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write   # the release, on a tag
+    steps:
+      - uses: actions/checkout@v7
+      - name: Version
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") { $v = "${{ github.ref_name }}".TrimStart("v") }
+          else { $v = "0.0.0.dev${{ github.run_number }}" }
+          "VERSION=$v" >> $env:GITHUB_ENV
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - name: Build
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: tools\windows\build.ps1 -Version $env:VERSION
+      # Signing (SignPath) goes here, before the hash is taken again.
+      - name: Install, check and uninstall
+        shell: pwsh
+        run: |
+          $exe = "dist\Shotcast-Setup-$env:VERSION.exe"
+          Start-Process $exe -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/nolaunch=1", "/LOG=install.log" -Wait
+          $app = "$env:LOCALAPPDATA\Programs\Shotcast"
+          & "$app\python\python.exe" -m commentator tray --home "$env:RUNNER_TEMP\shotcast-home" --self-test
+          if ($LASTEXITCODE -ne 0) { throw "self-test failed" }
+          if (-not (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name Shotcast -ErrorAction SilentlyContinue)) { throw "no Start with Windows entry" }
+          Start-Process "$app\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES" -Wait
+          Start-Sleep 5
+          if (Test-Path "$app\python") { throw "uninstall left the app behind" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Shotcast-Setup-${{ env.VERSION }}
+          path: dist/*
+      - name: Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release create "${{ github.ref_name }}" dist/* --title "Shotcast ${{ github.ref_name }}" --generate-notes

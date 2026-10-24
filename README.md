@@ -148,6 +148,30 @@ beyond that is supported on paper but not yet run live:
 
 ## Quick start
 
+### The Windows app (easiest)
+
+1. Download **`Shotcast-Setup-<version>.exe`** from the latest
+   [release](https://github.com/jjmerri/gspro-shotcast/releases/latest) and run it. It installs
+   for your Windows user only (no administrator prompt) and brings its own Python. The installer
+   isn't code-signed yet, so Windows SmartScreen may say "Windows protected your PC": choose
+   **More info → Run anyway**. Each release lists the installer's SHA-256 next to it.
+2. Shotcast starts in the **tray** (the golf ball by the clock; it may be under the ^ arrow) and,
+   unless you untick it, every time Windows starts. It records every shot and round without any
+   API keys. Click the icon for the **stats page**; right-click it for the menu:
+   - **Check the screen read...**: start GSPro, get to a hole, choose this and bring GSPro to the
+     front. Every line should say OK (see [Checking the screen read](docs/setup.md#checking-the-screen-read)).
+   - **Turn the AI booth on**: asks for the OpenAI and Anthropic keys (in `.env`) the first time.
+   - **Settings**: edit `config.yaml` and `.env`, open the Shotcast folder or the logs.
+   - **Warnings** (when there are any), **Restart the booth**, **Back up now**,
+     **Check for updates** / **Restart to update**, **Start with Windows**, **Quit**.
+
+   The icon's light is green when everything's fine, orange with warnings, red when the booth
+   isn't running. Updates are checked every few hours and offered in the menu, never installed
+   on their own (not mid-round). Your settings, season database and backups are in
+   `%LOCALAPPDATA%\Shotcast`, which updating and uninstalling leave alone.
+
+### From the ZIP or git
+
 1. On GitHub, **Code → Download ZIP**, and unzip it somewhere it can stay (for example
    `Documents\gspro-shotcast`). Or `git clone https://github.com/jjmerri/gspro-shotcast.git`.
 2. Double-click **`install.bat`**. It finds Python 3.12 or 3.13 (or offers to install 3.13),

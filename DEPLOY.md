@@ -6,6 +6,23 @@ machine; either way, the sim PC should be a **git clone** of this repo so update
 Your own machine details (host, user, SSH key, paths) belong in `DEPLOY.local.md`, which is
 gitignored. Keep personal notes there, not here.
 
+## The Windows app
+
+The installer from [Releases](https://github.com/jjmerri/gspro-shotcast/releases) is the simplest
+setup for a sim PC that just plays: see the [README](README.md#the-windows-app-easiest). It puts a
+private Python with Shotcast in `%LOCALAPPDATA%\Programs\Shotcast` and runs `shotcast tray`, which
+keeps the booth running (restarting it after a crash, up to 3 times in 10 minutes), serves the
+stats page on this PC and offers updates. Everything else (config.yaml, .env, the league file,
+`logs\` with season.db, backups and the booth, tray and `booth-errors.log` logs) lives in
+`%LOCALAPPDATA%\Shotcast`. The rest of this page is for a git clone.
+
+Don't run both: if another booth is running (start-booth.bat or a scheduled task), the tray
+doesn't start one and says so; **Restart the booth** in its menu stops the other and starts its own.
+
+Releases are built by `.github/workflows/windows-app.yml` when a `v*` tag is pushed (the tag is
+the version); running the workflow by hand makes a test build in the run's artifacts. To build
+locally on Windows with Inno Setup 6: `powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 -Version 0.2.0`.
+
 ## Install
 
 `install.bat` (double-click it in a clone or an unzipped download) does the install below and

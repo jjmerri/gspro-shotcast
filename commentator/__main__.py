@@ -3,6 +3,7 @@ import asyncio
 import time
 import json
 import logging
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -10,12 +11,16 @@ from pathlib import Path
 from .config import Config, load_config
 
 
-def _setup_logging(verbose: bool, log_dir: str | None = None) -> None:
-    handlers: list[logging.Handler] = [logging.StreamHandler()]
+def _setup_logging(verbose: bool, log_dir: str | None = None, name: str = "booth") -> None:
+    handlers: list[logging.Handler] = []
+    # No console under pythonw (the tray); the tray's booth logs to its file only, keeping its stderr
+    # file for crashes.
+    if sys.stderr is not None and not (log_dir and os.environ.get("SHOTCAST_FILE_LOG_ONLY")):
+        handlers.append(logging.StreamHandler())
     if log_dir:
         # A file copy, so a session can be reviewed afterwards (or watched remotely).
         Path(log_dir).mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(Path(log_dir) / f"booth-{time.strftime('%Y-%m-%d')}.log", encoding="utf-8"))
+        handlers.append(logging.FileHandler(Path(log_dir) / f"{name}-{time.strftime('%Y-%m-%d')}.log", encoding="utf-8"))
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
@@ -784,6 +789,48 @@ def cmd_cost(cfg: Config, args) -> None:
     print(summarize(cfg.log_dir, weeks=args.weeks, as_model=args.as_model))
 
 
+def _load_env(config: str) -> None:
+    """The booth's own .env, so its keys aren't shared machine-wide: next to config.yaml (the
+    Windows app's home folder), else next to the code (a checkout or ZIP). Values here override
+    anything set system-wide."""
+    from .dotenv import load_env
+
+    loaded: list[str] = []
+    beside_code = Path(__file__).resolve().parents[1] / ".env"
+    beside_config = Path(config).resolve().parent / ".env"
+    for path in dict.fromkeys((beside_code, beside_config)):   # the config's wins
+        loaded += load_env(path)
+    if loaded:
+        logging.info("Loaded %s from .env", ", ".join(dict.fromkeys(loaded)))
+
+
+def cmd_tray(parser, args) -> None:
+    from . import tray
+
+    if args.write_icon:
+        tray.write_icon(args.write_icon)
+        return
+    if args.config != "config.yaml":
+        parser.error("tray uses config.yaml in its home folder: pass --home instead of -c")
+    home, first = tray.prepare_home(args.home)
+    os.chdir(home)
+    config = home / "config.yaml"
+    _setup_logging(args.verbose, "logs", name="tray")
+    _load_env(str(config))
+    cfg = load_config(config)
+    if args.self_test:
+        tray.self_test(home, cfg)
+        return
+    if not tray.single_instance():
+        logging.info("Shotcast is already running; opening the stats page")
+        tray.open_running_stats(home)
+        return
+    from .updater import current_version
+
+    logging.info("Shotcast %s starting in %s", current_version(), home)
+    tray.Tray(home, cfg, first_run=first).run()
+
+
 def main() -> None:
     # Windows consoles default to a legacy code page; OCR'd text can hold anything.
     for stream in (sys.stdout, sys.stderr):
@@ -893,6 +940,11 @@ def main() -> None:
     p.add_argument("--weeks", type=int, default=12)
     p.add_argument("--as-model", help="Price every call as this Claude model, e.g. claude-sonnet-5-5")
 
+    p = sub.add_parser("tray", help="The Windows app: run the booth and stats page from a tray icon")
+    p.add_argument("--home", help="Folder for config.yaml, .env and logs (default %%LOCALAPPDATA%%\\Shotcast)")
+    p.add_argument("--self-test", action="store_true", help="Check the app loads and serves the stats page, then exit")
+    p.add_argument("--write-icon", metavar="ICO", help="Write the app's icon to this .ico file and exit")
+
     p = sub.add_parser("squabbit", help="Read this league's data from Squabbit (needs .env credentials)")
     p.add_argument("--invite", help="League invite code (defaults to squabbit_invite in the league file)")
     p.add_argument("--tournament", help="Also print a tournament's fields and a sample scorecard")
@@ -907,13 +959,10 @@ def main() -> None:
                    help="Recompute every team's net on the league's leaderboards and report how many match")
 
     args = parser.parse_args()
+    if args.command == "tray":
+        return cmd_tray(parser, args)
     _setup_logging(args.verbose, "logs" if args.command == "run" else None)
-    from .dotenv import load_env
-
-    # The booth's own .env (next to config.yaml), so its key isn't shared machine-wide.
-    loaded = load_env(Path(__file__).resolve().parents[1] / ".env")
-    if loaded:
-        logging.info("Loaded %s from .env", ", ".join(loaded))
+    _load_env(args.config)
     cfg = load_config(args.config) if Path(args.config).exists() else Config()
     if not Path(args.config).exists():
         logging.warning("%s not found; using defaults", args.config)

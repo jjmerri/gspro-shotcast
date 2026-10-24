@@ -8,13 +8,15 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
-import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from commentator.settings_files import env_value, set_commentary, set_env  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 KEYS = [("OPENAI_API_KEY", "OpenAI", "https://platform.openai.com/api-keys"),
@@ -25,25 +27,6 @@ def ask_yes(question: str, default: bool = True) -> bool:
     hint = "Y/n" if default else "y/N"
     answer = input(f"{question} [{hint}] ").strip().lower()
     return default if not answer else answer.startswith("y")
-
-
-def set_commentary(config_text: str, enabled: bool) -> str:
-    """Flip `commentary: enabled:` in config.yaml's text, keeping its comments."""
-    pattern = re.compile(r"(^commentary:\s*\n(?:[ \t]*#.*\n)*[ \t]+enabled:[ \t]*)(true|false)", re.M)
-    if not pattern.search(config_text):
-        raise ValueError("no `commentary: enabled:` line")
-    return pattern.sub(lambda m: m.group(1) + ("true" if enabled else "false"), config_text, count=1)
-
-
-def env_value(env_text: str, key: str) -> str:
-    m = re.search(rf"^{key}=(.*)$", env_text, re.M)
-    return m.group(1).strip() if m else ""
-
-
-def set_env(env_text: str, key: str, value: str) -> str:
-    if re.search(rf"^{key}=.*$", env_text, re.M):
-        return re.sub(rf"^{key}=.*$", lambda _: f"{key}={value}", env_text, count=1, flags=re.M)
-    return env_text.rstrip("\n") + f"\n{key}={value}\n"
 
 
 def setup_config(booth: bool) -> None:

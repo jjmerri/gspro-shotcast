@@ -34,6 +34,8 @@ local = ["kokoro-onnx>=0.4"]
 publish = ["boto3"]
 # Importing the league's yearly spreadsheets.
 league = ["openpyxl>=3.1"]
+# The Windows app's tray icon (`shotcast tray`).
+tray = ["pystray>=0.19"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-xdist>=3"]
 
 [project.scripts]
