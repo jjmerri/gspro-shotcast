@@ -64,3 +64,11 @@ def test_settings_that_wouldnt_load_arent_saved():
                                 {"OPENAI_API_KEY": "sk-1", "NTFY_TOPIC": "t"}, None)
     assert yaml.safe_load(config)["commentary"]["enabled"] is False
     assert env == "OPENAI_API_KEY=sk-1\nNTFY_TOPIC=t\n"
+
+
+def test_an_edit_that_would_touch_anything_else_is_refused():
+    text = "'publish':\n  bucket: b\n  region: r\n"
+    with pytest.raises(ValueError, match="by hand"):
+        set_yaml(text, ("publish", "enabled"), True)
+    bom = "\ufeffpublish:\n  bucket: b\n"
+    assert set_yaml(bom, ("publish", "bucket"), "c") == "\ufeffpublish:\n  bucket: c\n"

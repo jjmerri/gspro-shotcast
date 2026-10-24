@@ -86,7 +86,7 @@ Filename: "{app}\python\pythonw.exe"; Parameters: "{#TrayArgs}{code:HomeArg}"; W
 [Code]
 var
   Upgrade: Boolean;
-  GSProPage: TInputDirWizardPage;
+  GSProPage: TInputQueryWizardPage;
   GSProSearched: Boolean;
 
 function IsUpgrade: Boolean;
@@ -150,14 +150,33 @@ begin
   Result := GSProDir('') <> '';
 end;
 
+procedure BrowseGSPro(Sender: TObject);
+var
+  Dir: String;
+begin
+  Dir := GSProPage.Values[0];
+  if BrowseForFolder('Choose the folder GSPro is installed in (the one with GSPLauncher.exe):', Dir, False) then
+    GSProPage.Values[0] := Dir;
+end;
+
 procedure InitializeWizard;
 var
   Previous: String;
+  Browse: TNewButton;
 begin
-  GSProPage := CreateInputDirPage(wpSelectTasks, 'GSPro', 'Where is GSPro installed?',
-    'Shotcast reads GSPro''s shot log and course files from its folder (the one with GSPLauncher.exe, usually C:\GSProV1).',
-    False, '');
-  GSProPage.Add('GSPro folder:');
+  // A text box (not a folder page, which won't take an empty answer: GSPro may not be on this PC).
+  GSProPage := CreateInputQueryPage(wpSelectTasks, 'GSPro', 'Where is GSPro installed?',
+    'Shotcast reads GSPro''s shot log and course files from its folder (the one with GSPLauncher.exe, usually C:\GSProV1).');
+  GSProPage.Add('GSPro folder:', False);
+  Browse := TNewButton.Create(GSProPage);
+  Browse.Parent := GSProPage.Surface;
+  Browse.Caption := 'Browse...';
+  Browse.Width := ScaleX(80);
+  Browse.Height := WizardForm.NextButton.Height;
+  Browse.Left := GSProPage.SurfaceWidth - Browse.Width;
+  Browse.Top := GSProPage.Edits[0].Top - (Browse.Height - GSProPage.Edits[0].Height) div 2;
+  Browse.OnClick := @BrowseGSPro;
+  GSProPage.Edits[0].Width := Browse.Left - ScaleX(8) - GSProPage.Edits[0].Left;
   if RegQueryStringValue(HKCU, 'Software\Shotcast', 'GSProDir', Previous) and (Previous <> '') then
   begin
     GSProPage.Values[0] := Previous;
@@ -169,7 +188,7 @@ procedure CurPageChanged(CurPageID: Integer);
 var
   Found: String;
 begin
-  if (CurPageID = GSProPage.ID) and not GSProSearched then
+  if (CurPageID = GSProPage.ID) and not GSProSearched and not WizardSilent then
   begin
     GSProSearched := True;
     WizardForm.NextButton.Enabled := False;

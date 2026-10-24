@@ -2,13 +2,11 @@
 (tools/install_setup.py) and the Windows app (commentator/tray.py and its Settings window)."""
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any
 
 import yaml
-
-_UNSET = object()
-
 
 def _indent(line: str) -> int:
     return len(line) - len(line.lstrip(" "))
@@ -94,19 +92,17 @@ def _child_indent(lines: list[str], i: int, end: int) -> int:
     return _indent(lines[i]) + 2
 
 
-def _get(data: Any, keys: tuple[str, ...]) -> Any:
-    for k in keys:
-        if not isinstance(data, dict) or k not in data:
-            return _UNSET
-        data = data[k]
-    return data
-
-
 def set_yaml(text: str, keys: tuple[str, ...] | str, value: Any) -> str:
     """Set a scalar or a list of scalars at `keys` (e.g. ("source", "connector_log")) in YAML text,
     keeping every other line, comment and spacing as it is. Missing keys are added at the end of
     their block. Raises ValueError if the result wouldn't read back as `value`."""
     keys = (keys,) if isinstance(keys, str) else tuple(keys)
+    bom = "\ufeff" if text.startswith("\ufeff") else ""
+    text = text[len(bom):]
+    try:
+        before = yaml.safe_load(text) or {}
+    except yaml.YAMLError as e:
+        raise ValueError(f"the file doesn't read as YAML: {e}") from e
     nl = "\r\n" if "\r\n" in text else "\n"
     lines = text.splitlines(keepends=True)
     if lines and not lines[-1].endswith(("\n", "\r")):
@@ -145,14 +141,22 @@ def set_yaml(text: str, keys: tuple[str, ...] | str, value: Any) -> str:
         lines[i:stop] = _value_lines(" " * ind, key, value, tail, nl, item_indent, column) + kept
         break
     out = "".join(lines)
+    # Only the one value may change: anything else (a key written in a way this doesn't follow, so a
+    # second copy of its section was added) means the edit went wrong.
+    expected = copy.deepcopy(before) if isinstance(before, dict) else {}
+    node = expected
+    for k in keys[:-1]:
+        if not isinstance(node.get(k), dict):
+            node[k] = {}
+        node = node[k]
+    node[keys[-1]] = list(value) if isinstance(value, (list, tuple)) else value
     try:
-        got = _get(yaml.safe_load(out), keys)
+        after = yaml.safe_load(out)
     except yaml.YAMLError as e:
         raise ValueError(f"couldn't set {'.'.join(keys)}: {e}") from e
-    want = list(value) if isinstance(value, (list, tuple)) else value
-    if got != want:
+    if after != expected:
         raise ValueError(f"couldn't set {'.'.join(keys)} in this file; edit it by hand")
-    return out
+    return bom + out
 
 
 def _value_lines(pad: str, key: str, value: Any, tail: str, nl: str, item_indent: int | None = None,
