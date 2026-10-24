@@ -93,12 +93,15 @@ def _layouts(db: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def _layout_for(layouts: list[sqlite3.Row], course: str, hole: int, session: int, first_ts: float,
-                last_ts: float) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
-    """(this round's layout, for the pin; the layout for the tee: this round's, else the hole's latest)."""
+                last_ts: float, until: float | None = None) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
+    """(this round's layout, for the pin; the layout for the tee: this round's, else the hole's latest).
+    GSPro logs a layout when a round completes, so this round's is stored after the hole was played
+    and before `until`, the session's next round's first shot (a round quit early has none)."""
     key = (course or "").casefold()
     same = [lo for lo in layouts if (lo["course"] or "").casefold() == key and lo["hole"] == hole]
+    end = min(first_ts + ROUND_HOURS, until) if until is not None else first_ts + ROUND_HOURS
     this_round = [lo for lo in same if lo["session_id"] == session and lo["ts"] is not None
-                  and last_ts - 60 <= lo["ts"] <= first_ts + ROUND_HOURS]
+                  and last_ts - 60 <= lo["ts"] <= end]
     with_tee = [lo for lo in this_round[:1] + same[::-1] if lo["tee_x"] is not None]
     return (this_round[0] if this_round else None), (with_tee[0] if with_tee else None)
 
@@ -149,20 +152,29 @@ def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]
         if row["id"] in round_of and m:
             groups.setdefault((round_of[row["id"]], int(m.group(1))), []).append(row)
     layouts, images = _layouts(db), _images(db)
+    # Each round's session and first and last shot, to end its layout window at the next round's start.
+    span: dict[int, list] = {}
+    for (rnd, _), rows in groups.items():
+        sp = span.setdefault(rnd, [rows[0]["session_id"], rows[0]["ts"], rows[-1]["ts"]])
+        sp[1], sp[2] = min(sp[1], rows[0]["ts"]), max(sp[2], rows[-1]["ts"])
     out = {}
     for key, rows in groups.items():
         if not any(r["start_x"] is not None for r in rows):
             continue
-        if (rp := _replay(rows, key[1], layouts)) is not None:
+        ses, _, last = span[key[0]]
+        until = min((f for s, f, _ in span.values() if s == ses and f > last), default=None)
+        if (rp := _replay(rows, key[1], layouts, until)) is not None:
             if rp["tee"] and rp["pin"] and (m := _map_for(images, rp["course"], key[1], rows[0]["session_id"])):
                 rp["map"] = m
             out[key] = rp
     return out
 
 
-def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row]) -> dict[str, Any] | None:
+def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row],
+            until: float | None = None) -> dict[str, Any] | None:
     first = rows[0]
-    this_round, any_round = _layout_for(layouts, first["course"], hole, first["session_id"], first["ts"], rows[-1]["ts"])
+    this_round, any_round = _layout_for(layouts, first["course"], hole, first["session_id"], first["ts"],
+                                        rows[-1]["ts"], until)
     tee = _xz(any_round["tee_x"], any_round["tee_z"]) if any_round else None
     pin, pin_est = (_xz(this_round["pin_x"], this_round["pin_z"]) if this_round else None), False
     played = [r for r in rows if not r["mulligan"] and r["outcome"] != "gimme"]

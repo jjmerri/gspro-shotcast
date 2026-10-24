@@ -97,6 +97,35 @@ def test_backfill_keeps_a_later_unrecorded_rounds_layout_off_an_earlier_round(tm
     assert [tuple(r) for r in st.db.execute("SELECT session_id, pin_z FROM hole_layouts")] == [(None, 350.0)]
 
 
+def test_a_round_quit_before_its_layout_doesnt_take_the_next_rounds_pin(tmp_path):
+    path, st = _season(tmp_path)
+    st.db.execute("UPDATE shots SET start_x = 10, start_z = 200 WHERE shot_number = 2")
+    st.db.execute("UPDATE shots SET start_x = 2, start_z = 295 WHERE shot_number = 3")
+    # The same session plays the hole again later, to the end, and that round logs a different pin.
+    for n, to_pin in enumerate([300.0, 100.0], 1):
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt,"
+                      " to_pin_yards, raw) VALUES (?, ?, 'Dan', 'Test Links', 'Hole 1, par 4, 328 yards', ?, '7I', 0, ?, '{}')",
+                      (st.session_id, 5000.0 + n, n, to_pin))
+    st.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes) VALUES (?, 6000, '2025-10-20',"
+                  " 'Test Links', 'Dan', 1)", (st.session_id,))
+    st.db.commit()
+    st.record_hole_layout("Test Links", [{"par": 4, "played": True, "tee": (0.0, 2.0, 0.0), "pin": (0.0, 1.0, 350.0)}],
+                          session_id=st.session_id, ts=5003.0)
+    rp = hole_replays(st.db)[(1, 1)]
+    assert rp["pin_estimated"] and math.dist(rp["pin"], (0, 300)) < 2.0
+
+
+def test_the_same_pins_from_new_tees_later_in_the_session_are_kept_and_repeats_are_not(tmp_path):
+    _, st = _season(tmp_path)
+    hole = {"par": 4, "played": True, "tee": (0.0, 2.0, 0.0), "pin": (0.0, 1.0, 300.0)}
+    add = lambda h, ts: st.record_hole_layout("Test Links", [h], session_id=st.session_id, ts=ts)  # noqa: E731
+    assert (add(hole, 1500.0), add(hole, 1500.0), add(hole, 1600.0)) == (1, 0, 0)   # one round's repeats
+    assert add({**hole, "tee": (50.0, 2.0, 50.0)}, 1700.0) == 1                      # other tees, same pin
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, raw)"
+                  " VALUES (?, 1800, 'Dan', 'Test Links', 'Hole 1, par 4, 328 yards', 1, 0, '{}')", (st.session_id,))
+    assert add(hole, 1900.0) == 1                                                    # played again since
+
+
 def test_backfill_ignores_a_log_of_rounds_the_season_never_recorded(tmp_path):
     path, st = _season(tmp_path)
     log = tmp_path / "output_log.txt"

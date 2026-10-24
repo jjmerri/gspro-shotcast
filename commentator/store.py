@@ -347,7 +347,7 @@ class Store:
                            ts: float | None = None) -> int:
         """Store the geometry of each played hole in a completed round's layout (the log's hole list,
         see gspro_log._layout_holes; hole numbers are list positions + 1). GSPro logs the list several
-        times over, so a hole already stored with the same pin for this session is skipped. Returns the
+        times over, so a repeat of a row this round already stored is skipped (see below). Returns the
         rows added. session_id -1 means this booth's session."""
         if not course:
             return 0
@@ -359,8 +359,16 @@ class Store:
             pin, tee, wp = h.get("pin"), h.get("tee"), h.get("waypoint")
             if not (h.get("played") and pin):
                 continue
-            if self.db.execute("SELECT 1 FROM hole_layouts WHERE session_id IS ? AND course = ? AND hole = ?"
-                               " AND pin_x = ? AND pin_z = ?", (sid, course, n, pin[0], pin[2])).fetchone():
+            # GSPro logs the list several times as a round completes: skip a row already stored for the
+            # same round, the same geometry with no stroke on the hole between the two. The same pins
+            # and tees played again later in the session are that later round's own layout.
+            same = self.db.execute("SELECT ts FROM hole_layouts WHERE session_id IS ? AND course = ? AND hole = ?"
+                                   " AND pin_x = ? AND pin_z = ? AND tee_x IS ? AND tee_z IS ?",
+                                   (sid, course, n, pin[0], pin[2], *((tee[0], tee[2]) if tee else (None, None))))
+            if any(t is None or ts is None or sid is None or not self.db.execute(
+                    "SELECT 1 FROM shots WHERE session_id = ? AND course = ? COLLATE NOCASE AND hole LIKE ?"
+                    " AND ts > ? AND ts < ? LIMIT 1", (sid, course, f"Hole {n},%", min(t, ts), max(t, ts))).fetchone()
+                   for (t,) in same.fetchall()):
                 continue
             none3 = (None, None, None)
             self.db.execute("INSERT INTO hole_layouts (session_id, ts, course, hole, par, tee_x, tee_y, tee_z,"
