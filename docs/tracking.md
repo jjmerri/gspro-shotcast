@@ -344,3 +344,11 @@ To keep the database without the booth talking, set
 are read from GSPro and recorded exactly as with commentary on, but nothing calls a model or a
 voice, so no API keys are needed. The league file is optional too: without one, players are
 recorded under their GSPro names and every round is practice.
+
+Off air (from the config or the ON AIR badge) only stops model and voice calls, and the screen reads
+that only feed them (the paid Jev minimap read, putt breaks, headlines, weather, scores, trivia).
+Shots, rounds, hole replays and their minimap images, publishing, backups and health checks carry on.
+
+If commentary is on but its API keys are missing, the booth still starts and records, off air, with
+a warning on the ON AIR badge saying which key is missing. With commentary off and no keys, the badge
+isn't shown, since it couldn't go on air.

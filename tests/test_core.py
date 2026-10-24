@@ -2897,6 +2897,55 @@ def test_no_commentary_needs_no_api_keys(monkeypatch):
     assert not engine.commentary_on and engine.speech.muted
 
 
+def test_commentary_on_without_api_keys_records_and_warns_on_the_overlay(monkeypatch, tmp_path):
+    from commentator.__main__ import _build_engine
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    cfg = Config(log_dir=str(tmp_path), db_path=str(tmp_path / "season.db"))
+    cfg.league_file = "data/league.example.json"
+    cfg.llm.live.provider = cfg.tts.provider = "openai"
+    cfg.screen.ocr = cfg.screen.send_images = False
+    cfg.commentary.enabled = True
+    engine = _build_engine(cfg)
+    assert cfg.overlay.enabled and not engine.commentary_on and engine.speech.muted
+    assert "OPENAI_API_KEY" in engine.health.get("commentary.unavailable").message
+    engine.set_commentary(True)   # the overlay's click can't put it on air
+    assert not engine.commentary_on
+
+    cfg.commentary.enabled = False   # off in config.yaml: no overlay, no warning
+    engine = _build_engine(cfg)
+    assert not cfg.overlay.enabled and engine.health.get("commentary.unavailable") is None
+
+
+async def test_paid_and_commentary_only_screen_reads_follow_the_on_air_switch(tmp_path):
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.commentary.enabled = False
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=None, segment_llm=None, speech=None, screen=object())
+    engine._putt_read_ok = True
+    made = []
+    engine._make_minimap = lambda: made.append(1) or "jev"
+    assert engine.minimap is None and not engine.putt_reader
+    engine.set_commentary(True)
+    assert engine.minimap == "jev" and engine.putt_reader
+    engine.set_commentary(False)
+    assert not engine.putt_reader
+    engine.set_commentary(True)
+    assert made == [1]
+
+    started = asyncio.Event()
+
+    async def jev_read():
+        started.set()
+        await asyncio.sleep(10)
+
+    task = asyncio.create_task(jev_read())
+    engine._minimap_tasks.add(task)
+    await started.wait()
+    engine.set_commentary(False)   # off air stops a Jev read in flight; the setup carries on without it
+    assert await engine._await_minimap(task, is_putt=False) is None and task.cancelled()
+
+
 async def test_late_putt_result_is_recorded_and_a_conceded_tap_in_gets_its_own_row(tmp_path):
     e = _mini_engine(tmp_path)
 

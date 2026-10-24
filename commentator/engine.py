@@ -415,6 +415,7 @@ class Engine:
         opener_llm: LLMClient | None = None,
         closer_llm: LLMClient | None = None,
         health: Health | None = None,
+        commentary_unavailable: str | None = None,
     ) -> None:
         self.cfg = cfg
         # Is the booth still reading GSPro right? In memory unless the caller gives it a file.
@@ -436,16 +437,27 @@ class Engine:
         self.closer_llm = closer_llm or self.round_llm
         self.speech = speech
         # Commentary off records shots and rounds but never calls a model or speaks (see _complete).
-        self.commentary_on = cfg.commentary.enabled
+        # Why the model and voice clients couldn't be built (missing API keys): recording only, and the
+        # booth can't be put on air.
+        self.commentary_unavailable = commentary_unavailable
+        self.commentary_on = cfg.commentary.enabled and not commentary_unavailable
+        if commentary_unavailable and cfg.health.enabled:
+            self.health.raise_issue("commentary.unavailable", "warn", "Commentary is on in config.yaml but "
+                                    f"can't start: {commentary_unavailable}. Recording only.")
+        else:
+            self.health.clear("commentary.unavailable", why="commentary clients built or commentary off")
         if league is not None and speech is not None:
             self.speech.spoken = league.spoken
         if speech is not None and not self.commentary_on:
             self.speech.muted = True
         self.screen = screen
         self.usage = UsageLog(cfg.log_dir)
-        self.minimap = self._make_minimap()
-        self.putt_reader = (self.cfg.putt_read.enabled and self.screen is not None and self.commentary_on
-                            and self.cfg.screen.capture == "monitor")
+        # Built when the booth first goes on air, and only used on air (Jev is a paid model call).
+        self.minimap = self._make_minimap() if self.commentary_on else None
+        self._minimap_tried = self.commentary_on
+        self._minimap_tasks: set[asyncio.Task] = set()   # reads in flight, cancelled on going off air
+        self._putt_read_ok = (self.cfg.putt_read.enabled and self.screen is not None
+                              and self.cfg.screen.capture == "monitor")
         self.rng = rng or random.Random()
         self.state = SessionState(recent_lines_max=cfg.commentary.recent_lines)
         # Live golf headlines for occasional between-shots banter; None when the feature is off.
@@ -663,7 +675,10 @@ class Engine:
         models = (("pre-shot", self.preshot_llm), ("in-flight fallback", self.flight_llm),
                   ("reactions", self.live_llm), ("segments", self.segment_llm),
                   ("round opener", self.opener_llm), ("round closer", self.closer_llm))
-        if not self.commentary_on:
+        if self.commentary_unavailable:
+            log.warning("Commentary can't start: %s. Recording shots and rounds only", self.commentary_unavailable)
+            models = ()
+        elif not self.commentary_on:
             log.info("Commentary off: recording shots and rounds only")
             models = ()
         for role, llm in models:
@@ -833,10 +848,15 @@ class Engine:
                 self._prev_activity, self._last_activity = self._last_activity, time.monotonic()
                 await self._emit_setup(hud)
 
+    @property
+    def putt_reader(self) -> bool:
+        """Read putt breaks off the screen: they only feed the commentary, so only on air."""
+        return self._putt_read_ok and self.commentary_on
+
     def _make_minimap(self) -> "JevMinimap | None":
         """The Jev minimap reader when minimap.provider is jev and it can run; otherwise None, and the
         hazard read stays on the preshot vision model."""
-        if self.cfg.minimap.provider != "jev" or self.screen is None or not self.commentary_on:
+        if self.cfg.minimap.provider != "jev" or self.screen is None:
             return None
         if why := JevMinimap.available():
             log.warning("minimap.provider is jev but %s; using the preshot vision model for hazards", why)
@@ -876,6 +896,8 @@ class Engine:
         region = self.screen.region("minimap")
         # Full resolution: the downscaled vision snapshot leaves the minimap's numbers too small to read.
         img = await asyncio.to_thread(self.screen.grab, region)
+        if not self.commentary_on:   # went off air during the grab: don't start the paid read
+            raise RuntimeError("off air")
         return await self.minimap.read(img, to_pin)
 
     async def _read_putt(self) -> PuttRead:
@@ -900,8 +922,10 @@ class Engine:
         if hud.shot_number == 1:
             self._snap_hole(hud)
         # The minimap read starts first so it runs during the HUD read below. It's cancelled for a putt.
-        minimap_task = asyncio.create_task(self._read_minimap(to_yards(hud.to_pin))) if self.minimap is not None else None
+        minimap_task = asyncio.create_task(self._read_minimap(to_yards(hud.to_pin))) if self.minimap is not None and self.commentary_on else None
         if minimap_task is not None:
+            self._minimap_tasks.add(minimap_task)
+            minimap_task.add_done_callback(self._minimap_tasks.discard)
             minimap_task.add_done_callback(lambda t: t.cancelled() or t.exception())
         # A distance in feet is a putt: the grid burst starts now, so it runs during the HUD read.
         putt_task = (self._start_putt_read() if self.putt_reader and "feet" in (hud.to_pin or "") else None)
@@ -1206,8 +1230,17 @@ class Engine:
         and recorded, so going back on air picks up mid-round with the full picture."""
         if on == self.commentary_on:
             return
+        if on and self.commentary_unavailable:
+            log.warning("Can't go on air: %s", self.commentary_unavailable)
+            return
         self.commentary_on = on
         log.info("Booth %s", "on air" if on else "off air: recording shots and rounds only")
+        if on and not self._minimap_tried:   # started off air: the hazard reader wasn't built
+            self._minimap_tried = True
+            self.minimap = self._make_minimap()
+        if not on:
+            for task in list(self._minimap_tasks):
+                task.cancel()   # a Jev read is several paid calls: stop the rest
         if self.speech is None:
             return
         if not on:
@@ -2936,6 +2969,10 @@ class Engine:
             return None
         try:
             read = await asyncio.wait_for(task, self.cfg.minimap.timeout_seconds)
+        except asyncio.CancelledError:
+            if task.cancelled() and not asyncio.current_task().cancelling():
+                return None   # the read was stopped (off air), not this setup
+            raise
         except asyncio.TimeoutError:
             log.warning("Minimap read timed out after %.1fs", self.cfg.minimap.timeout_seconds)
             return None

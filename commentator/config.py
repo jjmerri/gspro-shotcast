@@ -458,7 +458,8 @@ class CommentaryConfig(BaseModel):
 class OverlayConfig(BaseModel):
     # A small always-on-top "ON AIR" badge over GSPro (a pulsing red dot). Click it to take the booth
     # off air (commentary off, shots and rounds still recorded) and back on. Changes the running booth
-    # only; `commentary.enabled` still decides how it starts. Only shown by `run` on a live source.
+    # only; `commentary.enabled` still decides how it starts. Only shown by `run` on a live source, and
+    # not when commentary is off and its API keys are missing (it couldn't go on air).
     enabled: bool = True
     # Where the badge's top-left corner sits, as fractions of the primary screen measured on a 16:10
     # screen; on another shape it moves with GSPro's HUD (see overlay.badge_geometry). The default is

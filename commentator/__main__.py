@@ -36,44 +36,52 @@ def _overlay_wanted(cfg: Config) -> bool:
 
 
 def _build_engine(cfg: Config):
+    if cfg.source.type == "replay":
+        return _build_live_engine(cfg) if cfg.commentary.enabled else _build_recording_engine(cfg)
+    # Commentary on, or off but switchable on from the overlay: build the real clients. If they can't
+    # be built (missing API keys), record only. Commentary on in config.yaml keeps the overlay up with
+    # a warning on it; off, the overlay is hidden since it couldn't go on air anyway.
+    if cfg.commentary.enabled or _overlay_wanted(cfg):
+        try:
+            return _build_live_engine(cfg)
+        except Exception as exc:
+            if cfg.commentary.enabled:
+                logging.getLogger("commentator").warning(
+                    "Commentary is on but its clients can't be built (%s): recording only", exc)
+                return _build_recording_engine(cfg, unavailable=str(exc))
+            logging.getLogger("commentator").warning(
+                "Commentary clients unavailable (%s): recording only, the ON AIR overlay is off", exc)
+            cfg.overlay.enabled = False
+    return _build_recording_engine(cfg)
+
+
+def _build_recording_engine(cfg: Config, unavailable: str | None = None):
+    """Recording only: no model or voice clients, so no API keys are needed. The engine never calls
+    these (see Engine._complete); they only fill the slots."""
     from .engine import Engine
     from .league import League
+    from .llm.base import LLMClient
     from .screen import Screen
     from .sources import build_source
     from .speech import SpeechQueue
     from .store import Store
+    from .tts.console_tts import ConsoleTTS
 
-    if not cfg.commentary.enabled and _overlay_wanted(cfg):
-        # Starting off air but switchable on from the overlay: build the real clients so going on air
-        # works, unless they can't be built (no API keys), in which case it's recording only.
-        try:
-            return _build_live_engine(cfg)
-        except Exception as exc:
-            logging.getLogger("commentator").warning(
-                "Commentary clients unavailable (%s): recording only, the ON AIR overlay is off", exc)
-            cfg.overlay.enabled = False
-    if not cfg.commentary.enabled:
-        # Recording only: no model or voice clients, so no API keys are needed. The engine never
-        # calls these (see Engine._complete); they only fill the slots.
-        from .llm.base import LLMClient
-        from .tts.console_tts import ConsoleTTS
+    class _Off(LLMClient):
+        provider = "off"
 
-        class _Off(LLMClient):
-            provider = "off"
+        async def complete_json(self, system, user, schema, images=None):
+            raise RuntimeError("commentary is off")
 
-            async def complete_json(self, system, user, schema, images=None):
-                raise RuntimeError("commentary is off")
-
-        off = _Off(cfg.llm.live.model_copy(update={"vision": False}))
-        return Engine(
-            cfg=cfg, league=League.load(cfg.league_file), source=build_source(cfg),
-            live_llm=off, segment_llm=off, speech=SpeechQueue(cfg, ConsoleTTS()),
-            screen=Screen(cfg.screen) if cfg.source.type != "replay" and cfg.screen.ocr else None,
-            await_preshot=cfg.source.type == "replay",
-            store=Store(cfg.db_path) if cfg.source.type != "replay" else None,
-            health=_health(cfg),
-        )
-    return _build_live_engine(cfg)
+    off = _Off(cfg.llm.live.model_copy(update={"vision": False}))
+    return Engine(
+        cfg=cfg, league=League.load(cfg.league_file), source=build_source(cfg),
+        live_llm=off, segment_llm=off, speech=SpeechQueue(cfg, ConsoleTTS()),
+        screen=Screen(cfg.screen) if cfg.source.type != "replay" and cfg.screen.ocr else None,
+        await_preshot=cfg.source.type == "replay",
+        store=Store(cfg.db_path) if cfg.source.type != "replay" else None,
+        health=_health(cfg), commentary_unavailable=unavailable,
+    )
 
 
 def _build_live_engine(cfg: Config):
@@ -152,7 +160,7 @@ async def cmd_run(cfg: Config, args) -> None:
     bid = build_id()
     logging.getLogger("commentator").info("Booth build: %s", bid)
     engine = _build_engine(cfg)
-    if cfg.commentary.enabled:
+    if engine.commentary_on:
         print(f"On air (build {bid}). Brain: {cfg.llm.live.provider}:{cfg.llm.live.model}  Voice: {cfg.tts.provider}  "
               f"Source: {cfg.source.type}. Ctrl+C to stop.", flush=True)
     else:
