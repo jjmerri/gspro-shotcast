@@ -9,7 +9,7 @@ Shot tracking, season stats and an AI broadcast booth for **GSPro 3.1.x** simula
   putts, scrambling). It all goes into one local SQLite file. No cloud services, accounts or API
   keys needed.
 - **Stats web page.** Strokes gained, club gapping, approach and putting by distance, scorecards,
-  every shot, and season highlights, in a local page over that file. Optionally published online
+  hole replays, every shot, and season highlights, in a local page over that file. Optionally published online
   after every round, behind a password, so the whole league can check their numbers from a phone.
 - **The booth.** Two AI commentators call your round live through the speakers. They know the
   launch numbers, the course, your league's standings and storylines, and what you did last
@@ -31,6 +31,12 @@ a mulligan, and the hole wrap-up.*
 |---|---|
 | ![Rounds: hole-by-hole scorecards](docs/screenshots/rounds.png) | ![Highlights: season records and top shots](docs/screenshots/highlights.png) |
 | ![Shots: every shot, filterable](docs/screenshots/shots.png) | ![Broadcasts: a night's commentary, shot by shot](docs/screenshots/broadcasts.png) |
+
+**Hole replays.** Click a hole on any scorecard to watch the group play it again: every shot
+drawn over GSPro's minimap of the hole, with the club and where it finished, and penalty
+areas marked.
+
+<img src="docs/screenshots/replay.png" alt="Hole replay: three players' shots on Paynes Valley 18, drawn over the hole's minimap" width="360">
 
 Every swing goes into `logs/season.db` with its launch data,
 where it finished and what it scored, plus each round's card and stats. The stats page shows
