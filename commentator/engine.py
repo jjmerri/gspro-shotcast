@@ -5963,17 +5963,21 @@ class Engine:
             log.info("Round %s over (%s) after %s of %s holes: signing off on the %s played",
                      r.id, event.reason, r.seq, r.holes, played)
             self._schedule_publish()   # the backup, if the sign-off never finishes
-            await self._sign_off(r, stats)
-            self._schedule_publish(after_speech=True)
-            self._schedule_backup("round end")
+            try:
+                await self._sign_off(r, stats)
+                self._schedule_publish(after_speech=True)
+            finally:
+                self._schedule_backup("round end")   # the round is stored even if the closer fails
             return
         if stats_obj := getattr(self.speech, "audio_stats", None):
             log.info("%s", audio_summary(stats_obj))
         stats = self._record_round_stats(r, event.reason)
         self._schedule_publish()   # the backup, if the sign-off never finishes
-        await self._sign_off(r, stats)
-        self._schedule_publish(after_speech=True)
-        self._schedule_backup("round end")
+        try:
+            await self._sign_off(r, stats)
+            self._schedule_publish(after_speech=True)
+        finally:
+            self._schedule_backup("round end")   # the round is stored even if the closer fails
 
     async def _sign_off(self, r: Round, stats: dict) -> None:
         season = {s.key: self.store.season_rounds(s.key, "league" if r.is_league else "practice") for s in r.sides}

@@ -321,7 +321,7 @@ backup:
   daily: 14
   weekly: 4
   s3: false          # also upload to publish.bucket under s3_prefix
-  s3_prefix: backups/
+  s3_prefix: backups/ # must stay under backups/, the only prefix the site won't serve
 ```
 
 By default the copies sit on the same drive as the database, which covers a corrupted or deleted
@@ -334,8 +334,8 @@ by anyone with the site password. The upload keys can't download, so restoring f
 own AWS credentials (`aws s3 cp s3://<BucketName>/backups/<file> .`).
 
 `python -m commentator backup` takes a copy now. To restore, stop the booth and run
-`python -m commentator restore logs/backups/season-....db.gz`; it checks the copy, backs up the
-current file first, then swaps it in.
+`python -m commentator restore logs/backups/season-....db.gz`; it checks the copy, saves the
+current file (even a corrupted one) as `pre-restore-*.db.gz` in the backup folder, then swaps it in.
 
 ## Recording only
 

@@ -764,7 +764,7 @@ def cmd_restore(cfg: Config, args) -> None:
     if not src.exists():
         sys.exit(f"No backup at {src}.")
     try:
-        saved = backup.restore(src, cfg.db_path, backup.folder(cfg), cfg.backup.daily, cfg.backup.weekly)
+        saved = backup.restore(src, cfg.db_path, backup.folder(cfg))
     except PermissionError:
         sys.exit("The season file is in use: stop the booth first.")
     print(f"Restored {src.name} as {cfg.db_path}" + (f" (the file it replaced is saved as {saved})" if saved else ""))

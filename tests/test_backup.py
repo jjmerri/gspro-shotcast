@@ -13,6 +13,7 @@ from commentator.league import League
 def _db(path, value="a"):
     with closing(sqlite3.connect(path)) as db:
         db.execute("CREATE TABLE IF NOT EXISTS t (v TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS shots (v TEXT)")
         db.execute("DELETE FROM t")
         db.execute("INSERT INTO t VALUES (?)", (value,))
         db.commit()
@@ -59,16 +60,67 @@ def test_back_up_skips_an_unchanged_database_and_prunes(tmp_path):
     assert _value(tmp_path / "out.db") == "b"
 
 
-def test_restore_puts_a_backup_back_and_saves_the_file_it_replaces(tmp_path):
+def test_restore_keeps_the_chosen_copy_and_saves_even_a_corrupted_current_file(tmp_path):
     db, dest = tmp_path / "season.db", tmp_path / "backups"
     _db(db, "old")
     old = backup.back_up(db, dest, daily=1, weekly=0)
-    _db(db, "new")
-    saved = backup.restore(old, db, dest, daily=1, weekly=0)   # same day: the safety copy prunes `old`
-    assert _value(db) == "old"
+    db.write_bytes(b"not a database")
+    (tmp_path / "season.db-journal").write_bytes(b"stale")
+    saved = backup.restore(old, db, dest)
+    assert _value(db) == "old" and old.exists()
+    assert not (tmp_path / "season.db-journal").exists()
     with gzip.open(saved) as fh:
-        (tmp_path / "out.db").write_bytes(fh.read())
-    assert _value(tmp_path / "out.db") == "new"
+        assert fh.read() == b"not a database"
+    assert backup.keep([p.name for p in dest.iterdir()]) == {old.name}   # pruning never sees it
+
+
+def test_restore_refuses_an_empty_or_foreign_file_and_puts_the_journal_back_on_failure(tmp_path, monkeypatch):
+    import pytest
+
+    db, dest = tmp_path / "season.db", tmp_path / "backups"
+    _db(db, "live")
+    empty = tmp_path / "empty.db.gz"
+    with gzip.open(empty, "wb"):
+        pass
+    other = tmp_path / "other.db"
+    with closing(sqlite3.connect(other)) as o:
+        o.execute("CREATE TABLE x (v)")
+        o.commit()
+    for bad in (empty, other):
+        with pytest.raises(RuntimeError):
+            backup.restore(bad, db, dest)
+    assert _value(db) == "live"
+
+    good = backup.back_up(db, dest)
+    journal = tmp_path / "season.db-journal"
+    journal.write_bytes(b"hot")
+    real = backup.os.replace
+
+    def locked(src, dst):
+        if str(dst) == str(db):
+            raise PermissionError("in use")
+        real(src, dst)
+
+    monkeypatch.setattr(backup.os, "replace", locked)
+    with pytest.raises(PermissionError):
+        backup.restore(good, db, dest)
+    assert journal.read_bytes() == b"hot"
+
+
+def test_keep_with_no_daily_copies_keeps_weekly_ones():
+    names = [_name(datetime(2026, 3, 2) + timedelta(days=d)) for d in range(21)]
+    assert len(backup.keep(names, daily=0, weekly=2)) == 2
+
+
+def test_s3_prefix_must_stay_under_backups():
+    import pytest
+    from pydantic import ValidationError
+    from commentator.config import BackupConfig
+
+    assert BackupConfig(s3_prefix="backups/simpc/").s3_prefix == "backups/simpc/"
+    for bad in ("archive/", "backupsx/", "backups/../v/"):
+        with pytest.raises(ValidationError):
+            BackupConfig(s3_prefix=bad)
 
 
 class FakeS3:

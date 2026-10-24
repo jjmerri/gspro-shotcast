@@ -634,12 +634,19 @@ class BackupConfig(BaseModel):
     # Default: log_dir/backups, on the same drive as the database. A synced or other drive (OneDrive,
     # Dropbox, a NAS, a USB stick) keeps the copies safe if the PC's drive dies.
     dir: str | None = None
-    daily: int = 14
-    weekly: int = 4
-    # Also upload each copy to publish.bucket under s3_prefix (with the same keys as publish). Only
-    # with the stack's rule that keeps CloudFront from serving that prefix (tools/aws/stats-site.yaml).
+    daily: int = Field(14, ge=0)
+    weekly: int = Field(4, ge=0)
+    # Also upload each copy to publish.bucket under s3_prefix (with the same keys as publish). It must
+    # stay under backups/: the stack keeps CloudFront from serving only that (tools/aws/stats-site.yaml).
     s3: bool = False
     s3_prefix: str = "backups/"
+
+    @field_validator("s3_prefix", mode="after")
+    @classmethod
+    def _under_backups(cls, v: str) -> str:
+        if v.strip("/").split("/")[0] != "backups" or ".." in v.split("/"):
+            raise ValueError("backup.s3_prefix must be backups/ or a folder under it")
+        return v
 
 
 class Config(BaseModel):

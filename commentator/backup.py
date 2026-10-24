@@ -79,7 +79,7 @@ def keep(names: list[str], daily: int = 14, weekly: int = 4) -> set[str]:
         week = when.isocalendar()[:2]
         if week in weeks or len(weeks) >= weekly:
             continue
-        if week == days[-1].isocalendar()[:2]:
+        if days and week == days[-1].isocalendar()[:2]:
             continue   # the week the daily copies reach back into is covered by them
         weeks.append(week)
         kept.add(name)
@@ -156,21 +156,44 @@ def upload(path: Path, bucket: str, prefix: str = "backups/", daily: int = 14, w
         client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in stale[chunk:chunk + 1000]]})
 
 
-def restore(backup: str | Path, db_path: str | Path, dest: str | Path, daily: int = 14,
-            weekly: int = 4) -> Path | None:
-    """Put a backup back as the database. The current database is backed up first (returned), and the
-    restored copy is checked before it replaces anything. Stop the booth first."""
-    backup, db_path = Path(backup), Path(db_path)
+def restore(backup: str | Path, db_path: str | Path, dest: str | Path) -> Path | None:
+    """Put a backup back as the database. The restored copy is checked before it replaces anything, and
+    the current file is kept as dest/pre-restore-*.db.gz (returned), copied byte for byte so a corrupted
+    one is kept too, and never pruned. Stop the booth first."""
+    backup, db_path, dest = Path(backup), Path(db_path), Path(dest)
+    stamp = datetime.now().strftime(STAMP)
     with tempfile.TemporaryDirectory(dir=db_path.parent) as tmp:
         raw = Path(tmp) / "season.db"
         opener = gzip.open if backup.name.endswith(".gz") else open
         with opener(backup, "rb") as fin, open(raw, "wb") as fout:
             shutil.copyfileobj(fin, fout, 1 << 20)
+        if raw.stat().st_size == 0:
+            raise RuntimeError(f"{backup.name} is empty")
         with closing(sqlite3.connect(raw)) as db:
             ok = db.execute("PRAGMA integrity_check").fetchone()[0]
+            season = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='shots'").fetchone()
         if ok != "ok":
             raise RuntimeError(f"{backup.name} failed its integrity check: {ok}")
-        # Read before this copy is taken: its pruning can drop an older copy from the same day.
-        saved = back_up(db_path, dest, daily, weekly, force=True) if db_path.exists() else None
-        os.replace(raw, db_path)
+        if not season:
+            raise RuntimeError(f"{backup.name} isn't a season database (no shots table)")
+        saved = None
+        if db_path.exists():
+            dest.mkdir(parents=True, exist_ok=True)
+            saved = dest / f"pre-restore-{stamp}.db.gz"
+            with open(db_path, "rb") as fin, gzip.open(saved, "wb", compresslevel=6) as fout:
+                shutil.copyfileobj(fin, fout, 1 << 20)
+        # A leftover journal belongs to the old file: SQLite would replay it into the restored one.
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for side in ("-journal", "-wal", "-shm"):
+                extra = db_path.with_name(db_path.name + side)
+                if extra.exists():
+                    aside = extra.with_name(f"{extra.name}.pre-restore-{stamp}")
+                    os.replace(extra, aside)
+                    moved.append((aside, extra))
+            os.replace(raw, db_path)
+        except BaseException:
+            for aside, extra in reversed(moved):   # the old file still needs its journal to recover
+                os.replace(aside, extra)
+            raise
     return saved
