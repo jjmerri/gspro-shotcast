@@ -133,7 +133,7 @@ const state = { tab: TABS.some(t => t[0] === hashTab) ? hashTab : "players", ctx
                 me: linkQ.get("player") ?? store.get("shotcast.me") ?? "", mine: null,
                 seen: Number(store.get("shotcast.seen")) || 0,
                 round: null, sort: {}, course: null, versus: [null, null], shotFilter: {}, shots: null, shotOpen: null,
-                session: null, transcript: null, replays: {}, replayHole: null };
+                session: null, transcript: null, replays: {}, replayHole: null, replayOnly: false };
 if (["league", "practice"].includes(linkQ.get("ctx"))) state.ctx = linkQ.get("ctx");
 for (const k of SHOT_LINK_KEYS) if (linkQ.get(k)) state.shotFilter[k] = linkQ.get(k);
 if (state.me) { state.player = state.me; state.versus[0] = state.me; }
@@ -354,8 +354,13 @@ function scorecard(holes, replays) {
 // and the pin at the top. World units are metres (x, z); an aim is the player's minimap click.
 const REPLAY_COLORS = ["#5fc58a", "#6fb3ff", "#ffb74d", "#e57373", "#ba68c8", "#4dd0e1"];
 // Animated, it plays the shots in turn (every player's nth shot together), each line drawing out
-// behind a ball, and ends on the static drawing.
-function replaySvg(rp, animate = false) {
+// behind a ball, and ends on the static drawing. `colors` gives each player one colour for the whole
+// round; `only` draws just that player's shots (the frame still fits everyone's, so it doesn't jump).
+function replaySvg(rp, animate = false, { colors = {}, only = null, focus = null } = {}) {
+  const color = (pl, i) => colors[pl.name] || REPLAY_COLORS[i % REPLAY_COLORS.length];
+  const drawn = only ? rp.players.filter(p => p.name === only) : rp.players;
+  const toggle = focus && rp.players.length > 1 && rp.players.some(p => p.name === focus)
+    ? ` · <button class="link" data-replayonly>${only ? "Show everyone" : `Only ${esc(focus)}`}</button>` : "";
   const pts = [rp.tee, rp.pin, ...rp.players.flatMap(p => p.shots.flatMap(s => [s.from, s.to, s.aim]))].filter(Boolean);
   if (pts.length < 2) return '<p class="empty">Not enough positions logged to draw this hole.</p>';
   const a = rp.tee || pts[0], b = rp.pin || pts[pts.length - 1];
@@ -382,13 +387,14 @@ function replaySvg(rp, animate = false) {
   if (rp.tee) { const [x, y] = P(rp.tee); g += `<rect x="${x - 4}" y="${y - 4}" width="8" height="8" fill="#ddd"><title>Tee</title></rect>`; }
   // Each shot number's start time: a step the length of its longest shot's flight, putts quicker.
   const starts = {}; let clock = 0.4;
-  for (const n of [...new Set(rp.players.flatMap(p => p.shots.map(s => s.n)))].sort((x, y) => x - y)) {
-    starts[n] = clock; clock += rp.players.some(p => p.shots.some(s => s.n === n && !s.putt)) ? 0.95 : 0.75;
+  for (const n of [...new Set(drawn.flatMap(p => p.shots.map(s => s.n)))].sort((x, y) => x - y)) {
+    starts[n] = clock; clock += drawn.some(p => p.shots.some(s => s.n === n && !s.putt)) ? 0.95 : 0.75;
   }
   const at = (cls, n, lag = 0, more = "") => animate ? ` class="${cls}" style="${more}animation-delay:${((starts[n] ?? 0) + lag).toFixed(2)}s"` : "";
   let balls = "";
   rp.players.forEach((pl, i) => {
-    const c = REPLAY_COLORS[i % REPLAY_COLORS.length];
+    if (!drawn.includes(pl)) return;
+    const c = color(pl, i);
     for (const s of pl.shots) {
       const tip = esc(`${pl.name} · shot ${s.n}${s.club ? " · " + s.club : ""}${s.lie ? " from the " + s.lie : ""}${s.to_pin != null ? ` · ${s.to_pin} yd to the pin` : ""}`);
       if (s.from && s.aim) { const [x1, y1] = P(s.from), [x2, y2] = P(s.aim);
@@ -407,12 +413,12 @@ function replaySvg(rp, animate = false) {
   const yd = [10, 25, 50, 100, 150, 200].reduce((a, v) => Math.abs(v - h * 1.0936 / 5) < Math.abs(a - h * 1.0936 / 5) ? v : a);
   const bar = yd / 1.0936 * k;
   g += `<line x1="8" y1="${H - 8}" x2="${(8 + bar).toFixed(1)}" y2="${H - 8}" stroke="#8fa59b" stroke-width="2"/><text x="8" y="${H - 13}" fill="#8fa59b" font-size="10">${yd} yd</text>`;
-  const legend = rp.players.map((pl, i) => `<span style="color:${REPLAY_COLORS[i % REPLAY_COLORS.length]}">● ${esc(pl.name)}${pl.strokes ? ` · ${pl.strokes}${pl.gimmes ? ` (incl. ${pl.gimmes} gimme${pl.gimmes > 1 ? "s" : ""})` : ""}` : ""}</span>`).join(" &nbsp;");
+  const legend = rp.players.map((pl, i) => `<span style="color:${color(pl, i)}${drawn.includes(pl) ? "" : ";opacity:.45"}">● ${esc(pl.name)}${pl.strokes ? ` · ${pl.strokes}${pl.gimmes ? ` (incl. ${pl.gimmes} gimme${pl.gimmes > 1 ? "s" : ""})` : ""}` : ""}</span>`).join(" &nbsp;");
   const notes = [rp.pin ? (rp.pin_estimated ? "Pin estimated from the shots' distances." : "") : "Pin position unknown.",
-                 rp.players.some(p => p.shots.some(s => s.aim)) ? "Dashed: where the player aimed." : "",
+                 drawn.some(p => p.shots.some(s => s.aim)) ? "Dashed: where the player aimed." : "",
                  rp.map && rp.map.approx ? "Map from another round here: its tee, pin dot and yardages may differ a little." : ""].filter(Boolean).join(" ");
   return `<div class="replay"><div class="sub">${esc(rp.course)} · hole ${rp.hole}${rp.par ? ` · par ${rp.par}` : ""}
-    · <button class="link" data-replayagain title="Play the hole again">↻ Play again</button></div>
+    · <button class="link" data-replayagain title="Play the hole again">↻ Play again</button>${toggle}</div>
     <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${g}</svg>
     <div class="sub">${legend}</div>${notes ? `<div class="sub">${notes}</div>` : ""}</div>`;
 }
@@ -625,14 +631,19 @@ function renderVersus() {
       </tbody></table>` : '<p class="empty">No course in common yet.</p>'}`;
 }
 
-function replayPart(reps) {
+function replayPart(reps, round) {
   if (!reps || !Object.keys(reps).length) return "";
   const rp = reps[state.replayHole];
   if (!rp) return '<p class="sub">Click a hole number for a replay of the hole.</p>';
+  // One colour per player for the whole round, in the order they first appear in it.
+  const names = [...new Set(Object.keys(reps).sort((x, y) => x - y).flatMap(h => reps[h].players.map(p => p.name)))];
+  const colors = Object.fromEntries(names.map((n, i) => [n, REPLAY_COLORS[i % REPLAY_COLORS.length]]));
+  // The player to single out: the one picked at the top, else this round row's player.
+  const focus = [state.me, round.side].find(n => n && rp.players.some(p => p.name === n)) || null;
   // Animate once per opening, not again on every re-render (a sort, another round's toggle).
   const key = `${state.round}:${state.replayHole}`, animate = state.replayPlayed !== key;
   state.replayPlayed = key;
-  return replaySvg(rp, animate);
+  return replaySvg(rp, animate, { colors, focus, only: state.replayOnly && focus ? focus : null });
 }
 
 function renderRounds() {
@@ -653,7 +664,7 @@ function renderRounds() {
       <td class="l">${esc(r.side)}${r.team && r.team !== r.side ? ` <span class="sub">${esc(r.team)}</span>` : ""}</td>
       <td class="l">${esc(r.format.replace("_", " "))}${tags}</td><td>${r.played}/${r.holes}</td><td>${dash(r.gross)}</td>
       <td>${toPar(r.to_par)}</td><td>${frac(r.fir)}</td><td>${frac(r.gir)}</td><td>${dash(r.putts)}</td></tr>` +
-      (open ? `<tr class="detail"><td colspan="${cols.length}">${scorecard(r.card, reps)}${replayPart(reps)}
+      (open ? `<tr class="detail"><td colspan="${cols.length}">${scorecard(r.card, reps)}${replayPart(reps, r)}
         <p class="sub">Scrambling ${frac(r.scramble)} · Sand saves ${frac(r.sand)} · Penalties ${dash(r.penalties)}${r.longest_drive ? ` · Longest drive ${Math.round(r.longest_drive)} yd` : ""}</p>
         <p><button class="link" data-roundshots="${r.round}">Every shot of this round →</button></p></td></tr>` : "");
   };
@@ -878,11 +889,14 @@ function showTabs() {
 
 document.addEventListener("click", (e) => {
   const t = e.target.closest("[data-tab],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
-                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain]");
+                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly]");
   if (!t) return;
   if (t.dataset.share !== undefined) {
     const done = ok => { t.textContent = ok ? "Link copied" : "Copy the address bar"; setTimeout(() => (t.textContent = "Copy link"), 2000); };
     navigator.clipboard ? navigator.clipboard.writeText(location.href).then(() => done(true), () => done(false)) : done(false);
+  } else if (t.dataset.replayonly !== undefined) {
+    state.replayOnly = !state.replayOnly;
+    render();
   } else if (t.dataset.replayagain !== undefined) {
     state.replayPlayed = null;
     render();
