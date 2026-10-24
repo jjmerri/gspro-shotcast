@@ -1331,7 +1331,8 @@ async def test_the_course_select_screen_reads_the_bookings_before_setup(tmp_path
 
     e.bookings = FakeBookings()
     reads = [{"course_select": "SELECT COURSE"}] * 3 + [_players_tab("Pebble Beach", {1: "MikeD"})] * 3
-    await _run_setup_watch(e, reads, until=lambda p: False, polls=20)
+    # Until every frame has been read (and the last re-read), however slow the machine.
+    await _run_setup_watch(e, reads, until=lambda p: e.screen.i > len(reads) + 2, polls=1000)
     # Fetched once at course select; the setup screen right after counts that read as fresh.
     assert fetched == ["course select"]
 

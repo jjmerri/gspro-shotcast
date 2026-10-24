@@ -155,7 +155,7 @@ def test_upload_prunes_the_bucket_the_same_way(tmp_path):
 
 
 def test_run_retries_a_failed_upload_on_the_next_backup(tmp_path, monkeypatch):
-    cfg = Config(log_dir=str(tmp_path))
+    cfg = Config(log_dir=str(tmp_path), db_path=str(tmp_path / "season.db"))
     cfg.backup.s3, cfg.publish.bucket = True, "b"
     _db(cfg.db_path)
     calls = []

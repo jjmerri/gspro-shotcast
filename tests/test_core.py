@@ -382,8 +382,9 @@ async def test_speech_queue_pauses_between_lines_but_not_after_silence():
         speech.say([Line("pbp", "one"), Line("pbp", "two"), Line("color", "three")])
         await drain()
         assert [s[0] for s in spans] == ["one", "two", "three"]
-        assert spans[1][1] - spans[0][2] >= 0.1 - 0.005     # same speaker carries on
-        assert spans[2][1] - spans[1][2] >= 0.2 - 0.005     # the other one takes over
+        slack = 0.02   # Windows' clock ticks about every 16 ms
+        assert spans[1][1] - spans[0][2] >= 0.1 - slack     # same speaker carries on
+        assert spans[2][1] - spans[1][2] >= 0.2 - slack     # the other one takes over
         assert spans[2][1] - spans[1][2] < 0.3
 
         await asyncio.sleep(0.25)   # longer than either gap: the next line starts at once
