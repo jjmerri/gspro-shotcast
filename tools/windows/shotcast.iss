@@ -48,6 +48,10 @@ Name: "desktopicon"; Description: "Make a desktop shortcut"; Flags: unchecked
 ; An update replaces the whole app, so packages a new version dropped don't linger.
 Type: filesandordirs; Name: "{app}\python"
 
+[UninstallDelete]
+; Files Python writes while running (__pycache__) aren't the installer's, so they'd keep the folder.
+Type: filesandordirs; Name: "{app}\python"
+
 [Files]
 Source: "{#BuildDir}\python\*"; DestDir: "{app}\python"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "{#BuildDir}\shotcast.ico"; DestDir: "{app}"; Flags: ignoreversion

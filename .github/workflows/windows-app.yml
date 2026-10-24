@@ -44,8 +44,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "self-test failed" }
           if (-not (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name Shotcast -ErrorAction SilentlyContinue)) { throw "no Start with Windows entry" }
           Start-Process "$app\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES" -Wait
-          Start-Sleep 5
-          if (Test-Path "$app\python") { throw "uninstall left the app behind" }
+          # The uninstaller runs a copy of itself and returns at once: wait for it.
+          for ($i = 0; $i -lt 60 -and (Test-Path "$app\python"); $i++) { Start-Sleep 2 }
+          if (Test-Path "$app\python") { Get-ChildItem "$app" -Recurse | Select-Object -First 20 FullName; throw "uninstall left the app behind" }
       - uses: actions/upload-artifact@v4
         with:
           name: Shotcast-Setup-${{ env.VERSION }}
