@@ -303,6 +303,40 @@ To change the password, run the `deploy` command again with the new one. To take
 the bucket (`aws s3 rm s3://<BucketName> --recursive`), delete the upload user's access key, and
 `aws cloudformation delete-stack --stack-name shotcast-stats`.
 
+## Backups
+
+The season file is the only copy of every round, so the booth backs it up: when it starts and after
+each round, but only if something changed since the last copy. Copies are gzipped SQLite files
+(`season-YYYYMMDD-HHMMSS.db.gz`, about half the database's size; the minimap images don't compress), taken with SQLite's online
+backup and integrity-checked before they're kept. A failure shows as a health warning on the ON AIR
+badge.
+
+It keeps the newest copy from each of the last 14 days that had one, then one a week for the 4
+weeks before those. Days without golf take no copies, so a break doesn't age the history out.
+
+```yaml
+backup:
+  enabled: true
+  dir: null          # default logs/backups; better: a OneDrive/Dropbox folder, NAS or other drive
+  daily: 14
+  weekly: 4
+  s3: false          # also upload to publish.bucket under s3_prefix
+  s3_prefix: backups/
+```
+
+By default the copies sit on the same drive as the database, which covers a corrupted or deleted
+file but not a dead drive. Point `dir` at a synced folder or another drive to cover that too.
+
+`s3: true` uploads each copy to the stats bucket under `backups/` (pruned the same way) with the
+publish keys; a failed upload is retried at the next backup. Deploy the stats stack from this repo
+first: its bucket policy keeps CloudFront from serving `backups/`, which would otherwise be readable
+by anyone with the site password. The upload keys can't download, so restoring from S3 needs your
+own AWS credentials (`aws s3 cp s3://<BucketName>/backups/<file> .`).
+
+`python -m commentator backup` takes a copy now. To restore, stop the booth and run
+`python -m commentator restore logs/backups/season-....db.gz`; it checks the copy, backs up the
+current file first, then swaps it in.
+
 ## Recording only
 
 To keep the database without the booth talking, set

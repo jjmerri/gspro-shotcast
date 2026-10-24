@@ -748,6 +748,28 @@ def cmd_publish(cfg: Config, args) -> None:
     print(f"Published {version} to s3://{cfg.publish.bucket}/{cfg.publish.prefix}")
 
 
+def cmd_backup(cfg: Config, args) -> None:
+    from . import backup
+
+    if not Path(cfg.db_path).exists():
+        sys.exit(f"No season database at {cfg.db_path}.")
+    path = backup.run(cfg, force=args.force)
+    print(f"Backed up to {path}" if path else f"Unchanged since the last copy in {backup.folder(cfg)}")
+
+
+def cmd_restore(cfg: Config, args) -> None:
+    from . import backup
+
+    src = Path(args.file)
+    if not src.exists():
+        sys.exit(f"No backup at {src}.")
+    try:
+        saved = backup.restore(src, cfg.db_path, backup.folder(cfg), cfg.backup.daily, cfg.backup.weekly)
+    except PermissionError:
+        sys.exit("The season file is in use: stop the booth first.")
+    print(f"Restored {src.name} as {cfg.db_path}" + (f" (the file it replaced is saved as {saved})" if saved else ""))
+
+
 def cmd_cost(cfg: Config, args) -> None:
     from .usage import summarize
 
@@ -828,6 +850,12 @@ def main() -> None:
     p.add_argument("--out", help="Where to build the site (default: logs/stats-site)")
     p.add_argument("--build-only", action="store_true", help="Build the site but don't upload it")
 
+    p = sub.add_parser("backup", help="Back up the season database now (backup: in config.yaml)")
+    p.add_argument("--force", action="store_true", help="Take a copy even if nothing changed")
+
+    p = sub.add_parser("restore", help="Put a backup back as the season database (stop the booth first)")
+    p.add_argument("file", help="A season-*.db.gz from the backup folder")
+
     p = sub.add_parser("backfill-log", help="Fill older shots' ball positions, aims and hole layouts from saved GSPro logs")
     p.add_argument("log", nargs="+", help="GSPro output_log.txt files")
     p.add_argument("--db", help="Database file (default: db_path, logs/season.db)")
@@ -886,7 +914,7 @@ def main() -> None:
         "run": cmd_run, "sniff": cmd_sniff, "calibrate": cmd_calibrate, "ocr-test": cmd_ocr_test, "screen-check": cmd_screen_check, "fixture": cmd_fixture, "notify-test": cmd_notify_test,
         "say": cmd_say, "banter": cmd_banter, "check": cmd_check, "eval": cmd_eval, "stats": cmd_stats,
         "stats-web": cmd_stats_web,
-        "publish": cmd_publish, "backfill-log": cmd_backfill_log, "snap-minimap": cmd_snap_minimap,
+        "publish": cmd_publish, "backup": cmd_backup, "restore": cmd_restore, "backfill-log": cmd_backfill_log, "snap-minimap": cmd_snap_minimap,
         "review": cmd_review,
         "cost": cmd_cost, "import-league": cmd_import_league, "squabbit": cmd_squabbit,
     }

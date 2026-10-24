@@ -626,6 +626,22 @@ class PublishConfig(BaseModel):
     delay_seconds: float = 180.0
 
 
+class BackupConfig(BaseModel):
+    # Copies of the season database (commentator/backup.py), taken when the booth starts and after
+    # every round, only when something changed. Kept: the newest of each of the last `daily` days with
+    # a copy, then one a week for `weekly` weeks before those.
+    enabled: bool = True
+    # Default: log_dir/backups, on the same drive as the database. A synced or other drive (OneDrive,
+    # Dropbox, a NAS, a USB stick) keeps the copies safe if the PC's drive dies.
+    dir: str | None = None
+    daily: int = 14
+    weekly: int = 4
+    # Also upload each copy to publish.bucket under s3_prefix (with the same keys as publish). Only
+    # with the stack's rule that keeps CloudFront from serving that prefix (tools/aws/stats-site.yaml).
+    s3: bool = False
+    s3_prefix: str = "backups/"
+
+
 class Config(BaseModel):
     # Optional. None = no league: every round is practice, players go by their GSPro names.
     league_file: str | None = None
@@ -654,6 +670,7 @@ class Config(BaseModel):
     minimap: MinimapConfig = Field(default_factory=MinimapConfig)
     putt_read: PuttReadConfig = Field(default_factory=PuttReadConfig)
     publish: PublishConfig = Field(default_factory=PublishConfig)
+    backup: BackupConfig = Field(default_factory=BackupConfig)
     log_dir: str = "logs"
     # Season history: every shot and line. Replays and evals never write to it.
     db_path: str = "logs/season.db"

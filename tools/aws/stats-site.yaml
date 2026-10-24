@@ -144,6 +144,12 @@ Resources:
             Condition:
               StringEquals:
                 AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+          # Database backups (backup.s3) share the bucket but are never served to the site.
+          - Effect: Deny
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${Bucket.Arn}/backups/*"
 
   # The booth's keys: upload and clean up in this bucket, nothing else. Create its access key
   # after the stack (aws iam create-access-key), so the secret never passes through CloudFormation.

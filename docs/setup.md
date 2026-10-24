@@ -141,6 +141,8 @@ pushed again for 12 hours, and a "resolved" push follows once they clear (`notif
 | `stats` | Season leaderboard from the shot database |
 | `stats-web` | Browse the season database in a local web page (`--db`, `--port`, `--no-browser`) |
 | `publish` | Build the stats page and upload it to S3 ([Sharing the stats page](tracking.md#sharing-the-stats-page); `--build-only` just builds it) |
+| `backup` | Back up the season database now (`--force` even if unchanged; [Backups](tracking.md#backups)) |
+| `restore <file>` | Put a backup back as the season database (stop the booth first) |
 | `import-league` | Build the league file and history from the yearly spreadsheets |
 | `cost` | Text-model calls and estimated cost per night (voice cost is in the booth log) |
 | `squabbit` | Read this league's data from Squabbit (needs `.env` credentials) |

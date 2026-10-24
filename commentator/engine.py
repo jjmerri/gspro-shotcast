@@ -558,6 +558,8 @@ class Engine:
         self._fire_rows: dict[int, tuple] = {}
         self._mulligans_done: set[int] = set()
         self._hazards_done: set[int] = set()   # fires whose penalty-area entry point is stored
+        self._backup_lock = asyncio.Lock()
+        self._backup_tasks: set[asyncio.Task] = set()
         # Recorded shots still waiting on their start position: GSPro attaches it only at the shooter's
         # score line, logged once the ball stops, and a putt is recorded before that.
         self._starts_due: set[int] = set()
@@ -686,6 +688,7 @@ class Engine:
             tasks.append(asyncio.create_task(self._follower.run(), name="gspro-log"))
         if self.cfg.health.enabled and self.cfg.source.type != "replay":
             asyncio.create_task(self._startup_health(), name="health")
+        self._schedule_backup("startup")
         if self.screen and self.cfg.screen.ocr:
             tasks.append(asyncio.create_task(self._watch_hud(), name="hud-watch"))
             if self.cfg.commentary.preround:
@@ -5954,6 +5957,7 @@ class Engine:
             played = max((st.holes_scored for st in stats.values()), default=0)
             if played < COUNTS_AS_ROUND_HOLES:
                 self._schedule_publish(after_speech=True)
+                self._schedule_backup("round end")
                 log.info("Round %s over (%s) after %s of %s holes: no closer", r.id, event.reason, r.seq, r.holes)
                 return
             log.info("Round %s over (%s) after %s of %s holes: signing off on the %s played",
@@ -5961,6 +5965,7 @@ class Engine:
             self._schedule_publish()   # the backup, if the sign-off never finishes
             await self._sign_off(r, stats)
             self._schedule_publish(after_speech=True)
+            self._schedule_backup("round end")
             return
         if stats_obj := getattr(self.speech, "audio_stats", None):
             log.info("%s", audio_summary(stats_obj))
@@ -5968,6 +5973,7 @@ class Engine:
         self._schedule_publish()   # the backup, if the sign-off never finishes
         await self._sign_off(r, stats)
         self._schedule_publish(after_speech=True)
+        self._schedule_backup("round end")
 
     async def _sign_off(self, r: Round, stats: dict) -> None:
         season = {s.key: self.store.season_rounds(s.key, "league" if r.is_league else "practice") for s in r.sides}
@@ -6048,6 +6054,31 @@ class Engine:
             log.warning("Stats page publish failed: %s", text[-2000:])
             if self.cfg.health.enabled:
                 self.health.raise_issue("publish.failed", "warn", f"Couldn't publish the stats page: {last}")
+
+    # ---- backing up the season file -------------------------------------------------------
+
+    def _schedule_backup(self, why: str) -> None:
+        """Back up the season file in the background (commentator/backup.py): at startup, and after a
+        round once its sign-off lines are stored. Skipped when nothing changed since the last copy."""
+        if not self.cfg.backup.enabled or self.cfg.source.type == "replay":
+            return
+        task = asyncio.create_task(self._backup(why), name="backup")
+        self._backup_tasks.add(task)
+        task.add_done_callback(self._backup_tasks.discard)
+
+    async def _backup(self, why: str) -> None:
+        from . import backup
+
+        async with self._backup_lock:
+            try:
+                path = await asyncio.to_thread(backup.run, self.cfg)
+            except Exception as e:
+                log.exception("Season backup (%s) failed", why)
+                if self.cfg.health.enabled:
+                    self.health.raise_issue("backup.failed", "warn", f"Couldn't back up the season file: {e}")
+                return
+        log.info("Season backup (%s): %s", why, path.name if path else "unchanged since the last copy")
+        self.health.clear("backup.failed", why="backed up")
 
     # ---- health checks --------------------------------------------------------------------
 
