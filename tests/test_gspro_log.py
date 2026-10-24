@@ -654,6 +654,27 @@ def test_each_shot_takes_the_position_and_aim_logged_since_the_last():
     assert s.layout_holes[1]["pin"] is None and not s.layout_holes[1]["played"]
 
 
+def _rest(player, x, z, tdist):
+    return (f"Selecting shot for player: {player}\nData for selected player: X {x} Y 1.0 Z {z}\n"
+            f"Logging tdist: {tdist} and ActiveGameGimmieDistance: 1.22\n")
+
+
+def test_in_a_group_each_shot_starts_where_its_own_players_ball_stopped():
+    # Paynes Valley, 10/23, three players: GSPro logs where the shooter's ball stopped right after their
+    # shot, so the block before a fire is usually someone else's ball.
+    s = _replay(
+        SHOT + _line(0, 1, 0, player=1) + _rest(1, 864.9, 237.2, 99.7)       # 1: Corey drives
+        + SHOT + _line(0, 1, 0, player=2) + _rest(2, 944.6, 207.9, 113.8)    # 2: Paul drives
+        + SHOT + _line(0, 1, 0, player=0) + _rest(0, 909.7, 239.5, 115.3)    # 3: Josh drives
+        + "Next Player\n" + SHOT + _line(0, 1, 1, player=0) + _rest(0, 849.0, 136.9, 6.0)   # 4: Josh
+        + "Next Player\n" + SHOT + _line(0, 1, 1, player=2) + _rest(2, 847.4, 151.0, 14.8)  # 5: Paul
+        + SHOT + _line(1, 1, 0, player=0) + _line(1, -1, 1, player=0) + _rest(0, 868.2, 510.3, 7.1)  # 6: taken back
+        + SHOT + _line(1, 1, 0, player=0))                                   # 7: the mulligan's re-hit
+    starts = [s.fire_info(n).get("start") for n in range(1, 8)]
+    assert starts == [None, None, None, (909.7, 1.0, 239.5), (944.6, 1.0, 207.9), None, (868.2, 1.0, 510.3)]
+    assert s.fire_info(5).get("to_pin") == 113.8 and "to_pin" not in s.fire_info(1)
+
+
 def test_aim_offset_scales_the_minimap_to_the_distance():
     assert aim_offset(0.0, -338.0, 150.0) == (0.0, 0.0)          # on the ball
     along, right = aim_offset(67.7, 339.0, 200.0)                # at the pin, a tenth of the span right

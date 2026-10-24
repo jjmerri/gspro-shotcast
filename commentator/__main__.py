@@ -697,9 +697,10 @@ def cmd_backfill_log(cfg: Config, args) -> None:
     path = Path(args.db or cfg.db_path)
     if not path.exists():
         sys.exit(f"No season database at {path}.")
-    got = backfill(str(path), args.log, dry_run=args.dry_run)
+    got = backfill(str(path), args.log, dry_run=args.dry_run, fix_starts=args.fix_starts)
     print(f"{'Would fill' if args.dry_run else 'Filled'}: {got['starts']} shot positions and {got['aims']} aims "
-          f"({got['matched']} of {got['fires']} logged shots matched); {got['layouts']} hole layouts.")
+          f"({got['matched']} of {got['fires']} logged shots matched); {got['layouts']} hole layouts."
+          + (f" Corrected {got['fixed']} positions." if args.fix_starts else ""))
 
 
 def cmd_snap_minimap(cfg: Config, args) -> None:
@@ -830,7 +831,9 @@ def main() -> None:
     p.add_argument("log", nargs="+", help="GSPro output_log.txt files")
     p.add_argument("--db", help="Database file (default: db_path, logs/season.db)")
     p.add_argument("--dry-run", action="store_true", help="Count what would be filled without changing the file")
-
+    p.add_argument("--fix-starts", action="store_true",
+                   help="Also correct stored ball positions the log disagrees with (group rounds recorded "
+                        "before positions followed the shooter)")
     p = sub.add_parser("snap-minimap", help="Keep GSPro's minimap as a hole's replay background, replacing the "
                                             "one kept (the booth keeps one itself off each tee)")
     p.add_argument("--course", required=True, help="Course name, as the shots have it")

@@ -58,6 +58,23 @@ def test_backfill_fills_positions_aims_and_layout_once(tmp_path):
     assert backfill(path, [str(log)]) == {**got, "starts": 0, "aims": 0, "layouts": 0}
 
 
+def test_fixing_starts_corrects_positions_taken_from_another_players_ball(tmp_path):
+    path, st = _season(tmp_path)
+    st.db.execute("UPDATE shots SET start_x = 50, start_z = 180 WHERE shot_number IN (1, 2)")   # the old shift
+    st.db.commit()
+    log = tmp_path / "output_log.txt"
+    log.write_text(_hole_log())
+    assert backfill(path, [str(log)])["fixed"] == 0                  # left alone unless asked
+    got = backfill(path, [str(log)], fix_starts=True)
+    assert got["fixed"] == 2
+    rows = st.db.execute("SELECT start_x, start_z FROM shots ORDER BY id").fetchall()
+    assert [tuple(r) for r in rows] == [(None, None), (10.0, 200.0), (2.0, 295.0)]
+    # And a tee shot is drawn from the tee whatever position was stored for it.
+    st.db.execute("UPDATE shots SET start_x = 50, start_z = 180 WHERE shot_number = 1")
+    st.db.commit()
+    assert hole_replays(st.db)[(1, 1)]["players"][0]["shots"][0]["from"] == [0.0, 0.0]
+
+
 def test_backfill_ignores_a_log_of_rounds_the_season_never_recorded(tmp_path):
     path, st = _season(tmp_path)
     log = tmp_path / "output_log.txt"

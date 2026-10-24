@@ -110,10 +110,13 @@ can't say which partner hit, so those shots are kept (`attributed = 0`) but left
 per-player stats. Replays and evals use an in-memory DB and never touch the file.
 
 Shots recorded before the booth stored positions can get them from a saved GSPro log:
-`python -m commentator backfill-log <output_log.txt>... [--db logs/season.db] [--dry-run]`. The log
+`python -m commentator backfill-log <output_log.txt>... [--db logs/season.db] [--dry-run] [--fix-starts]`. The log
 has no timestamps, so its shots are matched to the file's in order, on course, hole and distance to
 the pin; a stretch of the log that mostly doesn't match (a round the booth never recorded) is
-skipped, and only shots with no position yet are filled. GSPro starts `output_log.txt` over at each
+skipped, and only shots with no position yet are filled. `--fix-starts` also corrects positions
+already stored that the log puts elsewhere: group rounds recorded before 10/24 have each shot starting
+where the previous player's ball stopped (GSPro logs a ball's spot right after its shot, for the
+player who hit it). GSPro starts `output_log.txt` over at each
 launch, so only the sessions since GSPro was last started can be backfilled. Stop the booth first and
 back the file up.
 

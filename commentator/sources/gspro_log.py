@@ -98,9 +98,10 @@ _VERSION = re.compile(r"^GSPro Version:\s*(\S+)")
 # file's altitude (Cabot Cliffs: 1,700 in the file, 50 here), and some rounds log 0.
 _ALTITUDE = re.compile(rf"^magnitude:.*\|\s*elevation\s+(-?{_NUM})\s*$")
 _FLOAT = r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
-# Where the ball sits for the shot being set up, in Unity world metres (Y is height), logged in the
-# setup block after "Selecting shot for player". Not logged before a hole's tee shot, nor before a shot
-# handed over without a setup block ("Next Player"), so a shot without one has no start position.
+# Where a player's ball came to rest, in Unity world metres (Y is height): logged in the block GSPro
+# writes for the shooter right after their shot ("ActivePlayer", "Selecting shot for player"), so it is
+# where that player's NEXT stroke starts, not the next shot fired (another player's, in a group). Also
+# logged for a mulligan's reset ball and a scramble's picked ball. Never logged before a tee shot.
 _POSITION = re.compile(rf"^Data for selected player:\s*X\s*({_FLOAT})\s+Y\s*({_FLOAT})\s+Z\s*({_FLOAT})")
 # A click on the minimap to move the aim: a bare "(x, y, 0.0)" in minimap units, origin at the map's
 # centre. GSPro fits the map so the ball sits near (0, -338) and the pin near (0, +339): y runs up the
@@ -340,12 +341,12 @@ class GsproState:
     altitude_ft: float | None = None   # the altitude GSPro is playing the current course at, once a ball bounces
     kinds: Counter = field(default_factory=Counter)
     unparsed: list = field(default_factory=list)
-    # Where the next shot is struck from and where it was aimed, attached to that shot's fire info
-    # ("start", "aim"). `_pos` is the last setup position, `_pos_fresh` whether no shot has been fired
-    # from it yet: a shot with no setup block of its own gets no start, except in a team format, where
-    # each teammate plays the picked ball from the same spot. `_aim` is the last minimap click.
-    _pos: tuple | None = None
-    _pos_fresh: bool = False
+    # Where a shot is struck from and where it was aimed, attached to that shot's fire info ("start",
+    # "aim", and "to_pin", the logged distance in metres). `_rest_by` is each player's ball since their
+    # last stroke: {"hole", "start", "to_pin"}, from the block GSPro logs for them after it stops. It is
+    # attached when the score line credits that player's next shot, on the same hole, and used once.
+    # `_aim` is the last minimap click, made by whoever is up before they swing.
+    _rest_by: dict = field(default_factory=dict)
     _aim: tuple | None = None
     # The hole list of the latest completed round (see _layout_holes), and how many have been seen.
     layout_holes: list = field(default_factory=list)
@@ -394,7 +395,8 @@ class GsproState:
                 self.layout_holes = ev.holes
                 self.layouts += 1
         elif ev.kind == "position":
-            self._pos, self._pos_fresh = ev.pos, True
+            if (p := self.active_player) is not None:   # the block's player, set by the preceding state/select
+                self._rest_by[p] = {"hole": self.hole_by.get(p, self.current_hole), "start": ev.pos}
         elif ev.kind == "aim":
             self._aim = ev.pos
         elif ev.kind == "material":
@@ -407,6 +409,11 @@ class GsproState:
                 self.to_pin_by[self.active_player] = ev.to_pin
                 self.gimme_by[self.active_player] = ev.gimmie
                 self.setups_by[self.active_player] = self.setups_by.get(self.active_player, 0) + 1
+                p = self.active_player
+                rest = self._rest_by.get(p)
+                if rest is None or "to_pin" in rest:   # a block with no position line of its own
+                    rest = self._rest_by[p] = {"hole": self.hole_by.get(p, self.current_hole)}
+                rest["to_pin"] = ev.to_pin
         elif ev.kind == "select":
             self.active_player = self.selected = ev.player
             self._since_select = True
@@ -418,11 +425,9 @@ class GsproState:
             self.fires += 1
             self._fire_at[self.fires] = time.monotonic()
             self._fire_info[self.fires] = info = {"player": None}
-            if self._pos is not None and (self._pos_fresh or self.team_scores):
-                info["start"] = self._pos
             if self._aim is not None:
                 info["aim"] = self._aim
-            self._pos_fresh, self._aim = False, None
+            self._aim = None
             for old in [n for n in self._fire_at if n <= self.fires - 40]:
                 self._fire_at.pop(old, None)
                 self._fire_info.pop(old, None)
@@ -445,7 +450,6 @@ class GsproState:
                 self._fire_info[self.fires]["penalty"] = ev.surface
         elif ev.kind == "gimmie":
             self.gimmies += 1
-            self._pos = None   # the hole is over: the next tee shot has no setup block of its own
             if self._since_select and self.active_player is not None and self.active_player == self.selected:
                 self.pick_gimmes.append((self.active_player, self.hole_by.get(self.active_player, self.current_hole)))
             if self.active_player is not None:
@@ -454,7 +458,6 @@ class GsproState:
                 self.gimmies_by[self.active_player] = self.gimmies_by.get(self.active_player, 0) + 1
         elif ev.kind == "hole_out":
             self.hole_outs += 1
-            self._pos = None
             self._end_next = True
             if self._unowned_fire is not None:
                 self._unowned_outs += 1    # the shooter's score line, next, says whose ball dropped
@@ -468,10 +471,12 @@ class GsproState:
                 self.teammates.add(frozenset((s, mate)))
                 self.players_seen.add(mate)
                 self.dropped_by[mate] = self.dropped_by.get(mate, 0) + 1
-                # The teammate now plays the picked ball: its lie and distance, not their own.
+                # The teammate now plays the picked ball: its lie, distance and spot, not their own.
                 for d in (self.lie_by, self.to_pin_by, self.gimme_by):
                     if s in d:
                         d[mate] = d[s]
+                if s in self._rest_by:
+                    self._rest_by[mate] = dict(self._rest_by[s])
         elif ev.kind == "state":
             self._apply_state(ev)
 
@@ -485,8 +490,8 @@ class GsproState:
         self.teammates.clear()
         self.selected = self.pick = None
         self._pending_lie = None
-        self._pos = self._aim = None
-        self._pos_fresh = False
+        self._aim = None
+        self._rest_by.clear()
         self._unowned_fire = self._unowned_wet = None
         self._unowned_outs = 0
         self.active_player = self.current_hole = self.lie = self.to_pin = self.gimmie = None
@@ -547,8 +552,11 @@ class GsproState:
         self._attach_lie(ev.player)
         if self._unowned_fire is not None:
             n, self._unowned_fire = self._unowned_fire, None
+            rest = self._rest_by.pop(ev.player, None)
             if n in self._fire_info:
                 self._fire_info[n]["player"] = ev.player
+                if rest is not None and rest["hole"] == ev.hole:   # a hole's tee shot has none
+                    self._fire_info[n].update({k: rest[k] for k in ("start", "to_pin") if k in rest})
             self._fires_by[ev.player] = (self._fires_by.get(ev.player, []) + [n])[-3:]
             self._shot_since_state[ev.player] = True
             if self._unowned_outs:

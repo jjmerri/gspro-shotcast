@@ -181,7 +181,10 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row]) -> d
                        for r in rows)
         shots = []
         for i, r in enumerate(mine):
-            start = _xz(r["start_x"], r["start_z"]) or (tee if (r["shot_number"] or 0) <= 1 else None)
+            # A tee shot starts on the tee whatever was stored: a group round recorded before positions
+            # followed the shooter can have the previous player's ball there.
+            start = ((tee if r["shot_number"] == 1 else None) or _xz(r["start_x"], r["start_z"])
+                     or (tee if (r["shot_number"] or 0) <= 1 else None))
             nxt = mine[i + 1] if i + 1 < len(mine) else None
             tags = json.loads(r["tags"] or "[]")
             end = None

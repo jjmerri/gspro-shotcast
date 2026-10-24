@@ -5,7 +5,8 @@ GSPro's output_log.txt has no timestamps, so a log's shots are matched to the se
 the log's fires and the stored struck shots are aligned in order (a weighted longest common
 subsequence), a pair matching on course, hole and the logged distance to the pin. A tee shot has no
 setup block in the log and so no distance; it pairs by being its hole's first stroke. Only shots that
-have no position yet are filled, so running it again, or over overlapping logs, changes nothing more.
+have no position yet are filled, so running it again, or over overlapping logs, changes nothing more
+(unless asked to correct stored positions, see backfill).
 """
 from __future__ import annotations
 
@@ -41,24 +42,24 @@ class LogRead:
 
 def read_log(text: str) -> LogRead:
     st, out = GsproState(), LogRead()
-    tdist, pending, segment = None, None, 0
+    pending, segment = None, 0
     for ev in parse_events(text):
         st.apply(ev)
-        if ev.kind == "tdist":
-            tdist = ev.to_pin
-        elif ev.kind == "shot_fired":
-            info = st.fire_info(st.fires)
-            pending = Fire(st.course_display, tdist * M_TO_YD if tdist is not None else None,
-                           info.get("start"), info.get("aim"), segment=segment)
-            out.fires.append(pending)
-            tdist = None
+        if ev.kind == "shot_fired":
+            pending = (st.fires, Fire(st.course_display, None, None, st.fire_info(st.fires).get("aim"), segment=segment))
+            out.fires.append(pending[1])
         elif ev.kind == "state" and pending is not None:
-            pending.hole = ev.hole + 1 if ev.hole is not None else None
+            # The score line names the shooter, and with it where their ball lay and how far out:
+            # with several players, the block logged before this fire was someone else's.
+            info, f = st.fire_info(pending[0]), pending[1]
+            f.hole = ev.hole + 1 if ev.hole is not None else None
+            f.start = info.get("start")
+            f.to_pin_yd = info["to_pin"] * M_TO_YD if info.get("to_pin") is not None else None
             pending = None
         elif ev.kind == "layout" and ev.holes:
             out.layouts.append((st.course_display, ev.holes, len(out.fires)))
         elif ev.kind in ("course", "end_round", "range"):
-            tdist = pending = None
+            pending = None
             segment += 1
     return out
 
@@ -116,22 +117,24 @@ def align(fires: list[Fire], rows: list[sqlite3.Row]) -> list[tuple[int, int]]:
             if seg_hit.get(fires[i].segment, 0) >= MIN_SEGMENT_MATCH * seg_total.get(fires[i].segment, 0) > 0]
 
 
-def backfill(db_path: str, logs: list[str], dry_run: bool = False) -> dict[str, int]:
+def backfill(db_path: str, logs: list[str], dry_run: bool = False, fix_starts: bool = False) -> dict[str, int]:
     """Fill the season file from these logs; a dry run works on a temporary copy (opening the file
-    upgrades its schema) and only counts."""
+    upgrades its schema) and only counts. `fix_starts` also overwrites a stored position the log puts
+    elsewhere: a group round recorded before positions followed the shooter has each shot starting
+    where the previous player's ball stopped."""
     if dry_run:
         with tempfile.TemporaryDirectory() as tmp:
             copy = shutil.copy(db_path, Path(tmp) / "season.db")
-            return _backfill(str(copy), logs)
-    return _backfill(db_path, logs)
+            return _backfill(str(copy), logs, fix_starts)
+    return _backfill(db_path, logs, fix_starts)
 
 
-def _backfill(db_path: str, logs: list[str]) -> dict[str, int]:
+def _backfill(db_path: str, logs: list[str], fix_starts: bool = False) -> dict[str, int]:
     store = Store(db_path, new_session=False)
     db = store.db
-    stats = {"fires": 0, "matched": 0, "starts": 0, "aims": 0, "layouts": 0}
+    stats = {"fires": 0, "matched": 0, "starts": 0, "aims": 0, "layouts": 0, "fixed": 0}
     for path in logs:
-        rows = db.execute("SELECT id, session_id, ts, course, hole, shot_number, to_pin_yards, start_x, aim_map_x"
+        rows = db.execute("SELECT id, session_id, ts, course, hole, shot_number, to_pin_yards, start_x, start_z, aim_map_x"
                           " FROM shots WHERE outcome IS NOT 'gimme' AND course != 'Practice' ORDER BY id").fetchall()
         with open(path, encoding="utf-8", errors="replace") as fh:
             got = read_log(fh.read())
@@ -142,7 +145,12 @@ def _backfill(db_path: str, logs: list[str]) -> dict[str, int]:
         for i, j in pairs:
             f, r = got.fires[i], rows[j]
             row_of[i] = r
-            if f.start and r["start_x"] is None:
+            if fix_starts and r["start_x"] is not None and (
+                    f.start is None or abs(f.start[0] - r["start_x"]) > 0.01 or abs(f.start[2] - r["start_z"]) > 0.01):
+                stats["fixed"] += 1   # a tee shot the log gives no start: the replay places it on the tee
+                db.execute("UPDATE shots SET start_x = ?, start_y = ?, start_z = ? WHERE id = ?",
+                           (*(f.start or (None, None, None)), r["id"]))
+            elif f.start and r["start_x"] is None:
                 stats["starts"] += 1
                 db.execute("UPDATE shots SET start_x = ?, start_y = ?, start_z = ? WHERE id = ?", (*f.start, r["id"]))
             if f.aim and r["aim_map_x"] is None:
