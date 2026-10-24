@@ -817,6 +817,8 @@ def cmd_tray(parser, args) -> None:
     config = home / "config.yaml"
     _setup_logging(args.verbose, "logs", name="tray")
     _load_env(str(config))
+    if not args.self_test:
+        tray.apply_installer_gspro_dir(home)
     cfg = load_config(config)
     if args.self_test:
         tray.self_test(home, cfg)

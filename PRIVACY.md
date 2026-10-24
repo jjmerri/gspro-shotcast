@@ -29,6 +29,7 @@ key. When on, they send this:
 | Phone alerts (`notify`) | ntfy.sh (or your ntfy server) | Health messages (for example "screen read failing") |
 | Squabbit handicaps (`squabbit`) | Squabbit (Google Firebase) | Your Squabbit login; it reads your league's handicaps |
 | Bookings (`bookings`) | SuperSaaS | Your API key; it reads the sim's bookings |
+| **Check** / **Send test** next to a key in the app's Settings | That key's service (OpenAI, Anthropic, Google, AWS, ntfy) | The key, to see if it works (only when you click it) |
 | Golf news, live scores, course trivia, weather | The news feeds you list, ESPN, Wikipedia, Open-Meteo | Requests for headlines and scores, the course's name, the shed's location |
 
 **Installing.** The Windows installer contains everything. Installing from source (`install.bat`

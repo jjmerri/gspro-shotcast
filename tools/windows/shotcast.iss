@@ -61,6 +61,7 @@ Source: "..\..\config.example.yaml"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\.env.example"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\PRIVACY.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\commentator\find_gspro.ps1"; Flags: dontcopy
 
 [Icons]
 Name: "{autoprograms}\Shotcast"; Filename: "{app}\python\pythonw.exe"; Parameters: "{#TrayArgs}"; WorkingDir: "{app}"; IconFilename: "{app}\shotcast.ico"
@@ -74,6 +75,8 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Root: HKCU; Subkey: "Software\Shotcast"; ValueType: dword; ValueName: "CheckForUpdates"; ValueData: "1"; Tasks: updates; Check: not IsUpgrade
 Root: HKCU; Subkey: "Software\Shotcast"; ValueType: dword; ValueName: "CheckForUpdates"; ValueData: "0"; Tasks: not updates; Check: not IsUpgrade
 Root: HKCU; Subkey: "Software\Shotcast"; Flags: uninsdeletekey
+; The GSPro folder from the GSPro page: the tray points config.yaml at it when it changes.
+Root: HKCU; Subkey: "Software\Shotcast"; ValueType: string; ValueName: "GSProDir"; ValueData: "{code:GSProDir}"; Check: HaveGSProDir
 
 [Run]
 Filename: "{app}\python\pythonw.exe"; Parameters: "{#TrayArgs}"; WorkingDir: "{app}"; Description: "Start Shotcast"; Flags: nowait postinstall skipifsilent
@@ -83,6 +86,8 @@ Filename: "{app}\python\pythonw.exe"; Parameters: "{#TrayArgs}{code:HomeArg}"; W
 [Code]
 var
   Upgrade: Boolean;
+  GSProPage: TInputDirWizardPage;
+  GSProSearched: Boolean;
 
 function IsUpgrade: Boolean;
 begin
@@ -111,6 +116,93 @@ begin
   Dir := ExpandConstant('{localappdata}\Programs\Shotcast\python\');
   Exec('powershell.exe', '-NoProfile -NonInteractive -Command "Get-Process python,pythonw -ErrorAction SilentlyContinue | '
     + 'Where-Object { $_.Path -like ''' + Dir + '*'' } | Stop-Process -Force"', '', SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
+// ---- the GSPro page: where GSPro is, found if it can be (find_gspro.ps1), else asked for
+
+function FindGSPro: String;
+var
+  Code: Integer;
+  OutFile: String;
+  Found: AnsiString;
+begin
+  Result := '';
+  ExtractTemporaryFile('find_gspro.ps1');
+  OutFile := ExpandConstant('{tmp}\gspro.txt');
+  if Exec('powershell.exe', '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'
+      + ExpandConstant('{tmp}\find_gspro.ps1') + '" -Out "' + OutFile + '"', '', SW_HIDE, ewWaitUntilTerminated, Code)
+    and LoadStringFromFile(OutFile, Found) then
+    Result := Trim(String(Found));
+end;
+
+function LooksLikeGSPro(Dir: String): Boolean;
+begin
+  Result := (Dir <> '') and FileExists(AddBackslash(Dir) + 'Core\GSP\GSPro.exe');
+end;
+
+function GSProDir(Param: String): String;
+begin
+  Result := Trim(GSProPage.Values[0]);
+end;
+
+function HaveGSProDir: Boolean;
+begin
+  Result := GSProDir('') <> '';
+end;
+
+procedure InitializeWizard;
+var
+  Previous: String;
+begin
+  GSProPage := CreateInputDirPage(wpSelectTasks, 'GSPro', 'Where is GSPro installed?',
+    'Shotcast reads GSPro''s shot log and course files from its folder (the one with GSPLauncher.exe, usually C:\GSProV1).',
+    False, '');
+  GSProPage.Add('GSPro folder:');
+  if RegQueryStringValue(HKCU, 'Software\Shotcast', 'GSProDir', Previous) and (Previous <> '') then
+  begin
+    GSProPage.Values[0] := Previous;
+    GSProSearched := True;
+  end;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+var
+  Found: String;
+begin
+  if (CurPageID = GSProPage.ID) and not GSProSearched then
+  begin
+    GSProSearched := True;
+    WizardForm.NextButton.Enabled := False;
+    GSProPage.SubCaptionLabel.Caption := 'Looking for GSPro...';
+    WizardForm.Refresh;
+    Found := FindGSPro;
+    WizardForm.NextButton.Enabled := True;
+    if Found <> '' then
+    begin
+      GSProPage.Values[0] := Found;
+      GSProPage.SubCaptionLabel.Caption := 'Found GSPro here. Shotcast reads its shot log and course files from this folder.';
+    end
+    else
+      GSProPage.SubCaptionLabel.Caption := 'Couldn''t find GSPro on this PC. Browse to the folder it''s installed in '
+        + '(the one with GSPLauncher.exe, usually C:\GSProV1), or leave this empty and set it later in Settings.';
+  end;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  Dir: String;
+begin
+  Result := True;
+  if CurPageID = GSProPage.ID then
+  begin
+    Dir := GSProDir('');
+    if Dir = '' then
+      Result := SuppressibleMsgBox('No GSPro folder: Shotcast reads shots from GSPro''s own log instead (no club data) '
+        + 'until you set it in the tray''s Settings. Continue?', mbConfirmation, MB_YESNO, IDYES) = IDYES
+    else if not LooksLikeGSPro(Dir) then
+      Result := SuppressibleMsgBox('There''s no Core\GSP\GSPro.exe in ' + Dir + '. Use this folder anyway?',
+        mbConfirmation, MB_YESNO, IDYES) = IDYES;
+  end;
 end;
 
 function InitializeSetup: Boolean;

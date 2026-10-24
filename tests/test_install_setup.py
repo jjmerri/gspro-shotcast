@@ -25,3 +25,9 @@ def test_env_keys_fill_the_template_lines():
     assert install_setup.env_value(text, "OPENAI_API_KEY") == r"sk-a\1b"
     assert text.count("OPENAI_API_KEY=") == 1
     assert install_setup.env_value(install_setup.set_env("", "NEW", "x"), "NEW") == "x"
+
+
+def test_commentary_flips_when_other_keys_come_first():
+    text = "commentary:\n  # on or off\n  voices: x\n  enabled: true   # talk\n  other: 1\nsource:\n  type: x\n"
+    off = install_setup.set_commentary(text, False)
+    assert off == text.replace("enabled: true ", "enabled: false")

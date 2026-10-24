@@ -126,6 +126,70 @@ def set_checks_for_updates(on: bool) -> None:
         winreg.SetValueEx(key, "CheckForUpdates", 0, winreg.REG_DWORD, int(on))
 
 
+def remember_gspro_dir(folder: str) -> None:
+    """The GSPro folder chosen in Settings, so the installer offers it next time."""
+    try:
+        import winreg
+
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, SETTINGS_KEY) as key:
+            winreg.SetValueEx(key, "GSProDir", 0, winreg.REG_SZ, folder)
+            winreg.SetValueEx(key, "GSProDirApplied", 0, winreg.REG_SZ, folder)
+    except (OSError, ImportError):
+        pass
+
+
+def apply_installer_gspro_dir(home: Path) -> None:
+    """Point config.yaml at the GSPro folder picked in the installer, once per pick (a later change
+    in Settings or by hand stands until the installer is given a different folder)."""
+    from . import gspro_dir
+    from .config import load_config
+
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, SETTINGS_KEY) as key:
+            folder = winreg.QueryValueEx(key, "GSProDir")[0]
+            try:
+                applied = winreg.QueryValueEx(key, "GSProDirApplied")[0]
+            except OSError:
+                applied = ""
+    except (OSError, ImportError):
+        return
+    if not folder or gspro_dir.same(folder, applied):
+        return
+    path = home / "config.yaml"
+    try:
+        if not gspro_dir.same(gspro_dir.folder_of(load_config(path).source.connector_log), folder):
+            path.write_text(gspro_dir.apply(path.read_text(encoding="utf-8"), folder), encoding="utf-8")
+            log.info("GSPro folder from the installer: %s", folder)
+    except Exception:
+        log.exception("Couldn't set the GSPro folder from the installer in config.yaml")
+        return
+    remember_gspro_dir(folder)
+
+
+def last_backup(cfg) -> str:
+    """When the last backup was taken, for the menu."""
+    import json
+    from datetime import datetime
+
+    from .backup import STATE, folder
+
+    try:
+        at = datetime.fromisoformat(json.loads((folder(cfg) / STATE).read_text(encoding="utf-8"))["at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return "No backup yet"
+    return f"Last backup {_when(at)}"
+
+
+def _when(at) -> str:
+    from datetime import datetime
+
+    days = (datetime.now().date() - at.date()).days
+    clock = at.strftime("%H:%M")
+    return f"today {clock}" if days == 0 else f"yesterday {clock}" if days == 1 else at.strftime("%b %d").replace(" 0", " ")
+
+
 def health_issues(log_dir: str | Path) -> list[tuple[str, str]]:
     """(level, message) for each open issue in the booth's health file, failures first."""
     import json
@@ -260,8 +324,9 @@ class Tray:
         self.booth = Booth(home, on_change=self._refresh)
         self.stats_url: str | None = None
         self.update = None            # a downloaded, checked updater.Release and its file
-        self.update_note = ""
+        self.checked_at = None        # when GitHub last said this is the latest
         self.icon = None
+        self.ui = None
         self._stop = threading.Event()
 
     # -- status
@@ -285,6 +350,25 @@ class Tray:
         except Exception:
             return False
 
+    def _safe(self, fn):
+        """A menu action that shows what went wrong instead of failing silently."""
+        def run(*_):
+            try:
+                fn()
+            except Exception as e:
+                log.exception("%s failed", getattr(fn, "__name__", "A menu action"))
+                self.error(f"That didn't work: {e}\n\nThe details are in logs\\tray-*.log.")
+        return run
+
+    def settings_saved(self) -> None:
+        from .config import load_config
+
+        try:
+            self.cfg = load_config(self.home / "config.yaml")
+        except Exception:
+            log.exception("Reloading config.yaml failed")
+        self._refresh()
+
     # -- actions
     def open_stats(self, *_) -> None:
         if self.stats_url:
@@ -300,11 +384,12 @@ class Tray:
         path = self.home / "config.yaml"
         on = not self._commentary_on()
         path.write_text(set_commentary(path.read_text(encoding="utf-8"), on), encoding="utf-8")
+        self.settings_saved()
         env = (self.home / ".env").read_text(encoding="utf-8") if (self.home / ".env").exists() else ""
         if on and not (env_value(env, "OPENAI_API_KEY") or env_value(env, "ANTHROPIC_API_KEY")):
-            edit_file(self.home / ".env")
-            self.notify("Add your OpenAI and Anthropic API keys to .env and save it, then choose Restart "
-                        "the booth. Until then it records with a warning on the ON AIR badge.")
+            self.info("The AI booth is on, but it needs API keys to talk: add them in Settings (API keys), "
+                      "save and restart the booth. Until then it records shots as before.")
+            self.settings("API keys")
         self.restart_booth()
 
     def screen_check(self, *_) -> None:
@@ -325,11 +410,23 @@ class Tray:
 
             try:
                 path = backup.run(self.cfg)
-                self.notify(f"Backed up to {path.name}." if path else "Nothing changed since the last backup.")
+                where = backup.folder(self.cfg)
+                s3 = " It's in the S3 bucket too." if self.cfg.backup.s3 else ""
+                self.info(f"Backed up the season to {path.name} in {where}.{s3}" if path else
+                          f"Nothing changed since the last backup ({last_backup(self.cfg).split(' ', 2)[-1]}), "
+                          f"so there's nothing new to save.")
             except Exception as e:
                 log.exception("Backup failed")
-                self.notify(f"Backup failed: {e}")
+                self.error(f"The backup failed: {e}")
+            finally:
+                self._refresh()
         threading.Thread(target=work, daemon=True).start()
+
+    def settings(self, tab: str | None = None) -> None:
+        if self.ui is not None:
+            self.ui.open_settings(self, tab)
+        else:
+            edit_file(self.home / "config.yaml")
 
     def toggle_start_with_windows(self, *_) -> None:
         set_starts_with_windows(not starts_with_windows(), self.home)
@@ -343,23 +440,32 @@ class Tray:
         threading.Thread(target=self._check_updates, args=(True,), daemon=True).start()
 
     def _check_updates(self, told: bool = False) -> None:
+        from datetime import datetime
+
         from . import updater
 
         try:
             release = updater.check(self.version)
             if release is None:
-                self.update_note = ""
+                self.checked_at = datetime.now()
                 if told:
-                    self.notify(f"Shotcast {self.version} is the latest.")
+                    self.info(f"Shotcast {self.version} is the latest version.")
                 return
             path = updater.download(release, self.home / "updates")
             self.update = (release, path)
-            self.notify(f"Shotcast {release.version} is ready. Choose Restart to update in the menu "
-                        "(not mid-round: it restarts the booth).")
+            self._refresh()
+            text = (f"Shotcast {release.version} is downloaded and ready (you have {self.version}).\n\n"
+                    "Update now? Shotcast restarts for it, so not in the middle of a round. "
+                    "Later: choose Restart to update in the tray menu.")
+            if told:
+                if self.ui is not None and self.ui.ask(text):
+                    self.apply_update()
+            else:
+                self.notify(f"Shotcast {release.version} is ready: choose Restart to update in the menu.")
         except Exception as e:
             log.warning("Update check failed: %r", e)
             if told:
-                self.notify(f"Couldn't check for updates: {e}")
+                self.error(f"Couldn't check for updates: {e}")
         finally:
             self._refresh()
 
@@ -395,12 +501,34 @@ class Tray:
             self.icon.stop()
 
     def notify(self, text: str) -> None:
+        """A Windows notification, for things nobody asked about (they may not show: Focus assist, or
+        notifications off for Python)."""
         log.info("Notice: %s", text)
         if self.icon is not None:
             try:
                 self.icon.notify(text, APP)
             except Exception:
                 pass
+
+    def info(self, text: str) -> None:
+        """A message box, for the result of something chosen in the menu."""
+        if self.ui is not None:
+            self.ui.info(text)
+        else:
+            self.notify(text)
+
+    def error(self, text: str) -> None:
+        if self.ui is not None:
+            self.ui.error(text)
+        else:
+            self.notify(text)
+
+    def update_label(self) -> str:
+        if self.update:
+            return f"Restart to update to {self.update[0].version}"
+        if self.checked_at:
+            return f"Check for updates (up to date, {_when(self.checked_at)})"
+        return "Check for updates"
 
     # -- menu
     def menu(self):
@@ -413,29 +541,33 @@ class Tray:
             return [item(f"{'Problem' if lvl == 'fail' else 'Warning'}: {msg}"[:120], None, enabled=False)
                     for lvl, msg in warnings()[:10]]
 
+        safe = self._safe
         return pystray.Menu(
             item(lambda _: self.status(), None, enabled=False),
+            item(lambda _: last_backup(self.cfg), None, enabled=False),
             item("Warnings", pystray.Menu(warning_items), visible=lambda _: bool(warnings())),
-            item("Open the stats page", self.open_stats, default=True, enabled=lambda _: bool(self.stats_url)),
+            item("Open the stats page", safe(self.open_stats), default=True, enabled=lambda _: bool(self.stats_url)),
             sep,
-            item("Restart the booth", self.restart_booth),
+            item("Restart the booth", safe(self.restart_booth)),
             item(lambda _: "Turn the AI booth off" if self._commentary_on() else "Turn the AI booth on",
-                 self.toggle_commentary),
-            item("Settings", pystray.Menu(
-                item("Edit settings (config.yaml)", self.edit_config),
-                item("Edit API keys (.env)", self.edit_keys),
-                item("Open the Shotcast folder", self.open_folder),
-                item("Open logs", self.open_logs),
-                item("Command prompt (shotcast commands)", self.command_prompt),
+                 safe(self.toggle_commentary)),
+            item("Settings...", safe(self.settings)),
+            item("More", pystray.Menu(
+                item("Open the Shotcast folder", safe(self.open_folder)),
+                item("Open logs", safe(self.open_logs)),
+                item("Edit config.yaml", safe(self.edit_config)),
+                item("Edit .env (API keys)", safe(self.edit_keys)),
+                item("Command prompt (shotcast commands)", safe(self.command_prompt)),
             )),
-            item("Check the screen read...", self.screen_check),
-            item("Back up now", self.back_up),
+            item("Check the screen read...", safe(self.screen_check)),
+            item("Back up now", safe(self.back_up)),
             sep,
-            item(lambda _: f"Restart to update to {self.update[0].version}" if self.update else "Check for updates",
-                 lambda *_: self.apply_update() if self.update else self.check_updates()),
-            item("Check for updates automatically", self.toggle_update_checks, checked=lambda _: checks_for_updates()),
-            item("Start with Windows", self.toggle_start_with_windows, checked=lambda _: starts_with_windows()),
-            item(f"About Shotcast {self.version}", self.about),
+            item(lambda _: self.update_label(),
+                 safe(lambda: self.apply_update() if self.update else self.check_updates())),
+            item("Check for updates automatically", safe(self.toggle_update_checks),
+                 checked=lambda _: checks_for_updates()),
+            item("Start with Windows", safe(self.toggle_start_with_windows), checked=lambda _: starts_with_windows()),
+            item(f"About Shotcast {self.version}", safe(self.about)),
             item("Quit", self.quit),
         )
 
@@ -490,6 +622,9 @@ class Tray:
     def run(self) -> None:
         import pystray
 
+        from .tray_ui import Ui
+
+        self.ui = Ui(fallback=self.notify)
         self.start_stats()
         if other_booths():
             self.booth.state = "other"
@@ -502,33 +637,76 @@ class Tray:
             icon.visible = True
             threading.Thread(target=self._watch, name="watch", daemon=True).start()
             if self.first_run:
-                self.notify("Shotcast is recording your shots. Right-click this icon for the stats page "
-                            "and settings, then run Check the screen read with GSPro on a hole.")
+                self.info("Shotcast is running and recording your shots. Its icon is in the taskbar's "
+                          "notification area (under ^ if it's hidden): right-click it for the stats page and "
+                          "Settings. Then, with GSPro on a hole, choose Check the screen read.")
 
         self.icon.run(setup)
 
 
-def icon_image(light: str = "green", size: int = 64):
-    """The tray icon: a golf ball on a green disc, with a status light."""
+def _logo(size: int):
+    """The app's logo: a golf ball sending out broadcast waves, on a green rounded square. Drawn at
+    four times the size and scaled down; small sizes leave out the dimples and the outer wave."""
+    import math
+
     from PIL import Image, ImageDraw
 
-    s = size
-    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    small = size <= 24
+    S = max(size, 32) * 4
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    bg = Image.new("RGBA", (S, S))
+    gd = ImageDraw.Draw(bg)
+    for y in range(S):
+        t = y / S
+        gd.line([(0, y), (S, y)], fill=(int(18 + 10 * t), int(122 - 50 * t), int(70 - 25 * t), 255))
+    mask = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, S - 1, S - 1), radius=int(S * (.16 if small else .22)), fill=255)
+    img.paste(bg, (0, 0), mask)
     d = ImageDraw.Draw(img)
-    d.ellipse((0, 0, s - 1, s - 1), fill=(20, 110, 60, 255))
-    d.ellipse((s * .2, s * .2, s * .8, s * .8), fill=(250, 250, 250, 255))
-    for x, y in ((.4, .38), (.6, .38), (.5, .5), (.4, .62), (.6, .62)):
-        r = s * .045
-        d.ellipse((s * x - r, s * y - r, s * x + r, s * y + r), fill=(200, 200, 200, 255))
+    cx, cy = S * (.38 if small else .40), S * (.64 if small else .62)
+    waves = (.40, .60) if small else (.36, .50, .64)
+    for i, r in enumerate(S * w for w in waves):
+        d.arc((cx - r, cy - r, cx + r, cy + r), start=-64, end=-16, fill=(255, 255, 255, 245 - i * 40),
+              width=int(S * (.09 if small else .055)))
+    r = S * (.30 if small else .25)
+    ball = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    bd = ImageDraw.Draw(ball)
+    for k in range(40):   # shaded, lit from the upper left
+        f = 1 - k / 40
+        rr, off, v = r * f, -r * .25 * (1 - f), int(212 + 43 * (1 - f))
+        bd.ellipse((cx + off - rr, cy + off - rr, cx + off + rr, cy + off + rr), fill=(v, v, min(255, v + 3), 255))
+    if not small:
+        for row in range(-3, 4):
+            for col in range(-3, 4):
+                x, y = cx + col * r * .27 + (r * .135 if row % 2 else 0), cy + row * r * .24
+                dist = math.hypot(x - cx, y - cy) / r
+                if dist < .84:
+                    s = r * .07 * (1 - .5 * dist ** 2)
+                    bd.ellipse((x - s, y - s, x + s, y + s), fill=(196, 201, 206, 255))
+    bmask = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(bmask).ellipse((cx - r, cy - r, cx + r, cy + r), fill=255)
+    img.paste(ball, (0, 0), bmask)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def icon_image(light: str = "green", size: int = 64):
+    """The tray icon: the logo with a status light (green, orange or red) in the corner."""
+    from PIL import ImageDraw
+
+    img = _logo(size)
+    s = size
     color = {"green": (40, 200, 90), "orange": (245, 160, 20), "red": (220, 40, 40)}.get(light, (40, 200, 90))
-    d.ellipse((s * .62, s * .62, s - 1, s - 1), fill=color + (255,), outline=(255, 255, 255, 255), width=max(1, s // 32))
+    ImageDraw.Draw(img).ellipse((s * .60, s * .60, s - 1, s - 1), fill=color + (255,),
+                                outline=(255, 255, 255, 255), width=max(1, s // 20))
     return img
 
 
 def write_icon(path: str | Path) -> None:
-    """The app's .ico (shortcuts, the installer), from the same drawing as the tray icon."""
-    img = icon_image("green", 256)
-    img.save(path, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+    """The app's .ico (shortcuts, the installer, Settings), each size drawn for itself."""
+    sizes = [16, 20, 24, 32, 40, 48, 64, 128, 256]
+    big = _logo(256)
+    big.save(path, format="ICO", sizes=[(n, n) for n in sizes],
+             append_images=[_logo(n) for n in sizes if n != 256])
 
 
 def single_instance() -> bool:

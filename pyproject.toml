@@ -45,7 +45,7 @@ shotcast = "commentator.__main__:main"
 include = ["commentator*"]
 
 [tool.setuptools.package-data]
-commentator = ["*.html", "stats_vendor/*/*"]
+commentator = ["*.html", "*.ps1", "stats_vendor/*/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

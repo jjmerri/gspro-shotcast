@@ -155,15 +155,21 @@ beyond that is supported on paper but not yet run live:
    for your Windows user only (no administrator prompt) and brings its own Python. The installer
    isn't code-signed yet, so Windows SmartScreen may say "Windows protected your PC": choose
    **More info → Run anyway**. Each release lists the installer's SHA-256 next to it (see the
-   [code signing policy](#code-signing-policy)).
+   [code signing policy](#code-signing-policy)). The installer finds GSPro (usually `C:\GSProV1`)
+   and asks for its folder if it can't.
 2. Shotcast starts in the **tray** (the golf ball by the clock; it may be under the ^ arrow) and,
    unless you untick it, every time Windows starts. It records every shot and round without any
    API keys. Click the icon for the **stats page**; right-click it for the menu:
    - **Check the screen read...**: start GSPro, get to a hole, choose this and bring GSPro to the
      front. Every line should say OK (see [Checking the screen read](docs/setup.md#checking-the-screen-read)).
-   - **Turn the AI booth on**: asks for the OpenAI and Anthropic keys (in `.env`) the first time.
-   - **Settings**: edit `config.yaml` and `.env`, open the Shotcast folder or the logs.
-   - **Warnings** (when there are any), **Restart the booth**, **Back up now**,
+   - **Turn the AI booth on**: asks for the OpenAI and Anthropic keys the first time.
+   - **Settings...**: the AI booth, voices and ON AIR badge; API keys (each with a **Check**); the
+     GSPro folder; the league file, Squabbit and SuperSaaS; sharing the stats page, S3 backups and
+     phone alerts. Everything else is in `config.yaml` (**Settings → Advanced**).
+   - **More**: open the Shotcast folder or the logs, edit `config.yaml` or `.env` by hand, and the
+     command prompt.
+   - **Warnings** (when there are any), **Restart the booth**, **Back up now** (the menu shows the
+     last backup),
      **Check for updates** / **Restart to update**, **Check for updates automatically**,
      **Start with Windows**, **Quit**.
 
@@ -173,10 +179,10 @@ beyond that is supported on paper but not yet run live:
    mid-round). Your settings, season database and backups are in
    `%LOCALAPPDATA%\Shotcast`, which updating and uninstalling leave alone.
 3. **Where things are.** The docs give paths from the Shotcast folder (`%LOCALAPPDATA%\Shotcast`;
-   **Settings → Open the Shotcast folder**): `logs\season.db`, `config.yaml`, `.env`, and a league
+   **More → Open the Shotcast folder**): `logs\season.db`, `config.yaml`, `.env`, and a league
    file you add as `data\league.json`. The docs' `.bat` files are the ZIP install's; the tray
    menu does their jobs.
-4. **Commands** such as `publish`, `import-league` and `restore` run from **Settings → Command
+4. **Commands** such as `publish`, `import-league` and `restore` run from **More → Command
    prompt**: type `shotcast <command>` there (`shotcast --help` lists them; they're the
    `python -m commentator <command>` in the docs).
 5. **Uninstall** from Windows Settings → Apps → Shotcast. It removes the app and its "Start with
