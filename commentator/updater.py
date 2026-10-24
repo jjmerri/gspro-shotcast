@@ -2,13 +2,15 @@
 
 A release carries `Shotcast-Setup-<version>.exe` and `<that name>.sha256`. The installer is
 downloaded in the background and checked against the hash; the tray offers it, and running it
-(silently) replaces the app and starts the tray again. Settings and the season file live outside
+(with only its progress window) replaces the app and starts the tray again, which then says whether
+the update took (`pending.json` next to the installer, `after_update`). Settings and the season file live outside
 the app's folder, so an update never touches them. Releases aren't code-signed yet; when they are,
 nothing here needs to change.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import subprocess
@@ -21,6 +23,8 @@ log = logging.getLogger(__name__)
 REPO = "jjmerri/gspro-shotcast"
 API = f"https://api.github.com/repos/{REPO}/releases/latest"
 INSTALLER = re.compile(r"^Shotcast-Setup-.+\.exe$")
+PENDING = "pending.json"
+INSTALL_LOG = "install.log"
 
 
 @dataclass
@@ -107,15 +111,35 @@ def download(release: Release, dest: str | Path, client=None) -> Path:
     return out
 
 
-def install(installer: Path, home: Path | None = None) -> None:
-    """Run the installer silently, on its own: it closes this app, replaces it and starts it again
-    (with `home` as --home, when the tray wasn't using the default folder)."""
+def install(installer: Path, version: str, home: Path | None = None) -> None:
+    """Run the installer on its own, showing only its progress: it closes this app, replaces it and
+    starts it again (with `home` as --home, when the tray wasn't using the default folder). Leaves a
+    note for `after_update`, and the installer's log, next to the installer."""
+    folder = installer.parent
+    (folder / PENDING).write_text(json.dumps({"from": current_version(), "to": version}), encoding="utf-8")
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    args = [str(installer), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
+    args = [str(installer), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", f"/LOG={folder / INSTALL_LOG}"]
     if home is not None:
         args.append(f"/home={home}")
     subprocess.Popen(args,
                      creationflags=flags, close_fds=True)
+
+
+def after_update(folder: Path, version: str) -> tuple[bool, str] | None:
+    """After `install`, on the next start: (True, message) if this is the version it installed,
+    (False, message) if it isn't; None when there was no update."""
+    note = folder / PENDING
+    try:
+        pending = json.loads(note.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    finally:
+        note.unlink(missing_ok=True)
+    want = str(pending.get("to", ""))
+    if version == want:
+        return True, f"Shotcast is updated to {version} (from {pending.get('from', 'the last version')})."
+    return False, (f"The update to {want} didn't install: this is still Shotcast {version}. "
+                   f"The installer's log is {folder / INSTALL_LOG}.")
 
 
 def _sha256(path: Path) -> str:

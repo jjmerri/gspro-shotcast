@@ -177,7 +177,8 @@ beyond that is supported on paper but not yet run live:
    The icon's light is green when everything's fine, orange with warnings, red when the booth
    isn't running. Updates are checked every few hours (unless you untick it; see the
    [privacy policy](PRIVACY.md)) and offered in the menu, never installed on their own (not
-   mid-round). Your settings, season database and backups are in
+   mid-round). Updating shows the installer's progress, then Shotcast starts again and says it's
+   updated. Your settings, season database and backups are in
    `%LOCALAPPDATA%\Shotcast`, which updating and uninstalling leave alone.
 3. **Where things are.** The docs give paths from the Shotcast folder (`%LOCALAPPDATA%\Shotcast`;
    **More → Open the Shotcast folder**): `logs\season.db`, `config.yaml`, `.env`, and a league

@@ -476,8 +476,21 @@ class Tray:
             return
         self.booth.stop()
         custom = self.home.resolve() != default_home().resolve()
-        updater.install(self.update[1], self.home.resolve() if custom else None)
+        updater.install(self.update[1], self.update[0].version, self.home.resolve() if custom else None)
         self.quit()
+
+    def _after_update(self) -> None:
+        from . import updater
+
+        try:
+            done = updater.after_update(self.home / "updates", self.version)
+        except Exception as e:
+            log.warning("Couldn't read the last update's note: %r", e)
+            return
+        if done is not None:
+            ok, text = done
+            log.info("Update: %s", text)
+            (self.info if ok else self.error)(text)
 
     def open_folder(self, *_) -> None:
         open_file(self.home)
@@ -640,6 +653,7 @@ class Tray:
                 self.info("Shotcast is running and recording your shots. Its icon is in the taskbar's "
                           "notification area (under ^ if it's hidden): right-click it for the stats page and "
                           "Settings. Then, with GSPro on a hole, choose Check the screen read.")
+            self._after_update()
 
         self.icon.run(setup)
 

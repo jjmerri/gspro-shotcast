@@ -137,3 +137,19 @@ def test_start_with_windows_runs_the_windowless_python(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "executable", str(tmp_path / "python.exe"))
     assert tray.run_command() == f'"{tmp_path / "pythonw.exe"}" -m commentator tray'
     assert tray.run_command(tmp_path / "home").endswith(f' tray --home "{(tmp_path / "home").resolve()}"')
+
+
+def test_update_says_whether_it_took(tmp_path, monkeypatch):
+    runs = []
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda args, **kw: runs.append(args))
+    monkeypatch.setattr(updater, "current_version", lambda: "0.1.0")
+    updater.install(tmp_path / "Shotcast-Setup-0.2.0.exe", "0.2.0")
+    assert "/SILENT" in runs[0] and f"/LOG={tmp_path / 'install.log'}" in runs[0]
+    ok, text = updater.after_update(tmp_path, "0.2.0")
+    assert ok and "0.2.0" in text and "0.1.0" in text
+    assert updater.after_update(tmp_path, "0.2.0") is None      # said once
+
+    updater.install(tmp_path / "Shotcast-Setup-0.2.0.exe", "0.2.0")
+    ok, text = updater.after_update(tmp_path, "0.1.0")
+    assert not ok and "install.log" in text
+    assert updater.after_update(tmp_path / "none", "0.1.0") is None
