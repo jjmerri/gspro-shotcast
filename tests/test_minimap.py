@@ -808,4 +808,11 @@ async def test_a_lie_the_gspro_log_fills_in_is_kept_for_the_impact(tmp_path, mon
     monkeypatch.setattr(engine.gspro, "lie_of", lambda idx: "fairway")
     hud = Hud(player_text="Josh 2nd (E) Shot 2 126 YDS", shot_number=2, to_pin="126 yards", lie=None)
     await engine._preshot_model(hud, "Josh", [], None)
-    assert hud.lie == "fairway" and engine._setup_lies == {("Josh", 2, "126 yards"): "fairway"}
+    assert hud.lie == "fairway" and engine._setup_lies == {}
+
+    # Only an empty impact read takes it: the log has where the ball landed, not where it rests.
+    unread = Hud(player_text="Josh 2nd (E) Shot 2 126 YDS", shot_number=2, to_pin="126 yards", lie=None)
+    engine._use_setup_lie(unread)
+    read = Hud(player_text="Josh 2nd (E) Shot 2 126 YDS", shot_number=2, to_pin="126 yards", lie="rough")
+    engine._use_setup_lie(read)
+    assert (unread.lie, read.lie) == ("fairway", "rough")

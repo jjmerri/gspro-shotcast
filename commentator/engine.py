@@ -526,6 +526,9 @@ class Engine:
         # read comes ~3 s after the swing, when the lie box may already show where the ball landed.
         self._setup_lies: dict[tuple, str] = {}
         self._setup_slopes: dict[tuple, tuple] = {}   # (up/down, side, side degrees) by setup key
+        # A lie the GSPro log filled in at setup when OCR missed it. The log has where the ball LANDED,
+        # so this only fills an empty impact read; it never overrides one like a setup read does.
+        self._setup_log_lies: dict[tuple, str] = {}
         # (who, shot) -> whether that stroke's setup showed the distance in yards: GSPro shows yards off
         # the green and feet on it. Kept apart from the distance, which switches to feet when the player
         # changes to putt mode, so a later read in feet can't hide a setup off the green.
@@ -948,8 +951,15 @@ class Engine:
         join = self._should_join()
         rest = ["lie", "player_name", "slope"] + (["others"] if hud.shot_number == 1 or late or join else [])
         extra = await self.screen.read_hud_async(rest)
-        hud.lie = extra.lie or (await self._reread_setup_lie(extra.name_sig)
-                                 if hud.shot_number != 1 and self.cfg.screen.ocr else None)
+        hud.lie = extra.lie
+        if not hud.lie and hud.shot_number != 1 and self.cfg.screen.ocr:
+            seq = self._shot_seq
+            hud.lie = await self._reread_setup_lie(extra.name_sig, seq)
+            if self._shot_seq != seq:   # swung during the re-reads: this setup's moment has passed
+                log.info("Setup dropped: the ball was struck during the lie re-read")
+                if putt_task is not None:
+                    putt_task.cancel()
+                return
         if key := _setup_key(hud):
             self._setup_yards[key[:2]] = "yard" in key[2]
             while len(self._setup_yards) > 8:
@@ -984,11 +994,14 @@ class Engine:
                  f"{self.screen.last_read_seconds:.2f} (capture {self.screen.last_capture_seconds:.2f})")
         await self._events.put(PreShotEvent(hud=hud, image=image, model_task=model_task))
 
-    async def _reread_setup_lie(self, name_sig: tuple | None) -> str | None:
+    async def _reread_setup_lie(self, name_sig: tuple | None, seq: int) -> str | None:
         """The lie box read empty at setup (a fade, or something over it): read it again a few times
-        while the player is still over the ball. Stops if the name cell shows another player."""
+        while the player is still over the ball. Stops if the name cell shows another player or the
+        ball is struck."""
         for attempt in range(1, SETUP_LIE_RETRIES + 1):
             await asyncio.sleep(SETUP_LIE_RETRY_SECONDS)
+            if self._shot_seq != seq:
+                return None
             again = await self.screen.read_hud_async(["lie", "player_name"])
             if name_sig_changed(name_sig, again.name_sig):
                 log.info("Setup lie unread; the player box changed before a re-read")
@@ -2875,7 +2888,9 @@ class Engine:
         if idx is not None and not on_tee and not hud.lie and g.shot_number(idx) > 1 and (lie := g.lie_of(idx)):
             hud.lie = lie
             if key := _setup_key(hud):   # for the impact too, whose own read may miss it again
-                self._setup_lies.setdefault(key, lie)
+                self._setup_log_lies[key] = lie
+                while len(self._setup_log_lies) > 8:
+                    del self._setup_log_lies[next(iter(self._setup_log_lies))]
         is_putt = (hud.lie or "").lower() == "green"
         if self.round and not self.round.ended:
             hc = self._hc
@@ -4156,6 +4171,9 @@ class Engine:
         if (setup_lie := self._setup_lies.get(_setup_key(before))) and setup_lie != before.lie:
             log.info("%s lie %s at setup (the impact read, after the swing, said %s)", tag, setup_lie, before.lie)
             before.lie = setup_lie
+        elif not before.lie and (log_lie := self._setup_log_lies.get(_setup_key(before))):
+            log.info("%s lie %s from the GSPro log at setup (unread on screen)", tag, log_lie)
+            before.lie = log_lie
         # The slope box is read only at setup (the impact read skips it): carry it over for the record.
         if (slope := self._setup_slopes.get(_setup_key(before))) and before.slope_updown is None \
                 and not before.slope_side:
@@ -4702,6 +4720,7 @@ class Engine:
         self.state.current_hole = event.current
         self._last_hud_shot = {}  # stroke counts start over on a new hole
         self._setup_lies.clear()   # a stroke's key (who, shot, distance) can recur on another hole
+        self._setup_log_lies.clear()
         self._setup_slopes.clear()
         self._setup_yards.clear()
         self.current_course = event.course or self.current_course

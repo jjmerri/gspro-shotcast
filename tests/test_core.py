@@ -2527,6 +2527,21 @@ async def test_an_empty_setup_lie_is_read_again_unless_the_player_changes(tmp_pa
     await engine._emit_setup(hud)
     assert hud.lie is None and engine._setup_lies == {}
 
+    # Struck during the re-reads: the setup is dropped rather than aired after the shot.
+    engine, screen = _setup_engine(tmp_path / "c")
+    lies, sigs = iter([None, "rough"]), iter([(0,) * 100] * 2)
+    real = screen.read_hud_async
+
+    async def swung(parts):
+        hud = await flaky(parts)
+        if parts == ["lie", "player_name"]:
+            engine._shot_seq += 1
+        return hud
+    screen.read_hud_async = swung
+    hud = Hud(player_text="Josh 2nd (E) Shot 2 126 YDS", shot_number=2, score_to_par="E", to_pin="126 yards")
+    await engine._emit_setup(hud)
+    assert engine._events.empty() and engine._setup_lies == {}
+
 
 async def test_emit_setup_reads_the_hud_before_the_model_and_skips_others_off_the_tee(tmp_path):
     engine, screen = _setup_engine(tmp_path)
