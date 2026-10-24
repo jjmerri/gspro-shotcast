@@ -35,6 +35,7 @@ class Ui:
         self._fallback = fallback
         self._ready = threading.Event()
         self.root = None
+        self.scale = 1.0
         self.settings_window: SettingsWindow | None = None
         threading.Thread(target=self._run, name="ui", daemon=True).start()
         self._ready.wait(10)
@@ -43,8 +44,13 @@ class Ui:
         try:
             import tkinter as tk
 
+            if os.name == "nt":
+                from .overlay import _dpi_aware
+
+                _dpi_aware()   # sharp text at 150%/200% display scaling (Tk then sizes its fonts for it)
             self.root = tk.Tk()
             self.root.withdraw()
+            self.scale = max(1.0, self.root.winfo_fpixels("1i") / 96)
             self.root.title(TITLE)
             self._icon = tk.PhotoImage(data=_logo_png(64))
             self.root.iconphoto(True, self._icon)
@@ -68,6 +74,10 @@ class Ui:
             except Exception:
                 log.exception("A window failed")
         self.root.after(100, self._pump)
+
+    def px(self, n: int) -> int:
+        """n pixels at 100% display scaling, in this screen's pixels."""
+        return round(n * self.scale)
 
     @property
     def ok(self) -> bool:
@@ -277,15 +287,15 @@ class SettingsWindow:
         self.env_text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
         self.win = w = tk.Toplevel(ui.root)
         w.title("Shotcast settings")
-        w.minsize(560, 420)
+        w.minsize(self._px(560), self._px(420))
         w.protocol("WM_DELETE_WINDOW", self.close)
         self.vars: dict[Any, Any] = {}
         self.orig: dict[Any, Any] = {}
         self.nb = ttk.Notebook(w)
-        self.nb.pack(fill="both", expand=True, padx=10, pady=(10, 0))
+        self.nb.pack(fill="both", expand=True, padx=self._px(10), pady=(self._px(10), 0))
         self.frames = {}
         for name in TABS:
-            f = ttk.Frame(self.nb, padding=12)
+            f = ttk.Frame(self.nb, padding=self._px(12))
             f.columnconfigure(1, weight=1)
             self.nb.add(f, text=name)
             self.frames[name] = f
@@ -301,13 +311,19 @@ class SettingsWindow:
         self._gspro_tab()
         self._advanced_tab()
 
-        bar = ttk.Frame(w, padding=10)
+        bar = ttk.Frame(w, padding=self._px(10))
         bar.pack(fill="x")
         ttk.Button(bar, text="Cancel", command=self.close).pack(side="right")
-        ttk.Button(bar, text="Save", command=self.save).pack(side="right", padx=6)
+        ttk.Button(bar, text="Save", command=self.save).pack(side="right", padx=self._px(6))
+        w.update_idletasks()
+        w.geometry(f"+{max(0, (w.winfo_screenwidth() - w.winfo_reqwidth()) // 2)}"
+                   f"+{max(0, (w.winfo_screenheight() - w.winfo_reqheight()) // 3)}")
         self.show(tab)
 
     # -- layout helpers
+    def _px(self, n: int) -> int:
+        return self.ui.px(n)
+
     def _next(self, tab: str) -> int:
         r = self.rows[tab]
         self.rows[tab] += 1
@@ -316,14 +332,14 @@ class SettingsWindow:
     def _note(self, tab: str, text: str) -> None:
         from tkinter import ttk
 
-        ttk.Label(self.frames[tab], text=text, wraplength=520, foreground="#555").grid(
-            row=self._next(tab), column=0, columnspan=4, sticky="w", pady=(0, 8))
+        ttk.Label(self.frames[tab], text=text, wraplength=self._px(520), foreground="#555").grid(
+            row=self._next(tab), column=0, columnspan=4, sticky="w", pady=(0, self._px(8)))
 
     def _link(self, tab: str, text: str, url: str) -> None:
         from tkinter import ttk
 
         lbl = ttk.Label(self.frames[tab], text=text, foreground="#0a58ca", cursor="hand2")
-        lbl.grid(row=self._next(tab), column=0, columnspan=4, sticky="w", pady=(8, 0))
+        lbl.grid(row=self._next(tab), column=0, columnspan=4, sticky="w", pady=(self._px(8), 0))
         lbl.bind("<Button-1>", lambda _: webbrowser.open(url))
 
     def _config_row(self, tab: str, label: str, keys: tuple[str, ...], kind: str, note: str) -> None:
@@ -334,9 +350,9 @@ class SettingsWindow:
         value = config_value(self.cfg, keys)
         if kind == "bool":
             var = tk.BooleanVar(value=bool(value))
-            ttk.Checkbutton(f, text=label, variable=var).grid(row=r, column=0, columnspan=3, sticky="w", pady=(6, 0))
+            ttk.Checkbutton(f, text=label, variable=var).grid(row=r, column=0, columnspan=3, sticky="w", pady=(self._px(6), 0))
         else:
-            ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=4, padx=(0, 8))
+            ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=self._px(4), padx=(0, self._px(8)))
             var = tk.StringVar(value="" if value is None else str(value))
             if kind.startswith("choice:"):
                 options = kind.split(":", 1)[1].split("|")
@@ -357,10 +373,10 @@ class SettingsWindow:
                         except ValueError:
                             pass
                         var.set(str(p))
-                ttk.Button(f, text="Browse...", command=browse).grid(row=r, column=2, padx=(6, 0))
+                ttk.Button(f, text="Browse...", command=browse).grid(row=r, column=2, padx=(self._px(6), 0))
         if note:
-            ttk.Label(f, text=note, wraplength=500, foreground="#555").grid(
-                row=self._next(tab), column=0, columnspan=4, sticky="w", padx=(22 if kind == "bool" else 0, 0))
+            ttk.Label(f, text=note, wraplength=self._px(500), foreground="#555").grid(
+                row=self._next(tab), column=0, columnspan=4, sticky="w", padx=(self._px(22) if kind == "bool" else 0, 0))
         self.vars[keys] = (var, kind)
         self.orig[keys] = var.get()
 
@@ -369,7 +385,7 @@ class SettingsWindow:
         from tkinter import ttk
 
         f, r = self.frames[tab], self._next(tab)
-        ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=4, padx=(0, 8))
+        ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=self._px(4), padx=(0, self._px(8)))
         var = tk.StringVar(value=env_value(self.env_text, key))
         entry = ttk.Entry(f, textvariable=var, show="\u2022" if secret else "")
         entry.grid(row=r, column=1, sticky="ew")
@@ -378,11 +394,11 @@ class SettingsWindow:
             shown = tk.BooleanVar(value=False)
             ttk.Checkbutton(f, text="Show", variable=shown,
                             command=lambda: entry.configure(show="" if shown.get() else "\u2022")).grid(
-                row=r, column=col, padx=(6, 0))
+                row=r, column=col, padx=(self._px(6), 0))
             col += 1
         if checkable:
             ttk.Button(f, text="Send test" if key == "NTFY_TOPIC" else "Check",
-                       command=lambda: self._check(key)).grid(row=r, column=col, padx=(6, 0))
+                       command=lambda: self._check(key)).grid(row=r, column=col, padx=(self._px(6), 0))
         self.vars[key] = (var, "env")
         self.orig[key] = var.get()
 
@@ -408,16 +424,16 @@ class SettingsWindow:
         current = gspro_dir.folder_of(self.cfg.source.connector_log) or ""
         self.gspro = tk.StringVar(value=current)
         self.gspro_orig = current
-        ttk.Label(f, text="GSPro folder").grid(row=r, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(f, text="GSPro folder").grid(row=r, column=0, sticky="w", padx=(0, self._px(8)))
         ttk.Entry(f, textvariable=self.gspro).grid(row=r, column=1, sticky="ew")
 
         def browse():
             path = filedialog.askdirectory(parent=self.win, initialdir=self.gspro.get() or "C:\\")
             if path:
                 self.gspro.set(str(Path(path)))
-        ttk.Button(f, text="Browse...", command=browse).grid(row=r, column=2, padx=(6, 0))
-        self.gspro_status = ttk.Label(f, text="", wraplength=500)
-        self.gspro_status.grid(row=self._next(tab), column=0, columnspan=4, sticky="w", pady=(6, 0))
+        ttk.Button(f, text="Browse...", command=browse).grid(row=r, column=2, padx=(self._px(6), 0))
+        self.gspro_status = ttk.Label(f, text="", wraplength=self._px(500))
+        self.gspro_status.grid(row=self._next(tab), column=0, columnspan=4, sticky="w", pady=(self._px(6), 0))
 
         def find():
             self.gspro_status.configure(text="Looking...")
@@ -426,7 +442,7 @@ class SettingsWindow:
                 found = gspro_dir.find()
                 self.ui.call(lambda: (self.gspro.set(found) if found else None, self._gspro_note(found is None)))
             threading.Thread(target=work, daemon=True).start()
-        ttk.Button(f, text="Find GSPro", command=find).grid(row=self._next(tab), column=0, sticky="w", pady=(6, 0))
+        ttk.Button(f, text="Find GSPro", command=find).grid(row=self._next(tab), column=0, sticky="w", pady=(self._px(6), 0))
         self.gspro.trace_add("write", lambda *_: self._gspro_note())
         self._gspro_note()
 
@@ -454,7 +470,7 @@ class SettingsWindow:
                          ("Edit .env (API keys)", lambda: edit_file(self.home / ".env")),
                          ("Open the Shotcast folder", lambda: open_file(self.home)),
                          ("Open logs", lambda: open_file(self.home / "logs"))):
-            ttk.Button(f, text=text, command=fn, width=28).grid(row=self._next(tab), column=0, sticky="w", pady=3)
+            ttk.Button(f, text=text, command=fn, width=28).grid(row=self._next(tab), column=0, sticky="w", pady=self._px(3))
 
     # -- window
     def alive(self) -> bool:
