@@ -957,8 +957,9 @@ class Engine:
             hud.lie = await self._reread_setup_lie(extra.name_sig, seq)
             if self._shot_seq != seq:   # swung during the re-reads: this setup's moment has passed
                 log.info("Setup dropped: the ball was struck during the lie re-read")
-                if putt_task is not None:
-                    putt_task.cancel()
+                for task in (minimap_task, putt_task):
+                    if task is not None:
+                        task.cancel()
                 return
         if key := _setup_key(hud):
             self._setup_yards[key[:2]] = "yard" in key[2]
