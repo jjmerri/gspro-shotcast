@@ -3,7 +3,8 @@
 GSPro's log gives every shot's starting position in the course's world metres (shots.start_*), the
 player's minimap aim click (shots.aim_map_*), and, when a round is completed, each hole's tee and pin
 (hole_layouts). A shot runs from its start to where the player's next stroke was played from, and a
-hole's last stroke into the pin. Positions are top-down (x, z): Unity's y is height, and +x is to the
+hole's last stroke into the pin; a ball lost to a penalty area (water, OB) runs to where it went in
+(shots.hazard_*), and the drop is the next stroke's start. Positions are top-down (x, z): Unity's y is height, and +x is to the
 right of a player facing +z, so the plain (x, z) plane is the map as seen from above.
 
 A tee shot has no logged start (GSPro sets it up without a setup block), so it comes from the hole's
@@ -34,7 +35,7 @@ PIN_FIT_MAX_RMS_M = 3.0         # an estimated pin whose distances miss by more 
 _HOLE = re.compile(r"Hole (\d+)")
 _PAR = re.compile(r"par (\d)")
 _COLS = ("id, session_id, ts, player, course, hole, shot_number, club, is_putt, lie_before, to_pin_yards,"
-         " outcome, mulligan, shared_ball, tags, start_x, start_z, aim_map_x, aim_map_y")
+         " outcome, mulligan, shared_ball, tags, start_x, start_z, aim_map_x, aim_map_y, hazard_x, hazard_z")
 
 
 def _xz(x: float | None, z: float | None) -> tuple[float, float] | None:
@@ -147,9 +148,10 @@ def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]
     have = {r[1] for r in db.execute("PRAGMA table_info(shots)")}
     if "start_x" not in have:
         return {}
+    cols = _COLS if "hazard_x" in have else _COLS.replace("hazard_x, hazard_z", "NULL AS hazard_x, NULL AS hazard_z")
     round_of = stats_web.shot_rounds(db)
     groups: dict[tuple[int, int], list[sqlite3.Row]] = {}
-    for row in db.execute(f"SELECT {_COLS} FROM shots ORDER BY id"):
+    for row in db.execute(f"SELECT {cols} FROM shots ORDER BY id"):
         m = _HOLE.match(row["hole"] or "")
         if row["id"] in round_of and m:
             groups.setdefault((round_of[row["id"]], int(m.group(1))), []).append(row)
@@ -205,13 +207,19 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
                      or (tee if (r["shot_number"] or 0) <= 1 else None))
             nxt = mine[i + 1] if i + 1 < len(mine) else None
             tags = json.loads(r["tags"] or "[]")
-            end = None
-            if r["shared_ball"] or "in_water" in tags:
-                end = None   # a teammate's ball may be played on; a penalty's next stroke is the drop
-            elif nxt is not None:
-                if (nxt["shot_number"] or 0) == (r["shot_number"] or 0) + 1:
-                    end = _xz(nxt["start_x"], nxt["start_z"])
-            elif finished:
+            end, hazard = None, _xz(r["hazard_x"], r["hazard_z"])
+            follows = nxt is not None and (nxt["shot_number"] or 0) == (r["shot_number"] or 0) + 1
+            if r["shared_ball"]:
+                end = None   # a teammate's ball may be played on
+            elif hazard and ((nxt is not None and not follows) or "in_water" in tags):
+                # Into a penalty area: the next stroke, after the penalty, is the drop. Only with a
+                # penalty to back it: GSPro can log an entry point for a ball that ends up dry.
+                end = hazard
+            elif "in_water" in tags:
+                end = None
+            elif follows:
+                end = _xz(nxt["start_x"], nxt["start_z"])
+            elif nxt is None and finished:
                 end = pin
             aim = None
             if (r["aim_map_x"] is not None and start and pin and not r["is_putt"]
@@ -220,7 +228,8 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
                 aim = (start[0] + f[0] * along + f[1] * right, start[1] + f[1] * along - f[0] * right)
             shots.append({"n": r["shot_number"], "club": r["club"], "putt": bool(r["is_putt"]),
                           "lie": r["lie_before"], "to_pin": r["to_pin_yards"] and round(r["to_pin_yards"], 1),
-                          "from": _r(start), "to": _r(end), "aim": _r(aim)})
+                          "from": _r(start), "to": _r(end), "aim": _r(aim),
+                          **({"penalty": True} if end is not None and end == hazard else {})})
         if any(s["from"] or s["to"] for s in shots):
             # The hole's score counts strokes that are never drawn: a gimme or conceded putt, a penalty.
             mine_all = [r for r in rows if (r["player"] or "unknown") == name and not r["mulligan"]]

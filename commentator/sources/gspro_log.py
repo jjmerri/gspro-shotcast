@@ -103,6 +103,11 @@ _FLOAT = r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
 # where that player's NEXT stroke starts, not the next shot fired (another player's, in a group). Also
 # logged for a mulligan's reset ball and a scramble's picked ball. Never logged before a tee shot.
 _POSITION = re.compile(rf"^Data for selected player:\s*X\s*({_FLOAT})\s+Y\s*({_FLOAT})\s+Z\s*({_FLOAT})")
+# Where a shot's ball crossed into a penalty area, in world metres, logged (repeatedly, the ball's
+# position changing) while it rolls or flies in. The first line can carry a (0.0, 0.0, 0.0) placeholder.
+# A ball that lands dry and rolls into the water logs only these, never a splash line. Not proof of a
+# penalty on its own: one was logged at the launch of a shot that finished on the green.
+_HAZARD = re.compile(rf"^Haz entry Point \(({_FLOAT}), ({_FLOAT}), ({_FLOAT})\)")
 # A click on the minimap to move the aim: a bare "(x, y, 0.0)" in minimap units, origin at the map's
 # centre. GSPro fits the map so the ball sits near (0, -338) and the pin near (0, +339): y runs up the
 # ball-to-pin line and x to its right, about 677 units for the whole distance (see aim_offset).
@@ -175,6 +180,10 @@ def parse_events(text: str) -> list[LogEvent]:
                                         holes=_layout_holes(line)))
             elif m := _POSITION.match(line):
                 out.append(LogEvent("position", pos=(float(m.group(1)), float(m.group(2)), float(m.group(3)))))
+            elif m := _HAZARD.match(line):
+                pos = (float(m.group(1)), float(m.group(2)), float(m.group(3)))
+                if any(pos):
+                    out.append(LogEvent("hazard", pos=pos))
             elif m := _AIM.match(line):
                 out.append(LogEvent("aim", pos=(float(m.group(1)), float(m.group(2)))))
             elif m := _VERSION.match(line):
@@ -342,7 +351,7 @@ class GsproState:
     kinds: Counter = field(default_factory=Counter)
     unparsed: list = field(default_factory=list)
     # Where a shot is struck from and where it was aimed, attached to that shot's fire info ("start",
-    # "aim", and "to_pin", the logged distance in metres). `_rest_by` is each player's ball since their
+    # "aim", and "to_pin", the logged distance in metres; "hazard", where it went into a penalty area). `_rest_by` is each player's ball since their
     # last stroke: {"hole", "start", "to_pin"}, from the block GSPro logs for them after it stops. It is
     # attached when the score line credits that player's next shot, on the same hole, and used once.
     # `_aim` is the last minimap click, made by whoever is up before they swing.
@@ -444,6 +453,9 @@ class GsproState:
         elif ev.kind == "launch_mode":
             if self.fires in self._fire_info:
                 self._fire_info[self.fires]["putting"] = ev.putting
+        elif ev.kind == "hazard":
+            if self.fires in self._fire_info:
+                self._fire_info[self.fires].setdefault("hazard", ev.pos)
         elif ev.kind == "penalty_surface":
             self.logs_penalty_surface = True
             if self.fires in self._fire_info:

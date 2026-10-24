@@ -557,6 +557,7 @@ class Engine:
         # hole), so a stroke GSPro later takes back (a mulligan) can be found and flagged.
         self._fire_rows: dict[int, tuple] = {}
         self._mulligans_done: set[int] = set()
+        self._hazards_done: set[int] = set()   # fires whose penalty-area entry point is stored
         # Recorded shots still waiting on their start position: GSPro attaches it only at the shooter's
         # score line, logged once the ball stops, and a putt is recorded before that.
         self._starts_due: set[int] = set()
@@ -4281,6 +4282,10 @@ class Engine:
             elif start := g.fire_info(fire).get("start"):
                 self._starts_due.discard(fire)
                 self.store.set_shot_position(self._fire_rows[fire][0], start)
+        for fire, row in self._fire_rows.items():
+            if fire not in self._hazards_done and (entry := g.fire_info(fire).get("hazard")):
+                self._hazards_done.add(fire)
+                self.store.set_shot_hazard(row[0], entry)
         for fire, kind in list(g.mulligan_fires.items()):
             if fire in self._mulligans_done or fire not in self._fire_rows:
                 continue

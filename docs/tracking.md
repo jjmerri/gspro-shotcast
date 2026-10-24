@@ -123,7 +123,11 @@ back the file up.
 A hole replay plays the shots in turn (every player's nth shot together), each line drawing out
 behind a ball, and ends on the full drawing; ↻ Play again replays it. Each player keeps one colour
 for the whole round, and "Only <name>" hides the others' shots (the player picked at the top, else
-the round row's player) until "Show everyone". It's drawn over GSPro's minimap
+the round row's player) until "Show everyone". A ball lost to a penalty area (water, OB) runs to
+where GSPro logged it going in (`shots.hazard_*`) and ends in a red ✕; the drop is the next stroke's
+start. GSPro logs that entry point even for a ball that rolls in with no splash line, but also, once,
+for a ball that finished dry, so it is drawn only when a penalty stroke follows. `backfill-log` fills
+it in for shots recorded before it was stored. It's drawn over GSPro's minimap
 of the hole, turned and scaled so the map's ball sits on
 the tee and its pin on the pin. The map is the same every round, so the booth keeps one per course and
 hole, at the first tee setup on a hole that has none, and every round there uses it, older ones too

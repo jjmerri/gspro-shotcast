@@ -31,6 +31,7 @@ class Fire:
     aim: tuple | None
     hole: int | None = None   # 1-based, from the next state line (which credits the shot)
     segment: int = 0          # which course load (or round restart) in the log it was played in
+    hazard: tuple | None = None   # where the ball went into a penalty area
 
 
 @dataclass
@@ -54,6 +55,7 @@ def read_log(text: str) -> LogRead:
             info, f = st.fire_info(pending[0]), pending[1]
             f.hole = ev.hole + 1 if ev.hole is not None else None
             f.start = info.get("start")
+            f.hazard = info.get("hazard")
             f.to_pin_yd = info["to_pin"] * M_TO_YD if info.get("to_pin") is not None else None
             pending = None
         elif ev.kind == "layout" and ev.holes:
@@ -132,10 +134,10 @@ def backfill(db_path: str, logs: list[str], dry_run: bool = False, fix_starts: b
 def _backfill(db_path: str, logs: list[str], fix_starts: bool = False) -> dict[str, int]:
     store = Store(db_path, new_session=False)
     db = store.db
-    stats = {"fires": 0, "matched": 0, "starts": 0, "aims": 0, "layouts": 0, "fixed": 0}
+    stats = {"fires": 0, "matched": 0, "starts": 0, "aims": 0, "layouts": 0, "fixed": 0, "hazards": 0}
     for path in logs:
-        rows = db.execute("SELECT id, session_id, ts, course, hole, shot_number, to_pin_yards, start_x, start_z, aim_map_x"
-                          " FROM shots WHERE outcome IS NOT 'gimme' AND course != 'Practice' ORDER BY id").fetchall()
+        rows = db.execute("SELECT id, session_id, ts, course, hole, shot_number, to_pin_yards, start_x, start_z, aim_map_x,"
+                          " hazard_x FROM shots WHERE outcome IS NOT 'gimme' AND course != 'Practice' ORDER BY id").fetchall()
         with open(path, encoding="utf-8", errors="replace") as fh:
             got = read_log(fh.read())
         stats["fires"] += len(got.fires)
@@ -156,6 +158,9 @@ def _backfill(db_path: str, logs: list[str], fix_starts: bool = False) -> dict[s
             if f.aim and r["aim_map_x"] is None:
                 stats["aims"] += 1
                 db.execute("UPDATE shots SET aim_map_x = ?, aim_map_y = ? WHERE id = ?", (*f.aim, r["id"]))
+            if f.hazard and r["hazard_x"] is None:
+                stats["hazards"] += 1
+                db.execute("UPDATE shots SET hazard_x = ?, hazard_y = ?, hazard_z = ? WHERE id = ?", (*f.hazard, r["id"]))
         for course, holes, before, seg in got.layouts:
             # The round's session is the one its last matched shot was stored in, within the same course
             # load (an earlier round's shots aren't this one's); a layout from a round with no matching

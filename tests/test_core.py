@@ -3124,6 +3124,22 @@ def test_a_putt_recorded_before_its_score_line_gets_its_start_once_the_line_arri
     assert not e._starts_due
 
 
+def test_where_a_recorded_shot_went_into_a_penalty_area_is_stored_once_logged(tmp_path):
+    from commentator.sources.gspro_log import LogEvent, parse_events
+    e = _mini_engine(tmp_path)
+    r = _log_round(e)
+    g = e.gspro
+    g.apply(LogEvent("shot_fired"))
+    sid, _ = _row(e, r, g.fires, 1, "tee")
+    for ev in parse_events("Haz entry Point (0.0, 0.0, 0.0), Haz ball pos (5.0, 1.0, 152.0), 0\n"
+                           "Haz entry Point (4.0, 1.0, 150.0), Haz ball pos (5.0, 1.0, 152.0), 0\n"
+                           "Haz entry Point (4.5, 1.0, 151.0), Haz ball pos (3.0, 9.0, 140.0), 0\n"):
+        g.apply(ev)
+    e._apply_log_corrections()
+    assert tuple(e.store.db.execute("SELECT hazard_x, hazard_y, hazard_z FROM shots WHERE id = ?", (sid,)).fetchone()) \
+        == (4.0, 1.0, 150.0)
+
+
 def test_a_mulligan_is_flagged_and_its_re_hit_takes_its_place(tmp_path):
     e = _mini_engine(tmp_path)
     r = _log_round(e)

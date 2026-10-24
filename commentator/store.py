@@ -60,7 +60,9 @@ CREATE TABLE IF NOT EXISTS shots (
     -- From GSPro's log: where the ball sat for this shot, in the course's world metres (y is height;
     -- NULL for a tee shot, which GSPro sets up without logging it: use hole_layouts' tee), and the
     -- player's last minimap aim click before it, in minimap units (NULL when the aim wasn't moved).
-    start_x REAL, start_y REAL, start_z REAL, aim_map_x REAL, aim_map_y REAL
+    start_x REAL, start_y REAL, start_z REAL, aim_map_x REAL, aim_map_y REAL,
+    -- Where the ball went into a penalty area (water, OB), world metres, from GSPro's log; else NULL.
+    hazard_x REAL, hazard_y REAL, hazard_z REAL
 );
 CREATE TABLE IF NOT EXISTS hole_layouts (            -- each hole's geometry, logged by GSPro when a round is complete
     id INTEGER PRIMARY KEY,
@@ -202,6 +204,7 @@ _DRIVE = "COALESCE(total_yards, carry_game_yards, carry_raw)"
 
 
 POSITION_COLS = ("start_x", "start_y", "start_z", "aim_map_x", "aim_map_y")
+HAZARD_COLS = ("hazard_x", "hazard_y", "hazard_z")
 
 
 def _position_values(start: tuple | None, aim: tuple | None) -> tuple[float | None, ...]:
@@ -272,7 +275,8 @@ class Store:
                  "outcome": "TEXT", "fmt": "TEXT", "attributed": "INTEGER NOT NULL DEFAULT 1",
                  "is_league": "INTEGER NOT NULL DEFAULT 1", "mulligan": "INTEGER NOT NULL DEFAULT 0",
                  "shared_ball": "INTEGER NOT NULL DEFAULT 0",
-                 **{col: "REAL" for col in CLUB_COLS}, **{col: "REAL" for col in POSITION_COLS}}
+                 **{col: "REAL" for col in CLUB_COLS}, **{col: "REAL" for col in POSITION_COLS},
+                 **{col: "REAL" for col in HAZARD_COLS}}
         for col, decl in added.items():
             if col not in have:
                 self.db.execute(f"ALTER TABLE shots ADD COLUMN {col} {decl}")
@@ -543,6 +547,13 @@ class Store:
         if shot_id is not None:
             self.db.execute("UPDATE shots SET start_x = ?, start_y = ?, start_z = ? WHERE id = ? AND start_x IS NULL",
                             (*start, shot_id))
+            self.db.commit()
+
+    def set_shot_hazard(self, shot_id: int | None, entry: tuple) -> None:
+        """Where GSPro's log had this shot's ball go into a penalty area (logged as it rolls or flies in)."""
+        if shot_id is not None:
+            self.db.execute("UPDATE shots SET hazard_x = ?, hazard_y = ?, hazard_z = ? WHERE id = ? AND hazard_x IS NULL",
+                            (*entry, shot_id))
             self.db.commit()
 
     def set_shot_start(self, shot_id: int | None, shot_number: int | None, lie_before: str | None) -> None:

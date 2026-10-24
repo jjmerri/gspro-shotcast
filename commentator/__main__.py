@@ -698,8 +698,9 @@ def cmd_backfill_log(cfg: Config, args) -> None:
     if not path.exists():
         sys.exit(f"No season database at {path}.")
     got = backfill(str(path), args.log, dry_run=args.dry_run, fix_starts=args.fix_starts)
-    print(f"{'Would fill' if args.dry_run else 'Filled'}: {got['starts']} shot positions and {got['aims']} aims "
-          f"({got['matched']} of {got['fires']} logged shots matched); {got['layouts']} hole layouts."
+    print(f"{'Would fill' if args.dry_run else 'Filled'}: {got['starts']} shot positions, {got['aims']} aims and "
+          f"{got['hazards']} penalty-area entries ({got['matched']} of {got['fires']} logged shots matched); "
+          f"{got['layouts']} hole layouts."
           + (f" Corrected {got['fixed']} positions." if args.fix_starts else ""))
 
 

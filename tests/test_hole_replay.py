@@ -180,6 +180,37 @@ def test_replay_runs_each_shot_to_the_next_and_the_last_into_the_pin(tmp_path):
     assert math.dist(shots[1]["aim"], want) < 0.1
 
 
+def test_a_ball_rolled_into_a_penalty_area_runs_to_where_it_went_in_then_the_drop(tmp_path):
+    # Tee shot rolls in (no splash line, only the entry points: a placeholder first), a penalty stroke,
+    # then the drop holed out from 150 m: Josh's 16th at Paynes Valley.
+    path = str(tmp_path / "season.db")
+    st = Store(path)
+    drop_m = math.hypot(6, 150)
+    for n, to_pin, outcome in [(1, 300 * M_TO_YD, None), (3, drop_m * M_TO_YD, "holed")]:
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt,"
+                      " to_pin_yards, outcome, tags, raw) VALUES (?, ?, 'Dan', 'Test Links', 'Hole 1, par 4, 328 yards',"
+                      " ?, '7I', 0, ?, ?, '[\"in_rough\"]', '{}')", (st.session_id, 1000.0 + n, n, round(to_pin, 1), outcome))
+    st.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes) VALUES (?, 2000, '2025-10-20', 'Test Links', 'Dan', 1)",
+                  (st.session_id,))
+    st.db.commit()
+    log = tmp_path / "output_log.txt"
+    log.write_text("Selected Course: test_gsp\nLoading course Test Links\n" + SHOT
+                   + "Haz entry Point (0.0, 0.0, 0.0), Haz ball pos (5.0, 1.0, 152.0), 0\n"
+                   + "Haz entry Point (4.0, 1.0, 150.0), Haz ball pos (5.0, 1.0, 152.0), 0\n"
+                   + "Haz entry Point (4.0, 1.0, 150.0), Haz ball pos (3.0, 9.0, 140.0), 0\n"
+                   + _state(0, 1, 0) + _state(0, 1, 1) + _setup(6.0, 150.0, round(drop_m, 4))
+                   + SHOT + "Hole out !!! \n" + _state(0, 1, 2) + "Round Is Complete\n" + LAYOUT)
+    assert backfill(path, [str(log)])["hazards"] == 1
+    shots = hole_replays(st.db)[(1, 1)]["players"][0]["shots"]
+    assert [(s["from"], s["to"], s.get("penalty")) for s in shots] == [
+        ([0.0, 0.0], [4.0, 150.0], True), ([6.0, 150.0], [0.0, 300.0], None)]
+    # An entry point with no penalty after it (GSPro logged one for a ball that finished dry) is ignored.
+    st.db.execute("UPDATE shots SET shot_number = 2 WHERE shot_number = 3")
+    st.db.commit()
+    shots = hole_replays(st.db)[(1, 1)]["players"][0]["shots"]
+    assert (shots[0]["to"], shots[0].get("penalty")) == ([6.0, 150.0], None)
+
+
 def test_a_replay_counts_the_gimme_it_cant_draw_in_the_score(tmp_path):
     path, st = _season(tmp_path)
     st.db.execute("UPDATE shots SET outcome = 'conceded' WHERE shot_number = 3")
