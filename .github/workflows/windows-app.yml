@@ -33,7 +33,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: tools\windows\build.ps1 -Version $env:VERSION
-      # Signing (SignPath) goes here, before the hash is taken again.
       - name: Install, check and uninstall
         shell: pwsh
         run: |
@@ -61,5 +60,5 @@ jobs:
         shell: pwsh
         run: |
           $hash = (Get-Content "dist\Shotcast-Setup-$env:VERSION.exe.sha256").Split(" ")[0]
-          $notes = "Download **Shotcast-Setup-$env:VERSION.exe** and run it (see the [README](https://github.com/jjmerri/gspro-shotcast#the-windows-app-easiest)).`n`nSHA-256: ``$hash```n`n[Code signing policy](https://github.com/jjmerri/gspro-shotcast#code-signing-policy) · [Privacy policy](https://github.com/jjmerri/gspro-shotcast/blob/main/PRIVACY.md)"
+          $notes = "Download **Shotcast-Setup-$env:VERSION.exe** and run it (see the [README](https://github.com/jjmerri/gspro-shotcast#the-windows-app-easiest)).`n`nSHA-256: ``$hash```n`n[Privacy policy](https://github.com/jjmerri/gspro-shotcast/blob/main/PRIVACY.md)"
           gh release create "${{ github.ref_name }}" dist/* --title "Shotcast ${{ github.ref_name }}" --notes $notes --generate-notes

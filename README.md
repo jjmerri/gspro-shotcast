@@ -154,8 +154,9 @@ beyond that is supported on paper but not yet run live:
    [release](https://github.com/jjmerri/gspro-shotcast/releases/latest) and run it. It installs
    for your Windows user only (no administrator prompt) and brings its own Python. The installer
    isn't code-signed yet, so Windows SmartScreen may say "Windows protected your PC": choose
-   **More info → Run anyway**. Each release lists the installer's SHA-256 next to it (see the
-   [code signing policy](#code-signing-policy)). The installer finds GSPro (usually `C:\GSProV1`)
+   **More info → Run anyway**. Releases are built from this repository by GitHub Actions
+   ([windows-app.yml](.github/workflows/windows-app.yml)), and each lists the installer's
+   SHA-256 next to it. The installer finds GSPro (usually `C:\GSProV1`)
    and asks for its folder if it can't.
 2. Shotcast starts in the **tray** (the golf ball by the clock; it may be under the ^ arrow) and,
    unless you untick it, every time Windows starts. It records every shot and round without any
@@ -222,23 +223,6 @@ No league file is needed; players are recorded and called by their GSPro names. 
 split league and practice rounds and get standings, net scores and storylines
 ([Leagues](docs/leagues.md)). To install by hand instead, see
 [Setup](docs/setup.md#setup-fresh-machine).
-
-## Code signing policy
-
-Windows releases are built from this repository's source by GitHub Actions
-([windows-app.yml](.github/workflows/windows-app.yml)); nothing is built on a personal machine.
-
-Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
-[SignPath Foundation](https://signpath.org) (applied for; until it's granted, releases are
-unsigned and each lists its installer's SHA-256).
-
-- Committers and reviewers: [jjmerri](https://github.com/jjmerri) (changes from anyone else come
-  as pull requests and are reviewed before merging)
-- Approvers (each signed release): [jjmerri](https://github.com/jjmerri)
-
-Privacy: this program will not transfer any information to other networked systems unless
-specifically requested by the user or the person installing or operating it. See the
-[privacy policy](PRIVACY.md) for exactly what each optional feature sends, and where.
 
 ## Documentation
 

@@ -39,7 +39,6 @@ SolidCompression=yes
 WizardStyle=modern
 CloseApplications=force
 RestartApplications=no
-; Code signing goes here once there's a certificate (SignPath): SignTool=... and SignedUninstaller=yes.
 
 [Tasks]
 Name: "startup"; Description: "Start Shotcast when Windows starts (recommended: it records every round)"
