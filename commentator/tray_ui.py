@@ -435,7 +435,7 @@ class SettingsWindow:
         if not_found:
             text = "Couldn't find GSPro on this PC: browse to its folder."
         elif not folder:
-            text = "Not set: Shotcast reads shots from GSPro's own log instead (no club data)."
+            text = "Choose GSPro's folder (Find GSPro or Browse)."
         elif gspro_dir.looks_like_gspro(folder):
             text = "\u2714 GSPro is in this folder."
         else:
@@ -494,7 +494,9 @@ class SettingsWindow:
             else:
                 config_changes[k] = v.strip() or (None if config_value(self.cfg, k) is None else "")
         gspro = self.gspro.get().strip()
-        return config_changes, env_changes, gspro if gspro != self.gspro_orig and gspro else None
+        if not gspro and self.gspro_orig:
+            raise ValueError("The GSPro folder is empty: choose GSPro's folder (or Cancel to keep it as it was).")
+        return config_changes, env_changes, gspro if gspro and not gspro_dir.same(gspro, self.gspro_orig) else None
 
     def save(self) -> None:
         from tkinter import messagebox

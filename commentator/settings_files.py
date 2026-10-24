@@ -181,13 +181,21 @@ def set_commentary(config_text: str, enabled: bool) -> str:
     return set_yaml(config_text, ("commentary", "enabled"), bool(enabled))
 
 
+def _env_line(key: str) -> re.Pattern:
+    # As commentator/dotenv.py reads it: spaces around the key, a byte-order mark on the first line.
+    return re.compile(rf"^\ufeff?[ \t]*{re.escape(key)}[ \t]*=(.*)$", re.M)
+
+
 def env_value(env_text: str, key: str) -> str:
-    m = re.search(rf"^{key}=(.*)$", env_text, re.M)
-    return m.group(1).strip() if m else ""
+    """The key's value as the booth sees it (the last line for it wins, quotes stripped)."""
+    found = _env_line(key).findall(env_text)
+    return found[-1].strip().strip('"').strip("'") if found else ""
 
 
 def set_env(env_text: str, key: str, value: str) -> str:
     value = value.replace("\r", "").replace("\n", "")
-    if re.search(rf"^{key}=.*$", env_text, re.M):
-        return re.sub(rf"^{key}=.*$", lambda _: f"{key}={value}", env_text, count=1, flags=re.M)
+    pattern = _env_line(key)
+    if pattern.search(env_text):
+        bom = "\ufeff" if env_text.startswith("\ufeff") else ""
+        return bom + pattern.sub(lambda _: f"{key}={value}", env_text[len(bom):])
     return env_text.rstrip("\n") + f"\n{key}={value}\n"

@@ -72,3 +72,12 @@ def test_an_edit_that_would_touch_anything_else_is_refused():
         set_yaml(text, ("publish", "enabled"), True)
     bom = "\ufeffpublish:\n  bucket: b\n"
     assert set_yaml(bom, ("publish", "bucket"), "c") == "\ufeffpublish:\n  bucket: c\n"
+
+
+def test_env_values_read_as_the_booth_reads_them():
+    from commentator.settings_files import env_value, set_env
+
+    text = '\ufeffOPENAI_API_KEY = "sk-1"\nNTFY_TOPIC=a\nNTFY_TOPIC=b\n'
+    assert env_value(text, "OPENAI_API_KEY") == "sk-1"
+    assert env_value(text, "NTFY_TOPIC") == "b"
+    assert set_env(text, "OPENAI_API_KEY", "sk-2") == "\ufeffOPENAI_API_KEY=sk-2\nNTFY_TOPIC=a\nNTFY_TOPIC=b\n"
