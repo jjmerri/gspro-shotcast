@@ -516,7 +516,17 @@ class SettingsWindow:
         write_atomic(config_path, config_text)
         write_atomic(env_path, env_text)
         for key, value in env_changes.items():
-            os.environ[key] = value
+            if value:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+        if any(k.startswith("AWS_") for k in env_changes):
+            try:
+                import boto3
+
+                boto3.DEFAULT_SESSION = None   # Back up now's S3 upload picks up the new keys
+            except ImportError:
+                pass
         if gspro:
             from .tray import remember_gspro_dir
 
