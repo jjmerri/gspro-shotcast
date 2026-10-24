@@ -260,6 +260,10 @@ PRESHOT_IDLE_WAIT_SECONDS = 5.0
 AFTER_ROUND_QUIET_SECONDS = 120.0
 # How often a hole's where-to-miss read (when there is one) is offered to the pre-shot line.
 STRATEGY_CHANCE = 0.6
+# An empty lie read at setup is retried this many times, this far apart (only the lie box and the
+# name cell, so each is quick), before the pre-shot look goes ahead without it.
+SETUP_LIE_RETRIES = 3
+SETUP_LIE_RETRY_SECONDS = 0.25
 
 # The words a flight line may use for the hazard its side is allowed to name.
 NAMED_WORDS = {"water": ("water", "lake", "pond"), "out of bounds": ("out of bounds", "ob"),
@@ -942,9 +946,10 @@ class Engine:
         rr = self.round
         late = (rr is not None and not rr.ended and rr.is_league and 1 <= rr.holes - rr.seq + 1 <= 4)
         join = self._should_join()
-        rest = ["lie", "slope"] + (["others"] if hud.shot_number == 1 or late or join else [])
+        rest = ["lie", "player_name", "slope"] + (["others"] if hud.shot_number == 1 or late or join else [])
         extra = await self.screen.read_hud_async(rest)
-        hud.lie = extra.lie
+        hud.lie = extra.lie or (await self._reread_setup_lie(extra.name_sig)
+                                 if hud.shot_number != 1 and self.cfg.screen.ocr else None)
         if key := _setup_key(hud):
             self._setup_yards[key[:2]] = "yard" in key[2]
             while len(self._setup_yards) > 8:
@@ -978,6 +983,21 @@ class Engine:
                  hud.slope_side_degrees, None if hud.elevation_yards is None else round(hud.elevation_yards, 1),
                  f"{self.screen.last_read_seconds:.2f} (capture {self.screen.last_capture_seconds:.2f})")
         await self._events.put(PreShotEvent(hud=hud, image=image, model_task=model_task))
+
+    async def _reread_setup_lie(self, name_sig: tuple | None) -> str | None:
+        """The lie box read empty at setup (a fade, or something over it): read it again a few times
+        while the player is still over the ball. Stops if the name cell shows another player."""
+        for attempt in range(1, SETUP_LIE_RETRIES + 1):
+            await asyncio.sleep(SETUP_LIE_RETRY_SECONDS)
+            again = await self.screen.read_hud_async(["lie", "player_name"])
+            if name_sig_changed(name_sig, again.name_sig):
+                log.info("Setup lie unread; the player box changed before a re-read")
+                return None
+            if again.lie:
+                log.info("Setup lie unread; re-read %s on attempt %s", again.lie, attempt)
+                return again.lie
+        log.info("Setup lie unread after %s re-reads", SETUP_LIE_RETRIES)
+        return None
 
     def _after_round(self, hud: Hud) -> bool:
         """The HUD still showing the finished round's last green: after the sign-off, GSPro's stale HUD
@@ -2854,6 +2874,8 @@ class Engine:
         on_tee = hud.shot_number == 1 or (hud.lie or "").lower() == "tee"
         if idx is not None and not on_tee and not hud.lie and g.shot_number(idx) > 1 and (lie := g.lie_of(idx)):
             hud.lie = lie
+            if key := _setup_key(hud):   # for the impact too, whose own read may miss it again
+                self._setup_lies.setdefault(key, lie)
         is_putt = (hud.lie or "").lower() == "green"
         if self.round and not self.round.ended:
             hc = self._hc

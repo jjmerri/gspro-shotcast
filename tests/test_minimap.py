@@ -799,3 +799,13 @@ def test_locate_takes_a_hidden_ball_from_the_tee_view_only_when_the_pin_is_where
     x, y = 0.495 * img.width, 0.755 * img.height
     ImageDraw.Draw(img).ellipse((x - 12, y - 12, x + 12, y + 12), fill=(90, 90, 90))
     assert locate(img) is None
+
+
+async def test_a_lie_the_gspro_log_fills_in_is_kept_for_the_impact(tmp_path, monkeypatch):
+    engine, _ = _engine(tmp_path)
+    monkeypatch.setattr(engine, "_gspro_idx", lambda player: 0)
+    monkeypatch.setattr(engine.gspro, "shot_number", lambda idx: 2)
+    monkeypatch.setattr(engine.gspro, "lie_of", lambda idx: "fairway")
+    hud = Hud(player_text="Josh 2nd (E) Shot 2 126 YDS", shot_number=2, to_pin="126 yards", lie=None)
+    await engine._preshot_model(hud, "Josh", [], None)
+    assert hud.lie == "fairway" and engine._setup_lies == {("Josh", 2, "126 yards"): "fairway"}

@@ -2500,6 +2500,34 @@ async def test_a_tee_setup_keeps_the_holes_minimap_even_off_air(tmp_path):
     assert (row["course"], row["hole"]) == ("Test Links", 7) and row["ball_x"] and row["pin_x"]
 
 
+async def test_an_empty_setup_lie_is_read_again_unless_the_player_changes(tmp_path, monkeypatch):
+    import commentator.engine as eng
+
+    monkeypatch.setattr(eng, "SETUP_LIE_RETRY_SECONDS", 0)
+    engine, screen = _setup_engine(tmp_path)
+    lies, sigs = iter([None, None, "fairway"]), iter([(0,) * 100] * 3)
+    real = screen.read_hud_async
+
+    async def flaky(parts):
+        hud = await real(parts)
+        hud.lie, hud.name_sig = next(lies), next(sigs)
+        return hud
+    screen.read_hud_async = flaky
+    hud = Hud(player_text="Josh 2nd (E) Shot 2 126 YDS", shot_number=2, score_to_par="E", to_pin="126 yards")
+    await engine._emit_setup(hud)
+    assert hud.lie == "fairway" and screen.reads[1:] == [["lie", "player_name"]] * 2
+    assert engine._setup_lies == {("Josh", 2, "126 yards"): "fairway"}
+
+    # Another player's name cell on the re-read: their lie isn't this shot's.
+    engine, screen = _setup_engine(tmp_path / "b")
+    lies, sigs = iter([None, "rough"]), iter([(0,) * 100, (1,) * 100])
+    real = screen.read_hud_async
+    screen.read_hud_async = flaky
+    hud = Hud(player_text="Josh 2nd (E) Shot 2 126 YDS", shot_number=2, score_to_par="E", to_pin="126 yards")
+    await engine._emit_setup(hud)
+    assert hud.lie is None and engine._setup_lies == {}
+
+
 async def test_emit_setup_reads_the_hud_before_the_model_and_skips_others_off_the_tee(tmp_path):
     engine, screen = _setup_engine(tmp_path)
     hud = Hud(player_text="Toby 2nd (+1) Shot 2 150 YDS", shot_number=2, score_to_par="+1",
@@ -2508,7 +2536,7 @@ async def test_emit_setup_reads_the_hud_before_the_model_and_skips_others_off_th
 
     # Lie and slope are read in one pass BEFORE the model call, so the facts include them; off the tee
     # the heavier "others" region is skipped entirely.
-    assert screen.reads == [["lie", "slope"]]
+    assert screen.reads == [["lie", "player_name", "slope"]]
     assert hud.lie == "rough" and hud.slope_side == "left"
     assert engine._setup_lies == {("Toby", 2, "150 yards"): "rough"}   # for the impact read to trust
 
@@ -2721,7 +2749,7 @@ async def test_emit_setup_reads_others_and_opens_the_round_on_the_tee(tmp_path):
     hud = Hud(player_text="Toby E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards")
     await engine._emit_setup(hud)
 
-    assert screen.reads == [["lie", "slope", "others"]]
+    assert screen.reads == [["lie", "player_name", "slope", "others"]]
     assert [o.name for o in hud.others] == ["Wes"]
     kinds = []
     while not engine._events.empty():
