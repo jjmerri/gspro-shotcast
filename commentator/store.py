@@ -510,6 +510,13 @@ class Store:
             self.db.execute("UPDATE shots SET mulligan = 1 WHERE id = ?", (shot_id,))
             self.db.commit()
 
+    def set_shot_position(self, shot_id: int | None, start: tuple) -> None:
+        """Where GSPro's log had the ball for this shot, once its score line arrived after it was recorded."""
+        if shot_id is not None:
+            self.db.execute("UPDATE shots SET start_x = ?, start_y = ?, start_z = ? WHERE id = ? AND start_x IS NULL",
+                            (*start, shot_id))
+            self.db.commit()
+
     def set_shot_start(self, shot_id: int | None, shot_number: int | None, lie_before: str | None) -> None:
         """A re-hit after a mulligan is the same stroke from the same spot as the one it replaced."""
         if shot_id is not None:

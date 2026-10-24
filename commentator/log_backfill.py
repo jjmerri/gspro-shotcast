@@ -36,8 +36,8 @@ class Fire:
 @dataclass
 class LogRead:
     fires: list[Fire] = field(default_factory=list)
-    # (course, hole list, index of the fires logged before it)
-    layouts: list[tuple[str | None, list[dict], int]] = field(default_factory=list)
+    # (course, hole list, index of the fires logged before it, the course load it was logged in)
+    layouts: list[tuple[str | None, list[dict], int, int]] = field(default_factory=list)
 
 
 def read_log(text: str) -> LogRead:
@@ -57,7 +57,7 @@ def read_log(text: str) -> LogRead:
             f.to_pin_yd = info["to_pin"] * M_TO_YD if info.get("to_pin") is not None else None
             pending = None
         elif ev.kind == "layout" and ev.holes:
-            out.layouts.append((st.course_display, ev.holes, len(out.fires)))
+            out.layouts.append((st.course_display, ev.holes, len(out.fires), segment))
         elif ev.kind in ("course", "end_round", "range"):
             pending = None
             segment += 1
@@ -156,10 +156,12 @@ def _backfill(db_path: str, logs: list[str], fix_starts: bool = False) -> dict[s
             if f.aim and r["aim_map_x"] is None:
                 stats["aims"] += 1
                 db.execute("UPDATE shots SET aim_map_x = ?, aim_map_y = ? WHERE id = ?", (*f.aim, r["id"]))
-        for course, holes, before in got.layouts:
-            # The round's session is the one its last matched shot was stored in; a layout from a log
-            # with no matching shots is kept without one (its tees still place tee shots).
-            last = next((row_of[i] for i in range(before - 1, -1, -1) if i in row_of), None)
+        for course, holes, before, seg in got.layouts:
+            # The round's session is the one its last matched shot was stored in, within the same course
+            # load (an earlier round's shots aren't this one's); a layout from a round with no matching
+            # shots is kept without one (its tees still place tee shots).
+            last = next((row_of[i] for i in range(before - 1, -1, -1)
+                         if i in row_of and got.fires[i].segment == seg), None)
             if last is not None and (last["course"] or "").casefold() != (course or "").casefold():
                 last = None
             stats["layouts"] += store.record_hole_layout(

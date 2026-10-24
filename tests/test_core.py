@@ -3097,6 +3097,25 @@ def _row(e, r, fire, n, lie, hole=11, seq=12):
     return sid, rec
 
 
+def test_a_putt_recorded_before_its_score_line_gets_its_start_once_the_line_arrives(tmp_path):
+    from commentator.sources.gspro_log import LogEvent
+    e = _mini_engine(tmp_path)
+    r = _log_round(e)
+    g = e.gspro
+    for ev in [LogEvent("shot_fired"), LogEvent("state", player=0, hole=11, score=1, strokes=1),
+               LogEvent("position", pos=(2.0, 1.0, 295.0)), LogEvent("shot_fired")]:
+        g.apply(ev)
+    sid, _ = _row(e, r, g.fires, 2, "green")   # the putt, recorded while the ball still rolls
+    e._starts_due.add(g.fires)
+    e._apply_log_corrections()
+    assert e.store.db.execute("SELECT start_x FROM shots WHERE id = ?", (sid,)).fetchone()[0] is None
+    g.apply(LogEvent("state", player=0, hole=11, score=2, strokes=1))
+    e._apply_log_corrections()
+    assert tuple(e.store.db.execute("SELECT start_x, start_y, start_z FROM shots WHERE id = ?", (sid,)).fetchone()) \
+        == (2.0, 1.0, 295.0)
+    assert not e._starts_due
+
+
 def test_a_mulligan_is_flagged_and_its_re_hit_takes_its_place(tmp_path):
     e = _mini_engine(tmp_path)
     r = _log_round(e)

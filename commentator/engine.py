@@ -557,6 +557,9 @@ class Engine:
         # hole), so a stroke GSPro later takes back (a mulligan) can be found and flagged.
         self._fire_rows: dict[int, tuple] = {}
         self._mulligans_done: set[int] = set()
+        # Recorded shots still waiting on their start position: GSPro attaches it only at the shooter's
+        # score line, logged once the ball stops, and a putt is recorded before that.
+        self._starts_due: set[int] = set()
         self._pickups_seen = 0   # GSPro pick-ups (score capped at the maximum) already applied
         self._pick_gimmes_seen = 0   # scramble picks inside the gimme circle already credited
         self._conceded_ids: set[int] = set()   # shots whose conceded putt row is stored
@@ -3598,6 +3601,8 @@ class Engine:
             self._fire_rows[fire] = (shot_id, rec, idx, impact_snap[1].get(idx) if idx is not None else None)
             for old in [f for f in self._fire_rows if f <= fire - 60]:
                 del self._fire_rows[old]
+            if not self.gspro.fire_info(fire).get("start"):
+                self._starts_due.add(fire)
             self._apply_log_corrections()   # a mulligan logged before this re-hit was recorded
         replay_facts = self._replay_facts(player, rec)
         must = "mulligan" if replay_facts else None
@@ -4270,6 +4275,12 @@ class Engine:
         # A score line that merely repeats is a mulligan only when each player has their own ball and
         # score; GSPro's shared-ball formats repeat it for other reasons. Best ball is still one ball each.
         team = r is not None and r.format in ("scramble", "alternate")
+        for fire in sorted(self._starts_due):
+            if fire not in self._fire_rows:
+                self._starts_due.discard(fire)
+            elif start := g.fire_info(fire).get("start"):
+                self._starts_due.discard(fire)
+                self.store.set_shot_position(self._fire_rows[fire][0], start)
         for fire, kind in list(g.mulligan_fires.items()):
             if fire in self._mulligans_done or fire not in self._fire_rows:
                 continue

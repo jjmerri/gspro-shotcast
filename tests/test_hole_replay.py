@@ -75,6 +75,28 @@ def test_fixing_starts_corrects_positions_taken_from_another_players_ball(tmp_pa
     assert hole_replays(st.db)[(1, 1)]["players"][0]["shots"][0]["from"] == [0.0, 0.0]
 
 
+def test_a_replay_keeps_its_own_rounds_tee_when_a_later_round_played_other_tees(tmp_path):
+    path, st = _season(tmp_path)
+    log = tmp_path / "output_log.txt"
+    log.write_text(_hole_log())
+    backfill(path, [str(log)])
+    st.record_hole_layout("Test Links", [{"par": 4, "played": True, "tee": (50.0, 2.0, 50.0),
+                                          "pin": (0.0, 1.0, 300.0)}], session_id=st.session_id + 1, ts=9e9)
+    assert hole_replays(st.db)[(1, 1)]["tee"] == [0.0, 0.0]
+
+
+def test_backfill_keeps_a_later_unrecorded_rounds_layout_off_an_earlier_round(tmp_path):
+    path, st = _season(tmp_path)
+    log = tmp_path / "output_log.txt"
+    # The recorded round is quit before its layout is logged; a round never recorded follows, to its end.
+    other = LAYOUT.replace('"z":300.0', '"z":350.0')
+    log.write_text(_hole_log().replace("Round Is Complete\n" + LAYOUT, "End Round Button Click\n")
+                   + "Selected Course: test_gsp\nLoading course Test Links\n" + SHOT + _state(0, 1, 0)
+                   + "Round Is Complete\n" + other)
+    backfill(path, [str(log)])
+    assert [tuple(r) for r in st.db.execute("SELECT session_id, pin_z FROM hole_layouts")] == [(None, 350.0)]
+
+
 def test_backfill_ignores_a_log_of_rounds_the_season_never_recorded(tmp_path):
     path, st = _season(tmp_path)
     log = tmp_path / "output_log.txt"

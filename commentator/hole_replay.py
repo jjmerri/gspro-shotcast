@@ -94,13 +94,13 @@ def _layouts(db: sqlite3.Connection) -> list[sqlite3.Row]:
 
 def _layout_for(layouts: list[sqlite3.Row], course: str, hole: int, session: int, first_ts: float,
                 last_ts: float) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
-    """(this round's layout, for the pin; any layout of the hole, for the tee), preferring the latest."""
+    """(this round's layout, for the pin; the layout for the tee: this round's, else the hole's latest)."""
     key = (course or "").casefold()
     same = [lo for lo in layouts if (lo["course"] or "").casefold() == key and lo["hole"] == hole]
     this_round = [lo for lo in same if lo["session_id"] == session and lo["ts"] is not None
                   and last_ts - 60 <= lo["ts"] <= first_ts + ROUND_HOURS]
-    with_tee = [lo for lo in same if lo["tee_x"] is not None]
-    return (this_round[0] if this_round else None), (with_tee[-1] if with_tee else None)
+    with_tee = [lo for lo in this_round[:1] + same[::-1] if lo["tee_x"] is not None]
+    return (this_round[0] if this_round else None), (with_tee[0] if with_tee else None)
 
 
 def _images(db: sqlite3.Connection) -> list[sqlite3.Row]:
