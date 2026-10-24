@@ -181,7 +181,12 @@ toward per-hole and per-shot stats (birdies, GIR, scrambling); in round totals (
 average and best net), only those with nine or more holes finished count. A quit that far in also
 earns a sign-off, over the holes actually played; a shorter one ends without a closer. Net scores
 are compared per nine holes, so a 9 and an 18 line up; the commentary scales them to the round
-being played.
+being played. A game shorter than nine holes (a one-hole 19th, a 3-hole round) is left out of round
+totals and isn't measured against them, since per nine a birdie on one hole would read as -9. A
+round's course is stored under the name GSPro gives it (the scorecard reads it in capitals).
+
+Every generated line over its word cap is cut to its last full sentence, or dropped if it has
+none; the booth log says which (`Cut a N-word line` / `Dropped a N-word line`), with the full text.
 
 The booth uses it too: season bests and streaks in the commentary, the per-lie carry factors
 (rebuilt at startup), and `python -m commentator stats` (a season leaderboard). Some starting

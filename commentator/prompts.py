@@ -680,7 +680,11 @@ def parse_lines(text: str, speakers: list[str], max_words: int, names: list[str]
             head = " ".join(words[:max_words])
             end = max(head.rfind(". "), head.rfind("! "), head.rfind("? "), *(i for i in [len(head) - 1] if head[-1] in ".!?"))
             if end <= 0:
+                log.warning("Dropped a %d-word line over the %d-word cap (no sentence end within it): %r",
+                            len(words), max_words, body)
                 continue
+            log.warning("Cut a %d-word line over the %d-word cap to %d words: %r", len(words), max_words,
+                        len(body[: end + 1].split()), body)
             body = head[: end + 1]
         speaker = item.get("speaker") if item.get("speaker") in speakers else speakers[0]
         lines.append(Line(speaker=speaker, text=body))

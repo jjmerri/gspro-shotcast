@@ -248,6 +248,14 @@ def test_parse_lines_clamps_and_validates():
     assert parse_lines("not json", ["pbp"], 10) == []
 
 
+def test_parse_lines_logs_the_lines_it_cuts_or_drops(caplog):
+    raw = json.dumps({"lines": [{"speaker": "pbp", "text": "Short one first. " + "word " * 20},
+                                {"speaker": "pbp", "text": "word " * 20}]})
+    with caplog.at_level("WARNING", logger="commentator.prompts"):
+        parse_lines(raw, ["pbp"], max_words=10)
+    assert ["Cut a 23-word" in caplog.messages[0], "Dropped a 20-word" in caplog.messages[1]] == [True, True]
+
+
 def test_parse_lines_strips_a_leaked_speaker_label():
     # A model sometimes echoes its own role key or display name into the text; it must not be spoken.
     raw = json.dumps({"lines": [
@@ -2211,7 +2219,7 @@ def test_team_broadcast_and_hole_stats(tmp_path):
     def put(scores, pars, gir, scr, sand, net):
         st = SideStats(holes_scored=len(scores), gross=sum(scores.values()), par=sum(pars.values()),
                        scores=scores, gir=gir, scramble=scr, sand=sand)
-        s.record_round(course="Pebble", fmt="best_ball", side="Aces", team="Aces", holes=len(scores),
+        s.record_round(course="Pebble", fmt="best_ball", side="Aces", team="Aces", holes=9,
                        stats=st, strokes=0, net_to_par=net, hole_number=lambda k: k, hole_pars=pars)
 
     put({1: 4, 2: 4, 3: 5, 4: 3, 5: 4}, {1: 4, 2: 5, 3: 4, 4: 4, 5: 4}, (3, 5), (2, 2), (1, 1), -1)

@@ -937,6 +937,8 @@ class Round:
         if s.longest_drive:
             facts.append(f"{possessive(who)} longest drive went {s.longest_drive:.0f} yards.")
         scale = self.holes / 9   # season numbers are per nine holes; put them on this round's length
+        if self.holes < COUNTS_AS_ROUND_HOLES:
+            return facts   # a short game (a one-hole 19th) isn't a round to measure against the season
         if season and season.get("net_rounds") and net is not None and self.is_league:
             avg, best = season.get("avg_net_to_par"), season.get("best_net_to_par")
             if best is not None and net < best * scale:

@@ -329,7 +329,7 @@ def courses(db: sqlite3.Connection, context: str | None = None, player: str | No
         for h in played:
             e = c["holes"].setdefault(h, {"hole": h, "par": pars[h], "scores": []})
             e["scores"].append(scores[h])
-        if len(played) >= 9 or r["complete"]:
+        if len(played) >= 9:   # a round of a nine or more (a one-hole 19th's birdie isn't a -9 nine)
             c["rounds"] += 1
             to_par = sum(scores[h] - pars[h] for h in played)
             # A round quit part-way through is ranked by the nine it finished; prorating the odd

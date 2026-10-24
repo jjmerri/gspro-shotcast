@@ -174,7 +174,10 @@ CREATE INDEX IF NOT EXISTS shots_lie ON shots(lie_before);
 # A round row counts toward the season's round totals (rounds played, average/best net) when it was
 # finished, or quit early after at least a full nine. Older rows have no holes_played: use holes.
 COUNTS_AS_ROUND_HOLES = 9   # a quit this far in counts as a round, and earns a sign-off
-_COUNTS_AS_ROUND = f"(complete = 1 OR COALESCE(holes_played, holes) >= {COUNTS_AS_ROUND_HOLES})"
+# A round of nine or more holes, finished or quit after a full nine. A shorter game (a one-hole 19th)
+# is left out: scored per nine, a birdie on its one hole would read as a -9 round.
+_COUNTS_AS_ROUND = (f"((complete = 1 AND holes >= {COUNTS_AS_ROUND_HOLES})"
+                    f" OR COALESCE(holes_played, holes) >= {COUNTS_AS_ROUND_HOLES})")
 # Net to par per nine holes, so 9- and 18-hole rounds (and a nine inside an abandoned 18) compare.
 # A round quit part-way through stores the nine it actually finished (nine_net_to_par), because
 # prorating eleven holes onto a nine invents a score nobody shot. Older rows have no nine column.
@@ -292,7 +295,24 @@ class Store:
         for col, decl in pr_added.items():
             if col not in have_pr:
                 self.db.execute(f"ALTER TABLE player_rounds ADD COLUMN {col} {decl}")
+        # A round's course read off the scorecard was stored in capitals: file it under the shots' name.
+        for table in ("rounds", "player_rounds"):
+            for (course,) in self.db.execute(f"SELECT DISTINCT course FROM {table} WHERE course IS NOT NULL").fetchall():
+                if (name := self.course_name(course)) != course:
+                    self.db.execute(f"UPDATE {table} SET course = ? WHERE course = ?", (name, course))
         self.db.commit()
+
+    def course_name(self, course: str | None) -> str | None:
+        """The course as the season already names it, ignoring case: GSPro's own name off its shots
+        (the scorecard and setup screen read it in capitals), else a round's that isn't in capitals."""
+        if not course:
+            return course
+        for table in ("shots", "rounds"):
+            row = self.db.execute(f"SELECT course FROM {table} WHERE course = ? COLLATE NOCASE AND course != upper(course)"
+                                  " ORDER BY id DESC LIMIT 1", (course,)).fetchone()
+            if row:
+                return row[0]
+        return course
 
     def _backfill_club_data(self) -> None:
         """Fill CLUB_COLS on older rows from the Open Connect message each one kept in `raw`."""
@@ -703,7 +723,7 @@ class Store:
             return []
         out: list[int] = []
         for row in self.db.execute(
-                "SELECT scores FROM rounds WHERE course = ? AND scores IS NOT NULL" + _ctx_sql(context), (course,)):
+                "SELECT scores FROM rounds WHERE course = ? COLLATE NOCASE AND scores IS NOT NULL" + _ctx_sql(context), (course,)):
             try:
                 scores = json.loads(row["scores"])
             except (TypeError, ValueError):
@@ -950,7 +970,7 @@ class Store:
                    sand_tries, putts, putt_holes, penalties, longest_drive, scores, hole_pars, source, is_league,
                    complete, holes_played, nine_to_par, nine_net_to_par)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (self.session_id, time.time(), time.strftime("%Y-%m-%d"), course, fmt, side, team, holes,
+            (self.session_id, time.time(), time.strftime("%Y-%m-%d"), self.course_name(course), fmt, side, team, holes,
              stats.gross if stats.holes_scored else None, stats.par or None, strokes, net_to_par,
              *stats.fir, *stats.gir, *stats.scramble, *stats.sand,
              stats.putts if stats.putt_holes else None, stats.putt_holes, stats.penalties, stats.longest_drive,
@@ -988,7 +1008,7 @@ class Store:
                    gir_hit, gir_tries, scramble_hit, scramble_tries, sand_hit, sand_tries,
                    putts, putt_holes, scores, hole_pars, is_league, complete, holes_played, nine_to_par)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (self.session_id, time.time(), player, course, fmt,
+            (self.session_id, time.time(), player, self.course_name(course), fmt,
              *stats.fir, *stats.gir, *stats.scramble, *stats.sand,
              stats.putts if stats.putt_holes else None, stats.putt_holes, scores_json, pars_json, int(is_league),
              int(complete), stats.holes_scored, None if complete else nine_to_par),
@@ -1106,7 +1126,7 @@ class Store:
             return {"rounds": 0}
         r = self.db.execute(
             f"""SELECT COUNT(*) AS rounds, AVG({_NET_PER_NINE}) AS avg_net_to_par, MIN({_NET_PER_NINE}) AS best_net_to_par
-               FROM rounds WHERE side = ? AND course = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND {_NET_PER_NINE} IS NOT NULL
+               FROM rounds WHERE side = ? AND course = ? COLLATE NOCASE AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND {_NET_PER_NINE} IS NOT NULL
                      AND {_COUNTS_AS_ROUND}"""
             + _ctx_sql(context),
             (side, course, self.session_id),

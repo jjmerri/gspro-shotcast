@@ -379,8 +379,8 @@ def test_closing_facts_judge_net_and_team_best_ball():
     assert "Mike got up and down 1 of 2 times after missing the green." in facts
     assert "one three-putt and one one-putt" in facts and "1 penalty stroke" in facts
     assert "1 double bogey (hole 2)" in facts
-    # Season averages are per nine; a 3-hole round compares against a third of it.
-    assert "Mike's average in 2 earlier league rounds (scaled to 3 holes): net 1 over par." in facts
+    # A game shorter than nine holes isn't measured against the season's per-nine rounds.
+    assert "earlier league rounds" not in facts and "best net league round" not in facts
     # Best ball net: strokes fall on the hardest holes; hole 3 is index 1.
     assert "Team Aces (best ball): net" in facts
 
@@ -2054,6 +2054,51 @@ def test_a_finished_round_keeps_the_prorated_rate_over_its_own_nine(tmp_path):
                    complete=True, first_nine=(0, 0))
     s.session_id = 2
     assert s.season_rounds("Mike")["best_net_to_par"] == 2
+
+
+def test_a_one_hole_game_is_not_a_round_scored_per_nine(tmp_path):
+    from commentator import season_analytics, stats_web
+    from commentator.round import SideStats
+    from commentator.store import Store
+
+    s = Store(str(tmp_path / "s.db"))
+    eighteen = SideStats(holes_scored=18, gross=74, par=72, scores={h: 5 if h < 3 else 4 for h in range(1, 19)})
+    birdie = SideStats(holes_scored=1, gross=2, par=3, scores={1: 2})
+    for st, holes, pars in ((eighteen, 18, {h: 4 for h in range(1, 19)}), (birdie, 1, {1: 3})):
+        s.record_round(course="Paynes Valley", fmt="stroke", side="Corey", team=None, holes=holes, stats=st,
+                       strokes=0, net_to_par=None, hole_number=lambda k: k, hole_pars=pars, is_league=False)
+        s.record_player_round(player="Corey", course="Paynes Valley", fmt="stroke", stats=st,
+                              hole_number=lambda k: k, hole_pars=pars, is_league=False)
+    s.session_id += 1
+    s.db.execute("INSERT INTO sessions (id, started_at, date) VALUES (?, 0, '2099-01-01')", (s.session_id,))
+    # A birdie on a one-hole 19th, scored per nine, would be a -9 best.
+    season = s.season_rounds("Corey")
+    assert (season["rounds"], season["best_gross_to_par"]) == (1, 1)
+    corey = next(p for p in stats_web.players(s.db) if p["name"] == "Corey")
+    assert (corey["rounds"], corey["best_to_par_9"]) == (1, 1)
+    assert season_analytics.courses(s.db)[0]["best"]["to_par_9"] == 1
+
+
+def test_a_round_read_off_the_scorecard_in_capitals_is_filed_under_the_courses_name(tmp_path):
+    from commentator.round import SideStats
+    from commentator.store import Store
+
+    path = str(tmp_path / "s.db")
+    s = Store(path)
+    s.db.execute("INSERT INTO shots (session_id, ts, course, is_putt, raw) VALUES (?, 0, 'Paynes Valley 19th', 0, '{}')",
+                 (s.session_id,))
+    st = SideStats(holes_scored=1, gross=3, par=3, scores={1: 3})
+    s.record_round(course="PAYNES VALLEY 19TH", fmt="stroke", side="Josh", team=None, holes=1, stats=st,
+                   strokes=0, net_to_par=None, hole_number=lambda k: k)
+    s.record_player_round(player="Josh", course="PAYNES VALLEY 19TH", fmt="stroke", stats=st, hole_number=lambda k: k)
+    assert s.db.execute("SELECT course FROM rounds").fetchone()[0] == "Paynes Valley 19th"
+    # One stored in capitals before is renamed when the season is opened.
+    s.db.execute("UPDATE rounds SET course = 'PAYNES VALLEY 19TH'")
+    s.db.execute("UPDATE player_rounds SET course = 'PAYNES VALLEY 19TH'")
+    s.db.commit()
+    again = Store(path, new_session=False)
+    assert {r[0] for r in again.db.execute("SELECT course FROM rounds UNION SELECT course FROM player_rounds")} \
+        == {"Paynes Valley 19th"}
 
 
 def test_a_nine_with_a_net_score_is_counted_as_well_as_averaged(tmp_path):

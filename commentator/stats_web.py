@@ -66,9 +66,10 @@ def _card(scores: dict[int, int], pars: dict[int, int]) -> dict[str, Any]:
     }
 
 
-def _counts(complete, played) -> bool:
-    """As in the booth: a finished round, or a full nine from one quit early."""
-    return bool(complete) or (played or 0) >= 9
+def _counts(played) -> bool:
+    """As in the booth: nine holes or more, finished or quit after a full nine (a player's card has no
+    round length, and a one-hole 19th scored per nine would read as a -9 round)."""
+    return (played or 0) >= 9
 
 
 ROUND_GAP_SECONDS = 30   # a round's sides are stored a moment apart; separate rounds are minutes apart
@@ -175,7 +176,7 @@ def player(db: sqlite3.Connection, name: str, context: str | None = None) -> dic
             if h["par"] in by_par:
                 by_par[h["par"]][0] += d
                 by_par[h["par"]][1] += 1
-        if card["played"] and _counts(r["complete"], r["holes_played"] or card["played"]):
+        if card["played"] and _counts(r["holes_played"] or card["played"]):
             # A round quit part-way through contributes the nine it finished; prorating the odd holes
             # onto a nine would rank it by a score nobody shot. Older rows have no stored nine.
             per_nine = r["nine_to_par"] if "nine_to_par" in r.keys() and r["nine_to_par"] is not None \
