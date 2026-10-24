@@ -33,6 +33,7 @@ SetupIconFile={#BuildDir}\shotcast.ico
 UninstallDisplayIcon={app}\shotcast.ico
 UninstallDisplayName=Shotcast
 LicenseFile=..\..\LICENSE
+InfoBeforeFile=..\..\PRIVACY.md
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -42,6 +43,7 @@ RestartApplications=no
 
 [Tasks]
 Name: "startup"; Description: "Start Shotcast when Windows starts (recommended: it records every round)"
+Name: "updates"; Description: "Check for updates automatically (asks GitHub every few hours; see the privacy policy)"
 Name: "desktopicon"; Description: "Make a desktop shortcut"; Flags: unchecked
 
 [InstallDelete]
@@ -58,6 +60,7 @@ Source: "{#BuildDir}\shotcast.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\config.example.yaml"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\.env.example"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\PRIVACY.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Shotcast"; Filename: "{app}\python\pythonw.exe"; Parameters: "{#TrayArgs}"; WorkingDir: "{app}"; IconFilename: "{app}\shotcast.ico"
@@ -66,6 +69,11 @@ Name: "{autodesktop}\Shotcast"; Filename: "{app}\python\pythonw.exe"; Parameters
 [Registry]
 ; The same value the tray's "Start with Windows" sets; an update keeps whatever the user chose there.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Shotcast"; ValueData: """{app}\python\pythonw.exe"" {#TrayArgs}"; Tasks: startup; Check: not IsUpgrade
+
+; Read by the tray; its menu changes it later, so an update leaves it alone.
+Root: HKCU; Subkey: "Software\Shotcast"; ValueType: dword; ValueName: "CheckForUpdates"; ValueData: "1"; Tasks: updates; Check: not IsUpgrade
+Root: HKCU; Subkey: "Software\Shotcast"; ValueType: dword; ValueName: "CheckForUpdates"; ValueData: "0"; Tasks: not updates; Check: not IsUpgrade
+Root: HKCU; Subkey: "Software\Shotcast"; Flags: uninsdeletekey
 
 [Run]
 Filename: "{app}\python\pythonw.exe"; Parameters: "{#TrayArgs}"; WorkingDir: "{app}"; Description: "Start Shotcast"; Flags: nowait postinstall skipifsilent

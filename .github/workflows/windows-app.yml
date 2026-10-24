@@ -43,6 +43,7 @@ jobs:
           & "$app\python\python.exe" -m commentator tray --home "$env:RUNNER_TEMP\shotcast-home" --self-test
           if ($LASTEXITCODE -ne 0) { throw "self-test failed" }
           if (-not (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name Shotcast -ErrorAction SilentlyContinue)) { throw "no Start with Windows entry" }
+          if ((Get-ItemProperty "HKCU:\Software\Shotcast" -Name CheckForUpdates -ErrorAction SilentlyContinue).CheckForUpdates -ne 1) { throw "update checks not on" }
           Start-Process "$app\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES" -Wait
           # The uninstaller runs a copy of itself and returns at once: wait for it.
           for ($i = 0; $i -lt 60 -and (Test-Path "$app\python"); $i++) { Start-Sleep 2 }
@@ -56,4 +57,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
-        run: gh release create "${{ github.ref_name }}" dist/* --title "Shotcast ${{ github.ref_name }}" --generate-notes
+        run: |
+          $hash = (Get-Content "dist\Shotcast-Setup-$env:VERSION.exe.sha256").Split(" ")[0]
+          $notes = "Download **Shotcast-Setup-$env:VERSION.exe** and run it (see the [README](https://github.com/jjmerri/gspro-shotcast#the-windows-app-easiest)).`n`nSHA-256: ``$hash```n`n[Code signing policy](https://github.com/jjmerri/gspro-shotcast#code-signing-policy) · [Privacy policy](https://github.com/jjmerri/gspro-shotcast/blob/main/PRIVACY.md)"
+          gh release create "${{ github.ref_name }}" dist/* --title "Shotcast ${{ github.ref_name }}" --notes $notes --generate-notes

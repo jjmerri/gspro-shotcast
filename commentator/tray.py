@@ -105,6 +105,27 @@ def set_starts_with_windows(on: bool, home: Path | None = None) -> None:
                 pass
 
 
+SETTINGS_KEY = r"Software\Shotcast"
+
+
+def checks_for_updates() -> bool:
+    """Whether to ask GitHub for updates by itself (the installer's tick box, then the menu's)."""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, SETTINGS_KEY) as key:
+            return bool(winreg.QueryValueEx(key, "CheckForUpdates")[0])
+    except (OSError, ImportError):
+        return True
+
+
+def set_checks_for_updates(on: bool) -> None:
+    import winreg
+
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, SETTINGS_KEY) as key:
+        winreg.SetValueEx(key, "CheckForUpdates", 0, winreg.REG_DWORD, int(on))
+
+
 def health_issues(log_dir: str | Path) -> list[tuple[str, str]]:
     """(level, message) for each open issue in the booth's health file, failures first."""
     import json
@@ -307,6 +328,10 @@ class Tray:
         set_starts_with_windows(not starts_with_windows(), self.home)
         self._refresh()
 
+    def toggle_update_checks(self, *_) -> None:
+        set_checks_for_updates(not checks_for_updates())
+        self._refresh()
+
     def check_updates(self, *_) -> None:
         threading.Thread(target=self._check_updates, args=(True,), daemon=True).start()
 
@@ -400,6 +425,7 @@ class Tray:
             sep,
             item(lambda _: f"Restart to update to {self.update[0].version}" if self.update else "Check for updates",
                  lambda *_: self.apply_update() if self.update else self.check_updates()),
+            item("Check for updates automatically", self.toggle_update_checks, checked=lambda _: checks_for_updates()),
             item("Start with Windows", self.toggle_start_with_windows, checked=lambda _: starts_with_windows()),
             item(f"About Shotcast {self.version}", self.about),
             item("Quit", self.quit),
@@ -450,7 +476,8 @@ class Tray:
                 self._refresh()
             if time.monotonic() >= next_update:
                 next_update = time.monotonic() + UPDATE_EVERY_S
-                threading.Thread(target=self._check_updates, daemon=True).start()
+                if checks_for_updates():
+                    threading.Thread(target=self._check_updates, daemon=True).start()
 
     def run(self) -> None:
         import pystray

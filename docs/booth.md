@@ -178,6 +178,7 @@ python -m commentator cost --as-model claude-sonnet-5-5   # the text calls repri
 
 ## Privacy
 
+The full list of what Shotcast sends anywhere is in the [privacy policy](../PRIVACY.md).
 With the default cloud setup, the booth sends to OpenAI and Anthropic what the commentators need
 to talk: player names, shot and score data, and the league file's context (notes, storylines).
 The pre-shot hazard look also sends a screenshot of GSPro to the vision model (Claude by default;

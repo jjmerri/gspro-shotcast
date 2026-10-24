@@ -154,7 +154,8 @@ beyond that is supported on paper but not yet run live:
    [release](https://github.com/jjmerri/gspro-shotcast/releases/latest) and run it. It installs
    for your Windows user only (no administrator prompt) and brings its own Python. The installer
    isn't code-signed yet, so Windows SmartScreen may say "Windows protected your PC": choose
-   **More info → Run anyway**. Each release lists the installer's SHA-256 next to it.
+   **More info → Run anyway**. Each release lists the installer's SHA-256 next to it (see the
+   [code signing policy](#code-signing-policy)).
 2. Shotcast starts in the **tray** (the golf ball by the clock; it may be under the ^ arrow) and,
    unless you untick it, every time Windows starts. It records every shot and round without any
    API keys. Click the icon for the **stats page**; right-click it for the menu:
@@ -163,11 +164,13 @@ beyond that is supported on paper but not yet run live:
    - **Turn the AI booth on**: asks for the OpenAI and Anthropic keys (in `.env`) the first time.
    - **Settings**: edit `config.yaml` and `.env`, open the Shotcast folder or the logs.
    - **Warnings** (when there are any), **Restart the booth**, **Back up now**,
-     **Check for updates** / **Restart to update**, **Start with Windows**, **Quit**.
+     **Check for updates** / **Restart to update**, **Check for updates automatically**,
+     **Start with Windows**, **Quit**.
 
    The icon's light is green when everything's fine, orange with warnings, red when the booth
-   isn't running. Updates are checked every few hours and offered in the menu, never installed
-   on their own (not mid-round). Your settings, season database and backups are in
+   isn't running. Updates are checked every few hours (unless you untick it; see the
+   [privacy policy](PRIVACY.md)) and offered in the menu, never installed on their own (not
+   mid-round). Your settings, season database and backups are in
    `%LOCALAPPDATA%\Shotcast`, which updating and uninstalling leave alone.
 
 ### From the ZIP or git
@@ -200,6 +203,23 @@ split league and practice rounds and get standings, net scores and storylines
 ([Leagues](docs/leagues.md)). To install by hand instead, see
 [Setup](docs/setup.md#setup-fresh-machine).
 
+## Code signing policy
+
+Windows releases are built from this repository's source by GitHub Actions
+([windows-app.yml](.github/workflows/windows-app.yml)); nothing is built on a personal machine.
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
+[SignPath Foundation](https://signpath.org) (applied for; until it's granted, releases are
+unsigned and each lists its installer's SHA-256).
+
+- Committers and reviewers: [jjmerri](https://github.com/jjmerri) (changes from anyone else come
+  as pull requests and are reviewed before merging)
+- Approvers (each signed release): [jjmerri](https://github.com/jjmerri)
+
+Privacy: this program will not transfer any information to other networked systems unless
+specifically requested by the user or the person installing or operating it. See the
+[privacy policy](PRIVACY.md) for exactly what each optional feature sends, and where.
+
 ## Documentation
 
 | | |
@@ -209,4 +229,5 @@ split league and practice rounds and get standings, net scores and storylines
 | [Leagues, formats and handicaps](docs/leagues.md) | The league file, league vs practice (and SuperSaaS bookings), formats, handicaps, Squabbit, closest to the pin |
 | [Setup, operation and development](docs/setup.md) | Full setup, bring-up, troubleshooting, health checks, phone pushes, commands, tests and tools |
 | [DEPLOY.md](DEPLOY.md) | Installing and updating on the sim PC, and where every file and log lives |
+| [Privacy policy](PRIVACY.md) | What stays on the PC, and what each optional feature sends where |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | The module map and data model, for working on the code |
