@@ -122,7 +122,8 @@ pushed again for 12 hours, and a "resolved" push follows once they clear (`notif
 
 ## Commands
 
-`python -m commentator <cmd>`, or `shotcast <cmd>` with the venv active:
+`python -m commentator <cmd>`, or `shotcast <cmd>` with the venv active (in the Windows app:
+tray menu → **Settings → Command prompt**, then `shotcast <cmd>`):
 
 | Command | What it does |
 |---|---|

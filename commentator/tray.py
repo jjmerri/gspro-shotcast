@@ -312,6 +312,13 @@ class Tray:
                          cwd=self.home, creationflags=NEW_CONSOLE)
         self.notify("Bring GSPro to the front: the screen check reads it in 8 seconds.")
 
+    def command_prompt(self, *_) -> None:
+        """A terminal in the home folder where `shotcast <command>` runs this app's Python."""
+        py = Path(python_exe()).parent
+        env = {**os.environ, "PATH": os.pathsep.join([str(py), str(py / "Scripts"), os.environ.get("PATH", "")])}
+        hello = "Shotcast commands: shotcast --help (for example shotcast publish, shotcast backup)"
+        subprocess.Popen(["cmd", "/k", "echo", hello], cwd=self.home, env=env, creationflags=NEW_CONSOLE)
+
     def back_up(self, *_) -> None:
         def work():
             from . import backup
@@ -419,6 +426,7 @@ class Tray:
                 item("Edit API keys (.env)", self.edit_keys),
                 item("Open the Shotcast folder", self.open_folder),
                 item("Open logs", self.open_logs),
+                item("Command prompt (shotcast commands)", self.command_prompt),
             )),
             item("Check the screen read...", self.screen_check),
             item("Back up now", self.back_up),

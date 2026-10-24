@@ -122,7 +122,7 @@ League file + Squabbit ─────────► standings, handicaps, stor
 - Any launch monitor GSPro supports. Built and tested with a **Uneekor EYE XO2**; others record
   the same shots and scores, with club data only when the monitor sends it
   ([Launch monitors](docs/tracking.md#launch-monitors)).
-- **Python 3.12 or 3.13.**
+- **Python 3.12 or 3.13**, for the ZIP or git install only (the Windows app brings its own).
 - For the booth only: speakers, and an **OpenAI API key** and an **Anthropic API key** for the
   default setup ([Cost](docs/booth.md#cost)). An Anthropic key alone works with voices on the PC,
   and fully local models and voices need no keys ([Choosing a setup](docs/booth.md#choosing-a-setup)).
@@ -172,6 +172,20 @@ beyond that is supported on paper but not yet run live:
    [privacy policy](PRIVACY.md)) and offered in the menu, never installed on their own (not
    mid-round). Your settings, season database and backups are in
    `%LOCALAPPDATA%\Shotcast`, which updating and uninstalling leave alone.
+3. **Where things are.** The docs give paths from the Shotcast folder (`%LOCALAPPDATA%\Shotcast`;
+   **Settings → Open the Shotcast folder**): `logs\season.db`, `config.yaml`, `.env`, and a league
+   file you add as `data\league.json`. The docs' `.bat` files are the ZIP install's; the tray
+   menu does their jobs.
+4. **Commands** such as `publish`, `import-league` and `restore` run from **Settings → Command
+   prompt**: type `shotcast <command>` there (`shotcast --help` lists them; they're the
+   `python -m commentator <command>` in the docs).
+5. **Uninstall** from Windows Settings → Apps → Shotcast. It removes the app and its "Start with
+   Windows" entry and keeps `%LOCALAPPDATA%\Shotcast`; delete that folder too to remove your
+   settings and season.
+
+Already running Shotcast from the ZIP or git? See
+[Moving to the Windows app](DEPLOY.md#moving-to-the-windows-app) to bring your season and settings
+across.
 
 ### From the ZIP or git
 

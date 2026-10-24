@@ -19,7 +19,22 @@ stats page on this PC and offers updates. Everything else (config.yaml, .env, th
 Don't run both: if another booth is running (start-booth.bat or a scheduled task), the tray
 doesn't start one and says so; **Restart the booth** in its menu stops the other and starts its own.
 
-Releases are built by `.github/workflows/windows-app.yml` when a `v*` tag is pushed (the tag is
+### Moving to the Windows app
+
+From a ZIP or git install, so the app carries on with the same season and settings:
+
+1. Stop the old booth: close its window (or `Get-CimInstance Win32_Process | ? CommandLine -match
+   'commentator.* run' | % { Stop-Process $_.ProcessId }` in PowerShell), and remove anything that
+   starts it (a scheduled task, the Startup folder).
+2. Install the app, then right-click the tray icon → **Quit**.
+3. Copy from the old folder into `%LOCALAPPDATA%\Shotcast`, replacing what's there: `config.yaml`,
+   `.env`, your league files from `data\` (`league.json`, `history.json`, course cards) into
+   `data\`, and the whole `logs\` folder (season.db, backups, replays). Paths in `config.yaml`
+   relative to the old folder (`logs/...`, `data/...`) keep working; fix any absolute ones.
+4. Start **Shotcast** from the Start menu. Check the tray's status and the stats page, then keep
+   the old folder until you're happy (it's also a backup).
+
+ `.github/workflows/windows-app.yml` when a `v*` tag is pushed (the tag is
 the version); running the workflow by hand makes a test build in the run's artifacts. To build
 locally on Windows with Inno Setup 6: `powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 -Version 0.2.0`.
 
