@@ -80,4 +80,5 @@ def test_env_values_read_as_the_booth_reads_them():
     text = '\ufeffOPENAI_API_KEY = "sk-1"\nNTFY_TOPIC=a\nNTFY_TOPIC=b\n'
     assert env_value(text, "OPENAI_API_KEY") == "sk-1"
     assert env_value(text, "NTFY_TOPIC") == "b"
+    assert env_value("NTFY_TOPIC=a\nNTFY_TOPIC=\n", "NTFY_TOPIC") == "a"
     assert set_env(text, "OPENAI_API_KEY", "sk-2") == "\ufeffOPENAI_API_KEY=sk-2\nNTFY_TOPIC=a\nNTFY_TOPIC=b\n"

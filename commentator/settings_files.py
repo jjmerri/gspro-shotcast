@@ -187,9 +187,10 @@ def _env_line(key: str) -> re.Pattern:
 
 
 def env_value(env_text: str, key: str) -> str:
-    """The key's value as the booth sees it (the last line for it wins, quotes stripped)."""
-    found = _env_line(key).findall(env_text)
-    return found[-1].strip().strip('"').strip("'") if found else ""
+    """The key's value as the booth sees it (the last non-empty line for it wins, quotes stripped)."""
+    found = [v.strip().strip('"').strip("'") for v in _env_line(key).findall(env_text)]
+    found = [v for v in found if v]
+    return found[-1] if found else ""
 
 
 def set_env(env_text: str, key: str, value: str) -> str:
