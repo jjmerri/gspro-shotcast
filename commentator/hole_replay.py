@@ -92,15 +92,16 @@ def _layouts(db: sqlite3.Connection) -> list[sqlite3.Row]:
         return []
 
 
-def _layout_for(layouts: list[sqlite3.Row], course: str, hole: int, session: int, first_ts: float,
+def _layout_for(layouts: list[sqlite3.Row], course: str, hole: int, sessions: set, first_ts: float,
                 last_ts: float, until: float | None = None) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
     """(this round's layout, for the pin; the layout for the tee: this round's, else the hole's latest).
-    GSPro logs a layout when a round completes, so this round's is stored after the hole was played
-    and before `until`, the session's next round's first shot (a round quit early has none)."""
+    GSPro logs a layout when a round completes, so this round's is stored in one of its sessions (a
+    booth restarted mid-round starts another) after the hole was played and before `until`, those
+    sessions' next round's first shot (a round quit early has none)."""
     key = (course or "").casefold()
     same = [lo for lo in layouts if (lo["course"] or "").casefold() == key and lo["hole"] == hole]
     end = min(first_ts + ROUND_HOURS, until) if until is not None else first_ts + ROUND_HOURS
-    this_round = [lo for lo in same if lo["session_id"] == session and lo["ts"] is not None
+    this_round = [lo for lo in same if lo["session_id"] in sessions and lo["ts"] is not None
                   and last_ts - 60 <= lo["ts"] <= end]
     with_tee = [lo for lo in this_round[:1] + same[::-1] if lo["tee_x"] is not None]
     return (this_round[0] if this_round else None), (with_tee[0] if with_tee else None)
@@ -114,7 +115,7 @@ def _images(db: sqlite3.Connection) -> list[sqlite3.Row]:
         return []
 
 
-def _map_for(images: list[sqlite3.Row], course: str, hole: int, session: int) -> dict[str, Any] | None:
+def _map_for(images: list[sqlite3.Row], course: str, hole: int, sessions: set) -> dict[str, Any] | None:
     """The hole's minimap for the replay background, by id (published once: hole_image_sources)."""
     from PIL import Image
 
@@ -126,7 +127,7 @@ def _map_for(images: list[sqlite3.Row], course: str, hole: int, session: int) ->
     w, h = Image.open(io.BytesIO(im["image"])).size
     return {"id": im["id"], "w": w, "h": h,
             "ball": [round(im["ball_x"] * w, 1), round(im["ball_y"] * h, 1)],
-            "pin": [round(im["pin_x"] * w, 1), round(im["pin_y"] * h, 1)], "approx": im["session_id"] != session}
+            "pin": [round(im["pin_x"] * w, 1), round(im["pin_y"] * h, 1)], "approx": im["session_id"] not in sessions}
 
 
 def hole_image_sources(db: sqlite3.Connection, ids: set[int]) -> dict[int, str]:
@@ -141,7 +142,8 @@ def _r(p: tuple[float, float] | None) -> list[float] | None:
 
 def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]]:
     """Every replayable hole, keyed by (round, hole number): the round as stats_web.shot_rounds numbers
-    it. A hole is replayable when at least one of its shots has a position."""
+    it. A hole is replayable when at least one of its shots has a position, or it took one drawn stroke
+    (an ace, or a tee shot into the gimme circle), which runs from the tee to the pin."""
     have = {r[1] for r in db.execute("PRAGMA table_info(shots)")}
     if "start_x" not in have:
         return {}
@@ -152,28 +154,32 @@ def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]
         if row["id"] in round_of and m:
             groups.setdefault((round_of[row["id"]], int(m.group(1))), []).append(row)
     layouts, images = _layouts(db), _images(db)
-    # Each round's session and first and last shot, to end its layout window at the next round's start.
+    # Each round's sessions and first and last shot, to end its layout window at the next round's start.
     span: dict[int, list] = {}
     for (rnd, _), rows in groups.items():
-        sp = span.setdefault(rnd, [rows[0]["session_id"], rows[0]["ts"], rows[-1]["ts"]])
+        sp = span.setdefault(rnd, [set(), rows[0]["ts"], rows[-1]["ts"]])
+        sp[0].update(r["session_id"] for r in rows)
         sp[1], sp[2] = min(sp[1], rows[0]["ts"]), max(sp[2], rows[-1]["ts"])
     out = {}
     for key, rows in groups.items():
-        if not any(r["start_x"] is not None for r in rows):
+        drawn = [r for r in rows if not r["mulligan"] and r["outcome"] != "gimme"]
+        one_stroke = (drawn and all(r["shot_number"] == 1 for r in drawn)
+                      and any(r["outcome"] in ("holed", "gimme", "conceded") for r in rows))
+        if not any(r["start_x"] is not None for r in rows) and not one_stroke:
             continue
         ses, _, last = span[key[0]]
-        until = min((f for s, f, _ in span.values() if s == ses and f > last), default=None)
-        if (rp := _replay(rows, key[1], layouts, until)) is not None:
-            if rp["tee"] and rp["pin"] and (m := _map_for(images, rp["course"], key[1], rows[0]["session_id"])):
+        until = min((f for s, f, _ in span.values() if s & ses and f > last), default=None)
+        if (rp := _replay(rows, key[1], layouts, ses, until)) is not None:
+            if rp["tee"] and rp["pin"] and (m := _map_for(images, rp["course"], key[1], ses)):
                 rp["map"] = m
             out[key] = rp
     return out
 
 
-def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row],
+def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sessions: set,
             until: float | None = None) -> dict[str, Any] | None:
     first = rows[0]
-    this_round, any_round = _layout_for(layouts, first["course"], hole, first["session_id"], first["ts"],
+    this_round, any_round = _layout_for(layouts, first["course"], hole, sessions, first["ts"],
                                         rows[-1]["ts"], until)
     tee = _xz(any_round["tee_x"], any_round["tee_z"]) if any_round else None
     pin, pin_est = (_xz(this_round["pin_x"], this_round["pin_z"]) if this_round else None), False

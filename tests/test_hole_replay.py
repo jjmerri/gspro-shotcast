@@ -126,6 +126,33 @@ def test_the_same_pins_from_new_tees_later_in_the_session_are_kept_and_repeats_a
     assert add(hole, 1900.0) == 1                                                    # played again since
 
 
+def test_an_ace_with_no_stored_position_is_replayed_from_the_tee_into_the_pin(tmp_path):
+    _, st = _season(tmp_path)
+    st.db.execute("DELETE FROM shots WHERE shot_number > 1")
+    st.db.execute("UPDATE shots SET outcome = 'holed'")
+    st.db.commit()
+    st.record_hole_layout("Test Links", [{"par": 4, "played": True, "tee": (0.0, 2.0, 0.0), "pin": (0.0, 1.0, 300.0)}],
+                          session_id=st.session_id, ts=1500.0)
+    shots = hole_replays(st.db)[(1, 1)]["players"][0]["shots"]
+    assert [(s["from"], s["to"]) for s in shots] == [([0.0, 0.0], [0.0, 300.0])]
+
+
+def test_a_booth_restarted_mid_round_still_finds_the_rounds_layout_for_earlier_holes(tmp_path):
+    _, st = _season(tmp_path)
+    st.db.execute("UPDATE shots SET start_x = 10, start_z = 200 WHERE shot_number = 2")
+    st.db.execute("UPDATE shots SET start_x = 2, start_z = 295 WHERE shot_number = 3")
+    # Hole 2 is played after a restart, in a new session, which records the round and its layout.
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, start_x, start_z,"
+                  " outcome, raw) VALUES (?, 1500, 'Dan', 'Test Links', 'Hole 2, par 3, 150 yards', 2, 1, 0, 140,"
+                  " 'holed', '{}')", (st.session_id + 1,))
+    st.db.execute("UPDATE rounds SET session_id = ?, holes = 2", (st.session_id + 1,))
+    st.db.commit()
+    st.record_hole_layout("Test Links", [{"par": 4, "played": True, "tee": (0.0, 2.0, 0.0), "pin": (0.0, 1.0, 300.0)}],
+                          session_id=st.session_id + 1, ts=1900.0)
+    rp = hole_replays(st.db)[(1, 1)]
+    assert (rp["pin"], rp["pin_estimated"]) == ([0.0, 300.0], False)
+
+
 def test_backfill_ignores_a_log_of_rounds_the_season_never_recorded(tmp_path):
     path, st = _season(tmp_path)
     log = tmp_path / "output_log.txt"
