@@ -26,13 +26,23 @@ def test_differential_caps_each_hole_and_scales_by_slope():
     assert HI._differential(scores, PARS, tee, 0.0) == (18.3, 18)
 
 
-def test_nine_holes_double_without_an_index_and_add_the_expected_nine_with_one():
+def test_short_rounds_scale_up_without_an_index_and_add_the_expected_holes_with_one():
     tee = {"tee": "Blue", "rating": 72.0, "slope": 113, "par": PARS, "index": {}}
     nine = {h: 5 for h in range(1, 10)}                    # 45 against a 36.0 rating
     assert HI._differential(nine, PARS, tee, None) == (18.0, 9)
     assert HI._differential(nine, PARS, tee, 10.0) == (15.4, 9)   # 9 + 0.52 x 10 + 1.2
     # No rated tee: par is the rating, on a 113 slope.
     assert HI._differential(nine, PARS, None, None) == (18.0, 9)
+    # A round quit after 17 keeps all 17 holes and adds the expected score for the one not played.
+    seventeen = {h: 4 for h in range(1, 18)}
+    assert HI._differential(seventeen, PARS, tee, 10.0) == (0.7, 17)              # 0 + 6.4 / 9
+    assert HI._differential(seventeen | {17: 8}, PARS, tee, 10.0) == (2.7, 17)    # capped at 6: no stroke there
+
+
+def test_the_course_handicap_rounds_half_up():
+    tee = {"tee": "Blue", "rating": 72.0, "slope": 113, "par": PARS, "index": {h: h for h in PARS}}
+    # Index 2.5 gives 3 strokes, so the third-hardest hole's cap is 4 + 2 + 1 = 7.
+    assert HI._differential(PARS | {3: 7}, PARS, tee, 2.5) == (3.0, 18)
 
 
 def test_the_tee_is_the_one_whose_yardages_match_the_logged_holes():
@@ -67,6 +77,34 @@ def test_indexes_from_the_rounds_on_record():
     assert [h["tee"] for h in ann["history"]] == ["Green"] * 3
     assert [h["differential"] for h in ann["history"]] == [10.0, 12.0, 14.0]
     assert ann["index"] == 8.0 and ann["history"][1]["index"] is None
+
+
+def _rounds(store, rounds, layouts=()):
+    sid = store.db.execute("INSERT INTO sessions (started_at, date) VALUES (0, '2026-10-01')").lastrowid
+    for ts, yards in layouts:
+        store.db.executemany("INSERT INTO hole_layouts (session_id, ts, course, hole, tee_x, tee_z, pin_x, pin_z)"
+                             " VALUES (?, ?, 'Test Links', ?, 0, 0, 0, ?)",
+                             [(sid, ts, h, yards / 1.0936133) for h in PARS])
+    for ended, scores in rounds:
+        store.db.execute("INSERT INTO player_rounds (session_id, ended_at, player, course, scores, hole_pars)"
+                         " VALUES (?, ?, 'Ann', 'Test Links', ?, ?)", (sid, ended, json.dumps(scores), json.dumps(PARS)))
+    return HI.indexes(store.db)["Ann"]
+
+
+def test_the_first_index_waits_for_54_holes():
+    nine = {h: 5 for h in range(1, 10)}
+    ann = _rounds(Store(None), [(i, nine) for i in range(6)])
+    assert [h["index"] is None for h in ann["history"]] == [True] * 5 + [False]
+
+
+def test_each_round_takes_the_tee_from_its_own_layouts():
+    store = Store(None)
+    card = CourseCard(name="Test Links", par=PARS, index={h: h for h in PARS},
+                      yards={"White": {h: 400 for h in PARS}, "Black": {h: 450 for h in PARS}},
+                      ratings={"White": (70.0, 113), "Black": (74.0, 113)})
+    store.record_course_tees("Test Links", card)
+    ann = _rounds(store, [(1000.0, PARS), (5000.0, PARS)], layouts=[(1001.0, 400), (5002.0, 450)])
+    assert [h["tee"] for h in ann["history"]] == ["White", "Black"]
 
 
 def test_the_league_handicap_comes_first_and_our_index_stands_in():

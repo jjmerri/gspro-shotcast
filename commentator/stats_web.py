@@ -48,6 +48,8 @@ def set_left_out(db_path: str | Path, shot_id: int, left_out: bool) -> bool:
     from contextlib import closing
 
     with closing(sqlite3.connect(db_path, timeout=10)) as db:
+        if "left_out" not in {r[1] for r in db.execute("PRAGMA table_info(shots)")}:
+            db.execute("ALTER TABLE shots ADD COLUMN left_out INTEGER NOT NULL DEFAULT 0")
         cur = db.execute("UPDATE shots SET left_out = ? WHERE id = ?", (int(left_out), shot_id))
         db.commit()
         return cur.rowcount > 0

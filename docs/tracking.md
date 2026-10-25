@@ -153,10 +153,11 @@ The booth keeps its own handicap index per player, by the World Handicap System:
 score differential is (113 / slope) × (adjusted gross − course rating), with each hole capped at
 net double bogey (par + 5 until the player has an index); the index is the average of the best
 differentials among the last 20 (best 1 of 3 up to best 8 of 20, with the WHS adjustments for
-fewer than 6), to 0.1, capped at 54. A 9-hole round counts as an 18 using the player's expected
-score for the other nine (0.52 × index + 1.2), or doubled before there's an index. Scramble and
+fewer than 6), to 0.1, capped at 54, once the player has 54 holes in. A round of 9 to 17 holes
+counts as an 18 using the player's expected score for the holes not played (0.52 × index + 1.2 a
+nine), or scaled up to 18 before there's an index. Scramble and
 alternate-shot rounds and rounds under nine holes don't count. The tee is the one whose yardages
-match the shots' tee distances, else the one whose length fits the score; a course with no
+match the round's logged tee-to-pin distances, else the one whose length fits the score; a course with no
 ratings uses par and slope 113. Sim scoring runs low, so plus indexes are common.
 
 When the league file has no handicap for a player, the booth uses this index for net scores and

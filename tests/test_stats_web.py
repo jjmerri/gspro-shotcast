@@ -170,6 +170,9 @@ def test_a_shot_left_out_drops_out_of_the_stats_but_stays_in_its_hole(tmp_path):
     db.commit()
     with stats_web.connect(path) as ro:
         assert stats_web.player(ro, "Ann")["shots"] == 3
+    # The local page's toggle adds the column to such a database.
+    assert stats_web.set_left_out(path, 1, True)
+    assert db.execute("SELECT left_out FROM shots WHERE id = 1").fetchone() == (1,)
 
 
 def test_the_local_page_can_leave_a_shot_out(tmp_path):
