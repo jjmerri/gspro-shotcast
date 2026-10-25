@@ -75,6 +75,8 @@ and is the option for third-party connectors that don't go through GSPconnect's 
     league.json          your league (teams, players, aliases, handicaps, schedule, stories)
     history.json         earlier seasons, from import-league (optional)
   logs\                  everything the booth writes (below)
+  obs\                   OBS Studio for the live stream, with its settings (from Set up the live stream)
+  live\                  the live stream's files while it's on (OBS writes, the booth uploads)
   updates\               downloaded installers and the last update's install log
 ```
 
@@ -101,6 +103,8 @@ Advanced**).
   - `GOOGLE_TTS_API_KEY` for the Google voices (`tts.provider: google`).
   - `SQUABBIT_EMAIL` and `SQUABBIT_PASSWORD` for the live-handicap pull (only if
     `squabbit.enabled: true`).
+  - `OBS_WEBSOCKET_PASSWORD` for starting and stopping OBS's stream (`live`; the tray's live stream
+    setup writes it).
 
 ## Quick checks
 

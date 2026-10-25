@@ -109,6 +109,10 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
   sql.js-httpvfs over HTTP range requests) and uploads it to S3 (`publish`; the booth runs it in a
   subprocess after each round). `stats-web` serves the same site locally.
   `tools/aws/stats-site.yaml` is the S3 + CloudFront + password stack.
+- **`live_stream.py`** the Live tab's stream: starts and stops OBS's HLS output over its WebSocket
+  with each round, and mirrors the playlist and segments to the bucket's `live/` as they're written.
+  **`obs_setup.py`** the tray's setup: downloads portable OBS, writes its profile and WebSocket
+  settings, and adds the GSPro capture.
 - **`state.py`** small in-session state (`ShotRecord`, `SessionState`).
 - **`league.py`** the league file model (teams, players, `gspro_name`/`aliases`, handicaps,
   schedule, storylines) and the course-name matcher.

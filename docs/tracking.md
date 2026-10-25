@@ -376,7 +376,9 @@ apart from any other OBS, and sets it up:
 
 Then try **Start the live stream** in the tray, open the page's Live tab, and stop it. Running the
 setup again keeps OBS's scenes and other settings. OBS has to be closed for it (right-click its
-icon by the clock, **Exit**).
+icon by the clock, **Exit**). If Windows Firewall asks whether OBS Studio may use public and
+private networks, choose **Cancel**: the booth reaches OBS's WebSocket on the same PC, which the
+firewall doesn't block, and the stream leaves as the booth's uploads.
 
 With your own OBS instead, set the same up in it by hand, put its WebSocket password in `.env` and
 point `live.obs_path` at its `obs64.exe` if it's not in `C:\Program Files\obs-studio`.

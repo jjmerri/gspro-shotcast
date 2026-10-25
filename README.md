@@ -11,7 +11,8 @@ Shot tracking, season stats and an AI broadcast booth for **GSPro 3.1.x** simula
 - **Stats web page.** Strokes gained, club gapping, approach and putting by distance, scorecards
   with round summaries and shareable score cards, hole replays with each shot's curve, shot
   shapes, a handicap index, and season highlights, in a local page over that file. Optionally published online
-  after every round, behind a password, so the whole league can check their numbers from a phone.
+  after every round, behind a password, so the whole league can check their numbers from a phone,
+  with a **Live** tab streaming the sim's screen and sound while a round is on.
 - **The booth.** Two AI commentators call your round live through the speakers. They know the
   launch numbers, the course, your league's standings and storylines, and what you did last
   week. Bring your own league: put your roster, schedule and storylines in a league file and the
@@ -53,6 +54,13 @@ own after every round. Each player can pick themselves to see just their rounds,
 and send a link to exactly what they're looking at. It can live on your own domain if you have
 one. Setup is one CloudFormation stack; see
 [Sharing the stats page](docs/tracking.md#sharing-the-stats-page).
+
+**Watch live.** The published page's **Live** tab plays GSPro's screen and sound, the booth's
+voices included, while a round is on, about 20 seconds behind and behind the same password. One
+tray action downloads and sets up [OBS Studio](https://obsproject.com/) to make the stream; the
+booth starts it when a round starts, stops it after the sign-off, and deletes it: nothing is
+kept, and it's free (no YouTube or Twitch). It costs about a cent an hour of uploads, and watching
+is within CloudFront's free tier for a league. See [Live stream](docs/tracking.md#live-stream).
 
 ## The booth
 
@@ -174,6 +182,10 @@ beyond that is supported on paper but not yet run live:
    - **Settings...**: the AI booth, voices and ON AIR badge; API keys (each with a **Check**); the
      GSPro folder; the league file, Squabbit and SuperSaaS; sharing the stats page, S3 backups and
      phone alerts. Everything else is in `config.yaml` (**Settings → Advanced**).
+   - **Set up the live stream...** (needs the stats page shared): downloads OBS Studio (224 MB) into
+     the Shotcast folder and sets it up for the page's Live tab. If Windows Firewall then asks
+     about OBS Studio, choose **Cancel**: nothing needs it reachable from other machines.
+     Once it's on, **Start/Stop the live stream** works it by hand, and the setup moves under **More**.
    - **More**: open the Shotcast folder or the logs, edit `config.yaml` or `.env` by hand, and the
      command prompt.
    - **Warnings** (when there are any), **Restart the booth**, **Back up now** (the menu shows the
@@ -206,7 +218,7 @@ split league and practice rounds and get standings, net scores and storylines
 
 | | |
 |---|---|
-| [Shot tracking and stats](docs/tracking.md) | Where the data comes from, launch monitors, the database tables, the stats page, example queries |
+| [Shot tracking and stats](docs/tracking.md) | Where the data comes from, launch monitors, the database tables, the stats page, publishing it, the live stream, example queries |
 | [The booth](docs/booth.md) | How a shot is called, models and voices, cost, privacy, the ON AIR badge |
 | [Leagues, formats and handicaps](docs/leagues.md) | The league file, league vs practice (and SuperSaaS bookings), formats, handicaps, Squabbit, closest to the pin |
 | [Setup, operation and development](docs/setup.md) | Full setup, bring-up, troubleshooting, health checks, phone pushes, commands, tests and tools |
