@@ -104,6 +104,27 @@ def test_gapping_uses_full_swings_and_reads_the_flight(db):
     assert pw["miss"] == "starts straight, draw" and dr["miss"] == "starts 3° right, slice"
 
 
+def test_a_lefty_s_shots_are_named_for_their_hand(db, tmp_path):
+    from commentator import shot_shape
+    from commentator.hud import Hud
+    from commentator.models import Shot
+
+    # Starting right and curving right: a right-hander's push slice is a left-hander's pull hook.
+    assert shot_shape.shape(3, 10, 200, handed="RH") == shot_shape.shape(3, 10, 200) == "Push slice"
+    assert shot_shape.shape(3, 10, 200, handed="LH") == "Pull hook"
+    for carry in (230, 240, 250):
+        shot(db, player="Dan", club="DR", carry_raw=carry, ball_speed=150, start_direction=3, spin_axis=10,
+             handed="LH")
+    db.commit()
+    assert A.gapping(db, "Dan")[0]["miss"] == "starts 3° right, hook"
+    # The booth stores the hand it read with each shot.
+    st = Store(str(tmp_path / "hands.db"))
+    sid = st.record_shot(player="Dan", hole="Hole 1", shot=Shot(club="DR", handed="RH"), before=Hud(handed="lh"),
+                         after=Hud(), tags=[], carry_game_yards=None, total_yards=None, offline_yards=None)
+    assert st.db.execute("SELECT handed FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "LH"
+    st.close()
+
+
 def test_recovery_counts_greens_found_from_trouble(db):
     hole = "Hole 1, par 4, 400 yards"
     shot(db, hole=hole, shot_number=1, club="DR", lie_before="tee", to_pin_yards=400)

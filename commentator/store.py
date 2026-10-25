@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS shots (
     -- player's last minimap aim click before it, in minimap units (NULL when the aim wasn't moved).
     start_x REAL, start_y REAL, start_z REAL, aim_map_x REAL, aim_map_y REAL,
     -- Where the ball went into a penalty area (water, OB), world metres, from GSPro's log; else NULL.
-    hazard_x REAL, hazard_y REAL, hazard_z REAL
+    hazard_x REAL, hazard_y REAL, hazard_z REAL,
+    handed TEXT                                  -- 'RH' / 'LH' as GSPro had the player set; NULL if unknown
 );
 CREATE TABLE IF NOT EXISTS hole_layouts (            -- each hole's geometry, logged by GSPro when a round is complete
     id INTEGER PRIMARY KEY,
@@ -285,7 +286,7 @@ class Store:
         added = {"to_pin_yards": "REAL", "finish_yards": "REAL", "gimme_yards": "REAL",
                  "outcome": "TEXT", "fmt": "TEXT", "attributed": "INTEGER NOT NULL DEFAULT 1",
                  "is_league": "INTEGER NOT NULL DEFAULT 1", "mulligan": "INTEGER NOT NULL DEFAULT 0",
-                 "shared_ball": "INTEGER NOT NULL DEFAULT 0", "left_out": "INTEGER NOT NULL DEFAULT 0",
+                 "shared_ball": "INTEGER NOT NULL DEFAULT 0", "left_out": "INTEGER NOT NULL DEFAULT 0", "handed": "TEXT",
                  **{col: "REAL" for col in CLUB_COLS}, **{col: "REAL" for col in POSITION_COLS},
                  **{col: "REAL" for col in HAZARD_COLS}}
         for col, decl in added.items():
@@ -351,7 +352,7 @@ class Store:
         to_pin_yards: float | None = None, finish_yards: float | None = None,
         gimme_yards: float | None = None, outcome: str | None = None, fmt: str | None = None,
         attributed: bool = True, is_league: bool = True, shared_ball: bool = False,
-        start: tuple | None = None, aim: tuple | None = None,
+        start: tuple | None = None, aim: tuple | None = None, handed: str | None = None,
     ) -> int:
         cur = self.db.execute(
             """INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, ball_speed,
@@ -360,9 +361,9 @@ class Store:
                    score_to_par, lie_after, carry_raw_tile_yards, carry_game_yards, total_yards, offline_yards,
                    tags, raw, to_pin_yards, finish_yards, gimme_yards, outcome, fmt, attributed, is_league,
                    shared_ball, club_path, angle_of_attack, face_to_target, dynamic_loft, face_impact_h,
-                   face_impact_v, start_x, start_y, start_z, aim_map_x, aim_map_y)
+                   face_impact_v, start_x, start_y, start_z, aim_map_x, aim_map_y, handed)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                       ?,?,?,?,?)""",
+                       ?,?,?,?,?,?)""",
             (self.session_id, shot.timestamp, player, course, hole, before.shot_number or after.shot_number, shot.club,
              int(shot.is_putt), shot.ball_speed, shot.vla, shot.hla, shot.total_spin, shot.spin_axis,
              shot.club_speed, shot.carry, shot.units, before.lie, before.slope_updown, before.slope_side,
@@ -371,7 +372,8 @@ class Store:
              total_yards, offline_yards,
              json.dumps(tags), json.dumps(shot.raw),
              to_pin_yards, finish_yards, gimme_yards, outcome, fmt, int(attributed), int(is_league),
-             int(shared_ball), *_club_values(shot), *_position_values(start, aim)),
+             int(shared_ball), *_club_values(shot), *_position_values(start, aim),
+             (handed or before.handed or shot.handed or "").strip().upper() or None),
         )
         self._unhole_if_played_on(cur.lastrowid, later=False)
         self._fill_previous_finish(cur.lastrowid)

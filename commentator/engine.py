@@ -3667,6 +3667,7 @@ class Engine:
             is_league=bool(r and r.is_league), shared_ball=shared,
             # where GSPro's log had the ball for this shot, and the player's minimap aim, for the replay
             start=self.gspro.fire_info(fire).get("start"), aim=self.gspro.fire_info(fire).get("aim"),
+            handed=before.handed or shot.handed or self.handed.get(player or ""),
         )
         rec.shot_id = shot_id
         # Not gated on the screen seeing touchdown: the finish comes from GSPro's log at the next shot,

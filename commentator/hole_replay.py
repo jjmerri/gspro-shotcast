@@ -39,7 +39,7 @@ _HOLE = re.compile(r"Hole (\d+)")
 _PAR = re.compile(r"par (\d)")
 _COLS = ("id, session_id, ts, player, course, hole, shot_number, club, is_putt, lie_before, to_pin_yards,"
          " outcome, mulligan, shared_ball, tags, start_x, start_z, aim_map_x, aim_map_y, hazard_x, hazard_z,"
-         " start_direction, spin_axis, COALESCE(carry_game_yards, carry_raw_tile_yards, carry_raw) AS carry")
+         " start_direction, spin_axis, handed, COALESCE(carry_game_yards, carry_raw_tile_yards, carry_raw) AS carry")
 
 
 def _xz(x: float | None, z: float | None) -> tuple[float, float] | None:
@@ -230,7 +230,7 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
                     and r["to_pin_yards"] and (f := _unit(pin[0] - start[0], pin[1] - start[1]))):
                 along, right = aim_offset(r["aim_map_x"], r["aim_map_y"], r["to_pin_yards"] / M_TO_YD)
                 aim = (start[0] + f[0] * along + f[1] * right, start[1] + f[1] * along - f[0] * right)
-            shape = shot_shape.shape(r["start_direction"], r["spin_axis"], r["carry"], bool(r["is_putt"]))
+            shape = shot_shape.shape(r["start_direction"], r["spin_axis"], r["carry"], bool(r["is_putt"]), r["handed"])
             bend = None if r["is_putt"] else shot_shape.bend_yards(r["spin_axis"], r["carry"])
             shots.append({"n": r["shot_number"], "club": r["club"], "putt": bool(r["is_putt"]),
                           "lie": r["lie_before"], "to_pin": r["to_pin_yards"] and round(r["to_pin_yards"], 1),

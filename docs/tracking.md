@@ -75,7 +75,7 @@ What's recorded, and from where:
 
 | Table | One row per | What's in it |
 |---|---|---|
-| `shots` | swing | Player, course, hole, shot number, club; launch monitor ball speed, launch angle, start direction, spin, spin axis, club speed, carry; club path, attack angle, face to target, dynamic loft and strike location on the face, when the monitor reported club data (NULL otherwise); lie before and after, slope, pin elevation, distance to the pin before and where it finished; GSPro's carry/total/offline; putt or full shot; a putt's result (holed, conceded, missed), or `holed` on a full shot that went in (a stroke the same player hits again on the same hole is never left `holed`: a putt becomes `missed`, a full shot loses its outcome); where GSPro had the ball before it (`start_x/y/z`, world metres, from the log's setup block; NULL on a tee shot, which has none) and the player's minimap aim click, if they moved it (`aim_map_x/y`); league or practice; `mulligan = 1` on a stroke GSPro took back; `left_out = 1` on a stroke left out of the stats (see below). A conceded tap-in gets its own putt row (`outcome = 'gimme'`, no ball data), so every putt on the card is here |
+| `shots` | swing | Player, course, hole, shot number, club; launch monitor ball speed, launch angle, start direction, spin, spin axis, club speed, carry; club path, attack angle, face to target, dynamic loft and strike location on the face, when the monitor reported club data (NULL otherwise); lie before and after, slope, pin elevation, distance to the pin before and where it finished; GSPro's carry/total/offline; putt or full shot; a putt's result (holed, conceded, missed), or `holed` on a full shot that went in (a stroke the same player hits again on the same hole is never left `holed`: a putt becomes `missed`, a full shot loses its outcome); where GSPro had the ball before it (`start_x/y/z`, world metres, from the log's setup block; NULL on a tee shot, which has none) and the player's minimap aim click, if they moved it (`aim_map_x/y`); league or practice; `mulligan = 1` on a stroke GSPro took back; `left_out = 1` on a stroke left out of the stats (see below). `handed`: the player's hand, `RH` or `LH`. A conceded tap-in gets its own putt row (`outcome = 'gimme'`, no ball data), so every putt on the card is here |
 | `hole_layouts` | hole of a completed round | Each played hole's tee, pin (as set that round) and GSPro's aim waypoint, in world metres, from the hole list GSPro logs when a round is complete (a round quit early logs none) |
 | `hole_images` | course and hole | GSPro's minimap off the tee (JPEG, title bar trimmed), with where the ball and pin sit on it: the background of every replay of the hole. Kept at the first tee setup on a hole that has none yet, on or off air |
 | `course_tees` | course and tee | Each tee's course rating, slope and par from the course's `coursedetails.txt`, kept whenever a course loads; used for the handicap index |
@@ -145,7 +145,8 @@ hole's map with the one on screen now: `python -m commentator snap-minimap --cou
 
 Each full swing's **shape** (draw, fade, pull hook, push slice...) is worked out from its start
 direction and spin axis, and shown in the Shots tab and as the curve of its line in the replay.
-Names assume a right-hander: a lefty's draw reads as a fade.
+Names follow the player's hand, which is stored with each shot (`shots.handed`, as GSPro has it set):
+a lefty's ball curving right is a draw. A shot with no hand stored is named as a right-hander's.
 
 ### Handicap index
 

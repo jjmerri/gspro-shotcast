@@ -37,9 +37,12 @@ def connect(path: str | Path) -> sqlite3.Connection:
     """Read-only, so viewing can never change the copy (or a live booth's file)."""
     db = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
     db.row_factory = sqlite3.Row
-    # A database from before shots could be left out of the stats: none are (a temp view shadows the table).
-    if "left_out" not in {r[1] for r in db.execute("PRAGMA table_info(shots)")}:
-        db.execute("CREATE TEMP VIEW shots AS SELECT *, 0 AS left_out FROM main.shots")
+    # A database from before shots could be left out of the stats (none are) or kept the player's hand
+    # (unknown): a temp view shadows the table with the missing columns.
+    have = {r[1] for r in db.execute("PRAGMA table_info(shots)")}
+    extra = [f"{v} AS {c}" for c, v in (("left_out", "0"), ("handed", "NULL")) if c not in have]
+    if extra:
+        db.execute(f"CREATE TEMP VIEW shots AS SELECT *, {', '.join(extra)} FROM main.shots")
     return db
 
 

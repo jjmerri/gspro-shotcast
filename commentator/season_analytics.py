@@ -198,12 +198,14 @@ def gapping(db: sqlite3.Connection, player: str, context: str | None = None) -> 
     counts, a mulligan's too. Medians and the middle half, so one mishit doesn't move the numbers."""
     rows = db.execute(
         "SELECT club, COALESCE(carry_raw_tile_yards, carry_raw) AS carry, total_yards, ball_speed, club_speed,"
-        " launch_angle, total_spin, spin_axis, start_direction FROM shots WHERE player = ? AND attributed = 1"
+        " launch_angle, total_spin, spin_axis, start_direction, handed FROM shots WHERE player = ? AND attributed = 1"
         " AND is_putt = 0 AND left_out = 0 AND club IS NOT NULL AND club != 'PT'"
         " AND COALESCE(carry_raw_tile_yards, carry_raw) > 0" + _ctx(context), (player,)).fetchall()
     by_club: dict[str, list] = defaultdict(list)
     for r in rows:
         by_club[r["club"]].append(r)
+    hands = Counter(r["handed"] for r in rows if r["handed"])
+    handed = hands.most_common(1)[0][0] if hands else None
     out = []
     for club, every in by_club.items():
         speeds = sorted(r["ball_speed"] for r in every if r["ball_speed"])
@@ -220,7 +222,7 @@ def gapping(db: sqlite3.Connection, player: str, context: str | None = None) -> 
                     "carry_max": round(carries[-1]), "total": med("total_yards"), "ball_speed": med("ball_speed"),
                     "club_speed": med("club_speed"), "smash": round(statistics.median(smash), 2) if smash else None,
                     "launch": med("launch_angle"), "spin": med("total_spin"), "spin_axis": med("spin_axis"),
-                    "start_dir": med("start_direction"), "miss": miss_label(med("start_direction"), med("spin_axis"))})
+                    "start_dir": med("start_direction"), "miss": miss_label(med("start_direction"), med("spin_axis"), handed)})
     out.sort(key=lambda c: -(c["carry"] or 0))
     for c in out:
         c["gap_to_next"] = None
@@ -229,11 +231,14 @@ def gapping(db: sqlite3.Connection, player: str, context: str | None = None) -> 
     return out
 
 
-def miss_label(start: float | None, axis: float | None) -> str | None:
-    """A right-hander's typical ball flight from start direction and spin axis (positive = right)."""
+def miss_label(start: float | None, axis: float | None, handed: str | None = None) -> str | None:
+    """A typical ball flight from start direction and spin axis (positive = right). The direction is
+    as seen; the curve is named for the player's hand (a lefty's ball curving right is a draw)."""
     if start is None or axis is None:
         return None
     side = "straight" if abs(start) < 1.5 else f"{abs(start):.0f}° {'right' if start > 0 else 'left'}"
+    if shot_shape.lefty(handed):
+        axis = -axis
     curve = ("slice" if axis >= 9 else "fade" if axis >= 3 else "hook" if axis <= -9 else "draw" if axis <= -3
              else "no curve")
     return f"starts {side}, {curve}"
@@ -495,13 +500,13 @@ def shot_log(db: sqlite3.Connection, context: str | None = None, *, player: str 
         " is_putt, lie_before, lie_after, ROUND(to_pin_yards, 1) AS to_pin, ROUND(finish_yards, 1) AS finish,"
         " ROUND(COALESCE(carry_raw_tile_yards, carry_raw)) AS carry, ROUND(total_yards) AS total, ball_speed,"
         " club_speed, launch_angle, total_spin, spin_axis, start_direction, outcome, mulligan, left_out, fmt,"
-        " COALESCE(carry_game_yards, carry_raw_tile_yards, carry_raw) AS flight"
+        " handed, COALESCE(carry_game_yards, carry_raw_tile_yards, carry_raw) AS flight"
         " FROM shots JOIN sessions ON sessions.id = shots.session_id WHERE " + " AND ".join(where)
         + _ctx(context).replace("is_league", "shots.is_league") + " ORDER BY shots.ts DESC, shots.id DESC LIMIT ?",
         (*args, limit)).fetchall()
     out = [dict(r) for r in rows]
     for r in out:
-        r["shape"] = shot_shape.shape(r["start_direction"], r["spin_axis"], r.pop("flight"), bool(r["is_putt"]))
+        r["shape"] = shot_shape.shape(r["start_direction"], r["spin_axis"], r.pop("flight"), bool(r["is_putt"]), r.pop("handed"))
     if out:
         ids = [r["id"] for r in out]
         said: dict[int, list] = defaultdict(list)

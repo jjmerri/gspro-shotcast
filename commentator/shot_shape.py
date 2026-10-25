@@ -1,8 +1,9 @@
 """A full swing's shape (push, pull, draw, fade, hook, slice) and how far it curved.
 
 From the launch monitor: start direction (degrees, positive = right of the target line) and spin axis
-(degrees, positive = tilted right, so the ball curves right). Labels are a right-hander's, as the
-gapping table's typical miss (season_analytics.miss_label): GSPro's handedness isn't stored per shot.
+(degrees, positive = tilted right, so the ball curves right). Names are the player's own: a
+right-hander's ball curving right is a fade, a left-hander's a draw (shots.handed; unknown reads as
+right-handed).
 GSPro's own "offline" yardage would be better than an estimated curve, but it isn't in its API.
 """
 from __future__ import annotations
@@ -20,10 +21,17 @@ CURVE_FACTOR = 0.6
 MAX_CURVE_SHARE = 0.25    # never more than a quarter of the carry sideways
 
 
-def shape(start: float | None, axis: float | None, carry: float | None, putt: bool = False) -> str | None:
+def lefty(handed: str | None) -> bool:
+    return (handed or "").strip().upper() == "LH"
+
+
+def shape(start: float | None, axis: float | None, carry: float | None, putt: bool = False,
+          handed: str | None = None) -> str | None:
     """"Push fade", "Draw", "Straight", ...; None for a putt, a short shot, or missing numbers."""
     if putt or start is None or axis is None or carry is None or carry < MIN_CARRY_YARDS:
         return None
+    if lefty(handed):   # a lefty's push starts left and their fade curves left: name it as a mirror image
+        start, axis = -start, -axis
     line = "Push" if start >= START_DEGREES else "Pull" if start <= -START_DEGREES else ""
     curve = ("slice" if axis >= HARD_CURVE_DEGREES else "fade" if axis >= CURVE_DEGREES
              else "hook" if axis <= -HARD_CURVE_DEGREES else "draw" if axis <= -CURVE_DEGREES else "")
