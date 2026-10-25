@@ -37,6 +37,9 @@ def test_short_rounds_scale_up_without_an_index_and_add_the_expected_holes_with_
     seventeen = {h: 4 for h in range(1, 18)}
     assert HI._differential(seventeen, PARS, tee, 10.0) == (0.7, 17)              # 0 + 6.4 / 9
     assert HI._differential(seventeen | {17: 8}, PARS, tee, 10.0) == (2.7, 17)    # capped at 6: no stroke there
+    # The strokes fall as over the full 18 (index 10: holes 1-10), so hole 10 keeps its stroke.
+    tee = {**tee, "index": {h: h for h in PARS}}
+    assert HI._differential(seventeen | {10: 7}, PARS, tee, 10.0) == (3.7, 17)
 
 
 def test_the_course_handicap_rounds_half_up():

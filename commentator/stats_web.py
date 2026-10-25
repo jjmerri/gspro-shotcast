@@ -131,11 +131,27 @@ def rounds(db: sqlite3.Connection, context: str | None = None) -> list[dict[str,
     _, of_row = round_groups(db)
     who: dict[int, set] = {}
     named = dict(db.execute("SELECT id, player FROM shots WHERE player IS NOT NULL AND player != 'unknown'").fetchall())
-    for sid, rnd in shot_rounds(db).items():
+    of_shot = shot_rounds(db)
+    for sid, rnd in of_shot.items():
         if sid in named:
             who.setdefault(rnd, set()).add(named[sid])
+    # A round with a drive left out of the stats gets its longest drive again from the drives kept.
+    kept: dict[tuple, float | None] = {}
+    left: set[tuple] = set()
+    for sid, player, d, out_ in db.execute(f"SELECT id, player, {_DRIVE}, left_out FROM shots WHERE {_TEE_DRIVER}"
+                                           f" AND mulligan = 0 AND {_DRIVE} IS NOT NULL"):
+        key = (of_shot.get(sid), player)
+        if out_:
+            left.add(key)
+        else:
+            kept[key] = max(kept.get(key) or 0, d)
     for r in db.execute("SELECT * FROM rounds WHERE 1=1" + _ctx(context) + " ORDER BY ended_at DESC, id DESC"):
         card = _card(_json(r["scores"]), _json(r["hole_pars"]))
+        rnd = of_row.get(r["id"], r["id"])
+        members = who.get(rnd, set()) | ({r["side"]} if r["side"] else set())
+        longest = r["longest_drive"]
+        if any((rnd, m) in left for m in members):
+            longest = max((kept[(rnd, m)] for m in members if (rnd, m) in kept), default=None)
         out.append({
             "id": r["id"], "round": of_row.get(r["id"], r["id"]), "ended": r["ended_at"], "date": r["date"],
             "course": r["course"],
@@ -148,7 +164,7 @@ def rounds(db: sqlite3.Connection, context: str | None = None) -> list[dict[str,
             "to_par": card["to_par"] if card["played"] else None,
             "fir": [r["fir_hit"], r["fir_tries"]], "gir": [r["gir_hit"], r["gir_tries"]],
             "scramble": [r["scramble_hit"], r["scramble_tries"]], "sand": [r["sand_hit"], r["sand_tries"]],
-            "putts": r["putts"], "penalties": r["penalties"], "longest_drive": r["longest_drive"],
+            "putts": r["putts"], "penalties": r["penalties"], "longest_drive": longest,
             "card": card["holes"],
         })
     return out

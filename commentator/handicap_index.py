@@ -127,8 +127,16 @@ def _differential(scores: dict[int, int], pars: dict[int, int], tee: dict | None
     slope = tee["slope"] if tee else NEUTRAL_SLOPE
     share = len(holes) / 18
     if index is not None:
-        ch = round_half_up(index * share * slope / NEUTRAL_SLOPE + (rating - par))
-        hard = sorted(holes, key=lambda h: ((tee or {}).get("index", {}).get(h) or 99, h))
+        if len(holes) > 9:
+            # 10 to 17 holes: the strokes fall as they would over the full 18, on the holes played.
+            full = sorted(set(holes) | set((tee or {}).get("par", {})) | set(pars))[:18]
+            full_par = sum(pars.get(h) or (tee or {}).get("par", {}).get(h) or 0 for h in full)
+            full_rating = tee["rating"] if tee else float(full_par)
+            ch = round_half_up(index * slope / NEUTRAL_SLOPE + (full_rating - full_par))
+        else:
+            full = holes
+            ch = round_half_up(index * share * slope / NEUTRAL_SLOPE + (rating - par))
+        hard = sorted(full, key=lambda h: ((tee or {}).get("index", {}).get(h) or 99, h))
         strokes = allocate(ch, hard)
         cap = {h: pars[h] + 2 + strokes.get(h, 0) for h in holes}
     else:

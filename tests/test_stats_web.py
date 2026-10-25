@@ -175,6 +175,19 @@ def test_a_shot_left_out_drops_out_of_the_stats_but_stays_in_its_hole(tmp_path):
     assert db.execute("SELECT left_out FROM shots WHERE id = 1").fetchone() == (1,)
 
 
+def test_a_round_left_out_drive_is_not_its_longest(tmp_path):
+    path, db = _db(tmp_path)
+    for i, yards in enumerate((999, 250)):
+        _shot(db, "Ann", ts=10 + i, course="Pebble", hole=f"Hole {i + 1}, par 4", club="DR", shot_number=1,
+              lie_before="tee", total_yards=yards, left_out=int(yards == 999))
+    db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, gross, scores, hole_pars,"
+               " longest_drive, complete) VALUES (1, 100, '2026-10-01', 'Pebble', 'Ann', 18, 8,"
+               " '{\"1\": 4, \"2\": 4}', '{\"1\": 4, \"2\": 4}', 999, 0)")
+    db.commit()
+    with stats_web.connect(path) as ro:
+        assert [r["longest_drive"] for r in stats_web.rounds(ro)] == [250]
+
+
 def test_the_local_page_can_leave_a_shot_out(tmp_path):
     path, db = _db(tmp_path)
     _shot(db, "Ann", club="DR", shot_number=1, lie_before="tee", total_yards=330)
