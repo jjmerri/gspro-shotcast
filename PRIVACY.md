@@ -32,8 +32,8 @@ key. When on, they send this:
 | **Check** / **Send test** next to a key in the app's Settings | That key's service (OpenAI, Anthropic, Google, AWS, ntfy) | The key, to see if it works (only when you click it) |
 | Golf news, live scores, course trivia, weather | The news feeds you list, ESPN, Wikipedia, Open-Meteo | Requests for headlines and scores, the course's name, the shed's location |
 
-**Installing.** The Windows installer contains everything. Installing from source (`install.bat`
-or `pip`) downloads Python packages from PyPI and the spaCy language model and OCR models from
+**Installing.** The Windows installer contains everything. Installing from source (`pip`)
+downloads Python packages from PyPI and the spaCy language model and OCR models from
 their publishers.
 
 Questions: https://github.com/jjmerri/gspro-shotcast/issues

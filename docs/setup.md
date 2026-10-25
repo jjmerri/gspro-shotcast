@@ -2,10 +2,10 @@
 
 # Setup, operation and development
 
-## Setup (fresh machine)
+## Running from source (development)
 
-`install.bat` does steps 1, 3, 5 and 7 for you (see the [README](../README.md#quick-start)). By
-hand:
+To play, install the Windows app (see the [README](../README.md#quick-start)). To work on the
+code, run it from a clone:
 
 1. **Python 3.12 or 3.13.**
 2. For the `gspro_sniffer` source only: **Npcap** with "Support loopback traffic" ticked
@@ -34,9 +34,9 @@ hand:
    `config.yaml` and Kokoro voices (steps 3-4). [Choosing a setup](booth.md#choosing-a-setup)
    compares the options.
 
-Your `config.yaml`, `.env`, `data/league.json` and `logs/` are gitignored, so `git pull` (or
-`update.bat`) updates the code without touching your league or settings. See [DEPLOY.md](../DEPLOY.md) for updating
-and running on the sim PC (`start-booth.bat`, `screen-check.bat`).
+Your `config.yaml`, `.env`, `data/league.json` and `logs/` are gitignored, so `git pull` updates
+the code without touching your league or settings. See [DEPLOY.md](../DEPLOY.md) for running on
+the sim PC.
 
 ## Bring-up, one step at a time
 

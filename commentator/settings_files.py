@@ -1,5 +1,5 @@
-"""Small edits to config.yaml and .env that keep their comments and layout: shared by install.bat
-(tools/install_setup.py) and the Windows app (commentator/tray.py and its Settings window)."""
+"""Small edits to config.yaml and .env that keep their comments and layout, for the Windows app
+(commentator/tray.py and its Settings window)."""
 from __future__ import annotations
 
 import copy

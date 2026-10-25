@@ -187,8 +187,7 @@ beyond that is supported on paper but not yet run live:
    `%LOCALAPPDATA%\Shotcast`, which updating and uninstalling leave alone.
 3. **Where things are.** The docs give paths from the Shotcast folder (`%LOCALAPPDATA%\Shotcast`;
    **More → Open the Shotcast folder**): `logs\season.db`, `config.yaml`, `.env`, and a league
-   file you add as `data\league.json`. Where the docs mention a `.bat` file, the tray menu does
-   its job.
+   file you add as `data\league.json`.
 4. **Commands** such as `publish`, `import-league` and `restore` run from **More → Command
    prompt**: type `shotcast <command>` there (`shotcast --help` lists them; they're the
    `python -m commentator <command>` in the docs).
@@ -198,8 +197,8 @@ beyond that is supported on paper but not yet run live:
 
 No league file is needed; players are recorded and called by their GSPro names. Add one later to
 split league and practice rounds and get standings, net scores and storylines
-([Leagues](docs/leagues.md)). To install by hand instead, see
-[Setup](docs/setup.md#setup-fresh-machine).
+([Leagues](docs/leagues.md)). To run from source for development, see
+[Setup](docs/setup.md#running-from-source-development).
 
 ## Documentation
 

@@ -203,7 +203,7 @@ def health_issues(log_dir: str | Path) -> list[tuple[str, str]]:
 
 
 def other_booths() -> list[int]:
-    """Booths not started by this app (start-booth.bat, a scheduled task): two would both commentate."""
+    """Booths not started by this app (a source checkout, a scheduled task): two would both commentate."""
     if os.name != "nt":
         return []
     # Python processes only: this PowerShell's own command line holds the pattern too.
@@ -333,7 +333,7 @@ class Tray:
     def status(self) -> str:
         s = self.booth.state
         if s == "other":
-            return "Another booth is running (start-booth.bat?)"
+            return "Another booth is running"
         if s == "crashed":
             return "The booth keeps stopping: see Open logs"
         if s == "stopped":

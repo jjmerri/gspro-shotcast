@@ -1,3 +1,2 @@
-# Windows batch files need CRLF line endings (labels and goto misbehave with LF only).
-*.bat text eol=crlf
+# PowerShell scripts keep CRLF line endings for Windows.
 *.ps1 text eol=crlf

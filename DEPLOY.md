@@ -1,109 +1,39 @@
 # Deploy and operate on the sim PC
 
-The booth runs on the Windows PC that runs GSPro. You can develop on the same PC or on another
-machine; either way, the sim PC should be a **git clone** of this repo so updates are a `git pull`.
+Shotcast runs on the Windows PC that runs GSPro, installed from
+[Releases](https://github.com/jjmerri/gspro-shotcast/releases) (see the
+[README](README.md#the-windows-app-easiest)). To work on the code, see
+[Setup and development](docs/setup.md).
 
 Your own machine details (host, user, SSH key, paths) belong in `DEPLOY.local.md`, which is
 gitignored. Keep personal notes there, not here.
 
 ## The Windows app
 
-The installer from [Releases](https://github.com/jjmerri/gspro-shotcast/releases) is the simplest
-setup for a sim PC that just plays: see the [README](README.md#the-windows-app-easiest). It puts a
-private Python with Shotcast in `%LOCALAPPDATA%\Programs\Shotcast` and runs `shotcast tray`, which
-keeps the booth running (restarting it after a crash, up to 3 times in 10 minutes), serves the
-stats page on this PC and offers updates. Everything else (config.yaml, .env, the league file,
-`logs\` with season.db, backups and the booth, tray and `booth-errors.log` logs) lives in
-`%LOCALAPPDATA%\Shotcast`. The rest of this page is for a git clone.
+The installer puts a private Python with Shotcast in `%LOCALAPPDATA%\Programs\Shotcast` and runs
+`shotcast tray`, which keeps the booth running (restarting it after a crash, up to 3 times in 10
+minutes), serves the stats page on this PC and offers updates. Everything else (config.yaml, .env,
+the league file, `logs\` with season.db, backups and the booth, tray and `booth-errors.log` logs)
+lives in `%LOCALAPPDATA%\Shotcast`.
 
-Don't run both: if another booth is running (start-booth.bat or a scheduled task), the tray
-doesn't start one and says so; **Restart the booth** in its menu stops the other and starts its own.
+**Updating.** The tray offers new releases (**Check for updates** / **Restart to update**); it
+never installs one on its own. An update closes the booth, installs, and starts Shotcast again, so
+don't update mid-round.
 
-### Moving to the Windows app
+**Publishing the stats page** (optional): with sharing set up in **Settings**, the booth uploads
+the page right after each round's sign-off
+([Sharing the stats page](docs/tracking.md#sharing-the-stats-page)).
 
-From a ZIP or git install, so the app carries on with the same season and settings:
+Don't run two booths: if another one is running (say, from a source checkout), the tray doesn't
+start its own and says so; **Restart the booth** in its menu stops the other and starts its own.
 
-1. Stop the old booth: close its window (or `Get-CimInstance Win32_Process | ? CommandLine -match
-   'commentator.* run' | % { Stop-Process $_.ProcessId }` in PowerShell), and remove anything that
-   starts it (a scheduled task, the Startup folder).
-2. Install the app, then right-click the tray icon → **Quit**.
-3. Copy from the old folder into `%LOCALAPPDATA%\Shotcast`, replacing what's there: `config.yaml`,
-   `.env`, your league files from `data\` (`league.json`, `history.json`, course cards) into
-   `data\`, and the whole `logs\` folder (season.db, backups, replays). Paths in `config.yaml`
-   relative to the old folder (`logs/...`, `data/...`) keep working; fix any absolute ones.
-4. Start **Shotcast** from the Start menu. Check the tray's status and the stats page, then keep
-   the old folder until you're happy (it's also a backup).
+## Releases
 
- `.github/workflows/windows-app.yml` when a `v*` tag is pushed (the tag is
+Releases are built by `.github/workflows/windows-app.yml` when a `v*` tag is pushed (the tag is
 the version); running the workflow by hand makes a test build in the run's artifacts. To build
 locally on Windows with Inno Setup 6: `powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 -Version 0.2.0`.
 
-## Install
-
-`install.bat` (double-click it in a clone or an unzipped download) does the install below and
-asks for the keys; see the [README](README.md#quick-start). By hand, from a terminal on the sim PC:
-
-```
-git clone https://github.com/jjmerri/gspro-shotcast.git
-cd gspro-shotcast
-py -3.13 -m venv .venv
-.venv\Scripts\pip install -e ".[capture,cloud]"
-copy config.example.yaml config.yaml
-copy .env.example .env
-```
-
-Then:
-
-1. Fill in `.env` with the keys you use (see [Config and secrets](#config-and-secrets)).
-2. Optional, for league features: `copy data\league.example.json data\league.json` and fill in
-   your league. Only `teams[].players[].name` is required; add `gspro_name` and `aliases` so the
-   booth can match GSPro's player names to your roster. Then set `league_file: data/league.json`
-   in `config.yaml`. Without a league file every round is commentated as practice.
-3. Edit `config.yaml` if needed. The example uses the cloud models and voices (both API keys in
-   `.env`) and GSPconnect's log as the shot source; see [docs/booth.md](docs/booth.md#models-and-voices)
-   for local models and voices and [docs/tracking.md](docs/tracking.md#launch-monitors) for other
-   launch monitors.
-4. Bring it up step by step: `check`, `say "Testing"`, `run --replay data/sample_shots.jsonl`,
-   then check the screen read with `screen-check.bat` (on a hole and on each setup tab).
-
-`config.yaml`, `.env`, `data/league.json`, `data/history.json` and `logs/` are all gitignored, so
-`git pull` never touches your league or your settings.
-
-## Update
-
-`update.bat` does this (or downloads the latest ZIP when the folder isn't a git clone). By hand:
-
-```
-cd gspro-shotcast
-git pull
-.venv\Scripts\pip install -e ".[capture,cloud]"     # only needed if pyproject.toml changed
-.venv\Scripts\python.exe -m compileall -q commentator  # quick syntax check
-```
-
-**An update does nothing until the booth is restarted.** Python loads modules once at launch,
-so changed code has no effect on a running booth. Relaunch `start-booth.bat`: it closes the
-running booth (and its window) and starts a fresh one. Don't update mid-round.
-
-When `config.example.yaml` changes, diff it against your `config.yaml` for new settings.
-
-## Running the booth
-
-Batch files in the repo root (`install.bat` and `update.bat` are under [Install](#install) and
-[Update](#update)):
-
-- **`start-booth.bat`** launches the booth minimized in a window titled "Golf Booth". Double-click
-  it for a league night; close that window to stop. Running it again restarts the booth: it closes
-  any booth already running, window and all, before starting the new one.
-- **`screen-check.bat`** counts down 8 s (bring GSPro to the front), then runs `screen-check` into
-  `logs\screen-check.txt` and shows it. Use it to confirm the screen read still lines up after a
-  GSPro update or a resolution change; `screen-check.bat --fix` writes moved boxes to `config.yaml`.
-- **`stats.bat`** opens the stats page over `logs\season.db`; close its window to stop it.
-- **Publishing the stats page** (optional): with `publish.enabled` and the AWS keys in `.env`, the
-  booth uploads the page right after each round's sign-off
-  ([Sharing the stats page](docs/tracking.md#sharing-the-stats-page)); install the uploader once with
-  `.venv\Scripts\pip install -e ".[publish]"`.
-
-### Remote administration (optional)
+## Remote administration (optional)
 
 If you manage the PC over SSH (Windows OpenSSH server):
 
@@ -135,23 +65,15 @@ and is the option for third-party connectors that don't go through GSPconnect's 
 ## Files on the PC
 
 ```
-gspro-shotcast\
-  install.bat            first install (re-run to add the booth or new keys)
-  update.bat             update to the latest version, keeping your settings
-  start-booth.bat        launch the booth (minimized)
-  stats.bat              open the stats page
-  screen-check.bat       screen-check into logs\screen-check.txt
-  config.yaml            your config (gitignored). Secrets are NOT here
-  config.example.yaml    the template, kept in sync with the code
-  .env                   secrets only (gitignored)
-  .env.example           the template for .env
-  .venv\                 the Python environment with all deps
-  commentator\           the package
+%LOCALAPPDATA%\Programs\Shotcast\   the app: its own Python, Shotcast, shotcast.exe (replaced by updates)
+%LOCALAPPDATA%\Shotcast\             your files (kept by updates and uninstall)
+  config.yaml            your config. Secrets are NOT here
+  .env                   secrets only
   data\
-    league.json          your league (teams, players, aliases, handicaps, schedule, stories; gitignored)
-    history.json         earlier seasons, from import-league (optional; gitignored)
-  models\                Kokoro voice files (only for local TTS)
+    league.json          your league (teams, players, aliases, handicaps, schedule, stories)
+    history.json         earlier seasons, from import-league (optional)
   logs\                  everything the booth writes (below)
+  updates\               downloaded installers and the last update's install log
 ```
 
 `logs\` holds, per day:
@@ -167,10 +89,11 @@ gspro-shotcast\
 
 ## Config and secrets
 
-- **`config.yaml`** is gitignored and per machine. A dev machine and the sim PC usually differ
-  (a dev box might use `source.type: replay` and console TTS). Keep a `config.yaml.bak` before
-  big edits as a rollback point.
-- **`.env` holds only secrets** and is gitignored. Start from `.env.example`. Keys the booth reads:
+Most settings are in the tray's **Settings** window; the rest are in `config.yaml` (**Settings →
+Advanced**).
+
+- **`config.yaml`** is per machine. Keep a `config.yaml.bak` before big edits as a rollback point.
+- **`.env` holds only secrets** (the Settings window's API keys go here). Keys the booth reads:
   - `ANTHROPIC_API_KEY` for Claude calls.
   - `OPENAI_API_KEY` for GPT models and the OpenAI voices.
   - `GOOGLE_TTS_API_KEY` for the Google voices (`tts.provider: google`).
@@ -179,11 +102,14 @@ gspro-shotcast\
 
 ## Quick checks
 
+From the tray's **More → Command prompt** (or `%LOCALAPPDATA%\Programs\Shotcast\Scripts\shotcast.exe`
+from `%LOCALAPPDATA%\Shotcast`):
+
 ```
-.venv\Scripts\python.exe -m commentator check   # league loads, models answer
-type logs\transcript-<today>.txt                # what was said tonight
-.venv\Scripts\python.exe -m commentator cost    # tonight's spend
+shotcast check                     # league loads, models answer
+type logs\transcript-<today>.txt   # what was said tonight
+shotcast cost                      # tonight's spend
 ```
 
-Tests take a minute or two on Windows. In `cmd`, read the end of the
-output with PowerShell `Get-Content ... | Select-Object -Last 20`, since `cmd` has no `tail`.
+In `cmd`, read the end of a log with PowerShell `Get-Content ... | Select-Object -Last 20`, since
+`cmd` has no `tail`.
