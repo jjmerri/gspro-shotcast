@@ -193,6 +193,8 @@ for browsing the database. Its tabs:
   a par-4/5 tee shot (a par-3 tee shot counts); a chip is from 50 yd and in, off the green.
 - **Booth**: lines and words per commentator, signature phrases, and putt-call accuracy by night.
 
+Broadcasts and Booth are hidden until the booth has said something (stats only, commentary off).
+
 The **player picker** at the top (Everyone, or one name) narrows every tab to that player:
 their row on Players, them on the left of Head-to-head, only rounds they played in (team rounds
 too), their own hole-by-hole averages on Courses next to everyone's, only their shots, only nights

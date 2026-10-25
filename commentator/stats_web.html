@@ -240,6 +240,8 @@ async function load() {
     if (mine !== loading) return;
     state.data = body;
     state.shots = null;
+    if (!tabs().some(([k]) => k === state.tab)) state.tab = "players";
+    showTabs();
     document.querySelectorAll("#ctx button").forEach(b => b.classList.toggle("on", b.dataset.ctx === state.ctx));
     showMe();
     markSeen();
@@ -1020,8 +1022,17 @@ function render() {
   writeHash();
 }
 
+// With the commentary off there is nothing on the booth's tabs: hide them.
+function tabs() {
+  const d = state.data;
+  if (!d) return TABS;
+  const has = { broadcasts: d.broadcasts.length > 0,
+                booth: d.booth.commentators.length > 0 || d.booth.calls.length > 0 || d.predictions.length > 0 };
+  return TABS.filter(([k]) => has[k] !== false);
+}
+
 function showTabs() {
-  $("#tabs").innerHTML = TABS.map(([k, label]) => `<button data-tab="${k}" class="${k === state.tab ? "on" : ""}">${label}</button>`).join("");
+  $("#tabs").innerHTML = tabs().map(([k, label]) => `<button data-tab="${k}" class="${k === state.tab ? "on" : ""}">${label}</button>`).join("");
 }
 
 document.addEventListener("click", (e) => {
