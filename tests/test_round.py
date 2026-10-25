@@ -535,6 +535,19 @@ def test_course_card_from_coursedetails_and_matches_by_name_not_folder(tmp_path)
     assert card and card.name == "Test Links"
     assert sum(card.par.values()) == 72 and card.par[1] == 5 and card.par[6] == 3
     assert len(card.index) == 18 and card.index[6] == 1 and card.altitude_ft == 1010
+    # Rating and slope per tee, in GSPro's tee order; a tee the course lacks isn't rated.
+    assert card.ratings == {"Black": (76.9, 145), "White": (70.5, 129)}
+
+
+def test_course_card_merges_the_details_ratings_into_the_csv_card(tmp_path):
+    from commentator import course_card
+
+    folder = tmp_path / "wynn_gsp"
+    folder.mkdir()
+    (folder / "wynn_gsp.unity3d.csv").write_text(WYNN_CSV, encoding="utf-8")
+    (folder / "coursedetails.txt").write_text(DETAILS.replace("Test Links", "Wynn Golf Club"), encoding="utf-8")
+    card = course_card.load(tmp_path, "Wynn Golf Club")
+    assert card.yards["Black"][9] == 424 and card.ratings["Black"] == (76.9, 145)
 
 
 def test_course_card_takes_the_folder_gspro_logged_when_two_names_match(tmp_path):

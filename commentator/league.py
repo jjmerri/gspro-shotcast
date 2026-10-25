@@ -32,6 +32,8 @@ class League:
         # commentary model and the transcript keep the real spelling.
         self.pronunciations: dict[str, str] = dict(data.get("pronunciations") or {})
         self.week_cards: dict[int, dict[str, Any]] = {}
+        # Our own handicap index per player (handicap_index), for whoever has no handicap here.
+        self.own_indexes: dict[str, float] = {}
         for team in data.get("teams", []):
             team_name = team.get("name", "")
             self.team_players[team_name] = []
@@ -121,8 +123,11 @@ class League:
         return entry.get("nickname") or team
 
     def handicap(self, player: str) -> float | None:
+        """The league's handicap (its file's, or Squabbit's live one), else our own index."""
         value = self.player_info.get(player, {}).get("handicap")
-        return float(value) if isinstance(value, (int, float)) else None
+        if isinstance(value, (int, float)):
+            return float(value)
+        return self.own_indexes.get(player)
 
     def apply_handicaps(self, by_id: dict[str, float | None]) -> list[str]:
         """Overwrite roster handicaps with live values keyed by Squabbit user id. A missing or

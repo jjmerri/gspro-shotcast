@@ -8,8 +8,9 @@ Shot tracking, season stats and an AI broadcast booth for **GSPro 3.1.x** simula
   data, where it finished, what it scored, plus every round's card and stats (fairways, greens,
   putts, scrambling). It all goes into one local SQLite file. No cloud services, accounts or API
   keys needed.
-- **Stats web page.** Strokes gained, club gapping, approach and putting by distance, scorecards,
-  hole replays, every shot, and season highlights, in a local page over that file. Optionally published online
+- **Stats web page.** Strokes gained, club gapping, approach and putting by distance, scorecards
+  with round summaries and shareable score cards, hole replays with each shot's curve, shot
+  shapes, a handicap index, and season highlights, in a local page over that file. Optionally published online
   after every round, behind a password, so the whole league can check their numbers from a phone.
 - **The booth.** Two AI commentators call your round live through the speakers. They know the
   launch numbers, the course, your league's standings and storylines, and what you did last
@@ -41,7 +42,8 @@ areas marked.
 Every swing goes into `logs/season.db` with its launch data,
 where it finished and what it scored, plus each round's card and stats. The stats page shows
 strokes gained, club gapping, approach and putting by distance, scorecards, every shot, and
-season highlights. Works with any launch monitor GSPro supports; see
+season highlights, plus each player's handicap index. A misread or practice swing can be left
+out of the stats with a click. Works with any launch monitor GSPro supports; see
 [what's recorded with yours](docs/tracking.md#launch-monitors). Lefties who use GSPro's mirrored
 HUD are read too: the layout is detected per player, shot by shot.
 

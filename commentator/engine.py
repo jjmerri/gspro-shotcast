@@ -696,6 +696,7 @@ class Engine:
             asyncio.create_task(self.speech.prepare(Line(self.speakers[0], "Warming up.")))
         if self.screen and self.cfg.screen.ocr:
             asyncio.create_task(self._warm_ocr())
+        self._refresh_own_handicaps(backfill=True)
         if self.news is not None:
             asyncio.create_task(self._news_loop(), name="news")
         if self.weather is not None:
@@ -4803,6 +4804,32 @@ class Engine:
             log.warning("Course card load failed (%s); par and index come from the scorecard", e)
             return None
 
+    def _keep_course_tees(self, course: str | None, card) -> None:
+        """Keep the course's tee ratings and yardages for our own handicap index (best-effort)."""
+        if card is not None and course:
+            try:
+                self.store.record_course_tees(course, card)
+            except Exception as e:
+                log.warning("Couldn't keep %s's tees (%s)", course, e)
+
+    def _refresh_own_handicaps(self, backfill: bool = False) -> None:
+        """Work out each player's own handicap index from the rounds on record, for anyone the league
+        has no handicap for. `backfill` first reads the tees of courses played before they were kept."""
+        try:
+            from . import course_card, handicap_index
+
+            if backfill:
+                # By name alone: the folder GSPro's log names is tonight's course, not these.
+                for course in self.store.courses_without_tees():
+                    self._keep_course_tees(course, course_card.load(self.cfg.source.gspro_courses_dirs, course))
+
+            own = handicap_index.indexes(self.store.db)
+            self.league.own_indexes = {p: v["index"] for p, v in own.items() if v["index"] is not None}
+            if self.league.own_indexes:
+                log.info("Own handicap indexes: %s", ", ".join(f"{p} {i}" for p, i in sorted(self.league.own_indexes.items())))
+        except Exception as e:
+            log.warning("Own handicap indexes failed (%s)", e)
+
     def _round_players(self, names: list[str]) -> list[str]:
         """Roster players in this round: every player on a team that has a GSPro name here.
         Both partners, so a one-ball team's net still has both handicaps."""
@@ -5000,6 +5027,7 @@ class Engine:
         """Re-find a pre-built round's card now that GSPro's log has surely named the selected folder:
         the setup screen can be read before it does, and a name two courses share took the wrong one."""
         card = self._load_course_card(self._card_course(course))
+        self._keep_course_tees(course, card)
         if card and (r.course_card is None or card.name != r.course_card.name):
             log.info("Course card for %r is %s, not %s, now GSPro's log names the course", course, card.name,
                      r.course_card.name if r.course_card else "none")
@@ -5032,6 +5060,7 @@ class Engine:
         # GSPro's course folder is named by GSPro's own course name, which the schedule carries as
         # gspro_course when it differs from the league's name (e.g. Balsams Panorama vs Wentworth).
         card = self._load_course_card(card_course or entry.get("gspro_course") or course)
+        self._keep_course_tees(course, card)
         if card:
             r.apply_course_card(card)
             # Feed the course's own altitude to the carry model (unless config already set one).
@@ -5998,6 +6027,7 @@ class Engine:
                     self.store.record_player_round(player=name, course=r.course, fmt=r.format, stats=pst,
                                                    hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
                                                    complete=complete, nine_to_par=nine[0] if nine else None)
+        self._refresh_own_handicaps()
         return stats
 
     async def handle_round_end(self, event: RoundEndEvent) -> None:

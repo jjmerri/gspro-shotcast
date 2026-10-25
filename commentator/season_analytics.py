@@ -14,6 +14,8 @@ import statistics
 from collections import Counter, defaultdict
 from typing import Any
 
+from . import shot_shape
+
 SHARED_BALL = ("scramble", "alternate")
 
 # Expected strokes to hole out, PGA Tour baseline (approximate, after Mark Broadie's "Every Shot
@@ -89,7 +91,8 @@ def _hole_key(label: str | None) -> str:
 def holes_played(db: sqlite3.Connection, context: str | None = None, player: str | None = None) -> list[dict]:
     """Each player's strokes grouped into holes, in order: a hole starts at stroke 1, when the stroke
     number goes back, or when the hole changes. Mulligans, unattributed strokes and shared-ball formats
-    are left out. A hole is `complete` when it ends holed, or in a conceded tap-in."""
+    are left out. A stroke a player left out of their stats stays in its hole (it was still played, and
+    it ends the stroke before it) but gains no strokes and counts toward no recovery or chip-in. A hole is `complete` when it ends holed, or in a conceded tap-in."""
     where = "attributed = 1 AND mulligan = 0 AND player IS NOT NULL AND player != 'unknown'" \
             " AND (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))" + _ctx(context)
     args: tuple = ()
@@ -143,7 +146,7 @@ def strokes_gained(holes: list[dict]) -> list[dict]:
             continue
         s = h["strokes"]
         for i, st in enumerate(s):
-            if st["outcome"] == "gimme":
+            if st["outcome"] == "gimme" or st["left_out"]:
                 continue
             start = expected(st["lie_before"] or ("green" if st["is_putt"] else None), st["to_pin_yards"])
             if start is None:
@@ -196,8 +199,8 @@ def gapping(db: sqlite3.Connection, player: str, context: str | None = None) -> 
     rows = db.execute(
         "SELECT club, COALESCE(carry_raw_tile_yards, carry_raw) AS carry, total_yards, ball_speed, club_speed,"
         " launch_angle, total_spin, spin_axis, start_direction FROM shots WHERE player = ? AND attributed = 1"
-        " AND is_putt = 0 AND club IS NOT NULL AND club != 'PT' AND COALESCE(carry_raw_tile_yards, carry_raw) > 0"
-        + _ctx(context), (player,)).fetchall()
+        " AND is_putt = 0 AND left_out = 0 AND club IS NOT NULL AND club != 'PT'"
+        " AND COALESCE(carry_raw_tile_yards, carry_raw) > 0" + _ctx(context), (player,)).fetchall()
     by_club: dict[str, list] = defaultdict(list)
     for r in rows:
         by_club[r["club"]].append(r)
@@ -244,7 +247,7 @@ def recovery(holes: list[dict]) -> dict[str, list[dict]]:
         s = h["strokes"]
         for i, st in enumerate(s):
             lie = (st["lie_before"] or "").lower()
-            if lie not in ("rough", "deep rough", "sand") or st["is_putt"] or st["to_pin_yards"] is None:
+            if st["left_out"] or lie not in ("rough", "deep rough", "sand") or st["is_putt"] or st["to_pin_yards"] is None:
                 continue
             nxt = s[i + 1] if i + 1 < len(s) else None
             holed = nxt is None and h["complete"]
@@ -409,13 +412,13 @@ def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = 
     # Chip-ins: a full shot from off the green (not the tee) that was the hole's last stroke.
     for h in holes:
         last = h["strokes"][-1]
-        if h["complete"] and last["outcome"] == "holed" and not last["is_putt"] and last["lie_before"] not in ("tee", "green"):
+        if h["complete"] and last["outcome"] == "holed" and not last["is_putt"] and not last["left_out"] and last["lie_before"] not in ("tee", "green"):
             yd = last["to_pin_yards"]
             moments.append({"player": h["player"], "date": h["date"], "course": h["course"], "hole": h["hole"],
                             "kind": "holed out", "text": f"Holed out from {round(yd) if yd else '?'} yd"
                             f" ({last['lie_before'] or 'off the green'}, {last['club'] or '?'})"})
     moments.sort(key=lambda m: m["date"] or "", reverse=True)
-    base = (" AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0" + _ctx(context)
+    base = (" AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)
             + (" AND player = ?" if player else ""))
     drive = "COALESCE(total_yards, carry_game_yards, carry_raw)"
 
@@ -491,11 +494,14 @@ def shot_log(db: sqlite3.Connection, context: str | None = None, *, player: str 
         "SELECT shots.id, sessions.date, shots.session_id, shots.player, shots.course, shots.hole, shot_number, club,"
         " is_putt, lie_before, lie_after, ROUND(to_pin_yards, 1) AS to_pin, ROUND(finish_yards, 1) AS finish,"
         " ROUND(COALESCE(carry_raw_tile_yards, carry_raw)) AS carry, ROUND(total_yards) AS total, ball_speed,"
-        " club_speed, launch_angle, total_spin, spin_axis, start_direction, outcome, mulligan, fmt"
+        " club_speed, launch_angle, total_spin, spin_axis, start_direction, outcome, mulligan, left_out, fmt,"
+        " COALESCE(carry_game_yards, carry_raw_tile_yards, carry_raw) AS flight"
         " FROM shots JOIN sessions ON sessions.id = shots.session_id WHERE " + " AND ".join(where)
         + _ctx(context).replace("is_league", "shots.is_league") + " ORDER BY shots.ts DESC, shots.id DESC LIMIT ?",
         (*args, limit)).fetchall()
     out = [dict(r) for r in rows]
+    for r in out:
+        r["shape"] = shot_shape.shape(r["start_direction"], r["spin_axis"], r.pop("flight"), bool(r["is_putt"]))
     if out:
         ids = [r["id"] for r in out]
         said: dict[int, list] = defaultdict(list)

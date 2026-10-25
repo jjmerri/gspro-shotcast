@@ -75,9 +75,10 @@ What's recorded, and from where:
 
 | Table | One row per | What's in it |
 |---|---|---|
-| `shots` | swing | Player, course, hole, shot number, club; launch monitor ball speed, launch angle, start direction, spin, spin axis, club speed, carry; club path, attack angle, face to target, dynamic loft and strike location on the face, when the monitor reported club data (NULL otherwise); lie before and after, slope, pin elevation, distance to the pin before and where it finished; GSPro's carry/total/offline; putt or full shot; a putt's result (holed, conceded, missed), or `holed` on a full shot that went in (a stroke the same player hits again on the same hole is never left `holed`: a putt becomes `missed`, a full shot loses its outcome); where GSPro had the ball before it (`start_x/y/z`, world metres, from the log's setup block; NULL on a tee shot, which has none) and the player's minimap aim click, if they moved it (`aim_map_x/y`); league or practice; `mulligan = 1` on a stroke GSPro took back. A conceded tap-in gets its own putt row (`outcome = 'gimme'`, no ball data), so every putt on the card is here |
+| `shots` | swing | Player, course, hole, shot number, club; launch monitor ball speed, launch angle, start direction, spin, spin axis, club speed, carry; club path, attack angle, face to target, dynamic loft and strike location on the face, when the monitor reported club data (NULL otherwise); lie before and after, slope, pin elevation, distance to the pin before and where it finished; GSPro's carry/total/offline; putt or full shot; a putt's result (holed, conceded, missed), or `holed` on a full shot that went in (a stroke the same player hits again on the same hole is never left `holed`: a putt becomes `missed`, a full shot loses its outcome); where GSPro had the ball before it (`start_x/y/z`, world metres, from the log's setup block; NULL on a tee shot, which has none) and the player's minimap aim click, if they moved it (`aim_map_x/y`); league or practice; `mulligan = 1` on a stroke GSPro took back; `left_out = 1` on a stroke left out of the stats (see below). A conceded tap-in gets its own putt row (`outcome = 'gimme'`, no ball data), so every putt on the card is here |
 | `hole_layouts` | hole of a completed round | Each played hole's tee, pin (as set that round) and GSPro's aim waypoint, in world metres, from the hole list GSPro logs when a round is complete (a round quit early logs none) |
 | `hole_images` | course and hole | GSPro's minimap off the tee (JPEG, title bar trimmed), with where the ball and pin sit on it: the background of every replay of the hole. Kept at the first tee setup on a hole that has none yet, on or off air |
+| `course_tees` | course and tee | Each tee's course rating, slope and par from the course's `coursedetails.txt`, kept whenever a course loads; used for the handicap index |
 | `rounds` | side per round (a player, or the team in a one-ball format) | Course, format, holes, gross, net to par, hole-by-hole scores and pars, fairways, greens in regulation, scrambling, sand saves, putts, penalties, longest drive (total distance); complete or quit early |
 | `player_rounds` | player per round | The same per-player stats and scores, for team formats where the side is the team |
 | `lines` | spoken line | Every line the booth said, tied to its shot |
@@ -109,6 +110,13 @@ shots are not recorded, only rounds. Practice rounds are recorded and flagged
 can't say which partner hit, so those shots are kept (`attributed = 0`) but left out of
 per-player stats. Replays and evals use an in-memory DB and never touch the file.
 
+**Leaving a shot out.** A bad read or a practice swing can be left out of the stats: open the
+shot on the Shots tab of the local stats page (the tray's Open stats) and click "Leave this shot
+out of the stats". It sets `shots.left_out = 1`: the stroke stays on the card, in the hole's score
+and in the replay, but drops out of every average, record, gapping table, highlight and strokes
+gained. Click again to count it. The published page is read-only and shows the tag; the change goes
+out with the next publish. Only the local page accepts the change (from this PC, JSON requests only).
+
 Shots recorded before the booth stored positions can get them from a saved GSPro log:
 `python -m commentator backfill-log <output_log.txt>... [--db logs/season.db] [--dry-run] [--fix-starts]`. The log
 has no timestamps, so its shots are matched to the file's in order, on course, hole and distance to
@@ -135,6 +143,25 @@ hole, at the first tee setup on a hole that has none, and every round there uses
 hole's map with the one on screen now: `python -m commentator snap-minimap --course "Kiawah Ocean Course" --hole 10
 [--session N] [--image screenshot.png]` (run it on the sim PC's desktop session, not over SSH).
 
+Each full swing's **shape** (draw, fade, pull hook, push slice...) is worked out from its start
+direction and spin axis, and shown in the Shots tab and as the curve of its line in the replay.
+Names assume a right-hander: a lefty's draw reads as a fade.
+
+### Handicap index
+
+The booth keeps its own handicap index per player, by the World Handicap System: each round's
+score differential is (113 / slope) × (adjusted gross − course rating), with each hole capped at
+net double bogey (par + 5 until the player has an index); the index is the average of the best
+differentials among the last 20 (best 1 of 3 up to best 8 of 20, with the WHS adjustments for
+fewer than 6), to 0.1, capped at 54. A 9-hole round counts as an 18 using the player's expected
+score for the other nine (0.52 × index + 1.2), or doubled before there's an index. Scramble and
+alternate-shot rounds and rounds under nine holes don't count. The tee is the one whose yardages
+match the shots' tee distances, else the one whose length fits the score; a course with no
+ratings uses par and slope 113. Sim scoring runs low, so plus indexes are common.
+
+When the league file has no handicap for a player, the booth uses this index for net scores and
+commentary. A Squabbit handicap, when there is one, is used in the commentary and never stored.
+
 Back the file up (`logs/season.db`); it's the only copy of your rounds.
 
 ## Stats web page
@@ -145,11 +172,14 @@ for browsing the database. Its tabs:
 - **Players**: the season table, plus per player strokes gained per nine (off the tee, approach,
   around the green, putting), night-by-night trends, club gapping with each club's typical flight
   (from full swings only, so chips don't shrink a wedge), approach by club, putting by length, and
-  recovery from rough and sand.
+  recovery from rough and sand, and the handicap index with its trend.
 - **Head-to-head**, **Rounds** (hole-by-hole cards, and a link to every shot of the round; a hole
   number that's a link draws the hole from above, tee at the bottom: each player's shots from where
   GSPro had the ball, dashed lines to where they aimed, and the pin, estimated from the shots'
-  distances to it when the round was quit before GSPro logged it), **Courses** (each hole's scoring average,
+  distances to it when the round was quit before GSPro logged it; a one-player round of nine
+  holes or more gets a summary: score per nine, fairways, greens and putts against the player's
+  season, strokes gained by category, best and worst shot, best and worst hole; **Share card**
+  saves the card as an image, or opens the phone's share sheet), **Courses** (each hole's scoring average,
   hardest and easiest, best nine).
 - **Shots**: every shot, filterable by player, course, club, lie and a date range (or one round,
   from the Rounds tab), with its launch data and what the booth said about it. A shot's round is

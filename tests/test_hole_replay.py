@@ -180,6 +180,25 @@ def test_replay_runs_each_shot_to_the_next_and_the_last_into_the_pin(tmp_path):
     assert math.dist(shots[1]["aim"], want) < 0.1
 
 
+def test_a_full_shot_bows_against_its_curve_and_a_putt_is_straight(tmp_path):
+    path, st = _season(tmp_path)
+    log = tmp_path / "output_log.txt"
+    log.write_text(_hole_log())
+    backfill(path, [str(log)])
+    # A pushed slice off the tee, a pulled draw in, a putt that read a spin axis anyway.
+    for n, start, axis, carry in [(1, 3.0, 12.0, 230.0), (2, -3.0, -5.0, 100.0), (3, 0.0, 8.0, None)]:
+        st.db.execute("UPDATE shots SET start_direction = ?, spin_axis = ?, carry_game_yards = ? WHERE shot_number = ?",
+                      (start, axis, carry, n))
+    st.db.commit()
+    shots = hole_replays(st.db)[(1, 1)]["players"][0]["shots"]
+    assert [s.get("shape") for s in shots] == ["Push slice", "Pull draw", None]
+    # Curving right, the drive starts left of where it ends up, so it bows left (negative), and the
+    # draw the other way; about a quarter of 0.6 x carry x sin(axis), in metres.
+    assert shots[0]["bend"] == round(-0.6 * 230 * math.sin(math.radians(12)) / 4 / M_TO_YD, 2)
+    assert shots[1]["bend"] > 0
+    assert "bend" not in shots[2]
+
+
 def test_a_ball_rolled_into_a_penalty_area_runs_to_where_it_went_in_then_the_drop(tmp_path):
     # Tee shot rolls in (no splash line, only the entry points: a placeholder first), a penalty stroke,
     # then the drop holed out from 150 m: Josh's 16th at Paynes Valley.

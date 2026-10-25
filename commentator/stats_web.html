@@ -52,6 +52,10 @@
   .s.double { background:var(--double); }
   .tag { font-size:11px; padding:1px 6px; border-radius:10px; border:1px solid var(--line); color:var(--dim); margin-left:6px; }
   .detail td { background:#121b19; padding:12px 14px; text-align:left; white-space:normal; }
+  h3.rsum { font-size:13px; margin:16px 0 8px; color:var(--dim); text-transform:uppercase; letter-spacing:.6px; }
+  .detail .cards { grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:8px; }
+  .detail .card { padding:8px 10px; }
+  .moments { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:8px 16px; margin:8px 0; }
   .bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; min-width:80px; }
   .bar i { display:block; height:100%; background:var(--accent); }
   .err { color:#ff8a80; padding:20px; }
@@ -68,8 +72,8 @@
   .rp-ball { animation:rp-fly .55s ease-in-out both; }
   @keyframes rp-in { from { opacity:0; } }
   @keyframes rp-draw { from { stroke-dashoffset:var(--len); } to { stroke-dashoffset:0; } }
-  @keyframes rp-fly { 0% { opacity:0; transform:translate(var(--x1), var(--y1)); } 1% { opacity:1; transform:translate(var(--x1), var(--y1)); }
-                      99% { opacity:1; transform:translate(var(--x2), var(--y2)); } 100% { opacity:0; transform:translate(var(--x2), var(--y2)); } }
+  /* The ball moves along its flight by its own animateMotion; this only shows it while it flies. */
+  @keyframes rp-fly { 0% { opacity:0; } 1% { opacity:1; } 99% { opacity:1; } 100% { opacity:0; } }
   @media (prefers-reduced-motion: reduce) { .rp-in, .rp-draw, .rp-ball { animation:none; } .rp-ball { display:none; } }
   .chip { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--accent); border-radius:999px; padding:4px 6px 4px 12px; background:#1d2c27; }
   .chip button { background:none; border:none; color:var(--dim); cursor:pointer; font:inherit; padding:0 4px; }
@@ -230,6 +234,7 @@ async function load() {
   try {
     const latest = await getJSON("latest.json", { cache: "no-store" });
     if (mine !== loading) return;
+    state.local = !!latest.local;   // served by the booth's own stats server, which can leave shots out
     if (!site || site.version !== latest.version) { site = { version: latest.version, db: null }; state.session = null; state.replays = {}; }
     const body = await getJSON(`v/${site.version}/summary-${state.ctx || "all"}.json`);
     if (mine !== loading) return;
@@ -400,8 +405,10 @@ function replaySvg(rp, animate = false, { colors = {}, only = null, focus = null
       if (s.from && s.aim) { const [x1, y1] = P(s.from), [x2, y2] = P(s.aim);
         g += `<g${at("rp-in", s.n)}><line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${c}" stroke-opacity=".45" stroke-dasharray="3 3"/><circle cx="${x2}" cy="${y2}" r="2.5" fill="none" stroke="${c}" stroke-opacity=".6"><title>${tip} · aim</title></circle></g>`; }
       if (s.from && s.to) { const [x1, y1] = P(s.from), [x2, y2] = P(s.to);
-        g += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${c}" stroke-width="${s.putt ? 1.5 : 2.5}"${at("rp-draw", s.n, 0.3, `--len:${(Math.hypot(x2 - x1, y2 - y1) + 1).toFixed(1)};`)}><title>${tip}</title></line>`;
-        if (animate) balls += `<circle r="2.5" fill="#fff" stroke="#111" stroke-width=".8" class="rp-ball" style="--x1:${x1}px;--y1:${y1}px;--x2:${x2}px;--y2:${y2}px;animation-delay:${((starts[s.n] ?? 0) + 0.3).toFixed(2)}s"/>`;
+        const { d, len } = flightPath(+x1, +y1, +x2, +y2, s.putt ? 0 : (s.bend || 0) * k);
+        g += `<path d="${d}" fill="none" stroke="${c}" stroke-width="${s.putt ? 1.5 : 2.5}"${at("rp-draw", s.n, 0.3, `--len:${(len + 1).toFixed(1)};`)}><title>${tip}${s.shape ? " · " + esc(s.shape) : ""}</title></path>`;
+        const delay = ((starts[s.n] ?? 0) + 0.3).toFixed(2);
+        if (animate) balls += `<circle r="2.5" fill="#fff" stroke="#111" stroke-width=".8" class="rp-ball" style="animation-delay:${delay}s"><animateMotion path="${d}" begin="${delay}s" dur=".55s" fill="freeze" calcMode="spline" keyTimes="0;1" keyPoints="0;1" keySplines=".42 0 .58 1"/></circle>`;
         if (s.penalty) g += `<g${at("rp-in", s.n, 0.85)}><path d="M${x2 - 4},${y2 - 4} l8,8 m0,-8 l-8,8" stroke="#e53935" stroke-width="2.2" stroke-linecap="round"/><title>${tip} · into the penalty area (penalty stroke, then the drop)</title></g>`; }
       if (s.from) { const [x, y] = P(s.from); g += `<g${at("rp-in", s.n)}><circle cx="${x}" cy="${y}" r="3.5" fill="${c}" stroke="#111"><title>${tip}</title></circle>`;
         g += `<text x="${+x + 6}" y="${+y + 3}" fill="${c}" font-size="10" paint-order="stroke" stroke="#111" stroke-width="2.5">${s.n ?? ""}${s.club && !s.putt ? " " + esc(s.club) : ""}</text></g>`; }
@@ -418,11 +425,28 @@ function replaySvg(rp, animate = false, { colors = {}, only = null, focus = null
   const notes = [rp.pin ? (rp.pin_estimated ? "Pin estimated from the shots' distances." : "") : "Pin position unknown.",
                  drawn.some(p => p.shots.some(s => s.aim)) ? "Dashed: where the player aimed." : "",
                  drawn.some(p => p.shots.some(s => s.penalty)) ? "✕: where a ball went into a penalty area (the next shot is the drop)." : "",
+                 drawn.some(p => p.shots.some(s => s.bend)) ? "Full shots curve by their shape, estimated from the spin axis." : "",
                  rp.map && rp.map.approx ? "Map from another round here: its tee, pin dot and yardages may differ a little." : ""].filter(Boolean).join(" ");
   return `<div class="replay"><div class="sub">${esc(rp.course)} · hole ${rp.hole}${rp.par ? ` · par ${rp.par}` : ""}
     · <button class="link" data-replayagain title="Play the hole again">↻ Play again</button>${toggle}</div>
     <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${g}</svg>
     <div class="sub">${legend}</div>${notes ? `<div class="sub">${notes}</div>` : ""}</div>`;
+}
+
+// A shot's flight from (x1, y1) to (x2, y2): a quadratic curve bowed `bend` pixels to the right of the
+// straight line at its middle (negative: to the left), or the straight line. Screen y runs down, so
+// the right of a shot heading (dx, dy) is (-dy, dx). Its length is for the line-drawing animation.
+function flightPath(x1, y1, x2, y2, bend) {
+  const dx = x2 - x1, dy = y2 - y1, n = Math.hypot(dx, dy);
+  if (!bend || n < 1 || Math.abs(bend) < 0.3) return { d: `M${x1},${y1} L${x2},${y2}`, len: n };
+  // A quadratic's middle is halfway to its control point, so the control point sits twice the bow out.
+  const cx = (x1 + x2) / 2 - dy / n * 2 * bend, cy = (y1 + y2) / 2 + dx / n * 2 * bend;
+  let len = 0, px = x1, py = y1;
+  for (let i = 1; i <= 16; i++) {
+    const t = i / 16, u = 1 - t, qx = u * u * x1 + 2 * u * t * cx + t * t * x2, qy = u * u * y1 + 2 * u * t * cy + t * t * y2;
+    len += Math.hypot(qx - px, qy - py); px = qx; py = qy;
+  }
+  return { d: `M${x1},${y1} Q${cx.toFixed(1)},${cy.toFixed(1)} ${x2},${y2}`, len };
 }
 
 // A small line chart: one point per night.
@@ -449,6 +473,9 @@ function lineChart(points, key, title, fmt = v => v, lowerIsBetter = false) {
       ${pts.map((p, i) => (pts.length <= 6 || i === 0 || i === pts.length - 1) ? `<text x="${x(i)}" y="${H - 6}" fill="#8fa59b" font-size="10" text-anchor="${i === pts.length - 1 && pts.length > 1 ? "end" : i === 0 && pts.length > 1 ? "start" : "middle"}">${p.date.slice(5)}</text>` : "").join("")}
     </svg></div>`;
 }
+
+// A handicap index as golfers write it: better than scratch is "+".
+const hcp = v => v === null || v === undefined ? "–" : v < 0 ? "+" + (-v).toFixed(1) : v.toFixed(1);
 
 const SG_LABELS = { off_tee: "Off the tee", approach: "Approach", around_green: "Around the green", putting: "Putting", total: "Total" };
 function sgBars(sg) {
@@ -482,6 +509,7 @@ function renderPlayers() {
   const cols = [
     { key: "name", label: "Player" },
     { key: "rounds", label: "Rounds", title: "Finished rounds, or a full nine from one quit early" },
+    { key: "index", label: "Index", title: "Handicap index worked out from rounds on record (World Handicap System rules, GSPro's tee ratings)" },
     { key: "avg_to_par_9", label: "Avg / 9", title: "Average score to par per nine holes (individual-ball rounds)" },
     { key: "best_to_par_9", label: "Best / 9" },
     { key: "sg_total", label: "SG / 9", title: "Strokes gained per nine vs. the PGA Tour baseline", val: p => p.sg ? p.sg.per_nine.total : null },
@@ -494,7 +522,7 @@ function renderPlayers() {
     { key: "avg_drive", label: "Avg drive" },
     { key: "longest_drive", label: "Longest" },
   ];
-  const row = p => `<tr class="click${p.name === state.player ? " sel" : ""}" data-player="${esc(p.name)}"><td><b>${esc(p.name)}</b></td><td>${p.rounds}</td>
+  const row = p => `<tr class="click${p.name === state.player ? " sel" : ""}" data-player="${esc(p.name)}"><td><b>${esc(p.name)}</b></td><td>${p.rounds}</td><td>${hcp(p.index)}</td>
     <td>${toPar(p.avg_to_par_9)}</td><td>${toPar(p.best_to_par_9)}</td>
     <td class="${p.sg && p.sg.per_nine.total >= 0 ? "good" : ""}">${p.sg ? signed(p.sg.per_nine.total, 1) : "–"}</td>
     <td>${dash(p.fir_pct, "%")} <span class="sub">${frac(p.fir)}</span></td>
@@ -518,6 +546,7 @@ function renderPlayer(p) {
   return `<h2>${esc(p.name)}</h2>
   <div class="cards">
     <div class="card"><div class="k">Scoring / 9</div><div class="v">${toPar(p.avg_to_par_9)}</div><div class="sub">best ${toPar(p.best_to_par_9)} · ${p.rounds} round${p.rounds === 1 ? "" : "s"} · ${p.holes} holes</div></div>
+    <div class="card"><div class="k">Handicap index</div><div class="v">${hcp(p.index)}</div><div class="sub">${p.index === null || p.index === undefined ? `needs 3 rounds of 9+ holes (${(p.index_history || []).length} so far)` : `from ${p.index_history.length} round${p.index_history.length === 1 ? "" : "s"} on record`}</div></div>
     <div class="card"><div class="k">By par</div><div class="v" style="font-size:16px">P3 ${toPar(pa["3"])} · P4 ${toPar(pa["4"])} · P5 ${toPar(pa["5"])}</div><div class="sub">average to par per hole</div></div>
     <div class="card"><div class="k">Hole outcomes</div><div class="v" style="font-size:16px">${dash(p.birdie_pct, "%")} / ${dash(p.par_pct, "%")} / ${dash(p.bogey_pct, "%")} / ${dash(p.double_pct, "%")}</div><div class="sub">birdie+ / par / bogey / double+</div></div>
     <div class="card"><div class="k">Driving</div><div class="v">${dash(p.avg_drive, " yd")}</div><div class="sub">longest ${dash(p.longest_drive, " yd")} · ${p.drives} drives · ${dash(p.fir_pct, "%")} fairways</div></div>
@@ -529,6 +558,7 @@ function renderPlayer(p) {
       ${lineChart(p.trend, "sg_9", "Strokes gained / 9", v => signed(v, 1))}
       ${lineChart(p.trend, "putts_per_hole", "Putts / hole", v => v.toFixed(2), true)}
       ${lineChart(p.trend, "gir_pct", "Greens in regulation", v => v + "%")}
+      ${(p.index_history || []).some(h => h.index !== null) ? lineChart(p.index_history, "index", "Handicap index", hcp, true) : ""}
     </div></div>
   </div>
   <h2>Gapping and typical miss</h2>
@@ -589,6 +619,7 @@ function renderVersus() {
   const sg = (p, k) => p.sg ? p.sg.per_nine[k] : null;
   const rows = [
     ["Rounds", p => p.rounds, null, v => v],
+    ["Handicap index", p => p.index, -1, hcp],
     ["Scoring / 9", p => p.avg_to_par_9, -1, toPar],
     ["Best nine", p => p.best_to_par_9, -1, toPar],
     ["Strokes gained / 9", p => sg(p, "total"), 1, v => signed(v)],
@@ -648,6 +679,106 @@ function replayPart(reps, round) {
   return replaySvg(rp, animate, { colors, focus, only: state.replayOnly && focus ? focus : null });
 }
 
+const SCORE_NAMES = { "-3": "albatross", "-2": "eagle", "-1": "birdie", "0": "par", "1": "bogey", "2": "double bogey", "3": "triple bogey" };
+const scoreName = (score, par) => score === 1 ? "hole-in-one" : SCORE_NAMES[score - par] || `+${score - par}`;
+function shotText(s) {
+  const from = s.putt ? `${Math.round(s.to_pin * 3)} ft putt` : `${esc(s.club || "?")} from ${Math.round(s.to_pin)} yd${s.lie ? ` (${esc(s.lie)})` : ""}`;
+  const to = s.outcome === "holed" ? ", holed" : s.putt ? (s.outcome ? `, ${esc(s.outcome)}` : "")
+    : s.finish !== null && s.finish !== undefined ? `, to ${s.finish < 10 ? Math.round(s.finish * 3) + " ft" : Math.round(s.finish) + " yd"}` : "";
+  return `Hole ${s.hole}: ${from}${to} <span class="${s.sg >= 0 ? "good" : "bad"}">${signed(s.sg)}</span>`;
+}
+
+// A player's round against their season: the numbers, strokes gained, best and worst shots and holes.
+function roundSummary(r) {
+  const m = r.summary;
+  if (!m) return "";
+  const fmt = { to_par: toPar, pct: v => v + "%", num: v => v.toFixed(2) };
+  const vs = m.vs.map(v => {
+    const cls = v.season === null ? "" : (v.round - v.season) * v.better > 0 ? "good" : (v.round - v.season) * v.better < 0 ? "bad" : "";
+    return `<div class="card"><div class="k">${v.label}</div><div class="v ${cls}">${fmt[v.fmt](v.round)}</div><div class="sub">season ${v.season === null ? "–" : fmt[v.fmt](v.season)}</div></div>`;
+  }).join("");
+  const sg = m.sg ? `<p class="sub">Strokes gained this round: ${Object.entries(SG_LABELS).map(([k, label]) =>
+    `${label.toLowerCase()} <b class="${m.sg[k] >= 0 ? "good" : "bad"}">${signed(m.sg[k], 1)}</b>`).join(" · ")}</p>` : "";
+  const moments = [
+    m.best_shot && `<div><span class="sub">Best shot</span><br>${shotText(m.best_shot)}</div>`,
+    m.worst_shot && `<div><span class="sub">Costliest shot</span><br>${shotText(m.worst_shot)}</div>`,
+    m.best_hole && `<div><span class="sub">Best hole</span><br>Hole ${m.best_hole.hole}: ${scoreName(m.best_hole.score, m.best_hole.par)} ${m.best_hole.score} on the par ${m.best_hole.par}</div>`,
+    m.worst_hole && `<div><span class="sub">Worst hole</span><br>Hole ${m.worst_hole.hole}: ${scoreName(m.worst_hole.score, m.worst_hole.par)} ${m.worst_hole.score} on the par ${m.worst_hole.par}</div>`,
+  ].filter(Boolean).join("");
+  return `<h3 class="rsum">Round summary</h3><div class="cards">${vs}</div>${sg}${moments ? `<div class="moments">${moments}</div>` : ""}`;
+}
+
+// A round as an image to post: course, player, score, the card, and the round's numbers.
+function shareCard(r) {
+  const holes = r.card || [], nines = [holes.slice(0, 9), holes.slice(9, 18)].filter(n => n.length);
+  const W = 1080, cell = 84, left = 140, top = 360, rowH = 54, block = rowH * 3 + 30;
+  const H = top + nines.length * block + 300;
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const g = c.getContext("2d");
+  const font = (size, weight = 400) => (g.font = `${weight} ${size}px system-ui, -apple-system, "Segoe UI", sans-serif`);
+  const text = (t, x, y, color = "#e6efe9", align = "left") => { g.fillStyle = color; g.textAlign = align; g.fillText(t, x, y); };
+  g.fillStyle = "#0f1715"; g.fillRect(0, 0, W, H);
+  g.fillStyle = "#5fc58a"; g.fillRect(0, 0, W, 10);
+  font(28, 600); text("⛳ GSPro Shotcast", 60, 70, "#8fa59b");
+  font(30); text(r.date || "", W - 60, 70, "#8fa59b", "right");
+  font(58, 700); text(r.course || "", 60, 150);
+  font(38, 500); text(r.side + (r.format && r.format !== "individual" ? ` · ${r.format.replace("_", " ")}` : ""), 60, 205, "#8fa59b");
+  font(120, 700); text(String(r.gross ?? "–"), 60, 330);
+  const grossW = g.measureText(String(r.gross ?? "–")).width;
+  font(64, 600); text(r.to_par === null || r.to_par === undefined ? "" : toPar(r.to_par), 60 + grossW + 30, 330,
+                      r.to_par < 0 ? "#5fc58a" : r.to_par > 0 ? "#e57373" : "#e6efe9");
+  font(30); text(`${r.played}${r.played !== r.holes ? ` of ${r.holes}` : ""} holes`, W - 60, 330, "#8fa59b", "right");
+  nines.forEach((nine, n) => {
+    const y0 = top + n * block + 20;
+    font(26, 600);
+    text("Hole", 60, y0 + rowH * 0.7, "#8fa59b"); text("Par", 60, y0 + rowH * 1.7, "#8fa59b"); text("Score", 60, y0 + rowH * 2.7, "#8fa59b");
+    nine.forEach((h, i) => {
+      const x = left + i * cell + cell / 2, d = h.score - h.par;
+      font(26, 600); text(String(h.hole), x, y0 + rowH * 0.7, "#5fc58a", "center");
+      font(28); text(String(h.par), x, y0 + rowH * 1.7, "#8fa59b", "center");
+      const cy = y0 + rowH * 2.5;
+      g.lineWidth = 3; g.strokeStyle = d < 0 ? "#e57373" : "#6fb3ff";
+      if (d < 0) { for (let k = 0; k < (d <= -2 ? 2 : 1); k++) { g.beginPath(); g.arc(x, cy, 26 - k * 7, 0, Math.PI * 2); g.stroke(); } }
+      else if (d > 0) { for (let k = 0; k < (d >= 2 ? 2 : 1); k++) g.strokeRect(x - 25 + k * 7, cy - 25 + k * 7, 50 - k * 14, 50 - k * 14); }
+      font(32, 600); text(String(h.score), x, y0 + rowH * 2.7, "#e6efe9", "center");
+    });
+    const tot = nine.reduce((a, h) => a + h.score, 0), par = nine.reduce((a, h) => a + h.par, 0);
+    font(26, 600); text(n ? "In" : nines.length > 1 ? "Out" : "Tot", left + 9 * cell + 40, y0 + rowH * 0.7, "#8fa59b", "center");
+    font(28); text(String(par), left + 9 * cell + 40, y0 + rowH * 1.7, "#8fa59b", "center");
+    font(32, 700); text(String(tot), left + 9 * cell + 40, y0 + rowH * 2.7, "#e6efe9", "center");
+  });
+  let y = top + nines.length * block + 60;
+  const pct = p => p && p[1] ? `${p[0]}/${p[1]}` : null;
+  const stats = [["Fairways", pct(r.fir)], ["Greens", pct(r.gir)], ["Putts", r.putts],
+                 ["Longest drive", r.longest_drive ? Math.round(r.longest_drive) + " yd" : null]].filter(s => s[1] !== null && s[1] !== undefined);
+  stats.forEach(([k, v], i) => {
+    const x = 60 + i * (W - 120) / stats.length;
+    font(24, 600); text(k.toUpperCase(), x, y, "#8fa59b");
+    font(44, 700); text(String(v), x, y + 52);
+  });
+  y += 120;
+  const m = r.summary, plain = h => h.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+  if (m && m.best_shot) { font(30); text("Best shot  " + plain(shotText(m.best_shot)), 60, y, "#e6efe9"); y += 50; }
+  if (m && m.sg) { font(26); text(`Strokes gained vs. tour: ${signed(m.sg.total, 1)}`, 60, y, "#8fa59b"); }
+  return c;
+}
+
+async function shareRound(r, btn) {
+  const canvas = shareCard(r);
+  const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
+  const name = `${r.date}-${r.course}-${r.side}`.replace(/[^\w-]+/g, "-") + ".png";
+  const file = new File([blob], name, { type: "image/png" });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: `${r.side} at ${r.course}` }); return; } catch (e) { if (e.name === "AbortError") return; }
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  btn.textContent = "Saved the image";
+  setTimeout(() => (btn.textContent = "Share card"), 2000);
+}
+
 function renderRounds() {
   const d = state.data;
   const cols = [
@@ -666,9 +797,10 @@ function renderRounds() {
       <td class="l">${esc(r.side)}${r.team && r.team !== r.side ? ` <span class="sub">${esc(r.team)}</span>` : ""}</td>
       <td class="l">${esc(r.format.replace("_", " "))}${tags}</td><td>${r.played}/${r.holes}</td><td>${dash(r.gross)}</td>
       <td>${toPar(r.to_par)}</td><td>${frac(r.fir)}</td><td>${frac(r.gir)}</td><td>${dash(r.putts)}</td></tr>` +
-      (open ? `<tr class="detail"><td colspan="${cols.length}">${scorecard(r.card, reps)}${replayPart(reps, r)}
+      (open ? `<tr class="detail"><td colspan="${cols.length}">${scorecard(r.card, reps)}${roundSummary(r)}${replayPart(reps, r)}
         <p class="sub">Scrambling ${frac(r.scramble)} · Sand saves ${frac(r.sand)} · Penalties ${dash(r.penalties)}${r.longest_drive ? ` · Longest drive ${Math.round(r.longest_drive)} yd` : ""}</p>
-        <p><button class="link" data-roundshots="${r.round}">Every shot of this round →</button></p></td></tr>` : "");
+        <p><button class="link" data-roundshots="${r.round}">Every shot of this round →</button>
+          · <button class="link" data-sharecard="${r.id}" title="An image of this round to post or send">Share card</button></p></td></tr>` : "");
   };
   const rows = state.me ? d.rounds.filter(r => r.players.includes(state.me)) : d.rounds;
   return `<h2>${meTitle("Rounds")}</h2>` + sortable("rounds", rows, cols, row, { empty: "No rounds in this view." })
@@ -746,7 +878,7 @@ function renderShots() {
     const head = `<tr class="click${open ? " sel" : ""}" data-shot="${s.id}"><td>${esc(s.date)}</td><td class="l">${esc(s.player)}</td>
       <td class="l">${esc(s.course)} <span class="sub">${esc(holeName(s.hole))}</span></td><td>${dash(s.shot_number)}</td><td>${esc(s.club || (s.outcome === "gimme" ? "gimme" : "–"))}</td>
       <td class="l">${esc(s.lie_before || "–")}</td><td>${putt ? ft(s.to_pin) : yd(s.to_pin)}</td>
-      <td>${putt || !s.carry ? "–" : s.carry + " yd"}</td><td class="l">${esc(result)}${left}${s.mulligan ? '<span class="tag">mulligan</span>' : ""}</td>
+      <td>${putt || !s.carry ? "–" : s.carry + " yd"}</td><td class="l">${esc(s.shape || "")}</td><td class="l">${esc(result)}${left}${s.mulligan ? '<span class="tag">mulligan</span>' : ""}${s.left_out ? '<span class="tag" title="Left out of the stats by hand">left out</span>' : ""}</td>
       <td>${s.lines.length ? `💬 ${s.lines.length}` : ""}</td></tr>`;
     if (!open) return head;
     const launch = putt ? "" : `<p class="sub">Ball ${dash(s.ball_speed && s.ball_speed.toFixed(1), " mph")} · club ${dash(s.club_speed && s.club_speed.toFixed(1), " mph")} ·
@@ -754,14 +886,17 @@ function renderShots() {
       axis ${dash(s.spin_axis && s.spin_axis.toFixed(1), "°")} · start ${dash(s.start_direction && s.start_direction.toFixed(1), "°")} · total ${yd(s.total)}</p>`;
     const said = s.lines.length ? s.lines.map(l => `<div class="line"><div class="who ${COLOR_KEYS.has(l.speaker) ? "color" : ""}">${esc(nameOf(l.speaker))}</div><div>${esc(l.text)} <span class="tag">${esc(l.kind)}</span></div></div>`).join("")
       : '<p class="empty">The booth said nothing tied to this shot.</p>';
-    return head + `<tr class="detail"><td colspan="10">${launch}${said}</td></tr>`;
+    const leave = state.local && !s.mulligan ? `<p><button class="link" data-leaveout="${s.id}" data-on="${s.left_out ? 0 : 1}">${s.left_out ? "Count this shot in the stats again" : "Leave this shot out of the stats"}</button>
+      <span class="sub">A bad read or a practice swing: it stays on the card and in the replay, but out of every average, record and strokes gained.</span></p>` : "";
+    return head + `<tr class="detail"><td colspan="11">${launch}${said}${leave}</td></tr>`;
   };
   const table = sortable("shots", state.shots.map((s, i) => ({ ...s, order: i })), [
     { key: "order", label: "Night", title: "Newest first" }, { key: "player", label: "Player", cls: "l" },
     { key: "course", label: "Course / hole", cls: "l", val: s => `${s.course} ${s.hole}` }, { key: "shot_number", label: "#" },
     { key: "club", label: "Club" }, { key: "lie_before", label: "From", cls: "l" },
     { key: "to_pin", label: "To pin" },
-    { key: "carry", label: "Carry", val: s => s.is_putt ? null : s.carry }, { key: "result", label: "Result", cls: "l", val: s => s.outcome || s.lie_after },
+    { key: "carry", label: "Carry", val: s => s.is_putt ? null : s.carry },
+    { key: "shape", label: "Shape", cls: "l", title: "A right-hander's shot shape, from the start direction and spin axis" }, { key: "result", label: "Result", cls: "l", val: s => s.outcome || s.lie_after },
     { key: "said", label: "💬", val: s => s.lines.length }],
     row, { key: "order", dir: f.round ? -1 : 1, empty: "No shots match." });
   return `<h2>${meTitle("Shots")}</h2>${controls}${table}
@@ -891,8 +1026,22 @@ function showTabs() {
 
 document.addEventListener("click", (e) => {
   const t = e.target.closest("[data-tab],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
-                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly]");
+                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-sharecard]");
   if (!t) return;
+  if (t.dataset.sharecard) {
+    const r = state.data.rounds.find(r => r.id === +t.dataset.sharecard);
+    if (r) shareRound(r, t);
+    return;
+  }
+  if (t.dataset.leaveout) {
+    t.disabled = true;
+    t.textContent = "Saving…";
+    fetch(`api/shots/${t.dataset.leaveout}/left-out`, { method: "POST", headers: { "Content-Type": "application/json" },
+                                                       body: JSON.stringify({ left_out: t.dataset.on === "1" }) })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); load(); })
+      .catch(e => { t.textContent = `Couldn't save (${e.message})`; });
+    return;
+  }
   if (t.dataset.share !== undefined) {
     const done = ok => { t.textContent = ok ? "Link copied" : "Copy the address bar"; setTimeout(() => (t.textContent = "Copy link"), 2000); };
     navigator.clipboard ? navigator.clipboard.writeText(location.href).then(() => done(true), () => done(false)) : done(false);

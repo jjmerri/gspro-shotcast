@@ -7,6 +7,9 @@ hole's last stroke into the pin; a ball lost to a penalty area (water, OB) runs 
 (shots.hazard_*), and the drop is the next stroke's start. Positions are top-down (x, z): Unity's y is height, and +x is to the
 right of a player facing +z, so the plain (x, z) plane is the map as seen from above.
 
+A full shot is drawn bowed by its estimated curve (shot_shape.bend_yards, as "bend": metres to
+the right of the straight line at its middle); a putt is straight.
+
 A tee shot has no logged start (GSPro sets it up without a setup block), so it comes from the hole's
 tee in hole_layouts, from any round on the course. The pin moves round to round, so it's taken only
 from this round's layout; a round quit before the end logged none, and the pin is then estimated from
@@ -27,7 +30,7 @@ import re
 import sqlite3
 from typing import Any
 
-from . import stats_web
+from . import shot_shape, stats_web
 from .sources.gspro_log import M_TO_YD, aim_offset
 
 ROUND_HOURS = 8 * 3600          # a round's layout is logged at its end, within this of its shots
@@ -35,7 +38,8 @@ PIN_FIT_MAX_RMS_M = 3.0         # an estimated pin whose distances miss by more 
 _HOLE = re.compile(r"Hole (\d+)")
 _PAR = re.compile(r"par (\d)")
 _COLS = ("id, session_id, ts, player, course, hole, shot_number, club, is_putt, lie_before, to_pin_yards,"
-         " outcome, mulligan, shared_ball, tags, start_x, start_z, aim_map_x, aim_map_y, hazard_x, hazard_z")
+         " outcome, mulligan, shared_ball, tags, start_x, start_z, aim_map_x, aim_map_y, hazard_x, hazard_z,"
+         " start_direction, spin_axis, COALESCE(carry_game_yards, carry_raw_tile_yards, carry_raw) AS carry")
 
 
 def _xz(x: float | None, z: float | None) -> tuple[float, float] | None:
@@ -226,9 +230,13 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
                     and r["to_pin_yards"] and (f := _unit(pin[0] - start[0], pin[1] - start[1]))):
                 along, right = aim_offset(r["aim_map_x"], r["aim_map_y"], r["to_pin_yards"] / M_TO_YD)
                 aim = (start[0] + f[0] * along + f[1] * right, start[1] + f[1] * along - f[0] * right)
+            shape = shot_shape.shape(r["start_direction"], r["spin_axis"], r["carry"], bool(r["is_putt"]))
+            bend = None if r["is_putt"] else shot_shape.bend_yards(r["spin_axis"], r["carry"])
             shots.append({"n": r["shot_number"], "club": r["club"], "putt": bool(r["is_putt"]),
                           "lie": r["lie_before"], "to_pin": r["to_pin_yards"] and round(r["to_pin_yards"], 1),
                           "from": _r(start), "to": _r(end), "aim": _r(aim),
+                          **({"shape": shape} if shape else {}),
+                          **({"bend": round(bend / M_TO_YD, 2)} if bend else {}),
                           **({"penalty": True} if end is not None and end == hazard else {})})
         if any(s["from"] or s["to"] for s in shots):
             # The hole's score counts strokes that are never drawn: a gimme or conceded putt, a penalty.

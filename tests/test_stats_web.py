@@ -145,3 +145,84 @@ def test_summary_says_whether_there_are_league_rounds(tmp_path):
     db.commit()
     with stats_web.connect(path) as ro:
         assert stats_web.summary(ro)["has_league"] is True
+
+
+def test_a_shot_left_out_drops_out_of_the_stats_but_stays_in_its_hole(tmp_path):
+    from commentator import season_analytics as A
+
+    path, db = _db(tmp_path)
+    _shot(db, "Ann", ts=1, hole="Hole 1, par 4", club="DR", shot_number=1, lie_before="tee", to_pin_yards=400,
+          total_yards=250)
+    _shot(db, "Ann", ts=2, hole="Hole 1, par 4", club="DR", shot_number=2, lie_before="fairway", to_pin_yards=150,
+          total_yards=330, left_out=1)
+    _shot(db, "Ann", ts=3, hole="Hole 1, par 4", club="PT", shot_number=3, is_putt=1, lie_before="green",
+          to_pin_yards=3, outcome="holed")
+    db.commit()
+    with stats_web.connect(path) as ro:
+        assert stats_web.player(ro, "Ann")["shots"] == 2
+        holes = A.holes_played(ro)
+        assert [s["shot_number"] for s in holes[0]["strokes"]] == [1, 2, 3]
+        # The left-out stroke still ends the drive (no penalty jump), but gains nothing itself.
+        assert [s["shot_id"] for s in A.strokes_gained(holes)] == [1, 3]
+        assert [s["left_out"] for s in A.shot_log(ro)] == [0, 1, 0]
+    # A database from before leaving shots out reads as none left out.
+    db.execute("ALTER TABLE shots DROP COLUMN left_out")
+    db.commit()
+    with stats_web.connect(path) as ro:
+        assert stats_web.player(ro, "Ann")["shots"] == 3
+
+
+def test_the_local_page_can_leave_a_shot_out(tmp_path):
+    path, db = _db(tmp_path)
+    _shot(db, "Ann", club="DR", shot_number=1, lie_before="tee", total_yards=330)
+    _shot(db, "Ann", club="DR", shot_number=1, lie_before="tee", total_yards=250)
+    db.commit()
+    server = stats_web.make_server(path, port=0, site=tmp_path / "site")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def post(body, kind="application/json", url="/api/shots/1/left-out", **headers):
+        return urllib.request.urlopen(urllib.request.Request(base + url, data=json.dumps(body).encode(),
+                                                             headers={"Content-Type": kind, **headers}))
+    try:
+        assert json.loads(urllib.request.urlopen(base + "/latest.json").read())["local"] is True
+        assert json.loads(post({"left_out": True}).read()) == {"id": 1, "left_out": True}
+        assert db.execute("SELECT left_out FROM shots WHERE id = 1").fetchone()[0] == 1
+        version = json.loads(urllib.request.urlopen(base + "/latest.json").read())["version"]
+        summary = json.loads(urllib.request.urlopen(f"{base}/v/{version}/summary-all.json").read())
+        assert summary["players"][0]["longest_drive"] == 250
+        for bad, code in (({"kind": "text/plain"}, 403), ({"Origin": "http://evil.example"}, 403),
+                          ({"url": "/api/shots/99/left-out"}, 404)):
+            with pytest.raises(urllib.error.HTTPError) as e:
+                post({"left_out": False}, **bad)
+            assert e.value.code == code
+        assert db.execute("SELECT left_out FROM shots WHERE id = 1").fetchone()[0] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_players_round_is_summed_up_against_their_season(tmp_path):
+    path, db = _db(tmp_path)
+    scores = {h: PARS[str(h)] for h in range(1, 10)} | {1: 3, 2: 6}
+    _player_round(db, "Ann", scores, gir_hit=5, gir_tries=9, putts=18, putt_holes=9)
+    _player_round(db, "Ann", {h: PARS[str(h)] + 1 for h in range(1, 10)}, gir_hit=1, gir_tries=9, putts=18, putt_holes=9)
+    db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, holes_played, gross, scores,"
+               " hole_pars, gir_hit, gir_tries, fir_hit, fir_tries, putts, putt_holes, is_league)"
+               " VALUES (1, 100, '2026-10-16', 'Pebble', 'Ann', 9, 9, 37, ?, ?, 5, 9, 0, 0, 18, 9, 0)",
+               (json.dumps({str(h): s for h, s in scores.items()}), json.dumps(PARS)))
+    _shot(db, "Ann", ts=1, course="Pebble", hole="Hole 1, par 4", club="7I", shot_number=1, lie_before="tee",
+          to_pin_yards=160, finish_yards=3)
+    _shot(db, "Ann", ts=2, course="Pebble", hole="Hole 1, par 4", club="PT", shot_number=2, is_putt=1,
+          lie_before="green", to_pin_yards=3, outcome="holed")
+    _shot(db, "Ann", ts=3, course="Pebble", hole="Hole 2, par 4", club="PT", shot_number=1, is_putt=1,
+          lie_before="green", to_pin_yards=20, outcome="holed", left_out=1)
+    db.commit()
+    with stats_web.connect(path) as ro:
+        m = stats_web.summary(ro)["rounds"][0]["summary"]
+    vs = {v["label"]: (v["round"], v["season"]) for v in m["vs"]}
+    assert vs["Score / 9"] == (1.0, 5.0) and vs["Greens"] == (55.6, 33.3) and vs["Putts / hole"] == (2.0, 2.0)
+    # The 9-footer gained most; the left-out 60-footer isn't counted; no shot lost strokes, so none cost any.
+    assert m["best_shot"]["id"] == 2 and m["worst_shot"] is None
+    assert m["sg"]["total"] == 0.99
+    assert (m["best_hole"]["hole"], m["worst_hole"]["hole"]) == (1, 2)

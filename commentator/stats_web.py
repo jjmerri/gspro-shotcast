@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from . import handicap_index
 from . import season_analytics as A
 
 SHARED_BALL = ("scramble", "alternate")
@@ -36,7 +37,20 @@ def connect(path: str | Path) -> sqlite3.Connection:
     """Read-only, so viewing can never change the copy (or a live booth's file)."""
     db = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
     db.row_factory = sqlite3.Row
+    # A database from before shots could be left out of the stats: none are (a temp view shadows the table).
+    if "left_out" not in {r[1] for r in db.execute("PRAGMA table_info(shots)")}:
+        db.execute("CREATE TEMP VIEW shots AS SELECT *, 0 AS left_out FROM main.shots")
     return db
+
+
+def set_left_out(db_path: str | Path, shot_id: int, left_out: bool) -> bool:
+    """Leave a shot out of the stats, or put it back (the local page's toggle). False when there's no such shot."""
+    from contextlib import closing
+
+    with closing(sqlite3.connect(db_path, timeout=10)) as db:
+        cur = db.execute("UPDATE shots SET left_out = ? WHERE id = ?", (int(left_out), shot_id))
+        db.commit()
+        return cur.rowcount > 0
 
 
 def _ctx(context: str | None) -> str:
@@ -138,12 +152,66 @@ def rounds(db: sqlite3.Connection, context: str | None = None) -> list[dict[str,
     return out
 
 
+def _shot_brief(st, h: dict, sg: dict) -> dict[str, Any]:
+    return {"id": st["id"], "hole": h["hole"], "shot_number": st["shot_number"], "club": st["club"],
+            "lie": st["lie_before"], "to_pin": st["to_pin_yards"], "putt": bool(st["is_putt"]),
+            "outcome": st["outcome"], "finish": st["finish_yards"], "category": sg["category"], "sg": round(sg["sg"], 2)}
+
+
+def add_round_summaries(db: sqlite3.Connection, rounds_: list[dict[str, Any]], holes: list[dict],
+                        people: list[dict[str, Any]]) -> None:
+    """A one-player side's round of nine holes or more gets a `summary`: the round against the player's season (score per
+    nine, fairways, greens, putts per hole), its strokes gained by category, its best and worst shots
+    by strokes gained, and its best and worst holes against par."""
+    of_shot = shot_rounds(db)
+    season = {p["name"]: p for p in people}
+    sg_of = {s["shot_id"]: s for s in A.strokes_gained(holes)}
+    by_round: dict[tuple, list[dict]] = {}
+    for h in holes:
+        rnd = of_shot.get(h["strokes"][0]["id"])
+        if rnd is not None:
+            by_round.setdefault((rnd, h["player"]), []).append(h)
+    for r in rounds_:
+        mine = by_round.get((r["round"], r["side"]))
+        p = season.get(r["side"])
+        if not mine or not p or r["format"] in SHARED_BALL or not _counts(r["played"]):
+            continue
+        sg = {c: 0.0 for c in A.SG_CATEGORIES}
+        shots = []
+        for h in mine:
+            for st in h["strokes"]:
+                if st["id"] in sg_of:
+                    sg[sg_of[st["id"]]["category"]] += sg_of[st["id"]]["sg"]
+                    shots.append(_shot_brief(st, h, sg_of[st["id"]]))
+        played = r["played"] or len(r["card"]) or 0
+        putt_holes = db.execute("SELECT putt_holes FROM rounds WHERE id = ?", (r["id"],)).fetchone()[0]
+        vs = [
+            {"label": "Score / 9", "round": round(r["to_par"] * 9 / played, 1) if r["to_par"] is not None and played else None,
+             "season": p["avg_to_par_9"], "better": -1, "fmt": "to_par"},
+            {"label": "Fairways", "round": _pct(*r["fir"]), "season": p["fir_pct"], "better": 1, "fmt": "pct"},
+            {"label": "Greens", "round": _pct(*r["gir"]), "season": p["gir_pct"], "better": 1, "fmt": "pct"},
+            {"label": "Putts / hole", "round": round(r["putts"] / putt_holes, 2) if r["putts"] is not None and putt_holes else None,
+             "season": p["putts_per_hole"], "better": -1, "fmt": "num"},
+        ]
+        card = sorted(r["card"], key=lambda c: c["score"] - c["par"])
+        spread = len(card) > 1 and card[0]["score"] - card[0]["par"] != card[-1]["score"] - card[-1]["par"]
+        ranked = sorted(shots, key=lambda s: -s["sg"])
+        r["summary"] = {
+            "vs": [v for v in vs if v["round"] is not None],
+            "sg": {**{c: round(v, 2) for c, v in sg.items()}, "total": round(sum(sg.values()), 2)} if shots else None,
+            "best_shot": ranked[0] if ranked else None,
+            "worst_shot": ranked[-1] if len(ranked) > 1 and ranked[-1]["sg"] < 0 else None,
+            "best_hole": card[0] if spread else None,
+            "worst_hole": card[-1] if spread else None,
+        }
+
+
 def players(db: sqlite3.Connection, context: str | None = None) -> list[dict[str, Any]]:
     """One row per player: season scoring, ball-striking, driving and putting."""
     names = [r[0] for r in db.execute(
         "SELECT player FROM player_rounds WHERE 1=1" + _ctx(context)
         + " UNION SELECT player FROM shots WHERE player IS NOT NULL AND player != 'unknown'"
-          " AND attributed = 1 AND mulligan = 0" + _ctx(context) + " ORDER BY 1")]
+          " AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context) + " ORDER BY 1")]
     return [player(db, name, context) for name in names]
 
 
@@ -199,7 +267,7 @@ def player(db: sqlite3.Connection, name: str, context: str | None = None) -> dic
         "par_avg": {str(k): round(v[0] / v[1], 2) if v[1] else None for k, v in by_par.items()},
         "history": history,
     })
-    shots = " AND player = ? AND attributed = 1 AND mulligan = 0" + _ctx(context)
+    shots = " AND player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)
     d = db.execute(f"SELECT COUNT(*) n, AVG({_DRIVE}) avg, MAX({_DRIVE}) best FROM shots "
                    f"WHERE {_TEE_DRIVER} AND {_DRIVE} IS NOT NULL" + shots, (name,)).fetchone()
     p["drives"] = d["n"]
@@ -239,7 +307,7 @@ def predictions(db: sqlite3.Connection, names: dict[str, str] | None = None) -> 
 
 
 def records(db: sqlite3.Connection, context: str | None = None, player: str | None = None) -> dict[str, Any]:
-    base = (" AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0" + _ctx(context)
+    base = (" AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)
             + (" AND player = ?" if player else ""))
     args = (player,) if player else ()
     drive = db.execute(f"SELECT player, {_DRIVE} AS v, course, hole FROM shots WHERE {_TEE_DRIVER} AND {_DRIVE} IS NOT NULL"
@@ -258,7 +326,11 @@ def summary(db: sqlite3.Connection, context: str | None = None,
     holes = A.holes_played(db, context)
     sg, rec, trend = A.sg_summary(holes), A.recovery(holes), A.trends(db, holes, context)
     people = players(db, context)
+    # Our own handicap index (handicap_index) goes by every counting round, whatever the context.
+    own = handicap_index.indexes(db)
     for p in people:
+        p["index"] = (own.get(p["name"]) or {}).get("index")
+        p["index_history"] = (own.get(p["name"]) or {}).get("history", [])
         p["sg"] = sg.get(p["name"])
         p["gapping"] = A.gapping(db, p["name"], context)
         p["recovery"] = rec.get(p["name"], [])
@@ -274,8 +346,10 @@ def summary(db: sqlite3.Connection, context: str | None = None,
     # league/practice filter and tags, since every round would be practice.
     has_league = db.execute("SELECT EXISTS (SELECT 1 FROM rounds WHERE is_league = 1)"
                             " OR EXISTS (SELECT 1 FROM shots WHERE is_league = 1)").fetchone()[0] == 1
+    rounds_ = rounds(db, context)
+    add_round_summaries(db, rounds_, holes, people)
     return {"context": context or "all", "last_session": last, "has_league": has_league, "players": people,
-            "rounds": rounds(db, context), "records": records(db, context), "predictions": predictions(db, names),
+            "rounds": rounds_, "records": records(db, context), "predictions": predictions(db, names),
             "courses": A.courses(db, context), "highlights": A.highlights(db, holes, context),
             "booth": A.booth(db, names), "broadcasts": A.broadcasts(db), "filters": filters}
 
@@ -308,6 +382,29 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
         def do_GET(self):  # noqa: N802
             self._file(head=False)
 
+        def do_POST(self):  # noqa: N802
+            # Only this page may write: same host, a JSON body (another site's form can't send one
+            # without a CORS preflight, which this server never answers).
+            host = self.headers.get("Host", "")
+            origin = self.headers.get("Origin")
+            if host.split(":")[0] not in ("127.0.0.1", "localhost") or (origin and urlparse(origin).netloc != host) \
+                    or not self.headers.get("Content-Type", "").startswith("application/json"):
+                return self._send(403, b"forbidden", "text/plain")
+            m = re.fullmatch(r"/api/shots/(\d+)/left-out", urlparse(self.path).path)
+            if not m:
+                return self._send(404, b"not found", "text/plain")
+            try:
+                body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 1024)) or b"{}")
+                left_out = bool(body["left_out"])
+                if not set_left_out(db_path, int(m.group(1)), left_out):
+                    return self._send(404, b"no such shot", "text/plain")
+                refresh()
+            except (ValueError, KeyError, TypeError) as e:
+                return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+            except (OSError, sqlite3.Error) as e:
+                return self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
+            self._send(200, json.dumps({"id": int(m.group(1)), "left_out": left_out}).encode(), "application/json")
+
         def _file(self, head: bool) -> None:
             rel = unquote(urlparse(self.path).path).lstrip("/") or "index.html"
             if rel == "latest.json":
@@ -319,6 +416,8 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
             if not path.is_file() or site.resolve() not in path.parents:
                 return self._send(404, b"not found", "text/plain", head)
             data = path.read_bytes()
+            if rel == "latest.json":   # served from here, the page may leave shots out of the stats
+                data = json.dumps({**json.loads(data), "local": True}).encode()
             kind = stats_site.CONTENT_TYPES.get(path.suffix, "application/octet-stream")
             m = re.fullmatch(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
             if m and int(m.group(1)) < len(data):

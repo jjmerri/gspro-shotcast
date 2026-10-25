@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS shots (
     attributed INTEGER NOT NULL DEFAULT 1,
     is_league INTEGER NOT NULL DEFAULT 1,        -- 1 = league round, 0 = practice; for the stat context split
     mulligan INTEGER NOT NULL DEFAULT 0,         -- 1 = GSPro took the stroke back; excluded from every stat
+    left_out INTEGER NOT NULL DEFAULT 0,         -- 1 = left out of the stats by hand (a misread, a practice
+                                                 -- swing); still a stroke on the card, unlike a mulligan
     shared_ball INTEGER NOT NULL DEFAULT 0,      -- 1 = a team format where GSPro copies balls between
                                                  -- teammates, so the next stroke may not be from this ball
     -- Club delivery, in degrees (face impact in mm from centre), only when the monitor reported club
@@ -84,6 +86,15 @@ CREATE TABLE IF NOT EXISTS hole_images (             -- GSPro's minimap off the 
     image BLOB NOT NULL,                         -- JPEG of the map area (title bar trimmed)
     ball_x REAL, ball_y REAL,                    -- the ball (on the tee) and the pin on it, as fractions of
     pin_x REAL, pin_y REAL                       -- the image from its top-left; NULL when not found
+);
+CREATE TABLE IF NOT EXISTS course_tees (            -- each tee's rating and slope, from GSPro's course files
+    course TEXT NOT NULL,                        -- as the season names the course (shots.course)
+    tee TEXT NOT NULL,                           -- GSPro's tee name: Black, White, Green, Blue, ...
+    rating REAL, slope REAL,                     -- NULL when the course doesn't rate this tee
+    yards TEXT,                                  -- JSON: hole number -> yards from this tee
+    par TEXT,                                    -- JSON: hole number -> par
+    hole_index TEXT,                             -- JSON: hole number -> stroke index
+    PRIMARY KEY (course, tee)
 );
 CREATE TABLE IF NOT EXISTS lines (
     id INTEGER PRIMARY KEY,
@@ -274,7 +285,7 @@ class Store:
         added = {"to_pin_yards": "REAL", "finish_yards": "REAL", "gimme_yards": "REAL",
                  "outcome": "TEXT", "fmt": "TEXT", "attributed": "INTEGER NOT NULL DEFAULT 1",
                  "is_league": "INTEGER NOT NULL DEFAULT 1", "mulligan": "INTEGER NOT NULL DEFAULT 0",
-                 "shared_ball": "INTEGER NOT NULL DEFAULT 0",
+                 "shared_ball": "INTEGER NOT NULL DEFAULT 0", "left_out": "INTEGER NOT NULL DEFAULT 0",
                  **{col: "REAL" for col in CLUB_COLS}, **{col: "REAL" for col in POSITION_COLS},
                  **{col: "REAL" for col in HAZARD_COLS}}
         for col, decl in added.items():
@@ -542,6 +553,38 @@ class Store:
             self.db.execute("UPDATE shots SET mulligan = 1 WHERE id = ?", (shot_id,))
             self.db.commit()
 
+    def set_left_out(self, shot_id: int, left_out: bool) -> bool:
+        """Leave a shot out of the stats (or put it back), by hand. It stays a stroke on the card and in
+        the replay. False when there's no such shot."""
+        cur = self.db.execute("UPDATE shots SET left_out = ? WHERE id = ?", (int(left_out), shot_id))
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def record_course_tees(self, course: str, card: Any) -> None:
+        """A course's tees (course_card.CourseCard): rating, slope, yards and par, for our own handicap
+        index. Replaces what was kept for the course, so a corrected course file wins."""
+        if not course or not (card.yards or card.ratings):
+            return
+        course = self.course_name(course)
+        par = json.dumps({str(h): p for h, p in card.par.items()})
+        index = json.dumps({str(h): i for h, i in card.index.items()})
+        rows = []
+        for tee in dict.fromkeys([*card.yards, *card.ratings]):
+            rating, slope = card.ratings.get(tee, (None, None))
+            yards = card.yards.get(tee) or {}
+            if rating is None and not any(yards.values()):
+                continue
+            rows.append((course, tee, rating, slope, json.dumps({str(h): y for h, y in yards.items()}), par, index))
+        self.db.execute("DELETE FROM course_tees WHERE course = ? COLLATE NOCASE", (course,))
+        self.db.executemany("INSERT INTO course_tees VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+        self.db.commit()
+
+    def courses_without_tees(self) -> list[str]:
+        """Courses with a round on record but no tees kept yet, to fill from GSPro's course files."""
+        return [r[0] for r in self.db.execute(
+            "SELECT DISTINCT course FROM rounds WHERE course IS NOT NULL AND NOT EXISTS"
+            " (SELECT 1 FROM course_tees t WHERE t.course = rounds.course COLLATE NOCASE)")]
+
     def set_shot_position(self, shot_id: int | None, start: tuple) -> None:
         """Where GSPro's log had the ball for this shot, once its score line arrived after it was recorded."""
         if shot_id is not None:
@@ -676,7 +719,7 @@ class Store:
                       MAX(CASE WHEN club = 'DR' AND is_putt = 0 AND (shot_number = 1 OR lie_before = 'tee' OR (shot_number IS NULL AND lie_before IS NULL)) THEN {_DRIVE} END) AS longest_drive,
                       AVG(CASE WHEN club = 'DR' AND is_putt = 0 AND (shot_number = 1 OR lie_before = 'tee' OR (shot_number IS NULL AND lie_before IS NULL)) THEN {_DRIVE} END) AS avg_drive,
                       COUNT(DISTINCT session_id) AS nights
-               FROM shots WHERE player = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND mulligan = 0""".format(_DRIVE=_DRIVE) + _ctx_sql(context),
+               FROM shots WHERE player = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND mulligan = 0 AND left_out = 0""".format(_DRIVE=_DRIVE) + _ctx_sql(context),
             (player, self.session_id),
         ).fetchone()
         return {k: r[k] for k in r.keys()}
@@ -696,7 +739,7 @@ class Store:
         rows = self.db.execute(
             """SELECT sh.player, sh.course, sh.hole, sh.finish_yards FROM shots sh
                JOIN sessions se ON se.id = sh.session_id
-               WHERE sh.is_league = 1 AND sh.attributed = 1 AND sh.mulligan = 0 AND sh.is_putt = 0
+               WHERE sh.is_league = 1 AND sh.attributed = 1 AND sh.mulligan = 0 AND sh.left_out = 0 AND sh.is_putt = 0
                      AND sh.shot_number = 1 AND sh.fmt IN ('best_ball', 'aggregate')
                      AND sh.finish_yards IS NOT NULL AND (sh.lie_after = 'green' OR sh.outcome = 'holed')
                      AND sh.player IS NOT NULL AND sh.player != 'unknown' AND se.date >= ?
@@ -720,7 +763,7 @@ class Store:
         r = self.db.execute(
             f"""SELECT player, {_DRIVE} AS carry FROM shots
                WHERE club = 'DR' AND is_putt = 0 AND (shot_number = 1 OR lie_before = 'tee' OR (shot_number IS NULL AND lie_before IS NULL)) AND player IS NOT NULL AND player != 'unknown' AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))
-                     AND mulligan = 0"""
+                     AND mulligan = 0 AND left_out = 0"""
             + _ctx_sql(context) + " ORDER BY carry DESC LIMIT 1",
             (self.session_id,),
         ).fetchone()
@@ -750,7 +793,7 @@ class Store:
                       ROUND(AVG(CASE WHEN club = 'DR' AND is_putt = 0 AND (shot_number = 1 OR lie_before = 'tee' OR (shot_number IS NULL AND lie_before IS NULL)) THEN {_DRIVE} END)) AS avg_drive,
                       ROUND(100.0 * SUM(CASE WHEN club = 'DR' AND lie_after = 'fairway' THEN 1 ELSE 0 END)
                             / NULLIF(SUM(CASE WHEN club = 'DR' AND lie_after IS NOT NULL THEN 1 ELSE 0 END), 0)) AS fairway_pct
-               FROM shots WHERE player IS NOT NULL AND player != 'unknown' AND mulligan = 0
+               FROM shots WHERE player IS NOT NULL AND player != 'unknown' AND mulligan = 0 AND left_out = 0
                GROUP BY player ORDER BY longest_drive DESC""".format(_DRIVE=_DRIVE)
         ).fetchall()
 
@@ -761,12 +804,12 @@ class Store:
             """SELECT COUNT(*) AS shots, COUNT(DISTINCT session_id) AS nights,
                       AVG(CASE WHEN is_putt = 0 THEN start_direction END) AS avg_start_dir,
                       COUNT(CASE WHEN is_putt = 0 AND start_direction IS NOT NULL THEN 1 END) AS aimed
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0""" + _ctx_sql(context),
+               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0""" + _ctx_sql(context),
             (player,),
         ).fetchone()
         fav = self.db.execute(
             """SELECT club, COUNT(*) AS n FROM shots
-               WHERE player = ? AND attributed = 1 AND mulligan = 0 AND club IS NOT NULL AND club NOT IN ('PT')"""
+               WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND club IS NOT NULL AND club NOT IN ('PT')"""
             + _ctx_sql(context) + " GROUP BY club ORDER BY n DESC LIMIT 1",
             (player,),
         ).fetchone()
@@ -779,7 +822,7 @@ class Store:
         """How close this player's full shots from about `yards` finish to the pin, this season."""
         r = self.db.execute(
             """SELECT COUNT(*) AS n, ROUND(AVG(finish_yards), 1) AS avg_finish_yards
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 0
+               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND is_putt = 0
                      AND finish_yards IS NOT NULL AND to_pin_yards BETWEEN ? AND ?""" + _ctx_sql(context),
             (player, yards - band, yards + band),
         ).fetchone()
@@ -794,7 +837,7 @@ class Store:
         lo, hi = max(0.0, feet - band_feet) / 3.0, (feet + band_feet) / 3.0   # feet -> yards
         r = self.db.execute(
             """SELECT COUNT(*) AS attempts, SUM(CASE WHEN outcome = 'holed' THEN 1 ELSE 0 END) AS made
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 1 AND outcome IS NOT NULL
+               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND is_putt = 1 AND outcome IS NOT NULL
                      AND outcome != 'gimme' AND to_pin_yards BETWEEN ? AND ?""" + _ctx_sql(context),
             (player, lo, hi),
         ).fetchone()
@@ -821,7 +864,7 @@ class Store:
                    SELECT to_pin_yards,
                           ROW_NUMBER() OVER (PARTITION BY session_id, course, hole ORDER BY ts) AS putt_no,
                           COUNT(*) OVER (PARTITION BY session_id, course, hole) AS putts
-                   FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND hole IS NOT NULL
+                   FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND hole IS NOT NULL
                          AND (lie_before = 'green' OR (is_putt = 1 AND lie_before IS NULL))"""
             + _ctx_sql(context) + """
                )
@@ -839,7 +882,7 @@ class Store:
         r = self.db.execute(
             f"""SELECT COUNT(*) AS n,
                        AVG(CASE WHEN outcome = 'holed' THEN 0 ELSE finish_yards END) AS avg_finish_yards
-                FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 0
+                FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND is_putt = 0
                       AND to_pin_yards >= ? AND to_pin_yards < ? AND finish_yards IS NOT NULL
                       AND (lie_after = 'green' OR outcome IN ('holed', 'conceded')) AND {self._BEFORE_TODAY}""",
             (player, lo_yards, hi_yards if hi_yards is not None else 1e9, self.session_id),
@@ -851,7 +894,7 @@ class Store:
         Conceded misses count as misses; the never-struck tap-ins ('gimme') don't count."""
         r = self.db.execute(
             f"""SELECT COUNT(*) AS attempts, SUM(CASE WHEN outcome = 'holed' THEN 1 ELSE 0 END) AS made
-                FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 1
+                FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND is_putt = 1
                       AND outcome IS NOT NULL AND outcome != 'gimme' AND to_pin_yards > ? AND to_pin_yards <= ?
                       AND {self._BEFORE_TODAY}""",
             (player, lo_feet / 3.0, (hi_feet if hi_feet is not None else 1e9) / 3.0, self.session_id),
@@ -865,7 +908,7 @@ class Store:
         the club's typical length over everything but chips, then only shots whose pin was well beyond
         that, so the player wasn't hitting a partial."""
         base = """SELECT total_yards, to_pin_yards FROM shots
-                  WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 0
+                  WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND is_putt = 0
                         AND total_yards IS NOT NULL AND total_yards > 0"""
         if club is None:
             rows = self.db.execute(base + " AND lie_before = 'tee' AND to_pin_yards >= 250", (player,)).fetchall()
@@ -935,7 +978,7 @@ class Store:
         ball formats (alternate, and a one-ball scramble), which are not attributed to a single player."""
         r = self.db.execute(
             """SELECT COUNT(*) AS tries, SUM(CASE WHEN lie_after = 'fairway' THEN 1 ELSE 0 END) AS hit
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 0 AND club = 'DR'
+               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND is_putt = 0 AND club = 'DR'
                      AND shot_number = 1 AND lie_after IS NOT NULL""" + _ctx_sql(context),
             (player,),
         ).fetchone()
@@ -951,7 +994,7 @@ class Store:
         params = [player, *lies] + ([max_to_pin] if max_to_pin is not None else [])
         r = self.db.execute(
             f"""SELECT COUNT(*) AS n, ROUND(AVG(finish_yards), 1) AS avg_finish_yards
-                FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND is_putt = 0 AND finish_yards IS NOT NULL
+                FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND is_putt = 0 AND finish_yards IS NOT NULL
                       AND lie_before IN ({placeholders}){clause}{_ctx_sql(context)}""",
             params,
         ).fetchone()

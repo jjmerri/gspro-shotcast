@@ -1,4 +1,4 @@
-"""The static scorecard (par, stroke index, tee yardages, altitude) for a GSPro course.
+"""The static scorecard (par, stroke index, tee yardages and ratings, altitude) for a GSPro course.
 
 GSPro ships this per course in two files, between them covering every course: a labelled, tab
 separated `<course>.unity3d.csv` (also has yardages), and a pipe-delimited `coursedetails.txt`.
@@ -32,6 +32,11 @@ class CourseCard:
     altitude_ft: float | None = None
     yards: dict[str, dict[int, int]] = field(default_factory=dict)  # tee name -> hole -> yards
     folder: str | None = None   # the GSPro course folder it was read from
+    ratings: dict[str, tuple[float, float]] = field(default_factory=dict)  # tee name -> (course rating, slope)
+
+
+# The tees coursedetails.txt rates, in its order: the same as the CSV's tee rows.
+TEE_ORDER = ("Black", "White", "Green", "Blue", "Yellow", "Red", "Junior", "Par 3")
 
 
 def load(courses_dirs: str | Path | list, course_name: str | None, folder: str | None = None) -> CourseCard | None:
@@ -126,14 +131,17 @@ def _canonical_name(folder: Path) -> str | None:
 
 
 def _load_folder(folder: Path) -> CourseCard | None:
+    details_file = folder / "coursedetails.txt"
+    details = _parse_details(details_file) if details_file.is_file() else None
     for csv in folder.glob("*.unity3d.csv"):  # preferred: also carries yardages
         card = _parse_csv(csv)
         if card:
+            if details and details.ratings:
+                # The ratings are in tee order: name them by the CSV's tee rows when it has them all.
+                names = list(card.yards) if len(card.yards) == len(TEE_ORDER) else list(TEE_ORDER)
+                card.ratings = {names[TEE_ORDER.index(t)]: v for t, v in details.ratings.items()}
             return card
-    details = folder / "coursedetails.txt"
-    if details.is_file():
-        return _parse_details(details)
-    return None
+    return details
 
 
 # ---- the labelled CSV -------------------------------------------------------------------------
@@ -192,7 +200,8 @@ def _parse_csv(path: Path) -> CourseCard | None:
 # ---- the pipe-delimited coursedetails.txt ----------------------------------------------------
 # Layout: name|author|altitude(ft)|description|location|1|1|total par|<N pars>|<N stroke indexes>|
 # <per-tee rating|slope pairs>|... The description can hold anything, so par and index are found by
-# their shape: N pars (3..6) followed by N indexes that are exactly 1..N.
+# their shape: N pars (3..6) followed by N indexes that are exactly 1..N. The rating and slope pairs
+# follow in TEE_ORDER, blank for a tee the course doesn't have.
 
 
 def _ints(tokens: list[str]) -> list[int] | None:
@@ -213,6 +222,7 @@ def _parse_details(path: Path) -> CourseCard | None:
             if pars and index and all(3 <= p <= 6 for p in pars) and set(index) == set(range(1, n + 1)):
                 altitude = float(tokens[2]) if len(tokens) > 2 and re.fullmatch(r"-?\d+(\.\d+)?", tokens[2]) else None
                 return CourseCard(
+                    ratings=_ratings(tokens[i + 2 * n:i + 2 * n + 2 * len(TEE_ORDER)]),
                     name=tokens[0] or path.parent.name,
                     par={h + 1: pars[h] for h in range(n)},
                     index={h + 1: index[h] for h in range(n)},
@@ -220,3 +230,16 @@ def _parse_details(path: Path) -> CourseCard | None:
                     altitude_ft=altitude,
                 )
     return None
+
+
+def _ratings(tokens: list[str]) -> dict[str, tuple[float, float]]:
+    """Each rated tee's (course rating, slope), from pairs in TEE_ORDER. A blank or malformed pair (one
+    course file has "54.0.120") is a tee without a rating."""
+    out = {}
+    for tee, k in zip(TEE_ORDER, range(0, len(tokens) - 1, 2)):
+        rating, slope = tokens[k], tokens[k + 1]
+        if re.fullmatch(r"\d+(\.\d+)?", rating) and re.fullmatch(r"\d+(\.\d+)?", slope):
+            r, sl = float(rating), float(slope)
+            if 20 <= r <= 90 and 55 <= sl <= 155:
+                out[tee] = (r, sl)
+    return out
