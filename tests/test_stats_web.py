@@ -191,6 +191,13 @@ def test_a_round_left_out_drive_is_not_its_longest(tmp_path):
         assert {r["side"]: r["longest_drive"] for r in stats_web.rounds(ro)} == {"Ann": 250, "Bob": 300}
 
 
+def test_the_booth_round_sheet_drops_a_left_out_drive():
+    store = Store(None)
+    for yards, out in ((999, 1), (250, 0)):
+        _shot(store.db, "Ann", club="DR", shot_number=1, lie_before="tee", total_yards=yards, left_out=out)
+    assert list(store.shot_lengths([1, 2]).values()) == [250]
+
+
 def test_the_local_page_can_leave_a_shot_out(tmp_path):
     path, db = _db(tmp_path)
     _shot(db, "Ann", club="DR", shot_number=1, lie_before="tee", total_yards=330)

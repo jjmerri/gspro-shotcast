@@ -920,12 +920,12 @@ class Store:
         return {"n": len(totals), "avg_total": _median(totals)}
 
     def shot_lengths(self, shot_ids: list[int]) -> dict[int, float]:
-        """GSPro's total length for these shots, where the HUD showed it."""
+        """GSPro's total length for these shots, where the HUD showed it (none left out of the stats)."""
         ids = [i for i in shot_ids if i is not None]
         if not ids:
             return {}
         rows = self.db.execute(
-            f"SELECT id, total_yards FROM shots WHERE total_yards IS NOT NULL AND id IN ({','.join('?' * len(ids))})", ids)
+            f"SELECT id, total_yards FROM shots WHERE total_yards IS NOT NULL AND left_out = 0 AND id IN ({','.join('?' * len(ids))})", ids)
         return {r["id"]: r["total_yards"] for r in rows}
 
     def record_form_mentions(self, players: list[str], topics: list[str]) -> None:
