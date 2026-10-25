@@ -30,7 +30,9 @@ start its own and says so; **Restart the booth** in its menu stops the other and
 ## Releases
 
 Releases are built by `.github/workflows/windows-app.yml` when a `v*` tag is pushed (the tag is
-the version); running the workflow by hand makes a test build in the run's artifacts. To build
+the version); running the workflow by hand makes a test build in the run's artifacts. The build
+runs the whole test suite on the Python it packages, with the packages pip resolved that day, so a
+dependency release that breaks the app fails the build instead of shipping. To build
 locally on Windows with Inno Setup 6: `powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 -Version 0.2.0`.
 
 ## Remote administration (optional)

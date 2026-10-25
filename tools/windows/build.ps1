@@ -1,8 +1,8 @@
 # Builds the Windows installer: dist\Shotcast-Setup-<version>.exe and its .sha256.
 #   powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 -Version 1.2.3
 # A private Python (python-build-standalone, which includes tkinter for the overlay) gets Shotcast
-# and its packages, the OCR models are fetched into it, it's checked (tray --self-test), and Inno
-# Setup packs it. Needs Inno Setup 6 (iscc) and an internet connection.
+# and its packages, the OCR models are fetched into it, it's checked (tray --self-test and the test
+# suite, run on that Python), and Inno Setup packs it. Needs Inno Setup 6 (iscc) and an internet connection.
 param(
     [Parameter(Mandatory = $true)][string]$Version,
     [string]$PythonMinor = "3.12",
@@ -52,6 +52,17 @@ Write-Host "Checking the app..."
 $home_ = Join-Path $env:TEMP "shotcast-selftest-$PID"
 & $Python -m commentator tray --home $home_ --self-test; Check "Self-test"
 Remove-Item $home_ -Recurse -Force -ErrorAction SilentlyContinue
+
+Write-Host "Running the tests on the packaged Python..."
+# Its packages are whatever pip resolved today, so a broken release of one fails the build here. The
+# test runner goes in a throwaway venv layered over the bundle, so nothing is added to what ships.
+$tests = Join-Path $env:TEMP "shotcast-tests-$PID"
+& $Python -m venv --system-site-packages $tests; Check "Test venv"
+$dev = & $Python -c "import tomllib; print(' '.join(tomllib.load(open(r'$pyproject', 'rb'))['project']['optional-dependencies']['dev']))"
+& "$tests\Scripts\python.exe" -m pip install --quiet --no-warn-script-location $dev.Split(" "); Check "Test tools"
+Push-Location $Root
+try { & "$tests\Scripts\python.exe" -m pytest -q -p no:cacheprovider; Check "Tests" }
+finally { Pop-Location; Remove-Item $tests -Recurse -Force -ErrorAction SilentlyContinue }
 Get-ChildItem (Join-Path $Build "python") -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
 
 Write-Host "Building the installer..."
