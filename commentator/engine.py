@@ -545,6 +545,10 @@ class Engine:
         self.live_mirror = None
         self._live_stop_task: asyncio.Task | None = None
         self._obs_lock = threading.Lock()
+        self._live_held = False             # OFF AIR on the badge: no stream until it's back on air
+        self._live_last_shot = time.monotonic()
+        self._live_idle_session: str | None = None   # the mirror session the idle watch stopped
+        self._live_resume_on_shot = False   # stopped for being idle mid-round: the next shot restarts it
         # Every 6-word phrase said this season, so a line can't come back weeks later.
         self._season_phrases: set[tuple[str, ...]] = set()
         for text in self.store.spoken_lines():
@@ -1278,6 +1282,7 @@ class Engine:
             return
         self.commentary_on = on
         log.info("Booth %s", "on air" if on else "off air: recording shots and rounds only")
+        self._live_on_air(on)
         if on and not self._minimap_tried:   # started off air: the hazard reader wasn't built
             self._minimap_tried = True
             self.minimap = self._make_minimap()
@@ -3363,6 +3368,7 @@ class Engine:
         # A shot the feed held back (GSPconnect skipped it) carries its impact time and state.
         impact = event.impact_at or time.monotonic()
         self._last_activity = time.monotonic()
+        self._live_shot()
         self._cancel_preshot()
         self._shot_id = None  # set once this shot is recorded; mid-flight lines come before that
         held = event.impact_state
@@ -6173,9 +6179,12 @@ class Engine:
             self.live_mirror.start()
         except Exception:
             log.exception("The live stream can't upload")
+            return
+        asyncio.get_running_loop().create_task(self._live_idle_watch(), name="live-idle")
 
     def _live_round_start(self) -> None:
-        if not (self._live_on() and self.cfg.live.with_rounds):
+        self._live_last_shot, self._live_resume_on_shot = time.monotonic(), False
+        if not (self._live_on() and self.cfg.live.with_rounds) or self._live_held:
             return
         try:
             loop = asyncio.get_running_loop()
@@ -6199,6 +6208,50 @@ class Engine:
                 log.info("Live stream: OBS output %s", "started" if what == "start" else "stopped")
         except Exception as e:
             log.warning("Live stream: couldn't %s OBS's output: %s", what, e)
+
+    def _round_on(self) -> bool:
+        return self.round is not None and not self.round.ended and not self._round_end_queued
+
+    def _live_on_air(self, on: bool) -> None:
+        """The badge: OFF AIR stops the stream, ON AIR mid-round starts it again."""
+        if not (self._live_on() and self.cfg.live.with_rounds):
+            return
+        self._live_held = not on
+        if on and not self._round_on():
+            return
+        if self._live_stop_task and not self._live_stop_task.done():
+            self._live_stop_task.cancel()
+        if on:
+            self._live_last_shot, self._live_resume_on_shot = time.monotonic(), False
+        try:
+            asyncio.get_running_loop().create_task(self._live_call("start" if on else "stop"), name="live-air")
+        except RuntimeError:
+            pass
+
+    def _live_shot(self) -> None:
+        self._live_last_shot = time.monotonic()
+        if not self._live_resume_on_shot or self._live_held or not self._round_on():
+            return
+        self._live_resume_on_shot = False
+        log.info("Live stream: a shot after the idle stop, back on")
+        asyncio.get_running_loop().create_task(self._live_call("start"), name="live-resume")
+
+    async def _live_idle_watch(self, every: float = 30.0) -> None:
+        """A stream left on, a round abandoned on a hole: off after live.idle_minutes with no shots."""
+        while True:
+            await asyncio.sleep(every)
+            idle, m = self.cfg.live.idle_minutes * 60, self.live_mirror
+            session = m.session if m is not None else None
+            if not idle or session is None or session == self._live_idle_session:
+                continue
+            # From its last shot, or from when it went on air (by hand, long after the last shot).
+            quiet = min(time.monotonic() - self._live_last_shot, m.clock() - m.since)
+            if quiet < idle:
+                continue
+            log.info("Live stream: no shots for %.0f minutes, stopping it", quiet / 60)
+            self._live_idle_session = session
+            self._live_resume_on_shot = self.cfg.live.with_rounds and self._round_on()
+            await self._live_call("stop")
 
     def _schedule_live_stop(self) -> None:
         """Off air once the sign-off has aired, and a little after."""

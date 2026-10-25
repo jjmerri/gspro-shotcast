@@ -637,6 +637,9 @@ class LiveConfig(BaseModel):
     # Start OBS's output when a round starts, and stop it stop_after_seconds after the sign-off.
     with_rounds: bool = True
     stop_after_seconds: float = 30.0
+    # Stop it after this long with no shots (a round left on a hole); the next shot of the round starts
+    # it again. 0: never. OFF AIR on the badge stops it too, and ON AIR mid-round starts it again.
+    idle_minutes: float = 20.0
     # Start OBS (minimized to the tray) when the booth starts, if it isn't running.
     launch_obs: bool = True
     obs_path: str | None = None   # default: the tray's OBS (obs\ here), else C:\Program Files\obs-studio

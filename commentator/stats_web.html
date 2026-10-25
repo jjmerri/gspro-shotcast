@@ -1026,12 +1026,22 @@ function renderBooth() {
 // session's playlist to play. A site without the stream has no status.json, and no Live tab.
 const HLS_LIB = "vendor/hls.js-1.7.3/hls.light.min.js";
 let player = null;   // { session, video, hls }: kept across renders so playback doesn't restart
+// While live, the booth rewrites status.json's "at" every 30 seconds. One that stops changing (or is
+// long past, allowing for clocks that disagree) is a booth killed mid-stream: off air.
+const LIVE_QUIET_MS = 100000, LIVE_DEAD_S = 600;
+let beat = { at: null, seen: 0 };
 async function pollLive() {
   let s = null;
   try {
     const r = await fetch("live/status.json", { cache: "no-store" });
     if (r.ok) s = await r.json();
   } catch (e) { s = null; }
+  if (s && s.live && s.at) {
+    const now = Date.now();
+    if (s.at !== beat.at) beat = { at: s.at, seen: now };
+    if (now - beat.seen > LIVE_QUIET_MS || now / 1000 - s.at > LIVE_DEAD_S) s = { live: false };
+  }
+  if (s) delete s.at;
   const was = JSON.stringify(state.live);
   state.live = s;
   if (JSON.stringify(s) === was) return;

@@ -254,5 +254,6 @@ live:
   enabled: false
   # with_rounds: true          # start OBS's output with each round, stop it after the sign-off
   # stop_after_seconds: 30
+  # idle_minutes: 20           # stop it after this long with no shots; the round's next shot restarts it
   # launch_obs: true           # start OBS minimized when the booth starts, if it isn't running
   # obs_path: C:\Program Files\obs-studio\bin\64bit\obs64.exe   # default: the tray's (obs\ here), else this

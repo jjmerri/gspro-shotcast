@@ -58,8 +58,8 @@ one. Setup is one CloudFormation stack; see
 **Watch live.** The published page's **Live** tab plays GSPro's screen and sound, the booth's
 voices included, while a round is on, about 20 seconds behind and behind the same password. One
 tray action downloads and sets up [OBS Studio](https://obsproject.com/) to make the stream; the
-booth starts it when a round starts, stops it after the sign-off, and deletes it: nothing is
-kept, and it's free (no YouTube or Twitch). It costs about a cent an hour of uploads, and watching
+booth starts it when a round starts, stops it after the sign-off (or OFF AIR, or 20 minutes
+with no shots), and deletes it: nothing is kept, and it's free (no YouTube or Twitch). It costs about a cent an hour of uploads, and watching
 is within CloudFront's free tier for a league. See [Live stream](docs/tracking.md#live-stream).
 
 ## The booth

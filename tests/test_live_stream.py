@@ -169,6 +169,85 @@ async def test_the_stream_starts_with_a_round_and_stops_after_the_sign_off(tmp_p
     assert calls == ["start", "start", "stop"]
 
 
+
+def test_mirror_keeps_saying_its_live_so_the_page_can_tell_a_killed_booth(tmp_path):
+    s3, now = FakeS3(), [1000.0]
+    m = Mirror(tmp_path, "bkt", client=s3, clock=lambda: now[0])
+    _playlist(tmp_path, 0, ["stream0.ts"], mtime=now[0])
+    m.step()
+    assert json.loads(s3.objects["live/status.json"][0])["at"] == 1000
+    for i in range(1, 9):                                            # 32 seconds of 4-second segments
+        now[0] += 4
+        _playlist(tmp_path, i, [f"stream{i}.ts"], mtime=now[0])
+        m.step()
+    assert json.loads(s3.objects["live/status.json"][0])["at"] == 1032
+
+
+async def test_off_air_and_idle_stop_the_stream_and_on_air_or_a_shot_starts_it(tmp_path, monkeypatch):
+    from tests.test_round import _engine as make
+
+    calls = []
+
+    class FakeObs:
+        def __init__(self, *a):
+            pass
+
+        def start(self):
+            calls.append("start")
+            return True
+
+        def stop(self):
+            calls.append("stop")
+            return True
+    monkeypatch.setattr(live_stream, "Obs", FakeObs)
+    eng = make(tmp_path)
+    eng.cfg.source.type = "connector_log"
+    eng.cfg.publish.bucket = "bkt"
+    eng.cfg.live.enabled = True
+    round_on = [True]
+    monkeypatch.setattr(eng, "_round_on", lambda: round_on[0])
+
+    eng._live_on_air(False)
+    eng._live_round_start()                                          # a round starting off air: no stream
+    await asyncio.sleep(0.05)
+    assert calls == ["stop"]
+    eng._live_on_air(True)                                           # back on air mid-round
+    await asyncio.sleep(0.05)
+    assert calls == ["stop", "start"]
+
+    calls.clear()
+    now = [5000.0]
+    eng.live_mirror = Mirror(tmp_path, "bkt", client=FakeS3(), clock=lambda: now[0])
+    eng.live_mirror.session, eng.live_mirror.since = "s1", now[0] - 3600
+    eng.cfg.live.idle_minutes = 20
+    eng._live_last_shot -= 19 * 60
+    watch = asyncio.create_task(eng._live_idle_watch(every=0.01))
+    await asyncio.sleep(0.05)
+    assert calls == []                                               # 19 minutes since the last shot
+    eng._live_last_shot -= 2 * 60
+    await asyncio.sleep(0.05)
+    assert calls == ["stop"]                                         # once, not every pass
+    eng._live_shot()                                                 # play goes on
+    await asyncio.sleep(0.05)
+    assert calls == ["stop", "start"]
+    eng._live_shot()
+    await asyncio.sleep(0.05)
+    assert calls == ["stop", "start"]
+
+    calls.clear()                                                    # started by hand an hour after the
+    eng.live_mirror.session, eng.live_mirror.since = "s2", now[0] - 60   # last shot: a minute on air
+    eng._live_last_shot -= 3600
+    round_on[0] = False
+    await asyncio.sleep(0.05)
+    assert calls == []
+    now[0] += 20 * 60
+    await asyncio.sleep(0.05)
+    assert calls == ["stop"]
+    eng._live_shot()                                                 # no round: a shot doesn't restart it
+    await asyncio.sleep(0.05)
+    assert calls == ["stop"]
+    watch.cancel()
+
 def _obs_zip(tmp_path):
     import hashlib
     import io

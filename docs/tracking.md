@@ -353,7 +353,17 @@ the PC, and a lifecycle rule in the stack deletes anything a crash left under `l
 
 The booth starts OBS's output when a round starts and stops it 30 seconds after the sign-off
 (`live.stop_after_seconds`), over OBS's WebSocket server; the tray's **Start/Stop the live stream**
-does it by hand. Use OBS's hardware encoder (NVENC on NVIDIA cards) so encoding stays off the CPU
+does it by hand. It also stops:
+
+- **OFF AIR** on the badge stops it, and no round starts it until **ON AIR**, which starts it again
+  mid-round.
+- **Idle**: after 20 minutes with no shots (`live.idle_minutes`; 0 for never), a round left on a hole
+  or a stream started by hand and forgotten. The round's next shot starts it again.
+- **The booth stopping**: while live it refreshes `live/status.json` every 30 seconds, and the page
+  shows off air once that goes quiet (about 2 minutes), so a booth that was quit or crashed
+  mid-stream doesn't leave a frozen player up. A booth starting clears `live/` and goes off air.
+
+Use OBS's hardware encoder (NVENC on NVIDIA cards) so encoding stays off the CPU
 GSPro needs.
 
 Cost: S3 charges for each upload, two every 4 seconds, about a cent an hour on air (about $3 for

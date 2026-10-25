@@ -3,7 +3,9 @@ playlist and a few seconds of video per file) into a folder, and this mirrors th
 stats bucket, behind the same league password as the stats. Nothing is kept: segments are deleted
 from the bucket as they leave the playlist, and the whole session when the stream stops.
 
-    live/status.json               {"live": true, "session": ..., "since": ...} or {"live": false}
+    live/status.json               {"live": true, "session": ..., "since": ..., "at": ...} or {"live": false}
+                                   ("at" is refreshed every HEARTBEAT_SECONDS while live, so the page can
+                                   tell a booth that was killed mid-stream)
     live/s/<session>/stream.m3u8   the playlist, re-uploaded as OBS rewrites it
     live/s/<session>/stream12.ts   its segments
 
@@ -27,6 +29,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 PASSWORD_ENV = "OBS_WEBSOCKET_PASSWORD"
+HEARTBEAT_SECONDS = 30
 OBS_EXE = Path(r"C:\Program Files\obs-studio\bin\64bit\obs64.exe")
 PORTABLE_OBS = Path("obs", "bin", "64bit", "obs64.exe")   # the tray's setup (obs_setup.py), in the home folder
 TYPES = {".m3u8": "application/vnd.apple.mpegurl", ".ts": "video/mp2t", ".m4s": "video/iso.segment",
@@ -197,6 +200,7 @@ class Mirror:
         self.sent: dict[str, int] = {}   # segment -> its file's mtime (ns) when it went up
         self.seen_mtime = 0.0
         self._announced = False
+        self._beat = 0.0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -210,7 +214,9 @@ class Mirror:
             self.client.delete_objects(Bucket=self.bucket, Delete={"Objects": [{"Key": k} for k in keys[i:i + 1000]]})
 
     def _status(self, live: bool) -> None:
-        body = {"live": live, "session": self.session, "since": self.since} if live else {"live": False}
+        body = {"live": live, "session": self.session, "since": self.since, "at": round(self.clock())} \
+            if live else {"live": False}
+        self._beat = self.clock()
         self._put("status.json", json.dumps(body).encode(), "no-cache")
         if self.status_file:
             try:
@@ -270,7 +276,7 @@ class Mirror:
                 self._put(f"s/{self.session}/{name}", data, "public, max-age=86400, immutable")
                 self.sent[name] = stamps[name]
         self._put(f"s/{self.session}/stream.m3u8", raw, "max-age=1")  # the page always asks for this name
-        if not self._announced:   # once its playlist is there to load
+        if not self._announced or self.clock() - self._beat >= HEARTBEAT_SECONDS:   # once its playlist's there
             self._status(True)
             self._announced = True
         gone = sorted(set(self.sent) - set(segments))
