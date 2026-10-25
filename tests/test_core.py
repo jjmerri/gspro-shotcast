@@ -1332,6 +1332,10 @@ def test_carry_is_leveled_by_where_the_ball_came_to_rest(tmp_path):
     hit("Hole 3", 1, 150.0, 146.0, "150 yards", 3.0, finish=0.0)   # holed: rested at the pin
     games = [(round(c), round(g)) for _, c, g, *_ in st.carry_pairs()]
     assert games == [(240, 234), (60, 70), (150, 149)]
+    # A shot left out of the stats doesn't train the model, but still says where the drive rested.
+    st.set_left_out(2, True)
+    assert [(round(c), round(g)) for _, c, g, *_ in st.carry_pairs()] == [(240, 234), (150, 149)]
+    st.set_left_out(2, False)
 
     # A later round's second shot on hole 2 says nothing about where this round's tee shot rested.
     hit("Hole 2", 2, 60.0, 60.0, "60 yards", 10.0)

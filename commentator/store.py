@@ -663,7 +663,7 @@ class Store:
         rows = self.db.execute(
             """SELECT id, session_id, player, hole, shot_number, is_putt, mulligan, fmt, lie_before, carry_raw,
                       units, carry_raw_tile_yards, carry_game_yards, elevation_yards, to_pin, course,
-                      launch_angle, finish_yards, ts, attributed, shared_ball
+                      launch_angle, finish_yards, ts, attributed, shared_ball, left_out
                FROM shots ORDER BY id"""
         ).fetchall()
         # Each player's next stroke (by impact time: rows are written as shot handlers finish, which
@@ -685,7 +685,8 @@ class Store:
 
         out = []
         for r in rows:
-            if r["is_putt"] or not r["lie_before"] or not (r["carry_game_yards"] or 0) > 0:
+            # (a left-out shot still marks where the one before it came to rest, above)
+            if r["is_putt"] or r["left_out"] or not r["lie_before"] or not (r["carry_game_yards"] or 0) > 0:
                 continue
             if r["carry_raw_tile_yards"]:
                 base, carry = "gspro", r["carry_raw_tile_yards"]
