@@ -202,9 +202,14 @@ def add_round_summaries(db: sqlite3.Connection, rounds_: list[dict[str, Any]], h
                     sg[sg_of[st["id"]]["category"]] += sg_of[st["id"]]["sg"]
                     shots.append(_shot_brief(st, h, sg_of[st["id"]]))
         played = r["played"] or len(r["card"]) or 0
-        putt_holes = db.execute("SELECT putt_holes FROM rounds WHERE id = ?", (r["id"],)).fetchone()[0]
+        row = db.execute("SELECT * FROM rounds WHERE id = ?", (r["id"],)).fetchone()
+        putt_holes = row["putt_holes"]
+        # As the season average counts it: a round quit part-way through by the nine it finished.
+        nine = row["nine_to_par"] if "nine_to_par" in row.keys() else None
+        per_nine = nine if nine is not None else (
+            round(r["to_par"] * 9 / played, 1) if r["to_par"] is not None and played else None)
         vs = [
-            {"label": "Score / 9", "round": round(r["to_par"] * 9 / played, 1) if r["to_par"] is not None and played else None,
+            {"label": "Score / 9", "round": per_nine,
              "season": p["avg_to_par_9"], "better": -1, "fmt": "to_par"},
             {"label": "Fairways", "round": _pct(*r["fir"]), "season": p["fir_pct"], "better": 1, "fmt": "pct"},
             {"label": "Greens", "round": _pct(*r["gir"]), "season": p["gir_pct"], "better": 1, "fmt": "pct"},

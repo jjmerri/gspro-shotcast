@@ -252,3 +252,9 @@ def test_a_players_round_is_summed_up_against_their_season(tmp_path):
     assert m["best_shot"]["id"] == 2 and m["worst_shot"] is None
     assert m["sg"]["total"] == 0.99
     assert (m["best_hole"]["hole"], m["worst_hole"]["hole"]) == (1, 2)
+    # A round quit part-way through scores by the nine it finished, as in the season average.
+    db.execute("UPDATE rounds SET holes_played = 11, nine_to_par = -1")
+    db.commit()
+    with stats_web.connect(path) as ro:
+        m = stats_web.summary(ro)["rounds"][0]["summary"]
+    assert m["vs"][0]["round"] == -1
