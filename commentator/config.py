@@ -639,7 +639,7 @@ class LiveConfig(BaseModel):
     stop_after_seconds: float = 30.0
     # Start OBS (minimized to the tray) when the booth starts, if it isn't running.
     launch_obs: bool = True
-    obs_path: str | None = None   # default: C:\Program Files\obs-studio\bin\64bit\obs64.exe
+    obs_path: str | None = None   # default: the tray's OBS (obs\ here), else C:\Program Files\obs-studio
     obs_host: str = "localhost"
     obs_port: int = 4455
 

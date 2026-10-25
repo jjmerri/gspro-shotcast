@@ -21,7 +21,7 @@ import webbrowser
 from collections import deque
 from pathlib import Path
 
-from .settings_files import env_value, set_commentary
+from .settings_files import env_value, set_commentary, set_env, set_yaml
 
 log = logging.getLogger(__name__)
 
@@ -329,6 +329,7 @@ class Tray:
         self.icon = None
         self.ui = None
         self._stop = threading.Event()
+        self._live_setup = threading.Lock()
 
     # -- status
     def status(self) -> str:
@@ -410,6 +411,65 @@ class Tray:
         else:
             obs.start()
             self.notify("Starting the live stream: it's on the stats page in about 20 seconds.")
+
+    def setup_live(self, *_) -> None:
+        from . import obs_setup
+
+        if not self._live_setup.acquire(blocking=False):
+            self.notify("The live stream is already being set up.")
+            return
+        try:
+            if obs_setup.installed(self.home) or self.ui is None or self.ui.ask(
+                    f"Set up the live stream on the stats page?\n\nThis downloads OBS Studio {obs_setup.OBS_VERSION} "
+                    f"({obs_setup.OBS_ZIP_MB} MB) into the Shotcast folder, apart from any other OBS, and sets it up "
+                    f"to stream GSPro's screen and sound while rounds are played."):
+                threading.Thread(target=self._setup_live, name="live-setup", daemon=True).start()
+                return
+        except BaseException:
+            self._live_setup.release()
+            raise
+        self._live_setup.release()
+
+    def _setup_live(self) -> None:
+        from . import live_stream, obs_setup
+        from .config import load_config
+        from .tray_ui import write_atomic
+
+        try:
+            if live_stream.obs_running():
+                self.error("OBS is running: close it first (right-click its icon by the clock, then Exit), "
+                           "then set up the live stream again.")
+                return
+            if not obs_setup.installed(self.home):
+                self.notify(f"Downloading OBS ({obs_setup.OBS_ZIP_MB} MB): this takes a few minutes.")
+                obs_setup.download(self.home)
+            cfg_path, env_path = self.home / "config.yaml", self.home / ".env"
+            cfg = load_config(cfg_path)
+            env = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+            password = env_value(env, live_stream.PASSWORD_ENV) or obs_setup.new_password()
+            playlist = self.home / cfg.live.dir / cfg.live.playlist
+            playlist.parent.mkdir(parents=True, exist_ok=True)
+            obs_setup.write_settings(self.home, password, playlist, cfg.live.obs_port)
+            write_atomic(env_path, set_env(env, live_stream.PASSWORD_ENV, password))
+            os.environ[live_stream.PASSWORD_ENV] = password
+            if not cfg.live.enabled:
+                write_atomic(cfg_path, set_yaml(cfg_path.read_text(encoding="utf-8"), ("live", "enabled"), True))
+            self.settings_saved()
+            obs_setup.launch(self.home)
+            obs = live_stream.Obs(cfg.live.obs_host, cfg.live.obs_port, password=password)
+            obs_setup.wait_for(obs)
+            obs_setup.configure(obs)
+            self.restart_booth()
+            where = ("It goes on the stats page's Live tab" if cfg.publish.bucket else
+                     "It needs the stats page published to a bucket (Settings, Sharing) before it shows anywhere")
+            self.info(f"The live stream is set up. OBS runs by the clock and streams GSPro while rounds are "
+                      f"played; \"Start the live stream\" in this menu tries it now. {where}.")
+        except Exception as e:
+            log.exception("Setting up the live stream failed")
+            self.error(f"Setting up the live stream didn't finish: {e}\n\nThe details are in logs\\tray-*.log.")
+        finally:
+            self._live_setup.release()
+            self._refresh()
 
     def screen_check(self, *_) -> None:
         subprocess.Popen(["cmd", "/k", python_exe(), "-m", "commentator", "screen-check", "--delay", "8"],
@@ -593,8 +653,11 @@ class Tray:
                  safe(self.toggle_commentary)),
             item(lambda _: "Stop the live stream" if self.live_now() else "Start the live stream",
                  safe(self.toggle_live), visible=lambda _: self.cfg.live.enabled),
+            item("Set up the live stream...", safe(self.setup_live), visible=lambda _: not self.cfg.live.enabled),
             item("Settings...", safe(self.settings)),
             item("More", pystray.Menu(
+                item("Set up the live stream again (OBS)...", safe(self.setup_live),
+                     visible=lambda _: self.cfg.live.enabled),
                 item("Open the Shotcast folder", safe(self.open_folder)),
                 item("Open logs", safe(self.open_logs)),
                 item("Edit config.yaml", safe(self.edit_config)),

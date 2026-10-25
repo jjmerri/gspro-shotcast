@@ -1,4 +1,5 @@
 import asyncio
+import os
 import json
 
 from commentator import live_stream
@@ -166,3 +167,133 @@ async def test_the_stream_starts_with_a_round_and_stops_after_the_sign_off(tmp_p
     eng._schedule_live_stop()
     await asyncio.wait_for(eng._live_stop_task, 2)
     assert calls == ["start", "start", "stop"]
+
+
+def _obs_zip(tmp_path):
+    import hashlib
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("bin/64bit/obs64.exe", b"exe")
+        z.writestr("bin/64bit/obs64.pdb", b"symbols")
+    data = buf.getvalue()
+
+    class Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+    return (lambda url, timeout: Response(data)), hashlib.sha256(data).hexdigest()
+
+
+def test_obs_download_is_checked_and_keeps_an_earlier_setup(tmp_path):
+    import pytest
+
+    from commentator import obs_setup
+
+    opener, sha = _obs_zip(tmp_path)
+    with pytest.raises(RuntimeError, match="checksum"):
+        obs_setup.download(tmp_path, sha256="0" * 64, opener=opener)
+    assert list(tmp_path.iterdir()) == []
+
+    obs_setup.download(tmp_path, sha256=sha, opener=opener)
+    assert obs_setup.installed(tmp_path) and not (tmp_path / "obs/bin/64bit/obs64.pdb").exists()
+    (tmp_path / "obs/config/obs-studio").mkdir(parents=True)
+    (tmp_path / "obs/config/obs-studio/user.ini").write_text("[Basic]\nProfile=Shotcast\n")
+    obs_setup.download(tmp_path, sha256=sha, opener=opener)          # a newer OBS: same scenes
+    assert "Shotcast" in (tmp_path / "obs/config/obs-studio/user.ini").read_text()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["obs"]
+
+
+def test_obs_settings_make_its_recording_the_stream_and_keep_its_own(tmp_path):
+    from commentator import obs_setup
+
+    profile = tmp_path / "obs/config/obs-studio/basic/profiles/Shotcast/basic.ini"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("\ufeff[Video]\r\nBaseCX=1920\r\n[Hotkeys]\r\nOBSBasic.StartRecording={\"bindings\":[]}\r\n",
+                       encoding="utf-8")
+    playlist = tmp_path / "live" / "stream.m3u8"
+    obs_setup.write_settings(tmp_path, "pw", playlist, 4456, encoder=("h264_nvenc", "preset=p4"))
+    text = profile.read_text(encoding="utf-8-sig")
+    assert f"FFURL={playlist}\n" in text and "RecType=FFmpeg" in text and "FFFormat=hls" in text
+    assert "BaseCX=1920" in text and 'OBSBasic.StartRecording={"bindings":[]}' in text
+    ws = json.loads((tmp_path / "obs/config/obs-studio/plugin_config/obs-websocket/config.json").read_text())
+    assert ws["server_password"] == "pw" and ws["server_port"] == 4456 and ws["server_enabled"]
+    assert (tmp_path / "obs/portable_mode.txt").exists()
+    assert "LastVersion=" in (tmp_path / "obs/config/obs-studio/global.ini").read_text(encoding="utf-8-sig")
+
+
+def test_obs_configure_fits_gspro_to_a_720p_stream_once(tmp_path):
+    from commentator import obs_setup
+
+    class FakeObs:
+        def __init__(self):
+            self.calls, self.inputs = [], ["Desktop Audio", "Mic/Aux"]
+
+        def call(self, request, data=None):
+            self.calls.append((request, data))
+            return {"GetVideoSettings": {"baseWidth": 3840, "baseHeight": 2160},
+                    "GetCurrentProgramScene": {"currentProgramSceneName": "Scene"},
+                    "GetInputList": {"inputs": [{"inputName": n} for n in self.inputs]},
+                    "CreateInput": {"sceneItemId": 7}, "GetSceneItemId": {"sceneItemId": 7},
+                    "GetSpecialInputs": {"mic1": "Mic/Aux"}}.get(request, {})
+
+    obs = FakeObs()
+    obs_setup.configure(obs)
+    sent = dict(obs.calls)
+    assert sent["SetVideoSettings"] == {"fpsNumerator": 30, "fpsDenominator": 1, "baseWidth": 1920,
+                                        "baseHeight": 1080, "outputWidth": 1280, "outputHeight": 720}
+    assert sent["CreateInput"]["inputKind"] == "game_capture"
+    assert sent["SetSceneItemTransform"]["sceneItemTransform"]["boundsWidth"] == 1920
+    assert sent["SetInputMute"] == {"inputName": "Mic/Aux", "inputMuted": True}
+
+    obs.inputs.append("GSPro")
+    obs.calls.clear()
+    obs_setup.configure(obs)                                         # set up again: no second GSPro
+    assert "CreateInput" not in dict(obs.calls) and "SetSceneItemTransform" in dict(obs.calls)
+
+
+def test_launching_obs_clears_its_crash_flag(tmp_path):
+    root = tmp_path / "obs"
+    exe = root / "bin" / "64bit" / "obs64.exe"
+    exe.parent.mkdir(parents=True)
+    (root / "portable_mode.txt").touch()
+    sentinel = root / "config" / "obs-studio" / ".sentinel"
+    sentinel.mkdir(parents=True)
+    (sentinel / "run_1234").touch()
+    live_stream.clear_crash_flag(exe)
+    assert list(sentinel.iterdir()) == []
+
+
+def test_tray_sets_up_the_live_stream(tmp_path, monkeypatch):
+    from commentator import obs_setup, tray
+    from commentator.config import load_config
+
+    home, _ = tray.prepare_home(tmp_path / "Shotcast")
+    (home / "obs").mkdir()                                           # as downloaded
+    monkeypatch.delenv(live_stream.PASSWORD_ENV, raising=False)
+    monkeypatch.setattr(live_stream, "obs_running", lambda: False)
+    monkeypatch.setattr(obs_setup, "installed", lambda home: True)
+    monkeypatch.setattr(obs_setup, "launch", lambda home: None)
+    monkeypatch.setattr(obs_setup, "wait_for", lambda obs: None)
+    configured, said = [], []
+    monkeypatch.setattr(obs_setup, "configure", lambda obs: configured.append(obs.password))
+    t = tray.Tray(home, load_config(home / "config.yaml"))
+    monkeypatch.setattr(t, "restart_booth", lambda: said.append("restart"))
+    monkeypatch.setattr(t, "info", said.append)
+    monkeypatch.setattr(t, "error", said.append)
+    monkeypatch.setattr(t, "notify", said.append)
+    with t._live_setup:
+        t.setup_live()                                               # a second click while it runs
+    assert said == ["The live stream is already being set up."]
+    said.clear()
+    t.setup_live()
+    with t._live_setup:                                              # held until the setup thread ends
+        pass
+    password = (home / ".env").read_text().split(f"{live_stream.PASSWORD_ENV}=")[1].split("\n")[0]
+    assert password and configured == [password] and os.environ[live_stream.PASSWORD_ENV] == password
+    assert t.cfg.live.enabled and (home / "live").is_dir()
+    assert said[0] == "restart" and "set up" in said[1]
+    assert f"FFURL={home / 'live' / 'stream.m3u8'}" in (
+        home / "obs/config/obs-studio/basic/profiles/Shotcast/basic.ini").read_text(encoding="utf-8-sig")

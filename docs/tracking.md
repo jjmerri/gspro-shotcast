@@ -360,32 +360,29 @@ Cost: S3 charges for each upload, two every 4 seconds, about a cent an hour on a
 a season of 144 rounds). Watching is within CloudFront's free 1 TB a month: at 2.5 Mbps one
 viewer-hour is about 1.3 GB, so about 800 viewer-hours a month.
 
-Setting it up on the GSPro PC (with the [stats page](#setting-it-up) already publishing):
+Setting it up on the GSPro PC (with the [stats page](#setting-it-up) already publishing): in the
+tray, **Set up the live stream...** (under **More** once it's on). It downloads OBS Studio's
+portable build (224 MB, checked against its published checksum) into the Shotcast folder's `obs\`,
+apart from any other OBS, and sets it up:
 
-1. Install [OBS Studio](https://obsproject.com/) (28 or newer).
-2. **Tools > WebSocket Server Settings**: turn on the server (port 4455) with authentication, and put
-   its password in Shotcast's `.env` as `OBS_WEBSOCKET_PASSWORD=...`.
-3. Add a **Game Capture** source for GSPro (or **Display Capture** for its screen); **Desktop Audio**
-   carries GSPro's sound and the booth's voices.
-4. **Settings > Video**: output resolution 1280x720, 30 FPS.
-5. **Settings > Output**, Output Mode **Advanced**, **Recording** tab:
-   - Type: **Custom Output (FFmpeg)**, FFmpeg Output Type: **Output to URL**
-   - File path or URL: `C:\Users\<you>\AppData\Local\Shotcast\live\stream.m3u8` (the Shotcast
-     folder's `live\stream.m3u8`)
-   - Container Format: **hls**; Muxer Settings: `hls_time=4 hls_list_size=5 hls_flags=delete_segments+temp_file`
-   - Video Bitrate 2500 Kbps, Keyframe interval 120 frames (4 seconds), Video Encoder **h264_nvenc**
-     (AMD: h264_amf, Intel: h264_qsv)
-   - Audio Bitrate 128 Kbps, Audio Encoder **aac**
-6. Turn it on in `config.yaml` and restart the booth:
+- its WebSocket server on port 4455, with a password it puts in `.env` (`OBS_WEBSOCKET_PASSWORD`)
+- a **Game Capture** of GSPro fitted to a 1080p canvas, streamed at 1280x720, 30 FPS; **Desktop
+  Audio** carries GSPro's sound and the booth's voices (a microphone, if there is one, is muted)
+- its recording output as the stream: **Custom Output (FFmpeg)** to the Shotcast folder's
+  `live\stream.m3u8`, container **hls** (`hls_time=4 hls_list_size=5 hls_flags=delete_segments+temp_file`),
+  2500 Kbps with a keyframe every 4 seconds on **h264_nvenc** (an NVIDIA card; else libx264), aac
+  at 128 Kbps
+- `live.enabled: true` in `config.yaml`, then it restarts the booth
 
-   ```yaml
-   live:
-     enabled: true
-   ```
+Then try **Start the live stream** in the tray, open the page's Live tab, and stop it. Running the
+setup again keeps OBS's scenes and other settings. OBS has to be closed for it (right-click its
+icon by the clock, **Exit**).
 
-7. Try **Start the live stream** in the tray, open the page's Live tab, then stop it.
+With your own OBS instead, set the same up in it by hand, put its WebSocket password in `.env` and
+point `live.obs_path` at its `obs64.exe` if it's not in `C:\Program Files\obs-studio`.
 
-The booth starts OBS minimized to the tray when it starts, if it isn't running (`live.launch_obs`).
+The booth starts OBS minimized to the tray when it starts, if it isn't running (`live.launch_obs`),
+clearing OBS's crash flag first so it doesn't stop at its Safe Mode question after a power cut.
 With a `publish.prefix`, the stream goes under `<prefix>/live/`: change the stack's lifecycle rule
 to match.
 

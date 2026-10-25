@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 
 PASSWORD_ENV = "OBS_WEBSOCKET_PASSWORD"
 OBS_EXE = Path(r"C:\Program Files\obs-studio\bin\64bit\obs64.exe")
+PORTABLE_OBS = Path("obs", "bin", "64bit", "obs64.exe")   # the tray's setup (obs_setup.py), in the home folder
 TYPES = {".m3u8": "application/vnd.apple.mpegurl", ".ts": "video/mp2t", ".m4s": "video/iso.segment",
          ".mp4": "video/mp4", ".json": "application/json"}
 
@@ -109,11 +110,24 @@ def obs_running() -> bool:
     return "obs64.exe" in out.lower()
 
 
+def clear_crash_flag(exe: Path) -> None:
+    """OBS 31+ offers Safe Mode on its next start after it ended without closing (a crash, a forced
+    end, the power going), and waits on that dialog, which nobody's watching here. Only while OBS isn't
+    running: it marks each run with a file in .sentinel and deletes it when it closes."""
+    root = exe.parents[2]
+    portable = any((root / n).exists() for n in ("portable_mode", "portable_mode.txt",
+                                                 "obs_portable_mode", "obs_portable_mode.txt"))
+    base = root / "config" if portable else Path(os.environ.get("APPDATA", ""))
+    for f in (base / "obs-studio" / ".sentinel").glob("run_*"):
+        f.unlink(missing_ok=True)
+
+
 def launch_obs(exe: str | Path | None = None) -> bool:
     """Start OBS minimized to the tray if it isn't running (Windows). True if it was started."""
-    exe = Path(exe) if exe else OBS_EXE
+    exe = Path(exe) if exe else (PORTABLE_OBS.resolve() if PORTABLE_OBS.exists() else OBS_EXE)
     if os.name != "nt" or not exe.exists() or obs_running():
         return False
+    clear_crash_flag(exe)
     # OBS looks for its data relative to the working folder, so it must start in its own.
     subprocess.Popen([str(exe), "--minimize-to-tray", "--disable-shutdown-check", "--disable-updater"],
                      cwd=exe.parent, creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))

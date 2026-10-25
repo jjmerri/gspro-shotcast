@@ -248,9 +248,11 @@ publish:
   # delay_seconds: 180                   # it publishes once the sign-off has aired; this is the backup
 
 # The Live tab on the published page: OBS's stream, mirrored to the publish bucket while a round is
-# on (docs/tracking.md#live-stream). OBS's WebSocket password goes in .env (OBS_WEBSOCKET_PASSWORD).
+# on (docs/tracking.md#live-stream). The tray's "Set up the live stream..." downloads and sets up
+# OBS and turns this on. OBS's WebSocket password goes in .env (OBS_WEBSOCKET_PASSWORD).
 live:
   enabled: false
   # with_rounds: true          # start OBS's output with each round, stop it after the sign-off
   # stop_after_seconds: 30
   # launch_obs: true           # start OBS minimized when the booth starts, if it isn't running
+  # obs_path: C:\Program Files\obs-studio\bin\64bit\obs64.exe   # default: the tray's (obs\ here), else this
