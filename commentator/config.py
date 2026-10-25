@@ -627,6 +627,23 @@ class PublishConfig(BaseModel):
     delay_seconds: float = 180.0
 
 
+class LiveConfig(BaseModel):
+    # The live stream on the stats page (docs/tracking.md#live-stream): OBS writes HLS into `dir`, and
+    # the booth mirrors it to publish.bucket under live/, behind the league password. Needs publish
+    # set up. OBS's WebSocket password goes in .env (OBS_WEBSOCKET_PASSWORD), never here.
+    enabled: bool = False
+    dir: str = "live"
+    playlist: str = "stream.m3u8"
+    # Start OBS's output when a round starts, and stop it stop_after_seconds after the sign-off.
+    with_rounds: bool = True
+    stop_after_seconds: float = 30.0
+    # Start OBS (minimized to the tray) when the booth starts, if it isn't running.
+    launch_obs: bool = True
+    obs_path: str | None = None   # default: C:\Program Files\obs-studio\bin\64bit\obs64.exe
+    obs_host: str = "localhost"
+    obs_port: int = 4455
+
+
 class BackupConfig(BaseModel):
     # Copies of the season database (commentator/backup.py), taken when the booth starts and after
     # every round, only when something changed. Kept: the newest of each of the last `daily` days with
@@ -678,6 +695,7 @@ class Config(BaseModel):
     minimap: MinimapConfig = Field(default_factory=MinimapConfig)
     putt_read: PuttReadConfig = Field(default_factory=PuttReadConfig)
     publish: PublishConfig = Field(default_factory=PublishConfig)
+    live: LiveConfig = Field(default_factory=LiveConfig)
     backup: BackupConfig = Field(default_factory=BackupConfig)
     log_dir: str = "logs"
     # Season history: every shot and line. Replays and evals never write to it.

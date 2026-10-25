@@ -59,6 +59,8 @@
   .bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; min-width:80px; }
   .bar i { display:block; height:100%; background:var(--accent); }
   .err { color:#ff8a80; padding:20px; }
+  .livedot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--birdie); margin-right:6px; vertical-align:1px; }
+  #liveslot video { width:100%; max-height:78vh; background:#000; border-radius:8px; }
   .empty { color:var(--dim); padding:10px 0; }
   .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:8px 0 14px; }
   select { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; }
@@ -125,7 +127,7 @@
 <main id="main"></main>
 <script src="vendor/sql.js-httpvfs-0.8.12/index.js"></script>
 <script>
-const TABS = [["players", "Players"], ["versus", "Head-to-head"], ["rounds", "Rounds"], ["courses", "Courses"],
+const TABS = [["live", "Live"], ["players", "Players"], ["versus", "Head-to-head"], ["rounds", "Rounds"], ["courses", "Courses"],
               ["shots", "Shots"], ["highlights", "Highlights"], ["broadcasts", "Broadcasts"], ["booth", "Booth"]];
 const PERIODS = [["3m", "3 months"], ["6m", "6 months"], ["9m", "9 months"], ["1y", "1 year"], ["all", "All time"]];
 // A link holds the view: #tab?player=…&ctx=…&round=…&from=…; see writeHash().
@@ -242,7 +244,7 @@ async function load() {
     if (mine !== loading) return;
     state.data = body;
     state.shots = null;
-    if (!tabs().some(([k]) => k === state.tab)) state.tab = "players";
+    if (!tabs().some(([k]) => k === state.tab) && state.tab !== "live") state.tab = "players";
     showTabs();
     document.querySelectorAll("#ctx button").forEach(b => b.classList.toggle("on", b.dataset.ctx === state.ctx));
     showMe();
@@ -1020,25 +1022,97 @@ function renderBooth() {
     n => `<tr><td>${esc(n.date)}</td><td>${n.rounds}</td><td>${n.lines}</td><td>${n.rounds ? Math.round(n.lines / n.rounds) : "–"}</td></tr>`, { key: "date", dir: -1 })}`;
 }
 
-const RENDER = { players: renderPlayers, versus: renderVersus, rounds: renderRounds, courses: renderCourses,
+// The live stream (live_stream.py): live/status.json says whether OBS is on air and which
+// session's playlist to play. A site without the stream has no status.json, and no Live tab.
+const HLS_LIB = "vendor/hls.js-1.7.3/hls.light.min.js";
+let player = null;   // { session, video, hls }: kept across renders so playback doesn't restart
+async function pollLive() {
+  let s = null;
+  try {
+    const r = await fetch("live/status.json", { cache: "no-store" });
+    if (r.ok) s = await r.json();
+  } catch (e) { s = null; }
+  const was = JSON.stringify(state.live);
+  state.live = s;
+  if (JSON.stringify(s) === was) return;
+  const onTab = state.tab === "live";
+  if (!s && onTab) state.tab = "players";   // a #live link to a site without the stream
+  showTabs();
+  if (onTab) render();
+}
+
+function renderLive() {
+  const s = state.live;
+  if (!s) return `<h2>Live</h2><p class="sub">There's no live stream on this page.</p>`;
+  if (!s.live) return `<h2>Live</h2><p class="sub">Off air. The stream comes on when a round starts at the sim.</p>`;
+  return `<h2>Live <span class="sub">since ${esc(new Date(s.since * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}</span></h2>
+  <div id="liveslot"></div>
+  <p class="sub">About 20 seconds behind the sim. It starts muted: unmute in the player. Nothing is recorded.</p>`;
+}
+
+function stopLive() {
+  if (!player) return;
+  if (player.hls) player.hls.destroy();
+  player.video.removeAttribute("src");
+  player.video.load();
+  player = null;
+}
+
+let hlsLoading = null;   // one download, however many times the tab is opened while it runs
+function loadHls() {
+  if (!hlsLoading) hlsLoading = new Promise((ok, fail) => {
+    const el = document.createElement("script");
+    el.src = HLS_LIB; el.onload = ok;
+    el.onerror = () => { el.remove(); hlsLoading = null; fail(new Error(`couldn't load ${HLS_LIB}`)); };
+    document.head.appendChild(el);
+  });
+  return hlsLoading;
+}
+
+// After each render: put the player (the same element, so it keeps playing) in the Live tab's slot.
+function attachLive() {
+  const s = state.live, slot = $("#liveslot");
+  if (state.tab !== "live" || !s || !s.live || !slot) { stopLive(); return; }
+  if (player && player.session !== s.session) stopLive();
+  if (!player) {
+    const video = Object.assign(document.createElement("video"), { controls: true, autoplay: true, muted: true, playsInline: true });
+    const src = `live/s/${encodeURIComponent(s.session)}/stream.m3u8`;
+    const me = player = { session: s.session, video, hls: null };
+    if (window.MediaSource || window.ManagedMediaSource) {
+      loadHls().then(() => {
+        if (player !== me) return;
+        me.hls = new Hls({ liveSyncDurationCount: 2 });
+        me.hls.loadSource(src);
+        me.hls.attachMedia(video);
+      }).catch(e => { if (player === me) slot.innerHTML = `<div class="err">The player didn't load: ${esc(e.message)}</div>`; });
+    } else {
+      video.src = src;   // iPhones play HLS themselves
+    }
+  }
+  slot.appendChild(player.video);
+}
+
+const RENDER = { live: renderLive, players: renderPlayers, versus: renderVersus, rounds: renderRounds, courses: renderCourses,
                  shots: renderShots, broadcasts: renderBroadcasts, highlights: renderHighlights, booth: renderBooth };
 function render() {
   if (!state.data) return;
   $("#main").innerHTML = RENDER[state.tab]();
+  attachLive();
   writeHash();
 }
 
-// With the commentary off there is nothing on the booth's tabs: hide them.
+// With the commentary off there is nothing on the booth's tabs: hide them. No stream, no Live tab.
 function tabs() {
   const d = state.data;
-  if (!d) return TABS;
-  const has = { broadcasts: d.broadcasts.length > 0,
-                booth: d.booth.commentators.length > 0 || d.booth.calls.length > 0 || d.predictions.length > 0 };
+  const has = { live: state.live !== null && state.live !== undefined };
+  if (d) Object.assign(has, { broadcasts: d.broadcasts.length > 0,
+                              booth: d.booth.commentators.length > 0 || d.booth.calls.length > 0 || d.predictions.length > 0 });
   return TABS.filter(([k]) => has[k] !== false);
 }
 
 function showTabs() {
-  $("#tabs").innerHTML = tabs().map(([k, label]) => `<button data-tab="${k}" class="${k === state.tab ? "on" : ""}">${label}</button>`).join("");
+  $("#tabs").innerHTML = tabs().map(([k, label]) => `<button data-tab="${k}" class="${k === state.tab ? "on" : ""}">`
+    + `${k === "live" && state.live && state.live.live ? '<span class="livedot"></span>' : ""}${label}</button>`).join("");
 }
 
 document.addEventListener("click", (e) => {
@@ -1136,6 +1210,8 @@ window.addEventListener("hashchange", () => location.reload());
 
 showTabs();
 load();
+pollLive();
+setInterval(pollLive, 15000);
 </script>
 </body>
 </html>

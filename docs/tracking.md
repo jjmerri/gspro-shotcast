@@ -195,6 +195,8 @@ for browsing the database. Its tabs:
 - **Booth**: lines and words per commentator, signature phrases, and putt-call accuracy by night.
 
 Broadcasts and Booth are hidden until the booth has said something (stats only, commentary off).
+On the published page, a **Live** tab plays the sim's screen while a round is on, if the
+[live stream](#live-stream) is set up (a red dot on the tab means it's on air).
 
 The **player picker** at the top (Everyone, or one name) narrows every tab to that player:
 their row on Players, them on the left of Head-to-head, only rounds they played in (team rounds
@@ -337,6 +339,55 @@ domain.
 To change the password, run the `deploy` command again with the new one. To take it all down, empty
 the bucket (`aws s3 rm s3://<BucketName> --recursive`), delete the upload user's access key, and
 `aws cloudformation delete-stack --stack-name shotcast-stats`.
+
+### Live stream
+
+The published page's **Live** tab can show the GSPro screen and sound (the booth's voices too)
+while a round is being played, behind the same password. OBS on the GSPro PC writes the stream as
+[HLS](https://en.wikipedia.org/wiki/HTTP_Live_Streaming), a playlist and 4-second video files, into
+the Shotcast folder; the booth uploads each file to the bucket's `live/` folder as it appears and
+deletes it once it drops off the playlist, and the page plays it with
+[hls.js](https://github.com/video-dev/hls.js) (vendored, like the SQLite library). Viewers are
+about 20 seconds behind. Nothing is kept: when the stream stops, its files go from the bucket and
+the PC, and a lifecycle rule in the stack deletes anything a crash left under `live/s/` after a day.
+
+The booth starts OBS's output when a round starts and stops it 30 seconds after the sign-off
+(`live.stop_after_seconds`), over OBS's WebSocket server; the tray's **Start/Stop the live stream**
+does it by hand. Use OBS's hardware encoder (NVENC on NVIDIA cards) so encoding stays off the CPU
+GSPro needs.
+
+Cost: S3 charges for each upload, two every 4 seconds, about a cent an hour on air (about $3 for
+a season of 144 rounds). Watching is within CloudFront's free 1 TB a month: at 2.5 Mbps one
+viewer-hour is about 1.3 GB, so about 800 viewer-hours a month.
+
+Setting it up on the GSPro PC (with the [stats page](#setting-it-up) already publishing):
+
+1. Install [OBS Studio](https://obsproject.com/) (28 or newer).
+2. **Tools > WebSocket Server Settings**: turn on the server (port 4455) with authentication, and put
+   its password in Shotcast's `.env` as `OBS_WEBSOCKET_PASSWORD=...`.
+3. Add a **Game Capture** source for GSPro (or **Display Capture** for its screen); **Desktop Audio**
+   carries GSPro's sound and the booth's voices.
+4. **Settings > Video**: output resolution 1280x720, 30 FPS.
+5. **Settings > Output**, Output Mode **Advanced**, **Recording** tab:
+   - Type: **Custom Output (FFmpeg)**, FFmpeg Output Type: **Output to URL**
+   - File path or URL: `C:\Users\<you>\AppData\Local\Shotcast\live\stream.m3u8` (the Shotcast
+     folder's `live\stream.m3u8`)
+   - Container Format: **hls**; Muxer Settings: `hls_time=4 hls_list_size=5 hls_flags=delete_segments+temp_file`
+   - Video Bitrate 2500 Kbps, Keyframe interval 120 frames (4 seconds), Video Encoder **h264_nvenc**
+     (AMD: h264_amf, Intel: h264_qsv)
+   - Audio Bitrate 128 Kbps, Audio Encoder **aac**
+6. Turn it on in `config.yaml` and restart the booth:
+
+   ```yaml
+   live:
+     enabled: true
+   ```
+
+7. Try **Start the live stream** in the tray, open the page's Live tab, then stop it.
+
+The booth starts OBS minimized to the tray when it starts, if it isn't running (`live.launch_obs`).
+With a `publish.prefix`, the stream goes under `<prefix>/live/`: change the stack's lifecycle rule
+to match.
 
 ## Backups
 

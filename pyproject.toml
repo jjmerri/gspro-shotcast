@@ -34,6 +34,8 @@ jev = ["typesafe-sdk>=0.7"]
 local = ["kokoro-onnx>=0.4"]
 # Uploading the stats page to S3 (`publish`).
 publish = ["boto3"]
+# The live stream on the stats page: starting and stopping OBS over its WebSocket server.
+live = ["websocket-client>=1.7"]
 # Importing the league's yearly spreadsheets.
 league = ["openpyxl>=3.1"]
 # The Windows app's tray icon (`shotcast tray`).

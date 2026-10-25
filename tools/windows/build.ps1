@@ -6,7 +6,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Version,
     [string]$PythonMinor = "3.12",
-    [string]$Extras = "capture,cloud,jev,publish,tray"
+    [string]$Extras = "capture,cloud,jev,publish,live,tray"
 )
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"

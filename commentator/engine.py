@@ -6,6 +6,7 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -540,6 +541,10 @@ class Engine:
         self.store = store or Store(None)
         self._publish_task: asyncio.Task | None = None
         self._publish_lock = asyncio.Lock()
+        # The live stream on the stats page: OBS's output, mirrored to the bucket (live_stream.py).
+        self.live_mirror = None
+        self._live_stop_task: asyncio.Task | None = None
+        self._obs_lock = threading.Lock()
         # Every 6-word phrase said this season, so a line can't come back weeks later.
         self._season_phrases: set[tuple[str, ...]] = set()
         for text in self.store.spoken_lines():
@@ -712,6 +717,7 @@ class Engine:
         if self.cfg.health.enabled and self.cfg.source.type != "replay":
             asyncio.create_task(self._startup_health(), name="health")
         self._schedule_backup("startup")
+        self._start_live()
         if self.screen and self.cfg.screen.ocr:
             tasks.append(asyncio.create_task(self._watch_hud(), name="hud-watch"))
             if self.cfg.commentary.preround:
@@ -755,6 +761,8 @@ class Engine:
             # early-returns then) still logs what TTS synthesized vs actually aired.
             if stats_obj := getattr(self.speech, "audio_stats", None):
                 log.info("%s", audio_summary(stats_obj))
+            if self.live_mirror is not None:
+                await asyncio.to_thread(self.live_mirror.close)
 
     async def _pump_source(self) -> None:
         try:
@@ -5098,6 +5106,7 @@ class Engine:
         self._setup_format = self._opener_prepared_format = None
         self._scramble_pairs = set()
         self._putted_on_last_hole = self._round_end_queued = False
+        self._live_round_start()
         # Close the "fresh empty scorecard" window so this same tee can't re-trigger a start.
         self._holes_played_at = 0.0
         # A closer pre-built for the previous round must not leak into this one.
@@ -6068,6 +6077,7 @@ class Engine:
             if played < COUNTS_AS_ROUND_HOLES:
                 self._schedule_publish(after_speech=True)
                 self._schedule_backup("round end")
+                self._schedule_live_stop()
                 log.info("Round %s over (%s) after %s of %s holes: no closer", r.id, event.reason, r.seq, r.holes)
                 return
             log.info("Round %s over (%s) after %s of %s holes: signing off on the %s played",
@@ -6078,6 +6088,7 @@ class Engine:
                 self._schedule_publish(after_speech=True)
             finally:
                 self._schedule_backup("round end")   # the round is stored even if the closer fails
+                self._schedule_live_stop()
             return
         if stats_obj := getattr(self.speech, "audio_stats", None):
             log.info("%s", audio_summary(stats_obj))
@@ -6088,6 +6099,7 @@ class Engine:
             self._schedule_publish(after_speech=True)
         finally:
             self._schedule_backup("round end")   # the round is stored even if the closer fails
+            self._schedule_live_stop()
 
     async def _sign_off(self, r: Round, stats: dict) -> None:
         season = {s.key: self.store.season_rounds(s.key, "league" if r.is_league else "practice") for s in r.sides}
@@ -6116,6 +6128,91 @@ class Engine:
         # variant so a league round's sign-off keeps its stakes framing.
         await self._speak("closer", self.closer_llm, user, facts_text, [], mode="round",
                           system=self._system_league if r.is_league else self._system_practice, max_words=cap)
+
+    # ---- the live stream ----------------------------------------------------------------------
+
+    def _live_on(self) -> bool:
+        lv = self.cfg.live
+        return lv.enabled and bool(self.cfg.publish.bucket) and self.cfg.source.type != "replay"
+
+    def _obs(self):
+        from .live_stream import Obs
+
+        return Obs(self.cfg.live.obs_host, self.cfg.live.obs_port)
+
+    def _start_live(self) -> None:
+        """Mirror OBS's stream folder to the bucket for as long as the booth runs."""
+        from . import live_stream
+
+        lv, p = self.cfg.live, self.cfg.publish
+        if not self._live_on():
+            if p.enabled and p.bucket and self.cfg.source.type != "replay":
+                # Turned off since it last ran: take the Live tab off the page.
+                def remove() -> None:
+                    try:
+                        import boto3
+
+                        live_stream.remove(p.bucket, p.prefix,
+                                           boto3.client("s3", region_name=p.region) if p.region else boto3.client("s3"))
+                    except Exception as e:
+                        log.info("Live stream: couldn't remove the Live tab: %s", e)
+                threading.Thread(target=remove, name="live-remove", daemon=True).start()
+            return
+        if lv.launch_obs:
+            try:
+                if live_stream.launch_obs(lv.obs_path):
+                    log.info("Started OBS for the live stream")
+            except Exception:
+                log.exception("Starting OBS failed")
+        try:
+            import boto3
+
+            client = boto3.client("s3", region_name=p.region) if p.region else boto3.client("s3")
+            self.live_mirror = live_stream.Mirror(lv.dir, p.bucket, p.prefix, lv.playlist, client,
+                                                  status_file=Path(self.cfg.log_dir) / "live.json")
+            self.live_mirror.start()
+        except Exception:
+            log.exception("The live stream can't upload")
+
+    def _live_round_start(self) -> None:
+        if not (self._live_on() and self.cfg.live.with_rounds):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return   # a round started outside the booth's loop (tests)
+        if self._live_stop_task and not self._live_stop_task.done():
+            self._live_stop_task.cancel()   # back-to-back rounds: stay on air
+        loop.create_task(self._live_call("start"), name="live-start")
+
+    async def _live_call(self, what: str) -> None:
+        obs = self._obs()
+
+        def call() -> bool:
+            # One at a time, in order: a stop already under way when the next round starts (its task
+            # cancelled, its thread not) must finish before that round's start looks at OBS.
+            with self._obs_lock:
+                return getattr(obs, what)()
+        try:
+            changed = await asyncio.to_thread(call)
+            if changed:
+                log.info("Live stream: OBS output %s", "started" if what == "start" else "stopped")
+        except Exception as e:
+            log.warning("Live stream: couldn't %s OBS's output: %s", what, e)
+
+    def _schedule_live_stop(self) -> None:
+        """Off air once the sign-off has aired, and a little after."""
+        if not (self._live_on() and self.cfg.live.with_rounds):
+            return
+        if self._live_stop_task and not self._live_stop_task.done():
+            self._live_stop_task.cancel()
+
+        async def stop() -> None:
+            await self._drain_speech(120)
+            await asyncio.sleep(self.cfg.live.stop_after_seconds)
+            await self._live_call("stop")
+
+        self._live_stop_task = asyncio.create_task(stop(), name="live-stop")
 
     # ---- publishing the stats page --------------------------------------------------------
 

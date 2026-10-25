@@ -189,6 +189,14 @@ def check_key(name: str, values: dict[str, str], cfg) -> str:
     if name == "GOOGLE_TTS_API_KEY":
         return _http_check("GET", "https://texttospeech.googleapis.com/v1/voices",
                            params={"languageCode": "en-US", "key": v})
+    if name == "OBS_WEBSOCKET_PASSWORD":
+        from .live_stream import Obs
+
+        try:
+            Obs(cfg.live.obs_host, cfg.live.obs_port, password=v).live()
+            return ""
+        except Exception as e:
+            return str(e)
     if name == "NTFY_TOPIC":
         server = (getattr(cfg.notify, "server", None) or "https://ntfy.sh").rstrip("/")
         return _http_check("POST", f"{server}/{v}", content="Test from Shotcast settings: pushes reach this phone.".encode(),
@@ -216,6 +224,8 @@ CONFIG_FIELDS: list[tuple[str, str, tuple[str, ...], str, str]] = [
     ("Sharing", "S3 bucket", ("publish", "bucket"), "text", ""),
     ("Sharing", "AWS region", ("publish", "region"), "text", ""),
     ("Sharing", "Copy backups to the S3 bucket too", ("backup", "s3"), "bool", ""),
+    ("Sharing", "Live stream on the stats page", ("live", "enabled"), "bool",
+     "OBS streams each round to the page's Live tab: set it up per docs/tracking.md#live-stream."),
 ]
 
 # (tab, label, .env key, secret, checkable)
@@ -230,6 +240,7 @@ ENV_FIELDS: list[tuple[str, str, str, bool, bool]] = [
     ("Sharing", "AWS access key ID", "AWS_ACCESS_KEY_ID", False, True),
     ("Sharing", "AWS secret access key", "AWS_SECRET_ACCESS_KEY", True, False),
     ("Sharing", "ntfy topic (phone pushes)", "NTFY_TOPIC", True, True),
+    ("Sharing", "OBS WebSocket password (live stream)", "OBS_WEBSOCKET_PASSWORD", True, True),
 ]
 
 TABS = ["Booth", "API keys", "GSPro", "League", "Sharing", "Advanced"]

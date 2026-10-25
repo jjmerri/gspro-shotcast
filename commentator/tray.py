@@ -9,6 +9,7 @@ the app, so updating or reinstalling never touches them.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -392,6 +393,24 @@ class Tray:
             self.settings("API keys")
         self.restart_booth()
 
+    def live_now(self) -> bool:
+        """On air, as the booth's stream mirror last wrote it."""
+        try:
+            return bool(json.loads((Path(self.cfg.log_dir) / "live.json").read_text(encoding="utf-8")).get("live"))
+        except (OSError, ValueError):
+            return False
+
+    def toggle_live(self, *_) -> None:
+        from .live_stream import Obs
+
+        obs = Obs(self.cfg.live.obs_host, self.cfg.live.obs_port)
+        if obs.live():
+            obs.stop()
+            self.notify("Stopping the live stream.")
+        else:
+            obs.start()
+            self.notify("Starting the live stream: it's on the stats page in about 20 seconds.")
+
     def screen_check(self, *_) -> None:
         subprocess.Popen(["cmd", "/k", python_exe(), "-m", "commentator", "screen-check", "--delay", "8"],
                          cwd=self.home, creationflags=NEW_CONSOLE)
@@ -510,6 +529,14 @@ class Tray:
     def quit(self, *_) -> None:
         self._stop.set()
         self.booth.stop()
+        if self.cfg.live.enabled and self.cfg.publish.bucket:
+            # Stopping the booth ends it outright, so it never got to take the stream off air.
+            from .live_stream import off_air
+
+            try:
+                off_air(self.cfg)
+            except Exception:
+                log.exception("Taking the live stream off air failed")
         if self.icon is not None:
             self.icon.stop()
 
@@ -564,6 +591,8 @@ class Tray:
             item("Restart the booth", safe(self.restart_booth)),
             item(lambda _: "Turn the AI booth off" if self._commentary_on() else "Turn the AI booth on",
                  safe(self.toggle_commentary)),
+            item(lambda _: "Stop the live stream" if self.live_now() else "Start the live stream",
+                 safe(self.toggle_live), visible=lambda _: self.cfg.live.enabled),
             item("Settings...", safe(self.settings)),
             item("More", pystray.Menu(
                 item("Open the Shotcast folder", safe(self.open_folder)),
