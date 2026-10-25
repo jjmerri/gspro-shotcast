@@ -187,10 +187,11 @@ for browsing the database. Its tabs:
   from the Rounds tab), with its launch data and what the booth said about it. A shot's round is
   the round that ended next after it on its course, so a round the booth restarted during keeps
   all its shots; shots from a round that never ended (or was quit before a hole was done) have none.
-- **Broadcasts**: a night's full transcript, in order.
 - **Highlights**: records, aces, eagles, hole-outs, birdie streaks, bounce-backs, blow-ups, and
   top-five drives, approaches, chips and putts. An approach is a full shot from 51-250 yd that isn't
-  a par-4/5 tee shot (a par-3 tee shot counts); a chip is from 50 yd and in, off the green.
+  a par-4/5 tee shot (a par-3 tee shot counts); a chip is from 50 yd and in, off the green. Pick the
+  last 3, 6 or 9 months, the last year (the default) or all time, counted back from when the page was built.
+- **Broadcasts**: a night's full transcript, in order.
 - **Booth**: lines and words per commentator, signature phrases, and putt-call accuracy by night.
 
 Broadcasts and Booth are hidden until the booth has said something (stats only, commentary off).

@@ -126,7 +126,8 @@
 <script src="vendor/sql.js-httpvfs-0.8.12/index.js"></script>
 <script>
 const TABS = [["players", "Players"], ["versus", "Head-to-head"], ["rounds", "Rounds"], ["courses", "Courses"],
-              ["shots", "Shots"], ["broadcasts", "Broadcasts"], ["highlights", "Highlights"], ["booth", "Booth"]];
+              ["shots", "Shots"], ["highlights", "Highlights"], ["broadcasts", "Broadcasts"], ["booth", "Booth"]];
+const PERIODS = [["3m", "3 months"], ["6m", "6 months"], ["9m", "9 months"], ["1y", "1 year"], ["all", "All time"]];
 // A link holds the view: #tab?player=…&ctx=…&round=…&from=…; see writeHash().
 const [hashTab, hashQuery] = location.hash.slice(1).split("?");
 const linkQ = new URLSearchParams(hashQuery || "");
@@ -137,7 +138,8 @@ const state = { tab: TABS.some(t => t[0] === hashTab) ? hashTab : "players", ctx
                 me: linkQ.get("player") ?? store.get("shotcast.me") ?? "", mine: null,
                 seen: Number(store.get("shotcast.seen")) || 0,
                 round: null, sort: {}, course: null, versus: [null, null], shotFilter: {}, shots: null, shotOpen: null,
-                session: null, transcript: null, replays: {}, replayHole: null, replayOnly: false };
+                session: null, transcript: null, replays: {}, replayHole: null, replayOnly: false,
+                period: PERIODS.some(p => p[0] === linkQ.get("period")) ? linkQ.get("period") : "1y" };
 if (["league", "practice"].includes(linkQ.get("ctx"))) state.ctx = linkQ.get("ctx");
 for (const k of SHOT_LINK_KEYS) if (linkQ.get(k)) state.shotFilter[k] = linkQ.get(k);
 if (state.me) { state.player = state.me; state.versus[0] = state.me; }
@@ -311,6 +313,7 @@ function writeHash() {
   q.set("player", state.me);   // empty = Everyone, so the link doesn't fall back to the recipient's pick
   if (state.ctx) q.set("ctx", state.ctx);
   if (state.tab === "shots") for (const k of SHOT_LINK_KEYS) if (state.shotFilter[k]) q.set(k, state.shotFilter[k]);
+  if (state.tab === "highlights" && state.period !== "1y") q.set("period", state.period);
   const h = "#" + state.tab + (q.toString() ? "?" + q : "");
   if (location.hash !== h) history.replaceState(null, "", h);
 }
@@ -945,8 +948,9 @@ function renderBroadcasts() {
 }
 
 function renderHighlights() {
-  if (!state.me) return highlightsView(state.data.records, state.data.highlights);
-  return withMine(meTitle("Season records"), m => highlightsView(m.records, m.highlights));
+  const p = state.period;
+  if (!state.me) return highlightsView(state.data.records[p], state.data.highlights[p]);
+  return withMine(meTitle("Records"), m => highlightsView(m.records[p], m.highlights[p]));
 }
 
 function highlightsView(r, h) {
@@ -956,7 +960,9 @@ function highlightsView(r, h) {
   const top = (title, rows, fmt) => `<div><h3>${title}</h3><table><tbody>${rows.length ? rows.map((x, i) =>
     `<tr><td class="wrap">${i + 1}. <b>${esc(x.player)}</b><br><span class="sub">${esc(x.date)} · ${esc(where(x))}</span></td><td>${fmt(x)}</td></tr>`).join("")
     : '<tr><td class="empty">None yet</td></tr>'}</tbody></table></div>`;
-  return `<h2>${meTitle("Season records")}</h2><div class="cards">
+  const pick = `<div class="controls"><div class="seg">${PERIODS.map(([k, label]) =>
+    `<button data-period="${k}" class="${k === state.period ? "on" : ""}">${label}</button>`).join("")}</div></div>`;
+  return `<h2>${meTitle("Records")}</h2>${pick}<div class="cards">
     ${card("Longest drive", r.longest_drive, x => Math.round(x.v) + " yd")}
     ${card("Closest approach", r.closest_approach, x => `${x.outcome === "holed" ? "holed" : ft(x.v) + " ft"} <span class="sub">${esc(x.club || "")}</span>`)}
     ${card("Longest putt holed", r.longest_putt, x => ft(x.v) + " ft")}
@@ -1037,8 +1043,13 @@ function showTabs() {
 
 document.addEventListener("click", (e) => {
   const t = e.target.closest("[data-tab],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
-                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-sharecard]");
+                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-sharecard],[data-period]");
   if (!t) return;
+  if (t.dataset.period) {
+    state.period = t.dataset.period;
+    render();
+    return;
+  }
   if (t.dataset.sharecard) {
     const r = state.data.rounds.find(r => r.id === +t.dataset.sharecard);
     if (r) shareRound(r, t);

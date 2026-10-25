@@ -7,6 +7,7 @@ only, since a scramble or alternate-shot score isn't one player's.
 """
 
 import bisect
+import calendar
 import json
 import re
 import sqlite3
@@ -14,6 +15,7 @@ import tempfile
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -332,10 +334,12 @@ def predictions(db: sqlite3.Connection, names: dict[str, str] | None = None) -> 
                                 "WHERE correct IS NOT NULL GROUP BY commentator ORDER BY commentator")]
 
 
-def records(db: sqlite3.Connection, context: str | None = None, player: str | None = None) -> dict[str, Any]:
+def records(db: sqlite3.Connection, context: str | None = None, player: str | None = None,
+            since: str | None = None) -> dict[str, Any]:
     base = (" AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)
-            + (" AND player = ?" if player else ""))
-    args = (player,) if player else ()
+            + (" AND player = ?" if player else "")
+            + (" AND session_id IN (SELECT id FROM sessions WHERE date >= ?)" if since else ""))
+    args = ((player,) if player else ()) + ((since,) if since else ())
     drive = db.execute(f"SELECT player, {_DRIVE} AS v, course, hole FROM shots WHERE {_TEE_DRIVER} AND {_DRIVE} IS NOT NULL"
                        + base + " ORDER BY v DESC LIMIT 1", args).fetchone()
     approach = db.execute(f"SELECT player, finish_yards AS v, club, outcome, course, hole FROM shots WHERE {A.APPROACH_SQL}"
@@ -344,6 +348,33 @@ def records(db: sqlite3.Connection, context: str | None = None, player: str | No
                       " AND to_pin_yards IS NOT NULL" + base + " ORDER BY v DESC LIMIT 1", args).fetchone()
     return {"longest_drive": dict(drive) if drive else None, "closest_approach": dict(approach) if approach else None,
             "longest_putt": dict(putt) if putt else None}
+
+
+# The Highlights tab's date ranges, in months back from the build (None: all time).
+PERIODS = {"3m": 3, "6m": 6, "9m": 9, "1y": 12, "all": None}
+
+
+def period_starts(today: date | None = None) -> dict[str, str | None]:
+    """Each range's first night (YYYY-MM-DD), the same day of the month that many months back."""
+    today = today or date.today()
+    out: dict[str, str | None] = {}
+    for key, months in PERIODS.items():
+        if months is None:
+            out[key] = None
+            continue
+        y, m = divmod(today.year * 12 + today.month - 1 - months, 12)
+        m += 1
+        out[key] = date(y, m, min(today.day, calendar.monthrange(y, m)[1])).isoformat()
+    return out
+
+
+def highlights_by_period(db: sqlite3.Connection, holes: list[dict], context: str | None = None,
+                         player: str | None = None, today: date | None = None) -> dict[str, Any]:
+    """Records and highlights for each of the tab's date ranges: a top five can't be cut down to a
+    shorter range on the page, so each range is worked out on its own."""
+    starts = period_starts(today)
+    return {"records": {k: records(db, context, player, s) for k, s in starts.items()},
+            "highlights": {k: A.highlights(db, holes, context, player, s) for k, s in starts.items()}}
 
 
 def summary(db: sqlite3.Connection, context: str | None = None,
@@ -375,8 +406,8 @@ def summary(db: sqlite3.Connection, context: str | None = None,
     rounds_ = rounds(db, context)
     add_round_summaries(db, rounds_, holes, people)
     return {"context": context or "all", "last_session": last, "has_league": has_league, "players": people,
-            "rounds": rounds_, "records": records(db, context), "predictions": predictions(db, names),
-            "courses": A.courses(db, context), "highlights": A.highlights(db, holes, context),
+            "rounds": rounds_, **highlights_by_period(db, holes, context), "predictions": predictions(db, names),
+            "courses": A.courses(db, context),
             "booth": A.booth(db, names), "broadcasts": A.broadcasts(db), "filters": filters}
 
 

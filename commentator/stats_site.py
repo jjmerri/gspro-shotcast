@@ -53,7 +53,7 @@ def player_file(src: sqlite3.Connection, name: str, context: str | None, holes: 
     """What the page shows for one picked player beyond the summary: their courses (hole by hole),
     highlights and records."""
     return {"name": name, "courses": A.courses(src, context, name),
-            "highlights": A.highlights(src, holes, context, name), "records": stats_web.records(src, context, name)}
+            **stats_web.highlights_by_period(src, holes, context, name)}
 
 
 def new_version() -> str:

@@ -216,7 +216,8 @@ def test_each_player_gets_a_file_of_just_their_courses_highlights_and_records(tm
         everyone = stats_web.records(src, None)
     assert ann["name"] == "Ann" and [c["players"] for c in ann["courses"]] == [["Ann"]]
     assert {h["avg"] for h in ann["courses"][0]["holes"]} == {4}
-    assert all(x["player"] == "Ann" for x in ann["highlights"]["drives"]) and ann["highlights"]["drives"]
-    assert ann["records"]["longest_drive"]["player"] == "Ann"
+    drives = ann["highlights"]["all"]["drives"]
+    assert drives and all(x["player"] == "Ann" for x in drives)
+    assert ann["records"]["all"]["longest_drive"]["player"] == "Ann"
     assert everyone["longest_drive"]["player"] == "Bob"   # the last shots are Bob's: the longest drives
     assert (vdir / "player" / "league").is_dir() and (vdir / "player" / "practice").is_dir()

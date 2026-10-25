@@ -370,21 +370,24 @@ def _to_par_name(d: int) -> str:
 
 
 def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = None,
-               player: str | None = None) -> dict[str, Any]:
+               player: str | None = None, since: str | None = None) -> dict[str, Any]:
     """The season's moments: aces, eagles, chip-ins, birdie streaks, bounce-backs and blow-ups from the
     cards; and top-five lists of drives, approaches, chips and putts holed from the shots. With
-    `player`, that player's own."""
+    `player`, that player's own; with `since` (YYYY-MM-DD), only nights from that date on."""
     moments: list[dict] = []
     streaks: list[dict] = []
     bounce: list[dict] = []
     blowups: list[dict] = []
-    args = (player,) if player else ()
+    args = ((player,) if player else ()) + ((since,) if since else ())
     if player:
         holes = [h for h in holes if h["player"] == player]
+    if since:
+        holes = [h for h in holes if (h["date"] or "") >= since]
     for r in db.execute("SELECT pr.*, s.date FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
                         " WHERE (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))"
                         + _ctx(context).replace("is_league", "pr.is_league")
-                        + (" AND pr.player = ?" if player else "") + " ORDER BY pr.ended_at", args):
+                        + (" AND pr.player = ?" if player else "") + (" AND s.date >= ?" if since else "")
+                        + " ORDER BY pr.ended_at", args):
         try:
             scores = {int(k): v for k, v in json.loads(r["scores"] or "{}").items() if isinstance(v, int)}
             pars = {int(k): v for k, v in json.loads(r["hole_pars"] or "{}").items() if isinstance(v, int)}
@@ -424,7 +427,7 @@ def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = 
                             f" ({last['lie_before'] or 'off the green'}, {last['club'] or '?'})"})
     moments.sort(key=lambda m: m["date"] or "", reverse=True)
     base = (" AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)
-            + (" AND player = ?" if player else ""))
+            + (" AND player = ?" if player else "") + (" AND date >= ?" if since else ""))
     drive = "COALESCE(total_yards, carry_game_yards, carry_raw)"
 
     def top(sql: str) -> list[dict]:

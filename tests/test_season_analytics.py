@@ -125,6 +125,24 @@ def test_a_lefty_s_shots_are_named_for_their_hand(db, tmp_path):
     st.close()
 
 
+def test_highlights_and_records_by_date_range(db):
+    from datetime import date
+
+    starts = stats_web.period_starts(date(2026, 5, 31))
+    assert starts == {"3m": "2026-02-28", "6m": "2025-11-30", "9m": "2025-08-31", "1y": "2025-05-31", "all": None}
+    db.execute("INSERT INTO sessions (id, date, started_at) VALUES (2, '2025-01-10', 0)")
+    db.execute("UPDATE sessions SET date = '2026-05-20' WHERE id = 1")
+    tee = {"club": "DR", "shot_number": 1, "lie_before": "tee", "hole": "Hole 1, par 4, 400 yards"}
+    shot(db, session_id=2, total_yards=320, **tee)      # last year's bomb
+    shot(db, total_yards=250, **tee)
+    db.commit()
+    got = stats_web.highlights_by_period(db, A.holes_played(db), today=date(2026, 5, 31))
+    assert [d["v"] for d in got["highlights"]["1y"]["drives"]] == [250]
+    assert [d["v"] for d in got["highlights"]["all"]["drives"]] == [320, 250]
+    assert got["records"]["3m"]["longest_drive"]["v"] == 250 and got["records"]["all"]["longest_drive"]["v"] == 320
+    assert got["records"]["all"] == stats_web.records(db) and got["highlights"]["all"] == A.highlights(db, A.holes_played(db))
+
+
 def test_recovery_counts_greens_found_from_trouble(db):
     hole = "Hole 1, par 4, 400 yards"
     shot(db, hole=hole, shot_number=1, club="DR", lie_before="tee", to_pin_yards=400)
