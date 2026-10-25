@@ -148,10 +148,10 @@ def rounds(db: sqlite3.Connection, context: str | None = None) -> list[dict[str,
     for r in db.execute("SELECT * FROM rounds WHERE 1=1" + _ctx(context) + " ORDER BY ended_at DESC, id DESC"):
         card = _card(_json(r["scores"]), _json(r["hole_pars"]))
         rnd = of_row.get(r["id"], r["id"])
-        members = who.get(rnd, set()) | ({r["side"]} if r["side"] else set())
         longest = r["longest_drive"]
-        if any((rnd, m) in left for m in members):
-            longest = max((kept[(rnd, m)] for m in members if (rnd, m) in kept), default=None)
+        # (a team side's players aren't on record per round, so its stored drive stands)
+        if (rnd, r["side"]) in left:
+            longest = kept.get((rnd, r["side"]))
         out.append({
             "id": r["id"], "round": of_row.get(r["id"], r["id"]), "ended": r["ended_at"], "date": r["date"],
             "course": r["course"],

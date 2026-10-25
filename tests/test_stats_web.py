@@ -180,12 +180,15 @@ def test_a_round_left_out_drive_is_not_its_longest(tmp_path):
     for i, yards in enumerate((999, 250)):
         _shot(db, "Ann", ts=10 + i, course="Pebble", hole=f"Hole {i + 1}, par 4", club="DR", shot_number=1,
               lie_before="tee", total_yards=yards, left_out=int(yards == 999))
-    db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, gross, scores, hole_pars,"
-               " longest_drive, complete) VALUES (1, 100, '2026-10-01', 'Pebble', 'Ann', 18, 8,"
-               " '{\"1\": 4, \"2\": 4}', '{\"1\": 4, \"2\": 4}', 999, 0)")
+    _shot(db, "Bob", ts=12, course="Pebble", hole="Hole 1, par 4", club="DR", shot_number=1, lie_before="tee",
+          total_yards=300)
+    for side, drive in (("Ann", 999), ("Bob", 300)):
+        db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, gross, scores, hole_pars,"
+                   " longest_drive, complete) VALUES (1, 100, '2026-10-01', 'Pebble', ?, 18, 8,"
+                   " '{\"1\": 4, \"2\": 4}', '{\"1\": 4, \"2\": 4}', ?, 0)", (side, drive))
     db.commit()
     with stats_web.connect(path) as ro:
-        assert [r["longest_drive"] for r in stats_web.rounds(ro)] == [250]
+        assert {r["side"]: r["longest_drive"] for r in stats_web.rounds(ro)} == {"Ann": 250, "Bob": 300}
 
 
 def test_the_local_page_can_leave_a_shot_out(tmp_path):
