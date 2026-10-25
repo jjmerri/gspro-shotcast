@@ -128,7 +128,6 @@ League file + Squabbit ─────────► standings, handicaps, stor
 - Any launch monitor GSPro supports. Built and tested with a **Uneekor EYE XO2**; others record
   the same shots and scores, with club data only when the monitor sends it
   ([Launch monitors](docs/tracking.md#launch-monitors)).
-- **Python 3.12 or 3.13**, for the ZIP or git install only (the Windows app brings its own).
 - For the booth only: speakers, and an **OpenAI API key** and an **Anthropic API key** for the
   default setup ([Cost](docs/booth.md#cost)). An Anthropic key alone works with voices on the PC,
   and fully local models and voices need no keys ([Choosing a setup](docs/booth.md#choosing-a-setup)).
@@ -188,43 +187,14 @@ beyond that is supported on paper but not yet run live:
    `%LOCALAPPDATA%\Shotcast`, which updating and uninstalling leave alone.
 3. **Where things are.** The docs give paths from the Shotcast folder (`%LOCALAPPDATA%\Shotcast`;
    **More → Open the Shotcast folder**): `logs\season.db`, `config.yaml`, `.env`, and a league
-   file you add as `data\league.json`. The docs' `.bat` files are the ZIP install's; the tray
-   menu does their jobs.
+   file you add as `data\league.json`. Where the docs mention a `.bat` file, the tray menu does
+   its job.
 4. **Commands** such as `publish`, `import-league` and `restore` run from **More → Command
    prompt**: type `shotcast <command>` there (`shotcast --help` lists them; they're the
    `python -m commentator <command>` in the docs).
 5. **Uninstall** from Windows Settings → Apps → Shotcast. It removes the app and its "Start with
    Windows" entry and keeps `%LOCALAPPDATA%\Shotcast`; delete that folder too to remove your
    settings and season.
-
-Already running Shotcast from the ZIP or git? See
-[Moving to the Windows app](DEPLOY.md#moving-to-the-windows-app) to bring your season and settings
-across.
-
-### From the ZIP or git
-
-1. On GitHub, **Code → Download ZIP**, and unzip it somewhere it can stay (for example
-   `Documents\gspro-shotcast`). Or `git clone https://github.com/jjmerri/gspro-shotcast.git`.
-2. Double-click **`install.bat`**. It finds Python 3.12 or 3.13 (or offers to install 3.13),
-   asks whether you want **shot tracking only** (no API keys, nothing leaves the PC) or
-   **tracking plus the booth**, installs everything into the folder, creates `config.yaml` and
-   `.env`, asks for the booth's API keys, and offers desktop shortcuts. Re-run it any time, for
-   example to add the booth later; it never overwrites your settings.
-3. Start GSPro, get to a hole, and double-click **`screen-check.bat`** (bring GSPro to the front
-   during the countdown). Every line should say OK: the screen read tells Shotcast who's up. If
-   some say FIX, run `screen-check.bat --fix` from a command prompt in the folder; see
-   [Checking the screen read](docs/setup.md#checking-the-screen-read).
-4. Double-click **`start-booth.bat`** (the Shotcast shortcut) and play. Every shot and round goes
-   into `logs\season.db`; with the booth on, click the ON AIR badge over GSPro to go off air
-   (recording continues) and back. If shots don't show up, see
-   [Launch monitors](docs/tracking.md#launch-monitors).
-5. **`stats.bat`** (Shotcast Stats) opens the stats page. To browse on another computer (Mac
-   too), copy `logs/season.db` into a checkout there and run `python -m commentator stats-web`;
-   it only needs Python and `pip install -e .`. To put it online for the league behind a password,
-   updated after every round, see [Sharing the stats page](docs/tracking.md#sharing-the-stats-page).
-
-**`update.bat`** updates to the latest version (`git pull`, or a fresh download if you used the
-ZIP) and keeps your `config.yaml`, `.env`, league file and `logs`.
 
 No league file is needed; players are recorded and called by their GSPro names. Add one later to
 split league and practice rounds and get standings, net scores and storylines
