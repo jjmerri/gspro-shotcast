@@ -26,7 +26,7 @@ key. When on, they send this:
 | The AI booth (`commentary.enabled`) | OpenAI, Anthropic (and Google, if chosen for the voices) | Player names, shot and score data, the league file's context, screenshots of GSPro for the hazard look (`screen.send_images`), and each line to be voiced. Their API terms apply. A fully local setup (Ollama and Kokoro) sends nothing. |
 | Jev minimap reads (`minimap.provider: jev`) | TypeSafe | A crop of GSPro's minimap |
 | Sharing the stats page (`publish`) and S3 backups (`backup.s3`) | Your own Amazon S3 bucket | The stats page, and copies of the season database |
-| The live stream (`live`) | Your own Amazon S3 bucket | Video of GSPro's screen and the PC's sound (the booth's voices too) while a round is on, deleted as it plays and when it stops. Its setup downloads OBS Studio from GitHub |
+| The live stream (`live`) | Your own Amazon S3 bucket | Video of GSPro's screen and the PC's sound (the booth's voices too) while a round is on (or when started by hand from the tray), deleted as it plays and when it stops. Its setup downloads OBS Studio from GitHub |
 | Phone alerts (`notify`) | ntfy.sh (or your ntfy server) | Health messages (for example "screen read failing") |
 | Squabbit handicaps (`squabbit`) | Squabbit (Google Firebase) | Your Squabbit login; it reads your league's handicaps |
 | Bookings (`bookings`) | SuperSaaS | Your API key; it reads the sim's bookings |

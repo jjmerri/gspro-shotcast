@@ -196,7 +196,8 @@ for browsing the database. Its tabs:
 
 Broadcasts and Booth are hidden until the booth has said something (stats only, commentary off).
 On the published page, a **Live** tab plays the sim's screen while a round is on, if the
-[live stream](#live-stream) is set up (a red dot on the tab means it's on air).
+[live stream](#live-stream) is set up (a red dot on the tab means it's on air; between rounds it
+says off air). Turning `live.enabled` off takes the tab away when the booth next starts.
 
 The **player picker** at the top (Everyone, or one name) narrows every tab to that player:
 their row on Players, them on the left of Head-to-head, only rounds they played in (team rounds
@@ -348,35 +349,44 @@ while a round is being played, behind the same password. OBS on the GSPro PC wri
 the Shotcast folder; the booth uploads each file to the bucket's `live/` folder as it appears and
 deletes it once it drops off the playlist, and the page plays it with
 [hls.js](https://github.com/video-dev/hls.js) (vendored, like the SQLite library). Viewers are
-about 20 seconds behind. Nothing is kept: when the stream stops, its files go from the bucket and
-the PC, and a lifecycle rule in the stack deletes anything a crash left under `live/s/` after a day.
+about 20 seconds behind, and the player starts muted. Any number of people can watch at once.
+Nothing is kept: when the stream stops, its files go from the bucket and the PC's `live\` folder
+(or when the next stream ends, if the booth was closing), and a lifecycle rule in the stack deletes
+anything a crash left under `live/s/` after a day.
 
 The booth starts OBS's output when a round starts and stops it 30 seconds after the sign-off
-(`live.stop_after_seconds`), over OBS's WebSocket server; the tray's **Start/Stop the live stream**
-does it by hand. It also stops:
+(`live.stop_after_seconds`), over OBS's WebSocket server; a round quit early stops it the same way,
+30 seconds after its sign-off or after the quit if it's too short for one. The tray's
+**Start/Stop the live stream** does it by hand. It also stops:
 
 - **OFF AIR** on the badge stops it, and no round starts it until **ON AIR**, which starts it again
   mid-round.
 - **Idle**: after 20 minutes with no shots (`live.idle_minutes`; 0 for never), a round left on a hole
   or a stream started by hand and forgotten. The round's next shot starts it again.
-- **The booth stopping**: while live it refreshes `live/status.json` every 30 seconds, and the page
-  shows off air once that goes quiet (about 2 minutes), so a booth that was quit or crashed
-  mid-stream doesn't leave a frozen player up. A booth starting clears `live/` and goes off air.
+- **Quit** in the tray stops OBS's output and takes the page off air at once. A booth that crashed
+  or was killed can't: while live it refreshes `live/status.json` every 30 seconds, and the page
+  shows off air within about 2 minutes of that stopping, rather than a frozen player. A booth
+  starting clears `live/` and goes off air.
+
+With `live.with_rounds: false` none of this follows rounds or the badge (only the idle stop
+applies): the stream is started and stopped by hand.
 
 Use OBS's hardware encoder (NVENC on NVIDIA cards) so encoding stays off the CPU
 GSPro needs.
 
 Cost: S3 charges for each upload, two every 4 seconds, about a cent an hour on air (about $3 for
 a season of 144 rounds). Watching is within CloudFront's free 1 TB a month: at 2.5 Mbps one
-viewer-hour is about 1.3 GB, so about 800 viewer-hours a month.
+viewer-hour is about 1.3 GB, so about 800 viewer-hours a month, counting every viewer.
 
 Setting it up on the GSPro PC (with the [stats page](#setting-it-up) already publishing): in the
-tray, **Set up the live stream...** (under **More** once it's on). It downloads OBS Studio's
-portable build (224 MB, checked against its published checksum) into the Shotcast folder's `obs\`,
+tray, **Set up the live stream...** (once it's on, **More → Set up the live stream again
+(OBS)...**). It downloads OBS Studio 33.0.0's portable build (224 MB, checked against its
+published checksum) into the Shotcast folder's `obs\` (`%LOCALAPPDATA%\Shotcast\obs`),
 apart from any other OBS, and sets it up:
 
 - its WebSocket server on port 4455, with a password it puts in `.env` (`OBS_WEBSOCKET_PASSWORD`)
-- a **Game Capture** of GSPro fitted to a 1080p canvas, streamed at 1280x720, 30 FPS; **Desktop
+- a **Game Capture** of GSPro filling a canvas the screen's shape, up to 1920 wide (1920x1080 on a
+  16:9 screen), streamed up to 1280 wide (1280x720 on 16:9), 30 FPS; **Desktop
   Audio** carries GSPro's sound and the booth's voices (a microphone, if there is one, is muted)
 - its recording output as the stream: **Custom Output (FFmpeg)** to the Shotcast folder's
   `live\stream.m3u8`, container **hls** (`hls_time=4 hls_list_size=5 hls_flags=delete_segments+temp_file`),

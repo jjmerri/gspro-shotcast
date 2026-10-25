@@ -59,7 +59,8 @@ one. Setup is one CloudFormation stack; see
 voices included, while a round is on, about 20 seconds behind and behind the same password. One
 tray action downloads and sets up [OBS Studio](https://obsproject.com/) to make the stream; the
 booth starts it when a round starts, stops it after the sign-off (or OFF AIR, or 20 minutes
-with no shots), and deletes it: nothing is kept, and it's free (no YouTube or Twitch). It costs about a cent an hour of uploads, and watching
+with no shots), and deletes it: nothing is kept, and no YouTube or Twitch account is needed. It
+costs about a cent an hour of uploads (about $3 a season), and watching
 is within CloudFront's free tier for a league. See [Live stream](docs/tracking.md#live-stream).
 
 ## The booth
@@ -185,7 +186,8 @@ beyond that is supported on paper but not yet run live:
    - **Set up the live stream...** (needs the stats page shared): downloads OBS Studio (224 MB) into
      the Shotcast folder and sets it up for the page's Live tab. If Windows Firewall then asks
      about OBS Studio, choose **Cancel**: nothing needs it reachable from other machines.
-     Once it's on, **Start/Stop the live stream** works it by hand, and the setup moves under **More**.
+     Once it's on, **Start/Stop the live stream** works it by hand, and the setup is under **More →
+     Set up the live stream again (OBS)...**.
    - **More**: open the Shotcast folder or the logs, edit `config.yaml` or `.env` by hand, and the
      command prompt.
    - **Warnings** (when there are any), **Restart the booth**, **Back up now** (the menu shows the
