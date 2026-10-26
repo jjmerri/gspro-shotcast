@@ -2622,12 +2622,16 @@ def _setup_engine(tmp_path):
 async def test_a_tee_setup_keeps_the_holes_minimap_even_off_air(tmp_path):
     from PIL import Image
 
+    from commentator.round import Round
+
     engine, screen = _setup_engine(tmp_path)
     engine.set_commentary(False)
     screen.detect_mirror = lambda: False
     screen.region = lambda name: None
     screen.grab = lambda region: Image.open("tests/fixtures/minimap_water_long.jpg")
     engine.current_course, engine.hole_number = "Test Links", 7
+    engine.round = Round(league=engine.league, gspro_players=["Toby"], course="Test Links", scheduled_format=None,
+                         holes=18, start_hole=1, is_league=False)
     await engine._emit_setup(Hud(player_text="Toby 1st (E) Shot 1 400 YDS", shot_number=1, score_to_par="E",
                                  to_pin="400 yards", lie=None))
     for _ in range(100):
@@ -3728,8 +3732,11 @@ def test_hole_change_is_checked_against_the_course_card(tmp_path):
 
 async def test_a_banner_that_flips_back_with_no_shot_undoes_the_hole_change(tmp_path):
     from commentator.models import HoleChangeEvent
+    from commentator.round import Round
     e = _mini_engine(tmp_path)
     e.cfg.screen.hud_poll_seconds = 0
+    e.round = Round(league=e.league, gspro_players=["Dan"], course="Test Links", scheduled_format=None,
+                    holes=18, start_hole=1, is_league=False)   # mid-round: an unread number counts on
     banners = [(4, "340 yards", 13)] * 3 + [(4, "40 yards", None)] * 10 + [(4, "340 yards", 13)] * 3
 
     class Screen:
@@ -3812,6 +3819,13 @@ def test_an_unnumbered_opening_banner_gets_the_start_hole(tmp_path):
     e.state.current_hole, r.start_hole_assumed = "Hole 1, par 4, 426 yards", False
     e._number_start_hole(r)
     assert e.state.current_hole == "Hole 1, par 4, 426 yards"
+    assert e.hole_number == 1   # a round quit and restarted on the same tee: the banner had it, the count didn't
+    # Dan, Tobacco Road: menu banners counted on to "Hole 11" before the round; at its start that's replaced.
+    e.hole_number, e.state.current_hole = 11, "Hole 11, par 5, 530 yards"
+    e._number_start_hole(r)
+    assert e.hole_number == 11
+    e._number_start_hole(r, opening=True)
+    assert e.hole_number == 1 and e.state.current_hole == "Hole 1, par 5, 530 yards"
 
 
 def test_a_stroke_set_up_in_yards_is_off_the_green(tmp_path):

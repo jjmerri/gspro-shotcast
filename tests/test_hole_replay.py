@@ -362,6 +362,33 @@ def test_a_round_quit_early_estimates_its_pin_from_the_shots_distances(tmp_path)
     assert rp["pin_estimated"] and math.dist(rp["pin"], (0, 300)) < 2.0
 
 
+def test_a_round_quit_early_takes_its_tee_and_pin_from_the_course_file(tmp_path):
+    import json
+
+    from commentator.course_layout import fill_missing
+    path, st = _season(tmp_path)
+    # A dogleg: from the tee GSPro measures through the aim point (60, 150), 323.1 m, not the 300 straight.
+    st.db.execute("UPDATE shots SET to_pin_yards = ?, start_x = 50, start_z = 100 WHERE shot_number = 1",
+                  (round(2 * math.hypot(60, 150) * M_TO_YD, 1),))   # a tee shot's stored start isn't the tee
+    st.db.execute("UPDATE shots SET start_x = 10, start_z = 200 WHERE shot_number = 2")
+    st.db.execute("UPDATE shots SET start_x = 2, start_z = 295 WHERE shot_number = 3")
+    st.db.commit()
+    folder = tmp_path / "Courses" / "test_gsp"
+    folder.mkdir(parents=True)
+    (folder / "coursedetails.txt").write_text("Test Links|Somewhere\n")
+    pos = lambda x, z: {"x": x, "y": 1.0, "z": z}   # noqa: E731
+    (folder / "test_gsp.GKD").write_text(json.dumps({"CourseName": "Test Links", "Holes": [{
+        "HoleNumber": 1, "Par": 4,
+        "Tees": [{"TeeType": "Black", "Position": pos(0, -40)}, {"TeeType": "White", "Position": pos(0, 0)},
+                 {"TeeType": "AimPoint1", "Enabled": True, "Position": pos(60, 150)}],
+        "Pins": [{"Day": "Thursday", "Position": pos(0, 300)}, {"Day": "Friday", "Position": pos(8, 290)}]}]}))
+    assert hole_replays(st.db)[(1, 1)]["tee"] is None
+    assert fill_missing(st.db, [str(tmp_path / "Courses")]) == 1
+    rp = hole_replays(st.db)[(1, 1)]
+    assert rp["tee"] == [0, 0] and rp["pin"] == [0, 300] and not rp["pin_estimated"]
+    assert fill_missing(st.db, [str(tmp_path / "Courses")]) == 0   # once
+
+
 def test_estimate_pin_is_none_when_the_distances_dont_agree():
     assert estimate_pin([((0.0, 0.0), 100.0), ((0.0, 50.0), 10.0)]) is None
 

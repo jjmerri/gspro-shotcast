@@ -746,6 +746,7 @@ class Engine:
             asyncio.create_task(self.speech.prepare(Line(self.speakers[0], "Warming up.")))
         if self.screen and self.cfg.screen.ocr:
             asyncio.create_task(self._warm_ocr())
+        self._fill_course_layouts()
         self._refresh_own_handicaps(backfill=True)
         if self.news is not None:
             asyncio.create_task(self._news_loop(), name="news")
@@ -880,8 +881,10 @@ class Engine:
                         number, self.hole_number_read = on_card, True
                     elif hud.hole_number and (number is None or hud.hole_number == number + 1):
                         number, self.hole_number_read = hud.hole_number, True
-                    elif number is not None:
+                    elif number is not None and self.round is not None and not self.round.ended:
                         number += 1
+                    else:
+                        number = None   # outside a round there's no count to go on: the round start numbers it
                     undo = (before_key, self.hole_number, self.hole_number_read, self._shot_seq)
                     self.hole_number = number
                     await self._events.put(HoleChangeEvent(previous=None, current=hole_label(hud, number),
@@ -931,8 +934,14 @@ class Engine:
 
     def _snap_hole(self, hud: Hud) -> None:
         """Keep the hole's minimap off the tee as the hole replay's background, once per course and hole.
-        On or off air: it's a record, like the shots. Runs in the background so the setup read isn't held up."""
-        course, hole = self.current_course or hud.course, self.hole_number or hud.hole_number
+        On or off air: it's a record, like the shots. Runs in the background so the setup read isn't held up.
+        Only in a round under way, on the hole it has counted: an opening tee is seen before its round
+        starts, when the course and the hole count can still be the last round's (or a menu banner's);
+        handle_round_start snaps it once the round has its course and opening hole."""
+        r = self.round
+        if r is None or r.ended:
+            return
+        course, hole = r.course or self.current_course, self.hole_number
         if self.screen is None or not course or not hole or (course, hole) in self._hole_snaps:
             return
         if self.store.has_hole_image(course, hole):   # one map per hole serves every round there
@@ -1260,17 +1269,25 @@ class Engine:
         if r is self.round:
             self._number_start_hole(r)
 
-    def _number_start_hole(self, r: Round) -> None:
+    def _number_start_hole(self, r: Round, opening: bool = False) -> None:
         """The round's first hole when its banner was read without a number. OCR often misses a lone
         "1", and the count was reset at the last round's end, so the opening hole was labelled by par
         and yardage alone; once the start hole is known (setup screen or GSPro's log), number it and
-        move anything already recorded there onto the numbered label."""
+        move anything already recorded there onto the numbered label. At the round's start (`opening`)
+        a number already counted is replaced too: it was counted before the round, off menu banners or
+        a round quit and restarted on the same tee."""
         wrong = self.state.current_hole
-        if self.hole_number is not None or r.ended or r.start_hole_assumed or not r.start_hole \
-                or r.seq != 1 or not wrong or re.match(r"Hole \d", wrong):
+        if r.ended or r.start_hole_assumed or not r.start_hole or r.seq != 1 or not wrong:
             return
+        if self.hole_number is not None and not (opening and self.hole_number != r.start_hole):
+            return
+        if opening and self.hole_number is not None:
+            log.info("Round %s: the hole counted before it started (%s) isn't its start hole %s",
+                     r.id, self.hole_number, r.start_hole)
         self.hole_number, self.hole_number_read = r.start_hole, True
-        label = f"Hole {r.start_hole}, {wrong}"
+        label = f"Hole {r.start_hole}, {re.sub(r'^Hole \d+, ', '', wrong)}"
+        if label == wrong:
+            return
         self.state.current_hole = label
         moved = [x for x in self.state.shots if x.round_id == r.id and x.hole == wrong]
         for x in moved:
@@ -5165,6 +5182,16 @@ class Engine:
             except Exception as e:
                 log.warning("Couldn't keep %s's tees (%s)", course, e)
 
+    def _fill_course_layouts(self, since: float | None = None) -> None:
+        """Take the tee and pin of each hole of a round quit early (which GSPro logs no layout for) from
+        the course file, for its hole replays (see course_layout). Best-effort."""
+        try:
+            from . import course_layout
+
+            course_layout.fill_missing(self.store.db, self.cfg.source.gspro_courses_dirs, since=since)
+        except Exception as e:
+            log.warning("Couldn't fill hole layouts from the course files (%s)", e)
+
     def _refresh_own_handicaps(self, backfill: bool = False) -> None:
         """Work out each player's own handicap index from the rounds on record, for anyone the league
         has no handicap for. `backfill` first reads the tees of courses played before they were kept."""
@@ -5554,6 +5581,8 @@ class Engine:
         hud, c = event.hud, self.cfg.commentary
         if event.joined:
             await self._join_round(hud)
+            if hud.shot_number == 1:
+                self._snap_hole(hud)
             return
         # The opener (aired over the course load) already introduces the opening hole and who's up, so
         # the live pre-shot on that first tee shot is redundant and lands late, just as the player is
@@ -5582,7 +5611,9 @@ class Engine:
             self._apply_setup_format(pending.round)
             self._apply_log_holes(pending.round)
             self._start_round(pending.round)
-            self._number_start_hole(pending.round)
+            self._number_start_hole(pending.round, opening=True)
+            if hud.shot_number == 1:
+                self._snap_hole(hud)
             # League: net scoring. Practice: no strokes, but the closer judges form against the index.
             self._bg(self._apply_live_handicaps(self._round_players(names)))
             if pending.aired:
@@ -5605,7 +5636,9 @@ class Engine:
         self._reconcile_slots(r, names)
         self._apply_log_holes(r)
         self._start_round(r)
-        self._number_start_hole(r)
+        self._number_start_hole(r, opening=True)
+        if hud.shot_number == 1:
+            self._snap_hole(hud)
         log.info("Round %s started on %s: %s; format %s; start hole %s%s", r.id, r.course,
                  "; ".join(f"{s.label} [{', '.join(s.gspro)}] strokes {s.strokes}" for s in r.sides),
                  FORMAT_NAMES.get(r.format or "", "not set"), r.start_hole,
@@ -6420,6 +6453,7 @@ class Engine:
                 self._closer_task.cancel()
             self._closer_branches = self._wrap_branches = None
             stats = self._record_round_stats(r, event.reason, complete=False)
+            self._fill_course_layouts(since=time.time() - 12 * 3600)
             played = max((st.holes_scored for st in stats.values()), default=0)
             if played < COUNTS_AS_ROUND_HOLES:
                 self._schedule_publish(after_speech=True)

@@ -76,8 +76,8 @@ What's recorded, and from where:
 | Table | One row per | What's in it |
 |---|---|---|
 | `shots` | swing | Player, course, hole, shot number, club; launch monitor ball speed, launch angle, start direction, spin, spin axis, club speed, carry; club path, attack angle, face to target, dynamic loft and strike location on the face, when the monitor reported club data (NULL otherwise); lie before and after, slope, pin elevation, distance to the pin before and where it finished; GSPro's carry/total/offline; putt or full shot; a putt's result (holed, conceded, missed), or `holed` on a full shot that went in (a stroke the same player hits again on the same hole is never left `holed`: a putt becomes `missed`, a full shot loses its outcome); where GSPro had the ball before it (`start_x/y/z`, world metres, from the log's setup block; NULL on a tee shot, which has none) and the player's minimap aim click, if they moved it (`aim_map_x/y`); league or practice; `mulligan = 1` on a stroke GSPro took back; `left_out = 1` on a stroke left out of the stats (see below). `handed`: the player's hand, `RH` or `LH`. `tree_hits`: how many times GSPro's log had the ball hit a tree in flight, foliage or a trunk (NULL for none); such a shot's carry is left out of the carry model. A conceded tap-in gets its own putt row (`outcome = 'gimme'`, no ball data), so every putt on the card is here |
-| `hole_layouts` | hole of a completed round | Each played hole's tee, pin (as set that round) and GSPro's aim waypoint, in world metres, from the hole list GSPro logs when a round is complete (a round quit early logs none) |
-| `hole_images` | course and hole | GSPro's minimap off the tee (JPEG, title bar trimmed), with where the ball and pin sit on it: the background of every replay of the hole. Kept at the first tee setup on a hole that has none yet, on or off air |
+| `hole_layouts` | hole of a completed round | Each played hole's tee, pin (as set that round) and GSPro's aim waypoint, in world metres, from the hole list GSPro logs when a round is complete; a round quit early logs none, so its holes are filled from the course's GKD file (see Rounds below) |
+| `hole_images` | course and hole | GSPro's minimap off the tee (JPEG, title bar trimmed), with where the ball and pin sit on it: the background of every replay of the hole. Kept at the first tee setup on a hole that has none yet, on or off air, once the round has started (an opening tee is snapped as the round starts, under its course and start hole) |
 | `course_tees` | course and tee | Each tee's course rating, slope and par from the course's `coursedetails.txt`, kept whenever a course loads; used for the handicap index |
 | `rounds` | side per round (a player, or the team in a one-ball format) | Course, format, holes, gross, net to par, hole-by-hole scores and pars, fairways, greens in regulation, scrambling, sand saves, putts, penalties, longest drive (total distance); complete or quit early |
 | `player_rounds` | player per round | The same per-player stats and scores, for team formats where the side is the team |
@@ -191,8 +191,10 @@ for browsing the database. Its tabs:
   recovery from rough and sand, and the handicap index with its trend.
 - **Head-to-head**, **Rounds** (hole-by-hole cards, and a link to every shot of the round; a hole
   number that's a link draws the hole from above, tee at the bottom: each player's shots from where
-  GSPro had the ball, dashed lines to where they aimed, and the pin, estimated from the shots'
-  distances to it when the round was quit before GSPro logged it; a one-player round of nine
+  GSPro had the ball, dashed lines to where they aimed, and the pin; when the round was quit before
+  GSPro logged its tees and pins, they're taken from the course's GKD file (the pin day the shots'
+  distances match, the tee box the tee shot's yardage matches), else the pin is estimated from those
+  distances; a one-player round of nine
   holes or more gets a summary: score per nine, fairways, greens and putts against the player's
   season, strokes gained by category, best and worst shot, best and worst hole; **Share card**
   saves the card as an image, or opens the phone's share sheet), **Courses** (each hole's scoring average,
