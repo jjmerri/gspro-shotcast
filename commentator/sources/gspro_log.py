@@ -309,8 +309,10 @@ class GsproState:
     setups_by: dict = field(default_factory=dict)
     # Strokes GSPro took back. A mulligan's fire number lands in `mulligan_fires`, mapped to how it
     # was seen: "undo" (a negative strokes line, explicit) or "repeat" (the re-hit's score line repeated
-    # the last one; only trustworthy when each player has their own ball and score - in GSPro's team
-    # modes the score lines repeat for other reasons). A pick-up adds (index, hole) to `pickups`.
+    # the last one). In GSPro's team modes it must repeat the player's last shot's own line (a penalty
+    # on a partner's picked-over ball logs a line a stroke ahead, and the next stroke repeats that),
+    # and the engine, knowing the format, decides whether it was a do-over. A pick-up adds (index,
+    # hole) to `pickups`.
     mulligan_fires: dict = field(default_factory=dict)
     pickups: list = field(default_factory=list)
     # A scramble's pick that landed inside the gimme circle: (index, hole) of the picked ball, whose
@@ -318,6 +320,7 @@ class GsproState:
     # settled as a miss by the time GSPro picked it. Append-only, like `pickups`.
     pick_gimmes: list = field(default_factory=list)
     _since_select: bool = False
+    _shot_score: dict = field(default_factory=dict)   # index -> the score line of the player's last shot
     _undo: dict = field(default_factory=dict)         # index -> (hole, penalties then, fire taken back)
     _picked: set = field(default_factory=set)          # (index, hole) capped at the maximum
     team_scores: bool = False   # GSPro copied a score between teammates this round (a shared-ball format)
@@ -613,9 +616,9 @@ class GsproState:
             # A shot was fired but the score didn't move: GSPro took the previous one back (a mulligan
             # logged with no negative line), and this shot replaced it.
             fires = self._fires_by.get(ev.player) or []
+            if len(fires) >= 2 and (not self.team_scores or self._shot_score.get(ev.player) == (ev.hole, ev.score)):
+                self.mulligan_fires.setdefault(fires[-2], "repeat")
             if not self.team_scores:
-                if len(fires) >= 2:
-                    self.mulligan_fires.setdefault(fires[-2], "repeat")
                 self.hole_scores.pop(key, None)   # a holed shot replayed: settled again if this one ends it
         elif prev is not None and ev.score > prev:
             # A score increase with no shot fired and no gimmie since THIS player's last score line is a
@@ -634,6 +637,8 @@ class GsproState:
             self._wet_at.pop(ev.player, None)
         else:
             self._score[key] = max(prev or 0, ev.score)
+        if shot:
+            self._shot_score[ev.player] = (ev.hole, ev.score)
         self._shot_since_state[ev.player] = False
         self._gimmie_since_state[ev.player] = False
         if self._end_next or ev.player in self._end_for:

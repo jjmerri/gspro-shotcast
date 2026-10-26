@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -792,14 +793,60 @@ def test_locate_takes_a_hidden_ball_from_the_tee_view_only_when_the_pin_is_where
     from commentator.minimap import TEE_BALL, locate, map_area
 
     # Kiawah 12 off the tee: GSPro printed "125" over the red ball, but the pin sits where it always does.
-    ball, pin = locate(Image.open("tests/fixtures/minimap_ball_hidden.jpg"))
-    assert ball == TEE_BALL and abs(pin[0] - 0.493) < 0.01 and abs(pin[1] - 0.085) < 0.01
+    tee = Image.open("tests/fixtures/minimap_ball_hidden.jpg").convert("RGB")
+    ball, pin = locate(tee)
+    assert math.dist(ball, TEE_BALL) < 0.01 and abs(pin[0] - 0.493) < 0.01 and abs(pin[1] - 0.085) < 0.01
+    # With the ball hidden altogether, the tee view says where it is.
+    ball, pin = locate(_ball_painted(tee, None))
+    assert ball == TEE_BALL and abs(pin[1] - 0.085) < 0.01
     # An approach, framed differently: with its ball covered, the standard spots would be wrong.
     img = map_area(Image.open("tests/fixtures/minimap_water_long.jpg")).convert("RGB")
     x, y = 0.495 * img.width, 0.755 * img.height
     ImageDraw.Draw(img).ellipse((x - 12, y - 12, x + 12, y + 12), fill=(90, 90, 90))
     assert locate(img) is None
 
+
+def _ball_painted(img, colour):
+    """The tee view with the ball spot covered by the ground beside it, and a dot of `colour` drawn there."""
+    from PIL import ImageDraw
+
+    from commentator.minimap import TEE_BALL
+
+    img = img.copy()
+    w, h = img.size
+    x, y, r = TEE_BALL[0] * w, TEE_BALL[1] * h, 0.016 * w
+    patch = img.crop((round(x + 3 * r), round(y - 3 * r), round(x + 6 * r), round(y + 3 * r)))
+    img.paste(patch.resize((round(6 * r), round(6 * r))), (round(x - 3 * r), round(y - 3 * r)))
+    if colour:
+        ImageDraw.Draw(img).ellipse((x - r, y - r, x + r, y + r), fill=colour)
+    return img
+
+
+def test_locate_finds_the_ball_in_whatever_colour_the_player_picked():
+    from commentator.minimap import TEE_BALL, locate
+
+    tee = Image.open("tests/fixtures/minimap_ball_hidden.jpg").convert("RGB")
+    for colour in ((40, 70, 220), (120, 12, 12), (240, 220, 30), (140, 40, 190), (250, 250, 250), (20, 20, 20)):
+        ball, pin = locate(_ball_painted(tee, colour))
+        assert math.dist(ball, TEE_BALL) < 0.006, colour
+        assert abs(pin[1] - 0.085) < 0.01
+
+
+
+def test_a_stored_minimap_without_its_ball_gets_it_when_the_season_is_opened(tmp_path):
+    from commentator.minimap import TEE_BALL
+    from commentator.store import Store
+
+    buf = io.BytesIO()
+    _ball_painted(Image.open("tests/fixtures/minimap_ball_hidden.jpg").convert("RGB"), (120, 12, 12)).save(buf, "JPEG")
+    path = str(tmp_path / "season.db")
+    st = Store(path)
+    st.record_hole_image("Bethpage Black", 1, buf.getvalue(), None, None)
+    st.record_hole_image("Bethpage Black", 2, b"not an image", None, None)
+    st.db.close()
+    rows = Store(path, new_session=False).db.execute("SELECT ball_x, ball_y, pin_y FROM hole_images ORDER BY hole").fetchall()
+    assert math.dist(tuple(rows[0])[:2], TEE_BALL) < 0.006 and abs(rows[0]["pin_y"] - 0.085) < 0.01
+    assert rows[1]["ball_x"] is None
 
 async def test_a_lie_the_gspro_log_fills_in_is_kept_for_the_impact(tmp_path, monkeypatch):
     engine, _ = _engine(tmp_path)

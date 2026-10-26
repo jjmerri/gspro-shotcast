@@ -494,10 +494,9 @@ class Round:
                 # shot and green are known; only the putts are still to come, and the branch's score says
                 # how many. Leaving the hole out made a closer call one fairway "all night" when the
                 # last drive was the second.
-                tee = [r for r in recs if r.shot_number == 1 and r.hud.lie]
-                if par >= 4 and tee:
+                if par >= 4 and (hit := _fairway_hit(recs, self.format == "scramble")) is not None:
                     fir_tries += 1
-                    fir += any(r.hud.lie == "fairway" for r in tee)
+                    fir += hit
                 if (reached := _green_reached_at(recs)) is not None and score is not None:
                     hole_gir = reached <= par - 1
                     gir_tries, gir = gir_tries + 1, gir + hole_gir
@@ -511,10 +510,9 @@ class Round:
                 if self.format != "scramble" and (saved := _sand_save(recs, score)) is not None:
                     sand_tries, sand = sand_tries + 1, sand + saved
                 continue
-            tee = [r for r in recs if r.shot_number == 1 and r.hud.lie]
-            if par >= 4 and tee:
+            if par >= 4 and (hit := _fairway_hit(recs, self.format == "scramble")) is not None:
                 fir_tries += 1
-                fir += any(r.hud.lie == "fairway" for r in tee)
+                fir += hit
             # GIR. The authoritative "settled on the green" signal is a shot PLAYED from the green (a
             # putt; lie_before == green), not a shot's own landing lie (that reads the touchdown spot).
             first_green = min((r.shot_number for r in green if r.shot_number), default=None)
@@ -1031,6 +1029,16 @@ def _season_facts(who: str, season: dict | None, holes: int = 9, league: bool = 
                      f"{to_par(round(season['avg_gross_to_par'] * scale))}; "
                      f"{_best_note(season['best_gross_to_par'])}.")
     return facts
+
+
+def _fairway_hit(recs: list, scramble: bool) -> bool | None:
+    """Whether a side's tee shot found the fairway, None when no read says. In a scramble the team
+    plays its second stroke from the ball it picked, so that stroke's lie is where a tee ball rested
+    even when the screen moved to the partner before reading it."""
+    tee = [r.hud.lie for r in recs if r.shot_number == 1 and r.hud.lie]
+    if scramble:
+        tee += [r.lie_before for r in recs if r.shot_number == 2 and r.lie_before not in (None, "tee")]
+    return "fairway" in tee if tee else None
 
 
 def _drive_yards(rec) -> float | None:

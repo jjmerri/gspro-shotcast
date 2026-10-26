@@ -155,6 +155,20 @@ def test_player_stats_reads_the_card_so_a_conceded_bogey_is_not_a_save():
     assert st.gir == (0, 1) and st.scramble == (0, 1)   # a missed green that was NOT saved for par
 
 
+def test_a_scramble_tee_ball_the_screen_never_read_counts_for_fir_from_the_team_s_second_shot():
+    # Both drives' rests went unread (the screen moved to the partner); the team's second stroke was
+    # played from the fairway, so the picked drive found it.
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="X", scheduled_format="scramble", holes=2)
+    r.par = {1: 4, 2: 4}
+    shots = [rec("MikeD", 1, 4, 1, "tee", None, "DR"), rec("Sarah", 1, 4, 1, "tee", None, "DR"),
+             rec("MikeD", 1, 4, 2, "fairway", "green"),
+             rec("MikeD", 2, 4, 1, "tee", None, "DR"), rec("Sarah", 2, 4, 1, "tee", None, "DR"),
+             rec("Sarah", 2, 4, 2, "rough", "green")]
+    for x in shots:
+        x.round_id = r.id
+    assert r.side_stats(r.side_for("MikeD"), shots).fir == (1, 2)
+
+
 def test_player_stats_counts_a_conceded_stiff_as_a_gir():
     # Par 3, tee shot stiff inside the gimme, tap-in conceded (card 2). There's no green-putt record,
     # but the tee shot reached the green in regulation, so it's a GIR hit, not a miss.

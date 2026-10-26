@@ -4,6 +4,7 @@ One file, no server. Open it with any SQLite viewer (e.g. DB Browser for SQLite)
 export. Replays and evals use an in-memory database so made-up shots never reach the season.
 """
 
+import io
 import json
 import logging
 import re
@@ -264,6 +265,7 @@ class Store:
         self.db.executescript(SCHEMA)
         self._migrate()
         self._backfill_finishes()
+        self._locate_hole_images()
         if not new_session:
             self.session_id = None
             self.db.commit()
@@ -444,6 +446,31 @@ class Store:
         self.db.commit()
         return cur.lastrowid
 
+    def _locate_hole_images(self) -> None:
+        """Look again for the ball and pin on stored minimaps that have none: the search once knew only a
+        bright red ball, and a map without them backs no replay. Only touches rows that have none."""
+        rows = self.db.execute("SELECT id, image FROM hole_images WHERE ball_x IS NULL OR pin_x IS NULL").fetchall()
+        if not rows:
+            return
+        from PIL import Image
+
+        from .minimap import locate
+
+        found = 0
+        for r in rows:
+            try:
+                spots = locate(Image.open(io.BytesIO(r["image"])))
+            except Exception:   # a damaged image stays as it is
+                log.debug("Couldn't read hole image %s", r["id"], exc_info=True)
+                continue
+            if spots:
+                found += 1
+                self.db.execute("UPDATE hole_images SET ball_x = ?, ball_y = ?, pin_x = ?, pin_y = ? WHERE id = ?",
+                                (*spots[0], *spots[1], r["id"]))
+        if found:
+            self.db.commit()
+            log.info("Found the ball and pin on %d stored hole minimaps", found)
+
     _FINISH_COLS = "id, session_id, player, hole, shot_number, is_putt, outcome, mulligan, attributed, " \
                    "to_pin_yards, finish_yards, gimme_yards, fmt"
 
@@ -601,12 +628,22 @@ class Store:
                             (*entry, shot_id))
             self.db.commit()
 
-    def set_shot_start(self, shot_id: int | None, shot_number: int | None, lie_before: str | None) -> None:
-        """A re-hit after a mulligan is the same stroke from the same spot as the one it replaced."""
-        if shot_id is not None:
-            self.db.execute("UPDATE shots SET shot_number = ?, lie_before = ? WHERE id = ?",
-                            (shot_number, lie_before, shot_id))
-            self.db.commit()
+    def set_shot_start(self, shot_id: int | None, shot_number: int | None, lie_before: str | None,
+                       replaced: int | None = None) -> None:
+        """A re-hit after a mulligan is the same stroke from the same spot as the one it replaced (shot
+        id `replaced`). GSPro's log can put the re-hit where the taken-back ball stopped, so the
+        replaced shot's position is copied over when both were set up the same distance out (a
+        scramble's new pick in between moves the ball, and the distance with it)."""
+        if shot_id is None:
+            return
+        self.db.execute("UPDATE shots SET shot_number = ?, lie_before = ? WHERE id = ?", (shot_number, lie_before, shot_id))
+        if replaced is not None:
+            self.db.execute(
+                "UPDATE shots SET (start_x, start_y, start_z) = (SELECT start_x, start_y, start_z FROM shots"
+                " WHERE id = :old) WHERE id = :new AND EXISTS (SELECT 1 FROM shots o WHERE o.id = :old"
+                " AND o.start_x IS NOT NULL AND abs(o.to_pin_yards - shots.to_pin_yards) < 0.5)",
+                {"old": replaced, "new": shot_id})
+        self.db.commit()
 
     def relabel_hole(self, old: str, new: str, since_id: int) -> None:
         """This session's shots from `since_id` on that were recorded on hole `old` move to `new`."""

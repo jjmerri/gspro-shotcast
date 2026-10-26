@@ -102,8 +102,12 @@ Mulligans and pick-ups follow GSPro's scoring. A mulligan's stroke stays in `sho
 `mulligan = 1`, and is left out of every score and stat (the re-hit takes its shot number); its
 club and ball data are still a real swing. With commentary on, the booth calls the mulligan
 when the player sets up to replay the stroke. Mulligans count in every format where each player
-has their own ball (best ball included); in scramble and alternate shot only GSPro's explicit
-take-back is used. A hole picked up is scored at GSPro's maximum, and
+has their own ball (best ball included) and in scramble, where a player's re-hit logs the same
+score as their last stroke (a penalty on a ball the team didn't pick logs a new one, so isn't
+mistaken for it); in alternate shot only GSPro's explicit take-back is used. The re-hit starts
+where the stroke it replaced did. In a scramble, a tee ball whose rest the screen never read still
+counts toward fairways hit: the team's second stroke is played from the drive it picked, so that
+stroke's lie says where it finished. A hole picked up is scored at GSPro's maximum, and
 those capped strokes are not counted as putts or penalties. Driving-range
 shots are not recorded, only rounds. Practice rounds are recorded and flagged
 (`is_league = 0`), so stats can be split league vs practice. On an alternate-shot round the log
@@ -137,7 +141,10 @@ start. GSPro logs that entry point even for a ball that rolls in with no splash 
 for a ball that finished dry, so it is drawn only when a penalty stroke follows. `backfill-log` fills
 it in for shots recorded before it was stored. It's drawn over GSPro's minimap
 of the hole, turned and scaled so the map's ball sits on
-the tee and its pin on the pin. The map is the same every round, so the booth keeps one per course and
+the tee and its pin on the pin (the ball's dot is the colour of the player's team, whatever was
+picked at setup; a map stored before this was found is fixed when the booth next opens the season).
+In a scramble, every partner's shot is drawn from the team's ball, but only the one the team played
+on has a line to where it finished. The map is the same every round, so the booth keeps one per course and
 hole, at the first tee setup on a hole that has none, and every round there uses it, older ones too
 (marked as from another round, since its tee, pin dot and yardages may differ a little). To replace a
 hole's map with the one on screen now: `python -m commentator snap-minimap --course "Kiawah Ocean Course" --hole 10

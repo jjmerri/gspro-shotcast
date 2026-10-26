@@ -431,8 +431,14 @@ def test_penalty_surface_is_kept_per_shot():
     assert s.fire_info(s.fire_of(s.fires, time.monotonic())) == {"player": 0, "putting": False, "penalty": "sand"}
 
 
-def test_a_repeated_score_in_a_team_format_is_not_a_mulligan():
-    text = "Standard Teammate Result Copy\n" + FIRE + _line(5, 1, 0) + FIRE + _line(5, 1, 0)
+def test_a_repeated_score_in_a_team_format_is_a_mulligan_only_when_it_repeats_the_players_last_shot():
+    # Real log (Bethpage 4, scramble): Dan tees off twice before Derek; the first was taken back.
+    text = "Standard Teammate Result Copy\n" + FIRE + _line(3, 1, 0) + FIRE + _line(3, 1, 0)
+    assert _replay(text).mulligan_fires == {1: "repeat"}
+    # Kiawah 12: Dan's ball found a penalty area (a line a stroke ahead, with no shot), Derek's was
+    # picked, and Dan's next stroke repeats the penalty's line. Not a do-over.
+    text = ("Standard Teammate Result Copy\n" + FIRE + _line(11, 1, 1, player=1) + _line(11, 1, 2, player=1)
+            + "Selecting shot for player: 0\n" + FIRE + _line(11, 1, 2, player=0) + FIRE + _line(11, 1, 2, player=1))
     assert not _replay(text).mulligan_fires
 
 

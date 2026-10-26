@@ -1001,17 +1001,71 @@ def map_area(img: Image.Image) -> Image.Image:
 # area: the same on every hole of a round on the sim PC (3450x2160), par 3 to par 5.
 TEE_BALL, TEE_PIN, TEE_FRAME_SLACK = (0.493, 0.907), (0.493, 0.083), 0.02
 
+# The dot search works on the map scaled to this width, where GSPro's ball and pin dots are 5 to 6 px
+# in radius; a yardage printed over a dot leaves bits of it too small to pass.
+_DOT_WIDTH, _DOT_RADII = 360, (4, 5, 6, 7)
+
+
+def _dot_near(img: Image.Image, spot: tuple[float, float], pin: bool = False) -> tuple[float, float] | None:
+    """A round dot of any colour within TEE_FRAME_SLACK of `spot` (fractions): the ball takes the colour
+    the player picked at setup. A dot is a patch of even colour that stands out from the ground on every
+    side of it; the pin's is also white or light grey. The best one's centre, or None."""
+    import numpy as np
+    from numpy.lib.stride_tricks import sliding_window_view
+
+    if img.width != _DOT_WIDTH:
+        img = img.resize((_DOT_WIDTH, max(1, round(img.height * _DOT_WIDTH / img.width))), Image.LANCZOS)
+    a = np.asarray(img.convert("RGB"), dtype=np.float32)
+    h, w = a.shape[:2]
+    pad = max(_DOT_RADII) + 4
+    x0, x1 = round((spot[0] - TEE_FRAME_SLACK) * w), round((spot[0] + TEE_FRAME_SLACK) * w)
+    y0, y1 = round((spot[1] - TEE_FRAME_SLACK) * h), round((spot[1] + TEE_FRAME_SLACK) * h)
+    x0, y0 = max(x0, pad), max(y0, pad)
+    x1, y1 = min(x1, w - 1 - pad), min(y1, h - 1 - pad)
+    if x1 < x0 or y1 < y0:
+        return None
+    win = sliding_window_view(a[y0 - pad:y1 + pad + 1, x0 - pad:x1 + pad + 1], (2 * pad + 1, 2 * pad + 1), axis=(0, 1))
+    win = win.transpose(0, 1, 3, 4, 2)   # (centre y, centre x, dy, dx, rgb)
+    yy, xx = np.mgrid[-pad:pad + 1, -pad:pad + 1]
+    d = np.hypot(xx, yy)
+    sector = ((np.arctan2(yy, xx) + math.pi) / (2 * math.pi) * 8).astype(int) % 8
+    cy, cx = np.mgrid[y0:y1 + 1, x0:x1 + 1]
+    near = np.hypot(cx / w - spot[0], cy / h - spot[1]) <= TEE_FRAME_SLACK
+    best, at = 0.0, None
+    for rr in _DOT_RADII:
+        core, ring = d <= rr - 1.2, (d >= rr + 1.5) & (d <= rr + 3.5)
+        inside = win[:, :, core]
+        m_in, sd_in = inside.mean(axis=2), inside.std(axis=2).mean(axis=2)
+        contrast = np.linalg.norm(m_in - win[:, :, ring].mean(axis=2), axis=2)
+        # Standing out on every side: the edge of a bunker or a fairway does on one side only.
+        enclosed = np.min([np.linalg.norm(m_in - win[:, :, ring & (sector == k)].mean(axis=2), axis=2)
+                           for k in range(8)], axis=0)
+        ok = near & (contrast >= 60) & (enclosed >= 0.6 * contrast) & (sd_in <= 0.45 * contrast)
+        if pin:
+            ok &= (m_in.min(axis=2) > 170) & (np.ptp(m_in, axis=2) < 45)
+        score = np.where(ok, enclosed - sd_in, 0.0)
+        k = int(score.argmax())
+        if score.flat[k] > best:
+            best, at = float(score.flat[k]), (float(cx.flat[k]) / w, float(cy.flat[k]) / h)
+    return at
+
 
 def locate(img: Image.Image) -> tuple[tuple[float, float], tuple[float, float]] | None:
-    """The ball (GSPro's red dot) and the pin (the flat white dot up the map from it) on a minimap, as
-    (x, y) fractions of the image, found in code so the hole snapshot needs no Jev call. GSPro centres
-    the map on the ball and turns it so the pin is straight up, so the pin must sit above the ball, near
-    its column; the grey shaded dot between them is the aim point. GSPro prints yardages over the map
-    and one can hide either dot, so when only one is found where GSPro's tee view puts it, the other
-    is taken from that view (TEE_BALL, TEE_PIN). None when neither is found, or the one found isn't
-    where the tee view puts it (a different framing, which the standard spots would get wrong)."""
+    """The ball (a dot in the colour the player picked at setup) and the pin (the flat white dot up the
+    map from it) on a minimap, as (x, y) fractions of the image, found in code so the hole snapshot
+    needs no Jev call. Off the tee GSPro frames every hole the same, so dots of any colour are looked
+    for where that view puts them (TEE_BALL, TEE_PIN); other players' balls can be on the map too, but
+    not on the player's own spot. Otherwise GSPro centres the map on the ball and turns it so the pin
+    is straight up: the pin must sit above the ball, near its column, and the grey shaded dot between
+    them is the aim point; this search knows only the red ball. GSPro prints yardages over the map and
+    one can hide either dot, so when only one is found where the tee view puts it, the other is taken
+    from that view. None when neither is found, or the one found isn't where the tee view puts it (a
+    different framing, which the standard spots would get wrong)."""
     import numpy as np
 
+    ball, pin = _dot_near(img, TEE_BALL), _dot_near(img, TEE_PIN, pin=True)
+    if ball and pin:
+        return ball, pin
     px = np.asarray(img.convert("RGB"), dtype=np.int16)
     h, w = px.shape[:2]
     r, g, b = px[..., 0], px[..., 1], px[..., 2]
@@ -1030,6 +1084,11 @@ def locate(img: Image.Image) -> tuple[tuple[float, float], tuple[float, float]] 
     size = w * h
     balls = dots((r > 170) & (g < 90) & (b < 90), max(12, size // 20000), size // 400)
     whites = dots((r > 235) & (g > 235) & (b > 235), max(12, size // 20000), size // 400)
+    if ball:
+        pins = [d for d in whites if d[1] < ball[1] - 0.05 and abs(d[0] - ball[0]) <= 0.12]
+        return ball, min(pins, key=lambda d: d[1])[:2] if pins else TEE_PIN
+    if pin:
+        return TEE_BALL, pin
     if balls:
         bx, by, _ = max(balls, key=lambda d: (d[2], d[1]))
         pins = [d for d in whites if d[1] < by - 0.05 and abs(d[0] - bx) <= 0.12]

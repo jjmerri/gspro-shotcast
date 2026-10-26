@@ -180,6 +180,68 @@ def test_replay_runs_each_shot_to_the_next_and_the_last_into_the_pin(tmp_path):
     assert math.dist(shots[1]["aim"], want) < 0.1
 
 
+def test_a_scramble_draws_only_the_ball_the_team_played_on(tmp_path):
+    path, st = _season(tmp_path)
+    log = tmp_path / "output_log.txt"
+    log.write_text(_hole_log())
+    backfill(path, [str(log)])
+    # Dan's ball was picked off the tee and for the approach; Derek hit from the same spots.
+    st.db.execute("UPDATE shots SET shared_ball = 1, total_yards = ?, lie_after = 'fairway' WHERE shot_number = 1",
+                  (round(math.hypot(10, 200) * M_TO_YD, 1),))
+    st.db.execute("UPDATE shots SET shared_ball = 1, total_yards = ? WHERE shot_number = 2",
+                  (round(math.hypot(8, 95) * M_TO_YD, 1),))
+    st.db.execute("UPDATE shots SET shared_ball = 1 WHERE shot_number = 3")
+    for n, ts, total, x, z, lie in ((1, 1001.5, 150.0, None, None, "rough"), (2, 1002.5, 30.0, 10.0, 200.0, None)):
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, to_pin_yards,"
+                      " total_yards, lie_after, shared_ball, start_x, start_z, raw) VALUES (?, ?, 'Derek', 'Test Links',"
+                      " 'Hole 1, par 4, 328 yards', ?, '7I', 0, 100, ?, ?, 1, ?, ?, '{}')",
+                      (st.session_id, ts, n, total, lie, x, z))
+    st.db.commit()
+    players = {p["name"]: p["shots"] for p in hole_replays(st.db)[(1, 1)]["players"]}
+    assert [(s["from"], s["to"]) for s in players["Dan"]] == [([0.0, 0.0], [10.0, 200.0]), ([10.0, 200.0], [2.0, 295.0]),
+                                                             ([2.0, 295.0], [0.0, 300.0])]
+    assert [(s["from"], s["to"]) for s in players["Derek"]] == [([0.0, 0.0], None), ([10.0, 200.0], None)]
+
+
+def test_scramble_teams_sharing_a_tee_are_drawn_apart_and_a_penalty_gap_is_not_run_to_the_pin(tmp_path):
+    path, st = _season(tmp_path)
+    log = tmp_path / "output_log.txt"
+    log.write_text(_hole_log())
+    backfill(path, [str(log)])
+    st.db.execute("UPDATE shots SET shared_ball = 1, total_yards = ? WHERE shot_number = 1",
+                  (round(math.hypot(10, 200) * M_TO_YD, 1),))
+    st.db.execute("UPDATE shots SET shared_ball = 1 WHERE shot_number > 1")
+    # Carl & Ed: Carl's 180 off the tee was picked and both played on from it. Fay & Gus: both drives
+    # went wet, and after the penalty Gus holed stroke 3 from the drop.
+    for who, n, ts, total, x, z, outcome, *hole in (
+            ("Carl", 1, 1001.1, 180, None, None, None), ("Ed", 1, 1001.2, 150, None, None, None),
+            ("Carl", 2, 1002.1, 110, 0.0, 180.0, None), ("Ed", 2, 1002.2, 130, 0.0, 180.0, None),
+            ("Fay", 1, 1001.3, 260, None, None, None), ("Gus", 1, 1001.4, 250, None, None, None),
+            ("Fay", 3, 1003.1, 40, 5.0, 150.0, None), ("Gus", 3, 1003.2, 165, 5.0, 150.0, "holed"),
+            # Hal & Ivy: Ivy's drive was picked and Hal holed from it before Ivy hit again; they
+            # played on together the next hole, which says they're partners.
+            ("Hal", 1, 1001.5, 220, None, None, None), ("Ivy", 1, 1001.6, 240, None, None, None),
+            ("Hal", 2, 1002.5, 61, -20.0, 240.0, "holed"),
+            ("Hal", 2, 1100.0, 50, 7.0, 7.0, None, "Hole 2, par 4, 300 yards"),
+            ("Ivy", 2, 1100.1, 50, 7.0, 7.0, None, "Hole 2, par 4, 300 yards"),
+            # Opponents putting from beside each other aren't partners.
+            ("Carl", 2, 1100.2, 3, 0.0, 298.0, None, "Hole 2, par 4, 300 yards"),
+            ("Fay", 2, 1100.3, 3, 0.5, 298.0, None, "Hole 2, par 4, 300 yards"),
+            (None, 2, 1100.4, 3, 0.5, 298.0, None, "Hole 2, par 4, 300 yards")):   # the screen missed who
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, to_pin_yards,"
+                      " total_yards, shared_ball, start_x, start_z, outcome, raw) VALUES (?, ?, ?, 'Test Links',"
+                      " ?, ?, '7I', 0, 100, ?, 1, ?, ?, ?, '{}')",
+                      (st.session_id, ts, who, *(hole or ["Hole 1, par 4, 328 yards"]), n,
+                       round(total * M_TO_YD, 1), x, z, outcome))
+    st.db.commit()
+    players = {p["name"]: p["shots"] for p in hole_replays(st.db)[(1, 1)]["players"]}
+    assert [s["to"] for s in players["Carl"]][0] == [0.0, 180.0] and players["Ed"][0]["to"] is None
+    assert players["Dan"][0]["to"] == [10.0, 200.0]
+    assert players["Fay"][0]["to"] is None and players["Gus"][0]["to"] is None
+    assert players["Gus"][1]["to"] == [0.0, 300.0]
+    assert players["Ivy"][0]["to"] == [-20.0, 240.0] and players["Hal"][0]["to"] is None
+
+
 def test_a_full_shot_bows_against_its_curve_and_a_putt_is_straight(tmp_path):
     path, st = _season(tmp_path)
     log = tmp_path / "output_log.txt"

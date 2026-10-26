@@ -3250,9 +3250,37 @@ def test_a_mulligan_is_flagged_and_its_re_hit_takes_its_place(tmp_path):
     assert e.store.fairways_hit("Paul")["tries"] == 1
 
 
-def test_a_repeated_score_in_a_shared_ball_format_flags_nothing(tmp_path):
+def test_a_repeated_score_in_a_scramble_is_a_mulligan(tmp_path):
     e = _mini_engine(tmp_path)
     r = _log_round(e, "scramble")
+    _, rec1 = _row(e, r, 7, 1, "tee")
+    _, rec2 = _row(e, r, 8, 2, "fairway")
+    e.gspro.mulligan_fires[7] = "repeat"
+    e._apply_log_corrections()
+    assert rec1.mulligan and (rec2.shot_number, rec2.lie_before) == (1, "tee")
+
+
+def test_a_re_hit_starts_where_the_stroke_it_replaced_did(tmp_path):
+    # Bethpage 7 (scramble): GSPro's log put Derek's re-hit where his taken-back ball had stopped.
+    e = _mini_engine(tmp_path)
+    r = _log_round(e, "scramble")
+    sid1, _ = _row(e, r, 7, 2, "rough")
+    sid2, _ = _row(e, r, 8, 2, "rough")
+    sid3, _ = _row(e, r, 9, 3, "deep rough")
+    db = e.store.db
+    for sid, x, to_pin in ((sid1, 10.0, 262.1), (sid2, 80.0, 262.1), (sid3, 80.0, 106.3)):
+        db.execute("UPDATE shots SET start_x = ?, start_y = 1, start_z = 5, to_pin_yards = ? WHERE id = ?", (x, to_pin, sid))
+    e.gspro.mulligan_fires[7] = "repeat"
+    e._apply_log_corrections()
+    assert db.execute("SELECT start_x FROM shots WHERE id = ?", (sid2,)).fetchone()[0] == 10.0
+    # A re-hit set up from elsewhere (a new pick moved the ball) keeps its own spot.
+    e.store.set_shot_start(sid3, 3, "deep rough", replaced=sid2)
+    assert db.execute("SELECT start_x FROM shots WHERE id = ?", (sid3,)).fetchone()[0] == 80.0
+
+
+def test_a_repeated_score_in_alternate_shot_flags_nothing(tmp_path):
+    e = _mini_engine(tmp_path)
+    r = _log_round(e, "alternate")
     _, rec1 = _row(e, r, 7, 1, "tee")
     e.gspro.mulligan_fires[7] = "repeat"
     e._apply_log_corrections()
@@ -3299,6 +3327,11 @@ def test_a_tee_shot_is_corrected_though_the_log_still_named_the_last_hole(tmp_pa
     assert rec.hud.lie is None
     e._correct_last_finish(0, snap, "fairway", "Hole 14", 2, "scramble")   # maybe a partner's ball
     assert rec.hud.lie is None
+    picked_mate = (*snap, {0: 1})                # GSPro dropped this player's ball for a partner's
+    e._correct_last_finish(0, picked_mate, "fairway", "Hole 14", 2, "scramble")
+    assert rec.hud.lie is None
+    e._correct_last_finish(0, (*snap, {0: 0}), "deep rough", "Hole 14", 2, "scramble")   # their own was picked
+    assert rec.hud.lie == "deep rough"
     e._correct_last_finish(0, snap, "fairway", "Hole 14", 2)
     assert rec.hud.lie == "fairway"
     assert e.store.db.execute("SELECT lie_after FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "fairway"

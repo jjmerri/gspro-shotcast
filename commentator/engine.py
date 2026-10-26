@@ -4354,10 +4354,11 @@ class Engine:
         same = hole is not None and now["hole"] == hole and now["pen"] == pen
         # GSPro's log moves to a new hole only once its tee shot is logged, so a tee shot's snapshot
         # still names the hole before. The HUD's strokes (1, then 2: no penalty between) on the same
-        # hole say it's this ball. Not in a scramble, where the second shot may be a partner's ball.
+        # hole say it's this ball. In a scramble the second shot may be a partner's ball: only when the
+        # log counts the balls GSPro dropped, and none of this player's was (their own was picked).
         tee_then_second = (rec.shot_number == 1 and shot_number == 2 and hole_label is not None
                            and _hole_key(rec.hole) == _hole_key(hole_label) and now["pen"] == 0
-                           and fmt != "scramble")
+                           and (fmt != "scramble" or len(snap) > 7))
         if rec.mulligan or not (same or tee_then_second) or now["dropped"] != dropped:
             return   # (a scramble that picked another ball: this shot is played from the team's ball)
         if (rec.hud.lie or "").lower() != lie:
@@ -4370,9 +4371,11 @@ class Engine:
         (mulligans), flagged so they leave the stats, and holes picked up (scored at the maximum)."""
         g, r = self.gspro, self.round
         self._sync_scramble()
-        # A score line that merely repeats is a mulligan only when each player has their own ball and
-        # score; GSPro's shared-ball formats repeat it for other reasons. Best ball is still one ball each.
-        team = r is not None and r.format in ("scramble", "alternate")
+        # A score line that merely repeats is a mulligan when each player has their own ball and score,
+        # and in a scramble, where each player hits once per stroke (the tracker leaves out the lines a
+        # penalty on a ball that wasn't picked puts a stroke ahead). Alternate shot's partners take turns
+        # on one score, which repeats for other reasons. Best ball is still one ball each.
+        team = r is not None and r.format == "alternate"
         for fire in sorted(self._starts_due):
             if fire not in self._fire_rows:
                 self._starts_due.discard(fire)
@@ -4398,7 +4401,7 @@ class Engine:
             nxt = next((v for f, v in sorted(self._fire_rows.items()) if f > fire and v[2] == idx), None)
             if nxt and nxt[3] == hole and nxt[1].round_id == rec.round_id:
                 nxt[1].shot_number, nxt[1].lie_before = rec.shot_number, rec.lie_before
-                self.store.set_shot_start(nxt[0], rec.shot_number, rec.lie_before)
+                self.store.set_shot_start(nxt[0], rec.shot_number, rec.lie_before, replaced=shot_id)
             log.info("Shot %s was a mulligan (GSPro took it back): left out of the stats", shot_id)
         while self._pickups_seen < len(g.pickups):
             idx, hole = g.pickups[self._pickups_seen]
