@@ -352,6 +352,28 @@ function scoreCell(score, par) {
   return `<span class="s ${cls}">${score}</span>`;
 }
 
+// A scramble partner's share of the team's strokes: shots played on from their ball, plus the gimme
+// and penalty strokes that ball cost, so the partners' counts add up to the score.
+function usedText(pl) {
+  const n = (k, one) => `${k} ${one}${k === 1 ? "" : "s"}`;
+  return n(pl.used, "shot") + " used" + (pl.used_gimmes ? ` + ${n(pl.used_gimmes, "gimme")}` : "")
+    + (pl.used_pens ? ` + ${n(pl.used_pens, "penalty").replace("penaltys", "penalties")}` : "");
+}
+
+// A scramble round's strokes by partner, summed over the holes with shot data.
+function shotsUsed(r, reps) {
+  if (!reps || r.format !== "scramble") return "";
+  const tot = {}, holes = Object.values(reps).filter(rp => rp.players.some(p => p.used != null));
+  for (const rp of holes) for (const p of rp.players) if (p.used != null) {
+    const t = tot[p.name] || (tot[p.name] = { used: 0, used_gimmes: 0, used_pens: 0 });
+    t.used += p.used; t.used_gimmes += p.used_gimmes || 0; t.used_pens += p.used_pens || 0;
+  }
+  if (!holes.length) return "";
+  const missing = (r.card || []).length - holes.length;
+  return `<p class="sub">Shots used: ${Object.entries(tot).map(([name, t]) => `${esc(name)} ${t.used + t.used_gimmes + t.used_pens}`
+    + (t.used_gimmes || t.used_pens ? ` (${usedText(t)})` : "")).join(" · ")}${missing > 0 ? ` · ${missing} hole${missing > 1 ? "s" : ""} without shot data` : ""}</p>`;
+}
+
 function scorecard(holes, replays) {
   if (!holes || !holes.length) return '<p class="empty">No hole-by-hole card recorded.</p>';
   const par = holes.reduce((a, h) => a + h.par, 0), gross = holes.reduce((a, h) => a + h.score, 0);
@@ -428,7 +450,7 @@ function replaySvg(rp, animate = false, { colors = {}, only = null, focus = null
   const yd = [10, 25, 50, 100, 150, 200].reduce((a, v) => Math.abs(v - h * 1.0936 / 5) < Math.abs(a - h * 1.0936 / 5) ? v : a);
   const bar = yd / 1.0936 * k;
   g += `<line x1="8" y1="${H - 8}" x2="${(8 + bar).toFixed(1)}" y2="${H - 8}" stroke="#8fa59b" stroke-width="2"/><text x="8" y="${H - 13}" fill="#8fa59b" font-size="10">${yd} yd</text>`;
-  const legend = rp.players.map((pl, i) => `<span style="color:${color(pl, i)}${drawn.includes(pl) ? "" : ";opacity:.45"}">● ${esc(pl.name)}${pl.used != null ? ` · ${pl.used} shot${pl.used === 1 ? "" : "s"} used` : pl.strokes ? ` · ${pl.strokes}${pl.gimmes ? ` (incl. ${pl.gimmes} gimme${pl.gimmes > 1 ? "s" : ""})` : ""}` : ""}</span>`).join(" &nbsp;");
+  const legend = rp.players.map((pl, i) => `<span style="color:${color(pl, i)}${drawn.includes(pl) ? "" : ";opacity:.45"}">● ${esc(pl.name)}${pl.used != null ? ` · ${usedText(pl)}` : pl.strokes ? ` · ${pl.strokes}${pl.gimmes ? ` (incl. ${pl.gimmes} gimme${pl.gimmes > 1 ? "s" : ""})` : ""}` : ""}</span>`).join(" &nbsp;");
   const notes = [rp.pin ? (rp.pin_estimated ? "Pin estimated from the shots' distances." : "") : "Pin position unknown.",
                  drawn.some(p => p.shots.some(s => s.aim)) ? "Dashed: where the player aimed." : "",
                  drawn.some(p => p.shots.some(s => s.penalty)) ? "✕: where a ball went into a penalty area (the next shot is the drop)." : "",
@@ -804,7 +826,7 @@ function renderRounds() {
       <td class="l">${esc(r.side)}${r.team && r.team !== r.side ? ` <span class="sub">${esc(r.team)}</span>` : ""}</td>
       <td class="l">${esc(r.format.replace("_", " "))}${tags}</td><td>${r.played}/${r.holes}</td><td>${dash(r.gross)}</td>
       <td>${toPar(r.to_par)}</td><td>${frac(r.fir)}</td><td>${frac(r.gir)}</td><td>${dash(r.putts)}</td></tr>` +
-      (open ? `<tr class="detail"><td colspan="${cols.length}">${scorecard(r.card, reps)}${roundSummary(r)}${replayPart(reps, r)}
+      (open ? `<tr class="detail"><td colspan="${cols.length}">${scorecard(r.card, reps)}${shotsUsed(r, reps)}${roundSummary(r)}${replayPart(reps, r)}
         <p class="sub">Scrambling ${frac(r.scramble)} · Sand saves ${frac(r.sand)} · Penalties ${dash(r.penalties)}${r.longest_drive ? ` · Longest drive ${Math.round(r.longest_drive)} yd` : ""}</p>
         <p><button class="link" data-roundshots="${r.round}">Every shot of this round →</button>
           · <button class="link" data-sharecard="${r.id}" title="An image of this round to post or send">Share card</button></p></td></tr>` : "");

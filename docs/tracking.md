@@ -148,8 +148,10 @@ on has a line to where it finished. GSPro's log names that ball after every stro
 for player"), and the putt that holes is the team's too; the booth stores it as `shots.picked` (1 the
 team's ball, 0 a ball lifted). A stroke without it, recorded before 10/26 or with no log, is worked
 out from where the next stroke started. Under the map, each scramble partner shows the shots of
-theirs the team used, not the hole's score: GSPro gives the team's gimme to one partner only, so the
-score read differently for each, and the gimme is no one's shot. The map is the same every round, so the booth keeps one per course and
+theirs the team used, plus the gimme (GSPro gives it to the partner whose ball was picked inside the
+circle) and any penalty stroke their picked ball cost (a gap in the team's stroke numbers after it),
+so the partners' counts add up to the hole's score. An open scramble round sums these per partner in
+a "Shots used" line under the scorecard, noting holes with no shot data. The map is the same every round, so the booth keeps one per course and
 hole, at the first tee setup on a hole that has none, and every round there uses it, older ones too
 (marked as from another round, since its tee, pin dot and yardages may differ a little). To replace a
 hole's map with the one on screen now: `python -m commentator snap-minimap --course "Kiawah Ocean Course" --hole 10

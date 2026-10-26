@@ -226,6 +226,7 @@ def test_a_scramble_draws_the_ball_gspro_picked_and_counts_each_partners_used_sh
     assert [s["to"] for s in players["Dan"]["shots"]] == [[10.0, 200.0], None, [0.0, 300.0]]
     assert [s["to"] for s in players["Derek"]["shots"]] == [None, [2.0, 295.0], None]
     assert (players["Dan"]["used"], players["Derek"]["used"]) == (2, 1)
+    assert [(players[n]["used_gimmes"], players[n]["used_pens"]) for n in ("Dan", "Derek")] == [(1, 0), (0, 0)]
     # The log's pick holds when its ball has no stored spot: Dan's lifted approach isn't drawn instead.
     st.db.execute("UPDATE shots SET start_x = NULL, start_z = NULL WHERE player = 'Derek' AND shot_number = 2")
     st.db.commit()
@@ -239,6 +240,13 @@ def test_a_scramble_draws_the_ball_gspro_picked_and_counts_each_partners_used_sh
     players = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}
     assert players["Dan"]["shots"][0]["to"] == [10.0, 200.0] and players["Derek"]["shots"][0]["to"] is None
     assert (players["Dan"]["used"], players["Derek"]["used"]) == (2, 1)
+    # Dan's picked drive cost a penalty stroke: the team's next stroke is its third. The partners'
+    # counts still add up to the score (5).
+    st.db.execute("UPDATE shots SET shot_number = shot_number + 1 WHERE shot_number >= 2")
+    st.db.commit()
+    players = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}
+    got = [(players[n]["used"], players[n]["used_gimmes"], players[n]["used_pens"]) for n in ("Dan", "Derek")]
+    assert got == [(2, 1, 1), (1, 0, 0)] and sum(map(sum, got)) == 5
 
 
 def test_scramble_teams_sharing_a_tee_are_drawn_apart_and_a_penalty_gap_is_not_run_to_the_pin(tmp_path):

@@ -361,9 +361,21 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
             gimmes = sum(r["outcome"] == "gimme" for r in mine_all)
             entry = {"name": name, "shots": shots, "strokes": strokes, "gimmes": gimmes}
             if name in (teams or {}) or any(r["fmt"] == "scramble" for r in mine_all):
-                # A scramble partner: the strokes the team played on from this player's ball. The
-                # hole's score is the team's, and only one partner's row carries the gimme.
-                entry["used"] = sum(r["id"] in team_used for r in mine)
+                # A scramble partner: the strokes the team played on from this player's ball, plus the
+                # strokes that ball cost without a swing, so the partners' counts add up to the hole's
+                # score: the gimme (only the picked partner's row carries it) and any penalty, the gap
+                # in the team's stroke numbers after a picked shot.
+                if name in (teams or {}):
+                    team = [r for r in rows if (r["player"] or "unknown") in teams
+                            and teams[r["player"]] == teams[name] and not r["mulligan"]]
+                else:
+                    team = [r for r in rows if r["fmt"] == "scramble" and not r["mulligan"]]
+                numbers = sorted({r["shot_number"] for r in team if r["shot_number"]})
+                used = [r for r in mine if r["id"] in team_used]
+                entry["used"] = len(used)
+                entry["used_gimmes"] = gimmes
+                entry["used_pens"] = sum(max(0, nxt - r["shot_number"] - 1) for r in used if r["shot_number"]
+                                         if (nxt := next((n for n in numbers if n > r["shot_number"]), None)))
             players.append(entry)
     if not players:
         return None
