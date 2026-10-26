@@ -989,7 +989,7 @@ function highlightsView(r, h) {
     `<button data-period="${k}" class="${k === state.period ? "on" : ""}">${label}</button>`).join("")}</div></div>`;
   return `<h2>${meTitle("Records")}</h2>${pick}<div class="cards">
     ${card("Longest drive", r.longest_drive, x => Math.round(x.v) + " yd")}
-    ${card("Closest approach", r.closest_approach, x => `${x.outcome === "holed" ? "holed" : ft(x.v) + " ft"} <span class="sub">${esc(x.club || "")}</span>`)}
+    ${card("Closest approach", r.closest_approach, x => `${x.outcome === "holed" ? "holed" : ft(x.v) + " ft"} <span class="sub">${esc(x.club || "")}${x.from_yd != null ? ` from ${x.from_yd} yd` : ""}</span>`)}
     ${card("Longest putt holed", r.longest_putt, x => ft(x.v) + " ft")}
   </div>
   <h2>Moments</h2>

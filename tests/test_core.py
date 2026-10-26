@@ -535,6 +535,39 @@ async def test_interrupt_cancels_a_stalled_synth_so_the_new_line_isnt_held_up():
     assert time.monotonic() - started < 0.5 and played == ["x"]
 
 
+async def test_a_new_shot_drops_waiting_lines_but_lets_the_one_on_air_finish():
+    import asyncio
+
+    from commentator.models import Line
+
+    played: list[str] = []
+    gate = asyncio.Event()
+
+    async def rec_play(audio):
+        played.append("start")
+        await gate.wait()
+        played.append("end")
+
+    tts = _StallingTTS(stall_calls=set())
+    speech = SpeechQueue(_fast_tts_cfg(hedge=30, live=30), tts, player=rec_play, stopper=lambda: None)
+    task = asyncio.create_task(speech.run())
+    speech.say([Line("pbp", "on air"), Line("color", "old news"), Line("pbp", "older news")])
+    while played != ["start"]:
+        await asyncio.sleep(0.01)
+    speech.drop_queued()
+    gate.set()
+    while not speech.is_idle():
+        await asyncio.sleep(0.01)
+    assert played == ["start", "end"]   # the line on air finished, the two behind it never played
+    speech.say([Line("pbp", "the new shot's call")])
+    while not speech.is_idle():
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert played == ["start", "end", "start", "end"]
+
+
 async def test_live_lines_voice_in_parallel_so_a_stall_doesnt_delay_the_next():
     import asyncio
     import time
@@ -1194,6 +1227,34 @@ async def test_flight_line_interrupts_and_beats_reaction(tmp_path):
     first_shot = said[: said.index("after call") + 1]
     assert first_shot == ["pre call", "flight call", "after call"]
     assert len(engine.flight_latencies) == 4
+
+
+async def test_a_reaction_written_after_a_newer_shot_was_hit_is_not_aired(tmp_path):
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.tts.console_simulate_duration = False
+    cfg.commentary.routine_comment_rate = 1.0
+    cfg.commentary.min_seconds_between_comments = 0
+    cfg.commentary.preshot_rate = 1.0
+    holder = {}
+
+    class SupersedingLLM(LLMClient):
+        async def complete_json(self, system, user, schema, images=None):
+            if any(k in user for k in ("React to this shot", "routine shot", "This is a big moment")):   # the live reaction: the next ball is struck while it's out
+                holder["e"]._shot_seq += 1
+                holder["reactions"] = holder.get("reactions", 0) + 1
+                return LLMResult(text=json.dumps({"lines": [{"speaker": "pbp", "text": "stale reaction"}]}))
+            kind = "flight" if user.startswith("IN FLIGHT") else "pre" if user.startswith("PRE-SHOT") else "after"
+            return LLMResult(text=json.dumps({"lines": [{"speaker": "pbp", "text": f"{kind} call"}]}))
+
+    llm = SupersedingLLM(cfg.llm.live)
+    engine = holder["e"] = Engine(cfg=cfg, league=League.load("data/league.example.json"),
+                                  source=ReplaySource("data/flight_test.jsonl", speed=1e6), live_llm=llm,
+                                  segment_llm=llm, speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0),
+                                  await_preshot=True)
+    await engine.run()
+    said = [x.split(": ", 1)[1] for x in next(tmp_path.glob("transcript-*")).read_text().splitlines()]
+    assert "flight call" in said and "stale reaction" not in said
+    assert holder["reactions"] > 0
 
 
 def test_projection_picks_outcomes_for_flight_test_scenarios():

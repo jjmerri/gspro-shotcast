@@ -377,7 +377,7 @@ def records(db: sqlite3.Connection, context: str | None = None, player: str | No
     args = ((player,) if player else ()) + ((since,) if since else ())
     drive = db.execute(f"SELECT player, {_DRIVE} AS v, course, hole FROM shots WHERE {_TEE_DRIVER} AND {_DRIVE} IS NOT NULL"
                        + base + " ORDER BY v DESC LIMIT 1", args).fetchone()
-    approach = db.execute(f"SELECT player, finish_yards AS v, club, outcome, course, hole FROM shots WHERE {A.APPROACH_SQL}"
+    approach = db.execute(f"SELECT player, finish_yards AS v, club, outcome, ROUND(to_pin_yards) AS from_yd, course, hole FROM shots WHERE {A.APPROACH_SQL}"
                           " AND finish_yards IS NOT NULL" + base + " ORDER BY v LIMIT 1", args).fetchone()
     putt = db.execute("SELECT player, to_pin_yards AS v, course, hole FROM shots WHERE is_putt = 1 AND outcome = 'holed'"
                       " AND to_pin_yards IS NOT NULL" + base + " ORDER BY v DESC LIMIT 1", args).fetchone()

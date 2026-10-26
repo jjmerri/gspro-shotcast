@@ -260,7 +260,8 @@ def test_closest_approaches_leave_out_chips_and_par_4_tee_shots(db):
     h = A.highlights(db, A.holes_played(db))
     assert [x["club"] for x in h["approaches"]] == ["8I", "9I"]
     assert [(x["club"], x["outcome"]) for x in h["chips"]] == [("SW", "holed"), ("LW", None)]
-    assert stats_web.records(db)["closest_approach"]["club"] == "8I"
+    best = stats_web.records(db)["closest_approach"]
+    assert (best["club"], best["from_yd"]) == ("8I", 150)
 
 
 def test_a_season_db_from_before_the_stored_nine_still_opens(db):

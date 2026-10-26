@@ -552,6 +552,21 @@ class SpeechQueue:
         if self._synth_task and not self._synth_task.done():
             self._synth_task.cancel()
 
+    def drop_queued(self) -> None:
+        """Drop every line not yet on air (queued, mid-synthesis, or the rest of a prepared exchange)
+        and let the one playing finish: a new shot was hit, so the last one's calls are old news."""
+        dropped = self._text_q.qsize() + self._audio_q.qsize()
+        self._generation += 1
+        self._drain(self._text_q)
+        self._drain(self._audio_q)
+        if self._synth_task and not self._synth_task.done():
+            self._synth_task.cancel()
+            dropped += 1
+        if self._gap and not self._gap.done():
+            self._gap.cancel()
+        if dropped:
+            log.info("New shot: dropped %s lines still waiting to air", dropped)
+
     def _drain(self, q: asyncio.Queue) -> None:
         while not q.empty():
             item = q.get_nowait()

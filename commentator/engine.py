@@ -3452,6 +3452,8 @@ class Engine:
         self._shot_seq += 1
         my_seq = self._shot_seq   # this shot's order, to keep concurrent handlers from reordering finish
         tag = f"[shot {self._shot_seq}]"
+        if self.speech is not None:
+            self.speech.drop_queued()   # the ball's in the air: the last shot's calls are old news
         lag = f", {time.time() - event.logged_at:.2f}s after GSPconnect logged it" if event.logged_at else ""
         log.info("%s detected%s: club %s, ball %.1f mph, launch %s, start %.1f, spin %s @ axis %.1f, carry %.1f %s, putt=%s",
                  tag, lag, shot.club, shot.ball_speed or 0,
@@ -3545,7 +3547,7 @@ class Engine:
                 log.info("%s projection: carry %.0f yd vs pin %s (elevation %s), drift %+.0f yd -> %s; plan %s",
                          tag, proj.carry, f"{pin:.0f} yd" if pin else "unknown", before.elevation_yards,
                          proj.lateral, proj.outcome, "ready" if fresh else ("stale" if plan else "none"))
-            if picked:
+            if picked and self._shot_seq == my_seq:   # not if another ball was struck during the impact read
                 outcome, text = picked
                 self.stats["flight_planned"] += 1
                 log.info("%s mid-flight call (%s) from the plan, audio %s, %.2fs after detection: %r", tag, outcome,
@@ -3558,9 +3560,9 @@ class Engine:
                     self.speech.say([line], interrupt=True, deadline=impact + self.cfg.tts.flight_audio_deadline_seconds)
                 self._write_transcript([line], "flight")
                 self.flight_latencies.append(time.monotonic() - impact)
-            else:
+            elif self._shot_seq == my_seq:
                 flight_task = asyncio.create_task(
-                    self._in_flight(projected, before, player, impact_image, impact, factor))
+                    self._in_flight(projected, before, player, impact_image, impact, factor, my_seq))
 
         # A ball in the water is a penalty with no resting lie to wait for, so SAY its splash NOW, off
         # the GSPro log's Hit_water (ingested by this point, after the impact read), instead of behind
@@ -3570,7 +3572,7 @@ class Engine:
         splash_said = False
         if c.pre_reactions and not shot.is_putt and shot_plan and shot_plan.reactions.get("water") \
                 and time.monotonic() - shot_plan_made_at < 180 and shot_plan.player in (None, player) \
-                and self._shot_wet(player, since=impact):
+                and self._shot_seq == my_seq and self._shot_wet(player, since=impact):
             text = shot_plan.reactions["water"]
             line = Line(speaker=self.speakers[0], text=text)
             self.state.record_lines([line])
@@ -3937,6 +3939,11 @@ class Engine:
         # recorded, so skip every further reaction.
         if splash_said:
             return
+        if self._shot_seq != my_seq:
+            # Another ball was struck while this one was followed to rest (a quick mulligan, the next
+            # player): its call would land on top of the new shot, about one already in the past.
+            log.info("%s reaction skipped: a newer shot was hit %.1fs after this one", tag, time.monotonic() - impact)
+            return
 
         # A ball in the water gets its splash reaction instantly, from the plan, off the GSPro log's
         # Hit_water (logged at the splash, unlike the penalty score which only lands after the drop).
@@ -4112,7 +4119,11 @@ class Engine:
             angle=self.rng.choice(ANGLES if not self.round or self.round.is_league else PRACTICE_ANGLES),
             big=score >= c.big_moment_threshold,
         )
-        await self._speak("shot", self.live_llm, user, facts_text, [], must=must, shot_id=shot_id)
+        lines = await self._compose("shot", self.live_llm, user, facts_text, [], must=must)
+        if self._shot_seq != my_seq:
+            log.info("%s reaction dropped: a newer shot was hit while it was written", tag)
+            return
+        self._air_lines("shot", lines, shot_id)
 
     def _trail_carry(self, player: str | None, entry: tuple) -> None:
         """Add a stroke to the player's trail in shot order, and teach the carry model from every full
@@ -4827,7 +4838,8 @@ class Engine:
             log.exception("Couldn't save review image")
 
     async def _in_flight(
-        self, shot, before: Hud, player: str | None, image: bytes | None, impact: float, factor: float
+        self, shot, before: Hud, player: str | None, image: bytes | None, impact: float, factor: float,
+        seq: int | None = None,
     ) -> None:
         deadline = self.cfg.commentary.flight_deadline_seconds
         images = [image] if image and self.flight_llm.cfg.vision else []
@@ -4851,7 +4863,7 @@ class Engine:
         self.flight_latencies.append(elapsed)
         # No retry: there isn't time. A bad line is simply not said.
         good, _ = self._grounded(lines[:1], facts_text, mode="flight", seen_image=bool(images))
-        if not good:
+        if not good or (seq is not None and self._shot_seq != seq):   # another ball's in the air now
             return
         line = Line(speaker=self.speakers[0], text=good[0].text)
         self.state.record_lines([line])
