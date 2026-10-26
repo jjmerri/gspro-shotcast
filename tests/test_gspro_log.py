@@ -507,6 +507,36 @@ def test_a_kick_off_the_cart_path_is_a_fact():
     assert asyncio.run(Engine._kick_facts(me, s.fires, "rough", True, wait=0)) == []
 
 
+def test_a_tree_hit_is_logged_on_its_shot_and_called_by_its_height():
+    from types import SimpleNamespace
+    from commentator.engine import Engine
+    from commentator.models import Shot
+
+    # Dan's approach on Tobacco Road 9, then a topped ball that ran into a bush. The roll line can
+    # come glued to a garbled one; it still marks the ball at rest.
+    s = GsproState()
+    for line in [" * ------- Shot Fired! ------- *", "LaunchExt - Regular Mode",
+                 " ** Leaves hitTime, 1.53 , HitCount 1, Penalty 33.9% , Accumulated penalty 33.9% ",
+                 "Using Material TVGdeeprough", "LM Type \ua212Roll dist ft9.689",
+                 " * ------- Shot Fired! ------- *", " * Leaves pas thru at hit 1",
+                 " ** Leaves hitTime, 1.84 , HitCount 1, Penalty 18.2% , Accumulated penalty 18.2% ",
+                 " ** Leaves hitTime, 2.10 , HitCount 2, Penalty 10.0% , Accumulated penalty 26.4% "]:
+        for ev in parse_events(line):
+            s.apply(ev)
+    first, second = s.fire_info(s.fires - 1), s.fire_info(s.fires)
+    assert first["leaves"] == [(1.53, 1, 33.9, 33.9)] and "rest_at" in first
+    assert len(second["leaves"]) == 2 and second["leaves_pass"] == 1 and "rest_at" not in second
+
+    me = SimpleNamespace(gspro=s, _raw_yards=Engine._raw_yards)
+    approach = Shot(ball_speed=112.15, vla=18.43, total_spin=2992, spin_axis=-1.69, carry=171.77)
+    fact = Engine._tree_facts(me, s.fires - 1, approach, 0.0)[0]
+    assert "high up in a tree" in fact and "once" in fact and "34%" in fact
+    topped = Shot(ball_speed=122, vla=-5.9, total_spin=1500, spin_axis=0, carry=1)
+    fact = Engine._tree_facts(me, s.fires, topped, 0.0)[0]
+    assert "as it came down" in fact and "2 times" in fact and "26%" in fact
+    assert Engine._tree_facts(me, s.fires, Shot(putter=True), 0.0) == []
+
+
 SCRAMBLE = "tests/data/gspro_scramble_sample.txt"
 
 

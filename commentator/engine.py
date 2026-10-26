@@ -16,6 +16,7 @@ from typing import Any
 
 from .carry_model import CarryModel, correct_for_elevation
 from .config import Config
+from .flight import point_at
 from .facts import (
     PUTT_FOR_FACT, SCORE_NAMES, _fmt_to_par, _to_par_value, club_delivery_facts, club_delivery_notable, club_name, flight_facts,
     history_facts, ordinal, preshot_facts, putt_elevation_inches, shot_facts, to_yards, WRONG_GREEN_YARDS, wrong_green_fact,
@@ -3600,7 +3601,10 @@ class Engine:
                 self.gspro.hole_outs_of(end_idx) > impact_snap[2].get(end_idx, 0)
                 or self.gspro.gimmies_of(end_idx) > impact_snap[3].get(end_idx, 0))
 
-        after, landed = await self._follow_shot(before, tag, shot.is_putt, hole_over) if ocr \
+        def at_rest() -> bool:   # GSPro's log has this shot's ball stopped
+            return self._log_truth and "rest_at" in self.gspro.fire_info(self.gspro.fire_of(fires0, impact))
+
+        after, landed = await self._follow_shot(before, tag, shot.is_putt, hole_over, at_rest) if ocr \
             else (Hud(), event.hud_hint is not None)
         if use_screen:
             log.info("%s final reading %.1fs after impact (landed=%s): lie %s, carry %s, total %s, offline %s", tag,
@@ -3634,7 +3638,10 @@ class Engine:
         carry_idx = None if unnamed else self._gspro_idx(player)
         dropped = None if carry_idx is None else impact_snap[7].get(carry_idx, 0)
         learn = None
-        if carry_game:
+        tree_hits = len(self.gspro.fire_info(self.gspro.fire_of(fires0, impact)).get("leaves") or ())
+        if carry_game and tree_hits:
+            log.info("%s hit foliage %s time(s) in flight: its carry isn't learned from", tag, tree_hits)
+        elif carry_game:
             learn_base, learn_carry = ("gspro", carry_flat) if carry_flat else ("lm", self._raw_yards(shot))
             learn = (before.lie, learn_carry, carry_game, self.current_course, shot.vla, learn_base)
         self._trail_carry(player, (my_seq, (shot_round.id if shot_round else None, shot_hole, before.shot_number),
@@ -3757,7 +3764,7 @@ class Engine:
             is_league=bool(r and r.is_league), shared_ball=shared,
             # where GSPro's log had the ball for this shot, and the player's minimap aim, for the replay
             start=self.gspro.fire_info(fire).get("start"), aim=self.gspro.fire_info(fire).get("aim"),
-            handed=before.handed or shot.handed or self.handed.get(player or ""),
+            handed=before.handed or shot.handed or self.handed.get(player or ""), tree_hits=tree_hits or None,
         )
         rec.shot_id = shot_id
         # Not gated on the screen seeing touchdown: the finish comes from GSPro's log at the next shot,
@@ -3784,6 +3791,9 @@ class Engine:
         if kick := await self._kick_facts(fire, hud.lie, shot.is_putt):
             score = max(score, c.interest_threshold)   # a bounce off the cart path gets its word
             replay_facts = replay_facts + kick
+        if tree := self._tree_facts(fire, shot, impact, tag):
+            score = max(score, c.interest_threshold)   # a ball knocked down by a tree gets its word
+            replay_facts = replay_facts + tree
         self._shot_id = shot_id   # for record_lines linkage; the local guards against a concurrent task
         log.info("%s by %s: interest %.2f %s", tag, player or "unknown", score, tags)
 
@@ -4291,6 +4301,37 @@ class Engine:
         return [f"The ball landed on {what} and kicked off it, finishing in the {lie}. That bounce is "
                 f"worth a word."]
 
+    def _tree_facts(self, fire: int | None, shot: Shot, impact: float, tag: str = "") -> list[str]:
+        """A fact when GSPro's log had the ball hit foliage in flight. GSPro doesn't say what it hit, so
+        the height there (modelled from the launch numbers) tells a tree from a bush."""
+        info = self.gspro.fire_info(fire)
+        if shot.is_putt or not (hits := info.get("leaves")):
+            return []
+        t, _, _, _ = hits[0]
+        lost = hits[-1][3]
+        # Only the first hit's height is modelled: the ball flew on slowed after it.
+        p = point_at(shot.ball_speed, shot.vla, shot.total_spin, shot.spin_axis, self._raw_yards(shot), t)
+        log.info("%s hit foliage %s time(s) (logged %.1fs after impact): first at %.2fs into the flight, "
+                 "~%s ft up and %s yd out by the model, %.0f%% of its speed lost%s", tag, len(hits),
+                 info["leaves_at"] - impact if "leaves_at" in info else float("nan"), t,
+                 f"{p.height_ft:.0f}" if p else "?", f"{p.out_yd:.0f}" if p else "?", lost,
+                 " (past the modelled landing)" if p and p.landed else "")
+        if p is None:
+            where = "somewhere along the way"
+        elif p.landed or p.height_ft < 10:
+            where = (f"low to the ground about {p.out_yd:.0f} yards out, so a bush or the lowest branches "
+                     "of a tree" if not p.landed else
+                     f"as it came down around {p.out_yd:.0f} yards out, into the trees or bushes there")
+        elif p.height_ft < 30:
+            where = f"in the branches of a tree, roughly {p.height_ft:.0f} feet up and {p.out_yd:.0f} yards out"
+        else:
+            where = f"high up in a tree, roughly {p.height_ft:.0f} feet up and {p.out_yd:.0f} yards out"
+        times = "once" if len(hits) == 1 else f"{len(hits)} times"
+        return [f"The ball hit foliage {times} in flight: {where}, by our estimate. It cost the ball about "
+                f"{lost:.0f}% of its speed, so the trees, not the swing, cut this shot short. Worth a word "
+                f"(an unlucky branch, a tree that jumped out). The height and distance are estimates: keep "
+                f"them loose, never exact."]
+
     def _use_setup_lie(self, before: Hud, tag: str = "") -> None:
         """The lie this stroke's setup read, while the player stood over the ball, over the impact
         read's: that comes ~3 s after the swing, when the lie box may show where the ball landed."""
@@ -4669,7 +4710,8 @@ class Engine:
             await asyncio.sleep(poll)
 
     async def _follow_shot(self, before: Hud, tag: str = "", is_putt: bool = False,
-                           ended: Callable[[], bool] | None = None) -> tuple[Hud, bool]:
+                           ended: Callable[[], bool] | None = None,
+                           at_rest: Callable[[], bool] | None = None) -> tuple[Hud, bool]:
         """Follows the ball through the HUD from impact until it stops.
 
         Checked on gameplay video: CARRY (game) counts up and freezes at touchdown (the lie flips
@@ -4718,6 +4760,8 @@ class Engine:
                          tag, time.monotonic() - started)
                 return _unsettled(last or landing or Hud(), tag), touchdown is not None
             reads += 1
+            # Asked BEFORE the read, so a rest logged mid-read can't vouch for a capture taken in flight.
+            logged_rest = at_rest is not None and at_rest()
             hud = await self.screen.read_hud_async(["lie", "player_name", "tiles"])
             if who is None and hud.name_sig not in (None, NAME_DARK):
                 who = hud.name_sig
@@ -4741,8 +4785,18 @@ class Engine:
                 landing, steady = hud, 0  # landing read; kept only as a fallback if the HUD moves on
                 log.info("%s touchdown ~%.1fs into the follow; following to rest", tag, touchdown)
                 if callable(getattr(self.screen, "grab_regions", None)):
-                    return await self._follow_to_rest(hud, who, tag, started, deadline, poll, ended)
+                    return await self._follow_to_rest(hud, who, tag, started, deadline, poll, ended, at_rest)
             prev_game = game
+            if logged_rest:
+                # GSPro's log had the ball stopped before this read was taken, so it is at rest. Without it the
+                # follow waits for the screen to show a landing, which a short or low ball may never do
+                # (a 28-yard mishit waited out the whole cap). The carry is only learnable once the tiles
+                # are known to be this shot's.
+                log.info("%s ball at rest in the GSPro log %.1fs into the follow (%s reads), resting lie %s",
+                         tag, time.monotonic() - started, reads, hud.lie)
+                if game is None and total is None:   # the next player's address: not this shot's read
+                    return _unsettled(last or landing or Hud(), tag), touchdown is not None
+                return hud, touchdown is not None or mine
             # Moved on to the next player: their address HUD shows carry (game) AND total length both
             # blank or the "--.--" placeholder (both parse to None) - the next shot hasn't been hit. The
             # tiles dict stays NON-empty on that placeholder, so test the parsed values, not emptiness.
@@ -4776,7 +4830,8 @@ class Engine:
         return _unsettled(last or landing or Hud(), tag), touchdown is not None
 
     async def _follow_to_rest(self, landing: Hud, who, tag: str, started: float, deadline: float,
-                              poll: float, ended: Callable[[], bool] | None = None) -> tuple[Hud, bool]:
+                              poll: float, ended: Callable[[], bool] | None = None,
+                              at_rest: Callable[[], bool] | None = None) -> tuple[Hud, bool]:
         """From touchdown on, watch the HUD's pixels rather than OCR it: a read OCRs the lie and the
         tiles one after the other (1.2-1.5 s), and GSPro shows the ball at rest only a second or so
         before moving the player box on, so the read-until-steady follow rarely saw a drive stop and
@@ -4794,6 +4849,7 @@ class Engine:
                 log.info("%s hole over in the GSPro log %.1fs into the follow; not waiting to see the ball stop",
                          tag, time.monotonic() - started)
                 return _unsettled(landing, tag), True
+            logged_rest = at_rest is not None and at_rest()   # before the grab: it must come after the rest
             try:
                 crops = await asyncio.to_thread(self.screen.grab_regions, parts)
             except Exception:
@@ -4812,10 +4868,12 @@ class Engine:
             fits = box and tiles is not None and tiles.size == landing.tile_crop_size
             total = tiles.crop(box) if fits else tiles
             steady = steady + 1 if total is not None and prev is not None and not _pixels_changed(prev, total) else 0
-            if steady >= 2:
+            logged_rest = logged_rest and steady < 2
+            if steady >= 2 or logged_rest:
                 hud = await asyncio.to_thread(self.screen.read_hud, parts, None, crops)
-                log.info("%s ball at rest: %s still %.1fs into the follow, resting lie %s", tag,
-                         "total length" if fits else "tiles", time.monotonic() - started, hud.lie)
+                log.info("%s ball at rest: %s %.1fs into the follow, resting lie %s", tag,
+                         "in the GSPro log" if logged_rest else ("total length" if fits else "tiles") + " still",
+                         time.monotonic() - started, hud.lie)
                 if self.cfg.screen.save_review_images:
                     await asyncio.to_thread(self._save_review_image, tag, "final")
                 # The next player's address shows both distance tiles blank ("--.--"): the box moved

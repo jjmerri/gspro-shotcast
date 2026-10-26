@@ -60,6 +60,8 @@ class LogEvent:
     altitude_ft: float | None = None  # altitude: the course altitude GSPro's ball physics is using
     pos: tuple | None = None          # position: the ball's world (x, y, z) in metres; aim: the minimap (x, y)
     holes: list | None = None         # layout: each hole's par and world tee/pin/waypoint (see _layout_holes)
+    leaves: tuple | None = None       # leaves: (seconds into the flight, hit count, penalty %, accumulated penalty %)
+    roll_ft: float | None = None      # roll: how far the ball rolled after landing, logged as it comes to rest
 
 
 # GSPro's `Using Material TVG<surface>` names mapped to the booth's lie vocabulary (commentator/hud.py
@@ -112,10 +114,21 @@ _HAZARD = re.compile(rf"^Haz entry Point \(({_FLOAT}), ({_FLOAT}), ({_FLOAT})\)"
 # centre. GSPro fits the map so the ball sits near (0, -338) and the pin near (0, +339): y runs up the
 # ball-to-pin line and x to its right, about 677 units for the whole distance (see aim_offset).
 _AIM = re.compile(rf"^\(({_FLOAT}), ({_FLOAT}), 0\.0\)$")
+# The ball went into foliage in flight and lost speed for it. GSPro names no object (tree or bush):
+# only the time into the flight, the hit's number on the shot and the speed it cost. Logged among the
+# launch lines, before the landing ones. A "Leaves pas thru at hit N" line instead means the ball went
+# through the foliage at no cost.
+_LEAVES = re.compile(rf"^\*\* Leaves hitTime,\s*({_NUM})\s*,\s*HitCount\s*(\d+),\s*Penalty\s*({_NUM})%\s*,"
+                     rf"\s*Accumulated penalty\s*({_NUM})%")
+_LEAVES_PASS = re.compile(r"^\* Leaves pas thru at hit (\d+)")
+# Logged once per shot (putts too, and water) as the ball comes to rest, before the shooter's score
+# block: the end of the ball's motion, whatever the screen shows.
+_ROLL = re.compile(rf"Roll dist ft\s*(-?{_NUM})")
 # Words that start a line the parser depends on. One that carries the word but doesn't parse means
 # GSPro changed its wording (an update): it comes out as an "unparsed" event for the health checks.
 # A season's log had none, so any is worth a look.
-_MARKERS = ("ActivePlayer:", "Logging tdist", "Selecting shot", "Using Material", "LaunchExt -", "Penalty Surface")
+_MARKERS = ("ActivePlayer:", "Logging tdist", "Selecting shot", "Using Material", "LaunchExt -", "Penalty Surface",
+            "Leaves", "Roll dist")
 
 
 def parse_events(text: str) -> list[LogEvent]:
@@ -186,6 +199,13 @@ def parse_events(text: str) -> list[LogEvent]:
                     out.append(LogEvent("hazard", pos=pos))
             elif m := _AIM.match(line):
                 out.append(LogEvent("aim", pos=(float(m.group(1)), float(m.group(2)))))
+            elif m := _LEAVES.match(line):
+                out.append(LogEvent("leaves", leaves=(float(m.group(1)), int(m.group(2)), float(m.group(3)),
+                                                      float(m.group(4)))))
+            elif _LEAVES_PASS.match(line):
+                out.append(LogEvent("leaves_pass"))
+            elif m := _ROLL.search(line):
+                out.append(LogEvent("roll", roll_ft=float(m.group(1))))
             elif m := _VERSION.match(line):
                 out.append(LogEvent("version", display=m.group(1)))
             elif m := _ALTITUDE.match(line):
@@ -460,6 +480,18 @@ class GsproState:
         elif ev.kind == "hazard":
             if self.fires in self._fire_info:
                 self._fire_info[self.fires].setdefault("hazard", ev.pos)
+        elif ev.kind == "leaves":
+            if self.fires in self._fire_info:
+                info = self._fire_info[self.fires]
+                info.setdefault("leaves_at", time.monotonic())
+                info.setdefault("leaves", []).append(ev.leaves)
+        elif ev.kind == "leaves_pass":
+            if self.fires in self._fire_info:
+                info = self._fire_info[self.fires]
+                info["leaves_pass"] = info.get("leaves_pass", 0) + 1
+        elif ev.kind == "roll":
+            if self.fires in self._fire_info:
+                self._fire_info[self.fires].setdefault("rest_at", time.monotonic())
         elif ev.kind == "penalty_surface":
             self.logs_penalty_surface = True
             if self.fires in self._fire_info:

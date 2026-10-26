@@ -41,6 +41,13 @@
    lie isn't named (except the green); the next setup and GSPro's log record where it stopped.
    A shot that GSPro's log says ended the hole (holed, or stopped inside the gimme circle) stops
    the follow there, so a chip that ends the hole is called without waiting to see it at rest.
+   GSPro also logs the end of every shot's roll (`Roll dist ft`): the first read after that line is
+   taken as at rest, so a short or low ball the screen never shows landing doesn't wait out the cap.
+   A ball that GSPro's log says hit foliage in flight (`Leaves hitTime`) gets a reaction fact. GSPro
+   doesn't say whether it was a tree or a bush, so `flight.py` models the height at the first hit from
+   the launch numbers: under 10 ft is a bush or low branches, 10-30 ft the branches of a tree, higher
+   is high up in a tree, and a hit after the modelled landing is the ball running into the trees as it
+   came down. Its shortened carry isn't learned from (`shots.tree_hits`).
 
 **Voices.** Lines are voiced as soon as they're written, several at once, and played in order. A
 cloud voice streams: a line starts playing once `tts.stream_prebuffer_seconds` (0.3) of audio has

@@ -1400,6 +1400,10 @@ def test_carry_is_leveled_by_where_the_ball_came_to_rest(tmp_path):
     st.set_left_out(2, True)
     assert [(round(c), round(g)) for _, c, g, *_ in st.carry_pairs()] == [(240, 234), (150, 149)]
     st.set_left_out(2, False)
+    # Nor does a ball knocked down by a tree: its short carry isn't the lie's or the elevation's doing.
+    st.db.execute("UPDATE shots SET tree_hits = 1 WHERE id = 4")
+    assert [(round(c), round(g)) for _, c, g, *_ in st.carry_pairs()] == [(240, 234), (60, 70)]
+    st.db.execute("UPDATE shots SET tree_hits = NULL WHERE id = 4")
 
     # A later round's second shot on hole 2 says nothing about where this round's tee shot rested.
     hit("Hole 2", 2, 60.0, 60.0, "60 yards", 10.0)
@@ -1745,6 +1749,31 @@ async def test_follow_shot_stops_when_the_log_says_the_chip_ended_the_hole(tmp_p
                                             ended=lambda: reads >= 3)
     assert time.monotonic() - started < 1 and reads == 3
     assert not landed and hud.lie is None
+
+
+async def test_follow_shot_stops_when_the_log_has_the_ball_at_rest(tmp_path):
+    # Dan's 28-yard mishit: the screen never showed a landing, so the follow sat out its 12 s cap
+    # though the ball stopped at once. GSPro logging the roll's end stops it at the next read, which
+    # is at rest, so its lie is named and (the tiles having climbed: this shot's) its carry learnable.
+    frames = iter([Hud(player_text="P", shot_number=1, lie="rough", tiles={"carry (game)": c, "total length": c})
+                   for c in ("15.0", "20.6", "28.1", "28.1", "28.1", "28.1")])
+    reads = 0
+
+    class Screen:
+        async def read_hud_async(self, parts):
+            nonlocal reads
+            reads += 1
+            return next(frames)
+
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.screen.follow_poll_seconds = 0.05
+    cfg.screen.follow_max_seconds = 12
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=Screen())
+    hud, landed = await engine._follow_shot(Hud(player_text="P", shot_number=1, lie="tee"),
+                                            at_rest=lambda: reads >= 3)
+    # Logged during the third read: that capture may predate the stop, so the fourth is the one used.
+    assert reads == 4 and landed and hud.lie == "rough" and hud.tiles["total length"] == "28.1"
 
 
 async def test_follow_shot_reads_the_resting_lie_not_the_landing_lie(tmp_path):

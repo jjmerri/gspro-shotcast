@@ -306,7 +306,7 @@ class Store:
                  "outcome": "TEXT", "fmt": "TEXT", "attributed": "INTEGER NOT NULL DEFAULT 1",
                  "is_league": "INTEGER NOT NULL DEFAULT 1", "mulligan": "INTEGER NOT NULL DEFAULT 0",
                  "shared_ball": "INTEGER NOT NULL DEFAULT 0", "left_out": "INTEGER NOT NULL DEFAULT 0", "handed": "TEXT",
-                 "picked": "INTEGER",
+                 "picked": "INTEGER", "tree_hits": "INTEGER",
                  **{col: "REAL" for col in CLUB_COLS}, **{col: "REAL" for col in POSITION_COLS},
                  **{col: "REAL" for col in HAZARD_COLS}}
         for col, decl in added.items():
@@ -373,6 +373,7 @@ class Store:
         gimme_yards: float | None = None, outcome: str | None = None, fmt: str | None = None,
         attributed: bool = True, is_league: bool = True, shared_ball: bool = False,
         start: tuple | None = None, aim: tuple | None = None, handed: str | None = None,
+        tree_hits: int | None = None,
     ) -> int:
         cur = self.db.execute(
             """INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, ball_speed,
@@ -381,9 +382,9 @@ class Store:
                    score_to_par, lie_after, carry_raw_tile_yards, carry_game_yards, total_yards, offline_yards,
                    tags, raw, to_pin_yards, finish_yards, gimme_yards, outcome, fmt, attributed, is_league,
                    shared_ball, club_path, angle_of_attack, face_to_target, dynamic_loft, face_impact_h,
-                   face_impact_v, start_x, start_y, start_z, aim_map_x, aim_map_y, handed)
+                   face_impact_v, start_x, start_y, start_z, aim_map_x, aim_map_y, handed, tree_hits)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                       ?,?,?,?,?,?)""",
+                       ?,?,?,?,?,?,?)""",
             (self.session_id, shot.timestamp, player, course, hole, before.shot_number or after.shot_number, shot.club,
              int(shot.is_putt), shot.ball_speed, shot.vla, shot.hla, shot.total_spin, shot.spin_axis,
              shot.club_speed, shot.carry, shot.units, before.lie, before.slope_updown, before.slope_side,
@@ -393,7 +394,7 @@ class Store:
              json.dumps(tags), json.dumps(shot.raw),
              to_pin_yards, finish_yards, gimme_yards, outcome, fmt, int(attributed), int(is_league),
              int(shared_ball), *_club_values(shot), *_position_values(start, aim),
-             (handed or before.handed or shot.handed or "").strip().upper() or None),
+             (handed or before.handed or shot.handed or "").strip().upper() or None, tree_hits),
         )
         self._unhole_if_played_on(cur.lastrowid, later=False)
         self._fill_previous_finish(cur.lastrowid)
@@ -729,7 +730,7 @@ class Store:
         rows = self.db.execute(
             """SELECT id, session_id, player, hole, shot_number, is_putt, mulligan, fmt, lie_before, carry_raw,
                       units, carry_raw_tile_yards, carry_game_yards, elevation_yards, to_pin, course,
-                      launch_angle, finish_yards, ts, attributed, shared_ball, left_out
+                      launch_angle, finish_yards, ts, attributed, shared_ball, left_out, tree_hits
                FROM shots ORDER BY id"""
         ).fetchall()
         # Each player's next stroke (by impact time: rows are written as shot handlers finish, which
@@ -752,7 +753,9 @@ class Store:
         out = []
         for r in rows:
             # (a left-out shot still marks where the one before it came to rest, above)
-            if r["is_putt"] or r["left_out"] or not r["lie_before"] or not (r["carry_game_yards"] or 0) > 0:
+            # (a ball knocked down by a tree carried short of what the lie and elevation explain)
+            if r["is_putt"] or r["left_out"] or r["tree_hits"] or not r["lie_before"] \
+                    or not (r["carry_game_yards"] or 0) > 0:
                 continue
             if r["carry_raw_tile_yards"]:
                 base, carry = "gspro", r["carry_raw_tile_yards"]
