@@ -1062,6 +1062,9 @@ def test_facts_describe_flight_and_count_streaks():
              ShotRecord("Tony", Shot(club="5I", hla=3.0, carry=180), None, Hud(), [])]
     hist = " ".join(history_facts("Tony", prior))
     assert "Tony's 3rd shot today" in hist and "last 2 full shots before this one all started right" in hist
+    assert "180 yards" in hist
+    prior[1].carry_game = 191.4   # GSPro's carry for the conditions replaces the launch monitor's
+    assert "191 yards" in " ".join(history_facts("Tony", prior)) and "180" not in " ".join(history_facts("Tony", prior))
 
 
 def test_grounding_rejects_invented_numbers_counts_and_outcomes():
@@ -2030,6 +2033,35 @@ def test_penalty_tracking_is_per_player_and_resets_each_hole(tmp_path):
     # A new hole clears the counts, so shot 1 on the next hole is not read as a drop from Toby's 2.
     engine._last_hud_shot = {}
     assert engine._penalty_facts("Toby", 1) == []
+
+
+def test_a_tee_shot_never_reads_the_last_holes_penalty_from_the_log(tmp_path):
+    from commentator.store import Store
+
+    cfg = Config(log_dir=str(tmp_path))
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, store=Store(str(tmp_path / "s.db")))
+    # The log still has the player on the hole before, with a penalty there, until they hit here.
+    engine.gspro.current_hole, engine.gspro.hole_by[0] = 13, 13
+    engine.gspro._penalties[(0, 13)] = 1
+    engine._gspro_idx = lambda player: 0
+    assert engine._penalty_facts("Dan", 1) == []
+    assert "penalty" in engine._penalty_facts("Dan", 3)[0].lower()   # mid-hole, the log's count stands
+
+
+def test_a_stale_shot_1_hud_after_a_scramble_pick_takes_the_logs_stroke(tmp_path):
+    from commentator.hud import Hud
+    e = _mini_engine(tmp_path)
+    g = e.gspro
+    g.team_scores, g.pick, g.current_hole, g.hole_by[1] = True, (0, 5), 5, 5
+    g._score[(1, 5)], g._pick_stroke, g.to_pin_by[1], g.lie_by[1] = 3, 1, 262.1 / 1.0936133, None   # 3: a penalty on his unpicked ball
+    hud = Hud(shot_number=1, to_pin="437.8 yards", lie="rough")
+    e._fix_stale_pick_hud(hud, 1)
+    assert hud.shot_number == 2 and hud.to_pin.startswith("262.") and hud.lie == "rough"
+    g.hole_scores[(0, 5)] = 4   # the hole is over: shot 1 is the next tee, left alone
+    tee = Hud(shot_number=1, to_pin="437.8 yards", lie="tee")
+    e._fix_stale_pick_hud(tee, 1)
+    assert tee.shot_number == 1 and tee.to_pin == "437.8 yards"
 
 
 def test_a_stroke_played_on_is_not_holed(tmp_path):
@@ -3401,7 +3433,11 @@ def test_a_setup_replaying_the_last_swing_is_called_a_mulligan(tmp_path):
                                    par=3, lie_before="tee", shot_number=1))
     nxt = Hud(shot_number=2, to_pin="69.2 yards")
     assert e._mulligan_facts("Paul", nxt) == [] and not getattr(nxt, "_mulligan", False)   # just the next shot
-    again = Hud(shot_number=1, to_pin="191.0 yards")
+    # Just after a scramble pick the HUD still shows the tee's stroke and distance, but the lie is the
+    # picked ball's: not a replay.
+    stale = Hud(shot_number=1, to_pin="191.0 yards", lie="fairway")
+    assert e._mulligan_facts("Paul", stale) == [] and not getattr(stale, "_mulligan", False)
+    again = Hud(shot_number=1, to_pin="191.0 yards", lie="tee")
     facts = e._mulligan_facts("Paul", again)
     assert len(facts) == 1 and "mulligan" in facts[0] and "3-hybrid that finished in the deep rough" in facts[0]
     assert again._mulligan
@@ -3735,6 +3771,43 @@ def test_gspro_revealing_a_scramble_makes_the_round_one(tmp_path):
     assert any("Sam's ball" in f for f in e._format_facts())
 
 
+def test_the_scramble_pick_fact_names_the_stroke_it_came_from(tmp_path):
+    # A reaction to the last hitter's stroke 2 once read "the team picked Sam's ball" (stroke 1's
+    # pick) as stroke 2's, and the booth announced a choice GSPro hadn't made.
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    e.round = Round(league=e.league, gspro_players=["Pat", "Sam"], course="X", scheduled_format="scramble",
+                    holes=9, is_league=False, slot_names=["Pat", "Sam"])
+    g = e.gspro
+    g.pick, g._pick_stroke, g.current_hole = (1, 0), 1, 0
+    assert e._pick_facts(2, setup=True) == ["Stroke 2 is played from Sam's ball, the team's pick from stroke 1."]
+    assert e._pick_facts(3, setup=True) == []   # a stale pick is no setup fact
+    assert e._pick_facts(1) == ["The team picked Sam's ball from the stroke-1 shots; stroke 2 is played from there."]
+    late = e._pick_facts(2)
+    assert "Stroke 2 was played from Sam's ball" in late[0] and "don't say or guess" in late[1]
+    g.pick = None
+    assert len(e._pick_facts(1)) == 1 and "don't say or guess" in e._pick_facts(1)[0]
+    assert e._pick_facts(1, setup=True) == []
+
+
+def test_the_hole_recap_counts_strokes_not_swings(tmp_path):
+    from commentator.hud import Hud
+    from commentator.models import Shot
+    from commentator.state import SessionState, ShotRecord
+    st = SessionState()
+    def rec(player, n, carry, game=None, picked=None, mulligan=False):
+        r = ShotRecord(player, Shot(club="9I", carry=carry), "8", Hud(lie="green"), [], shot_number=n,
+                       carry_game=game, picked=picked)
+        r.mulligan = mulligan
+        st.record_shot(r)
+    rec("Derek", 1, 114.6, 131.9, picked=False, mulligan=True)
+    rec("Derek", 1, 114.6, 131.9, picked=True)
+    rec("Dan", 1, 114.6, 128.0, picked=False)
+    recap = st.hole_recap("8")
+    assert len(recap) == 2 and "carried 132" in recap[0] and "stroke 1" in recap[0]
+    assert "played on from this ball" in recap[0] and "not used" in recap[1]
+
+
 def test_a_shamble_stores_no_scramble_picks(tmp_path):
     from commentator.round import Round
     e = _mini_engine(tmp_path)
@@ -4018,3 +4091,21 @@ def test_every_great_shot_has_its_own_excitement_level():
     assert (approach_gimme_level(120.0), approach_gimme_level(160.0)) == (8, 9)
     assert approach_gimme_level(120.0, finish_feet=0.8) == 9
     assert (stuffed_level(12.0), stuffed_level(5.1), stuffed_level(5.6)) == (6, 8, 6)   # as it is said
+
+
+def test_a_booth_left_running_overnight_starts_the_morning_in_a_new_session(tmp_path):
+    import time as _time
+
+    from commentator.hud import Hud
+    from commentator.models import Shot
+    from commentator.store import Store
+
+    s = Store(str(tmp_path / "s.db"))
+    night = s.session_id
+    s.record_shot(player="Dan", hole="Hole 1", shot=Shot(club="DR"), before=Hud(lie="tee", shot_number=1), after=Hud(),
+                  tags=[], carry_game_yards=None, total_yards=None, offline_yards=None)
+    last = s.db.execute("SELECT ts FROM shots").fetchone()[0]
+    assert not s.roll_session_if_idle(now=last + 3600) and s.session_id == night   # a break, same night
+    assert s.roll_session_if_idle(now=last + 10 * 3600) and s.session_id != night
+    assert s.db.execute("SELECT date FROM sessions WHERE id = ?", (s.session_id,)).fetchone()[0] == \
+        _time.strftime("%Y-%m-%d", _time.localtime(last + 10 * 3600))

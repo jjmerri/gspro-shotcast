@@ -341,6 +341,7 @@ class GsproState:
     # player's next shot was played from (the team ball), so its finish and lie can't be read off it.
     selected: int | None = None
     pick: tuple | None = None
+    _pick_stroke: int | None = None
     teammates: set = field(default_factory=set)
     dropped_by: dict = field(default_factory=dict)
     # This GSPro logs "Penalty Surface" lines, so a shot with none was played from a surface that
@@ -484,6 +485,7 @@ class GsproState:
             s, mate = self.selected, ev.player
             if s is not None and mate is not None and mate != s:
                 self.pick = (s, self.hole_by.get(s, self.current_hole))
+                self._pick_stroke = self._score.get(self.pick)
                 self.teammates.add(frozenset((s, mate)))
                 self.players_seen.add(mate)
                 self.dropped_by[mate] = self.dropped_by.get(mate, 0) + 1
@@ -651,7 +653,12 @@ class GsproState:
         elif prev is not None and ev.score > prev:
             # A score increase with no shot fired and no gimmie since THIS player's last score line is a
             # penalty stroke (a ball in the water or out of bounds, scored before the drop is played).
-            if not self._shot_since_state.get(ev.player) and not self._gimmie_since_state.get(ev.player):
+            # Not when a shared-ball hole has already ended: GSPro then copies the team's final score
+            # onto each partner, a bump with no shot that read as a penalty on every scramble hole.
+            team = {ev.player} | {m for pair in self.teammates if ev.player in pair for m in pair}
+            closed = self.team_scores and any(i in team and h == ev.hole for i, h in self.hole_scores)
+            if not self._shot_since_state.get(ev.player) and not self._gimmie_since_state.get(ev.player) \
+                    and not closed:
                 self._penalties[key] = self._penalties.get(key, 0) + (ev.score - prev)
                 # The next shot is from the drop, not where the ball ended (the water), and no fresh
                 # material is logged for the drop, so forget the stale lie and let OCR fill it in.
@@ -711,6 +718,10 @@ class GsproState:
 
     def picked_up(self, idx: int | None, hole: int | None) -> bool:
         return (idx, hole) in self._picked
+
+    def pick_stroke(self) -> int | None:
+        """Which stroke the scramble's latest picked ball was, as counted when GSPro picked it."""
+        return self._pick_stroke if self.pick else None
 
     def shot_number(self, player: int | None = None) -> int:
         """The stroke the player is about to play: strokes already taken plus one."""

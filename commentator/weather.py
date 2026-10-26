@@ -71,7 +71,8 @@ def describe(c: Conditions, place: str, now: datetime | None = None) -> str:
     where = f" in {place}" if place else ""
     return (f"Outside the shed{where} right now: {', '.join(parts)}. Inside the shed it's always dry and calm, "
             "so the weather doesn't touch play: it's colour (what they're escaping, or missing), for the odd "
-            "line, not every one.")
+            "line, not every one. Work it into a thought (\"a crisp fifty outside, perfect for the drive "
+            "home\"), never a bare reading like \"Fifty and clear.\"")
 
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"

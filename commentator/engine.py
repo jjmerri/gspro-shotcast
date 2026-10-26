@@ -1798,10 +1798,10 @@ class Engine:
     def _spent_notes(self) -> list[str]:
         return [p for p, n in self._note_uses.items() if n >= self.NOTE_USES_PER_ROUND]
 
-    def _format_facts(self) -> list[str]:
+    def _format_facts(self, stroke: int | None = None, setup: bool = False) -> list[str]:
         if not self.round or self.round.ended:
             return []
-        return self.round.format_facts() + self._pick_facts() + self._roster_facts()
+        return self.round.format_facts() + self._pick_facts(stroke, setup) + self._roster_facts()
 
     def _roster_facts(self) -> list[str]:
         """Who isn't here: a partner of someone playing is left out entirely (a solo practice round had
@@ -2130,7 +2130,8 @@ class Engine:
         log.info("Mulligan: %s replayed stroke %s (from GSPro's log)", who, rec.shot_number)
         return [f"This swing was a mulligan: {who} took back the previous one"
                 f"{f' (the {club})' if club else ''} and replayed the stroke from the same spot. Mention "
-                f"the mulligan, and judge this result as the one that counts."]
+                f"the mulligan and judge this result on its own, but don't call it final or \"the one that "
+                f"counts\": another mulligan can still follow."]
 
     def _bunker_facts(self, player: str | None) -> list[str]:
         """A recurring theme: how often this player has finished in a bunker this round (taken-back
@@ -2167,6 +2168,11 @@ class Engine:
         here, there = to_yards(hud.to_pin), to_yards(last.to_pin_before or last.hud.to_pin)
         if not same_hole or here is None or there is None or abs(here - there) > max(1.0 if there < 30 else 3.0, there * 0.05):
             return []
+        # A replay is from the same lie. Right after a scramble pick the HUD can still show the tee's
+        # stroke and distance while the lie already reads the picked ball's (fairway, sand): not a mulligan.
+        was, now = (last.lie_before or "").lower(), (hud.lie or "").lower()
+        if was and now and was != now:
+            return []
         self._mulligans_called.add(id(last))
         hud._mulligan = True
         who = self._display(player)
@@ -2187,6 +2193,11 @@ class Engine:
         on we use it, else we infer the penalty from the HUD shot number jumping.
         """
         idx = self._gspro_idx(player)
+        if shot_number == 1:
+            # A hole's first stroke follows no penalty. On the tee the log can still hold the player's
+            # last hole (it moves on at their first shot here), so don't read that hole's count.
+            self._last_hud_shot[player or "unknown"] = 1
+            return []
         if idx is not None and self.gspro.current_hole is not None:
             return self._penalty_facts_from_truth(idx)
         if not shot_number:
@@ -2902,6 +2913,21 @@ class Engine:
         self._strategy_hole = hole
         return [line]
 
+    def _fix_stale_pick_hud(self, hud: Hud, idx: int | None) -> None:
+        """Right after a scramble pick GSPro's HUD can still show "Shot 1" and the tee distance (Derek
+        "has 437 yards" for a stroke 2 from 262). The log has the team ball by then: trust it."""
+        g = self.gspro
+        if (idx is not None and hud.shot_number == 1 and g.team_scores and g.pick
+                and g.pick[1] == g.current_hole and g.hole_by.get(idx) == g.current_hole
+                and not any(h == g.current_hole for _, h in g.hole_scores)   # not the next tee
+                and (n := (g.pick_stroke() or 0) + 1) > 1 and (tp := g.to_pin_of(idx)) is not None):
+            # The team's ball sets the stroke: this player's own count can carry a penalty on a ball
+            # the team didn't pick.
+            log.info("Stale HUD after a scramble pick: shot 1 %s -> stroke %d, %.1f yards", hud.to_pin, n, tp)
+            hud.shot_number, hud.to_pin = n, f"{tp:.1f} yards"
+            if (hud.lie or "").lower() == "tee":
+                hud.lie = g.lie_of(idx)
+
     async def _preshot_model(self, hud: Hud, player: str | None, images: list[bytes],
                              minimap_task: "asyncio.Task[MinimapRead] | None" = None,
                              putt_task: "asyncio.Task[PuttRead] | None" = None) -> tuple[dict[str, str], str]:
@@ -2913,6 +2939,7 @@ class Engine:
         setup, before the full HUD read finishes."""
         g = self.gspro
         idx = self._gspro_idx(player)   # this player's GSPro index, or None when the log isn't attributable
+        self._fix_stale_pick_hud(hud, idx)
         # The log's material is where the ball first LANDED, not where it came to rest (a drive that
         # kicked off the cart path into the rough logs "concrete"; across a season's log, a fairway
         # landing was played from the rough about 1 time in 12), so the HUD's resting lie wins and the
@@ -2963,7 +2990,7 @@ class Engine:
                  + self._mulligan_facts(player, hud)
                  + self._penalty_facts(player, hud.shot_number) + self._truth_context_facts(is_putt, idx)
                  + history_facts(self._display(player), self.state.player_shots(player or "unknown"))
-                 + self._format_facts() + self._ctp_facts(hud.shot_number, hud, player)
+                 + self._format_facts(hud.shot_number, setup=True) + self._ctp_facts(hud.shot_number, hud, player)
                  + self._profile_facts(player, is_putt, hud) + self._prediction_facts(player, is_putt, hud)
                  + self._stakes_facts(hud, player) + self._team_score_facts(player)
                  + self._finish_correction_facts(hud, player)
@@ -3664,6 +3691,7 @@ class Engine:
             player or "unknown", shot, shot_hole, hud, tags,
             round_id=r.id if r else None, hole_seq=round_hole, par=shot_par,
             lie_before=before.lie, shot_number=before.shot_number, to_pin_before=before.to_pin,
+            carry_game=carry_game,
         )
         self.state.record_shot(rec)
         if r and r.seq >= r.holes and before.lie == "green":
@@ -4020,7 +4048,7 @@ class Engine:
                       and not shot.is_putt else [])
         facts = (lead + replay_facts + flight + club + result + sand_theme
                  + history_facts(self._display(player), prior) + season_facts
-                 + self._format_facts() + (self._ctp_facts(1) if hud.shot_number == 1 else []))
+                 + self._format_facts(before.shot_number) + (self._ctp_facts(1) if hud.shot_number == 1 else []))
         who, team = self._who(player)
         user, facts_text = shot_prompt(
             player=who,
@@ -4348,17 +4376,32 @@ class Engine:
             log.info("GSPro's log shows a scramble (was %s): teams %s; %s earlier shots relabelled",
                      was, [s.label for s in r.sides], 0 if was == "scramble" else len(ids))
 
-    def _pick_facts(self) -> list[str]:
-        """Whose ball the team is playing, from GSPro's last scramble pick on this hole."""
+    def _pick_facts(self, stroke: int | None = None, setup: bool = False) -> list[str]:
+        """Whose ball the team is playing, from GSPro's last scramble pick on this hole. Given the stroke
+        being set up or reacted to, it says which stroke that pick was: a reaction to the last hitter
+        once read the previous stroke's pick as this one's ("the team has chosen Dan's ball")."""
         g, r = self.gspro, self.round
-        if not r or r.ended or r.format != "scramble" or not g.pick:
+        if not r or r.ended or r.format != "scramble":
             return []
+        undecided = (f"Whose stroke-{stroke} ball the team takes isn't decided until everyone has hit and "
+                     f"GSPro picks: don't say or guess which ball they chose.") if stroke and not setup else None
+        if not g.pick:
+            return [undecided] if undecided else []
         idx, hole = g.pick
         order = r.slot_names or list(r.roster)
         if hole != g.current_hole or idx >= len(order) or not order[idx]:
-            return []
+            return [undecided] if undecided else []
         name = r.league.match_player(order[idx]) or order[idx]
-        return [f"The team picked {name}'s ball from the last round of shots; everyone plays from there."]
+        n = g.pick_stroke()
+        if not stroke or not n:
+            return [f"The team picked {name}'s ball from the last round of shots; everyone plays from there."]
+        if setup:
+            return [f"Stroke {stroke} is played from {name}'s ball, the team's pick from stroke {n}."] \
+                if n == stroke - 1 else []
+        if n >= stroke:
+            return [f"The team picked {name}'s ball from the stroke-{stroke} shots; stroke {stroke + 1} is "
+                    f"played from there."]
+        return [f"Stroke {stroke} was played from {name}'s ball (the team's pick from stroke {n}).", undecided]
 
     def _correct_last_finish(self, idx: int, snap: tuple, lie: str | None, hole_label: str | None = None,
                              shot_number: int | None = None, fmt: str | None = None) -> None:
@@ -4412,6 +4455,7 @@ class Engine:
                     and (picked := g.fire_info(fire).get("picked")) is not None):
                 self._picks_done.add(fire)
                 self.store.set_picked(row[0], picked)
+                row[1].picked = picked
         for fire, kind in list(g.mulligan_fires.items()):
             if fire in self._mulligans_done or fire not in self._fire_rows:
                 continue
@@ -5129,6 +5173,9 @@ class Engine:
         task.add_done_callback(lambda t: (self._bg_tasks.discard(t), t.cancelled() or t.exception()))
 
     def _start_round(self, r: Round) -> None:
+        if self.store.roll_session_if_idle():
+            log.info("Booth idle for hours: round %s starts a new session (%s)", r.id, self.store.session_id)
+            self.state.shots.clear()   # "today" starts over with the new session
         self.round = r
         self.state.recent_lines.words.reset()
         r.shot_floor = self.store.last_shot_id()

@@ -28,6 +28,8 @@ class ShotRecord:
     to_pin_before: str | None = None   # the HUD's distance to the pin when the swing was set up
     shot_id: int | None = None   # its row in the store
     outcome: str | None = None   # how it ended, from GSPro's log: holed / missed / conceded (inside the gimme)
+    picked: bool | None = None   # a scramble ball the team played on (True) or lifted (False); None if not known
+    carry_game: float | None = None   # GSPro's own carry (elevation and conditions), when it was on screen
 
 
 class RecentLines(deque):
@@ -69,22 +71,27 @@ class SessionState:
 
         out = []
         for r in self.shots:
-            if r.hole != hole:
+            if r.hole != hole or r.mulligan:   # a swing GSPro took back never happened on the card
                 continue
             what = "putt" if r.shot.is_putt else (club_name(r.shot.club) or "shot")
             # A putt for birdie or better is named as one, so the recap's "look at birdie" is grounded.
             if r.shot.is_putt and r.shot_number and r.par and r.shot_number - r.par <= -1 \
                     and (score := SCORE_NAMES.get(r.shot_number - r.par)):
                 what = f"putt for {score.split(' ', 1)[1]}"
-            desc = f"{name(r.player)}: {what}"
-            if r.shot.carry and not r.shot.is_putt:
-                desc += f", carried {round(r.shot.carry)}"
+            desc = f"{name(r.player)}: {f'stroke {r.shot_number}, ' if r.shot_number else ''}{what}"
+            carry = r.carry_game or r.shot.carry   # GSPro's carry, not the launch monitor's flat one
+            if carry and not r.shot.is_putt:
+                desc += f", carried {round(carry)}"
             if r.outcome == "conceded":
                 desc += ", stopped inside the gimme circle"
             elif r.hud.lie:
                 desc += f", finished in the {r.hud.lie}"
             if r.outcome == "holed" or (r.shot.is_putt and r.outcome == "missed"):
                 desc += f", {r.outcome}"
+            if r.picked is True:
+                desc += " (the team played on from this ball)"
+            elif r.picked is False:
+                desc += " (not used: the team played another ball)"
             out.append(desc)
             if r.outcome == "conceded":
                 # GSPro counts the tap-in nobody hits: a stroke and a putt on the card

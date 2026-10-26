@@ -275,6 +275,23 @@ class Store:
         ).lastrowid
         self.db.commit()
 
+    def roll_session_if_idle(self, idle_hours: float = 6.0, now: float | None = None) -> bool:
+        """Start a new session when this one has sat idle for hours: a booth left running overnight
+        otherwise filed the next morning's rounds under the night before."""
+        if self.session_id is None:
+            return False
+        now = time.time() if now is None else now
+        last = self.db.execute(
+            "SELECT MAX(COALESCE((SELECT MAX(ts) FROM shots WHERE session_id = s.id), 0), s.started_at) "
+            "FROM sessions s WHERE s.id = ?", (self.session_id,)).fetchone()[0]
+        if last is None or now - last < idle_hours * 3600:
+            return False
+        self.session_id = self.db.execute(
+            "INSERT INTO sessions (started_at, date) VALUES (?, ?)",
+            (now, time.strftime("%Y-%m-%d", time.localtime(now)))).lastrowid
+        self.db.commit()
+        return True
+
     def _migrate(self) -> None:
         """Add columns a pre-existing season.db is missing, so an older file keeps working."""
         # hole_images was once kept per session: keep each hole's first map with its ball and pin found

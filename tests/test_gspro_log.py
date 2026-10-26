@@ -518,6 +518,7 @@ def test_a_scramble_pick_is_read_and_the_dropped_ball_takes_the_picked_one():
     for ev in parse_events("".join(text[:24])):    # through the first pick
         s.apply(ev)
     assert s.team_scores and s.pick == (1, 0) and s.teammates == {frozenset((0, 1))}
+    assert s.pick_stroke() == 1
     assert s.dropped_by == {0: 1}
     assert s.lie_of(0) == "fairway" and s.to_pin_by[0] == s.to_pin_by[1] == 125.4661
     for ev in parse_events("".join(text[24:])):
@@ -526,6 +527,19 @@ def test_a_scramble_pick_is_read_and_the_dropped_ball_takes_the_picked_one():
     # Each stroke's ball the team played on, the last one the putt GSPro picked inside the circle.
     assert {n: s.fire_info(n).get("picked") for n in range(1, 7)} == {
         1: False, 2: True, 3: True, 4: False, 5: True, 6: False}
+    # The team's final score copied onto the partner after the gimme is not a penalty stroke.
+    assert s.penalties(1) == 0 and not s._penalties
+
+
+def test_one_teams_finish_doesnt_hide_another_teams_penalty():
+    s = GsproState()
+    s.team_scores, s.teammates = True, {frozenset((0, 1)), frozenset((2, 3))}
+    s.hole_scores[(0, 0)] = 4   # team 0-1 is done on the hole
+    for ev in [LogEvent("state", player=2, hole=0, score=2, strokes=1),
+               LogEvent("state", player=2, hole=0, score=3, strokes=1),   # water: a bump with no shot
+               LogEvent("state", player=1, hole=0, score=4, strokes=1)]:  # the partner's final-score copy
+        s.apply(ev)
+    assert s.penalties(2) == 1 and s.penalties(1) == 0
 
 
 def test_in_a_scramble_the_putt_that_holed_is_the_teams_and_the_partners_miss_is_not():

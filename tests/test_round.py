@@ -2709,7 +2709,7 @@ def test_a_hole_recap_names_a_putt_for_birdie():
     for s in st.shots:
         s.hole = "hole 1"
     recap = st.hole_recap("hole 1")
-    assert recap[2].startswith("Mike: putt for birdie") and recap[3] == "Mike: putt"
+    assert recap[2].startswith("Mike: stroke 3, putt for birdie") and recap[3] == "Mike: stroke 4, putt"
 
 
 def test_a_hole_recap_counts_the_conceded_tap_in_as_a_putt():
@@ -2724,7 +2724,7 @@ def test_a_hole_recap_counts_the_conceded_tap_in_as_a_putt():
     st.shots[2].outcome, st.shots[3].outcome = "missed", "conceded"
     recap = st.hole_recap("hole 1")
     assert recap[2].endswith(", missed")
-    assert recap[3] == "Mike: putt, stopped inside the gimme circle"
+    assert recap[3] == "Mike: stroke 4, putt, stopped inside the gimme circle"
     assert recap[4] == "Mike: conceded tap-in (counts as a putt)" and len(recap) == 5
     st.shots[3].outcome = "holed"
     assert st.hole_recap("hole 1")[3].endswith(", holed") and len(st.hole_recap("hole 1")) == 4

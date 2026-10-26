@@ -5,6 +5,7 @@ invented claims came from. Everything here is computed; the model only phrases i
 """
 
 import re
+from dataclasses import replace
 
 from .models import Shot
 from .state import ShotRecord
@@ -148,10 +149,13 @@ def ordinal(n: int) -> str:
 def history_facts(player: str | None, prior: list[ShotRecord]) -> list[str]:
     who = player or "This player"
     whose = who + ("'" if who.endswith("s") else "'s")
-    facts = [f"This is {whose} {ordinal(len(prior) + 1)} shot today."]
+    # The running count is background: aired, it became trivia ("the 23rd shot of the morning").
+    facts = [f"This is {whose} {ordinal(len(prior) + 1)} shot today (background: don't quote the running count)."]
     full = [r for r in prior if not r.shot.is_putt]
     if full:
         last = full[-1].shot
+        if full[-1].carry_game:   # GSPro's carry, not the launch monitor's flat one ("the 269-yard drive")
+            last = replace(last, carry=full[-1].carry_game, units="Yards")
         desc = " ".join(shot_facts(last)).replace("Club: ", "").rstrip(".")
         facts.append(f"{whose} previous full shot: {desc}.")
     # Only state a streak when the code has counted it, so the model can't invent one.
