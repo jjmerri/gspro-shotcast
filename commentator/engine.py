@@ -740,6 +740,11 @@ class Engine:
             asyncio.create_task(self._weather_loop(), name="weather")
         if self.bookings is not None:
             self._fetch_bookings("startup")
+        if self.cfg.publish.enabled and self.cfg.publish.bucket and self.cfg.source.type != "replay":
+            if self.bookings is not None and self.cfg.booking.schedule_days:
+                asyncio.create_task(self._schedule_loop(), name="schedule")
+            else:
+                asyncio.create_task(asyncio.to_thread(self._remove_schedule), name="schedule-remove")
         tasks = [asyncio.create_task(self.speech.run(), name="speech")]
         if self.source is not None:
             tasks.append(asyncio.create_task(self._pump_source(), name="source"))
@@ -1380,6 +1385,46 @@ class Engine:
             return
         self._bookings_fetched = time.monotonic()
         self._bookings_task = asyncio.create_task(self.bookings.refresh(why=why), name="bookings")
+
+    def _s3(self):
+        import boto3
+
+        p = self.cfg.publish
+        return boto3.client("s3", region_name=p.region) if p.region else boto3.client("s3")
+
+    def _schedule_key(self) -> str:
+        p = self.cfg.publish.prefix.strip("/")
+        return (p + "/" if p else "") + "schedule.json"
+
+    def _remove_schedule(self) -> None:
+        """No schedule (bookings or the tab turned off): take the bookings off the page."""
+        try:
+            self._s3().delete_objects(Bucket=self.cfg.publish.bucket, Delete={"Objects": [{"Key": self._schedule_key()}]})
+        except Exception as e:
+            log.info("Schedule: couldn't remove the stats page's schedule: %s", e)
+
+    async def _schedule_loop(self) -> None:
+        """Keep the stats page's Schedule tab (schedule.json) up to date with the next few weeks of
+        bookings. A failed fetch leaves the last one up; the page says when it was read."""
+        from .booking import schedule_json
+
+        p, b = self.cfg.publish, self.cfg.booking
+        client = None
+        while True:
+            try:
+                body = schedule_json(await self.bookings.upcoming(b.schedule_days))
+
+                def put() -> None:
+                    nonlocal client
+                    if client is None:
+                        client = self._s3()
+                    client.put_object(Bucket=p.bucket, Key=self._schedule_key(), Body=body,
+                                      ContentType="application/json", CacheControl="no-cache")
+                await asyncio.to_thread(put)
+                log.info("Schedule: uploaded %d upcoming bookings", len(json.loads(body)["bookings"]))
+            except Exception as e:
+                log.warning("Schedule: couldn't update the stats page's schedule: %s", e)
+            await asyncio.sleep(b.schedule_refresh_minutes * 60)
 
     async def _bookings_ready(self, timeout: float = 5.0, stale_after: float = 600.0) -> None:
         """Let a fetch in flight land before a round is classified, so it decides on fresh bookings.
@@ -6378,7 +6423,8 @@ class Engine:
 
             client = boto3.client("s3", region_name=p.region) if p.region else boto3.client("s3")
             self.live_mirror = live_stream.Mirror(lv.dir, p.bucket, p.prefix, lv.playlist, client,
-                                                  status_file=Path(self.cfg.log_dir) / "live.json")
+                                                  status_file=Path(self.cfg.log_dir) / "live.json",
+                                                  keep_days=lv.keep_days)
             self.live_mirror.start()
         except Exception:
             log.exception("The live stream can't upload")
@@ -6397,7 +6443,22 @@ class Engine:
             self._live_stop_task.cancel()   # back-to-back rounds: stay on air
         loop.create_task(self._live_call("start"), name="live-start")
 
+    def _live_label(self) -> str | None:
+        """The round on the stream, for the Full rounds tab: course, then who's playing."""
+        r = self.round
+        if r is None:
+            return None
+        names = list(dict.fromkeys(p for side in r.sides for p in (side.players or side.gspro)))
+        kind = "" if r.is_league else "practice"
+        return " · ".join(x for x in (r.course or "Round", ", ".join(names), kind) if x)
+
+    def _live_mark(self, replace: bool = False) -> None:
+        if self.live_mirror is not None and (label := self._live_label()):
+            self.live_mirror.mark(label, replace=replace)
+
     async def _live_call(self, what: str) -> None:
+        if what == "start" and self._round_on():
+            self._live_mark()
         obs = self._obs()
 
         def call() -> bool:
@@ -6458,6 +6519,7 @@ class Engine:
 
     def _schedule_live_stop(self) -> None:
         """Off air once the sign-off has aired, and a little after."""
+        self._live_mark(replace=True)   # the course and players as the round ended, read in full by now
         if not (self._live_on() and self.cfg.live.with_rounds):
             return
         if self._live_stop_task and not self._live_stop_task.done():

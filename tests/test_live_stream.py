@@ -376,3 +376,108 @@ def test_tray_sets_up_the_live_stream(tmp_path, monkeypatch):
     assert said[0] == "restart" and "set up" in said[1]
     assert f"FFURL={home / 'live' / 'stream.m3u8'}" in (
         home / "obs/config/obs-studio/basic/profiles/Shotcast/basic.ini").read_text(encoding="utf-8-sig")
+
+
+def _kept(s3, sid):
+    return json.loads(s3.objects["live/recordings.json"][0])["recordings"], s3.objects[f"live/s/{sid}/full.m3u8"][0].decode()
+
+
+def test_a_kept_stream_plays_from_the_start_with_its_rounds_marked(tmp_path):
+    s3, now = FakeS3(), [1000.0]
+    m = Mirror(tmp_path / "hls", "bkt", client=s3, status_file=tmp_path / "live.json", clock=lambda: now[0], keep_days=7)
+    m.folder.mkdir()
+    m.clear()
+    m.mark("Tobacco Road · Dan, Dave")                               # the round starts before OBS does
+    _playlist(m.folder, 0, ["stream0.ts", "stream1.ts"], mtime=now[0])
+    m.step()
+    sid = m.session
+    for i in range(2, 30):                                          # three minutes, rolling off the live playlist
+        now[0] += 6
+        _playlist(m.folder, i - 1, [f"stream{i - 1}.ts", f"stream{i}.ts"], mtime=now[0])
+        m.step()
+        if i == 20:
+            m.mark("Pebble Beach · Dan")                            # back to back: the same stream
+    m.mark("Pebble Beach · Dan, Jim", replace=True)                # the players as the round ended
+    now[0] += 6
+    _playlist(m.folder, 28, ["stream28.ts", "stream29.ts"], ended=True, mtime=now[0])
+    m.step()
+    recs, full = _kept(s3, sid)
+    assert f"live/s/{sid}/stream0.ts" in s3.objects and f"live/s/{sid}/stream.m3u8" not in s3.objects
+    assert full.count("#EXTINF:6.000,") == 30 and full.rstrip().endswith("#EXT-X-ENDLIST") and "stream0.ts" in full
+    assert recs == [{"session": sid, "since": 1000, "ended": 1180, "duration": 180,
+                     "rounds": [{"at": 0, "label": "Tobacco Road · Dan, Dave"}, {"at": 114, "label": "Pebble Beach · Dan, Jim"}]}]
+
+    now[0] += 8 * 86400                                              # a week on, the next stream deletes it
+    _playlist(m.folder, 0, ["stream0.ts"], mtime=now[0])
+    m.step()
+    now[0] += 6
+    _playlist(m.folder, 0, ["stream0.ts"], ended=True, mtime=now[0])
+    m.step()                                                         # too short to keep, and the old one's past
+    assert not [k for k in s3.objects if k.startswith("live/s/")]
+    assert json.loads(s3.objects["live/recordings.json"][0]) == {"recordings": []}
+
+
+def test_a_stream_cut_off_by_a_crash_is_closed_and_kept_on_the_next_start(tmp_path):
+    s3, now = FakeS3(), [1000.0]
+    status = tmp_path / "live.json"
+    m = Mirror(tmp_path / "hls", "bkt", client=s3, status_file=status, clock=lambda: now[0], keep_days=7)
+    m.folder.mkdir()
+    m.clear()
+    for i in range(20):
+        _playlist(m.folder, i, [f"stream{i}.ts"], mtime=now[0])
+        m.step()
+        now[0] += 6
+    sid = m.session                                                  # the booth is killed here
+    s3.objects["live/s/lost/stream3.ts"] = (b"", "", "")            # not in the PC's record: can't be listed
+    m2 = Mirror(tmp_path / "hls", "bkt", client=s3, status_file=status, clock=lambda: now[0], keep_days=7)
+    m2.clear()
+    recs, full = _kept(s3, sid)
+    assert recs[0]["session"] == sid and recs[0]["duration"] == 120 and recs[0]["ended"] == 1120
+    assert full.rstrip().endswith("#EXT-X-ENDLIST") and full.count("#EXTINF") == 20
+    assert "live/s/lost/stream3.ts" not in s3.objects
+    assert json.loads(s3.objects["live/status.json"][0]) == {"live": False}
+
+
+def test_kept_streams_wait_for_the_start_up_tidy_before_streaming(tmp_path):
+    import threading
+
+    s3, calls = FakeS3(), []
+    m = Mirror(tmp_path / "hls", "bkt", client=s3, status_file=tmp_path / "live.json", keep_days=7)
+    m.retry_seconds = 0.01
+    real_clear = m.clear
+
+    def clear():
+        calls.append("clear")
+        if len(calls) < 3:
+            raise OSError("S3 unreachable")   # listing failed: the week's streams are unknown
+        real_clear()
+    m.clear = clear
+    m.step = lambda: (calls.append("step"), m._stop.set())
+    t = threading.Thread(target=m.run, args=(0.01,))
+    t.start()
+    t.join(5)
+    assert calls == ["clear", "clear", "clear", "step"]   # nothing streamed (or the record overwritten) till it worked
+
+
+def test_a_failed_prune_doesnt_cost_the_new_stream(tmp_path):
+    s3, now = FakeS3(), [1000.0]
+    m = Mirror(tmp_path / "hls", "bkt", client=s3, status_file=tmp_path / "live.json", clock=lambda: now[0], keep_days=7)
+    m.folder.mkdir()
+    m.clear()
+    m.recordings = [{"session": "old", "since": 0, "ended": 100, "duration": 100, "rounds": []}]
+    now[0] += 8 * 86400
+    real = s3.get_paginator
+    s3.get_paginator = lambda _: (_ for _ in ()).throw(OSError("S3 hiccup"))
+    _playlist(m.folder, 0, ["stream0.ts"], mtime=now[0])
+    m.step()
+    s3.get_paginator = real
+    for i in range(1, 20):
+        now[0] += 6
+        _playlist(m.folder, i, [f"stream{i}.ts"], mtime=now[0])
+        m.step()
+    sid = m.session
+    now[0] += 1
+    _playlist(m.folder, 19, ["stream19.ts"], ended=True, mtime=now[0])
+    m.step()
+    recs, full = _kept(s3, sid)
+    assert m.session is None and [r["session"] for r in recs] == [sid] and recs[0]["duration"] == 120   # kept, and the old one pruned after all

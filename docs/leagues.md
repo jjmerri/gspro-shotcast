@@ -41,7 +41,8 @@ file by hand.
   in (or within `slack_minutes` of) a booking marked "Practice" is practice, even on the week's
   course with a full team. A "League Week N" booking doesn't pin the week (a group may play two in
   one block), so it, no booking, or SuperSaaS being unreachable leaves the matching above to decide.
-  A `commentary.round_week` override still wins.
+  A `commentary.round_week` override still wins. With the stats page publishing, the next two weeks
+  of bookings are also on its Schedule tab (see [tracking](tracking.md#stats-web-page)).
 - **Opener.** When everyone is on shot 1 at even par, still the full hole away, and nothing has
   been recorded on the course today, the booth opens the broadcast. With the early opener on
   (`commentary.preround`), it reads the course and roster (league players and guests alike) off

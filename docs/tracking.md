@@ -212,6 +212,11 @@ Broadcasts and Booth are hidden until the booth has said something (stats only, 
 On the published page, a **Live** tab plays the sim's screen while a round is on, if the
 [live stream](#live-stream) is set up (a red dot on the tab means it's on air; between rounds it
 says off air). Turning `live.enabled` off takes the tab away when the booth next starts.
+**Full rounds** plays each stream of the last week from the start, with a link to where each
+round in it begins (course and players); a stream still on air can be watched from its start too.
+**Schedule** lists the sim's SuperSaaS bookings for the next two weeks (time, the booker's name
+and the booking type), when [bookings](leagues.md) are on (`booking.schedule_days`, 0 for none);
+the booth refreshes it every 30 minutes while it runs.
 
 The **player picker** at the top (Everyone, or one name) narrows every tab to that player:
 their row on Players, them on the left of Head-to-head, only rounds they played in (team rounds
@@ -365,13 +370,19 @@ the bucket (`aws s3 rm s3://<BucketName> --recursive`), delete the upload user's
 The published page's **Live** tab can show the GSPro screen and sound (the booth's voices too)
 while a round is being played, behind the same password. OBS on the GSPro PC writes the stream as
 [HLS](https://en.wikipedia.org/wiki/HTTP_Live_Streaming), a playlist and 4-second video files, into
-the Shotcast folder; the booth uploads each file to the bucket's `live/` folder as it appears and
-deletes it once it drops off the playlist, and the page plays it with
+the Shotcast folder; the booth uploads each file to the bucket's `live/` folder as it appears, and
+the page plays it with
 [hls.js](https://github.com/video-dev/hls.js) (vendored, like the SQLite library). Viewers are
 about 20 seconds behind, and the player starts muted. Any number of people can watch at once.
-Nothing is kept: when the stream stops, its files go from the bucket and the PC's `live\` folder
-(or when the next stream ends, if the booth was closing), and a lifecycle rule in the stack deletes
-anything a crash left under `live/s/` after a day.
+Each stream is kept for a week (`live.keep_days`) for the **Full rounds** tab, with a second
+playlist (`full.m3u8`) of every file from the start and `live/recordings.json` listing the streams
+and where each round in them starts. A stream under a minute isn't kept. Streams past a week are
+deleted as the next one starts or stops, or when the booth starts, and a lifecycle rule in the stack
+deletes anything under `live/s/` after 8 days (stacks made before 0.1.16 had 1 day: update the stack,
+or kept streams vanish after a day). A stream cut off by a crash is closed and listed when the booth
+next starts. With `live.keep_days: 0` nothing is kept: each file goes from the bucket once it drops
+off the playlist, and the rest when the stream stops. Either way the PC's `live\` folder is emptied
+when a stream stops.
 
 The booth starts OBS's output when a round starts and stops it 30 seconds after the sign-off
 (`live.stop_after_seconds`), over OBS's WebSocket server; a round quit early stops it the same way,
@@ -385,7 +396,7 @@ The booth starts OBS's output when a round starts and stops it 30 seconds after 
 - **Quit** in the tray stops OBS's output and takes the page off air at once. A booth that crashed
   or was killed can't: while live it refreshes `live/status.json` every 30 seconds, and the page
   shows off air within about 2 minutes of that stopping, rather than a frozen player. A booth
-  starting clears `live/` and goes off air.
+  starting goes off air, and clears `live/` of everything but the week's kept streams.
 
 With `live.with_rounds: false` none of this follows rounds or the badge (only the idle stop
 applies): the stream is started and stopped by hand.
@@ -393,9 +404,11 @@ applies): the stream is started and stopped by hand.
 Use OBS's hardware encoder (NVENC on NVIDIA cards) so encoding stays off the CPU
 GSPro needs.
 
-Cost: S3 charges for each upload, two every 4 seconds, about a cent an hour on air (about $3 for
-a season of 144 rounds). Watching is within CloudFront's free 1 TB a month: at 2.5 Mbps one
-viewer-hour is about 1.3 GB, so about 800 viewer-hours a month, counting every viewer.
+Cost: S3 charges for each upload, three every 4 seconds, about a cent and a half an hour on air
+(about $4 for a season of 144 rounds). A week kept is about 1.2 GB an hour streamed: two 18-hole
+rounds a day is about 20 GB, about 50 cents a month. Watching (live or kept) is within CloudFront's
+free 1 TB a month: at 2.5 Mbps one viewer-hour is about 1.3 GB, so about 800 viewer-hours a month,
+counting every viewer; past it, about 11 cents a viewer-hour.
 
 Setting it up on the GSPro PC (with the [stats page](#setting-it-up) already publishing): in the
 tray, **Set up the live stream...** (once it's on, **More → Set up the live stream again

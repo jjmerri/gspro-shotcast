@@ -58,10 +58,12 @@ one. Setup is one CloudFormation stack; see
 **Watch live.** The published page's **Live** tab plays GSPro's screen and sound, the booth's
 voices included, while a round is on, about 20 seconds behind and behind the same password. One
 tray action downloads and sets up [OBS Studio](https://obsproject.com/) to make the stream; the
-booth starts it when a round starts, stops it after the sign-off (or OFF AIR, or 20 minutes
-with no shots), and deletes it: nothing is kept, and no YouTube or Twitch account is needed. It
-costs about a cent an hour of uploads (about $3 a season), and watching
-is within CloudFront's free tier for a league. See [Live stream](docs/tracking.md#live-stream).
+booth starts it when a round starts and stops it after the sign-off (or OFF AIR, or 20 minutes
+with no shots); no YouTube or Twitch account is needed. Each stream is kept for a week on the
+**Full rounds** tab, to watch a round from its first tee shot, then deleted. It costs about a cent
+and a half an hour of uploads plus about 50 cents a month to keep a busy week, and watching is
+within CloudFront's free tier for a league. See [Live stream](docs/tracking.md#live-stream). With
+SuperSaaS bookings on, a **Schedule** tab shows who has the sim booked for the next two weeks.
 
 ## The booth
 

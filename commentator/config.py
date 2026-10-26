@@ -329,6 +329,10 @@ class BookingConfig(BaseModel):
     type_field: str = "field_1_r"    # the booking field holding the League/Practice dropdown
     # A round this close before a booking starts or after it ends still counts as in it.
     slack_minutes: float = 30.0
+    # With publish set up, the stats page's Schedule tab: the next schedule_days of bookings (times,
+    # type and the booker's name), uploaded as schedule.json every schedule_refresh_minutes. 0: none.
+    schedule_days: int = Field(14, ge=0)
+    schedule_refresh_minutes: float = Field(30.0, gt=0)
 
 
 class SourceConfig(BaseModel):
@@ -645,6 +649,10 @@ class LiveConfig(BaseModel):
     obs_path: str | None = None   # default: the tray's OBS (obs\ here), else C:\Program Files\obs-studio
     obs_host: str = "localhost"
     obs_port: int = 4455
+    # Keep each stream this many days, so the page's Full rounds tab can play whole rounds from the start
+    # (about 1.2 GB an hour in the bucket). 0: nothing kept, the video deleted as it goes. The stack's
+    # lifecycle rule (tools/aws/stats-site.yaml) must keep live/s/ at least a day longer.
+    keep_days: int = Field(7, ge=0)
 
 
 class BackupConfig(BaseModel):

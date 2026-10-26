@@ -121,6 +121,7 @@ booking:
   type_field: field_1_r   # the booking field with the League/Practice dropdown
   slack_minutes: 30       # a round this long before or after a booking still counts as in it
                           # (read at startup and as each setup screen comes up)
+  schedule_days: 14       # with publish on: the stats page's Schedule tab, this many days ahead; 0: none
 
 screen:
   monitor: 1
@@ -255,6 +256,7 @@ live:
   # with_rounds: true          # start OBS's output with each round, stop it after the sign-off
   # stop_after_seconds: 30
   # idle_minutes: 20           # stop it after this long with no shots (the round's next shot restarts it); 0: never
+  # keep_days: 7               # keep each stream this long for the page's Full rounds tab; 0: keep nothing
   # launch_obs: true           # start OBS minimized when the booth starts, if it isn't running
   # dir: live                  # where OBS writes the stream, in the Shotcast folder
   # playlist: stream.m3u8

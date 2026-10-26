@@ -26,10 +26,10 @@ key. When on, they send this:
 | The AI booth (`commentary.enabled`) | OpenAI, Anthropic (and Google, if chosen for the voices) | Player names, shot and score data, the league file's context, screenshots of GSPro for the hazard look (`screen.send_images`), and each line to be voiced. Their API terms apply. A fully local setup (Ollama and Kokoro) sends nothing. |
 | Jev minimap reads (`minimap.provider: jev`) | TypeSafe | A crop of GSPro's minimap |
 | Sharing the stats page (`publish`) and S3 backups (`backup.s3`) | Your own Amazon S3 bucket | The stats page, and copies of the season database |
-| The live stream (`live`) | Your own Amazon S3 bucket | Video of GSPro's screen and the PC's sound (the booth's voices too) while a round is on (or when started by hand from the tray), deleted as it plays and when it stops. Its setup downloads OBS Studio from GitHub |
+| The live stream (`live`) | Your own Amazon S3 bucket | Video of GSPro's screen and the PC's sound (the booth's voices too) while a round is on (or when started by hand from the tray), kept for 7 days (`live.keep_days`) so the page can replay whole rounds, with each round's course and players, then deleted (with `keep_days: 0`, deleted as it plays and when it stops). Its setup downloads OBS Studio from GitHub |
 | Phone alerts (`notify`) | ntfy.sh (or your ntfy server) | Health messages (for example "screen read failing") |
 | Squabbit handicaps (`squabbit`) | Squabbit (Google Firebase) | Your Squabbit login; it reads your league's handicaps |
-| Bookings (`bookings`) | SuperSaaS | Your API key; it reads the sim's bookings |
+| Bookings (`bookings`) | SuperSaaS | Your API key; it reads the sim's bookings. With publishing on, the next two weeks of them (times, type and the booker's name, never an email address) go on the stats page's Schedule tab, `schedule.json` in your bucket (`booking.schedule_days: 0` for none) |
 | **Check** / **Send test** next to a key in the app's Settings | That key's service (OpenAI, Anthropic, Google, AWS, ntfy) | The key, to see if it works (only when you click it) |
 | Golf news, live scores, course trivia, weather | The news feeds you list, ESPN, Wikipedia, Open-Meteo | Requests for headlines and scores, the course's name, the shed's location |
 

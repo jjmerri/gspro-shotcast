@@ -127,7 +127,7 @@
 <main id="main"></main>
 <script src="vendor/sql.js-httpvfs-0.8.12/index.js"></script>
 <script>
-const TABS = [["live", "Live"], ["players", "Players"], ["versus", "Head-to-head"], ["rounds", "Rounds"], ["courses", "Courses"],
+const TABS = [["live", "Live"], ["vods", "Full rounds"], ["schedule", "Schedule"], ["players", "Players"], ["versus", "Head-to-head"], ["rounds", "Rounds"], ["courses", "Courses"],
               ["shots", "Shots"], ["highlights", "Highlights"], ["broadcasts", "Broadcasts"], ["booth", "Booth"]];
 const PERIODS = [["3m", "3 months"], ["6m", "6 months"], ["9m", "9 months"], ["1y", "1 year"], ["all", "All time"]];
 // A link holds the view: #tab?player=…&ctx=…&round=…&from=…; see writeHash().
@@ -141,6 +141,8 @@ const state = { tab: TABS.some(t => t[0] === hashTab) ? hashTab : "players", ctx
                 seen: Number(store.get("shotcast.seen")) || 0,
                 round: null, sort: {}, course: null, versus: [null, null], shotFilter: {}, shots: null, shotOpen: null,
                 session: null, transcript: null, replays: {}, replayHole: null, replayOnly: false,
+                vods: undefined, vod: linkQ.get("vod") ? { session: linkQ.get("vod"), at: +linkQ.get("at") || 0 } : null,
+                schedule: undefined,
                 period: PERIODS.some(p => p[0] === linkQ.get("period")) ? linkQ.get("period") : "1y" };
 if (["league", "practice"].includes(linkQ.get("ctx"))) state.ctx = linkQ.get("ctx");
 for (const k of SHOT_LINK_KEYS) if (linkQ.get(k)) state.shotFilter[k] = linkQ.get(k);
@@ -244,7 +246,8 @@ async function load() {
     if (mine !== loading) return;
     state.data = body;
     state.shots = null;
-    if (!tabs().some(([k]) => k === state.tab) && state.tab !== "live") state.tab = "players";
+    // The tabs read from their own files may not have loaded yet: they settle it themselves.
+    if (!tabs().some(([k]) => k === state.tab) && !EXTRA_TABS.includes(state.tab)) state.tab = "players";
     showTabs();
     document.querySelectorAll("#ctx button").forEach(b => b.classList.toggle("on", b.dataset.ctx === state.ctx));
     showMe();
@@ -316,6 +319,10 @@ function writeHash() {
   if (state.ctx) q.set("ctx", state.ctx);
   if (state.tab === "shots") for (const k of SHOT_LINK_KEYS) if (state.shotFilter[k]) q.set(k, state.shotFilter[k]);
   if (state.tab === "highlights" && state.period !== "1y") q.set("period", state.period);
+  if (state.tab === "vods" && state.vod) {
+    q.set("vod", state.vod.session);
+    if (state.vod.at) q.set("at", String(state.vod.at));
+  }
   const h = "#" + state.tab + (q.toString() ? "?" + q : "");
   if (location.hash !== h) history.replaceState(null, "", h);
 }
@@ -1080,7 +1087,10 @@ function renderLive() {
   if (!s.live) return `<h2>Live</h2><p class="sub">Off air. The stream comes on when a round starts at the sim.</p>`;
   return `<h2>Live <span class="sub">since ${esc(new Date(s.since * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}</span></h2>
   <div id="liveslot"></div>
-  <p class="sub">About 20 seconds behind the sim. It starts muted: unmute in the player. Nothing is recorded.</p>`;
+  <p class="sub">About 20 seconds behind the sim. It starts muted: unmute in the player.${
+    (state.vods || []).some(v => v.session === s.session)
+      ? ` Missed the start? <button class="link" data-vod="${esc(s.session)}" data-vodat="0">Watch from the beginning</button>.`
+      : " Nothing is recorded."}</p>`;
 }
 
 function stopLive() {
@@ -1102,30 +1112,97 @@ function loadHls() {
   return hlsLoading;
 }
 
-// After each render: put the player (the same element, so it keeps playing) in the Live tab's slot.
+// What the player should be showing: the Live tab's stream, or the Full rounds tab's pick.
+function wantedVideo() {
+  const s = state.live;
+  if (state.tab === "live" && s && s.live) return { key: s.session, src: `live/s/${encodeURIComponent(s.session)}/stream.m3u8`, live: true };
+  if (state.tab === "vods" && state.vod && (state.vods || []).some(v => v.session === state.vod.session))
+    return { key: "vod:" + state.vod.session, src: `live/s/${encodeURIComponent(state.vod.session)}/full.m3u8`, at: state.vod.at || 0 };
+  return null;
+}
+
+// After each render: put the player (the same element, so it keeps playing) in the tab's slot.
 function attachLive() {
-  const s = state.live, slot = $("#liveslot");
-  if (state.tab !== "live" || !s || !s.live || !slot) { stopLive(); return; }
-  if (player && player.session !== s.session) stopLive();
+  const want = wantedVideo(), slot = $("#liveslot");
+  if (!want || !slot) { stopLive(); return; }
+  if (player && player.session !== want.key) stopLive();
   if (!player) {
-    const video = Object.assign(document.createElement("video"), { controls: true, autoplay: true, muted: true, playsInline: true });
-    const src = `live/s/${encodeURIComponent(s.session)}/stream.m3u8`;
-    const me = player = { session: s.session, video, hls: null };
+    const video = Object.assign(document.createElement("video"), { controls: true, autoplay: true, muted: !!want.live, playsInline: true });
+    const me = player = { session: want.key, video, hls: null };
     if (window.MediaSource || window.ManagedMediaSource) {
       loadHls().then(() => {
         if (player !== me) return;
-        me.hls = new Hls({ liveSyncDurationCount: 2 });
-        me.hls.loadSource(src);
+        // A recording still going is a growing playlist: start where asked, not at its live edge.
+        me.hls = new Hls(want.live ? { liveSyncDurationCount: 2 } : { startPosition: want.at });
+        me.hls.loadSource(want.src);
         me.hls.attachMedia(video);
       }).catch(e => { if (player === me) slot.innerHTML = `<div class="err">The player didn't load: ${esc(e.message)}</div>`; });
     } else {
-      video.src = src;   // iPhones play HLS themselves
+      video.src = want.src;   // iPhones play HLS themselves
+      if (!want.live) video.addEventListener("loadedmetadata", () => { video.currentTime = want.at; }, { once: true });
     }
   }
   slot.appendChild(player.video);
 }
 
-const RENDER = { live: renderLive, players: renderPlayers, versus: renderVersus, rounds: renderRounds, courses: renderCourses,
+// Full rounds (live_stream.py keeps each stream for a week): live/recordings.json lists them, each with
+// where its rounds start. The schedule (schedule.json) is the sim's bookings, uploaded by the booth.
+const EXTRA_TABS = ["live", "vods", "schedule"];
+async function pollExtras() {
+  const get = async url => { try { const r = await fetch(url, { cache: "no-store" }); return r.ok ? await r.json() : null; } catch (e) { return null; } };
+  const [rec, sched] = await Promise.all([get("live/recordings.json"), get("schedule.json")]);
+  const vods = rec && Array.isArray(rec.recordings) ? rec.recordings.filter(v => v.duration > 0 || v.ended === null) : null;
+  const schedule = sched && Array.isArray(sched.bookings) ? sched : null;
+  const was = JSON.stringify([state.vods, state.schedule]);
+  state.vods = vods; state.schedule = schedule;
+  if (JSON.stringify([vods, schedule]) === was) return;
+  const shown = state.tab;
+  if ((state.tab === "vods" && !(vods && vods.length)) || (state.tab === "schedule" && !schedule)) state.tab = "players";
+  showTabs();
+  if (EXTRA_TABS.includes(shown)) render();
+}
+
+const hm = secs => { const m = Math.round(secs / 60); return m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m` : `${m} min`; };
+const when = (t, opts) => new Date(t).toLocaleString([], opts);
+
+function renderVods() {
+  const vods = state.vods || [];
+  if (!vods.length) return `<h2>Full rounds</h2><p class="sub">Nothing kept yet: each round streamed live is kept here for a week.</p>`;
+  const sel = state.vod && vods.find(v => v.session === state.vod.session);
+  const going = v => v.ended === null && state.live && state.live.live && state.live.session === v.session;
+  const chapters = v => (v.rounds.length ? v.rounds : [{ at: 0, label: "From the start" }]).map(r =>
+    `<button class="link" data-vod="${esc(v.session)}" data-vodat="${r.at}">${esc(r.label)}</button>`
+    + (r.at ? ` <span class="sub">${hm(r.at)} in</span>` : "")).join("<br>");
+  const day = { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+  return `<h2>Full rounds <span class="sub">the stream of every round, kept for a week</span></h2>
+  ${sel ? `<h3>${esc((sel.rounds[0] || {}).label || "Stream")} <span class="sub">${esc(when(sel.since * 1000, day))}</span></h3>
+    <div id="liveslot"></div>
+    ${sel.rounds.length > 1 ? `<div class="controls">Jump to: ${sel.rounds.map(r =>
+      `<button class="link" data-vod="${esc(sel.session)}" data-vodat="${r.at}">${esc(r.label)}</button>`).join(" · ")}</div>` : ""}` : ""}
+  <table><tr><th>Started</th><th class="l">Rounds</th><th>Length</th></tr>
+  ${vods.map(v => `<tr class="${sel === v ? "sel" : ""}"><td>${esc(when(v.since * 1000, day))}</td><td class="l wrap">${chapters(v)}</td>
+    <td>${going(v) ? '<span class="livedot"></span>live' : v.duration ? hm(v.duration) : "–"}</td></tr>`).join("")}
+  </table>`;
+}
+
+function renderSchedule() {
+  const sc = state.schedule;
+  if (!sc) return `<h2>Schedule</h2><p class="sub">No schedule on this page.</p>`;
+  const now = new Date(), days = {};
+  for (const b of sc.bookings) (days[b.start.slice(0, 10)] ||= []).push(b);
+  const t = s => new Date(s).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const body = Object.entries(days).map(([d, bs]) => `<tr><th class="l" colspan="3">${esc(new Date(d + "T12:00")
+      .toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" }))}</th></tr>`
+    + bs.map(b => {
+      const on = new Date(b.start) <= now && now < new Date(b.finish);
+      return `<tr class="${on ? "sel" : ""}"><td>${esc(t(b.start))} – ${esc(t(b.finish))}${on ? ' <span class="tag">now</span>' : ""}</td>
+        <td class="l">${esc(b.name || "Booked")}</td><td class="l sub">${esc(b.kind)}</td></tr>`;
+    }).join("")).join("");
+  return `<h2>Schedule <span class="sub">the sim's bookings · updated ${esc(when(sc.updated, { weekday: "short", hour: "numeric", minute: "2-digit" }))}</span></h2>
+  ${body ? `<table>${body}</table>` : '<p class="sub">Nothing booked.</p>'}`;
+}
+
+const RENDER = { live: renderLive, vods: renderVods, schedule: renderSchedule, players: renderPlayers, versus: renderVersus, rounds: renderRounds, courses: renderCourses,
                  shots: renderShots, broadcasts: renderBroadcasts, highlights: renderHighlights, booth: renderBooth };
 function render() {
   if (!state.data) return;
@@ -1137,7 +1214,8 @@ function render() {
 // With the commentary off there is nothing on the booth's tabs: hide them. No stream, no Live tab.
 function tabs() {
   const d = state.data;
-  const has = { live: state.live !== null && state.live !== undefined };
+  const has = { live: state.live !== null && state.live !== undefined, vods: !!(state.vods && state.vods.length),
+                schedule: !!state.schedule };
   if (d) Object.assign(has, { broadcasts: d.broadcasts.length > 0,
                               booth: d.booth.commentators.length > 0 || d.booth.calls.length > 0 || d.predictions.length > 0 });
   return TABS.filter(([k]) => has[k] !== false);
@@ -1150,8 +1228,23 @@ function showTabs() {
 
 document.addEventListener("click", (e) => {
   const t = e.target.closest("[data-tab],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
-                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-sharecard],[data-period]");
+                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-sharecard],[data-period],[data-vod]");
   if (!t) return;
+  if (t.dataset.vod) {
+    const at = +t.dataset.vodat || 0;
+    if (player && player.session === "vod:" + t.dataset.vod) {
+      player.video.currentTime = at;   // the same stream: just jump
+      player.video.play().catch(() => {});
+    } else {
+      stopLive();
+    }
+    state.vod = { session: t.dataset.vod, at };
+    state.tab = "vods";
+    showTabs();
+    render();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    return;
+  }
   if (t.dataset.period) {
     state.period = t.dataset.period;
     render();
@@ -1245,6 +1338,8 @@ showTabs();
 load();
 pollLive();
 setInterval(pollLive, 15000);
+pollExtras();
+setInterval(pollExtras, 60000);
 </script>
 </body>
 </html>

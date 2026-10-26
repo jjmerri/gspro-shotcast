@@ -863,6 +863,35 @@ def test_classify_round_separates_league_from_practice(tmp_path):
     assert practice and "Rando" in practice
 
 
+async def test_the_schedule_lists_bookings_from_now_with_names(monkeypatch):
+    from datetime import datetime
+
+    import httpx
+
+    from commentator import booking
+    from commentator.booking import Bookings, schedule_json
+
+    rows = [{"start": "2026-10-26T17:00", "finish": "2026-10-26T18:00", "field_1_r": "Practice", "full_name": "Dan M"},
+            {"start": "2026-10-26T19:00", "finish": "2026-10-26T21:00", "field_1_r": "League Week 4", "created_by": "jim@x.com"},
+            {"start": "2026-10-28T18:00", "finish": "2026-10-28T19:00", "field_1_r": "Practice", "full_name": "Dave", "deleted": True},
+            {"start": "2026-10-27T18:00", "finish": "2026-10-27T19:00", "field_1_r": "Practice", "full_name": " Dave "}]
+    seen = {}
+
+    def handler(request):
+        seen.update(request.url.params)
+        return httpx.Response(200, json={"bookings": rows})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(booking.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    now = datetime(2026, 10, 26, 19, 30)
+    got = await Bookings("GolfShed", 792418, "k").upcoming(14, now=now)
+    assert seen["from"] == "2026-10-26 00:00:00" and seen["to"] == "2026-11-10 00:00:00"
+    assert [(b.start.day, b.name) for b in got] == [(26, "jim@x.com"), (27, "Dave")]   # the one that's over is gone
+    sched = json.loads(schedule_json(got, now))["bookings"]
+    assert sched[1] == {"start": "2026-10-27T18:00", "finish": "2026-10-27T19:00", "kind": "Practice", "name": "Dave"}
+    assert sched[0]["name"] == ""                                     # never an email address on the page
+
+
 async def test_a_practice_booking_makes_a_league_looking_round_practice(tmp_path, monkeypatch, caplog):
     import logging
     from datetime import datetime

@@ -47,14 +47,16 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
-      # The live stream (live_stream.py) deletes its video as it goes; this catches any a crash left
-      # behind. With a publish.prefix, the stream is under <prefix>/live/s/ instead: change it to match.
+      # The live stream (live_stream.py) keeps each stream live.keep_days (7) for the Full rounds tab and
+      # then deletes it; this catches any it missed, a day after. With live.keep_days 0 it deletes its
+      # video as it goes, and this only catches what a crash left. With a publish.prefix, the stream is
+      # under <prefix>/live/s/ instead: change it to match.
       LifecycleConfiguration:
         Rules:
           - Id: live-stream-leftovers
             Status: Enabled
             Prefix: live/s/
-            ExpirationInDays: 1
+            ExpirationInDays: 8
 
   OriginAccess:
     Type: AWS::CloudFront::OriginAccessControl
