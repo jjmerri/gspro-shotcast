@@ -2128,6 +2128,15 @@ def test_prediction_record_tracks_commentator_accuracy(tmp_path):
     assert s.prediction_record("pbp") == {"total": 0, "hits": 0}
 
 
+def test_a_call_record_is_said_as_a_rate_not_a_count():
+    from commentator.engine import _rate_words
+
+    assert _rate_words(33, 50) == "about two times in three"
+    assert _rate_words(25, 50) == "half the time"
+    assert (_rate_words(47, 50), _rate_words(49, 50)) == ("about nine times in ten", "almost every time")
+    assert (_rate_words(0, 5), _rate_words(1, 10), _rate_words(5, 5)) == ("never", "one time in ten", "every time")
+
+
 def test_player_profile_proximity_and_putting(tmp_path):
     from commentator.hud import Hud
     from commentator.models import Shot

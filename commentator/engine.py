@@ -285,6 +285,22 @@ def _names_other_scenery(text: str, allowed_kind: str | None) -> bool:
 BOARD_WAIT_SECONDS = 3.0
 
 
+_RATE_WORDS = ((0.0, "never"), (1 / 10, "one time in ten"), (1 / 5, "one time in five"),
+               (1 / 4, "one time in four"), (1 / 3, "one time in three"), (2 / 5, "two times in five"),
+               (1 / 2, "half the time"), (3 / 5, "three times in five"), (2 / 3, "two times in three"),
+               (3 / 4, "three times in four"), (4 / 5, "four times in five"), (9 / 10, "nine times in ten"),
+               (1.0, "every time"))
+
+
+def _rate_words(hits: int, total: int) -> str:
+    """A success rate the way a person says it: 'about two times in three' (33 of 50), not the count."""
+    rate = hits / total
+    frac, words = min(_RATE_WORDS, key=lambda fw: abs(fw[0] - rate))
+    if abs(frac - rate) < 1e-9:
+        return words
+    return f"almost {words}" if frac in (0.0, 1.0) else f"about {words}"
+
+
 def _week_gap_fact(team: str, net: int, leader: str, best: int, holes_left: int) -> str:
     """Where a team stands against the week's best posted net with holes to play, and what it takes."""
     last = "the last hole" if holes_left == 1 else f"the last {holes_left} holes"
@@ -2673,7 +2689,9 @@ class Engine:
                  f"{name} make that prediction out loud before the stroke."]
         rec = self.store.prediction_record(commentator)
         if rec["total"] >= 5:
-            facts.append(f"{name} has been right on {rec['hits']} of {rec['total']} shot calls this season.")
+            facts.append(f"{name}'s calls this season have been right {_rate_words(rec['hits'], rec['total'])} "
+                         f"({round(100 * rec['hits'] / rec['total'])}%). If it's mentioned, say it that way, "
+                         "never as a count of calls.")
         return facts
 
     def _net_stakes(self, r: Round, player: str, holes_left: int) -> list[str]:
