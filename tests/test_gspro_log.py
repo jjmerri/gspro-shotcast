@@ -538,7 +538,7 @@ def test_a_tree_hit_is_logged_on_its_shot_and_called_by_its_height():
     assert Engine._tree_facts(me, s.fires, Shot(putter=True), 0.0) == []
 
 
-def test_wood_is_a_tree_when_met_short_of_the_carry_or_after_leaves_else_a_structure():
+def test_wood_is_a_tree_unless_met_at_ground_level_where_the_ball_came_down():
     import asyncio
     from types import SimpleNamespace
     from commentator.engine import Engine
@@ -562,13 +562,13 @@ def test_wood_is_a_tree_when_met_short_of_the_carry_or_after_leaves_else_a_struc
     assert s.tree_wood(trunk, 9.2, 53.1) and s.tree_wood(trunk, 1.8, 20.5)   # a trunk, rising or at its base
     assert s.tree_wood(leafy, 42.5, 71.8) and s.tree_wood(leafy)
     assert not s.tree_wood(bridge, 86.9, 97.8)   # descent 0.0 too, but met where it came down: steps
-    assert not s.tree_wood(trunk) and not s.tree_wood(trunk, None, 53.1)   # no carry read: not called a tree
+    assert s.tree_wood(trunk) and s.tree_wood(bridge, None, 97.8)   # no carry read: wood is taken as a tree
 
     me = SimpleNamespace(gspro=s, _raw_yards=Engine._raw_yards)
     me._foliage_fact = lambda *a: Engine._foliage_fact(me, *a)
     shot = Shot(ball_speed=54.8, vla=36.4, total_spin=8499, spin_axis=-6.1, carry=53.1)
     assert asyncio.run(Engine._kick_facts(me, trunk, "rough", False, wait=0, wood_tree=True)) == []
-    assert "bridge" in asyncio.run(Engine._kick_facts(me, bridge, "rough", False, wait=0))[0]
+    assert "bridge" in asyncio.run(Engine._kick_facts(me, bridge, "rough", False, wait=0, wood_tree=False))[0]
     fact = Engine._tree_facts(me, trunk, shot, 0.0, "", True)
     assert len(fact) == 1 and "wood of a tree" in fact[0]
     facts = Engine._tree_facts(me, leafy, shot, 0.0, "", True)

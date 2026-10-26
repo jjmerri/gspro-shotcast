@@ -67,8 +67,8 @@ class LogEvent:
 
 # GSPro's `Using Material TVG<surface>` names mapped to the booth's lie vocabulary (commentator/hud.py
 # LIES). Unmapped materials fall back to the OCR lie rather than guessing a word downstream can't use.
-# Wood met before this share of the full carry stood up off the ground: a tree (see tree_wood). From the
-# sim, trunks were hit at 8-17% of the carry; a leafy tree at 59%.
+# Wood met at or past this share of the full carry was at ground level: a bridge or steps, not a tree
+# (see tree_wood). From the sim, trunks were hit at 8-17% of the carry; a leafy tree at 59%.
 WOOD_TREE_SHORT = 0.7
 
 MATERIAL_TO_LIE = {
@@ -759,17 +759,17 @@ class GsproState:
         return self._fire_info.get(n, {}) if n is not None else {}
 
     def tree_wood(self, n: int | None, contact_yd: float | None = None, carry_yd: float | None = None) -> bool:
-        """Whether the shot's first landing on wood was a tree, not a bridge, steps or a wall. GSPro names
-        only the material. A bridge or steps sit at (or below) the ground, so the ball meets them about
-        where it would have landed; a tree stands up and stops it short, whether rising or falling. So
-        wood is a tree when the shot also went through leaves, or when the ball reached it (GSPro's
-        carry, `contact_yd`) well short of its full carry (`carry_yd`). Unknown distances: a structure."""
+        """Whether the shot's first landing on wood was a tree. GSPro names only the material, and on a
+        course wood is mostly trees, so it's a tree unless the ball met it at ground level: about where it
+        would have landed anyway (GSPro's carry, `contact_yd`, which ends at that first contact, at least
+        WOOD_TREE_SHORT of the full carry `carry_yd`), which is a bridge, steps or a wall. Leaves on the
+        same shot make it a tree regardless. Unknown distances: a tree."""
         info = self.fire_info(n)
         if info.get("landed") not in ("wood", "timber"):
             return False
-        if info.get("leaves"):
+        if info.get("leaves") or contact_yd is None or not carry_yd:
             return True
-        return bool(contact_yd is not None and carry_yd and contact_yd < WOOD_TREE_SHORT * carry_yd)
+        return contact_yd < WOOD_TREE_SHORT * carry_yd
 
     def putting_mode(self, base_fires: int, impact: float, slack: float = 3.0) -> bool | None:
         """Whether GSPro played the shot that hit at `impact` as a putt, or None if not logged (yet)."""
