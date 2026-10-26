@@ -3444,6 +3444,35 @@ def test_a_setup_replaying_the_last_swing_is_called_a_mulligan(tmp_path):
     assert e._mulligan_facts("Paul", Hud(shot_number=1, to_pin="191.0 yards")) == []   # announced once
 
 
+def test_a_taken_back_putt_that_barely_moved_is_called_a_misread(tmp_path):
+    e = _mini_engine(tmp_path)
+    r = _log_round(e)
+    r.seq = 12
+
+    def putt(speed):
+        e.state.record_shot(ShotRecord("Paul", Shot(ball_speed=speed, club="PT"), "Hole 12",
+                                       Hud(lie="green", to_pin="15 feet 1 inches"), [], round_id=r.id, hole_seq=12,
+                                       par=4, lie_before="green", shot_number=3, to_pin_before="16 feet 0 inches"))
+    putt(1.4)   # the launch monitor read Dan setting the ball down: 16 ft putt, went under a foot
+    facts = e._mulligan_facts("Paul", Hud(shot_number=3, to_pin="16 feet 0 inches", lie="green"))
+    assert len(facts) == 1 and "misread" in facts[0] and "not a mulligan on a bad putt" in facts[0]
+    putt(5.0)   # a real (short) putt taken back is still a mulligan
+    facts = e._mulligan_facts("Paul", Hud(shot_number=3, to_pin="16 feet 0 inches", lie="green"))
+    assert len(facts) == 1 and "misread" not in facts[0] and "mulligan" in facts[0]
+
+
+def test_a_misread_putt_seen_only_in_the_log_is_called_a_misread(tmp_path):
+    e = _mini_engine(tmp_path)
+    r = _log_round(e)
+    _, rec1 = _row(e, r, 7, 3, "green")
+    rec1.shot.ball_speed = 1.2
+    _, rec2 = _row(e, r, 8, 3, "green")
+    e.gspro.mulligan_fires[7] = "repeat"
+    e._apply_log_corrections()
+    facts = e._replay_facts("Paul", rec2)
+    assert len(facts) == 1 and "misread" in facts[0]
+
+
 def test_best_ball_is_one_ball_each_so_a_repeated_score_is_a_mulligan(tmp_path):
     # Riviera, best ball: Leo replayed his 40-yard pitch on 18 twice; GSPro only repeated the score line.
     e = _mini_engine(tmp_path)

@@ -267,7 +267,7 @@ def putt_elevation_inches(hud) -> int | None:
 
 
 def elevation_facts(hud) -> list[str]:
-    if (hud.lie or "").lower() == "green":
+    if (hud.lie or "").lower() == "green" and wrong_green_yards(hud.lie, hud.to_pin) is None:
         if (inches := putt_elevation_inches(hud)) is None:
             return []
         way = "uphill" if inches > 0 else "downhill"
@@ -313,12 +313,35 @@ def flight_facts(
     return facts
 
 
+WRONG_GREEN_YARDS = 60.0
+
+
+def wrong_green_yards(lie: str | None, to_pin: str | None) -> float | None:
+    """How far from this hole's pin a ball sits on a green that can't be this hole's (a putt of more
+    than 60 yards: another hole's green, or the far end of a giant double green), else None."""
+    pin = to_yards(to_pin)
+    return pin if (lie or "").lower() == "green" and pin is not None and pin > WRONG_GREEN_YARDS else None
+
+
+def wrong_green_fact(yards: float, *, played_off: bool = False) -> str:
+    if played_off:
+        return (f"This shot was played off the wrong green: the ball sat on a green {yards:.0f} yards from "
+                "this hole's pin (another hole's green, or the far end of a giant double green). Have some "
+                "fun with it - the divots, the greenkeeper, the group on that hole - before the result.")
+    return (f"The ball is on a green, but it's the wrong one: {yards:.0f} yards from this hole's pin, on "
+            "another hole's green (or the far end of a giant double green). Have some fun with it. It is "
+            "not a real putt: don't call it a putt for any score, and don't call the hole's green found.")
+
+
 def preshot_facts(hud, hole_par: int | None, handed: str | None = None) -> list[str]:
     facts = []
     if hud.shot_number:
         facts.append(f"This is shot {hud.shot_number} on this hole.")
-    putting = (hud.lie or "").lower() == "green"
-    if hud.to_pin:
+    wrong = wrong_green_yards(hud.lie, hud.to_pin)
+    putting = (hud.lie or "").lower() == "green" and wrong is None
+    if wrong is not None:
+        facts.append(wrong_green_fact(wrong))
+    elif hud.to_pin:
         # Putts are always spoken in feet: GSPro's HUD switches a long putt to yards, which the booth
         # then read out as "17 yards" for a putt. Convert any on-the-green distance to feet.
         pin_yards = to_yards(hud.to_pin)

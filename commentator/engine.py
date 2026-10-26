@@ -18,7 +18,8 @@ from .carry_model import CarryModel, correct_for_elevation
 from .config import Config
 from .facts import (
     PUTT_FOR_FACT, SCORE_NAMES, _fmt_to_par, _to_par_value, club_delivery_facts, club_delivery_notable, club_name, flight_facts,
-    history_facts, ordinal, preshot_facts, putt_elevation_inches, shot_facts, to_yards, wrong_putt_score,
+    history_facts, ordinal, preshot_facts, putt_elevation_inches, shot_facts, to_yards, WRONG_GREEN_YARDS, wrong_green_fact,
+    wrong_green_yards, wrong_putt_score,
 )
 from .flight_pick import FlightPlan, Hazard, pick_line, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
@@ -336,6 +337,15 @@ def _lie_family(lie: str) -> str:
 
 def _lie_prep(lie: str) -> str:
     return "on" if lie in ("green", "fringe", "fairway", "tee") else "in"
+
+
+MISREAD_PUTT_MPH = 3.0   # no real putt this season left the face under 3 mph; a nudged ball does
+
+
+def _misread_putt(rec: ShotRecord) -> bool:
+    """A taken-back putt that barely moved: the launch monitor reading the player nudging the ball."""
+    putt = rec.shot.is_putt or (rec.lie_before or "").lower() == "green"
+    return putt and rec.shot.ball_speed is not None and rec.shot.ball_speed < MISREAD_PUTT_MPH
 
 
 def _short_miss_fact(before: Hud, par: int | None) -> str | None:
@@ -2067,7 +2077,8 @@ class Engine:
                 facts += self._ctp_mark_source(lead)
             facts += self._ctp_group_facts(r, exclude=self._display(player) if player else None)
             return facts
-        if shot_number == 2 and hud and hud.lie == "green" and hud.to_pin and player:
+        if shot_number == 2 and hud and hud.lie == "green" and hud.to_pin and player \
+                and not getattr(hud, "_wrong_green", False):
             who = self._display(player)
             lead = self._ctp_leader(r, hole, exclude=who)
             group = self._ctp_group_facts(r, exclude=who)
@@ -2128,6 +2139,10 @@ class Engine:
         who = self._display(player)
         club = club_name(prev.shot.club)
         log.info("Mulligan: %s replayed stroke %s (from GSPro's log)", who, rec.shot_number)
+        if _misread_putt(prev):
+            return [f"This stroke replaced a 'putt' that barely moved the ball: almost certainly the launch "
+                    f"monitor misreading {who} nudging the ball into position, so GSPro took it back. Call it a "
+                    f"misread by the machine, not a mulligan on a bad putt, then judge this putt on its own."]
         return [f"This swing was a mulligan: {who} took back the previous one"
                 f"{f' (the {club})' if club else ''} and replayed the stroke from the same spot. Mention "
                 f"the mulligan and judge this result on its own, but don't call it final or \"the one that "
@@ -2181,6 +2196,11 @@ class Engine:
         went = f" (the {club}" if club else " (the last one"
         went += f" that finished in the {lie})" if lie and lie not in ("green", "fairway") else ")"
         log.info("Mulligan: %s replaying stroke %s from %s", who, hud.shot_number, hud.to_pin)
+        if _misread_putt(last):
+            return [f"{who} is replaying stroke {hud.shot_number}: the last 'putt' barely moved the ball, so it "
+                    f"was almost certainly the launch monitor misreading {who} nudging the ball into position, "
+                    f"not a real stroke. Call it a misread and have a laugh at the machine, not a mulligan on a "
+                    f"bad putt."]
         return [f"{who} is taking a mulligan: the last swing{went} was taken back, and {who} is replaying "
                 f"stroke {hud.shot_number} from the same spot. Mention the mulligan."]
 
@@ -2952,7 +2972,12 @@ class Engine:
                 self._setup_log_lies[key] = lie
                 while len(self._setup_log_lies) > 8:
                     del self._setup_log_lies[next(iter(self._setup_log_lies))]
-        is_putt = (hud.lie or "").lower() == "green"
+        on_green = (hud.lie or "").lower() == "green"
+        # A ball on another hole's green is no putt: it'll be chipped or hit back toward this hole.
+        is_putt = on_green and not wrong_green_yards(hud.lie, hud.to_pin)
+        if on_green and not is_putt:
+            hud._wrong_green = True
+            log.info("Wrong green: %r is on a green %s from this hole's pin", self._display(player), hud.to_pin)
         if self.round and not self.round.ended:
             hc = self._hc
             hc.setups += 1
@@ -2969,7 +2994,7 @@ class Engine:
             # GSPro's measured distance to the pin, in place of the OCR read, for full shots (the HUD's
             # feet/inches reading stays for putts, where it's finer). Logged at ball-settle, so already
             # current for the shot being set up.
-            if idx is not None and not is_putt and (tp := g.to_pin_of(idx)) is not None:
+            if idx is not None and not on_green and (tp := g.to_pin_of(idx)) is not None:
                 # Trust the log's measured distance, but if it disagrees wildly with what's on screen
                 # for the player at address, keep the OCR reading: a big gap means the per-player slot
                 # was mis-attributed (grabbing the partner's distance in a multiplayer round).
@@ -3137,7 +3162,7 @@ class Engine:
         if not data:
             self.plan = None  # every call failed; don't let the previous shot's plan air for this one
             return
-        is_putt = (event.hud.lie or "").lower() == "green"
+        is_putt = (event.hud.lie or "").lower() == "green" and not getattr(event.hud, "_wrong_green", False)
         # The flight branches come from the text-only branch call, which never saw the hole, so ground
         # them as unseen: a flight line may only name scenery/hazards present in the facts, not invent
         # them. Only the separate hazard call sees the image, and its output isn't line-grounded.
@@ -3168,8 +3193,8 @@ class Engine:
             rate = max(rate, 0.9)
         correction = getattr(event.hud, "_lie_correction", False)
         stymie = getattr(event.hud, "_stymie", False)
-        if getattr(event.hud, "_mulligan", False) or correction or stymie:
-            rate = 1.0   # a mulligan, a wrong call to set straight, or a tree in the way always gets its word
+        if getattr(event.hud, "_mulligan", False) or correction or stymie or getattr(event.hud, "_wrong_green", False):
+            rate = 1.0   # a mulligan, a wrong call to set straight, a tree in the way or the wrong green always gets its word
         # The opening tee shot skips the spoken setup line (the opener just set the round up, and a
         # line here would land late), but still pre-voices the flight and result branches below so the
         # first shot's calls are ready at impact like every other shot's.
@@ -3676,6 +3701,8 @@ class Engine:
         if shot.putter is None:
             await self._read_putter(shot, fires0, impact, tag, wait=0.0)  # the log may have caught up
         fire = self.gspro.fire_of(fires0, impact)
+        # Read before the lie fix-up below, which can recast a green set up in yards as the fringe.
+        off_wrong_green = None if shot.is_putt else wrong_green_yards(before.lie, before.to_pin)
         played_from = self._played_from(before, shot, self.gspro.fire_info(fire),
                                         MATERIAL_TO_LIE.get(lies0.get(idx)) if idx is not None else None)
         if played_from == "green" and self._set_up_in_yards(before):
@@ -3747,7 +3774,9 @@ class Engine:
                 self._starts_due.add(fire)
             self._apply_log_corrections()   # a mulligan logged before this re-hit was recorded
         replay_facts = self._replay_facts(player, rec)
-        must = "mulligan" if replay_facts else None
+        must = ("misread" if "misread" in replay_facts[0] else "mulligan") if replay_facts else None
+        if off_wrong_green is not None:
+            score = max(score, c.interest_threshold)   # a shot off another hole's green gets its word
         if replay_facts:
             score = max(score, c.interest_threshold)   # the mulligan gets its word
         if kick := await self._kick_facts(fire, hud.lie, shot.is_putt):
@@ -3775,6 +3804,7 @@ class Engine:
         gimme_level = gimme_feet = None
         roll_yards = tile_yards("total length")
         outcome = full_result = None
+        wrong_green = None
         if shot.is_putt and ((self.screen is not None and ocr) or idx is not None):
             base_outs, base_gim = impact_snap[2].get(idx, 0), impact_snap[3].get(idx, 0)
             if idx is not None:
@@ -3891,6 +3921,17 @@ class Engine:
                     score = max(score, c.big_moment_threshold)
                     log.info("%s stuffed it: %.0f feet from the hole from %.0f yards (GSPro log)",
                              tag, close_feet, start_yards)
+            if (hud.lie or "").lower() == "green" and close_feet is None and full_result not in ("holed", "conceded"):
+                # On a green, but whose? GSPro's finishing distance says (a drive "found the green" 322
+                # yards from the pin, then had "a putt for albatross").
+                finish = await self._wait_finish_yards(idx, impact_snap[0].get(idx), 1.0)
+                if finish is not None and finish > WRONG_GREEN_YARDS:
+                    wrong_green = finish
+                    score = max(score, c.interest_threshold)
+                    if "found_green" in tags:
+                        tags.remove("found_green")
+                    tags.append("wrong_green")
+                    log.info("%s finished on the wrong green, %.0f yards from the pin", tag, finish)
 
         # The early splash (above) already aired and was the call for this shot; the shot has now been
         # recorded, so skip every further reaction.
@@ -4015,6 +4056,12 @@ class Engine:
             left = None
             if idx is not None and self._log_truth:
                 left = await self._wait_finish_yards(idx, impact_snap[0].get(idx), 1.0)
+            if left is not None and wrong_green is None and left > WRONG_GREEN_YARDS \
+                    and (hud.lie or "").lower() == "green":
+                wrong_green = left   # the tdist came too late for the check above: still no birdie putt
+                if "found_green" in tags:
+                    tags.remove("found_green")
+                tags.append("wrong_green")
             if left is not None:
                 on_green = (hud.lie or "").lower() in ("green", "fringe")
                 where = f"{left * 3:.0f} feet" if on_green or left < 10 else f"{left:.0f} yards"
@@ -4022,9 +4069,13 @@ class Engine:
             else:
                 result = result + ["How far the ball is from the pin now is not known: don't state a distance "
                                    "left, and don't repeat the starting distance as if it were."]
-        if next_putt and not shot.is_putt and full_result not in ("holed", "conceded") and \
+        if wrong_green is not None:
+            result = [wrong_green_fact(wrong_green)]
+        elif next_putt and not shot.is_putt and full_result not in ("holed", "conceded") and \
                 (close_feet is not None or (hud.lie or "").lower() == "green"):
             result = result + [next_putt]
+        if off_wrong_green is not None:
+            result = [wrong_green_fact(off_wrong_green, played_off=True)] + result
         # No in-the-moment "distance from the pin": the only estimate available (start distance minus
         # how far the ball travelled, from a tile that can read stale) was unreliable enough to call a
         # ball in a greenside bunker "three yards, beautifully done". The lie (describe) is read

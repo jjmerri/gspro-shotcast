@@ -863,3 +863,21 @@ async def test_a_lie_the_gspro_log_fills_in_is_kept_for_the_impact(tmp_path, mon
     read = Hud(player_text="Josh 2nd (E) Shot 2 126 YDS", shot_number=2, to_pin="126 yards", lie="rough")
     engine._use_setup_lie(read)
     assert (unread.lie, read.lie) == ("fairway", "rough")
+
+
+async def test_a_ball_on_another_holes_green_is_no_putt(tmp_path):
+    from commentator.facts import preshot_facts
+    # Dan's mulligan drive at Tobacco Road came to rest on a green 967 feet from the pin: "this putt is
+    # somehow for albatross".
+    hud = Hud(shot_number=2, to_pin="967 feet 9 inches", lie="green", score_to_par="+1", elevation_yards=2.0)
+    facts = " ".join(preshot_facts(hud, 4))
+    assert "wrong one: 323 yards" in facts and "putt is for" not in facts and "albatross" not in facts
+    assert "The putt is" not in facts and "2 yards uphill" in facts
+    assert "967 feet" not in facts
+    near = " ".join(preshot_facts(Hud(shot_number=2, to_pin="30 feet 0 inches", lie="green"), 4))
+    assert "wrong" not in near and "This putt is for eagle" in near
+
+    engine, _ = _engine(tmp_path)
+    hud = Hud(player_text="Dan 2nd Shot 2 967 FT", shot_number=2, to_pin="967 feet 9 inches", lie="green")
+    _, facts_text = await engine._preshot_model(hud, "Dan", [], None)
+    assert hud._wrong_green and "wrong one" in facts_text and "albatross" not in facts_text
