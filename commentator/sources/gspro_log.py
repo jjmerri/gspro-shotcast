@@ -478,6 +478,7 @@ class GsproState:
                 self._unowned_outs += 1    # the shooter's score line, next, says whose ball dropped
             elif self.active_player is not None:
                 self.hole_outs_by[self.active_player] = self.hole_outs_by.get(self.active_player, 0) + 1
+                self._mark_pick(self.active_player)
         elif ev.kind == "team_copy":
             self.team_scores = True
             s, mate = self.selected, ev.player
@@ -486,6 +487,7 @@ class GsproState:
                 self.teammates.add(frozenset((s, mate)))
                 self.players_seen.add(mate)
                 self.dropped_by[mate] = self.dropped_by.get(mate, 0) + 1
+                self._mark_pick(s, [mate])
                 # The teammate now plays the picked ball: its lie, distance and spot, not their own.
                 for d in (self.lie_by, self.to_pin_by, self.gimme_by):
                     if s in d:
@@ -512,6 +514,23 @@ class GsproState:
         self.active_player = self.current_hole = self.lie = self.to_pin = self.gimmie = None
         self.hole_outs = self.gimmies = 0
         self.team_scores = False
+
+    def _mark_pick(self, player: int, mates: list[int] | None = None) -> None:
+        """In a shared-ball round, the player's last shot is the one the team played on (GSPro picked
+        it, or it holed): fire info "picked" True, and the teammates' last shots on the same hole, not
+        yet settled, False. `mates` defaults to every partner a copy has linked to the player."""
+        if not self.team_scores:
+            return
+        info = self._fire_info.get((self._fires_by.get(player) or [None])[-1])
+        if info is None:
+            return
+        info.setdefault("picked", True)
+        if mates is None:
+            mates = [m for pair in self.teammates if player in pair for m in pair if m != player]
+        for m in mates:
+            other = self._fire_info.get((self._fires_by.get(m) or [None])[-1])
+            if other is not None and "picked" not in other and other.get("hole") == info.get("hole"):
+                other["picked"] = False
 
     def _attach_lie(self, idx: int) -> None:
         """Commit the material seen just before this player's setup block as that player's lie."""
@@ -570,12 +589,14 @@ class GsproState:
             rest = self._rest_by.pop(ev.player, None)
             if n in self._fire_info:
                 self._fire_info[n]["player"] = ev.player
+                self._fire_info[n]["hole"] = ev.hole
                 if rest is not None and rest["hole"] == ev.hole:   # a hole's tee shot has none
                     self._fire_info[n].update({k: rest[k] for k in ("start", "to_pin") if k in rest})
             self._fires_by[ev.player] = (self._fires_by.get(ev.player, []) + [n])[-3:]
             self._shot_since_state[ev.player] = True
             if self._unowned_outs:
                 self.hole_outs_by[ev.player] = self.hole_outs_by.get(ev.player, 0) + self._unowned_outs
+                self._mark_pick(ev.player)
             if self._unowned_wet is not None:
                 self._wet_since_shot[ev.player] = True
                 self._wet_at[ev.player] = self._unowned_wet

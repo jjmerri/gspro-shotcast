@@ -428,7 +428,7 @@ def test_penalty_surface_is_kept_per_shot():
     import time
     s = _replay(FIRE + "LaunchExt - Regular Mode\nPenalty Surface TVGsand, Spin71%, Speed 78%, VLA 100%\n"
                 + _line(1, 1, 1))
-    assert s.fire_info(s.fire_of(s.fires, time.monotonic())) == {"player": 0, "putting": False, "penalty": "sand"}
+    assert s.fire_info(s.fire_of(s.fires, time.monotonic())) == {"player": 0, "hole": 1, "putting": False, "penalty": "sand"}
 
 
 def test_a_repeated_score_in_a_team_format_is_a_mulligan_only_when_it_repeats_the_players_last_shot():
@@ -523,6 +523,27 @@ def test_a_scramble_pick_is_read_and_the_dropped_ball_takes_the_picked_one():
     for ev in parse_events("".join(text[24:])):
         s.apply(ev)
     assert s.pick == (0, 0) and s.dropped_by == {0: 1, 1: 2}
+    # Each stroke's ball the team played on, the last one the putt GSPro picked inside the circle.
+    assert {n: s.fire_info(n).get("picked") for n in range(1, 7)} == {
+        1: False, 2: True, 3: True, 4: False, 5: True, 6: False}
+
+
+def test_in_a_scramble_the_putt_that_holed_is_the_teams_and_the_partners_miss_is_not():
+    s = GsproState()
+    for ev in [LogEvent("shot_fired"), LogEvent("state", player=0, hole=0, score=1, strokes=1),
+               LogEvent("shot_fired"), LogEvent("state", player=1, hole=0, score=1, strokes=1),
+               LogEvent("select", player=1), LogEvent("team_copy", player=0),
+               LogEvent("shot_fired"), LogEvent("state", player=0, hole=0, score=2, strokes=1),
+               LogEvent("shot_fired"), LogEvent("hole_out"), LogEvent("state", player=1, hole=0, score=2, strokes=1)]:
+        s.apply(ev)
+    assert [s.fire_info(n).get("picked") for n in range(1, 5)] == [False, True, False, True]
+
+
+def test_a_solo_hole_out_is_not_a_pick():
+    s = GsproState()
+    for ev in [LogEvent("shot_fired"), LogEvent("hole_out"), LogEvent("state", player=0, hole=0, score=1, strokes=1)]:
+        s.apply(ev)
+    assert "picked" not in s.fire_info(1)
 
 
 def test_a_solo_select_line_is_not_a_scramble():

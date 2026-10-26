@@ -586,6 +586,7 @@ class Engine:
         self._fire_rows: dict[int, tuple] = {}
         self._mulligans_done: set[int] = set()
         self._hazards_done: set[int] = set()   # fires whose penalty-area entry point is stored
+        self._picks_done: set[int] = set()     # fires whose scramble pick (used or not) is stored
         self._backup_lock = asyncio.Lock()
         self._backup_tasks: set[asyncio.Task] = set()
         # Recorded shots still waiting on their start position: GSPro attaches it only at the shooter's
@@ -4376,6 +4377,9 @@ class Engine:
         # penalty on a ball that wasn't picked puts a stroke ahead). Alternate shot's partners take turns
         # on one score, which repeats for other reasons. Best ball is still one ball each.
         team = r is not None and r.format == "alternate"
+        # A shamble selects drives too, but its partners then play their own balls: only a scramble's
+        # strokes are each one partner's ball played on and the rest lifted.
+        scramble = r is not None and r.format == "scramble" and not r.no_scramble
         for fire in sorted(self._starts_due):
             if fire not in self._fire_rows:
                 self._starts_due.discard(fire)
@@ -4386,6 +4390,10 @@ class Engine:
             if fire not in self._hazards_done and (entry := g.fire_info(fire).get("hazard")):
                 self._hazards_done.add(fire)
                 self.store.set_shot_hazard(row[0], entry)
+            if (scramble and row[1].round_id == r.id and fire not in self._picks_done
+                    and (picked := g.fire_info(fire).get("picked")) is not None):
+                self._picks_done.add(fire)
+                self.store.set_picked(row[0], picked)
         for fire, kind in list(g.mulligan_fires.items()):
             if fire in self._mulligans_done or fire not in self._fire_rows:
                 continue

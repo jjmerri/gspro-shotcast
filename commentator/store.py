@@ -289,6 +289,7 @@ class Store:
                  "outcome": "TEXT", "fmt": "TEXT", "attributed": "INTEGER NOT NULL DEFAULT 1",
                  "is_league": "INTEGER NOT NULL DEFAULT 1", "mulligan": "INTEGER NOT NULL DEFAULT 0",
                  "shared_ball": "INTEGER NOT NULL DEFAULT 0", "left_out": "INTEGER NOT NULL DEFAULT 0", "handed": "TEXT",
+                 "picked": "INTEGER",
                  **{col: "REAL" for col in CLUB_COLS}, **{col: "REAL" for col in POSITION_COLS},
                  **{col: "REAL" for col in HAZARD_COLS}}
         for col, decl in added.items():
@@ -621,6 +622,13 @@ class Store:
                             (*start, shot_id))
             self.db.commit()
 
+    def set_picked(self, shot_id: int | None, picked: bool) -> None:
+        """Whether the team played on from this shared-ball shot, as GSPro's log said: its pick, or the
+        putt that holed. NULL when the log never said (a round before this was read, or no log)."""
+        if shot_id is not None:
+            self.db.execute("UPDATE shots SET picked = ? WHERE id = ?", (int(picked), shot_id))
+            self.db.commit()
+
     def set_shot_hazard(self, shot_id: int | None, entry: tuple) -> None:
         """Where GSPro's log had this shot's ball go into a penalty area (logged as it rolls or flies in)."""
         if shot_id is not None:
@@ -660,7 +668,9 @@ class Store:
     def set_format(self, shot_ids: list[int], fmt: str) -> None:
         """Relabel a round's shots once its real format is known (a scramble GSPro's log revealed)."""
         if shot_ids:
-            self.db.executemany("UPDATE shots SET fmt = ? WHERE id = ?", [(fmt, i) for i in shot_ids])
+            # A scramble's balls are shared, including the tee shots recorded before it was known.
+            self.db.executemany("UPDATE shots SET fmt = ?, shared_ball = shared_ball OR ? WHERE id = ?",
+                                [(fmt, fmt == "scramble", i) for i in shot_ids])
             self.db.commit()
 
     def record_gimme(self, shot_id: int) -> int | None:

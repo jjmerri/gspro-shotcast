@@ -32,6 +32,8 @@ class Fire:
     hole: int | None = None   # 1-based, from the next state line (which credits the shot)
     segment: int = 0          # which course load (or round restart) in the log it was played in
     hazard: tuple | None = None   # where the ball went into a penalty area
+    player: int | None = None     # GSPro's index for the shooter
+    picked: bool | None = None    # in a scramble, whether the team played on from this ball
 
 
 @dataclass
@@ -44,16 +46,19 @@ class LogRead:
 def read_log(text: str) -> LogRead:
     st, out = GsproState(), LogRead()
     pending, segment = None, 0
+    infos = []   # each fire's info, kept past the state's window: a pick lands after both partners hit
     for ev in parse_events(text):
         st.apply(ev)
         if ev.kind == "shot_fired":
             pending = (st.fires, Fire(st.course_display, None, None, st.fire_info(st.fires).get("aim"), segment=segment))
             out.fires.append(pending[1])
+            infos.append(st.fire_info(st.fires))
         elif ev.kind == "state" and pending is not None:
             # The score line names the shooter, and with it where their ball lay and how far out:
             # with several players, the block logged before this fire was someone else's.
             info, f = st.fire_info(pending[0]), pending[1]
             f.hole = ev.hole + 1 if ev.hole is not None else None
+            f.player = ev.player
             f.start = info.get("start")
             f.hazard = info.get("hazard")
             f.to_pin_yd = info["to_pin"] * M_TO_YD if info.get("to_pin") is not None else None
@@ -63,6 +68,8 @@ def read_log(text: str) -> LogRead:
         elif ev.kind in ("course", "end_round", "range"):
             pending = None
             segment += 1
+    for f, info in zip(out.fires, infos):
+        f.picked = info.get("picked")
     return out
 
 
@@ -134,16 +141,30 @@ def backfill(db_path: str, logs: list[str], dry_run: bool = False, fix_starts: b
 def _backfill(db_path: str, logs: list[str], fix_starts: bool = False) -> dict[str, int]:
     store = Store(db_path, new_session=False)
     db = store.db
-    stats = {"fires": 0, "matched": 0, "starts": 0, "aims": 0, "layouts": 0, "fixed": 0, "hazards": 0}
+    stats = {"fires": 0, "matched": 0, "starts": 0, "aims": 0, "layouts": 0, "fixed": 0, "hazards": 0, "picks": 0}
     for path in logs:
-        rows = db.execute("SELECT id, session_id, ts, course, hole, shot_number, to_pin_yards, start_x, start_z, aim_map_x,"
-                          " hazard_x FROM shots WHERE outcome IS NOT 'gimme' AND course != 'Practice' ORDER BY id").fetchall()
+        rows = db.execute("SELECT id, session_id, ts, player, course, hole, shot_number, to_pin_yards, start_x, start_z,"
+                          " aim_map_x, hazard_x, picked, fmt FROM shots WHERE outcome IS NOT 'gimme' AND course != 'Practice' ORDER BY id").fetchall()
         with open(path, encoding="utf-8", errors="replace") as fh:
             got = read_log(fh.read())
         stats["fires"] += len(got.fires)
         pairs = align(got.fires, rows)
         stats["matched"] += len(pairs)
         row_of = {}
+        # Scramble partners' strokes share a distance, so a pairing can cross them: a pick is only
+        # written where the row's player is the one the course load mostly pairs that index with.
+        votes: dict[tuple, dict[str, int]] = {}
+        for i, j in pairs:
+            f, who = got.fires[i], rows[j]["player"]
+            if f.player is not None and who:
+                v = votes.setdefault((f.segment, f.player), {})
+                v[who] = v.get(who, 0) + 1
+        name_of = {k: who for k, v in votes.items() if (who := max(v, key=v.get)) and v[who] * 2 > sum(v.values())}
+        # Two indices on one name in a course load: the pairing crossed partners, so trust neither.
+        seen: dict[tuple, int] = {}
+        for (seg, _), who in name_of.items():
+            seen[(seg, who)] = seen.get((seg, who), 0) + 1
+        name_of = {k: who for k, who in name_of.items() if seen[(k[0], who)] == 1}
         for i, j in pairs:
             f, r = got.fires[i], rows[j]
             row_of[i] = r
@@ -158,6 +179,10 @@ def _backfill(db_path: str, logs: list[str], fix_starts: bool = False) -> dict[s
             if f.aim and r["aim_map_x"] is None:
                 stats["aims"] += 1
                 db.execute("UPDATE shots SET aim_map_x = ?, aim_map_y = ? WHERE id = ?", (*f.aim, r["id"]))
+            if f.picked is not None and r["picked"] is None and r["player"] and r["fmt"] == "scramble" \
+                    and name_of.get((f.segment, f.player)) == r["player"]:
+                stats["picks"] += 1
+                db.execute("UPDATE shots SET picked = ? WHERE id = ?", (int(f.picked), r["id"]))
             if f.hazard and r["hazard_x"] is None:
                 stats["hazards"] += 1
                 db.execute("UPDATE shots SET hazard_x = ?, hazard_y = ?, hazard_z = ? WHERE id = ?", (*f.hazard, r["id"]))

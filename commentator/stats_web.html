@@ -428,7 +428,7 @@ function replaySvg(rp, animate = false, { colors = {}, only = null, focus = null
   const yd = [10, 25, 50, 100, 150, 200].reduce((a, v) => Math.abs(v - h * 1.0936 / 5) < Math.abs(a - h * 1.0936 / 5) ? v : a);
   const bar = yd / 1.0936 * k;
   g += `<line x1="8" y1="${H - 8}" x2="${(8 + bar).toFixed(1)}" y2="${H - 8}" stroke="#8fa59b" stroke-width="2"/><text x="8" y="${H - 13}" fill="#8fa59b" font-size="10">${yd} yd</text>`;
-  const legend = rp.players.map((pl, i) => `<span style="color:${color(pl, i)}${drawn.includes(pl) ? "" : ";opacity:.45"}">● ${esc(pl.name)}${pl.strokes ? ` · ${pl.strokes}${pl.gimmes ? ` (incl. ${pl.gimmes} gimme${pl.gimmes > 1 ? "s" : ""})` : ""}` : ""}</span>`).join(" &nbsp;");
+  const legend = rp.players.map((pl, i) => `<span style="color:${color(pl, i)}${drawn.includes(pl) ? "" : ";opacity:.45"}">● ${esc(pl.name)}${pl.used != null ? ` · ${pl.used} shot${pl.used === 1 ? "" : "s"} used` : pl.strokes ? ` · ${pl.strokes}${pl.gimmes ? ` (incl. ${pl.gimmes} gimme${pl.gimmes > 1 ? "s" : ""})` : ""}` : ""}</span>`).join(" &nbsp;");
   const notes = [rp.pin ? (rp.pin_estimated ? "Pin estimated from the shots' distances." : "") : "Pin position unknown.",
                  drawn.some(p => p.shots.some(s => s.aim)) ? "Dashed: where the player aimed." : "",
                  drawn.some(p => p.shots.some(s => s.penalty)) ? "✕: where a ball went into a penalty area (the next shot is the drop)." : "",

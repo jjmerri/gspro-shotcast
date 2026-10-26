@@ -39,8 +39,8 @@ _HOLE = re.compile(r"Hole (\d+)")
 _PAR = re.compile(r"par (\d)")
 _COLS = ("id, session_id, ts, player, course, hole, shot_number, club, is_putt, lie_before, lie_after,"
          " to_pin_yards, total_yards, offline_yards,"
-         " outcome, mulligan, shared_ball, tags, start_x, start_z, aim_map_x, aim_map_y, hazard_x, hazard_z,"
-         " start_direction, spin_axis, handed, COALESCE(carry_game_yards, carry_raw_tile_yards, carry_raw) AS carry")
+         " outcome, mulligan, shared_ball, fmt, tags, start_x, start_z, aim_map_x, aim_map_y, hazard_x, hazard_z,"
+         " start_direction, spin_axis, handed, picked, COALESCE(carry_game_yards, carry_raw_tile_yards, carry_raw) AS carry")
 
 
 def _xz(x: float | None, z: float | None) -> tuple[float, float] | None:
@@ -154,6 +154,8 @@ def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]
     if "start_x" not in have:
         return {}
     cols = _COLS if "hazard_x" in have else _COLS.replace("hazard_x, hazard_z", "NULL AS hazard_x, NULL AS hazard_z")
+    if "picked" not in have:
+        cols = cols.replace(" picked,", " NULL AS picked,")
     round_of = stats_web.shot_rounds(db)
     groups: dict[tuple[int, int], list[sqlite3.Row]] = {}
     for row in db.execute(f"SELECT {cols} FROM shots ORDER BY id"):
@@ -194,6 +196,12 @@ def _travel_m(r: sqlite3.Row) -> float | None:
     return r["carry"] / M_TO_YD if r["carry"] else None
 
 
+def _shared(r: sqlite3.Row) -> bool:
+    """A team format where GSPro copies balls between teammates (a scramble's opening tee shots
+    can predate the log revealing it, and so lack the flag)."""
+    return r["fmt"] == "scramble" or bool(r["shared_ball"])
+
+
 def _scramble_teams(rows: list[sqlite3.Row]) -> dict[str, str]:
     """Each shared-ball player's team, as one partner's name, from a whole round's shots: GSPro
     puts partners' balls on the very same spot for every stroke after the tee shot (all teams tee
@@ -202,7 +210,7 @@ def _scramble_teams(rows: list[sqlite3.Row]) -> dict[str, str]:
     a hole, so a hole one partner finished alone still knows the team."""
     spots: dict[tuple, list[tuple]] = {}
     for r in rows:
-        if (r["shared_ball"] and r["player"] and not r["mulligan"] and (r["shot_number"] or 0) > 1
+        if (_shared(r) and r["player"] and not r["mulligan"] and (r["shot_number"] or 0) > 1
                 and r["start_x"] is not None and (m := _HOLE.match(r["hole"] or ""))):
             spots.setdefault((m.group(1), r["shot_number"]), []).append((r["player"], (r["start_x"], r["start_z"])))
     both: dict[tuple, list[int]] = {}
@@ -226,18 +234,22 @@ def _scramble_teams(rows: list[sqlite3.Row]) -> dict[str, str]:
 
 
 def _team_ends(played: list[sqlite3.Row], starts: dict[int, tuple | None], rows: list[sqlite3.Row],
-               pin: tuple | None, teams: dict[str, str]) -> dict[int, tuple]:
-    """Where the picked ball of each shared-ball stroke went, by shot id: in a scramble each partner
-    hits from the team's ball, the team plays on from one of them, and the others' are lifted, so only
-    the picked shot is drawn on. The same partners' next stroke starts where it finished; the picked
-    one is the shot whose length fits that (the one whose resting lie is that stroke's, on a tie). The
-    stroke that holed or was conceded runs to the pin, and so does the one that ended the hole when
-    the team's last stroke was a gimme."""
-    shared = [r for r in played if r["shared_ball"] and r["shot_number"]]
+               pin: tuple | None, teams: dict[str, str]) -> tuple[dict[int, tuple], set[int]]:
+    """Where the picked ball of each shared-ball stroke went, by shot id, and the ids of the picked
+    shots: in a scramble each partner hits from the team's ball, the team plays on from one of them,
+    and the others' are lifted, so only the picked shot is drawn on. GSPro's log names the pick
+    (shots.picked); a stroke recorded without it is worked out: the same partners' next stroke starts
+    where it finished, so the picked one is the shot whose length fits that (the one whose resting lie
+    is that stroke's, on a tie). The stroke that holed or was conceded runs to the pin, and so does
+    the one that ended the hole when the team's last stroke was a gimme."""
+    shared = [r for r in played if _shared(r) and r["shot_number"]]
     finished = {r["player"] for r in rows if r["outcome"] in ("holed", "gimme", "conceded") and not r["mulligan"]}
     def root(p):
         return teams.get(p, p)
     ends: dict[int, tuple] = {}
+    # The log's pick stands whether or not its ball has a stored spot.
+    logged_by = {(root(r["player"]), r["shot_number"]): r for r in shared if r["picked"] and r["player"]}
+    used: set[int] = {r["id"] for r in logged_by.values()}
     done: set[int] = set()
     for r in shared:
         if r["id"] in done or starts.get(r["id"]) is None:
@@ -249,7 +261,11 @@ def _team_ends(played: list[sqlite3.Row], starts: dict[int, tuple | None], rows:
         names = {o["player"] for o in group}
         last = max(o["shot_number"] for o in shared if root(o["player"]) == root(r["player"]))
         holed = [o for o in group if o["outcome"] in ("holed", "conceded")]
+        logged = logged_by.get((root(r["player"]), r["shot_number"]))
         if holed:
+            if logged is not None and logged["id"] != holed[0]["id"]:
+                used.discard(logged["id"])
+            used.add(holed[0]["id"])
             if pin:
                 ends[holed[0]["id"]] = pin
             continue
@@ -261,6 +277,13 @@ def _team_ends(played: list[sqlite3.Row], starts: dict[int, tuple | None], rows:
             to, lie = pin, None
         else:
             continue
+        if logged is not None:
+            if any(o["id"] == logged["id"] for o in group):
+                ends[logged["id"]] = to
+            continue
+        group = [o for o in group if o["picked"] is None]   # a ball the log says was lifted isn't the pick
+        if not group:
+            continue
 
         def err(o, to=to, lie=lie):
             t = _travel_m(o)
@@ -269,7 +292,8 @@ def _team_ends(played: list[sqlite3.Row], starts: dict[int, tuple | None], rows:
         best = min(group, key=err)
         if len(group) == 1 or err(best)[0] < math.inf:
             ends[best["id"]] = to
-    return ends
+            used.add(best["id"])
+    return ends, used
 
 
 def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sessions: set,
@@ -292,7 +316,7 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
     # followed the shooter can have the previous player's ball there.
     starts = {r["id"]: ((tee if r["shot_number"] == 1 else None) or _xz(r["start_x"], r["start_z"])
                         or (tee if (r["shot_number"] or 0) <= 1 else None)) for r in played}
-    team_ends = _team_ends(played, starts, rows, pin, teams or {})
+    team_ends, team_used = _team_ends(played, starts, rows, pin, teams or {})
     players = []
     for name in dict.fromkeys(r["player"] or "unknown" for r in rows):
         mine = [r for r in played if (r["player"] or "unknown") == name]
@@ -305,7 +329,7 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
             tags = json.loads(r["tags"] or "[]")
             end, hazard = None, _xz(r["hazard_x"], r["hazard_z"])
             follows = nxt is not None and (nxt["shot_number"] or 0) == (r["shot_number"] or 0) + 1
-            if r["shared_ball"]:
+            if _shared(r):
                 end = team_ends.get(r["id"])   # drawn only for the ball the team played on
             elif hazard and ((nxt is not None and not follows) or "in_water" in tags):
                 # Into a penalty area: the next stroke, after the penalty, is the drop. Only with a
@@ -335,7 +359,12 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
             mine_all = [r for r in rows if (r["player"] or "unknown") == name and not r["mulligan"]]
             strokes = max((r["shot_number"] or 0 for r in mine_all), default=0) or None
             gimmes = sum(r["outcome"] == "gimme" for r in mine_all)
-            players.append({"name": name, "shots": shots, "strokes": strokes, "gimmes": gimmes})
+            entry = {"name": name, "shots": shots, "strokes": strokes, "gimmes": gimmes}
+            if name in (teams or {}) or any(r["fmt"] == "scramble" for r in mine_all):
+                # A scramble partner: the strokes the team played on from this player's ball. The
+                # hole's score is the team's, and only one partner's row carries the gimme.
+                entry["used"] = sum(r["id"] in team_used for r in mine)
+            players.append(entry)
     if not players:
         return None
     return {"course": first["course"], "hole": hole, "par": par, "tee": _r(tee), "pin": _r(pin),

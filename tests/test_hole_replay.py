@@ -203,6 +203,44 @@ def test_a_scramble_draws_only_the_ball_the_team_played_on(tmp_path):
     assert [(s["from"], s["to"]) for s in players["Derek"]] == [([0.0, 0.0], None), ([10.0, 200.0], None)]
 
 
+def test_a_scramble_draws_the_ball_gspro_picked_and_counts_each_partners_used_shots(tmp_path):
+    path, st = _season(tmp_path)
+    log = tmp_path / "output_log.txt"
+    log.write_text(_hole_log())
+    backfill(path, [str(log)])
+    # No lengths to go by: the log's pick says Dan's drive and Derek's approach; Dan holed, and the
+    # gimme row GSPro gave Dan is no one's shot.
+    st.db.execute("UPDATE shots SET shared_ball = 1, picked = shot_number IN (1, 3)")
+    for n, x, z, picked, outcome in ((1, None, None, 0, None), (2, 10.0, 200.0, 1, None),
+                                     (3, 2.0, 295.0, None, "missed")):
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, to_pin_yards,"
+                      " shared_ball, start_x, start_z, picked, outcome, raw) VALUES (?, ?, 'Derek', 'Test Links',"
+                      " 'Hole 1, par 4, 328 yards', ?, '7I', 0, 100, 1, ?, ?, ?, ?, '{}')",
+                      (st.session_id, 1000.5 + n, n, x, z, picked, outcome))
+    st.db.execute("UPDATE shots SET picked = 0 WHERE player = 'Dan' AND shot_number = 2")
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, outcome,"
+                  " shared_ball, raw) VALUES (?, 1004, 'Dan', 'Test Links', 'Hole 1, par 4, 328 yards', 4, 'PT', 1,"
+                  " 'gimme', 0, '{}')", (st.session_id,))
+    st.db.commit()
+    players = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}
+    assert [s["to"] for s in players["Dan"]["shots"]] == [[10.0, 200.0], None, [0.0, 300.0]]
+    assert [s["to"] for s in players["Derek"]["shots"]] == [None, [2.0, 295.0], None]
+    assert (players["Dan"]["used"], players["Derek"]["used"]) == (2, 1)
+    # The log's pick holds when its ball has no stored spot: Dan's lifted approach isn't drawn instead.
+    st.db.execute("UPDATE shots SET start_x = NULL, start_z = NULL WHERE player = 'Derek' AND shot_number = 2")
+    st.db.commit()
+    players = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}
+    assert players["Dan"]["shots"][1]["to"] is None
+    assert (players["Dan"]["used"], players["Derek"]["used"]) == (2, 1)
+    # Tee shots recorded before the log revealed the scramble carry only its format, not the flag.
+    st.db.execute("UPDATE shots SET fmt = 'scramble'")
+    st.db.execute("UPDATE shots SET shared_ball = 0 WHERE shot_number = 1")
+    st.db.commit()
+    players = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}
+    assert players["Dan"]["shots"][0]["to"] == [10.0, 200.0] and players["Derek"]["shots"][0]["to"] is None
+    assert (players["Dan"]["used"], players["Derek"]["used"]) == (2, 1)
+
+
 def test_scramble_teams_sharing_a_tee_are_drawn_apart_and_a_penalty_gap_is_not_run_to_the_pin(tmp_path):
     path, st = _season(tmp_path)
     log = tmp_path / "output_log.txt"
@@ -349,3 +387,84 @@ def test_opening_a_season_keeps_one_map_per_hole_preferring_one_with_the_ball_an
     st.db.commit()
     db = Store(path, new_session=False).db
     assert [tuple(r) for r in db.execute("SELECT session_id FROM hole_images")] == [(2,)]
+
+
+def test_backfill_reads_each_scramble_strokes_pick_from_the_log(tmp_path):
+    def state(p, score):
+        return f"ActivePlayer: {p}  currentHole: 0  strokes: 1  Previous Score: {score}\n"
+    log = tmp_path / "output_log.txt"
+    log.write_text("Selected Course: test_gsp\nLoading course Test Links\n" + SHOT + state(0, 0) + SHOT + state(1, 0)
+                   + "Selecting shot for player: 1\nData for selected player: X 0.0 Y 1.0 Z 200.0\n"
+                   "Logging tdist: 100.0 and ActiveGameGimmieDistance: 1.22\n"
+                   "1503 SelectShot Updating teammate score: player 0\n"
+                   + SHOT + state(0, 1) + SHOT + "Hole out !!! \n" + state(1, 1))
+    path = str(tmp_path / "season.db")
+    st = Store(path)
+    for ts, who, n, to_pin in ((1, "Dan", 1, 300), (2, "Derek", 1, 300), (3, "Dan", 2, 100), (4, "Derek", 2, 100)):
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, to_pin_yards,"
+                      " shared_ball, fmt, raw) VALUES (?, ?, ?, 'Test Links', 'Hole 1, par 4, 328 yards', ?, '7I', 0, ?, 1,"
+                      " 'scramble', '{}')",
+                      (st.session_id, ts, who, n, round(to_pin * M_TO_YD, 1)))
+    st.db.execute("UPDATE shots SET fmt = 'shamble'")
+    st.db.commit()
+    assert backfill(path, [str(log)])["picks"] == 0     # a shamble's partners play their own balls on
+    st.db.execute("UPDATE shots SET fmt = 'scramble'")
+    st.db.commit()
+    assert backfill(path, [str(log)])["picks"] == 4
+    assert [r[0] for r in st.db.execute("SELECT picked FROM shots ORDER BY id")] == [0, 1, 0, 1]
+    # With Dan's second stroke never recorded, his lifted ball pairs with Derek's row: both indices
+    # then read as Derek, so no pick is trusted rather than Derek's holed putt marked as lifted.
+    st.db.execute("DELETE FROM shots WHERE player = 'Dan' AND shot_number = 2")
+    st.db.execute("UPDATE shots SET picked = NULL")
+    st.db.execute("UPDATE shots SET player = 'Derek' WHERE player = 'Dan'")
+    st.db.commit()
+    backfill(path, [str(log)])
+    assert [r[0] for r in st.db.execute("SELECT picked FROM shots ORDER BY id")] == [None, None, None]
+    # With Dan's drive back, each index has its own name again: Derek's drive was the pick, and his
+    # second row, paired with Dan's lifted putt, is left alone.
+    st.db.execute("UPDATE shots SET player = 'Dan' WHERE id = (SELECT MIN(id) FROM shots)")
+    st.db.commit()
+    backfill(path, [str(log)])
+    assert [r[0] for r in st.db.execute("SELECT picked FROM shots ORDER BY id")] == [None, 1, None]
+
+
+def test_backfill_trusts_no_pick_for_an_index_tied_between_names(tmp_path):
+    def state(p, score):
+        return f"ActivePlayer: {p}  currentHole: 0  strokes: 1  Previous Score: {score}\n"
+    log = tmp_path / "output_log.txt"
+    log.write_text("Selected Course: test_gsp\nLoading course Test Links\n" + SHOT + state(0, 0) + SHOT + state(1, 0)
+                   + "Selecting shot for player: 1\nData for selected player: X 0.0 Y 1.0 Z 200.0\n"
+                   "Logging tdist: 100.0 and ActiveGameGimmieDistance: 1.22\n"
+                   "1503 SelectShot Updating teammate score: player 0\n"
+                   + SHOT + state(0, 1) + SHOT + "Hole out !!! \n" + state(1, 1))
+    path = str(tmp_path / "season.db")
+    st = Store(path)
+    # Index 0's second stroke is stored as Derek's, so index 0 pairs once with each name.
+    for ts, who, n, to_pin in ((1, "Dan", 1, 300), (2, "Derek", 1, 300), (3, "Derek", 2, 100), (4, "Derek", 2, 100)):
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, to_pin_yards,"
+                      " shared_ball, fmt, raw) VALUES (?, ?, ?, 'Test Links', 'Hole 1, par 4, 328 yards', ?, '7I', 0, ?, 1,"
+                      " 'scramble', '{}')",
+                      (st.session_id, ts, who, n, round(to_pin * M_TO_YD, 1)))
+    st.db.commit()
+    backfill(path, [str(log)])
+    assert [r[0] for r in st.db.execute("SELECT picked FROM shots ORDER BY id")] == [None, 1, None, 1]
+
+
+def test_a_scramble_hole_without_shared_spots_still_counts_shots_used(tmp_path):
+    path, st = _season(tmp_path)
+    log = tmp_path / "output_log.txt"
+    log.write_text(_hole_log())
+    backfill(path, [str(log)])
+    # Dan's drive was picked and finished inside the gimme circle: no second stroke shares a spot,
+    # so position can't tie the partners together, but the format and the log's pick can.
+    st.db.execute("DELETE FROM shots WHERE shot_number > 1")
+    st.db.execute("UPDATE shots SET fmt = 'scramble', shared_ball = 1, picked = 1")
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, to_pin_yards,"
+                  " shared_ball, fmt, start_x, start_z, picked, raw) VALUES (?, 1001.5, 'Derek', 'Test Links',"
+                  " 'Hole 1, par 4, 328 yards', 1, 'DR', 0, 300, 1, 'scramble', 0.0, 0.0, 0, '{}')", (st.session_id,))
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, outcome,"
+                  " shared_ball, fmt, raw) VALUES (?, 1004, 'Dan', 'Test Links', 'Hole 1, par 4, 328 yards', 2, 'PT', 1,"
+                  " 'gimme', 1, 'scramble', '{}')", (st.session_id,))
+    st.db.commit()
+    players = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}
+    assert (players["Dan"]["used"], players["Derek"]["used"]) == (1, 0)

@@ -712,7 +712,7 @@ def cmd_backfill_log(cfg: Config, args) -> None:
         sys.exit(f"No season database at {path}.")
     got = backfill(str(path), args.log, dry_run=args.dry_run, fix_starts=args.fix_starts)
     print(f"{'Would fill' if args.dry_run else 'Filled'}: {got['starts']} shot positions, {got['aims']} aims and "
-          f"{got['hazards']} penalty-area entries ({got['matched']} of {got['fires']} logged shots matched); "
+          f"{got['hazards']} penalty-area entries, {got['picks']} scramble picks ({got['matched']} of {got['fires']} logged shots matched); "
           f"{got['layouts']} hole layouts."
           + (f" Corrected {got['fixed']} positions." if args.fix_starts else ""))
 
@@ -913,7 +913,7 @@ def main() -> None:
     p = sub.add_parser("restore", help="Put a backup back as the season database (stop the booth first)")
     p.add_argument("file", help="A season-*.db.gz from the backup folder")
 
-    p = sub.add_parser("backfill-log", help="Fill older shots' ball positions, aims and hole layouts from saved GSPro logs")
+    p = sub.add_parser("backfill-log", help="Fill older shots' ball positions, aims, scramble picks and hole layouts from saved GSPro logs")
     p.add_argument("log", nargs="+", help="GSPro output_log.txt files")
     p.add_argument("--db", help="Database file (default: db_path, logs/season.db)")
     p.add_argument("--dry-run", action="store_true", help="Count what would be filled without changing the file")

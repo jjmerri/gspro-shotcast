@@ -3683,11 +3683,37 @@ def test_gspro_revealing_a_scramble_makes_the_round_one(tmp_path):
     rec.shot_id = sid
     e.gspro.teammates.add(frozenset((0, 1)))
     e.gspro.pick, e.gspro.current_hole = (1, 0), 0
+    e._fire_rows[1] = (sid, rec, 0, 0)
+    e.gspro._fire_info[1] = {"player": 0, "picked": False}
     e._apply_log_corrections()
     assert r.format == "scramble" and [s.gspro for s in r.sides] == [["Pat", "Sam"]]
+    assert e.store.db.execute("SELECT picked FROM shots WHERE id = ?", (sid,)).fetchone()[0] == 0
     assert not r.anonymous_players()
-    assert e.store.db.execute("SELECT fmt FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "scramble"
+    assert tuple(e.store.db.execute("SELECT fmt, shared_ball FROM shots WHERE id = ?", (sid,)).fetchone()) == ("scramble", 1)
     assert any("Sam's ball" in f for f in e._format_facts())
+
+
+def test_a_shamble_stores_no_scramble_picks(tmp_path):
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Pat", "Sam"], course="X", scheduled_format=None, holes=9,
+              is_league=False, slot_names=["Pat", "Sam"])
+    r.no_scramble = True   # the setup screen said shamble: partners play their own balls after the drive
+    e.round = r
+    sid, rec = _row(e, r, 7, 1, "tee", hole=0, seq=1)
+    e.gspro.teammates.add(frozenset((0, 1)))
+    e._fire_rows[1] = (sid, rec, 0, 0)
+    e.gspro._fire_info[1] = {"player": 0, "picked": False}
+    e._apply_log_corrections()
+    assert e.store.db.execute("SELECT picked FROM shots WHERE id = ?", (sid,)).fetchone()[0] is None
+    # Nor once a scramble follows it.
+    r2 = Round(league=e.league, gspro_players=["Pat", "Sam"], course="X", scheduled_format=None, holes=9,
+               is_league=False, slot_names=["Pat", "Sam"])
+    e.round = r2
+    r2.play_scramble([["Pat", "Sam"]])
+    e._apply_log_corrections()
+    assert r2.format == "scramble" and r2.id != r.id
+    assert e.store.db.execute("SELECT picked FROM shots WHERE id = ?", (sid,)).fetchone()[0] is None
 
 
 def test_the_opener_and_closer_greet_for_the_time_of_day():
