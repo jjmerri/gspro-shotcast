@@ -486,7 +486,7 @@ class Store:
         if not self._same_hole_next(prev, nxt) or nxt["shot_number"] != prev["shot_number"] + 1:
             return None
         if nxt["outcome"] == "gimme":
-            return prev["gimme_yards"] or nxt["gimme_yards"] or 1.3
+            return prev["gimme_yards"] or nxt["gimme_yards"]   # (inside it; None with no radius logged)
         return nxt["to_pin_yards"]
 
     def _fill_previous_finish(self, shot_id: int) -> None:

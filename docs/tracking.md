@@ -224,7 +224,12 @@ bookmark `#rounds?player=Their+Name`. Rounds that ended since this browser's las
 
 Strokes gained is measured against an approximate PGA Tour baseline (Broadie-style expected
 strokes by lie and distance), so negative numbers are normal; it's for comparing players and
-nights. Click a column header to sort a table. It filters league, practice or all rounds (the filter and the league/practice tags only show once the database has a league round). It's the same static page that
+nights. Gimmes aren't assumed to be any size: each round's gimme circle is the radius GSPro logged
+for most of its shots, and the usual one is the radius most league rounds were played with (each
+round counted once). A round with a different circle is tagged on Rounds (e.g. **6 ft gimmes**),
+putting by length starts at the usual circle, and in strokes gained a stroke that stops in a bigger
+circle than usual is charged for the longer putt it was spared (holing out from 2/3 of the radius,
+beyond the usual circle's), so a generous circle doesn't inflate it. Click a column header to sort a table. It filters league, practice or all rounds (the filter and the league/practice tags only show once the database has a league round). It's the same static page that
 [gets published](#sharing-the-stats-page): the local server opens the database read-only, builds
 the page's files into `logs/stats-web-site` (again whenever the database changes) and serves them. It
 follows the booth's own stat rules: mulligans are left out, and scoring, GIR, scrambling, sand and putting

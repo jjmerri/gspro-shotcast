@@ -77,6 +77,28 @@ def test_holes_split_on_stroke_one_and_strokes_gained_add_up(db):
     assert A.sg_summary(A.holes_played(db))["Ann"]["holes"] == 2
 
 
+def test_a_bigger_gimme_circle_than_usual_is_worth_more(db):
+    for sid in (4, 6):
+        db.execute("INSERT OR IGNORE INTO sessions (id, started_at, date) VALUES (?, 0, '2026-10-01')", (sid,))
+    for g in (4 / 3, 6 / 3):
+        hole, sess = f"Hole {int(g * 3)}, par 4, 400 yards", int(g * 3)
+        shot(db, hole=hole, shot_number=1, club="DR", lie_before="tee", to_pin_yards=400, gimme_yards=g, session_id=sess)
+        shot(db, hole=hole, shot_number=2, club="8I", lie_before="fairway", to_pin_yards=150, gimme_yards=g,
+             session_id=sess)
+        shot(db, hole=hole, shot_number=3, is_putt=1, lie_before="green", outcome="gimme", gimme_yards=g, session_id=sess)
+    # The 6 ft session's par 3, its tee shot without a radius (and so its gimme): the session's radius.
+    shot(db, hole="Hole 7, par 3, 150 yards", shot_number=1, club="8I", lie_before="tee", to_pin_yards=150, session_id=6)
+    shot(db, hole="Hole 7, par 3, 150 yards", shot_number=2, is_putt=1, lie_before="green", outcome="gimme", session_id=6)
+    db.commit()
+    holes = A.holes_played(db)
+    usual, big, par3 = [s["sg"] for s in A.strokes_gained(holes, 4.0) if s["category"] == "approach"]
+    assert usual == pytest.approx(A.expected("fairway", 150) - 1.0 - 1)      # the usual circle: tap-in at 1.0
+    spared = A.expected("green", 4 / 3) - A.expected("green", 8 / 9)
+    assert big == pytest.approx(usual - spared)
+    assert par3 == pytest.approx(A.expected("tee", 150) - 1.0 - spared - 1)
+    assert [s["sg"] for s in A.strokes_gained(holes) if s["category"] == "approach"][:2] == pytest.approx([usual, usual])
+
+
 def test_a_penalty_stroke_costs_a_shot_and_mulligans_and_scrambles_are_left_out(db):
     shot(db, hole="Hole 1, par 4, 400 yards", shot_number=1, club="DR", lie_before="tee", to_pin_yards=400)
     shot(db, hole="Hole 1, par 4, 400 yards", shot_number=1, club="DR", lie_before="tee", to_pin_yards=400, mulligan=1)

@@ -62,14 +62,33 @@ def test_shot_stats_skip_mulligans_and_long_tee_shots_aren_t_approaches(tmp_path
     _shot(db, "Ann", club="PT", is_putt=1, to_pin_yards=1.0, outcome="holed")    # 3 ft, gimmes off
     db.commit()
     with stats_web.connect(path) as ro:
-        p = stats_web.player(ro, "Ann")
+        p = stats_web.player(ro, "Ann", gimme_ft=4.0)
         rec = stats_web.records(ro)
+        six = stats_web.player(ro, "Ann", gimme_ft=6.0)["putting"][0]
     assert (p["avg_drive"], p["longest_drive"]) == (250, 250)
     assert p["clubs"] == [{"club": "3W", "n": 1, "avg_finish": 20.0, "best_finish": 20.0, "avg_from": 230.0}]
     six_ten = next(b for b in p["putting"] if b["range"] == "6-10 ft")
     assert (six_ten["made"], six_ten["attempts"]) == (1, 2)
     assert p["putting"][0]["range"] == "4-6 ft" and (p["putting"][0]["made"], p["putting"][0]["attempts"]) == (1, 1)
+    assert (six["range"], six["made"], six["attempts"]) == ("6-10 ft", 2, 3)   # buckets start at the usual circle
     assert rec["longest_drive"]["v"] == 250 and rec["longest_putt"]["v"] == 2.5
+
+
+def test_the_usual_gimme_is_the_one_most_league_rounds_used(tmp_path):
+    path, db = _db(tmp_path)
+    # Three league rounds (two at 6 ft, one at 4 ft) and a practice round at 4 ft with many more shots.
+    for i, (league, ft, n) in enumerate(((1, 6, 2), (1, 6, 2), (1, 4, 2), (0, 4, 30))):
+        end = 1000 * (i + 1)
+        for k in range(n):
+            _shot(db, "Ann", ts=end - 100 + k, course="Pebble", gimme_yards=ft / 3, is_league=league)
+        _shot(db, "Ann", ts=end - 1, course="Pebble", is_league=league)   # an opening tee shot logs none
+        db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, gross, scores, hole_pars,"
+                   " is_league) VALUES (1, ?, '2026-10-01', 'Pebble', 'Ann', 9, 36, '{}', '{}', ?)", (end, league))
+    db.commit()
+    with stats_web.connect(path) as ro:
+        s = stats_web.summary(ro)
+    assert s["gimme_ft"] == 6.0
+    assert sorted(r["gimme_ft"] for r in s["rounds"]) == [4.0, 4.0, 6.0, 6.0]
 
 
 def test_context_filter_splits_league_and_practice(tmp_path):

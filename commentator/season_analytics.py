@@ -134,13 +134,29 @@ def _category(stroke, par: int | None) -> str:
     return "around_green" if (stroke["to_pin_yards"] or 999) <= AROUND_GREEN_YARDS else "approach"
 
 
-def strokes_gained(holes: list[dict]) -> list[dict]:
+def _gimme_end(radius_yards: float | None, usual_ft: float | None) -> float:
+    """Expected strokes left by a stroke that stopped in the gimme circle: 1.0 (the conceded tap-in) in
+    the usual circle. A bigger circle concedes longer putts, so its gimme is worth what a ball spread
+    over it would take to hole (the average spot is 2/3 of the radius out) beyond the usual one's."""
+    if radius_yards is None or usual_ft is None:
+        return 1.0
+    return 1.0 + expected("green", radius_yards * 2 / 3) - expected("green", usual_ft / 3.0 * 2 / 3)
+
+
+def strokes_gained(holes: list[dict], usual_gimme_ft: float | None = None) -> list[dict]:
     """Strokes gained on every stroke whose start and finish are known: expected strokes before, minus
     expected after, minus one (and minus any penalty strokes, seen as a jump in the stroke number). A
-    conceded tap-in is a stroke from a known spot (expected 1.0), so it's 0 gained and only ends the
-    stroke before it. Only finished holes count, so the strokes and the holes they're divided by
-    match (a hole left unfinished is often the messy one, and its stroke numbers can skip)."""
+    conceded tap-in is a stroke from a known spot (expected 1.0 in the usual circle, `usual_gimme_ft`;
+    see _gimme_end), so it's 0 gained and only ends the stroke before it. Only finished holes count, so
+    the strokes and the holes they're divided by match (a hole left unfinished is often the messy one,
+    and its stroke numbers can skip)."""
     out = []
+    # A gimme's radius is copied from the stroke that left it, which can be the one without (a session's
+    # opening tee shot): then the radius the rest of that session's strokes logged.
+    logged: dict[int, Counter] = defaultdict(Counter)
+    for h in holes:
+        logged[h["session_id"]].update(st["gimme_yards"] for st in h["strokes"] if st["gimme_yards"] is not None)
+    session_radius = {sid: c.most_common(1)[0][0] for sid, c in logged.items() if c}
     for h in holes:
         if not h["complete"]:
             continue
@@ -153,7 +169,8 @@ def strokes_gained(holes: list[dict]) -> list[dict]:
                 continue
             if i + 1 < len(s):
                 nxt = s[i + 1]
-                end = 1.0 if nxt["outcome"] == "gimme" else expected(
+                radius = nxt["gimme_yards"] if nxt["gimme_yards"] is not None else session_radius.get(h["session_id"])
+                end = _gimme_end(radius, usual_gimme_ft) if nxt["outcome"] == "gimme" else expected(
                     nxt["lie_before"] or ("green" if nxt["is_putt"] else None), nxt["to_pin_yards"])
                 if end is None:
                     continue
@@ -166,9 +183,9 @@ def strokes_gained(holes: list[dict]) -> list[dict]:
     return out
 
 
-def sg_summary(holes: list[dict]) -> dict[str, dict]:
+def sg_summary(holes: list[dict], usual_gimme_ft: float | None = None) -> dict[str, dict]:
     """Per player: strokes gained per category and in total, per nine holes played, against the tour."""
-    sg = strokes_gained(holes)
+    sg = strokes_gained(holes, usual_gimme_ft)
     nines: dict[str, float] = defaultdict(float)
     for h in holes:
         if h["complete"]:
@@ -272,7 +289,8 @@ def recovery(holes: list[dict]) -> dict[str, list[dict]]:
     return out
 
 
-def trends(db: sqlite3.Connection, holes: list[dict], context: str | None = None) -> dict[str, list[dict]]:
+def trends(db: sqlite3.Connection, holes: list[dict], context: str | None = None,
+           usual_gimme_ft: float | None = None) -> dict[str, list[dict]]:
     """Per player, one point per night: score to par per nine, putts per hole, fairways and greens hit,
     and strokes gained per nine. From individual-ball rounds."""
     nights: dict[tuple, dict] = {}
@@ -296,7 +314,7 @@ def trends(db: sqlite3.Connection, holes: list[dict], context: str | None = None
         n["gir"][0] += r["gir_hit"] or 0
         n["gir"][1] += r["gir_tries"] or 0
     sg_night: dict[tuple, float] = defaultdict(float)
-    for s in strokes_gained(holes):
+    for s in strokes_gained(holes, usual_gimme_ft):
         sg_night[(s["player"], s["date"])] += s["sg"]
     holes_night: Counter = Counter((h["player"], h["date"]) for h in holes if h["complete"])
     out: dict[str, list[dict]] = defaultdict(list)

@@ -14,6 +14,7 @@ import sqlite3
 import tempfile
 import threading
 import webbrowser
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import date
 from pathlib import Path
@@ -24,10 +25,9 @@ from . import handicap_index
 from . import season_analytics as A
 
 SHARED_BALL = ("scramble", "alternate")
-# Putt length buckets in feet (to_pin_yards is stored in yards). They start at GSPro's 4 ft gimme
-# circle: anything inside it is conceded, never struck, so the first bucket also takes the rare putt
-# struck from closer (gimmes switched off) rather than show a bucket that's always empty.
-PUTT_BUCKETS = [(4, 6), (6, 10), (10, 20), (20, 40), (40, None)]
+# Putt length bucket edges in feet (to_pin_yards is stored in yards); the first bucket starts at the
+# usual gimme circle (putt_buckets).
+PUTT_EDGES = (6, 10, 20, 40)
 # Approach-by-club only counts shots from this close, so a 3-wood off a par-5 tee isn't an "approach".
 APPROACH_MAX_YARDS = 250
 _DRIVE = "COALESCE(total_yards, carry_game_yards, carry_raw)"
@@ -131,8 +131,39 @@ def shot_rounds(db: sqlite3.Connection) -> dict[int, int]:
     return out
 
 
-def rounds(db: sqlite3.Connection, context: str | None = None) -> list[dict[str, Any]]:
+def round_gimmes(db: sqlite3.Connection) -> dict[int, float]:
+    """Each round's gimme radius in feet: the one most of its shots logged (GSPro writes it at every
+    shot's setup; the odd shot without one, like an opening tee shot, is outvoted)."""
+    per: dict[int, Counter] = {}
+    of_shot = shot_rounds(db)
+    for sid, g in db.execute("SELECT id, gimme_yards FROM shots WHERE gimme_yards IS NOT NULL"):
+        if (rnd := of_shot.get(sid)) is not None:
+            per.setdefault(rnd, Counter())[round(g * 3, 1)] += 1
+    return {rnd: c.most_common(1)[0][0] for rnd, c in per.items()}
+
+
+def usual_gimme(db: sqlite3.Connection, gimmes: dict[int, float]) -> float | None:
+    """The usual gimme radius in feet: the one most league rounds were played with, each round counted
+    once (most rounds of any kind before there are league ones). None with no radius on record."""
+    _, of_row = round_groups(db)
+    league = {of_row.get(i, i) for (i,) in db.execute("SELECT id FROM rounds WHERE is_league = 1")}
+    pool = [g for rnd, g in gimmes.items() if rnd in league] or list(gimmes.values())
+    return Counter(pool).most_common(1)[0][0] if pool else None
+
+
+def putt_buckets(gimme_ft: float | None) -> list[tuple[float, float | None]]:
+    """Putt length buckets in feet, the first from the usual gimme circle (a putt inside it is conceded,
+    never struck): that bucket also takes the rare putt struck from closer, in a round with a smaller
+    circle or none, rather than show a bucket that's always empty. From 0 with no radius on record."""
+    lo = gimme_ft or 0
+    edges = [e for e in PUTT_EDGES if e > lo]
+    return list(zip([lo, *edges], [*edges, None]))
+
+
+def rounds(db: sqlite3.Connection, context: str | None = None,
+           gimmes: dict[int, float] | None = None) -> list[dict[str, Any]]:
     out = []
+    gimmes = round_gimmes(db) if gimmes is None else gimmes
     _, of_row = round_groups(db)
     who: dict[int, set] = {}
     named = dict(db.execute("SELECT id, player FROM shots WHERE player IS NOT NULL AND player != 'unknown'").fetchall())
@@ -170,7 +201,7 @@ def rounds(db: sqlite3.Connection, context: str | None = None) -> list[dict[str,
             "fir": [r["fir_hit"], r["fir_tries"]], "gir": [r["gir_hit"], r["gir_tries"]],
             "scramble": [r["scramble_hit"], r["scramble_tries"]], "sand": [r["sand_hit"], r["sand_tries"]],
             "putts": r["putts"], "penalties": r["penalties"], "longest_drive": longest,
-            "card": card["holes"],
+            "card": card["holes"], "gimme_ft": gimmes.get(rnd),
         })
     return out
 
@@ -182,13 +213,13 @@ def _shot_brief(st, h: dict, sg: dict) -> dict[str, Any]:
 
 
 def add_round_summaries(db: sqlite3.Connection, rounds_: list[dict[str, Any]], holes: list[dict],
-                        people: list[dict[str, Any]]) -> None:
+                        people: list[dict[str, Any]], usual_gimme_ft: float | None = None) -> None:
     """A one-player side's round of nine holes or more gets a `summary`: the round against the player's season (score per
     nine, fairways, greens, putts per hole), its strokes gained by category, its best and worst shots
     by strokes gained, and its best and worst holes against par."""
     of_shot = shot_rounds(db)
     season = {p["name"]: p for p in people}
-    sg_of = {s["shot_id"]: s for s in A.strokes_gained(holes)}
+    sg_of = {s["shot_id"]: s for s in A.strokes_gained(holes, usual_gimme_ft)}
     by_round: dict[tuple, list[dict]] = {}
     for h in holes:
         rnd = of_shot.get(h["strokes"][0]["id"])
@@ -234,16 +265,19 @@ def add_round_summaries(db: sqlite3.Connection, rounds_: list[dict[str, Any]], h
         }
 
 
-def players(db: sqlite3.Connection, context: str | None = None) -> list[dict[str, Any]]:
+def players(db: sqlite3.Connection, context: str | None = None,
+            gimme_ft: float | None = None) -> list[dict[str, Any]]:
     """One row per player: season scoring, ball-striking, driving and putting."""
     names = [r[0] for r in db.execute(
         "SELECT player FROM player_rounds WHERE 1=1" + _ctx(context)
         + " UNION SELECT player FROM shots WHERE player IS NOT NULL AND player != 'unknown'"
           " AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context) + " ORDER BY 1")]
-    return [player(db, name, context) for name in names]
+    return [player(db, name, context, gimme_ft) for name in names]
 
 
-def player(db: sqlite3.Connection, name: str, context: str | None = None) -> dict[str, Any]:
+def player(db: sqlite3.Connection, name: str, context: str | None = None,
+           gimme_ft: float | None = None) -> dict[str, Any]:
+    """`gimme_ft` is the usual gimme radius (usual_gimme), where the putting buckets start."""
     p: dict[str, Any] = {"name": name}
     fir = [0, 0]
     tot = {k: [0, 0] for k in ("gir", "scramble", "sand", "putts")}
@@ -308,11 +342,12 @@ def player(db: sqlite3.Connection, name: str, context: str | None = None) -> dic
         " AND club IS NOT NULL AND club NOT IN ('DR', 'PT') AND to_pin_yards <= ?" + shots + " GROUP BY club ORDER BY avg_from DESC",
         (APPROACH_MAX_YARDS, name))]
     p["putting"] = []
-    for lo, hi in PUTT_BUCKETS:
+    buckets = putt_buckets(gimme_ft)
+    for lo, hi in buckets:
         r = db.execute("SELECT COUNT(*) n, SUM(outcome = 'holed') made FROM shots WHERE is_putt = 1"
                        " AND outcome IS NOT NULL AND outcome != 'gimme' AND to_pin_yards >= ? AND to_pin_yards < ?"
-                       + shots, (0 if lo == PUTT_BUCKETS[0][0] else lo / 3.0, (hi or 10_000) / 3.0, name)).fetchone()
-        p["putting"].append({"range": f"{lo}-{hi} ft" if hi else f"{lo}+ ft", "attempts": r["n"],
+                       + shots, (0 if lo == buckets[0][0] else lo / 3.0, (hi or 10_000) / 3.0, name)).fetchone()
+        p["putting"].append({"range": f"{lo:g}-{hi} ft" if hi else f"{lo:g}+ ft", "attempts": r["n"],
                              "made": r["made"] or 0, "pct": _pct(r["made"] or 0, r["n"])})
     return p
 
@@ -381,8 +416,10 @@ def summary(db: sqlite3.Connection, context: str | None = None,
             names: dict[str, str] | None = None) -> dict[str, Any]:
     last = db.execute("SELECT MAX(date) FROM sessions").fetchone()[0]
     holes = A.holes_played(db, context)
-    sg, rec, trend = A.sg_summary(holes), A.recovery(holes), A.trends(db, holes, context)
-    people = players(db, context)
+    gimmes = round_gimmes(db)
+    usual = usual_gimme(db, gimmes)
+    sg, rec, trend = A.sg_summary(holes, usual), A.recovery(holes), A.trends(db, holes, context, usual)
+    people = players(db, context, usual)
     # Our own handicap index (handicap_index) goes by every counting round, whatever the context.
     own = handicap_index.indexes(db)
     for p in people:
@@ -403,9 +440,10 @@ def summary(db: sqlite3.Connection, context: str | None = None,
     # league/practice filter and tags, since every round would be practice.
     has_league = db.execute("SELECT EXISTS (SELECT 1 FROM rounds WHERE is_league = 1)"
                             " OR EXISTS (SELECT 1 FROM shots WHERE is_league = 1)").fetchone()[0] == 1
-    rounds_ = rounds(db, context)
-    add_round_summaries(db, rounds_, holes, people)
-    return {"context": context or "all", "last_session": last, "has_league": has_league, "players": people,
+    rounds_ = rounds(db, context, gimmes)
+    add_round_summaries(db, rounds_, holes, people, usual)
+    return {"context": context or "all", "last_session": last, "has_league": has_league, "gimme_ft": usual,
+            "players": people,
             "rounds": rounds_, **highlights_by_period(db, holes, context), "predictions": predictions(db, names),
             "courses": A.courses(db, context),
             "booth": A.booth(db, names), "broadcasts": A.broadcasts(db), "filters": filters}

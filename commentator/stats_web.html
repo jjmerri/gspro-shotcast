@@ -618,7 +618,7 @@ function renderPlayer(p) {
         { key: "pct", label: "%" }, { key: "bar", label: "", cls: "l", val: b => b.pct }],
         b => `<tr><td>${b.range}</td><td>${b.attempts ? `${b.made}/${b.attempts}` : "–"}</td><td>${dash(b.pct, "%")}</td>
         <td class="l"><div class="bar"><i style="width:${Math.min(100, b.pct || 0)}%"></i></div></td></tr>`, { key: "order" })}
-      <p class="sub">Putts with a known result. Gimmes (inside GSPro's 4 ft circle) are conceded, not putted, so they're left out.</p></div>
+      <p class="sub">Putts with a known result. Gimmes (inside GSPro's ${state.data.gimme_ft ? `${state.data.gimme_ft} ft ` : ""}circle${state.data.gimme_ft ? ", the one most rounds use" : ""}) are conceded, not putted, so they're left out.</p></div>
   </div>
   <h2>Recovery</h2>
   ${sortable("rec", p.recovery, [
@@ -821,6 +821,7 @@ function renderRounds() {
     if (open && state.replays[r.round] === undefined) loadReplays(r.round);
     const reps = open && typeof state.replays[r.round] === "object" ? state.replays[r.round] : null;
     const tags = (!state.data.has_league ? "" : r.league ? '<span class="tag">league</span>' : '<span class="tag">practice</span>') + (r.complete ? "" : '<span class="tag">quit early</span>')
+      + (r.gimme_ft != null && d.gimme_ft != null && r.gimme_ft !== d.gimme_ft ? `<span class="tag" title="This round's gimme circle differs from the usual ${d.gimme_ft} ft">${r.gimme_ft} ft gimmes</span>` : "")
       + (state.seen && r.ended > state.seen ? '<span class="tag new">new</span>' : "");
     return `<tr class="click" data-round="${r.id}"><td>${esc(r.date)}</td><td class="l">${esc(r.course)}</td>
       <td class="l">${esc(r.side)}${r.team && r.team !== r.side ? ` <span class="sub">${esc(r.team)}</span>` : ""}</td>

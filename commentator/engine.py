@@ -4099,7 +4099,7 @@ class Engine:
             if after["outs"] > before["outs"]:
                 self.store.set_shot_result(prev_id, finish_yards=0.0)                  # holed
             elif after["gim"] > before["gim"]:
-                self.store.set_shot_result(prev_id, finish_yards=(self.gspro.gimme_of(idx) or 1.3))  # conceded
+                self.store.set_shot_result(prev_id, finish_yards=self.gspro.gimme_of(idx))  # conceded
             return
         if after["pen"] > before["pen"]:   # same hole, a penalty on this shot: the next setup is the drop
             return
