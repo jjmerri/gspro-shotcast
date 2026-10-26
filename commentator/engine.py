@@ -3746,7 +3746,7 @@ class Engine:
                     else c.hole_result_window_seconds
                 outcome = await self._wait_putt_result(idx, base_outs, base_gim, base_shot,
                                                        window, base_hole=base_hole,
-                                                       base_setup=base_setup)
+                                                       base_setup=base_setup, fire=fire)
                 if outcome == "unknown":
                     # The settle window passed with no log signal (holed/conceded/stroke-advance): a long
                     # miss, whose stroke only advances at the next setup. Commentary can't wait for it,
@@ -3757,7 +3757,7 @@ class Engine:
                              tag, window)
                     self._bg(self._late_result(shot_id, idx, base_outs, base_gim, base_shot, tag, True,
                                                self._pending_prediction.pop(player, None), shot_hole,
-                                               base_hole=base_hole, base_setup=base_setup, rec=rec))
+                                               base_hole=base_hole, base_setup=base_setup, rec=rec, fire=fire))
                 else:
                     self._record_result(shot_id, outcome, tag, putt=True, rec=rec)
                     holed = outcome == "holed"
@@ -3809,7 +3809,7 @@ class Engine:
             short = (start_yards := to_yards(before.to_pin)) is not None and start_yards <= SHORT_GAME_YARDS
             watch = near and (landed or short or hole_over())
             full_result = await self._wait_putt_result(idx, *base, 1.5 if landed else 5.0,
-                                                       base_hole=base_hole, base_setup=base_setup) \
+                                                       base_hole=base_hole, base_setup=base_setup, fire=fire) \
                 if watch else "unknown"
             if full_result in ("holed", "conceded"):
                 self._record_result(shot_id, full_result, tag, putt=False, rec=rec)
@@ -3819,7 +3819,7 @@ class Engine:
                 score = max(score, c.big_moment_threshold if full_result == "holed" else c.interest_threshold)
             elif full_result == "unknown":
                 self._bg(self._late_result(shot_id, idx, *base, tag, False, rec=rec, base_hole=base_hole,
-                                           base_setup=base_setup))
+                                           base_setup=base_setup, fire=fire))
             if full_result == "conceded" and start_yards:
                 # GSPro logs where the ball stopped (tdist) the line before the gimmie, so it's in by now:
                 # a foot away nearly dropped, four feet is just a gimme.
@@ -4457,13 +4457,14 @@ class Engine:
     async def _late_result(self, shot_id: int | None, idx: int, base_outs: int, base_gim: int, base_shot: int,
                            tag: str, putt: bool, prediction: tuple | None = None, hole: str | None = None,
                            window: float = 60.0, rec: ShotRecord | None = None,
-                           base_hole: int | None = None, base_setup: int | None = None) -> None:
+                           base_hole: int | None = None, base_setup: int | None = None,
+                           fire: int | None = None) -> None:
         """Background: keep watching the log for how a stroke ended after commentary has moved on. A
         long missed putt only shows in the log when the next one is set up, well past the reaction
         window; a full shot can come to rest inside the gimme circle. Gives up after `window`."""
         try:
             outcome = await self._wait_putt_result(idx, base_outs, base_gim, base_shot, window, poll=0.5,
-                                                   base_hole=base_hole, base_setup=base_setup)
+                                                   base_hole=base_hole, base_setup=base_setup, fire=fire)
             if outcome == "unknown" or (not putt and outcome == "missed"):
                 return
             self._record_result(shot_id, outcome, tag, putt, rec)
@@ -4494,7 +4495,7 @@ class Engine:
     async def _wait_putt_result(self, idx: int, base_outs: int, base_gim: int, base_shot: int,
                                 window: float, poll: float = 0.2, base_hole: int | None = None,
                                 base_setup: int | None = None, setup_grace: float = 0.3,
-                                no_setup_after: float = 2.0) -> str:
+                                no_setup_after: float = 2.0, fire: int | None = None) -> str:
         """Resolve a stroke from the GSPro log, no banner wait: 'holed' (a hole-out registered),
         'conceded' (a gimmie registered), or 'missed'. Returns 'unknown' when the window closes without
         a result, so the caller doesn't claim a definitive miss it never saw.
@@ -4510,13 +4511,18 @@ class Engine:
         `base_hole` is the player's hole in the log at impact. On a tee shot the log can still be on
         the last hole (stroke 6 there), and the new hole's count restarts below that, so the player's
         hole moving on counts as the stroke being taken as well; without it a tee shot's watch ran on
-        and claimed the gimme the player's next stroke earned."""
+        and claimed the gimme the player's next stroke earned. `fire` is this stroke's "Shot Fired"
+        number: once the player has hit again, anything after is a later stroke's. In a scramble a ball
+        that isn't picked gets no setup of its own, so without this a chip's watch ran on and claimed
+        the gimme its player's putt earned a minute later."""
         g = self.gspro
         deadline = time.monotonic() + window
         setups = getattr(g, "setups_by", None) if base_setup is not None else None
         settled_at = advanced_at = None
         while True:
             now = time.monotonic()
+            if fire is not None and g.fired_since(idx, fire):
+                return "missed"
             if g.hole_outs_of(idx) > base_outs:
                 return "holed"
             if setups is None or setups.get(idx, 0) > base_setup:

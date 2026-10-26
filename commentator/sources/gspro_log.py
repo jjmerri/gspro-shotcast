@@ -557,6 +557,13 @@ class GsproState:
     def hole_outs_of(self, idx: int | None) -> int:
         return self.hole_outs_by.get(idx, 0) if idx is not None else self.hole_outs
 
+    def fired_since(self, idx: int | None, fire: int) -> bool:
+        """Whether the player has hit (and owned) a stroke after fire number `fire`. False if `fire`
+        is another player's, so a mismatched fire can't cut a stroke's watch short."""
+        if idx is None or self.fire_info(fire).get("player") not in (None, idx):
+            return False
+        return any(n > fire for n in self._fires_by.get(idx, []))
+
     def gimmies_of(self, idx: int | None) -> int:
         return self.gimmies_by.get(idx, 0) if idx is not None else self.gimmies
 

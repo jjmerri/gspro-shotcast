@@ -3116,6 +3116,9 @@ class _SetupLog:
     def gimmies_of(self, idx):
         return self.gim
 
+    def fired_since(self, idx, fire):
+        return False
+
     def shot_number(self, idx):
         return self.shot
 
@@ -3138,6 +3141,36 @@ async def test_a_putts_score_line_before_its_gimmie_is_not_a_miss(tmp_path):
     # No setup ever follows the advance: the advance still settles it, a moment later.
     assert await e._wait_putt_result(0, 0, 0, 3, window=3, poll=0.05, base_setup=7,
                                      no_setup_after=0.2) == "missed"
+
+
+async def test_a_scramble_chip_that_was_not_picked_does_not_claim_its_players_putt_gimmie(tmp_path):
+    # Dan, Kiawah 12: Derek's chip was picked, so GSPro set Dan's ball up no more; the chip's watch ran
+    # on and claimed the gimme Dan's putt was given a minute later (two gimme rows for one hole).
+    from commentator.sources.gspro_log import GsproState, parse_events
+    e = _mini_engine(tmp_path)
+    e.gspro = g = GsproState()
+
+    def feed(text):
+        for ev in parse_events(text):
+            g.apply(ev)
+    fire = "* ------- Shot Fired! ------- *\n"
+    feed(fire + "ActivePlayer: 0  currentHole: 11  strokes: 1  Previous Score: 2\n" + fire)
+    chip, base = g.fires, (g.hole_outs_of(1), g.gimmies_of(1), g.shot_number(1), dict(g.setups_by).get(1, 0))
+    task = asyncio.create_task(e._wait_putt_result(1, *base[:3], window=5, poll=0.05, base_hole=11,
+                                                   base_setup=base[3], fire=chip))
+    feed("ActivePlayer: 1  currentHole: 11  strokes: 1  Previous Score: 2\n"
+         "Selecting shot for player: 0\nData for selected player: X 503.6 Y 24.8 Z 471.8\n"
+         "Logging tdist: 2.85 and ActiveGameGimmieDistance: 1.22\n"
+         "1503 SelectShot Updating teammate score: player 1\n"
+         + fire + "ActivePlayer: 0  currentHole: 11  strokes: 1  Previous Score: 3\n"
+         + fire + "ActivePlayer: 1  currentHole: 11  strokes: 1  Previous Score: 3\n"
+         "Selecting shot for player: 1\nData for selected player: X 504.3 Y 24.9 Z 474.7\n"
+         "Logging tdist: 0.32 and ActiveGameGimmieDistance: 1.22\n"
+         "Select Shot - active user ball is within Gimmie distance\n"
+         "ActivePlayer: 1  currentHole: 11  strokes: 1  Previous Score: 4\n")
+    assert g.gimmies_of(1) > base[1]
+    assert await asyncio.wait_for(task, 2) == "missed"
+    assert not g.fired_since(1, chip - 1)   # Derek's stroke: not Dan's to settle
 
 
 async def test_a_chip_watch_ends_at_its_own_setup_not_the_next_putts_gimmie(tmp_path):
