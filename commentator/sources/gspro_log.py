@@ -62,6 +62,7 @@ class LogEvent:
     holes: list | None = None         # layout: each hole's par and world tee/pin/waypoint (see _layout_holes)
     leaves: tuple | None = None       # leaves: (seconds into the flight, hit count, penalty %, accumulated penalty %)
     roll_ft: float | None = None      # roll: how far the ball rolled after landing, logged as it comes to rest
+    descent: float | None = None      # bounce: the ball's descent angle at its first landing (0 = not falling yet)
 
 
 # GSPro's `Using Material TVG<surface>` names mapped to the booth's lie vocabulary (commentator/hud.py
@@ -121,6 +122,10 @@ _AIM = re.compile(rf"^\(({_FLOAT}), ({_FLOAT}), 0\.0\)$")
 _LEAVES = re.compile(rf"^\*\* Leaves hitTime,\s*({_NUM})\s*,\s*HitCount\s*(\d+),\s*Penalty\s*({_NUM})%\s*,"
                      rf"\s*Accumulated penalty\s*({_NUM})%")
 _LEAVES_PASS = re.compile(r"^\* Leaves pas thru at hit (\d+)")
+# The ball's first bounce, logged just before its "Using Material" line. A descent angle of 0.0 means
+# it hadn't started coming down: it struck something standing up (a tree trunk) on the way up, or
+# barely left the ground.
+_BOUNCE = re.compile(rf"^Force {_NUM}\|\|.*\|\|\s*descent angle\s*({_NUM})\|\|")
 # Logged once per shot (putts too, and water) as the ball comes to rest, before the shooter's score
 # block: the end of the ball's motion, whatever the screen shows.
 _ROLL = re.compile(rf"Roll dist ft\s*(-?{_NUM})")
@@ -204,6 +209,8 @@ def parse_events(text: str) -> list[LogEvent]:
                                                       float(m.group(4)))))
             elif _LEAVES_PASS.match(line):
                 out.append(LogEvent("leaves_pass"))
+            elif m := _BOUNCE.match(line):
+                out.append(LogEvent("bounce", descent=float(m.group(1))))
             elif m := _ROLL.search(line):
                 out.append(LogEvent("roll", roll_ft=float(m.group(1))))
             elif m := _VERSION.match(line):
@@ -432,6 +439,9 @@ class GsproState:
                 self._rest_by[p] = {"hole": self.hole_by.get(p, self.current_hole), "start": ev.pos}
         elif ev.kind == "aim":
             self._aim = ev.pos
+        elif ev.kind == "bounce":
+            if self._unowned_fire is not None and self._unowned_fire in self._fire_info:
+                self._fire_info[self._unowned_fire]["descent"] = ev.descent
         elif ev.kind == "material":
             self.lie = self._pending_lie = ev.surface
             if self._unowned_fire is not None and self._unowned_fire in self._fire_info:
@@ -743,6 +753,15 @@ class GsproState:
 
     def fire_info(self, n: int | None) -> dict:
         return self._fire_info.get(n, {}) if n is not None else {}
+
+    def tree_wood(self, n: int | None) -> bool:
+        """Whether the shot's first landing on wood was a tree, not a bridge or wall. GSPro names only
+        the material: wood struck before the ball started coming down (a trunk on the way up), or on a
+        shot that also went through leaves, was a tree; other wood is taken as a structure."""
+        info = self.fire_info(n)
+        if info.get("landed") not in ("wood", "timber"):
+            return False
+        return info.get("descent", 1.0) < 0.5 or bool(info.get("leaves"))
 
     def putting_mode(self, base_fires: int, impact: float, slack: float = 3.0) -> bool | None:
         """Whether GSPro played the shot that hit at `impact` as a putt, or None if not logged (yet)."""

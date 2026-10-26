@@ -256,6 +256,16 @@ NEWS_TRIGGER_TAGS = {
 
 # How long news prep waits for a round start to settle before spending on it.
 NEWS_PREP_SETTLE_SECONDS = 20.0
+# A foliage hit worth calling while the ball is in the air: at least this much of its speed lost (a
+# brush through the leaves costs less and isn't worth cutting the flight line off for).
+TREE_CALL_PENALTY = 15.0
+# How long after impact a tree hit is watched for (GSPro logs foliage hits within ~0.3 s of impact).
+TREE_CALL_WATCH_SECONDS = 3.0
+TREE_CALLS = ("Oh, that's into the trees!", "That's caught a branch!", "Oh no, it's clipped the tree!",
+              "Ooh, that's found the trees!")
+TREE_LOW_CALLS = ("Oh, that's clipped something low!", "That's into the bushes!")
+TRUNK_CALLS = ("Oh, straight into the tree!", "That's smacked the trunk!", "Ooh, right off the tree!")
+
 # Calls whose prompt cache costs more to write (1.25x) than it saves: the closer runs once a round,
 # so its cache is rarely read back before it expires (usage log, Oct 2026).
 UNCACHED_KINDS = {"closer"}
@@ -565,6 +575,7 @@ class Engine:
         # changes to putt mode, so a later read in feet can't hide a setup off the green.
         self._setup_yards: dict[tuple, bool] = {}
         self._shot_seq = 0
+        self._tree_called = 0   # the _shot_seq whose tree hit was called in flight
         # Hazard map and pre-written mid-flight lines from the latest pre-shot look.
         self.plan: FlightPlan | None = None
         # In-memory unless the caller passes the season database; replays use made-up shots.
@@ -3516,11 +3527,14 @@ class Engine:
         # the (slow, under shot-animation load) impact OCR read. The line was voiced for this moment;
         # it must not wait on OCR. The impact read below still runs, for the reaction and learning.
         c = self.cfg.commentary
+        if c.in_flight and not shot.is_putt and self.speech is not None and self.commentary_on:
+            tree_call = asyncio.create_task(self._tree_flight_call(fires0, impact, shot, my_seq, tag))
+            tree_call.add_done_callback(lambda t: t.cancelled() or t.exception())
         flight_played = False
         plan = shot_plan = self.plan  # shot_plan survives the one-swing nulling below, for the reaction
         shot_plan_made_at = self._plan_made_at  # snapshot: the next player's pre-shot can rebind the live one
         if c.in_flight and not shot.is_putt and (shot.carry or 0) >= c.min_flight_carry and plan \
-                and time.monotonic() - self._plan_made_at < 180:
+                and time.monotonic() - self._plan_made_at < 180 and not self._tree_hit_logged(fires0, impact, shot):
             carry0 = self._raw_yards(shot)
             factor0 = self.carry.factor(plan.lie, carry0, self.current_course, shot.vla, "lm")
             picked = pick_line(plan, replace(shot, carry=carry0, units="Yards"), plan.to_pin, factor0, plan.elevation_yards)
@@ -3596,7 +3610,9 @@ class Engine:
                 log.info("%s projection: carry %.0f yd vs pin %s (elevation %s), drift %+.0f yd -> %s; plan %s",
                          tag, proj.carry, f"{pin:.0f} yd" if pin else "unknown", before.elevation_yards,
                          proj.lateral, proj.outcome, "ready" if fresh else ("stale" if plan else "none"))
-            if picked and self._shot_seq == my_seq:   # not if another ball was struck during the impact read
+            if self._tree_called == my_seq or self._tree_hit_logged(fires0, impact, shot):
+                pass   # a tree hit is called (or about to be): the plan's line and a fresh one no longer fit
+            elif picked and self._shot_seq == my_seq:   # not if another ball was struck during the impact read
                 outcome, text = picked
                 self.stats["flight_planned"] += 1
                 log.info("%s mid-flight call (%s) from the plan, audio %s, %.2fs after detection: %r", tag, outcome,
@@ -3611,7 +3627,7 @@ class Engine:
                 self.flight_latencies.append(time.monotonic() - impact)
             elif self._shot_seq == my_seq:
                 flight_task = asyncio.create_task(
-                    self._in_flight(projected, before, player, impact_image, impact, factor, my_seq))
+                    self._in_flight(projected, before, player, impact_image, impact, factor, my_seq, fires0))
 
         # A ball in the water is a penalty with no resting lie to wait for, so SAY its splash NOW, off
         # the GSPro log's Hit_water (ingested by this point, after the impact read), instead of behind
@@ -3686,9 +3702,10 @@ class Engine:
         carry_idx = None if unnamed else self._gspro_idx(player)
         dropped = None if carry_idx is None else impact_snap[7].get(carry_idx, 0)
         learn = None
-        tree_hits = len(self.gspro.fire_info(self.gspro.fire_of(fires0, impact)).get("leaves") or ())
+        fire0 = self.gspro.fire_of(fires0, impact)
+        tree_hits = len(self.gspro.fire_info(fire0).get("leaves") or ()) + self.gspro.tree_wood(fire0)
         if carry_game and tree_hits:
-            log.info("%s hit foliage %s time(s) in flight: its carry isn't learned from", tag, tree_hits)
+            log.info("%s hit a tree %s time(s) in flight: its carry isn't learned from", tag, tree_hits)
         elif carry_game:
             learn_base, learn_carry = ("gspro", carry_flat) if carry_flat else ("lm", self._raw_yards(shot))
             learn = (before.lie, learn_carry, carry_game, self.current_course, shot.vla, learn_base)
@@ -4343,18 +4360,32 @@ class Engine:
         while "landed" not in self.gspro.fire_info(fire) and time.monotonic() < deadline:
             await asyncio.sleep(0.1)
         landed = MATERIAL_TO_LIE.get(self.gspro.fire_info(fire).get("landed") or "")
-        if landed not in ("cart path", "structure") or landed == lie.lower():
-            return []
+        if landed not in ("cart path", "structure") or landed == lie.lower() or self.gspro.tree_wood(fire):
+            return []   # wood that was a tree is _tree_facts' to call
         what = "the cart path" if landed == "cart path" else "something man-made (a bridge or wall)"
         return [f"The ball landed on {what} and kicked off it, finishing in the {lie}. That bounce is "
                 f"worth a word."]
 
     def _tree_facts(self, fire: int | None, shot: Shot, impact: float, tag: str = "") -> list[str]:
-        """A fact when GSPro's log had the ball hit foliage in flight. GSPro doesn't say what it hit, so
-        the height there (modelled from the launch numbers) tells a tree from a bush."""
-        info = self.gspro.fire_info(fire)
-        if shot.is_putt or not (hits := info.get("leaves")):
+        """Facts when GSPro's log had the ball hit a tree: foliage in flight, or the wood of a trunk or
+        branch (see GsproState.tree_wood). GSPro doesn't say what the foliage was, so the height there
+        (modelled from the launch numbers) tells a tree from a bush."""
+        if shot.is_putt:
             return []
+        info = self.gspro.fire_info(fire)
+        hits = info.get("leaves") or []
+        facts = self._foliage_fact(hits, info, shot, impact, tag) if hits else []
+        if self.gspro.tree_wood(fire):
+            rising = info.get("descent", 1.0) < 0.5
+            log.info("%s hit wood %s (descent angle %s): a tree, not a structure", tag,
+                     "on the way up" if rising else "on the way down", info.get("descent"))
+            when = "before it had even started coming down" if rising else "as it came down"
+            facts.append(f"The ball {'then ' if hits else ''}struck the wood of a tree (the trunk or a thick "
+                         f"branch) {when} and bounced off it, so a tree, not the swing, cut this shot short. "
+                         f"Worth a word. It was a tree: never call it a bridge, a wall or a cart path.")
+        return facts
+
+    def _foliage_fact(self, hits: list, info: dict, shot: Shot, impact: float, tag: str) -> list[str]:
         t, _, _, _ = hits[0]
         lost = hits[-1][3]
         # Only the first hit's height is modelled: the ball flew on slowed after it.
@@ -4370,6 +4401,10 @@ class Engine:
             where = (f"low to the ground about {p.out_yd:.0f} yards out, so a bush or the lowest branches "
                      "of a tree" if not p.landed else
                      f"as it came down around {p.out_yd:.0f} yards out, into the trees or bushes there")
+        elif p.height_ft < 20:
+            # A big bush reads ~11 ft by the model (a test on the sim): this band can't tell them apart.
+            where = (f"about {p.height_ft:.0f} feet up and {p.out_yd:.0f} yards out, so a big bush or the low "
+                     "branches of a tree")
         elif p.height_ft < 30:
             where = f"in the branches of a tree, roughly {p.height_ft:.0f} feet up and {p.out_yd:.0f} yards out"
         else:
@@ -4943,9 +4978,62 @@ class Engine:
         except Exception:
             log.exception("Couldn't save review image")
 
+    def _tree_hit_logged(self, fires0: int, impact: float, shot: Shot) -> tuple[float, tuple] | None:
+        """The tree hit worth a flight call that GSPro's log already has for this shot: when it
+        happens (monotonic) and the stock lines to call it with. None if there's none (yet)."""
+        fire = self.gspro.fire_of(fires0, impact)
+        info = self.gspro.fire_info(fire)
+        hits = info.get("leaves") or []
+        if hits and hits[-1][3] >= TREE_CALL_PENALTY:
+            t = hits[0][0]
+            p = point_at(shot.ball_speed, shot.vla, shot.total_spin, shot.spin_axis, self._raw_yards(shot), t)
+            low = p is not None and (p.landed or p.height_ft < 10)
+            return impact + t, TREE_LOW_CALLS if low else TREE_CALLS
+        if self.gspro.tree_wood(fire) and info.get("descent", 1.0) < 0.5:
+            return time.monotonic(), TRUNK_CALLS
+        return None
+
+    async def _tree_flight_call(self, fires0: int, impact: float, shot: Shot, seq: int, tag: str) -> None:
+        """Call a tree hit while the ball is in the air. GSPro works the flight out at launch and logs
+        each foliage hit among the launch lines (within ~0.3 s of impact) with its time into the
+        flight, so the call is timed to the moment the ball reaches the branches. Wood struck on the
+        way up (a trunk) is called as soon as it's logged."""
+        deadline = impact + TREE_CALL_WATCH_SECONDS
+        found = None
+        while self._shot_seq == seq:   # checked at least once, even when started late
+            if (found := self._tree_hit_logged(fires0, impact, shot)) or time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.1)
+        if found is None or self._shot_seq != seq:
+            return
+        hit_at, choices = found
+        self._tree_called = seq
+        line = Line(speaker=self.speakers[0], text=self.rng.choice(choices))
+        if not self._prevoicing():
+            # Voiced as it plays: start it early enough to land near the hit, and never past it by 2 s.
+            await asyncio.sleep(max(0.0, hit_at - 0.8 - time.monotonic()))
+            if self._shot_seq != seq:
+                return
+            self.state.record_lines([line])
+            self.speech.say([line], interrupt=True, deadline=hit_at + 2.0)
+            self._write_transcript([line], "flight")
+            log.info("%s tree call in flight, %.2fs after impact (the hit at %.2fs): %r", tag,
+                     time.monotonic() - impact, hit_at - impact, line.text)
+            return
+        kept, audio = await self._voice_ahead([line])
+        # Land the word a beat before the ball reaches the branches; skip it once that's long gone.
+        await asyncio.sleep(max(0.0, hit_at - 0.2 - time.monotonic()))
+        if self._shot_seq != seq or time.monotonic() > hit_at + 2.0:
+            return
+        self.state.record_lines(kept)
+        self._air_exchange(list(zip(kept, audio)))
+        self._write_transcript(kept, "flight")
+        log.info("%s tree call in flight, %.2fs after impact (the hit at %.2fs): %r", tag,
+                 time.monotonic() - impact, hit_at - impact, kept[0].text if kept else "")
+
     async def _in_flight(
         self, shot, before: Hud, player: str | None, image: bytes | None, impact: float, factor: float,
-        seq: int | None = None,
+        seq: int | None = None, fires0: int | None = None,
     ) -> None:
         deadline = self.cfg.commentary.flight_deadline_seconds
         images = [image] if image and self.flight_llm.cfg.vision else []
@@ -4970,6 +5058,9 @@ class Engine:
         # No retry: there isn't time. A bad line is simply not said.
         good, _ = self._grounded(lines[:1], facts_text, mode="flight", seen_image=bool(images))
         if not good or (seq is not None and self._shot_seq != seq):   # another ball's in the air now
+            return
+        if seq is not None and self._tree_called == seq or \
+                fires0 is not None and self._tree_hit_logged(fires0, impact, shot):   # the tree call has this shot
             return
         line = Line(speaker=self.speakers[0], text=good[0].text)
         self.state.record_lines([line])

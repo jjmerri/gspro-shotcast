@@ -8,7 +8,7 @@ import random
 import re
 
 from commentator.config import Config
-from commentator.engine import Engine
+from commentator.engine import TREE_CALL_WATCH_SECONDS, TREE_CALLS, Engine
 from commentator.hud import Hud
 from commentator.interest import score_shot
 from commentator.league import League
@@ -4118,6 +4118,51 @@ async def test_the_closer_skips_prompt_caching_and_other_calls_keep_it(tmp_path)
     await engine._complete("closer", llm, "hi", [])
     await engine._complete("news", llm, "hi", [])
     assert "cache_control" not in sent[0] and "cache_control" in sent[1]
+
+
+async def test_a_tree_hit_is_called_in_flight_as_the_ball_reaches_it(tmp_path):
+    from commentator.sources.gspro_log import parse_events
+
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.tts.console_simulate_duration = False
+    cfg.tts.prevoice = False
+    e = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+               live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=SpeechQueue(cfg, ConsoleTTS()),
+               screen=None, rng=random.Random(0))
+    aired = []
+    e._prevoicing = lambda: False
+    e.speech.say = lambda lines, **k: aired.append((time.monotonic(), lines[0].text, k.get("deadline")))
+    shot = Shot(ball_speed=59.4, vla=32.5, total_spin=9533, spin_axis=2.2, carry=60.6, units="Yards")
+
+    def fire(*lines):
+        for line in (" * ------- Shot Fired! ------- *", *lines):
+            for ev in parse_events(line):
+                e.gspro.apply(ev)
+
+    # A branch 0.5 s into the flight that cost a third of the ball's speed: called just before it.
+    fire(" ** Leaves hitTime, 0.50 , HitCount 1, Penalty 34.9% , Accumulated penalty 34.9% ")
+    e._shot_seq += 1
+    impact = time.monotonic()
+    await e._tree_flight_call(e.gspro.fires, impact, shot, e._shot_seq, "[t]")
+    # Voiced as it plays (no prevoicing): sent a moment ahead of the hit, never to play 2 s past it.
+    assert len(aired) == 1 and aired[0][1] in TREE_CALLS and aired[0][2] == pytest.approx(impact + 2.5)
+    assert e._tree_called == e._shot_seq
+
+    # Voiced ahead: played a beat before the ball reaches the branches.
+    e._prevoicing = lambda: True
+    e._air_exchange = lambda items: aired.append((time.monotonic(), items[0][0].text, None))
+    fire(" ** Leaves hitTime, 0.50 , HitCount 1, Penalty 34.9% , Accumulated penalty 34.9% ")
+    e._shot_seq += 1
+    impact = time.monotonic()
+    await e._tree_flight_call(e.gspro.fires, impact, shot, e._shot_seq, "[t]")
+    assert len(aired) == 2 and aired[1][0] - impact >= 0.29
+
+    # Through the leaves at no cost: nothing to call (watched from near the end of its window).
+    fire(" * Leaves pas thru at hit 1")
+    e._shot_seq += 1
+    await e._tree_flight_call(e.gspro.fires, time.monotonic() - TREE_CALL_WATCH_SECONDS + 0.2, shot,
+                              e._shot_seq, "[t]")
+    assert len(aired) == 2 and e._tree_called != e._shot_seq
 
 
 async def test_a_tree_on_the_line_always_gets_its_setup_line(tmp_path, caplog):

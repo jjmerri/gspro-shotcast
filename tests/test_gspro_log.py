@@ -528,6 +528,7 @@ def test_a_tree_hit_is_logged_on_its_shot_and_called_by_its_height():
     assert len(second["leaves"]) == 2 and second["leaves_pass"] == 1 and "rest_at" not in second
 
     me = SimpleNamespace(gspro=s, _raw_yards=Engine._raw_yards)
+    me._foliage_fact = lambda *a: Engine._foliage_fact(me, *a)
     approach = Shot(ball_speed=112.15, vla=18.43, total_spin=2992, spin_axis=-1.69, carry=171.77)
     fact = Engine._tree_facts(me, s.fires - 1, approach, 0.0)[0]
     assert "high up in a tree" in fact and "once" in fact and "34%" in fact
@@ -535,6 +536,41 @@ def test_a_tree_hit_is_logged_on_its_shot_and_called_by_its_height():
     fact = Engine._tree_facts(me, s.fires, topped, 0.0)[0]
     assert "as it came down" in fact and "2 times" in fact and "26%" in fact
     assert Engine._tree_facts(me, s.fires, Shot(putter=True), 0.0) == []
+
+
+def test_wood_is_a_tree_when_struck_rising_or_after_leaves_else_a_structure():
+    import asyncio
+    from types import SimpleNamespace
+    from commentator.engine import Engine
+    from commentator.models import Shot
+
+    def bounce(descent):
+        return (f"Force 19.23|| SurfMul 1.41|| BallSpeed 38.32|| AngleSpeedBounce 0.62|| descent angle {descent}"
+                f"|| ExitAngle 45.7")
+
+    # From the sim: a trunk on the way up; leaves then wood coming down; wood coming down alone.
+    s = GsproState()
+    for line in [" * ------- Shot Fired! ------- *", bounce("0.0"), "Using Material TVGwood",
+                 " * ------- Shot Fired! ------- *",
+                 " ** Leaves hitTime, 1.05 , HitCount 1, Penalty 11.4% , Accumulated penalty 11.4% ",
+                 bounce("36.8"), "Using Material TVGwood",
+                 " * ------- Shot Fired! ------- *", bounce("10.5"), "Using Material TVGwood"]:
+        for ev in parse_events(line):
+            s.apply(ev)
+    trunk, leafy, bridge = s.fires - 2, s.fires - 1, s.fires
+    assert s.fire_info(trunk)["descent"] == 0.0
+    assert s.tree_wood(trunk) and s.tree_wood(leafy) and not s.tree_wood(bridge)
+
+    me = SimpleNamespace(gspro=s, _raw_yards=Engine._raw_yards)
+    me._foliage_fact = lambda *a: Engine._foliage_fact(me, *a)
+    shot = Shot(ball_speed=54.8, vla=36.4, total_spin=8499, spin_axis=-6.1, carry=53.1)
+    assert asyncio.run(Engine._kick_facts(me, trunk, "rough", False, wait=0)) == []
+    assert "bridge" in asyncio.run(Engine._kick_facts(me, bridge, "rough", False, wait=0))[0]
+    fact = Engine._tree_facts(me, trunk, shot, 0.0)
+    assert len(fact) == 1 and "wood of a tree" in fact[0] and "before it had even started" in fact[0]
+    facts = Engine._tree_facts(me, leafy, shot, 0.0)
+    assert len(facts) == 2 and "then struck the wood" in facts[1] and "as it came down" in facts[1]
+    assert Engine._tree_facts(me, bridge, shot, 0.0) == []
 
 
 SCRAMBLE = "tests/data/gspro_scramble_sample.txt"

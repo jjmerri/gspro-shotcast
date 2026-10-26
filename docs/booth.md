@@ -45,9 +45,16 @@
    taken as at rest, so a short or low ball the screen never shows landing doesn't wait out the cap.
    A ball that GSPro's log says hit foliage in flight (`Leaves hitTime`) gets a reaction fact. GSPro
    doesn't say whether it was a tree or a bush, so `flight.py` models the height at the first hit from
-   the launch numbers: under 10 ft is a bush or low branches, 10-30 ft the branches of a tree, higher
-   is high up in a tree, and a hit after the modelled landing is the ball running into the trees as it
-   came down. Its shortened carry isn't learned from (`shots.tree_hits`).
+   the launch numbers: under 10 ft is a bush or low branches, 10-20 ft a big bush or a tree's low
+   branches, 20-30 ft the branches of a tree, higher is high up in a tree, and a hit after the modelled
+   landing is the ball running into the trees as it came down. A first bounce off wood (`Using Material
+   TVGwood`) is a tree trunk or branch, not a bridge, when it came before the ball started coming down
+   (the log's `descent angle 0.0`) or after leaves on the same shot; other wood stays a structure. Its
+   shortened carry isn't learned from (`shots.tree_hits`).
+   GSPro logs foliage hits at launch, each with its time into the flight, so a hit that cost at least
+   15% of the ball's speed is also called in flight, timed to the moment the ball reaches the
+   branches (a stock line, no model call); a trunk struck on the way up is called as soon as it's
+   logged. That call replaces the planned flight line.
 
 **Voices.** Lines are voiced as soon as they're written, several at once, and played in order. A
 cloud voice streams: a line starts playing once `tts.stream_prebuffer_seconds` (0.3) of audio has
