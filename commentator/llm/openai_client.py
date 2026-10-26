@@ -25,7 +25,8 @@ class OpenAIClient(LLMClient):
         )
 
     async def complete_json(
-        self, system: str, user: str, schema: dict[str, Any], images: list[bytes] | None = None
+        self, system: str, user: str, schema: dict[str, Any], images: list[bytes] | None = None,
+        cache: bool = True,
     ) -> LLMResult:
         if images and self.cfg.vision:
             content: Any = [{"type": "text", "text": user}]

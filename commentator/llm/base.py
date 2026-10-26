@@ -29,6 +29,9 @@ class LLMClient(ABC):
 
     @abstractmethod
     async def complete_json(
-        self, system: str, user: str, schema: dict[str, Any], images: list[bytes] | None = None
+        self, system: str, user: str, schema: dict[str, Any], images: list[bytes] | None = None,
+        cache: bool = True,
     ) -> LLMResult:
-        """Return model output constrained to `schema`. `images` are JPEG bytes."""
+        """Return model output constrained to `schema`. `images` are JPEG bytes. `cache=False` skips
+        prompt caching where the provider charges extra to write it (a call whose prompt is rarely
+        reused)."""

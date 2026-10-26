@@ -256,6 +256,9 @@ NEWS_TRIGGER_TAGS = {
 
 # How long news prep waits for a round start to settle before spending on it.
 NEWS_PREP_SETTLE_SECONDS = 20.0
+# Calls whose prompt cache costs more to write (1.25x) than it saves: the closer runs once a round,
+# so its cache is rarely read back before it expires (usage log, Oct 2026).
+UNCACHED_KINDS = {"closer"}
 
 # How long a putt's or short shot's setup line waits for the booth to stop talking before it's dropped.
 PRESHOT_IDLE_WAIT_SECONDS = 5.0
@@ -6735,7 +6738,8 @@ class Engine:
             return "{}"
         started = time.monotonic()
         try:
-            result = await llm.complete_json(system or self.system, user, schema or self.schema, images)
+            no_cache = {"cache": False} if kind in UNCACHED_KINDS else {}
+            result = await llm.complete_json(system or self.system, user, schema or self.schema, images, **no_cache)
         except asyncio.CancelledError:
             # A deadline (the mid-flight call) or a newer shot gave up on it: still time it.
             log.info("%s call (%s:%s): cancelled after %.1fs", kind, llm.provider, llm.model,

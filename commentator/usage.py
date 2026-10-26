@@ -5,13 +5,14 @@ from pathlib import Path
 
 from .llm import LLMClient, LLMResult
 
-# USD per million tokens: (input, output). Cache reads bill at 0.1x input, writes at 1.25x.
-# Check current pricing before relying on these.
+# USD per million tokens: (input, output[, cache-read multiplier]). Cache reads bill at 0.1x input
+# unless a model says otherwise (Opus and Sonnet 5.5 bill them at 0.05x); 5-minute cache writes at
+# 1.25x. Check current pricing before relying on these.
 PRICES = {
     "claude-haiku-4-5": (1.0, 5.0),
     "claude-haiku-5-5": (0.10, 0.50),
-    "claude-sonnet-5-5": (2.0, 10.0),
-    "claude-opus-5-5": (4.0, 20.0),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.05),
+    "claude-opus-5-5": (4.0, 20.0, 0.05),
     # TypeSafe Jev (the minimap read) bills input tokens only; output is free. Published rate, not
     # confirmed against a TypeSafe bill.
     "jev": (0.042, 0.0),
@@ -74,10 +75,10 @@ def estimate_cost(model: str, r: dict) -> float:
     price = next((p for prefix, p in PRICES.items() if model.startswith(prefix)), None)
     if not price:
         return 0.0
-    inp, out = price
+    inp, out, read = (*price, 0.1)[:3]
     return (
         (r.get("input_tokens") or 0) * inp
-        + (r.get("cache_read_tokens") or 0) * inp * 0.1
+        + (r.get("cache_read_tokens") or 0) * inp * read
         + (r.get("cache_write_tokens") or 0) * inp * 1.25
         + (r.get("output_tokens") or 0) * out
     ) / 1_000_000

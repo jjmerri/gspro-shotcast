@@ -18,7 +18,8 @@ class OllamaClient(LLMClient):
         self._http = httpx.AsyncClient(timeout=cfg.timeout_seconds)
 
     async def complete_json(
-        self, system: str, user: str, schema: dict[str, Any], images: list[bytes] | None = None
+        self, system: str, user: str, schema: dict[str, Any], images: list[bytes] | None = None,
+        cache: bool = True,
     ) -> LLMResult:
         user_msg: dict[str, Any] = {"role": "user", "content": user}
         if images and self.cfg.vision:

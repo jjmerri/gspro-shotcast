@@ -279,7 +279,7 @@ class FakeLLM(LLMClient):
         super().__init__(cfg)
         self.prompts: list[str] = []
 
-    async def complete_json(self, system, user, schema, images=None):
+    async def complete_json(self, system, user, schema, images=None, cache=True):
         self.prompts.append(user)
         if m := re.search(r"Next hole: (.+)", user):
             text = f"Segment for {m.group(1)}"
@@ -924,6 +924,9 @@ def test_usage_prices_openai_cached_tokens_and_summarizes_voice_cost_and_latency
     # OpenAI's prompt_tokens include the cached ones: 1M prompt with 800k cached is 200k full + 800k cached.
     cost = estimate_cost("gpt-6-luna", {"input_tokens": 1_000_000, "cache_read_tokens": 800_000})
     assert cost == pytest.approx(0.2 * 0.10 + 0.8 * 0.01)
+    # Cache reads: 0.05x input on Opus/Sonnet 5.5, the standard 0.1x elsewhere.
+    assert estimate_cost("claude-opus-5-5", {"cache_read_tokens": 1_000_000}) == pytest.approx(0.20)
+    assert estimate_cost("claude-haiku-4-5-20251001", {"cache_read_tokens": 1_000_000}) == pytest.approx(0.10)
     assert tts_cost("gpt-4o-mini-tts", 100, 60) == pytest.approx(0.015)
     assert tts_cost("gpt-4o-mini-tts", 100, 0) == 0 and tts_cost("kokoro", 100, 60) == 0
 
@@ -4092,6 +4095,29 @@ async def test_a_model_call_cut_off_by_its_deadline_or_failing_is_still_timed(tm
             await engine._complete("shot", llm, "FAIL", [])
     assert re.search(r"flight call \(.+\): cancelled after 0\.\ds", caplog.text)
     assert re.search(r"shot call \(.+\): failed after 0\.\ds: boom", caplog.text)
+
+
+async def test_the_closer_skips_prompt_caching_and_other_calls_keep_it(tmp_path):
+    from types import SimpleNamespace
+
+    from commentator.llm.anthropic_client import AnthropicClient
+
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.llm.live.model = "claude-opus-5-5"
+    sent = []
+
+    class Recorder(AnthropicClient):
+        async def _create(self, params):
+            sent.append(params["system"][0])
+            return SimpleNamespace(stop_reason="end_turn", content=[], usage=SimpleNamespace(
+                input_tokens=1, output_tokens=1))
+
+    llm = Recorder(cfg.llm.live)
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None, live_llm=llm,
+                    segment_llm=llm, speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0))
+    await engine._complete("closer", llm, "hi", [])
+    await engine._complete("news", llm, "hi", [])
+    assert "cache_control" not in sent[0] and "cache_control" in sent[1]
 
 
 async def test_a_tree_on_the_line_always_gets_its_setup_line(tmp_path, caplog):

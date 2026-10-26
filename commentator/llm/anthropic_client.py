@@ -59,7 +59,8 @@ class AnthropicClient(LLMClient):
         return await self._client.messages.create(**params)
 
     async def complete_json(
-        self, system: str, user: str, schema: dict[str, Any], images: list[bytes] | None = None
+        self, system: str, user: str, schema: dict[str, Any], images: list[bytes] | None = None,
+        cache: bool = True,
     ) -> LLMResult:
         content: list[dict[str, Any]] = []
         if images and self.cfg.vision:
@@ -78,7 +79,7 @@ class AnthropicClient(LLMClient):
             "model": self.cfg.model,
             "max_tokens": self.cfg.max_tokens,
             # Personas + league context are identical every shot, so cache them.
-            "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            "system": [{"type": "text", "text": system, **({"cache_control": {"type": "ephemeral"}} if cache else {})}],
             "messages": [{"role": "user", "content": content}],
             "output_config": {"format": {"type": "json_schema", "schema": schema}},
         }
