@@ -264,7 +264,6 @@ TREE_CALL_WATCH_SECONDS = 3.0
 TREE_CALLS = ("Oh, that's into the trees!", "That's caught a branch!", "Oh no, it's clipped the tree!",
               "Ooh, that's found the trees!")
 TREE_LOW_CALLS = ("Oh, that's clipped something low!", "That's into the bushes!")
-TRUNK_CALLS = ("Oh, straight into the tree!", "That's smacked the trunk!", "Ooh, right off the tree!")
 
 # Calls whose prompt cache costs more to write (1.25x) than it saves: the closer runs once a round,
 # so its cache is rarely read back before it expires (usage log, Oct 2026).
@@ -3703,7 +3702,9 @@ class Engine:
         dropped = None if carry_idx is None else impact_snap[7].get(carry_idx, 0)
         learn = None
         fire0 = self.gspro.fire_of(fires0, impact)
-        tree_hits = len(self.gspro.fire_info(fire0).get("leaves") or ()) + self.gspro.tree_wood(fire0)
+        # GSPro's carry ends where the ball first met something: wood well short of the full carry stood up.
+        wood_tree = self.gspro.tree_wood(fire0, carry_game, carry_flat or self._raw_yards(shot))
+        tree_hits = len(self.gspro.fire_info(fire0).get("leaves") or ()) + wood_tree
         if carry_game and tree_hits:
             log.info("%s hit a tree %s time(s) in flight: its carry isn't learned from", tag, tree_hits)
         elif carry_game:
@@ -3853,10 +3854,10 @@ class Engine:
             score = max(score, c.interest_threshold)   # a shot off another hole's green gets its word
         if replay_facts:
             score = max(score, c.interest_threshold)   # the mulligan gets its word
-        if kick := await self._kick_facts(fire, hud.lie, shot.is_putt):
+        if kick := await self._kick_facts(fire, hud.lie, shot.is_putt, wood_tree=wood_tree):
             score = max(score, c.interest_threshold)   # a bounce off the cart path gets its word
             replay_facts = replay_facts + kick
-        if tree := self._tree_facts(fire, shot, impact, tag):
+        if tree := self._tree_facts(fire, shot, impact, tag, wood_tree):
             score = max(score, c.interest_threshold)   # a ball knocked down by a tree gets its word
             replay_facts = replay_facts + tree
         self._shot_id = shot_id   # for record_lines linkage; the local guards against a concurrent task
@@ -4351,7 +4352,8 @@ class Engine:
             self.speech.say_prepared_sequence(list(zip(kept, audio)))
             aired(kept)
 
-    async def _kick_facts(self, fire: int | None, lie: str | None, is_putt: bool, wait: float = 0.5) -> list[str]:
+    async def _kick_facts(self, fire: int | None, lie: str | None, is_putt: bool, wait: float = 0.5,
+                          wood_tree: bool = False) -> list[str]:
         """A fact when the ball came down on the cart path (or a man-made structure) and bounced on to
         rest somewhere else. GSPro logs the landing surface as the ball settles, so give it a moment."""
         if is_putt or fire is None or not lie:
@@ -4360,28 +4362,27 @@ class Engine:
         while "landed" not in self.gspro.fire_info(fire) and time.monotonic() < deadline:
             await asyncio.sleep(0.1)
         landed = MATERIAL_TO_LIE.get(self.gspro.fire_info(fire).get("landed") or "")
-        if landed not in ("cart path", "structure") or landed == lie.lower() or self.gspro.tree_wood(fire):
+        if landed not in ("cart path", "structure") or landed == lie.lower() or wood_tree:
             return []   # wood that was a tree is _tree_facts' to call
-        what = "the cart path" if landed == "cart path" else "something man-made (a bridge or wall)"
+        what = "the cart path" if landed == "cart path" else "something man-made (a bridge, steps or a wall)"
         return [f"The ball landed on {what} and kicked off it, finishing in the {lie}. That bounce is "
                 f"worth a word."]
 
-    def _tree_facts(self, fire: int | None, shot: Shot, impact: float, tag: str = "") -> list[str]:
+    def _tree_facts(self, fire: int | None, shot: Shot, impact: float, tag: str = "",
+                    wood_tree: bool = False) -> list[str]:
         """Facts when GSPro's log had the ball hit a tree: foliage in flight, or the wood of a trunk or
-        branch (see GsproState.tree_wood). GSPro doesn't say what the foliage was, so the height there
+        branch (`wood_tree`, see GsproState.tree_wood). GSPro doesn't say what the foliage was, so the height there
         (modelled from the launch numbers) tells a tree from a bush."""
         if shot.is_putt:
             return []
         info = self.gspro.fire_info(fire)
         hits = info.get("leaves") or []
         facts = self._foliage_fact(hits, info, shot, impact, tag) if hits else []
-        if self.gspro.tree_wood(fire):
-            rising = info.get("descent", 1.0) < 0.5
-            log.info("%s hit wood %s (descent angle %s): a tree, not a structure", tag,
-                     "on the way up" if rising else "on the way down", info.get("descent"))
-            when = "before it had even started coming down" if rising else "as it came down"
+        if wood_tree:
+            log.info("%s hit wood short of its carry (descent angle %s): a tree, not a structure", tag,
+                     info.get("descent"))
             facts.append(f"The ball {'then ' if hits else ''}struck the wood of a tree (the trunk or a thick "
-                         f"branch) {when} and bounced off it, so a tree, not the swing, cut this shot short. "
+                         f"branch) and bounced off it, so a tree, not the swing, cut this shot short. "
                          f"Worth a word. It was a tree: never call it a bridge, a wall or a cart path.")
         return facts
 
@@ -4989,15 +4990,13 @@ class Engine:
             p = point_at(shot.ball_speed, shot.vla, shot.total_spin, shot.spin_axis, self._raw_yards(shot), t)
             low = p is not None and (p.landed or p.height_ft < 10)
             return impact + t, TREE_LOW_CALLS if low else TREE_CALLS
-        if self.gspro.tree_wood(fire) and info.get("descent", 1.0) < 0.5:
-            return time.monotonic(), TRUNK_CALLS
         return None
 
     async def _tree_flight_call(self, fires0: int, impact: float, shot: Shot, seq: int, tag: str) -> None:
         """Call a tree hit while the ball is in the air. GSPro works the flight out at launch and logs
         each foliage hit among the launch lines (within ~0.3 s of impact) with its time into the
-        flight, so the call is timed to the moment the ball reaches the branches. Wood struck on the
-        way up (a trunk) is called as soon as it's logged."""
+        flight, so the call is timed to the moment the ball reaches the branches. A trunk (wood, no
+        leaves) isn't called here: only GSPro's carry, read once the ball stops, tells it from a bridge."""
         deadline = impact + TREE_CALL_WATCH_SECONDS
         found = None
         while self._shot_seq == seq:   # checked at least once, even when started late
