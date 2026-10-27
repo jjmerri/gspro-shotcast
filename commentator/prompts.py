@@ -159,11 +159,10 @@ def shot_prompt(
         guidance += f" An angle you could take, if it fits: {angle}."
     if has_images:
         guidance += " Screenshots: first at impact, second after the ball came to rest."
-    prompt = (
-        "FACTS:\n" + facts_text
-        + _recent_block(recent_lines)
-        + f"\n\n{guidance}" + BREVITY
-    )
+    # Instructions first, facts and recent lines after: OpenAI caches a request's longest repeated
+    # prefix, so whatever leads the prompt and doesn't change from call to call is billed at the cached
+    # rate. Only the system prompt matched before, since every user prompt opened with this shot's facts.
+    prompt = guidance + BREVITY + "\n\nFACTS:\n" + facts_text + _recent_block(recent_lines)
     return prompt, facts_text
 
 
@@ -191,12 +190,12 @@ def segment_prompt(*, previous_hole: str | None, current_hole: str, recap: list[
         + [clock_fact()]
     )
     prompt = (
-        "FACTS:\n" + facts_text
-        + _recent_block(recent_lines)
-        + "\n\nBetween holes: a short two-or-three line exchange. Sum up the hole that just finished if there "
+        "Between holes: a short two-or-three line exchange. Sum up the hole that just finished if there "
         "was anything notable, then bring in the next one however suits the moment (not the same way the "
         "last hole was introduced), using standings or storylines where they fit."
         + BREVITY
+        + "\n\nFACTS:\n" + facts_text
+        + _recent_block(recent_lines)
     )
     return prompt, facts_text
 
@@ -211,10 +210,10 @@ def wrap_recap_prompt(*, finished_hole: str | None, result: list[str], recap: li
         + [f"- {r}" for r in recap or ["(none recorded)"]] + [clock_fact()]
     )
     prompt = (
-        "FACTS:\n" + facts_text
-        + _recent_block(recent_lines)
-        + "\n\nThe hole just finished on the score in the facts. Give a short two-line exchange between the "
+        "The hole just finished on the score in the facts. Give a short two-line exchange between the "
         "commentators summing up how it played out and the result. Don't mention or tee up the next hole."
+        "\n\nFACTS:\n" + facts_text
+        + _recent_block(recent_lines)
     )
     return prompt, facts_text
 
@@ -342,11 +341,11 @@ def hole_intro_prompt(*, hole: str, recent_lines, extra: list[str] | None = None
     """Tee up the hole that's starting (used when the recap played pre-made and didn't include it)."""
     facts_text = "\n".join([f"This hole: {hole}"] + (extra or []) + [clock_fact()])
     prompt = (
-        "FACTS:\n" + facts_text
-        + _recent_block(recent_lines)
-        + "\n\nA new hole is starting: one or two short lines to bring it in, any way you like. The "
+        "A new hole is starting: one or two short lines to bring it in, any way you like. The "
         "yardage and par are there if they help, but you needn't lead with them, and the last hole's "
         "intro in the recent lines is the one way NOT to open. Don't recap the previous hole."
+        "\n\nFACTS:\n" + facts_text
+        + _recent_block(recent_lines)
     )
     return prompt, facts_text
 
@@ -491,21 +490,21 @@ def preshot_line_prompt(
     recent = _recent_block(recent_lines)
     if is_putt:
         prompt = (
-            "PRE-PUTT LINE. FACTS:\n" + facts_text + recent
-            + '\n\nThe player is over a putt. Reply with "lines": one short line (at most 15 words), usually '
-            f'from "{speaker}": what the putt is for and the read, without predicting whether it drops.'
+            'PRE-PUTT LINE. The player is over a putt. Reply with "lines": one short line (at most 15 words), '
+            f'usually from "{speaker}": what the putt is for and the read, without predicting whether it drops.'
             + (f' Occasionally "{second}" adds the second line if a needle fits.' if second else "")
+            + "\n\nFACTS:\n" + facts_text + recent
         )
         return prompt, facts_text
     prompt = (
-        "PRE-SHOT LINE. FACTS:\n" + facts_text + recent
-        + '\n\nThe player is setting up to hit. Reply with "lines": one or two short scene-setting lines '
-        f'(at most 15 words each), usually from "{speaker}": the shot they face, what\'s at stake, the '
+        'PRE-SHOT LINE. The player is setting up to hit. Reply with "lines": one or two short scene-setting '
+        f'lines (at most 15 words each), usually from "{speaker}": the shot they face, what\'s at stake, the '
         "storyline. You can't see the hole, so don't warn about a specific hazard ahead (water, bunkers, "
         "trees, out of bounds) unless the facts name it; keep it about the player and the moment. Given a "
         '"Strategy:" fact, you may fold the smart play into one clause (e.g. "with those bunkers short, you '
         'can\'t come up short here"), but only when it fits, never as a lecture. Don\'t predict the result.'
         + (f' Now and then, when a storyline or a needle fits, "{second}" chimes in with the second line.' if second else "")
+        + "\n\nFACTS:\n" + facts_text + recent
     )
     return prompt, facts_text
 
@@ -542,8 +541,7 @@ def preshot_branch_prompt(
     recent = _recent_block(recent_lines)
     if is_putt:
         prompt = (
-            "PRE-PUTT BRANCHES. FACTS:\n" + facts_text + recent
-            + '\n\nThe player is over a putt. Reply with "reaction_lines": what ' + speaker
+            'PRE-PUTT BRANCHES. The player is over a putt. Reply with "reaction_lines": what ' + speaker
             + " says the instant the ball stops, at most 12 words each, written now for each way it can finish. "
             "Each value is the spoken words themselves, never a speaker name or label. "
             "Match the putt number in the facts (a made first putt is a one-putt, a made second putt is a two-putt, "
@@ -554,6 +552,7 @@ def preshot_branch_prompt(
             + (f' holed_reply ({second} jumps in straight after the holed call, excitement '
                f"{holed_putt_level(putt_feet) or 6} out of 10 too, with their own reaction rather than a repeat "
                "of it; at most 12 words)." if reply and second else "")
+            + "\n\nFACTS:\n" + facts_text + recent
         )
         return prompt, facts_text
     trouble = ('left_trouble / right_trouble: the ball drifting toward trouble on that side while STILL IN THE '
@@ -573,19 +572,20 @@ def preshot_branch_prompt(
                    '"into", "finds")' + (f"; {generic[0]}_trouble stays generic (\"drifting {generic[0]}, "
                    f'trouble in play"), no specific feature' if generic else ""))
     prompt = (
-        "PRE-SHOT BRANCHES. FACTS:\n" + facts_text + recent
-        + "\n\nThe player is about to hit. Write the lines now, for each way the shot could go. Reply with two things, each value "
-        "the spoken words themselves, never a speaker name or label:\n"
+        "PRE-SHOT BRANCHES. The player is about to hit. Write the lines now, for each way the shot could go. "
+        "Reply with two things, each value the spoken words themselves, never a speaker name or label:\n"
         f'1. "flight_lines": what {speaker} says while the ball is in the air: at most 10 words, present '
         "tense, no numbers, never where it lands. on_target (dead straight at the target: never the words "
         '"left" or "right" here, they read as a direction), short (short of the FLAG, usually still on the green: '
         '"might be a touch short", "leaves itself a putt from below"; never that it needs more carry to reach or '
-        'won\'t reach the green, unless the green front is clearly beyond this club), long, left, right, ' + trouble
-        + ". " + _FLIGHT_WATER + "."
+        'won\'t reach the green, unless the green front is clearly beyond this club), long, left, right, and '
+        "left_trouble / right_trouble (below). " + _FLIGHT_WATER + "."
         + '\n2. "reaction_lines": what ' + speaker + ' says the instant the ball stops, at most 12 words each, '
         "written now for each place it can finish, judged against what this shot was trying to do (a tee shot wants "
         "the fairway; an approach wants the green). Write one per outcome: " + _RESULT_GUIDANCE
         + ". Keep the reaction honest to each result; don't claim a number or a distance."
+        + "\n\n" + trouble + "."
+        + "\n\nFACTS:\n" + facts_text + recent
     )
     return prompt, facts_text
 

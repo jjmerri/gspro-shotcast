@@ -1561,6 +1561,10 @@ def test_driving_records_count_only_tee_shots(tmp_path):
     assert stats["avg_drive"] == 260.0 and stats["longest_drive"] == 260.0
 
 
+# How a shot reaction prompt opens (shot_prompt's guidance, ahead of its facts).
+_REACTION = ("React to this shot", "This was a routine shot", "This is a big moment")
+
+
 async def test_season_best_drive_is_called_out(tmp_path):
     from commentator.store import Store
 
@@ -1581,7 +1585,7 @@ async def test_season_best_drive_is_called_out(tmp_path):
                     source=ReplaySource("data/sample_shots.jsonl", speed=1e6), live_llm=llm, segment_llm=llm,
                     speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0), store=Store(db))
     await engine.run()
-    reactions = [p for p in llm.prompts if p.startswith("FACTS:")]
+    reactions = [p for p in llm.prompts if p.startswith(_REACTION)]
     tony = next(p for p in reactions if "Player: Tony" in p and "driver" in p)
     assert "new personal best: longer than Tony's longest drive from earlier weeks (245 yards)" in tony
     mike = next(p for p in reactions if "Player: Mike" in p and "driver" in p)
@@ -1611,7 +1615,7 @@ async def test_a_drive_shorter_than_one_earlier_today_is_no_personal_best(tmp_pa
                     source=ReplaySource("data/sample_shots.jsonl", speed=1e6), live_llm=llm, segment_llm=llm,
                     speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0), store=today)
     await engine.run()
-    tony = next(p for p in llm.prompts if p.startswith("FACTS:") and "Player: Tony" in p and "driver" in p)
+    tony = next(p for p in llm.prompts if p.startswith(_REACTION) and "Player: Tony" in p and "driver" in p)
     assert "new personal best" not in tony
     assert "Not a personal best: Tony hit a longer drive earlier today (390 yards)" in tony
 def test_slope_and_elevation_parsing():
