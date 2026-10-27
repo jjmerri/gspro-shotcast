@@ -922,8 +922,13 @@ def test_usage_prices_openai_cached_tokens_and_summarizes_voice_cost_and_latency
     from commentator.usage import UsageLog, estimate_cost, summarize, tts_cost
 
     # OpenAI's prompt_tokens include the cached ones: 1M prompt with 800k cached is 200k full + 800k cached.
-    cost = estimate_cost("gpt-6-luna", {"input_tokens": 1_000_000, "cache_read_tokens": 800_000})
+    cost = estimate_cost("gpt-6-luna", {"input_tokens": 1_000_000, "cache_read_tokens": 800_000,
+                                        "service_tier": "default"})
     assert cost == pytest.approx(0.2 * 0.10 + 0.8 * 0.01)
+    # Fast mode bills 2x; a row from before the tier was logged ran on the "fast" default.
+    assert estimate_cost("gpt-6-luna", {"output_tokens": 1_000_000, "service_tier": "fast"}) == pytest.approx(1.0)
+    assert estimate_cost("gpt-6-luna", {"output_tokens": 1_000_000}) == pytest.approx(1.0)
+    assert estimate_cost("gpt-6-luna", {"output_tokens": 1_000_000, "service_tier": None}) == pytest.approx(0.5)
     # Cache reads: 0.05x input on Opus/Sonnet 5.5, the standard 0.1x elsewhere.
     assert estimate_cost("claude-opus-5-5", {"cache_read_tokens": 1_000_000}) == pytest.approx(0.20)
     assert estimate_cost("claude-haiku-4-5-20251001", {"cache_read_tokens": 1_000_000}) == pytest.approx(0.10)
@@ -941,10 +946,10 @@ def test_usage_prices_openai_cached_tokens_and_summarizes_voice_cost_and_latency
                "cache_read_tokens": 0, "output_tokens": 0, "latency_s": 1.0, "est_cost_usd": 0.0})
     out = summarize(str(tmp_path), weeks=1)
     row = out.splitlines()[1]
-    assert "openai $0.10" in row       # recomputed: older OpenAI rows were logged at $0
+    assert "openai $0.20" in row       # recomputed at the fast tier: older OpenAI rows were logged at $0
     assert "$    0.03" in row and "2.0/1.0" in row and "1/2" in row and "0.40/0.40s" in row
     assert row.rstrip().endswith("1")  # one dropped line
-    assert "Last night x 1 weeks: $0.13" in out
+    assert "Last night x 1 weeks: $0.23" in out
 
 
 async def test_a_line_past_its_own_deadline_is_dropped():

@@ -22,6 +22,9 @@ PRICES = {
 OPENAI_PRICES = {
     "gpt-6-luna": (0.10, 0.50, 0.01),
 }
+# OpenAI service tier -> price multiplier on all three rates. "fast" (formerly "priority") bills 2x.
+# A row without a service_tier predates the field; the config has always defaulted to "fast".
+OPENAI_TIER_MULTIPLIER = {"fast": 2.0, "priority": 2.0, "flex": 0.5}
 
 
 # Cloud TTS (gpt-4o-mini-tts) is billed by generated audio time; OpenAI's own estimate is about this.
@@ -67,7 +70,8 @@ def estimate_cost(model: str, r: dict) -> float:
     if oa:
         inp, out, cached_price = oa
         cached = r.get("cache_read_tokens") or 0
-        return (
+        tier = OPENAI_TIER_MULTIPLIER.get(r.get("service_tier", "fast") or "", 1.0)
+        return tier * (
             max((r.get("input_tokens") or 0) - cached, 0) * inp
             + cached * cached_price
             + (r.get("output_tokens") or 0) * out
@@ -108,6 +112,8 @@ class UsageLog:
             "cache_write_tokens": result.cache_write_tokens,
             "latency_s": round(result.latency_seconds, 2),
         }
+        if llm.provider == "openai":
+            row["service_tier"] = llm.cfg.service_tier
         row["est_cost_usd"] = round(estimate_cost(llm.model, row), 6)
         self.write(row)
 
