@@ -70,9 +70,9 @@ sound rapid-fire. It only tops up the silence since the last line ended: a line 
 quiet spell (a mid-flight call) starts at once, and an interrupt skips it.
 
 Only what airs is voiced (`tts.prevoice: false`, the default): the flight call is voiced at impact,
-the result call when the ball stops, and the wrap, closer and asides as they play. Their text is
+the result call when the ball stops, and the wrap and asides as they play. Their text is
 still written ahead, so there's no model wait. `tts.prevoice: true` voices every possible flight and
-result call at setup, and every wrap and closer branch, so they play with no voicing wait, but
+result call at setup, and every wrap branch, so they play with no voicing wait, but
 most of that audio is never played (about 80% of the voice bill). A local voice (Kokoro) always
 voices ahead, since it's free and slow on CPU. Every line has a deadline (a flight call
 must start within `tts.flight_audio_deadline_seconds` of impact, any other on-demand line within
@@ -128,7 +128,7 @@ real cost.
 | `preshot` (hazard read, vision) | `claude-haiku-5-5`, vision, max_tokens 900 | Reads the hole minimap for hazards; cheaper and better at it than 4.5 |
 | `minimap` (optional, `provider: jev`) | TypeSafe `jev-latest` (+ `jev-preview` to find the ball and pin) | Reads the minimap in ~0.3 s: water, red-lined penalty areas with no water in them, out of bounds and bunkers left/right of the line to the pin, water to carry, front/back of the green, and bunkers measured off the map's scale (code finds sand-coloured patches near the line, Jev confirms each is a bunker, not a beach or roof), trees near the line and any tree right in the way, which side of the green the pin is on, and doglegs from the tee. Answers below `threshold` (bunkers: `sand_threshold`) are dropped. A side's trouble flight line may then name that side's hazard, and plays only when that hazard is in play. Needs `.[jev]` and `TYPESAFE_API_KEY`. Falls back to `preshot` |
 | `opener` | `claude-sonnet-5-5` | Raced against the course load, so a fast model. At most `opener_max_lines` (3) lines of up to `opener_max_words` (25) words |
-| `closer` | `claude-opus-5-5`, max_tokens 2000 | Pre-fetched on the last hole (solo: once the ball is on the green; a group: once only one side is left to finish), branched by the final score, so latency is hidden; use the richest model. Its lines may run to `closer_max_words` (40) rather than a live call's 18 |
+| `closer` | `claude-opus-5-5`, max_tokens 2000 | One call at round end, once the final score is known; it's written while the last hole's wrap airs, so most of its latency is hidden; use the richest model. Its lines may run to `closer_max_words` (40) rather than a live call's 18 |
 | Voices (`tts`) | OpenAI `gpt-4o-mini-tts` (`fable` / `ballad`) | The dominant cost; see [Cost](#cost) |
 
 ### Choosing a setup

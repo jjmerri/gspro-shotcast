@@ -237,50 +237,54 @@ def test_an_aside_held_for_a_long_putt_doesnt_air_on_a_short_one(tmp_path):
     assert e._news_pick({"tags": ["putt", "long_putt"], "routine": False}) == (held, True)
 
 
-async def test_asides_are_written_to_the_airtime_a_round_actually_has(tmp_path, monkeypatch):
-    import commentator.engine as eng
-
-    monkeypatch.setattr(eng, "NEWS_PREP_SETTLE_SECONDS", 0)
+async def test_each_nine_writes_its_asides_at_its_second_hole_to_its_airtime(tmp_path):
     e = _engine(tmp_path)
-    # Five quiet moments across an 18 (one every three holes, never the first or the last two), two
-    # across a nine: that is the whole bucket, shared by scores, trivia and news.
+    # Five quiet moments across an 18 (one every three holes, never the first or the last two): three
+    # on the front, two on the back. A nine on its own has two.
     assert e._aside_slots(18) == 5 and e._aside_slots(9) == 2
     e.news, e.trivia = object(), object()
-    e.cfg.news.per_nine, e.cfg.trivia.per_round = 2, 2
-    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
-    assert e._split_asides(r, 2) == (1, 1)                    # a nine: one of each, not four
-    assert e._split_asides(r, 1) == (0, 1)
-    r.holes = 18
-    assert e._split_asides(r, 5) == (2, 3)
-    e.cfg.trivia.per_round = 0
-    assert e._split_asides(r, 5) == (0, 4)                    # never past news's own share
+    e.cfg.news.per_nine, e.cfg.trivia.per_round = 2, 1
+    r = SimpleNamespace(holes=18, seq=1, ended=False, is_league=False)
+    e.round = r
+    written = []
 
-    # A live score claims its check-in first; trivia and news get only what's left.
+    async def _trivia(r, n=None):
+        written.append(("trivia", r.seq, n))
+
+    async def _news(r, n=None):
+        written.append(("news", r.seq, n))
+
+    e._prepare_trivia, e._prepare_news = _trivia, _news
+
+    async def _hole(seq):
+        r.seq = seq
+        e._maybe_prep_asides(r)
+        for t in list(e._aside_tasks):
+            await t
+
+    for seq in range(1, 11):
+        await _hole(seq)
+    assert sorted(written) == [("news", 2, 2), ("trivia", 2, 1)]    # front nine: 3 slots, at hole 2
+    e._news_bits = [_bit("news")]                                     # one of them never found its moment
+    await _hole(11)
+    assert written[2:] == [("news", 11, 1)]                          # back: 2 slots, 1 still waiting, trivia spent
+    await _hole(12)
+    assert len(written) == 3                                          # once per nine
+
+    # A live score claims its check-in first, inside its own nine.
     item = ScoreItem("nhl:5", "team", "in", "NHL, live: Bruins 2, Stars 1.", "2-1")
     e.scores = _Scores([item])
     e.cfg.scores.per_nine, e.cfg.trivia.per_round = 1, 2
-    written = {}
-
-    async def _trivia(r, n=None):
-        written["trivia"] = n
-
-    async def _news(r, n=None):
-        written["news"] = n
-
-    e._prepare_trivia, e._prepare_news = _trivia, _news
     r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
-    e.round = r
-    await e._news_prep(r)
-    for t in list(e._aside_tasks):
-        await t
-    assert len(e._score_holes) == 1 and written == {"news": 1}
+    e.round, e._news_bits, written[:] = r, [], []
+    e._start_round_asides(r)
+    await _hole(2)
+    assert len(e._score_holes) == 1 and 3 <= e._score_holes[0] <= 7 and written == [("news", 2, 1)]
 
 
 async def test_a_superseded_round_start_doesnt_pay_for_its_asides(tmp_path):
-    from commentator.engine import NEWS_PREP_SETTLE_SECONDS
     from tests.test_round import _NewsLLM, _news_engine
 
-    assert NEWS_PREP_SETTLE_SECONDS > 0                  # the window a false start is cancelled inside
     e = _news_engine(tmp_path, llm := _NewsLLM())
     e.cfg.news.per_nine = 3
     r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
@@ -288,7 +292,7 @@ async def test_a_superseded_round_start_doesnt_pay_for_its_asides(tmp_path):
     await e._prepare_news(r)
     assert llm.prompts == [] and e._news_bits == []      # not one call spent on a round that's gone
 
-    # Quitting inside the settle window leaves the round in place but ended: still nothing to write.
+    # A round quit leaves it in place but ended: still nothing to write.
     e.round = r
     r.ended = True
     await e._prepare_news(r)

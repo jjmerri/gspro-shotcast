@@ -2943,12 +2943,11 @@ async def test_quitting_stops_aside_work_still_being_paid_for(tmp_path):
 
     async def forever():
         await asyncio.sleep(3600)
-    e._news_task = asyncio.create_task(forever())
+    e._aside_task(forever(), "aside-prep")
     e._aside_task(forever(), "trivia-prep")
-    [trivia] = list(e._aside_tasks)
+    tasks = list(e._aside_tasks)
     await e.handle_round_end(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
-    assert e._news_task.cancelled() or e._news_task.cancelling()
-    assert trivia.cancelled() or trivia.cancelling()
+    assert all(t.cancelled() or t.cancelling() for t in tasks)
 
 
 def test_closing_facts_say_a_cut_short_round_has_no_finished_score():
@@ -3083,54 +3082,15 @@ def _last_hole_pair(tmp_path):
     r.holes, r.start_hole, r.start_hole_assumed, r.seq = 2, 1, False, 2
     r.par = {1: 4, 2: 3}
     e.round = r
-    kicks = []
-    e._kick_closer_branches = lambda key, scores, fixed=None: kicks.append((key, scores, fixed))
-    return e, r, kicks
-
-
-def test_a_group_pre_builds_the_closer_once_one_side_is_left_on_the_last_hole(tmp_path):
-    e, r, kicks = _last_hole_pair(tmp_path)
-    r.set_log_scores("MikeD", {1: 5})
-    r.set_log_scores("Sarah", {1: 4})
-    e._kick_group_closer(r)
-    assert kicks == []                                  # both still playing the last hole
-    r.set_log_scores("MikeD", {1: 5, 2: 3})
-    e._kick_group_closer(r)
-    sarah = next(s for s in r.sides if "Sarah" in s.gspro)
-    mike = next(s for s in r.sides if "MikeD" in s.gspro)
-    assert kicks == [(sarah.key, [2, 3, 4, 5], {mike.key: 3})]
-
-
-async def test_a_group_closer_plays_only_if_the_others_finished_as_written(tmp_path):
-    from commentator.models import Line
-
-    e, r, _ = _last_hole_pair(tmp_path)
-    r.set_log_scores("MikeD", {1: 5, 2: 3})
-    r.set_log_scores("Sarah", {1: 4, 2: 4})
-    sarah = next(s for s in r.sides if "Sarah" in s.gspro)
-    mike = next(s for s in r.sides if "MikeD" in s.gspro)
-    played = []
-    e._play_prepared_closer = lambda strokes, key: played.append((strokes, key)) or True
-    branch = {"side": sarah.key, "by_score": {4: ([Line(e.speakers[0], "x")], [b""])}}
-
-    async def run(fixed):
-        played.clear()
-        e._closer_branches = {**branch, "fixed": fixed}
-        stats = {s.key: r.side_stats(s, []) for s in r.sides}
-        await e._sign_off(r, stats)
-        return list(played)
-
-    assert await run({mike.key: 3}) == [(4, sarah.key)]
-    assert await run({mike.key: 4}) == []        # Mike's hole changed after the branches were written
+    return e, r
 
 
 async def test_the_closer_keeps_lines_longer_than_a_live_call_gets(tmp_path):
     import json
 
-    e, r, _ = _last_hole_pair(tmp_path)
+    e, r = _last_hole_pair(tmp_path)
     r.set_log_scores("MikeD", {1: 5, 2: 3})
     r.set_log_scores("Sarah", {1: 4, 2: 4})
-    sarah = next(s for s in r.sides if "Sarah" in s.gspro)
     rich = ("That was a proper evening of golf in the shed with friends trading shots and stories "
             "and nobody wanting it to end before the last putt dropped")
     assert 18 < len(rich.split()) <= e.cfg.commentary.closer_max_words
@@ -3140,18 +3100,12 @@ async def test_the_closer_keeps_lines_longer_than_a_live_call_gets(tmp_path):
         prompts.append(user)
         return json.dumps({"lines": [{"speaker": e.speakers[0], "text": rich}]})
 
-    async def voice(lines):
-        return lines, [b""] * len(lines)
-
-    e._complete, e._voice_ahead = complete, voice
-    await e._prepare_closer_branches(sarah.key, [4], {})
-    assert [l.text for l in e._closer_branches["by_score"][4][0]] == [rich]   # pre-built on the last hole
+    e._complete = complete
     aired = []
     e._air_lines = lambda kind, lines, shot_id=None: aired.extend(lines)
-    e._closer_branches = None
     await e._sign_off(r, {s.key: r.side_stats(s, []) for s in r.sides})
-    assert [l.text for l in aired] == [rich]                                   # written at the end
-    assert all(f"up to {e.cfg.commentary.closer_max_words} words" in p for p in prompts)
+    assert [line.text for line in aired] == [rich] and len(prompts) == 1      # one call, at the end
+    assert f"up to {e.cfg.commentary.closer_max_words} words" in prompts[0]
 
 
 def test_a_scramble_pick_inside_the_gimme_circle_records_the_teams_conceded_putt(tmp_path):

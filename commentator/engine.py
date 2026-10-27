@@ -254,8 +254,6 @@ NEWS_TRIGGER_TAGS = {
     "the_turn": {"at_the_turn"},
 }
 
-# How long news prep waits for a round start to settle before spending on it.
-NEWS_PREP_SETTLE_SECONDS = 20.0
 # A foliage hit worth calling while the ball is in the air: at least this much of its speed lost (a
 # brush through the leaves costs less and isn't worth cutting the flight line off for).
 TREE_CALL_PENALTY = 15.0
@@ -511,7 +509,6 @@ class Engine:
             w.enabled and self.commentary_on
             and (w.location or (w.latitude is not None and w.longitude is not None))) else None
         self._news_bits: list[PreparedNews] = []    # this round's asides, written and voiced at the start
-        self._news_task: asyncio.Task | None = None
         self._news_aired: list[int] = []            # round hole seqs an aside played on
         self._news_used: set[str] = set()           # stories aired this session (for a round with no known players)
         self._news_moment: dict | None = None       # the last shot, for the aside that may follow it
@@ -526,6 +523,8 @@ class Engine:
         self._score_said: dict[str, list[str]] = {}  # event key -> what the booth said about it, this session
         self._score_written: set[str] = set()       # "key@version": scores already written up, this session
         self._aside_tasks: set[asyncio.Task] = set()
+        self._aside_nines: set[int] = set()          # nines of this round whose asides are written
+        self._trivia_planned = 0                     # trivia asides written this round (per_round caps it)
         self.speakers = list(cfg.personas)
         self._persona_names = [p.name for p in cfg.personas.values()]  # for stripping leaked speaker labels
         self.schema = output_schema(self.speakers)
@@ -558,8 +557,6 @@ class Engine:
         # The round closer, pre-generated and pre-voiced on the last hole before the final putt,
         # branched by the deciding side's possible final score (solo rounds only). Played at round end
         # only when the actual final score matches a branch, else the on-demand closer runs.
-        self._closer_branches: dict | None = None
-        self._closer_task: asyncio.Task | None = None
         self.last_hole_result: str | None = None  # GSPro's last result banner (Birdie/Par/...), if read
         self._shot_id: int | None = None
         # The lie read at each setup, while the player stood over the ball, by _setup_key: the impact
@@ -1202,8 +1199,6 @@ class Engine:
             self._apply_log_holes(r)
             if not self._round_end_queued:   # once it's ending, End Round's reset mustn't wipe the scores
                 self._sync_log_scores(r)
-                if self.commentary_on and self.cfg.commentary.closer:
-                    self._kick_group_closer(r)
         if g.round_completes != self._log_round_completes:
             self._log_round_completes = g.round_completes
             if live and not r.log_complete:
@@ -1304,9 +1299,6 @@ class Engine:
         log.info("Round %s: GSPro hasn't finished the round after %s holes; now counting %s", r.id, r.holes, holes)
         r.set_holes(holes)
         self._putted_on_last_hole = False
-        if self._closer_task and not self._closer_task.done():
-            self._closer_task.cancel()
-        self._closer_branches = None
 
     def _check_round_idle(self) -> None:
         r = self.round
@@ -1489,13 +1481,19 @@ class Engine:
         nines = max(1, -(-r.holes // 9))
         return max(1, min(self.cfg.news.per_nine * nines, self._aside_slots(r.holes)))
 
+    def _nine_slots(self, r, nine: int) -> int:
+        """The asides this nine (0 = the round's first) still has airtime for from the current hole:
+        _aside_slots' one-every-three-holes rhythm, counted from here to the nine's end."""
+        lo, hi = max(9 * nine + 1, r.seq), 9 * nine + 9
+        return sum(1 for h in range(2, max(r.holes - 1, 3), 3) if lo <= h <= hi)
+
     def _split_asides(self, r, room: int) -> tuple[int, int]:
-        """(trivia, news) to write into the airtime live scores left: taken in turn, news first, each
-        up to its configured share. Every aside is written with the closer's model, and the round has
-        airtime for only so many (see _aside_slots), so one written past that is money never heard."""
-        nines = max(1, -(-r.holes // 9))
-        caps = [self.cfg.trivia.per_round if self.trivia is not None else 0,
-                self.cfg.news.per_nine * nines if self.news is not None else 0]
+        """(trivia, news) to write for a nine into the airtime live scores left: taken in turn, news
+        first; news up to its per-nine share, trivia up to what's left of its per-round share. Every
+        aside is written with the closer's model, and a nine has airtime for only so many (see
+        _aside_slots), so one written past that is money never heard."""
+        caps = [max(0, self.cfg.trivia.per_round - self._trivia_planned) if self.trivia is not None else 0,
+                self.cfg.news.per_nine if self.news is not None else 0]
         got = [0, 0]
         while room > 0 and (got[0] < caps[0] or got[1] < caps[1]):
             for i in (1, 0):
@@ -1504,27 +1502,42 @@ class Engine:
                     room -= 1
         return got[0], got[1]
 
-    async def _news_prep(self, r) -> None:
-        """Wait for the round start to settle, then plan and write its asides. A round start can be
-        superseded seconds later (the course read corrects itself, a setup screen is reopened), and
-        this task is cancelled when it is, so settling first means a false start costs nothing: these
-        are the closer's model, the dearest calls the booth makes, and no aside can play before the
-        second hole anyway. Live scores claim their check-ins first (they're only planned when
-        something is on), then trivia and news share what's left of the round's airtime."""
-        await asyncio.sleep(NEWS_PREP_SETTLE_SECONDS)
-        if self.round is not r or r.ended:
+    def _maybe_prep_asides(self, r) -> None:
+        """At the second hole played of each nine, start writing that nine's asides. Written then,
+        not at the round start, a false start or a round quit early pays for none (or only the nine
+        it reached): these are the closer's model, the dearest calls the booth makes, and no aside
+        can play on a nine's first hole anyway."""
+        if not self._asides_on() or r.ended or r.seq < 2:
             return
-        room = self._aside_slots(r.holes)
-        if self.scores is not None:
-            room -= await self._plan_scores(r, room)
-        trivia, news = self._split_asides(r, room)
-        log.info("Asides for this round: %d slot(s); %d score, %d trivia, %d news",
-                 self._aside_slots(r.holes), len(self._score_holes), trivia, news)
+        nine = (r.seq - 1) // 9
+        if nine in self._aside_nines or r.seq < 9 * nine + 2:
+            return
+        self._aside_nines.add(nine)
+        self._aside_task(self._news_prep(r, nine), "aside-prep")
+
+    async def _news_prep(self, r, nine: int = 0) -> None:
+        """Plan and write one nine's asides. Live scores claim their check-ins first (they're only
+        planned when something is on), then news and trivia share what's left of the nine's airtime,
+        less any aside from earlier in the round that's still waiting to air."""
+        now = time.monotonic()
+        # Still to air from earlier: written asides, score check-ins planned (a deferred one can land
+        # in this nine), and check-ins being written right now.
+        waiting = (sum(1 for b in self._news_bits if b.expires is None or b.expires > now)
+                   + len(self._score_holes)
+                   + sum(1 for t in self._aside_tasks if t.get_name() == "scores-prep" and not t.done()))
+        slots = self._nine_slots(r, nine)
+        room = slots - waiting
+        if room > 0 and self.scores is not None:
+            room -= await self._plan_scores(r, room, last_hole=9 * nine + 9)
+        trivia, news = self._split_asides(r, max(0, room))
+        self._trivia_planned += trivia
+        log.info("Asides for nine %d (from round hole %s): %d slot(s), %d still waiting; %d trivia, %d news",
+                 nine + 1, r.seq, slots, waiting, trivia, news)
         if self.round is not r or r.ended:
             return
         if trivia:
             self._aside_task(self._prepare_trivia(r, trivia), "trivia-prep")
-        if news:
+        if news and self.news is not None:
             await self._prepare_news(r, news)
 
     async def _prepare_news(self, r, n: int | None = None) -> None:
@@ -1623,10 +1636,11 @@ class Engine:
         task.add_done_callback(lambda t: (self._aside_tasks.discard(t), t.cancelled() or t.exception()))
 
     def _start_round_asides(self, r) -> None:
-        """Cancel the last round's trivia and score work; _news_prep plans this round's."""
+        """Cancel the last round's aside work; _maybe_prep_asides starts this round's, nine by nine."""
         for task in list(self._aside_tasks):
             task.cancel()
         self._score_holes = []
+        self._aside_nines, self._trivia_planned = set(), 0
 
     async def _prepare_trivia(self, r, n: int | None = None) -> None:
         """Write and voice this round's course-trivia asides up front, from the real course's article,
@@ -1664,18 +1678,19 @@ class Engine:
                  "; ".join(f"hole {b.hole}" if b.hole else "any quiet moment"
                            for b in self._news_bits if b.kind == "trivia"))
 
-    async def _plan_scores(self, r, room: int | None = None) -> int:
+    async def _plan_scores(self, r, room: int | None = None, last_hole: int | None = None) -> int:
         """Pick the holes a live score is written for, if anything's on tonight, at most `room` of
-        them, and return how many. Only the plan is made now: each score is fetched as its hole
-        starts, so it isn't stale by the time it airs."""
+        them, from the next hole up to `last_hole` (a nine's end), and return how many. Only the plan
+        is made now: each score is fetched as its hole starts, so it isn't stale by the time it airs."""
         items = await self.scores.fetch()
         if not items or self.round is not r:
             log.info("Scores: nothing live or on tonight; no score asides this round")
             return 0
-        n = max(0, self.cfg.scores.per_nine) * max(1, -(-r.holes // 9))
+        n = max(0, self.cfg.scores.per_nine) * (1 if last_hole else max(1, -(-r.holes // 9)))
         if room is not None:
             n = min(n, room)
-        first, last = 2, r.holes - 2          # the asides' window: not the first hole or the last two
+        # The asides' window: not the first hole or the last two, and not this hole, already started.
+        first, last = max(2, r.seq + 1), min(r.holes - 2, last_hole or r.holes)
         if n <= 0 or last < first:
             return 0
         # One hole from each equal stretch of the window, so two check-ins aren't back to back.
@@ -1688,7 +1703,7 @@ class Engine:
             hole = self.rng.randint(lo, max(lo, hi))
             if not holes or hole - holes[-1] >= 3:
                 holes.append(hole)
-        self._score_holes = holes
+        self._score_holes = sorted(self._score_holes + holes)
         log.info("Scores: %d on tonight (%s); a check-in on round hole(s) %s", len(items),
                  "; ".join(i.key for i in items), holes)
         return len(holes)
@@ -2052,99 +2067,6 @@ class Engine:
         self._air_exchange(list(zip(lines, audio)))
         self._write_transcript(lines, "segment")
         log.info("Wrap: pre-made branch played for %s strokes, no model call", strokes)
-        return True
-
-    def _kick_closer_branches(self, side_key: str, scores: list[int], fixed: dict[str, int] | None = None) -> None:
-        """(Re)start the background pre-build of the round closer on the last hole, branched by the
-        deciding side's possible final `scores`, so the sign-off is ready to play the instant the
-        round ends with no model call (lets the closer use a rich, slower model with no felt latency).
-        In a group the deciding side is the last one still on the last hole; `fixed` holds the other
-        sides' last-hole scores the branches were written with, checked again before one plays."""
-        # Only on cloud TTS: pre-voicing several branches is a network call there, but on local Kokoro
-        # it's CPU-bound and would starve the OCR poller during the last putts. On Kokoro the closer
-        # just runs on demand at round end (same as before).
-        if not getattr(self.speech.tts, "concurrent", False):
-            return
-        if self._closer_branches:
-            return  # already built for this round; don't rebuild on every late putt
-        if self._closer_task and not self._closer_task.done():
-            self._closer_task.cancel()
-        self._closer_task = asyncio.create_task(self._prepare_closer_branches(side_key, scores, fixed or {}))
-        self._closer_task.add_done_callback(lambda t: t.cancelled() or t.exception())
-
-    def _kick_group_closer(self, r: Round) -> None:
-        """A group on the last hole: once every side but one has finished it, pre-build the closer
-        branched on that last side's score (par -1 to +2), with the others' scores fixed."""
-        if len(r.sides) < 2 or r.ended or r.seq < r.holes or self._closer_branches \
-                or (self._closer_task and not self._closer_task.done()):
-            return
-        if any(r.card_score(s, q) is None for s in r.sides for q in range(1, r.holes)):
-            return   # an earlier hole isn't scored yet: the closer's totals would be wrong
-        remaining = [s for s in r.sides if r.card_score(s, r.holes) is None]
-        par = r.par.get(r.holes) or self.current_par
-        if len(remaining) != 1 or not par:
-            return
-        fixed = {s.key: r.card_score(s, r.holes) for s in r.sides if s is not remaining[0]}
-        log.info("Closer: pre-building for %s's finish on the last hole (others done: %s)",
-                 remaining[0].label, fixed)
-        self._kick_closer_branches(remaining[0].key, [p for p in (par - 1, par, par + 1, par + 2) if p > 0], fixed)
-
-    async def _prepare_closer_branches(self, side_key: str, scores: list[int], fixed: dict[str, int]) -> None:
-        r = self.round
-        if not r or r.ended or not self.cfg.commentary.closer or not scores:
-            return
-        side = next((s for s in r.sides if s.key == side_key), None)
-        if side is None:
-            return
-        season = {s.key: self.store.season_rounds(s.key, "league" if r.is_league else "practice") for s in r.sides}
-
-        async def gen(strokes):
-            facts = (r.closing_facts(self.state.shots, season, final_overrides={side_key: strokes},
-                                     week_ctp=self._closer_week_ctp(r))
-                     + self._league_facts(r, closing=True) + self._weather_facts())
-            cap = self.cfg.commentary.closer_max_words
-            user, facts_text = closer_prompt(facts=facts, recent_lines=self.state.recent_lines, max_words=cap)
-            # "round" mode grounding: the closer spans the whole round, so skip the single-lie check.
-            system = self._system_league if r.is_league else self._system_practice
-            return self._grounded(await self._generate("closer", self.closer_llm, user, [], system=system, max_words=cap),
-                                  facts_text, "round", False)[0]
-
-        drafts = await asyncio.gather(*(gen(s) for s in scores), return_exceptions=True)
-        written: dict[int, list] = {}
-        for strokes, lines in zip(scores, drafts):
-            if isinstance(lines, Exception):
-                log.debug("Closer branch for %s strokes failed: %s", strokes, lines)
-            elif lines:
-                written[strokes] = lines
-        # On a network voice, voice every branch (and every line in it) at once; a local CPU voice goes
-        # one line at a time. A branch whose opening line couldn't be voiced is left out, so the
-        # on-demand fallback covers it. With tts.prevoice off (cloud), only the text is kept and the
-        # branch that airs is voiced as it plays.
-        if getattr(self.speech.tts, "concurrent", False):
-            voiced = await asyncio.gather(*(self._voice_ahead(l) for l in written.values()))
-        else:
-            voiced = [await self._voice_ahead(l) for l in written.values()]
-        branches: dict[int, tuple] = {k: v for k, v in zip(written, voiced) if v[0]}
-        if not r.ended and branches:
-            self._closer_branches = {"side": side_key, "by_score": branches, "fixed": fixed}
-            log.info("Closer: branches ready for %s (%s)", sorted(branches), side.label)
-
-    def _play_prepared_closer(self, final_strokes: int | None, side_key: str) -> bool:
-        """Play the pre-made closer branch for the score the deciding side actually finished on.
-        Returns False (fall back to the on-demand closer) when there's no branch for that score, so a
-        mismatch or a never-built set can never air a wrong sign-off."""
-        cb = self._closer_branches
-        self._closer_branches = None
-        if not cb or cb.get("side") != side_key or final_strokes is None:
-            return False
-        branch = cb["by_score"].get(final_strokes)
-        if not branch:
-            return False
-        lines, audio = branch
-        self.state.record_lines(lines)
-        self._air_exchange(list(zip(lines, audio)))
-        self._write_transcript(lines, "closer")
-        log.info("Closer: pre-made branch played for %s strokes, no model call", final_strokes)
         return True
 
     def _missing_possessive(self, text: str) -> str | None:
@@ -3283,8 +3205,6 @@ class Engine:
             self._wrap_branches and self._wrap_branches.get("hole") == self.state.current_hole
         ):
             self._kick_wrap_branches(r.sides[0].key, [event.hud.shot_number, event.hud.shot_number + 1], [])
-            if r.seq >= r.holes:  # last hole, putt with no closer built yet: branch the closer too
-                self._kick_closer_branches(r.sides[0].key, [event.hud.shot_number, event.hud.shot_number + 1])
 
         # Weight the dice toward the moments worth setting up: every putt (a long lag and a close
         # scoring look both deserve a word) and a short scoring approach. Routine full shots keep the
@@ -3919,8 +3839,6 @@ class Engine:
         if r and len(r.sides) == 1 and not shot.is_putt and (hud.lie or "").lower() == "green" and before.shot_number:
             n = before.shot_number
             self._kick_wrap_branches(r.sides[0].key, [n + 1, n + 2, n + 3], [])
-            if r.seq >= r.holes:  # last hole: also pre-build the round closer, branched by final score
-                self._kick_closer_branches(r.sides[0].key, [n + 1, n + 2, n + 3])
 
         # Resolve a putt's result once, for EVERY putt, so the outcome, finishing distance and the
         # prediction grade are never skipped (a notable putt, a too-soon one, or a failed dice roll all
@@ -5153,6 +5071,7 @@ class Engine:
                 r.par.setdefault(r.seq, self.current_par)
             log.info("Round %s: hole %s of %s", r.id, r.seq, r.holes)
             self._score_hole_started(r)
+            self._maybe_prep_asides(r)
             if r.seq > r.holes:
                 if self._log_rounds and not r.log_complete:
                     self._extend_round(r)
@@ -5525,16 +5444,7 @@ class Engine:
         self._live_round_start()
         # Close the "fresh empty scorecard" window so this same tee can't re-trigger a start.
         self._holes_played_at = 0.0
-        # A closer pre-built for the previous round must not leak into this one.
-        if self._closer_task and not self._closer_task.done():
-            self._closer_task.cancel()
-        self._closer_branches = None
-        if self._news_task and not self._news_task.done():
-            self._news_task.cancel()
         self._news_bits, self._news_aired, self._news_moment = [], [], None
-        if self.news is not None or self.trivia is not None or self.scores is not None:
-            self._news_task = asyncio.create_task(self._news_prep(r), name="news-prep")
-            self._news_task.add_done_callback(lambda t: t.cancelled() or t.exception())
         self._start_round_asides(r)
         # Per-round live state must not carry into a new round (a reused (idx, hole) would suppress a
         # real penalty call, a streak would continue, a stale call would be graded against a new putt).
@@ -5729,6 +5639,7 @@ class Engine:
         log.info("Round %s joined mid-round on %s (%s): %s; started on hole %s, now on hole %s (%s of %s); no opener",
                  r.id, r.course, "league" if is_league else "practice", ", ".join(s.label for s in r.sides),
                  r.start_hole, self.hole_number, r.seq, r.holes)
+        self._maybe_prep_asides(r)   # joined past a nine's second hole: no hole change will start it
 
     async def _watch_setup(self) -> None:
         probed = callable(getattr(self.screen, "setup_frame", None)) and callable(
@@ -6375,8 +6286,6 @@ class Engine:
             log.info("Scorecard didn't match the round's players (%s): rows %s", list(r.roster), list(event.card.scores))
             return
         log.info("Round %s scorecard: %s", r.id, {g: dict(sorted(v.items())) for g, v in r.card_scores.items()})
-        if self.commentary_on and self.cfg.commentary.closer:
-            self._kick_group_closer(r)
         if self.cfg.commentary.segments_on_hole_change and self.state.current_hole \
                 and self._wrapped_hole != self.state.current_hole:
             # In a group, the moment the second-to-last side holes out (one side left to putt), pre-
@@ -6477,10 +6386,8 @@ class Engine:
         r.ended = True
         self._round_ended_at = time.monotonic()
         # Asides can no longer play, so prep still in flight is money spent on nothing. The guards in
-        # _news_prep stop it starting another story; only a cancel stops the one already running from
-        # retrying its lines and voicing them.
-        if self._news_task and not self._news_task.done():
-            self._news_task.cancel()
+        # _prepare_news stop it starting another story; only a cancel stops the one already running
+        # from retrying its lines and voicing them.
         for task in list(self._aside_tasks):
             task.cancel()
         self._shots_at_round_end = self.gspro.fires
@@ -6491,13 +6398,11 @@ class Engine:
             except Exception:
                 log.exception("Post-round health checkup failed")
         if event.abandoned:
-            # Quit partway: the wrap and closer prepared for a finished round are dropped. The holes
+            # Quit partway: the wrap prepared for a finished round is dropped. The holes
             # played are still recorded (marked incomplete): their per-hole stats count, and a full
             # nine or more counts as a round in the season totals, scored per nine. A quit that far in
             # earns a sign-off over the holes actually played; a shorter one is left alone.
-            if self._closer_task and not self._closer_task.done():
-                self._closer_task.cancel()
-            self._closer_branches = self._wrap_branches = None
+            self._wrap_branches = None
             stats = self._record_round_stats(r, event.reason, complete=False)
             self._fill_course_layouts(since=time.time() - 12 * 3600)
             played = max((st.holes_scored for st in stats.values()), default=0)
@@ -6534,20 +6439,8 @@ class Engine:
                  + self._league_facts(r, closing=True))
         if not self.cfg.commentary.closer:
             return
-        # A closer pre-built on the last hole plays instantly when its branch matches the deciding side's
-        # actual final score and every other side finished as it was written; any mismatch or absence
-        # falls through to the on-demand closer below.
-        cb = self._closer_branches
-        side = next((s for s in r.sides if cb and s.key == cb["side"]), None)
-        if side is not None and side.key in stats and all(
-                stats[k].scores.get(r.holes) == v for k, v in cb.get("fixed", {}).items() if k in stats):
-            # The last hole's prepared wrap fires just before this with no yield between them; let it
-            # finish airing (bounded) before the closer, so the sign-off follows the wrap instead of
-            # its say_prepared_sequence interrupt cutting the wrap off mid-exchange.
-            await self._drain_speech(self.cfg.commentary.wrap_wait_seconds + 20)
-            if self._play_prepared_closer(stats[side.key].scores.get(r.holes), side.key):
-                return
-        self._closer_branches = None
+        # One call, written now that the final score is known, while the last hole's wrap airs: it
+        # used to be pre-built on the last hole in three or four score branches, one of which aired.
         cap = self.cfg.commentary.closer_max_words
         user, facts_text = closer_prompt(facts=facts + self._weather_facts(), recent_lines=self.state.recent_lines,
                                          max_words=cap)
