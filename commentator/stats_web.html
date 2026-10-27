@@ -60,6 +60,9 @@
   .bar i { display:block; height:100%; background:var(--accent); }
   .err { color:#ff8a80; padding:20px; }
   .livedot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--birdie); margin-right:6px; vertical-align:1px; }
+  #liveslot { position:relative; }
+  #liveslot .unmute { position:absolute; top:12px; left:12px; background:rgba(0,0,0,.7); color:#fff; border:1px solid var(--line);
+                      border-radius:6px; padding:8px 12px; font:inherit; cursor:pointer; }
   #liveslot video { width:100%; max-height:78vh; background:#000; border-radius:8px; }
   .empty { color:var(--dim); padding:10px 0; }
   .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:8px 0 14px; }
@@ -370,8 +373,9 @@ async function shareLink(hash, title, btn) {
 }
 
 // Where a moment (a shot's or a hole's first time, epoch seconds) is in the kept streams: that
-// stream and a few seconds before, to see the setup. Nothing once the stream is gone (a week).
-const WATCH_LEAD = 5;
+// stream and a second before. `since` is when the stream was first seen, a little after it began, so
+// the time lands early already. Nothing once the stream is gone (a week).
+const WATCH_LEAD = 1;
 function videoAt(ts) {
   if (!ts || !state.vods) return null;
   const now = Date.now() / 1000;
@@ -1199,7 +1203,21 @@ function attachLive() {
   if (player && player.session !== want.key) stopLive();
   if (!player) {
     const video = Object.assign(document.createElement("video"), { controls: true, autoplay: true, muted: !!want.live, playsInline: true });
-    const me = player = { session: want.key, video, hls: null };
+    const me = player = { session: want.key, video, hls: null, unmute: null };
+    // Opened from a link (no tap on the page yet), a browser won't start a video with sound: start it
+    // muted, with a button to turn the sound on.
+    video.addEventListener("canplay", () => {
+      if (!video.paused || player !== me) return;
+      video.play().catch(e => {
+        if (e.name !== "NotAllowedError" || player !== me) return;
+        video.muted = true;
+        video.play().catch(() => {});
+        const b = me.unmute = Object.assign(document.createElement("button"), { className: "unmute", textContent: "🔊 Tap for sound" });
+        b.onclick = () => { video.muted = false; };
+        video.addEventListener("volumechange", () => { if (!video.muted) { b.remove(); me.unmute = null; } });
+        video.after(b);
+      });
+    }, { once: true });
     if (window.MediaSource || window.ManagedMediaSource) {
       loadHls().then(() => {
         if (player !== me) return;
@@ -1214,6 +1232,7 @@ function attachLive() {
     }
   }
   slot.appendChild(player.video);
+  if (player.unmute) slot.appendChild(player.unmute);
 }
 
 // Round replays (live_stream.py keeps each stream for a week): live/recordings.json lists them, each with

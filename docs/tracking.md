@@ -231,7 +231,7 @@ Shots and Highlights) has its own share button (🔗, or **Share link**): a phon
 sheet, a computer copies the link. A link to one shot (`#shots?shot=1234`) lists the round it was
 in with that shot open; a link to a round (`#rounds?round=45&hole=3`) opens its scorecard and that
 hole's replay. While a round's stream is still kept (a week), its rounds, holes and shots also get
-**▶ Watch**, which opens **Round replays** five seconds before that swing (the back button returns).
+**▶ Watch**, which opens **Round replays** about a second before that swing (the back button returns).
 A player can bookmark `#rounds?player=Their+Name`. Rounds that ended since this browser's last visit are tagged
 **new**, with a count in the header. On a phone, the tabs wrap and wide tables scroll sideways.
 
