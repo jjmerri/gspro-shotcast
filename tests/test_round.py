@@ -169,6 +169,20 @@ def test_a_scramble_tee_ball_the_screen_never_read_counts_for_fir_from_the_team_
     assert r.side_stats(r.side_for("MikeD"), shots).fir == (1, 2)
 
 
+def test_a_scramble_fairway_is_the_picked_drive_s_not_the_partner_s():
+    # Sarah's drive found the fairway, but the team played MikeD's from the deep rough: no fairway.
+    # Before, either drive in the fairway counted, which over-counted a family scramble 3/6 for 2/6.
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="X", scheduled_format="scramble", holes=2)
+    r.par = {1: 5, 2: 4}
+    shots = [rec("MikeD", 1, 5, 1, "tee", "deep rough", "DR"), rec("Sarah", 1, 5, 1, "tee", "fairway", "DR"),
+             rec("MikeD", 1, 5, 2, "deep rough", "fairway"),
+             # No second-stroke read: drives that disagree say nothing.
+             rec("MikeD", 2, 4, 1, "tee", "rough", "DR"), rec("Sarah", 2, 4, 1, "tee", "fairway", "DR")]
+    for x in shots:
+        x.round_id = r.id
+    assert r.side_stats(r.side_for("MikeD"), shots).fir == (0, 1)
+
+
 def test_player_stats_counts_a_conceded_stiff_as_a_gir():
     # Par 3, tee shot stiff inside the gimme, tap-in conceded (card 2). There's no green-putt record,
     # but the tee shot reached the green in regulation, so it's a GIR hit, not a miss.
@@ -2704,6 +2718,29 @@ def test_roster_facts_name_an_absent_partner(tmp_path):
     e._start_round(Round(league=e.league, gspro_players=["Josh", "Sam"], course="X", scheduled_format=None))
     assert not any("Not playing" in f for f in e._roster_facts())
     assert e._who("Josh")[1] is not None
+
+
+def test_a_lone_league_player_in_a_practice_scramble_is_a_side_of_one(tmp_path):
+    # Josh played alone in a practice scramble against a family team: his side was his league team, so
+    # the booth had partner Sam ("two-time defending champions") playing all night, and the other
+    # team's ball pick went into Josh's calls.
+    e = _engine_with(tmp_path, _noted_league())
+    r = Round(league=e.league, gspro_players=["Tony", "Priya", "Josh"], course="X", scheduled_format="scramble",
+              is_league=False, slot_names=["Tony", "Priya", "Josh"])
+    e._start_round(r)
+    josh = r.side_for("Josh")
+    assert josh.players == ["Josh"] and josh.label == "Josh"
+    assert r.side_for("Tony").players == ["Tony", "Priya"] and r.side_for("Tony").label == "Duffers"
+    assert "Not playing this round: Sam" in " ".join(e._roster_facts())
+    assert e._who("Josh") == ("Josh", None)
+    e.gspro.pick, e.gspro._pick_stroke, e.gspro.current_hole = (1, 0), 1, 0   # Priya's ball picked
+    assert "playing alone" in e._pick_facts(1, player="Josh")[0]
+    assert not any("Priya" in f for f in e._format_facts(1, player="Josh"))
+    assert "Priya's ball" in e._pick_facts(1, player="Tony")[0]
+    # Practice alternate shot on one partner's profile is still both partners.
+    alt = Round(league=e.league, gspro_players=["Josh"], course="X", scheduled_format="alternate", is_league=False)
+    e._start_round(alt)
+    assert alt.side_for("Josh").players == ["Josh", "Sam"] and not e._absent_partners()
 
 
 def test_club_delivery_never_on_back_to_back_reactions(tmp_path):

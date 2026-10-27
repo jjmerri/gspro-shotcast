@@ -1867,11 +1867,14 @@ class Engine:
         return player, team
 
     def _absent_partners(self) -> list[str]:
-        """Teammates of someone playing who aren't in this round (never in a one-ball team format)."""
+        """Teammates of someone playing who aren't in this round. A one-ball team's side lists both
+        partners, so a league alternate shot or scramble has none; a practice scramble with Josh alone
+        has Corey."""
         r = self.round
-        if not r or r.ended or r.format in TEAM_BALL:
+        if not r or r.ended:
             return []
-        playing = {p for p in r.roster.values() if p}
+        playing = {p for side in r.sides for p in side.players} if r.format in TEAM_BALL else \
+            {p for p in r.roster.values() if p}
         teams = {self.league.player_team.get(p) for p in playing} - {None}
         return [p for t in teams for p in self.league.team_players.get(t, []) if p not in playing]
 
@@ -1884,10 +1887,10 @@ class Engine:
     def _spent_notes(self) -> list[str]:
         return [p for p, n in self._note_uses.items() if n >= self.NOTE_USES_PER_ROUND]
 
-    def _format_facts(self, stroke: int | None = None, setup: bool = False) -> list[str]:
+    def _format_facts(self, stroke: int | None = None, setup: bool = False, player: str | None = None) -> list[str]:
         if not self.round or self.round.ended:
             return []
-        return self.round.format_facts() + self._pick_facts(stroke, setup) + self._roster_facts()
+        return self.round.format_facts() + self._pick_facts(stroke, setup, player) + self._roster_facts()
 
     def _roster_facts(self) -> list[str]:
         """Who isn't here: a partner of someone playing is left out entirely (a solo practice round had
@@ -3091,7 +3094,7 @@ class Engine:
                  + self._mulligan_facts(player, hud)
                  + self._penalty_facts(player, hud.shot_number) + self._truth_context_facts(is_putt, idx)
                  + history_facts(self._display(player), self.state.player_shots(player or "unknown"))
-                 + self._format_facts(hud.shot_number, setup=True) + self._ctp_facts(hud.shot_number, hud, player)
+                 + self._format_facts(hud.shot_number, setup=True, player=player) + self._ctp_facts(hud.shot_number, hud, player)
                  + self._profile_facts(player, is_putt, hud) + self._prediction_facts(player, is_putt, hud)
                  + self._stakes_facts(hud, player) + self._team_score_facts(player)
                  + self._finish_correction_facts(hud, player)
@@ -3760,11 +3763,18 @@ class Engine:
                      and (before.shot_number == 1 or (before.lie or "").lower() == "tee"
                           or (before.shot_number is None and not before.lie)))
         if tee_drive and drive and season.get("longest_drive"):
-            if drive > season["longest_drive"]:
+            # Earlier weeks are the record, but a longer drive earlier today already broke it: every
+            # drive past last week's best was "a personal best" all night, the shorter ones included.
+            today = self.store.today_longest_drive(player)
+            if drive > season["longest_drive"] and today and drive <= today:
+                season_facts.append(f"Not a personal best: {player} hit a longer drive earlier today "
+                                    f"({today:.0f} yards).")
+            elif drive > season["longest_drive"]:
                 tags.append("season_best_drive")
                 score = max(score + 0.5, c.big_moment_threshold)
-                season_facts.append(f"That's a new personal best: longer than {player}'s longest drive from "
-                                    f"earlier weeks ({season['longest_drive']:.0f} yards). Excitement "
+                beaten = (f"today's earlier best ({today:.0f} yards)" if today and today > season["longest_drive"]
+                          else f"{player}'s longest drive from earlier weeks ({season['longest_drive']:.0f} yards)")
+                season_facts.append(f"That's a new personal best: longer than {beaten}. Excitement "
                                     f"{SEASON_BEST_DRIVE_LEVEL} out of 10.")
             elif (best := self.store.season_longest_drive(context="league")) and drive > best[1]:
                 tags.append("league_best_drive")
@@ -4199,7 +4209,7 @@ class Engine:
                       and not shot.is_putt else [])
         facts = (lead + replay_facts + flight + club + result + sand_theme
                  + history_facts(self._display(player), prior) + season_facts
-                 + self._format_facts(before.shot_number) + (self._ctp_facts(1) if hud.shot_number == 1 else []))
+                 + self._format_facts(before.shot_number, player=player) + (self._ctp_facts(1) if hud.shot_number == 1 else []))
         who, team = self._who(player)
         user, facts_text = shot_prompt(
             player=who,
@@ -4580,13 +4590,20 @@ class Engine:
             log.info("GSPro's log shows a scramble (was %s): teams %s; %s earlier shots relabelled",
                      was, [s.label for s in r.sides], 0 if was == "scramble" else len(ids))
 
-    def _pick_facts(self, stroke: int | None = None, setup: bool = False) -> list[str]:
+    def _pick_facts(self, stroke: int | None = None, setup: bool = False, player: str | None = None) -> list[str]:
         """Whose ball the team is playing, from GSPro's last scramble pick on this hole. Given the stroke
         being set up or reacted to, it says which stroke that pick was: a reaction to the last hitter
-        once read the previous stroke's pick as this one's ("the team has chosen Dan's ball")."""
+        once read the previous stroke's pick as this one's ("the team has chosen Dan's ball"). Given the
+        player, only their own side's pick: a lone player in the scramble picks nothing, and another
+        team's pick isn't theirs ("Josh gives it a gentle stroke, but Kathy's ball is the team's choice")."""
         g, r = self.gspro, self.round
         if not r or r.ended or r.format != "scramble":
             return []
+        side = r.side_for(player) if player else None
+        if side is not None and len(side.gspro) == 1 and len(side.players) <= 1:
+            who = self._display(player)
+            return [f"{who} is playing alone, on {who}'s own ball every stroke: no team, no pick of a ball, "
+                    "and nobody else's ball has anything to do with this shot."]
         undecided = (f"Whose stroke-{stroke} ball the team takes isn't decided until everyone has hit and "
                      f"GSPro picks: don't say or guess which ball they chose.") if stroke and not setup else None
         if not g.pick:
@@ -4594,6 +4611,8 @@ class Engine:
         idx, hole = g.pick
         order = r.slot_names or list(r.roster)
         if hole != g.current_hole or idx >= len(order) or not order[idx]:
+            return [undecided] if undecided else []
+        if side is not None and r.side_for(order[idx]) is not side:
             return [undecided] if undecided else []
         name = r.league.match_player(order[idx]) or order[idx]
         n = g.pick_stroke()

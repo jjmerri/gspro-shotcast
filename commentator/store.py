@@ -794,6 +794,18 @@ class Store:
         ).fetchone()
         return {k: r[k] for k in r.keys()}
 
+    def today_longest_drive(self, player: str) -> float | None:
+        """The player's longest drive already recorded today, so a second big drive tonight isn't
+        another 'personal best' when an earlier one tonight went further."""
+        r = self.db.execute(
+            f"""SELECT MAX({_DRIVE}) AS longest FROM shots
+               WHERE player = ? AND club = 'DR' AND is_putt = 0 AND (shot_number = 1 OR lie_before = 'tee' OR (shot_number IS NULL AND lie_before IS NULL))
+                     AND session_id IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))
+                     AND mulligan = 0 AND left_out = 0""",
+            (player, self.session_id),
+        ).fetchone()
+        return r["longest"] if r else None
+
     def last_shot_id(self) -> int:
         return self.db.execute("SELECT COALESCE(MAX(id), 0) FROM shots").fetchone()[0]
 

@@ -1586,6 +1586,34 @@ async def test_season_best_drive_is_called_out(tmp_path):
     assert "new personal best: longer than Tony's longest drive from earlier weeks (245 yards)" in tony
     mike = next(p for p in reactions if "Player: Mike" in p and "driver" in p)
     assert "new personal best: longer than Mike's longest drive from earlier weeks (290 yards)" in mike
+
+
+async def test_a_drive_shorter_than_one_earlier_today_is_no_personal_best(tmp_path):
+    # Kathy's earlier-weeks best was 117 yards, so every drive past it was "a personal best" all
+    # night, the 142-yarder after a 227 included.
+    from commentator.store import Store
+
+    db = str(tmp_path / "season.db")
+    old = Store(db)
+    old.record_shot(player="Tony", hole="Hole 1", shot=Shot(club="DR", carry=200.0), before=Hud(lie="tee"),
+                    after=Hud(lie="rough"), tags=[], carry_game_yards=205.0, total_yards=None, offline_yards=None)
+    _backdate(old)
+    old.close()
+    today = Store(db)
+    today.record_shot(player="Tony", hole="Hole 1", shot=Shot(club="DR", carry=380.0), before=Hud(lie="tee"),
+                      after=Hud(lie="fairway"), tags=[], carry_game_yards=390.0, total_yards=None, offline_yards=None)
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.tts.console_simulate_duration = False
+    cfg.commentary.routine_comment_rate = 1.0
+    cfg.commentary.min_seconds_between_comments = 0
+    llm = FakeLLM(cfg.llm.live)
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"),
+                    source=ReplaySource("data/sample_shots.jsonl", speed=1e6), live_llm=llm, segment_llm=llm,
+                    speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0), store=today)
+    await engine.run()
+    tony = next(p for p in llm.prompts if p.startswith("FACTS:") and "Player: Tony" in p and "driver" in p)
+    assert "new personal best" not in tony
+    assert "Not a personal best: Tony hit a longer drive earlier today (390 yards)" in tony
 def test_slope_and_elevation_parsing():
     from commentator.hud import parse_elevation, parse_slope
 

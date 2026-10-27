@@ -219,8 +219,17 @@ class Round:
         sides = []
         if self.format in TEAM_BALL:
             for team, gspro in self.teams.items():
-                players = self.league.team_players.get(team) or [self.roster.get(g) or g for g in gspro]
-                sides.append(Side(key=team, label=team, players=players, gspro=gspro, team=team))
+                here = [self.roster.get(g) or g for g in gspro]
+                # A practice round has only who's in GSPro: Josh alone in a practice scramble isn't
+                # "Josh and Corey" (the booth had Corey playing all night). A GSPro name that is the
+                # team's own (one shared ball, no player matched) still stands for the whole team, and so
+                # does alternate shot: one profile is both partners taking turns.
+                practice_here = (not self.is_league and self.format != "alternate"
+                                 and any(self.roster.get(g) for g in gspro))
+                players = here if practice_here else (self.league.team_players.get(team) or here)
+                whole = set(self.league.team_players.get(team) or players)
+                label = team if set(players) == whole else " & ".join(players)
+                sides.append(Side(key=team, label=label, players=players, gspro=gspro, team=team))
         else:
             for g, player in self.roster.items():
                 name = player or g
@@ -1033,11 +1042,17 @@ def _season_facts(who: str, season: dict | None, holes: int = 9, league: bool = 
 
 def _fairway_hit(recs: list, scramble: bool) -> bool | None:
     """Whether a side's tee shot found the fairway, None when no read says. In a scramble the team
-    plays its second stroke from the ball it picked, so that stroke's lie is where a tee ball rested
-    even when the screen moved to the partner before reading it."""
+    plays its second stroke from the ball it picked, so that stroke's lie is where the picked tee ball
+    rested (even when the screen moved to the partner before reading it). That beats the tee reads: a
+    partner's drive in the fairway doesn't count when the team played the other one from the rough.
+    Without it, the tee reads count only when they agree."""
     tee = [r.hud.lie for r in recs if r.shot_number == 1 and r.hud.lie]
     if scramble:
-        tee += [r.lie_before for r in recs if r.shot_number == 2 and r.lie_before not in (None, "tee")]
+        picked = [r.lie_before for r in recs if r.shot_number == 2 and r.lie_before not in (None, "tee")]
+        if picked:
+            return "fairway" in picked
+        if tee and len({lie == "fairway" for lie in tee}) > 1:
+            return None
     return "fairway" in tee if tee else None
 
 
