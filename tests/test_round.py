@@ -2533,6 +2533,17 @@ def test_a_round_with_no_league_players_drops_the_league_framing(tmp_path):
     assert not e._no_members(member) and "This is a practice round" in e._opener_io(member)[1]
 
 
+def test_the_opener_gives_a_back_nine_start_its_own_par(tmp_path):
+    from commentator.course_card import CourseCard
+
+    e = _engine(tmp_path)
+    r = e._build_round(["MikeD"], "Somewhere", {}, is_league=False)
+    r.start_hole, r.start_hole_assumed, r.holes = 10, False, 9
+    r.apply_course_card(CourseCard(name="Somewhere", par={h: 4 for h in range(1, 19)} | {1: 5, 10: 3},
+                                   index={}))
+    assert "First hole: hole 10, par 3." in e._opener_io(r)[1]
+
+
 def test_a_round_takes_the_setup_holes_and_the_next_one_reads_its_own(tmp_path):
     e = _engine(tmp_path)
     e._setup_holes = (10, 9)

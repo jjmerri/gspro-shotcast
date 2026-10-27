@@ -5495,7 +5495,7 @@ class Engine:
         # unknown, so leave the first hole out rather than claim the stale HUD hole; a tee-time opener
         # (no preload) still has the live HUD hole.
         if r.start_hole and not r.start_hole_assumed:
-            par = r.par.get(r.start_hole)
+            par = r.par.get(1)   # r.par is keyed by the round's hole order, not the course's
             hole = f"hole {r.start_hole}" + (f", par {par}" if par else "")
         else:
             hole = None if preround else self.state.current_hole
