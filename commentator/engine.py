@@ -191,7 +191,7 @@ def _slot_state(tone) -> str:
 BOOKINGS_FRESH_SECONDS = 300.0
 # A game-mode change alone (same players and nines) re-writes the front-loaded opener only once the
 # mode has sat unchanged this long: clicking through the modes rewrote it on every click.
-FORMAT_SETTLE_SECONDS = 5.0
+FORMAT_SETTLE_SECONDS = 3.0
 
 
 def _play_button_course(text: str) -> str | None:
