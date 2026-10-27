@@ -127,7 +127,7 @@
 <main id="main"></main>
 <script src="vendor/sql.js-httpvfs-0.8.12/index.js"></script>
 <script>
-const TABS = [["live", "Live"], ["vods", "Full rounds"], ["schedule", "Schedule"], ["players", "Players"], ["versus", "Head-to-head"], ["rounds", "Rounds"], ["courses", "Courses"],
+const TABS = [["live", "Live"], ["vods", "Round replays"], ["schedule", "Schedule"], ["players", "Players"], ["versus", "Head-to-head"], ["rounds", "Rounds"], ["courses", "Courses"],
               ["shots", "Shots"], ["highlights", "Highlights"], ["broadcasts", "Broadcasts"], ["booth", "Booth"]];
 const PERIODS = [["3m", "3 months"], ["6m", "6 months"], ["9m", "9 months"], ["1y", "1 year"], ["all", "All time"]];
 // A link holds the view: #tab?player=…&ctx=…&round=…&from=…; see writeHash().
@@ -1112,7 +1112,7 @@ function loadHls() {
   return hlsLoading;
 }
 
-// What the player should be showing: the Live tab's stream, or the Full rounds tab's pick.
+// What the player should be showing: the Live tab's stream, or the Round replays tab's pick.
 function wantedVideo() {
   const s = state.live;
   if (state.tab === "live" && s && s.live) return { key: s.session, src: `live/s/${encodeURIComponent(s.session)}/stream.m3u8`, live: true };
@@ -1145,7 +1145,7 @@ function attachLive() {
   slot.appendChild(player.video);
 }
 
-// Full rounds (live_stream.py keeps each stream for a week): live/recordings.json lists them, each with
+// Round replays (live_stream.py keeps each stream for a week): live/recordings.json lists them, each with
 // where its rounds start. The schedule (schedule.json) is the sim's bookings, uploaded by the booth.
 const EXTRA_TABS = ["live", "vods", "schedule"];
 async function pollExtras() {
@@ -1167,14 +1167,14 @@ const when = (t, opts) => new Date(t).toLocaleString([], opts);
 
 function renderVods() {
   const vods = state.vods || [];
-  if (!vods.length) return `<h2>Full rounds</h2><p class="sub">Nothing kept yet: each round streamed live is kept here for a week.</p>`;
+  if (!vods.length) return `<h2>Round replays</h2><p class="sub">Nothing kept yet: each round streamed live is kept here for a week.</p>`;
   const sel = state.vod && vods.find(v => v.session === state.vod.session);
   const going = v => v.ended === null && state.live && state.live.live && state.live.session === v.session;
   const chapters = v => (v.rounds.length ? v.rounds : [{ at: 0, label: "From the start" }]).map(r =>
     `<button class="link" data-vod="${esc(v.session)}" data-vodat="${r.at}">${esc(r.label)}</button>`
     + (r.at ? ` <span class="sub">${hm(r.at)} in</span>` : "")).join("<br>");
   const day = { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
-  return `<h2>Full rounds <span class="sub">the stream of every round, kept for a week</span></h2>
+  return `<h2>Round replays <span class="sub">the stream of every round, kept for a week</span></h2>
   ${sel ? `<h3>${esc((sel.rounds[0] || {}).label || "Stream")} <span class="sub">${esc(when(sel.since * 1000, day))}</span></h3>
     <div id="liveslot"></div>
     ${sel.rounds.length > 1 ? `<div class="controls">Jump to: ${sel.rounds.map(r =>

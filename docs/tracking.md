@@ -214,7 +214,7 @@ Broadcasts and Booth are hidden until the booth has said something (stats only, 
 On the published page, a **Live** tab plays the sim's screen while a round is on, if the
 [live stream](#live-stream) is set up (a red dot on the tab means it's on air; between rounds it
 says off air). Turning `live.enabled` off takes the tab away when the booth next starts.
-**Full rounds** plays each stream of the last week from the start, with a link to where each
+**Round replays** plays each stream of the last week from the start, with a link to where each
 round in it begins (course and players); a stream still on air can be watched from its start too.
 **Schedule** lists the sim's SuperSaaS bookings for the next two weeks (time, the booker's name
 and the booking type), when [bookings](leagues.md) are on (`booking.schedule_days`, 0 for none);
@@ -376,7 +376,7 @@ the Shotcast folder; the booth uploads each file to the bucket's `live/` folder 
 the page plays it with
 [hls.js](https://github.com/video-dev/hls.js) (vendored, like the SQLite library). Viewers are
 about 20 seconds behind, and the player starts muted. Any number of people can watch at once.
-Each stream is kept for a week (`live.keep_days`) for the **Full rounds** tab, with a second
+Each stream is kept for a week (`live.keep_days`) for the **Round replays** tab, with a second
 playlist (`full.m3u8`) of every file from the start and `live/recordings.json` listing the streams
 and where each round in them starts. A stream under a minute isn't kept. Streams past a week are
 deleted as the next one starts or stops, or when the booth starts, and a lifecycle rule in the stack

@@ -6571,7 +6571,7 @@ class Engine:
         loop.create_task(self._live_call("start"), name="live-start")
 
     def _live_label(self) -> str | None:
-        """The round on the stream, for the Full rounds tab: course, then who's playing."""
+        """The round on the stream, for the Round replays tab: course, then who's playing."""
         r = self.round
         if r is None:
             return None

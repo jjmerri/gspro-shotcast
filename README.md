@@ -60,7 +60,7 @@ voices included, while a round is on, about 20 seconds behind and behind the sam
 tray action downloads and sets up [OBS Studio](https://obsproject.com/) to make the stream; the
 booth starts it when a round starts and stops it after the sign-off (or OFF AIR, or 20 minutes
 with no shots); no YouTube or Twitch account is needed. Each stream is kept for a week on the
-**Full rounds** tab, to watch a round from its first tee shot, then deleted. It costs about a cent
+**Round replays** tab, to watch a round from its first tee shot, then deleted. It costs about a cent
 and a half an hour of uploads plus about 50 cents a month to keep a busy week, and watching is
 within CloudFront's free tier for a league. See [Live stream](docs/tracking.md#live-stream). With
 SuperSaaS bookings on, a **Schedule** tab shows who has the sim booked for the next two weeks.

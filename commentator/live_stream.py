@@ -1,7 +1,7 @@
 """The live stream on the stats page: OBS on the GSPro PC writes the screen and sound as HLS (a
 playlist and a few seconds of video per file) into a folder, and this mirrors that folder to the
 stats bucket, behind the same league password as the stats. Each stream is kept for keep_days (the
-page's Full rounds tab plays it from the start), then deleted; with keep_days 0 nothing is kept: segments
+page's Round replays tab plays it from the start), then deleted; with keep_days 0 nothing is kept: segments
 are deleted from the bucket as they leave the playlist, and the whole session when the stream stops.
 
     live/status.json               {"live": true, "session": ..., "since": ..., "at": ...} or {"live": false}
@@ -296,7 +296,7 @@ class Mirror:
 
     def mark(self, label: str, replace: bool = False) -> None:
         """A round starts (or, with replace, has its final name): label the stream from here, for the
-        Full rounds tab. Called from any thread; the mirror files it on its next pass."""
+        Round replays tab. Called from any thread; the mirror files it on its next pass."""
         if self.keep:
             with self._marks_lock:
                 self._marks.append((self.clock(), label, replace))
@@ -470,7 +470,7 @@ class Mirror:
             self.session = None
             self._prune()
             self._save_index()
-            log.info("Live stream: kept %.0f minutes for the Full rounds tab", duration / 60)
+            log.info("Live stream: kept %.0f minutes for the Round replays tab", duration / 60)
         else:
             self._delete([prefix + n for n in self.sent] + [prefix + "stream.m3u8"]
                          + ([prefix + "full.m3u8"] if self.track else []))

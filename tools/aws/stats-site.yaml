@@ -47,7 +47,7 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
-      # The live stream (live_stream.py) keeps each stream live.keep_days (7) for the Full rounds tab and
+      # The live stream (live_stream.py) keeps each stream live.keep_days (7) for the Round replays tab and
       # then deletes it; this catches any it missed, a day after. With live.keep_days 0 it deletes its
       # video as it goes, and this only catches what a crash left. With a publish.prefix, the stream is
       # under <prefix>/live/s/ instead: change it to match.
