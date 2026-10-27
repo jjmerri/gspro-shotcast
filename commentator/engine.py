@@ -967,14 +967,14 @@ class Engine:
         task.add_done_callback(lambda t: t.cancelled() or t.exception() and log.warning(
             "Couldn't keep the minimap of hole %s: %r", hole, t.exception()))
 
-    async def _read_minimap(self, to_pin: float | None) -> MinimapRead:
+    async def _read_minimap(self, to_pin: float | None, tee: bool | None = None) -> MinimapRead:
         await asyncio.to_thread(self.screen.detect_mirror)
         region = self.screen.region("minimap")
         # Full resolution: the downscaled vision snapshot leaves the minimap's numbers too small to read.
         img = await asyncio.to_thread(self.screen.grab, region)
         if not self.commentary_on:   # went off air during the grab: don't start the paid read
             raise RuntimeError("off air")
-        return await self.minimap.read(img, to_pin)
+        return await self.minimap.read(img, to_pin, tee)
 
     async def _read_putt(self) -> PuttRead:
         p = self.cfg.putt_read
@@ -998,7 +998,8 @@ class Engine:
         if hud.shot_number == 1:
             self._snap_hole(hud)
         # The minimap read starts first so it runs during the HUD read below. It's cancelled for a putt.
-        minimap_task = asyncio.create_task(self._read_minimap(to_yards(hud.to_pin))) if self.minimap is not None and self.commentary_on else None
+        minimap_task = asyncio.create_task(self._read_minimap(
+            to_yards(hud.to_pin), None if hud.shot_number is None else hud.shot_number == 1)) if self.minimap is not None and self.commentary_on else None
         if minimap_task is not None:
             self._minimap_tasks.add(minimap_task)
             minimap_task.add_done_callback(self._minimap_tasks.discard)

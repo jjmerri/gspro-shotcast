@@ -1172,8 +1172,9 @@ class JevMinimap:
                 log.exception("Couldn't log the Jev request's usage")
         return resp.answers
 
-    async def read(self, img: Image.Image, to_pin: float | None = None) -> MinimapRead:
-        """`to_pin` (yards) sets the map's scale for the bunker search; without it there's none."""
+    async def read(self, img: Image.Image, to_pin: float | None = None, tee: bool | None = None) -> MinimapRead:
+        """`to_pin` (yards) sets the map's scale for the bunker search; without it there's none. `tee`
+        False skips the dogleg read, which `facts` only uses from the tee; None (unknown) keeps it."""
         from typesafe_sdk import Box, Choice, Image as JevImage, Noul
 
         started = time.perf_counter()
@@ -1222,12 +1223,13 @@ class JevMinimap:
                 inside = _greyed(img, out)
                 left, right = half(inside, b, p, "left"), half(inside, b, p, "right")
                 patches, leafy, dots = [], [], []
+                dogleg = tee is not False and bool(to_pin) and to_pin >= DOGLEG_MIN_YARDS
                 if to_pin and to_pin > 0:
                     search = min(to_pin, AIM_SEARCH_YARDS) if to_pin >= AIM_CHECK_MIN_YARDS else to_pin
                     patches, leafy, dots = await asyncio.gather(
                         asyncio.to_thread(sand_patches, img, b, p, SAND_CORRIDOR_YARDS / search, out),
                         asyncio.to_thread(tree_patches, img, b, p, search, out),
-                        asyncio.to_thread(aim_dots, img, b, p) if to_pin >= DOGLEG_MIN_YARDS else asyncio.sleep(0, []))
+                        asyncio.to_thread(aim_dots, img, b, p) if dogleg else asyncio.sleep(0, []))
                     patches, leafy = patches[:MAX_SAND_CHECKS], leafy[:MAX_TREE_CHECKS]
                 state = {"left": JevImage(_jpeg(left)), "right": JevImage(_jpeg(right))}
                 side_qs = {}
@@ -1238,12 +1240,13 @@ class JevMinimap:
                     state[f"leafy{i}"] = JevImage(_jpeg(patch[4]))
                     side_qs[f"tree{i}"] = Noul(instructions=TREE_Q.format(k=f"leafy{i}"))
                     side_qs[f"one{i}"] = Noul(instructions=SINGLE_Q.format(k=f"leafy{i}"))
-                aimed = img.convert("RGB")
-                w, h = aimed.size
-                ImageDraw.Draw(aimed).line([(b[0] * w, b[1] * h), (p[0] * w, p[1] * h)], fill=(0, 255, 255),
-                                           width=max(2, w // 150))
-                state["aimed"] = JevImage(_jpeg(aimed))
-                side_qs["fairway"] = Choice(instructions=DOGLEG_Q, criteria=FAIRWAY)
+                w, h = img.size
+                if dogleg:
+                    aimed = img.convert("RGB")
+                    ImageDraw.Draw(aimed).line([(b[0] * w, b[1] * h), (p[0] * w, p[1] * h)], fill=(0, 255, 255),
+                                               width=max(2, w // 150))
+                    state["aimed"] = JevImage(_jpeg(aimed))
+                    side_qs["fairway"] = Choice(instructions=DOGLEG_Q, criteria=FAIRWAY)
                 if to_pin and to_pin / max(1e-6, abs(b[1] - p[1])) <= PIN_SIDE_MAX_MAP_YARDS:
                     # About 30 yards around the pin, on the map's own scale.
                     rad = max(20, round(h * abs(b[1] - p[1]) * 30 / to_pin))

@@ -104,7 +104,7 @@ async def test_jev_read_splits_the_map_and_reads_numbers():
     r = await JevMinimap(Config().minimap, client=fake).read(Image.new("RGB", (170, 310)))
     assert r.sides and len(fake.calls) == 3
     assert fake.calls[0][0] == "jev-preview" and fake.calls[0][2] == ["ball", "pin"]
-    assert fake.calls[2][1] == ["aimed", "left", "right"]   # no to_pin: no patches, no green close-up
+    assert fake.calls[2][1] == ["left", "right"]   # no to_pin: no patches, no green close-up, no dogleg
     assert r.facts(160) == ["Hole layout: water in front, about 142 yards to carry it.",
                             "Hole layout: water down the left.",
                             "Green: 150 yards to the front edge, 172 to the back."]
@@ -286,6 +286,14 @@ async def test_jev_read_confirms_and_measures_sand():
     r = await JevMinimap(Config().minimap, client=fake).read(img, to_pin=400)
     assert sorted(fake.calls[2][1]) == ["aimed", "left", "patch0", "patch1", "right"]
     assert {b.side for b in r.sand} == {"left", "right"}
+
+
+async def test_jev_read_skips_the_dogleg_read_off_the_tee():
+    img = _course([(250, 400, 290, 440)])
+    for tee, asked in ((True, True), (None, True), (False, False)):
+        fake = FakeJev()
+        await JevMinimap(Config().minimap, client=fake).read(img, to_pin=400, tee=tee)
+        assert ("aimed" in fake.calls[2][1]) is asked and ("fairway" in fake.calls[2][2]) is asked
 
 
 def test_split_bunker_pieces_merge_into_one():
