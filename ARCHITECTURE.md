@@ -131,7 +131,9 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
   net stakes late in a round, and the week's closest to the pin (`Store.week_ctp`).
 - **`news.py`** fetches real golf headlines (RSS/Atom) for between-shots banter, because the
   model's own news is stale. Teasers with no facts in them are skipped. At round start the engine
-  has the closer's model write and voice `news.per_nine` two-line asides per nine holes; each is
+  has the closer's model write and voice two-line asides (news, course trivia, live scores) up to
+  the round's airtime: live scores claim their check-ins first, then news and trivia take turns at
+  what's left, each within its configured share (`news.per_nine`, `trivia.per_round`). Each is
   held for a quiet shot, or for the kind of shot its story is about (a long drive, trouble), with a
   bridging first line for that moment. At most one every three holes, never on the first or last two.
 

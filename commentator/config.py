@@ -381,6 +381,10 @@ class CommentaryConfig(BaseModel):
     # The round's sign-off isn't racing the next shot, so it gets room for a rich closing conversation;
     # at 18 its longer lines were cut to a fragment or dropped.
     closer_max_words: int = 40
+    # The opener's welcome ran 19-24 words; at 18 it was dropped whole and the opener retried for a
+    # missing welcome. Shorter than the closer's: it plays over a load screen that can be quick.
+    opener_max_words: int = 25
+    opener_max_lines: int = 3
     segments_on_hole_change: bool = True
     # Before voicing the between-holes wrap, wait up to this long for the hole's last shot handler to
     # finish, so the final-shot reaction and the wrap don't talk over each other. Bounded so a slow

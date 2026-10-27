@@ -4258,6 +4258,30 @@ async def test_an_opener_without_its_welcome_is_written_again(tmp_path):
                                        "One name on the sheet, Nigel."]   # Duke naming himself is dropped
 
 
+async def test_a_long_welcome_keeps_the_opener_and_it_runs_three_lines(tmp_path):
+    # At the live 18-word cap a one-sentence 19-word welcome was dropped whole, so the opener failed
+    # its welcome check and was paid for twice.
+    welcome = ("Good evening, everyone, and welcome to Sheep Ranch for a nine-hole practice round, "
+               "with Kathy and Dylan out together.")
+    reply = [{"speaker": "pbp", "text": welcome},
+             {"speaker": "color", "text": "A brand new pairing, Nigel."},
+             {"speaker": "pbp", "text": "Dylan leads us off on the par-five first."},
+             {"speaker": "color", "text": "I like his chances of setting the tone."}]
+
+    class OneLLM(FakeLLM):
+        async def complete_json(self, system, user, schema, images=None):
+            self.prompts.append(user)
+            return LLMResult(text=json.dumps({"lines": reply}))
+
+    e = _mini_engine(tmp_path)
+    llm = OneLLM(e.cfg.llm.live)
+    lines = await e._compose("opener", llm, "THE ROUND IS ABOUT TO START.", "", [], mode="round",
+                             max_words=e.cfg.commentary.opener_max_words)
+    assert len(llm.prompts) == 1
+    assert [line.text for line in lines] == [welcome, "A brand new pairing, Nigel.",
+                                       "Dylan leads us off on the par-five first."]
+
+
 def test_a_name_run_into_what_is_theirs_is_rejected(tmp_path):
     from commentator.models import Line
     from commentator.round import Side

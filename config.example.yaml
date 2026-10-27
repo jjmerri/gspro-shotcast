@@ -150,6 +150,8 @@ commentary:
   recent_lines: 30   # shown to the model; a season-wide check catches older repeats
   max_words_per_line: 28
   aside_max_words: 30   # news, trivia and score asides: room to tell the story in one line
+  opener_max_words: 25  # the opener's welcome runs long; it plays over the load screen
+  opener_max_lines: 3
   segments_on_hole_change: true
   max_speech_backlog: 4
   in_flight: true

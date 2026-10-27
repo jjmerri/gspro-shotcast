@@ -609,12 +609,14 @@ def time_of_day_fact(now: datetime | None = None) -> str:
             f"good {part}, and the session is \"{words}\" (not \"tonight\" before the evening).")
 
 
-def opener_prompt(*, facts: list[str], recent_lines, now: datetime | None = None) -> tuple[str, str]:
+def opener_prompt(*, facts: list[str], recent_lines, now: datetime | None = None,
+                  max_words: int | None = None, max_lines: int = 3) -> tuple[str, str]:
     facts_text = "\n".join([*facts, time_of_day_fact(now)])
     prompt = (
         "THE ROUND IS ABOUT TO START. FACTS:\n" + facts_text
         + _recent_block(recent_lines)
-        + "\n\nOpen the broadcast: three or four lines, alternating between the two commentators. Welcome "
+        + f"\n\nOpen the broadcast: {max_lines} lines at most, alternating between the two commentators. "
+        "Welcome "
         "everyone, say what the round's format means for these players, pick one storyline, rivalry or "
         "prediction worth watching, and send us to the opening hole: name the hole and its par (from a "
         "'First hole' fact) and who is first on the tee (from a 'First on the tee' fact), but only when "
@@ -622,6 +624,7 @@ def opener_prompt(*, facts: list[str], recent_lines, now: datetime | None = None
         "last name once, as the 'Playing' facts give it (a player with only one name there goes by that "
         "name; never invent a surname); first names are fine after that. Don't read out handicaps or list "
         "everyone's numbers; one detail that matters beats five that don't."
+        + (aside_room(max_words) if max_words else "")
     )
     return prompt, facts_text
 

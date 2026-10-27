@@ -1485,32 +1485,55 @@ class Engine:
         return max(1, len(range(2, max(holes - 1, 3), 3)))
 
     def _news_wanted(self, r) -> int:
-        """How many golf-news asides to write for this round. Trivia and live scores are drawn from
-        the same bucket and the same airtime (see _news_pick), so a full batch of each leaves most of
-        them unheard - and news is written with the closer's model, so it is the expensive one to
-        waste. News takes the airtime the others haven't claimed, never more than configured."""
+        """News's own ceiling for a round: its configured share, never more than the airtime."""
         nines = max(1, -(-r.holes // 9))
-        claimed = ((self.cfg.trivia.per_round if self.trivia is not None else 0)
-                   + (self.cfg.scores.per_nine * nines if self.scores is not None else 0))
-        return max(1, min(self.cfg.news.per_nine * nines, self._aside_slots(r.holes) - claimed))
+        return max(1, min(self.cfg.news.per_nine * nines, self._aside_slots(r.holes)))
+
+    def _split_asides(self, r, room: int) -> tuple[int, int]:
+        """(trivia, news) to write into the airtime live scores left: taken in turn, news first, each
+        up to its configured share. Every aside is written with the closer's model, and the round has
+        airtime for only so many (see _aside_slots), so one written past that is money never heard."""
+        nines = max(1, -(-r.holes // 9))
+        caps = [self.cfg.trivia.per_round if self.trivia is not None else 0,
+                self.cfg.news.per_nine * nines if self.news is not None else 0]
+        got = [0, 0]
+        while room > 0 and (got[0] < caps[0] or got[1] < caps[1]):
+            for i in (1, 0):
+                if room > 0 and got[i] < caps[i]:
+                    got[i] += 1
+                    room -= 1
+        return got[0], got[1]
 
     async def _news_prep(self, r) -> None:
-        """Wait for the round start to settle, then write its asides. A round start can be superseded
-        seconds later (the course read corrects itself, a setup screen is reopened), and this task is
-        cancelled when it is, so settling first means a false start costs nothing: these are the
-        closer's model, the dearest calls the booth makes, and no aside can play before the second
-        hole anyway."""
+        """Wait for the round start to settle, then plan and write its asides. A round start can be
+        superseded seconds later (the course read corrects itself, a setup screen is reopened), and
+        this task is cancelled when it is, so settling first means a false start costs nothing: these
+        are the closer's model, the dearest calls the booth makes, and no aside can play before the
+        second hole anyway. Live scores claim their check-ins first (they're only planned when
+        something is on), then trivia and news share what's left of the round's airtime."""
         await asyncio.sleep(NEWS_PREP_SETTLE_SECONDS)
-        if self.round is r and not r.ended:
-            await self._prepare_news(r)
+        if self.round is not r or r.ended:
+            return
+        room = self._aside_slots(r.holes)
+        if self.scores is not None:
+            room -= await self._plan_scores(r, room)
+        trivia, news = self._split_asides(r, room)
+        log.info("Asides for this round: %d slot(s); %d score, %d trivia, %d news",
+                 self._aside_slots(r.holes), len(self._score_holes), trivia, news)
+        if self.round is not r or r.ended:
+            return
+        if trivia:
+            self._aside_task(self._prepare_trivia(r, trivia), "trivia-prep")
+        if news:
+            await self._prepare_news(r, news)
 
-    async def _prepare_news(self, r) -> None:
+    async def _prepare_news(self, r, n: int | None = None) -> None:
         """Write and voice this round's golf-world asides up front, with the round's richest model, so
         each plays instantly and whole when its moment comes (a live one was thin, and its reply could
         miss its voice deadline and leave the opener hanging)."""
         if not self.news.headlines:
             await self.news.refresh()
-        n = self._news_wanted(r)
+        n = self._news_wanted(r) if n is None else n
         # Nobody hears the same story twice: skip any that someone in this round already heard.
         listeners = self._listeners(r)
         heard = self.store.news_heard(listeners) if listeners else self._news_used
@@ -1600,16 +1623,12 @@ class Engine:
         task.add_done_callback(lambda t: (self._aside_tasks.discard(t), t.cancelled() or t.exception()))
 
     def _start_round_asides(self, r) -> None:
-        """Cancel the last round's trivia and score work, then start this round's."""
+        """Cancel the last round's trivia and score work; _news_prep plans this round's."""
         for task in list(self._aside_tasks):
             task.cancel()
         self._score_holes = []
-        if self.trivia is not None:
-            self._aside_task(self._prepare_trivia(r), "trivia-prep")
-        if self.scores is not None:
-            self._aside_task(self._plan_scores(r), "scores-plan")
 
-    async def _prepare_trivia(self, r) -> None:
+    async def _prepare_trivia(self, r, n: int | None = None) -> None:
         """Write and voice this round's course-trivia asides up front, from the real course's article,
         steering clear of what earlier rounds here already told."""
         course = r.course or self.current_course
@@ -1619,7 +1638,7 @@ class Engine:
         title, article = found
         told = self.store.recent_asides("trivia", title)
         made = 0
-        for _ in range(max(0, self.cfg.trivia.per_round)):
+        for _ in range(max(0, self.cfg.trivia.per_round if n is None else n)):
             user, facts_text = trivia_prompt(course=course, title=title, article=article, told=told,
                                              openings=self._aside_openings())
             try:
@@ -1645,17 +1664,20 @@ class Engine:
                  "; ".join(f"hole {b.hole}" if b.hole else "any quiet moment"
                            for b in self._news_bits if b.kind == "trivia"))
 
-    async def _plan_scores(self, r) -> None:
-        """Pick the holes a live score is written for, if anything's on tonight. Only the plan is made
-        now: each score is fetched as its hole starts, so it isn't stale by the time it airs."""
+    async def _plan_scores(self, r, room: int | None = None) -> int:
+        """Pick the holes a live score is written for, if anything's on tonight, at most `room` of
+        them, and return how many. Only the plan is made now: each score is fetched as its hole
+        starts, so it isn't stale by the time it airs."""
         items = await self.scores.fetch()
         if not items or self.round is not r:
             log.info("Scores: nothing live or on tonight; no score asides this round")
-            return
+            return 0
         n = max(0, self.cfg.scores.per_nine) * max(1, -(-r.holes // 9))
+        if room is not None:
+            n = min(n, room)
         first, last = 2, r.holes - 2          # the asides' window: not the first hole or the last two
-        if n == 0 or last < first:
-            return
+        if n <= 0 or last < first:
+            return 0
         # One hole from each equal stretch of the window, so two check-ins aren't back to back.
         span = (last - first + 1) / n
         holes = []
@@ -1669,6 +1691,7 @@ class Engine:
         self._score_holes = holes
         log.info("Scores: %d on tonight (%s); a check-in on round hole(s) %s", len(items),
                  "; ".join(i.key for i in items), holes)
+        return len(holes)
 
     def _score_hole_started(self, r) -> None:
         due = [h for h in self._score_holes if h <= r.seq]
@@ -5509,7 +5532,7 @@ class Engine:
         if self._news_task and not self._news_task.done():
             self._news_task.cancel()
         self._news_bits, self._news_aired, self._news_moment = [], [], None
-        if self.news is not None:
+        if self.news is not None or self.trivia is not None or self.scores is not None:
             self._news_task = asyncio.create_task(self._news_prep(r), name="news-prep")
             self._news_task.add_done_callback(lambda t: t.cancelled() or t.exception())
         self._start_round_asides(r)
@@ -5545,7 +5568,9 @@ class Engine:
                  + self._league_facts(r) + self._weather_facts())
         if self._no_members(r):   # the practice-round framing assumes league players
             facts = [f for f in facts if not f.startswith("This is a practice round, not a league match")]
-        return opener_prompt(facts=facts, recent_lines=self.state.recent_lines)
+        c = self.cfg.commentary
+        return opener_prompt(facts=facts, recent_lines=self.state.recent_lines, max_words=c.opener_max_words,
+                             max_lines=c.opener_max_lines)
 
     def _same_course(self, x: str | None, y: str | None) -> bool:
         a, b = self._canonical_course(x), self._canonical_course(y)
@@ -5674,7 +5699,8 @@ class Engine:
                      "airing a second", sorted(aired_players), sorted(tee_players))
             return
         user, facts_text = self._opener_io(r, first)
-        await self._speak("opener", self.opener_llm, user, facts_text, [], mode="round")
+        await self._speak("opener", self.opener_llm, user, facts_text, [], mode="round",
+                          max_words=self.cfg.commentary.opener_max_words)
 
     async def _join_round(self, hud: Hud) -> None:
         """Track a round the booth came up in the middle of: same roster and course as a fresh start,
@@ -6152,7 +6178,8 @@ class Engine:
             (self.league.match_player(names[0]) or names[0]) if names else None)
         user, facts_text = self._opener_io(r, first=first, preround=True)
         lines = await self._compose("opener", self.opener_llm, user, facts_text, [], mode="round",
-                                    system=self._system_league if is_league else self._system_practice)
+                                    system=self._system_league if is_league else self._system_practice,
+                                    max_words=self.cfg.commentary.opener_max_words)
         if not lines:
             log.info("Early opener for %r produced no lines; it'll be made at the tee", r.course)
             if gen is not None and gen == self._opener_gen:
@@ -6994,6 +7021,8 @@ class Engine:
                 log.info("%s retry still had problems: %s", kind, "; ".join(still_bad + needs(lines)))
             if still_bad:
                 self.stats["dropped_after_retry"] += len(still_bad)
+        if kind == "opener":
+            lines = lines[:self.cfg.commentary.opener_max_lines]   # it plays over a load that can be quick
         return lines
 
     def _air_lines(self, kind: str, lines: list[Line], shot_id: int | None = None) -> None:

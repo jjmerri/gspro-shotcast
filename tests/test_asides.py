@@ -237,22 +237,43 @@ def test_an_aside_held_for_a_long_putt_doesnt_air_on_a_short_one(tmp_path):
     assert e._news_pick({"tags": ["putt", "long_putt"], "routine": False}) == (held, True)
 
 
-async def test_news_is_written_to_the_airtime_a_round_actually_has(tmp_path):
-    llm = _AsideLLM()
+async def test_asides_are_written_to_the_airtime_a_round_actually_has(tmp_path, monkeypatch):
+    import commentator.engine as eng
+
+    monkeypatch.setattr(eng, "NEWS_PREP_SETTLE_SECONDS", 0)
     e = _engine(tmp_path)
-    e.closer_llm = llm
-    r = SimpleNamespace(holes=18, seq=1, ended=False, is_league=False)
     # Five quiet moments across an 18 (one every three holes, never the first or the last two), two
-    # across a nine: that is the whole bucket, not news's own share of it.
+    # across a nine: that is the whole bucket, shared by scores, trivia and news.
     assert e._aside_slots(18) == 5 and e._aside_slots(9) == 2
-    assert e._news_wanted(r) == 4                                        # nothing else is switched on
-    e.trivia, e.scores = object(), object()
-    e.cfg.trivia.per_round, e.cfg.scores.per_nine = 2, 1
-    assert e._news_wanted(r) == 1                                        # 1 + 2 + 2 fills the 18
-    r.holes = 9
-    assert e._news_wanted(r) == 1                                        # never written down to nothing
-    e.cfg.news.per_nine = 0
-    assert e._news_wanted(r) == 1
+    e.news, e.trivia = object(), object()
+    e.cfg.news.per_nine, e.cfg.trivia.per_round = 2, 2
+    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
+    assert e._split_asides(r, 2) == (1, 1)                    # a nine: one of each, not four
+    assert e._split_asides(r, 1) == (0, 1)
+    r.holes = 18
+    assert e._split_asides(r, 5) == (2, 3)
+    e.cfg.trivia.per_round = 0
+    assert e._split_asides(r, 5) == (0, 4)                    # never past news's own share
+
+    # A live score claims its check-in first; trivia and news get only what's left.
+    item = ScoreItem("nhl:5", "team", "in", "NHL, live: Bruins 2, Stars 1.", "2-1")
+    e.scores = _Scores([item])
+    e.cfg.scores.per_nine, e.cfg.trivia.per_round = 1, 2
+    written = {}
+
+    async def _trivia(r, n=None):
+        written["trivia"] = n
+
+    async def _news(r, n=None):
+        written["news"] = n
+
+    e._prepare_trivia, e._prepare_news = _trivia, _news
+    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
+    e.round = r
+    await e._news_prep(r)
+    for t in list(e._aside_tasks):
+        await t
+    assert len(e._score_holes) == 1 and written == {"news": 1}
 
 
 async def test_a_superseded_round_start_doesnt_pay_for_its_asides(tmp_path):
