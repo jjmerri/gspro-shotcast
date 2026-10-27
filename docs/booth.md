@@ -5,7 +5,8 @@
 ## How a shot sounds
 
 1. **Pre-shot.** When the player box settles on a new shot, three calls fire at once: a spoken
-   setup line (`live`), a hazard read off the minimap (`preshot`, vision; or Jev with
+   setup line (`live`; only when the shot wins its `commentary.preshot_rate` roll, which is made
+   first so a line that won't air is never written), a hazard read off the minimap (`preshot`, vision; or Jev with
    `minimap.provider: jev`, which runs first and also hands its hazards and yardages to the
    setup line and branches as facts; on a putt, `putt_read.enabled` instead reads the break and
    slope from the drift of GSPro's green-grid dots over a quick burst of frames), and the full set of

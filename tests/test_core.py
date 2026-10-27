@@ -2724,6 +2724,7 @@ async def test_an_empty_setup_lie_is_read_again_unless_the_player_changes(tmp_pa
 
 async def test_emit_setup_reads_the_hud_before_the_model_and_skips_others_off_the_tee(tmp_path):
     engine, screen = _setup_engine(tmp_path)
+    engine.cfg.commentary.preshot_rate = 1.0
     hud = Hud(player_text="Toby 2nd (+1) Shot 2 150 YDS", shot_number=2, score_to_par="+1",
               to_pin="150 yards", lie=None)
     await engine._emit_setup(hud)
@@ -4243,6 +4244,18 @@ async def test_a_tree_on_the_line_always_gets_its_setup_line(tmp_path, caplog):
         assert "Setup line skipped" in caplog.text
         await e.handle_preshot(event(stymie=True))
     assert [l.text for l in e.state.recent_lines] == ["Josh has a tree right in his way here."]
+
+
+async def test_a_setup_line_that_wont_air_is_never_written(tmp_path):
+    engine, _ = _setup_engine(tmp_path)
+    engine.cfg.commentary.preshot_rate = 0.0
+    hud = Hud(player_text="Toby 2nd (+1) Shot 2 150 YDS", shot_number=2, score_to_par="+1",
+              to_pin="150 yards", lie="rough")
+    raws, _ = await engine._preshot_model(hud, "Toby", [])
+    assert "line" not in raws and raws.get("branches")   # branches still written for impact
+    hud._stymie = True   # a tree on the line always gets its word, so its line is written
+    raws, _ = await engine._preshot_model(hud, "Toby", [])
+    assert raws.get("line")
 
 
 async def test_an_opener_without_its_welcome_is_written_again(tmp_path):

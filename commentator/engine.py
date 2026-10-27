@@ -3078,11 +3078,15 @@ class Engine:
         # always run; the hazard read (preshot_llm, vision) runs only for a full shot with an image to
         # read. A lean fact set (lie + pin) keeps the vision call fast. Order the dict so the swing-
         # critical line is first in the gather for the clearest failure logging.
-        calls: dict[str, Any] = {
-            "line": self._complete("preshot-line", self.live_llm, line_user, [], preshot_line_schema(self.speakers)),
-            "branches": self._complete("preshot-branches", self.flight_llm, branch_user, [],
-                                       preshot_branch_schema(self.speakers, is_putt, lag, reply)),
-        }
+        # Roll for the setup line before writing it: a line that won't air is a wasted call. The
+        # branches are always written (impact needs them whether or not a setup line is spoken).
+        hud._line_turn = self.rng.random() <= self._setup_line_rate(hud, is_putt)
+        calls: dict[str, Any] = {}
+        if hud._line_turn and self.cfg.commentary.preshot:
+            calls["line"] = self._complete("preshot-line", self.live_llm, line_user, [],
+                                           preshot_line_schema(self.speakers))
+        calls["branches"] = self._complete("preshot-branches", self.flight_llm, branch_user, [],
+                                           preshot_branch_schema(self.speakers, is_putt, lag, reply))
         if minimap is not None:
             calls["hazards"] = self._done(json.dumps({"hazards": [
                 {"kind": h.kind, "side": h.side, "from_yards": h.from_yards, "to_yards": h.to_yards,
@@ -3101,6 +3105,18 @@ class Engine:
         # failure points; none may take the swing-critical line down with it.
         results = await asyncio.gather(*calls.values(), return_exceptions=True)
         return dict(zip(calls.keys(), results)), facts_text
+
+    def _setup_line_rate(self, hud: Hud, is_putt: bool) -> float:
+        """The chance this setup gets a spoken line. Weighted toward the moments worth setting up:
+        every putt (a long lag and a close scoring look both deserve a word) and a short scoring
+        approach; routine full shots keep the baseline rate."""
+        rate = self.cfg.commentary.preshot_rate
+        pin_yd = to_yards(hud.to_pin)
+        if is_putt or (pin_yd is not None and pin_yd <= 40):
+            rate = max(rate, 0.9)
+        if any(getattr(hud, flag, False) for flag in ("_mulligan", "_lie_correction", "_stymie", "_wrong_green")):
+            rate = 1.0   # a mulligan, a wrong call to set straight, a tree in the way or the wrong green always gets its word
+        return rate
 
     @staticmethod
     async def _done(value: str) -> str:
@@ -3206,17 +3222,11 @@ class Engine:
         ):
             self._kick_wrap_branches(r.sides[0].key, [event.hud.shot_number, event.hud.shot_number + 1], [])
 
-        # Weight the dice toward the moments worth setting up: every putt (a long lag and a close
-        # scoring look both deserve a word) and a short scoring approach. Routine full shots keep the
-        # baseline rate. A busy booth defers a putt or short setup line until idle; it never talks over a live call.
-        rate = c.preshot_rate
+        # A busy booth defers a putt or short setup line until idle; it never talks over a live call.
+        rate = self._setup_line_rate(event.hud, is_putt)
         pin_yd = to_yards(event.hud.to_pin)
-        if is_putt or (pin_yd is not None and pin_yd <= 40):
-            rate = max(rate, 0.9)
         correction = getattr(event.hud, "_lie_correction", False)
         stymie = getattr(event.hud, "_stymie", False)
-        if getattr(event.hud, "_mulligan", False) or correction or stymie or getattr(event.hud, "_wrong_green", False):
-            rate = 1.0   # a mulligan, a wrong call to set straight, a tree in the way or the wrong green always gets its word
         # The opening tee shot skips the spoken setup line (the opener just set the round up, and a
         # line here would land late), but still pre-voices the flight and result branches below so the
         # first shot's calls are ready at impact like every other shot's.
@@ -3240,7 +3250,10 @@ class Engine:
                 self._pending_prediction[pred[2]] = (pred[0], pred[1], self.state.current_hole)
 
         spoken = not skip_setup_line and c.preshot
-        if spoken and self.rng.random() > rate:
+        turn = getattr(event.hud, "_line_turn", None)
+        if turn is None:   # results supplied without _preshot_model (replay, tests): roll here
+            turn = self.rng.random() <= rate
+        if spoken and not turn:
             log.info("Setup line skipped: not this shot's turn (rate %.0f%%)", rate * 100)
         elif spoken and (good := setup_lines()):
             if self.speech.is_idle():
