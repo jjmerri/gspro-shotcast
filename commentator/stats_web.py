@@ -171,6 +171,10 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
     for sid, rnd in of_shot.items():
         if sid in named:
             who.setdefault(rnd, set()).add(named[sid])
+    started: dict[int, float] = {}   # each round's first shot, for the page's video links
+    for sid, ts in db.execute("SELECT id, ts FROM shots"):
+        if (rnd := of_shot.get(sid)) is not None and (rnd not in started or ts < started[rnd]):
+            started[rnd] = ts
     # A round with a drive left out of the stats gets its longest drive again from the drives kept.
     kept: dict[tuple, float | None] = {}
     left: set[tuple] = set()
@@ -190,6 +194,7 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             longest = kept.get((rnd, r["side"]))
         out.append({
             "id": r["id"], "round": of_row.get(r["id"], r["id"]), "ended": r["ended_at"], "date": r["date"],
+            "started": started.get(of_row.get(r["id"], r["id"])),
             "course": r["course"],
             # who played in it (a team side's players too), so the page can show one player's rounds
             "players": sorted(who.get(of_row.get(r["id"], r["id"]), set()) | ({r["side"]} if r["side"] else set())), "format": r["format"] or "individual",
@@ -207,7 +212,7 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
 
 
 def _shot_brief(st, h: dict, sg: dict) -> dict[str, Any]:
-    return {"id": st["id"], "hole": h["hole"], "shot_number": st["shot_number"], "club": st["club"],
+    return {"id": st["id"], "ts": st["ts"], "hole": h["hole"], "shot_number": st["shot_number"], "club": st["club"],
             "lie": st["lie_before"], "to_pin": st["to_pin_yards"], "putt": bool(st["is_putt"]),
             "outcome": st["outcome"], "finish": st["finish_yards"], "category": sg["category"], "sg": round(sg["sg"], 2)}
 
@@ -375,11 +380,11 @@ def records(db: sqlite3.Connection, context: str | None = None, player: str | No
             + (" AND player = ?" if player else "")
             + (" AND session_id IN (SELECT id FROM sessions WHERE date >= ?)" if since else ""))
     args = ((player,) if player else ()) + ((since,) if since else ())
-    drive = db.execute(f"SELECT player, {_DRIVE} AS v, course, hole FROM shots WHERE {_TEE_DRIVER} AND {_DRIVE} IS NOT NULL"
+    drive = db.execute(f"SELECT id, ts, player, {_DRIVE} AS v, course, hole FROM shots WHERE {_TEE_DRIVER} AND {_DRIVE} IS NOT NULL"
                        + base + " ORDER BY v DESC LIMIT 1", args).fetchone()
-    approach = db.execute(f"SELECT player, finish_yards AS v, club, outcome, ROUND(to_pin_yards) AS from_yd, course, hole FROM shots WHERE {A.APPROACH_SQL}"
+    approach = db.execute(f"SELECT id, ts, player, finish_yards AS v, club, outcome, ROUND(to_pin_yards) AS from_yd, course, hole FROM shots WHERE {A.APPROACH_SQL}"
                           " AND finish_yards IS NOT NULL" + base + " ORDER BY v LIMIT 1", args).fetchone()
-    putt = db.execute("SELECT player, to_pin_yards AS v, course, hole FROM shots WHERE is_putt = 1 AND outcome = 'holed'"
+    putt = db.execute("SELECT id, ts, player, to_pin_yards AS v, course, hole FROM shots WHERE is_putt = 1 AND outcome = 'holed'"
                       " AND to_pin_yards IS NOT NULL" + base + " ORDER BY v DESC LIMIT 1", args).fetchone()
     return {"longest_drive": dict(drive) if drive else None, "closest_approach": dict(approach) if approach else None,
             "longest_putt": dict(putt) if putt else None}

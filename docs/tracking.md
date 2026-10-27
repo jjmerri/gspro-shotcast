@@ -224,9 +224,15 @@ The **player picker** at the top (Everyone, or one name) narrows every tab to th
 their row on Players, them on the left of Head-to-head, only rounds they played in (team rounds
 too), their own hole-by-hole averages on Courses next to everyone's, only their shots, only nights
 they were on air, and their own records and highlights. The browser remembers the pick. The
-address bar always holds the view (tab, player, league/practice, and the Shots filters, e.g.
-`#shots?player=Ann&club=DR`), so **Copy link** gives a link that opens exactly that. A player can
-bookmark `#rounds?player=Their+Name`. Rounds that ended since this browser's last visit are tagged
+address bar always holds the view (tab, player, league/practice, the Shots filters and open shot,
+the open round and hole, the course, the head-to-head pair, e.g. `#shots?player=Ann&club=DR`), so
+**Share link** gives a link that opens exactly that. Each round, hole replay and shot (on Rounds,
+Shots and Highlights) has its own share button (🔗, or **Share link**): a phone opens its share
+sheet, a computer copies the link. A link to one shot (`#shots?shot=1234`) lists the round it was
+in with that shot open; a link to a round (`#rounds?round=45&hole=3`) opens its scorecard and that
+hole's replay. While a round's stream is still kept (a week), its rounds, holes and shots also get
+**▶ Watch**, which opens **Round replays** five seconds before that swing (the back button returns).
+A player can bookmark `#rounds?player=Their+Name`. Rounds that ended since this browser's last visit are tagged
 **new**, with a count in the header. On a phone, the tabs wrap and wide tables scroll sideways.
 
 Strokes gained is measured against an approximate PGA Tour baseline (Broadie-style expected

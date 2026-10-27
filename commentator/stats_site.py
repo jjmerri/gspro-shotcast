@@ -98,6 +98,7 @@ def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | No
         # Each filter walks its own index in the page's order, so the newest matches come first.
         for col in (*SHOT_FILTERS, "is_league"):
             db.execute(f"CREATE INDEX pub_shot_{col} ON pub_shot ({col}, ord)")
+        db.execute("CREATE INDEX pub_shot_id ON pub_shot (id)")   # a link to one shot finds its round
         db.execute("ANALYZE")   # lets SQLite pick the most selective filter's index
         db.commit()
         db.execute("VACUUM")

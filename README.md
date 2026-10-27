@@ -51,7 +51,7 @@ HUD are read too: the layout is detected per player, shot by shot.
 **Share it with your league.** The booth can publish the stats page as a password-protected
 website (your own AWS account: S3 behind CloudFront, pennies a month or free) and update it on its
 own after every round. Each player can pick themselves to see just their rounds, shots and records,
-and send a link to exactly what they're looking at. It can live on your own domain if you have
+and send a link to exactly what they're looking at: a round, a hole, a shot, a record. It can live on your own domain if you have
 one. Setup is one CloudFormation stack; see
 [Sharing the stats page](docs/tracking.md#sharing-the-stats-page).
 
@@ -60,7 +60,8 @@ voices included, while a round is on, about 20 seconds behind and behind the sam
 tray action downloads and sets up [OBS Studio](https://obsproject.com/) to make the stream; the
 booth starts it when a round starts and stops it after the sign-off (or OFF AIR, or 20 minutes
 with no shots); no YouTube or Twitch account is needed. Each stream is kept for a week on the
-**Round replays** tab, to watch a round from its first tee shot, then deleted. It costs about a cent
+**Round replays** tab, to watch a round from its first tee shot, then deleted; a round, hole
+or shot on the stats page has a **▶ Watch** button that jumps to that moment in it. It costs about a cent
 and a half an hour of uploads plus about 50 cents a month to keep a busy week, and watching is
 within CloudFront's free tier for a league. See [Live stream](docs/tracking.md#live-stream). With
 SuperSaaS bookings on, a **Schedule** tab shows who has the sim booked for the next two weeks.

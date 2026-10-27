@@ -202,6 +202,20 @@ def test_courses_rank_holes_and_highlights_find_streaks_bounce_backs_and_real_ho
     assert h["blowups"][0]["hole"] == 6 and h["blowups"][0]["over"] == 3
 
 
+def test_highlights_point_at_their_stroke_for_links_and_video(db):
+    player_round(db, "Ann", {**{h: PARS[str(h)] for h in range(1, 10)}, 4: 3})   # an eagle on the par-5 4th
+    db.execute("UPDATE player_rounds SET ended_at = 1e9")
+    hole = "Hole 4, par 5, 500 yards"
+    shot(db, hole=hole, shot_number=1, club="DR", lie_before="tee", to_pin_yards=500, total_yards=280)
+    shot(db, hole=hole, shot_number=2, club="3W", lie_before="fairway", to_pin_yards=220, finish_yards=4)
+    putt = shot(db, hole=hole, shot_number=3, club="PT", is_putt=1, lie_before="green", to_pin_yards=4, outcome="holed")
+    db.commit()
+    h = A.highlights(db, A.holes_played(db))
+    (eagle,) = [m for m in h["moments"] if m["kind"] == "eagle"]
+    assert eagle["id"] == putt and eagle["ts"] == db.execute("SELECT ts FROM shots WHERE id = ?", (putt,)).fetchone()[0]
+    assert h["putts"][0]["id"] == putt
+
+
 def test_booth_phrases_shot_log_and_transcript(db):
     sid = shot(db, hole="Hole 1, par 4, 400 yards", shot_number=1, club="DR", lie_before="tee", to_pin_yards=400)
     lines = [("pbp", "shot", "Onto the green, Duke, onto the green.", sid),

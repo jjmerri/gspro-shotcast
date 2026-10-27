@@ -401,6 +401,20 @@ def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = 
         holes = [h for h in holes if h["player"] == player]
     if since:
         holes = [h for h in holes if (h["date"] or "") >= since]
+    # A card moment's stroke (its id and time, for the page's links and video): the player's hole in
+    # that session, the last one played before the round ended.
+    by_hole: dict[tuple, list[dict]] = {}
+    for h in holes:
+        by_hole.setdefault((h["player"], h["session_id"], h["course"], h["hole"]), []).append(h)
+
+    def at(r, hole: int, last: bool = False) -> dict:
+        hs = [h for h in by_hole.get((r["player"], r["session_id"], r["course"], hole), [])
+              if h["strokes"][0]["ts"] <= r["ended_at"] + 60]
+        if not hs:
+            return {}
+        st = hs[-1]["strokes"][-1 if last else 0]
+        return {"id": st["id"], "ts": st["ts"]}
+
     for r in db.execute("SELECT pr.*, s.date FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
                         " WHERE (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))"
                         + _ctx(context).replace("is_league", "pr.is_league")
@@ -417,31 +431,31 @@ def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = 
         for i, h in enumerate(played):
             d = scores[h] - pars[h]
             if scores[h] == 1:
-                moments.append({**base, "hole": h, "kind": "ace", "text": f"Hole-in-one on the par-{pars[h]} {h}th"})
+                moments.append({**base, **at(r, h, True), "hole": h, "kind": "ace", "text": f"Hole-in-one on the par-{pars[h]} {h}th"})
             elif d <= -2:
-                moments.append({**base, "hole": h, "kind": "eagle",
+                moments.append({**base, **at(r, h, True), "hole": h, "kind": "eagle",
                                 "text": f"{'Albatross' if d <= -3 else 'Eagle'} {scores[h]} on the par-{pars[h]} {h}th"})
             if d >= 3:
-                blowups.append({**base, "hole": h, "score": scores[h], "par": pars[h], "over": d})
+                blowups.append({**base, **at(r, h), "hole": h, "score": scores[h], "par": pars[h], "over": d})
             if i and played[i - 1] == h - 1 and (prev := scores[h - 1] - pars[h - 1]) >= 1 and d <= -1:
-                bounce.append({**base, "holes": [h - 1, h], "from": _to_par_name(prev), "to": _to_par_name(d)})
+                bounce.append({**base, **at(r, h), "holes": [h - 1, h], "from": _to_par_name(prev), "to": _to_par_name(d)})
             if d <= -1 and (not run or run[-1] == h - 1):
                 run.append(h)
             elif d <= -1:
                 run = [h]
             else:
                 if len(run) >= 2:
-                    streaks.append({**base, "holes": run[:], "length": len(run)})
+                    streaks.append({**base, **at(r, run[0]), "holes": run[:], "length": len(run)})
                 run = []
         if len(run) >= 2:
-            streaks.append({**base, "holes": run[:], "length": len(run)})
+            streaks.append({**base, **at(r, run[0]), "holes": run[:], "length": len(run)})
     # Chip-ins: a full shot from off the green (not the tee) that was the hole's last stroke.
     for h in holes:
         last = h["strokes"][-1]
         if h["complete"] and last["outcome"] == "holed" and not last["is_putt"] and not last["left_out"] and last["lie_before"] not in ("tee", "green"):
             yd = last["to_pin_yards"]
             moments.append({"player": h["player"], "date": h["date"], "course": h["course"], "hole": h["hole"],
-                            "kind": "holed out", "text": f"Holed out from {round(yd) if yd else '?'} yd"
+                            "id": last["id"], "ts": last["ts"], "kind": "holed out", "text": f"Holed out from {round(yd) if yd else '?'} yd"
                             f" ({last['lie_before'] or 'off the green'}, {last['club'] or '?'})"})
     moments.sort(key=lambda m: m["date"] or "", reverse=True)
     base = (" AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)
@@ -457,13 +471,13 @@ def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = 
         "streaks": sorted(streaks, key=lambda s: (-s["length"], s["date"] or ""))[:10],
         "bounce_backs": sorted(bounce, key=lambda b: b["date"] or "", reverse=True)[:10],
         "blowups": sorted(blowups, key=lambda b: (-b["over"], b["date"] or ""))[:5],
-        "drives": top(f"SELECT player, ROUND({drive}) AS v, course, hole, date{j} WHERE club = 'DR' AND is_putt = 0"
+        "drives": top(f"SELECT shots.id, ts, player, ROUND({drive}) AS v, course, hole, date{j} WHERE club = 'DR' AND is_putt = 0"
                       f" AND (shot_number = 1 OR lie_before = 'tee') AND {drive} IS NOT NULL{base} ORDER BY v DESC LIMIT 5"),
-        "approaches": top(f"SELECT player, ROUND(finish_yards * 3) AS v, outcome, club, ROUND(to_pin_yards) AS from_yd, course,"
+        "approaches": top(f"SELECT shots.id, ts, player, ROUND(finish_yards * 3) AS v, outcome, club, ROUND(to_pin_yards) AS from_yd, course,"
                           f" hole, date{j} WHERE {APPROACH_SQL} AND finish_yards IS NOT NULL{base} ORDER BY finish_yards LIMIT 5"),
-        "chips": top(f"SELECT player, ROUND(finish_yards * 3) AS v, outcome, club, ROUND(to_pin_yards) AS from_yd, lie_before AS lie,"
+        "chips": top(f"SELECT shots.id, ts, player, ROUND(finish_yards * 3) AS v, outcome, club, ROUND(to_pin_yards) AS from_yd, lie_before AS lie,"
                      f" course, hole, date{j} WHERE {CHIP_SQL} AND finish_yards IS NOT NULL{base} ORDER BY finish_yards LIMIT 5"),
-        "putts": top(f"SELECT player, ROUND(to_pin_yards * 3) AS v, course, hole, date{j} WHERE is_putt = 1"
+        "putts": top(f"SELECT shots.id, ts, player, ROUND(to_pin_yards * 3) AS v, course, hole, date{j} WHERE is_putt = 1"
                      f" AND outcome = 'holed' AND to_pin_yards IS NOT NULL{base} ORDER BY to_pin_yards DESC LIMIT 5"),
     }
 
@@ -517,7 +531,7 @@ def shot_log(db: sqlite3.Connection, context: str | None = None, *, player: str 
             where.append(f"{'sessions.' if col == 'date' else 'shots.'}{col} = ?")
             args.append(val)
     rows = db.execute(
-        "SELECT shots.id, sessions.date, shots.session_id, shots.player, shots.course, shots.hole, shot_number, club,"
+        "SELECT shots.id, shots.ts, sessions.date, shots.session_id, shots.player, shots.course, shots.hole, shot_number, club,"
         " is_putt, lie_before, lie_after, ROUND(to_pin_yards, 1) AS to_pin, ROUND(finish_yards, 1) AS finish,"
         " ROUND(COALESCE(carry_raw_tile_yards, carry_raw)) AS carry, ROUND(total_yards) AS total, ball_speed,"
         " club_speed, launch_angle, total_spin, spin_axis, start_direction, outcome, mulligan, left_out, fmt,"

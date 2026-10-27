@@ -185,6 +185,7 @@ def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]
         if (rp := _replay(rows, key[1], layouts, ses, until, teams[key[0]])) is not None:
             if rp["tee"] and rp["pin"] and (m := _map_for(images, rp["course"], key[1], ses)):
                 rp["map"] = m
+            rp["ts"] = min(r["ts"] for r in rows)   # the hole's first shot, for the page's video link
             out[key] = rp
     return out
 

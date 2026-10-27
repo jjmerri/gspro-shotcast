@@ -170,6 +170,7 @@ def test_replay_runs_each_shot_to_the_next_and_the_last_into_the_pin(tmp_path):
     backfill(path, [str(log)])
     rp = hole_replays(st.db)[(1, 1)]
     assert (rp["tee"], rp["pin"], rp["pin_estimated"], rp["par"]) == ([0.0, 0.0], [0.0, 300.0], False, 4)
+    assert rp["ts"] == st.db.execute("SELECT MIN(ts) FROM shots").fetchone()[0]   # the page's video link
     shots = rp["players"][0]["shots"]
     assert [(s["from"], s["to"]) for s in shots] == [([0.0, 0.0], [10.0, 200.0]), ([10.0, 200.0], [2.0, 295.0]),
                                                      ([2.0, 295.0], [0.0, 300.0])]
