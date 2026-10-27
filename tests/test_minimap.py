@@ -81,20 +81,18 @@ class FakeJev:
                 answers[k] = _box(0.5, 0.9, self.box_conf)
             elif k == "pin":
                 answers[k] = _box(0.5, self.pin_y, self.box_conf)
-            elif k in ("aim_h", "aim_r"):
+            elif k in ("aim_h", "aim_t", "aim_o"):
                 n = f"{self.aim or 0:03d}"
-                answers[k] = SimpleNamespace(type="choice", choice=n[0] if k == "aim_h" else n[1:],
+                answers[k] = SimpleNamespace(type="choice", choice=n["hto".index(k[-1])],
                                              confidence=0.95 if self.aim else 0.3)
             elif k == "aim_label":
                 answers[k] = SimpleNamespace(type="noul", noul=0.95 if self.aim else 0.1)
             elif k in ("fairway", "pin_side"):
                 choice, conf = self.choices.get(k, ("along" if k == "fairway" else "center", 0.5))
                 answers[k] = SimpleNamespace(type="choice", choice=choice, confidence=conf)
-            elif k.endswith("_h"):
-                answers[k] = SimpleNamespace(type="choice", choice="1", confidence=0.9)
-            elif k.endswith("_r"):
-                answers[k] = SimpleNamespace(type="choice", choice={"carry_r": "42", "front_r": "50"}.get(k, "72"),
-                                             confidence=0.9)
+            elif k.endswith(("_h", "_t", "_o")):
+                n = "1" + {"carry": "42", "front": "50"}.get(k[:-2], "72")
+                answers[k] = SimpleNamespace(type="choice", choice=n["hto".index(k[-1])], confidence=0.9)
             else:
                 answers[k] = SimpleNamespace(type="noul", noul=0.9 if k in ("water_ahead", "carry_shown", "water_left",
                                                                             "front_shown", "back_shown") else 0.1)

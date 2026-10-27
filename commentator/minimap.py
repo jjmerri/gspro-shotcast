@@ -7,8 +7,7 @@ picture?" and poor at judging left from right, so the geometry is done here in c
 1. Jev boxes the ball (a coloured dot, usually red) and the pin (white dot) on the minimap.
 2. The map is split along the ball-to-pin line into a left and a right image, the other side greyed.
 3. Jev says what each half holds (water, bunkers), and reads the yardage
-   numbers GSPro prints on the map (carry over water, front and back of the green) as two choices:
-   the hundreds digit and the last two digits.
+   numbers GSPro prints on the map (carry over water, front and back of the green) one digit at a time.
 4. GSPro doesn't number bunkers, but the map is drawn to scale: the ball-to-pin pixel distance over
    the yards to the pin gives yards per pixel. Code finds sand-coloured patches near the line of
    play, Jev confirms each one is a bunker (it can't box them reliably itself, but it's good at
@@ -78,7 +77,27 @@ CROSSING_SPAN = 0.1    # a line spreading wider than this off the line of play i
 STRAND_GAP = 0.02      # a gap this wide (off the line of play) between pixels in one step separates strands
 EDGE_STEP = 0.05       # the edge is kept per this fraction of the ball-to-pin distance
 HUNDREDS = {str(i): (f"{i * 100} to {i * 100 + 99}" if i else "under 100") for i in range(6)}
-LAST_TWO = {f"{i:02d}": f"the last two digits are {i:02d}" for i in range(100)}
+# The tens and ones are asked separately: one 100-way choice costs Jev about 2,200 input tokens, two
+# 10-way choices about 580, and they read the numbers just as well.
+TENS = {str(i): f"the tens digit is {i}" for i in range(10)}
+ONES = {str(i): f"the ones digit is {i}" for i in range(10)}
+
+
+def _digit_questions(key: str, consider: str) -> dict:
+    """Questions `{key}_h`, `{key}_t` and `{key}_o` for the number `consider` describes."""
+    from typesafe_sdk import Choice
+
+    return {f"{key}_h": Choice(instructions=f"{consider} What is its hundreds digit?", criteria=HUNDREDS),
+            f"{key}_t": Choice(instructions=f"{consider} What is its tens digit (the second-to-last digit)?",
+                               criteria=TENS),
+            f"{key}_o": Choice(instructions=f"{consider} What is its ones digit (the last digit)?", criteria=ONES)}
+
+
+def _digits(answers: dict, key: str) -> tuple[int, float]:
+    """The number `_digit_questions(key, ...)` read, and the least sure of its digits."""
+    h, t, o = answers[f"{key}_h"], answers[f"{key}_t"], answers[f"{key}_o"]
+    return (int(h.choice) * 100 + int(t.choice) * 10 + int(o.choice),
+            min(h.confidence, t.confidence, o.confidence))
 NUMBERS = {
     "carry": "the yardage number printed at the FAR edge of the water the shot must carry over (where the carry ends)",
     "front": "the yardage number printed at the FRONT edge of the green (the edge nearest the ball)",
@@ -1168,10 +1187,7 @@ class JevMinimap:
             qs = {}
             for key, what in NUMBERS.items():
                 qs[f"{key}_shown"] = Noul(instructions=f"{MAP} Is there {what} on `map`?")
-                qs[f"{key}_h"] = Choice(instructions=f"{MAP} Consider {what}. What is its hundreds digit?",
-                                        criteria=HUNDREDS)
-                qs[f"{key}_r"] = Choice(instructions=f"{MAP} Consider {what}. What are its last two digits?",
-                                        criteria=LAST_TWO)
+                qs.update(_digit_questions(key, f"{MAP} Consider {what}."))
             return qs
 
         whole_qs = {
@@ -1189,9 +1205,9 @@ class JevMinimap:
             self._ask(self.cfg.model, {"map": JevImage(whole)}, whole_qs))
         result.seen.update({k: a.noul for k, a in answers.items() if getattr(a, "type", "") == "noul"})
         for key in NUMBERS:
-            h, r = answers[f"{key}_h"], answers[f"{key}_r"]
-            if min(h.confidence, r.confidence) >= self.cfg.number_confidence:
-                result.numbers[key] = int(h.choice) * 100 + int(r.choice)
+            n, sure = _digits(answers, key)
+            if sure >= self.cfg.number_confidence:
+                result.numbers[key] = n
 
         ball, pin = found["ball"], found["pin"]
         b, p = _centre(ball.box), _centre(pin.box)
@@ -1260,15 +1276,12 @@ class JevMinimap:
                     spot_qs.update({
                         "aim_label": Noul(instructions=f"{SPOT} Is a white yardage number printed right beside that "
                                                        "centre dot?"),
-                        "aim_h": Choice(instructions=f"{what} What is its hundreds digit?", criteria=HUNDREDS),
-                        "aim_r": Choice(instructions=f"{what} What are its last two digits?", criteria=LAST_TWO)})
+                        **_digit_questions("aim", what)})
                 if spot_qs:
                     answers, spot_answers = await asyncio.gather(self._ask(self.cfg.model, state, side_qs),
                                                                  self._ask(self.cfg.model, spot_state, spot_qs))
-                    if "aim_h" in spot_answers and spot_answers["aim_label"].noul >= self.cfg.threshold and \
-                            min(spot_answers["aim_h"].confidence, spot_answers["aim_r"].confidence) >= AIM_CONFIDENCE:
-                        ah, ar = spot_answers["aim_h"], spot_answers["aim_r"]
-                        n = int(ah.choice) * 100 + int(ar.choice)
+                    n, sure = _digits(spot_answers, "aim") if "aim_h" in spot_answers else (0, 0.0)
+                    if sure >= AIM_CONFIDENCE and spot_answers["aim_label"].noul >= self.cfg.threshold:
                         if 0 < n < AIM_SHORT * to_pin:
                             result.aim = n
                             log.info("Minimap: the pin is off the map; measuring to the %d-yard aim point", n)
