@@ -189,6 +189,9 @@ def _slot_state(tone) -> str:
 
 # A bookings read this recent (at course select, say) covers the setup screen that follows it.
 BOOKINGS_FRESH_SECONDS = 300.0
+# A game-mode change alone (same players and nines) re-writes the front-loaded opener only once the
+# mode has sat unchanged this long: clicking through the modes rewrote it on every click.
+FORMAT_SETTLE_SECONDS = 5.0
 
 
 def _play_button_course(text: str) -> str | None:
@@ -677,6 +680,7 @@ class Engine:
         # scramble sets the round's format; leagues mostly leave GSPro on stroke play and score their
         # format in an app. A shamble or alternate shot only stops the log calling it a scramble.
         self._setup_format: str | None = None
+        self._setup_format_at = float("-inf")   # when the game mode last changed
         self._opener_prepared_format: str | None = None
         # The last roster (and slot order) read off a setup screen's PLAYERS tab, for a setup that never shows it.
         self._last_setup_roster: tuple[list[str], list[str]] | None = None
@@ -6002,7 +6006,7 @@ class Engine:
                     if word in text), None)
         if fmt != self._setup_format:
             log.info("Setup MATCH SETTINGS tab: game mode %r%s", text.strip(), f" ({fmt})" if fmt else "")
-            self._setup_format = fmt
+            self._setup_format, self._setup_format_at = fmt, time.monotonic()
         return cache
 
     def _read_setup_holes(self, tones: dict, fresh: bool, at: float | None = None) -> None:
@@ -6048,6 +6052,18 @@ class Engine:
         if not key or (key == self._opener_prepared_for and self._setup_holes == self._opener_prepared_holes
                        and self._setup_format == self._opener_prepared_format):
             return
+        if (key == self._opener_prepared_for and self._setup_holes == self._opener_prepared_holes
+                and time.monotonic() - self._setup_format_at < FORMAT_SETTLE_SECONDS):
+            # Only the game mode changed, and it may still be changing; a later poll writes it. The
+            # opener written for the old mode is out of date: drop it (and any compose still running)
+            # so neither the load screen nor the tee airs it.
+            p = self._pending_opening
+            if p is not None and p.awaiting_load and not p.aired:
+                self._pending_opening = None
+            self._opener_gen += 1
+            # Matches no mode, so a switch back to the original one still gets its opener re-written.
+            self._opener_prepared_format = "stale"
+            return
         self._opener_prepared_for, self._opener_prepared_holes = key, self._setup_holes
         self._opener_prepared_format = self._setup_format
         self._opener_gen += 1
@@ -6065,6 +6081,8 @@ class Engine:
                 and course_match_score(p.course, course) >= 0.6
                 and (self._setup_holes is None or (p.round.start_hole, p.round.holes) == self._setup_holes)
                 and (self._setup_format != "scramble" or p.round.format == "scramble")
+                # Written before a game-mode change still waiting to settle: out of date.
+                and self._setup_format == self._opener_prepared_format
                 # Still the same kind of round: a practice booking can turn up after it was written.
                 and (self._classify_round(roster, course)[1] is None) == p.is_league)
 

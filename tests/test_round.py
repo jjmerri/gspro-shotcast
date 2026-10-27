@@ -1067,6 +1067,47 @@ async def test_a_superseded_front_load_does_not_revive_the_pending_opener(tmp_pa
     assert e._pending_opening is None   # bailed before airing; no second opener
 
 
+def test_a_game_mode_change_waits_for_the_mode_to_settle_before_rewriting_the_opener(tmp_path, monkeypatch):
+    import types
+
+    import commentator.engine as eng
+
+    e = _engine(tmp_path)
+    started: list[int] = []
+    monkeypatch.setattr(e, "_bg", lambda coro: (coro.close(), started.append(e._opener_gen)))
+    now = [100.0]
+    monkeypatch.setattr(eng.time, "monotonic", lambda: now[0])
+    e._maybe_front_load("Pebble Beach", ["MikeD", "Sarah"])
+    assert len(started) == 1   # a new roster writes at once
+
+    # Clicking through the modes: each change restarts the wait, so nothing is written mid-click, and
+    # the opener held for the old mode is dropped so the tee can't air it.
+    e._pending_opening = types.SimpleNamespace(awaiting_load=True, aired=False)
+    for fmt in ("scramble", None, "shamble"):
+        e._setup_format, e._setup_format_at = fmt, now[0]
+        now[0] += 2
+        e._maybe_front_load("Pebble Beach", ["MikeD", "Sarah"])
+    assert len(started) == 1 and e._pending_opening is None
+    now[0] += eng.FORMAT_SETTLE_SECONDS
+    e._maybe_front_load("Pebble Beach", ["MikeD", "Sarah"])
+    assert len(started) == 2   # settled on shamble: written once
+    e._maybe_front_load("Pebble Beach", ["MikeD", "Sarah"])
+    assert len(started) == 2
+
+    # Back to the mode it started on: the dropped opener is still re-written once settled.
+    e._setup_format, e._setup_format_at = "scramble", now[0]
+    e._maybe_front_load("Pebble Beach", ["MikeD", "Sarah"])
+    e._setup_format, e._setup_format_at = "shamble", now[0] + 1
+    now[0] += 1 + eng.FORMAT_SETTLE_SECONDS
+    e._maybe_front_load("Pebble Beach", ["MikeD", "Sarah"])
+    assert len(started) == 3
+
+    # A roster change still writes at once, even mid-wait.
+    e._setup_format, e._setup_format_at = "scramble", now[0]
+    e._maybe_front_load("Pebble Beach", ["MikeD"])
+    assert len(started) == 4
+
+
 async def test_no_second_opener_when_an_occluded_tee_drops_a_partner(tmp_path):
     from commentator.models import RoundStartEvent
 
