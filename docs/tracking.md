@@ -381,7 +381,8 @@ while a round is being played, behind the same password. OBS on the GSPro PC wri
 the Shotcast folder; the booth uploads each file to the bucket's `live/` folder as it appears, and
 the page plays it with
 [hls.js](https://github.com/video-dev/hls.js) (vendored, like the SQLite library). Viewers are
-about 20 seconds behind, and the player starts muted. Any number of people can watch at once.
+about 20 seconds behind, and the player (live or a replay) starts muted, with a button to turn the
+sound on. Any number of people can watch at once.
 Each stream is kept for a week (`live.keep_days`) for the **Round replays** tab, with a second
 playlist (`full.m3u8`) of every file from the start and `live/recordings.json` listing the streams
 and where each round in them starts. A stream under a minute isn't kept. Streams past a week are

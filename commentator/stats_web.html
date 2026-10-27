@@ -1162,7 +1162,7 @@ function renderLive() {
   if (!s.live) return `<h2>Live</h2><p class="sub">Off air. The stream comes on when a round starts at the sim.</p>`;
   return `<h2>Live <span class="sub">since ${esc(new Date(s.since * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}</span></h2>
   <div id="liveslot"></div>
-  <p class="sub">About 20 seconds behind the sim. It starts muted: unmute in the player.${
+  <p class="sub">About 20 seconds behind the sim. It starts muted: tap for sound.${
     (state.vods || []).some(v => v.session === s.session)
       ? ` Missed the start? <button class="link" data-vod="${esc(s.session)}" data-vodat="0">Watch from the beginning</button>.`
       : " Nothing is recorded."}</p>`;
@@ -1202,21 +1202,14 @@ function attachLive() {
   if (!want || !slot) { stopLive(); return; }
   if (player && player.session !== want.key) stopLive();
   if (!player) {
-    const video = Object.assign(document.createElement("video"), { controls: true, autoplay: true, muted: !!want.live, playsInline: true });
+    const video = Object.assign(document.createElement("video"), { controls: true, autoplay: true, muted: true, playsInline: true });
     const me = player = { session: want.key, video, hls: null, unmute: null };
-    // Opened from a link (no tap on the page yet), a browser won't start a video with sound: start it
-    // muted, with a button to turn the sound on.
+    // Every video starts muted, with a button to turn the sound on.
+    const b = me.unmute = Object.assign(document.createElement("button"), { className: "unmute", textContent: "🔊 Tap for sound" });
+    b.onclick = () => { video.muted = false; };
+    video.addEventListener("volumechange", () => { if (!video.muted && me.unmute) { b.remove(); me.unmute = null; } });
     video.addEventListener("canplay", () => {
-      if (!video.paused || player !== me) return;
-      video.play().catch(e => {
-        if (e.name !== "NotAllowedError" || player !== me) return;
-        video.muted = true;
-        video.play().catch(() => {});
-        const b = me.unmute = Object.assign(document.createElement("button"), { className: "unmute", textContent: "🔊 Tap for sound" });
-        b.onclick = () => { video.muted = false; };
-        video.addEventListener("volumechange", () => { if (!video.muted) { b.remove(); me.unmute = null; } });
-        video.after(b);
-      });
+      if (video.paused && player === me) video.play().catch(() => {});
     }, { once: true });
     if (window.MediaSource || window.ManagedMediaSource) {
       loadHls().then(() => {
