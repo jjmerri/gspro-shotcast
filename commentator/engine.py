@@ -31,7 +31,7 @@ from .interest import (LEAGUE_BEST_DRIVE_LEVEL, LONG_HOLED_PUTT_FEET, SEASON_BES
                        short_game_gimme_level, stuffed_level)
 from .league import League, course_match_score
 from .llm import LLMClient
-from .minimap import JevMinimap, MinimapRead, snapshot as minimap_snapshot
+from .minimap import JevMinimap, MinimapRead, same_map, snapshot as minimap_snapshot
 from .putt_read import REGION as PUTT_REGION, PuttRead, read_break
 from .models import (
     HoleChangeEvent, Line, PreShotEvent, RoundEndEvent, RoundStartEvent, ScorecardEvent, Shot, ShotEvent,
@@ -501,6 +501,7 @@ class Engine:
         self.minimap = self._make_minimap() if self.commentary_on else None
         self._minimap_tried = self.commentary_on
         self._minimap_tasks: set[asyncio.Task] = set()   # reads in flight, cancelled on going off air
+        self._last_minimap: tuple | None = None   # (image, to_pin, tee, read) of the last minimap read
         self._putt_read_ok = (self.cfg.putt_read.enabled and self.screen is not None
                               and self.cfg.screen.capture == "monitor")
         self.rng = rng or random.Random()
@@ -974,7 +975,13 @@ class Engine:
         img = await asyncio.to_thread(self.screen.grab, region)
         if not self.commentary_on:   # went off air during the grab: don't start the paid read
             raise RuntimeError("off air")
-        return await self.minimap.read(img, to_pin, tee)
+        last = self._last_minimap
+        if last and last[1:3] == (to_pin, tee) and await asyncio.to_thread(same_map, last[0], img):
+            log.info("Minimap unchanged since the last read; reusing it")
+            return replace(last[3], seconds=0.0)
+        read = await self.minimap.read(img, to_pin, tee)
+        self._last_minimap = (img, to_pin, tee, read)
+        return read
 
     async def _read_putt(self) -> PuttRead:
         p = self.cfg.putt_read

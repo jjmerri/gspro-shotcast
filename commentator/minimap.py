@@ -34,7 +34,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 from .config import MinimapConfig
 
@@ -81,6 +81,19 @@ HUNDREDS = {str(i): (f"{i * 100} to {i * 100 + 99}" if i else "under 100") for i
 # 10-way choices about 580, and they read the numbers just as well.
 TENS = {str(i): f"the tens digit is {i}" for i in range(10)}
 ONES = {str(i): f"the ones digit is {i}" for i in range(10)}
+
+
+# Two grabs are the same map (a mulligan, a re-read setup) when no more than this share of pixels
+# changed by more than SAME_MAP_LEVEL. An aim line drawn across the map changes several times more.
+SAME_MAP_LEVEL = 24
+SAME_MAP_SHARE = 0.001
+
+
+def same_map(a: Image.Image, b: Image.Image) -> bool:
+    if a.size != b.size:
+        return False
+    changed = ImageChops.difference(a.convert("L"), b.convert("L")).point(lambda v: 255 if v > SAME_MAP_LEVEL else 0)
+    return changed.histogram()[255] <= SAME_MAP_SHARE * a.width * a.height
 
 
 def _digit_questions(key: str, consider: str) -> dict:
@@ -1184,17 +1197,28 @@ class JevMinimap:
                              tree_threshold=self.cfg.tree_threshold,
                              choice_confidence=self.cfg.choice_confidence, to_pin_hint=to_pin)
 
-        def number_questions() -> dict:
+        def number_questions(keys: list[str]) -> dict:
             qs = {}
-            for key, what in NUMBERS.items():
+            for key in keys:
+                what = NUMBERS[key]
                 qs[f"{key}_shown"] = Noul(instructions=f"{MAP} Is there {what} on `map`?")
                 qs.update(_digit_questions(key, f"{MAP} Consider {what}."))
             return qs
 
+        def take_numbers(answers: dict, keys: list[str]) -> None:
+            result.seen.update({k: a.noul for k, a in answers.items() if getattr(a, "type", "") == "noul"})
+            for key in keys:
+                n, sure = _digits(answers, key)
+                if sure >= self.cfg.number_confidence:
+                    result.numbers[key] = n
+
+        # Water to carry is rare, so its yardage is only asked once Jev says there's water ahead.
+        green_numbers = [k for k in NUMBERS if k != "carry"]
+
         whole_qs = {
             "water_ahead": Noul(instructions=f"{MAP} Does the shot have to carry over water between the ball and the pin?"),
             "island": Noul(instructions=f"{MAP} Is the green an island green, surrounded by water?"),
-            **number_questions(),
+            **number_questions(green_numbers),
         }
         boxes = {"ball": Box(instructions="The small solid dot marking the golf ball near the bottom middle of `map` (usually "
                                              "red, but it can be any colour; a dot, not a line)"),
@@ -1204,109 +1228,112 @@ class JevMinimap:
         found, answers = await asyncio.gather(
             self._ask(self.cfg.box_model, {"map": JevImage(whole)}, boxes),
             self._ask(self.cfg.model, {"map": JevImage(whole)}, whole_qs))
-        result.seen.update({k: a.noul for k, a in answers.items() if getattr(a, "type", "") == "noul"})
-        for key in NUMBERS:
-            n, sure = _digits(answers, key)
-            if sure >= self.cfg.number_confidence:
-                result.numbers[key] = n
+        take_numbers(answers, green_numbers)
 
-        ball, pin = found["ball"], found["pin"]
-        b, p = _centre(ball.box), _centre(pin.box)
-        # GSPro centres the map on the ball, so a slightly unsure ball box in the middle is still the ball.
-        ball_ok = ball.confidence >= self.cfg.box_confidence or (
-            ball.confidence >= self.cfg.box_confidence - 0.15 and abs(b[0] - 0.5) <= 0.06)
-        if ball_ok and pin.confidence >= self.cfg.box_confidence:
-            if p[1] < b[1]:   # the pin must be up the map from the ball, or the split means nothing
-                result.lines = await asyncio.to_thread(boundary_lines, img, b, p)
-                result.past = await asyncio.to_thread(past_trouble, img, b, p)
-                out = await asyncio.to_thread(out_of_play, img, b, p)
-                inside = _greyed(img, out)
-                left, right = half(inside, b, p, "left"), half(inside, b, p, "right")
-                patches, leafy, dots = [], [], []
-                dogleg = tee is not False and bool(to_pin) and to_pin >= DOGLEG_MIN_YARDS
-                if to_pin and to_pin > 0:
-                    search = min(to_pin, AIM_SEARCH_YARDS) if to_pin >= AIM_CHECK_MIN_YARDS else to_pin
-                    patches, leafy, dots = await asyncio.gather(
-                        asyncio.to_thread(sand_patches, img, b, p, SAND_CORRIDOR_YARDS / search, out),
-                        asyncio.to_thread(tree_patches, img, b, p, search, out),
-                        asyncio.to_thread(aim_dots, img, b, p) if dogleg else asyncio.sleep(0, []))
-                    patches, leafy = patches[:MAX_SAND_CHECKS], leafy[:MAX_TREE_CHECKS]
-                state = {"left": JevImage(_jpeg(left)), "right": JevImage(_jpeg(right))}
-                side_qs = {}
-                for i, patch in enumerate(patches):
-                    state[f"patch{i}"] = JevImage(_jpeg(patch[4]))
-                    side_qs[f"sand{i}"] = Noul(instructions=SAND_Q.format(k=f"patch{i}"))
-                for i, patch in enumerate(leafy):
-                    state[f"leafy{i}"] = JevImage(_jpeg(patch[4]))
-                    side_qs[f"tree{i}"] = Noul(instructions=TREE_Q.format(k=f"leafy{i}"))
-                    side_qs[f"one{i}"] = Noul(instructions=SINGLE_Q.format(k=f"leafy{i}"))
-                w, h = img.size
-                if dogleg:
-                    aimed = img.convert("RGB")
-                    ImageDraw.Draw(aimed).line([(b[0] * w, b[1] * h), (p[0] * w, p[1] * h)], fill=(0, 255, 255),
-                                               width=max(2, w // 150))
-                    state["aimed"] = JevImage(_jpeg(aimed))
-                    side_qs["fairway"] = Choice(instructions=DOGLEG_Q, criteria=FAIRWAY)
-                if to_pin and to_pin / max(1e-6, abs(b[1] - p[1])) <= PIN_SIDE_MAX_MAP_YARDS:
-                    # About 30 yards around the pin, on the map's own scale.
-                    rad = max(20, round(h * abs(b[1] - p[1]) * 30 / to_pin))
-                    green = img.crop((round(p[0] * w) - rad, round(p[1] * h) - rad,
-                                      round(p[0] * w) + rad, round(p[1] * h) + rad)).resize((320, 320))
-                    state["green"] = JevImage(_jpeg(green))
-                    side_qs["pin_side"] = Choice(
-                        instructions=f"{GREEN} Where is the pin left to right, as the golfer looks at it?",
-                        criteria=PIN_SIDE)
-                for side in ("left", "right"):
-                    intro = HALF.format(side=side)
-                    side_qs[f"water_{side}"] = Noul(instructions=f"{intro} {WATER_Q.format(side=side)}")
-                    side_qs[f"bunker_{side}"] = Noul(instructions=f"{intro} Is there any bunker or sandy area in `{side}`?")
-                spot_qs, spot_state = {}, {}
-                dots = dots[:MAX_AIM_CHECKS]
-                if dots:
-                    rd = round(w * 0.12)
-                    for i, (x, y) in enumerate(dots):
-                        spot_state[f"dot{i}"] = JevImage(_jpeg(img.crop(
-                            (round(x * w) - rd, round(y * h) - rd, round(x * w) + rd, round(y * h) + rd)).resize((320, 320))))
-                        spot_qs[f"dot{i}"] = Noul(instructions=AIM_DOT_Q.format(k=f"dot{i}"))
-                if to_pin and to_pin >= AIM_CHECK_MIN_YARDS:
-                    # Read the number beside the dot, in case it's the aim point rather than the pin. A
-                    # call of its own: alongside the other images Jev reads their numbers into this one.
-                    r = round(w * 0.16)
-                    spot = img.crop((round(p[0] * w) - r, round(p[1] * h) - r,
-                                     round(p[0] * w) + r, round(p[1] * h) + r)).resize((320, 320))
-                    spot_state["spot"] = JevImage(_jpeg(spot))
-                    what = f"{SPOT} Consider the white number printed right beside the centre dot."
-                    spot_qs.update({
-                        "aim_label": Noul(instructions=f"{SPOT} Is a white yardage number printed right beside that "
-                                                       "centre dot?"),
-                        **_digit_questions("aim", what)})
-                if spot_qs:
-                    answers, spot_answers = await asyncio.gather(self._ask(self.cfg.model, state, side_qs),
-                                                                 self._ask(self.cfg.model, spot_state, spot_qs))
-                    n, sure = _digits(spot_answers, "aim") if "aim_h" in spot_answers else (0, 0.0)
-                    if sure >= AIM_CONFIDENCE and spot_answers["aim_label"].noul >= self.cfg.threshold:
-                        if 0 < n < AIM_SHORT * to_pin:
-                            result.aim = n
-                            log.info("Minimap: the pin is off the map; measuring to the %d-yard aim point", n)
-                    # The confirmed aim dot nearest the ball is the tee shot's.
-                    if aim_dot := next((d for i, d in enumerate(dots)
-                                        if spot_answers[f"dot{i}"].noul >= AIM_DOT_SURE), None):
-                        result.aim_turn = _turn(b, p, aim_dot, w, h)
-                else:
-                    answers = await self._ask(self.cfg.model, state, side_qs)
-                result.seen.update({k: a.noul for k, a in answers.items()
-                                    if getattr(a, "type", "noul") == "noul"
-                                    and not k.startswith(("sand", "tree", "one"))})
-                result.choices.update({k: (answers[k].choice, answers[k].confidence)
-                                       for k in ("fairway", "pin_side") if k in answers})
-                result.sand = [Sand(side, near, far, answers[f"sand{i}"].noul, off=off, wide=wide)
-                               for i, (side, near, far, off, _, wide) in enumerate(patches)]
-                result.trees = [Tree(side, near, far, answers[f"tree{i}"].noul, off=off, blocks=blocks,
-                                     single=answers[f"one{i}"].noul)
-                                for i, (side, near, far, off, _, blocks) in enumerate(leafy)]
-                result.sides = True
-        else:
-            log.info("Minimap: ball/pin not found confidently (%.2f/%.2f); no side reads",
-                     ball.confidence, pin.confidence)
+        async def read_carry() -> None:
+            take_numbers(await self._ask(self.cfg.model, {"map": JevImage(whole)}, number_questions(["carry"])),
+                         ["carry"])
+
+        async def read_sides() -> None:
+            ball, pin = found["ball"], found["pin"]
+            b, p = _centre(ball.box), _centre(pin.box)
+            # GSPro centres the map on the ball, so a slightly unsure ball box in the middle is still the ball.
+            ball_ok = ball.confidence >= self.cfg.box_confidence or (
+                ball.confidence >= self.cfg.box_confidence - 0.15 and abs(b[0] - 0.5) <= 0.06)
+            if ball_ok and pin.confidence >= self.cfg.box_confidence:
+                if p[1] < b[1]:   # the pin must be up the map from the ball, or the split means nothing
+                    result.lines = await asyncio.to_thread(boundary_lines, img, b, p)
+                    result.past = await asyncio.to_thread(past_trouble, img, b, p)
+                    out = await asyncio.to_thread(out_of_play, img, b, p)
+                    inside = _greyed(img, out)
+                    left, right = half(inside, b, p, "left"), half(inside, b, p, "right")
+                    patches, leafy, dots = [], [], []
+                    dogleg = tee is not False and bool(to_pin) and to_pin >= DOGLEG_MIN_YARDS
+                    if to_pin and to_pin > 0:
+                        search = min(to_pin, AIM_SEARCH_YARDS) if to_pin >= AIM_CHECK_MIN_YARDS else to_pin
+                        patches, leafy, dots = await asyncio.gather(
+                            asyncio.to_thread(sand_patches, img, b, p, SAND_CORRIDOR_YARDS / search, out),
+                            asyncio.to_thread(tree_patches, img, b, p, search, out),
+                            asyncio.to_thread(aim_dots, img, b, p) if dogleg else asyncio.sleep(0, []))
+                        patches, leafy = patches[:MAX_SAND_CHECKS], leafy[:MAX_TREE_CHECKS]
+                    state = {"left": JevImage(_jpeg(left)), "right": JevImage(_jpeg(right))}
+                    side_qs = {}
+                    for i, patch in enumerate(patches):
+                        state[f"patch{i}"] = JevImage(_jpeg(patch[4]))
+                        side_qs[f"sand{i}"] = Noul(instructions=SAND_Q.format(k=f"patch{i}"))
+                    for i, patch in enumerate(leafy):
+                        state[f"leafy{i}"] = JevImage(_jpeg(patch[4]))
+                        side_qs[f"tree{i}"] = Noul(instructions=TREE_Q.format(k=f"leafy{i}"))
+                        side_qs[f"one{i}"] = Noul(instructions=SINGLE_Q.format(k=f"leafy{i}"))
+                    w, h = img.size
+                    if dogleg:
+                        aimed = img.convert("RGB")
+                        ImageDraw.Draw(aimed).line([(b[0] * w, b[1] * h), (p[0] * w, p[1] * h)], fill=(0, 255, 255),
+                                                   width=max(2, w // 150))
+                        state["aimed"] = JevImage(_jpeg(aimed))
+                        side_qs["fairway"] = Choice(instructions=DOGLEG_Q, criteria=FAIRWAY)
+                    if to_pin and to_pin / max(1e-6, abs(b[1] - p[1])) <= PIN_SIDE_MAX_MAP_YARDS:
+                        # About 30 yards around the pin, on the map's own scale.
+                        rad = max(20, round(h * abs(b[1] - p[1]) * 30 / to_pin))
+                        green = img.crop((round(p[0] * w) - rad, round(p[1] * h) - rad,
+                                          round(p[0] * w) + rad, round(p[1] * h) + rad)).resize((320, 320))
+                        state["green"] = JevImage(_jpeg(green))
+                        side_qs["pin_side"] = Choice(
+                            instructions=f"{GREEN} Where is the pin left to right, as the golfer looks at it?",
+                            criteria=PIN_SIDE)
+                    for side in ("left", "right"):
+                        intro = HALF.format(side=side)
+                        side_qs[f"water_{side}"] = Noul(instructions=f"{intro} {WATER_Q.format(side=side)}")
+                        side_qs[f"bunker_{side}"] = Noul(instructions=f"{intro} Is there any bunker or sandy area in `{side}`?")
+                    spot_qs, spot_state = {}, {}
+                    dots = dots[:MAX_AIM_CHECKS]
+                    if dots:
+                        rd = round(w * 0.12)
+                        for i, (x, y) in enumerate(dots):
+                            spot_state[f"dot{i}"] = JevImage(_jpeg(img.crop(
+                                (round(x * w) - rd, round(y * h) - rd, round(x * w) + rd, round(y * h) + rd)).resize((320, 320))))
+                            spot_qs[f"dot{i}"] = Noul(instructions=AIM_DOT_Q.format(k=f"dot{i}"))
+                    if to_pin and to_pin >= AIM_CHECK_MIN_YARDS:
+                        # Read the number beside the dot, in case it's the aim point rather than the pin. A
+                        # call of its own: alongside the other images Jev reads their numbers into this one.
+                        r = round(w * 0.16)
+                        spot = img.crop((round(p[0] * w) - r, round(p[1] * h) - r,
+                                         round(p[0] * w) + r, round(p[1] * h) + r)).resize((320, 320))
+                        spot_state["spot"] = JevImage(_jpeg(spot))
+                        what = f"{SPOT} Consider the white number printed right beside the centre dot."
+                        spot_qs.update({
+                            "aim_label": Noul(instructions=f"{SPOT} Is a white yardage number printed right beside that "
+                                                           "centre dot?"),
+                            **_digit_questions("aim", what)})
+                    if spot_qs:
+                        answers, spot_answers = await asyncio.gather(self._ask(self.cfg.model, state, side_qs),
+                                                                     self._ask(self.cfg.model, spot_state, spot_qs))
+                        n, sure = _digits(spot_answers, "aim") if "aim_h" in spot_answers else (0, 0.0)
+                        if sure >= AIM_CONFIDENCE and spot_answers["aim_label"].noul >= self.cfg.threshold:
+                            if 0 < n < AIM_SHORT * to_pin:
+                                result.aim = n
+                                log.info("Minimap: the pin is off the map; measuring to the %d-yard aim point", n)
+                        # The confirmed aim dot nearest the ball is the tee shot's.
+                        if aim_dot := next((d for i, d in enumerate(dots)
+                                            if spot_answers[f"dot{i}"].noul >= AIM_DOT_SURE), None):
+                            result.aim_turn = _turn(b, p, aim_dot, w, h)
+                    else:
+                        answers = await self._ask(self.cfg.model, state, side_qs)
+                    result.seen.update({k: a.noul for k, a in answers.items()
+                                        if getattr(a, "type", "noul") == "noul"
+                                        and not k.startswith(("sand", "tree", "one"))})
+                    result.choices.update({k: (answers[k].choice, answers[k].confidence)
+                                           for k in ("fairway", "pin_side") if k in answers})
+                    result.sand = [Sand(side, near, far, answers[f"sand{i}"].noul, off=off, wide=wide)
+                                   for i, (side, near, far, off, _, wide) in enumerate(patches)]
+                    result.trees = [Tree(side, near, far, answers[f"tree{i}"].noul, off=off, blocks=blocks,
+                                         single=answers[f"one{i}"].noul)
+                                    for i, (side, near, far, off, _, blocks) in enumerate(leafy)]
+                    result.sides = True
+            else:
+                log.info("Minimap: ball/pin not found confidently (%.2f/%.2f); no side reads",
+                         ball.confidence, pin.confidence)
+        # The carry question runs alongside the side questions, so it adds no time to the read.
+        await asyncio.gather(read_sides(), *([read_carry()] if result._yes("water_ahead") else []))
         result.seconds = time.perf_counter() - started
         return result

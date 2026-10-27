@@ -65,8 +65,8 @@ def _box(x, y, conf):
 class FakeJev:
     """Answers by question name, like the real client; records which calls were made."""
 
-    def __init__(self, box_conf=0.9, pin_y=0.2, choices=None, aim=None):
-        self.box_conf, self.pin_y, self.calls = box_conf, pin_y, []
+    def __init__(self, box_conf=0.9, pin_y=0.2, choices=None, aim=None, water=True):
+        self.box_conf, self.pin_y, self.calls, self.water = box_conf, pin_y, [], water
         self.choices = choices or {}
         self.aim = aim   # the number beside the pin box's dot, when it's really the aim point
 
@@ -94,20 +94,32 @@ class FakeJev:
                 n = "1" + {"carry": "42", "front": "50"}.get(k[:-2], "72")
                 answers[k] = SimpleNamespace(type="choice", choice=n["hto".index(k[-1])], confidence=0.9)
             else:
-                answers[k] = SimpleNamespace(type="noul", noul=0.9 if k in ("water_ahead", "carry_shown", "water_left",
+                answers[k] = SimpleNamespace(type="noul", noul=0.9 if (k == "water_ahead" and self.water) or k in (
+                                                                            "carry_shown", "water_left",
                                                                             "front_shown", "back_shown") else 0.1)
         return SimpleNamespace(answers=answers)
+
+    def side_call(self):
+        return next(c for c in self.calls if "left" in c[1])
 
 
 async def test_jev_read_splits_the_map_and_reads_numbers():
     fake = FakeJev()
     r = await JevMinimap(Config().minimap, client=fake).read(Image.new("RGB", (170, 310)))
-    assert r.sides and len(fake.calls) == 3
+    assert r.sides and len(fake.calls) == 4
     assert fake.calls[0][0] == "jev-preview" and fake.calls[0][2] == ["ball", "pin"]
-    assert fake.calls[2][1] == ["left", "right"]   # no to_pin: no patches, no green close-up, no dogleg
+    assert fake.side_call()[1] == ["left", "right"]   # no to_pin: no patches, no green close-up, no dogleg
     assert r.facts(160) == ["Hole layout: water in front, about 142 yards to carry it.",
                             "Hole layout: water down the left.",
                             "Green: 150 yards to the front edge, 172 to the back."]
+
+
+async def test_jev_read_only_asks_the_carry_yardage_when_there_is_water_ahead():
+    for water, carry_asked in ((True, True), (False, False)):
+        fake = FakeJev(water=water)
+        r = await JevMinimap(Config().minimap, client=fake).read(Image.new("RGB", (170, 310)))
+        assert any("carry_shown" in c[2] for c in fake.calls) is carry_asked
+        assert ("carry" in r.numbers) is carry_asked
 
 
 async def test_each_jev_request_is_logged_with_its_tokens_and_cost(tmp_path):
@@ -122,7 +134,7 @@ async def test_each_jev_request_is_logged_with_its_tokens_and_cost(tmp_path):
     fake = BilledJev()
     await JevMinimap(Config().minimap, client=fake, usage=UsageLog(str(tmp_path))).read(Image.new("RGB", (170, 310)))
     rows = [json.loads(l) for l in (tmp_path / "usage.jsonl").read_text().splitlines()]
-    assert len(rows) == len(fake.calls) == 3
+    assert len(rows) == len(fake.calls) == 4
     assert {(r["kind"], r["provider"], r["model"], r["input_tokens"]) for r in rows} == {
         ("minimap", "typesafe", "jev-1.14", 2_000)}
     assert all(r["est_cost_usd"] == pytest.approx(2_000 * 0.042 / 1e6) for r in rows)  # output is free
@@ -132,7 +144,7 @@ async def test_each_jev_request_is_logged_with_its_tokens_and_cost(tmp_path):
 async def test_jev_read_skips_sides_without_a_confident_ball_and_pin():
     fake = FakeJev(box_conf=0.3)
     r = await JevMinimap(Config().minimap, client=fake).read(Image.new("RGB", (300, 500)))
-    assert not r.sides and len(fake.calls) == 2
+    assert not r.sides and len(fake.calls) == 3   # ball/pin, whole map, and the carry (water ahead)
     assert "Hole layout: water down the left." not in r.facts(160)
     # A pin below the ball means the boxes are wrong; no split either.
     r = await JevMinimap(Config().minimap, client=FakeJev(pin_y=0.95)).read(Image.new("RGB", (300, 500)))
@@ -193,6 +205,31 @@ async def test_preshot_cancels_the_minimap_read_on_a_putt(tmp_path):
     raws, _ = await engine._preshot_model(hud, None, [], task)
     await asyncio.sleep(0)
     assert task.cancelled() and "hazards" not in raws
+
+
+
+async def test_an_unchanged_minimap_is_not_read_again(tmp_path):
+    from PIL import ImageDraw
+
+    engine, _ = _engine(tmp_path)
+    base = _course([(250, 400, 290, 440)])
+    aimed = base.copy()
+    ImageDraw.Draw(aimed).line([(230, 752), (230, 152)], fill=(0, 255, 255), width=3)
+    grabs = iter([base, base.copy(), aimed, base.copy(), base.copy()])
+    engine.screen = SimpleNamespace(detect_mirror=lambda: None, region=lambda name: None,
+                                    grab=lambda region: next(grabs))
+    reads = []
+
+    class Reader:
+        async def read(self, img, to_pin, tee):
+            reads.append((to_pin, tee))
+            return MinimapRead(threshold=0.7)
+
+    engine.minimap, engine.commentary_on = Reader(), True
+    for to_pin, tee in ((400, True), (400, True), (400, True), (400, True), (380, False)):
+        await engine._read_minimap(to_pin, tee)
+    # The repeat is reused; the aim line, the map going back, and a new distance are each read.
+    assert reads == [(400, True), (400, True), (400, True), (380, False)]
 
 
 def _course(blobs):
@@ -284,7 +321,7 @@ async def test_jev_read_confirms_and_measures_sand():
     fake = FakeJev()
     img = _course([(250, 400, 290, 440), (150, 600, 200, 630)])
     r = await JevMinimap(Config().minimap, client=fake).read(img, to_pin=400)
-    assert sorted(fake.calls[2][1]) == ["aimed", "left", "patch0", "patch1", "right"]
+    assert sorted(fake.side_call()[1]) == ["aimed", "left", "patch0", "patch1", "right"]
     assert {b.side for b in r.sand} == {"left", "right"}
 
 
@@ -293,7 +330,7 @@ async def test_jev_read_skips_the_dogleg_read_off_the_tee():
     for tee, asked in ((True, True), (None, True), (False, False)):
         fake = FakeJev()
         await JevMinimap(Config().minimap, client=fake).read(img, to_pin=400, tee=tee)
-        assert ("aimed" in fake.calls[2][1]) is asked and ("fairway" in fake.calls[2][2]) is asked
+        assert ("aimed" in fake.side_call()[1]) is asked and ("fairway" in fake.side_call()[2]) is asked
 
 
 def test_split_bunker_pieces_merge_into_one():
@@ -380,7 +417,7 @@ def test_tree_facts_stymie_dogleg_and_pin_spot():
 async def test_jev_read_asks_the_pin_side_only_on_an_approach():
     fake = FakeJev(choices={"pin_side": ("left", 0.9)})
     r = await JevMinimap(Config().minimap, client=fake).read(_course([]), to_pin=150)
-    assert "green" in fake.calls[2][1] and "pin_side" in fake.calls[2][2]
+    assert "green" in fake.side_call()[1] and "pin_side" in fake.side_call()[2]
     assert "Pin: on the front left of the green." in r.facts(150)   # the fake's green is 150 to 172
     far = FakeJev()
     await JevMinimap(Config().minimap, client=far).read(_course([]), to_pin=450)
