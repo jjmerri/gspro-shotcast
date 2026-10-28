@@ -63,6 +63,7 @@ class LogEvent:
     leaves: tuple | None = None       # leaves: (seconds into the flight, hit count, penalty %, accumulated penalty %)
     roll_ft: float | None = None      # roll: how far the ball rolled after landing, logged as it comes to rest
     descent: float | None = None      # bounce: the ball's descent angle at its first landing (0 = not falling yet)
+    cup_mm: float | None = None       # cup: how far from the cup's centre (mm) the ball crossed it
 
 
 # GSPro's `Using Material TVG<surface>` names mapped to the booth's lie vocabulary (commentator/hud.py
@@ -133,9 +134,18 @@ _BOUNCE = re.compile(rf"^Force {_NUM}\|\|.*\|\|\s*descent angle\s*({_NUM})\|\|")
 # Logged once per shot (putts too, and water) as the ball comes to rest, before the shooter's score
 # block: the end of the ball's motion, whatever the screen shows.
 _ROLL = re.compile(rf"Roll dist ft\s*(-?{_NUM})")
+# Logged only when the ball runs over the cup (putts, and the odd chip): how far from its centre it
+# crossed, in mm. Then "Hole out" (it dropped), "Cup capture Lip Out" (it caught the cup and spun
+# out), "Cup capture no action. Ball speed to high..." (it burned the edge with too much pace), or
+# nothing (it raced over the hole). "Flag hit & no capture" is a full shot striking the flagstick.
+# (Every holed putt logs "Lip In Launched": that's GSPro's drop, not a ball that rattled in.)
+_CUP = re.compile(r"^Distance to cup = (\d+)mm")
 # Words that start a line the parser depends on. One that carries the word but doesn't parse means
 # GSPro changed its wording (an update): it comes out as an "unparsed" event for the health checks.
 # A season's log had none, so any is worth a look.
+# A holed ball that crossed the cup this far from its centre (mm; the cup's radius is ~54) caught the
+# edge on the way in. On the sim, holed putts crossed at 0-41 mm, then a gap, then 45-50 (about 1 in 11).
+LIP_IN_MM = 45.0
 _MARKERS = ("ActivePlayer:", "Logging tdist", "Selecting shot", "Using Material", "LaunchExt -", "Penalty Surface",
             "Leaves", "Roll dist")
 
@@ -217,6 +227,12 @@ def parse_events(text: str) -> list[LogEvent]:
                 out.append(LogEvent("bounce", descent=float(m.group(1))))
             elif m := _ROLL.search(line):
                 out.append(LogEvent("roll", roll_ft=float(m.group(1))))
+            elif m := _CUP.match(line):
+                out.append(LogEvent("cup", cup_mm=float(m.group(1))))
+            elif line.startswith("Cup capture"):
+                out.append(LogEvent("lip_out"))
+            elif line.startswith("Flag hit"):
+                out.append(LogEvent("flag_hit"))
             elif m := _VERSION.match(line):
                 out.append(LogEvent("version", display=m.group(1)))
             elif m := _ALTITUDE.match(line):
@@ -503,6 +519,13 @@ class GsproState:
             if self.fires in self._fire_info:
                 info = self._fire_info[self.fires]
                 info["leaves_pass"] = info.get("leaves_pass", 0) + 1
+        elif ev.kind in ("cup", "lip_out", "flag_hit"):
+            if self.fires in self._fire_info:
+                info = self._fire_info[self.fires]
+                if ev.kind == "cup":
+                    info.setdefault("cup_mm", ev.cup_mm)
+                else:
+                    info[ev.kind] = True
         elif ev.kind == "roll":
             if self.fires in self._fire_info:
                 self._fire_info[self.fires].setdefault("rest_at", time.monotonic())
@@ -520,6 +543,8 @@ class GsproState:
                 self.gimmies_by[self.active_player] = self.gimmies_by.get(self.active_player, 0) + 1
         elif ev.kind == "hole_out":
             self.hole_outs += 1
+            if self.fires in self._fire_info:
+                self._fire_info[self.fires]["holed"] = True
             self._end_next = True
             if self._unowned_fire is not None:
                 self._unowned_outs += 1    # the shooter's score line, next, says whose ball dropped
@@ -757,6 +782,20 @@ class GsproState:
 
     def fire_info(self, n: int | None) -> dict:
         return self._fire_info.get(n, {}) if n is not None else {}
+
+    def cup_of(self, n: int | None) -> str | None:
+        """How shot `n` met the cup, from the log: "flagstick" (a full shot struck it), "lip_in" (it
+        dropped, but caught the edge on the way: crossed at least LIP_IN_MM from the centre), "lip_out"
+        (it ran over the cup and stayed out: spun out, burned the edge or raced across), or None."""
+        info = self.fire_info(n)
+        if info.get("flag_hit"):
+            return "flagstick"
+        mm = info.get("cup_mm")
+        if mm is None:
+            return None
+        if info.get("holed"):
+            return "lip_in" if mm >= LIP_IN_MM else None
+        return "lip_out"
 
     def tree_wood(self, n: int | None, contact_yd: float | None = None, carry_yd: float | None = None) -> bool:
         """Whether the shot's first landing on wood was a tree. GSPro names only the material, and on a

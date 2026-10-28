@@ -395,7 +395,9 @@ FLIGHT_OUTCOMES = ("on_target", "short", "long", "left", "right", "left_trouble"
 RESULT_OUTCOMES = (
     "green", "fairway", "semi rough", "rough", "deep rough", "pine straw", "sand", "cart path", "structure", "water",
 )
-PUTT_RESULT_OUTCOMES = ("holed", "short", "past")
+# lip_out / lip_in come from the GSPro log's cup lines (GsproState.cup_of): the ball ran over the cup
+# and stayed out, or dropped only after catching the edge.
+PUTT_RESULT_OUTCOMES = ("holed", "short", "past", "lip_out", "lip_in")
 # A long putt (CommentaryConfig.gimme_lag_feet) also gets a line for stopping inside the gimme circle.
 LAG_PUTT_OUTCOMES = PUTT_RESULT_OUTCOMES + ("gimme",)
 
@@ -554,7 +556,10 @@ def preshot_branch_prompt(
             + " says the instant the ball stops, at most 12 words each, written now for each way it can finish. "
             "Each value is the spoken words themselves, never a speaker name or label. "
             "Match the putt number in the facts (a made first putt is a one-putt, a made second putt is a two-putt, "
-            "and so on). holed (it drops" + holed_putt_cue(putt_feet) + "), short (left short of the hole), past (misses and runs past or by). A missed "
+            "and so on). holed (it drops" + holed_putt_cue(putt_feet) + "), short (left short of the hole), past (misses and runs past or by), "
+            "lip_out (it catches the cup and spins out: react to how close it came, without saying how far "
+            "it finished or what's left), lip_in (it drops, but only just, catching the edge on the way in). "
+            "A missed "
             "putt's next putt is for the score the facts give for the next putt, never this putt's score."
             + (" gimme (a long lag that stops inside the gimme circle, conceded as a tap-in: credit the lag "
                "and say what score it leaves, without claiming it dropped)." if lag else "")

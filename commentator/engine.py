@@ -366,6 +366,15 @@ def _misread_putt(rec: ShotRecord) -> bool:
     return putt and rec.shot.ball_speed is not None and rec.shot.ball_speed < MISREAD_PUTT_MPH
 
 
+# How the ball met the cup (GsproState.cup_of), for the live reaction. Keyed (is_putt, cup).
+_CUP_FACTS = {
+    (True, "lip_out"): "It caught the cup and lipped out: it very nearly went in.",
+    (True, "lip_in"): "It only just dropped: it caught the edge of the cup on the way in.",
+    (False, "lip_out"): "The ball caught the edge of the cup and lipped out: it very nearly went in.",
+    (False, "flagstick"): "The ball hit the flagstick.",
+}
+
+
 def _short_miss_fact(before: Hud, par: int | None) -> str | None:
     """A short putt that missed and was conceded: the model heard only "inside the gimme circle" and
     called a missed four-footer for par "a gentle touch". Say it was a miss and what it cost."""
@@ -3398,7 +3407,7 @@ class Engine:
         line = Line(speaker=self.speakers[0], text=text)
         lines = [line]
         audio = plan.reaction_audio.get(outcome)
-        reply = plan.reactions.get("holed_reply") if outcome == "holed" else None
+        reply = plan.reactions.get("holed_reply") if outcome in ("holed", "lip_in") else None
         if reply:
             lines.append(Line(speaker=self._reaction_speaker("holed_reply"), text=reply))
             reply_audio = plan.reaction_audio.get("holed_reply")
@@ -3450,7 +3459,7 @@ class Engine:
             if phrase := repeats(body, [self.system_examples]) or repeats(body, recent):
                 log.info("Dropped the pre-written %s reaction (reuses %r): %r", outcome, phrase, body)
                 continue
-            if putt_for and (named := wrong_putt_score(body, *putt_for, holed=outcome == "holed")):
+            if putt_for and (named := wrong_putt_score(body, *putt_for, holed=outcome in ("holed", "lip_in"))):
                 log.info("Dropped the pre-written %s reaction (calls a putt for %s): %r", outcome, named, body)
                 continue
             if said := wrong_round_score(body, facts_text):
@@ -4100,10 +4109,17 @@ class Engine:
         # too_soon so it never talks over the last line.
         lag_gimme = bool(shot.is_putt and outcome == "conceded" and shot_plan
                          and shot_plan.player in (None, player) and shot_plan.reactions.get("gimme"))
+        # A ball that lipped out or in, or hit the flagstick, always gets a word too.
+        cup = self.gspro.cup_of(fire)
+        if cup:
+            log.info("%s cup: %s (crossed %s mm from the centre)", tag, cup, self.gspro.fire_info(fire).get("cup_mm"))
+        cup_putt = bool(shot.is_putt and cup in ("lip_out", "lip_in") and shot_plan
+                        and shot_plan.player in (None, player) and shot_plan.reactions.get(cup))
         if not notable:
             if too_soon:
                 return
-            if self.rng.random() > c.routine_comment_rate and "makeable_putt" not in tags and not lag_gimme:
+            if self.rng.random() > c.routine_comment_rate and "makeable_putt" not in tags and not lag_gimme \
+                    and not cup:
                 return
 
         # Routine shots take the pre-written result line (voiced at setup, played now with no model
@@ -4112,12 +4128,13 @@ class Engine:
         # the worst thing to react to late or miss, and a live call here can lag or drop.
         # An "unknown" putt (no log signal in the window) must NOT take the pre-written line: with no
         # result we can't say short vs holed, so fall through to the grounded live reaction instead.
-        if c.pre_reactions and outcome != "unknown" and (not notable or (shot.is_putt and holed) or lag_gimme) \
+        if c.pre_reactions and outcome != "unknown" \
+                and (not notable or (shot.is_putt and holed) or lag_gimme or cup_putt) \
                 and shot_plan \
                 and time.monotonic() - shot_plan_made_at < 180 \
                 and shot_plan.player in (None, player) and shot_plan.is_putt == shot.is_putt:
             picked = pick_reaction(shot_plan, after_lie=hud.lie, start_yards=to_yards(before.to_pin),
-                                   roll_yards=roll_yards, holed=holed, conceded=outcome == "conceded")
+                                   roll_yards=roll_yards, holed=holed, conceded=outcome == "conceded", cup=cup)
             if picked:
                 outcome, text = picked
                 audio = self._play_reaction(shot_plan, outcome, text)
@@ -4167,6 +4184,8 @@ class Engine:
                                                lie=None if long_gimme else before.lie, level=gimme_level))
             elif gimme_feet is not None:
                 result.append(f"It {where}.")
+        if cup and (fact := _CUP_FACTS.get((shot.is_putt, cup))):
+            result = result + [fact]
         # On the green in regulation or better: say what the next putt is for, so "ten feet for
         # birdie" is a fact, not a guess (a par 5 in two is an eagle putt).
         next_putt = None

@@ -2893,6 +2893,24 @@ def test_pick_reaction_uses_the_banner_for_putts():
     assert pick_reaction(putt, "green", 17.2, 15.7, holed=None)[0] == "short"  # 51ft putt stopping 4ft short
 
 
+def test_pick_reaction_takes_the_lip_lines_and_leaves_a_flagstick_to_the_model():
+    from commentator.flight_pick import FlightPlan, pick_reaction
+
+    putt = FlightPlan(player="Toby", to_pin="37 feet", is_putt=True,
+                      reactions={"holed": "drained it", "short": "left short", "past": "ran by",
+                                 "gimme": "great lag", "lip_out": "spun out", "lip_in": "side door"})
+    assert pick_reaction(putt, "green", 12.0, 9.0, holed=False, conceded=True, cup="lip_out") == ("lip_out", "spun out")
+    assert pick_reaction(putt, "green", 12.0, 13.0, holed=False, cup="lip_out") == ("lip_out", "spun out")
+    assert pick_reaction(putt, "green", 12.0, 12.0, holed=True, cup="lip_in") == ("lip_in", "side door")
+    plain = FlightPlan(player="Toby", to_pin="37 feet", is_putt=True,
+                       reactions={"holed": "drained it", "short": "left short", "past": "ran by", "lip_out": "null"})
+    assert pick_reaction(plain, "green", 12.0, 13.0, holed=False, cup="lip_out")[0] == "past"   # no usable line
+    assert pick_reaction(plain, "green", 12.0, 12.0, holed=True, cup="lip_in")[0] == "holed"
+    chip = FlightPlan(player="Toby", to_pin="20 yards", reactions={"green": "on the dance floor"})
+    assert pick_reaction(chip, "green", 20, None, cup="flagstick") is None
+    assert pick_reaction(chip, "green", 20, None, cup="lip_out") is None
+
+
 def test_pick_reaction_maps_lies_and_putt_rolls():
     from commentator.flight_pick import FlightPlan, pick_reaction
 

@@ -82,14 +82,19 @@ _LIE_REACTION = {
 
 def pick_reaction(plan: FlightPlan, after_lie: str | None, start_yards: float | None,
                   roll_yards: float | None, holed: bool | None = None,
-                  conceded: bool = False) -> tuple[str, str] | None:
+                  conceded: bool = False, cup: str | None = None) -> tuple[str, str] | None:
     """The pre-written reaction for how the shot actually finished, or None to fall back to a model
     call. Full shots key off the final lie. A putt is "holed" ONLY when GSPro's log or the hole-result
     banner said so (`holed` True); otherwise it's short or past by the roll, never a guessed make (a
     putt that stops a few feet short rolls nearly the full distance). A `conceded` putt (stopped in the
     gimme circle) takes the "gimme" line when a long putt has one; with none it falls back too, since a
-    short or past line can say another putt is needed when the next one is conceded."""
+    short or past line can say another putt is needed when the next one is conceded. `cup` is how the
+    ball met the cup (GsproState.cup_of): a putt that lipped out or in takes that line when it has one,
+    and a full shot that struck the flagstick or lipped out falls back to the model, which is told."""
     if plan.is_putt:
+        special = "lip_in" if holed and cup == "lip_in" else "lip_out" if not holed and cup == "lip_out" else None
+        if special and (line := plan.reactions.get(special)) and line.strip().lower() != "null":
+            return special, line
         if holed:
             outcome = "holed"
         elif conceded:
@@ -105,6 +110,8 @@ def pick_reaction(plan: FlightPlan, after_lie: str | None, start_yards: float | 
         else:
             return None
     else:
+        if cup in ("flagstick", "lip_out"):
+            return None
         outcome = _LIE_REACTION.get((after_lie or "").strip().lower())
         if outcome is None:
             return None

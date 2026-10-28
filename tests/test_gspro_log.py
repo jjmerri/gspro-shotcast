@@ -538,6 +538,34 @@ def test_a_tree_hit_is_logged_on_its_shot_and_called_by_its_height():
     assert Engine._tree_facts(me, s.fires, Shot(putter=True), 0.0) == []
 
 
+
+def test_the_cup_lines_say_how_each_ball_met_the_cup():
+    # From the sim (Josh, Owl's Nest): a lip-out on 8, a putt holed dead centre, one that caught the
+    # edge on the way in, one that burned the edge with too much pace, and a chip off the flagstick.
+    fired = " * ------- Shot Fired! ------- *"
+    s = GsproState()
+    shots = [
+        ["LaunchExt - Putting Mode", "Distance to cup = 46mm, time:281763.3", "Cup capture Lip Out", "Roll dist ft37.991"],
+        ["LaunchExt - Putting Mode", "Distance to cup = 12mm, time:2522.16", "Hole out !!! ",
+         "Lip In Launched. Source = 2", "Roll dist ft11.431"],
+        ["LaunchExt - Putting Mode", "Distance to cup = 47mm, time:2522.16", "Hole out !!! ",
+         "Lip In Launched. Source = 2", "Roll dist ft4.8"],
+        ["LaunchExt - Putting Mode", "Distance to cup = 52mm, time:1.0",
+         "Cup capture no action. Ball speed to high or Lip out active", "Roll dist ft11.677"],
+        ["LaunchExt - Regular Mode", "Cup hit off Center 1330.143", "Distance to cup = 28mm, time:263091.3",
+         "Flag hit & no capture, time:263091.3", "Roll dist ft48.470"],
+        ["LaunchExt - Regular Mode", "Cup hit off Center 1539.6", "Roll dist ft20.0"],
+    ]
+    for shot in shots:
+        for line in [fired, *shot]:
+            for ev in parse_events(line):
+                s.apply(ev)
+    first = s.fires - len(shots) + 1
+    assert [s.cup_of(first + i) for i in range(len(shots))] == \
+        ["lip_out", None, "lip_in", "lip_out", "flagstick", None]
+    assert s.cup_of(None) is None
+
+
 def test_wood_is_a_tree_unless_met_at_ground_level_where_the_ball_came_down():
     import asyncio
     from types import SimpleNamespace

@@ -178,3 +178,6 @@ async def test_a_long_holed_putt_gets_the_colour_reply_after_the_call(tmp_path):
     del plan.reaction_audio["holed_reply"]
     engine._play_reaction(plan, "holed", reactions["holed"])
     assert said[1][0] == "say" and [line.speaker for line in said[1][1]] == ["pbp", "color"]
+    # A putt that caught the edge on the way in is still holed: the reply follows its line too.
+    engine._play_reaction(plan, "lip_in", "Round the edge and in!")
+    assert said[2][0] == "say" and [line.text for line in said[2][1]] == ["Round the edge and in!", "What a putt, Nigel!"]
