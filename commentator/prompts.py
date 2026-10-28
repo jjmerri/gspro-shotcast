@@ -70,7 +70,13 @@ or say when something happened beyond what the facts say (a mark from an earlier
 - Everything else is yours, and it's what makes this worth listening to: opinions, banter, golf insight (what \
 the flight says about the swing), callbacks to earlier shots, predictions, and the players' tendencies, \
 rivalries, bets and standings from the league notes. The two commentators should have chemistry and \
-disagree sometimes. They call each other by name ({names}).
+disagree sometimes. They know each other's names ({names}) but use them sparingly, like real broadcast \
+partners: at most one line in four, and never start a line with the other's name.
+- Silence is part of a great broadcast. Let a good shot breathe; not every shot needs the second voice. \
+When a line wouldn't add a laugh, a real opinion or a sharp insight, leave it out. Generic filler ("a fresh \
+challenge", "calls for a steadier touch", "a welcome change", "a reset") is dead air: never say it.
+- When the analyst speaks, give them a real take: commit to an opinion, a prediction they could be wrong \
+about, or a joke with an actual punchline. Hedged, mild observations are wasted lines.
 - You are usually handed more facts than belong in a line or two, on purpose. PICK the one or two most \
 interesting for THIS shot and this moment and leave the rest unsaid; you don't have to use a fact just \
 because it's there. Choose a different angle from shot to shot (the swing, a tendency, the stakes, a \
@@ -86,7 +92,8 @@ for its distance. Comparing with the league or the other players is fine when th
 comparison (the longest drive of the night, the best putter in the league); just never belittle someone's \
 length against longer hitters, and don't keep coming back to it.
 - A player's miss pattern (a shot that keeps going right, say) is worth one mention a round, maybe a callback \
-later; not a refrain on every swing.
+later; not a refrain on every swing. If the recent lines already mention it, leave it alone unless it breaks \
+(the first straight one) or costs them big.
 - Refer to players by name, or "they", unless the league notes give someone's pronouns. Never guess from a name.
 - Talk about the players, not to them, like a TV booth they can't hear: "Dan needs this one", never \
 "Same spot, Dan" or "That'll do, Dan". The same goes for the sign-off ("go enjoy it, lads").
@@ -497,9 +504,11 @@ def preshot_line_prompt(
         )
         return prompt, facts_text
     prompt = (
-        'PRE-SHOT LINE. The player is setting up to hit. Reply with "lines": one or two short scene-setting '
-        f'lines (at most 15 words each), usually from "{speaker}": the shot they face, what\'s at stake, the '
-        "storyline. You can't see the hole, so don't warn about a specific hazard ahead (water, bunkers, "
+        'PRE-SHOT LINE. The player is setting up to hit. Reply with "lines": often an empty list (an ordinary '
+        "shot with no storyline needs no setup). Otherwise one short scene-setting line (at most 15 words), "
+        f'usually from "{speaker}": the moment, what\'s at stake, the storyline, in a few well-chosen words. '
+        "Not a readout: the screen already shows the yardage and lie, so mention them only when they ARE the "
+        "story. You can't see the hole, so don't warn about a specific hazard ahead (water, bunkers, "
         "trees, out of bounds) unless the facts name it; keep it about the player and the moment. Given a "
         '"Strategy:" fact, you may fold the smart play into one clause (e.g. "with those bunkers short, you '
         'can\'t come up short here"), but only when it fits, never as a lecture. Don\'t predict the result.'
@@ -623,7 +632,9 @@ def opener_prompt(*, facts: list[str], recent_lines, now: datetime | None = None
         "the facts include them, and never invent a starter or a hole. Introduce each player by first and "
         "last name once, as the 'Playing' facts give it (a player with only one name there goes by that "
         "name; never invent a surname); first names are fine after that. Don't read out handicaps or list "
-        "everyone's numbers; one detail that matters beats five that don't."
+        "everyone's numbers; one detail that matters beats five that don't. Make it sound like the top of a "
+        "real broadcast with personality, not a press release: give the second voice an opinion, a needle or a "
+        "bold prediction to put on the record, rather than a recited stat."
         + (aside_room(max_words) if max_words else "")
     )
     return prompt, facts_text
@@ -639,8 +650,12 @@ def closer_prompt(*, facts: list[str], recent_lines, now: datetime | None = None
         "Tell the story of the round, don't recite the stats: pick the two or three threads that matter most "
         "and connect them (a player who kept missing fairways but still found greens, a hot putter that saved "
         "a round, one bad hole that undid a good card). Judge every score against the handicap: the net score "
-        "says whether it was a good round, not the gross. Finish with the team result if there is one, then "
-        "sign off. At most one number per line."
+        "says whether it was a good round, not the gross. When the facts give a team result, finish with it "
+        "(otherwise don't mention a team result at all), then sign off. At most one number per line, and lines with none are better: name the moment that mattered, "
+        "not the count. Give it personality: each commentator "
+        "commits to a clear opinion of the round (said naturally, never announced as a \"verdict\"), a callback "
+        "to a running joke or a prediction from the broadcast's recent lines if one landed, and a last line "
+        "people would remember, not a generic thanks-for-watching."
         + (aside_room(max_words) if max_words else "")
     )
     return prompt, facts_text
