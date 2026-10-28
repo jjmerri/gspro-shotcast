@@ -110,6 +110,26 @@ KNOWN_PAGES: dict[str, str | None] = {
     "bandon dunes": "Bandon Dunes Golf Resort",
     "pacific dunes": "Bandon Dunes Golf Resort",
     "sheep ranch": "Bandon Dunes Golf Resort",
+    # PGA Tour and major venues of the 2025 and 2026 seasons
+    "moline cc": "TPC Deere Run",  # card: "pays homage to TPC Deere Run"
+    "northern twin cities golf course": "TPC Twin Cities",  # card: TPC Twin Cities, Blaine MN
+    "aronimink golf club": "Aronimink Golf Club",
+    "waialae": "Waialae Country Club",
+    "memorial park golf course": "Memorial Park, Houston#Facilities",
+    "detroit gc-rmc": "Detroit Golf Club",
+    "the renaissance club": "Renaissance Club",
+    "the renaissance club tournament": "Renaissance Club",
+    "sedgefield": "Sedgefield Country Club",
+    "silverado resort & spa - north": "Silverado Resort",
+    "silverado resort & spa - south": "Silverado Resort",
+    "sea island seaside course": "Sea Island, Georgia#Golf",
+    "sea island plantation course": "Sea Island, Georgia#Golf",
+    "sgt west - stadium course": "PGA West",
+    "copperhead cc": "Innisbrook Resort and Golf Club",
+    "river highlands cc": "TPC River Highlands",
+    "old greenwood golf club": None,
+    "country club of jackson": None,
+    "the dunes golf and beach club": None,
 }
 
 

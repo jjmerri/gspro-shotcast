@@ -192,6 +192,23 @@ SIGNATURE_HOLES: dict[str, dict[int, str]] = {
     "cabotcliffs": {
         16: "Cabot Cliffs' par-3 16th, played across a chasm in the cliffs to a green above the Gulf of "
             "St. Lawrence."},
+    "shinnecock hills golf club": {
+        7: "Shinnecock Hills' par-3 7th, a Redan: in the final round of the 2004 U.S. Open its green got "
+           "so firm that officials watered it between groups."},
+    "sgt west - stadium course": {
+        17: "PGA West Stadium Course's par-3 17th, Alcatraz, an island green walled in by rocks, where Lee "
+            "Trevino made a hole-in-one in the 1987 Skins Game."},
+    "copperhead cc": {
+        16: "Copperhead's 16th, the start of the Snake Pit, the closing three holes at the Valspar "
+            "Championship.",
+        17: "Copperhead's par-3 17th, the middle of the Snake Pit, the Valspar Championship's closing stretch.",
+        18: "Copperhead's 18th, the last hole of the Snake Pit and of the Valspar Championship."},
+    "river highlands cc": {
+        15: "TPC River Highlands' 15th, a drivable par 4 with water down the left, at the Travelers "
+            "Championship.",
+        16: "TPC River Highlands' par-3 16th, played over the lake, at the Travelers Championship."},
+    "the dunes golf and beach club": {
+        13: "the Dunes Club's 13th, Waterloo, a long par 5 that bends around Lake Singleton."},
     # One par 3 played 18 times: say it once, on the first
     "paynes valley 19th": {
         1: "Payne's Valley's 19th hole, the Big Rock, a bonus par 3 played down to a green set among rock "
