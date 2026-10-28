@@ -102,7 +102,9 @@ def test_trivia_goes_by_gspros_course_id_and_never_by_screen_text(monkeypatch):
     assert asyncio.run(t.article("GAME MENU")) is None                 # OCR'd a menu: no lookup at all
     assert asyncio.run(t.article("Cabot Cliffs", None, "cabotcliffs_gsp")) is None   # known: no article
     assert asyncio.run(t.article("the_ancient_course"))[0] == "Old Course at St Andrews"
-    assert asked == [("TPC at Sawgrass", True), ("Old Course at St Andrews", True)]
+    assert asyncio.run(t.article("Georgia Golf Club"))[0] == "Augusta National Golf Club"  # renamed replica
+    assert asked == [("TPC at Sawgrass", True), ("Old Course at St Andrews", True),
+                     ("Augusta National Golf Club", True)]
 
 
 def test_a_searched_article_has_to_be_about_a_golf_course_and_a_known_section_is_cut_out():
