@@ -61,7 +61,7 @@ $tests = Join-Path $env:TEMP "shotcast-tests-$PID"
 $dev = & $Python -c "import tomllib; print(' '.join(tomllib.load(open(r'$pyproject', 'rb'))['project']['optional-dependencies']['dev']))"
 & "$tests\Scripts\python.exe" -m pip install --quiet --no-warn-script-location $dev.Split(" "); Check "Test tools"
 Push-Location $Root
-try { & "$tests\Scripts\python.exe" -m pytest -q -p no:cacheprovider; Check "Tests" }
+try { & "$tests\Scripts\python.exe" -m pytest -q -n auto -p no:cacheprovider; Check "Tests" }
 finally { Pop-Location; Remove-Item $tests -Recurse -Force -ErrorAction SilentlyContinue }
 Get-ChildItem (Join-Path $Build "python") -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
 

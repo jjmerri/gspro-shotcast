@@ -626,15 +626,15 @@ def opener_prompt(*, facts: list[str], recent_lines, now: datetime | None = None
         + _recent_block(recent_lines)
         + f"\n\nOpen the broadcast: {max_lines} lines at most, alternating between the two commentators. "
         "Welcome "
-        "everyone, say what the round's format means for these players, pick one storyline, rivalry or "
-        "prediction worth watching, and send us to the opening hole: name the hole and its par (from a "
+        "everyone, say what the round's format means for these players, pick one storyline or rivalry "
+        "worth watching, and send us to the opening hole: name the hole and its par (from a "
         "'First hole' fact) and who is first on the tee (from a 'First on the tee' fact), but only when "
         "the facts include them, and never invent a starter or a hole. Introduce each player by first and "
         "last name once, as the 'Playing' facts give it (a player with only one name there goes by that "
         "name; never invent a surname); first names are fine after that. Don't read out handicaps or list "
         "everyone's numbers; one detail that matters beats five that don't. Make it sound like the top of a "
-        "real broadcast with personality, not a press release: give the second voice an opinion, a needle or a "
-        "bold prediction to put on the record, rather than a recited stat."
+        "real broadcast with personality, not a press release: give the second voice an opinion or a needle "
+        "rather than a recited stat, and no predictions."
         + (aside_room(max_words) if max_words else "")
     )
     return prompt, facts_text

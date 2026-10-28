@@ -28,6 +28,12 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - name: pip cache
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: pip-windows-${{ hashFiles('pyproject.toml') }}
+          restore-keys: pip-windows-
       - name: Build
         shell: pwsh
         env:

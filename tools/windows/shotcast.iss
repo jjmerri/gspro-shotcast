@@ -34,7 +34,9 @@ UninstallDisplayIcon={app}\shotcast.ico
 UninstallDisplayName=Shotcast
 LicenseFile=..\..\LICENSE
 InfoBeforeFile=..\..\PRIVACY.md
-Compression=lzma2/max
+; Multithreaded normal compression builds in a fraction of the time of /max for a little more size.
+Compression=lzma2/normal
+LZMANumBlockThreads=4
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=force
