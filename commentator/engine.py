@@ -3691,7 +3691,7 @@ class Engine:
         # The opening tee shot can be struck before the round starts: the round is only known from the
         # setup read that follows the swing (a round quit and restarted, the first player swinging fast).
         if shot_round is None and before.shot_number == 1 and (cur := self.round) and not cur.ended \
-                and cur.seq == 1 and self._round_started_at > impact:
+                and cur.seq == 1 and self._round_started_at >= impact:
             shot_round, round_hole = cur, cur.seq
             if _hole_key(shot_hole) == _hole_key(self.state.current_hole):
                 shot_hole = self.state.current_hole   # the opening hole's label once the round numbered it
