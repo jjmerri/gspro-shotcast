@@ -2063,6 +2063,26 @@ async def test_range_keeps_the_booth_off(tmp_path):
     assert e._is_round_start(tee)
 
 
+async def test_a_swing_gspro_never_played_is_ignored(tmp_path, monkeypatch):
+    import commentator.engine as engine_mod
+    from commentator.models import Shot, ShotEvent
+    from commentator.sources.gspro_log import LogEvent
+
+    # A practice swing while the course loads: GSPconnect sends it, but GSPro's log never fires it.
+    monkeypatch.setattr(engine_mod, "UNPLAYED_SHOT_WAIT_SECONDS", 0.3)
+    e = _engine(tmp_path)
+    e.cfg.source.gspro_log_truth = True
+    e._follower = type("Follower", (), {"primed": True})()
+    e.gspro.version, e.gspro.mode = "3.1.6.20", "course"
+    swing = Hud(player_text="MikeD E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards")
+    await e.handle_shot(ShotEvent(shot=Shot(club="7I", carry=150.0), hud_hint=swing))
+    assert e.state.shots == [] and e._shot_seq == 0
+    assert e.store.db.execute("SELECT COUNT(*) FROM shots").fetchone()[0] == 0
+    # One GSPro did play goes through.
+    e.gspro.apply(LogEvent("shot_fired"))
+    await e.handle_shot(ShotEvent(shot=Shot(club="7I", carry=150.0), hud_hint=swing))
+    assert e._shot_seq == 1 and len(e.state.shots) == 1
+
 async def test_an_eighteen_counted_as_nine_plays_on_until_gspro_completes_it(tmp_path):
     from commentator.models import ScorecardEvent
 

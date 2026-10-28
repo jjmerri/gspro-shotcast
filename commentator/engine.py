@@ -263,6 +263,9 @@ NEWS_TRIGGER_TAGS = {
 TREE_CALL_PENALTY = 15.0
 # How long after impact a tree hit is watched for (GSPro logs foliage hits within ~0.3 s of impact).
 TREE_CALL_WATCH_SECONDS = 3.0
+# How long after impact, outside a round, GSPro's log gets to say it played a shot (its "Shot Fired"
+# comes within about half a second): one it never logs was hit while GSPro couldn't take it.
+UNPLAYED_SHOT_WAIT_SECONDS = 2.5
 TREE_CALLS = ("Oh, that's into the trees!", "That's caught a branch!", "Oh no, it's clipped the tree!",
               "Ooh, that's found the trees!")
 TREE_LOW_CALLS = ("Oh, that's clipped something low!", "That's into the bushes!")
@@ -1180,6 +1183,23 @@ class Engine:
     def _log_rounds(self) -> bool:
         """GSPro's own log is followed, so it (not a guessed hole count) says when a round ends."""
         return self._log_truth
+
+    async def _gspro_played(self, fires0: int, impact: float) -> bool:
+        """Whether GSPro took the shot. The launch monitor sends a swing in the menus or during a
+        course's loading screen too (a practice swing while it loads), but GSPro plays none of them:
+        its log never says "Shot Fired". Those aired as shots on the last hole and kept the opener
+        waiting. Checked only outside a round, so a shot in play never waits on the log."""
+        if not self._log_truth or self._follower is None or not self._follower.primed or not self.gspro.version:
+            return True   # GSPro's log isn't being followed: nothing to tell by
+        r = self.round
+        if r is not None and not r.ended and self.gspro.mode == "course":
+            return True
+        deadline = impact + UNPLAYED_SHOT_WAIT_SECONDS
+        while self.gspro.fire_of(fires0, impact) is None:
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.1)
+        return True
 
     def _on_range(self) -> bool:
         """GSPro is on the driving range, where the booth stays off: no commentary, nothing recorded."""
@@ -3503,16 +3523,21 @@ class Engine:
             return
         # A shot the feed held back (GSPconnect skipped it) carries its impact time and state.
         impact = event.impact_at or time.monotonic()
+        held = event.impact_state
+        impact_snap, fires0, setups0, lies0 = held[0] if held else self._impact_state()
+        # The reaction runs in the background and may finish after the hole has changed; pin the
+        # hole and par to this shot so a late reaction still talks about the right hole.
+        shot_hole, shot_par, shot_round, round_hole = held[1:] if held else self._impact_hole()
+        if not held and not await self._gspro_played(fires0, impact):
+            log.info("Shot ignored: GSPro never played it (struck in the menus or while a course loads; "
+                     "club %s, ball %.1f mph, carry %.1f)", event.shot.club, event.shot.ball_speed or 0,
+                     event.shot.carry or 0)
+            return
         self._last_activity = time.monotonic()
         self._live_shot()
         self._cancel_preshot()
         self._shot_id = None  # set once this shot is recorded; mid-flight lines come before that
-        held = event.impact_state
-        impact_snap, fires0, setups0, lies0 = held[0] if held else self._impact_state()
         self._apply_log_corrections()
-        # The reaction runs in the background and may finish after the hole has changed; pin the
-        # hole and par to this shot so a late reaction still talks about the right hole.
-        shot_hole, shot_par, shot_round, round_hole = held[1:] if held else self._impact_hole()
         shot = event.shot
         self._shot_seq += 1
         my_seq = self._shot_seq   # this shot's order, to keep concurrent handlers from reordering finish
