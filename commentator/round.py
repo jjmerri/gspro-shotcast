@@ -464,6 +464,30 @@ class Round:
     def was_picked_up(self, names: list[str], seq: int) -> bool:
         return any((n, seq) in self.picked_up for n in names)
 
+    def running_to_par(self, player: str | None, records: list = ()) -> int | None:
+        """A player's round score to par through the holes they've finished, from our own scores (GSPro's
+        log, else the card): None when a hole before the current one has no score or par to count."""
+        gspro = [g for g, p in self.roster.items() if g == player or p == player]
+        side = self.side_for(player)
+        if not player or not (gspro or side):
+            return None
+        total = 0
+        for seq in range(1, self.holes + 1):
+            if self.format in TEAM_BALL and side:
+                score = self.card_score(side, seq)
+            else:
+                score = next((v for g in gspro or side.gspro if (v := self.score_of(g, seq)) is not None), None)
+            if score is None:
+                if seq < self.seq:
+                    return None
+                continue
+            par = self.par.get(seq) or next((r.par for r in records
+                                             if r.round_id == self.id and r.hole_seq == seq and r.par), None)
+            if not par:
+                return None
+            total += score - par
+        return total
+
     def complete(self) -> bool:
         return all(self.card_score(side, seq) is not None for side in self.sides for seq in range(1, self.holes + 1))
 
@@ -637,6 +661,10 @@ class Round:
             if par >= 4 and tee:
                 fir_tries += 1
                 fir += any(r.hud.lie == "fairway" for r in tee)
+            elif par >= 4 and self.player_format(player) not in TEAM_BALL \
+                    and (hit := _own_tee_ball_fairway(recs)) is not None:
+                fir_tries += 1
+                fir += hit
             first_green = min((r.shot_number for r in green if r.shot_number), default=None)
             hole_gir = None   # unknown when the reads can't place it
             if first_green:
@@ -1068,7 +1096,24 @@ def _fairway_hit(recs: list, scramble: bool) -> bool | None:
             return "fairway" in picked
         if tee and len({lie == "fairway" for lie in tee}) > 1:
             return None
-    return "fairway" in tee if tee else None
+    if tee:
+        return "fairway" in tee
+    return _own_tee_ball_fairway(recs) if not scramble else None
+
+
+def _own_tee_ball_fairway(recs: list) -> bool | None:
+    """One player's tee shot when its resting lie went unread (the screen moved to the next player
+    first, or the ball went out of bounds): the second stroke's lie is where it rested, and a penalty
+    off the tee (the next stroke numbered 3 or more) is a missed fairway, as the PGA Tour counts it."""
+    if len({r.player for r in recs}) != 1:
+        return None   # partners' balls: which tee shot the next stroke follows isn't known
+    later = sorted(r.shot_number for r in recs if r.shot_number and r.shot_number > 1)
+    if not later or not any(r.shot_number == 1 for r in recs):
+        return None
+    if later[0] > 2:
+        return False
+    nxt = [r.lie_before for r in recs if r.shot_number == 2 and r.lie_before not in (None, "tee")]
+    return "fairway" in nxt if nxt else None
 
 
 def _drive_yards(rec) -> float | None:

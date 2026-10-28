@@ -118,8 +118,13 @@ def parse_player_box(items: list[str]) -> dict:
         out["shot_number"] = int(m.group(1))
     if m := SCORE.search(text):
         out["score_to_par"] = m.group(1)
-    elif any(t.strip() == "E" for t in items):
-        out["score_to_par"] = "E"
+    else:
+        # On the tee GSPro shows the score bare ("+4", "E"), not in brackets after a stroke ordinal.
+        head = text[:m.start()] if (m := SHOT.search(text)) else text
+        if (words := head.split()) and SCORE_BADGE.match(words[-1]):
+            out["score_to_par"] = words[-1]
+        elif any(t.strip() == "E" for t in items):
+            out["score_to_par"] = "E"
     # The first distance after "Shot N" is to the pin; the second is elevation.
     after_shot = text[m.end():] if (m := SHOT.search(text)) else text
     if d := DISTANCE.search(after_shot):

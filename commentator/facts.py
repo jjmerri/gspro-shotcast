@@ -146,6 +146,18 @@ def ordinal(n: int) -> str:
     return f"{n}{suffix}"
 
 
+def _total_yards(rec: ShotRecord) -> float | None:
+    """How far a recorded shot went in all (GSPro's total length tile), in yards, when it was read.
+    Only for a shot seen to land (its game carry was kept): otherwise the tile can be the last shot's."""
+    hud = rec.hud
+    if rec.carry_game is None:
+        return None
+    m = re.search(r"\d+(?:\.\d+)?", (hud.tiles or {}).get("total length", "") if hud else "")
+    if not m:
+        return None
+    return float(m.group(0)) * (1.0936 if (hud.to_pin or "").endswith("metres") else 1)
+
+
 def history_facts(player: str | None, prior: list[ShotRecord]) -> list[str]:
     who = player or "This player"
     whose = who + ("'" if who.endswith("s") else "'s")
@@ -157,6 +169,10 @@ def history_facts(player: str | None, prior: list[ShotRecord]) -> list[str]:
         if full[-1].carry_game:   # GSPro's carry, not the launch monitor's flat one ("the 269-yard drive")
             last = replace(last, carry=full[-1].carry_game, units="Yards")
         desc = " ".join(shot_facts(last)).replace("Club: ", "").rstrip(".")
+        if (total := _total_yards(full[-1])) is not None:
+            # A chip carries a couple of yards and rolls the rest: the carry alone made a 5-yard lob
+            # wedge "that two-yard lob wedge".
+            desc += f". It went {total:.0f} yards in all, carry and roll (say this, not the carry, for how far it went)"
         facts.append(f"{whose} previous full shot: {desc}.")
     # Only state a streak when the code has counted it, so the model can't invent one.
     sides = [("right" if r.shot.hla > 2 else "left" if r.shot.hla < -2 else "straight")
@@ -351,6 +367,9 @@ def preshot_facts(hud, hole_par: int | None, handed: str | None = None) -> list[
                          else f"The ball is about {feet:.0f} feet from the hole.")
         else:
             facts.append(f"The pin is {hud.to_pin} away.")
+            if hud.shot_number and hud.shot_number > 1:
+                # The hole's length is in its name; a 14-yard pitch was called "150 yards on this par three".
+                facts.append("That's this shot's distance; the hole's listed length is from the tee, not from here.")
     if hud.lie:
         prep = "on" if hud.lie in ("green", "tee", "fringe") else "in"
         facts.append(f"The ball currently lies {prep} the {hud.lie}.")
@@ -369,7 +388,10 @@ def preshot_facts(hud, hole_par: int | None, handed: str | None = None) -> list[
     if putting and diff is not None and (name := SCORE_NAMES.get(diff)):
         line = f"If this putt is holed it's {name} on the hole"
         if round_par is not None:
-            line += f", which takes the round to {_fmt_to_par(round_par + diff)}"
+            # From and to: "for bogey to stay at one over" and "the double, three over for the round"
+            # (at +21) both came from the end number alone.
+            line += (f", which moves the round from {_fmt_to_par(round_par)} to {_fmt_to_par(round_par + diff)}"
+                     if diff else f", which keeps the round at {_fmt_to_par(round_par)}")
         facts.append(line + ".")
     elif (pin := to_yards(hud.to_pin)) is not None and pin < 60 and diff is not None \
             and (name := SCORE_NAMES.get(diff + 1)):

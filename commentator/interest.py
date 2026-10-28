@@ -5,6 +5,7 @@ from .models import Shot
 from .state import ShotRecord
 
 TROUBLE_LIES = ("water", "hazard", "out of bounds", "bunker", "sand", "trees", "deep rough", "fescue", "native")
+MISHIT_FROM_YARDS = 60
 
 
 def _to_feet(to_pin: str | None) -> float | None:
@@ -19,10 +20,12 @@ def _to_feet(to_pin: str | None) -> float | None:
     return None
 
 
-def score_shot(shot: Shot, prior: list[ShotRecord], hud: Hud) -> tuple[float, list[str]]:
+def score_shot(shot: Shot, prior: list[ShotRecord], hud: Hud,
+               from_yards: float | None = None) -> tuple[float, list[str]]:
     """Rough 0..1 'is this worth talking about' score, plus tags explaining why.
 
-    Tags go into the prompt too, so the model knows what stood out.
+    Tags go into the prompt too, so the model knows what stood out. `from_yards` is how far from the
+    pin the shot was played: a short carry is only a mishit when the ball had much further to go.
     """
     score = 0.0
     tags: list[str] = []
@@ -74,7 +77,9 @@ def score_shot(shot: Shot, prior: list[ShotRecord], hud: Hud) -> tuple[float, li
         score += 0.25
         tags.append("big_slice_or_fade" if axis > 0 else "big_hook_or_draw")
 
-    if (shot.ball_speed or 0) < 70 and carry < 60 and shot.club not in (None, "SW", "LW", "GW", "PW"):
+    # An iron chipped from beside the green carries a few yards on purpose: not a mishit.
+    if (shot.ball_speed or 0) < 70 and carry < 60 and shot.club not in (None, "SW", "LW", "GW", "PW") \
+            and (from_yards is None or from_yards >= MISHIT_FROM_YARDS):
         score += 0.5
         tags.append("mishit")
 

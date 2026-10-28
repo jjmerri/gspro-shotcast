@@ -1053,6 +1053,9 @@ def test_hud_parsers_on_real_ocr_output():
     p = parse_player_box(["Mixtape_Golf", "4th (-1)", "Shot 4", "19.5 YDS", "▲4FT 6"])
     assert p["shot_number"] == 4 and p["score_to_par"] == "-1" and p["to_pin"] == "19.5 yards"
     assert parse_player_box(["Mixtape_Golf", "E", "Shot 1", "359.1 YDS", "5.0YDS"])["score_to_par"] == "E"
+    # On the tee the score is bare, not bracketed: "+4" was read as no score at all.
+    assert parse_player_box(["Drew", "+4", "Shot 1", "504.7 YDS", "OFT 4"])["score_to_par"] == "+4"
+    assert parse_player_box(["Dan -1", "Shot 1", "300.6 YDS", "5.0 YDS"])["score_to_par"] == "-1"
     assert parse_player_box(["Mixtape_Golf", "3rd (E)", "Shot 3", "10 FT 8", "OFT O"])["to_pin"] == "10 feet 8 inches"
     assert parse_player_box(["MyGolfQuest", "2nd (E)", "Shot 2", "98.2 m", "50"])["to_pin"] == "98.2 metres"
 
@@ -2538,7 +2541,49 @@ def test_a_chip_is_framed_as_up_and_down_not_a_holed_birdie():
     chip = " ".join(preshot_facts(Hud(lie="fairway", to_pin="23.4 yards", shot_number=3, score_to_par="+3"), 4))
     assert "birdie" not in chip and "up and down" in chip and "makes a par" in chip
     putt = " ".join(preshot_facts(Hud(lie="green", to_pin="9 feet", shot_number=3, score_to_par="+3"), 4))
-    assert "If this putt is holed it's a birdie on the hole, which takes the round to +2" in putt
+    assert "If this putt is holed it's a birdie on the hole, which moves the round from +3 to +2" in putt
+    par_putt = " ".join(preshot_facts(Hud(lie="green", to_pin="4 feet", shot_number=4, score_to_par="+1"), 4))
+    assert "which keeps the round at +1" in par_putt
+
+
+def test_a_round_score_the_facts_dont_give_is_rejected():
+    from commentator.grounding import check_line, wrong_round_score
+
+    facts = "If this putt is holed it's a double bogey on the hole, which moves the round from +21 to +23."
+    assert wrong_round_score("Drew holes the double-bogey putt, making it three over for the round.", facts)
+    assert wrong_round_score("Drew holes it, moving to twenty-three over.", facts) is None
+    assert wrong_round_score("Dan rolls it home for birdie, moving to five over.", "from +6 to +5") is None
+    assert wrong_round_score("That's two over on the hole.", facts) is None   # the hole, not the round
+    # A swing measurement isn't a round score, and a compound number is read whole.
+    assert wrong_round_score("Three over for the round.", facts + " Swing path +3.5 degrees.")
+    assert wrong_round_score("Forty-one over for the round.", "from +40 to +41") is None
+    assert wrong_round_score("Forty-one over for the round.", "from +2 to +1")
+    assert not check_line("Moving to three over for the round.", facts, "", mode="preshot").ok
+    assert check_line("Moving to three over for the round.", facts, "", mode="round").ok
+
+
+def test_parse_lines_strips_a_speaker_label_run_into_the_line():
+    lines = parse_lines(json.dumps({"lines": [{"speaker": "pbp", "text": "I'm calling this one in. Nigel: Dan rolls it home."}]}),
+                        ["pbp", "color"], 30, ["Nigel", "Duke"])
+    assert lines[0].text == "I'm calling this one in. Dan rolls it home."
+
+
+def test_a_short_iron_chip_is_not_a_mishit():
+    chip = Shot(club="8I", carry=7, ball_speed=25)
+    assert "mishit" not in score_shot(chip, [], Hud(lie="green"), from_yards=13)[1]
+    assert "mishit" in score_shot(chip, [], Hud(lie="rough"), from_yards=150)[1]
+
+
+def test_previous_shot_fact_gives_how_far_it_went_not_just_the_carry():
+    from commentator.facts import history_facts
+
+    rec = ShotRecord("Drew", Shot(club="LW", carry=2.1, units="Yards"), None,
+                     Hud(to_pin="11.7 yards", tiles={"total length": "5.3"}), [], carry_game=2.1)
+    prev = next(f for f in history_facts("Drew", [rec]) if "previous full shot" in f)
+    assert "went 5 yards in all" in prev
+    # Not seen to land: the tile may still be the last shot's 250, so no total is given.
+    rec.carry_game, rec.hud.tiles["total length"] = None, "250"
+    assert "in all" not in next(f for f in history_facts("Drew", [rec]) if "previous full shot" in f)
 
 
 def test_gimme_circle_fact_flags_a_short_putt_just_outside(tmp_path):

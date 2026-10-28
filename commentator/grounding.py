@@ -17,6 +17,51 @@ WORD_CLAIM = re.compile(
     r"\b(" + "|".join(NUMBER_WORDS) + r")[\s-]+(in a row|straight|yards?|feet|foot|ft|mph|putts?|shots?|strokes?|holes?|points?)\b"
 )
 
+# A round score to par stated in a shot line ("three over for the round", "moving to five over"). The
+# hole's own score ("two over on the hole") isn't matched: only a round marker or a move to a score.
+_TENS = ("twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety")
+_SCORE_NUM = r"(?<![\w-])(even|level|(?:" + "|".join(_TENS) + r")(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|" \
+    + "|".join(sorted((w for w in NUMBER_WORDS if w not in _TENS), key=len, reverse=True)) + r"|one|\d+)"
+ROUND_SCORE_CLAIMS = (
+    re.compile(rf"{_SCORE_NUM}(?:\s+(over|under))?(?:\s+par)?\s+(?:for|on)\s+the\s+(?:round|day|night)\b"),
+    re.compile(rf"\b(?:moves?|moving|slips?|slipping|drops?|dropping|stays?|staying|stay|sits?|sitting|remains?|"
+               rf"goes|going|gets|getting|falls?|falling|climbs?|climbing|back|keeps? (?:him|her|them|it))"
+               rf"\s+(?:(?:him|her|them|it)\s+)?(?:to|at)\s+{_SCORE_NUM}(?:\s+(over|under)|\s+par)\b"),
+)
+# Only whole signed numbers state a score to par: a "+3.5" swing path or a "+3 degrees" slope doesn't.
+_ROUND_FACT = re.compile(r"(?<![\w.])([+-]\d+)(?!\d|\.\d|\s*(?:°|%|(?:degrees?|mph|rpm|yards?|feet|ft|percent)\b))"
+                         r"|\beven par\b|\bE\b")
+
+
+def _score_word_value(word: str) -> int | None:
+    word = word.replace("-", " ")
+    if word in ("even", "level"):
+        return 0
+    if word.isdigit():
+        return int(word)
+    parts = word.split()
+    words = {**NUMBER_WORDS, "one": 1}
+    if all(p in words for p in parts):
+        return sum(words[p] for p in parts)
+    return None
+
+
+def wrong_round_score(line: str, facts: str) -> str | None:
+    """The round score to par a line claims when no fact gives it ("three over for the round" at +23)."""
+    lowered = line.lower()
+    allowed = {0 if m.group(1) is None else int(m.group(1)) for m in _ROUND_FACT.finditer(facts)}
+    for pattern in ROUND_SCORE_CLAIMS:
+        for m in pattern.finditer(lowered):
+            value = _score_word_value(m.group(1))
+            if value is None:
+                continue
+            if value and not m.group(2):
+                continue   # "five for the round" isn't a score to par
+            claim = -value if m.group(2) == "under" else value
+            if claim not in allowed:
+                return m.group(0)
+    return None
+
 # Words that always need explicit support: they claim something happened, whatever the phrasing.
 OUTCOMES = {
     "water": ("water", "hazard", "penalty"),
@@ -144,6 +189,8 @@ def check_line(
     for word, _unit in WORD_CLAIM.findall(lowered):
         if not near_a_fact(float(NUMBER_WORDS[word])):
             problems.append(f'"{word}" is a count the facts don\'t give')
+    if mode not in ("round", "news") and (said := wrong_round_score(line, facts)):
+        problems.append(f'"{said}": that round score isn\'t in the facts')
 
     facts_lower = facts.lower()
     # Normalised the same way as the line's words: GSPro's "sand" lie is a bunker for this purpose.

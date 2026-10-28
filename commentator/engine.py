@@ -24,7 +24,8 @@ from .facts import (
 )
 from .flight_pick import FlightPlan, Hazard, pick_line, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
-from .grounding import SCENERY, bare_acknowledgement, check_line, meta_talk, ngrams, note_keywords, repeats, uses_note
+from .grounding import (SCENERY, bare_acknowledgement, check_line, meta_talk, ngrams, note_keywords, repeats, uses_note,
+                        wrong_round_score)
 from .hud import NAME_DARK, Hud, describe, hole_key, name_sig_changed
 from .interest import (LEAGUE_BEST_DRIVE_LEVEL, LONG_HOLED_PUTT_FEET, SEASON_BEST_DRIVE_LEVEL,
                        approach_gimme_level, holed_out_level, holed_putt_score, score_shot,
@@ -689,6 +690,7 @@ class Engine:
         self._players_snap: tuple | None = None
         self._idle_card_logged: dict | None = None
         self._scramble_pairs: set = set()   # the log's teammate pairs last applied to the round
+        self._round_started_at = 0.0   # monotonic time the current round started
         self._opener_gen = 0
         # Set when a round opens so the one redundant, late pre-shot on the opening tee shot is skipped.
         self._skip_opening_preshot = False
@@ -2455,6 +2457,18 @@ class Engine:
         # exists for them, but surfacing here would duplicate verbatim.
         return facts
 
+    def _use_own_scores(self, hud: Hud, player: str | None) -> None:
+        """Round scores to par from our own tally of finished holes in place of the HUD's (an OCR read
+        that can miss or garble), for this player and the others on screen; the HUD's where we can't."""
+        r = self.round
+        if r is None or r.ended:
+            return
+        if (own := r.running_to_par(player, self.state.shots)) is not None:
+            hud.score_to_par = "E" if own == 0 else f"{own:+d}"
+        for other in hud.others:
+            if (own := r.running_to_par(self._player(other.name), self.state.shots)) is not None:
+                other.score_to_par = "E" if own == 0 else f"{own:+d}"
+
     def _stakes_facts(self, hud: Hud, player: str | None) -> list[str]:
         """The match situation late in a league round: holes left and where this player stands against
         the field on the card, so the booth can put weight on a shot that's actually for something."""
@@ -3047,6 +3061,7 @@ class Engine:
         if is_putt and putt_task is None and self.putt_reader:
             putt_task = self._start_putt_read()   # a putt the distance didn't give away (metres)
         putt = await self._await_putt(putt_task, is_putt)
+        self._use_own_scores(hud, player)
         facts = (preshot_facts(hud, self.current_par, self.handed.get(player or ""))
                  + self._mulligan_facts(player, hud)
                  + self._penalty_facts(player, hud.shot_number) + self._truth_context_facts(is_putt, idx)
@@ -3418,6 +3433,9 @@ class Engine:
             if putt_for and (named := wrong_putt_score(body, *putt_for, holed=outcome == "holed")):
                 log.info("Dropped the pre-written %s reaction (calls a putt for %s): %r", outcome, named, body)
                 continue
+            if said := wrong_round_score(body, facts_text):
+                log.info("Dropped the pre-written %s reaction (round score %r isn't in the facts): %r", outcome, said, body)
+                continue
             out[outcome] = body
         return out
 
@@ -3670,6 +3688,14 @@ class Engine:
             score_to_par=before.score_to_par, lie=after.lie, tiles=after.tiles,
         )
         player = player or self._player(hud.player_text, event.player_hint)
+        # The opening tee shot can be struck before the round starts: the round is only known from the
+        # setup read that follows the swing (a round quit and restarted, the first player swinging fast).
+        if shot_round is None and before.shot_number == 1 and (cur := self.round) and not cur.ended \
+                and cur.seq == 1 and self._round_started_at > impact:
+            shot_round, round_hole = cur, cur.seq
+            if _hole_key(shot_hole) == _hole_key(self.state.current_hole):
+                shot_hole = self.state.current_hole   # the opening hole's label once the round numbered it
+            log.info("%s struck just before round %s started: it's the round's opening tee shot", tag, cur.id)
         unit = "metres" if (hud.to_pin or before.to_pin or "").endswith("metres") else "yards"
 
         def tile_yards(name: str) -> float | None:
@@ -3709,7 +3735,7 @@ class Engine:
                 log.warning("%s mid-flight call failed", tag, exc_info=True)
 
         prior = self.state.player_shots(player or "unknown")
-        score, tags = score_shot(shot, prior, hud)
+        score, tags = score_shot(shot, prior, hud, to_yards(before.to_pin))
         # A standout club delivery (big angle of attack, a real shape, a flush or a clear mishit) is
         # worth a word even when the result was ordinary, so it crosses the interest threshold and
         # gets a live reaction carrying the club facts below. Only for players with the markers.
@@ -5453,6 +5479,7 @@ class Engine:
             log.info("Booth idle for hours: round %s starts a new session (%s)", r.id, self.store.session_id)
             self.state.shots.clear()   # "today" starts over with the new session
         self.round = r
+        self._round_started_at = time.monotonic()
         self.state.recent_lines.words.reset()
         r.shot_floor = self.store.last_shot_id()
         self._hc = RoundCounters(fires_at_start=self.gspro.fires, kinds_at_start=dict(self.gspro.kinds))

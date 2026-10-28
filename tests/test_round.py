@@ -138,6 +138,32 @@ def test_player_stats_computes_the_same_from_one_players_shots():
     assert r.player_stats("Nobody", shots).holes_scored == 0   # a player with no shots gets nothing
 
 
+def test_running_to_par_is_our_own_tally_of_finished_holes():
+    r, card, shots = _three_hole_round()
+    r.par = {1: 4, 2: 3}                  # hole 3's par only on its shot records
+    r.set_log_scores("MikeD", {1: 5, 2: 3})
+    r.seq = 3
+    assert r.running_to_par("MikeD", shots) == 1          # bogey, par, hole 3 still in play
+    r.set_log_scores("MikeD", {1: 5, 2: 3, 3: 3})
+    assert r.running_to_par("MikeD", shots) == -1         # an eagle on the par 5
+    assert r.running_to_par("MikeD") is None              # no par for hole 3: the screen's read stands
+    r.set_log_scores("MikeD", {1: 5})
+    assert r.running_to_par("MikeD", shots) is None       # hole 2 finished but not scored
+    assert r.running_to_par("Nobody", shots) is None
+
+
+def test_an_unread_tee_lie_falls_back_to_the_next_shot_or_a_penalty():
+    # Hole 1's tee lie wasn't read (the HUD moved on): shot 2 played from the rough is a missed fairway.
+    r, card, shots = _three_hole_round()
+    shots[0].hud.lie, shots[1].lie_before = None, "rough"
+    assert r.player_stats("Mike", shots).fir == (1, 2)
+    shots[1].lie_before = "fairway"
+    assert r.player_stats("Mike", shots).fir == (2, 2)
+    # Out of bounds off the tee: no lie, and the next stroke is the third. A miss.
+    shots[1].shot_number = 3
+    assert r.player_stats("Mike", shots).fir == (1, 2)
+
+
 def test_player_stats_reads_the_card_so_a_conceded_bogey_is_not_a_save():
     # Par 4 missed into greenside sand, out to 5 ft, tap-in conceded -> a real bogey 5. The conceded
     # putt leaves no shot record, so the shots alone imply a 4 (a false up-and-down). The scorecard has
@@ -2001,6 +2027,24 @@ def _queued(e):
     while not e._events.empty():
         out.append(e._events.get_nowait())
     return out
+
+
+async def test_a_tee_shot_struck_just_before_the_round_starts_is_its_opening_shot(tmp_path):
+    from commentator.models import RoundStartEvent, Shot, ShotEvent
+
+    # A round quit and restarted: the first drive goes before the setup read that starts the round.
+    e = _engine(tmp_path)
+    e.cfg.commentary.closer = e.cfg.commentary.opener = False
+    tee = Hud(player_text="MikeD E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards", lie="tee")
+    drive = ShotEvent(shot=Shot(club="DR", carry=250.0), hud_hint=tee, impact_hud_hint=tee)
+    e.state.current_hole = "par 4, 400 yards"   # the banner's number not read yet
+    e._capture_impact(drive)
+    await e.handle_round_start(RoundStartEvent(hud=tee))
+    e.state.current_hole = "Hole 1, par 4, 400 yards"   # the round numbered its opening hole
+    await e.handle_shot(drive)
+    rec = e.state.shots[-1]
+    assert (rec.round_id, rec.hole_seq, rec.shot_number) == (e.round.id, 1, 1)
+    assert rec.hole == "Hole 1, par 4, 400 yards"
 
 
 async def test_range_keeps_the_booth_off(tmp_path):

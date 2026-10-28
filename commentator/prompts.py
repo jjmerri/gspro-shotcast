@@ -670,6 +670,9 @@ def parse_lines(text: str, speakers: list[str], max_words: int, names: list[str]
     # leading role/name prefix so it isn't spoken. Matches a persona key or its display name.
     labels = {s.lower() for s in speakers} | {str(n).lower() for n in (names or [])}
     prefix = re.compile(r"^\s*(" + "|".join(re.escape(l) for l in labels) + r")\s*:\s*", re.I) if labels else None
+    # ...or runs two speakers' lines into one ("I'm calling this one in. Nigel: Dan rolls it home").
+    inner = re.compile(r"(?<=[.!?])\s+(?:" + "|".join(re.escape(l) for l in labels) + r")\s*:\s*", re.I) \
+        if labels else None
     lines: list[Line] = []
     for item in items:
         if not isinstance(item, dict):
@@ -677,6 +680,8 @@ def parse_lines(text: str, speakers: list[str], max_words: int, names: list[str]
         body = " ".join(str(item.get("text", "")).split())
         while prefix and (m := prefix.match(body)):
             body = body[m.end():]
+        if inner:
+            body = inner.sub(" ", body)
         if not body or body.strip(" .,:;!?-\"'").lower() in labels:   # just a speaker label ("pbp")
             continue
         words = body.split()
