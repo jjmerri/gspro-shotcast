@@ -7,7 +7,10 @@ from types import SimpleNamespace
 from commentator.engine import PreparedNews
 from commentator.models import Line
 from commentator.scores import ScoreItem, parse_games, parse_tour
-from commentator.trivia import _words, clean
+import asyncio
+
+from commentator.signature_holes import signature_hole
+from commentator.trivia import CourseTrivia, _words, clean, course_key, section_of
 from tests.test_round import _engine
 
 NOW = datetime(2026, 10, 20, 18, 5, tzinfo=timezone(timedelta(hours=-4)))
@@ -68,6 +71,73 @@ def test_trivia_keeps_the_prose_and_matches_on_a_distinctive_word():
     assert clean(text) == "Bethpage Black is a golf course.\n\n== History ==\nOpened in 1936."
     assert _words("Riviera") & _words("Riviera Country Club")
     assert not _words("The Ancient Course") & _words("Golf course")
+
+
+class _Page:
+    def __init__(self, title, text):
+        self.title, self.text = title, text
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"query": {"pages": [{"title": self.title, "extract": self.text}]}}
+
+
+def test_trivia_goes_by_gspros_course_id_and_never_by_screen_text(monkeypatch):
+    t, asked = CourseTrivia({"The Ancient Course": "Old Course at St Andrews"}), []
+
+    async def _extract(client, title, known=False):
+        asked.append((title, known))
+        return title, "text"
+
+    async def _search(client, course):
+        asked.append(("search", course))
+        return []
+
+    monkeypatch.setattr(t, "_extract", _extract)
+    monkeypatch.setattr(t, "_search", _search)
+    assert course_key("dpc_sodgrass_gsp") == course_key("DPC Sodgrass") == "dpc sodgrass"
+    assert asyncio.run(t.article("Sodgrass Links", "SODGRASS LINKS", "dpc_sodgrass_gsp"))[0] == "TPC at Sawgrass"
+    assert asyncio.run(t.article("GAME MENU")) is None                 # OCR'd a menu: no lookup at all
+    assert asyncio.run(t.article("Cabot Cliffs", None, "cabotcliffs_gsp")) is None   # known: no article
+    assert asyncio.run(t.article("the_ancient_course"))[0] == "Old Course at St Andrews"
+    assert asked == [("TPC at Sawgrass", True), ("Old Course at St Andrews", True)]
+
+
+def test_a_searched_article_has_to_be_about_a_golf_course_and_a_known_section_is_cut_out():
+    words = " ".join(["word"] * 90)
+
+    class _Client:
+        def __init__(self, text):
+            self.text = text
+
+        async def get(self, url, params):
+            return _Page(params["titles"], self.text)
+
+    t = CourseTrivia()
+    game = f"Golf is a golf video game published by Nintendo.\n\n== Gameplay ==\n{words}"
+    assert asyncio.run(t._extract(_Client(game), "Golf (1984 video game)")) is None
+    club = f"Riviera Country Club is a private club with a championship golf course.\n\n== History ==\n{words}"
+    assert asyncio.run(t._extract(_Client(club), "Riviera Country Club"))[0] == "Riviera Country Club"
+    hotel = (f"Wynn is a casino.\n\n== Features ==\nShows.\n\n=== Golf course ===\nThe Wynn Golf Club. {words}"
+             f"\n\n=== Pools ===\nWet.\n\n== References ==\nx")
+    assert section_of(hotel, "Golf course") == f"The Wynn Golf Club. {words}"
+    assert asyncio.run(t._extract(_Client(hotel), "Wynn Las Vegas#Golf course", known=True))[1].startswith("The Wynn")
+
+
+def test_a_famous_hole_is_told_once_on_the_first_tee_shot_there(tmp_path):
+    assert "island-green" in signature_hole(["Sodgrass?", "dpc_sodgrass_gsp"], 17)
+    assert signature_hole(["dpc_sodgrass_gsp"], 5) is None and signature_hole(["Premonition"], 17) is None
+    e = _engine(tmp_path)
+    e.round = SimpleNamespace(id=1, course="DPC Sodgrass")
+    e.hole_number = 17
+    [fact] = e._signature_facts("Joe")
+    assert fact.startswith("Famous hole: this is GSPro's version of TPC Sawgrass's 17th, the island-green par 3")
+    assert e._signature_facts("Joe") == [fact]            # Joe's setup rebuilt: still his to hear
+    assert e._signature_facts("Ann") == []                # the rest of the group don't hear it again
+    e.hole_number = 18
+    assert e._signature_facts("Ann")
 
 
 def _bit(kind, hole=None, expires=None, trigger=None):
@@ -182,7 +252,7 @@ async def test_course_trivia_is_written_from_the_article_and_remembers_what_aire
     e.cfg.news.banter_rate = 1.0
 
     class _Trivia:
-        async def article(self, course):
+        async def article(self, *names):
             return "Old Course at St Andrews", "The Old Course is a golf course. The Bruins lead two to one."
 
     e.trivia = _Trivia()

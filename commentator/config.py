@@ -567,7 +567,8 @@ class TriviaConfig(BaseModel):
     # like the news asides; a story about one hole waits for that hole. Off by default.
     enabled: bool = False
     per_round: int = 2
-    # GSPro course name -> Wikipedia article title, for courses the search can't place on its own.
+    # GSPro course name or id -> Wikipedia article title ("Title#Section" for one section), on top of
+    # trivia.KNOWN_PAGES, for courses the search can't place on its own.
     pages: dict[str, str] = Field(default_factory=lambda: {"The Ancient Course": "Old Course at St Andrews"})
 
 

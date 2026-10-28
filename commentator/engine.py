@@ -49,7 +49,8 @@ from .booking import Bookings
 from .history import History
 from .news import GolfNews
 from .scores import LiveScores
-from .trivia import CourseTrivia
+from .signature_holes import signature_hole
+from .trivia import CourseTrivia, looks_like_a_course
 from .weather import Weather
 from .round import FORMAT_NAMES, TEAM_BALL, Round, normalize_format, to_par
 from .round import _join as _join_names
@@ -542,6 +543,7 @@ class Engine:
         self._aside_tasks: set[asyncio.Task] = set()
         self._aside_nines: set[int] = set()          # nines of this round whose asides are written
         self._trivia_planned = 0                     # trivia asides written this round (per_round caps it)
+        self._signature_told: tuple | None = None    # (round id, hole, player) the famous-hole note went to
         self.speakers = list(cfg.personas)
         self._persona_names = [p.name for p in cfg.personas.values()]  # for stripping leaked speaker labels
         self.schema = output_schema(self.speakers)
@@ -1685,11 +1687,20 @@ class Engine:
         self._score_holes = []
         self._aside_nines, self._trivia_planned = set(), 0
 
+    def _course_names(self, r) -> list[str]:
+        """What the round's course goes by, best first: GSPro's own display name and course id (from its
+        log, when it's on) bracket the scorecard's name, which is OCR and can be screen text."""
+        display = id_ = None
+        if self._log_truth and self.gspro.mode == "course":
+            display, id_ = self.gspro.course_display, self.gspro.course
+        return [n for n in (display, r.course or self.current_course, id_) if n]
+
     async def _prepare_trivia(self, r, n: int | None = None) -> None:
         """Write and voice this round's course-trivia asides up front, from the real course's article,
         steering clear of what earlier rounds here already told."""
-        course = r.course or self.current_course
-        found = await self.trivia.article(course)
+        names = self._course_names(r)
+        course = next((n for n in names if looks_like_a_course(n)), None) or r.course or self.current_course
+        found = await self.trivia.article(*names)
         if not found or self.round is not r:
             return
         title, article = found
@@ -2855,6 +2866,20 @@ class Engine:
             return [f"{who} hasn't dropped a shot in the last {n} holes."]
         return []
 
+    def _signature_facts(self, player: str | None) -> list[str]:
+        """On the first tee shot of a famous hole on a replica of a real course: what the real hole is
+        known for. Only for the first player to tee off there (a rebuilt setup for them keeps it), so
+        the rest of the group don't hear it again."""
+        r = self.round
+        if r is None or (note := signature_hole(self._course_names(r), self.hole_number)) is None:
+            return []
+        told = self._signature_told
+        if told and told[:2] == (r.id, self.hole_number) and told[2] != player:
+            return []
+        self._signature_told = (r.id, self.hole_number, player)
+        return [f"Famous hole: this is GSPro's version of {note} Worth a line if it fits the moment; "
+                "tell only what this says."]
+
     def _hole_field_facts(self, player: str | None) -> list[str]:
         """On the first shot of a hole: the hole's difficulty (stroke index), how the league has
         scored it this season, and whether this player gets a handicap stroke here (so the booth can
@@ -3117,7 +3142,8 @@ class Engine:
                                                                        to_yards(hud.to_pin)))
                  + (self._bunker_facts(player) if (hud.lie or "").lower() in ("sand", "bunker")
                     and self.rng.random() < 0.5 else [])
-                 + (self._hole_field_facts(player) + self._streak_facts(player) if hud.shot_number == 1 else [])
+                 + (self._hole_field_facts(player) + self._streak_facts(player) + self._signature_facts(player)
+                    if hud.shot_number == 1 else [])
                  + (minimap.facts(to_yards(hud.to_pin), hud.lie) if minimap else [])
                  + (["The tree on the line to the pin is the story of this shot: say how it blocks the way."]
                     if getattr(hud, "_stymie", False) else [])
