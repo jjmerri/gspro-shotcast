@@ -1228,6 +1228,7 @@ function attachLive() {
     const b = me.unmute = Object.assign(document.createElement("button"), { className: "unmute", textContent: "🔊 Tap for sound" });
     b.onclick = () => { video.muted = false; };
     video.addEventListener("volumechange", () => { if (!video.muted && me.unmute) { b.remove(); me.unmute = null; } });
+    video.addEventListener("webkitendfullscreen", afterFullscreen);   // iPhone's own player
     video.addEventListener("canplay", () => {
       if (video.paused && player === me) video.play().catch(() => {});
     }, { once: true });
@@ -1308,8 +1309,24 @@ function renderSchedule() {
 
 const RENDER = { live: renderLive, vods: renderVods, schedule: renderSchedule, players: renderPlayers, versus: renderVersus, rounds: renderRounds, courses: renderCourses,
                  shots: renderShots, broadcasts: renderBroadcasts, highlights: renderHighlights, booth: renderBooth };
+// Redrawing takes the player out of the page for a moment, and that ends full screen. The polls redraw
+// the Live tab every minute (the recording's length grows), so wait until the viewer leaves full screen.
+function playerFullscreen() {
+  if (!player) return false;
+  const v = player.video, fs = document.fullscreenElement || document.webkitFullscreenElement;
+  return !!(fs && fs.contains(v)) || !!v.webkitDisplayingFullscreen;
+}
+let renderLater = false;
+function afterFullscreen() {
+  // iOS can still report full screen while its exit event fires
+  setTimeout(() => { if (renderLater && !playerFullscreen()) { renderLater = false; render(); } }, 0);
+}
+document.addEventListener("fullscreenchange", afterFullscreen);
+document.addEventListener("webkitfullscreenchange", afterFullscreen);
+
 function render() {
   if (!state.data) return;
+  if (playerFullscreen()) { renderLater = true; return; }
   $("#main").innerHTML = RENDER[state.tab]();
   attachLive();
   writeHash();
