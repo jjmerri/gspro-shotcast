@@ -150,8 +150,9 @@ CREATE TABLE IF NOT EXISTS rounds (
     complete INTEGER NOT NULL DEFAULT 1,         -- 0 = quit early in GSPro (holes_played < holes)
     holes_played INTEGER,                        -- holes actually scored (NULL on older rows: use holes)
     nine_to_par INTEGER,                         -- gross to par over the first nine played, set only on a
-    nine_net_to_par INTEGER                      -- part-played round; the season ranks per nine, and
+    nine_net_to_par INTEGER,                     -- part-played round; the season ranks per nine, and
                                                  -- prorating eleven holes onto nine invents a score
+    players TEXT                                 -- JSON: the side's players (NULL on older rows)
 );
 CREATE TABLE IF NOT EXISTS predictions (
     id INTEGER PRIMARY KEY,
@@ -318,7 +319,7 @@ class Store:
         rounds_added = {"scramble_hit": "INTEGER", "scramble_tries": "INTEGER", "sand_hit": "INTEGER",
                         "sand_tries": "INTEGER", "hole_pars": "TEXT", "is_league": "INTEGER NOT NULL DEFAULT 1",
                         "complete": "INTEGER NOT NULL DEFAULT 1", "holes_played": "INTEGER",
-                        "nine_to_par": "INTEGER", "nine_net_to_par": "INTEGER"}
+                        "nine_to_par": "INTEGER", "nine_net_to_par": "INTEGER", "players": "TEXT"}
         for col, decl in rounds_added.items():
             if col not in have_rounds:
                 self.db.execute(f"ALTER TABLE rounds ADD COLUMN {col} {decl}")
@@ -683,12 +684,21 @@ class Store:
             self.db.execute("UPDATE shots SET lie_after = ? WHERE id = ?", (lie, shot_id))
             self.db.commit()
 
-    def set_format(self, shot_ids: list[int], fmt: str) -> None:
-        """Relabel a round's shots once its real format is known (a scramble GSPro's log revealed)."""
+    def set_format(self, shot_ids: list[int], fmt: str | None) -> None:
+        """Relabel a round's shots once its real format is known (a scramble GSPro's log revealed, or
+        none for a player it left on a team of one)."""
         if shot_ids:
-            # A scramble's balls are shared, including the tee shots recorded before it was known.
-            self.db.executemany("UPDATE shots SET fmt = ?, shared_ball = shared_ball OR ? WHERE id = ?",
-                                [(fmt, fmt == "scramble", i) for i in shot_ids])
+            # A scramble's balls are shared, including the tee shots recorded before it was known; a lone
+            # player's are their own.
+            self.db.executemany("UPDATE shots SET fmt = ?, shared_ball = ? WHERE id = ?",
+                                [(fmt, int(fmt == "scramble"), i) for i in shot_ids])
+            # The conceded putt a stroke left (record_gimme's row, which copied that stroke's format).
+            self.db.executemany(
+                """UPDATE shots SET fmt = ? WHERE outcome = 'gimme' AND id > ? AND EXISTS (
+                       SELECT 1 FROM shots s WHERE s.id = ? AND s.session_id IS shots.session_id
+                       AND s.player IS shots.player AND s.hole IS shots.hole
+                       AND s.shot_number + 1 IS shots.shot_number)""",
+                [(fmt, i, i) for i in shot_ids])
             self.db.commit()
 
     def record_gimme(self, shot_id: int) -> int | None:
@@ -1083,7 +1093,7 @@ class Store:
         return {k: r[k] for k in r.keys()}
 
     def record_round(self, *, course, fmt, side, team, holes, stats, strokes, net_to_par, hole_number,
-                     hole_pars=None, is_league: bool = True, complete: bool = True,
+                     hole_pars=None, is_league: bool = True, complete: bool = True, players: list[str] | None = None,
                      first_nine: tuple[int, int | None] | None = None) -> None:
         """One side's round. A round quit early is recorded too (complete=0, holes_played short): its
         per-hole and per-try stats count, but it only counts as a round in the season totals once a
@@ -1104,14 +1114,14 @@ class Store:
             """INSERT INTO rounds (session_id, ended_at, date, course, format, side, team, holes, gross, par, strokes,
                    net_to_par, fir_hit, fir_tries, gir_hit, gir_tries, scramble_hit, scramble_tries, sand_hit,
                    sand_tries, putts, putt_holes, penalties, longest_drive, scores, hole_pars, source, is_league,
-                   complete, holes_played, nine_to_par, nine_net_to_par)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   complete, holes_played, nine_to_par, nine_net_to_par, players)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (self.session_id, time.time(), time.strftime("%Y-%m-%d"), self.course_name(course), fmt, side, team, holes,
              stats.gross if stats.holes_scored else None, stats.par or None, strokes, net_to_par,
              *stats.fir, *stats.gir, *stats.scramble, *stats.sand,
              stats.putts if stats.putt_holes else None, stats.putt_holes, stats.penalties, stats.longest_drive,
              scores_json, pars_json, stats.source, int(is_league), int(complete), stats.holes_scored,
-             nine, nine_net),
+             nine, nine_net, json.dumps(players) if players else None),
         )
         self.db.commit()
 

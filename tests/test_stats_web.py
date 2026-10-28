@@ -91,6 +91,21 @@ def test_the_usual_gimme_is_the_one_most_league_rounds_used(tmp_path):
     assert sorted(r["gimme_ft"] for r in s["rounds"]) == [4.0, 4.0, 6.0, 6.0]
 
 
+def test_a_rounds_side_players_come_from_the_record_else_its_shots(tmp_path):
+    path, db = _db(tmp_path)
+    for player in ("Tony", "Priya"):
+        _shot(db, player, ts=900, course="Pebble")
+    # An older row (no players kept) for a practice team stored under its league team's name.
+    db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, team, holes, is_league)"
+               " VALUES (1, 1000, '2026-10-01', 'Pebble', 'Duffers', 'Duffers', 9, 0)")
+    db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, team, holes, is_league, players)"
+               " VALUES (1, 5000, '2026-10-02', 'Pebble', 'Aces', 'Aces', 9, 1, '[\"Josh\", \"Sam\"]')")
+    db.commit()
+    with stats_web.connect(path) as ro:
+        got = {r["side"]: r["side_players"] for r in stats_web.rounds(ro)}
+    assert got == {"Duffers": ["Priya", "Tony"], "Aces": ["Josh", "Sam"]}
+
+
 def test_context_filter_splits_league_and_practice(tmp_path):
     path, db = _db(tmp_path)
     nine = {h: PARS[str(h)] for h in range(1, 10)}

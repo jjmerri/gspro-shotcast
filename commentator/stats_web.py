@@ -71,6 +71,14 @@ def _json(text: str | None) -> dict[int, int]:
         return {}
 
 
+def _names(text: str | None) -> list[str] | None:
+    try:
+        v = json.loads(text or "null")
+    except (TypeError, ValueError):
+        return None
+    return [n for n in v if isinstance(n, str)] if isinstance(v, list) else None
+
+
 def _pct(hit, tries) -> float | None:
     return round(100.0 * hit / tries, 1) if tries else None
 
@@ -185,9 +193,16 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             left.add(key)
         else:
             kept[key] = max(kept.get(key) or 0, d)
+    sides = Counter(of_row.values())
     for r in db.execute("SELECT * FROM rounds WHERE 1=1" + _ctx(context) + " ORDER BY ended_at DESC, id DESC"):
         card = _card(_json(r["scores"]), _json(r["hole_pars"]))
         rnd = of_row.get(r["id"], r["id"])
+        # Who played this side: on record since rounds kept it; before, the side itself when it's a
+        # player, or everyone with a shot when the round had just the one side.
+        played_by = _names(r["players"]) if "players" in r.keys() else None
+        if not played_by:
+            here = who.get(rnd, set())
+            played_by = [r["side"]] if r["side"] in here else sorted(here) if sides[rnd] == 1 and here else None
         longest = r["longest_drive"]
         # (a team side's players aren't on record per round, so its stored drive stands)
         if (rnd, r["side"]) in left:
@@ -197,8 +212,8 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             "started": started.get(of_row.get(r["id"], r["id"])),
             "course": r["course"],
             # who played in it (a team side's players too), so the page can show one player's rounds
-            "players": sorted(who.get(of_row.get(r["id"], r["id"]), set()) | ({r["side"]} if r["side"] else set())), "format": r["format"] or "individual",
-            "side": r["side"], "team": r["team"], "holes": r["holes"],
+            "players": sorted(who.get(rnd, set()) | ({r["side"]} if r["side"] else set()) | set(played_by or [])), "format": r["format"] or "individual",
+            "side": r["side"], "side_players": played_by, "team": r["team"], "holes": r["holes"],
             "played": r["holes_played"] if r["holes_played"] is not None else r["holes"],
             "complete": bool(r["complete"]), "league": bool(r["is_league"]),
             "gross": card["gross"] if card["played"] else r["gross"],

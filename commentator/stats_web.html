@@ -70,6 +70,7 @@
   input[type=date] { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:5px 6px; font:inherit; color-scheme:dark; }
   button.link { background:none; border:none; color:var(--accent); cursor:pointer; font:inherit; padding:0; }
   .scorecard button.link.on { text-decoration:underline; font-weight:700; }
+  .scorecard .nine { background:rgba(255,255,255,.04); font-weight:600; }
   .replay { margin:10px 0; } .replay svg { background:#16241f; border:1px solid var(--line); border-radius:8px; max-width:100%; height:auto; }
   /* The replay's animation: each element runs once and then holds the static drawing's look. */
   .rp-in { animation:rp-in .3s ease-out both; }
@@ -447,12 +448,20 @@ function shotsUsed(r, reps) {
 
 function scorecard(holes, replays) {
   if (!holes || !holes.length) return '<p class="empty">No hole-by-hole card recorded.</p>';
-  const par = holes.reduce((a, h) => a + h.par, 0), gross = holes.reduce((a, h) => a + h.score, 0);
+  const sum = (hs, k) => hs.reduce((a, h) => a + h[k], 0);
+  const par = sum(holes, "par"), gross = sum(holes, "score");
   const head = h => replays && replays[h.hole]
     ? `<button class="link${state.replayHole === h.hole ? " on" : ""}" data-replay="${h.hole}" title="Replay this hole">${h.hole}</button>` : h.hole;
-  return `<table class="scorecard"><tr><th>Hole</th>${holes.map(h => `<th>${head(h)}</th>`).join("")}<th>Tot</th></tr>
-    <tr><td class="sub">Par</td>${holes.map(h => `<td class="sub">${h.par}</td>`).join("")}<td class="sub">${par}</td></tr>
-    <tr><td>Score</td>${holes.map(h => `<td>${scoreCell(h.score, h.par)}</td>`).join("")}<td><b>${gross}</b> <span class="sub">${toPar(gross - par)}</span></td></tr></table>`;
+  // Each nine with its subtotal (Out for 1-9, In for 10-18), then the total when there are both.
+  const nines = [["Out", holes.filter(h => h.hole <= 9)], ["In", holes.filter(h => h.hole > 9)]].filter(([, hs]) => hs.length);
+  const both = nines.length > 1;
+  const row = (cell, sub, tot) => nines.map(([label, hs]) => hs.map(cell).join("") + sub(label, hs)).join("") + (both ? tot : "");
+  const toParOf = (s, p) => ` <span class="sub">${toPar(s - p)}</span>`;
+  return `<table class="scorecard"><tr><th>Hole</th>${row(h => `<th>${head(h)}</th>`, l => `<th class="nine">${l}</th>`, "<th>Tot</th>")}</tr>
+    <tr><td class="sub">Par</td>${row(h => `<td class="sub">${h.par}</td>`, (l, hs) => `<td class="sub nine">${sum(hs, "par")}</td>`, `<td class="sub">${par}</td>`)}</tr>
+    <tr><td>Score</td>${row(h => `<td>${scoreCell(h.score, h.par)}</td>`,
+      (l, hs) => `<td class="nine"><b>${sum(hs, "score")}</b>${both ? "" : toParOf(sum(hs, "score"), sum(hs, "par"))}</td>`,
+      `<td><b>${gross}</b>${toParOf(gross, par)}</td>`)}</tr></table>`;
 }
 
 // A hole drawn from the logged ball positions, seen from above and turned so the tee is at the bottom
@@ -809,6 +818,10 @@ function roundSummary(r) {
   return `<h3 class="rsum">Round summary</h3><div class="cards">${vs}</div>${sg}${moments ? `<div class="moments">${moments}</div>` : ""}`;
 }
 
+// Who a round row is: a league round's side (a player, or a team in a one-ball format), else the
+// players themselves, since a practice round's team is no one's league side.
+const sideName = r => !r.league && r.side_players && r.side_players.length ? r.side_players.join(" & ") : r.side;
+
 // A round as an image to post: course, player, score, the card, and the round's numbers.
 function shareCard(r) {
   const holes = r.card || [], nines = [holes.slice(0, 9), holes.slice(9, 18)].filter(n => n.length);
@@ -824,7 +837,7 @@ function shareCard(r) {
   font(28, 600); text("⛳ GSPro Shotcast", 60, 70, "#8fa59b");
   font(30); text(r.date || "", W - 60, 70, "#8fa59b", "right");
   font(58, 700); text(r.course || "", 60, 150);
-  font(38, 500); text(r.side + (r.format && r.format !== "individual" ? ` · ${r.format.replace("_", " ")}` : ""), 60, 205, "#8fa59b");
+  font(38, 500); text(sideName(r) + (r.format && r.format !== "individual" ? ` · ${r.format.replace("_", " ")}` : ""), 60, 205, "#8fa59b");
   font(120, 700); text(String(r.gross ?? "–"), 60, 330);
   const grossW = g.measureText(String(r.gross ?? "–")).width;
   font(64, 600); text(r.to_par === null || r.to_par === undefined ? "" : toPar(r.to_par), 60 + grossW + 30, 330,
@@ -867,11 +880,16 @@ function shareCard(r) {
 
 async function shareRound(r, btn) {
   const canvas = shareCard(r);
-  const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
-  const name = `${r.date}-${r.course}-${r.side}`.replace(/[^\w-]+/g, "-") + ".png";
+  // Built synchronously (not canvas.toBlob): a phone only opens its share sheet straight off the tap,
+  // and iOS counts an await before navigator.share as the tap being over.
+  const bin = atob(canvas.toDataURL("image/png").split(",")[1]);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const blob = new Blob([bytes], { type: "image/png" });
+  const name = `${r.date}-${r.course}-${sideName(r)}`.replace(/[^\w-]+/g, "-") + ".png";
   const file = new File([blob], name, { type: "image/png" });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
-    try { await navigator.share({ files: [file], title: `${r.side} at ${r.course}` }); return; } catch (e) { if (e.name === "AbortError") return; }
+    try { await navigator.share({ files: [file], title: `${sideName(r)} at ${r.course}` }); return; } catch (e) { if (e.name === "AbortError") return; }
   }
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob); a.download = name; a.click();
@@ -883,7 +901,7 @@ async function shareRound(r, btn) {
 function renderRounds() {
   const d = state.data;
   const cols = [
-    { key: "date", label: "Date" }, { key: "course", label: "Course", cls: "l" }, { key: "side", label: "Player / side", cls: "l" },
+    { key: "date", label: "Date" }, { key: "course", label: "Course", cls: "l" }, { key: "side", label: "Player / side", cls: "l", val: sideName },
     { key: "format", label: "Format", cls: "l" }, { key: "played", label: "Holes" }, { key: "gross", label: "Gross" },
     { key: "to_par", label: "To par" }, { key: "fir", label: "Fairways", val: r => r.fir[1] ? r.fir[0] / r.fir[1] : null },
     { key: "gir", label: "GIR", val: r => r.gir[1] ? r.gir[0] / r.gir[1] : null }, { key: "putts", label: "Putts" },
@@ -896,7 +914,7 @@ function renderRounds() {
       + (r.gimme_ft != null && d.gimme_ft != null && r.gimme_ft !== d.gimme_ft ? `<span class="tag" title="This round's gimme circle differs from the usual ${d.gimme_ft} ft">${r.gimme_ft} ft gimmes</span>` : "")
       + (state.seen && r.ended > state.seen ? '<span class="tag new">new</span>' : "");
     return `<tr class="click" data-round="${r.id}"><td>${esc(r.date)}</td><td class="l">${esc(r.course)}</td>
-      <td class="l">${esc(r.side)}${r.team && r.team !== r.side ? ` <span class="sub">${esc(r.team)}</span>` : ""}</td>
+      <td class="l">${esc(sideName(r))}${r.league && r.team && r.team !== r.side ? ` <span class="sub">${esc(r.team)}</span>` : ""}</td>
       <td class="l">${esc(r.format.replace("_", " "))}${tags}</td><td>${r.played}/${r.holes}</td><td>${dash(r.gross)}</td>
       <td>${toPar(r.to_par)}</td><td>${frac(r.fir)}</td><td>${frac(r.gir)}</td><td>${dash(r.putts)}</td></tr>` +
       (open ? `<tr class="detail"><td colspan="${cols.length}">${scorecard(r.card, reps)}${shotsUsed(r, reps)}${roundSummary(r)}${replayPart(reps, r)}
@@ -990,7 +1008,8 @@ function renderShots() {
       <td class="l">${esc(s.course)} <span class="sub">${esc(holeName(s.hole))}</span></td><td>${dash(s.shot_number)}</td><td>${esc(s.club || (s.outcome === "gimme" ? "gimme" : "–"))}</td>
       <td class="l">${esc(s.lie_before || "–")}</td><td>${putt ? ft(s.to_pin) : yd(s.to_pin)}</td>
       <td>${putt || !s.carry ? "–" : s.carry + " yd"}</td><td class="l">${esc(s.shape || "")}</td><td class="l">${esc(result)}${left}${s.mulligan ? '<span class="tag">mulligan</span>' : ""}${s.left_out ? '<span class="tag" title="Left out of the stats by hand">left out</span>' : ""}</td>
-      <td>${s.lines.length ? `💬 ${s.lines.length}` : ""}</td></tr>`;
+      <td>${s.lines.length ? `💬 ${s.lines.length}` : ""}</td>
+      <td>${watchBtn(s.ts, "▶")}</td><td>${shareBtn(hashFor("shots", { shot: s.id, player: "" }), "this shot")}</td></tr>`;
     if (!open) return head;
     const launch = putt ? "" : `<p class="sub">Ball ${dash(s.ball_speed && s.ball_speed.toFixed(1), " mph")} · club ${dash(s.club_speed && s.club_speed.toFixed(1), " mph")} ·
       launch ${dash(s.launch_angle && s.launch_angle.toFixed(1), "°")} · spin ${dash(s.total_spin && Math.round(s.total_spin), " rpm")} ·
@@ -999,8 +1018,7 @@ function renderShots() {
       : '<p class="empty">The booth said nothing tied to this shot.</p>';
     const leave = state.local && !s.mulligan ? `<p><button class="link" data-leaveout="${s.id}" data-on="${s.left_out ? 0 : 1}">${s.left_out ? "Count this shot in the stats again" : "Leave this shot out of the stats"}</button>
       <span class="sub">A bad read or a practice swing: it stays on the card and in the replay, but out of every average, record and strokes gained.</span></p>` : "";
-    const acts = `<p><span class="acts">${watchBtn(s.ts, "▶ Watch the shot")}${shareBtn(hashFor("shots", { shot: s.id, player: "" }), "this shot", "Share link")}</span></p>`;
-    return head + `<tr class="detail"><td colspan="11">${launch}${said}${acts}${leave}</td></tr>`;
+    return head + `<tr class="detail"><td colspan="13">${launch}${said}${leave}</td></tr>`;
   };
   const table = sortable("shots", state.shots.map((s, i) => ({ ...s, order: i })), [
     { key: "order", label: "Night", title: "Newest first" }, { key: "player", label: "Player", cls: "l" },
@@ -1009,7 +1027,9 @@ function renderShots() {
     { key: "to_pin", label: "To pin" },
     { key: "carry", label: "Carry", val: s => s.is_putt ? null : s.carry },
     { key: "shape", label: "Shape", cls: "l", title: "A right-hander's shot shape, from the start direction and spin axis" }, { key: "result", label: "Result", cls: "l", val: s => s.outcome || s.lie_after },
-    { key: "said", label: "💬", val: s => s.lines.length }],
+    { key: "said", label: "💬", val: s => s.lines.length },
+    { key: "watch", label: "Watch", title: "Watch the shot on the round's video", val: s => videoAt(s.ts) ? 1 : null },
+    { key: "share", label: "Share", title: "A link to the shot" }],
     row, { key: "order", dir: f.round ? -1 : 1, empty: "No shots match." });
   return `<h2>${meTitle("Shots")}</h2>${controls}${table}
     <p class="sub">${f.round ? "In the order they were played" : "Newest first, up to 500"}. Click a column to sort; click a shot for its launch numbers and what the booth said.</p>`;
@@ -1018,7 +1038,7 @@ function renderShots() {
 function roundLabel(id) {
   const sides = state.data.rounds.filter(r => r.round === id);
   if (!sides.length) return "not in this view";
-  return `${sides[0].date} · ${sides[0].course} · ${[...new Set(sides.map(r => r.side))].join(", ")}`;
+  return `${sides[0].date} · ${sides[0].course} · ${[...new Set(sides.map(sideName))].join(", ")}`;
 }
 
 function nameOf(key) {

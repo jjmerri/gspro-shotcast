@@ -283,6 +283,19 @@ class Round:
             if self.week_card["index"].get(hole):
                 self.index[seq] = int(self.week_card["index"][hole])
 
+    def solo(self, side: Side | None) -> bool:
+        """A one-person team in a scramble (a lone player against a team, or alone in GSPro's scramble
+        mode): nobody to pick a ball with, so it's an ordinary individual round."""
+        return (self.format == "scramble" and side is not None
+                and len(side.players) == 1 and len(side.gspro) == 1)
+
+    def side_format(self, side: Side | None) -> str | None:
+        """The format this side actually played: none (individual) for a one-person scramble team."""
+        return None if self.solo(side) else self.format
+
+    def player_format(self, player: str | None) -> str | None:
+        return self.side_format(self.side_for(player)) if self.format == "scramble" else self.format
+
     def anonymous_players(self) -> list[str]:
         """Players who share a ball nobody can attribute: their names mustn't go on a shot."""
         if self.format not in TEAM_BALL:
@@ -460,6 +473,7 @@ class Round:
         mine = [r for r in records if r.round_id == self.id and not r.mulligan
                 and (r.player in side.players or r.player in side.gspro)]
         stats = SideStats(source=self._score_source())
+        scramble = self.side_format(side) == "scramble"
         fir, fir_tries, gir, gir_tries = 0, 0, 0, 0
         scr, scr_tries, sand, sand_tries = 0, 0, 0, 0
         for seq in range(1, (self.stats_through or self.holes) + 1):
@@ -503,7 +517,7 @@ class Round:
                 # shot and green are known; only the putts are still to come, and the branch's score says
                 # how many. Leaving the hole out made a closer call one fairway "all night" when the
                 # last drive was the second.
-                if par >= 4 and (hit := _fairway_hit(recs, self.format == "scramble")) is not None:
+                if par >= 4 and (hit := _fairway_hit(recs, scramble)) is not None:
                     fir_tries += 1
                     fir += hit
                 if (reached := _green_reached_at(recs)) is not None and score is not None:
@@ -511,15 +525,15 @@ class Round:
                     gir_tries, gir = gir_tries + 1, gir + hole_gir
                     if not hole_gir:
                         scr_tries, scr = scr_tries + 1, scr + (score <= par)
-                    if (putts := score - reached + 1) > 0 and self.format != "scramble":
+                    if (putts := score - reached + 1) > 0 and not scramble:
                         stats.putts += putts
                         stats.putt_holes += 1
                         stats.one_putts += putts == 1
                         stats.three_putts += putts >= 3
-                if self.format != "scramble" and (saved := _sand_save(recs, score)) is not None:
+                if not scramble and (saved := _sand_save(recs, score)) is not None:
                     sand_tries, sand = sand_tries + 1, sand + saved
                 continue
-            if par >= 4 and (hit := _fairway_hit(recs, self.format == "scramble")) is not None:
+            if par >= 4 and (hit := _fairway_hit(recs, scramble)) is not None:
                 fir_tries += 1
                 fir += hit
             # GIR. The authoritative "settled on the green" signal is a shot PLAYED from the green (a
@@ -556,7 +570,7 @@ class Round:
                 scr_tries += 1
                 scr += score <= par
             # Sand saves (skipped for scramble, where the pooled two balls can't say which the team played).
-            if self.format != "scramble" and (saved := _sand_save(recs, score)) is not None:
+            if not scramble and (saved := _sand_save(recs, score)) is not None:
                 sand_tries += 1
                 sand += saved
             # Putts as the PGA Tour counts them: every stroke played from the green, whatever the club
@@ -572,7 +586,7 @@ class Round:
             putts = len(putt_recs) + (conceded if on_green else 0)
             # Holed from off the green (a chip-in, an ace): the card ends on a tracked full shot.
             holed_off = not putt_recs and bool(numbers) and score == numbers[-1] and all(r.lie_before for r in recs)
-            if (putts or holed_off) and self.format != "scramble":
+            if (putts or holed_off) and not scramble:
                 stats.putts += putts
                 stats.putt_holes += 1
                 stats.one_putts += putts == 1
@@ -593,6 +607,7 @@ class Round:
         The hole loop mirrors side_stats."""
         mine = [r for r in records if r.round_id == self.id and not r.mulligan and r.player == player]
         stats = SideStats(source=self._score_source())
+        scramble = self.player_format(player) == "scramble"
         # card_scores is keyed by the raw GSPro name; ShotRecord.player is the ROSTER name (match_player),
         # or the raw GSPro text on a match miss. Map through self.roster {gspro: roster} to this player's
         # GSPro name(s), so the card row is actually found (g == player covers the match-miss fallback).
@@ -647,7 +662,7 @@ class Round:
                 scr_tries += 1
                 scr += score <= par
             # Sand saves (skipped for scramble, where the pooled two balls can't say which the team played).
-            if self.format != "scramble" and (saved := _sand_save(recs, score)) is not None:
+            if not scramble and (saved := _sand_save(recs, score)) is not None:
                 sand_tries += 1
                 sand += saved
             # Putts per hole, from this player's own green shots. Skipped in a scramble, where both
@@ -666,7 +681,7 @@ class Round:
             putts = len(putt_recs) + (conceded if on_green else 0)
             # Holed from off the green (a chip-in, an ace): the card ends on a tracked full shot.
             holed_off = not putt_recs and bool(numbers) and score == numbers[-1] and all(r.lie_before for r in recs)
-            if (putts or holed_off) and self.format != "scramble":
+            if (putts or holed_off) and not scramble:
                 stats.putts += putts
                 stats.putt_holes += 1
                 stats.one_putts += putts == 1

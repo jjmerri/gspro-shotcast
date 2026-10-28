@@ -3945,6 +3945,32 @@ def test_gspro_revealing_a_scramble_makes_the_round_one(tmp_path):
     assert any("Sam's ball" in f for f in e._format_facts())
 
 
+def test_a_scramble_pair_found_later_gets_its_earlier_shots_relabelled(tmp_path):
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Pat", "Sam", "Cal", "Dee"], course="X", scheduled_format=None,
+              holes=9, is_league=False, slot_names=["Pat", "Sam", "Cal", "Dee"])
+    e.round = r
+    sid, rec = _row(e, r, 7, 1, "tee", hole=0, seq=1)
+    rec.shot_id, rec.player = sid, "Cal"
+    gimme = e.store.record_gimme(sid)
+    e.gspro.teammates.add(frozenset((0, 1)))
+    e._sync_scramble()
+    assert r.player_format("Cal") is None   # alone until GSPro ties Cal to Dee
+    e.gspro.teammates.add(frozenset((2, 3)))
+    e._sync_scramble()
+    assert tuple(e.store.db.execute("SELECT fmt, shared_ball FROM shots WHERE id = ?", (sid,)).fetchone()) == ("scramble", 1)
+    assert e.store.db.execute("SELECT fmt FROM shots WHERE id = ?", (gimme,)).fetchone()[0] == "scramble"
+    # GSPro re-pairing leaves Dee alone: her earlier shots are her own again.
+    e.gspro.teammates.clear()
+    e.gspro.teammates.update({frozenset((0, 1)), frozenset((0, 2))})
+    rec.player = "Dee"
+    e._sync_scramble()
+    assert r.player_format("Dee") is None
+    assert tuple(e.store.db.execute("SELECT fmt, shared_ball FROM shots WHERE id = ?", (sid,)).fetchone()) == (None, 0)
+    assert e.store.db.execute("SELECT fmt FROM shots WHERE id = ?", (gimme,)).fetchone()[0] is None
+
+
 def test_the_scramble_pick_fact_names_the_stroke_it_came_from(tmp_path):
     # A reaction to the last hitter's stroke 2 once read "the team picked Sam's ball" (stroke 1's
     # pick) as stroke 2's, and the booth announced a choice GSPro hadn't made.

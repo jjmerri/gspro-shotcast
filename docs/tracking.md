@@ -171,7 +171,8 @@ differentials among the last 20 (best 1 of 3 up to best 8 of 20, with the WHS ad
 fewer than 6), to 0.1, capped at 54, once the player has 54 holes in. A round of 9 to 17 holes
 counts as an 18 using the player's expected score for the holes not played (0.52 × index + 1.2 a
 nine), or scaled up to 18 before there's an index. Scramble and
-alternate-shot rounds and rounds under nine holes don't count. The tee is the one whose yardages
+alternate-shot rounds and rounds under nine holes don't count (a player alone on a one-person
+scramble team plays their own ball, so that's recorded as an ordinary individual round). The tee is the one whose yardages
 match the round's logged tee-to-pin distances, else the one whose length fits the score; a course with no
 ratings uses par and slope 113. Sim scoring runs low, so plus indexes are common.
 
@@ -189,7 +190,8 @@ for browsing the database. Its tabs:
   around the green, putting), night-by-night trends, club gapping with each club's typical flight
   (from full swings only, so chips don't shrink a wedge), approach by club, putting by length, and
   recovery from rough and sand, and the handicap index with its trend.
-- **Head-to-head**, **Rounds** (hole-by-hole cards, and a link to every shot of the round; a hole
+- **Head-to-head**, **Rounds** (hole-by-hole cards with Out and In for each nine, and a link to every
+  shot of the round; a practice round is listed under its players, a league round under its side; a hole
   number that's a link draws the hole from above, tee at the bottom: each player's shots from where
   GSPro had the ball, dashed lines to where they aimed, and the pin; when the round was quit before
   GSPro logged its tees and pins, they're taken from the course's GKD file (the pin day the shots'
@@ -200,7 +202,8 @@ for browsing the database. Its tabs:
   saves the card as an image, or opens the phone's share sheet), **Courses** (each hole's scoring average,
   hardest and easiest, best nine).
 - **Shots**: every shot, filterable by player, course, club, lie and a date range (or one round,
-  from the Rounds tab), with its launch data and what the booth said about it. A shot's round is
+  from the Rounds tab), with its launch data and what the booth said about it; each row has its own
+  ▶ Watch and 🔗 share buttons. A shot's round is
   the round that ended next after it on its course, so a round the booth restarted during keeps
   all its shots; shots from a round that never ended (or was quit before a hole was done) have none.
 - **Highlights**: records, aces, eagles, hole-outs, birdie streaks, bounce-backs, blow-ups, and

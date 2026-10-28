@@ -2795,6 +2795,21 @@ def test_a_lone_league_player_in_a_practice_scramble_is_a_side_of_one(tmp_path):
     assert alt.side_for("Josh").players == ["Josh", "Sam"] and not e._absent_partners()
 
 
+def test_a_one_person_scramble_team_is_recorded_as_an_individual_round(tmp_path):
+    import json
+    e = _engine_with(tmp_path, _noted_league())
+    r = Round(league=e.league, gspro_players=["Tony", "Priya", "Josh"], course="X", scheduled_format="scramble",
+              is_league=False, slot_names=["Tony", "Priya", "Josh"], holes=2)
+    e._start_round(r)
+    for g in ("Tony", "Priya", "Josh"):
+        r.set_log_scores(g, {1: 4, 2: 3})
+    assert r.side_format(r.side_for("Josh")) is None and r.player_format("Tony") == "scramble"
+    e._record_round_stats(r, "test")
+    rows = {row["side"]: row for row in e.store.db.execute("SELECT side, format, players FROM rounds")}
+    assert rows["Josh"]["format"] is None and json.loads(rows["Josh"]["players"]) == ["Josh"]
+    assert rows["Duffers"]["format"] == "scramble" and json.loads(rows["Duffers"]["players"]) == ["Tony", "Priya"]
+
+
 def test_club_delivery_never_on_back_to_back_reactions(tmp_path):
     e = _engine_with(tmp_path, _noted_league())
 

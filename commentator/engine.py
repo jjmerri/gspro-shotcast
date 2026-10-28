@@ -3683,8 +3683,9 @@ class Engine:
             self.carry.altitude[self.current_course] = self.gspro.altitude_ft   # beats the course file's
         # A team format where GSPro copies balls between teammates: the next stroke may be a partner's
         # ball, unless GSPro dropped none of this player's balls in between (their own was picked).
-        shared = bool(shot_round and (shot_round.format == "scramble" or shot_round.no_scramble)
-                      or self.gspro.team_scores)
+        # (never for a lone player in a scramble: nobody else's ball can be theirs)
+        shared = not (shot_round and shot_round.solo(shot_round.side_for(player))) and bool(
+            shot_round and (shot_round.format == "scramble" or shot_round.no_scramble) or self.gspro.team_scores)
         unnamed = not player or player == "unknown" or self._anonymous(player)
         carry_idx = None if unnamed else self._gspro_idx(player)
         dropped = None if carry_idx is None else impact_snap[7].get(carry_idx, 0)
@@ -3798,7 +3799,7 @@ class Engine:
         # those shots aren't attributed). finish_yards (how close the ball got) is set now for full
         # shots; a putt's finishing distance and holed/conceded outcome are filled in below. (idx was
         # resolved above for the closest-approach record.)
-        fmt = r.format if r else None
+        fmt = r.player_format(player) if r else None
         # Attribution is independent of the GSPro log: a shot is attributed to its player unless the
         # ball is shared (any one-ball team format, via _anonymous), where GSPro's name isn't who hit.
         # The log-only fields (finish/gimme distance) are gated separately on idx, so turning the log
@@ -4550,11 +4551,14 @@ class Engine:
         names = [[order[i] for i in sorted(grp) if i < len(order) and order[i]] for grp in groups]
         was = r.format
         if r.play_scramble([n for n in names if len(n) > 1]):
-            ids = [x.shot_id for x in self.state.shots if x.round_id == r.id and x.shot_id is not None]
-            if was != "scramble":
-                self.store.set_format(ids, "scramble")
+            # Every time the teams change: a pair found later had its earlier shots filed as solo, and a
+            # player the setup grouped by league team may turn out to be alone (their shots are their own).
+            mine = [x for x in self.state.shots if x.round_id == r.id and x.shot_id is not None]
+            ids = [x.shot_id for x in mine if r.player_format(x.player) == "scramble"]
+            self.store.set_format(ids, "scramble")
+            self.store.set_format([x.shot_id for x in mine if r.solo(r.side_for(x.player))], None)
             log.info("GSPro's log shows a scramble (was %s): teams %s; %s earlier shots relabelled",
-                     was, [s.label for s in r.sides], 0 if was == "scramble" else len(ids))
+                     was, [s.label for s in r.sides], len(ids))
 
     def _pick_facts(self, stroke: int | None = None, setup: bool = False, player: str | None = None) -> list[str]:
         """Whose ball the team is playing, from GSPro's last scramble pick on this hole. Given the stroke
@@ -6391,7 +6395,10 @@ class Engine:
         for side in r.sides:
             st = stats[side.key]
             if st.holes_scored:
-                self.store.record_round(course=r.course, fmt=r.format, side=side.key, team=side.team, holes=r.holes,
+                # A one-person scramble team is an individual round, filed under the player.
+                self.store.record_round(course=r.course, fmt=r.side_format(side),
+                                        side=side.players[0] if r.solo(side) else side.key, team=side.team,
+                                        holes=r.holes, players=side.players,
                                         stats=st, strokes=side.strokes, net_to_par=net[side.key],
                                         hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
                                         complete=complete,
@@ -6408,7 +6415,7 @@ class Engine:
                 pst = r.player_stats(name, self.state.shots)
                 if pst.holes_scored:
                     nine = r.first_nine(pst)
-                    self.store.record_player_round(player=name, course=r.course, fmt=r.format, stats=pst,
+                    self.store.record_player_round(player=name, course=r.course, fmt=r.player_format(name), stats=pst,
                                                    hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
                                                    complete=complete, nine_to_par=nine[0] if nine else None)
         self._refresh_own_handicaps()
