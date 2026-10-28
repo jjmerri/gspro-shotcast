@@ -188,6 +188,58 @@ def history_facts(player: str | None, prior: list[ShotRecord]) -> list[str]:
     return facts
 
 
+_CUP_NAMES = {"lip_out": "lip-out", "lip_in": "lip-in", "flagstick": "ball off the flagstick"}
+GIMME_EDGE_INCHES = 3   # a ball this close outside the gimme circle "just missed" being conceded
+
+
+def gimme_edge(to_pin_yd: float | None, gimme_yd: float | None) -> bool:
+    """A ball resting just outside the gimme circle, within GIMME_EDGE_INCHES of its edge."""
+    return bool(to_pin_yd and gimme_yd) and 0 < (to_pin_yd - gimme_yd) * 36 <= GIMME_EDGE_INCHES
+
+
+_OPTIONAL = "Optional colour, only if it fits the moment (skip it more often than not): "
+
+
+def moment_facts(player: str | None, round_shots: list[ShotRecord], current: ShotRecord | None = None,
+                 putt: bool = False, at_edge: bool = False) -> list[str]:
+    """This round's running tally of cup moments (lip-outs, lip-ins, flagstick hits) and of balls left
+    just outside the gimme circle, so "his third lip-out of the round" is counted, never guessed. Told
+    only once a moment repeats, and as optional colour. Before a shot (no `current`): a putt hears its
+    earlier lip-outs/lip-ins, and a ball sitting just outside the circle hears it's happened before.
+    After it, `current`'s cup moment counts in."""
+    who = player or "This player"
+    whose = who + ("'" if who.endswith("s") else "'s")
+    shots = [r for r in round_shots if not r.mulligan]
+    if current is not None:
+        if current.cup and (n := 1 + sum(r.cup == current.cup for r in shots)) >= 2:
+            return [f"{_OPTIONAL}that is {whose} {ordinal(n)} {_CUP_NAMES[current.cup]} this round."]
+        return []
+    facts = []
+    if putt:
+        for cup in ("lip_out", "lip_in"):
+            if n := sum(r.cup == cup for r in shots):
+                facts.append(f"{_OPTIONAL}{who} has had {n} {_CUP_NAMES[cup]}{'s' if n > 1 else ''} earlier this round.")
+    if at_edge and (n := 1 + sum(r.gimme_edge for r in shots)) >= 2:
+        facts.append(f"{_OPTIONAL}{whose} ball has stopped within a few inches outside the gimme circle "
+                     f"{n} times this round, this one included: so close to a conceded putt, again.")
+    return facts
+
+
+def lie_cost_fact(lie: str, cost: tuple[int, int] | None) -> str | None:
+    """What GSPro's lie did to a full shot ("Penalty Surface ... Spin%, Speed%"), when it's telling:
+    a flier (spin stripped, speed kept: it comes out hot and runs) or a heavy lie that cost it speed."""
+    if not cost:
+        return None
+    spin, speed = cost
+    if spin <= 65 and speed >= 93:
+        return (f"A flier lie in the {lie}: it kept only {spin}% of its spin but nearly all its speed, so it "
+                "came out hot with little spin and ran on landing.")
+    if speed <= 85:
+        return (f"A heavy lie in the {lie}: it took {100 - speed}% off the ball speed and {100 - spin}% off the "
+                "spin, so the ball came out slow.")
+    return None
+
+
 DIST = re.compile(r"(\d+(?:\.\d+)?)\s*(yards|metres|feet)(?:\s+(\d+)\s+inches)?")
 SCORE_NAMES = {-3: "an albatross", -2: "an eagle", -1: "a birdie", 0: "a par", 1: "a bogey", 2: "a double bogey"}
 PUTT_FOR = {-3: "albatross", -2: "eagle", -1: "birdie", 0: "par", 1: "bogey", 2: "double bogey", 3: "triple bogey"}

@@ -1111,6 +1111,21 @@ def test_facts_describe_flight_and_count_streaks():
     assert "191 yards" in " ".join(history_facts("Tony", prior)) and "180" not in " ".join(history_facts("Tony", prior))
 
 
+def test_moment_facts_tally_the_round_only_once_a_moment_repeats():
+    from commentator.facts import gimme_edge, lie_cost_fact, moment_facts
+
+    assert gimme_edge(1.22 + 2 / 36, 1.22) and not gimme_edge(1.22 + 4 / 36, 1.22) and not gimme_edge(1.2, 1.22)
+    putt = lambda **kw: ShotRecord("Tony", Shot(club="PT"), None, Hud(), [], **kw)
+    rnd = [putt(cup="lip_out"), putt(cup="lip_out", mulligan=True), putt(gimme_edge=True)]
+    before = " ".join(moment_facts("Tony", rnd, putt=True, at_edge=True))
+    assert "Optional colour" in before and "1 lip-out earlier this round" in before and "2 times this round" in before
+    assert moment_facts("Tony", rnd[:2], putt=True, at_edge=True)[1:] == []   # a first near miss isn't a tally
+    assert moment_facts("Tony", [], putt(cup="lip_out")) == []                 # nor is a first lip-out
+    assert "Tony's 2nd lip-out this round" in moment_facts("Tony", rnd, putt(cup="lip_out"))[0]
+    assert "flier" in lie_cost_fact("rough", (57, 98)) and "heavy" in lie_cost_fact("deep rough", (53, 80))
+    assert lie_cost_fact("sand", (100, 93)) is None and lie_cost_fact("rough", None) is None
+
+
 def test_grounding_rejects_invented_numbers_counts_and_outcomes():
     from commentator.grounding import check_line
     # A live putt reaction with no result from the log can't say it dropped.
@@ -2601,6 +2616,25 @@ def test_gimme_circle_fact_flags_a_short_putt_just_outside(tmp_path):
     assert engine._truth_context_facts(True, 0) == []
     g.to_pin_by[0] = 1.7
     assert engine._truth_context_facts(True, None) == []   # unattributable (e.g. alternate shot)
+
+
+def test_a_penalty_after_a_dry_landing_says_the_ball_ran_into_the_hazard(tmp_path, monkeypatch):
+    from commentator.store import Store
+
+    cfg = Config(log_dir=str(tmp_path))
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, store=Store(str(tmp_path / "s.db")))
+    g = engine.gspro
+    g.hole_by[0] = 5
+    monkeypatch.setattr(g, "penalties", lambda idx: 1)
+    monkeypatch.setattr(g, "shot_number", lambda idx: 3)
+    rec = ShotRecord("Tony", Shot(club="7I"), None, Hud(), [])
+    engine._fire_rows[7] = (1, rec, 0, 5)
+    g._fire_info[7] = {"hazard": (1.0, 2.0, 3.0)}
+    assert "ran on into the penalty area" in " ".join(engine._penalty_facts_from_truth(0))
+    rec.tags.append("in_water")          # it splashed: the usual penalty fact only
+    engine._narrated_pen.clear()
+    assert "ran on" not in " ".join(engine._penalty_facts_from_truth(0))
 
 
 def test_connector_log_source_on_real_uneekor_messages():

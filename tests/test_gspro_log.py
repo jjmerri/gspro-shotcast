@@ -428,7 +428,8 @@ def test_penalty_surface_is_kept_per_shot():
     import time
     s = _replay(FIRE + "LaunchExt - Regular Mode\nPenalty Surface TVGsand, Spin71%, Speed 78%, VLA 100%\n"
                 + _line(1, 1, 1))
-    assert s.fire_info(s.fire_of(s.fires, time.monotonic())) == {"player": 0, "hole": 1, "putting": False, "penalty": "sand"}
+    assert s.fire_info(s.fire_of(s.fires, time.monotonic())) == {"player": 0, "hole": 1, "putting": False, "penalty": "sand",
+                                                                  "lie_cost": (71, 78)}
 
 
 def test_a_repeated_score_in_a_team_format_is_a_mulligan_only_when_it_repeats_the_players_last_shot():

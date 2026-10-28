@@ -383,7 +383,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "semirough"
+"surface": "semirough",
+"lie_cost": [
+95,
+99
+]
 },
 {
 "kind": "material",
@@ -624,7 +628,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "sand"
+"surface": "sand",
+"lie_cost": [
+100,
+93
+]
 },
 {
 "kind": "material",
@@ -682,7 +690,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "rough"
+"surface": "rough",
+"lie_cost": [
+68,
+87
+]
 },
 {
 "kind": "material",
@@ -713,7 +725,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "rough"
+"surface": "rough",
+"lie_cost": [
+64,
+94
+]
 },
 {
 "kind": "material",
@@ -744,7 +760,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "sand"
+"surface": "sand",
+"lie_cost": [
+69,
+74
+]
 },
 {
 "kind": "material",
@@ -775,7 +795,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "sand"
+"surface": "sand",
+"lie_cost": [
+66,
+76
+]
 },
 {
 "kind": "material",
@@ -962,7 +986,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "rough"
+"surface": "rough",
+"lie_cost": [
+65,
+93
+]
 },
 {
 "kind": "material",
@@ -1159,7 +1187,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "semirough"
+"surface": "semirough",
+"lie_cost": [
+95,
+99
+]
 },
 {
 "kind": "material",
@@ -1391,7 +1423,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "semirough"
+"surface": "semirough",
+"lie_cost": [
+95,
+99
+]
 },
 {
 "kind": "material",
@@ -1422,7 +1458,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "sand"
+"surface": "sand",
+"lie_cost": [
+71,
+74
+]
 },
 {
 "kind": "material",
@@ -1600,7 +1640,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "sand"
+"surface": "sand",
+"lie_cost": [
+100,
+93
+]
 },
 {
 "kind": "material",
@@ -1827,7 +1871,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "deeprough"
+"surface": "deeprough",
+"lie_cost": [
+56,
+79
+]
 },
 {
 "kind": "material",
@@ -1912,7 +1960,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "rough"
+"surface": "rough",
+"lie_cost": [
+61,
+96
+]
 },
 {
 "kind": "material",

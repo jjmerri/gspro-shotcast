@@ -19,7 +19,7 @@ from .config import Config
 from .flight import point_at
 from .facts import (
     PUTT_FOR_FACT, SCORE_NAMES, _fmt_to_par, _to_par_value, club_delivery_facts, club_delivery_notable, club_name, flight_facts,
-    history_facts, ordinal, preshot_facts, putt_elevation_inches, shot_facts, to_yards, WRONG_GREEN_YARDS, wrong_green_fact,
+    gimme_edge, history_facts, lie_cost_fact, moment_facts, ordinal, preshot_facts, putt_elevation_inches, shot_facts, to_yards, WRONG_GREEN_YARDS, wrong_green_fact,
     wrong_green_yards, wrong_putt_score,
 )
 from .flight_pick import FlightPlan, Hazard, pick_line, pick_reaction, project
@@ -2971,6 +2971,11 @@ class Engine:
             return False
         return gs.wet(idx, since=since)
 
+    def _round_shots(self, player: str | None) -> list[ShotRecord]:
+        """This player's recorded shots in the current round (the round's running tallies)."""
+        r = self.round
+        return [x for x in self.state.player_shots(player or "unknown") if r and x.round_id == r.id]
+
     def _truth_context_facts(self, is_putt: bool, idx: int | None) -> list[str]:
         """Gimme-circle context from the GSPro log for this player.
 
@@ -2996,9 +3001,15 @@ class Engine:
             return []
         self._narrated_pen[(idx, hole)] = penalties
         n = self.gspro.shot_number(idx)
-        return [f"A penalty stroke was taken (a ball in the water or out of bounds, then a drop); "
-                f"{penalties} penalty stroke{'s' if penalties > 1 else ''} on this hole so far. Counting "
-                f"the penalty, this is stroke {n} on the hole: call it the {ordinal(n)}, not an earlier number."]
+        facts = [f"A penalty stroke was taken (a ball in the water or out of bounds, then a drop); "
+                 f"{penalties} penalty stroke{'s' if penalties > 1 else ''} on this hole so far. Counting "
+                 f"the penalty, this is stroke {n} on the hole: call it the {ordinal(n)}, not an earlier number."]
+        # GSPro logs a ball crossing into a penalty area; with no splash, it landed dry and ran in.
+        fire, last = next(((f, v) for f, v in sorted(self._fire_rows.items(), reverse=True) if v[2] == idx),
+                          (None, None))
+        if last and last[3] == hole and self.gspro.fire_info(fire).get("hazard") and "in_water" not in last[1].tags:
+            facts.append("The ball that cost the penalty landed dry and then ran on into the penalty area.")
+        return facts
 
     def _strategy_facts(self, minimap: "MinimapRead | None", hud: Hud) -> list[str]:
         """The minimap's read on where to miss, offered at most once a hole and not every hole, so the
@@ -3095,6 +3106,8 @@ class Engine:
                  + self._mulligan_facts(player, hud)
                  + self._penalty_facts(player, hud.shot_number) + self._truth_context_facts(is_putt, idx)
                  + history_facts(self._display(player), self.state.player_shots(player or "unknown"))
+                 + moment_facts(self._display(player), self._round_shots(player), putt=is_putt,
+                                at_edge=idx is not None and gimme_edge(self.gspro.to_pin_of(idx), self.gspro.gimme_of(idx)))
                  + self._format_facts(hud.shot_number, setup=True, player=player) + self._ctp_facts(hud.shot_number, hud, player)
                  + self._profile_facts(player, is_putt, hud) + self._prediction_facts(player, is_putt, hud)
                  + self._stakes_facts(hud, player) + self._team_score_facts(player)
@@ -3851,6 +3864,9 @@ class Engine:
             lie_before=before.lie, shot_number=before.shot_number, to_pin_before=before.to_pin,
             carry_game=carry_game,
         )
+        if idx is not None and (start_m := impact_snap[0].get(idx)) is not None:
+            # Where this stroke was struck from (GSPro's distance at impact, in metres, to the inch).
+            rec.gimme_edge = gimme_edge(start_m * M_TO_YD, self.gspro.gimme_of(idx))
         self.state.record_shot(rec)
         if r and r.seq >= r.holes and before.lie == "green":
             self._putted_on_last_hole = True
@@ -4065,6 +4081,8 @@ class Engine:
                     tags.append("wrong_green")
                     log.info("%s finished on the wrong green, %.0f yards from the pin", tag, finish)
 
+        # How the ball met the cup counts toward today's tally even when no reaction airs below.
+        rec.cup = self.gspro.cup_of(fire)
         # The early splash (above) already aired and was the call for this shot; the shot has now been
         # recorded, so skip every further reaction.
         if splash_said:
@@ -4110,7 +4128,7 @@ class Engine:
         lag_gimme = bool(shot.is_putt and outcome == "conceded" and shot_plan
                          and shot_plan.player in (None, player) and shot_plan.reactions.get("gimme"))
         # A ball that lipped out or in, or hit the flagstick, always gets a word too.
-        cup = self.gspro.cup_of(fire)
+        cup = rec.cup
         if cup:
             log.info("%s cup: %s (crossed %s mm from the centre)", tag, cup, self.gspro.fire_info(fire).get("cup_mm"))
         cup_putt = bool(shot.is_putt and cup in ("lip_out", "lip_in") and shot_plan
@@ -4186,6 +4204,10 @@ class Engine:
                 result.append(f"It {where}.")
         if cup and (fact := _CUP_FACTS.get((shot.is_putt, cup))):
             result = result + [fact]
+        info = self.gspro.fire_info(fire)
+        if not shot.is_putt and (fact := lie_cost_fact(MATERIAL_TO_LIE.get(info.get("penalty") or "", "rough"),
+                                                       info.get("lie_cost"))):
+            result = result + [fact]
         # On the green in regulation or better: say what the next putt is for, so "ten feet for
         # birdie" is a fact, not a guess (a par 5 in two is an eagle putt).
         next_putt = None
@@ -4245,7 +4267,9 @@ class Engine:
         sand_theme = (self._bunker_facts(player) if (hud.lie or "").lower() in ("sand", "bunker")
                       and not shot.is_putt else [])
         facts = (lead + replay_facts + flight + club + result + sand_theme
-                 + history_facts(self._display(player), prior) + season_facts
+                 + history_facts(self._display(player), prior)
+                 + moment_facts(self._display(player), [x for x in prior if r and x.round_id == r.id], rec)
+                 + season_facts
                  + self._format_facts(before.shot_number, player=player) + (self._ctp_facts(1) if hud.shot_number == 1 else []))
         who, team = self._who(player)
         user, facts_text = shot_prompt(

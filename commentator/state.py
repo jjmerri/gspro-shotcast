@@ -30,6 +30,8 @@ class ShotRecord:
     outcome: str | None = None   # how it ended, from GSPro's log: holed / missed / conceded (inside the gimme)
     picked: bool | None = None   # a scramble ball the team played on (True) or lifted (False); None if not known
     carry_game: float | None = None   # GSPro's own carry (elevation and conditions), when it was on screen
+    cup: str | None = None   # how the ball met the cup, from GSPro's log: lip_out / lip_in / flagstick
+    gimme_edge: bool = False   # struck from just outside the gimme circle (its last stroke nearly conceded it)
 
 
 class RecentLines(deque):

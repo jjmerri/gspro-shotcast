@@ -64,6 +64,7 @@ class LogEvent:
     roll_ft: float | None = None      # roll: how far the ball rolled after landing, logged as it comes to rest
     descent: float | None = None      # bounce: the ball's descent angle at its first landing (0 = not falling yet)
     cup_mm: float | None = None       # cup: how far from the cup's centre (mm) the ball crossed it
+    lie_cost: tuple[int, int] | None = None   # penalty_surface: the (spin %, speed %) the lie left the shot
 
 
 # GSPro's `Using Material TVG<surface>` names mapped to the booth's lie vocabulary (commentator/hud.py
@@ -98,7 +99,9 @@ _LAUNCH_MODE = re.compile(r"^LaunchExt - (\w+) Mode")
 # Logged right after "Shot Fired" when the ball was struck from a surface that costs it speed or spin
 # (rough, deep rough, sand...): GSPro's own word on the lie the shot was actually played from. The
 # "Using Material" line, by contrast, is where the ball first landed, not where it came to rest.
-_PENALTY_SURFACE = re.compile(r"^Penalty Surface TVG(\w+),")
+# The percentages are what the lie left the shot, and vary shot to shot on one surface: rough keeps
+# 57-81% of the spin (a flier at the low end), sand 100% from a clean lie down to ~63% when buried.
+_PENALTY_SURFACE = re.compile(r"^Penalty Surface TVG(\w+),(?: Spin(\d+)%, Speed (\d+)%)?")
 # The driving range loads as its own "course": these lines mark it (and there's no `Selected Course:`).
 _RANGE_MARKERS = ("GSPro Multi Range", "RangeLevelLoaded()")
 _VERSION = re.compile(r"^GSPro Version:\s*(\S+)")
@@ -168,7 +171,8 @@ def parse_events(text: str) -> list[LogEvent]:
             elif m := _LAUNCH_MODE.match(line):
                 out.append(LogEvent("launch_mode", putting=m.group(1).lower() == "putting"))
             elif m := _PENALTY_SURFACE.match(line):
-                out.append(LogEvent("penalty_surface", surface=m.group(1).lower()))
+                cost = (int(m.group(2)), int(m.group(3))) if m.group(2) else None
+                out.append(LogEvent("penalty_surface", surface=m.group(1).lower(), lie_cost=cost))
             elif m := _TEAMMATE.search(line):
                 out.append(LogEvent("team_copy", player=int(m.group(1))))
             elif line.startswith("Standard Teammate Result Copy"):
@@ -533,6 +537,8 @@ class GsproState:
             self.logs_penalty_surface = True
             if self.fires in self._fire_info:
                 self._fire_info[self.fires]["penalty"] = ev.surface
+                if ev.lie_cost:
+                    self._fire_info[self.fires]["lie_cost"] = ev.lie_cost
         elif ev.kind == "gimmie":
             self.gimmies += 1
             if self._since_select and self.active_player is not None and self.active_player == self.selected:

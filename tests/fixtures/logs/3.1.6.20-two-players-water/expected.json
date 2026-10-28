@@ -442,7 +442,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "rough"
+"surface": "rough",
+"lie_cost": [
+77,
+92
+]
 },
 {
 "kind": "material",
@@ -590,7 +594,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "sand"
+"surface": "sand",
+"lie_cost": [
+67,
+77
+]
 },
 {
 "kind": "material",
@@ -862,7 +870,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "rough"
+"surface": "rough",
+"lie_cost": [
+77,
+92
+]
 },
 {
 "kind": "material",
@@ -1128,7 +1140,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "rough"
+"surface": "rough",
+"lie_cost": [
+81,
+93
+]
 },
 {
 "kind": "material",
@@ -1377,7 +1393,11 @@
 },
 {
 "kind": "penalty_surface",
-"surface": "deeprough"
+"surface": "deeprough",
+"lie_cost": [
+45,
+85
+]
 },
 {
 "kind": "material",
