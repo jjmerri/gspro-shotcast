@@ -449,6 +449,22 @@ icon by the clock, **Exit**). If Windows Firewall asks whether OBS Studio may us
 private networks, choose **Cancel**: the booth reaches OBS's WebSocket on the same PC, which the
 firewall doesn't block, and the stream leaves as the booth's uploads.
 
+<a id="game-sound"></a>**Game sound with the room quiet.** Turning GSPro down in Windows' Volume mixer
+turns it down in the stream too: OBS records it after the mixer. To keep GSPro's sound in the
+stream with none in the room, send GSPro to an output nothing's plugged into, such as the
+motherboard's optical port, and have OBS record that:
+
+1. Windows Settings → System → Sound → Volume mixer: with GSPro running, set **GSPro**'s output
+   device to the unused output (e.g. **Realtek Digital Output**) and its volume to 100. Windows
+   remembers it for GSPro from then on.
+2. In `config.yaml`, `live.game_sound_device: Realtek Digital Output` (the output's name, or part
+   of it, as Windows shows it).
+
+As each round's stream starts, the booth adds a **Game sound** source in OBS recording that output
+at `live.game_sound_db` (-10 dB, under the voices), or points it back at it if it changed; a level
+changed with its fader in OBS stays. If no output (or more than one) has that name, `booth-*.log`
+says so and lists them.
+
 With your own OBS instead, set the same up in it by hand, put its WebSocket password in `.env` and
 point `live.obs_path` at its `obs64.exe` if it's not in `C:\Program Files\obs-studio`.
 

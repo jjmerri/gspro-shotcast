@@ -481,3 +481,97 @@ def test_a_failed_prune_doesnt_cost_the_new_stream(tmp_path):
     m.step()
     recs, full = _kept(s3, sid)
     assert m.session is None and [r["session"] for r in recs] == [sid] and recs[0]["duration"] == 120   # kept, and the old one pruned after all
+
+
+def test_game_sound_records_the_named_output_and_keeps_its_fader(caplog):
+    from commentator import obs_setup
+
+    devices = [{"itemName": "Default", "itemValue": "default"},
+               {"itemName": "BenQ PJ (NVIDIA High Definition Audio)", "itemValue": "benq"},
+               {"itemName": "Realtek Digital Output (Realtek(R) Audio)", "itemValue": "spdif"},
+               {"itemName": "Speakers (Realtek(R) Audio)", "itemValue": "spk"}]
+
+    class FakeObs:
+        def __init__(self):
+            self.calls, self.device = [], None
+            self.inputs = {"Desktop Audio": "wasapi_output_capture"}
+            self.in_scene = set()
+
+        def call(self, request, data=None):
+            self.calls.append((request, data))
+            if request == "CreateInput":
+                self.inputs[data["inputName"]] = data["inputKind"]
+                self.in_scene.add(data["inputName"])
+                self.device = data["inputSettings"]["device_id"]
+            if request == "CreateSceneItem":
+                self.in_scene.add(data["sourceName"])
+            if request == "GetSceneItemId" and data["sourceName"] not in self.in_scene:
+                raise live_stream.ObsError("No source was found")
+            return {"GetInputList": {"inputs": [{"inputName": n, "unversionedInputKind": k}
+                                                for n, k in self.inputs.items()]},
+                    "GetSpecialInputs": {"desktop1": "Desktop Audio"},
+                    "GetCurrentProgramScene": {"currentProgramSceneName": "Scene"},
+                    "GetInputPropertiesListPropertyItems": {"propertyItems": devices},
+                    "GetInputSettings": {"inputSettings": {"device_id": self.device}}}.get(request, {})
+
+    obs = FakeObs()
+    assert obs_setup.game_sound(obs, "realtek digital output", -12)
+    sent = dict(obs.calls)
+    assert sent["CreateInput"]["inputSettings"] == {"device_id": "spdif"}
+    assert sent["SetInputVolume"] == {"inputName": "Game sound", "inputVolumeDb": -12}
+
+    obs.calls.clear()
+    assert obs_setup.game_sound(obs, "Realtek Digital Output")      # already there: fader left alone
+    assert [r for r, _ in obs.calls if r.startswith("Set") or r == "CreateInput"] == []
+    obs.device = "benq"                                              # pointed elsewhere: pointed back
+    obs.calls.clear()
+    assert obs_setup.game_sound(obs, "Realtek Digital Output")
+    assert dict(obs.calls)["SetInputSettings"]["inputSettings"] == {"device_id": "spdif"}
+    assert "SetInputVolume" not in dict(obs.calls)
+
+    obs.calls.clear()
+    assert not obs_setup.game_sound(obs, "Realtek")                  # two outputs match: neither
+    assert not obs_setup.game_sound(obs, "Optical")
+    assert [r for r, _ in obs.calls if r.startswith("Set") or r == "CreateInput"] == []
+    assert "more than one" in caplog.text and "no output" in caplog.text
+
+    obs.in_scene.clear()                                             # another scene on air: added to it
+    assert obs_setup.game_sound(obs, "Realtek Digital Output")
+    assert dict(obs.calls)["CreateSceneItem"]["sourceName"] == "Game sound"
+    obs.inputs["Game sound"] = "wasapi_process_output_capture"      # the name taken by another kind
+    obs.calls.clear()
+    assert not obs_setup.game_sound(obs, "Realtek Digital Output")
+    assert [r for r, _ in obs.calls if r.startswith(("Set", "Create"))] == []
+
+
+async def test_a_rounds_stream_checks_the_game_sound_first_and_starts_anyway(tmp_path, monkeypatch):
+    from commentator import obs_setup
+    from tests.test_round import _engine as make
+
+    calls = []
+
+    class FakeObs:
+        def __init__(self, *a):
+            pass
+
+        def start(self):
+            calls.append("start")
+            return True
+
+    def game_sound(obs, device, db):
+        calls.append(("game sound", device, db))
+        raise RuntimeError("OBS said no")
+    monkeypatch.setattr(live_stream, "Obs", FakeObs)
+    monkeypatch.setattr(obs_setup, "game_sound", game_sound)
+    eng = make(tmp_path)
+    eng.cfg.source.type = "connector_log"
+    eng.cfg.publish.bucket = "bkt"
+    eng.cfg.live.enabled = True
+    eng._live_round_start()
+    await asyncio.sleep(0.05)
+    assert calls == ["start"]                                        # not configured: not checked
+    calls.clear()
+    eng.cfg.live.game_sound_device = "Realtek Digital Output"
+    eng._live_round_start()
+    await asyncio.sleep(0.05)
+    assert calls == [("game sound", "Realtek Digital Output", -10.0), "start"]

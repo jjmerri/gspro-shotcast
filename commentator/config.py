@@ -654,6 +654,11 @@ class LiveConfig(BaseModel):
     obs_path: str | None = None   # default: the tray's OBS (obs\ here), else C:\Program Files\obs-studio
     obs_host: str = "localhost"
     obs_port: int = 4455
+    # GSPro's own sound in the stream (docs/tracking.md#game-sound): the Windows output GSPro plays to,
+    # one nothing's plugged into so the room stays quiet (e.g. "Realtek Digital Output"; GSPro is sent
+    # there in Windows' Volume mixer). OBS records it game_sound_db below full, under the booth's voices.
+    game_sound_device: str | None = None
+    game_sound_db: float = -10.0
     # Keep each stream this many days, so the page's Round replays tab can play whole rounds from the start
     # (about 1.2 GB an hour in the bucket). 0: nothing kept, the video deleted as it goes. The stack's
     # lifecycle rule (tools/aws/stats-site.yaml) must keep live/s/ at least a day longer.

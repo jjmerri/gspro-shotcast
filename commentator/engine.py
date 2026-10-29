@@ -6771,6 +6771,13 @@ class Engine:
             # One at a time, in order: a stop already under way when the next round starts (its task
             # cancelled, its thread not) must finish before that round's start looks at OBS.
             with self._obs_lock:
+                if what == "start" and (device := self.cfg.live.game_sound_device):
+                    try:
+                        from .obs_setup import game_sound
+
+                        game_sound(obs, device, self.cfg.live.game_sound_db)
+                    except Exception as e:
+                        log.warning("Live stream: couldn't check OBS's game sound: %s", e)
                 return getattr(obs, what)()
         try:
             changed = await asyncio.to_thread(call)

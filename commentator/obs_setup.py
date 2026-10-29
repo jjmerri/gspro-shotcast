@@ -31,6 +31,8 @@ FOLDER = "obs"
 NAME = "Shotcast"
 SOURCE = "GSPro"
 GSPRO_WINDOW = "GSPro:UnityWndClass:GSpro.exe"   # title:class:exe; OBS matches the exe first
+GAME_SOUND = "Game sound"
+OUTPUT_CAPTURE = "wasapi_output_capture"
 VERSION_FILE = "shotcast-obs-version.txt"
 # As OBS writes it: MAKE_SEMANTIC_VERSION(33, 0, 0). Set, OBS skips its first-run wizard.
 LAST_VERSION = 33 << 24
@@ -171,6 +173,48 @@ def configure(obs: Obs) -> None:
         "boundsAlignment": 0, "boundsWidth": base_w, "boundsHeight": base_h}})
     if mic := obs.call("GetSpecialInputs").get("mic1"):
         obs.call("SetInputMute", {"inputName": mic, "inputMuted": True})
+
+
+def game_sound(obs: Obs, device: str, db: float = -10.0) -> bool:
+    """A "Game sound" source recording the Windows output named `device` (that name exactly, else the
+    one name containing it), added if it's missing and pointed back at it if it moved. Its fader is set
+    only when it's added, so a level changed in OBS stays."""
+    kinds = {i["inputName"]: i.get("unversionedInputKind") or i.get("inputKind")
+             for i in obs.call("GetInputList")["inputs"]}
+    if kinds.get(GAME_SOUND, OUTPUT_CAPTURE) != OUTPUT_CAPTURE:
+        log.warning("Game sound: OBS already has a %r that isn't an Audio Output Capture; rename it", GAME_SOUND)
+        return False
+    inputs = {n for n, k in kinds.items() if k == OUTPUT_CAPTURE}
+    probe = GAME_SOUND if GAME_SOUND in inputs else obs.call("GetSpecialInputs").get("desktop1")
+    if probe is None:
+        log.warning("Game sound: OBS has no Desktop Audio to list its outputs from")
+        return False
+    items = [i for i in obs.call("GetInputPropertiesListPropertyItems",
+                                 {"inputName": probe, "propertyName": "device_id"})["propertyItems"]
+             if i["itemValue"] != "default"]
+    want = device.strip().lower()
+    found = ([i for i in items if i["itemName"].lower() == want] or
+             [i for i in items if want in i["itemName"].lower()])
+    if len(found) != 1:
+        log.warning("Game sound: %s output called %r (OBS has: %s)", "no" if not found else "more than one",
+                    device, ", ".join(i["itemName"] for i in items))
+        return False
+    dev, name = found[0]["itemValue"], found[0]["itemName"]
+    scene = obs.call("GetCurrentProgramScene")["currentProgramSceneName"]
+    if GAME_SOUND in inputs:
+        if obs.call("GetInputSettings", {"inputName": GAME_SOUND})["inputSettings"].get("device_id") != dev:
+            obs.call("SetInputSettings", {"inputName": GAME_SOUND, "inputSettings": {"device_id": dev}})
+            log.info("Game sound: now recording %s", name)
+        try:
+            obs.call("GetSceneItemId", {"sceneName": scene, "sourceName": GAME_SOUND})
+        except ObsError:   # not in the scene on air: put it there too
+            obs.call("CreateSceneItem", {"sceneName": scene, "sourceName": GAME_SOUND, "sceneItemEnabled": True})
+        return True
+    obs.call("CreateInput", {"sceneName": scene, "inputName": GAME_SOUND, "inputKind": OUTPUT_CAPTURE,
+                             "inputSettings": {"device_id": dev}, "sceneItemEnabled": True})
+    obs.call("SetInputVolume", {"inputName": GAME_SOUND, "inputVolumeDb": db})
+    log.info("Game sound: recording %s at %+.0f dB", name, db)
+    return True
 
 
 def wait_for(obs: Obs, seconds: float = 90, clock=time.monotonic, sleep=time.sleep) -> None:

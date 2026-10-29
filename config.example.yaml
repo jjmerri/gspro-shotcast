@@ -264,4 +264,7 @@ live:
   # playlist: stream.m3u8
   # obs_host: localhost        # OBS's WebSocket server
   # obs_port: 4455
+  # game_sound_device: Realtek Digital Output   # GSPro's sound with the room quiet: GSPro sent to an
+  #                            # unused output in Windows' Volume mixer, OBS records it (docs/tracking.md#game-sound)
+  # game_sound_db: -10         # its level in the stream, under the booth's voices
   # obs_path: C:\Program Files\obs-studio\bin\64bit\obs64.exe   # default: the tray's (obs\ here), else this
