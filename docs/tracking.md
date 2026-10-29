@@ -237,7 +237,7 @@ in with that shot open; a link to a round (`#rounds?round=45&hole=3`) opens its 
 hole's replay. While a round's stream is still kept (a week), its rounds, holes and shots also get
 **▶ Watch**, which opens **Round replays** about a second before that swing (the back button returns).
 A player can bookmark `#rounds?player=Their+Name`. Rounds that ended since this browser's last visit are tagged
-**new**, with a count in the header. On a phone, the tabs wrap, Rounds keeps the score next to the player, Shots drops its secondary columns (they're in a tapped shot's detail), and other wide tables scroll sideways. Shots lists 100 at a time, with a button for more. The All/League/Practice and player pickers show only on the tabs they narrow: Booth covers every session and player, and Broadcasts every session. Tapping a player or a course scrolls to their profile or hole-by-hole, and Back from a round's "Every shot" list returns to its scorecard.
+**new**, with a count in the header. On a phone, the tabs are one row that swipes sideways and stays at the top of the screen, Rounds keeps the score next to the player, Shots drops its secondary columns (they're in a tapped shot's detail), and other wide tables scroll sideways. Shots lists 100 at a time, with a button for more. The All/League/Practice and player pickers show only on the tabs they narrow: Booth covers every session and player, and Broadcasts every session. Tapping a player or a course scrolls to their profile or hole-by-hole, and Back from a round's "Every shot" list returns to its scorecard.
 
 Strokes gained is measured against an approximate PGA Tour baseline (Broadie-style expected
 strokes by lie and distance), so negative numbers are normal; it's for comparing players and

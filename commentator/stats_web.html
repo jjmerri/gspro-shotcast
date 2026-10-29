@@ -110,8 +110,15 @@
   .more { margin:10px 0; }
   .narrow { display:none; }
   @media (max-width: 800px) {
-    header { position:static; padding:10px 12px; gap:8px 10px; }
-    header .meta { margin-left:0; width:100%; }
+    /* The header scrolls away except its last row, the tabs: one row that swipes sideways, pinned at
+       the top (--pin, set by pinTabs, is minus the height above the tabs). */
+    header { top:var(--pin, 0px); padding:10px 12px; gap:8px 10px; }
+    header .meta { margin-left:0; width:100%; order:8; }
+    header nav { order:9; flex:none; width:100%; flex-wrap:nowrap; overflow-x:auto;
+                 scrollbar-width:none; -webkit-overflow-scrolling:touch; }
+    header nav::-webkit-scrollbar { display:none; }
+    header nav.more { -webkit-mask-image:linear-gradient(to right, #000 80%, transparent); mask-image:linear-gradient(to right, #000 80%, transparent); }
+    header nav button { flex:none; }
     main { padding:10px 12px 40px; }
     table { display:block; overflow-x:auto; }
     /* Phones: a table's secondary columns go (.wide); what they said is in the row's detail (.narrow). */
@@ -1411,9 +1418,27 @@ function showScope() {
 
 function showTabs() {
   showScope();
-  $("#tabs").innerHTML = tabs().map(([k, label]) => `<button data-tab="${k}" class="${k === state.tab ? "on" : ""}">`
+  const nav = $("#tabs");
+  nav.innerHTML = tabs().map(([k, label]) => `<button data-tab="${k}" class="${k === state.tab ? "on" : ""}">`
     + `${k === "live" && state.live && state.live.live ? '<span class="livedot"></span>' : ""}${label}</button>`).join("");
+  const on = nav.querySelector(".on");
+  if (on && nav.scrollWidth > nav.clientWidth) nav.scrollLeft = on.offsetLeft - nav.offsetLeft - (nav.clientWidth - on.offsetWidth) / 2;
+  pinTabs();
 }
+
+// On a phone the tab row stays at the top (see the CSS): the header sticks that far above the screen.
+// The row fades out on the right while there are more tabs to swipe to.
+function pinTabs() {
+  const nav = $("#tabs"), header = nav.parentNode;
+  const pin = matchMedia("(max-width: 800px)").matches ? 8 - nav.offsetTop : 0;
+  header.style.setProperty("--pin", `${pin}px`);
+  // What the stuck header covers: a scroll to a heading (a profile, a course's holes) lands below it.
+  document.documentElement.style.scrollPaddingTop = `${header.offsetHeight + pin + 8}px`;
+  nav.classList.toggle("more", nav.scrollLeft + nav.clientWidth < nav.scrollWidth - 4);
+}
+$("#tabs").addEventListener("scroll", pinTabs, { passive: true });
+window.addEventListener("resize", pinTabs);
+if (window.ResizeObserver) new ResizeObserver(pinTabs).observe($("header"));
 
 document.addEventListener("click", (e) => {
   const t = e.target.closest("[data-tab],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
@@ -1496,6 +1521,9 @@ document.addEventListener("click", (e) => {
     state.tab = t.dataset.tab;
     showTabs();
     render();
+    // Switching from far down a page: start the new one at its top, not mid-way.
+    const top = $("#main").getBoundingClientRect().top + scrollY - $("header").getBoundingClientRect().bottom;
+    if (scrollY > top) window.scrollTo(0, Math.max(0, top));
   } else if (t.dataset.ctx !== undefined) {
     state.ctx = t.dataset.ctx;
     document.querySelectorAll("#ctx button").forEach(b => b.classList.toggle("on", b === t));
