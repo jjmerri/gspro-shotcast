@@ -214,7 +214,8 @@ for browsing the database. Its tabs:
 - **Booth**: lines and words per commentator, signature phrases, and putt-call accuracy by night.
 
 Broadcasts and Booth are hidden until the booth has said something (stats only, commentary off).
-On the published page, a **Live** tab plays the sim's screen while a round is on, if the
+Three more tabs are only on the [published page](#sharing-the-stats-page), since the booth uploads
+what they show straight to the site. A **Live** tab plays the sim's screen while a round is on, if the
 [live stream](#live-stream) is set up (a red dot on the tab means it's on air; between rounds it
 says off air). Turning `live.enabled` off takes the tab away when the booth next starts.
 **Round replays** plays each stream of the last week from the start, with a link to where each

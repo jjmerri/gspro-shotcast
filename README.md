@@ -66,6 +66,21 @@ and a half an hour of uploads plus about 50 cents a month to keep a busy week, a
 within CloudFront's free tier for a league. See [Live stream](docs/tracking.md#live-stream). With
 SuperSaaS bookings on, a **Schedule** tab shows who has the sim booked for the next two weeks.
 
+**Local vs published.** The tray's stats page is local: it runs on the sim PC over the database and
+needs no setup. Publishing it puts the same page online and adds the rest:
+
+| | Local page (sim PC) | Published page |
+|---|:---:|:---:|
+| Players, Head-to-head, Rounds, Courses, Shots, Highlights, Broadcasts, Booth tabs | ✅ | ✅ |
+| Hole replays, round summaries, Share card | ✅ | ✅ |
+| Leave a shot out of the stats | ✅ | shows the tag only |
+| Updated | whenever the database changes | after every round |
+| Open from a phone or anywhere, behind a password | | ✅ |
+| Share links other people can open | | ✅ |
+| **Live** tab (needs the [live stream](docs/tracking.md#live-stream)) | | ✅ |
+| **Round replays** tab and **▶ Watch** buttons (needs the live stream) | | ✅ |
+| **Schedule** tab (needs SuperSaaS bookings) | | ✅ |
+
 ## The booth
 
 Two voices call the action: **Nigel** on play-by-play, a calm British delivery, and **Duke** on
