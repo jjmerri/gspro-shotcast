@@ -27,6 +27,14 @@ Parameters:
     Type: String
     Default: ""
     Description: ACM certificate in us-east-1 covering DomainName and www.DomainName.
+  LoginDays:
+    Type: Number
+    Default: 365
+    MinValue: 1
+    MaxValue: 400
+    Description: >-
+      Days a browser stays signed in after entering the password (a cookie; browsers cap it at
+      400). Changing the password signs every browser out.
 
 Conditions:
   HasDomain: !Not [!Equals [!Ref DomainName, ""]]
@@ -67,7 +75,7 @@ Resources:
         SigningBehavior: always
         SigningProtocol: sigv4
 
-  # Runs at the edge on every request, before the cache: no password, no page.
+  # Runs at the edge on every request, before the cache: no password (or sign-in cookie), no page.
   BasicAuth:
     Type: AWS::CloudFront::Function
     Properties:
@@ -78,6 +86,13 @@ Resources:
         Runtime: cloudfront-js-2.0
       FunctionCode: !Sub
         - |
+          var crypto = require("crypto");
+          // The sign-in cookie: a keyed hash of the password, so it can't be read back into one and
+          // a new password invalidates it. Set by SignInCookie once the password is accepted.
+          function signedIn(request) {
+            var c = request.cookies.stats_login;
+            return !!c && c.value === crypto.createHmac("sha256", "${Token}").update("stats-login").digest("hex");
+          }
           function handler(event) {
             var domain = "${Domain}";
             var host = event.request.headers.host ? event.request.headers.host.value : "";
@@ -89,7 +104,7 @@ Resources:
               };
             }
             var auth = event.request.headers.authorization;
-            if (auth && auth.value === "Basic ${Token}") {
+            if (signedIn(event.request) || (auth && auth.value === "Basic ${Token}")) {
               return event.request;
             }
             return {
@@ -101,6 +116,41 @@ Resources:
         - Token: !Base64
             Fn::Sub: "${SiteUser}:${SitePassword}"
           Domain: !Ref DomainName
+
+  # After a request let in by the password, keeps the browser signed in for LoginDays with a
+  # cookie, so it isn't asked again every time it forgets the password (phones do, often).
+  SignInCookie:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub "${AWS::StackName}-sign-in-cookie"
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Keeps a browser signed in to the stats page after the password
+        Runtime: cloudfront-js-2.0
+      FunctionCode: !Sub
+        - |
+          var crypto = require("crypto");
+          function handler(event) {
+            var request = event.request, response = event.response;
+            var auth = request.headers.authorization;
+            if (!auth || auth.value !== "Basic ${Token}" || response.statusCode >= 400) {
+              return response;
+            }
+            var value = crypto.createHmac("sha256", "${Token}").update("stats-login").digest("hex");
+            var c = request.cookies.stats_login;
+            if (c && c.value === value) {
+              return response;
+            }
+            response.cookies = response.cookies || {};
+            response.cookies.stats_login = {
+              value: value,
+              attributes: "Path=/; Max-Age=" + (${Days} * 86400) + "; Secure; HttpOnly; SameSite=Lax"
+            };
+            return response;
+          }
+        - Token: !Base64
+            Fn::Sub: "${SiteUser}:${SitePassword}"
+          Days: !Ref LoginDays
 
   Distribution:
     Type: AWS::CloudFront::Distribution
@@ -137,6 +187,8 @@ Resources:
           FunctionAssociations:
             - EventType: viewer-request
               FunctionARN: !GetAtt BasicAuth.FunctionMetadata.FunctionARN
+            - EventType: viewer-response
+              FunctionARN: !GetAtt SignInCookie.FunctionMetadata.FunctionARN
 
   # Only this distribution can read the bucket.
   BucketPolicy:

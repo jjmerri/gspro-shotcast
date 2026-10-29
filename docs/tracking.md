@@ -288,7 +288,8 @@ GROUP BY club ORDER BY avg_carry DESC;
 
 The stats page can go online for the league behind one shared username and password, updated on
 its own after every round. It's a static site in a private S3 bucket, served by CloudFront; a
-CloudFront Function checks the password before anything is served, and the booth PC uploads with
+CloudFront Function checks the password before anything is served (once it's been entered, a
+sign-in cookie keeps that browser in for a year, `LoginDays`), and the booth PC uploads with
 keys that can only write to that bucket. For a league it costs pennies a month or nothing (S3
 uploads are free to send in, and CloudFront's free tier is 1 TB out a month).
 
@@ -373,7 +374,10 @@ CNAME at the `DistributionDomain` output. On Cloudflare, set both records to DNS
 not proxied. Every other address, `www` and the `cloudfront.net` one included, redirects to the
 domain.
 
-To change the password, run the `deploy` command again with the new one. To take it all down, empty
+To change the password, run the `deploy` command again with the new one; that signs every browser
+out. To pick up a newer template (such as the sign-in cookie) on a stack you already have, run
+`deploy` again with the same password, or with `--parameter-overrides LoginDays=90` to keep browsers
+signed in for a different number of days. To take it all down, empty
 the bucket (`aws s3 rm s3://<BucketName> --recursive`), delete the upload user's access key, and
 `aws cloudformation delete-stack --stack-name shotcast-stats`.
 
