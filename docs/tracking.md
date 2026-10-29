@@ -195,6 +195,9 @@ Broadcasts, Booth). A section with more than one view has its own row of tabs at
   around the green, putting), night-by-night trends, club gapping with each club's typical flight
   (from full swings only, so chips don't shrink a wedge), approach by club, putting by length, and
   recovery from rough and sand, the handicap index with its trend, and every round (a tap opens it).
+  **Against the league** sets each of their numbers beside the league's (everyone else in the view, with
+  their counts pooled, so a player with more rounds counts for more; the handicap index is the mean)
+  and their rank among players with 3+ rounds. Head-to-head's second picker has **League average** too.
 - **Head-to-head**, **Rounds** (tapping a round opens its page: the side's score, fairways, greens and putts,
   the round's other sides a tap away, links to the players and the course, hole-by-hole cards with Out and In for each nine, and a link to every
   shot of the round; a practice round is listed under its players, a league round under its side; a hole

@@ -370,6 +370,9 @@ def player(db: sqlite3.Connection, name: str, context: str | None = None,
         "bogey_pct": _pct(bogeys, holes), "double_pct": _pct(doubles, holes),
         "par_avg": {str(k): round(v[0] / v[1], 2) if v[1] else None for k, v in by_par.items()},
         "history": history,
+        # The counts behind the rates, so the page can pool any group of players (the league average).
+        "totals": {"nines": sum(nines), "putts": tot["putts"],
+                   "outcomes": [birdies, pars_made, bogeys, doubles], "by_par": {str(k): v for k, v in by_par.items()}},
     })
     shots = " AND player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)
     d = db.execute(f"SELECT COUNT(*) n, AVG({_DRIVE}) avg, MAX({_DRIVE}) best FROM shots "
@@ -377,6 +380,7 @@ def player(db: sqlite3.Connection, name: str, context: str | None = None,
     p["drives"] = d["n"]
     p["avg_drive"] = round(d["avg"]) if d["avg"] is not None else None
     p["longest_drive"] = round(d["best"]) if d["best"] is not None else None
+    p["totals"]["drive_yards"] = d["avg"] * d["n"] if d["avg"] is not None else 0
     p["shots"] = db.execute("SELECT COUNT(*) FROM shots WHERE 1=1" + shots, (name,)).fetchone()[0]
     p["clubs"] = [dict(r) for r in db.execute(
         "SELECT club, COUNT(*) AS n, ROUND(AVG(finish_yards), 1) AS avg_finish, ROUND(MIN(finish_yards), 1) AS best_finish,"

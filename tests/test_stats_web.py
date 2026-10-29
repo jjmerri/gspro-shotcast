@@ -344,3 +344,26 @@ def test_three_putts_by_first_putt_length_leave_out_scramble_holes(tmp_path):
     assert t["three_putts"] == [1, 3]
     bands = {b["range"]: (b["three_putts"], b["holes"]) for b in t["three_putting"]}
     assert bands["30-40 ft"] == (1, 2) and bands["0-10 ft"] == (0, 1)
+
+
+def test_the_pages_league_average_rounds_like_pythons_own_numbers():
+    """A pooled figure (the page's pyRound) and a player's own (Python's round) must agree, or a tie
+    shows as a win: 49/20 is 2.45 as a float just under, 2.5 in Python; 26/32 -> 81.25% -> 81.2."""
+    import random
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fn = re.search(r"const pyRound = .*?\n};\n", page, re.S).group(0)
+    rng = random.Random(1)
+    cases = [(49, 20, 1), (2600, 32, 1), (5, 2, 0), (7, 2, 0), (-5, 2, 0), (-1, 4, 1)] + [
+        (rng.randint(-3000, 3000), rng.choice([2, 4, 8, 20, 40, rng.randint(1, 400)]), rng.choice([0, 1, 2]))
+        for _ in range(3000)]
+    script = fn + "console.log(JSON.stringify(%s.map(([a, b, d]) => pyRound(a / b, d))))" % json.dumps(cases)
+    got = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
+    assert got == [round(a / b, d) for a, b, d in cases]

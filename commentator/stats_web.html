@@ -845,6 +845,7 @@ function renderPlayer(p) {
     <div class="card"><div class="k">Hole outcomes</div><div class="v" style="font-size:16px">${dash(p.birdie_pct, "%")} / ${dash(p.par_pct, "%")} / ${dash(p.bogey_pct, "%")} / ${dash(p.double_pct, "%")}</div><div class="sub">birdie+ / par / bogey / double+</div></div>
     <div class="card"><div class="k">Driving</div><div class="v">${dash(p.avg_drive, " yd")}</div><div class="sub">longest ${dash(p.longest_drive, " yd")} · ${p.drives} drives · ${dash(p.fir_pct, "%")} fairways</div></div>
   </div>
+  ${leagueTable(p)}
   <div class="grid2">
     <div><h2>Strokes gained</h2>${sgBars(p.sg)}</div>
     <div><h2>Night by night</h2><div class="charts" style="grid-template-columns:1fr 1fr">
@@ -912,37 +913,109 @@ function sideOf(round, name) {
 // The side a player played on, out of one round's sides (players lists the whole round).
 const sideIn = (sides, name) => name ? sides.find(r => r.side === name) || sides.find(r => (r.side_players || []).includes(name)) || sides.find(r => r.players.includes(name)) : undefined;
 
+// The stats a player is compared on (Head-to-head and their page): label, value, which way is
+// better (1 higher, -1 lower, null neither), format.
+const sgOf = (p, k) => p.sg ? p.sg.per_nine[k] : null;
+const COMPARE_ROWS = [
+  ["Rounds", p => p.rounds, null, v => v],
+  ["Handicap index", p => p.index, -1, hcp],
+  ["Scoring / 9", p => p.avg_to_par_9, -1, toPar],
+  ["Best nine", p => p.best_to_par_9, -1, toPar],
+  ["Strokes gained / 9", p => sgOf(p, "total"), 1, v => signed(v)],
+  ["  off the tee", p => sgOf(p, "off_tee"), 1, v => signed(v)],
+  ["  approach", p => sgOf(p, "approach"), 1, v => signed(v)],
+  ["  around the green", p => sgOf(p, "around_green"), 1, v => signed(v)],
+  ["  putting", p => sgOf(p, "putting"), 1, v => signed(v)],
+  ["Fairways", p => p.fir_pct, 1, v => v + "%"],
+  ["Greens in regulation", p => p.gir_pct, 1, v => v + "%"],
+  ["Scrambling", p => p.scramble_pct, 1, v => v + "%"],
+  ["Sand saves", p => p.sand_pct, 1, v => v + "%"],
+  ["Putts / hole", p => p.putts_per_hole, -1, v => v],
+  ["3-putt %", p => p.three_putt_pct, -1, v => v + "%"],
+  ["Birdie or better", p => p.birdie_pct, 1, v => v + "%"],
+  ["Double bogey or worse", p => p.double_pct, -1, v => v + "%"],
+  ["Average drive", p => p.avg_drive, 1, v => v + " yd"],
+  ["Longest drive", p => p.longest_drive, 1, v => v + " yd"],
+];
+const known = v => v !== null && v !== undefined;
+const FIELD = "*league", FIELD_NAME = "League average", RANK_MIN_ROUNDS = 3;
+
+// A group of players as one: their counts pooled (a player with more rounds weighs more), the
+// best and longest the group's best, the handicap index their mean.
+// Python's round() (half to even), so a pooled figure rounds as the players' own (from Python) do.
+const pyRound = (x, d = 0) => {
+  // From x's exact decimal value (toFixed's digits), as Python does: an exact tie goes to the even digit.
+  const e = Math.abs(x).toFixed(100), dot = e.indexOf("."), cut = d ? dot + 1 + d : dot;
+  if (!/^\.?50*$/.test(e.slice(cut))) return Number(x.toFixed(d));
+  const kept = Number(e.slice(0, cut)), odd = +e[cut - 1] % 2;
+  return Math.sign(x) * Number((kept + (odd ? 10 ** -d : 0)).toFixed(d));
+};
+function fieldOf(ps) {
+  const sum = f => ps.reduce((t, p) => t + (f(p) || 0), 0);
+  const pool = k => [sum(p => p[k] && p[k][0]), sum(p => p[k] && p[k][1])];
+  const pct = ([a, b]) => b ? pyRound(100 * a / b, 1) : null;
+  const tot = k => sum(p => p.totals && p.totals[k]);
+  const rounds = sum(p => p.rounds), holes = sum(p => p.holes), drives = sum(p => p.drives);
+  const putts = [sum(p => p.totals && p.totals.putts[0]), sum(p => p.totals && p.totals.putts[1])];
+  const outcome = i => pct([sum(p => p.totals && p.totals.outcomes[i]), holes]);
+  const best = (f, pick) => { const xs = ps.map(f).filter(known); return xs.length ? pick(...xs) : null; };
+  const idx = ps.map(p => p.index).filter(known);
+  const sgHoles = sum(p => p.sg && p.sg.holes);
+  const sg = sgHoles ? { holes: sgHoles, per_nine: Object.fromEntries(Object.keys(SG_LABELS).map(k =>
+    [k, pyRound(sum(p => p.sg && p.sg.per_nine[k] * p.sg.holes) / sgHoles, 2)])) } : null;
+  return {
+    name: FIELD_NAME, field: true, players: ps.length, rounds, holes, drives,
+    index: idx.length ? pyRound(idx.reduce((a, b) => a + b, 0) / idx.length, 1) : null,
+    avg_to_par_9: rounds ? pyRound(tot("nines") / rounds, 1) : null,
+    best_to_par_9: best(p => p.best_to_par_9, Math.min), sg,
+    fir_pct: pct(pool("fir")), gir_pct: pct(pool("gir")), scramble_pct: pct(pool("scramble")),
+    sand_pct: pct(pool("sand")), three_putt_pct: pct(pool("three_putts")),
+    putts_per_hole: putts[1] ? pyRound(putts[0] / putts[1], 2) : null,
+    birdie_pct: outcome(0), par_pct: outcome(1), bogey_pct: outcome(2), double_pct: outcome(3),
+    avg_drive: drives ? pyRound(tot("drive_yards") / drives) : null,
+    longest_drive: best(p => p.longest_drive, Math.max),
+    history: ps.flatMap(p => p.history || []),
+  };
+}
+
+// Where p's value ranks among the players with enough rounds (null if p hasn't enough, or no value).
+function rankOf(p, f, better, ps) {
+  const v = f(p), pool = ps.filter(x => x.rounds >= RANK_MIN_ROUNDS && known(f(x)));
+  if (!better || !known(v) || p.rounds < RANK_MIN_ROUNDS || pool.length < 2) return null;
+  return { at: 1 + pool.filter(x => better > 0 ? f(x) > v : f(x) < v).length, of: pool.length };
+}
+
+// A player against everyone else in this view.
+function leagueTable(p) {
+  const others = state.data.players.filter(x => x.name !== p.name);
+  if (!others.length) return "";
+  const F = fieldOf(others);
+  const rows = COMPARE_ROWS.filter(([, , better]) => better).map(([label, f, better, fmt]) => {
+    const v = f(p), l = f(F), r = rankOf(p, f, better, state.data.players);
+    const cls = known(v) && known(l) && v !== l ? ((better > 0 ? v > l : v < l) ? "good" : "bad") : "";
+    return `<tr><td class="l${label.startsWith("  ") ? " sub" : ""}"${label.startsWith("  ") ? ' style="padding-left:24px"' : ""}>${label.trim()}</td>
+      <td class="${cls}">${known(v) ? fmt(v) : "–"}</td><td>${known(l) ? fmt(l) : "–"}</td>
+      <td>${r ? `${ordinal(r.at)} <span class="sub">of ${r.of}</span>` : "–"}</td></tr>`;
+  }).join("");
+  return `<h2>Against the league</h2>
+  <p class="sub">The league is everyone else in this view (${others.length} player${others.length === 1 ? "" : "s"}, ${F.rounds} rounds), pooled, so a player with more rounds counts for more. Ranks are among players with ${RANK_MIN_ROUNDS}+ rounds.
+    <a class="link" href="${esc(hashFor("versus", { a: p.name, b: FIELD }))}">Side by side</a></p>
+  <table class="versus"><thead><tr><th class="l">Stat</th><th>${esc(p.name)}</th><th>League</th><th>Rank</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
 function renderVersus() {
   const ps = state.data.players;
   if (ps.length < 2) return '<p class="empty">Head-to-head needs two players in the database.</p>';
   let [a, b] = state.versus;
   const ranked = [...ps].sort((x, y) => y.rounds - x.rounds || y.holes - x.holes);
   if (!ps.some(p => p.name === a)) a = ranked[0].name;
-  if (!ps.some(p => p.name === b) || b === a) b = ranked.find(p => p.name !== a).name;
+  if (b !== FIELD && (!ps.some(p => p.name === b) || b === a)) b = ranked.find(p => p.name !== a).name;
   state.versus = [a, b];
-  const A = ps.find(p => p.name === a), B = ps.find(p => p.name === b);
-  const opt = (sel, which) => `<select data-versus="${which}">${ps.map(p => `<option${p.name === sel ? " selected" : ""}>${esc(p.name)}</option>`).join("")}</select>`;
-  const sg = (p, k) => p.sg ? p.sg.per_nine[k] : null;
-  const rows = [
-    ["Rounds", p => p.rounds, null, v => v],
-    ["Handicap index", p => p.index, -1, hcp],
-    ["Scoring / 9", p => p.avg_to_par_9, -1, toPar],
-    ["Best nine", p => p.best_to_par_9, -1, toPar],
-    ["Strokes gained / 9", p => sg(p, "total"), 1, v => signed(v)],
-    ["  off the tee", p => sg(p, "off_tee"), 1, v => signed(v)],
-    ["  approach", p => sg(p, "approach"), 1, v => signed(v)],
-    ["  around the green", p => sg(p, "around_green"), 1, v => signed(v)],
-    ["  putting", p => sg(p, "putting"), 1, v => signed(v)],
-    ["Fairways", p => p.fir_pct, 1, v => v + "%"],
-    ["Greens in regulation", p => p.gir_pct, 1, v => v + "%"],
-    ["Scrambling", p => p.scramble_pct, 1, v => v + "%"],
-    ["Sand saves", p => p.sand_pct, 1, v => v + "%"],
-    ["Putts / hole", p => p.putts_per_hole, -1, v => v],
-    ["Birdie or better", p => p.birdie_pct, 1, v => v + "%"],
-    ["Double bogey or worse", p => p.double_pct, -1, v => v + "%"],
-    ["Average drive", p => p.avg_drive, 1, v => v + " yd"],
-    ["Longest drive", p => p.longest_drive, 1, v => v + " yd"],
-  ];
+  const A = ps.find(p => p.name === a), B = b === FIELD ? fieldOf(ps.filter(p => p.name !== a)) : ps.find(p => p.name === b);
+  const bName = b === FIELD ? FIELD_NAME : b;
+  const opt = (sel, which) => `<select data-versus="${which}">${ps.map(p => `<option${p.name === sel ? " selected" : ""}>${esc(p.name)}</option>`).join("")}`
+    + (which ? `<option value="${FIELD}"${sel === FIELD ? " selected" : ""}>${FIELD_NAME} (everyone else)</option>` : "") + `</select>`;
+  const rows = COMPARE_ROWS;
   const cell = (v, other, better, fmt) => {
     const win = better && v !== null && v !== undefined && other !== null && other !== undefined && (better > 0 ? v > other : v < other);
     return `<td class="${win ? "win" : ""}">${v === null || v === undefined ? "–" : fmt(v)}</td>`;
@@ -960,11 +1033,11 @@ function renderVersus() {
   const shared = Object.keys(courseA).filter(c => courseB[c]);
   return `<h2>Head-to-head</h2><div class="controls">${opt(a, 0)} <span class="sub">vs</span> ${opt(b, 1)}
       <span class="sub" style="margin-left:12px">Categories won: <b class="good">${tally[0]}</b> – <b class="good">${tally[1]}</b></span></div>
-    <table class="versus"><thead><tr><th>Stat</th><th>${esc(a)}</th><th>${esc(b)}</th></tr></thead><tbody>
+    <table class="versus"><thead><tr><th>Stat</th><th>${esc(a)}</th><th>${esc(bName)}</th></tr></thead><tbody>
     ${rows.map(([label, f, better, fmt]) => `<tr><td${label.startsWith("  ") ? ' class="sub" style="padding-left:24px"' : ""}>${label.trim()}</td>${cell(f(A), f(B), better, fmt)}${cell(f(B), f(A), better, fmt)}</tr>`).join("")}
     </tbody></table>
     <h2>Courses both have played</h2>
-    ${shared.length ? `<table><thead><tr><th>Course</th><th>${esc(a)} / 9</th><th>${esc(b)} / 9</th></tr></thead><tbody>
+    ${shared.length ? `<table><thead><tr><th>Course</th><th>${esc(a)} / 9</th><th>${esc(bName)} / 9</th></tr></thead><tbody>
       ${shared.map(c => { const x = avg(courseA[c]), y = avg(courseB[c]);
         return `<tr><td>${esc(c)}</td><td class="${x < y ? "good" : ""}">${toPar(x)} <span class="sub">(${courseA[c].length})</span></td><td class="${y < x ? "good" : ""}">${toPar(y)} <span class="sub">(${courseB[c].length})</span></td></tr>`; }).join("")}
       </tbody></table>` : '<p class="empty">No course in common yet.</p>'}`;
