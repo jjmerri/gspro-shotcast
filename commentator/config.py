@@ -634,6 +634,14 @@ class PublishConfig(BaseModel):
     # round ends is the backup, in case the sign-off never finishes.
     after_round: bool = True
     delay_seconds: float = 180.0
+    # The page's name (its title and header) and the name of its last section's tab (Schedule,
+    # Broadcasts, Booth), here and on the booth's own copy of the page.
+    site_name: str = "Shotcast"
+    more_tab: str = "More"
+
+    @property
+    def brand(self) -> dict[str, str]:
+        return {"site_name": self.site_name, "more_tab": self.more_tab}
 
 
 class LiveConfig(BaseModel):

@@ -543,10 +543,11 @@ def summary(db: sqlite3.Connection, context: str | None = None,
 
 
 def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | None = None,
-                site: str | Path | None = None) -> ThreadingHTTPServer:
+                site: str | Path | None = None, brand: dict[str, str] | None = None) -> ThreadingHTTPServer:
     """Serve the stats page on localhost only (port 0 picks a free one), the same static site that
     `publish` uploads (stats_site.py), built into `site` (a temp folder by default) and rebuilt when
-    the database changes. `names` maps persona keys to on-air names."""
+    the database changes. `names` maps persona keys to on-air names; `brand` is build()'s site_name
+    and more_tab."""
     from . import stats_site
 
     db_path = Path(db_path)
@@ -558,7 +559,7 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
         with lock:
             mtime = db_path.stat().st_mtime
             if built["mtime"] != mtime:
-                stats_site.build(db_path, site, names)
+                stats_site.build(db_path, site, names, **(brand or {}))
                 built["mtime"] = mtime
 
     refresh()
@@ -635,8 +636,9 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
 
 
 def serve(db_path: str | Path, port: int = 8765, open_browser: bool = True,
-          names: dict[str, str] | None = None, site: str | Path | None = None) -> None:
-    server = make_server(db_path, port, names, site)
+          names: dict[str, str] | None = None, site: str | Path | None = None,
+          brand: dict[str, str] | None = None) -> None:
+    server = make_server(db_path, port, names, site, brand)
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"Season stats from {db_path} at {url} (Ctrl+C to stop)")
     if open_browser:

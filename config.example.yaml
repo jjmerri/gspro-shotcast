@@ -249,6 +249,8 @@ publish:
   # bucket: shotcast-stats-bucket-xxxx   # the stack's BucketName output
   # region: us-east-1
   # delay_seconds: 180                   # it publishes once the sign-off has aired; this is the backup
+  # site_name: Shotcast                  # the page's title and header
+  # more_tab: More                       # the tab for Schedule, Broadcasts and Booth
 
 # The Live tab on the published page: OBS's stream, mirrored to the publish bucket while a round is
 # on (docs/tracking.md#live-stream). The tray's "Set up the live stream..." downloads and sets up

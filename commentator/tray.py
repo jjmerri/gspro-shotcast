@@ -702,9 +702,9 @@ class Tray:
         names = {key: persona.name for key, persona in self.cfg.personas.items()}
         site = Path(self.cfg.log_dir) / "stats-web-site"
         try:
-            server = make_server(db, STATS_PORT, names, site)
+            server = make_server(db, STATS_PORT, names, site, self.cfg.publish.brand)
         except OSError:
-            server = make_server(db, 0, names, site)   # the usual port is taken
+            server = make_server(db, 0, names, site, self.cfg.publish.brand)   # the usual port is taken
         self.stats_url = f"http://127.0.0.1:{server.server_address[1]}/"
         (Path(self.cfg.log_dir) / "stats-url.txt").write_text(self.stats_url, encoding="utf-8")
         threading.Thread(target=server.serve_forever, name="stats", daemon=True).start()

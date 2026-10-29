@@ -184,8 +184,8 @@ Back the file up (`logs/season.db`); it's the only copy of your rounds.
 ## Stats web page
 
 `python -m commentator stats-web` opens a local page (http://127.0.0.1:8765)
-for browsing the database. Its header reads **The Golf Shed**, with the app's logo. Its tabs are five sections: **Home**, **Rounds** (Rounds, Courses, Shots),
-**Players** (Players, Head-to-head, Records), **Watch** (Live, Round replays) and **The Shed** (Schedule,
+for browsing the database. Its header reads **Shotcast** (`publish.site_name`), with the app's logo. Its tabs are five sections: **Home**, **Rounds** (Rounds, Courses, Shots),
+**Players** (Players, Head-to-head, Records), **Watch** (Live, Round replays) and **More** (`publish.more_tab`: Schedule,
 Broadcasts, Booth). A section with more than one view has its own row of tabs at the top of the page.
 
 - **Home**: what's on air, the next booking, the latest rounds with every side's score, and recent

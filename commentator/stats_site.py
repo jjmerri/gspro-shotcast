@@ -23,6 +23,7 @@ import secrets
 import shutil
 import sqlite3
 import time
+from html import escape
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ from . import season_analytics as A
 from . import stats_web
 
 PAGE = Path(__file__).with_name("stats_web.html")
+SITE_NAME, MORE_TAB = "Shotcast", "More"   # publish.site_name, publish.more_tab
 VENDOR = Path(__file__).with_name("stats_vendor")
 CONTEXTS = {"all": None, "league": "league", "practice": "practice"}
 SHOT_FILTERS = ("date", "player", "course", "club", "lie", "round")   # the page's exact-match filters
@@ -131,10 +133,22 @@ def _note_records(out: dict[int, dict], by_period: dict[str, dict]) -> None:
             out[shot["id"]] = shot
 
 
+def page(site_name: str = SITE_NAME, more_tab: str = MORE_TAB) -> str:
+    """The page, with the site's name (title and header) and its last section's tab name."""
+    html = PAGE.read_text(encoding="utf-8")
+    for old, new in (("<title>Shotcast</title>", f"<title>{escape(site_name)}</title>"),
+                     ('<span id="sitename">Shotcast</span>', f'<span id="sitename">{escape(site_name)}</span>'),
+                     ('<meta name="more-tab" content="More">', f'<meta name="more-tab" content="{escape(more_tab)}">')):
+        assert html.count(old) == 1, old
+        html = html.replace(old, new)
+    return html
+
+
 def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = None,
-          records: dict[int, dict] | None = None) -> str:
+          records: dict[int, dict] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB) -> str:
     """Build (or refresh) the site in `site` from the season database; returns the new version. With
-    `records`, it's filled with every shot holding a record (id -> the record), for record_clips."""
+    `records`, it's filled with every shot holding a record (id -> the record), for record_clips.
+    `site_name` and `more_tab` are publish.site_name and publish.more_tab."""
     records = {} if records is None else records
     db_path, site = Path(db_path), Path(site)
     version = new_version()
@@ -155,7 +169,7 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
                 (pdir / f"{p['file']}.json").write_text(json.dumps(pf, separators=(",", ":")), encoding="utf-8")
             (vdir / f"summary-{name}.json").write_text(json.dumps(body, separators=(",", ":")), encoding="utf-8")
         build_data_db(src, vdir / "stats.db", names)
-    shutil.copyfile(PAGE, site / "index.html")
+    (site / "index.html").write_text(page(site_name, more_tab), encoding="utf-8")
     for lib in VENDOR.iterdir():
         if lib.is_dir():
             shutil.copytree(lib, site / "vendor" / lib.name, dirs_exist_ok=True)
@@ -220,13 +234,13 @@ def _list(client: Any, bucket: str, prefix: str) -> set[str]:
 
 
 def publish(db_path: str | Path, site: str | Path, bucket: str, prefix: str = "", region: str | None = None,
-            names: dict[str, str] | None = None) -> str:
+            names: dict[str, str] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB) -> str:
     """Build the site from the database and upload it, then keep the record shots' clips up to date
     (record_clips.py). Returns the published version."""
     import boto3
 
     records: dict[int, dict] = {}
-    build(db_path, site, names, records)
+    build(db_path, site, names, records, site_name, more_tab)
     client = boto3.client("s3", region_name=region) if region else boto3.client("s3")
     version = upload(site, bucket, prefix, client)
     try:
@@ -248,8 +262,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--prefix", default="")
     p.add_argument("--region")
     p.add_argument("--names", default="{}", help="persona keys to on-air names, as JSON")
+    p.add_argument("--site-name", default=SITE_NAME)
+    p.add_argument("--more-tab", default=MORE_TAB)
     a = p.parse_args(argv)
-    version = publish(a.db, a.site, a.bucket, a.prefix, a.region, json.loads(a.names))
+    version = publish(a.db, a.site, a.bucket, a.prefix, a.region, json.loads(a.names), a.site_name, a.more_tab)
     print(f"Published {version} to s3://{a.bucket}/{a.prefix}")
 
 

@@ -150,11 +150,14 @@ def test_server_serves_the_page_and_summary(tmp_path):
                " VALUES (1, 0, '2026-10-16', 'Pebble', 'Ann', 9, 37, ?, ?, 0)",
                (json.dumps({"1": 5, "2": 4}), json.dumps(PARS)))
     db.commit()
-    server = stats_web.make_server(path, port=0, site=tmp_path / "site")   # season.db is next to site/
+    server = stats_web.make_server(path, port=0, site=tmp_path / "site",   # season.db is next to site/
+                                   brand={"site_name": "Ann & Bo's", "more_tab": "The Shed"})
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
     try:
-        assert b"The Golf Shed" in urllib.request.urlopen(base + "/").read()
+        page = urllib.request.urlopen(base + "/").read()
+        assert b"<title>Ann &amp; Bo&#x27;s</title>" in page and b'content="The Shed"' in page
+        assert b'<span id="sitename">Ann &amp; Bo&#x27;s</span>' in page
         version = json.loads(urllib.request.urlopen(base + "/latest.json").read())["version"]
         body = json.loads(urllib.request.urlopen(f"{base}/v/{version}/summary-practice.json").read())
         assert body["context"] == "practice"
