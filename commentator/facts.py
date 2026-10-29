@@ -241,10 +241,11 @@ def lie_cost_fact(lie: str, cost: tuple[int, int] | None) -> str | None:
 
 
 DIST = re.compile(r"(\d+(?:\.\d+)?)\s*(yards|metres|feet)(?:\s+(\d+)\s+inches)?")
-SCORE_NAMES = {-3: "an albatross", -2: "an eagle", -1: "a birdie", 0: "a par", 1: "a bogey", 2: "a double bogey"}
-PUTT_FOR = {-3: "albatross", -2: "eagle", -1: "birdie", 0: "par", 1: "bogey", 2: "double bogey", 3: "triple bogey"}
+SCORE_NAMES = {-3: "an albatross", -2: "an eagle", -1: "a birdie", 0: "a par", 1: "a bogey", 2: "a double bogey",
+               3: "a triple bogey", 4: "a quadruple bogey"}
+PUTT_FOR = {d: name.split(" ", 1)[1] for d, name in SCORE_NAMES.items()}
 PUTT_FOR_FACT = re.compile(r"This putt is for ([a-z ]+)\. If it misses, the next putt is for ([a-z ]+),")
-_PUTT_FOR_SAID = re.compile(r"\bfor (?:an? )?(albatross|eagle|birdie|par|(?:double |triple )?bogey)\b", re.I)
+_PUTT_FOR_SAID = re.compile(r"\bfor (?:an? )?(albatross|eagle|birdie|par|(?:double |triple |quadruple )?bogey)\b", re.I)
 
 
 _NEXT_PUTT = re.compile(r"comeback|come-back|\bnext\b|another|return|tap-in|left with|"
@@ -267,6 +268,23 @@ def wrong_putt_score(text: str, this: str, nxt: str, holed: bool) -> str | None:
         if not ok:
             return said
     return None
+
+
+# A hole score named in a line, unless it's a "for" phrase or a putt's label ("his par putt", "a par 4").
+_HOLE_SCORE_SAID = re.compile(
+    r"(?<!\bfor )(?<!\bfor an )(?<!\bfor a )(?<!double )(?<!triple )(?<!quadruple )(?<!over )(?<!under )(?<!even )"
+    r"\b(albatross|eagle|birdie|par|(?:double |triple |quadruple )?bogey)\b"
+    r"(?![\s-]+(?:putts?|try|tries|chance|look|attempt|effort|save|\d|three|four|five)\b)", re.I)
+
+
+def wrong_conceded_score(text: str, this: str, nxt: str) -> str | None:
+    """The hole score a pre-written "gimme" reaction gives when that's wrong: the lag stopped inside
+    the gimme circle, so the conceded putt makes the hole `nxt` ("leaving Bob a two-putt bogey" on a
+    lag for bogey that went down as a double). A "for" phrase is checked by wrong_putt_score."""
+    for m in _HOLE_SCORE_SAID.finditer(text):
+        if (said := m.group(1).lower()) != nxt:
+            return said
+    return wrong_putt_score(text, this, nxt, holed=False)
 
 
 def to_yards(distance: str | None) -> float | None:
@@ -452,5 +470,6 @@ def preshot_facts(hud, hole_par: int | None, handed: str | None = None) -> list[
     # A missed putt's comeback is for the next score, not this one: a pre-written "past" reaction
     # carried "for par" over to a comeback that was for bogey.
     if putting and diff is not None and (this := PUTT_FOR.get(diff)) and (nxt := PUTT_FOR.get(diff + 1)):
-        facts.append(f"This putt is for {this}. If it misses, the next putt is for {nxt}, not {this}.")
+        facts.append(f"This putt is for {this}. If it misses, the next putt is for {nxt}, not {this}. "
+                     f"If it stops inside the gimme circle, the next putt is conceded and the hole is {nxt}.")
     return facts

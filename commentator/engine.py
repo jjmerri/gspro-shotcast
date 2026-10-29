@@ -20,7 +20,7 @@ from .flight import point_at
 from .facts import (
     PUTT_FOR_FACT, SCORE_NAMES, _fmt_to_par, _to_par_value, club_delivery_facts, club_delivery_notable, club_name, flight_facts,
     gimme_edge, history_facts, lie_cost_fact, moment_facts, ordinal, preshot_facts, putt_elevation_inches, shot_facts, to_yards, WRONG_GREEN_YARDS, wrong_green_fact,
-    wrong_green_yards, wrong_putt_score,
+    wrong_conceded_score, wrong_green_yards, wrong_putt_score,
 )
 from .flight_pick import FlightPlan, Hazard, pick_line, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
@@ -390,6 +390,17 @@ def _short_miss_fact(before: Hud, par: int | None) -> str | None:
         if ends:
             fact += f", so the hole goes down as {ends}"
     return fact + ". It was a miss that cost a stroke, not a good lag."
+
+
+def _conceded_hole_fact(before: Hud, par: int | None) -> str | None:
+    """What a lag that stopped in the gimme circle scores: the conceded putt is a stroke too, so a lag
+    for bogey makes a double ("a two-putt bogey" was called on one)."""
+    if not (before.shot_number and par):
+        return None
+    strokes = before.shot_number + 1
+    name = SCORE_NAMES.get(strokes - par)
+    return (f"With the conceded putt counted, the hole goes down as {strokes} on the par {par}"
+            + (f": {name}" if name else "") + ".")
 
 
 def _feet_text(feet: float) -> str:
@@ -836,6 +847,8 @@ class Engine:
     async def _pump_source(self) -> None:
         try:
             async for event in self.source.events():
+                if isinstance(event, ShotEvent):
+                    event.received_at, event.received_fires = time.monotonic(), self.gspro.fires
                 await self._events.put(event)
         except Exception:
             log.exception("Shot source stopped; no more shots will come through")
@@ -1199,14 +1212,33 @@ class Engine:
         """Whether GSPro took the shot. The launch monitor sends a swing in the menus or during a
         course's loading screen too (a practice swing while it loads), but GSPro plays none of them:
         its log never says "Shot Fired". Those aired as shots on the last hole and kept the opener
-        waiting. Checked only outside a round, so a shot in play never waits on the log."""
-        if not self._log_truth or self._follower is None or not self._follower.primed or not self.gspro.version:
+        waiting. Checked here only outside a round, so a shot in play never waits on the log before its
+        flight call; in a round, handle_shot checks it once the ball is followed (_gspro_fired)."""
+        if not self._fire_log_followed():
             return True   # GSPro's log isn't being followed: nothing to tell by
         r = self.round
         if r is not None and not r.ended and self.gspro.mode == "course":
             return True
+        return await self._gspro_fired(fires0, impact)
+
+    def _fire_log_followed(self) -> bool:
+        return bool(self._log_truth and self._follower is not None and self._follower.primed and self.gspro.version)
+
+    async def _gspro_fired(self, fires0: int, impact: float, event: ShotEvent | None = None) -> bool:
+        """Whether GSPro's log has this shot's "Shot Fired", waiting until UNPLAYED_SHOT_WAIT_SECONDS
+        after impact. GSPconnect can also send a swing GSPro never plays mid-round (it hung and was
+        restarted): it aired as a 2-yard drive and went into the stats. A shot that queued behind other
+        events is looked for from when it arrived, so its fire isn't taken for an earlier or later shot's."""
+        if event is not None and event.received_at is not None and event.received_fires is not None:
+            fires0, impact = event.received_fires, event.received_at
         deadline = impact + UNPLAYED_SHOT_WAIT_SECONDS
-        while self.gspro.fire_of(fires0, impact) is None:
+
+        def fired() -> bool:
+            # Only a fire within this shot's window: a later real swing mustn't vouch for a phantom.
+            n = self.gspro.fire_of(fires0, impact)
+            return n is not None and self.gspro._fire_at.get(n, float("inf")) <= deadline
+
+        while not fired():
             if time.monotonic() >= deadline:
                 return False
             await asyncio.sleep(0.1)
@@ -3501,6 +3533,10 @@ class Engine:
             if putt_for and (named := wrong_putt_score(body, *putt_for, holed=outcome in ("holed", "lip_in"))):
                 log.info("Dropped the pre-written %s reaction (calls a putt for %s): %r", outcome, named, body)
                 continue
+            if putt_for and outcome == "gimme" and (named := wrong_conceded_score(body, *putt_for)):
+                log.info("Dropped the pre-written gimme reaction (the hole is %s, not %s): %r",
+                         putt_for[1], named, body)
+                continue
             if said := wrong_round_score(body, facts_text):
                 log.info("Dropped the pre-written %s reaction (round score %r isn't in the facts): %r", outcome, said, body)
                 continue
@@ -3752,6 +3788,10 @@ class Engine:
             log.info("%s final reading %.1fs after impact (landed=%s): lie %s, carry %s, total %s, offline %s", tag,
                      time.monotonic() - impact, landed, after.lie, after.tiles.get("carry (game)"),
                      after.tiles.get("total length"), after.tiles.get("offline (raw)"))
+        if not held and self._fire_log_followed() and not await self._gspro_fired(fires0, impact, event):
+            log.warning("%s dropped: GSPro never played it (no \"Shot Fired\" in its log; club %s, ball %.1f mph, "
+                        "carry %.1f): not recorded or called", tag, shot.club, shot.ball_speed or 0, shot.carry or 0)
+            return
         try:
             self._health_shot(before, after, shot.is_putt, ocr)
         except Exception:
@@ -4199,6 +4239,8 @@ class Engine:
                       "so the hole is over. No more putting is needed."]
             if (miss := _short_miss_fact(before, shot_par)):
                 result.append(miss)
+            elif (ends := _conceded_hole_fact(before, shot_par)):
+                result.append(ends)
         elif shot.is_putt and outcome == "holed":
             result = ["The putt went in the hole: holed."]
         elif shot.is_putt and outcome == "missed":
@@ -6045,7 +6087,11 @@ class Engine:
             # that Play was pressed): the load-screen title matches the course we set up. A popup over
             # the button reads neither, so we just keep state and wait.
             load_title = gate.get("load_course", "").strip()
-            loading = bool(seen_setup and course and load_title and course_match_score(load_title, course) >= 0.6)
+            # Backing out to course select puts its search bar ("pebble  FILTERS ...") where the load
+            # title sits; a search still holding the course's name isn't its load screen.
+            search_bar = "FILTERS" in load_title.upper()
+            loading = bool(seen_setup and course and load_title and not search_bar
+                           and course_match_score(load_title, course) >= 0.6)
             if loading and probed:
                 self._take_holes_sample(holes_since)   # nines changed in the moment before Play was pressed
             if loading and not roster and self._last_setup_roster:

@@ -134,6 +134,10 @@ class ShotEvent:
     impact_at: float | None = None
     impact_state: Any = None
     impact_read: Any = None     # the booth's screen read at impact (a task)
+    # When the booth took it off the feed (monotonic) and GSPro's "Shot Fired" count then: the shot
+    # may queue behind other events before it's handled.
+    received_at: float | None = None
+    received_fires: int | None = None
 
 
 @dataclass

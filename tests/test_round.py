@@ -1408,6 +1408,43 @@ async def test_setup_watcher_ignores_a_popup_over_the_setup_screen(tmp_path):
     assert p is None or (not p.aired and p.awaiting_load)
 
 
+async def test_backing_out_to_a_course_search_for_the_course_is_not_its_load(tmp_path):
+    import asyncio
+
+    e = _engine(tmp_path)
+    e.cfg.commentary.preround_poll_seconds = 0.01
+    # Back to course select with the search box still holding the course's name (seen live: the DPC
+    # Pebble opener aired as the players went to pick another course).
+    reads = [
+        {"setup_course": "Play DPC Pebble", "setup_slot_1": "MikeD", "setup_slot_2": "Sarah"},
+        {"setup_course": "Play DPC Pebble", "setup_slot_1": "MikeD", "setup_slot_2": "Sarah"},
+        {"load_course": "pebble  FILTERS 目 田"},
+    ]
+    e.screen = _ListScreen(reads)
+    task = asyncio.create_task(e._watch_setup())
+    for _ in range(60):
+        await asyncio.sleep(0.01)
+    task.cancel()
+    p = e._pending_opening
+    assert p is None or (not p.aired and p.awaiting_load)
+
+
+class _ListScreen:
+    def __init__(self, reads):
+        self.reads, self.i = reads, 0
+
+    def grab_and_read(self, names):
+        r = self.reads[min(self.i, len(self.reads) - 1)]
+        self.i += 1
+        return r, {n: r.get(n, "") for n in names}
+
+    def read_region_lines(self, names, image):
+        return {n: ([v] if (v := image.get(n, "").strip()) else []) for n in names}
+
+    def read_region_lines_cached(self, names, image, cache):
+        return self.read_region_lines(names, image), cache
+
+
 class _PixelSetupScreen:
     """A setup screen with pixel tones: each frame is a dict of region text plus "tones" (region ->
     Tone). Regions without a tone read as an empty "+" slot; the PLAYERS tab is dark unless given.
@@ -2082,6 +2119,41 @@ async def test_a_swing_gspro_never_played_is_ignored(tmp_path, monkeypatch):
     e.gspro.apply(LogEvent("shot_fired"))
     await e.handle_shot(ShotEvent(shot=Shot(club="7I", carry=150.0), hud_hint=swing))
     assert e._shot_seq == 1 and len(e.state.shots) == 1
+
+
+async def test_a_swing_gspro_never_played_mid_round_is_not_recorded(tmp_path, monkeypatch):
+    import commentator.engine as engine_mod
+    from commentator.models import Shot, ShotEvent
+    from commentator.sources.gspro_log import LogEvent
+
+    # GSPconnect hung mid-round and sent a drive GSPro never played: it aired as a 2-yard drive and
+    # went into the stats. In a round the check waits until the ball's followed, then drops it.
+    monkeypatch.setattr(engine_mod, "UNPLAYED_SHOT_WAIT_SECONDS", 0.3)
+    e, r = await _log_round(tmp_path)
+    e._follower = type("Follower", (), {"primed": True})()
+    e.gspro.version, e.gspro.mode = "3.1.6.20", "course"
+    drive = Hud(player_text="MikeD E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards")
+    await e.handle_shot(ShotEvent(shot=Shot(club="DR", carry=229.0), hud_hint=drive))
+    assert e.state.shots == []
+    assert e.store.db.execute("SELECT COUNT(*) FROM shots").fetchone()[0] == 0
+    e.gspro.apply(LogEvent("shot_fired"))
+    await e.handle_shot(ShotEvent(shot=Shot(club="DR", carry=229.0), hud_hint=drive))
+    assert len(e.state.shots) == 1
+    # A played shot that queued behind a hole-change call: its fire is older than the handler's start,
+    # so it's found from when the booth took the shot off the feed.
+    import time
+    fired_at = time.monotonic() - 4
+    e.gspro.apply(LogEvent("shot_fired"))
+    e.gspro._fire_at[e.gspro.fires] = fired_at
+    await e.handle_shot(ShotEvent(shot=Shot(club="7I", carry=150.0), hud_hint=drive,
+                                  received_at=fired_at + 0.5, received_fires=e.gspro.fires))
+    assert len(e.state.shots) == 2
+    # A phantom whose window closed before the next real swing fired: that fire isn't its.
+    phantom_at, fires = time.monotonic() - 6, e.gspro.fires
+    e.gspro.apply(LogEvent("shot_fired"))
+    await e.handle_shot(ShotEvent(shot=Shot(club="DR", carry=2.0), hud_hint=drive,
+                                  received_at=phantom_at, received_fires=fires))
+    assert len(e.state.shots) == 2
 
 async def test_an_eighteen_counted_as_nine_plays_on_until_gspro_completes_it(tmp_path):
     from commentator.models import ScorecardEvent

@@ -1988,6 +1988,21 @@ def test_prewritten_putt_reactions_name_the_comeback_for_the_next_score(tmp_path
     assert wrong_putt_score("Leaves himself a putt for par.", "par", "bogey", holed=False) == "par"
 
 
+def test_putts_past_double_bogey_name_their_score_and_a_gimme_lag_counts_the_conceded_putt(tmp_path):
+    from commentator.facts import preshot_facts, wrong_conceded_score
+    # Bob's seventh on a par 4 was called "for double bogey"; nothing in the facts said triple.
+    facts = "\n".join(preshot_facts(Hud(shot_number=7, lie="green", to_pin="7 feet 5 inches"), 4))
+    assert "a triple bogey on the hole" in facts and "the next putt is for quadruple bogey" in facts
+    # A lag for bogey that stopped in the gimme circle went down as a double, not "a two-putt bogey".
+    e = _mini_engine(tmp_path)
+    lag = "\n".join(preshot_facts(Hud(shot_number=5, lie="green", to_pin="40 feet 11 inches"), 4))
+    out = e._build_reactions({"reaction_lines": {
+        "gimme": "Excellent lag; that's conceded, leaving Bob a two-putt bogey."}}, True, lag)
+    assert "gimme" not in out
+    assert wrong_conceded_score("That was for bogey; he'll take the double bogey.", "bogey", "double bogey") is None
+    assert wrong_conceded_score("His bogey putt dies by the cup on this par 4.", "bogey", "double bogey") is None
+
+
 async def test_follow_shot_moves_on_at_the_next_player_placeholder(tmp_path):
     # The next player's address HUD shows carry AND total as "--.--" (non-empty tiles, both parse to
     # None). The follow must read that reset as moved-on and return THIS shot's last read, never theirs.
