@@ -7,8 +7,9 @@ are deleted from the bucket as they leave the playlist, and the whole session wh
     live/status.json               {"live": true, "session": ..., "since": ..., "at": ...} or {"live": false}
                                    ("at" is refreshed every HEARTBEAT_SECONDS while live, so the page can
                                    tell a booth that was killed mid-stream)
-    live/recordings.json           {"recordings": [{"session", "since", "ended", "duration",
-                                   "rounds": [{"at": seconds in, "label"}]}]}, newest first
+    live/recordings.json           {"recordings": [{"session", "since", "ended", "duration", "shots",
+                                   "rounds": [{"at": seconds in, "label"}]}]}, newest first ("shots":
+                                   whether a shot was played on it; one with none isn't kept)
     live/s/<session>/stream.m3u8   the live playlist, re-uploaded as OBS rewrites it
     live/s/<session>/full.m3u8     every segment so far (kept streams only), ENDLIST once it's over
     live/s/<session>/stream12.ts   its segments
@@ -35,6 +36,7 @@ log = logging.getLogger(__name__)
 PASSWORD_ENV = "OBS_WEBSOCKET_PASSWORD"
 HEARTBEAT_SECONDS = 30
 MIN_RECORDING_SECONDS = 60   # a stream shorter than this (OBS started and stopped) isn't kept
+SHOT_LEAD_SECONDS = 60       # a shot this long before a stream is first seen counts as on it
 OBS_EXE = Path(r"C:\Program Files\obs-studio\bin\64bit\obs64.exe")
 PORTABLE_OBS = Path("obs", "bin", "64bit", "obs64.exe")   # the tray's setup (obs_setup.py), in the home folder
 TYPES = {".m3u8": "application/vnd.apple.mpegurl", ".ts": "video/mp2t", ".m4s": "video/iso.segment",
@@ -246,6 +248,7 @@ class Mirror:
         self.track: list[tuple[str, float]] = []   # kept streams: every segment so far, with its length
         self.recordings: list[dict] = []           # live/recordings.json, newest first
         self._marks: list[tuple[float, str, bool]] = []   # from mark(), for the thread to file
+        self._shots: list[float] = []   # from shot(), when each was played
         self._marks_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -271,8 +274,8 @@ class Mirror:
                 pass
 
     def _save_index(self) -> None:
-        """recordings.json to the bucket, and (with the stream so far) to the PC: the uploader can't
-        read the bucket back, so a booth killed mid-stream closes it from this on its next start."""
+        """recordings.json to the bucket, and (with the stream so far) to the PC, so a booth killed
+        mid-stream closes it from this on its next start."""
         self._put("recordings.json", json.dumps({"recordings": self.recordings}).encode(), "no-cache")
         self._save_state()
 
@@ -301,16 +304,29 @@ class Mirror:
             with self._marks_lock:
                 self._marks.append((self.clock(), label, replace))
 
+    def shot(self) -> None:
+        """A shot was played: the stream it's on is kept (one with no shots, a round that never got
+        going, isn't). Called from any thread."""
+        if self.keep:
+            now = self.clock()
+            with self._marks_lock:   # off air, only the latest counts (for a stream about to start)
+                self._shots = [t for t in self._shots if t > now - SHOT_LEAD_SECONDS] + [now]
+
     def _file_marks(self) -> bool:
         with self._marks_lock:
             marks, self._marks = self._marks, []
+            shots, self._shots = self._shots, []
         rec = self._recording()
         if rec is None:
             with self._marks_lock:
-                # Off air: the next stream starts with the latest of them (a round started before OBS).
+                # Off air: the next stream starts with the latest of them (a round started before OBS),
+                # and a shot just before it with the shot.
                 self._marks = [m for m in marks if not m[2]][-1:] + self._marks
+                self._shots = [t for t in shots if t > self.clock() - SHOT_LEAD_SECONDS] + self._shots
             return False
         changed = False
+        if rec.get("shots") is False and any(t >= self.since - SHOT_LEAD_SECONDS for t in shots):
+            rec["shots"], changed = True, True
         for at, label, replace in marks:
             if at < self.since - 1800:
                 continue   # a round that started long before this stream: not what's on it
@@ -329,7 +345,7 @@ class Mirror:
     def clear(self) -> None:
         """Off air. With nothing kept, nothing left in the bucket from a stream that never stopped
         cleanly. Kept: a stream that never stopped cleanly is closed and listed, and any past
-        keep_days, too short to keep, or not listed (its record lost) deleted."""
+        keep_days, too short to keep, with no shots played on it, or not listed (its record lost) deleted."""
         keys: dict[str, list[str]] = {}
         for page in self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=self.root + "s/"):
             for o in page.get("Contents", []):
@@ -353,7 +369,8 @@ class Mirror:
                 if duration >= MIN_RECORDING_SECONDS:
                     self._put(f"s/{session}/full.m3u8", vod_playlist(track, ended=True), "max-age=300")
                     log.info("Live stream: closed session %s, cut off after %.0f minutes", session, duration / 60)
-            if rec is None or rec["duration"] < MIN_RECORDING_SECONDS or now - rec["since"] > self.keep:
+            if (rec is None or rec["duration"] < MIN_RECORDING_SECONDS or now - rec["since"] > self.keep
+                    or rec.get("shots") is False):
                 gone += ks
                 continue
             if (stale := f"{self.root}s/{session}/stream.m3u8") in ks:
@@ -422,7 +439,7 @@ class Mirror:
             if self.keep:
                 self._prune()   # a booth left running for days: a week-old stream goes as the next starts
                 self.recordings.insert(0, {"session": self.session, "since": round(now), "ended": None,
-                                           "duration": 0, "rounds": []})
+                                           "duration": 0, "shots": False, "rounds": []})
         durations = segment_durations(raw.decode("utf-8", "replace")) if self.keep else {}
         added = False
         for name in segments:
@@ -462,8 +479,10 @@ class Mirror:
         prefix = f"{self.root}s/{self.session}/"
         self._status(False)
         duration = sum(d for _, d in self.track)
-        if self.keep and duration >= MIN_RECORDING_SECONDS and (rec := self._recording()):
+        rec = self._recording() if self.keep and duration >= MIN_RECORDING_SECONDS else None
+        if rec is not None:
             self._file_marks()
+        if rec is not None and rec.get("shots") is not False:
             self._put(f"s/{self.session}/full.m3u8", vod_playlist(self.track, ended=True), "max-age=300")
             self._delete([prefix + "stream.m3u8"])
             rec.update(ended=round(self.since + duration), duration=round(duration))
@@ -472,6 +491,8 @@ class Mirror:
             self._save_index()
             log.info("Live stream: kept %.0f minutes for the Round replays tab", duration / 60)
         else:
+            if rec is not None:
+                log.info("Live stream: no shots played on it, so not kept")
             self._delete([prefix + n for n in self.sent] + [prefix + "stream.m3u8"]
                          + ([prefix + "full.m3u8"] if self.track else []))
             if self.keep:

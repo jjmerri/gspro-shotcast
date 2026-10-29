@@ -442,6 +442,11 @@ def predictions(db: sqlite3.Connection, names: dict[str, str] | None = None) -> 
                                 "WHERE correct IS NOT NULL GROUP BY commentator ORDER BY commentator")]
 
 
+# The closest-approach records' bands, by the distance the shot was hit from (yards, over lo up to hi);
+# together they cover every approach (season_analytics.APPROACH_SQL).
+APPROACH_BANDS = ((A.AROUND_GREEN_YARDS, 100), (100, 150), (150, 200), (200, A.APPROACH_MAX_YARDS))
+
+
 def records(db: sqlite3.Connection, context: str | None = None, player: str | None = None,
             since: str | None = None) -> dict[str, Any]:
     base = (" AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)
@@ -450,12 +455,23 @@ def records(db: sqlite3.Connection, context: str | None = None, player: str | No
     args = ((player,) if player else ()) + ((since,) if since else ())
     drive = db.execute(f"SELECT id, ts, player, {_DRIVE} AS v, course, hole FROM shots WHERE {_TEE_DRIVER} AND {_DRIVE} IS NOT NULL"
                        + base + " ORDER BY v DESC LIMIT 1", args).fetchone()
-    approach = db.execute(f"SELECT id, ts, player, finish_yards AS v, club, outcome, ROUND(to_pin_yards) AS from_yd, course, hole FROM shots WHERE {A.APPROACH_SQL}"
-                          " AND finish_yards IS NOT NULL" + base + " ORDER BY v LIMIT 1", args).fetchone()
+    approaches = []
+    for lo, hi in APPROACH_BANDS:   # 1 ft from 80 yd isn't the shot 2 ft from 200 is: a record for each
+        best = db.execute(f"SELECT id, ts, player, finish_yards AS v, club, outcome, ROUND(to_pin_yards) AS from_yd, course, hole"
+                          f" FROM shots WHERE {A.APPROACH_SQL} AND to_pin_yards > ? AND to_pin_yards <= ?"
+                          " AND finish_yards IS NOT NULL" + base + " ORDER BY v LIMIT 1", (lo, hi) + args).fetchone()
+        approaches.append({"from": lo, "to": hi, "best": dict(best) if best else None})
     putt = db.execute("SELECT id, ts, player, to_pin_yards AS v, course, hole FROM shots WHERE is_putt = 1 AND outcome = 'holed'"
                       " AND to_pin_yards IS NOT NULL" + base + " ORDER BY v DESC LIMIT 1", args).fetchone()
-    return {"longest_drive": dict(drive) if drive else None, "closest_approach": dict(approach) if approach else None,
+    return {"longest_drive": dict(drive) if drive else None, "approaches": approaches,
             "longest_putt": dict(putt) if putt else None}
+
+
+def record_shots(records_: dict[str, Any]) -> list[dict]:
+    """The shots holding one records() result's records."""
+    shots = [records_.get("longest_drive"), records_.get("longest_putt")]
+    shots += [b["best"] for b in records_.get("approaches") or []]
+    return [s for s in shots if s]
 
 
 # The Records tab's date ranges, in months back from the build (None: all time).

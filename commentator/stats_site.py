@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from . import hole_replay
+from . import record_clips
 from . import season_analytics as A
 from . import stats_web
 
@@ -124,8 +125,17 @@ def shot_query(context: str | None, filters: dict[str, str], limit: int = 500) -
     return sql, args
 
 
-def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = None) -> str:
-    """Build (or refresh) the site in `site` from the season database; returns the new version."""
+def _note_records(out: dict[int, dict], by_period: dict[str, dict]) -> None:
+    for rec in by_period.values():
+        for shot in stats_web.record_shots(rec):
+            out[shot["id"]] = shot
+
+
+def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = None,
+          records: dict[int, dict] | None = None) -> str:
+    """Build (or refresh) the site in `site` from the season database; returns the new version. With
+    `records`, it's filled with every shot holding a record (id -> the record), for record_clips."""
+    records = {} if records is None else records
     db_path, site = Path(db_path), Path(site)
     version = new_version()
     vdir = site / "v" / version
@@ -137,10 +147,12 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
             pdir = vdir / "player" / name
             pdir.mkdir(parents=True, exist_ok=True)
             holes = A.holes_played(src, context)
+            _note_records(records, body["records"])
             for p in body["players"]:
                 p["file"] = player_key(p["name"])
-                (pdir / f"{p['file']}.json").write_text(
-                    json.dumps(player_file(src, p["name"], context, holes), separators=(",", ":")), encoding="utf-8")
+                pf = player_file(src, p["name"], context, holes)
+                _note_records(records, pf["records"])
+                (pdir / f"{p['file']}.json").write_text(json.dumps(pf, separators=(",", ":")), encoding="utf-8")
             (vdir / f"summary-{name}.json").write_text(json.dumps(body, separators=(",", ":")), encoding="utf-8")
         build_data_db(src, vdir / "stats.db", names)
     shutil.copyfile(PAGE, site / "index.html")
@@ -209,11 +221,20 @@ def _list(client: Any, bucket: str, prefix: str) -> set[str]:
 
 def publish(db_path: str | Path, site: str | Path, bucket: str, prefix: str = "", region: str | None = None,
             names: dict[str, str] | None = None) -> str:
-    """Build the site from the database and upload it. Returns the published version."""
+    """Build the site from the database and upload it, then keep the record shots' clips up to date
+    (record_clips.py). Returns the published version."""
     import boto3
 
-    build(db_path, site, names)
-    return upload(site, bucket, prefix, boto3.client("s3", region_name=region) if region else boto3.client("s3"))
+    records: dict[int, dict] = {}
+    build(db_path, site, names, records)
+    client = boto3.client("s3", region_name=region) if region else boto3.client("s3")
+    version = upload(site, bucket, prefix, client)
+    try:
+        n = record_clips.sync(client, bucket, prefix, records)
+        print(f"Record clips: {n['kept']} kept, {n['added']} new, {n['removed']} removed")
+    except Exception as e:   # the stats are up: the clips are tried again next publish
+        print(f"Record clips not updated: {e}")
+    return version
 
 
 def main(argv: list[str] | None = None) -> None:

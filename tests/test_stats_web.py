@@ -154,7 +154,7 @@ def test_server_serves_the_page_and_summary(tmp_path):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
     try:
-        assert b"Season stats" in urllib.request.urlopen(base + "/").read()
+        assert b"The Golf Shed" in urllib.request.urlopen(base + "/").read()
         version = json.loads(urllib.request.urlopen(base + "/latest.json").read())["version"]
         body = json.loads(urllib.request.urlopen(f"{base}/v/{version}/summary-practice.json").read())
         assert body["context"] == "practice"

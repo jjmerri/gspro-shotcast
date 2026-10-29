@@ -397,6 +397,7 @@ def test_a_kept_stream_plays_from_the_start_with_its_rounds_marked(tmp_path):
         m.step()
         if i == 20:
             m.mark("Pebble Beach · Dan")                            # back to back: the same stream
+            m.shot()
     m.mark("Pebble Beach · Dan, Jim", replace=True)                # the players as the round ended
     now[0] += 6
     _playlist(m.folder, 28, ["stream28.ts", "stream29.ts"], ended=True, mtime=now[0])
@@ -404,7 +405,7 @@ def test_a_kept_stream_plays_from_the_start_with_its_rounds_marked(tmp_path):
     recs, full = _kept(s3, sid)
     assert f"live/s/{sid}/stream0.ts" in s3.objects and f"live/s/{sid}/stream.m3u8" not in s3.objects
     assert full.count("#EXTINF:6.000,") == 30 and full.rstrip().endswith("#EXT-X-ENDLIST") and "stream0.ts" in full
-    assert recs == [{"session": sid, "since": 1000, "ended": 1180, "duration": 180,
+    assert recs == [{"session": sid, "since": 1000, "ended": 1180, "duration": 180, "shots": True,
                      "rounds": [{"at": 0, "label": "Tobacco Road · Dan, Dave"}, {"at": 114, "label": "Pebble Beach · Dan, Jim"}]}]
 
     now[0] += 8 * 86400                                              # a week on, the next stream deletes it
@@ -423,6 +424,7 @@ def test_a_stream_cut_off_by_a_crash_is_closed_and_kept_on_the_next_start(tmp_pa
     m = Mirror(tmp_path / "hls", "bkt", client=s3, status_file=status, clock=lambda: now[0], keep_days=7)
     m.folder.mkdir()
     m.clear()
+    m.shot()                                                         # just before OBS starts: counts
     for i in range(20):
         _playlist(m.folder, i, [f"stream{i}.ts"], mtime=now[0])
         m.step()
@@ -436,6 +438,34 @@ def test_a_stream_cut_off_by_a_crash_is_closed_and_kept_on_the_next_start(tmp_pa
     assert full.rstrip().endswith("#EXT-X-ENDLIST") and full.count("#EXTINF") == 20
     assert "live/s/lost/stream3.ts" not in s3.objects
     assert json.loads(s3.objects["live/status.json"][0]) == {"live": False}
+
+
+def test_a_stream_with_no_shots_on_it_isnt_kept(tmp_path):
+    s3, now = FakeS3(), [1000.0]
+    status = tmp_path / "live.json"
+    m = Mirror(tmp_path / "hls", "bkt", client=s3, status_file=status, clock=lambda: now[0], keep_days=7)
+    m.folder.mkdir()
+    m.clear()
+    m.shot()                                                         # the last round's, long before
+    now[0] += 600
+    m.mark("GAME MENU · Josh")                                       # a round that never got going
+    for i in range(20):
+        _playlist(m.folder, i, [f"stream{i}.ts"], mtime=now[0])
+        m.step()
+        now[0] += 6
+    _playlist(m.folder, 19, ["stream19.ts"], ended=True, mtime=now[0])
+    m.step()
+    assert not [k for k in s3.objects if k.startswith("live/s/")]
+    assert json.loads(s3.objects["live/recordings.json"][0]) == {"recordings": []}
+
+    for i in range(20):                                              # again, and the booth's killed
+        _playlist(m.folder, i, [f"stream{i}.ts"], mtime=now[0])
+        m.step()
+        now[0] += 6
+    m2 = Mirror(tmp_path / "hls", "bkt", client=s3, status_file=status, clock=lambda: now[0], keep_days=7)
+    m2.clear()
+    assert not [k for k in s3.objects if k.startswith("live/s/")]
+    assert json.loads(s3.objects["live/recordings.json"][0]) == {"recordings": []}
 
 
 def test_kept_streams_wait_for_the_start_up_tidy_before_streaming(tmp_path):
@@ -476,6 +506,7 @@ def test_a_failed_prune_doesnt_cost_the_new_stream(tmp_path):
         _playlist(m.folder, i, [f"stream{i}.ts"], mtime=now[0])
         m.step()
     sid = m.session
+    m.shot()
     now[0] += 1
     _playlist(m.folder, 19, ["stream19.ts"], ended=True, mtime=now[0])
     m.step()

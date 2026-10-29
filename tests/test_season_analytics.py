@@ -270,12 +270,17 @@ def test_closest_approaches_leave_out_chips_and_par_4_tee_shots(db):
          finish_yards=0.2)
     shot(db, hole="Hole 6, par 4, 400 yards", shot_number=3, club="SW", lie_before="sand", to_pin_yards=15,
          finish_yards=0, outcome="holed")
+    shot(db, hole="Hole 7, par 5, 520 yards", shot_number=2, club="4I", lie_before="fairway", to_pin_yards=210,
+         finish_yards=8)
     db.commit()
     h = A.highlights(db, A.holes_played(db))
-    assert [x["club"] for x in h["approaches"]] == ["8I", "9I"]
+    assert [x["club"] for x in h["approaches"]] == ["8I", "9I", "4I"]
     assert [(x["club"], x["outcome"]) for x in h["chips"]] == [("SW", "holed"), ("LW", None)]
-    best = stats_web.records(db)["closest_approach"]
-    assert (best["club"], best["from_yd"]) == ("8I", 150)
+    # A record for each distance band: the 4-iron from 210 holds its own, however much closer the 8-iron got.
+    bands = {(b["from"], b["to"]): b["best"] for b in stats_web.records(db)["approaches"]}
+    assert list(bands) == [(50, 100), (100, 150), (150, 200), (200, 250)]
+    assert (bands[(100, 150)]["club"], bands[(100, 150)]["from_yd"]) == ("8I", 150)
+    assert bands[(200, 250)]["club"] == "4I" and bands[(50, 100)] is None and bands[(150, 200)] is None
 
 
 def test_a_season_db_from_before_the_stored_nine_still_opens(db):

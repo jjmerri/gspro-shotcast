@@ -3981,6 +3981,8 @@ class Engine:
             handed=before.handed or shot.handed or self.handed.get(player or ""), tree_hits=tree_hits or None,
         )
         rec.shot_id = shot_id
+        if self.live_mirror is not None:
+            self.live_mirror.shot()   # a stream with no shots on it isn't kept
         # Not gated on the screen seeing touchdown: the finish comes from GSPro's log at the next shot,
         # and a water or OB ball is caught there by its penalty. (Gating on it lost half the finishes.)
         if in_order and not shot.is_putt:

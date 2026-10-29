@@ -184,7 +184,7 @@ Back the file up (`logs/season.db`); it's the only copy of your rounds.
 ## Stats web page
 
 `python -m commentator stats-web` opens a local page (http://127.0.0.1:8765)
-for browsing the database. Its tabs are five sections: **Home**, **Rounds** (Rounds, Courses, Shots),
+for browsing the database. Its header reads **The Golf Shed**, with the app's logo. Its tabs are five sections: **Home**, **Rounds** (Rounds, Courses, Shots),
 **Players** (Players, Head-to-head, Records), **Watch** (Live, Round replays) and **The Shed** (Schedule,
 Broadcasts, Booth). A section with more than one view has its own row of tabs at the top of the page.
 
@@ -217,7 +217,9 @@ Broadcasts, Booth). A section with more than one view has its own row of tabs at
   top-five drives, approaches, chips and putts. An approach is a full shot from 51-250 yd that isn't
   a par-4/5 tee shot (a par-3 tee shot counts); a chip is from 50 yd and in, off the green. Pick the
   last 3, 6 or 9 months, the last year (the default) or all time, counted back from when the page was built.
-  Each has **View shot**, which lists its round's shots with that one open.
+  Closest approach has a card for each band (51-100, 100-150, 150-200 and 200-250 yd), since a
+  2 ft leave from 200 yd beats a 1 ft one from 80. Each has **View shot**, which lists its round's
+  shots with that one open.
 - **Broadcasts**: a night's full transcript, in order (the night picked is in the link).
 - **Booth**: lines and words per commentator, signature phrases, and putt-call accuracy by night.
 
@@ -228,6 +230,13 @@ what they show straight to the site. A **Live** tab plays the sim's screen while
 says off air). Turning `live.enabled` off takes the tab away when the booth next starts.
 **Round replays** plays each stream of the last week from the start, with a link to where each
 round in it begins (course and players); a stream still on air can be watched from its start too.
+It also lists **Record shots**: each publish copies about 24 seconds of stream around every shot
+that holds a record on the page (the season's, league's, practice's and each player's, for every
+period) into `live/clips/<shot id>/`, listed in `live/clips.json`. These clips aren't deleted after
+a week like the streams. A clip is deleted at the next publish once its shot no longer holds a
+record. A record shot whose stream was already gone has no clip, and one near the end of a stream
+still uploading gets its clip at a later publish. Its **▶ Watch** and share link play the clip. Clips need the uploader to read `live/`. Stacks made before 0.1.39
+can't, so update the stack; until then each publish skips the clips and says why.
 **Schedule** lists the sim's SuperSaaS bookings for the next two weeks (time, the booker's name
 and the booking type), when [bookings](leagues.md) are on (`booking.schedule_days`, 0 for none);
 the booth refreshes it every 30 minutes while it runs.
@@ -404,7 +413,8 @@ about 20 seconds behind, and the player (live or a replay) starts muted, with a 
 sound on. Any number of people can watch at once.
 Each stream is kept for a week (`live.keep_days`) for the **Round replays** tab, with a second
 playlist (`full.m3u8`) of every file from the start and `live/recordings.json` listing the streams
-and where each round in them starts. A stream under a minute isn't kept. Streams past a week are
+and where each round in them starts. A stream under a minute isn't kept, and nor is one with no
+shot played on it (or in the minute before it started), such as a round that never got past GSPro's menu. Streams past a week are
 deleted as the next one starts or stops, or when the booth starts, and a lifecycle rule in the stack
 deletes anything under `live/s/` after 8 days (stacks made before 0.1.16 had 1 day: update the stack,
 or kept streams vanish after a day). A stream cut off by a crash is closed and listed when the booth

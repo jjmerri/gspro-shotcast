@@ -213,7 +213,8 @@ Resources:
             Action: s3:GetObject
             Resource: !Sub "${Bucket.Arn}/backups/*"
 
-  # The booth's keys: upload and clean up in this bucket, nothing else. Create its access key
+  # The booth's keys: upload and clean up in this bucket, and read back the streams (record_clips.py
+  # copies each record shot out of its stream before the stream goes), nothing else. Create its access key
   # after the stack (aws iam create-access-key), so the secret never passes through CloudFormation.
   Uploader:
     Type: AWS::IAM::User
@@ -226,6 +227,10 @@ Resources:
               - Effect: Allow
                 Action: [s3:PutObject, s3:DeleteObject]
                 Resource: !Sub "${Bucket.Arn}/*"
+              # With a publish.prefix, the stream is under <prefix>/live/ instead: change it to match.
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${Bucket.Arn}/live/*"
               - Effect: Allow
                 Action: s3:ListBucket
                 Resource: !GetAtt Bucket.Arn
