@@ -365,5 +365,6 @@ def test_the_pages_league_average_rounds_like_pythons_own_numbers():
         (rng.randint(-3000, 3000), rng.choice([2, 4, 8, 20, 40, rng.randint(1, 400)]), rng.choice([0, 1, 2]))
         for _ in range(3000)]
     script = fn + "console.log(JSON.stringify(%s.map(([a, b, d]) => pyRound(a / b, d))))" % json.dumps(cases)
-    got = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
+    # on stdin: Windows caps a command line at 32k characters
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, text=True, check=True).stdout)
     assert got == [round(a / b, d) for a, b, d in cases]
