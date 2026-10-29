@@ -71,7 +71,7 @@ needs no setup. Publishing it puts the same page online and adds the rest:
 
 | | Local page (sim PC) | Published page |
 |---|:---:|:---:|
-| Players, Head-to-head, Rounds, Courses, Shots, Highlights, Broadcasts, Booth tabs | ✅ | ✅ |
+| Home; Rounds, Courses, Shots; Players, Head-to-head, Records; Broadcasts, Booth; round and player pages | ✅ | ✅ |
 | Hole replays, round summaries, Share card | ✅ | ✅ |
 | Leave a shot out of the stats | ✅ | shows the tag only |
 | Updated | whenever the database changes | after every round |

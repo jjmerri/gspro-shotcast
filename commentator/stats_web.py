@@ -122,6 +122,21 @@ def round_groups(db: sqlite3.Connection) -> tuple[list[dict[str, Any]], dict[int
     return groups, of_row
 
 
+def player_round_of(db: sqlite3.Connection):
+    """A lookup from a player_rounds row (session, course, end) to its round in `rounds` (round_groups'
+    id): both are stored as the round ends, a moment apart. None when no side of it was recorded."""
+    _, of_row = round_groups(db)
+    ends: dict[tuple, list[tuple[float, int]]] = {}
+    for rid, sess, end, course in db.execute("SELECT id, session_id, ended_at, course FROM rounds"):
+        ends.setdefault((sess, (course or "").casefold()), []).append((end, of_row[rid]))
+
+    def find(session_id: int, course: str | None, ended_at: float) -> int | None:
+        near = [(abs(end - ended_at), rnd) for end, rnd in ends.get((session_id, (course or "").casefold()), [])]
+        best = min(near, default=None)
+        return best[1] if best and best[0] <= ROUND_GAP_SECONDS else None
+    return find
+
+
 def shot_rounds(db: sqlite3.Connection) -> dict[int, int]:
     """Each shot's round: shots aren't stored with one, so it's the round that ended next after the
     shot (and after the round before it), when that round was on the shot's course and ended within a
@@ -214,7 +229,7 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
         if (rnd, r["side"]) in left:
             longest = kept.get((rnd, r["side"]))
         out.append({
-            "id": r["id"], "round": of_row.get(r["id"], r["id"]), "ended": r["ended_at"], "date": r["date"],
+            "id": r["id"], "round": of_row.get(r["id"], r["id"]), "session": r["session_id"], "ended": r["ended_at"], "date": r["date"],
             "started": started.get(of_row.get(r["id"], r["id"])),
             "course": r["course"],
             # who played in it (a team side's players too), so the page can show one player's rounds
@@ -310,6 +325,7 @@ def player(db: sqlite3.Connection, name: str, context: str | None = None,
     holes = birdies = pars_made = bogeys = doubles = 0
     by_par: dict[int, list[int]] = {3: [0, 0], 4: [0, 0], 5: [0, 0]}
     history = []
+    round_of = player_round_of(db)
     for r in db.execute("SELECT * FROM player_rounds WHERE player = ?" + _ctx(context) + " ORDER BY ended_at",
                         (name,)):
         fir[0] += r["fir_hit"] or 0
@@ -338,7 +354,8 @@ def player(db: sqlite3.Connection, name: str, context: str | None = None,
                 else card["to_par"] * 9.0 / card["played"]
             nines.append(per_nine)
             history.append({"date": _date(db, r["session_id"]), "course": r["course"], "played": card["played"],
-                            "gross": card["gross"], "to_par": card["to_par"]})
+                            "gross": card["gross"], "to_par": card["to_par"],
+                            "round": round_of(r["session_id"], r["course"], r["ended_at"])})
     p.update({
         "rounds": len(nines),
         "avg_to_par_9": round(sum(nines) / len(nines), 1) if nines else None,
@@ -441,7 +458,7 @@ def records(db: sqlite3.Connection, context: str | None = None, player: str | No
             "longest_putt": dict(putt) if putt else None}
 
 
-# The Highlights tab's date ranges, in months back from the build (None: all time).
+# The Records tab's date ranges, in months back from the build (None: all time).
 PERIODS = {"3m": 3, "6m": 6, "9m": 9, "1y": 12, "all": None}
 
 

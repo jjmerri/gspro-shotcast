@@ -105,7 +105,17 @@
   #me { border-color:var(--accent); }
   .tag.new { border-color:var(--eagle); color:var(--eagle); }
   .meta button.link { font-size:12px; margin-left:10px; }
-  .acts { white-space:nowrap; } .acts button.link + button.link { margin-left:8px; }
+  .acts { white-space:nowrap; } .acts > * + * { margin-left:8px; }
+  a.link { color:var(--accent); text-decoration:none; } a.link:hover { text-decoration:underline; }
+  .subtabs { margin:0 0 4px; gap:18px; border-bottom:1px solid var(--line); flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none; }
+  .subtabs button { border:none; border-bottom:2px solid transparent; border-radius:0; padding:8px 2px; background:none; flex:none; }
+  .subtabs button.on { border-color:var(--accent); background:none; }
+  .rcards { grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); }
+  .subtabs + h2, .subtabs + p + h2 { margin-top:16px; }
+  .ractions { line-height:2; }
+  .round .cards { grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:8px; }
+  .home .cards { grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); }
+  .home .card.go { cursor:pointer; } .home .card.go:hover { border-color:var(--accent); }
   .controls select { max-width:100%; }
   .more { margin:10px 0; }
   .narrow { display:none; }
@@ -150,44 +160,70 @@
 <main id="main"></main>
 <script src="vendor/sql.js-httpvfs-0.8.12/index.js"></script>
 <script>
-const TABS = [["live", "Live"], ["vods", "Round replays"], ["schedule", "Schedule"], ["players", "Players"], ["versus", "Head-to-head"], ["rounds", "Rounds"], ["courses", "Courses"],
-              ["shots", "Shots"], ["highlights", "Highlights"], ["broadcasts", "Broadcasts"], ["booth", "Booth"]];
+// The page's views, in five sections (the header's tabs); a section with more than one view has its
+// own row of tabs. A round's page and a player's page sit in Rounds and Players, reached from a row.
+const SECTIONS = [["home", "Home", ["home"]], ["rounds", "Rounds", ["rounds", "courses", "shots"]],
+                  ["players", "Players", ["players", "versus", "highlights"]], ["watch", "Watch", ["live", "vods"]],
+                  ["shed", "The Shed", ["schedule", "broadcasts", "booth"]]];
+const VIEWS = { home: "Home", rounds: "Rounds", courses: "Courses", shots: "Shots", round: "Round", players: "Players",
+                player: "Player", versus: "Head-to-head", highlights: "Records", live: "Live", vods: "Round replays",
+                schedule: "Schedule", broadcasts: "Broadcasts", booth: "Booth" };
+const PAGES = { round: "rounds", player: "players" };
+const sectionOf = v => PAGES[v] || SECTIONS.find(s => s[2].includes(v))[0];
 const PERIODS = [["3m", "3 months"], ["6m", "6 months"], ["9m", "9 months"], ["1y", "1 year"], ["all", "All time"]];
-// A link holds the view: #tab?player=…&ctx=… and the tab's own keys (hashFor): a shots filter and an
-// open shot, an open round and hole, a course, a head-to-head pair, a player, a video and a time in it.
-const [hashTab, hashQuery] = location.hash.slice(1).split("?");
-const linkQ = new URLSearchParams(hashQuery || "");
 const store = { get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
                 set: (k, v) => { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} } };
-const SHOT_LINK_KEYS = ["round", "from", "to", "course", "club", "lie"];
-const state = { tab: TABS.some(t => t[0] === hashTab) ? hashTab : "players", ctx: "", data: null, player: null,
-                me: linkQ.get("player") ?? store.get("shotcast.me") ?? "", mine: null,
+// The shots filter in a link; `who` is the Shots tab's own player filter, not the picked player.
+const SHOT_LINK_KEYS = ["round", "from", "to", "course", "club", "lie", "who"];
+const state = { tab: "home", ctx: "", data: null, player: null, me: "", mine: null, lastView: {},
                 seen: Number(store.get("shotcast.seen")) || 0,
-                round: null, sort: {}, more: {}, course: null, versus: [null, null], shotFilter: {}, shots: null, shotOpen: null,
-                session: null, transcript: null, replays: {}, replayHole: null, replayOnly: false,
-                vods: undefined, vod: linkQ.get("vod") ? { session: linkQ.get("vod"), at: +linkQ.get("at") || 0 } : null,
-                schedule: undefined,
-                period: PERIODS.some(p => p[0] === linkQ.get("period")) ? linkQ.get("period") : "1y" };
-if (["league", "practice"].includes(linkQ.get("ctx"))) state.ctx = linkQ.get("ctx");
-const linkNum = k => Number(linkQ.get(k)) || null;
-if (hashTab === "shots") {
-  for (const k of SHOT_LINK_KEYS) if (linkQ.get(k)) state.shotFilter[k] = linkQ.get(k);
-  if (linkNum("shot")) {
-    state.shotOpen = linkNum("shot");
-    state.scrollTo = { sel: `tr[data-shot="${state.shotOpen}"]`, until: Date.now() + 20000 };
-    // A shot on its own: the page looks up its round (loadShots) and lists that round's shots.
-    if (!SHOT_LINK_KEYS.some(k => linkQ.get(k))) state.shotLink = state.shotOpen;
+                round: null, roundGroup: null, sort: {}, more: {}, course: null, versus: [null, null], shotFilter: {}, shots: null, shotOpen: null,
+                session: null, transcript: null, transcriptFor: null, replays: {}, replayHole: null, replayOnly: false,
+                vods: undefined, vod: null, schedule: undefined, period: "1y" };
+
+// A link holds the view: #view?player=…&ctx=… and the view's own keys (hashFor): a shots filter and an
+// open shot, a round and hole, a course, a head-to-head pair, a player, a session, a video and a time
+// in it. Read when the page opens and again on Back/Forward; true when the data needs loading again.
+function applyHash() {
+  const [view, query] = location.hash.slice(1).split("?");
+  const q = new URLSearchParams(query || "");
+  const num = k => Number(q.get(k)) || null;
+  const was = [state.me, state.ctx];
+  state.me = q.get("player") ?? store.get("shotcast.me") ?? "";
+  state.ctx = ["league", "practice"].includes(q.get("ctx")) ? q.get("ctx") : "";
+  state.tab = VIEWS[view] ? view : "home";
+  state.scrollTo = null;
+  // Older links: a round opened on Rounds, a profile under Players.
+  if (view === "rounds" && num("round")) state.tab = "round";
+  if (view === "players" && q.get("show") && !state.me) state.tab = "player";
+  if (state.tab === "shots") {
+    const f = {};
+    for (const k of SHOT_LINK_KEYS) if (q.get(k)) f[k] = q.get(k);
+    if (JSON.stringify(f) !== JSON.stringify(state.shotFilter)) { state.shotFilter = f; state.shots = null; }
+    state.shotOpen = num("shot");
+    if (state.shotOpen) {
+      state.scrollTo = { sel: `tr[data-shot="${state.shotOpen}"]`, until: Date.now() + 20000 };
+      // A shot on its own: the page looks up its round (loadShots) and lists that round's shots.
+      if (!Object.keys(f).length) { state.shotLink = state.shotOpen; state.shots = null; }
+    }
   }
+  if (state.tab === "round") {
+    state.round = num("round") || num("id");
+    state.roundGroup = state.round ? null : num("r");
+    state.replayHole = num("hole");
+    state.replayPlayed = null;
+    if (state.replayHole) state.scrollTo = { sel: ".replay", until: Date.now() + 20000 };
+  }
+  if (state.tab === "courses" && q.get("course")) state.course = q.get("course");
+  if (state.tab === "player") state.player = q.get("name") || q.get("show") || state.player;
+  if (state.tab === "versus") state.versus = [q.get("a") || state.versus[0] || state.me || null, q.get("b") || state.versus[1]];
+  if (state.tab === "highlights") state.period = PERIODS.some(p => p[0] === q.get("period")) ? q.get("period") : "1y";
+  if (state.tab === "vods") state.vod = q.get("vod") ? { session: q.get("vod"), at: +q.get("at") || 0 } : null;
+  if (state.tab === "broadcasts" && num("session")) state.session = num("session");
+  return !state.data || was[0] !== state.me || was[1] !== state.ctx;
 }
-if (hashTab === "rounds" && linkNum("round")) {
-  state.round = linkNum("round");
-  state.replayHole = linkNum("hole");
-  state.scrollTo = { sel: state.replayHole ? ".replay" : `tr[data-round="${state.round}"]`, until: Date.now() + 20000 };
-}
-if (hashTab === "courses" && linkQ.get("course")) state.course = linkQ.get("course");
-if (state.me) { state.player = state.me; state.versus[0] = state.me; }
-if (hashTab === "players" && !state.me && linkQ.get("show")) state.player = linkQ.get("show");
-if (hashTab === "versus") state.versus = [linkQ.get("a") || state.versus[0], linkQ.get("b") || state.versus[1]];
+applyHash();
+if (state.me) { if (state.tab !== "player") state.player = state.me; state.versus[0] = state.versus[0] || state.me; }
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const dash = (v, suffix = "") => v === null || v === undefined ? "–" : v + suffix;
@@ -282,13 +318,13 @@ async function load() {
     const latest = await getJSON("latest.json", { cache: "no-store" });
     if (mine !== loading) return;
     state.local = !!latest.local;   // served by the booth's own stats server, which can leave shots out
-    if (!site || site.version !== latest.version) { site = { version: latest.version, db: null }; state.session = null; state.replays = {}; }
+    if (!site || site.version !== latest.version) { site = { version: latest.version, db: null }; state.transcriptFor = null; state.replays = {}; }
     const body = await getJSON(`v/${site.version}/summary-${state.ctx || "all"}.json`);
     if (mine !== loading) return;
     state.data = body;
     state.shots = null;
     // The tabs read from their own files may not have loaded yet: they settle it themselves.
-    if (!tabs().some(([k]) => k === state.tab) && !EXTRA_TABS.includes(state.tab)) state.tab = "players";
+    if (!tabs().includes(state.tab) && !EXTRA_TABS.includes(state.tab)) state.tab = "home";
     showTabs();
     document.querySelectorAll("#ctx button").forEach(b => b.classList.toggle("on", b.dataset.ctx === state.ctx));
     showMe();
@@ -316,7 +352,7 @@ function showMe() {
 function setMe(name) {
   state.me = name;
   store.set("shotcast.me", name || null);
-  delete state.shotFilter.player;
+  delete state.shotFilter.who;
   state.shots = null;
   state.session = null;
   if (name) { state.player = name; state.versus[0] = name; if (state.versus[1] === name) state.versus[1] = null; }
@@ -363,18 +399,45 @@ function hashFor(tab = state.tab, v = null) {
   const set = (k, x) => { if (x !== null && x !== undefined && x !== "") q.set(k, String(x)); };
   if (v) for (const [k, x] of Object.entries(v)) k === "player" ? q.set(k, x) : set(k, x);
   else if (tab === "shots") { for (const k of SHOT_LINK_KEYS) set(k, state.shotFilter[k]); set("shot", state.shotOpen); }
-  else if (tab === "rounds" && state.round) { set("round", state.round); set("hole", state.replayHole); }
+  else if (tab === "round") { set("id", state.round); set("r", state.roundGroup); set("hole", state.replayHole); }
   else if (tab === "courses") set("course", state.course);
   else if (tab === "versus") { set("a", state.versus[0]); set("b", state.versus[1]); }
-  else if (tab === "players" && !state.me) set("show", state.player);
+  else if (tab === "player") set("name", state.player);
   else if (tab === "highlights" && state.period !== "1y") set("period", state.period);
   else if (tab === "vods" && state.vod) { set("vod", state.vod.session); if (state.vod.at) set("at", state.vod.at); }
+  else if (tab === "broadcasts") set("session", state.session);
   return "#" + tab + "?" + q;
 }
 
+let shownHash = location.hash;   // the link drawn, so Back/Forward know when there's a view to change to
 function writeHash() {
   const h = hashFor();
-  if (location.hash !== h) history.replaceState(null, "", h);
+  if (location.hash !== h) history.replaceState(history.state, "", h);
+  shownHash = location.hash;
+}
+
+// Into a round, a player, a round's shots, a video: a history entry first, so Back comes out of it to
+// where the page was (and how far down). The caller sets the view and draws it, which writes its link.
+function remember() {
+  history.replaceState({ y: scrollY }, "", location.hash);
+  history.pushState(null, "", location.hash);
+}
+function openView(view) {
+  remember();
+  state.tab = view;
+  showTabs();
+  render();
+  if (!state.scrollTo) window.scrollTo(0, 0);
+}
+// A link followed on the page (an <a href="#…">), Back or Forward: the view in the address.
+function route(y = 0) {
+  if (location.hash === shownHash) return;
+  shownHash = location.hash;
+  const reload = applyHash();
+  if (reload) { load(); return; }
+  showTabs();
+  render();
+  if (!state.scrollTo) window.scrollTo(0, y);
 }
 
 // A share button: the phone's share sheet, else the link copied.
@@ -412,9 +475,9 @@ function shotShare(x, title = "this shot") {
   const w = x && videoAt(x.ts);
   return w ? shareBtn(hashFor("vods", { vod: w.session, at: w.at, player: "" }), title) : "";
 }
-// A shot's (or a highlight's) watch and share buttons.
+// A shot's (or a highlight's) links: the shot in its round's list, and while the video's kept, watch and share.
 const shotActions = (x, title = "this shot") => x && x.id
-  ? ` <span class="acts">${watchBtn(x.ts, "▶")}${shotShare(x, title)}</span>` : "";
+  ? ` <span class="acts"><a class="link" href="${esc(hashFor("shots", { shot: x.id }))}" title="The shot in its round: launch numbers and what the booth said">View shot</a>${watchBtn(x.ts, "▶")}${shotShare(x, title)}</span>` : "";
 
 // Rounds that ended after this device's last visit are tagged new; the mark moves on once seen.
 function markSeen() {
@@ -657,7 +720,56 @@ function gapChart(clubs) {
       <span class="lbl" style="left:calc(${pct(c.carry)} + 8px)">${Math.round(c.carry)} yd</span></div>`).join("")}</div>`;
 }
 
-// ---- tabs -------------------------------------------------------------------------------------
+// ---- views ------------------------------------------------------------------------------------
+
+// Where to start: what's on now, the next booking, the picked player's latest round and numbers, the
+// last few rounds and moments, each a tap from the rest.
+function renderHome() {
+  const d = state.data, me = state.me, now = Date.now();
+  const cards = [];
+  if (state.live && state.live.live)
+    cards.push(`<div class="card go" data-tab="live"><div class="k"><span class="livedot"></span>On air now</div><div class="v">Watch live</div><div class="sub">since ${esc(new Date(state.live.since * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}</div></div>`);
+  const next = state.schedule && state.schedule.bookings.find(b => new Date(b.finish) > now);
+  if (next) {
+    const on = new Date(next.start) <= now;
+    cards.push(`<div class="card go" data-tab="schedule"><div class="k">${on ? "At the sim now" : "Next at the sim"}</div><div class="v" style="font-size:17px">${esc(when(next.start, { weekday: "short", hour: "numeric", minute: "2-digit" }))}</div>
+      <div class="sub">${esc(next.name || "Booked")} · until ${esc(when(next.finish, { hour: "numeric", minute: "2-digit" }))}</div></div>`);
+  }
+  const p = me && d.players.find(p => p.name === me);
+  if (p) cards.push(`<div class="card go" data-player="${esc(p.name)}"><div class="k">${esc(p.name)}</div><div class="v">${toPar(p.avg_to_par_9)} <span class="sub">a nine</span></div>
+    <div class="sub">index ${hcp(p.index)} · best ${toPar(p.best_to_par_9)} · ${p.rounds} round${p.rounds === 1 ? "" : "s"}</div></div>`);
+  const mineR = me ? d.rounds.filter(r => r.players.includes(me)) : d.rounds;
+  const last = me && mineR[0] && sideIn(d.rounds.filter(r => r.round === mineR[0].round), me);
+  if (last) cards.push(`<div class="card go" data-round="${last.id}"><div class="k">${me ? "Latest round" : "Last round"}${freshTag(last)}</div><div class="v">${dash(last.gross)} <span class="sub">${toPar(last.to_par)}</span></div>
+    <div class="sub">${esc(sideName(last))} · ${esc(last.course)} · ${esc(last.date)}</div></div>`);
+  if (!me) {   // the season's leaders, for everyone
+    const ix = d.players.filter(p => p.index !== null && p.index !== undefined).sort((a, b) => a.index - b.index)[0];
+    if (ix) cards.push(`<div class="card go" data-player="${esc(ix.name)}"><div class="k">Lowest handicap</div><div class="v">${hcp(ix.index)}</div><div class="sub">${esc(ix.name)} · ${toPar(ix.avg_to_par_9)} a nine</div></div>`);
+    const rec = d.records["1y"] || {};
+    for (const [k, label, v] of [["longest_drive", "Longest drive", x => Math.round(x.v) + " yd"], ["longest_putt", "Longest putt holed", x => Math.round(x.v * 3) + " ft"]])
+      if (rec[k]) cards.push(`<div class="card go" data-tab="highlights"><div class="k">${label} <span class="sub">this year</span></div><div class="v">${v(rec[k])}</div><div class="sub">${esc(rec[k].player)} · ${esc(rec[k].course || "")}</div></div>`);
+  }
+  // The latest rounds as played: each with its sides' scores.
+  const groups = [];
+  for (const r of mineR) {
+    let g = groups.find(g => g.round === r.round);
+    if (!g) { if (groups.length === 8) continue; groups.push(g = { round: r.round, first: r, sides: [] }); }
+    g.sides.push(r);
+  }
+  const pickSide = g => sideIn(g.sides, me) || g.sides[0];
+  const recent = groups.length ? `<table class="rounds"><tbody>${groups.map(g => `<tr class="click" data-round="${pickSide(g).id}"><td style="width:1%">${esc(g.first.date)}${freshTag(g.first)}</td>
+    <td class="l">${esc(g.first.course)}<div class="sub">${g.sides.map(r => `${esc(sideName(r))} ${dash(r.gross)} (${toPar(r.to_par)})`).join(" · ")}</div></td></tr>`).join("")}</tbody></table>
+    <p class="sub"><button class="link" data-tab="rounds">All rounds →</button></p>` : '<p class="empty">No rounds in this view yet.</p>';
+  const ms = ((d.highlights["3m"] || {}).moments || []).filter(m => !me || m.player === me).slice(0, 5);
+  const moments = ms.length ? ms.map(m => `<div class="moment"><div class="kind">${esc(m.kind)}</div><div><b>${esc(m.player)}</b> · ${esc(m.text)}
+    <div class="sub">${esc(m.date)} · ${esc(m.course)}${m.hole ? ` · hole ${m.hole}` : ""}${shotActions(m)}</div></div></div>`).join("")
+    + `<p class="sub"><button class="link" data-tab="highlights">All records and moments →</button></p>` : "";
+  const pickHint = me ? "" : `<p class="sub">Pick yourself in the “Everyone” menu at the top to see your own numbers here and on every tab.</p>`;
+  return `<div class="home"><h2>${meTitle("Home")}</h2>${pickHint}${cards.length ? `<div class="cards">${cards.join("")}</div>` : ""}
+    <h2>${me ? "Their latest rounds" : "Latest rounds"}</h2>${recent}
+    ${moments ? `<h2>Moments <span class="sub">last 3 months</span></h2>${moments}` : ""}</div>`;
+}
+
 
 function renderPlayers() {
   const d = state.data;
@@ -689,20 +801,34 @@ function renderPlayers() {
     <td>${dash(p.avg_drive, " yd")}</td><td>${dash(p.longest_drive, " yd")}</td></tr>`;
   if (state.me && !d.players.some(p => p.name === state.me))
     return `<h2>${meTitle("Players")}</h2><p class="empty">${esc(state.me)} has no rounds in this view.</p>`;
-  const shown = state.me ? d.players.filter(p => p.name === state.me) : d.players;
-  let html = `<h2>${meTitle("Players")}</h2>`
-    + (state.me ? "" : `<p class="sub">Tap a player for their profile below.</p>`)
-    + sortable("players", shown, cols, row, { key: "avg_to_par_9" });
-  const p = shown.find(p => p.name === (state.me || state.player))
-    || [...shown].sort((a, b) => b.rounds - a.rounds || b.holes - a.holes)[0];
-  if (p) { state.player = p.name; html += renderPlayer(p); }
-  return html;
+  // One player picked: their row and their page, here.
+  if (state.me) {
+    state.player = state.me;
+    return `<h2>${meTitle("Players")}</h2>` + sortable("players", d.players.filter(p => p.name === state.me), cols, row)
+      + renderPlayer(d.players.find(p => p.name === state.me));
+  }
+  return `<h2>Players</h2><p class="sub">Tap a player for their page: scoring, strokes gained, gapping, putting and every round.</p>`
+    + sortable("players", d.players, cols, row, { key: "avg_to_par_9" });
+}
+
+// A player's page: everyone's list is a tap back.
+function renderPlayerPage() {
+  const p = state.data.players.find(p => p.name === state.player);
+  const back = `<p class="sub"><button class="link" data-tab="players">← All players</button></p>`;
+  if (!p) return back + `<h2>${esc(state.player || "Player")}</h2><p class="empty">No rounds in this view.${state.ctx ? ' <button class="link" data-ctx="">Show all rounds</button>' : ""}</p>`;
+  return back + renderPlayer(p);
 }
 
 function renderPlayer(p) {
   const pa = p.par_avg;
   const only = state.me ? "" : `<button class="link" data-onlyme="${esc(p.name)}" title="Narrow every tab to ${esc(p.name)} (the picker at the top; remembered on this device)">Show only ${esc(p.name)} on every tab</button>`;
-  return `<h2 id="profile">${esc(p.name)}</h2>${only ? `<p class="sub">${only}</p>` : ""}
+  const others = state.data.players.filter(x => x.name !== p.name);
+  const links = [only,
+    others.length ? `<a class="link" href="${esc(hashFor("versus", { a: p.name, b: state.versus[1] && state.versus[1] !== p.name ? state.versus[1] : others[0].name }))}">Head-to-head</a>` : "",
+    // (the picked player narrows the Shots tab to theirs, so another's shots aren't a link from there)
+    !state.me ? `<a class="link" href="${esc(hashFor("shots", { who: p.name }))}">Their shots</a>`
+      : state.me === p.name ? `<a class="link" href="${esc(hashFor("shots", {}))}">Their shots</a>` : ""].filter(Boolean).join(" · ");
+  return `<h2 id="profile">${esc(p.name)}</h2><p class="sub">${links}</p>
   <div class="cards">
     <div class="card"><div class="k">Scoring / 9</div><div class="v">${toPar(p.avg_to_par_9)}</div><div class="sub">best ${toPar(p.best_to_par_9)} · ${p.rounds} round${p.rounds === 1 ? "" : "s"} · ${p.holes} holes</div></div>
     <div class="card"><div class="k">Handicap index</div><div class="v">${hcp(p.index)}</div><div class="sub">${p.index === null || p.index === undefined ? `needs 3 rounds of 9+ holes (${(p.index_history || []).length} so far)` : `from ${p.index_history.length} round${p.index_history.length === 1 ? "" : "s"} on record`}</div></div>
@@ -760,12 +886,22 @@ function renderPlayer(p) {
     r => `<tr><td class="l">${esc(r.lie)}</td><td class="l">${r.band === "greenside" ? "greenside (≤50 yd)" : "longer"}</td><td>${r.n}</td>
       <td>${r.avg_from} yd</td><td>${dash(r.green_pct, "%")}${r.holed ? ` <span class="sub">${r.holed} holed</span>` : ""}</td><td>${dash(r.avg_left, " yd")}</td></tr>`)}
   <h2>Rounds</h2>
-  ${sortable("hist", p.history, [
+  <p class="sub">Their individual-ball rounds of a nine or more. Tap one for its page.</p>
+  ${sortable("hist", p.history.map(h => ({ ...h, side: sideOf(h.round, p.name) })), [
     { key: "date", label: "Date" }, { key: "course", label: "Course", cls: "l" }, { key: "played", label: "Holes" },
     { key: "gross", label: "Gross" }, { key: "to_par", label: "To par" }],
-    h => `<tr><td>${esc(h.date)}</td><td class="l">${esc(h.course)}</td><td>${h.played}</td><td>${h.gross}</td><td>${toPar(h.to_par)}</td></tr>`,
+    h => `<tr${h.side ? ` class="click" data-round="${h.side}"` : ""}><td>${esc(h.date)}</td><td class="l">${esc(h.course)}</td><td>${h.played}</td><td>${h.gross}</td><td>${toPar(h.to_par)}</td></tr>`,
     { key: "date", dir: -1 })}`;
 }
+
+// A player's side of a round (its row id), when the round is in this view.
+function sideOf(round, name) {
+  if (!round) return null;
+  const r = sideIn(state.data.rounds.filter(r => r.round === round), name);
+  return r ? r.id : null;
+}
+// The side a player played on, out of one round's sides (players lists the whole round).
+const sideIn = (sides, name) => name ? sides.find(r => r.side === name) || sides.find(r => (r.side_players || []).includes(name)) || sides.find(r => r.players.includes(name)) : undefined;
 
 function renderVersus() {
   const ps = state.data.players;
@@ -950,6 +1086,13 @@ async function shareRound(r, btn) {
   setTimeout(() => (btn.textContent = "Share card"), 2000);
 }
 
+function roundTags(r) {
+  const d = state.data;
+  return (!d.has_league ? "" : r.league ? '<span class="tag">league</span>' : '<span class="tag">practice</span>') + (r.complete ? "" : '<span class="tag">quit early</span>')
+    + (r.gimme_ft != null && d.gimme_ft != null && r.gimme_ft !== d.gimme_ft ? `<span class="tag" title="This round's gimme circle differs from the usual ${d.gimme_ft} ft">${r.gimme_ft} ft gimmes</span>` : "");
+}
+const freshTag = r => state.seen && r.ended > state.seen ? '<span class="tag new">new</span>' : "";
+
 function renderRounds() {
   const d = state.data;
   const cols = [
@@ -959,27 +1102,50 @@ function renderRounds() {
     { key: "fir", label: "Fairways", val: r => r.fir[1] ? r.fir[0] / r.fir[1] : null },
     { key: "gir", label: "GIR", val: r => r.gir[1] ? r.gir[0] / r.gir[1] : null }, { key: "putts", label: "Putts" },
   ];
-  const row = r => {
-    const open = state.round === r.id;
-    if (open && state.replays[r.round] === undefined) loadReplays(r.round);
-    const reps = open && typeof state.replays[r.round] === "object" ? state.replays[r.round] : null;
-    const tags = (!state.data.has_league ? "" : r.league ? '<span class="tag">league</span>' : '<span class="tag">practice</span>') + (r.complete ? "" : '<span class="tag">quit early</span>')
-      + (r.gimme_ft != null && d.gimme_ft != null && r.gimme_ft !== d.gimme_ft ? `<span class="tag" title="This round's gimme circle differs from the usual ${d.gimme_ft} ft">${r.gimme_ft} ft gimmes</span>` : "");
-    const fresh = state.seen && r.ended > state.seen ? '<span class="tag new">new</span>' : "";
-    return `<tr class="click${open ? " sel" : ""}" data-round="${r.id}"><td>${esc(r.date)}${fresh}</td><td class="l">${esc(r.course)}</td>
+  const row = r => `<tr class="click" data-round="${r.id}"><td>${esc(r.date)}${freshTag(r)}</td><td class="l">${esc(r.course)}</td>
       <td class="l">${esc(sideName(r))}${r.league && r.team && r.team !== r.side ? ` <span class="sub">${esc(r.team)}</span>` : ""}</td>
       <td>${dash(r.gross)}</td><td>${toPar(r.to_par)}</td>
-      <td class="l">${esc(r.format.replace("_", " "))}${tags}</td><td>${r.played}${r.played !== r.holes ? `/${r.holes}` : ""}</td>
-      <td>${frac(r.fir)}</td><td>${frac(r.gir)}</td><td>${dash(r.putts)}</td></tr>` +
-      (open ? `<tr class="detail"><td colspan="${cols.length}">${scorecard(r.card, reps)}${shotsUsed(r, reps)}${roundSummary(r)}${replayPart(reps, r)}
-        <p class="sub">Scrambling ${frac(r.scramble)} · Sand saves ${frac(r.sand)} · Penalties ${dash(r.penalties)}${r.longest_drive ? ` · Longest drive ${Math.round(r.longest_drive)} yd` : ""}</p>
-        <p><button class="link" data-roundshots="${r.round}">Every shot of this round →</button>
-          · <button class="link" data-sharecard="${r.id}" title="An image of this round to post or send">Share card</button>
-          · ${shareBtn(hashFor("rounds", { round: r.id }), "this round", "Share link")}${(w => w ? " · " + w : "")(watchBtn(r.started, "▶ Watch the round"))}</p></td></tr>` : "");
-  };
+      <td class="l">${esc(r.format.replace("_", " "))}${roundTags(r)}</td><td>${r.played}${r.played !== r.holes ? `/${r.holes}` : ""}</td>
+      <td>${frac(r.fir)}</td><td>${frac(r.gir)}</td><td>${dash(r.putts)}</td></tr>`;
   const rows = state.me ? d.rounds.filter(r => r.players.includes(state.me)) : d.rounds;
-  return `<h2>${meTitle("Rounds")}</h2><p class="sub">Tap a round for its scorecard, hole replays and shots.${state.me ? " Includes team rounds they played in." : ""}</p>`
+  return `<h2>${meTitle("Rounds")}</h2><p class="sub">Tap a round for its page: the scorecard, hole replays, shots and video.${state.me ? " Includes team rounds they played in." : ""}</p>`
     + sortable("rounds", rows, cols, row, { empty: "No rounds in this view.", cls: "rounds" });
+}
+
+// One side of a round on its own page, with the round's other sides a tap away.
+function renderRound() {
+  const d = state.data;
+  if (state.roundGroup) {   // a link to the round as a whole: the picked player's side, else the first
+    const sides = d.rounds.filter(r => r.round === state.roundGroup);
+    const r = sideIn(sides, state.me) || sides[0] || d.rounds.find(r => r.id === state.roundGroup);
+    if (r) { state.round = r.id; state.roundGroup = null; }
+  }
+  const r = d.rounds.find(r => r.id === state.round);
+  const back = `<p class="sub"><button class="link" data-tab="rounds">← All rounds</button></p>`;
+  if (!r) return back + `<h2>Round</h2><p class="empty">This round isn't in this view.${state.ctx ? ' <button class="link" data-ctx="">Show all rounds</button>' : ""}</p>`;
+  if (state.replays[r.round] === undefined) loadReplays(r.round);
+  const reps = typeof state.replays[r.round] === "object" ? state.replays[r.round] : null;
+  const sides = d.rounds.filter(x => x.round === r.round);
+  const pick = sides.length > 1 ? `<div class="controls"><div class="seg">${sides.map(x =>
+    `<button data-round="${x.id}" class="${x.id === r.id ? "on" : ""}">${esc(sideName(x))} <span class="sub">${toPar(x.to_par)}</span></button>`).join("")}</div></div>` : "";
+  const known = new Set(d.players.map(p => p.name));
+  const who = (r.side_players && r.side_players.length ? r.side_players : [r.side]).map(n =>
+    known.has(n) ? `<button class="link" data-player="${esc(n)}">${esc(n)}</button>` : esc(n)).join(" & ");
+  const team = r.league && r.team && r.team !== r.side ? ` <span class="sub">${esc(r.team)}</span>` : "";
+  const said = d.broadcasts.some(b => b.id === r.session)
+    ? `<a class="link" href="${esc(hashFor("broadcasts", { session: r.session }))}">What the booth said</a>` : "";
+  const acts = [`<button class="link" data-roundshots="${r.round}">Every shot</button>`, watchBtn(r.started, "▶ Watch the round"), said,
+                `<button class="link" data-sharecard="${r.id}" title="An image of this round to post or send">Share card</button>`,
+                shareBtn(hashFor("round", { id: r.id }), "this round", "Share link")].filter(Boolean).join(" · ");
+  return back + `<h2>${esc(r.date)} · <a class="link" href="${esc(hashFor("courses", { course: r.course }))}">${esc(r.course)}</a></h2>${pick}
+    <p>${who}${team} · ${esc(r.format.replace("_", " "))}${roundTags(r)}${freshTag(r)}</p>
+    <div class="cards rcards">
+      <div class="card"><div class="k">Score</div><div class="v">${dash(r.gross)} <span class="sub">${toPar(r.to_par)}</span></div><div class="sub">${r.played}${r.played !== r.holes ? ` of ${r.holes}` : ""} holes</div></div>
+      <div class="card"><div class="k">Fairways · greens</div><div class="v">${frac(r.fir)} · ${frac(r.gir)}</div><div class="sub">scrambling ${frac(r.scramble)} · sand ${frac(r.sand)}</div></div>
+      <div class="card"><div class="k">Putts</div><div class="v">${dash(r.putts)}</div><div class="sub">penalties ${dash(r.penalties)}${r.longest_drive ? ` · longest drive ${Math.round(r.longest_drive)} yd` : ""}</div></div>
+    </div>
+    <p class="ractions">${acts}</p>
+    <h2>Scorecard</h2><div class="round">${scorecard(r.card, reps)}${shotsUsed(r, reps)}${replayPart(reps, r)}${roundSummary(r)}</div>`;
 }
 
 function renderCourses() {
@@ -1017,8 +1183,18 @@ function coursesView(cs, field) {
         ${field ? (f => `<td>${f === null ? "–" : signed(f)}</td><td class="${f !== null && h.to_par < f ? "good" : ""}">${f === null ? "–" : signed(h.to_par - f)}</td>`)(fieldHole(h.hole)) : ""}
         <td>${h.birdie_pct}%</td><td>${h.bogey_plus_pct}%</td><td>${h.best}</td><td>${h.worst}</td></tr>`;
     }, { key: "hole" });
-  return `<h2>${meTitle("Courses")}</h2><p class="sub">Tap a course for its hole-by-hole below.</p>${list}<h2 id="coursedetail">${esc(c.course)}: hole by hole</h2>${holes}
-    <p class="sub">${field ? `${esc(state.me)}'s individual-ball cards on this course, against everyone's.` : "Every individual-ball card on this course."} ${c.best ? `Best nine: ${esc(c.best.player)}, ${toPar(c.best.to_par)} over ${c.best.holes} holes on ${esc(c.best.date)}.` : ""}</p>`;
+  const same = x => (x || "").toLowerCase() === c.course.toLowerCase();
+  const here = state.data.rounds.filter(r => same(r.course) && (!state.me || r.players.includes(state.me)));
+  const rounds = sortable("courserounds", here, [
+    { key: "date", label: "Date" }, { key: "side", label: "Player / side", cls: "l", val: sideName },
+    { key: "gross", label: "Gross" }, { key: "to_par", label: "To par" }, { key: "played", label: "Holes" }],
+    r => `<tr class="click" data-round="${r.id}"><td>${esc(r.date)}${freshTag(r)}</td><td class="l">${esc(sideName(r))}</td><td>${dash(r.gross)}</td>
+      <td>${toPar(r.to_par)}</td><td>${r.played}${r.played !== r.holes ? `/${r.holes}` : ""}</td></tr>`,
+    { empty: "No rounds here in this view.", page: 10 });
+  return `<h2>${meTitle("Courses")}</h2><p class="sub">Tap a course for its holes and rounds below.</p>${list}<h2 id="coursedetail">${esc(c.course)}: hole by hole</h2>${holes}
+    <p class="sub">${field ? `${esc(state.me)}'s individual-ball cards on this course, against everyone's.` : "Every individual-ball card on this course."} ${c.best ? `Best nine: ${esc(c.best.player)}, ${toPar(c.best.to_par)} over ${c.best.holes} holes on ${esc(c.best.date)}.` : ""}</p>
+    <h2>${esc(c.course)}: rounds</h2>${rounds}
+    <p class="sub">Tap a round for its page. <a class="link" href="${esc(hashFor("shots", { course: (state.data.filters.courses.find(same) || c.course) }))}">Every shot here</a></p>`;
 }
 
 async function loadShots() {
@@ -1034,7 +1210,7 @@ async function loadShots() {
   }
   const f = state.shotFilter;
   delete state.more.shots;
-  try { state.shots = await queryShots(state.ctx, state.me ? { ...f, player: state.me } : f); } catch (e) { state.shots = { error: e.message }; }
+  try { state.shots = await queryShots(state.ctx, { ...f, player: state.me || f.who }); } catch (e) { state.shots = { error: e.message }; }
   render();
 }
 
@@ -1044,9 +1220,11 @@ function renderShots() {
     `<option${f[key] === v ? " selected" : ""}>${esc(v)}</option>`).join("")}</select>`;
   const dates = d.filters.dates, lo = dates[dates.length - 1] || "", hi = dates[0] || "";
   const day = (key, label) => `<label class="sub">${label} <input type="date" data-shotf="${key}" value="${esc(f[key] || "")}" min="${lo}" max="${hi}"></label>`;
-  const chip = f.round ? `<span class="chip">Round: ${esc(roundLabel(+f.round))} <button data-unround title="Show all rounds">✕</button></span>` : "";
+  const chip = f.round ? `<span class="chip">Round: ${esc(roundLabel(+f.round))}${state.data.rounds.some(r => r.round === +f.round)
+    ? ` <a class="link" href="${esc(hashFor("round", { r: f.round }))}" title="The round's scorecard and replays">Scorecard</a>` : ""} <button data-unround title="Show all rounds">✕</button></span>` : "";
   const any = Object.keys(f).length ? '<button class="link" data-clearshots>Clear filters</button>' : "";
-  const who = `<select data-me><option value="">Player: all</option>${d.players.map(p => `<option${p.name === state.me ? " selected" : ""}>${esc(p.name)}</option>`).join("")}</select>`;
+  // Picked at the top: every view is theirs. Else a filter for this tab alone.
+  const who = state.me ? "" : sel("who", "Player", d.players.map(p => p.name));
   const controls = `<div class="controls">${chip}${who}
     ${sel("course", "Course", d.filters.courses)}${sel("club", "Club", d.filters.clubs)}${sel("lie", "Lie", d.filters.lies)}
     ${day("from", "From")}${day("to", "to")}${any}</div>`;
@@ -1104,17 +1282,21 @@ function nameOf(key) {
 }
 
 async function loadTranscript(id) {
-  state.session = id;
+  state.session = state.transcriptFor = id;
   state.transcript = "loading";
   render();
-  try { state.transcript = await queryTranscript(id); } catch (e) { state.transcript = { error: e.message }; }
+  let t;
+  try { t = await queryTranscript(id); } catch (e) { t = { error: e.message }; }
+  if (state.transcriptFor !== id) return;   // another session picked meanwhile
+  state.transcript = t;
   render();
 }
 
 function renderBroadcasts() {
   const bs = state.me ? state.data.broadcasts.filter(b => b.players.includes(state.me)) : state.data.broadcasts;
   if (!bs.length) return `<h2>${meTitle("Broadcasts")}</h2><p class="empty">No broadcasts recorded yet.</p>`;
-  if (state.session === null || !bs.some(b => b.id === state.session)) { state.session = bs[0].id; loadTranscript(bs[0].id); }
+  if (state.session === null || !bs.some(b => b.id === state.session)) state.session = bs[0].id;
+  if (state.transcriptFor !== state.session) loadTranscript(state.session);
   const label = b => `${b.date} · ${b.courses[0] || "no course"}${b.courses.length > 1 ? ` +${b.courses.length - 1}` : ""} · ${b.players.join(", ")}`;
   const pick = `<div class="controls"><select data-session>${bs.map(b => `<option value="${b.id}"${b.id === state.session ? " selected" : ""}>${esc(label(b))}</option>`).join("")}</select></div>`;
   const t = state.transcript;
@@ -1228,9 +1410,9 @@ async function pollLive() {
   state.live = s;
   if (JSON.stringify(s) === was) return;
   const onTab = state.tab === "live";
-  if (!s && onTab) state.tab = "players";   // a #live link to a site without the stream
+  if (!s && onTab) state.tab = "home";   // a #live link to a site without the stream
   showTabs();
-  if (onTab) render();
+  if (onTab || state.tab === "home") render();
 }
 
 function renderLive() {
@@ -1318,10 +1500,10 @@ async function pollExtras() {
   state.vods = vods; state.schedule = schedule;
   if (JSON.stringify([vods, schedule]) === was) return;
   const shown = state.tab;
-  if ((state.tab === "vods" && !(vods && vods.length)) || (state.tab === "schedule" && !schedule)) state.tab = "players";
+  if ((state.tab === "vods" && !(vods && vods.length)) || (state.tab === "schedule" && !schedule)) state.tab = "home";
   showTabs();
-  // The watch buttons on rounds, shots and records need the streams too.
-  if ([...EXTRA_TABS, "rounds", "shots", "highlights"].includes(shown)) render();
+  // The watch buttons on rounds, shots and records need the streams too, and Home the next booking.
+  if ([...EXTRA_TABS, "home", "round", "player", "rounds", "shots", "highlights"].includes(shown)) render();
 }
 
 const hm = secs => { const m = Math.round(secs / 60); return m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m` : `${m} min`; };
@@ -1364,7 +1546,8 @@ function renderSchedule() {
   ${body ? `<table>${body}</table>` : '<p class="sub">Nothing booked.</p>'}`;
 }
 
-const RENDER = { live: renderLive, vods: renderVods, schedule: renderSchedule, players: renderPlayers, versus: renderVersus, rounds: renderRounds, courses: renderCourses,
+const RENDER = { home: renderHome, live: renderLive, vods: renderVods, schedule: renderSchedule, players: renderPlayers, player: renderPlayerPage,
+                 versus: renderVersus, rounds: renderRounds, round: renderRound, courses: renderCourses,
                  shots: renderShots, broadcasts: renderBroadcasts, highlights: renderHighlights, booth: renderBooth };
 // Redrawing takes the player out of the page for a moment, and that ends full screen. The polls redraw
 // the Live tab every minute (the recording's length grows), so wait until the viewer leaves full screen.
@@ -1384,7 +1567,8 @@ document.addEventListener("webkitfullscreenchange", afterFullscreen);
 function render() {
   if (!state.data) return;
   if (playerFullscreen()) { renderLater = true; return; }
-  $("#main").innerHTML = RENDER[state.tab]();
+  if (!PAGES[state.tab]) state.lastView[sectionOf(state.tab)] = state.tab;
+  $("#main").innerHTML = subTabs() + RENDER[state.tab]();
   attachLive();
   writeHash();
   // A link to a round, hole or shot: bring it into view once it's drawn (replays and shots load later).
@@ -1396,20 +1580,39 @@ function render() {
   }
 }
 
-// With the commentary off there is nothing on the booth's tabs: hide them. No stream, no Live tab.
+// The views there's something to show on. With the commentary off there is nothing on the booth's
+// views: they go. No stream, no Live; nothing kept, no replays; no bookings, no Schedule.
 function tabs() {
   const d = state.data;
   const has = { live: state.live !== null && state.live !== undefined, vods: !!(state.vods && state.vods.length),
                 schedule: !!state.schedule };
   if (d) Object.assign(has, { broadcasts: d.broadcasts.length > 0,
                               booth: d.booth.commentators.length > 0 || d.booth.calls.length > 0 || d.predictions.length > 0 });
-  return TABS.filter(([k]) => has[k] !== false);
+  return Object.keys(VIEWS).filter(k => has[k] !== false);
+}
+// The sections with a view to show, each with those views.
+function sections() {
+  const shown = tabs();
+  return SECTIONS.map(([k, label, views]) => [k, label, views.filter(v => shown.includes(v))]).filter(s => s[2].length);
+}
+// A section's view to open: the one last looked at there, else its first.
+function sectionView(sec) {
+  const [, , views] = sections().find(s => s[0] === sec);
+  return views.includes(state.lastView[sec]) ? state.lastView[sec] : views[0];
+}
+// The row of a section's own views, at the top of the page.
+function subTabs() {
+  const sec = sections().find(s => s[0] === sectionOf(state.tab));
+  if (!sec || sec[2].length < 2) return "";
+  return `<nav class="seg subtabs">${sec[2].map(v => `<button data-tab="${v}" class="${v === state.tab ? "on" : ""}">`
+    + `${v === "live" && state.live && state.live.live ? '<span class="livedot"></span>' : ""}${VIEWS[v]}</button>`).join("")}</nav>`;
 }
 
-// The header's All/League/Practice and player picker, on the tabs they narrow: the booth's tabs are
-// about every session (Broadcasts can still pick a player's); the video and the schedule are the sim's.
-const CTX_TABS = ["players", "versus", "rounds", "courses", "shots", "highlights"];
-const ME_TABS = [...CTX_TABS, "broadcasts"];
+// The header's All/League/Practice and player picker, on the views they narrow: the booth's are about
+// every session (Broadcasts can still pick a player's); the video and the schedule are the sim's. A
+// round is the round whatever's picked; a player's page is theirs (in the context picked).
+const CTX_TABS = ["home", "players", "player", "versus", "rounds", "courses", "shots", "highlights"];
+const ME_TABS = ["home", "players", "versus", "rounds", "courses", "shots", "highlights", "broadcasts"];
 function showScope() {
   $("#ctx").style.display = state.data && state.data.has_league && CTX_TABS.includes(state.tab) ? "" : "none";
   $("#me").style.display = ME_TABS.includes(state.tab) ? "" : "none";
@@ -1418,9 +1621,10 @@ function showScope() {
 
 function showTabs() {
   showScope();
-  const nav = $("#tabs");
-  nav.innerHTML = tabs().map(([k, label]) => `<button data-tab="${k}" class="${k === state.tab ? "on" : ""}">`
-    + `${k === "live" && state.live && state.live.live ? '<span class="livedot"></span>' : ""}${label}</button>`).join("");
+  const nav = $("#tabs"), here = sectionOf(state.tab);
+  const live = state.live && state.live.live;
+  nav.innerHTML = sections().map(([k, label]) => `<button data-section="${k}" class="${k === here ? "on" : ""}">`
+    + `${k === "watch" && live ? '<span class="livedot"></span>' : ""}${label}</button>`).join("");
   const on = nav.querySelector(".on");
   if (on && nav.scrollWidth > nav.clientWidth) nav.scrollLeft = on.offsetLeft - nav.offsetLeft - (nav.clientWidth - on.offsetWidth) / 2;
   pinTabs();
@@ -1441,7 +1645,18 @@ window.addEventListener("resize", pinTabs);
 if (window.ResizeObserver) new ResizeObserver(pinTabs).observe($("header"));
 
 document.addEventListener("click", (e) => {
-  const t = e.target.closest("[data-tab],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
+  const a = e.target.closest('a[href^="#"]');
+  if (a) {
+    // A link to another view on the page: drawn here, with Back to come out of it (a new tab still opens
+    // with a modified click).
+    if (e.button || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    remember();
+    history.replaceState(null, "", a.getAttribute("href"));
+    route();
+    return;
+  }
+  const t = e.target.closest("[data-tab],[data-section],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
                              + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-sharecard],[data-period],[data-vod],[data-link],[data-more],[data-onlyme]");
   if (!t) return;
   if (t.dataset.link) {
@@ -1449,8 +1664,8 @@ document.addEventListener("click", (e) => {
     return;
   }
   if (t.dataset.vod) {
-    // From another tab: a history entry to come back to (the back button reloads that view).
-    if (state.tab !== "vods") history.pushState(null, "", location.hash);
+    // From another view: a history entry to come back to.
+    if (state.tab !== "vods") remember();
     const at = +t.dataset.vodat || 0;
     if (player && player.session === "vod:" + t.dataset.vod) {
       player.video.currentTime = at;   // the same stream: just jump
@@ -1507,18 +1722,20 @@ document.addEventListener("click", (e) => {
     state.replayHole = state.replayHole === +t.dataset.replay ? null : +t.dataset.replay;
     render();
   } else if (t.dataset.roundshots) {   // drill into a round: just its shots, with Back to the scorecard
-    history.pushState(null, "", location.hash);
+    remember();
     state.shotFilter = { round: t.dataset.roundshots };
+    state.shotOpen = null;
     delete state.sort.shots;
     state.tab = "shots";
     showTabs();
     loadShots();
+    window.scrollTo(0, 0);
   } else if (t.dataset.unround !== undefined || t.dataset.clearshots !== undefined) {
     if (t.dataset.unround !== undefined) delete state.shotFilter.round; else state.shotFilter = {};
     delete state.sort.shots;
     loadShots();
-  } else if (t.dataset.tab) {
-    state.tab = t.dataset.tab;
+  } else if (t.dataset.tab || t.dataset.section) {
+    state.tab = t.dataset.tab || sectionView(t.dataset.section);
     showTabs();
     render();
     // Switching from far down a page: start the new one at its top, not mid-way.
@@ -1535,12 +1752,13 @@ document.addEventListener("click", (e) => {
     render();
   } else if (t.dataset.player) {
     state.player = t.dataset.player;
-    state.scrollTo = { sel: "#profile", block: "start", until: Date.now() + 2000 };
-    render();
+    openView("player");
   } else if (t.dataset.round) {
-    state.round = state.round === +t.dataset.round ? null : +t.dataset.round;
+    const side = state.tab === "round";   // another side of the round open: the same page
+    state.round = +t.dataset.round;
+    state.roundGroup = null;
     state.replayHole = state.replayPlayed = null;
-    render();
+    if (side) render(); else openView("round");
   } else if (t.dataset.course) {
     state.course = t.dataset.course;
     state.scrollTo = { sel: "#coursedetail", block: "start", until: Date.now() + 2000 };
@@ -1566,8 +1784,11 @@ document.addEventListener("change", (e) => {
   }
 });
 
-// A link pasted into an open page: start over from it.
-window.addEventListener("hashchange", () => location.reload());
+// Back and Forward (and a link pasted into the open page): the view in the address, and on Back how
+// far down the page was.
+history.scrollRestoration = "manual";
+window.addEventListener("popstate", e => route(e.state && e.state.y));
+window.addEventListener("hashchange", () => route());
 
 showTabs();
 load();

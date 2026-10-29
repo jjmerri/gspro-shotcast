@@ -184,13 +184,19 @@ Back the file up (`logs/season.db`); it's the only copy of your rounds.
 ## Stats web page
 
 `python -m commentator stats-web` opens a local page (http://127.0.0.1:8765)
-for browsing the database. Its tabs:
+for browsing the database. Its tabs are five sections: **Home**, **Rounds** (Rounds, Courses, Shots),
+**Players** (Players, Head-to-head, Records), **Watch** (Live, Round replays) and **The Shed** (Schedule,
+Broadcasts, Booth). A section with more than one view has its own row of tabs at the top of the page.
 
-- **Players**: the season table, plus per player strokes gained per nine (off the tee, approach,
+- **Home**: what's on air, the next booking, the latest rounds with every side's score, and recent
+  moments; with a player picked, their numbers and latest round too, and without one the season's
+  lowest handicap, longest drive and longest putt holed. Each is a tap to its round, player or tab.
+- **Players**: the season table; tapping a player opens their page: strokes gained per nine (off the tee, approach,
   around the green, putting), night-by-night trends, club gapping with each club's typical flight
   (from full swings only, so chips don't shrink a wedge), approach by club, putting by length, and
-  recovery from rough and sand, and the handicap index with its trend.
-- **Head-to-head**, **Rounds** (hole-by-hole cards with Out and In for each nine, and a link to every
+  recovery from rough and sand, the handicap index with its trend, and every round (a tap opens it).
+- **Head-to-head**, **Rounds** (tapping a round opens its page: the side's score, fairways, greens and putts,
+  the round's other sides a tap away, links to the players and the course, hole-by-hole cards with Out and In for each nine, and a link to every
   shot of the round; a practice round is listed under its players, a league round under its side; a hole
   number that's a link draws the hole from above, tee at the bottom: each player's shots from where
   GSPro had the ball, dashed lines to where they aimed, and the pin; when the round was quit before
@@ -199,18 +205,20 @@ for browsing the database. Its tabs:
   distances; a one-player round of nine
   holes or more gets a summary: score per nine, fairways, greens and putts against the player's
   season, strokes gained by category, best and worst shot, best and worst hole; **Share card**
-  saves the card as an image, or opens the phone's share sheet), **Courses** (each hole's scoring average,
-  hardest and easiest, best nine).
+  saves the card as an image, or opens the phone's share sheet; **What the booth said** opens that night's
+  broadcast), **Courses** (each hole's scoring average, hardest and easiest, best nine, the rounds played
+  there and a link to every shot on it).
 - **Shots**: every shot, filterable by player, course, club, lie and a date range (or one round,
-  from the Rounds tab), with its launch data and what the booth said about it; each row has its own
+  from a round's page, with a link back to its scorecard), with its launch data and what the booth said about it; each row has its own
   ▶ Watch and 🔗 share buttons. A shot's round is
   the round that ended next after it on its course, so a round the booth restarted during keeps
   all its shots; shots from a round that never ended (or was quit before a hole was done) have none.
-- **Highlights**: records, aces, eagles, hole-outs, birdie streaks, bounce-backs, blow-ups, and
+- **Records**: records, aces, eagles, hole-outs, birdie streaks, bounce-backs, blow-ups, and
   top-five drives, approaches, chips and putts. An approach is a full shot from 51-250 yd that isn't
   a par-4/5 tee shot (a par-3 tee shot counts); a chip is from 50 yd and in, off the green. Pick the
   last 3, 6 or 9 months, the last year (the default) or all time, counted back from when the page was built.
-- **Broadcasts**: a night's full transcript, in order.
+  Each has **View shot**, which lists its round's shots with that one open.
+- **Broadcasts**: a night's full transcript, in order (the night picked is in the link).
 - **Booth**: lines and words per commentator, signature phrases, and putt-call accuracy by night.
 
 Broadcasts and Booth are hidden until the booth has said something (stats only, commentary off).
@@ -225,19 +233,22 @@ and the booking type), when [bookings](leagues.md) are on (`booking.schedule_day
 the booth refreshes it every 30 minutes while it runs.
 
 The **player picker** at the top (Everyone, or one name) narrows every tab to that player:
-their row on Players, them on the left of Head-to-head, only rounds they played in (team rounds
+their numbers and rounds on Home, their row and page on Players, them on the left of Head-to-head, only rounds they played in (team rounds
 too), their own hole-by-hole averages on Courses next to everyone's, only their shots, only nights
-they were on air, and their own records and highlights. The browser remembers the pick. The
+they were on air, and their own records and highlights. The browser remembers the pick. The Shots
+tab's own player filter (with Everyone picked) is just a filter: it doesn't change the pick. The
 address bar always holds the view (tab, player, league/practice, the Shots filters and open shot,
-the open round and hole, the course, the head-to-head pair, e.g. `#shots?player=Ann&club=DR`), so
+the round and hole, the player, the course, the head-to-head pair, the broadcast, e.g.
+`#shots?player=Ann&club=DR`), so
 **Share link** gives a link that opens exactly that. Each round, hole replay and shot (on Rounds,
-Shots and Highlights) has its own share button (🔗, or **Share link**): a phone opens its share
+Shots and Records) has its own share button (🔗, or **Share link**): a phone opens its share
 sheet, a computer copies the link. A link to one shot (`#shots?shot=1234`) lists the round it was
-in with that shot open; a link to a round (`#rounds?round=45&hole=3`) opens its scorecard and that
-hole's replay. While a round's stream is still kept (a week), its rounds, holes and shots also get
+in with that shot open; a link to a round (`#round?id=45&hole=3`) opens its page and that
+hole's replay (older `#rounds?round=45` and `#players?show=Ann` links still work). Back and Forward
+move between the views opened, back to where the page was scrolled. While a round's stream is still kept (a week), its rounds, holes and shots also get
 **▶ Watch**, which opens **Round replays** about a second before that swing (the back button returns).
-A player can bookmark `#rounds?player=Their+Name`. Rounds that ended since this browser's last visit are tagged
-**new**, with a count in the header. On a phone, the tabs are one row that swipes sideways and stays at the top of the screen, Rounds keeps the score next to the player, Shots drops its secondary columns (they're in a tapped shot's detail), and other wide tables scroll sideways. Shots lists 100 at a time, with a button for more. The All/League/Practice and player pickers show only on the tabs they narrow: Booth covers every session and player, and Broadcasts every session. Tapping a player or a course scrolls to their profile or hole-by-hole, and Back from a round's "Every shot" list returns to its scorecard.
+A player can bookmark `#home?player=Their+Name`. Rounds that ended since this browser's last visit are tagged
+**new**, with a count in the header. On a phone, the sections are one row that swipes sideways and stays at the top of the screen, Rounds keeps the score next to the player, Shots drops its secondary columns (they're in a tapped shot's detail), and other wide tables scroll sideways. Shots lists 100 at a time, with a button for more. The All/League/Practice and player pickers show only on the tabs they narrow: Booth covers every session and player, Broadcasts every session, and a round's page is that round whoever's picked. Tapping a course scrolls to its hole-by-hole.
 
 Strokes gained is measured against an approximate PGA Tour baseline (Broadie-style expected
 strokes by lie and distance), so negative numbers are normal; it's for comparing players and

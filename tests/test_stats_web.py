@@ -106,6 +106,26 @@ def test_a_rounds_side_players_come_from_the_record_else_its_shots(tmp_path):
     assert got == {"Duffers": ["Priya", "Tony"], "Aces": ["Josh", "Sam"]}
 
 
+def test_a_players_history_links_each_round_it_was_part_of(tmp_path):
+    path, db = _db(tmp_path)
+    for end, side in ((0, "Ann"), (10, "Bob"), (3600, "Ann")):   # two sides of one round, then another round
+        db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, is_league)"
+                   " VALUES (1, ?, '2026-10-01', 'Pebble', ?, 9, 0)", (end, side))
+    nine = {h: PARS[str(h)] for h in range(1, 10)}
+    _player_round(db, "Ann", nine)
+    db.execute("INSERT INTO player_rounds (session_id, ended_at, player, course, scores, hole_pars, is_league,"
+               " complete, holes_played) VALUES (1, 3600, 'Ann', 'Pebble', ?, ?, 0, 1, 9)",
+               (json.dumps(nine), json.dumps(PARS)))
+    db.execute("INSERT INTO player_rounds (session_id, ended_at, player, course, scores, hole_pars, is_league,"
+               " complete, holes_played) VALUES (1, 9999, 'Ann', 'Elsewhere', ?, ?, 0, 1, 9)",
+               (json.dumps(nine), json.dumps(PARS)))
+    db.commit()
+    with stats_web.connect(path) as ro:
+        ids = [r["id"] for r in ro.execute("SELECT id FROM rounds ORDER BY id")]
+        assert [h["round"] for h in stats_web.player(ro, "Ann")["history"]] == [ids[0], ids[2], None]
+        assert {r["session"] for r in stats_web.rounds(ro)} == {1}
+
+
 def test_context_filter_splits_league_and_practice(tmp_path):
     path, db = _db(tmp_path)
     nine = {h: PARS[str(h)] for h in range(1, 10)}
