@@ -203,6 +203,12 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
         if not played_by:
             here = who.get(rnd, set())
             played_by = [r["side"]] if r["side"] in here else sorted(here) if sides[rnd] == 1 and here else None
+        holes = r["holes"]
+        played = r["holes_played"] if r["holes_played"] is not None else holes
+        complete = bool(r["complete"])
+        if not complete and holes == 18 and played == 9:
+            # Stopped right at the turn: a nine with the back left switched on in GSPro, not a quit.
+            holes, complete = 9, True
         longest = r["longest_drive"]
         # (a team side's players aren't on record per round, so its stored drive stands)
         if (rnd, r["side"]) in left:
@@ -213,9 +219,8 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             "course": r["course"],
             # who played in it (a team side's players too), so the page can show one player's rounds
             "players": sorted(who.get(rnd, set()) | ({r["side"]} if r["side"] else set()) | set(played_by or [])), "format": r["format"] or "individual",
-            "side": r["side"], "side_players": played_by, "team": r["team"], "holes": r["holes"],
-            "played": r["holes_played"] if r["holes_played"] is not None else r["holes"],
-            "complete": bool(r["complete"]), "league": bool(r["is_league"]),
+            "side": r["side"], "side_players": played_by, "team": r["team"], "holes": holes,
+            "played": played, "complete": complete, "league": bool(r["is_league"]),
             "gross": card["gross"] if card["played"] else r["gross"],
             "to_par": card["to_par"] if card["played"] else None,
             "fir": [r["fir_hit"], r["fir_tries"]], "gir": [r["gir_hit"], r["gir_tries"]],
@@ -369,7 +374,38 @@ def player(db: sqlite3.Connection, name: str, context: str | None = None,
                        + shots, (0 if lo == buckets[0][0] else lo / 3.0, (hi or 10_000) / 3.0, name)).fetchone()
         p["putting"].append({"range": f"{lo:g}-{hi} ft" if hi else f"{lo:g}+ ft", "attempts": r["n"],
                              "made": r["made"] or 0, "pct": _pct(r["made"] or 0, r["n"])})
+    p.update(three_putts(db, name, context))
     return p
+
+
+# First-putt length bucket edges in feet for the three-putt chart.
+THREE_PUTT_EDGES = (10, 20, 30, 40, 60)
+
+
+def three_putts(db: sqlite3.Connection, name: str, context: str | None = None) -> dict[str, Any]:
+    """Holes three-putted (or worse), overall and by the first putt's length. As Store.three_putt_rate:
+    a hole's putts are its strokes from the green (a conceded tap-in's 'gimme' row counts, as on the
+    card), grouped by session + course + hole, the first by time giving the length. Shared-ball holes are
+    left out (the team's putts aren't one player's)."""
+    rows = db.execute(
+        """WITH hole_putts AS (
+               SELECT to_pin_yards,
+                      ROW_NUMBER() OVER (PARTITION BY session_id, course, hole ORDER BY ts) AS putt_no,
+                      COUNT(*) OVER (PARTITION BY session_id, course, hole) AS putts
+               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0
+                     AND shared_ball = 0 AND COALESCE(fmt, '') NOT IN ('scramble', 'alternate') AND hole IS NOT NULL
+                     AND (lie_before = 'green' OR (is_putt = 1 AND lie_before IS NULL))""" + _ctx(context) + """
+           )
+           SELECT to_pin_yards * 3 AS feet, putts FROM hole_putts WHERE putt_no = 1""", (name,)).fetchall()
+    total = [sum(r["putts"] >= 3 for r in rows), len(rows)]
+    edges = [0, *THREE_PUTT_EDGES]
+    by_length = []
+    for lo, hi in zip(edges, [*THREE_PUTT_EDGES, None]):
+        got = [r for r in rows if r["feet"] is not None and r["feet"] >= lo and (hi is None or r["feet"] < hi)]
+        n3 = sum(r["putts"] >= 3 for r in got)
+        by_length.append({"range": f"{lo}-{hi} ft" if hi else f"{lo}+ ft", "holes": len(got), "three_putts": n3,
+                          "pct": _pct(n3, len(got))})
+    return {"three_putt_pct": _pct(*total), "three_putts": total, "three_putting": by_length}
 
 
 def _date(db: sqlite3.Connection, session_id: int) -> str | None:

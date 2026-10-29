@@ -588,6 +588,23 @@ function lineChart(points, key, title, fmt = v => v, lowerIsBetter = false) {
     </svg></div>`;
 }
 
+// Three-putt rate by first-putt length: one column per range, the count of holes under it.
+function threePuttChart(bands) {
+  if (!bands || !bands.some(b => b.holes)) return '<p class="empty">No putting holes yet.</p>';
+  const W = 300, H = 130, pad = { l: 6, r: 6, t: 16, b: 30 };
+  const max = Math.max(20, ...bands.map(b => b.pct || 0));
+  const bw = (W - pad.l - pad.r) / bands.length;
+  const y = v => pad.t + (max - v) * (H - pad.t - pad.b) / max;
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}">${bands.map((b, i) => {
+    const x = pad.l + i * bw, cx = x + bw / 2, v = b.pct || 0;
+    return `<rect x="${(x + bw * 0.18).toFixed(1)}" y="${y(v).toFixed(1)}" width="${(bw * 0.64).toFixed(1)}" height="${(H - pad.b - y(v)).toFixed(1)}" fill="${b.holes ? "#e0795f" : "transparent"}" rx="2">
+        <title>${b.range}: ${b.three_putts} of ${b.holes} holes</title></rect>
+      <text x="${cx}" y="${y(v) - 4}" fill="#cfe0d6" font-size="10" text-anchor="middle">${b.holes ? Math.round(v) + "%" : "–"}</text>
+      <text x="${cx}" y="${H - 16}" fill="#8fa59b" font-size="10" text-anchor="middle">${b.range}</text>
+      <text x="${cx}" y="${H - 4}" fill="#8fa59b" font-size="9" text-anchor="middle">${b.three_putts}/${b.holes}</text>`;
+  }).join("")}</svg></div>`;
+}
+
 // A handicap index as golfers write it: better than scratch is "+".
 const hcp = v => v === null || v === undefined ? "–" : v < 0 ? "+" + (-v).toFixed(1) : v.toFixed(1);
 
@@ -632,6 +649,7 @@ function renderPlayers() {
     { key: "scramble_pct", label: "Scrambling", title: "Par or better after missing the green" },
     { key: "sand_pct", label: "Sand saves", title: "Up and down from a greenside bunker (PGA Tour definition)" },
     { key: "putts_per_hole", label: "Putts / hole" },
+    { key: "three_putt_pct", label: "3-putt %", title: "Holes taking three putts or more" },
     { key: "birdie_pct", label: "Birdie %", title: "Holes made in birdie or better" },
     { key: "avg_drive", label: "Avg drive" },
     { key: "longest_drive", label: "Longest" },
@@ -643,7 +661,7 @@ function renderPlayers() {
     <td>${dash(p.gir_pct, "%")} <span class="sub">${frac(p.gir)}</span></td>
     <td>${dash(p.scramble_pct, "%")} <span class="sub">${frac(p.scramble)}</span></td>
     <td>${dash(p.sand_pct, "%")} <span class="sub">${frac(p.sand)}</span></td>
-    <td>${dash(p.putts_per_hole)}</td><td>${dash(p.birdie_pct, "%")}</td>
+    <td>${dash(p.putts_per_hole)}</td><td>${dash(p.three_putt_pct, "%")} <span class="sub">${frac(p.three_putts)}</span></td><td>${dash(p.birdie_pct, "%")}</td>
     <td>${dash(p.avg_drive, " yd")}</td><td>${dash(p.longest_drive, " yd")}</td></tr>`;
   if (state.me && !d.players.some(p => p.name === state.me))
     return `<h2>${meTitle("Players")}</h2><p class="empty">${esc(state.me)} has no rounds in this view.</p>`;
@@ -703,7 +721,9 @@ function renderPlayer(p) {
         { key: "pct", label: "%" }, { key: "bar", label: "", cls: "l", val: b => b.pct }],
         b => `<tr><td>${b.range}</td><td>${b.attempts ? `${b.made}/${b.attempts}` : "–"}</td><td>${dash(b.pct, "%")}</td>
         <td class="l"><div class="bar"><i style="width:${Math.min(100, b.pct || 0)}%"></i></div></td></tr>`, { key: "order" })}
-      <p class="sub">Putts with a known result. Gimmes (inside GSPro's ${state.data.gimme_ft ? `${state.data.gimme_ft} ft ` : ""}circle${state.data.gimme_ft ? ", the one most rounds use" : ""}) are conceded, not putted, so they're left out.</p></div>
+      <p class="sub">Putts with a known result. Gimmes (inside GSPro's ${state.data.gimme_ft ? `${state.data.gimme_ft} ft ` : ""}circle${state.data.gimme_ft ? ", the one most rounds use" : ""}) are conceded, not putted, so they're left out.</p>
+      <h2>Three-putts by first putt</h2>${threePuttChart(p.three_putting)}
+      <p class="sub">How often a hole took three putts or more, by the length of its first putt (a conceded tap-in counts, as on the card). Scramble and alternate-shot holes are left out.</p></div>
   </div>
   <h2>Recovery</h2>
   ${sortable("rec", p.recovery, [
@@ -920,7 +940,7 @@ function renderRounds() {
       + (state.seen && r.ended > state.seen ? '<span class="tag new">new</span>' : "");
     return `<tr class="click" data-round="${r.id}"><td>${esc(r.date)}</td><td class="l">${esc(r.course)}</td>
       <td class="l">${esc(sideName(r))}${r.league && r.team && r.team !== r.side ? ` <span class="sub">${esc(r.team)}</span>` : ""}</td>
-      <td class="l">${esc(r.format.replace("_", " "))}${tags}</td><td>${r.played}/${r.holes}</td><td>${dash(r.gross)}</td>
+      <td class="l">${esc(r.format.replace("_", " "))}${tags}</td><td>${r.played}${r.played !== r.holes ? `/${r.holes}` : ""}</td><td>${dash(r.gross)}</td>
       <td>${toPar(r.to_par)}</td><td>${frac(r.fir)}</td><td>${frac(r.gir)}</td><td>${dash(r.putts)}</td></tr>` +
       (open ? `<tr class="detail"><td colspan="${cols.length}">${scorecard(r.card, reps)}${shotsUsed(r, reps)}${roundSummary(r)}${replayPart(reps, r)}
         <p class="sub">Scrambling ${frac(r.scramble)} · Sand saves ${frac(r.sand)} · Penalties ${dash(r.penalties)}${r.longest_drive ? ` · Longest drive ${Math.round(r.longest_drive)} yd` : ""}</p>

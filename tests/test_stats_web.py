@@ -292,3 +292,35 @@ def test_a_players_round_is_summed_up_against_their_season(tmp_path):
     with stats_web.connect(path) as ro:
         m = stats_web.summary(ro)["rounds"][0]["summary"]
     assert m["vs"][0]["round"] == -1
+
+
+def test_an_eighteen_stopped_at_the_turn_reads_as_a_nine_and_a_later_quit_stays_a_quit(tmp_path):
+    path, db = _db(tmp_path)
+    for side, played in (("Ann", 9), ("Bob", 12)):
+        db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, holes_played, complete)"
+                   " VALUES (1, 100, '2026-10-01', 'Pebble', ?, 18, ?, 0)", (side, played))
+    db.commit()
+    with stats_web.connect(path) as ro:
+        got = {r["side"]: (r["played"], r["holes"], r["complete"]) for r in stats_web.rounds(ro)}
+    assert got == {"Ann": (9, 9, True), "Bob": (12, 18, False)}
+
+
+def test_three_putts_by_first_putt_length_leave_out_scramble_holes(tmp_path):
+    path, db = _db(tmp_path)
+    ts = iter(range(1000))
+
+    def hole(n, feet, putts, **kw):
+        for i in range(putts):
+            _shot(db, "Ann", ts=next(ts), course="Pebble", hole=f"Hole {n}, par 4", is_putt=1, lie_before="green",
+                  to_pin_yards=(feet if i == 0 else 1) / 3, **kw)
+
+    hole(1, 35, 3)
+    hole(2, 33, 2)
+    hole(3, 5, 1)
+    hole(4, 35, 3, fmt="scramble", shared_ball=1)
+    db.commit()
+    with stats_web.connect(path) as ro:
+        t = stats_web.three_putts(ro, "Ann")
+    assert t["three_putts"] == [1, 3]
+    bands = {b["range"]: (b["three_putts"], b["holes"]) for b in t["three_putting"]}
+    assert bands["30-40 ft"] == (1, 2) and bands["0-10 ft"] == (0, 1)
