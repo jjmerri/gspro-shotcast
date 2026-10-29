@@ -266,6 +266,7 @@ TREE_CALL_PENALTY = 15.0
 TREE_CALL_WATCH_SECONDS = 3.0
 # How long after impact, outside a round, GSPro's log gets to say it played a shot (its "Shot Fired"
 # comes within about half a second): one it never logs was hit while GSPro couldn't take it.
+BANTER_WAIT_SECONDS = 40.0   # the most a routine shot's call waits for an aside on air to finish
 UNPLAYED_SHOT_WAIT_SECONDS = 2.5
 TREE_CALLS = ("Oh, that's into the trees!", "That's caught a branch!", "Oh no, it's clipped the tree!",
               "Ooh, that's found the trees!")
@@ -1917,7 +1918,7 @@ class Engine:
         self._news_aired.append(self.round.seq)
         lines = [line for line, _ in items]
         self.state.record_lines(lines)
-        self._air_exchange(items)
+        self._air_exchange(items, banter=True)
         self._write_transcript(lines, "banter")
         if bit.kind == "trivia":
             self.store.record_aside("trivia", bit.topic, " ".join(l.text for l in lines))
@@ -2067,13 +2068,19 @@ class Engine:
             return await self.speech.prepare_exchange(lines)
         return list(lines), [None] * len(lines)
 
-    def _air_exchange(self, items: list[tuple[Line, object]]) -> None:
+    def _air_exchange(self, items: list[tuple[Line, object]], banter: bool = False) -> None:
         """Play an exchange from _voice_ahead: its clips if they were voiced ahead, else voiced now
-        (streamed, line by line) the same way a live line is."""
+        (streamed, line by line) the same way a live line is. `banter` (an aside) isn't cut off by a
+        routine shot (_banter_on)."""
+        extra = {"banter": True} if banter else {}
         if self._prevoicing():
-            self.speech.say_prepared_sequence(items)
+            self.speech.say_prepared_sequence(items, **extra)
         else:
-            self.speech.say([line for line, _ in items], interrupt=True)
+            self.speech.say([line for line, _ in items], interrupt=True, **extra)
+
+    def _banter_on(self) -> bool:
+        """An aside is on air: only a big moment cuts it off; a routine shot's calls wait or skip."""
+        return self.speech is not None and getattr(self.speech, "banter_airing", lambda: False)()
 
     def _kick_wrap_branches(self, side_key: str, scores: list[int], other_facts: list[str]) -> None:
         """(Re)start the background pre-build of the hole wrap, branched by the one side still to
@@ -3628,6 +3635,9 @@ class Engine:
         tag = f"[shot {self._shot_seq}]"
         if self.speech is not None:
             self.speech.drop_queued()   # the ball's in the air: the last shot's calls are old news
+        banter = self._banter_on()   # an aside plays on: no mid-flight calls over it
+        if banter:
+            log.info("%s an aside is on air: no mid-flight call", tag)
         lag = f", {time.time() - event.logged_at:.2f}s after GSPconnect logged it" if event.logged_at else ""
         log.info("%s detected%s: club %s, ball %.1f mph, launch %s, start %.1f, spin %s @ axis %.1f, carry %.1f %s, putt=%s",
                  tag, lag, shot.club, shot.ball_speed or 0,
@@ -3641,13 +3651,13 @@ class Engine:
         # the (slow, under shot-animation load) impact OCR read. The line was voiced for this moment;
         # it must not wait on OCR. The impact read below still runs, for the reaction and learning.
         c = self.cfg.commentary
-        if c.in_flight and not shot.is_putt and self.speech is not None and self.commentary_on:
+        if c.in_flight and not shot.is_putt and self.speech is not None and self.commentary_on and not banter:
             tree_call = asyncio.create_task(self._tree_flight_call(fires0, impact, shot, my_seq, tag))
             tree_call.add_done_callback(lambda t: t.cancelled() or t.exception())
         flight_played = False
         plan = shot_plan = self.plan  # shot_plan survives the one-swing nulling below, for the reaction
         shot_plan_made_at = self._plan_made_at  # snapshot: the next player's pre-shot can rebind the live one
-        if c.in_flight and not shot.is_putt and (shot.carry or 0) >= c.min_flight_carry and plan \
+        if c.in_flight and not banter and not shot.is_putt and (shot.carry or 0) >= c.min_flight_carry and plan \
                 and time.monotonic() - self._plan_made_at < 180 and not self._tree_hit_logged(fires0, impact, shot):
             carry0 = self._raw_yards(shot)
             factor0 = self.carry.factor(plan.lie, carry0, self.current_course, shot.vla, "lm")
@@ -3712,7 +3722,7 @@ class Engine:
         flight_task = None
         plan, self.plan = self.plan, None  # a plan is good for one swing
         # Only the fallback here now: the fresh-plan line already played above, before this read.
-        if not flight_played and c.in_flight and not shot.is_putt and (shot.carry or 0) >= c.min_flight_carry:
+        if not flight_played and not banter and c.in_flight and not shot.is_putt and (shot.carry or 0) >= c.min_flight_carry:
             fresh = plan and time.monotonic() - self._plan_made_at < 180 and plan.player in (None, player)
             picked = pick_line(plan, projected, before.to_pin, factor, before.elevation_yards) if fresh else None
             if fresh and self._shot_wet(plan.player, since=impact) and plan.lines.get("water"):
@@ -3749,7 +3759,7 @@ class Engine:
         # shot below (so the fairway streak resets and the stroke is counted); `splash_said` then skips
         # the reaction section. Falls through to the reaction-path water check if not wet yet here.
         splash_said = False
-        if c.pre_reactions and not shot.is_putt and shot_plan and shot_plan.reactions.get("water") \
+        if c.pre_reactions and not banter and not shot.is_putt and shot_plan and shot_plan.reactions.get("water") \
                 and time.monotonic() - shot_plan_made_at < 180 and shot_plan.player in (None, player) \
                 and self._shot_seq == my_seq and self._shot_wet(player, since=impact):
             text = shot_plan.reactions["water"]
@@ -4158,6 +4168,20 @@ class Engine:
             # player): its call would land on top of the new shot, about one already in the past.
             log.info("%s reaction skipped: a newer shot was hit %.1fs after this one", tag, time.monotonic() - impact)
             return
+        if self._banter_on():
+            # An aside is long and paid for: only a big moment cuts it off; a routine call waits for it.
+            if score >= c.big_moment_threshold:
+                log.info("%s a big moment (excitement %s): the call cuts the aside off", tag, score)
+            else:
+                waited = time.monotonic()
+                aired_out = await self.speech.wait_banter(BANTER_WAIT_SECONDS)
+                log.info("%s the call waited %.1fs for the aside to finish", tag, time.monotonic() - waited)
+                if not aired_out:
+                    log.info("%s reaction skipped: something else cut the aside off and took the air", tag)
+                    return
+                if self._shot_seq != my_seq:
+                    log.info("%s reaction skipped: a newer shot was hit while the aside played", tag)
+                    return
 
         # A ball in the water gets its splash reaction instantly, from the plan, off the GSPro log's
         # Hit_water (logged at the splash, unlike the penalty score which only lands after the drop).
@@ -4355,6 +4379,9 @@ class Engine:
         if self._shot_seq != my_seq:
             log.info("%s reaction dropped: a newer shot was hit while it was written", tag)
             return
+        if lines and self._banter_on():
+            # Only a big moment (or an aside past its wait) gets here with the aside still on air.
+            self.speech.interrupt()
         self._air_lines("shot", lines, shot_id)
 
     def _trail_carry(self, player: str | None, entry: tuple) -> None:

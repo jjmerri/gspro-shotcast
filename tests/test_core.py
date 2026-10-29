@@ -568,6 +568,46 @@ async def test_a_new_shot_drops_waiting_lines_but_lets_the_one_on_air_finish():
     assert played == ["start", "end", "start", "end"]
 
 
+async def test_a_new_shot_lets_an_aside_on_air_play_out_and_a_routine_call_waits_for_it():
+    import asyncio
+
+    from commentator.models import Line
+
+    played: list[str] = []
+    gate = asyncio.Event()
+
+    async def rec_play(audio):
+        played.append("start")
+        await gate.wait()
+        played.append("end")
+
+    speech = SpeechQueue(_fast_tts_cfg(hedge=30, live=30), _StallingTTS(stall_calls=set()),
+                         player=rec_play, stopper=lambda: None)
+    task = asyncio.create_task(speech.run())
+    speech.say([Line("pbp", "the story"), Line("color", "the reply")], interrupt=True, banter=True)
+    while played != ["start"]:
+        await asyncio.sleep(0.01)
+    speech.drop_queued()   # the next shot is struck mid-aside
+    assert speech.banter_airing()
+    waiting = asyncio.create_task(speech.wait_banter(5))
+    gate.set()
+    await waiting
+    assert played == ["start", "end", "start", "end"] and not speech.banter_airing()   # both lines aired
+    # Once it's done, a new shot drops what's waiting as before.
+    gate.clear()
+    speech.say([Line("pbp", "on air"), Line("color", "old news")])
+    while played[-1] != "start":
+        await asyncio.sleep(0.01)
+    speech.drop_queued()
+    gate.set()
+    while not speech.is_idle():
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert played.count("start") == 3
+
+
 async def test_live_lines_voice_in_parallel_so_a_stall_doesnt_delay_the_next():
     import asyncio
     import time
@@ -4340,7 +4380,7 @@ async def test_a_tree_hit_is_called_in_flight_as_the_ball_reaches_it(tmp_path):
 
     # Voiced ahead: played a beat before the ball reaches the branches.
     e._prevoicing = lambda: True
-    e._air_exchange = lambda items: aired.append((time.monotonic(), items[0][0].text, None))
+    e._air_exchange = lambda items, **_: aired.append((time.monotonic(), items[0][0].text, None))
     fire(" ** Leaves hitTime, 0.50 , HitCount 1, Penalty 34.9% , Accumulated penalty 34.9% ")
     e._shot_seq += 1
     impact = time.monotonic()

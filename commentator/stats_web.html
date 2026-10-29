@@ -387,10 +387,15 @@ function watchBtn(ts, label = "▶ Watch") {
   const w = videoAt(ts);
   return w ? `<button class="link" data-vod="${esc(w.session)}" data-vodat="${w.at}" title="Watch it on the round's video">${label}</button>` : "";
 }
-// A shot's (or a highlight's) watch and share buttons. Its link is for everyone: the picked player
-// may not be the one who hit it (an opponent's shot on a round they played in).
+// A shot's share button links straight to it on the round's video (nobody wants the shot's page);
+// none once the video's gone. The link is for everyone: the picked player may not be the one who hit it.
+function shotShare(x, title = "this shot") {
+  const w = x && videoAt(x.ts);
+  return w ? shareBtn(hashFor("vods", { vod: w.session, at: w.at, player: "" }), title) : "";
+}
+// A shot's (or a highlight's) watch and share buttons.
 const shotActions = (x, title = "this shot") => x && x.id
-  ? ` <span class="acts">${watchBtn(x.ts, "▶")}${shareBtn(hashFor("shots", { shot: x.id, player: "" }), title)}</span>` : "";
+  ? ` <span class="acts">${watchBtn(x.ts, "▶")}${shotShare(x, title)}</span>` : "";
 
 // Rounds that ended after this device's last visit are tagged new; the mark moves on once seen.
 function markSeen() {
@@ -1009,7 +1014,7 @@ function renderShots() {
       <td class="l">${esc(s.lie_before || "–")}</td><td>${putt ? ft(s.to_pin) : yd(s.to_pin)}</td>
       <td>${putt || !s.carry ? "–" : s.carry + " yd"}</td><td class="l">${esc(s.shape || "")}</td><td class="l">${esc(result)}${left}${s.mulligan ? '<span class="tag">mulligan</span>' : ""}${s.left_out ? '<span class="tag" title="Left out of the stats by hand">left out</span>' : ""}</td>
       <td>${s.lines.length ? `💬 ${s.lines.length}` : ""}</td>
-      <td>${watchBtn(s.ts, "▶")}</td><td>${shareBtn(hashFor("shots", { shot: s.id, player: "" }), "this shot")}</td></tr>`;
+      <td>${watchBtn(s.ts, "▶")}</td><td>${shotShare(s)}</td></tr>`;
     if (!open) return head;
     const launch = putt ? "" : `<p class="sub">Ball ${dash(s.ball_speed && s.ball_speed.toFixed(1), " mph")} · club ${dash(s.club_speed && s.club_speed.toFixed(1), " mph")} ·
       launch ${dash(s.launch_angle && s.launch_angle.toFixed(1), "°")} · spin ${dash(s.total_spin && Math.round(s.total_spin), " rpm")} ·
@@ -1029,7 +1034,7 @@ function renderShots() {
     { key: "shape", label: "Shape", cls: "l", title: "A right-hander's shot shape, from the start direction and spin axis" }, { key: "result", label: "Result", cls: "l", val: s => s.outcome || s.lie_after },
     { key: "said", label: "💬", val: s => s.lines.length },
     { key: "watch", label: "Watch", title: "Watch the shot on the round's video", val: s => videoAt(s.ts) ? 1 : null },
-    { key: "share", label: "Share", title: "A link to the shot" }],
+    { key: "share", label: "Share", title: "A link to the shot on the round's video", val: s => videoAt(s.ts) ? 1 : null }],
     row, { key: "order", dir: f.round ? -1 : 1, empty: "No shots match." });
   return `<h2>${meTitle("Shots")}</h2>${controls}${table}
     <p class="sub">${f.round ? "In the order they were played" : "Newest first, up to 500"}. Click a column to sort; click a shot for its launch numbers and what the booth said.</p>`;

@@ -194,6 +194,10 @@ class SpeechQueue:
         # generation but not this) is still cleared by the feeder, and an overlapping sequence keeps
         # ownership until it finishes.
         self._sequencing: int | None = None
+        # The generation an aside (news, trivia, scores) is airing in: a new shot doesn't drop the rest
+        # of it, and the engine holds a routine shot's calls until it's done (it's long, and paid for).
+        self._banter_gen: int | None = None
+        self._banter_lines: set[int] = set()   # id()s of its lines still to air
         # Per-session audio tally, for the cost estimate. "synth" counts every clip actually run
         # through TTS (including pre-voiced branches that never air); "spoken" counts only the clips
         # that reached the speakers. The gap is the pre-voicing waste. Non-blocking dict increments.
@@ -248,13 +252,16 @@ class SpeechQueue:
         self.audio_stats["spoken_chars"] += len(text)
         self.audio_stats["spoken_seconds"] += _aired_seconds(audio)
 
-    def say(self, lines: list[Line], interrupt: bool = False, deadline: float | None = None) -> None:
+    def say(self, lines: list[Line], interrupt: bool = False, deadline: float | None = None,
+            banter: bool = False) -> None:
         """Queue lines to voice and play. `deadline` (a time.monotonic()) is when they stop being worth
         saying; each line is also dropped if its voice isn't ready within live_deadline_seconds."""
         if self.muted:
             return
         if interrupt:
             self.interrupt()
+            if banter:
+                self._banter_gen, self._banter_lines = self._generation, {id(line) for line in lines}
         else:
             # Commentary on a shot from two shots ago is worse than none.
             backlog = self._text_q.qsize() + self._audio_q.qsize()
@@ -504,7 +511,7 @@ class SpeechQueue:
         self._audio_q.put_nowait((self._generation, line, audio, None, None))
         self._pending += 1
 
-    def say_prepared_sequence(self, items: list[tuple[Line, Audio | None]]) -> None:
+    def say_prepared_sequence(self, items: list[tuple[Line, Audio | None]], banter: bool = False) -> None:
         """Play several already-voiced lines in order. Cuts off whatever's playing once, then feeds
         the clips to the play loop one at a time (the audio queue holds only one, so a background task
         awaits each put, like the synth loop does). A later interrupt supersedes the rest of the
@@ -515,6 +522,8 @@ class SpeechQueue:
         self.interrupt()
         gen = self._generation
         self._sequencing = gen
+        if banter:
+            self._banter_gen, self._banter_lines = gen, {id(line) for line, _ in items}
         self._pending += len(items)
 
         async def feed() -> None:
@@ -552,9 +561,25 @@ class SpeechQueue:
         if self._synth_task and not self._synth_task.done():
             self._synth_task.cancel()
 
+    def banter_airing(self) -> bool:
+        """An aside is still on air (or queued to finish), and nothing has cut it off."""
+        return self._banter_gen == self._generation and bool(self._banter_lines)
+
+    async def wait_banter(self, limit: float) -> bool:
+        """Wait (up to `limit`) for the aside to finish. False if something else cut it off and took
+        the air (a hole wrap, a big moment), so what waited is now old news."""
+        deadline = time.monotonic() + limit
+        while self.banter_airing() and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+        return self._banter_gen == self._generation
+
     def drop_queued(self) -> None:
         """Drop every line not yet on air (queued, mid-synthesis, or the rest of a prepared exchange)
-        and let the one playing finish: a new shot was hit, so the last one's calls are old news."""
+        and let the one playing finish: a new shot was hit, so the last one's calls are old news. An
+        aside on air is kept whole."""
+        if self.banter_airing():
+            log.info("New shot: the aside on air plays on")
+            return
         dropped = self._text_q.qsize() + self._audio_q.qsize()
         self._generation += 1
         self._drain(self._text_q)
@@ -588,6 +613,7 @@ class SpeechQueue:
             item = await self._text_q.get()
             if item.gen != self._generation or item.exchange == self._lost_exchange:
                 _discard(item)
+                self._banter_lines.discard(id(item.line))
                 self._pending -= 1
                 continue
             if item.task is None:
@@ -614,6 +640,7 @@ class SpeechQueue:
                     self._record({"kind": "line", "outcome": "dropped", "reason": "late" if late else "no_voice",
                                   "chars": len(item.line.text)})
                     self._lost_exchange = item.exchange  # its replies go too
+                self._banter_lines.discard(id(item.line))
                 self._pending -= 1
                 continue
             if item.gen != self._generation or self._sequencing is not None:
@@ -621,6 +648,7 @@ class SpeechQueue:
                 # line would splice into the middle of it; drop it rather than compete for the queue.
                 if isinstance(audio, StreamedAudio):
                     audio.cancel()
+                self._banter_lines.discard(id(item.line))
                 self._pending -= 1
                 continue
             await self._audio_q.put((item.gen, item.line, audio, item.deadline, item.queued))
@@ -697,4 +725,5 @@ class SpeechQueue:
             finally:
                 if streamed:
                     audio.cancel()   # an interrupted clip stops downloading
+                self._banter_lines.discard(id(line))
                 self._pending -= 1
