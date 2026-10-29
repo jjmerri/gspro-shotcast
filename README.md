@@ -245,3 +245,7 @@ split league and practice rounds and get standings, net scores and storylines
 | [DEPLOY.md](DEPLOY.md) | Installing and updating on the sim PC, and where every file and log lives |
 | [Privacy policy](PRIVACY.md) | What stays on the PC, and what each optional feature sends where |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | The module map and data model, for working on the code |
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE): free for personal, hobby and other noncommercial use; no commercial use. Versions released before this license (v0.1.38 and earlier) were published under MIT.
