@@ -1003,6 +1003,7 @@ class GsproLogFollower:
         s.starts_late = past.starts_late
         s.hole_scores = dict(past.hole_scores)   # holes already finished in a round being joined
         s._score.update({k: past._score[k] for k in past.hole_scores if k in past._score})   # so they can reopen
+        s._picked = set(past._picked)   # picked-up holes: finished, though not yet in hole_scores
         s.current_hole = past.current_hole if past.shots_since_course else None
         s.version, s.kinds, s.unparsed = past.version, Counter(past.kinds), list(past.unparsed)
         self.primed = True

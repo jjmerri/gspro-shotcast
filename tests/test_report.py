@@ -126,12 +126,21 @@ def test_report_codes_read_back_however_they_are_typed():
             report.parse_code(bad)
 
 
-def test_the_sent_box_copies_the_report_code():
+def test_the_sent_box_copies_the_report_code(monkeypatch):
     import pytest
 
     tk = pytest.importorskip("tkinter")
     from commentator.tray_ui import Ui
 
+    class Hidden(tk.Toplevel):   # never shown on the screen running the tests
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.withdraw()
+
+        def focus_force(self):
+            pass
+
+    monkeypatch.setattr(tk, "Toplevel", Hidden)
     ui = Ui.__new__(Ui)                         # Tk on this thread, not Ui's own
     try:
         ui.root, ui.scale = tk.Tk(), 1.0
@@ -139,7 +148,10 @@ def test_the_sent_box_copies_the_report_code():
         pytest.skip("no display")
     try:
         ui.root.withdraw()
+        copied = []   # not the real clipboard: that's the tester's
+        monkeypatch.setattr(ui.root, "clipboard_clear", lambda: copied.clear())
+        monkeypatch.setattr(ui.root, "clipboard_append", copied.append)
         ui._code_box("Sent. Your report code is:", "ABCD-2345", "Pass it on.", "Shotcast")()
-        assert ui.root.clipboard_get() == "ABCD-2345"
+        assert copied == ["ABCD-2345"]
     finally:
         ui.root.destroy()

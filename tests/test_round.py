@@ -2481,6 +2481,47 @@ async def test_joining_takes_the_start_and_current_hole_from_the_log(tmp_path):
     assert r and r.start_hole == 10 and not r.start_hole_assumed and r.seq == 4 and e.hole_number == 13
 
 
+async def test_joining_on_the_next_tee_before_its_first_shot_takes_the_huds_hole(tmp_path):
+    """GSPro 3.59 logs nothing on a new tee until its first shot: a booth started there learns from
+    the log that the hole just finished is the current one, while the HUD shows the next."""
+    from pathlib import Path
+
+    from commentator.models import RoundStartEvent
+    from commentator.sources.gspro_log import GsproLogFollower
+
+    shot = " * ------- Shot Fired! ------- *"
+
+    def before_first_shot_on(text, hole0):
+        return text[:text.rindex(shot, 0, text.index(f"currentHole: {hole0} "))]
+
+    text = Path("tests/fixtures/logs/3.59.11-two-players-quit/output_log.txt").read_text(encoding="utf-8")
+
+    async def join(log_text, hud):
+        e = _log_engine(tmp_path / str(len(log_text)))
+        (tmp_path / "Player.log").write_text(log_text, encoding="utf-8")
+        f = GsproLogFollower(str(tmp_path / "Player.log"))
+        f._prime()   # how a booth coming up mid-round learns where GSPro is
+        e.gspro = f.state
+        await e.handle_round_start(RoundStartEvent(hud=hud, joined=True))
+        return e
+
+    # Both players holed out on 1; the HUD is on the hole 2 tee.
+    e = await join(before_first_shot_on(text, 1), Hud(player_text="Josh E 196.0yd", hole_number=2))
+    assert e.round.seq == 2 and e.hole_number == 2
+    # A scramble scores a hole under one partner: the second round in this log is on hole 4's tee.
+    pine = Path("tests/data/gspro_log_hole_scores.txt").read_text(encoding="utf-8")
+    e = await join(before_first_shot_on(pine, 4), Hud(player_text="Josh E 400.0yd", hole_number=5))
+    assert e.hole_number == 5
+    # A picked-up hole isn't scored until its player's next state line: on 18's tee after a pick-up on 17.
+    riv = Path("tests/fixtures/logs/3.1.6.20-3450x2160-riviera/output_log.txt").read_text(encoding="utf-8")
+    e = await join(before_first_shot_on(riv, 17), Hud(player_text="Josh E 400.0yd", hole_number=18))
+    assert e.hole_number == 18
+    # Mid-hole, a HUD misread of the next hole doesn't move it: hole 1 isn't finished there yet.
+    mid = text.rindex(shot, 0, text.index("Previous Score: 3"))
+    e = await join(text[:mid], Hud(player_text="Josh E 30.0yd", hole_number=2))
+    assert e.round.seq == 1 and e.hole_number == 1
+
+
 async def test_range_with_a_round_open_ends_it_quietly(tmp_path):
     e, r = await _log_round(tmp_path)
     e.gspro.mode = "range"

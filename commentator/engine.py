@@ -6016,10 +6016,18 @@ class Engine:
         r.start_hole, r.start_hole_assumed = g.first_hole + 1, False   # the log's holes are 0-based
         if r.course_card:
             r.apply_course_card(r.course_card)
-        r.seq = max(1, g.current_hole - g.first_hole + 1)
+        current = g.current_hole
+        # GSPro (3.59 at least) logs nothing on the next tee until its first shot, so a booth that comes
+        # up there still sees the last hole: take the HUD's hole when it's the next one and someone has
+        # finished the log's hole (scored or picked up). The group plays a hole together, so the HUD only
+        # moves on once it's done; a scramble scores a hole under one partner, so not "everyone".
+        if current is not None and hud.hole_number == current + 2 and any(
+                h == current for _, h in (*g.hole_scores, *g._picked)):
+            current += 1
+        r.seq = max(1, current - g.first_hole + 1)
         if r.seq > r.holes:
             r.set_holes(max(r.seq, min(18, r.start_hole + 17) - r.start_hole + 1))
-        self.hole_number, self.hole_number_read = g.current_hole + 1, True
+        self.hole_number, self.hole_number_read = current + 1, True
         self._reconcile_slots(r, names)
         self._start_round(r)
         log.info("Round %s joined mid-round on %s (%s): %s; started on hole %s, now on hole %s (%s of %s); no opener",
