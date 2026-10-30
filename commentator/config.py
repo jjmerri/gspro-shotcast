@@ -699,8 +699,8 @@ class BackupConfig(BaseModel):
         return v
 
 
-# The maintainer's problem-report drop (tools/aws/report-drop.yaml); empty until it's deployed.
-REPORT_DROP_URL = ""
+# The maintainer's problem-report drop (tools/aws/report-drop.yaml's UploadUrl).
+REPORT_DROP_URL = "https://l3wyufawstioeuhs7wz6tztgqq0ehaek.lambda-url.us-east-1.on.aws/"
 
 
 class ReportConfig(BaseModel):

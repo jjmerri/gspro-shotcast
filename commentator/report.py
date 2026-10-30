@@ -411,5 +411,11 @@ def fetch(code: str, out_dir: Path, stack: str = "shotcast-report-drop", region:
     bucket = next(o["OutputValue"] for o in outputs if o["OutputKey"] == "BucketName")
     out_dir.mkdir(parents=True, exist_ok=True)
     dest = out_dir / f"shotcast-report-{code}.zip"
-    session.client("s3").download_file(bucket, f"kept/{code}.zip", str(dest))
+    try:
+        session.client("s3").download_file(bucket, f"kept/{code}.zip", str(dest))
+    except Exception as e:
+        if getattr(e, "response", {}).get("Error", {}).get("Code") in ("404", "NoSuchKey"):
+            raise ValueError(f"No report under {show_code(code)}: mistyped, not a Shotcast report, "
+                             "or over two weeks old") from None
+        raise
     return dest
