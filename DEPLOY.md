@@ -35,6 +35,35 @@ runs the whole test suite on the Python it packages, with the packages pip resol
 dependency release that breaks the app fails the build instead of shipping. To build
 locally on Windows with Inno Setup 6: `powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 -Version 0.2.0`.
 
+## Problem-report drop (maintainers only)
+
+Users don't need this, and neither does publishing a stats page: it's where the tray's **Create a
+problem report** sends its zip when the user says yes, so they can pass on a short code instead of
+a file. The app's default `report.upload_url` (`REPORT_DROP_URL` in `commentator/config.py`) points
+at the maintainer's; a fork can deploy its own and point that at it, or leave it empty so reports
+are only saved.
+
+[`tools/aws/report-drop.yaml`](tools/aws/report-drop.yaml) is its own stack, separate from the
+stats page's: a private bucket, a Lambda function URL that hands out one-time upload links, and a
+DynamoDB table counting uploads. Nobody can list or download through it, so it's no use as
+storage: each upload is one zip of at most 25 MB, a few per IP and 100 in all per day, anything
+that isn't a Shotcast report is deleted as it lands, and everything is deleted after 14 days. At a
+handful of reports it costs nothing (free tier, or cents).
+
+```
+aws cloudformation deploy --stack-name shotcast-report-drop --template-file tools/aws/report-drop.yaml \
+  --capabilities CAPABILITY_IAM
+aws cloudformation describe-stacks --stack-name shotcast-report-drop --query "Stacks[0].Outputs"
+```
+
+The stack name must be lowercase (it names the bucket). Put the `UploadUrl` output in
+`REPORT_DROP_URL` (or a user's `report.upload_url`). To read a report someone sent, with this AWS
+account's credentials and `pip install -e ".[publish]"`:
+
+```
+shotcast fetch-report ABCD-EFGH        # saves shotcast-report-ABCD-EFGH.zip here
+```
+
 ## Remote administration (optional)
 
 If you manage the PC over SSH (Windows OpenSSH server):

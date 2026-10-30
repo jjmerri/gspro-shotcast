@@ -1,0 +1,278 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  GSPro Shotcast problem-report drop, for whoever supports Shotcast users (not needed for the stats
+  page). The tray's "Create a problem report" can send its zip here and gives the user a short code
+  to pass on. Uploads are write-only (no one can list or download through it), one size-capped zip
+  each, rate-limited per IP and per day, checked to be a Shotcast report, and deleted after
+  KeepDays. Only someone with this AWS account reads them: shotcast fetch-report CODE.
+  See DEPLOY.md#problem-report-drop.
+
+Parameters:
+  KeepDays:
+    Type: Number
+    Default: 14
+    MinValue: 1
+    Description: Days a report is kept before S3 deletes it.
+  MaxMegabytes:
+    Type: Number
+    Default: 25
+    MinValue: 1
+    MaxValue: 100
+    Description: Largest report accepted.
+  PerIpPerDay:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    Description: Uploads one IP address may start in a UTC day.
+  PerDay:
+    Type: Number
+    Default: 100
+    MinValue: 1
+    Description: Uploads anyone may start in a UTC day, all together.
+
+Resources:
+  # Named rather than generated: the function needs the name, and the bucket needs the function (to
+  # tell it about uploads), so neither can wait for the other. Stack names must be lowercase for it.
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-reports
+            Status: Enabled
+            ExpirationInDays: !Ref KeepDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt Drop.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: reports/
+    DependsOn: DropS3Permission
+
+  # Upload counts per IP and per day; each row expires (DynamoDB TTL) two days on.
+  Counters:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: k
+          AttributeType: S
+      KeySchema:
+        - AttributeName: k
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  DropRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: report-drop
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # PutObject only so the upload links it signs are valid; it never writes itself.
+              # It also files each checked report under kept/.
+              - Effect: Allow
+                Action: [s3:PutObject, s3:GetObject, s3:DeleteObject]
+                Resource: !Sub "arn:aws:s3:::${AWS::StackName}-${AWS::AccountId}-${AWS::Region}/*"
+              - Effect: Allow
+                Action: dynamodb:UpdateItem
+                Resource: !GetAtt Counters.Arn
+
+  # Two jobs: a POST to its URL hands out one upload link (or says no, over a limit), and S3 calls it
+  # for each upload: a Shotcast report moves to kept/<code>.zip, anything else is deleted. A link
+  # can be used again until it expires, so a later upload under a code already kept is deleted
+  # without being read.
+  Drop:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt DropRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          BUCKET: !Sub "${AWS::StackName}-${AWS::AccountId}-${AWS::Region}"
+          COUNTERS: !Ref Counters
+          MAX_BYTES: !Sub "${MaxMegabytes}000000"
+          PER_IP: !Ref PerIpPerDay
+          PER_DAY: !Ref PerDay
+      Code:
+        ZipFile: |
+          import json, os, secrets, time, urllib.parse, zipfile
+          import boto3
+          from botocore.config import Config
+
+          REGION = os.environ["AWS_REGION"]
+          s3 = boto3.client("s3", region_name=REGION, endpoint_url=f"https://s3.{REGION}.amazonaws.com",
+                            config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}))
+          db = boto3.client("dynamodb")
+          MAX_BYTES = int(os.environ["MAX_BYTES"])
+          ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"   # nothing to misread: no 0/O, 1/I/L
+          LINK_SECONDS = 600
+
+          def reply(status, body):
+              return {"statusCode": status, "headers": {"content-type": "application/json"},
+                      "body": json.dumps(body)}
+
+          def count(key, limit):
+              """Add one to key's count unless it's at limit; False when it is."""
+              try:
+                  db.update_item(TableName=os.environ["COUNTERS"], Key={"k": {"S": key}},
+                                 UpdateExpression="ADD n :one SET #t = :ttl",
+                                 ConditionExpression="attribute_not_exists(n) OR n < :limit",
+                                 ExpressionAttributeNames={"#t": "ttl"},
+                                 ExpressionAttributeValues={":one": {"N": "1"}, ":limit": {"N": str(limit)},
+                                                            ":ttl": {"N": str(int(time.time()) + 2 * 86400)}})
+                  return True
+              except db.exceptions.ConditionalCheckFailedException:
+                  return False
+
+          def upload_link(event):
+              if event.get("requestContext", {}).get("http", {}).get("method") != "POST":
+                  return reply(405, {"error": "POST only"})
+              day = time.strftime("%Y-%m-%d", time.gmtime())
+              ip = event["requestContext"]["http"].get("sourceIp", "?")
+              # The IP first, so one sender over their limit doesn't use up the day's for everyone.
+              if not count(f"ip#{ip}#{day}", int(os.environ["PER_IP"])):
+                  return reply(429, {"error": "Too many reports from here today. Try again tomorrow."})
+              if not count(f"day#{day}", int(os.environ["PER_DAY"])):
+                  return reply(429, {"error": "The report drop is full for today. Try again tomorrow."})
+              code = "".join(secrets.choice(ALPHABET) for _ in range(8))
+              post = s3.generate_presigned_post(
+                  os.environ["BUCKET"], f"reports/{code}.zip",
+                  Fields={"Content-Type": "application/zip"},
+                  Conditions=[{"Content-Type": "application/zip"}, ["content-length-range", 1, MAX_BYTES]],
+                  ExpiresIn=LINK_SECONDS)
+              return reply(200, {"code": code, "url": post["url"], "fields": post["fields"], "max_bytes": MAX_BYTES})
+
+          def is_report(path):
+              try:
+                  with zipfile.ZipFile(path) as z:
+                      # Only the start, and only deflate or none: bzip2 and LZMA unpack whole blocks
+                      # however little is read, so a tiny upload could fill memory.
+                      if z.getinfo("summary.txt").compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                          return False
+                      with z.open("summary.txt") as f:
+                          return f.read(64).startswith(b"Shotcast problem report")
+              except Exception:
+                  return False
+
+          def exists(bucket, key):
+              try:
+                  s3.head_object(Bucket=bucket, Key=key)
+                  return True
+              except s3.exceptions.ClientError:
+                  return False
+
+          def keep(bucket, kept, path):
+              """File the checked copy (not the upload, which a replayed link could have replaced since)
+              under kept/, unless that code already has one: the first report under a code stays."""
+              try:
+                  with open(path, "rb") as f:
+                      s3.put_object(Bucket=bucket, Key=kept, Body=f, ContentType="application/zip", IfNoneMatch="*")
+              except s3.exceptions.ClientError as e:
+                  if e.response.get("Error", {}).get("Code") not in ("PreconditionFailed", "ConditionalRequestConflict"):
+                      raise
+                  print(f"{kept} already has a report; keeping that one")
+
+          def check_uploads(event):
+              for rec in event["Records"]:
+                  bucket = rec["s3"]["bucket"]["name"]
+                  key = urllib.parse.unquote_plus(rec["s3"]["object"]["key"])
+                  kept = "kept/" + key[len("reports/"):]
+                  if exists(bucket, kept):
+                      print(f"Deleting {key}: that code already has a report")
+                      s3.delete_object(Bucket=bucket, Key=key)
+                      continue
+                  path = "/tmp/upload.zip"
+                  try:
+                      # S3 failures raise: Lambda retries and the upload stays. Only a look at it decides.
+                      ok = False
+                      if rec["s3"]["object"].get("size", 0) <= MAX_BYTES:
+                          s3.download_file(bucket, key, path)
+                          ok = is_report(path)
+                      if ok:
+                          keep(bucket, kept, path)
+                  finally:
+                      if os.path.exists(path):
+                          os.remove(path)
+                  if not ok:
+                      print(f"Deleting {key}: not a Shotcast report")
+                  s3.delete_object(Bucket=bucket, Key=key)
+
+          def handler(event, context):
+              if "Records" in event:
+                  return check_uploads(event)
+              return upload_link(event)
+
+  DropUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt Drop.Arn
+      AuthType: NONE
+
+  DropUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Drop
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  # Function URLs made since October 2025 need this as well as InvokeFunctionUrl.
+  DropUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Drop
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+  DropS3Permission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Drop
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:aws:s3:::${AWS::StackName}-${AWS::AccountId}-${AWS::Region}"
+
+Outputs:
+  UploadUrl:
+    Description: "config.yaml: report.upload_url (the app's default points at the maintainer's)"
+    Value: !GetAtt DropUrl.FunctionUrl
+  BucketName:
+    Description: Where reports land (shotcast fetch-report reads it from this stack)
+    Value: !Ref Bucket

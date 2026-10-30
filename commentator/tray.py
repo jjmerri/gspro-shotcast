@@ -507,13 +507,30 @@ class Tray:
 
             try:
                 path = report.build(self.cfg, self.home / "config.yaml")
-                open_file(path.parent)
-                self.info(f"Saved {path.name} in {path.parent} (opened). It has the booth's logs, GSPro's log, "
-                          "the screens the booth kept and the season's player names, but no API keys. "
-                          "Send it to whoever is helping you.")
             except Exception as e:
                 log.exception("Problem report failed")
                 self.error(f"Couldn't make the problem report: {e}")
+                return
+            what = ("It has the booth's logs, GSPro's log, the screens the booth kept and the season's "
+                    "player names, but no API keys.")
+            url = self.cfg.report.upload_url
+            if url and self.ui is not None and self.ui.ask(
+                    f"Saved {path.name}. {what}\n\nSend it to Shotcast support now? You'll get a short "
+                    "code to pass on to whoever is helping you. Reports are deleted after two weeks."):
+                try:
+                    code = report.show_code(report.upload(path, url))
+                    self.info(f"Sent. Your report code is {code}\n\nPass it on to whoever is helping you "
+                              f"(it's in the tray log too). The zip is also saved in {path.parent}.")
+                    return
+                except Exception as e:
+                    log.exception("Sending the problem report failed")
+                    self.error(f"Couldn't send the report ({e}). It's saved in {path.parent} (opening it "
+                               "now): send the zip some other way.")
+                    open_file(path.parent)
+                    return
+            open_file(path.parent)
+            self.info(f"Saved {path.name} in {path.parent} (opened). {what} "
+                      "Send it to whoever is helping you.")
         threading.Thread(target=work, daemon=True).start()
 
     def settings(self, tab: str | None = None) -> None:

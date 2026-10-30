@@ -778,6 +778,20 @@ def cmd_report(cfg: Config, args) -> None:
 
     path = report.build(cfg, Path(args.config))
     print(f"Saved the problem report to {path}")
+    if args.send:
+        if not cfg.report.upload_url:
+            sys.exit("No report.upload_url set, so there's nowhere to send it; send the zip some other way.")
+        print(f"Sent. Your report code is {report.show_code(report.upload(path, cfg.report.upload_url))}")
+
+
+def cmd_fetch_report(cfg: Config, args) -> None:
+    from . import report
+
+    try:
+        path = report.fetch(args.code, Path(args.out), args.stack, args.region, args.profile)
+    except ValueError as e:
+        sys.exit(str(e))
+    print(f"Saved {path}")
 
 
 def cmd_restore(cfg: Config, args) -> None:
@@ -920,7 +934,15 @@ def main() -> None:
     p = sub.add_parser("backup", help="Back up the season database now (backup: in config.yaml)")
     p.add_argument("--force", action="store_true", help="Take a copy even if nothing changed")
 
-    sub.add_parser("report", help="Zip the logs, screens and setup into a problem report (no API keys)")
+    p = sub.add_parser("report", help="Zip the logs, screens and setup into a problem report (no API keys)")
+    p.add_argument("--send", action="store_true", help="Also send it to report.upload_url and print its code")
+
+    p = sub.add_parser("fetch-report", help="Download a sent problem report by its code (report-drop stack owner)")
+    p.add_argument("code", help="The code the sender was given, like ABCD-EFGH")
+    p.add_argument("--out", default=".", help="Folder to save it in (default: here)")
+    p.add_argument("--stack", default="shotcast-report-drop", help="The report-drop stack's name")
+    p.add_argument("--region", help="The stack's region (default: the AWS profile's)")
+    p.add_argument("--profile", help="AWS profile to use (default: the default credentials)")
 
     p = sub.add_parser("restore", help="Put a backup back as the season database (stop the booth first)")
     p.add_argument("file", help="A season-*.db.gz from the backup folder")
@@ -985,7 +1007,7 @@ def main() -> None:
         "run": cmd_run, "sniff": cmd_sniff, "calibrate": cmd_calibrate, "ocr-test": cmd_ocr_test, "screen-check": cmd_screen_check, "fixture": cmd_fixture, "notify-test": cmd_notify_test,
         "say": cmd_say, "banter": cmd_banter, "check": cmd_check, "eval": cmd_eval, "stats": cmd_stats,
         "stats-web": cmd_stats_web,
-        "publish": cmd_publish, "backup": cmd_backup, "report": cmd_report, "restore": cmd_restore, "backfill-log": cmd_backfill_log, "snap-minimap": cmd_snap_minimap,
+        "publish": cmd_publish, "backup": cmd_backup, "report": cmd_report, "fetch-report": cmd_fetch_report, "restore": cmd_restore, "backfill-log": cmd_backfill_log, "snap-minimap": cmd_snap_minimap,
         "review": cmd_review,
         "cost": cmd_cost, "import-league": cmd_import_league, "squabbit": cmd_squabbit,
     }

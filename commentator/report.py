@@ -358,3 +358,58 @@ def keep_frame(log_dir: str | Path, reason: str, image, meta: dict, keep: int = 
         except OSError:
             log.warning("Couldn't remove the old screen %s", old.name)
     return d / f"{stem}.jpg"
+
+
+CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"   # the report drop's (tools/aws/report-drop.yaml)
+
+
+def show_code(code: str) -> str:
+    """ABCD-EFGH: easier to read out or type than eight in a row."""
+    return f"{code[:4]}-{code[4:]}" if len(code) == 8 else code
+
+
+def parse_code(text: str) -> str:
+    """A report code as typed (any case, with dashes or spaces), or ValueError."""
+    code = re.sub(r"[\s-]", "", text).upper()
+    if len(code) != 8 or any(c not in CODE_ALPHABET for c in code):
+        raise ValueError(f"{text!r} isn't a report code (eight letters and digits, like ABCD-EFGH)")
+    return code
+
+
+def upload(path: Path, url: str, timeout: float = 120.0) -> str:
+    """Send a report zip to a report drop and return its code. The drop hands out a one-time,
+    size-capped upload link; the zip goes straight to its bucket."""
+    import httpx
+
+    size = path.stat().st_size
+    r = httpx.post(url, json={"size": size}, timeout=30.0)
+    if r.status_code == 429:
+        raise RuntimeError(r.json().get("error") or "The report drop is busy; try again tomorrow.")
+    r.raise_for_status()
+    drop = r.json()
+    if size > int(drop.get("max_bytes") or size):
+        raise RuntimeError(f"The report is {size / 1e6:.0f} MB, over the drop's "
+                           f"{int(drop['max_bytes']) / 1e6:.0f} MB. Send the zip some other way.")
+    with path.open("rb") as f:
+        # S3 wants the policy fields first and the file last; httpx sends data before files.
+        up = httpx.post(drop["url"], data=drop["fields"], files={"file": (path.name, f, "application/zip")},
+                        timeout=timeout)
+    up.raise_for_status()
+    code = parse_code(drop["code"])
+    log.info("Problem report %s sent as %s", path.name, show_code(code))
+    return code
+
+
+def fetch(code: str, out_dir: Path, stack: str = "shotcast-report-drop", region: str | None = None,
+          profile: str | None = None) -> Path:
+    """Download a sent report by its code, with the report drop's AWS account (the maintainer's)."""
+    import boto3
+
+    code = parse_code(code)
+    session = boto3.Session(profile_name=profile, region_name=region)
+    outputs = session.client("cloudformation").describe_stacks(StackName=stack)["Stacks"][0]["Outputs"]
+    bucket = next(o["OutputValue"] for o in outputs if o["OutputKey"] == "BucketName")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest = out_dir / f"shotcast-report-{code}.zip"
+    session.client("s3").download_file(bucket, f"kept/{code}.zip", str(dest))
+    return dest

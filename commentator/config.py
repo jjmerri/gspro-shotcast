@@ -699,6 +699,16 @@ class BackupConfig(BaseModel):
         return v
 
 
+# The maintainer's problem-report drop (tools/aws/report-drop.yaml); empty until it's deployed.
+REPORT_DROP_URL = ""
+
+
+class ReportConfig(BaseModel):
+    # Where "Create a problem report" offers to send its zip: a report-drop stack's UploadUrl output.
+    # Empty: the report is only saved, for the user to send some other way.
+    upload_url: str = REPORT_DROP_URL
+
+
 class Config(BaseModel):
     # Optional. None = no league: every round is practice, players go by their GSPro names.
     league_file: str | None = None
@@ -729,6 +739,7 @@ class Config(BaseModel):
     publish: PublishConfig = Field(default_factory=PublishConfig)
     live: LiveConfig = Field(default_factory=LiveConfig)
     backup: BackupConfig = Field(default_factory=BackupConfig)
+    report: ReportConfig = Field(default_factory=ReportConfig)
     log_dir: str = "logs"
     # Season history: every shot and line. Replays and evals never write to it.
     db_path: str = "logs/season.db"

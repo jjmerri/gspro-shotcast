@@ -72,3 +72,55 @@ def test_keep_frame_keeps_only_the_newest_few(tmp_path, monkeypatch):
     kept = sorted(p.name for p in (tmp_path / report.FRAMES_DIR).glob("*.jpg"))
     assert kept == [f"minimap-miss-20990101-0000{i:02d}.jpg" for i in (3, 4, 5)]
     assert len(list((tmp_path / report.FRAMES_DIR).glob("*.json"))) == 3
+
+
+class _Resp:
+    def __init__(self, status, body=None):
+        self.status_code, self._body = status, body
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+def test_upload_asks_the_drop_for_a_link_then_posts_the_zip_to_it(tmp_path, monkeypatch):
+    import httpx
+    import pytest
+
+    zp = tmp_path / "r.zip"
+    zp.write_bytes(b"PK" + b"x" * 100)
+    calls = []
+    drop = {"code": "ABCD2345", "url": "https://bucket.s3/", "fields": {"key": "reports/ABCD2345.zip"},
+            "max_bytes": 1000}
+
+    def post(url, **kw):
+        calls.append((url, kw))
+        if url == "https://drop/":
+            return _Resp(200, drop)
+        assert kw["data"] == drop["fields"] and kw["files"]["file"][1].read() == zp.read_bytes()
+        return _Resp(204)
+
+    monkeypatch.setattr(httpx, "post", post)
+    assert report.show_code(report.upload(zp, "https://drop/")) == "ABCD-2345"
+    assert [u for u, _ in calls] == ["https://drop/", "https://bucket.s3/"]
+
+    drop["max_bytes"] = 50                      # over the drop's cap: never uploaded
+    calls.clear()
+    with pytest.raises(RuntimeError, match="over the drop"):
+        report.upload(zp, "https://drop/")
+    assert len(calls) == 1
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: _Resp(429, {"error": "full for today"}))
+    with pytest.raises(RuntimeError, match="full for today"):
+        report.upload(zp, "https://drop/")
+
+
+def test_report_codes_read_back_however_they_are_typed():
+    import pytest
+
+    assert report.parse_code(" abcd-2345 ") == "ABCD2345"
+    for bad in ("ABCD-234", "ABCD-2340", "../../x"):   # 0 isn't in a code
+        with pytest.raises(ValueError):
+            report.parse_code(bad)

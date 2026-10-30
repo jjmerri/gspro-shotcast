@@ -253,6 +253,11 @@ publish:
   # site_name: Shotcast                  # the page's title and header
   # more_tab: More                       # the tab for Schedule, Broadcasts and Booth
 
+# "Create a problem report" in the tray can send its zip to whoever supports Shotcast and give you
+# a code to pass on. Set upload_url to "" to only save it (DEPLOY.md#problem-report-drop).
+# report:
+#   upload_url: ""
+
 # The Live tab on the published page: OBS's stream, mirrored to the publish bucket while a round is
 # on (docs/tracking.md#live-stream). The tray's "Set up the live stream..." downloads and sets up
 # OBS and turns this on. OBS's WebSocket password goes in .env (OBS_WEBSOCKET_PASSWORD).
