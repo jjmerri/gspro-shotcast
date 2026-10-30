@@ -693,6 +693,8 @@ class SpeechQueue:
                 name = self.cfg.personas[line.speaker].name if line.speaker in self.cfg.personas else line.speaker
                 print(f"  [{name}] {line.text}", flush=True)
                 log.info("Speaking [%s]: %s", name, line.text)
+                if (on_air := getattr(line, "_on_air", None)) is not None:
+                    on_air()   # the caller's hook for "this was actually said", not just queued
                 wait = time.monotonic() - queued if queued is not None else None
                 if wait is not None and wait > _SLOW_LINE_SECONDS:
                     log.info("Line started %.1fs after it was queued: %s", wait, line.text)

@@ -488,6 +488,26 @@ class Round:
             total += score - par
         return total
 
+    def par_type_to_par(self, side: Side, through: int, records: list = (),
+                        extra: tuple[int, int, int] | None = None) -> dict[int, tuple[int, int]] | None:
+        """A side's score to par split by the hole's par (3, 4, 5) over holes 1..`through`, as
+        {par: (to_par, holes)}. The par comes from the shots' own HUD read first (the course card can
+        mismatch the holes played). `extra` = (seq, strokes, par) supplies a hole not yet on the card
+        (a pre-built wrap branch). None when a hole in range has no score or par."""
+        tally: dict[int, tuple[int, int]] = {}
+        for seq in range(1, through + 1):
+            if extra is not None and seq == extra[0]:
+                score, par = extra[1], extra[2]
+            else:
+                score = self.card_score(side, seq)
+                par = next((r.par for r in records if r.round_id == self.id and r.hole_seq == seq and r.par),
+                           None) or self.par.get(seq)
+            if score is None or not par:
+                return None
+            to_par, holes = tally.get(par, (0, 0))
+            tally[par] = (to_par + score - par, holes + 1)
+        return tally
+
     def complete(self) -> bool:
         return all(self.card_score(side, seq) is not None for side in self.sides for seq in range(1, self.holes + 1))
 

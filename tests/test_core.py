@@ -2692,6 +2692,111 @@ def test_a_penalty_after_a_dry_landing_says_the_ball_ran_into_the_hazard(tmp_pat
     assert "ran on" not in " ".join(engine._penalty_facts_from_truth(0))
 
 
+def test_an_unaired_dry_penalty_is_forced_into_the_setup_line_and_retried(tmp_path, monkeypatch):
+    engine, _ = _setup_engine(tmp_path)
+    g = engine.gspro
+    g.hole_by[0] = 5
+    monkeypatch.setattr(g, "penalties", lambda idx: 1)
+    monkeypatch.setattr(g, "shot_number", lambda idx: 3)
+    rec = ShotRecord("Tony", Shot(club="Driver"), None, Hud(), [])
+    engine._fire_rows[7] = (1, rec, 0, 5)
+    hud = Hud(player_text="Tony", shot_number=3, lie="rough", to_pin="300 yards")
+    facts = engine._penalty_facts_from_truth(0, hud)
+    assert "hasn't been mentioned on air" in " ".join(facts)
+    assert hud._penalty == ((0, 5), 1, True) and engine._setup_line_rate(hud, False) == 1.0
+    # Nothing aired: the next setup still carries it.
+    assert engine._penalty_facts_from_truth(0, Hud(shot_number=3))
+    rec.tags.append("in_water")          # the splash was called: told once, not forced
+    hud = Hud(shot_number=3, to_pin="300 yards")
+    assert "hasn't been mentioned" not in " ".join(engine._penalty_facts_from_truth(0, hud))
+    assert not getattr(hud, "_penalty", None) and engine._setup_line_rate(hud, False) < 1.0
+    assert engine._penalty_facts_from_truth(0, Hud(shot_number=3)) == []
+
+
+async def test_a_penalty_counts_as_told_only_once_its_setup_line_airs(tmp_path):
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.tts.console_simulate_duration = False
+    cfg.tts.prevoice = False
+    cfg.commentary.preshot_rate = 0.0
+    e = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+               live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=SpeechQueue(cfg, ConsoleTTS()),
+               screen=None, rng=random.Random(0))
+
+    async def raws(text):
+        line = {"lines": [{"speaker": "pbp", "text": text}]}
+        return {"line": json.dumps(line)}, "A penalty stroke was taken. This is stroke 3 on the hole: call it the 3rd."
+
+    def event(force, text="Josh is playing his third after the penalty."):
+        hud = Hud(player_text="Josh", shot_number=3, lie="rough", to_pin="151.8 yards")
+        hud._penalty = ((0, 5), 1, force)
+        return PreShotEvent(hud=hud, model_task=asyncio.ensure_future(raws(text)))
+
+    await e.handle_preshot(event(force=False))    # skipped by the rate: still untold
+    assert (0, 5) not in e._narrated_pen
+    await e.handle_preshot(event(force=True))     # forced and queued...
+    assert [l.text for l in e.state.recent_lines] == ["Josh is playing his third after the penalty."]
+    e.speech.drop_queued()                        # ...but the ball was struck before it played
+    task = asyncio.create_task(e.speech.run())
+    try:
+        await asyncio.sleep(0.05)
+        assert (0, 5) not in e._narrated_pen
+        await e.handle_preshot(event(True, "That penalty leaves Josh hitting three."))   # plays: told
+        while not e.speech.is_idle():
+            await asyncio.sleep(0.01)
+        assert e._narrated_pen[(0, 5)] == 1
+    finally:
+        task.cancel()
+
+
+def test_the_wrap_gets_the_holes_penalties_and_the_par_type_tally(tmp_path):
+    from commentator.round import Round
+    engine, _ = _setup_engine(tmp_path)
+    r = engine.round = Round(league=engine.league, gspro_players=["Toby"], course="X", scheduled_format=None, holes=18)
+    r.par = {1: 3, 2: 4, 3: 3, 4: 5}
+    r.card_scores = {"Toby": {1: 2, 2: 6, 3: 2}}
+    r.seq = 4
+    engine._fire_rows[7] = (1, ShotRecord("Toby", Shot(club="Driver"), None, Hud(), [], round_id=r.id, hole_seq=2), 0, 12)
+    engine.gspro._penalties[(0, 12)] = 1
+    assert "1 penalty stroke" in " ".join(engine._hole_penalty_facts(2)) and not engine._hole_penalty_facts(3)
+    tally = " ".join(engine._wrap_tally_facts())
+    assert "2 under on the par 3s (2 played)" in tally and "2 over on the par 4s (1 played)" in tally
+    # A pre-built branch counts the score it's written for on the hole still being played.
+    branch = " ".join(engine._par_type_facts(4, (r.sides[0].key, 4, 4, 5)))
+    assert "1 under on the par 5s (1 played)" in branch
+
+
+def test_a_par_type_tally_the_facts_dont_give_is_rejected():
+    from commentator.grounding import check_line
+    fact = "Score by hole type through 6 holes: Corey is 2 under on the par 3s (2 played)."
+    assert not check_line("Corey's two under on the par threes today.", "Corey made 3.", "", mode="round").ok
+    assert check_line("Corey's two under on the par threes today.", fact, "", mode="round").ok
+    assert not check_line("Corey's one under on the par threes today.", fact, "", mode="round").ok
+    both = fact + "\nScore by hole type through 6 holes: Toby is 1 over on the par 3s (2 played)."
+    assert check_line("Corey's two under on the par threes today.", both, "", mode="round").ok
+    assert not check_line("Corey's one over on the par threes today.", both, "", mode="round").ok
+    assert not check_line("On the par threes, Corey is two over.", both, "", mode="round").ok
+    assert check_line("On the par threes, Corey is two under.", both, "", mode="round").ok
+    assert not check_line("One over on the par threes for Corey.", both, "", mode="round").ok
+    four = both.replace("(2 played).", "(2 played), 1 over on the par 4s (3 played).", 1)
+    assert check_line("Corey is two under on the par threes and one over on the par fours.", four, "", mode="round").ok
+    assert not check_line("On the par threes through two holes, Corey is one over.", both, "", mode="round").ok
+    steady = four.replace("2 under on the par 3s", "even on the par 3s")
+    assert check_line("Corey has held steady on the par threes, but is one over on the par fours.", steady, "",
+                      mode="round").ok
+    assert check_line("Even the par threes punish a loose swing.", "Corey made 3.", "", mode="round").ok
+    assert check_line("On the par threes, even Corey has to be careful.", "Corey made 3.", "", mode="round").ok
+    assert check_line("The par threes are even tougher today.", "Corey made 3.", "", mode="round").ok
+    assert check_line("Even on the par threes, club selection matters.", fact, "", mode="round").ok
+    assert not check_line("Corey's even on the par threes.", fact, "", mode="round").ok
+    assert not check_line("On the par threes, Corey is even.", fact, "", mode="round").ok
+    assert check_line("The par threes have been kind, but Corey is two over par for the round.",
+                      fact + " Round: Corey +2.", "", mode="round").ok
+    assert check_line("The par threes have been kind, but Corey is two over for the round.",
+                      fact + " Round: Corey +2.", "", mode="round").ok
+    assert check_line("One over on this par three, a bogey.", "Corey made 4 on the par-3 hole, 1 over par (a bogey).", "",
+                      mode="round").ok
+
+
 def test_connector_log_source_on_real_uneekor_messages():
     from commentator.sources.connector_log import ConnectorLogSource
     from commentator.sources.gspro_sniffer import is_shot_message

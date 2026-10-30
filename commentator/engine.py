@@ -2080,6 +2080,53 @@ class Engine:
         return [self._score_fact(side, s, par, picked=r.was_picked_up([*side.gspro, *side.players], r.seq - 1))
                 for side in r.sides if (s := r.card_score(side, r.seq - 1)) is not None]
 
+    def _hole_penalty_facts(self, seq: int) -> list[str]:
+        """Penalty strokes each player took on hole `seq` of the round, from GSPro's log, so the wrap
+        counts them instead of explaining the extra stroke as a missed putt. Left out of a scramble,
+        where a penalty on a ball that wasn't picked never reaches the team score."""
+        r = self.round
+        if not r or r.ended or (r.format == "scramble" and not r.no_scramble):
+            return []
+        holes = {(rec.player, idx): hole for _, rec, idx, hole in self._fire_rows.values()
+                 if rec.round_id == r.id and rec.hole_seq == seq and idx is not None}
+        facts = []
+        for (player, idx), hole in holes.items():
+            if n := self.gspro.penalties_on(idx, hole):
+                facts.append(f"Penalty on the finished hole: {self._display(player) or player} took {n} penalty "
+                             f"stroke{'s' if n > 1 else ''} (a ball in the water, out of bounds or lost), counted "
+                             f"in the hole score. Those strokes were penalties, not extra shots or putts.")
+        return facts
+
+    def _par_type_facts(self, through: int, extra: tuple[str, int, int, int] | None = None) -> list[str]:
+        """Each side's score to par on the par 3s, 4s and 5s through hole `through`, so a wrap that
+        wants the tally has the real numbers (the model added one up itself and got it wrong).
+        `extra` = (side key, seq, strokes, par): a pre-built branch's hypothetical score for a hole
+        the card doesn't have yet."""
+        r = self.round
+        if not r or r.ended or through < 2:
+            return []
+        facts = []
+        for side in r.sides:
+            hyp = extra[1:] if extra and extra[0] == side.key else None
+            tally = r.par_type_to_par(side, through, self.state.shots, hyp)
+            if not tally:
+                continue
+            parts = []
+            for par in sorted(tally):
+                to_par, holes = tally[par]
+                margin = "even" if to_par == 0 else f"{abs(to_par)} {'over' if to_par > 0 else 'under'}"
+                parts.append(f"{margin} on the par {par}s ({holes} played)")
+            facts.append(f"Score by hole type through {through} holes: {side.label} is {', '.join(parts)}.")
+        return facts
+
+    def _wrap_tally_facts(self) -> list[str]:
+        """The on-demand wrap's penalty and par-type facts for the hole just finished (the scorecard
+        has moved the round on to the next hole, so that's seq - 1)."""
+        r = self.round
+        if not r or r.ended or r.seq <= 1:
+            return []
+        return self._hole_penalty_facts(r.seq - 1) + self._par_type_facts(r.seq - 1)
+
     def _prevoicing(self) -> bool:
         return getattr(self.speech, "prevoicing", True)
 
@@ -2134,7 +2181,8 @@ class Engine:
         async def gen(strokes):
             # "round" mode: a recap spans several lies, so skip the single-finishing-lie check that
             # would otherwise reject "found the green, then the rough".
-            result = other_facts + [self._score_fact(side, strokes, par)] + theme + roster
+            result = (other_facts + [self._score_fact(side, strokes, par)] + self._hole_penalty_facts(r.seq)
+                      + self._par_type_facts(r.seq, (side.key, r.seq, strokes, par)) + theme + roster)
             user, facts = wrap_recap_prompt(finished_hole=finished, result=result,
                                             recap=recap, recent_lines=self.state.recent_lines)
             return self._grounded(await self._generate("segment", self.segment_llm, user, []), facts, "round", False)[0]
@@ -2351,13 +2399,15 @@ class Engine:
         return [f"{who} is taking a mulligan: the last swing{went} was taken back, and {who} is replaying "
                 f"stroke {hud.shot_number} from the same spot. Mention the mulligan."]
 
-    def _penalty_facts(self, player: str | None, shot_number: int | None) -> list[str]:
+    def _penalty_facts(self, player: str | None, shot_number: int | None, hud: Hud | None = None) -> list[str]:
         """A fact when a penalty stroke was taken, so the booth counts it instead of swings.
 
         GSPro folds a penalty into the stroke count without playing a shot for it, so the shot
         number jumps (2 -> 4 after a water ball and drop). Without this the model counts physical
         swings and calls the fourth shot a third. The GSPro log counts penalties exactly; when it's
-        on we use it, else we infer the penalty from the HUD shot number jumping.
+        on we use it, else we infer the penalty from the HUD shot number jumping. With the setup's
+        `hud`, the log's penalty is only counted as told once a line carrying it airs (see
+        _penalty_facts_from_truth).
         """
         idx = self._gspro_idx(player)
         if shot_number == 1:
@@ -2366,7 +2416,7 @@ class Engine:
             self._last_hud_shot[player or "unknown"] = 1
             return []
         if idx is not None and self.gspro.current_hole is not None:
-            return self._penalty_facts_from_truth(idx)
+            return self._penalty_facts_from_truth(idx, hud)
         if not shot_number:
             return []
         key = player or "unknown"
@@ -3087,13 +3137,18 @@ class Engine:
                     f"{dist_ft:.0f} feet; it was not conceded, so it has to be holed."]
         return []
 
-    def _penalty_facts_from_truth(self, idx: int) -> list[str]:
-        """The penalty fact from GSPro's own stroke count, told once per new penalty on a hole."""
+    def _penalty_facts_from_truth(self, idx: int, hud: Hud | None = None) -> list[str]:
+        """The penalty fact from GSPro's own stroke count, told once per new penalty on a hole.
+
+        GSPro scores a dry penalty (out of bounds, a ball that ran into a penalty area, a lost ball)
+        only as it moves on to the next player, after the shot's own call, so the next setup is the
+        first place the booth can say it. With a setup `hud` and no splash already called, that
+        setup's line is marked to always air and the penalty only counts as told once a line carrying
+        it airs: a dropped or cancelled setup line leaves it for the next one."""
         hole = self.gspro.hole_by.get(idx, self.gspro.current_hole)   # this player's hole, not the global one
         penalties = self.gspro.penalties(idx)
         if penalties <= self._narrated_pen.get((idx, hole), 0):
             return []
-        self._narrated_pen[(idx, hole)] = penalties
         n = self.gspro.shot_number(idx)
         facts = [f"A penalty stroke was taken (a ball in the water or out of bounds, then a drop); "
                  f"{penalties} penalty stroke{'s' if penalties > 1 else ''} on this hole so far. Counting "
@@ -3103,6 +3158,12 @@ class Engine:
                           (None, None))
         if last and last[3] == hole and self.gspro.fire_info(fire).get("hazard") and "in_water" not in last[1].tags:
             facts.append("The ball that cost the penalty landed dry and then ran on into the penalty area.")
+        splashed = bool(last and last[3] == hole and "in_water" in last[1].tags)
+        if hud is None or splashed or not self.cfg.commentary.preshot:
+            self._narrated_pen[(idx, hole)] = penalties   # the splash call told it (or no setup line will)
+        else:
+            hud._penalty = ((idx, hole), penalties, True)
+            facts.append("The penalty hasn't been mentioned on air yet: say so.")
         return facts
 
     def _strategy_facts(self, minimap: "MinimapRead | None", hud: Hud) -> list[str]:
@@ -3198,7 +3259,7 @@ class Engine:
         self._use_own_scores(hud, player)
         facts = (preshot_facts(hud, self.current_par, self.handed.get(player or ""))
                  + self._mulligan_facts(player, hud)
-                 + self._penalty_facts(player, hud.shot_number) + self._truth_context_facts(is_putt, idx)
+                 + self._penalty_facts(player, hud.shot_number, hud) + self._truth_context_facts(is_putt, idx)
                  + history_facts(self._display(player), self.state.player_shots(player or "unknown"))
                  + moment_facts(self._display(player), self._round_shots(player), putt=is_putt,
                                 at_edge=idx is not None and gimme_edge(self.gspro.to_pin_of(idx), self.gspro.gimme_of(idx)))
@@ -3278,8 +3339,11 @@ class Engine:
         pin_yd = to_yards(hud.to_pin)
         if is_putt or (pin_yd is not None and pin_yd <= 40):
             rate = max(rate, 0.9)
-        if any(getattr(hud, flag, False) for flag in ("_mulligan", "_lie_correction", "_stymie", "_wrong_green")):
-            rate = 1.0   # a mulligan, a wrong call to set straight, a tree in the way or the wrong green always gets its word
+        if any(getattr(hud, flag, False) for flag in ("_mulligan", "_lie_correction", "_stymie", "_wrong_green")) \
+                or (getattr(hud, "_penalty", None) or (0, 0, False))[2]:
+            # A mulligan, a wrong call to set straight, a tree in the way, the wrong green or a penalty
+            # not yet called (no splash) always gets its word.
+            rate = 1.0
         return rate
 
     @staticmethod
@@ -3402,6 +3466,14 @@ class Engine:
             good, problems = self._grounded(lines, facts_text, mode="preshot", seen_image=False)  # the line call is text-only
             if not good:
                 log.info("Setup line dropped: %s", "; ".join(problems) or "the model wrote none")
+            elif (pen := getattr(event.hud, "_penalty", None)) is not None:
+                # Told once the line saying it is actually on air (hooked before any voicing can drop
+                # lines): one queued and then dropped, or never voiced, leaves it for the next setup.
+                def told(key=pen[0], n=pen[1]) -> None:
+                    self._narrated_pen[key] = max(self._narrated_pen.get(key, 0), n)
+                said = next((l for l in good if re.search(r"penalt|out of bounds|\bOB\b|lost ball|\bdrop", l.text, re.I)),
+                            good[-1])
+                said._on_air = told
             return good
 
         def aired(good: list) -> None:
@@ -3423,7 +3495,8 @@ class Engine:
             if self.speech.is_idle():
                 self.speech.say(good)
                 aired(good)
-            elif is_putt or correction or stymie or (pin_yd is not None and pin_yd <= 40):
+            elif is_putt or correction or stymie or (pin_yd is not None and pin_yd <= 40) \
+                    or (getattr(event.hud, "_penalty", None) or (0, 0, False))[2]:
                 task = asyncio.create_task(self._air_setup_when_idle(good, self._shot_seq, PRESHOT_IDLE_WAIT_SECONDS, aired))
                 task.add_done_callback(lambda t: t.cancelled() or t.exception())
             else:
@@ -5358,7 +5431,7 @@ class Engine:
             current_hole=event.current,
             recap=self.state.hole_recap(previous, name=lambda p: self._display(p) or p),
             recent_lines=self.state.recent_lines,
-            result=self._hole_score_facts(previous) + self._roster_facts()
+            result=self._hole_score_facts(previous) + self._wrap_tally_facts() + self._roster_facts()
             + self._weather_facts(self.cfg.weather.between_holes_rate),
         )
         await self._speak("segment", self.segment_llm, user, facts_text + "\n" + "\n".join(self._format_facts()), [])

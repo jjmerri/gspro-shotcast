@@ -831,6 +831,10 @@ class GsproState:
         """The stroke the player is about to play: strokes already taken plus one."""
         return self.strokes_before(player) + 1
 
+    def penalties_on(self, player: int, hole) -> int:
+        """Penalty strokes `player` took on a given GSPro hole (not just the one they're on now)."""
+        return self._penalties.get((player, hole), 0)
+
     def penalties(self, player: int | None = None) -> int:
         """Penalty strokes counted on this player's current hole."""
         p = self.active_player if player is None else player

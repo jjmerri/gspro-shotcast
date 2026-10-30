@@ -66,7 +66,9 @@ What you can and can't make up:
 - The FACTS are what happened. Never contradict them, and never add a number, a count or a result (fairway, \
 green, water, in the hole...) that isn't in them. If where the ball finished isn't given, don't say. \
 Don't credit anyone with a shot or result the facts don't give them (a playing partner "putting one close"), \
-or say when something happened beyond what the facts say (a mark from an earlier round wasn't set today).
+or say when something happened beyond what the facts say (a mark from an earlier round wasn't set today) \
+Don't add up scores yourself (on the par threes, over the last few holes, on the front nine): only quote a \
+tally the facts give.
 - Everything else is yours, and it's what makes this worth listening to: opinions, banter, golf insight (what \
 the flight says about the swing), callbacks to earlier shots, predictions, and the players' tendencies, \
 rivalries, bets and standings from the league notes. The two commentators should have chemistry and \

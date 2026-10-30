@@ -33,6 +33,54 @@ _ROUND_FACT = re.compile(r"(?<![\w.])([+-]\d+)(?!\d|\.\d|\s*(?:°|%|(?:degrees?|
                          r"|\beven par\b|\bE\b")
 
 
+# A score to par on one type of hole ("two under on the par threes"): only the wrap's tally fact gives
+# one, and the model adding it up itself got it wrong.
+_PAR_TYPE = r"par[\s-]?(3|4|5|three|four|five)(?:s|'s|es)\b"
+PAR_TYPE_CLAIM = re.compile(rf"{_SCORE_NUM}(?:\s+(over|under))?(?:\s+par)?\s+(?:on|across|over)\s+(?:the\s+|those\s+|all\s+the\s+)?{_PAR_TYPE}")
+# "On the par threes, Corey is two under": a few words on, a verb, then a score with a direction (or
+# "even"), not one scoped elsewhere ("two over for the round") or an adverb ("even Corey").
+PAR_TYPE_CLAIM_AFTER = re.compile(
+    rf"{_PAR_TYPE}(?:,?\s+[\w&-]+){{0,6}}?(?:\s+(?:is|are|sits|stands|was|were|went|goes|has gone)|'s)\s+(?:at\s+)?"
+    rf"{_SCORE_NUM}(?:\s+(over|under)|(?:(?<=even)|(?<=level))(?=\s+par\b|\s*(?:[,;.!?]|$|and\b|but\b)))(?:\s+par)?\b"
+    rf"(?!\s+(?:par\s+)?(?:for|on|in|through|after|since)\b)")
+_PAR_TYPE_FACT = re.compile(r"\b(even|(\d+) (over|under)) on the par ([345])s\b")
+_PAR_TYPE_SIDE = re.compile(r"score by hole type through \d+ holes: (.+?) is ([^\n]*)")
+_PAR_NUM = {"3": 3, "4": 4, "5": 5, "three": 3, "four": 4, "five": 5}
+
+
+def wrong_par_type_tally(line: str, facts: str) -> str | None:
+    """A score on the par 3s/4s/5s the line claims that no fact gives (or that differs from the fact).
+    Each side's tally is kept apart: a claim in a sentence naming one side is checked against that
+    side's; with no side named, any side's tally for that par will do."""
+    lowered = line.lower()
+    sides: dict[str, dict[int, int]] = {}
+    for fact in _PAR_TYPE_SIDE.finditer(facts.lower()):
+        sides[fact.group(1)] = {int(m.group(4)): 0 if m.group(1) == "even" else int(m.group(2)) * (-1 if m.group(3) == "under" else 1)
+                                for m in _PAR_TYPE_FACT.finditer(fact.group(2))}
+
+    def allowed(m: re.Match, par: int) -> set[int]:
+        start = max(lowered.rfind(c, 0, m.start()) for c in ".;!?") + 1
+        end = min((i for c in ".;!?" if (i := lowered.find(c, m.end())) >= 0), default=len(lowered))
+        sentence = lowered[start:end]
+        named = [t for side, t in sides.items() if re.search(rf"\b{re.escape(side)}\b", sentence)]
+        return {t[par] for t in (named if len(named) == 1 else sides.values()) if par in t}
+
+    # A bare "even" leading into "on the par threes" is a score only after a verb ("he's even on the par
+    # threes"), not the adverb opening "Even on the par threes, club selection matters".
+    claims = [(m, m.group(1), m.group(2), m.group(3)) for m in PAR_TYPE_CLAIM.finditer(lowered)
+              if m.group(1) not in ("even", "level") or re.match(r"\s+par\b", lowered[m.end(1):])
+              or re.search(r"(?:\b(?:is|are|sits|stands|was|were|stays?|remains?|at)|'s)\s*$", lowered[:m.start()])]
+    claims += [(m, m.group(2), m.group(3), m.group(1)) for m in PAR_TYPE_CLAIM_AFTER.finditer(lowered)
+               if not any(f.start() < m.end() and m.start() < f.end() for f, *_ in claims)]
+    for m, word, direction, par in claims:
+        value = _score_word_value(word)
+        if value is None or (value and not direction):
+            continue
+        if (-value if direction == "under" else value) not in allowed(m, _PAR_NUM[par]):
+            return m.group(0)
+    return None
+
+
 def _score_word_value(word: str) -> int | None:
     word = word.replace("-", " ")
     if word in ("even", "level"):
@@ -191,6 +239,8 @@ def check_line(
             problems.append(f'"{word}" is a count the facts don\'t give')
     if mode not in ("round", "news") and (said := wrong_round_score(line, facts)):
         problems.append(f'"{said}": that round score isn\'t in the facts')
+    if said := wrong_par_type_tally(line, facts):
+        problems.append(f'"{said}": that score on the par-type holes isn\'t in the facts')
 
     facts_lower = facts.lower()
     # Normalised the same way as the line's words: GSPro's "sand" lie is a bunker for this purpose.
