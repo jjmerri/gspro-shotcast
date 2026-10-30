@@ -9,7 +9,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
-from .config import DEFAULT_REGIONS, HUD_ASPECT, NEW_UI_REGIONS, Region, ScreenConfig
+from .config import HUD_ASPECT, NEW_UI_REGIONS, Region, ScreenConfig
 from .hud import (
     DISTANCE, LIE_CELL, NAME_DARK, Hud, OcrItem, arrow_direction, parse_club, parse_elevation, parse_hole_box, parse_lie,
     parse_others, parse_player_box, parse_score_banner, parse_scorecard, parse_slope, parse_tiles, tile_value_items,
@@ -222,12 +222,19 @@ class Screen:
                      if on_left else "standard (minimap bottom-right, club bottom-left)")
         return self.mirrored
 
+    def base_region(self, name: str) -> Region | None:
+        """A region as configured for this GSPro, before any mirroring. On GSPro's new menus (self.ui)
+        it comes from the config's regions_new, else NEW_UI_REGIONS for a box they moved."""
+        if self.ui == "new":
+            if name in self.cfg.regions_new:
+                return self.cfg.regions_new[name]
+            if name in NEW_UI_REGIONS:
+                return NEW_UI_REGIONS[name]
+        return self.cfg.regions.get(name)
+
     def region(self, name: str) -> Region | None:
-        """A HUD region, moved to the other side when the layout is mirrored. On GSPro's new menus
-        (self.ui) a region they moved comes from NEW_UI_REGIONS, unless the config sets it."""
-        region = self.cfg.regions.get(name)
-        if self.ui == "new" and name in NEW_UI_REGIONS and region == DEFAULT_REGIONS.get(name):
-            region = NEW_UI_REGIONS[name]
+        """A HUD region (see base_region), moved to the other side when the layout is mirrored."""
+        region = self.base_region(name)
         if region is not None and self.mirrored and name in MIRRORED:
             return mirrored_region(region)
         return region

@@ -6,7 +6,8 @@ and the read comes back empty. This finds the panels by the labels GSPro always 
 "CARRY (game)", "CLUB", "MATCH SETTINGS", ...): one OCR pass over the whole screen, then each group of
 boxes is placed by fitting the labels' reference positions (scale and offset) to where they are. The
 boxes are read both ways, so a fix is only offered when it reads better, and `--fix` writes it to
-config.yaml's screen.regions.
+config.yaml's screen.regions (screen.regions_new on GSPro 3.59 and later, whose menus and HUD differ:
+each version has its own labels, boxes and config list, so a fix on one never moves the other's).
 """
 
 import re
@@ -18,10 +19,10 @@ from pathlib import Path
 import yaml
 from PIL import Image, ImageDraw, ImageFont
 
-from .config import DEFAULT_REGIONS, Region
+from .config import DEFAULT_REGIONS, NEW_UI_REGIONS, Region
 from .hud import OcrItem
 
-# The screen the reference positions below were measured on (GSPro 3.1.6, 16:10).
+# The screen the reference positions below were measured on (GSPro 3.1.6 and 3.59.11, 16:10).
 REF_W, REF_H = 3450, 2160
 
 
@@ -74,25 +75,92 @@ _SETUP_BOTTOM = Group("play_button", "bottom", (
 for _kind in ("setup_players", "setup_match", "setup_holes"):
     GROUPS[_kind] = (_SETUP_TOP, _SETUP_BOTTOM)
 
+# GSPro 3.59's labels, measured on 3.59.11 frames scaled to the reference screen. Its HUD shows no
+# "SHOT n" (the player box's second line is the distance to the pin), names the hole "Hole 1 Par 4",
+# shows the club's name instead of a CLUB label, and its left tile panel is two columns.
+_NEW_TILE_Y = (279, 407, 535, 661, 789, 916)
+_NEW_SETUP_TOP = Group("setup", "top", (
+    Anchor(r"round settings", 1725, 83, 87), Anchor(r"(\S{1,3}\s+)?players", 1249, 250, 71),
+    Anchor(r"match", 1722, 250, 74), Anchor(r"(\S{1,3}\s+)?holes", 2148, 250, 78),
+    Anchor(r"\W{0,3}\s*back", 208, 84, 54)), _SETUP_TOP.regions)
+_NEW_SETUP_BOTTOM = Group("play_button", "bottom", (
+    Anchor(r"invite players.*", 260, 2069, 45), Anchor(r"play\b.+", 3009, 2068, 45)), ("setup_course",))
+GROUPS_NEW = {
+    "shot": (
+        Group("player", "top", (Anchor(r"[\d.]+\s*(yds?|ft|m|')(?![a-z]).*", 70, 141, 42, "left"),),
+              ("player_box", "player_name", "others")),
+        Group("hole", "top", (Anchor(r"hole \d+.*", 2911, 138, 42, "left"), Anchor(r"\d{2,3} yds", 3292, 140, 48)),
+              ("hole_box",)),
+        Group("club", "bottom", (Anchor(r"right|left", 157, 2043, 45), Anchor(r"hand", 155, 2084, 38)), ("club",)),
+        Group("slope", "bottom", (Anchor(r".*\b(up|down)", 3053, 2104, 45), Anchor(r".*\b(right|left)", 3280, 2105, 45)),
+              ("slope", "lie", "minimap")),
+        Group("tiles", "top", tuple(Anchor(_TILE, 3278, y, 42) for y in _NEW_TILE_Y), ("tiles",)),
+        Group("tiles_left", "top", tuple(Anchor(_TILE, x, y, 42) for x in (170, 424) for y in _NEW_TILE_Y),
+              ("tiles_left",)),
+    ),
+    "scorecard": (
+        Group("scorecard", "middle", (Anchor(r"built by.*", 572, 569, 47), Anchor(r"hole", 374, 671, 57),
+                                      Anchor(r"par", 364, 766, 54), Anchor(r"index", 383, 855, 55),
+                                      Anchor(r"distance", 410, 945, 59), Anchor(r"out", 1812, 672, 52),
+                                      Anchor(r"in", 2880, 671, 47)), ("scorecard_title", "scorecard")),
+    ),
+}
+for _kind in ("setup_players", "setup_match", "setup_holes"):
+    GROUPS_NEW[_kind] = (_NEW_SETUP_TOP, _NEW_SETUP_BOTTOM)
+
+
+def groups(kind: str, ui: str) -> tuple[Group, ...]:
+    return (GROUPS_NEW if ui == "new" else GROUPS)[kind]
+
+
+def base_region(name: str, ui: str) -> Region:
+    """A box as the booth places it on the reference screen with no config: GSPro 3.59 moved some."""
+    return NEW_UI_REGIONS[name] if ui == "new" and name in NEW_UI_REGIONS else DEFAULT_REGIONS[name]
+
+
+def config_key(ui: str) -> str:
+    """The screen: list in config.yaml that holds this GSPro's boxes."""
+    return "regions_new" if ui == "new" else "regions"
+
+
 KIND_NAMES = {"shot": "a hole (the HUD)", "scorecard": "the scorecard", "setup_players": "setup, Players tab",
               "setup_match": "setup, Match Settings tab", "setup_holes": "setup, Holes tab"}
 
 
 def detect_kind(items: list[OcrItem]) -> str | None:
     """Which GSPro screen the OCR lines are from, or None."""
+    return detect_screen(items)[0]
+
+
+def detect_screen(items: list[OcrItem]) -> tuple[str | None, str | None]:
+    """(kind, ui) of the GSPro screen the OCR lines are from: the kind or None, and "classic" or "new"
+    (GSPro 3.59's menus) when the labels say which, else None."""
     texts = {i.text.strip().upper() for i in items}
     has = lambda pat: any(re.fullmatch(pat, t, re.I) for t in texts)  # noqa: E731
+    yards = sum(bool(re.fullmatch(r"\d{2,3} YARDS", t)) for t in texts) >= 3
     if has("MATCH SETTINGS") and has("HOLES") and has("ROUND SETTINGS"):
         if has("GAME MODE"):
-            return "setup_match"
-        if has(r"(FRONT|BACK) 9") or sum(bool(re.fullmatch(r"\d{2,3} YARDS", t)) for t in texts) >= 3:
-            return "setup_holes"
-        return "setup_players"
+            return "setup_match", "classic"
+        if has(r"(FRONT|BACK) 9") or yards:
+            return "setup_holes", "classic"
+        return "setup_players", "classic"
+    # 3.59: the tabs read PLAYERS / MATCH / HOLES, often with their icon OCR'd as a mark in front.
+    # Its scorecard has ROUND SETTINGS too, but not the tabs.
+    if has("ROUND SETTINGS") and has("MATCH") and has(r"(\S{1,3}\s+)?HOLES") and has(r"(\S{1,3}\s+)?PLAYERS"):
+        if has("GAME MODE"):
+            return "setup_match", "new"
+        if has("FRONT") or yards:
+            return "setup_holes", "new"
+        return "setup_players", "new"
     if has("SCORECARD") and has("INDEX"):
-        return "scorecard"
-    if (has("CLUB") and has("HAND")) or has(r"PAR \d") or sum(bool(re.fullmatch(_TILE, t, re.I)) for t in texts) >= 2:
-        return "shot"
-    return None
+        return "scorecard", "classic"
+    if has(r"BUILT BY.*") and has("INDEX"):
+        return "scorecard", "new"
+    if has("HAND") or has(r"PAR \d") or has(r"HOLE \d+.*") \
+            or sum(bool(re.fullmatch(_TILE, t, re.I)) for t in texts) >= 2:
+        # 3.1 labels the club box CLUB; 3.59 shows only the club's name there.
+        return "shot", "classic" if has(r"SHOT \d+") or has("CLUB") else "new" if has(r"HOLE \d+.*") else None
+    return None, None
 
 
 def _predict(a: Anchor, pin: str, w: int, h: int) -> tuple[float, float]:
@@ -152,10 +220,10 @@ def _own_scale(matches: list[tuple[Anchor, OcrItem]]) -> float | None:
     return num / den
 
 
-def fit_groups(kind: str, items: list[OcrItem], w: int, h: int) -> list[Fit]:
+def fit_groups(kind: str, items: list[OcrItem], w: int, h: int, ui: str = "classic") -> list[Fit]:
     """Scale and offset for each of the screen's groups that has an anchor in view."""
     used: set[int] = set()
-    fits = [Fit(g, m) for g in GROUPS[kind] if (m := match_group(g, items, w, h, used))
+    fits = [Fit(g, m) for g in groups(kind, ui) if (m := match_group(g, items, w, h, used))
             and (len(m) >= 2 or not g.name.startswith("tiles"))]   # one stray word isn't a tile panel
     for f in fits:
         f.scale = _own_scale(f.matches)
@@ -169,12 +237,12 @@ def fit_groups(kind: str, items: list[OcrItem], w: int, h: int) -> list[Fit]:
     return fits
 
 
-def proposed_regions(fits: list[Fit], w: int, h: int) -> dict[str, Region]:
+def proposed_regions(fits: list[Fit], w: int, h: int, ui: str = "classic") -> dict[str, Region]:
     """Each fitted group's boxes moved onto this screen, as plain fractions of it."""
     out = {}
     for f in fits:
         for name in f.group.regions:
-            left, top, bw, bh = DEFAULT_REGIONS[name].to_pixels(REF_W, REF_H)
+            left, top, bw, bh = base_region(name, ui).to_pixels(REF_W, REF_H)
             x0, y0 = f.scale * left + f.dx, f.scale * top + f.dy
             x1, y1 = x0 + f.scale * bw, y0 + f.scale * bh
             x0, y0, x1, y1 = max(0.0, x0), max(0.0, y0), min(float(w), x1), min(float(h), y1)
@@ -249,6 +317,7 @@ def passed(cs: list[Check]) -> int:
 class Report:
     kind: str | None
     size: tuple[int, int]
+    ui: str = "classic"                                           # the GSPro menus the boxes are for
     current: list[Check] = field(default_factory=list)
     fixed: list[Check] = field(default_factory=list)
     moves: dict[str, Region] = field(default_factory=dict)        # regions worth writing
@@ -266,21 +335,24 @@ def run(screen, img: Image.Image) -> Report:
     img = img.convert("RGB")
     w, h = img.size
     items = screen.ocr_items(img)
-    kind = detect_kind(items)
-    rep = Report(kind, (w, h))
+    kind, ui = detect_screen(items)
+    # The screen's own labels say which GSPro it is better than the log can (an old log, --image).
+    screen.ui = ui or screen.ui
+    rep = Report(kind, (w, h), ui=screen.ui)
     if kind is None:
         return rep
     rep.current = checks(kind, fixtures.read_kind(kind, screen, img))
-    fits = fit_groups(kind, items, w, h)
+    fits = fit_groups(kind, items, w, h, screen.ui)
     rep.anchors = sum(len(f.matches) for f in fits)
-    rep.proposed = proposed_regions(fits, w, h)
-    regions = screen.cfg.regions
+    rep.proposed = proposed_regions(fits, w, h, screen.ui)
     for name, r in rep.proposed.items():
-        rep.off[name] = overlap(regions[name].to_pixels(w, h), r.to_pixels(w, h))
+        rep.off[name] = overlap(screen.base_region(name).to_pixels(w, h), r.to_pixels(w, h))
     moved = {n: r for n, r in rep.proposed.items() if rep.off[n] < 0.7}
     if not moved:
         return rep
-    trial = type(screen)(screen.cfg.model_copy(update={"regions": {**regions, **moved}}))
+    key = config_key(screen.ui)
+    trial = type(screen)(screen.cfg.model_copy(update={key: {**getattr(screen.cfg, key), **moved}}))
+    trial.ui = screen.ui
     trial._ocr = screen._ocr
     rep.fixed = checks(kind, fixtures.read_kind(kind, trial, img))
     if passed(rep.fixed) > passed(rep.current):
@@ -297,7 +369,7 @@ def annotate(img: Image.Image, screen, rep: Report) -> Image.Image:
     width = max(2, w // 800)
     font = ImageFont.load_default(size=max(12, w // 120))
     for name in rep.proposed:
-        l, t, bw, bh = screen.cfg.regions[name].to_pixels(w, h)
+        l, t, bw, bh = screen.base_region(name).to_pixels(w, h)
         colour = (230, 40, 40) if name in rep.moves or rep.off.get(name, 1) < 0.7 else (40, 220, 40)
         d.rectangle([l, t, l + bw, t + bh], outline=colour, width=width)
         d.text((l + 4, t + 4), name, fill=colour, font=font)
@@ -326,7 +398,7 @@ def format_report(rep: Report) -> str:
     off = sorted(n for n, o in rep.off.items() if o < 0.7)
     if rep.moves:
         lines.append(f"Boxes off their panels: {', '.join(sorted(rep.moves))}. `screen-check --fix` writes "
-                     "the moved ones to config.yaml (screen.regions).")
+                     f"the moved ones to config.yaml (screen.{config_key(rep.ui)}).")
     elif off:
         lines.append(f"These boxes sit away from where GSPro's labels put them ({', '.join(off)}), but moving "
                      "them didn't read any better, so nothing to fix from this screen.")
@@ -352,29 +424,29 @@ def _content(line: str) -> bool:
     return bool(line.strip()) and not line.lstrip().startswith("#")
 
 
-def write_regions(path: Path, moves: dict[str, Region]) -> Path | None:
-    """Put `moves` under screen.regions in the YAML config at `path`, keeping the rest of the file (and
-    its comments) as it is. Regions already listed there are replaced in place. Returns the backup of
+def write_regions(path: Path, moves: dict[str, Region], key: str = "regions") -> Path | None:
+    """Put `moves` under screen.<key> (regions, or regions_new for GSPro 3.59) in the YAML config at
+    `path`, keeping the rest of the file (and its comments) as it is. Regions already listed there are replaced in place. Returns the backup of
     the old file (None if there was no file). Raises RuntimeError, changing nothing, if the result
     wouldn't read back as the old config plus exactly these moves."""
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     lines = text.splitlines()
     s = next((i for i, ln in enumerate(lines) if re.match(r"^screen:\s*(#.*)?$", ln)), None)
     if s is None:
-        lines += ["", "screen:", "  regions:"] + [_region_line(n, r, "    ") for n, r in moves.items()]
+        lines += ["", "screen:", f"  {key}:"] + [_region_line(n, r, "    ") for n, r in moves.items()]
     else:
         end = next((i for i in range(s + 1, len(lines)) if _content(lines[i]) and _indent(lines[i]) == 0),
                    len(lines))
         child = next((" " * _indent(lines[i]) for i in range(s + 1, end) if _content(lines[i])), "  ")
         rg = next((i for i in range(s + 1, end)
-                   if re.match(rf"^{child}regions:(\s|$)", lines[i])), None)
+                   if re.match(rf"^{child}{key}:(\s|$)", lines[i])), None)
         if rg is None:
             at = end
             while at > s + 1 and not lines[at - 1].strip():
                 at -= 1
-            lines[at:at] = [f"{child}regions:"] + [_region_line(n, r, child * 2) for n, r in moves.items()]
+            lines[at:at] = [f"{child}{key}:"] + [_region_line(n, r, child * 2) for n, r in moves.items()]
         else:
-            inline = re.match(rf"^{child}regions:\s*(.*?)\s*$", lines[rg]).group(1)
+            inline = re.match(rf"^{child}{key}:\s*(.*?)\s*$", lines[rg]).group(1)
             if inline and not inline.startswith("#"):
                 # `regions: {...}` on one line: rewrite it as a block, keeping its entries.
                 try:
@@ -383,10 +455,10 @@ def write_regions(path: Path, moves: dict[str, Region]) -> Path | None:
                         raise ValueError(inline)
                     existing = {n: Region(**v) for n, v in existing.items()}
                 except Exception:
-                    raise RuntimeError(f"Couldn't read screen.regions in {path} to add to it; nothing "
+                    raise RuntimeError(f"Couldn't read screen.{key} in {path} to add to it; nothing "
                                        "changed. Write it as one region per line and try again.")
                 existing.update(moves)
-                lines[rg:rg + 1] = [f"{child}regions:"] + [_region_line(n, r, child * 2)
+                lines[rg:rg + 1] = [f"{child}{key}:"] + [_region_line(n, r, child * 2)
                                                             for n, r in existing.items()]
             else:
                 rend = rg + 1
@@ -416,21 +488,21 @@ def write_regions(path: Path, moves: dict[str, Region]) -> Path | None:
     try:
         old_cfg = yaml.safe_load(text) or {}
         new_cfg = yaml.safe_load(new) or {}
-        old_regions = dict((old_cfg.get("screen") or {}).get("regions") or {})
-        new_regions = dict((new_cfg.get("screen") or {}).get("regions") or {})
+        old_regions = dict((old_cfg.get("screen") or {}).get(key) or {})
+        new_regions = dict((new_cfg.get("screen") or {}).get(key) or {})
         ok = (all(Region(**new_regions.get(n, {})) == r for n, r in moves.items())
               and {n: v for n, v in new_regions.items() if n not in moves}
               == {n: v for n, v in old_regions.items() if n not in moves})
         for cfg in (old_cfg, new_cfg):
             if isinstance(cfg.get("screen"), dict):
-                cfg["screen"] = {k: v for k, v in cfg["screen"].items() if k != "regions"}
+                cfg["screen"] = {k: v for k, v in cfg["screen"].items() if k != key}
         ok = ok and {k: v for k, v in new_cfg.items() if k != "screen" or v} \
             == {k: v for k, v in old_cfg.items() if k != "screen" or v}
     except Exception:
         ok = False
     if not ok:
         raise RuntimeError(f"Couldn't write the moved boxes into {path} cleanly; nothing changed. "
-                           "Add them under screen: regions: by hand: " + ", ".join(
+                           f"Add them under screen: {key}: by hand: " + ", ".join(
                                _region_line(n, r, "").strip() for n, r in moves.items()))
     backup = None
     if path.exists():

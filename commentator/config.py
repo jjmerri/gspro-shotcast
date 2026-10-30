@@ -326,6 +326,11 @@ class ScreenConfig(BaseModel):
     # Regions set in the config replace those defaults one by one; the rest keep their default.
     regions: dict[str, Region] = Field(default_factory=lambda: dict(DEFAULT_REGIONS))
 
+    # The same for GSPro 3.59 and later (its new menus and HUD), which the booth detects: a region
+    # listed here is used only there, and the setup boxes in `regions` don't apply there. Each
+    # version's `screen-check --fix` writes to its own list, so a fix for one can't move the other's.
+    regions_new: dict[str, Region] = Field(default_factory=dict)
+
     @field_validator("regions", mode="after")
     @classmethod
     def _merge_defaults(cls, regions: dict[str, Region]) -> dict[str, Region]:

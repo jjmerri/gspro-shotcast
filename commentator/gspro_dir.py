@@ -11,11 +11,12 @@ from .settings_files import set_yaml
 DEFAULT = r"C:\GSProV1"
 CONNECTOR_LOG = r"Core\GSPC\ConnectDebug.txt"
 COURSES = (r"Courses", r"Core\GSP\Courses")
-EXE = r"Core\GSP\GSPro.exe"
+# The 3.1 release, and the 3.59 public beta installed next to it (or on its own).
+EXES = (r"Core\GSP\GSPro.exe", r"Core\GSProPublicBeta\GSpro.exe")
 
 
 def looks_like_gspro(folder: str) -> bool:
-    return bool(folder) and os.path.isfile(os.path.join(folder, EXE))
+    return bool(folder) and any(os.path.isfile(os.path.join(folder, exe)) for exe in EXES)
 
 
 def find() -> str | None:

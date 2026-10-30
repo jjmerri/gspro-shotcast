@@ -65,7 +65,9 @@ Screen 1920x1080: a hole (the HUD)
 It also finds each panel by the labels GSPro draws on it ("PAR 4", "CARRY (game)", "CLUB",
 "MATCH SETTINGS", ...) and works out where the boxes belong on your screen. A `FIX` line is a
 read that comes back once the boxes are moved there; `screen-check --fix` writes those boxes to
-`screen.regions` in `config.yaml` (the old file is kept as `config.yaml.bak`). Run it on a hole
+`screen.regions` in `config.yaml` (the old file is kept as `config.yaml.bak`). It checks GSPro 3.1
+and the 3.59 public beta alike, telling them apart by their labels; on 3.59 the fix goes to
+`screen.regions_new` instead, so fixing one version's boxes never moves the other's. Run it on a hole
 and on each setup tab, since each screen places its own boxes. `logs/screen-check.png` shows the
 boxes: green read, red are off their panel, yellow is where `--fix` puts them.
 

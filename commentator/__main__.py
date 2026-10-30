@@ -324,6 +324,7 @@ def cmd_screen_check(cfg: Config, args) -> None:
             time.sleep(1)
         print(" " * 70, end="\r")
     screen = Screen(cfg.screen)
+    screen.ui = _log_ui(cfg)
     img = _load_image(args.image)
     if img is None:
         img = screen.grab()
@@ -349,11 +350,12 @@ def cmd_screen_check(cfg: Config, args) -> None:
             print("Nothing to fix from this screen.")
             return
         path = Path(args.config)
+        key = screencheck.config_key(rep.ui)
         try:
-            backup = screencheck.write_regions(path, rep.moves)
+            backup = screencheck.write_regions(path, rep.moves, key)
         except RuntimeError as exc:
             sys.exit(str(exc))
-        print(f"Wrote {len(rep.moves)} region(s) to {path} under screen.regions"
+        print(f"Wrote {len(rep.moves)} region(s) to {path} under screen.{key}"
               + (f" (old file kept as {backup})" if backup else "")
               + ". Restart the booth to use them, and run screen-check on the other GSPro screens too.")
 

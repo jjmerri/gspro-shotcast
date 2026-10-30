@@ -180,7 +180,7 @@ beyond that is supported on paper but not yet run live:
 - **GSPro updates.** Built against 3.1.x. The 3.59 public beta (new menus and HUD, its log in
   `Player.log`) is detected from the version GSPro logs, and the booth switches its log, setup
   screen and HUD reads to match; it has been checked on recordings of one 3.59.11 session, not yet
-  run live. On the beta, `screen-check` still checks the 3.1 layout, and the `gspro_log` shot source
+  run live. `screen-check` and the tray's GSPro folder check work on both. On the beta, the `gspro_log` shot source
   takes its numbers from the shot files GSPro saves once the ball stops (the beta logs no
   `LaunchExt Vars`), so those shots air a few seconds late with no mid-flight call. A release that moves the HUD or changes the
   log can break reads until the code catches up; `screen-check` shows which boxes stopped reading.

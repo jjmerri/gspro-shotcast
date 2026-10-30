@@ -1739,11 +1739,13 @@ def test_gspro_3_59_setup_screen_tones_and_regions():
     assert gspro_ui(None, "C:/GSPro/GSPro_Data/output_log.txt") == "classic"
 
     mine = Region(left=0.1, top=0.1, width=0.1, height=0.05)
-    sc = Screen(ScreenConfig(regions={"setup_slot_2": mine}))
+    sc = Screen(ScreenConfig(regions={"setup_slot_2": mine}, regions_new={"setup_slot_3": mine}))
     assert sc.region("setup_slot_1") == DEFAULT_REGIONS["setup_slot_1"]
     sc.ui = "new"
     assert sc.region("setup_slot_1") == NEW_UI_REGIONS["setup_slot_1"]
-    assert sc.region("setup_slot_2") == mine   # set in the config: kept
+    # A 3.1 box doesn't apply where 3.59 moved it; 3.59's own list does.
+    assert sc.region("setup_slot_2") == NEW_UI_REGIONS["setup_slot_2"]
+    assert sc.region("setup_slot_3") == mine
     assert sc.region("setup_course") == DEFAULT_REGIONS["setup_course"]   # didn't move
 
 

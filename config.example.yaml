@@ -142,6 +142,8 @@ screen:
   # as written, measured on your screen.
   # regions:
   #   lie: {left: 0.84, top: 0.45, width: 0.16, height: 0.53}
+  # regions_new: the same for GSPro 3.59 and later, used only there (screen-check --fix on that
+  # GSPro writes here, so the two versions' fixes don't mix).
 
 commentary:
   enabled: true           # false (or `run --no-commentary`): record shots and rounds only, no talking

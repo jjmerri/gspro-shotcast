@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -9,14 +10,16 @@ from commentator.config import DEFAULT_REGIONS, ScreenConfig, load_config
 from commentator.hud import OcrItem
 
 
-def _items(kind, place, w, h):
+def _items(kind, place, w, h, ui="classic"):
     """OCR lines for each of a screen's anchors, put where `place` maps their reference point."""
     out = []
     texts = {r"shot \d+": "Shot 2", r"par \d": "PAR 4", r"\d{2,3} yds": "392 YDS", r"club": "CLUB", r"hand": "HAND",
              r".*\b(up|down)": "0.0° UP", r".*\b(right|left)": "0.0° RIGHT", r"play\b.+": "PLAY RIVIERA!",
-             r"invite players.*": "INVITE PLAYERS"}
+             r"invite players.*": "INVITE PLAYERS", r"[\d.]+\s*(yds?|ft|m|')(?![a-z]).*": "391.5yd27.1yd", r"hole \d+.*": "Hole 1 Par 4",
+             r"right|left": "RIGHT", r"(\S{1,3}\s+)?players": "† PLAYERS", r"(\S{1,3}\s+)?holes": "5. HOLES",
+             r"\W{0,3}\s*back": "← BACK"}
     tiles = iter(["CARRY (game)", "CARRY (raw)", "TOTAL LENGTH", "BALL SPEED", "TOTAL SPIN", "CLUB SPEED"])
-    for g in sc.GROUPS[kind]:
+    for g in sc.groups(kind, ui):
         if g.name == "tiles_left":
             continue
         for a in g.anchors:
@@ -39,6 +42,60 @@ def test_screens_are_told_apart_by_their_labels():
     assert sc.detect_kind(lines("SCORECARD", "HOLE", "INDEX", "CLUB", "HAND")) == "scorecard"
     assert sc.detect_kind(lines("Shot 1", "PAR 4", "CARRY (game)")) == "shot"
     assert sc.detect_kind(lines("Brightness & color")) is None
+
+
+def test_gspro_359_screens_are_told_apart_from_31():
+    """3.59's tabs (icons OCR'd as marks), scorecard and HUD say which GSPro is up, so the boxes and
+    the config list a fix goes to follow the screen."""
+    lines = lambda *t: [OcrItem(text=x, x=0, y=0, h=10) for x in t]  # noqa: E731
+    tabs = ("ROUND SETTINGS", "← BACK", "† PLAYERS", "MATCH", "5. HOLES")
+    assert sc.detect_screen(lines(*tabs, "Game Mode")) == ("setup_match", "new")
+    assert sc.detect_screen(lines(*tabs, "BACK", "FRONT")) == ("setup_holes", "new")
+    assert sc.detect_screen(lines(*tabs, "Josh")) == ("setup_players", "new")
+    # Its scorecard lists the ROUND SETTINGS under the table, without the tabs.
+    assert sc.detect_screen(lines("Built By: RUNPUDDRUN", "Hole", "Index", "ROUND SETTINGS", "Club Speed")) \
+        == ("scorecard", "new")
+    assert sc.detect_screen(lines("Hole 1 Par 4", "392 yds", "Driver", "RIGHT", "HAND")) == ("shot", "new")
+    assert sc.detect_screen(lines("SCORECARD", "HOLE", "INDEX")) == ("scorecard", "classic")
+    assert sc.detect_screen(lines("Shot 1", "PAR 4", "CARRY (game)")) == ("shot", "classic")
+    assert sc.detect_screen(lines("Driver", "CLUB", "RH", "CARRY (game)", "BALL SPEED")) == ("shot", "classic")
+    assert sc.detect_screen(lines("CARRY (game)", "BALL SPEED")) == ("shot", None)
+
+
+@pytest.mark.parametrize("w,h", [(1920, 1080), (2560, 1600)])
+def test_gspro_359_boxes_follow_its_own_labels(w, h):
+    """3.59's labels place its own boxes (the moved setup ones included), not 3.1's."""
+    s = w / sc.REF_W
+
+    def place(x, y, pin):
+        return x * s, (y * s if pin == "top" else h - (sc.REF_H - y) * s if pin == "bottom"
+                       else h / 2 + (y - sc.REF_H / 2) * s)
+
+    for kind in ("shot", "setup_players"):
+        fits = sc.fit_groups(kind, _items(kind, place, w, h, "new"), w, h, "new")
+        got = _boxes_match(sc.proposed_regions(fits, w, h, "new"), w, h,
+                           lambda n: sc.base_region(n, "new").to_pixels)
+        # The nine checkboxes are a few pixels across, so rounding alone costs them a tenth.
+        assert got and min(got.values()) > 0.85, got
+    assert "setup_slot_1" in got
+    # The player box's distance reads in feet on the green, or metres.
+    player = sc.groups("shot", "new")[0].anchors[0].pattern
+    assert all(re.fullmatch(player, t, re.I) for t in ("391.5yd27.1yd", "28ft4", "98.2 m", "4' 6\""))
+    assert not re.fullmatch(player, "0 MPH", re.I)
+
+
+def test_each_gspro_reads_its_own_config_list():
+    from commentator.config import NEW_UI_REGIONS
+    from commentator.screen import Screen
+
+    mine = sc.Region(left=0.1, top=0.1, width=0.2, height=0.05)
+    new = sc.Region(left=0.2, top=0.2, width=0.2, height=0.05)
+    screen = Screen(ScreenConfig(regions={"setup_slot_1": mine, "lie": mine}, regions_new={"hole_box": new}))
+    assert screen.region("setup_slot_1") == mine and screen.region("hole_box") == DEFAULT_REGIONS["hole_box"]
+    screen.ui = "new"
+    # A 3.1 fix to a box 3.59 moved doesn't apply there; one to a box it didn't move still does.
+    assert screen.region("setup_slot_1") == NEW_UI_REGIONS["setup_slot_1"]
+    assert screen.region("lie") == mine and screen.region("hole_box") == new
 
 
 @pytest.mark.parametrize("w,h", [(1920, 1080), (2560, 1600), (3440, 1440)])
@@ -122,6 +179,17 @@ def test_fix_adds_a_screen_section_when_there_is_none(tmp_path):
     r = sc.Region(left=0.1, top=0.2, width=0.3, height=0.1)
     sc.write_regions(cfg, {"hole_box": r})
     assert load_config(cfg).screen.regions["hole_box"] == r and load_config(cfg).log_dir == "logs"
+
+
+def test_a_359_fix_goes_to_its_own_list_and_leaves_31s_alone(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("screen:\n  regions:\n    lie: {left: 0.8, top: 0.4, width: 0.15, height: 0.5}\n",
+                   encoding="utf-8")
+    r = sc.Region(left=0.1, top=0.2, width=0.3, height=0.1)
+    sc.write_regions(cfg, {"lie": r}, sc.config_key("new"))
+    screen = load_config(cfg).screen
+    assert screen.regions_new == {"lie": r}
+    assert screen.regions["lie"] == sc.Region(left=0.8, top=0.4, width=0.15, height=0.5)
 
 
 def test_fix_keeps_inline_regions(tmp_path):
