@@ -5,8 +5,9 @@ load, the 18-hole par layout, and several holes of play including a water-ball p
 hole-out.
 """
 
+from commentator.sources import gspro_log
 from commentator.sources.gspro_log import (
-    GsproLogFollower, GsproState, LogEvent, _split_trailing, aim_offset, build_state, parse_events,
+    GsproLogFollower, GsproState, LogEvent, _split_trailing, aim_offset, build_state, live_log, parse_events,
 )
 
 SAMPLE = "tests/data/gspro_output_log_sample.txt"
@@ -339,6 +340,49 @@ def test_follower_learns_from_the_backlog_whether_play_has_begun(tmp_path):
     assert f.state.mode == "menu" and f.state.shots_since_course == 0
 
 
+def test_the_log_followed_is_the_one_gspro_wrote_last(tmp_path, monkeypatch):
+    import os
+    old, beta = tmp_path / "output_log.txt", tmp_path / "Player.log"
+    old.write_text("GSPro Version: 3.1.6.20\nSelected Course: paynes_valley_gsp\n")   # mid-round, no End Round
+    beta.write_text("")                                  # 3.1 leaves Player.log empty
+    assert live_log(str(old)) == str(old)
+    f = GsproLogFollower(str(old))
+    f._prime()
+    assert f.path == str(old) and f.state.version == "3.1.6.20" and f.state.mode == "course"
+    beta.write_text("GSPro Version: 3.59.11 PUBLIC BETA\nSelected Course: paynes_valley_gsp\n")   # GSPro restarted as the beta
+    os.utime(old, (1, 1))
+    monkeypatch.setattr(gspro_log, "LOG_RECHECK_SECONDS", 0)
+    chunk = f._read_new()
+    assert f._switched
+    f._new_session()                                     # as run() does: the 3.1 round is over
+    assert f.state.round_ends == 1
+    for e in parse_events(chunk):
+        f.state.apply(e)
+    assert f.path == str(beta) and f.state.version == "3.59.11" and f.state.course == "paynes_valley_gsp"
+    assert live_log(str(tmp_path / "custom.log")) == str(tmp_path / "custom.log")   # a named file is used as is
+
+
+def test_gspro_3_59_lines_give_the_same_landing_rest_aim_and_flag_as_3_1():
+    import time
+    # Real GSPro 3.59.11 lines: no `Using Material`, no `Roll dist`, no `Flag hit`, aim with 0.00.
+    bounce = "magnitude: 7.635617 | yForce 5.11382 | material TVG{} | SoundMultiplier 0.35 | SoundForceScale 0.70 | elevation 1391\n"
+    s = _replay("(-17.67, -399.27, 0.00)\n" + FIRE + bounce.format("fairway"))
+    info = s.fire_info(s.fires)
+    assert info["aim"] == (-17.67, -399.27) and info["landed"] == "fairway" and "rest_at" not in info
+    assert s.altitude_ft == 1391
+    s.apply(parse_events(_line(1, 1, 0))[0])
+    assert "rest_at" in s.fire_info(s.fires)             # the shooter's score line: the ball stopped
+    s = _replay(FIRE + bounce.format("pin"))
+    assert s.fire_info(s.fires)["flag_hit"]
+    # 3.1 logs `Using Material` then the same bounce line: the first one names the landing, once.
+    s = _replay(FIRE + "Using Material TVGsand\n" + bounce.format("fairway") + "Roll dist ft3.2\n")
+    assert s.fire_info(s.fires)["landed"] == "sand" and s.kinds["material"] == 1
+    rest = s.fire_info(s.fires)["rest_at"]
+    time.sleep(0.01)
+    s.apply(parse_events(_line(1, 1, 0))[0])
+    assert s.fire_info(s.fires)["rest_at"] == rest
+
+
 def test_skipping_hole_one_marks_a_late_start_until_the_next_round():
     s = GsproState()
     for ev in parse_events("Selected Course: paynes_valley_gsp\nLoading course Paynes Valley\nSkipping hole 1\n"):
@@ -428,8 +472,9 @@ def test_penalty_surface_is_kept_per_shot():
     import time
     s = _replay(FIRE + "LaunchExt - Regular Mode\nPenalty Surface TVGsand, Spin71%, Speed 78%, VLA 100%\n"
                 + _line(1, 1, 1))
-    assert s.fire_info(s.fire_of(s.fires, time.monotonic())) == {"player": 0, "hole": 1, "putting": False, "penalty": "sand",
-                                                                  "lie_cost": (71, 78)}
+    info = dict(s.fire_info(s.fire_of(s.fires, time.monotonic())))
+    assert info.pop("rest_at")
+    assert info == {"player": 0, "hole": 1, "putting": False, "penalty": "sand", "lie_cost": (71, 78)}
 
 
 def test_a_repeated_score_in_a_team_format_is_a_mulligan_only_when_it_repeats_the_players_last_shot():

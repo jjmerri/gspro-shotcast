@@ -55,9 +55,9 @@ from .trivia import CourseTrivia, looks_like_a_course
 from .weather import Weather
 from .round import FORMAT_NAMES, TEAM_BALL, Round, normalize_format, to_par
 from .round import _join as _join_names
-from .screen import Screen, name_signature
+from .screen import Screen, name_signature, tone_of
 from .sources.base import ShotSource
-from .sources.gspro_log import M_TO_YD, MATERIAL_TO_LIE, GsproLogFollower, GsproState
+from .sources.gspro_log import M_TO_YD, MATERIAL_TO_LIE, GsproLogFollower, GsproState, live_log
 from .speech import SpeechQueue
 from .state import SessionState, ShotRecord
 from .store import COUNTS_AS_ROUND_HOLES, Store
@@ -127,7 +127,8 @@ def _setup_slot_name(lines: list[str]) -> str | None:
     more than one name-like line means the picker is open - ignore the read and let the next poll (with
     it closed) get a clean one, rather than mangle several players into one slot."""
     named = [t for ln in lines if len(t := ln.strip()) >= 2 and re.search(r"[A-Za-z]", t)]
-    if len(named) != 1 or named[0].lower() == "empty slot":   # GSPro's own "no player" dropdown entry
+    # GSPro's own "no player" entry (and 3.59's added-but-unpicked pill), however the OCR spaces it.
+    if len(named) != 1 or " ".join(named[0].lower().split()) == "empty slot":
         return None
     return named[0]
 
@@ -145,6 +146,27 @@ _MATCH_TAB_LIT = 180
 _NINE_CHECKED = 0.4
 _PILL_MEDIAN = (90, 170)
 _LIST_LIGHT = 0.25
+# GSPro 3.59's setup screen (Screen.ui "new", NEW_UI_REGIONS) marks the selected tab with a blue
+# underline (its strip is ~0.6 blue pixels, an unselected tab's none) and fills a name pill with a dark
+# team colour (~0.9 saturated pixels; an empty slot is plain dark grey, none). Its checked nine is a
+# white box like the old one, and its open dropdown the same near-white list.
+_TAB_BLUE = 0.3
+_PILL_COLOR = 0.5
+
+
+def _tab_lit(tone, level: float) -> bool:
+    """A setup tab's region shows it selected: bright (the classic menus' white pill) or blue (3.59's
+    underline)."""
+    return tone.mean >= level or tone.blue >= _TAB_BLUE
+
+
+def gspro_ui(version: str | None, log_path: str | None = None) -> str:
+    """Which setup menus GSPro shows: "new" from 3.59 (the redesign first out as a public beta),
+    "classic" before. From the version its log reports; until that's read, from the log's name (3.59
+    writes Unity's Player.log, 3.1 output_log.txt)."""
+    if version and (m := re.match(r"\s*(\d+)\.(\d+)", version)):
+        return "new" if (int(m.group(1)), int(m.group(2))) >= (3, 59) else "classic"
+    return "new" if log_path and re.split(r"[\\/]", log_path)[-1].lower() == "player.log" else "classic"
 
 
 def _nines_picked(tones: dict) -> tuple[int, int] | None:
@@ -152,7 +174,7 @@ def _nines_picked(tones: dict) -> tuple[int, int] | None:
     nine is checked."""
     tab = tones.get("setup_holes_tab")
     front, back = tones.get("setup_front9_box"), tones.get("setup_back9_box")
-    if tab is None or tab.mean < _HOLES_TAB_LIT or front is None or back is None:
+    if tab is None or not _tab_lit(tab, _HOLES_TAB_LIT) or front is None or back is None:
         return None
     f, b = front.light >= _NINE_CHECKED, back.light >= _NINE_CHECKED
     return (1, 18) if f and b else (1, 9) if f else (10, 9) if b else None
@@ -187,7 +209,9 @@ def _slot_state(tone) -> str:
     """'list' (an open dropdown covers it), 'filled' (a name pill), or 'empty', from a slot's Tone."""
     if tone.light >= _LIST_LIGHT:
         return "list"
-    return "filled" if _PILL_MEDIAN[0] <= tone.median <= _PILL_MEDIAN[1] else "empty"
+    if _PILL_MEDIAN[0] <= tone.median <= _PILL_MEDIAN[1] or tone.color >= _PILL_COLOR:
+        return "filled"
+    return "empty"
 
 
 # A bookings read this recent (at course select, say) covers the setup screen that follows it.
@@ -1245,6 +1269,15 @@ class Engine:
         if r is not None and not r.ended and self.gspro.mode == "course":
             return True
         return await self._gspro_fired(fires0, impact)
+
+    def _sync_screen_ui(self) -> None:
+        """Point the screen reader at the menus of the GSPro that's running (see gspro_ui)."""
+        if self.screen is None:
+            return
+        ui = gspro_ui(self.gspro.version, self._follower.path if self._follower else None)
+        if ui != getattr(self.screen, "ui", None):
+            log.info("GSPro %s: reading its %s menus", self.gspro.version or "(version not read yet)", ui)
+            self.screen.ui = ui
 
     def _fire_log_followed(self) -> bool:
         return bool(self._log_truth and self._follower is not None and self._follower.primed and self.gspro.version)
@@ -5987,16 +6020,15 @@ class Engine:
         unchecks a nine and presses Play just as quickly would get an 18-hole round. Only the small tab
         boxes are grabbed each time; the full frame only when a tab is lit."""
         slots = [f"setup_slot_{i}" for i in range(1, 9)]
-        region = self.screen.region("setup_players_tab")
-        holes_region = self.screen.region("setup_holes_tab")
         last_nines: tuple[int, int] | None = None
 
-        def lit(r, level):
-            hist = self.screen.grab(r).convert("L").histogram()
-            return sum(v * c for v, c in enumerate(hist)) / (sum(hist) or 1) >= level
+        def lit(name, level):
+            # Looked up each time: the regions move when the booth learns which GSPro is running.
+            region = self.screen.region(name)
+            return region is not None and _tab_lit(tone_of(self.screen.grab(region)), level)
 
         def sample_holes():
-            if not lit(holes_region, _HOLES_TAB_LIT):
+            if not lit("setup_holes_tab", _HOLES_TAB_LIT):
                 return None
             at = time.monotonic()
             frame = self.screen.setup_frame()
@@ -6004,18 +6036,19 @@ class Engine:
                 ["setup_holes_tab", "setup_front9_box", "setup_back9_box"], frame))
 
         def sample():
-            if not lit(region, _PLAYERS_TAB_LIT):
+            if not lit("setup_players_tab", _PLAYERS_TAB_LIT):
                 return None
             at = time.monotonic()
             frame = self.screen.setup_frame()
             tones = self.screen.region_tones(["setup_players_tab", *slots], frame)
             states = [_slot_state(tones[n]) for n in slots if n in tones]
-            if tones["setup_players_tab"].mean < _PLAYERS_TAB_LIT or "list" in states or "filled" not in states:
+            if not _tab_lit(tones["setup_players_tab"], _PLAYERS_TAB_LIT) or "list" in states or "filled" not in states:
                 return None
             return at, frame, tones
 
         while True:
             await asyncio.sleep(0.25)
+            self._sync_screen_ui()
             if self.round is not None and not self.round.ended:
                 self._players_snap = self._holes_snap = None
                 last_nines = None
@@ -6072,6 +6105,7 @@ class Engine:
         seen_play: str | None = None   # the Play button's course on this poll (None off the setup screen)
         while True:
             await asyncio.sleep(max(c.preround_poll_seconds, 0.2))
+            self._sync_screen_ui()
             prev_at, frame_at = frame_at, time.monotonic()
             if self.round is not None and not self.round.ended:
                 # Mid-round the setup regions land on the live HUD; nothing to read until it's over.
@@ -6104,7 +6138,7 @@ class Engine:
                          "setup_back9_box", *slots],
                         frame)
                     tab = tones.get("setup_players_tab")
-                    players_tab = tab is not None and tab.mean >= _PLAYERS_TAB_LIT
+                    players_tab = tab is not None and _tab_lit(tab, _PLAYERS_TAB_LIT)
                     if players_tab:
                         players_read_at = grabbed_at
                     # On the PLAYERS tab only the Play button matters; elsewhere also the load title.
@@ -6119,7 +6153,8 @@ class Engine:
                 log.exception("Setup-screen read failed")
                 continue
             play_course = _play_button_course(gate.get("setup_course", ""))
-            if not play_course and "select course" in gate.get("course_select", "").lower():
+            # The course list's title: "Select Course" (3.1), "LOCAL MATCH" (3.59).
+            if not play_course and any(t in gate.get("course_select", "").lower() for t in ("select course", "local match")):
                 self._fetch_bookings("course select", fresh_within=BOOKINGS_FRESH_SECONDS)
             last_play, seen_play = seen_play, play_course
             if held:
@@ -6163,7 +6198,7 @@ class Engine:
                         mode_cache = await self._read_setup_format(tones, frame, fresh, mode_cache)
                     except Exception:
                         log.exception("Setup game-mode read failed")
-                    if (tab := tones.get("setup_holes_tab")) is not None and tab.mean >= _HOLES_TAB_LIT:
+                    if (tab := tones.get("setup_holes_tab")) is not None and _tab_lit(tab, _HOLES_TAB_LIT):
                         self._keep_fixture_frame("setup_holes", frame)
                     if course and play_course == course and roster:
                         self._maybe_front_load(play_course, roster, slot_order)   # recompose if the nines changed
@@ -6309,7 +6344,7 @@ class Engine:
         if fresh:
             self._setup_format = None
         tab = tones.get("setup_match_tab")
-        if tab is None or tab.mean < _MATCH_TAB_LIT:
+        if tab is None or not _tab_lit(tab, _MATCH_TAB_LIT):
             return cache
         lines, cache = await asyncio.to_thread(self.screen.read_region_lines_cached, ["setup_game_mode"],
                                                frame, cache)
@@ -7052,7 +7087,7 @@ class Engine:
         files = {}
         feed = type(self.source).__name__
         if self._log_truth or feed in ("GsproLogShotSource", "ConnectorWithLogFallback"):
-            files["GSPro log"] = self.cfg.source.gspro_log
+            files["GSPro log"] = self._follower.path if self._follower else live_log(self.cfg.source.gspro_log)
         if feed in ("ConnectorLogSource", "ConnectorWithLogFallback"):   # not GSPro's log alone
             files["connector log"] = self.cfg.source.connector_log
         check_files(h, files)

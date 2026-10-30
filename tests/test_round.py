@@ -460,6 +460,18 @@ def test_parse_others_reads_rows_with_distances_only():
     items = [OcrItem("Wes", 113, 42, 47), OcrItem("400.3yds", 329, 42, 41), OcrItem(" 8.0yds", 472, 42, 39),
              OcrItem("E", 622, 40, 37), OcrItem("212.5", 100, 300, 40), OcrItem("CARRY (game)", 100, 340, 20)]
     assert parse_others(items) == [OtherPlayer("Wes", "400.3 yards", "E")]
+    # A name that is (or holds) a lie word is still a name on a one-line row.
+    for name in ("Green", "Alex Green"):
+        row = [OcrItem(name, 113, 42, 47), OcrItem("400.3yds", 329, 42, 41), OcrItem("E", 622, 40, 37)]
+        assert parse_others(row) == [OtherPlayer(name, "400.3 yards", "E")]
+
+
+def test_parse_others_reads_3_59_two_line_rows():
+    # 3.59 puts the name and score on one line and the distance (and lie) on the next.
+    items = [OcrItem("Corey", 60, 300, 20), OcrItem("E", 200, 300, 20), OcrItem("19.6 yds", 60, 325, 16),
+             OcrItem("Fairway", 160, 325, 16), OcrItem("Josh", 60, 360, 20), OcrItem("E", 200, 360, 20),
+             OcrItem("5ft 5", 60, 385, 16), OcrItem("Oft 0", 160, 385, 16)]
+    assert parse_others(items) == [OtherPlayer("Corey", "19.6 yards", "E"), OtherPlayer("Josh", "5 feet 5 inches", "E")]
 
 
 def test_scorecard_ocr_on_real_frame():
@@ -1703,6 +1715,36 @@ def test_setup_slot_name_rejects_the_empty_slot_entry():
 
     assert _setup_slot_name(["Empty Slot"]) is None and _setup_slot_name(["Toby"]) == "Toby"
     assert [_slot_state(t) for t in (_PILL, _EMPTY, _LIST)] == ["filled", "empty", "list"]
+
+
+def test_gspro_3_59_setup_screen_tones_and_regions():
+    """GSPro 3.59's setup screen, its tones measured on 3.59.11 captures: the selected tab is a blue
+    underline and a filled name pill is a dark team colour. The booth picks its regions from the
+    version GSPro logs, keeping any region the config sets itself."""
+    from commentator.config import DEFAULT_REGIONS, NEW_UI_REGIONS, Region, ScreenConfig
+    from commentator.engine import _HOLES_TAB_LIT, _nines_picked, _setup_slot_name, _slot_state, _tab_lit, gspro_ui
+    from commentator.screen import Screen
+
+    tab_on, tab_off = Tone(64, 71, 0.0, blue=0.6, color=0.6), Tone(35, 31, 0.0)
+    red_pill, empty, dropdown = Tone(69, 62, 0.03, color=0.96), Tone(21, 21, 0.0), Tone(149, 238, 0.59)
+    assert _tab_lit(tab_on, _HOLES_TAB_LIT) and not _tab_lit(tab_off, _HOLES_TAB_LIT)
+    assert [_slot_state(t) for t in (red_pill, empty, dropdown)] == ["filled", "empty", "list"]
+    box_on, box_off = Tone(228, 254, 0.86), Tone(66, 66, 0.0, color=0.29)
+    assert _nines_picked({"setup_holes_tab": tab_on, "setup_front9_box": box_off, "setup_back9_box": box_on}) == (10, 9)
+    assert _setup_slot_name(["Empty  Slot"]) is None   # an added pill with no player picked
+
+    assert gspro_ui("3.59.11 PUBLIC BETA") == "new" and gspro_ui("3.1.6.20") == "classic"
+    # The version line not read yet: 3.59 writes Player.log, 3.1 output_log.txt.
+    assert gspro_ui(None, r"C:\Users\x\AppData\LocalLow\GSPro\GSPro\Player.log") == "new"
+    assert gspro_ui(None, "C:/GSPro/GSPro_Data/output_log.txt") == "classic"
+
+    mine = Region(left=0.1, top=0.1, width=0.1, height=0.05)
+    sc = Screen(ScreenConfig(regions={"setup_slot_2": mine}))
+    assert sc.region("setup_slot_1") == DEFAULT_REGIONS["setup_slot_1"]
+    sc.ui = "new"
+    assert sc.region("setup_slot_1") == NEW_UI_REGIONS["setup_slot_1"]
+    assert sc.region("setup_slot_2") == mine   # set in the config: kept
+    assert sc.region("setup_course") == DEFAULT_REGIONS["setup_course"]   # didn't move
 
 
 async def test_setup_watcher_without_a_pixel_probe_trusts_league_players_only(tmp_path):

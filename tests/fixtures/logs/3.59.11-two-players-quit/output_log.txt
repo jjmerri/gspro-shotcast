@@ -1,0 +1,96 @@
+GSPro Version: 3.59.11 PUBLIC BETA
+Selected Course: paynes_valley_gsp
+Loading course Paynes Valley
+ * ------- Shot Fired! ------- *
+LaunchExt - Regular Mode
+Force 10.75|| SurfMul 0.44|| BallSpeed 70.51|| AngleSpeedBounce 0.32|| descent angle 37.6|| ExitAngle 30.1
+magnitude: 10.74866 | yForce 4.462347 | material TVGdeeprough | SoundMultiplier 0.1219184 | SoundForceScale 0.6095918 | elevation 1391
+ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Data for selected player: X 971.4026 Y 116.2853 Z 204.4916
+Logging tdist: 134.2032 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+LaunchExt - Regular Mode
+Force 7.64|| SurfMul 0.48|| BallSpeed 57.66|| AngleSpeedBounce 0.31|| descent angle 48.9|| ExitAngle 44.5
+magnitude: 7.635617 | yForce 5.11382 | material TVGfairway | SoundMultiplier 0.3549092 | SoundForceScale 0.7098185 | elevation 1391
+ActivePlayer: 1  currentHole: 0  strokes: 1  Previous Score: 0
+Selecting shot for player: 1
+Data for selected player: X 950.9527 Y 118.1502 Z 257.1432
+Logging tdist: 153.0894 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+LaunchExt - Regular Mode
+Force 7.15|| SurfMul 0.48|| BallSpeed 55.96|| AngleSpeedBounce 0.32|| descent angle 44.1|| ExitAngle 41.8
+magnitude: 7.154953 | yForce 4.777755 | material TVGfairway | SoundMultiplier 0.3290581 | SoundForceScale 0.6581161 | elevation 1391
+ActivePlayer: 1  currentHole: 0  strokes: 1  Previous Score: 1
+Selecting shot for player: 1
+Data for selected player: X 848.6216 Y 113.0816 Z 121.274
+Logging tdist: 17.94783 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+LaunchExt - Regular Mode
+Penalty Surface TVGdeeprough, Spin53%, Speed 80%, VLA 98%
+Force 7.85|| SurfMul 0.48|| BallSpeed 50.85|| AngleSpeedBounce 0.34|| descent angle 41.5|| ExitAngle 34.4
+magnitude: 7.849154 | yForce 4.043339 | material TVGfairway | SoundMultiplier 0.2725646 | SoundForceScale 0.5451291 | elevation 1391
+ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Data for selected player: X 870.2047 Y 112.8548 Z 155.4927
+Logging tdist: 23.21444 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+LaunchExt - Regular Mode
+Force 6.23|| SurfMul 0.25|| BallSpeed 26.45|| AngleSpeedBounce 0.22|| descent angle 27.7|| ExitAngle 21.4
+magnitude: 6.232447 | yForce 2.343137 | material TVGgreen | SoundMultiplier 0.1417798 | SoundForceScale 0.2835595 | elevation 1391
+ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Data for selected player: X 856.4249 Y 113.2332 Z 137.8445
+Logging tdist: 1.655529 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+LaunchExt - Regular Mode
+Force 5.78|| SurfMul 0.25|| BallSpeed 25.45|| AngleSpeedBounce 0.22|| descent angle 33.9|| ExitAngle 26.2
+magnitude: 5.783995 | yForce 2.464921 | material TVGgreen | SoundMultiplier 0.1511478 | SoundForceScale 0.3022955 | elevation 1391
+ActivePlayer: 1  currentHole: 0  strokes: 1  Previous Score: 2
+Selecting shot for player: 1
+Data for selected player: X 853.0434 Y 112.799 Z 146.5183
+Logging tdist: 8.581042 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+LaunchExt - Putting Mode
+ActivePlayer: 1  currentHole: 0  strokes: 1  Previous Score: 3
+Selecting shot for player: 1
+Data for selected player: X 855.4262 Y 113.2684 Z 134.9227
+Logging tdist: 3.268347 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+LaunchExt - Putting Mode
+ActivePlayer: 1  currentHole: 0  strokes: 1  Previous Score: 4
+Selecting shot for player: 1
+Data for selected player: X 853.6852 Y 113.1397 Z 141.561
+Logging tdist: 3.616393 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+LaunchExt - Putting Mode
+ActivePlayer: 1  currentHole: 0  strokes: 1  Previous Score: 5
+Selecting shot for player: 1
+Data for selected player: X 854.5648 Y 113.2044 Z 138.9295
+Logging tdist: 0.856082 and ActiveGameGimmieDistance: 1.22
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 1  currentHole: 0  strokes: 1  Previous Score: 6
+ * ------- Shot Fired! ------- *
+LaunchExt - Putting Mode
+Distance to cup = 6mm, time:1053.3
+Hole out !!! 
+Distance to cup = 6mm, time:1053.32
+Hole out !!! 
+ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+LaunchExt - Regular Mode
+Force 7.02|| SurfMul 0.48|| BallSpeed 54.58|| AngleSpeedBounce 0.31|| descent angle 46.5|| ExitAngle 45.6
+magnitude: 7.017519 | yForce 5.121771 | material TVGfairway | SoundMultiplier 0.3555208 | SoundForceScale 0.7110417 | elevation 1391
+ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Data for selected player: X 870.9563 Y 95.82645 Z 508.4916
+Logging tdist: 10.2161 and ActiveGameGimmieDistance: 1.22
+ * ------- Shot Fired! ------- *
+LaunchExt - Regular Mode
+Force 6.90|| SurfMul 0.35|| BallSpeed 56.53|| AngleSpeedBounce 0.24|| descent angle 39.2|| ExitAngle 37.2
+magnitude: 6.904944 | yForce 3.959615 | material TVGrough | SoundMultiplier 0.2661242 | SoundForceScale 0.5322484 | elevation 1391
+ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Data for selected player: X 840.6457 Y 92.8523 Z 469.5953
+Logging tdist: 52.31242 and ActiveGameGimmieDistance: 1.22
+End Round Button Click

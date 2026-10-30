@@ -1,4 +1,4 @@
-"""Reads GSPro's own Unity log (output_log.txt) for authoritative game state.
+"""Reads GSPro's own Unity log (output_log.txt, or Player.log on 3.59+) for authoritative game state.
 
 GSPconnect's ConnectDebug.txt (our shot source) carries launch-monitor ball data only. GSPro the
 simulator writes a separate log with the game truth the screen can only hint at: whose turn it is,
@@ -38,8 +38,32 @@ import re
 import time
 from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+# GSPro 3.1 writes output_log.txt; the 3.59 builds (the 2026 public beta) write Player.log beside it
+# and leave the other one stale. Either can be installed, or both, so the live one is whichever was
+# written last.
+LOG_NAMES = ("output_log.txt", "Player.log")
+LOG_RECHECK_SECONDS = 5.0
+
+
+def live_log(path: str) -> str:
+    """The GSPro log being written now: of output_log.txt and Player.log in the configured log's
+    folder, the non-empty one written last. A configured path with any other name is used as is."""
+    p = Path(path).expanduser()
+    if p.name.lower() not in {n.lower() for n in LOG_NAMES}:
+        return path
+    best, newest = path, -1.0
+    for name in LOG_NAMES:
+        try:
+            st = (cand := p.with_name(name)).stat()
+        except OSError:
+            continue
+        if st.st_size and st.st_mtime > newest:
+            best, newest = str(cand), st.st_mtime
+    return best
 
 
 @dataclass
@@ -87,6 +111,11 @@ _SELECT = re.compile(r"Selecting shot for player:\s*(\d+)")
 # A scramble's pick: the chosen ball's result is copied onto each teammate, who plays on from there.
 _TEAMMATE = re.compile(r"Updating teammate score: player\s*(\d+)")
 _MATERIAL = re.compile(r"Using Material TVG(\w+)")
+# The first bounce's sound line also names the material: `magnitude: ... | material TVGfairway | ...`
+# (`material water` for a splash). GSPro 3.1 logs it right after the matching `Using Material` line;
+# the 3.59 builds dropped `Using Material`, so there this is the landing. `TVGpin` is the flagstick
+# (3.59 logs no "Flag hit" line), `TVGnone` something with no surface (a tree trunk).
+_SOUND_MATERIAL = re.compile(r"^magnitude:.*\|\s*material (?:TVG)?(\w+)\s*\|")
 M_TO_YD = 1.0936133       # GSPro's log distances are Unity metres; the booth works in yards
 _NUM = r"\d+(?:\.\d+)?"   # a plain number, so a stray "1.2.3" can't reach float()
 _TDIST = re.compile(rf"Logging tdist:\s*({_NUM})\s+and ActiveGameGimmieDistance:\s*({_NUM})")
@@ -122,7 +151,7 @@ _HAZARD = re.compile(rf"^Haz entry Point \(({_FLOAT}), ({_FLOAT}), ({_FLOAT})\)"
 # A click on the minimap to move the aim: a bare "(x, y, 0.0)" in minimap units, origin at the map's
 # centre. GSPro fits the map so the ball sits near (0, -338) and the pin near (0, +339): y runs up the
 # ball-to-pin line and x to its right, about 677 units for the whole distance (see aim_offset).
-_AIM = re.compile(rf"^\(({_FLOAT}), ({_FLOAT}), 0\.0\)$")
+_AIM = re.compile(rf"^\(({_FLOAT}), ({_FLOAT}), 0\.0+\)$")   # 3.59 writes 0.00
 # The ball went into foliage in flight and lost speed for it. GSPro names no object (tree or bush):
 # only the time into the flight, the hit's number on the shot and the speed it cost. Logged among the
 # launch lines, before the landing ones. A "Leaves pas thru at hit N" line instead means the ball went
@@ -135,7 +164,8 @@ _LEAVES_PASS = re.compile(r"^\* Leaves pas thru at hit (\d+)")
 # barely left the ground.
 _BOUNCE = re.compile(rf"^Force {_NUM}\|\|.*\|\|\s*descent angle\s*({_NUM})\|\|")
 # Logged once per shot (putts too, and water) as the ball comes to rest, before the shooter's score
-# block: the end of the ball's motion, whatever the screen shows.
+# block: the end of the ball's motion, whatever the screen shows. GSPro 3.1 only: on 3.59 the
+# shooter's score line is the first sign the ball stopped (see GsproState's "state").
 _ROLL = re.compile(rf"Roll dist ft\s*(-?{_NUM})")
 # Logged only when the ball runs over the cup (putts, and the odd chip): how far from its centre it
 # crossed, in mm. Then "Hole out" (it dropped), "Cup capture Lip Out" (it caught the cup and spun
@@ -181,7 +211,17 @@ def parse_events(text: str) -> list[LogEvent]:
                 out.append(LogEvent("hole_out"))
             elif "within Gimmie distance" in line:
                 out.append(LogEvent("gimmie"))
-            elif "Hit_water" in line or "| material water |" in line:
+            elif line.startswith("magnitude:"):
+                if m := _SOUND_MATERIAL.search(line):
+                    surface = m.group(1).lower()
+                    if surface == "water":   # the splash, logged the instant the ball goes in
+                        out.append(LogEvent("hit_water"))
+                    out.append(LogEvent("sound_material", surface=surface))
+                    if surface == "pin":
+                        out.append(LogEvent("flag_hit"))
+                if m := _ALTITUDE.match(line):
+                    out.append(LogEvent("altitude", altitude_ft=float(m.group(1))))
+            elif "Hit_water" in line:
                 # The splash, logged the instant the ball goes in (before the penalty score bump).
                 out.append(LogEvent("hit_water"))
             elif m := _SELECT.search(line):
@@ -347,6 +387,7 @@ class GsproState:
     _unowned_fire: int | None = None
     _unowned_wet: float | None = None
     _unowned_outs: int = 0
+    _material_since_fire: bool = False   # a `Using Material` line since the last "Shot Fired" (GSPro 3.1)
     # Every "Shot Fired" (a running count that never resets), when it was ingested (monotonic), and
     # what GSPro logged for it (putting/regular mode, the penalty surface it was struck from, who hit
     # it), so the engine can ask how GSPro played a given shot.
@@ -439,12 +480,7 @@ class GsproState:
         elif ev.kind == "range":
             self.mode = "range"
         elif ev.kind == "end_round":
-            self.mode = "menu"
-            self.round_ends += 1
-            self._finish_picked()
-            self.last_hole_scores = dict(self.hole_scores)   # for the booth to settle the round with
-            self._reset_round()             # the next round, even on this same course, starts clean
-            self.shots_since_course, self.first_hole, self.starts_late = 0, None, False
+            self.end_round()
         elif ev.kind == "skip_hole":
             if ev.hole == 1:
                 self.starts_late = True
@@ -466,7 +502,11 @@ class GsproState:
         elif ev.kind == "bounce":
             if self._unowned_fire is not None and self._unowned_fire in self._fire_info:
                 self._fire_info[self._unowned_fire]["descent"] = ev.descent
+        elif ev.kind == "sound_material":
+            if not self._material_since_fire:   # GSPro 3.59: no `Using Material` line came first
+                self.apply(LogEvent("material", surface=ev.surface))
         elif ev.kind == "material":
+            self._material_since_fire = True
             self.lie = self._pending_lie = ev.surface
             if self._unowned_fire is not None and self._unowned_fire in self._fire_info:
                 self._fire_info[self._unowned_fire]["landed"] = ev.surface   # where that shot first came down
@@ -490,6 +530,7 @@ class GsproState:
         elif ev.kind == "shot_fired":
             self.shots_since_course += 1
             self.fires += 1
+            self._material_since_fire = False
             self._fire_at[self.fires] = time.monotonic()
             self._fire_info[self.fires] = info = {"player": None}
             if self._aim is not None:
@@ -574,7 +615,20 @@ class GsproState:
                 if s in self._rest_by:
                     self._rest_by[mate] = dict(self._rest_by[s])
         elif ev.kind == "state":
+            if self._unowned_fire in self._fire_info:
+                # The shooter's score line follows the ball coming to rest: the rest time on 3.59,
+                # which logs no `Roll dist` line (3.1's, logged just before, is kept).
+                self._fire_info[self._unowned_fire].setdefault("rest_at", time.monotonic())
             self._apply_state(ev)
+
+    def end_round(self) -> None:
+        """The round is over (End Round, or GSPro restarted as the other version mid-round)."""
+        self.mode = "menu"
+        self.round_ends += 1
+        self._finish_picked()
+        self.last_hole_scores = dict(self.hole_scores)   # for the booth to settle the round with
+        self._reset_round()             # the next round, even on this same course, starts clean
+        self.shots_since_course, self.first_hole, self.starts_late = 0, None, False
 
     def _reset_round(self) -> None:
         for d in (self.players_seen, self.lie_by, self.to_pin_by, self.gimme_by, self.hole_by,
@@ -864,20 +918,45 @@ def build_state(text: str) -> GsproState:
 
 
 class GsproLogFollower:
-    """Tails output_log.txt by byte offset and keeps a GsproState current.
+    """Tails GSPro's log by byte offset and keeps a GsproState current.
 
     Starts at the end of the file so the booth doesn't replay a whole session's history, then reads
     whatever GSPro appends. GSPro truncates (a new session reuses the path) are detected by the file
     shrinking, and the offset resets. A partial trailing line is buffered until its newline arrives.
+    Which file is followed (see live_log) is rechecked every few seconds: GSPro restarted as the other
+    version starts a new session in the other file, read from its start like a truncate.
     """
 
     def __init__(self, path: str, state: GsproState | None = None, poll: float = 0.3):
-        self.path = path
+        self.configured = path
+        self.path = live_log(path)
         self.state = state or GsproState()
         self.poll = poll
         self._offset = 0
         self._buf = ""
+        self._checked = time.monotonic()
+        self._switched = False           # set by _switch (a worker thread), acted on in run()
         self.primed = False              # the backlog has been read (the health checks wait for it)
+
+    def _switch(self) -> None:
+        """Follow the other GSPro log once it is the one being written."""
+        now = time.monotonic()
+        if now - self._checked < LOG_RECHECK_SECONDS:
+            return
+        self._checked = now
+        if (path := live_log(self.configured)) != self.path:
+            log.info("GSPro is writing %s now; following it instead of %s", path, self.path)
+            self.path, self._offset, self._buf = path, 0, ""
+            self._switched = True
+
+    def _new_session(self) -> None:
+        """After a switch: a new GSPro session, so a round the old one was in is over (its End Round
+        never logged), even if the new one goes back to the same course."""
+        self._switched = False
+        if self.state.mode == "course":
+            self.state.end_round()
+        elif self.state.mode == "range":
+            self.state.mode = "menu"
 
     def _read_new(self) -> str:
         """New bytes since the last read, decoded. Read in BINARY so the offset is a true byte count:
@@ -886,7 +965,13 @@ class GsproLogFollower:
         try:
             size = os.path.getsize(self.path)
         except OSError:
-            return ""
+            size = None
+        if size is None or size == self._offset:   # idle: a good moment to see if GSPro moved files
+            self._switch()
+            try:
+                size = os.path.getsize(self.path)
+            except OSError:
+                return ""
         if size < self._offset:          # the file was genuinely truncated/replaced (GSPro restarted)
             self._offset, self._buf = 0, ""
         if size == self._offset:
@@ -901,6 +986,7 @@ class GsproLogFollower:
         """Skip the historical backlog, but learn from it where GSPro is now: on the range, in the menus,
         or on a course (and whether anyone has hit there yet, and on which holes), so a booth started
         on the range stays quiet and one started mid-round joins it rather than opening a new one."""
+        self.path = live_log(self.configured)
         try:
             with open(self.path, "rb") as f:
                 text = f.read().decode("utf-8", "replace")
@@ -928,6 +1014,8 @@ class GsproLogFollower:
         while True:
             try:
                 chunk = await asyncio.to_thread(self._read_new)
+                if self._switched:
+                    self._new_session()
                 if chunk:
                     self._buf += chunk
                     self._buf, complete = _split_trailing(self._buf)

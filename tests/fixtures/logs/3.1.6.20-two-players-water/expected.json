@@ -1614,6 +1614,14 @@
 "kind": "hit_water"
 },
 {
+"kind": "sound_material",
+"surface": "water"
+},
+{
+"kind": "altitude",
+"altitude_ft": 50.0
+},
+{
 "kind": "hit_water"
 },
 {

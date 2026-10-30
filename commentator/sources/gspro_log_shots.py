@@ -1,5 +1,8 @@
 """A shot feed from GSPro's own log (output_log.txt), for any launch monitor.
 
+GSPro 3.1 only: the 3.59 builds (the 2026 public beta, logging to Player.log) don't log the
+`LaunchExt Vars` line, so there the shots must come from GSPconnect or the Open Connect sniffer.
+
 GSPro logs every shot it plays, whatever sent it, as a "Shot Fired!" block with the ball data it
 used:
 
@@ -18,10 +21,12 @@ import asyncio
 import logging
 import os
 import re
+import time
 from collections.abc import AsyncIterator
 
 from ..models import HoleChangeEvent, Shot, ShotEvent
 from .base import ShotSource
+from .gspro_log import LOG_RECHECK_SECONDS, live_log
 
 log = logging.getLogger(__name__)
 
@@ -50,16 +55,28 @@ def shot_from_launch(vals: dict[str, float]) -> Shot:
 
 
 class GsproLogShotSource(ShotSource):
-    """Tails output_log.txt from its end and yields a shot for each `LaunchExt Vars` line."""
+    """Tails GSPro's log from its end and yields a shot for each `LaunchExt Vars` line."""
 
     def __init__(self, path: str, poll_seconds: float = 0.1, backup: bool = False) -> None:
-        self.path = path
+        self.configured = path
+        self.path = live_log(path)
+        self._checked = time.monotonic()
         self.backup = backup   # standing in for GSPconnect only while it's silent (sources/fallback.py)
         self.poll = poll_seconds
         self._offset: int | None = None
         self._buf = ""
 
+    def _switch(self) -> None:
+        """Follow the other GSPro log (see gspro_log.live_log) from its end once it is the one written."""
+        if (now := time.monotonic()) - self._checked < LOG_RECHECK_SECONDS:
+            return
+        self._checked = now
+        if (path := live_log(self.configured)) != self.path:
+            log.info("GSPro is writing %s now; reading shots from it instead of %s", path, self.path)
+            self.path, self._offset, self._buf = path, None, ""
+
     def _read_new_lines(self) -> list[str]:
+        self._switch()
         try:
             size = os.path.getsize(self.path)
         except OSError:

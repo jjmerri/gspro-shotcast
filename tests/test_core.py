@@ -1088,7 +1088,7 @@ async def test_interrupt_mid_sequence_releases_the_synth_loop():
 
 # Exact OCR output captured from GSPro 3.1.x release frames (see data/screens/SOURCES.md).
 def test_hud_parsers_on_real_ocr_output():
-    from commentator.hud import OcrItem, hole_key, parse_hole_box, parse_lie, parse_player_box, parse_tiles
+    from commentator.hud import OcrItem, hole_key, parse_club, parse_hole_box, parse_lie, parse_player_box, parse_tiles
 
     p = parse_player_box(["Mixtape_Golf", "4th (-1)", "Shot 4", "19.5 YDS", "▲4FT 6"])
     assert p["shot_number"] == 4 and p["score_to_par"] == "-1" and p["to_pin"] == "19.5 yards"
@@ -1106,6 +1106,14 @@ def test_hud_parsers_on_real_ocr_output():
 
     assert parse_lie(["Green", "O0T"]) == "green"
     assert parse_lie(["Rough"]) == "rough"
+
+    # GSPro 3.59 (public beta): "Hole 2" over the course, "RIGHT HAND", feet and inches run together.
+    assert parse_hole_box(["Hole 2", "Paynes Valley", "PAR 3", "153 YDS"])["hole_number"] == 2
+    assert parse_hole_box(["Hole 2", "Paynes Valley", "PAR 3", "153 YDS"])["course"] == "Paynes Valley"
+    assert parse_player_box(["Josh", "E", "28ft4"])["to_pin"] == "28 feet 4 inches"
+    # The elevation's "0ft 0" ran into the distance: the inches stop at the next "ft".
+    assert parse_player_box(["Josh", "E", "5ft 50ft 0"])["to_pin"] == "5 feet 5 inches"
+    assert parse_club(["Driver", "RIGHT HAND"])["handed"] == "RH"
 
     # Two-column tiles come out of OCR as value, value, label, label; pairing is by position.
     items = [OcrItem("2.6 1-0", 1725, 115, 30), OcrItem("86.2", 1840, 115, 30),
@@ -1694,6 +1702,24 @@ def test_slope_and_elevation_parsing():
     assert parse_elevation("▲4FT 6", metric=False, arrow="down") == 1.5  # glyph beats pixels
     assert parse_elevation("▲0'8", metric=False, arrow=None) == 8 / 36   # feet'inches
     assert parse_elevation("5IN", metric=False, arrow="down") == -5 / 36
+    assert parse_elevation("Oft 3", metric=False, arrow="up") == 3 / 36   # 3.59's "0ft 3", O for 0
+
+
+def test_player_box_elevation_skips_only_the_lie_cell():
+    from PIL import Image
+
+    from commentator.hud import OcrItem
+    from commentator.screen import Screen
+
+    img = Image.new("RGB", (600, 120))
+    for name in ("Alex Smith", "Alex Green", "Green"):   # a name holding a lie word isn't the lie
+        items = [OcrItem(name, 100, 20, 20, 60), OcrItem("19.5 YDS", 100, 60, 20, 60),
+                 OcrItem("▲4FT 6", 250, 60, 20, 220)]
+        assert Screen._elevation(img, items, metric=False) == 1.5
+    # 3.59: the lie follows the elevation on the distance row, then the shot-number strip.
+    items = [OcrItem("Josh", 100, 20, 20, 80), OcrItem("25.4yd", 100, 60, 20, 70), OcrItem("▲1ft 2", 250, 60, 20, 220),
+             OcrItem("Green", 350, 60, 20, 320), OcrItem("123", 450, 60, 20, 430)]
+    assert Screen._elevation(img, items, metric=False) == 14 / 36
 
 
 def test_putt_elevation_is_spoken_in_inches_and_feet():
@@ -3072,6 +3098,12 @@ def test_score_banner_parsing():
     # "FOR BIRDIE"/"FOR BOGEY" is the pre-shot prompt, not a result: the hole isn't over yet.
     assert parse_score_banner(["FOR", "BIRDIE"]) is None
     assert parse_score_banner(["FOR BOGEY"]) is None
+    # 3.59 shows the strokes, not a name: named from the hole's par when known.
+    assert parse_score_banner(["SCORE: 7"], par=4) == ("Triple Bogey", 3)
+    assert parse_score_banner(["SCORE:", "3"], par=4) == ("Birdie", -1)
+    assert parse_score_banner(["SCORE: 1"], par=3) == ("Ace", None)
+    assert parse_score_banner(["SCORE: 9"], par=3) == ("Score 9", 6)
+    assert parse_score_banner(["SCORE: 5"]) == ("Score 5", None)
 
 
 def test_pick_reaction_uses_the_banner_for_putts():

@@ -1,0 +1,500 @@
+[
+{
+"kind": "version",
+"display": "3.59.11"
+},
+{
+"kind": "course",
+"course": "paynes_valley_gsp"
+},
+{
+"kind": "course_display",
+"display": "Paynes Valley"
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": false
+},
+{
+"kind": "bounce",
+"descent": 37.6
+},
+{
+"kind": "sound_material",
+"surface": "deeprough"
+},
+{
+"kind": "altitude",
+"altitude_ft": 1391.0
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 0,
+"score": 1,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 0
+},
+{
+"kind": "position",
+"pos": [
+971.4026,
+116.2853,
+204.4916
+]
+},
+{
+"kind": "tdist",
+"to_pin": 134.2032,
+"gimmie": 1.22
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": false
+},
+{
+"kind": "bounce",
+"descent": 48.9
+},
+{
+"kind": "sound_material",
+"surface": "fairway"
+},
+{
+"kind": "altitude",
+"altitude_ft": 1391.0
+},
+{
+"kind": "state",
+"player": 1,
+"hole": 0,
+"score": 1,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 1
+},
+{
+"kind": "position",
+"pos": [
+950.9527,
+118.1502,
+257.1432
+]
+},
+{
+"kind": "tdist",
+"to_pin": 153.0894,
+"gimmie": 1.22
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": false
+},
+{
+"kind": "bounce",
+"descent": 44.1
+},
+{
+"kind": "sound_material",
+"surface": "fairway"
+},
+{
+"kind": "altitude",
+"altitude_ft": 1391.0
+},
+{
+"kind": "state",
+"player": 1,
+"hole": 0,
+"score": 2,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 1
+},
+{
+"kind": "position",
+"pos": [
+848.6216,
+113.0816,
+121.274
+]
+},
+{
+"kind": "tdist",
+"to_pin": 17.94783,
+"gimmie": 1.22
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": false
+},
+{
+"kind": "penalty_surface",
+"surface": "deeprough",
+"lie_cost": [
+53,
+80
+]
+},
+{
+"kind": "bounce",
+"descent": 41.5
+},
+{
+"kind": "sound_material",
+"surface": "fairway"
+},
+{
+"kind": "altitude",
+"altitude_ft": 1391.0
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 0,
+"score": 2,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 0
+},
+{
+"kind": "position",
+"pos": [
+870.2047,
+112.8548,
+155.4927
+]
+},
+{
+"kind": "tdist",
+"to_pin": 23.21444,
+"gimmie": 1.22
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": false
+},
+{
+"kind": "bounce",
+"descent": 27.7
+},
+{
+"kind": "sound_material",
+"surface": "green"
+},
+{
+"kind": "altitude",
+"altitude_ft": 1391.0
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 0,
+"score": 3,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 0
+},
+{
+"kind": "position",
+"pos": [
+856.4249,
+113.2332,
+137.8445
+]
+},
+{
+"kind": "tdist",
+"to_pin": 1.655529,
+"gimmie": 1.22
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": false
+},
+{
+"kind": "bounce",
+"descent": 33.9
+},
+{
+"kind": "sound_material",
+"surface": "green"
+},
+{
+"kind": "altitude",
+"altitude_ft": 1391.0
+},
+{
+"kind": "state",
+"player": 1,
+"hole": 0,
+"score": 3,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 1
+},
+{
+"kind": "position",
+"pos": [
+853.0434,
+112.799,
+146.5183
+]
+},
+{
+"kind": "tdist",
+"to_pin": 8.581042,
+"gimmie": 1.22
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": true
+},
+{
+"kind": "state",
+"player": 1,
+"hole": 0,
+"score": 4,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 1
+},
+{
+"kind": "position",
+"pos": [
+855.4262,
+113.2684,
+134.9227
+]
+},
+{
+"kind": "tdist",
+"to_pin": 3.268347,
+"gimmie": 1.22
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": true
+},
+{
+"kind": "state",
+"player": 1,
+"hole": 0,
+"score": 5,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 1
+},
+{
+"kind": "position",
+"pos": [
+853.6852,
+113.1397,
+141.561
+]
+},
+{
+"kind": "tdist",
+"to_pin": 3.616393,
+"gimmie": 1.22
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": true
+},
+{
+"kind": "state",
+"player": 1,
+"hole": 0,
+"score": 6,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 1
+},
+{
+"kind": "position",
+"pos": [
+854.5648,
+113.2044,
+138.9295
+]
+},
+{
+"kind": "tdist",
+"to_pin": 0.856082,
+"gimmie": 1.22
+},
+{
+"kind": "gimmie"
+},
+{
+"kind": "state",
+"player": 1,
+"hole": 0,
+"score": 7,
+"strokes": 1
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": true
+},
+{
+"kind": "cup",
+"cup_mm": 6.0
+},
+{
+"kind": "hole_out"
+},
+{
+"kind": "cup",
+"cup_mm": 6.0
+},
+{
+"kind": "hole_out"
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 0,
+"score": 4,
+"strokes": 1
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": false
+},
+{
+"kind": "bounce",
+"descent": 46.5
+},
+{
+"kind": "sound_material",
+"surface": "fairway"
+},
+{
+"kind": "altitude",
+"altitude_ft": 1391.0
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 1,
+"score": 1,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 0
+},
+{
+"kind": "position",
+"pos": [
+870.9563,
+95.82645,
+508.4916
+]
+},
+{
+"kind": "tdist",
+"to_pin": 10.2161,
+"gimmie": 1.22
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": false
+},
+{
+"kind": "bounce",
+"descent": 39.2
+},
+{
+"kind": "sound_material",
+"surface": "rough"
+},
+{
+"kind": "altitude",
+"altitude_ft": 1391.0
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 1,
+"score": 1,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 0
+},
+{
+"kind": "position",
+"pos": [
+840.6457,
+92.8523,
+469.5953
+]
+},
+{
+"kind": "tdist",
+"to_pin": 52.31242,
+"gimmie": 1.22
+},
+{
+"kind": "end_round"
+}
+]

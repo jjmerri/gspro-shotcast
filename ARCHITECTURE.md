@@ -166,6 +166,12 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
 - `gspro_sniffer.py` sniffs GSPro Open Connect loopback (scapy, needs Npcap + admin).
 - `gspro_log.py` tails GSPro's `output_log.txt` into a live `GsproState` game-truth model,
   including each fire's ball position and minimap aim, and the hole list of a completed round.
+  GSPro 3.59 (public beta) writes `Player.log` beside it instead; `live_log` picks whichever was
+  written last and the follower switches when GSPro does. The engine sets `Screen.ui` from the
+  logged version (`engine.gspro_ui`: "new" from 3.59), which swaps in `config.NEW_UI_REGIONS` for
+  the moved setup-screen regions (a region set in the config wins). The setup checks read either
+  menu: a tab is lit when bright (3.1) or blue-underlined (3.59, `Tone.blue`), a name pill is filled
+  when grey (3.1) or team-coloured (3.59, `Tone.color`). The HUD parsers take both layouts as is.
 - `replay.py` replays a `.jsonl` shot feed offline. `stream.py` is shared async plumbing.
 
 ## Invariants that are easy to break

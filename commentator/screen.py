@@ -1,6 +1,7 @@
 import asyncio
 import io
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -8,10 +9,10 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
-from .config import HUD_ASPECT, Region, ScreenConfig
+from .config import DEFAULT_REGIONS, HUD_ASPECT, NEW_UI_REGIONS, Region, ScreenConfig
 from .hud import (
-    Hud, NAME_DARK, OcrItem, arrow_direction, parse_club, parse_elevation, parse_hole_box, parse_lie, parse_others,
-    parse_player_box, parse_score_banner, parse_scorecard, parse_slope, parse_tiles, tile_value_items,
+    DISTANCE, LIE_CELL, NAME_DARK, Hud, OcrItem, arrow_direction, parse_club, parse_elevation, parse_hole_box, parse_lie,
+    parse_others, parse_player_box, parse_score_banner, parse_scorecard, parse_slope, parse_tiles, tile_value_items,
 )
 
 log = logging.getLogger(__name__)
@@ -19,11 +20,38 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Tone:
-    """A region's grey levels (0-255): mean, median, and the share of near-white (>= 200) pixels."""
+    """A region's grey levels (0-255): mean, median, and the share of near-white (>= 200) pixels;
+    and the share of strongly blue pixels (GSPro 3.59 marks the selected setup tab with a blue
+    underline) and of saturated ones (its name pills are a dark team colour, not grey)."""
 
     mean: float
     median: float
     light: float
+    blue: float = 0.0
+    color: float = 0.0
+
+
+def tone_of(img: Image.Image) -> Tone:
+    """The Tone of a whole image (a region's crop)."""
+    import numpy as np
+
+    hist = img.convert("L").histogram()
+    n = sum(hist) or 1
+    mean = sum(v * c for v, c in enumerate(hist)) / n
+    acc, median = 0, 0
+    for v, c in enumerate(hist):
+        acc += c
+        if acc * 2 >= n:
+            median = v
+            break
+    a = np.asarray(img.convert("RGB"), dtype=int)
+    if a.size:
+        r, g, b = a[..., 0], a[..., 1], a[..., 2]
+        blue = float(((b > 150) & (b - r > 80) & (b - g > 30)).mean())
+        color = float((a.max(axis=2) - a.min(axis=2) > 60).mean())
+    else:
+        blue = color = 0.0
+    return Tone(mean=mean, median=median, light=sum(hist[200:]) / n, blue=blue, color=color)
 
 
 def name_signature(img: Image.Image) -> tuple:
@@ -112,6 +140,9 @@ class Screen:
         self.last_read_seconds = 0.0
         self.last_capture_seconds = 0.0
         self.mirrored = False   # the current player's HUD is in GSPro's lefty layout (see MIRRORED)
+        # Which GSPro menus are on screen: "classic" (3.1) or "new" (3.59's redesign, NEW_UI_REGIONS).
+        # The engine sets it from the GSPro version in the log.
+        self.ui = "classic"
         self.monitor = cfg.monitor   # the monitor read last (follow_window moves it to GSPro's)
         self._monitor_at = -1e9
         self._monitor_lock = threading.Lock()
@@ -192,11 +223,24 @@ class Screen:
         return self.mirrored
 
     def region(self, name: str) -> Region | None:
-        """A HUD region, moved to the other side when the layout is mirrored."""
+        """A HUD region, moved to the other side when the layout is mirrored. On GSPro's new menus
+        (self.ui) a region they moved comes from NEW_UI_REGIONS, unless the config sets it."""
         region = self.cfg.regions.get(name)
+        if self.ui == "new" and name in NEW_UI_REGIONS and region == DEFAULT_REGIONS.get(name):
+            region = NEW_UI_REGIONS[name]
         if region is not None and self.mirrored and name in MIRRORED:
             return mirrored_region(region)
         return region
+
+    def _padded(self, name: str, img: Image.Image) -> Image.Image:
+        """3.59's name pills fill their crop edge to edge in a saturated team colour, and the OCR's
+        detector misses a short name there ("Josh" on red) unless the pill gets a margin of its own
+        colour."""
+        if self.ui != "new" or not name.startswith("setup_slot_"):
+            return img
+        from PIL import ImageOps
+
+        return ImageOps.expand(img, border=max(8, img.height // 2), fill=img.getpixel((1, 1)))
 
     def _setup_frame(self) -> Image.Image:
         """Full frame for the pre-round setup read."""
@@ -326,19 +370,10 @@ class Screen:
         name pill, an empty "+" slot, and an open player dropdown (a near-white list)."""
         out: dict[str, Tone] = {}
         for name in names:
-            region = self.cfg.regions.get(name)
+            region = self.region(name)
             if region is None:
                 continue
-            hist = self.crop(image, region).convert("L").histogram()
-            n = sum(hist) or 1
-            mean = sum(v * c for v, c in enumerate(hist)) / n
-            acc, median = 0, 0
-            for v, c in enumerate(hist):
-                acc += c
-                if acc * 2 >= n:
-                    median = v
-                    break
-            out[name] = Tone(mean=mean, median=median, light=sum(hist[200:]) / n)
+            out[name] = tone_of(self.crop(image, region))
         return out
 
     def setup_frame(self) -> Image.Image:
@@ -392,6 +427,8 @@ class Screen:
             if name == "player_box":
                 for k, v in parse_player_box(texts).items():
                     setattr(hud, k, v)
+                if hud.shot_number is None:
+                    hud.shot_number = self._strip_shot(img, items)
                 hud.elevation_yards = self._elevation(img, items, metric=(hud.to_pin or "").endswith("metres"))
             elif name == "hole_box":
                 for k, v in parse_hole_box(texts).items():
@@ -412,26 +449,90 @@ class Screen:
             elif name == "others":
                 hud.others = parse_others(items)
             elif name == "score_banner":
-                banner = parse_score_banner(texts)
+                banner = parse_score_banner(texts, hud.par)
                 hud.hole_result = banner[0] if banner else None
             elif name == "scorecard_title":
-                hud.scorecard_open = any("SCORECARD" in t.upper() for t in texts)
+                # 3.59's card has no title: the GS PRO logo, with the hole row's "Out" under it.
+                title = " ".join(texts).upper()
+                hud.scorecard_open = "SCORECARD" in title or (
+                    "GSPRO" in title.replace(" ", "") and re.search(r"\bOUT\b", title) is not None)
             elif name == "scorecard":
                 hud.scorecard = parse_scorecard(items)
         return hud
 
     @staticmethod
     def _elevation(img: Image.Image, items: list[OcrItem], metric: bool) -> float | None:
-        """The elevation readout is the last number in the player box, with its arrow just left of it."""
-        import re
+        """The elevation readout is the last number in the player box, with its arrow just left of it.
 
+        On 3.59 the lie and the shot-number strip follow it, so only items left of the lie count; and
+        OCR sometimes joins it to the distance ("5ft 5  0ft 0"), so then it's the text after that."""
         numeric = [i for i in items if re.search(r"\d", i.text) and not re.search(r"shot|\(", i.text, re.I)]
-        if len(numeric) < 2:  # the first number is the distance to the pin
+        # The lie: a cell of lie words only (3.59 says just "Deep" for deep rough) right of the
+        # distance, so a player called "Alex Green" above it doesn't count.
+        dist = next((i for i in items if DISTANCE.search(i.text)), None)
+        lie_left = min((i.left for i in items if dist is not None and i.left > dist.left
+                        and LIE_CELL.fullmatch(i.text.strip().lower())), default=None)
+        if lie_left is not None:
+            numeric = [i for i in numeric if i.left < lie_left]
+        if not numeric:
             return None
-        item = numeric[-1]
+        if len(numeric) >= 2:  # the first number is the distance to the pin
+            item, text, left = numeric[-1], numeric[-1].text, numeric[-1].left
+        else:
+            item = numeric[0]
+            d = DISTANCE.search(item.text)
+            text = item.text[d.end():] if d else ""
+            if not re.search(r"\d", text):
+                return None
+            width = 2 * (item.x - item.left)
+            left = item.left + width * (len(item.text) - len(text.lstrip())) / max(len(item.text), 1)
         h = max(item.h, 4)
-        crop = img.crop((max(0, int(item.left - 1.6 * h)), int(item.y - h / 2), int(item.left + 0.9 * h), int(item.y + h / 2)))
-        return parse_elevation(item.text, metric, arrow_direction(crop))
+        crop = img.crop((max(0, int(left - 1.6 * h)), int(item.y - h / 2), int(left + 0.9 * h), int(item.y + h / 2)))
+        return parse_elevation(text, metric, arrow_direction(crop))
+
+    def _strip_shot(self, img: Image.Image, items: list[OcrItem]) -> int | None:
+        """3.59's shot number: the digit in the white box on the strip of shot numbers (1..par, more
+        once past it) right of the distance to the pin. The strip's plain digits OCR as one run
+        ("1234"), so the box is found by its pixels and its digit read on its own."""
+        import numpy as np
+        from PIL import ImageOps
+
+        row = next((i for i in items if DISTANCE.search(i.text)), None)
+        if row is None:
+            return None
+        # The box is about twice the text's height, so its columns stay mostly light through the digit
+        # while the gap to the "FOR PAR" pill that can follow it is dark top to bottom.
+        h = max(row.h, 4)
+        top = max(0, int(row.y - h))
+        band = np.asarray(img.convert("RGB"), dtype=int)[top:int(row.y + h)]
+        if band.size == 0:
+            return None
+        light = (band.min(axis=2) > 130) & (np.ptp(band, axis=2) < 50)
+        cols = np.append(light.mean(axis=0) > 0.3, False)
+        start = None
+        for x, on in enumerate(cols):
+            if on and start is None:
+                start = x
+            elif not on and start is not None:
+                if start > row.x and 0.6 * h <= x - start <= 1.6 * h:
+                    # Just the white: the box has a team-colour line above and a grey band below,
+                    # and with them a lone digit often doesn't OCR.
+                    white = band[:, start:x].min(axis=2) > 170
+                    rows = np.nonzero(white.mean(axis=1) > 0.5)[0]
+                    if rows.size == 0:
+                        return None
+                    tight = img.crop((start + 1, top + rows.min() + 1, x - 1, top + rows.max()))
+                    loose = img.crop((start, top, x, top + band.shape[0]))
+                    # A lone digit is the detector's weak spot; no one framing reads every digit.
+                    for crop, scale, pad in ((tight, 1, 10), (tight, 2, 20), (loose, 2, x - start)):
+                        crop = crop.resize((crop.width * scale, crop.height * scale))
+                        crop = ImageOps.expand(crop, border=pad, fill=(255, 255, 255))
+                        text = re.sub(r"[^0-9]", "", "".join(i.text for i in self.ocr_items(crop)))
+                        if text and 0 < int(text) < 20:
+                            return int(text)
+                    return None
+                start = None
+        return None
 
     async def read_hud_async(self, parts: list[str]) -> Hud:
         started = time.perf_counter()
@@ -453,7 +554,7 @@ class Screen:
         base = image if image is not None else self._grab_full()
         out: dict[str, str] = {}
         for name in names:
-            region = self.cfg.regions.get(name)
+            region = self.region(name)
             if region is None:
                 out[name] = ""
                 continue
@@ -476,12 +577,12 @@ class Screen:
         base = image if image is not None else self._grab_full()
         out: dict[str, list[str]] = {}
         for name in names:
-            region = self.cfg.regions.get(name)
+            region = self.region(name)
             if region is None:
                 out[name] = []
                 continue
             try:
-                img = self.crop(base, region)
+                img = self._padded(name, self.crop(base, region))
                 scale = self.cfg.ocr_scale
                 if scale and scale != 1.0:
                     img = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))))
@@ -505,7 +606,7 @@ class Screen:
         out: dict[str, list[str]] = {}
         new_cache: dict[str, tuple] = {}
         for name in names:
-            region = self.cfg.regions.get(name)
+            region = self.region(name)
             if region is None:
                 out[name] = []
                 continue
@@ -521,8 +622,9 @@ class Screen:
                 lines = prev[1]
             else:
                 scale = self.cfg.ocr_scale
-                ocr_img = (img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))))
-                           if scale and scale != 1.0 else img)
+                ocr_img = self._padded(name, img)
+                ocr_img = (ocr_img.resize((max(1, round(ocr_img.width * scale)), max(1, round(ocr_img.height * scale))))
+                           if scale and scale != 1.0 else ocr_img)
                 try:
                     lines = _group_lines(self.ocr_items(ocr_img))
                 except Exception:
@@ -562,7 +664,9 @@ class Screen:
         for y in range(0, img.height, 100):
             draw.line([(0, y), (img.width, y)], fill=(255, 0, 255), width=1)
             draw.text((2, y + 2), str(y), fill=(255, 255, 0))
-        for name, r in self.cfg.regions.items():
+        for name in self.cfg.regions:
+            if (r := self.region(name)) is None:
+                continue
             left, top, width, height = r.to_pixels(img.width, img.height)
             draw.rectangle([left, top, left + width, top + height], outline=(0, 255, 0), width=3)
             draw.text((left + 4, top + 4), name, fill=(0, 255, 0))

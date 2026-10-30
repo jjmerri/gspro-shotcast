@@ -151,7 +151,8 @@ League file + Squabbit ─────────► standings, handicaps, stor
 
 ## Requirements
 
-- A Windows PC running **GSPro 3.1.x**, windowed or borderless (not exclusive fullscreen).
+- A Windows PC running **GSPro 3.1.x** (or the 3.59 public beta, see below), windowed or
+  borderless (not exclusive fullscreen).
   Shotcast runs on the same PC. It reads GSPro's screen; checked on 16:10 (3450×2160) and 16:9
   (1920×1080) screens, and `screen-check --fix` fits it to others.
 - Any launch monitor GSPro supports. Built and tested with a **Uneekor EYE XO2**; others record
@@ -176,8 +177,12 @@ beyond that is supported on paper but not yet run live:
   covered. A GSPro window smaller than the screen is only tested on saved screenshots.
 - **English and yards.** The screen and log reads expect GSPro's English labels, yards and mph.
   Metres or another language will likely misread.
-- **GSPro updates.** Built against 3.1.x. A release that moves the HUD or changes the log can
-  break reads until the code catches up; `screen-check` shows which boxes stopped reading.
+- **GSPro updates.** Built against 3.1.x. The 3.59 public beta (new menus and HUD, its log in
+  `Player.log`) is detected from the version GSPro logs, and the booth switches its log, setup
+  screen and HUD reads to match; it has been checked on recordings of one 3.59.11 session, not yet
+  run live. On the beta, `screen-check` still checks the 3.1 layout, and the `gspro_log` shot source
+  has no shot data (the beta logs no `LaunchExt Vars`). A release that moves the HUD or changes the
+  log can break reads until the code catches up; `screen-check` shows which boxes stopped reading.
 - **Windows only** for tracking and the booth. The stats page runs anywhere with Python.
 
 ## Quick start

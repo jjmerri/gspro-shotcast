@@ -113,6 +113,28 @@ DEFAULT_REGIONS = {
     "course_select": Region(left=0.012, top=0.095, width=0.13, height=0.05, aspect=HUD_ASPECT),
 }
 
+# GSPro 3.59 (public beta) redesigned the menus. Its in-round HUD, Play button and load screen still
+# fit DEFAULT_REGIONS, but the setup screens moved: these replace the defaults while the booth sees that GSPro (Screen.ui "new"),
+# unless the config sets the region itself. Measured on 1600x1002 captures of 3.59.11.
+_SLOT_X, _SLOT_Y = (0.050, 0.2845, 0.519, 0.7535), (0.212, 0.4815)
+NEW_UI_REGIONS = {
+    # A card's name pill sits in its coloured header bar; the box stops short of the chevron.
+    **{f"setup_slot_{row * 4 + col + 1}": Region(left=x, top=y, width=0.145, height=0.040, aspect=HUD_ASPECT)
+       for row, y in enumerate(_SLOT_Y) for col, x in enumerate(_SLOT_X)},
+    # The tabs (PLAYERS / MATCH / HOLES) mark the selected one with a blue underline, not a white
+    # pill: these boxes are just the underline's strip, read for blue (Tone.blue).
+    "setup_players_tab": Region(left=0.315, top=0.1345, width=0.110, height=0.005, aspect=HUD_ASPECT),
+    "setup_match_tab": Region(left=0.445, top=0.1345, width=0.110, height=0.005, aspect=HUD_ASPECT),
+    "setup_holes_tab": Region(left=0.575, top=0.1345, width=0.110, height=0.005, aspect=HUD_ASPECT),
+    # MATCH tab, ROUND panel: the Game Mode dropdown's value, short of its chevron.
+    "setup_game_mode": Region(left=0.155, top=0.280, width=0.115, height=0.030, aspect=HUD_ASPECT),
+    # HOLES tab: the FRONT and BACK checkboxes (white with a tick when checked, an outline when not).
+    "setup_front9_box": Region(left=0.077, top=0.348, width=0.012, height=0.018, aspect=HUD_ASPECT),
+    "setup_back9_box": Region(left=0.077, top=0.632, width=0.012, height=0.018, aspect=HUD_ASPECT),
+    # The course list's title is "LOCAL MATCH", top centre.
+    "course_select": Region(left=0.40, top=0.010, width=0.20, height=0.055, aspect=HUD_ASPECT),
+}
+
 
 class PersonaConfig(BaseModel):
     name: str

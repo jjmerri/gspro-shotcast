@@ -84,21 +84,23 @@ def read_kind(kind: str, screen, img: Image.Image) -> dict:
     if kind == "setup_players":
         filled = [s for s in SETUP_SLOTS if s in tones and e._slot_state(tones[s]) == "filled"]
         lines = screen.read_region_lines(filled, img) if filled else {}
-        return {"course": course, "players_tab": tones["setup_players_tab"].mean >= e._PLAYERS_TAB_LIT,
+        return {"course": course, "players_tab": e._tab_lit(tones["setup_players_tab"], e._PLAYERS_TAB_LIT),
                 "slots": [e._setup_slot_name(lines.get(s, [])) if s in filled else None for s in SETUP_SLOTS]}
     if kind == "setup_holes":
         f, b = (tones[n].light >= e._NINE_CHECKED for n in ("setup_front9_box", "setup_back9_box"))
-        return {"course": course, "holes_tab": tones["setup_holes_tab"].mean >= e._HOLES_TAB_LIT,
+        return {"course": course, "holes_tab": e._tab_lit(tones["setup_holes_tab"], e._HOLES_TAB_LIT),
                 "picked": [1, 18] if f and b else [1, 9] if f else [10, 9] if b else None}
     if kind == "setup_match":
         mode = " ".join(screen.read_region_lines(["setup_game_mode"], img).get("setup_game_mode", []))
-        return {"course": course, "match_tab": tones["setup_match_tab"].mean >= e._MATCH_TAB_LIT,
+        return {"course": course, "match_tab": e._tab_lit(tones["setup_match_tab"], e._MATCH_TAB_LIT),
                 "mode_read": bool(mode.strip()), "scramble": "SCRAMBLE" in mode.upper()}
     raise ValueError(f"unknown screen fixture kind {kind!r}")
 
 
 def save_screen(frame: Image.Image, screen, name: str, meta: dict, root: Path = ROOT, kind: str = "shot") -> Path:
-    regions = _regions(screen.cfg.regions)
+    # The regions as the booth reads them now (GSPro's new menus move the setup ones), so the fixture
+    # replays with them as plain config regions.
+    regions = {r: screen.region(r) or _regions(screen.cfg.regions)[r] for r in KIND_REGIONS[kind]}
     img = frame.convert("RGB")
     out = root / "screens" / name
     out.mkdir(parents=True, exist_ok=True)
@@ -210,12 +212,19 @@ def log_fixtures(root: Path = ROOT) -> list[Path]:
     return sorted(p.parent for p in (root / "logs").glob("*/expected.json"))
 
 
+def _kinds(kinds) -> set[str]:
+    out = set(kinds)
+    if "sound_material" in out:   # GSPro 3.59 names the landing only on the bounce's sound line
+        out.add("material")
+    return out
+
+
 def check_log(text: str, root: Path = ROOT) -> list[str]:
     """Line kinds every log fixture has but the live log's last round doesn't, and changed wording."""
     evs = parse_events("\n".join(last_round(text)))
-    kinds = {e.kind for e in evs}
+    kinds = _kinds(e.kind for e in evs)
     problems = [f"a GSPro log line changed wording: {e.display!r}" for e in evs if e.kind == "unparsed"][:5]
-    fixtures = [{e["kind"] for e in json.loads((p / "expected.json").read_text(encoding="utf-8"))}
+    fixtures = [_kinds(e["kind"] for e in json.loads((p / "expected.json").read_text(encoding="utf-8")))
                 for p in log_fixtures(root)]
     if fixtures:
         # Only kinds every round logs (a quit round has no "Round Is Complete", a dry one no splash).

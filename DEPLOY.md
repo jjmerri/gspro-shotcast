@@ -84,7 +84,7 @@ It only reads these; it never writes to them. Paths are GSPro's defaults; change
 | Source | Default path | Gives the booth |
 |---|---|---|
 | GSPconnect debug log (`source.type: connector_log`) | `C:\GSProV1\Core\GSPC\ConnectDebug.txt` | Ball and club data per shot from GSPconnect's built-in connectors (e.g. Uneekor) |
-| GSPro Unity log (`source.gspro_log_truth: true`) | `%USERPROFILE%\AppData\LocalLow\GSPro\GSPro\output_log.txt` | Authoritative strokes, penalties, resting-lie material, distance to pin, hole-outs, concessions, course and par |
+| GSPro Unity log (`source.gspro_log_truth: true`) | `%USERPROFILE%\AppData\LocalLow\GSPro\GSPro\output_log.txt` (the 3.59 beta writes `Player.log` in the same folder; the booth follows whichever GSPro is writing) | Authoritative strokes, penalties, resting-lie material, distance to pin, hole-outs, concessions, course and par |
 | GSPro course files (`source.gspro_courses_dirs`) | `C:\GSProV1\Courses` and `C:\GSProV1\Core\GSP\Courses` | Par, stroke index, tee yardages, altitude |
 | Screen (OCR + vision) | live framebuffer (`screen.capture: monitor`) | Who is up, HUD carry/total tiles, minimap lie and slope, the hole image for the hazard read |
 | GSPro's own DB | `%USERPROFILE%\AppData\LocalLow\GSPro\GSPro\GSPro.db` | GSPro's internal store. The booth does not read or write this; listed only so it is not mistaken for ours |

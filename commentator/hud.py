@@ -1,4 +1,4 @@
-"""Parses OCR of the GSPro HUD (release 3.1.x layout) into fields.
+"""Parses OCR of the GSPro HUD into fields: the 3.1.x layout, and the redesigned one from 3.59.
 
 Layout, as seen on GSPro 3.1.6.20:
 - player box (top left): name, "Shot N", distance to pin, elevation, and a red badge
@@ -6,6 +6,11 @@ Layout, as seen on GSPro 3.1.6.20:
 - hole box (top right): hole number square, course, "PAR 4", hole length.
 - data tiles (right edge): value above label, one or two columns, chosen by the player.
 - minimap header (lower right): the ball's current lie ("Fairway", "Rough", "Green"...).
+
+GSPro 3.59 (public beta) keeps the regions but changes what's in them: the player box is a name bar
+with the bare score ("Josh  E"), then distance to the pin, elevation, lie and a strip of shot numbers
+(1..par) with the current one in a white box and no "Shot N" text; the hole box is one line ("Hole 1
+Par 4 392 yds"); the handedness box says "RIGHT HAND"; the hole-out banner says "SCORE: 5".
 """
 
 import re
@@ -19,10 +24,14 @@ LIES = ("deep rough", "semi rough", "pine straw", "cart path", "waste area", "fa
         "fringe", "bunker", "sand", "tee", "water", "hazard", "out of bounds", "fescue", "native", "waste",
         "concrete", "trees")
 
-DISTANCE = re.compile(r"(\d+(?:\.\d+)?)\s*(m|yds?|ft)\b(?:\s*(\d+))?", re.IGNORECASE)
+# Inches (0-11) only after feet. No \b after the unit: 3.59 OCRs a putt's "28ft 1" as "28ft1", and can
+# lose the elevation arrow between them ("5ft 5 ▼0ft 0" as "5ft 50ft 0"), hence a single inch digit
+# when the next is the elevation's.
+DISTANCE = re.compile(r"(\d+(?:\.\d+)?)\s*(m|yds?|ft)(?![a-z])(?:(?<=ft)\s*(1[01]|\d)(?!\s*ft\b))?", re.IGNORECASE)
 SCORE = re.compile(r"\((E|[+-]\d+)\)")
 SHOT = re.compile(r"\bshot\s*(\d+)", re.IGNORECASE)
 PAR = re.compile(r"\bpar\s*(\d)", re.IGNORECASE)
+HOLE = re.compile(r"\bhole\s*(\d{1,2})\b", re.IGNORECASE)
 NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 
 
@@ -123,13 +132,18 @@ def parse_player_box(items: list[str]) -> dict:
         head = text[:m.start()] if (m := SHOT.search(text)) else text
         if (words := head.split()) and SCORE_BADGE.match(words[-1]):
             out["score_to_par"] = words[-1]
-        elif any(t.strip() == "E" for t in items):
-            out["score_to_par"] = "E"
+        elif badge := next((t.strip() for t in items if SCORE_BADGE.match(t.strip())), None):
+            out["score_to_par"] = badge  # 3.59: the bare score sits on the name bar
     # The first distance after "Shot N" is to the pin; the second is elevation.
     after_shot = text[m.end():] if (m := SHOT.search(text)) else text
     if d := DISTANCE.search(after_shot):
         out["to_pin"] = _fmt_distance(d)
     return out
+
+
+def _zero(text: str) -> str:
+    """3.59's "0ft 5" often OCRs as "Oft 5"."""
+    return re.sub(r"\bO(?=\s*(?:ft|yd|m\b|'))", "0", text)
 
 
 ELEVATION = re.compile(r"([▲▼]?)\s*(\d+(?:\.\d+)?)\s*(yds?|ft|in|'|m)?\s*(\d+)?", re.IGNORECASE)
@@ -141,7 +155,7 @@ def parse_elevation(text: str, metric: bool, arrow: str | None) -> float | None:
     OCR sometimes keeps the arrow glyph, which beats the pixel guess. Metric layouts show a bare
     number: whole numbers look like centimetres ("50" beside a "50cm" marker), decimals like metres.
     """
-    m = ELEVATION.search(text)
+    m = ELEVATION.search(_zero(text))
     if not m:
         return None
     glyph, value, unit, inches = m.group(1), float(m.group(2)), (m.group(3) or "").lower(), m.group(4)
@@ -183,6 +197,10 @@ def arrow_direction(region) -> str | None:
     top, bot = nz.min(), nz.max()
     cy = (w * np.arange(a.shape[0])[:, None]).sum() / w.sum()
     rel = (cy - top) / max(bot - top, 1)
+    if 0.4 <= rel <= 0.6:
+        # Blur spreads the centroid toward the middle; the widest row still sits by the base
+        # (3.59's ▼ on a 1600px frame: centroid at 0.44, widest row at 0.33-0.375).
+        rel = (int(rows.argmax()) - top) / max(bot - top, 1)
     return "up" if rel > 0.6 else "down" if rel < 0.4 else None
 
 
@@ -208,8 +226,12 @@ def parse_hole_box(items: list[str]) -> dict:
         out["par"] = int(m.group(1))
     if d := DISTANCE.search(text):
         out["hole_length"] = _fmt_distance(d)
+    if m := HOLE.search(text):
+        out["hole_number"] = int(m.group(1))
     for t in items:
         t = t.strip()
+        if HOLE.search(t):
+            continue
         if t.isdigit() and 1 <= int(t) <= 18 and not out.get("hole_number"):
             out["hole_number"] = int(t)
         elif re.search(r"[A-Za-z]{3}", t) and not PAR.search(t) and not DISTANCE.search(t):
@@ -228,7 +250,7 @@ CLUB_WORDS = [
 
 
 def parse_club(items: list[str]) -> dict:
-    """GSPro's club box ("Driver", "7 Iron", ...) and handedness box ("RH"/"LH")."""
+    """GSPro's club box ("Driver", "7 Iron", ...) and handedness box ("RH"/"LH", 3.59 "RIGHT HAND")."""
     text = " ".join(items).lower()
     out: dict = {}
     for pattern, code in CLUB_WORDS:
@@ -237,6 +259,8 @@ def parse_club(items: list[str]) -> dict:
             break
     if m := re.search(r"\b(rh|lh)\b", text):
         out["handed"] = m.group(1).upper()
+    elif m := re.search(r"\b(right|left)\s*hand", text):
+        out["handed"] = m.group(1)[0].upper() + "H"
     return out
 
 
@@ -264,15 +288,30 @@ SCORE_BANNERS: list[tuple[tuple[str, ...], str, int | None]] = [
 ]
 
 
-def parse_score_banner(items: list[str]) -> tuple[str, int | None] | None:
+SCORE_STROKES = re.compile(r"\bSCORE\s*:?\s*(\d{1,2})\b")
+
+
+def banner_for(strokes: int, par: int) -> tuple[str, int | None]:
+    """The named result for `strokes` on a par-`par` hole, as the 3.1 banner would have said it."""
+    if strokes == 1:
+        return "Ace", None
+    to_par = strokes - par
+    return next((label for _, label, tp in SCORE_BANNERS if tp == to_par), f"Score {strokes}"), to_par
+
+
+def parse_score_banner(items: list[str], par: int | None = None) -> tuple[str, int | None] | None:
     """The centre-screen hole-result banner: (label, strokes-relative-to-par), or None if no banner
     is up. OCR of a short all-caps word, so match on the joined text rather than word boundaries.
 
     GSPro's "For Birdie" banner shows "FOR BIRDIE"/"FOR BOGEY" before the shot and flashes the bare
-    result ("BIRDIE", "DBL BOGEY") only once the hole is done, so a "FOR" means it hasn't finished."""
+    result ("BIRDIE", "DBL BOGEY") only once the hole is done, so a "FOR" means it hasn't finished.
+    3.59 shows the strokes instead ("SCORE: 5"), named here from the hole's `par`."""
     text = " ".join(items).upper()
     if not text.strip() or re.search(r"\bFOR\b", text):
         return None
+    if m := SCORE_STROKES.search(text):
+        strokes = int(m.group(1))
+        return banner_for(strokes, par) if par else (f"Score {strokes}", None)
     for needles, label, to_par in SCORE_BANNERS:
         if any(n in text for n in needles):
             return label, to_par
@@ -316,6 +355,7 @@ def _rows(items: list[OcrItem]) -> list[list[OcrItem]]:
 
 
 SCORE_BADGE = re.compile(r"^(E|[+-]\d+)$")
+LIE_CELL = re.compile(r"(?:{0})(?:\s+(?:{0}))*".format("|".join(re.escape(lie) for lie in (*LIES, "deep"))))
 
 
 def parse_others(items: list[OcrItem]) -> list[OtherPlayer]:
@@ -325,13 +365,26 @@ def parse_others(items: list[OcrItem]) -> list[OtherPlayer]:
     this side of the screen (bare numbers over labels) out of the list.
     """
     out = []
+    pending: tuple[str, str | None] | None = None  # 3.59: name and score on one line, distance below
     for row in _rows(items):
         texts = [i.text.strip() for i in row]
         distance = DISTANCE.search(" ".join(texts))
-        name = next((t for t in texts if re.search(r"[A-Za-z]{2}", t) and not DISTANCE.search(t)), None)
+        names = [t for t in texts if re.search(r"[A-Za-z]{2}", t) and not DISTANCE.search(_zero(t))
+                 and not re.search(r"\d(st|nd|rd|th)\b|\bin for\b", t, re.I)]
+        # 3.59's distance line also names the lie ("Fairway", "Deep"): not a name under a name line.
+        # A whole cell of lie words only, so "Alex Green" (or a classic row's lone "Green") still counts.
+        name = next((t for t in names if not LIE_CELL.fullmatch(t.strip().lower())), None)
+        if name is None and names and not (distance and pending):
+            name = names[0]
+        score = next((t for t in texts if SCORE_BADGE.match(t)), None)
+        if name and not distance:
+            pending = (name, score)
+            continue
+        if distance and not name and pending:
+            name, score = pending[0], score or pending[1]
+        pending = None
         if not (distance and name):
             continue
-        score = next((t for t in texts if SCORE_BADGE.match(t)), None)
         out.append(OtherPlayer(name=name, to_pin=_fmt_distance(distance), score_to_par=score))
     return out
 

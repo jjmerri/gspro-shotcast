@@ -217,6 +217,7 @@ def cmd_calibrate(cfg: Config, args) -> None:
         print(" " * 60, end="\r")
     stem = args.out or "calibrate"
     screen = Screen(cfg.screen)
+    screen.ui = _log_ui(cfg)
     base = _load_image(args.image)
     out_dir = Path(cfg.log_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -227,6 +228,22 @@ def cmd_calibrate(cfg: Config, args) -> None:
     (base if base is not None else screen.grab()).save(raw)
     print(f"Saved {grid} (100px grid + current regions) and {raw} (clean). The grid labels give "
           f"pixel coords; divide by the image size for fractional regions.")
+
+
+def _log_ui(cfg: Config) -> str:
+    """The setup menus (Screen.ui) of the GSPro whose log is being written now, from the head of it."""
+    from .engine import gspro_ui
+    from .sources.gspro_log import live_log
+
+    path = live_log(cfg.source.gspro_log)
+    version = None
+    try:
+        with open(Path(path).expanduser(), "rb") as f:
+            head = f.read(200_000).decode("utf-8", "replace")
+        version = next((ln.split(":", 1)[1].strip() for ln in head.splitlines() if ln.startswith("GSPro Version:")), None)
+    except OSError:
+        pass
+    return gspro_ui(version, path)
 
 
 def cmd_fixture(cfg: Config, args) -> None:
@@ -249,15 +266,21 @@ def cmd_fixture(cfg: Config, args) -> None:
         if not frames:
             print("No saved frame: the booth saves one on each round's first full shot and on the scorecard "
                   "and setup tabs (or pass --image).")
-    text = None
+    text = log_path = None
     if not args.no_log:
         try:
-            text = Path(args.log or cfg.source.gspro_log).read_bytes().decode("utf-8", "replace")
+            from .sources.gspro_log import live_log
+
+            log_path = args.log or live_log(cfg.source.gspro_log)
+            text = Path(log_path).read_bytes().decode("utf-8", "replace")
         except OSError as e:
             print(f"Can't read GSPro's log: {e}")
     version = next((ln.split(":", 1)[1].strip() for ln in (text or "").splitlines()[:400]
                     if ln.startswith("GSPro Version:")), None)
+    from .engine import gspro_ui
+
     screen = Screen(cfg.screen)
+    screen.ui = gspro_ui(version, log_path) if text is not None else _log_ui(cfg)
     if args.action == "save":
         if not args.name:
             sys.exit("fixture save needs a NAME (e.g. 3.1.6.20-3450x2160)")
@@ -268,6 +291,8 @@ def cmd_fixture(cfg: Config, args) -> None:
             if side.exists():
                 meta = {**meta, **{k: v for k, v in json.loads(side.read_text()).items() if k in ("gspro_version", "course")}}
             name = args.name if kind == "shot" else f"{args.name}-{kind}"
+            if meta.get("gspro_version"):
+                screen.ui = gspro_ui(meta["gspro_version"])
             out = fixtures.save_screen(_load_image(image), screen, name, meta, kind=kind)
             print(f"Screen fixture ({kind}): {out}")
             print(json.dumps(json.loads((out / "fixture.json").read_text())["expected"], indent=1))
@@ -897,7 +922,8 @@ def main() -> None:
     p.add_argument("--image", help="A full-resolution frame (default: every log_dir/fixture-frame[-kind].png the booth saved)")
     p.add_argument("--kind", choices=["shot", "scorecard", "setup_players", "setup_holes", "setup_match"],
                    help="Screen kind: what --image shows, or the one saved frame to use (default: all saved)")
-    p.add_argument("--log", help="GSPro's output_log.txt (default: source.gspro_log)")
+    p.add_argument("--log", help="GSPro's output_log.txt or Player.log (default: whichever of them "
+                   "beside source.gspro_log GSPro wrote last)")
     p.add_argument("--no-screen", action="store_true", help="Skip the screen")
     p.add_argument("--no-log", action="store_true", help="Skip the log")
 
