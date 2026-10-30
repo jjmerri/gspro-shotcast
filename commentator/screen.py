@@ -145,6 +145,23 @@ class Screen:
             self.monitor = found
         return found
 
+    def gspro_showing(self) -> bool:
+        """GSPro's own (Unity) window is open and not minimized; a browser tab or folder with GSPro in
+        its title doesn't count. True off Windows or when the check fails, so a broken lookup never
+        hides the ON AIR badge."""
+        import sys
+
+        if sys.platform != "win32":
+            return True
+        try:
+            from . import winshot
+
+            info = winshot.window_info(self.cfg.window_title)
+        except Exception:
+            log.debug("Couldn't look for GSPro's window", exc_info=True)
+            return True
+        return bool(info) and info.get("game", False) and not info["minimized"]
+
     def _mon(self, sct) -> dict:
         return sct.monitors[self.monitor_index(sct.monitors)]
 

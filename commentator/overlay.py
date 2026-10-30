@@ -1,6 +1,7 @@
 """The ON AIR badge: a small always-on-top window over GSPro with a pulsing red dot. Clicking it takes
 the booth off air (and back on). Tk runs on its own thread; the click is handed to the booth's event
 loop, and the badge reads the booth's actual state so it never shows something the booth isn't doing.
+It hides while GSPro's window is closed or minimized.
 
 While the booth's health checks have an issue open (commentator/health.py), a "!" chip shows to the
 right of the badge: amber for a warning, red for a failure. Hover it for the list; right-click it to
@@ -56,9 +57,12 @@ class OnAirOverlay:
     def __init__(self, cfg: OverlayConfig, is_on: Callable[[], bool], toggle: Callable[[], None],
                  health_status: Callable[[], tuple[str | None, list[str]]] | None = None,
                  dismiss: Callable[[], None] | None = None,
-                 where: Callable[[], tuple[int, int, int, int]] | None = None) -> None:
+                 where: Callable[[], tuple[int, int, int, int]] | None = None,
+                 showing: Callable[[], bool] | None = None) -> None:
         self.cfg = cfg
         self.where = where        # (left, top, width, height) of GSPro's monitor; None: the primary
+        self.showing = showing    # GSPro's window is up; the badge hides while it isn't. None: always shown
+        self._visible = True
         self.is_on = is_on        # read on the Tk thread every frame; a bool read is safe
         self.toggle = toggle      # called on the Tk thread; must hand off to the booth's loop itself
         self.health_status = health_status   # thread-safe: (worst level or None, one line per issue)
@@ -86,6 +90,15 @@ class OnAirOverlay:
             log.debug("Couldn't find GSPro's monitor", exc_info=True)
             return None
 
+    def _gspro_up(self) -> bool:
+        if self.showing is None:
+            return True
+        try:
+            return bool(self.showing())
+        except Exception:
+            log.debug("Couldn't tell whether GSPro is open", exc_info=True)
+            return True
+
     def _build_and_loop(self) -> None:
         import tkinter as tk
 
@@ -94,6 +107,9 @@ class OnAirOverlay:
         # its interpreter to be freed on another thread, which aborts the process.
         root = tk.Tk()
         root.withdraw()
+        self._visible = self._gspro_up()
+        if not self._visible:
+            log.info("ON AIR badge hidden until GSPro's window is up")
         self._show(tk, root, self._monitor())
         root.mainloop()
 
@@ -129,11 +145,16 @@ class OnAirOverlay:
                 log.exception("ON AIR toggle failed")
 
         c.bind("<Button-1>", click)
-        chip = self._health_chip(tk, win, c, x, y, w, h) if cw else None
-        win.deiconify()
-        if sys.platform == "win32":
-            win.update_idletasks()
-            _no_activate(win)
+        chip, hide_tip = self._health_chip(tk, win, c, x, y, w, h) if cw else (None, None)
+
+        def reveal() -> None:
+            win.deiconify()
+            if sys.platform == "win32":
+                win.update_idletasks()
+                _no_activate(win)
+
+        if self._visible:
+            reveal()
 
         state = {"alive": True, "checked": time.monotonic()}
 
@@ -141,9 +162,20 @@ class OnAirOverlay:
             if not state["alive"]:
                 return
             now = time.monotonic()
-            if self.where is not None and now - state["checked"] >= MONITOR_EVERY_S:
+            if (self.where is not None or self.showing is not None) and now - state["checked"] >= MONITOR_EVERY_S:
                 state["checked"] = now
-                m = self._monitor()
+                up = self._gspro_up()
+                if up != self._visible:
+                    self._visible = up
+                    log.info("ON AIR badge %s", "shown: GSPro's window is up" if up
+                             else "hidden: GSPro's window is closed or minimized")
+                    if up:
+                        reveal()
+                    else:
+                        if hide_tip:
+                            hide_tip()
+                        win.withdraw()
+                m = self._monitor() if self.where is not None else None
                 if m is not None and m != mon:
                     state["alive"] = False   # this badge's callbacks stop; the new one has its own
                     win.destroy()
@@ -168,19 +200,22 @@ class OnAirOverlay:
             if not state["alive"]:
                 return
             # GSPro taking focus (or going fullscreen) can push it above a plain topmost window; re-assert.
-            if sys.platform == "win32":
-                _topmost(win)
-            else:
-                win.attributes("-topmost", True)
-                win.lift()
+            # Not while hidden: SWP_SHOWWINDOW would bring it back.
+            if self._visible:
+                if sys.platform == "win32":
+                    _topmost(win)
+                else:
+                    win.attributes("-topmost", True)
+                    win.lift()
             root.after(TOPMOST_EVERY_MS, stay_on_top)
 
         frame()
         stay_on_top()
         log.info("ON AIR overlay shown at %s,%s (%sx%s) on a %sx%s screen", x, y, w, h, sw, sh)
 
-    def _health_chip(self, tk, root, c, x: int, y: int, w: int, h: int) -> Callable[[], None]:
-        """Draw the (hidden) chip and its hover list; returns the per-frame updater."""
+    def _health_chip(self, tk, root, c, x: int, y: int, w: int, h: int
+                     ) -> tuple[Callable[[], None], Callable[[], None]]:
+        """Draw the (hidden) chip and its hover list; returns the per-frame updater and a hide for the list."""
         cx, cy, r = w + h * 0.6, h / 2, h * 0.42
         disc = c.create_oval(cx - r, cy - r, cx + r, cy + r, fill=AMBER, outline=PANEL_EDGE, state="hidden", tags="chip")
         mark = c.create_text(cx, cy, text="!", fill=PANEL, font=("Segoe UI", -round(h * 0.62), "bold"),
@@ -244,7 +279,7 @@ class OnAirOverlay:
             elif state["hover"]:
                 show()
 
-        return update
+        return update, hide
 
 
 def _rgb(hexcolor: str) -> tuple[int, int, int]:

@@ -181,7 +181,8 @@ async def cmd_run(cfg: Config, args) -> None:
                          lambda: engine.set_commentary(not engine.commentary_on)),
                      health_status=health.status if health else None,
                      dismiss=health.dismiss if health else None,
-                     where=engine.screen.monitor_rect if engine.screen and cfg.screen.follow_window else None).start()
+                     where=engine.screen.monitor_rect if engine.screen and cfg.screen.follow_window else None,
+                     showing=engine.screen.gspro_showing if engine.screen else None).start()
     await engine.run()
 
 

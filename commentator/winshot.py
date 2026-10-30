@@ -57,8 +57,9 @@ def find_window(substr: str) -> int | None:
 
 
 def window_info(substr: str) -> dict | None:
-    """The title and screen rectangle (left, top, right, bottom) of the window find_window picks, or
-    None when there isn't one (or not on Windows)."""
+    """The title, screen rectangle (left, top, right, bottom), minimized state and whether it's a Unity
+    game window ("game") of the window find_window picks, or None when there isn't one (or not on
+    Windows)."""
     hwnd = find_window(substr)
     if not hwnd:
         return None
@@ -67,8 +68,10 @@ def window_info(substr: str) -> dict | None:
     n = _user32.GetWindowTextLengthW(hwnd)
     buf = ctypes.create_unicode_buffer(n + 1)
     _user32.GetWindowTextW(hwnd, buf, n + 1)
+    cls = ctypes.create_unicode_buffer(64)
+    _user32.GetClassNameW(hwnd, cls, 64)
     return {"title": buf.value, "rect": (r.left, r.top, r.right, r.bottom),
-            "minimized": bool(_user32.IsIconic(hwnd))}
+            "minimized": bool(_user32.IsIconic(hwnd)), "game": cls.value == UNITY_CLASS}
 
 
 class _BMI(ctypes.Structure):

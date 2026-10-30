@@ -215,6 +215,7 @@ GSPro, in the top strip between the wind readout and the hole box. Click it to g
 booth stops talking at once and makes no model or voice calls, but keeps recording every shot and
 round. Click again to go back on air, mid-round included. It changes the running booth only;
 `commentary.enabled` still decides how the booth starts (starting off air, the badge can still put
-it on air if the API keys are set). It never takes focus from GSPro and stays on top of it. Move,
+it on air if the API keys are set). It never takes focus from GSPro and stays on top of it, on
+whichever monitor GSPro is on, and hides while GSPro is closed or minimized. Move,
 resize or hide it with the `overlay` section of the config. GSPro must be windowed or borderless,
 not exclusive fullscreen, for anything to draw over it.

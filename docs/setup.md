@@ -84,8 +84,8 @@ to an issue; they show player names, so look them over first.
 - **Players not picked up from the setup screen.** Those boxes adjust to the screen's shape too
   (checked on 16:10 and 16:9). Run `screen-check` with the Players tab up (and the Match
   Settings and Holes tabs), or `calibrate --out setup` to place the `setup_*` regions by hand.
-- **Nothing reads at all, or the ON AIR badge doesn't show.** GSPro must be windowed or
-  borderless, not exclusive fullscreen. The booth reads whichever monitor GSPro is on (with
+- **Nothing reads at all, or the ON AIR badge doesn't show.** The badge only shows while GSPro's
+  window is open and not minimized. GSPro must be windowed or borderless, not exclusive fullscreen. The booth reads whichever monitor GSPro is on (with
   `screen.follow_window: false`, or when GSPro's window can't be found, `screen.monitor`). A window
   over the HUD (the booth's own console, a notification, the taskbar) is read as part of it.
 - **Silence, or errors in the log about the model or voice.** Check the keys in `.env`

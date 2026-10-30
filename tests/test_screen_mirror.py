@@ -87,3 +87,35 @@ def test_the_screen_follows_gspro_to_its_monitor(monkeypatch):
     assert s.monitor_index(MONITORS) == 1
     assert Screen(ScreenConfig(follow_window=False, monitor=1)).monitor_index(MONITORS) == 1
     assert Screen(ScreenConfig(monitor=2)).monitor_index(MONITORS[:2]) == 1   # screen.monitor unplugged
+
+
+def test_the_on_air_badge_only_shows_while_gspro_is_up(monkeypatch):
+    from commentator import winshot
+    from commentator.config import OverlayConfig
+    from commentator.overlay import OnAirOverlay
+
+    monkeypatch.setattr("sys.platform", "win32")
+    window = {"title": "GSPro", "rect": (0, 0, 3840, 2160), "minimized": False, "game": True}
+    monkeypatch.setattr(winshot, "window_info", lambda title: window)
+    s = Screen(ScreenConfig())
+    assert s.gspro_showing()
+    window["game"] = False           # only a browser tab titled GSPro
+    assert not s.gspro_showing()
+    window["game"] = True
+    window["minimized"] = True
+    assert not s.gspro_showing()
+    window = None
+    assert not s.gspro_showing()
+
+    def broken(title):
+        raise OSError("no user32")
+
+    monkeypatch.setattr(winshot, "window_info", broken)
+    assert s.gspro_showing()            # a failed lookup never hides the badge
+
+    def badge(showing):
+        return OnAirOverlay(OverlayConfig(), is_on=lambda: True, toggle=lambda: None, showing=showing)
+
+    assert not badge(lambda: False)._gspro_up()
+    assert badge(None)._gspro_up()
+    assert badge(lambda: 1 / 0)._gspro_up()
