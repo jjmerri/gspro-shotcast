@@ -601,6 +601,9 @@ class Engine:
         # the green and feet on it. Kept apart from the distance, which switches to feet when the player
         # changes to putt mode, so a later read in feet can't hide a setup off the green.
         self._setup_yards: dict[tuple, bool] = {}
+        # (who, shot) -> id of that player's swing before it, at its setup: a mulligan replays a stroke
+        # that was set up, while one played before its setup settled leaves the HUD showing it a moment.
+        self._set_up: dict[tuple, int | None] = {}
         self._shot_seq = 0
         self._tree_called = 0   # the _shot_seq whose tree hit was called in flight
         # Hazard map and pre-written mid-flight lines from the latest pre-shot look.
@@ -1085,6 +1088,25 @@ class Engine:
         if "others" in rest:
             hud.others = extra.others
         player = self._player(hud.player_text, None)
+        if player and hud.shot_number:
+            swings = [x for x in self.state.shots if x.player == player]
+            stroke = (player, hud.shot_number)
+            if (last := self._replayed_swing(player, hud)) is None:
+                self._set_up[stroke] = id(swings[-1]) if swings else None
+                while len(self._set_up) > 32:
+                    del self._set_up[next(iter(self._set_up))]
+            elif stroke not in self._set_up or self._set_up[stroke] not in (
+                    id(last), id(swings[-2]) if len(swings) > 1 else None):
+                # The player hit this stroke before its setup settled (a quick putt), and the HUD still
+                # showed it as the ball rolled: it's been played, so it isn't a setup (nor a mulligan).
+                log.info("Setup dropped: %r already played stroke %s (a late read, not a mulligan)",
+                         self._display(player), hud.shot_number)
+                for task in (minimap_task, putt_task):
+                    if task is not None:
+                        task.cancel()
+                return
+            else:   # a mulligan, set up again: the stroke can be taken back again
+                self._set_up[stroke] = id(last)
         model_task = asyncio.create_task(self._preshot_model(hud, player, [image] if image else [], minimap_task,
                                                              putt_task))
         # If this setup is superseded before handle_preshot awaits the call, the task is orphaned;
@@ -2283,27 +2305,35 @@ class Engine:
         return [f"{self._display(player)} has found a bunker {len(seqs)} times this round{where}:{theme or ' worth a mention'}"
                 f"; bring it up now and then, not on every shot."]
 
+    def _replayed_swing(self, player: str | None, hud: Hud) -> ShotRecord | None:
+        """This player's last swing when this setup is for the same stroke, on the same hole, from the
+        same spot and lie: the swing was taken back (a mulligan), or the HUD hasn't moved on from it yet."""
+        if not player or not hud.shot_number:
+            return None
+        r = self.round if self.round and not self.round.ended else None
+        last = next((x for x in reversed(self.state.shots) if x.player == player), None)
+        if last is None or last.shot_number != hud.shot_number:
+            return None
+        same_hole = (last.round_id == r.id and last.hole_seq == r.seq) if r else last.hole == self.state.current_hole
+        # Where the swing was played from, not where it finished.
+        here, there = to_yards(hud.to_pin), to_yards(last.to_pin_before or last.hud.to_pin)
+        if not same_hole or here is None or there is None or abs(here - there) > max(1.0 if there < 30 else 3.0, there * 0.05):
+            return None
+        # A replay is from the same lie. Right after a scramble pick the HUD can still show the tee's
+        # stroke and distance while the lie already reads the picked ball's (fairway, sand): not a mulligan.
+        was, now = (last.lie_before or "").lower(), (hud.lie or "").lower()
+        if was and now and was != now:
+            return None
+        return last
+
     def _mulligan_facts(self, player: str | None, hud: Hud) -> list[str]:
         """A fact when the player is replaying their last swing (a mulligan). GSPro puts the ball back
         and the HUD back to the same stroke number, so a setup for the same stroke, from the same spot,
         as this player's last swing on this hole means that swing was taken back. Read off the HUD at
         the re-hit's setup because GSPro's log often says nothing about a mulligan until the re-hit has
         been played. Marks the HUD so the setup line is always voiced."""
-        if not player or not hud.shot_number:
-            return []
-        r = self.round if self.round and not self.round.ended else None
-        last = next((x for x in reversed(self.state.shots) if x.player == player), None)
-        if last is None or id(last) in self._mulligans_called or last.shot_number != hud.shot_number:
-            return []
-        same_hole = (last.round_id == r.id and last.hole_seq == r.seq) if r else last.hole == self.state.current_hole
-        # Where the taken-back swing was played from, not where it finished.
-        here, there = to_yards(hud.to_pin), to_yards(last.to_pin_before or last.hud.to_pin)
-        if not same_hole or here is None or there is None or abs(here - there) > max(1.0 if there < 30 else 3.0, there * 0.05):
-            return []
-        # A replay is from the same lie. Right after a scramble pick the HUD can still show the tee's
-        # stroke and distance while the lie already reads the picked ball's (fairway, sand): not a mulligan.
-        was, now = (last.lie_before or "").lower(), (hud.lie or "").lower()
-        if was and now and was != now:
+        last = self._replayed_swing(player, hud)
+        if last is None or id(last) in self._mulligans_called:
             return []
         self._mulligans_called.add(id(last))
         hud._mulligan = True

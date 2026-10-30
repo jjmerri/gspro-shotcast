@@ -3091,6 +3091,42 @@ async def test_emit_setup_ignores_the_finished_rounds_stale_hud(tmp_path):
     assert isinstance(await engine._events.get(), PreShotEvent)
 
 
+async def test_a_stroke_played_before_its_setup_settled_is_not_a_mulligan(tmp_path):
+    # Paul putted before his setup settled; the HUD still showed that stroke as the ball rolled, and the
+    # late read was called a mulligan ("Paul replays this 30-footer"). A stroke that was set up first
+    # and comes back is still a mulligan.
+    from commentator.round import Round
+    engine, _ = _setup_engine(tmp_path)
+    r = engine.round = Round(league=engine.league, gspro_players=["Toby"], course="X", scheduled_format=None,
+                             holes=18)
+
+    def swing(n):
+        engine.state.record_shot(ShotRecord("Toby", Shot(ball_speed=60, club="7I"), "Hole 1",
+                                            Hud(lie="green", to_pin="40 yards"), [], round_id=r.id,
+                                            hole_seq=r.seq, lie_before="rough", shot_number=n,
+                                            to_pin_before="40 yards"))
+
+    swing(3)
+    await engine._emit_setup(Hud(player_text="Toby 3rd (+1) Shot 3 40 YDS", shot_number=3, score_to_par="+1",
+                                 to_pin="40 yards"))
+    assert engine._events.empty()
+    await engine._emit_setup(Hud(player_text="Toby 3rd (+1) Shot 3 40 YDS", shot_number=3, score_to_par="+1",
+                                 to_pin="40.1 yards"))   # another read of it, the distance read a hair off
+    assert engine._events.empty()
+    hud = Hud(player_text="Toby 4th (+1) Shot 4 40 YDS", shot_number=4, score_to_par="+1", to_pin="40 yards")
+    await engine._emit_setup(hud)
+    await (await engine._events.get()).model_task
+    swing(4)
+    again = Hud(player_text="Toby 4th (+1) Shot 4 40 YDS", shot_number=4, score_to_par="+1", to_pin="40 yards")
+    await engine._emit_setup(again)
+    _, facts_text = await (await engine._events.get()).model_task
+    assert "mulligan" in facts_text and again._mulligan
+    swing(4)   # taken back again
+    await engine._emit_setup(Hud(player_text="Toby 4th (+1) Shot 4 40 YDS", shot_number=4, score_to_par="+1",
+                                 to_pin="40.1 yards"))
+    assert isinstance(await engine._events.get(), PreShotEvent)
+
+
 async def test_emit_setup_reads_others_and_opens_the_round_on_the_tee(tmp_path):
     engine, screen = _setup_engine(tmp_path)
     hud = Hud(player_text="Toby E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards")
