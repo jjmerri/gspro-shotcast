@@ -103,6 +103,47 @@ class Ui:
         else:
             self._fallback(text)
 
+    def code(self, text: str, code: str, after: str = "", title: str = TITLE) -> None:
+        """`text`, a code to pass on in big letters with a button that copies it (message boxes
+        can't be selected), then `after`."""
+        log.info("Notice: %s %s %s", text, code, after)
+        if self.ok:
+            self.call(lambda: self._code_box(text, code, after, title))
+        else:
+            self._fallback(f"{text} {code}\n\n{after}")
+
+    def _code_box(self, text: str, code: str, after: str, title: str) -> Any:
+        import tkinter as tk
+        from tkinter import ttk
+
+        w = tk.Toplevel(self.root)
+        w.title(title)
+        w.resizable(False, False)
+        w.attributes("-topmost", True)
+        f = ttk.Frame(w, padding=self.px(14))
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text=text, wraplength=self.px(380), justify="left").pack(anchor="w")
+        ttk.Label(f, text=code, font=("Consolas", 18, "bold")).pack(pady=self.px(10))
+        if after:
+            ttk.Label(f, text=after, wraplength=self.px(380), justify="left").pack(anchor="w")
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", pady=(self.px(12), 0))
+
+        def copy():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(code)
+            self.root.update()
+            copy_btn.configure(text="Copied")
+
+        ttk.Button(bar, text="OK", command=w.destroy).pack(side="right")
+        copy_btn = ttk.Button(bar, text="Copy code", command=copy)
+        copy_btn.pack(side="right", padx=self.px(6))
+        w.update_idletasks()
+        w.geometry(f"+{max(0, (w.winfo_screenwidth() - w.winfo_reqwidth()) // 2)}"
+                   f"+{max(0, (w.winfo_screenheight() - w.winfo_reqheight()) // 3)}")
+        w.focus_force()
+        return copy
+
     def error(self, text: str, title: str = TITLE) -> None:
         log.warning("Error shown: %s", text)
         if self.ok:

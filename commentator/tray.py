@@ -519,8 +519,9 @@ class Tray:
                     "code to pass on to whoever is helping you. Reports are deleted after two weeks."):
                 try:
                     code = report.show_code(report.upload(path, url))
-                    self.info(f"Sent. Your report code is {code}\n\nPass it on to whoever is helping you "
-                              f"(it's in the tray log too). The zip is also saved in {path.parent}.")
+                    self.ui.code("Sent. Your report code is:", code,
+                                 "Pass it on to whoever is helping you (it's in the tray log too). "
+                                 f"The zip is also saved in {path.parent}.")
                     return
                 except Exception as e:
                     log.exception("Sending the problem report failed")
