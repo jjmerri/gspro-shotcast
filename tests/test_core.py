@@ -1782,6 +1782,31 @@ def test_player_box_elevation_skips_only_the_lie_cell():
     assert Screen._elevation(img, items, metric=False) == 14 / 36
 
 
+def test_the_359_shot_box_is_read_as_the_strip_beside_it_says():
+    """At 3450 px the boxed "1" OCRs as "7" in some framings: the strip's next digit settles it."""
+    from PIL import Image
+
+    from commentator.config import ScreenConfig
+    from commentator.hud import OcrItem
+    from commentator.screen import Screen
+
+    img = Image.open("tests/fixtures/player_box_359_shot_strip.png").convert("RGB")   # Josh, tee, box on 1
+    items = [OcrItem("Josh", 116.75, 76, 64, 63), OcrItem("E", 666.5, 75, 54, 649),
+             OcrItem("332.0 yd", 129.75, 142, 40, 68), OcrItem("▼ 7.8yd", 265.25, 142.5, 39, 212),
+             OcrItem("Tee", 432.5, 141, 32, 404), OcrItem("1", 600, 140.25, 30, 591),
+             OcrItem("2 3 4", 669.75, 141, 36, 620)]
+    s = Screen(ScreenConfig())
+    reads = iter(["7", "1", "", "1"])
+    s.ocr_items = lambda crop: [OcrItem(next(reads), 10, 10, 10, 5)]
+    assert s._strip_shot(img, items) == 1
+    # Without the strip's other digits, the framings' most common read.
+    reads = iter(["7", "1", "", "1"])
+    assert s._strip_shot(img, items[:-1]) == 1
+    # Past par the strip runs to two digits: "10" left of the box means 11, not 2.
+    reads = iter(["1", "11", "11", "11"])
+    assert s._strip_shot(img, items[:-2] + [OcrItem("10", 560, 140, 30, 550)]) == 11
+
+
 def test_putt_elevation_is_spoken_in_inches_and_feet():
     from commentator.facts import elevation_facts
     from commentator.hud import Hud

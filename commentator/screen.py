@@ -133,6 +133,36 @@ def monitor_of(rect: tuple[int, int, int, int], monitors: list[dict]) -> int | N
                  and m["top"] <= cy < m["top"] + m["height"]), None)
 
 
+def _strip_neighbour(items: list[OcrItem], row: OcrItem, start: int, end: int) -> int | None:
+    """What 3.59's shot box (columns start..end) should hold, from the plain strip digits beside it
+    on the distance row: one less than the digit right of it, else one more than the digit left."""
+    after, before = None, None
+    for i in items:
+        if abs(i.y - row.y) > row.h or not re.fullmatch(r"[\d ]+", i.text.strip() or "x"):
+            continue
+        digits = i.text.split()
+        if i.left >= end - 2 and (after is None or i.left < after[0]):
+            after = (i.left, _strip_number(digits[0], first=True))
+        elif 2 * i.x - i.left <= start + 2 and (before is None or i.left > before[0]):
+            before = (i.left, _strip_number(digits[-1], first=False))
+    if after and after[1] is not None:
+        guess = after[1] - 1
+    elif before and before[1] is not None:
+        guess = before[1] + 1
+    else:
+        guess = None
+    return guess if guess and 0 < guess < 20 else None
+
+
+def _strip_number(token: str, first: bool) -> int | None:
+    """The strip number at the box's end of an OCR token: "7", "10", or digits run together
+    ("234", its first or last). None when it could be either ("12": twelve, or 1 and 2)."""
+    run = len(token) > 1 and all(int(b) == int(a) + 1 for a, b in zip(token, token[1:]))
+    if run:
+        return None if int(token) < 20 else int(token[0] if first else token[-1])
+    return int(token) if int(token) < 20 else None
+
+
 class Screen:
     def __init__(self, cfg: ScreenConfig) -> None:
         self.cfg = cfg
@@ -530,14 +560,22 @@ class Screen:
                         return None
                     tight = img.crop((start + 1, top + rows.min() + 1, x - 1, top + rows.max()))
                     loose = img.crop((start, top, x, top + band.shape[0]))
-                    # A lone digit is the detector's weak spot; no one framing reads every digit.
-                    for crop, scale, pad in ((tight, 1, 10), (tight, 2, 20), (loose, 2, x - start)):
+                    # A lone digit is the detector's weak spot; no one framing reads every digit (at
+                    # 3450 px a "1" read "7" as often as "1", and a neighbour creeps into "31" or
+                    # "14"). The strip counts up, so the plain digits beside the box say what it
+                    # should hold: a read that agrees wins, else the most common read.
+                    expect = _strip_neighbour(items, row, start, x)
+                    reads = []
+                    for crop, scale, pad in ((tight, 1, 10), (tight, 2, 20), (loose, 2, x - start),
+                                             (tight, 3, 30)):
                         crop = crop.resize((crop.width * scale, crop.height * scale))
                         crop = ImageOps.expand(crop, border=pad, fill=(255, 255, 255))
                         text = re.sub(r"[^0-9]", "", "".join(i.text for i in self.ocr_items(crop)))
                         if text and 0 < int(text) < 20:
-                            return int(text)
-                    return None
+                            if int(text) == expect:
+                                return expect
+                            reads.append(int(text))
+                    return max(reads, key=reads.count) if reads else None
                 start = None
         return None
 
