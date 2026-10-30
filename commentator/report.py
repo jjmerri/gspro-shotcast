@@ -239,7 +239,14 @@ def _build(cfg: Config, config_path: Path) -> Path:
 
         def add_file(name: str, p: Path, cap: int | None = None) -> None:
             if p.is_file():
-                if p.suffix.lower() in (".png", ".jpg", ".jpeg"):
+                if p.suffix.lower() == ".png":   # a 4K PNG is ~12 MB: too big to send round
+                    from PIL import Image
+
+                    buf = io.BytesIO()
+                    with Image.open(p) as img:
+                        img.convert("RGB").save(buf, format="JPEG", quality=85)
+                    z.writestr(name[:-4] + ".jpg", buf.getvalue())
+                elif p.suffix.lower() in (".jpg", ".jpeg"):
                     z.write(p, name)
                 else:
                     add_text(name, tail(p, cap) if cap else p.read_bytes())

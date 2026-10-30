@@ -57,7 +57,7 @@ def test_report_zips_logs_screens_and_maps_without_the_env(tmp_path, monkeypatch
         booth = z.read("logs/booth-2099-01-01.log").decode()
     assert ".env" not in names and not any(n.endswith(".env") for n in names)
     assert "sk-secret-value-123" not in booth and "<redacted>" in booth
-    assert {"config.yaml", "gspro/Player.log", "screens/fixture-frame.png", "minimaps/Pebble-03-no-pin.jpg",
+    assert {"config.yaml", "gspro/Player.log", "screens/fixture-frame.jpg", "minimaps/Pebble-03-no-pin.jpg",
             "logs/health.json"} <= names
     assert any(n.startswith("screens/report-frames/no-player-") and n.endswith(".jpg") for n in names)
     assert "OPENAI_API_KEY" in summary and "sk-secret" not in summary
