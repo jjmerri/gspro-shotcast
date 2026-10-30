@@ -364,7 +364,8 @@ class SourceConfig(BaseModel):
     # connector_log: follow GSPconnect's debug log (Uneekor and other built-in connectors). Falls
     #   back to gspro_log when that log doesn't exist.
     # gspro_log: read each shot from GSPro's own log. Works with any launch monitor; ball data only
-    #   (no club speed, path, face or strike location).
+    #   (no club speed, path, face or strike location). On GSPro 3.59 the numbers come from the shot
+    #   files GSPro saves once the ball stops, so there's no mid-flight call.
     # gspro_sniffer: capture Open Connect traffic on port 921 (third-party connectors; needs Npcap).
     type: Literal["connector_log", "gspro_log", "gspro_sniffer", "replay"] = "connector_log"
     connector_log: str = r"C:\GSProV1\Core\GSPC\ConnectDebug.txt"

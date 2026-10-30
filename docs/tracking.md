@@ -52,7 +52,11 @@ The shot feeds:
   ("GSPconnect skipped a shot" in the booth log).
 - **`gspro_log`**: reads each shot from GSPro's own log, which records the ball data GSPro
   played (`LaunchExt Vars: sp 138.37, el 15.21, ...`) whatever sent it. Its numbers matched the
-  Uneekor feed shot for shot, but it hasn't been run with other monitors yet. Use it if your
+  Uneekor feed shot for shot, but it hasn't been run with other monitors yet. GSPro 3.59 (the
+  public beta) logs the fire without the numbers; there the same numbers are read from the files
+  GSPro saves once the ball stops (`currentRound.dat`, or `GSPro.db`'s `LastShot` for practice),
+  3-13 s after impact. Those shots are recorded and reacted to as usual but get no mid-flight
+  call. Use it if your
   monitor's shots don't show up with `connector_log`. Carry is read as yards and speed as mph
   (checked with GSPro set to yards; metric is untested).
 - **`gspro_sniffer`**: captures the Open Connect traffic on GSPro's port 921, for third-party

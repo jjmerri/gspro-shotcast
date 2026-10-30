@@ -163,6 +163,10 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
 - `connector_log.py` tails GSPconnect's `ConnectDebug.txt` for the shot feed (the default).
 - `gspro_log_shots.py` the shot feed from GSPro's own log (`LaunchExt Vars` lines): any launch
   monitor, ball data only. `connector_log` falls back to it when `ConnectDebug.txt` is missing.
+  GSPro 3.59 logs only the fire, so there each fire waits for `gspro_files.py`: the shot GSPro saves
+  in `currentRound.dat` (every stroke of the round) or `GSPro.db`'s `LastShot` (practice) once the
+  ball stops. The source asks the booth for its impact snapshot (`on_impact`) half a second after
+  the fire, and the engine skips mid-flight calls for a shot that arrives after the ball is down.
 - `gspro_sniffer.py` sniffs GSPro Open Connect loopback (scapy, needs Npcap + admin).
 - `gspro_log.py` tails GSPro's `output_log.txt` into a live `GsproState` game-truth model,
   including each fire's ball position and minimap aim, and the hole list of a completed round.

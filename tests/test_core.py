@@ -1303,6 +1303,66 @@ async def test_flight_line_interrupts_and_beats_reaction(tmp_path):
     assert len(engine.flight_latencies) == 4
 
 
+@pytest.mark.parametrize("late, from_files", [(8, False), (1, True)])
+async def test_a_shot_delivered_after_the_ball_landed_gets_no_flight_call(tmp_path, late, from_files):
+    from commentator.models import ShotEvent
+
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.tts.console_simulate_duration = False
+    cfg.commentary.routine_comment_rate = 1.0
+    cfg.commentary.min_seconds_between_comments = 0
+    cfg.commentary.preshot_rate = 1.0
+
+    class PhaseLLM(LLMClient):
+        async def complete_json(self, system, user, schema, images=None):
+            kind = "flight" if user.startswith("IN FLIGHT") else "pre" if user.startswith("PRE-SHOT") else "after"
+            return LLMResult(text=json.dumps({"lines": [{"speaker": "pbp", "text": f"{kind} call"}]}))
+
+    class SavedAtRest:
+        """GSPro 3.59's saved shot: snapshotted in the air, delivered once the ball stopped."""
+        on_impact = None
+
+        def __init__(self, inner):
+            self.inner = inner
+
+        async def events(self):
+            async for ev in self.inner.events():
+                if isinstance(ev, ShotEvent):
+                    self.on_impact(ev)
+                    ev.impact_at -= late
+                    ev.landed = from_files
+                yield ev
+
+    llm = PhaseLLM(cfg.llm.live)
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"),
+                    source=SavedAtRest(ReplaySource("data/flight_test.jsonl", speed=1e6)), live_llm=llm,
+                    segment_llm=llm, speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0), await_preshot=True)
+    await engine.run()
+    said = [l.split(": ", 1)[1] for l in next(tmp_path.glob("transcript-*")).read_text().splitlines()]
+    assert "after call" in said and "flight call" not in said
+    assert engine.flight_latencies == []
+
+
+async def test_the_impact_snapshot_ends_the_setups_moment(tmp_path):
+    import dataclasses
+    from commentator.models import ShotEvent
+    from commentator.models import Shot
+    cfg = Config(log_dir=str(tmp_path))
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=ReplaySource("data/flight_test.jsonl"),
+                    live_llm=None, segment_llm=None, speech=None, rng=random.Random(0))
+    preshot = asyncio.create_task(asyncio.sleep(10))
+    engine._preshot_task, seq = preshot, engine._shot_seq
+    engine._capture_impact(ev := ShotEvent(shot=Shot()))
+    await asyncio.sleep(0)
+    assert preshot.cancelled() and engine._shot_seq == ev.impact_seq == seq + 1
+    # A ball struck before this one is handled: this one is superseded and stays behind it.
+    engine._capture_impact(newer := ShotEvent(shot=Shot()))
+    engine._preshot_task = asyncio.create_task(asyncio.sleep(10))
+    await engine.handle_shot(dataclasses.replace(ev, shot=Shot(ball_speed=120.0, vla=14.0, carry=180.0)))
+    assert engine._shot_seq == newer.impact_seq == seq + 2 and not engine._preshot_task.cancelled()
+    engine._preshot_task.cancel()
+
+
 async def test_a_reaction_written_after_a_newer_shot_was_hit_is_not_aired(tmp_path):
     cfg = Config(log_dir=str(tmp_path))
     cfg.tts.console_simulate_duration = False

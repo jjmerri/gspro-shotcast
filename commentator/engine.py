@@ -289,6 +289,9 @@ NEWS_TRIGGER_TAGS = {
 TREE_CALL_PENALTY = 15.0
 # How long after impact a tree hit is watched for (GSPro logs foliage hits within ~0.3 s of impact).
 TREE_CALL_WATCH_SECONDS = 3.0
+# A shot the feed delivers this long after impact (GSPro 3.59's saved shot, written once the ball
+# stops) gets no mid-flight call: the ball is down. A held GSPconnect-skipped shot is ~1.5 s late.
+FLIGHT_CALL_LATE_SECONDS = 3.0
 # How long after impact, outside a round, GSPro's log gets to say it played a shot (its "Shot Fired"
 # comes within about half a second): one it never logs was hit while GSPro couldn't take it.
 BANTER_WAIT_SECONDS = 40.0   # the most a routine shot's call waits for an aside on air to finish
@@ -846,7 +849,10 @@ class Engine:
                         self._cancel_preshot()
                         self._preshot_task = asyncio.create_task(self.handle_preshot(event))
                         if self.await_preshot:
-                            await self._preshot_task
+                            t = self._preshot_task
+                            await asyncio.wait({t})   # an impact capture may cancel it meanwhile
+                            if not t.cancelled() and t.exception() is not None:
+                                raise t.exception()
                     elif isinstance(event, RoundStartEvent):
                         await self.handle_round_start(event)
                     elif isinstance(event, ScorecardEvent):
@@ -3742,6 +3748,13 @@ class Engine:
     def _capture_impact(self, event: ShotEvent) -> None:
         event.impact_at = time.monotonic()
         event.impact_state = (self._impact_state(), *self._impact_hole())
+        # The ball's in the air now, though the shot comes later: the setup's moment and its pending
+        # lines are past (handle_shot reuses this count).
+        self._cancel_preshot()
+        self._shot_seq += 1
+        event.impact_seq = self._shot_seq
+        if self.speech is not None:
+            self.speech.drop_queued()
         # Read the screen now, while it still shows this shot's player, lie and tiles.
         if self.screen is not None and event.hud_hint is None:
             event.impact_read = asyncio.ensure_future(self._read_impact_hud("[held shot]"))
@@ -3764,18 +3777,29 @@ class Engine:
             return
         self._last_activity = time.monotonic()
         self._live_shot()
-        self._cancel_preshot()
+        # Counted at impact (_capture_impact) if the feed held it; superseded if a ball was struck since,
+        # and then it mustn't cancel or clear that newer shot's work.
+        counted = held is not None and event.impact_seq is not None
+        superseded = counted and event.impact_seq != self._shot_seq
+        if not superseded:
+            self._cancel_preshot()
         self._shot_id = None  # set once this shot is recorded; mid-flight lines come before that
         self._apply_log_corrections()
         shot = event.shot
-        self._shot_seq += 1
-        my_seq = self._shot_seq   # this shot's order, to keep concurrent handlers from reordering finish
-        tag = f"[shot {self._shot_seq}]"
-        if self.speech is not None:
+        if not counted:
+            self._shot_seq += 1
+        my_seq = event.impact_seq if counted else self._shot_seq   # this shot's order, to keep concurrent handlers from reordering finish
+        tag = f"[shot {my_seq}]"
+        if self.speech is not None and not superseded:
             self.speech.drop_queued()   # the ball's in the air: the last shot's calls are old news
         banter = self._banter_on()   # an aside plays on: no mid-flight calls over it
         if banter:
             log.info("%s an aside is on air: no mid-flight call", tag)
+        landed_already = event.landed or (held is not None
+                                          and time.monotonic() - impact > FLIGHT_CALL_LATE_SECONDS)
+        if landed_already:
+            log.info("%s arrived %.1fs after impact%s: the ball is down, no mid-flight call", tag,
+                     time.monotonic() - impact, " (from GSPro's shot files)" if event.landed else "")
         lag = f", {time.time() - event.logged_at:.2f}s after GSPconnect logged it" if event.logged_at else ""
         log.info("%s detected%s: club %s, ball %.1f mph, launch %s, start %.1f, spin %s @ axis %.1f, carry %.1f %s, putt=%s",
                  tag, lag, shot.club, shot.ball_speed or 0,
@@ -3789,14 +3813,15 @@ class Engine:
         # the (slow, under shot-animation load) impact OCR read. The line was voiced for this moment;
         # it must not wait on OCR. The impact read below still runs, for the reaction and learning.
         c = self.cfg.commentary
-        if c.in_flight and not shot.is_putt and self.speech is not None and self.commentary_on and not banter:
+        if c.in_flight and not shot.is_putt and self.speech is not None and self.commentary_on and not banter \
+                and not landed_already:
             tree_call = asyncio.create_task(self._tree_flight_call(fires0, impact, shot, my_seq, tag))
             tree_call.add_done_callback(lambda t: t.cancelled() or t.exception())
         flight_played = False
         plan = shot_plan = self.plan  # shot_plan survives the one-swing nulling below, for the reaction
         shot_plan_made_at = self._plan_made_at  # snapshot: the next player's pre-shot can rebind the live one
-        if c.in_flight and not banter and not shot.is_putt and (shot.carry or 0) >= c.min_flight_carry and plan \
-                and time.monotonic() - self._plan_made_at < 180 and not self._tree_hit_logged(fires0, impact, shot):
+        if c.in_flight and not banter and not landed_already and not shot.is_putt \
+                and (shot.carry or 0) >= c.min_flight_carry and plan and time.monotonic() - self._plan_made_at < 180 and not self._tree_hit_logged(fires0, impact, shot):
             carry0 = self._raw_yards(shot)
             factor0 = self.carry.factor(plan.lie, carry0, self.current_course, shot.vla, "lm")
             picked = pick_line(plan, replace(shot, carry=carry0, units="Yards"), plan.to_pin, factor0, plan.elevation_yards)
@@ -3860,7 +3885,7 @@ class Engine:
         flight_task = None
         plan, self.plan = self.plan, None  # a plan is good for one swing
         # Only the fallback here now: the fresh-plan line already played above, before this read.
-        if not flight_played and not banter and c.in_flight and not shot.is_putt and (shot.carry or 0) >= c.min_flight_carry:
+        if not flight_played and not banter and not landed_already and c.in_flight and not shot.is_putt and (shot.carry or 0) >= c.min_flight_carry:
             fresh = plan and time.monotonic() - self._plan_made_at < 180 and plan.player in (None, player)
             picked = pick_line(plan, projected, before.to_pin, factor, before.elevation_yards) if fresh else None
             if fresh and self._shot_wet(plan.player, since=impact) and plan.lines.get("water"):

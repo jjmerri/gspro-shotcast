@@ -25,7 +25,7 @@ QUIET_SECONDS = 30.0
 MISSED_AFTER = 2.0      # a log shot GSPconnect hasn't sent by now, it skipped (both feeds see a shot within a second)
 SAME_SPEED = 0.05       # mph: the log rounds ball speed to two decimals
 CAPTURE_AFTER = 0.5     # a held shot's impact state is taken this soon: the ball is still in the air
-MATCH_WINDOW = 30.0     # how far apart the two copies of one shot can arrive
+MATCH_WINDOW = 60.0     # how far apart the two copies of one shot can arrive (3.59's comes when the ball stops)
 
 
 def _speed(ev) -> float | None:
@@ -61,11 +61,23 @@ class ConnectorWithLogFallback(ShotSource):
                 log.exception("The %s shot feed failed", name)
             await queue.put((name, None))
 
+        sent: list[tuple[float, float]] = []       # GSPconnect shots whose log copy hasn't come yet
+
+        def log_impact(ev) -> None:
+            # GSPro 3.59's log copy is saved once the ball stops, so its source asks for the impact
+            # snapshot while the ball's in the air. GSPconnect has normally sent the shot by then:
+            # the booth is already reading it, so only take one when GSPconnect hasn't.
+            now = time.monotonic()
+            if self.on_impact is not None and not (self.connector_live() and any(
+                    now - t < self.missed_after for t, _ in sent)):
+                self.on_impact(ev)
+        if hasattr(self.gspro_log, "on_impact"):
+            self.gspro_log.on_impact = log_impact
+
         tasks = [asyncio.create_task(pump("connector", self.connector), name="feed-connector"),
                  asyncio.create_task(pump("gspro_log", self.gspro_log), name="feed-gspro-log")]
         done = 0
         # Each physical shot reaches both feeds; copies are paired one to one, oldest first.
-        sent: list[tuple[float, float]] = []       # GSPconnect shots whose log copy hasn't come yet
         filled: list[tuple[float, float]] = []     # log shots aired as skipped, in case GSPconnect was just late
         held: list[list] = []                      # [arrived, event, captured]: log shots GSPconnect should send
 
@@ -126,13 +138,16 @@ class ConnectorWithLogFallback(ShotSource):
                                 ev.impact_at = twin[1].impact_at
                                 ev.impact_state = twin[1].impact_state
                                 ev.impact_read = twin[1].impact_read
+                                ev.impact_seq = twin[1].impact_seq
                         else:
                             sent.append((now, speed))
                     yield ev
                 elif self.connector_live():
                     # GSPconnect normally has this shot too, with club data; hold it in case it doesn't.
                     if isinstance(ev, ShotEvent) and not take(sent, _speed(ev), now):
-                        held.append([now, ev, False])
+                        # A copy that comes late (GSPro 3.59's, once the ball stops) has its impact
+                        # snapshot already and is held from impact, not from when it came.
+                        held.append([ev.impact_at, ev, True] if ev.impact_at is not None else [now, ev, False])
                     continue
                 else:
                     if not self.using_log:

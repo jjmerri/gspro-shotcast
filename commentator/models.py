@@ -134,6 +134,8 @@ class ShotEvent:
     impact_at: float | None = None
     impact_state: Any = None
     impact_read: Any = None     # the booth's screen read at impact (a task)
+    impact_seq: int | None = None   # the booth's shot count it took at impact
+    landed: bool = False        # the feed only had it once the ball came to rest (GSPro 3.59's shot files)
     # When the booth took it off the feed (monotonic) and GSPro's "Shot Fired" count then: the shot
     # may queue behind other events before it's handled.
     received_at: float | None = None
