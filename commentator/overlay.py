@@ -31,6 +31,7 @@ ON_TEXT = "#ffffff"
 FRAME_MS = 40
 PULSE_SECONDS = 1.6
 TOPMOST_EVERY_MS = 1000
+MONITOR_EVERY_S = 3.0    # how often to check GSPro hasn't moved to another monitor
 
 
 def _mix(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> str:
@@ -54,8 +55,10 @@ def badge_geometry(cfg: OverlayConfig, sw: int, sh: int) -> tuple[int, int, int,
 class OnAirOverlay:
     def __init__(self, cfg: OverlayConfig, is_on: Callable[[], bool], toggle: Callable[[], None],
                  health_status: Callable[[], tuple[str | None, list[str]]] | None = None,
-                 dismiss: Callable[[], None] | None = None) -> None:
+                 dismiss: Callable[[], None] | None = None,
+                 where: Callable[[], tuple[int, int, int, int]] | None = None) -> None:
         self.cfg = cfg
+        self.where = where        # (left, top, width, height) of GSPro's monitor; None: the primary
         self.is_on = is_on        # read on the Tk thread every frame; a bool read is safe
         self.toggle = toggle      # called on the Tk thread; must hand off to the booth's loop itself
         self.health_status = health_status   # thread-safe: (worst level or None, one line per issue)
@@ -74,22 +77,42 @@ class OnAirOverlay:
         except Exception:
             log.exception("ON AIR overlay failed; the booth carries on without it")
 
+    def _monitor(self) -> tuple[int, int, int, int] | None:
+        if self.where is None:
+            return None
+        try:
+            return self.where()
+        except Exception:
+            log.debug("Couldn't find GSPro's monitor", exc_info=True)
+            return None
+
     def _build_and_loop(self) -> None:
         import tkinter as tk
 
+        # One root for the thread's life, never shown: the badge is a window under it, rebuilt on the
+        # new monitor when GSPro moves (it may be another size). Replacing the root itself would leave
+        # its interpreter to be freed on another thread, which aborts the process.
         root = tk.Tk()
         root.withdraw()
-        root.overrideredirect(True)
-        root.attributes("-topmost", True)
+        self._show(tk, root, self._monitor())
+        root.mainloop()
+
+    def _show(self, tk, root, mon: tuple[int, int, int, int] | None) -> None:
+        """Show the badge on `mon` (None: the primary screen); it moves itself when GSPro does."""
+        win = tk.Toplevel(root)
+        win.withdraw()
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
         if sys.platform == "win32":
-            root.attributes("-transparentcolor", KEY)
-        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+            win.attributes("-transparentcolor", KEY)
+        left, top, sw, sh = mon or (0, 0, root.winfo_screenwidth(), root.winfo_screenheight())
         x, y, w, h = badge_geometry(self.cfg, sw, sh)
+        x, y = x + left, y + top
         r = h * 0.26                              # dot radius
         font = ("Segoe UI", -round(h * 0.5), "bold")
         cw = round(h * 1.15) if self.health_status else 0     # room for the health chip, see-through when clear
-        root.geometry(f"{w + cw}x{h}+{x}+{y}")
-        c = tk.Canvas(root, width=w + cw, height=h, bg=KEY, highlightthickness=0, cursor="hand2")
+        win.geometry(f"{w + cw}x{h}+{x}+{y}")
+        c = tk.Canvas(win, width=w + cw, height=h, bg=KEY, highlightthickness=0, cursor="hand2")
         c.pack()
         _pill(c, 1, 1, w - 2, h - 2, fill=PANEL, outline=PANEL_EDGE)
         cx, cy = h * 0.55, h / 2
@@ -106,13 +129,26 @@ class OnAirOverlay:
                 log.exception("ON AIR toggle failed")
 
         c.bind("<Button-1>", click)
-        chip = self._health_chip(tk, root, c, x, y, w, h) if cw else None
-        root.deiconify()
+        chip = self._health_chip(tk, win, c, x, y, w, h) if cw else None
+        win.deiconify()
         if sys.platform == "win32":
-            root.update_idletasks()
-            _no_activate(root)
+            win.update_idletasks()
+            _no_activate(win)
+
+        state = {"alive": True, "checked": time.monotonic()}
 
         def frame() -> None:
+            if not state["alive"]:
+                return
+            now = time.monotonic()
+            if self.where is not None and now - state["checked"] >= MONITOR_EVERY_S:
+                state["checked"] = now
+                m = self._monitor()
+                if m is not None and m != mon:
+                    state["alive"] = False   # this badge's callbacks stop; the new one has its own
+                    win.destroy()
+                    self._show(tk, root, m)
+                    return
             if self.is_on():
                 t = pulse(time.monotonic())
                 c.itemconfigure(dot, fill=_mix(RED_DIM, RED, 0.35 + 0.65 * t))
@@ -129,18 +165,19 @@ class OnAirOverlay:
             root.after(FRAME_MS, frame)
 
         def stay_on_top() -> None:
+            if not state["alive"]:
+                return
             # GSPro taking focus (or going fullscreen) can push it above a plain topmost window; re-assert.
             if sys.platform == "win32":
-                _topmost(root)
+                _topmost(win)
             else:
-                root.attributes("-topmost", True)
-                root.lift()
+                win.attributes("-topmost", True)
+                win.lift()
             root.after(TOPMOST_EVERY_MS, stay_on_top)
 
         frame()
         stay_on_top()
         log.info("ON AIR overlay shown at %s,%s (%sx%s) on a %sx%s screen", x, y, w, h, sw, sh)
-        root.mainloop()
 
     def _health_chip(self, tk, root, c, x: int, y: int, w: int, h: int) -> Callable[[], None]:
         """Draw the (hidden) chip and its hover list; returns the per-frame updater."""

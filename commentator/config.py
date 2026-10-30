@@ -271,6 +271,9 @@ class TTSConfig(BaseModel):
 
 
 class ScreenConfig(BaseModel):
+    # Read the monitor GSPro's window is on, rechecked every few seconds; `monitor` (1 = the primary)
+    # is used when GSPro's window can't be found (not running, minimized) or with this off.
+    follow_window: bool = True
     monitor: int = 1
     # "monitor" grabs the framebuffer and never touches GSPro's render path; "window" captures
     # GSPro's own window via PrintWindow so a popup in front can't corrupt the read, but it forces

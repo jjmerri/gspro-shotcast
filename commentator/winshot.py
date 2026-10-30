@@ -18,17 +18,24 @@ PW_RENDERFULLCONTENT = 2
 try:
     _user32 = ctypes.windll.user32
     _gdi32 = ctypes.windll.gdi32
-    _user32.SetProcessDPIAware()
+    try:   # per-monitor, as the overlay asks: whichever sets it first wins, so they must agree
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except (AttributeError, OSError):
+        _user32.SetProcessDPIAware()
     _AVAILABLE = True
 except (AttributeError, OSError):
     _AVAILABLE = False
 
 
+UNITY_CLASS = "UnityWndClass"   # GSPro's own window, not a folder or browser tab with GSPro in its title
+
+
 def find_window(substr: str) -> int | None:
-    """The handle of the largest visible window whose title contains `substr`, or None."""
+    """The handle of the visible window whose title contains `substr`: a Unity game window first, then
+    the largest. None if there isn't one."""
     if not _AVAILABLE:
         return None
-    matches: list[tuple[int, int]] = []
+    matches: list[tuple[int, tuple[bool, int]]] = []
 
     @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     def visit(hwnd, _):
@@ -40,7 +47,9 @@ def find_window(substr: str) -> int | None:
                 if substr.lower() in buf.value.lower():
                     r = wintypes.RECT()
                     _user32.GetWindowRect(hwnd, ctypes.byref(r))
-                    matches.append((hwnd, (r.right - r.left) * (r.bottom - r.top)))
+                    cls = ctypes.create_unicode_buffer(64)
+                    _user32.GetClassNameW(hwnd, cls, 64)
+                    matches.append((hwnd, (cls.value == UNITY_CLASS, (r.right - r.left) * (r.bottom - r.top))))
         return True
 
     _user32.EnumWindows(visit, 0)

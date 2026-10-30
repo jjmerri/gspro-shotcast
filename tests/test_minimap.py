@@ -931,7 +931,7 @@ async def test_a_minimap_without_a_pin_leaves_the_screen_for_a_problem_report(tm
 
     engine, _ = _engine(tmp_path)
     engine.cfg.source.type = "connector_log"
-    engine.screen = SimpleNamespace(detect_mirror=lambda: None, region=lambda name: None,
+    engine.screen = SimpleNamespace(detect_mirror=lambda: None, region=lambda name: None, monitor=1,
                                     grab=lambda region=None: Image.new("RGB", (460, 836), (80, 105, 40)))
     engine.round = SimpleNamespace(ended=False, course="Pebble")
     engine.hole_number = 3

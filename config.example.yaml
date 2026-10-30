@@ -124,6 +124,7 @@ booking:
   schedule_days: 14       # with publish on: the stats page's Schedule tab, this many days ahead; 0: none
 
 screen:
+  follow_window: true        # read whichever monitor GSPro is on (monitor: below when it can't be found)
   monitor: 1
   capture: monitor           # framebuffer grab (never stalls GSPro). "window" is occlusion-proof
   window_title: GSPro        # but forces a synchronous render each grab and can freeze the game

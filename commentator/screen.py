@@ -1,6 +1,7 @@
 import asyncio
 import io
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -93,6 +94,17 @@ def _slope_bar(img: Image.Image) -> bool:
     return teal and (spread > 35 or spread < 6)
 
 
+FOLLOW_SECONDS = 3.0   # how often to look again for the monitor GSPro's window is on
+
+
+def monitor_of(rect: tuple[int, int, int, int], monitors: list[dict]) -> int | None:
+    """The index into mss's monitors (1 up; 0 is the whole desktop) of the one holding the centre of
+    `rect` (left, top, right, bottom), or None when it's on none of them."""
+    cx, cy = (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
+    return next((i for i, m in enumerate(monitors) if i and m["left"] <= cx < m["left"] + m["width"]
+                 and m["top"] <= cy < m["top"] + m["height"]), None)
+
+
 class Screen:
     def __init__(self, cfg: ScreenConfig) -> None:
         self.cfg = cfg
@@ -100,6 +112,49 @@ class Screen:
         self.last_read_seconds = 0.0
         self.last_capture_seconds = 0.0
         self.mirrored = False   # the current player's HUD is in GSPro's lefty layout (see MIRRORED)
+        self.monitor = cfg.monitor   # the monitor read last (follow_window moves it to GSPro's)
+        self._monitor_at = -1e9
+        self._monitor_lock = threading.Lock()
+
+    def monitor_index(self, monitors: list[dict]) -> int:
+        """The mss monitor to read: the one GSPro's window is on (looked up every few seconds), else
+        screen.monitor. Called from worker threads and the overlay's."""
+        if not self.cfg.follow_window:
+            return self.cfg.monitor
+        now = time.monotonic()
+        with self._monitor_lock:
+            if now - self._monitor_at < FOLLOW_SECONDS and self.monitor < len(monitors):
+                return self.monitor
+            self._monitor_at = now
+        found, why = None, "screen.monitor: GSPro's window isn't up"
+        try:
+            from . import winshot
+
+            info = winshot.window_info(self.cfg.window_title)
+            if info and info["minimized"] and self.monitor < len(monitors):
+                return self.monitor   # it comes back where it was
+            if info:
+                found, why = monitor_of(info["rect"], monitors), "GSPro's window is on it"
+        except Exception:
+            log.debug("Couldn't look for GSPro's window", exc_info=True)
+        if found is None or found >= len(monitors):
+            found = self.cfg.monitor if self.cfg.monitor < len(monitors) else 1
+        with self._monitor_lock:
+            if found != self.monitor:
+                log.info("Reading monitor %s (%s)", found, why)
+            self.monitor = found
+        return found
+
+    def _mon(self, sct) -> dict:
+        return sct.monitors[self.monitor_index(sct.monitors)]
+
+    def monitor_rect(self) -> tuple[int, int, int, int]:
+        """(left, top, width, height) of the monitor being read, in desktop pixels."""
+        import mss
+
+        with mss.mss() as sct:
+            m = self._mon(sct)
+            return m["left"], m["top"], m["width"], m["height"]
 
     def detect_mirror(self, base: "Image.Image | None" = None) -> bool:
         """Check which side the minimap is on, from `base` (a full frame) or two tiny grabs. Runs on
@@ -154,14 +209,14 @@ class Screen:
 
         # mss handles aren't thread-safe, and these calls run in worker threads.
         with mss.mss() as sct:
-            raw = sct.grab(sct.monitors[self.cfg.monitor])
+            raw = sct.grab(self._mon(sct))
             return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
 
     def monitor_size(self) -> tuple[int, int]:
         import mss
 
         with mss.mss() as sct:
-            mon = sct.monitors[self.cfg.monitor]
+            mon = self._mon(sct)
             return mon["width"], mon["height"]
 
     def grab(self, region: Region | None = None) -> Image.Image:
@@ -171,7 +226,7 @@ class Screen:
             import mss
 
             with mss.mss() as sct:
-                mon = sct.monitors[self.cfg.monitor]
+                mon = self._mon(sct)
                 left, top, width, height = region.to_pixels(mon["width"], mon["height"])
                 box = {"left": mon["left"] + left, "top": mon["top"] + top, "width": width, "height": height}
                 raw = sct.grab(box)
@@ -186,7 +241,7 @@ class Screen:
 
         out = []
         with mss.mss() as sct:
-            mon = sct.monitors[self.cfg.monitor]
+            mon = self._mon(sct)
             left, top, width, height = region.to_pixels(mon["width"], mon["height"])
             box = {"left": mon["left"] + left, "top": mon["top"] + top, "width": width, "height": height}
             for i in range(frames):

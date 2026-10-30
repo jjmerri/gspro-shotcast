@@ -85,7 +85,8 @@ to an issue; they show player names, so look them over first.
   (checked on 16:10 and 16:9). Run `screen-check` with the Players tab up (and the Match
   Settings and Holes tabs), or `calibrate --out setup` to place the `setup_*` regions by hand.
 - **Nothing reads at all, or the ON AIR badge doesn't show.** GSPro must be windowed or
-  borderless, not exclusive fullscreen, and on the primary monitor (`screen.monitor`). A window
+  borderless, not exclusive fullscreen. The booth reads whichever monitor GSPro is on (with
+  `screen.follow_window: false`, or when GSPro's window can't be found, `screen.monitor`). A window
   over the HUD (the booth's own console, a notification, the taskbar) is read as part of it.
 - **Silence, or errors in the log about the model or voice.** Check the keys in `.env`
   (`check` tries the text models, `say` the voices). A bad key or an outage makes the booth go

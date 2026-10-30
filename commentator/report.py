@@ -121,11 +121,14 @@ def _describe(path: Path) -> str:
 
 def screen_layout(cfg: Config) -> list[str]:
     """The monitors, the one the booth reads, and where GSPro's window is."""
-    lines = [f"screen.capture: {cfg.screen.capture}   screen.monitor: {cfg.screen.monitor}"
-             f"   screen.window_title: {cfg.screen.window_title!r}   screen.ocr: {cfg.screen.ocr}"]
+    from .screen import monitor_of
+
+    lines = [f"screen.capture: {cfg.screen.capture}   screen.follow_window: {cfg.screen.follow_window}"
+             f"   screen.monitor: {cfg.screen.monitor}   screen.window_title: {cfg.screen.window_title!r}"
+             f"   screen.ocr: {cfg.screen.ocr}"]
     window = None
     try:
-        from . import winshot   # first: it makes the process DPI-aware, so both report real pixels
+        from . import winshot
 
         window = winshot.window_info(cfg.screen.window_title)
     except Exception as e:
@@ -138,23 +141,22 @@ def screen_layout(cfg: Config) -> list[str]:
             monitors = list(sct.monitors)
     except Exception as e:
         lines.append(f"Monitors: couldn't list them ({e!r})")
+    on = monitor_of(window["rect"], monitors) if window else None
+    reads = on if cfg.screen.follow_window and on is not None else cfg.screen.monitor
     for i, m in enumerate(monitors):
         if i:
-            tag = " <- the booth reads this one" if i == cfg.screen.monitor and cfg.screen.capture == "monitor" else ""
+            tag = " <- the booth reads this one" if i == reads else ""
             lines.append(f"Monitor {i}: {m['width']}x{m['height']} at ({m['left']}, {m['top']}){tag}")
-    if monitors and cfg.screen.monitor >= len(monitors):
-        lines.append(f"!! screen.monitor is {cfg.screen.monitor} but there are only {len(monitors) - 1} monitors")
+    if monitors and reads >= len(monitors):
+        lines.append(f"!! screen.monitor is {reads} but there are only {len(monitors) - 1} monitors")
     if window is None:
         lines.append(f"GSPro window: none found with {cfg.screen.window_title!r} in its title (not running?)")
     else:
         left, top, right, bottom = window["rect"]
-        cx, cy = (left + right) // 2, (top + bottom) // 2
-        on = next((i for i, m in enumerate(monitors) if i and m["left"] <= cx < m["left"] + m["width"]
-                   and m["top"] <= cy < m["top"] + m["height"]), None)
         lines.append(f"GSPro window: {window['title']!r} {right - left}x{bottom - top} at ({left}, {top})"
                      f"{' MINIMIZED' if window['minimized'] else ''}, on monitor {on}")
-        if cfg.screen.capture == "monitor" and on is not None and on != cfg.screen.monitor:
-            lines.append(f"!! GSPro is on monitor {on} but the booth reads monitor {cfg.screen.monitor}")
+        if on is not None and on != reads:
+            lines.append(f"!! GSPro is on monitor {on} but the booth reads monitor {reads}")
     return lines
 
 

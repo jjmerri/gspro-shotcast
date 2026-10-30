@@ -7123,7 +7123,7 @@ class Engine:
             return
         self._fixture_saved_at[key] = now
         meta = {"gspro_version": self.gspro.version, "course": self.round.course if self.round else None,
-                "hole": self.hole_number, "monitor": self.cfg.screen.monitor,
+                "hole": self.hole_number, "monitor": self.screen.monitor,
                 "capture": self.cfg.screen.capture, **meta}
 
         def save() -> None:

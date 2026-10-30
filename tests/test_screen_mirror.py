@@ -53,3 +53,37 @@ def test_a_frame_without_the_slope_bar_keeps_the_last_layout():
     s.detect_mirror(_frame(mirrored=True))
     assert s.detect_mirror(_frame(bar=False)) is True
     assert s.detect_mirror(Image.new("RGB", (1600, 1000), (0, 0, 0))) is True
+
+
+MONITORS = [{"left": -1920, "top": 0, "width": 5760, "height": 2160},      # 0: the whole desktop
+            {"left": 0, "top": 0, "width": 3840, "height": 2160},
+            {"left": -1920, "top": 0, "width": 1920, "height": 1080}]
+
+
+def test_monitor_of_finds_the_monitor_holding_the_windows_centre():
+    from commentator.screen import monitor_of
+
+    assert monitor_of((-1920, 0, 0, 1080), MONITORS) == 2
+    assert monitor_of((0, 0, 3840, 2160), MONITORS) == 1
+    assert monitor_of((9000, 0, 9100, 100), MONITORS) is None
+
+
+def test_the_screen_follows_gspro_to_its_monitor(monkeypatch):
+    from commentator import screen as screen_mod, winshot
+
+    window = {"title": "GSPro", "rect": (-1920, 0, 0, 1080), "minimized": False}
+    monkeypatch.setattr(winshot, "window_info", lambda title: window)
+    clock = [100.0]
+    monkeypatch.setattr(screen_mod.time, "monotonic", lambda: clock[0])
+    s = Screen(ScreenConfig())
+    assert s.monitor_index(MONITORS) == 2
+    window["minimized"] = True       # minimized: stays where GSPro was
+    clock[0] += 10
+    assert s.monitor_index(MONITORS) == 2
+    assert s.monitor_index(MONITORS[:2]) == 1   # its monitor unplugged while minimized
+    assert s.monitor_index(MONITORS) == 1       # (and the fallback sticks until it's looked up again)
+    window = None                    # GSPro closed: back to screen.monitor
+    clock[0] += 10
+    assert s.monitor_index(MONITORS) == 1
+    assert Screen(ScreenConfig(follow_window=False, monitor=1)).monitor_index(MONITORS) == 1
+    assert Screen(ScreenConfig(monitor=2)).monitor_index(MONITORS[:2]) == 1   # screen.monitor unplugged
