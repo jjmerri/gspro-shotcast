@@ -47,6 +47,21 @@ def find_window(substr: str) -> int | None:
     return max(matches, key=lambda m: m[1])[0] if matches else None
 
 
+def window_info(substr: str) -> dict | None:
+    """The title and screen rectangle (left, top, right, bottom) of the window find_window picks, or
+    None when there isn't one (or not on Windows)."""
+    hwnd = find_window(substr)
+    if not hwnd:
+        return None
+    r = wintypes.RECT()
+    _user32.GetWindowRect(hwnd, ctypes.byref(r))
+    n = _user32.GetWindowTextLengthW(hwnd)
+    buf = ctypes.create_unicode_buffer(n + 1)
+    _user32.GetWindowTextW(hwnd, buf, n + 1)
+    return {"title": buf.value, "rect": (r.left, r.top, r.right, r.bottom),
+            "minimized": bool(_user32.IsIconic(hwnd))}
+
+
 class _BMI(ctypes.Structure):
     _fields_ = [("size", wintypes.DWORD), ("w", wintypes.LONG), ("h", wintypes.LONG),
                 ("planes", wintypes.WORD), ("bpp", wintypes.WORD), ("comp", wintypes.DWORD),

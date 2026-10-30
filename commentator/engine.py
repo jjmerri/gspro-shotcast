@@ -34,6 +34,7 @@ from .league import League, course_match_score
 from .llm import LLMClient
 from .minimap import JevMinimap, MinimapRead, same_map, snapshot as minimap_snapshot
 from .putt_read import REGION as PUTT_REGION, PuttRead, read_break
+from . import report as problem_report
 from .models import (
     HoleChangeEvent, Line, PreShotEvent, RoundEndEvent, RoundStartEvent, ScorecardEvent, Shot, ShotEvent,
 )
@@ -996,6 +997,7 @@ class Engine:
                          "found" if pin else "not found")
             if pin is None:
                 self._hole_snaps.discard((course, hole))   # try again at the next player's tee shot
+                self._keep_report_frame("minimap-miss", ball_found=ball is not None)
 
         task = asyncio.create_task(snap())
         task.add_done_callback(lambda t: t.cancelled() or t.exception() and log.warning(
@@ -3939,6 +3941,8 @@ class Engine:
         shared = not (shot_round and shot_round.solo(shot_round.side_for(player))) and bool(
             shot_round and (shot_round.format == "scramble" or shot_round.no_scramble) or self.gspro.team_scores)
         unnamed = not player or player == "unknown" or self._anonymous(player)
+        if not player or player == "unknown":
+            self._keep_report_frame("no-player", shot=before.shot_number, hud_text=hud.player_text)
         carry_idx = None if unnamed else self._gspro_idx(player)
         dropped = None if carry_idx is None else impact_snap[7].get(carry_idx, 0)
         learn = None
@@ -7106,6 +7110,29 @@ class Engine:
             return
         self._fixture_saved_at[kind] = now
         asyncio.create_task(asyncio.to_thread(self._save_fixture_frame, kind, frame), name=f"fixture-{kind}")
+
+    def _keep_report_frame(self, reason: str, **meta) -> None:
+        """Leave the screen behind for the next problem report when a read came up empty (no player
+        on a shot, no pin on the minimap): what the booth was looking at shows whether it's reading
+        the wrong monitor or GSPro's screen changed. At most every ten minutes per reason."""
+        if self.screen is None or self.cfg.source.type == "replay":
+            return
+        now = time.monotonic()
+        key = f"report-{reason}"
+        if now - self._fixture_saved_at.get(key, -1e9) < 600:
+            return
+        self._fixture_saved_at[key] = now
+        meta = {"gspro_version": self.gspro.version, "course": self.round.course if self.round else None,
+                "hole": self.hole_number, "monitor": self.cfg.screen.monitor,
+                "capture": self.cfg.screen.capture, **meta}
+
+        def save() -> None:
+            try:
+                problem_report.keep_frame(self.cfg.log_dir, reason, self.screen.grab(), meta)
+            except Exception:
+                log.exception("Couldn't keep the %s screen for a problem report", reason)
+
+        asyncio.create_task(asyncio.to_thread(save), name=key)
 
     def _save_fixture_frame(self, kind: str = "shot", frame=None) -> None:
         try:

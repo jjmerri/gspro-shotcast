@@ -501,6 +501,21 @@ class Tray:
                 self._refresh()
         threading.Thread(target=work, daemon=True).start()
 
+    def problem_report(self, *_) -> None:
+        def work():
+            from . import report
+
+            try:
+                path = report.build(self.cfg, self.home / "config.yaml")
+                open_file(path.parent)
+                self.info(f"Saved {path.name} in {path.parent} (opened). It has the booth's logs, GSPro's log, "
+                          "the screens the booth kept and the season's player names, but no API keys. "
+                          "Send it to whoever is helping you.")
+            except Exception as e:
+                log.exception("Problem report failed")
+                self.error(f"Couldn't make the problem report: {e}")
+        threading.Thread(target=work, daemon=True).start()
+
     def settings(self, tab: str | None = None) -> None:
         if self.ui is not None:
             self.ui.open_settings(self, tab)
@@ -666,6 +681,7 @@ class Tray:
             )),
             item("Check the screen read...", safe(self.screen_check)),
             item("Back up now", safe(self.back_up)),
+            item("Create a problem report", safe(self.problem_report)),
             sep,
             item(lambda _: self.update_label(),
                  safe(lambda: self.apply_update() if self.update else self.check_updates())),

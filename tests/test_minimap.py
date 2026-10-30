@@ -924,3 +924,22 @@ async def test_a_ball_on_another_holes_green_is_no_putt(tmp_path):
     hud = Hud(player_text="Dan 2nd Shot 2 967 FT", shot_number=2, to_pin="967 feet 9 inches", lie="green")
     _, facts_text = await engine._preshot_model(hud, "Dan", [], None)
     assert hud._wrong_green and "wrong one" in facts_text and "albatross" not in facts_text
+
+
+async def test_a_minimap_without_a_pin_leaves_the_screen_for_a_problem_report(tmp_path):
+    from commentator.report import FRAMES_DIR
+
+    engine, _ = _engine(tmp_path)
+    engine.cfg.source.type = "connector_log"
+    engine.screen = SimpleNamespace(detect_mirror=lambda: None, region=lambda name: None,
+                                    grab=lambda region=None: Image.new("RGB", (460, 836), (80, 105, 40)))
+    engine.round = SimpleNamespace(ended=False, course="Pebble")
+    engine.hole_number = 3
+    for _ in range(2):   # the second miss (the next player's tee shot) is inside the throttle
+        engine._snap_hole(Hud())
+        for _ in range(20):
+            await asyncio.sleep(0.02)
+    frames = list((tmp_path / FRAMES_DIR).glob("minimap-miss-*.jpg"))
+    assert len(frames) == 1
+    meta = json.loads(frames[0].with_suffix(".json").read_text())
+    assert meta["course"] == "Pebble" and meta["hole"] == 3 and meta["monitor"] == 1
