@@ -4131,7 +4131,7 @@ def test_round_end_keeps_the_end_of_gspros_log(tmp_path, monkeypatch):
     e.cfg.log_dir = str(tmp_path / "logs")
     (tmp_path / "logs").mkdir()
     src = tmp_path / "output_log.txt"
-    src.write_text("old\n" * 10 + "Shot Fired\n")
+    src.write_bytes(b"old\n" * 10 + b"Shot Fired\n")
     e.cfg.source.gspro_log = str(src)
     monkeypatch.setattr(engine_mod, "GSPRO_LOG_KEEP_BYTES", 11)
     for i in range(7):
@@ -4139,4 +4139,4 @@ def test_round_end_keeps_the_end_of_gspros_log(tmp_path, monkeypatch):
     e._keep_gspro_log()
     kept = sorted(p.name for p in (tmp_path / "logs").glob("gspro-*.log"))
     assert len(kept) == engine_mod.KEEP_GSPRO_LOGS and kept[0] == "gspro-2026-01-04-120000.log"
-    assert (tmp_path / "logs" / kept[-1]).read_text() == "Shot Fired\n"
+    assert (tmp_path / "logs" / kept[-1]).read_bytes() == b"Shot Fired\n"
