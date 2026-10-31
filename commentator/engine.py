@@ -113,6 +113,11 @@ def hole_label(hud: Hud, number: int | None) -> str:
     return ", ".join(parts)
 
 
+def _tile_values(tiles: dict[str, str], unit: str) -> tuple:
+    """A shot's (carry (game), carry (raw), total length, offline (raw)) tiles, in yards."""
+    return tuple(_tile_yards(tiles, t, unit) for t in ("carry (game)", "carry (raw)", "total length", "offline (raw)"))
+
+
 def _tile_yards(tiles: dict[str, str], name: str, unit: str) -> float | None:
     """A data tile's value in yards; None for a missing tile or a "--.--" placeholder."""
     value = re.search(r"-?\d+(?:\.\d+)?", tiles.get(name, ""))
@@ -723,9 +728,10 @@ class Engine:
         # GSPro's "hide UI on shot" keeps the tiles off screen until the next player is up, so the follow
         # can't read them; the next setup read does. The swing whose tiles are still wanted, the tiles a
         # setup read for a swing, and the recorded shot each swing's tiles go to: (shot id, record,
-        # launch monitor carry in yards, unit, health counts then).
+        # the tiles the shot before it showed, unit, health counts then).
         self._tiles_wanted: int | None = None
         self._late_tiles: dict[int, dict[str, str]] = {}
+        self._shown_tiles: tuple | None = None   # the latest shot's (carry, raw carry, total, offline) read
         self._tiles_due: dict[int, tuple] = {}
         # (when, frame, tones) of the latest PLAYERS-tab frame the quick sampler caught (see _sample_players_tab).
         self._players_snap: tuple | None = None
@@ -3945,8 +3951,11 @@ class Engine:
         # Only a follow that saw the ball land vouches for its tiles: otherwise they may be the last shot's.
         follow_tiles = landed and any(_tile_yards(after.tiles, t, "yards") is not None
                                       for t in ("carry (game)", "total length"))
-        if follow_tiles and self._tiles_wanted == my_seq:
-            self._tiles_wanted = None
+        shown_before = self._shown_tiles
+        if follow_tiles:
+            self._shown_tiles = _tile_values(after.tiles, unit)
+            if self._tiles_wanted == my_seq:
+                self._tiles_wanted = None
         if not held and self._fire_log_followed() and not await self._gspro_fired(fires0, impact, event):
             log.warning("%s dropped: GSPro never played it (no \"Shot Fired\" in its log; club %s, ball %.1f mph, "
                         "carry %.1f): not recorded or called", tag, shot.club, shot.ball_speed or 0, shot.carry or 0)
@@ -4133,7 +4142,7 @@ class Engine:
         )
         rec.shot_id = shot_id
         if ocr and not shot.is_putt and shot_id is not None and not follow_tiles:
-            self._tiles_due[my_seq] = (shot_id, rec, self._raw_yards(shot), unit, self._hc)
+            self._tiles_due[my_seq] = (shot_id, rec, shown_before, unit, self._hc)
             while len(self._tiles_due) > 4:
                 del self._tiles_due[next(iter(self._tiles_due))]
             self._apply_late_tiles(my_seq)
@@ -5001,19 +5010,20 @@ class Engine:
 
     def _apply_late_tiles(self, seq: int) -> None:
         """A shot's tiles read at the next setup (GSPro hid them while the ball was followed), once both
-        the read and the shot's record are in. Kept only when the carry agrees with the launch monitor's,
-        so another shot's tiles left on screen aren't taken for this one's."""
+        the read and the shot's record are in. No swing came between the shot and the read, so GSPro's
+        tiles are this shot's; unless they're exactly the shot before's, when this one's never came up.
+        (The launch monitor's carry is no check: GSPro's can be well off it.)"""
         if seq not in self._tiles_due or seq not in self._late_tiles:
             return
-        (shot_id, rec, lm, unit, hc), tiles = self._tiles_due.pop(seq), self._late_tiles.pop(seq)
-        game, raw = _tile_yards(tiles, "carry (game)", unit), _tile_yards(tiles, "carry (raw)", unit)
-        total, offline = _tile_yards(tiles, "total length", unit), _tile_yards(tiles, "offline (raw)", unit)
-        fits = (abs(raw - lm) <= max(4.0, 0.06 * lm) if raw is not None
-                else game is not None and 0.7 * lm <= game <= 1.3 * lm + 5)
-        if not lm or not fits:
-            log.info("[shot %s] tiles at the next setup (carry %s, raw %s) don't match the launch monitor's "
-                     "%.1f yd: another shot's, not kept", seq, game, raw, lm)
+        (shot_id, rec, before, unit, hc), tiles = self._tiles_due.pop(seq), self._late_tiles.pop(seq)
+        game, raw, total, offline = values = _tile_values(tiles, unit)
+        # Only the fields both reads have: a follow reads one panel, a setup both.
+        both = [(a, b) for a, b in zip(values, before or ()) if a is not None and b is not None]
+        if both and all(a == b for a, b in both):
+            log.info("[shot %s] tiles at the next setup (carry %s, total %s) are the shot before's: not kept",
+                     seq, game, total)
             return
+        self._shown_tiles = values
         # The follow never saw this ball land, so whatever it read wasn't confirmed as this shot's.
         self.store.set_shot_tiles(shot_id, carry_game_yards=game, carry_raw_tile_yards=raw,
                                   total_yards=total, offline_yards=offline)

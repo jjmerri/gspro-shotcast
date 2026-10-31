@@ -2979,7 +2979,7 @@ async def test_tiles_hidden_through_the_follow_are_read_at_the_next_setup(tmp_pa
     rec = ShotRecord("Josh", Shot(ball_speed=130, club="5I", carry=201.2), "Hole 1", Hud(), [])
     engine._shot_seq = 7
     engine._tiles_wanted = 7
-    engine._tiles_due[7] = (sid, rec, 201.2, "yards", engine._hc)
+    engine._tiles_due[7] = (sid, rec, None, "yards", engine._hc)
     setup = Hud(player_text="Corey E Shot 1 391.5 YDS", shot_number=1, score_to_par="E", to_pin="391.5 yards")
     await engine._emit_setup(setup)
     assert "tiles" in screen.reads[-1]
@@ -2991,7 +2991,8 @@ async def test_tiles_hidden_through_the_follow_are_read_at_the_next_setup(tmp_pa
                                  to_pin="180 yards"))
     assert "tiles" not in screen.reads[-1]
 
-    # Tiles that don't fit this swing's carry are another shot's, left on screen: not kept.
+    # The shot before's tiles still up: this shot's never came up, so they aren't kept for it. Its
+    # follow read one panel (no offline); the setup reads both.
     engine, screen = _setup_engine(tmp_path / "b")
     real = screen.read_hud_async
     screen.read_hud_async = with_tiles
@@ -2999,7 +3000,7 @@ async def test_tiles_hidden_through_the_follow_are_read_at_the_next_setup(tmp_pa
                                    before=Hud(shot_number=2), after=Hud(), tags=[], carry_game_yards=None,
                                    total_yards=None, offline_yards=None)
     engine._shot_seq = engine._tiles_wanted = 3
-    engine._tiles_due[3] = (sid, rec, 120.0, "yards", engine._hc)
+    engine._tiles_due[3] = (sid, rec, (203.4, None, 214.8, None), "yards", engine._hc)
     await engine._emit_setup(Hud(player_text="Corey E Shot 2 150 YDS", shot_number=2, score_to_par="E",
                                  to_pin="150 yards"))
     assert engine.store.db.execute("SELECT total_yards FROM shots WHERE id = ?", (sid,)).fetchone()[0] is None
