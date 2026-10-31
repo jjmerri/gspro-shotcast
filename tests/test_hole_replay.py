@@ -504,3 +504,69 @@ def test_a_scramble_hole_without_shared_spots_still_counts_shots_used(tmp_path):
     st.db.commit()
     players = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}
     assert (players["Dan"]["used"], players["Derek"]["used"]) == (1, 0)
+
+
+def test_a_total_the_hidden_hud_never_showed_comes_from_the_logged_positions(tmp_path):
+    _, st = _season(tmp_path)
+    st.db.execute("UPDATE shots SET start_x = 10, start_z = 200, carry_raw = 200 WHERE shot_number = 2")
+    st.db.execute("UPDATE shots SET start_x = 2, start_z = 295 WHERE shot_number = 3")
+    st.db.execute("UPDATE shots SET carry_raw = 200 WHERE shot_number = 1")
+    st.db.commit()
+    total = lambda n: st.db.execute("SELECT total_yards FROM shots WHERE shot_number = ?", (n,)).fetchone()[0]  # noqa: E731
+    # The approach is filled at once: its next stroke's start is its rest. It didn't fit the carry.
+    assert st.fill_log_totals() == 0 and total(2) is None
+    st.db.execute("UPDATE shots SET carry_raw = 100 WHERE shot_number = 2")
+    assert st.fill_log_totals() == 1 and total(2) == round(math.hypot(8, 95) * M_TO_YD, 1)
+    # The drive waits for the round's layout, which logs the tee it was hit from.
+    assert total(1) is None
+    st.record_hole_layout("Test Links", [{"par": 4, "played": True, "tee": (0.0, 2.0, 0.0), "pin": (0.0, 1.0, 300.0)}],
+                          session_id=st.session_id, ts=1500.0)
+    assert st.fill_log_totals() == 1 and total(1) == round(math.hypot(10, 200) * M_TO_YD, 1)
+    assert total(3) is None   # a putt: none
+
+
+def test_a_logged_total_pairs_strokes_by_time_and_never_across_a_round_end(tmp_path):
+    _, st = _season(tmp_path)
+    st.db.execute("UPDATE shots SET start_x = 10, start_z = 200, carry_raw = 100 WHERE shot_number = 2")
+    st.db.execute("UPDATE shots SET start_x = 2, start_z = 295 WHERE shot_number = 3")
+    # The approach's handler finished after the putt's, so it was saved after it.
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, start_x, start_z,"
+                  " carry_raw, raw) SELECT session_id, ts, player, course, hole, shot_number, club, is_putt, start_x,"
+                  " start_z, carry_raw, raw FROM shots WHERE shot_number = 2")
+    st.db.execute("DELETE FROM shots WHERE id = (SELECT MIN(id) FROM shots WHERE shot_number = 2)")
+    ended = st.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes)"
+                          " VALUES (?, 1002.5, '2025-10-20', 'Test Links', 'Dan', 1)", (st.session_id,)).lastrowid
+    st.db.commit()
+    assert st.fill_log_totals() == 0   # a round ended between the approach and the putt: another ball
+    st.db.execute("DELETE FROM rounds WHERE id = ?", (ended,))
+    assert st.fill_log_totals() == 1
+    assert st.db.execute("SELECT total_yards FROM shots WHERE shot_number = 2").fetchone()[0] == round(
+        math.hypot(8, 95) * M_TO_YD, 1)
+
+
+def test_a_drive_doesnt_take_the_tee_of_a_later_round_on_the_hole(tmp_path):
+    _, st = _season(tmp_path)   # its round ended without logging the layout
+    st.db.execute("UPDATE shots SET start_x = 10, start_z = 200 WHERE shot_number = 2")
+    st.db.execute("UPDATE shots SET carry_raw = 200 WHERE shot_number = 1")
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, raw)"
+                  " VALUES (?, 2500, 'Dan', 'Test Links', 'Hole 1', 1, 'DR', 0, '{}')", (st.session_id,))
+    st.db.commit()
+    st.record_hole_layout("Test Links", [{"par": 4, "played": True, "tee": (0.0, 2.0, 20.0), "pin": (0.0, 1.0, 300.0)}],
+                          session_id=st.session_id, ts=3000.0)
+    st.fill_log_totals()
+    assert st.db.execute("SELECT total_yards FROM shots WHERE ts = 1001").fetchone()[0] is None
+
+
+def test_a_logged_total_follows_later_corrections_and_a_read_total_is_kept(tmp_path):
+    _, st = _season(tmp_path)
+    st.db.execute("UPDATE shots SET start_x = 10, start_z = 200, carry_raw = 100 WHERE shot_number = 2")
+    st.db.execute("UPDATE shots SET start_x = 2, start_z = 295 WHERE shot_number = 3")
+    st.db.commit()
+    total = lambda n: st.db.execute("SELECT total_yards FROM shots WHERE shot_number = ?", (n,)).fetchone()[0]  # noqa: E731
+    assert st.fill_log_totals() == 1 and total(2) == round(math.hypot(8, 95) * M_TO_YD, 1)
+    st.db.execute("UPDATE shots SET start_z = 290 WHERE shot_number = 3")   # its position corrected
+    assert st.fill_log_totals() == 1 and total(2) == round(math.hypot(8, 90) * M_TO_YD, 1)
+    st.db.execute("UPDATE shots SET mulligan = 1 WHERE shot_number = 3")   # no longer the next stroke
+    assert st.fill_log_totals() == 1 and total(2) is None
+    st.db.execute("UPDATE shots SET mulligan = 0, total_yards = 99 WHERE shot_number = 2")   # read off the HUD
+    assert st.fill_log_totals() == 0 and total(2) == 99
