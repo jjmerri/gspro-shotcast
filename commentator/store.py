@@ -739,6 +739,21 @@ class Store:
                         (new, self.session_id, old, since_id))
         self.db.commit()
 
+    def set_shot_tiles(self, shot_id: int, *, carry_game_yards: float | None, carry_raw_tile_yards: float | None,
+                       total_yards: float | None, offline_yards: float | None) -> None:
+        """A shot's tiles read after it was recorded, at the next player's setup (GSPro hid them while the
+        ball flew). They take the place of the follow's unconfirmed reads and of a total worked out from
+        the log; a tile not read leaves its column as it was."""
+        cols = {"carry_game_yards": carry_game_yards, "carry_raw_tile_yards": carry_raw_tile_yards,
+                "offline_yards": offline_yards, "total_yards": total_yards}
+        sets = [f"{col} = ?" for col, v in cols.items() if v is not None]
+        if total_yards is not None:
+            sets.append("total_from_log = 0")
+        if sets:
+            self.db.execute(f"UPDATE shots SET {', '.join(sets)} WHERE id = ?",
+                            (*(v for v in cols.values() if v is not None), shot_id))
+            self.db.commit()
+
     def set_lie_after(self, shot_id: int | None, lie: str | None) -> None:
         """Where the ball came to rest, corrected once the next shot says where it was played from."""
         if shot_id is not None and lie:

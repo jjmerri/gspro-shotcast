@@ -2961,6 +2961,50 @@ async def test_an_empty_setup_lie_is_read_again_unless_the_player_changes(tmp_pa
     assert engine._events.empty() and engine._setup_lies == {}
 
 
+async def test_tiles_hidden_through_the_follow_are_read_at_the_next_setup(tmp_path):
+    engine, screen = _setup_engine(tmp_path)
+    real = screen.read_hud_async
+    shown = {"carry (game)": "203.4", "total length": "214.8", "offline (raw)": "6.1"}
+
+    async def with_tiles(parts):
+        hud = await real(parts)
+        if "tiles" in parts:
+            hud.tiles = dict(shown)
+        return hud
+    screen.read_hud_async = with_tiles
+    # The follow caught the last shot's total before GSPro hid the HUD: unconfirmed, and replaced.
+    sid = engine.store.record_shot(player="Josh", hole="Hole 1", shot=Shot(ball_speed=130, club="5I", carry=201.2),
+                                   before=Hud(shot_number=1), after=Hud(), tags=[], carry_game_yards=None,
+                                   total_yards=152.0, offline_yards=None)
+    rec = ShotRecord("Josh", Shot(ball_speed=130, club="5I", carry=201.2), "Hole 1", Hud(), [])
+    engine._shot_seq = 7
+    engine._tiles_wanted = 7
+    engine._tiles_due[7] = (sid, rec, 201.2, "yards", engine._hc)
+    setup = Hud(player_text="Corey E Shot 1 391.5 YDS", shot_number=1, score_to_par="E", to_pin="391.5 yards")
+    await engine._emit_setup(setup)
+    assert "tiles" in screen.reads[-1]
+    row = engine.store.db.execute("SELECT carry_game_yards, total_yards, offline_yards FROM shots WHERE id = ?",
+                                  (sid,)).fetchone()
+    assert tuple(row) == (203.4, 214.8, 6.1) and rec.hud.tiles["total length"] == "214.8" and rec.carry_game == 203.4
+    # Done: the next setup doesn't read them again.
+    await engine._emit_setup(Hud(player_text="Josh E Shot 2 180 YDS", shot_number=2, score_to_par="E",
+                                 to_pin="180 yards"))
+    assert "tiles" not in screen.reads[-1]
+
+    # Tiles that don't fit this swing's carry are another shot's, left on screen: not kept.
+    engine, screen = _setup_engine(tmp_path / "b")
+    real = screen.read_hud_async
+    screen.read_hud_async = with_tiles
+    sid = engine.store.record_shot(player="Josh", hole="Hole 1", shot=Shot(ball_speed=90, club="9I", carry=120.0),
+                                   before=Hud(shot_number=2), after=Hud(), tags=[], carry_game_yards=None,
+                                   total_yards=None, offline_yards=None)
+    engine._shot_seq = engine._tiles_wanted = 3
+    engine._tiles_due[3] = (sid, rec, 120.0, "yards", engine._hc)
+    await engine._emit_setup(Hud(player_text="Corey E Shot 2 150 YDS", shot_number=2, score_to_par="E",
+                                 to_pin="150 yards"))
+    assert engine.store.db.execute("SELECT total_yards FROM shots WHERE id = ?", (sid,)).fetchone()[0] is None
+
+
 async def test_a_setup_isnt_kept_for_the_impact_read_when_a_swing_lands_during_it(tmp_path):
     engine, screen = _setup_engine(tmp_path)
     hud = Hud(player_text="Josh 2nd (E) Shot 2 126 YDS", shot_number=2, score_to_par="E", to_pin="126 yards")
