@@ -1,6 +1,5 @@
 import asyncio
 import bisect
-import difflib
 import json
 import logging
 import os
@@ -27,7 +26,7 @@ from .flight_pick import FlightPlan, Hazard, pick_line, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
 from .grounding import (SCENERY, bare_acknowledgement, check_line, meta_talk, ngrams, note_keywords, repeats, uses_note,
                         wrong_round_score)
-from .hud import NAME_DARK, Hud, describe, hole_key, name_sig_changed
+from .hud import NAME_DARK, Hud, Scorecard, describe, hole_key, name_sig_changed
 from .interest import (LEAGUE_BEST_DRIVE_LEVEL, LONG_HOLED_PUTT_FEET, SEASON_BEST_DRIVE_LEVEL,
                        approach_gimme_level, holed_out_level, holed_putt_score, score_shot,
                        short_game_gimme_level, stuffed_level)
@@ -55,6 +54,8 @@ from .signature_holes import signature_hole
 from .trivia import CourseTrivia, looks_like_a_course
 from .weather import Weather
 from .round import FORMAT_NAMES, TEAM_BALL, Round, normalize_format, to_par
+from .round import name_key as _name_key
+from .round import name_ratio as _name_ratio
 from .round import _join as _join_names
 from .screen import Screen, name_signature
 from .sources.base import ShotSource
@@ -1133,7 +1134,7 @@ class Engine:
                 del self._setup_slopes[next(iter(self._setup_slopes))]
         if "others" in rest:
             hud.others = extra.others
-        self._admit_player(hud)
+        self._note_player(hud)
         player = self._player(hud.player_text, None)
         if player and hud.shot_number:
             swings = [x for x in self.state.shots if x.player == player]
@@ -2037,9 +2038,12 @@ class Engine:
         # Not on the league roster (no league file, or a guest): the round's own GSPro names.
         r = self.round
         if r and not r.ended and texts and texts[0]:
-            raw = _gspro_name(texts[0]).casefold()
-            if name := next((n for n in r.roster if n and n.casefold() == raw), None):
-                return name
+            raw = _gspro_name(texts[0])
+            if name := self._guest_name(raw):
+                if name.casefold() == raw.casefold():
+                    return name
+                # A misread: whoever the read of the name itself would be (a league player's league name).
+                return self.league.match_player(texts[0].replace(raw, name, 1)) or name
         return next((t for t in texts[1:] if t), None)
 
     def _anonymous(self, player: str | None) -> bool:
@@ -3148,7 +3152,14 @@ class Engine:
         if not self._log_truth or r is None or r.ended or r.format == "alternate":
             return None
         if r.slot_names:                       # captured setup slots: the trustworthy name -> index map
-            return r.roster_position(player)
+            name = r.current_name(player) if player else player   # a shot in flight may hold a pre-rename name
+            # Teed after a name held on the first hole: their index waits on whether that's a player.
+            if r.seq == 1 and r.held:
+                g = name if name in r.roster else next((g for g, p in r.roster.items() if p and p == name), None)
+                held = {h[0] for h in r.held.values()}
+                if g in r.teed and any(n in held for n in r.teed[:r.teed.index(g)]):
+                    return None
+            return r.roster_position(name)
         if len(r.roster) <= 1 and not self.gspro.multiplayer:
             return 0                           # genuinely one player (the log shows one too): index 0
         return None                            # no slot order and more than one player: don't attribute
@@ -4103,6 +4114,8 @@ class Engine:
         if not shot.is_putt and "in_water" not in tags and self._shot_wet(player, since=impact):
             tags = [*tags, "in_water"]   # the GSPro log saw the splash: the wrap can say where it went
         r = shot_round
+        if r and player:
+            player = r.current_name(player)   # a guest renamed while this shot was in flight
         rec = ShotRecord(
             player or "unknown", shot, shot_hole, hud, tags,
             round_id=r.id if r else None, hole_seq=round_hole, par=shot_par,
@@ -5991,35 +6004,165 @@ class Engine:
             log.info("From the setup screen, not on the tee: %s", extra)
         return names + extra, list(slots)
 
-    def _admit_player(self, hud: Hud) -> None:
-        """A first-tee setup for someone the round doesn't have (a guest who wasn't up first, the setup
-        screen unread): add them, so their shots and scores are theirs. A name a letter or two off a
-        player's already in is an OCR slip, not a new player."""
+    def _guest_name(self, raw: str) -> str | None:
+        """The round's GSPro name a player-box read is: the same name, then the same but for OCR's
+        look-alike characters, then a letter or two off one player and no other. None when it's nobody's,
+        or a name held as maybe another player (see _note_player)."""
         r = self.round
-        if not r or r.ended or r.seq != 1 or hud.shot_number != 1 or hud.score_to_par != "E":
+        if not r or r.ended or not raw:
+            return None
+        cf = raw.casefold()
+        if g := next((g for g in r.roster if g.casefold() == cf), None):
+            return g
+        key = _name_key(raw)
+        if cf in r.held or not key:
+            return None
+        same = [g for g in r.roster if _name_key(g) == key]
+        if same:
+            return same[0] if len(same) == 1 else None
+        scored = sorted(((_name_ratio(g, raw), g) for g in r.roster), reverse=True)
+        if scored and scored[0][0] >= 0.8 and (len(scored) == 1 or scored[1][0] < scored[0][0] - 0.1):
+            return scored[0][1]
+        return None
+
+    def _note_player(self, hud: Hud) -> None:
+        """Keep the round's players right from each setup's player box.
+        - A first-tee setup for someone the round doesn't have (a guest who wasn't up first, the setup
+          screen unread) adds them, so their shots and scores are theirs.
+        - A name a letter or two off someone who's already teed off is held until it's read at another
+          shot: a misread doesn't repeat there, another player (Mike, then Mikey) does. One that's a
+          player's name with letters missing waits for the scorecard.
+        - A guest added under a misread takes the spelling the reads settle on."""
+        r = self.round
+        if not r or r.ended:
             return
         raw = _gspro_name(hud.player_text or "")
         if len(raw) < 2 or not re.search(r"[^\W\d_]", raw):
             return
+        first_tee = r.seq == 1 and hud.shot_number == 1 and hud.score_to_par == "E"
+        at = (r.seq, hud.shot_number)
         match = self.league.match_player(hud.player_text)
-        known = [g for g, p in r.roster.items() if g.casefold() == raw.casefold() or (match and p == match)]
-        near = known or [g for g in r.roster
-                         if difflib.SequenceMatcher(None, g.casefold(), raw.casefold()).ratio() >= 0.8]
-        if near:
-            if near[0] not in r.teed:
-                r.teed.append(near[0])
-            if not known:
-                log.info("First-tee setup for %r, close to %s already in round %s: not added", raw, near, r.id)
+        if held := r.held.get(raw.casefold()):
+            # Read again at another shot: a player, not a misread. Unless it's someone's name with
+            # letters missing (John for John B), which OCR can repeat: then only the card can add them.
+            if held[2] != at and not self._shortened(r, raw):
+                del r.held[raw.casefold()]
+                self._add_to_round(r, held[0], match, teed=held[1])
+            return
+        g = next((g for g, p in r.roster.items() if match and p == match), None) or self._guest_name(raw)
+        # A name a letter or two off someone who's teed off already (Mikey after Mike), or off more
+        # than one player: maybe a misread, maybe another player.
+        near = (g and not match and g in r.teed and _name_key(g) != _name_key(raw)) or (
+            not g and any(_name_ratio(n, raw) >= 0.8 for n in r.roster))
+        if g and not (first_tee and near):
+            if first_tee and g not in r.teed:
+                r.teed.append(g)
+            if r.roster.get(g) is None and not r.is_league and not self.league.match_team(g):
+                self._spelled(r, g, raw)
+            return
+        if not first_tee:
             return
         if r.is_league:
             # The lineup was a scheduled league match; someone else in it makes it practice, which
             # can't be redone mid-hole. The setup screen (always read) is what classifies it right.
             log.info("First-tee setup for %r, not in league round %s: not added", raw, r.id)
             return
-        if r.add_player(raw):
-            log.info("Round %s: %r is up on the first tee too; added (players now %s)", r.id, raw, list(r.roster))
-            if match:
-                self._bg(self._apply_live_handicaps(self._round_players([raw])))
+        if near:
+            r.held[raw.casefold()] = (raw, list(r.teed), at)
+            r.teed.append(raw)   # a later one held or added goes after it, should it turn out a player
+            log.info("First-tee setup for %r, close to %s in round %s: held until it's read again",
+                     raw, [n for n in r.roster if _name_ratio(n, raw) >= 0.8], r.id)
+            return
+        self._add_to_round(r, raw, match)
+
+    @staticmethod
+    def _shortened(r: Round, raw: str) -> bool:
+        """True when `raw` is a roster name with letters missing."""
+        key = _name_key(raw)
+        for n in r.roster:
+            it = iter(_name_key(n))
+            if len(_name_key(n)) > len(key) and all(ch in it for ch in key):
+                return True
+        return False
+
+    def _add_to_round(self, r: Round, name: str, match: str | None, **where) -> None:
+        old = list(r.slot_names or [])
+        if not r.add_player(name, **where):
+            return
+        new = r.slot_names or []
+        # An index that's someone else's now: its last shot isn't this one's to finish or correct.
+        for cache in (self._pending_finish, self._finish_seq, self._last_row):
+            for k in [k for k in cache if (old[k] if k < len(old) else None) != (new[k] if k < len(new) else None)]:
+                del cache[k]
+        log.info("Round %s: %r added (players now %s, GSPro order %s)", r.id, name, list(r.roster), r.slot_names)
+        if self._log_rounds and not self._round_end_queued:
+            self._sync_log_scores(r)   # the log's scores by slot: everyone after them moved down one
+        if match:
+            self._bg(self._apply_live_handicaps(self._round_players([name])))
+
+    def _spelled(self, r: Round, g: str, raw: str) -> None:
+        """Count a guest's name as read; one spelled another way (a misread when they were added) takes
+        the spelling that's read three times and more than twice as often."""
+        votes = r.spellings.setdefault(g, {})
+        votes[raw] = votes.get(raw, 0) + 1
+        best = max(votes, key=votes.get)
+        if best == g or votes[best] < 3 or votes[best] <= 2 * votes.get(g, 0):
+            return
+        if any(n.casefold() == best.casefold() for n in r.roster if n != g) or not r.rename_player(g, best):
+            return
+        for x in self.state.shots:
+            if x.round_id == r.id and x.player == g:
+                x.player = best
+        moved = self.store.rename_shots(g, best, after_id=r.shot_floor) if r.shot_floor is not None else 0
+        log.info("Round %s: %r is read as %r: renamed (%s stored shots)", r.id, g, best, moved)
+
+    def _admit_from_card(self, r: Round, card: Scorecard) -> bool:
+        """Rows on GSPro's scorecard with scores the round has nobody for: players it missed (not up first
+        on the first tee and that setup unread, or the booth started mid-round). Added in the card's row
+        order, which is GSPro's slot order. Not into a league round (see _note_player). True if any."""
+        if r.is_league:
+            return False
+        # Row order is slot order only if the read has every row: a missed row above would shift them.
+        if not set(r.roster) <= {m for _, m in r.card_rows if m}:
+            log.info("Round %s: scorecard read without all of %s: no players added from it", r.id, list(r.roster))
+            return False
+        seen = self.gspro.players_seen if self._log_rounds else ()
+        slots = max(len(r.slot_names), max(seen, default=-1) + 1)
+        if len(r.card_rows) < slots:
+            log.info("Round %s: scorecard read %s rows of %s players: no players added from it",
+                     r.id, len(r.card_rows), slots)
+            return False
+        added, above = False, None
+        # Players the card has by name (not just a letter or two off): a row close to anyone else may be them.
+        on_card = {m for n, m in r.card_rows if m and (_name_key(n) == _name_key(m) or (
+            r.roster.get(m) and self.league.match_player(n) == r.roster[m]))}
+        for n, g in list(r.card_rows):
+            if g is not None:
+                above = g
+                continue
+            # A row not added stops it: it may be someone in a slot, and rows below added after the
+            # row above it would take that slot.
+            unmatched = [x for x in r.roster if x not in on_card]
+            if any(_name_ratio(x, n) >= 0.8 for x in unmatched):
+                log.info("Round %s: scorecard row %r is close to %s, not on the card by name: not added "
+                         "(nor any row below it)", r.id, n, unmatched)
+                break
+            if not (card.scores.get(n) and len(n) >= 2 and re.search(r"[^\W\d_]", n)):
+                log.info("Round %s: scorecard row %r has no scores read: no rows below it added", r.id, n)
+                break
+            # The held name it is: the same, or else the one held name it's a letter or two off.
+            same = [k for k in r.held if _name_key(k) == _name_key(n)] or [
+                k for k in r.held if _name_ratio(k, n) >= 0.8]
+            held = r.held.pop(same[0]) if len(same) == 1 else None
+            name = held[0] if held else (n.title() if n.isupper() else n)
+            before = len(r.roster)
+            self._add_to_round(r, name, self.league.match_player(name), after=above, first=above is None)
+            if len(r.roster) == before:
+                break
+            added, above = True, name
+            on_card.add(name)
+            log.info("Round %s: %r from the scorecard", r.id, name)
+        return added
 
     def _reconcile_slots(self, r: Round, names: list[str]) -> None:
         """Make sure the round has a GSPro player-index order. The setup-screen slots are the source
@@ -6085,6 +6228,7 @@ class Engine:
             self._apply_setup_format(pending.round)
             self._apply_log_holes(pending.round)
             self._start_round(pending.round)
+            self._note_player(hud)   # the first one up has teed off
             self._number_start_hole(pending.round, opening=True)
             if hud.shot_number == 1:
                 self._snap_hole(hud)
@@ -6110,6 +6254,7 @@ class Engine:
         self._reconcile_slots(r, names)
         self._apply_log_holes(r)
         self._start_round(r)
+        self._note_player(hud)   # the first one up has teed off
         self._number_start_hole(r, opening=True)
         if hud.shot_number == 1:
             self._snap_hole(hud)
@@ -6157,6 +6302,7 @@ class Engine:
         self.hole_number, self.hole_number_read = g.current_hole + 1, True
         self._reconcile_slots(r, names)
         self._start_round(r)
+        self._note_player(hud)
         log.info("Round %s joined mid-round on %s (%s): %s; started on hole %s, now on hole %s (%s of %s); no opener",
                  r.id, r.course, "league" if is_league else "practice", ", ".join(s.label for s in r.sides),
                  r.start_hole, self.hole_number, r.seq, r.holes)
@@ -6830,6 +6976,8 @@ class Engine:
         if not r.apply_scorecard(event.card):
             log.info("Scorecard didn't match the round's players (%s): rows %s", list(r.roster), list(event.card.scores))
             return
+        if self._admit_from_card(r, event.card):
+            r.apply_scorecard(event.card)
         log.info("Round %s scorecard: %s", r.id, {g: dict(sorted(v.items())) for g, v in r.card_scores.items()})
         if self.cfg.commentary.segments_on_hole_change and self.state.current_hole \
                 and self._wrapped_hole != self.state.current_hole:

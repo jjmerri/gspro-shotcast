@@ -3589,14 +3589,14 @@ async def test_a_guest_first_seen_on_the_first_tee_joins_the_round(tmp_path):
     e.round = Round(league=e.league, gspro_players=["Kroll"], course="Pebble Beach", scheduled_format=None,
                     holes=18, start_hole=1, is_league=False)
     e.round.slot_names = ["Kroll"]
-    e._admit_player(Hud(player_text="Barrows E Shot 1 150 YDS", shot_number=1, score_to_par="E"))
+    e._note_player(Hud(player_text="Barrows E Shot 1 150 YDS", shot_number=1, score_to_par="E"))
     assert list(e.round.roster) == ["Kroll", "Barrows"] and e.round.slot_names == ["Kroll", "Barrows"]
     assert e._player("Barrows E Shot 1 150 YDS", None) == "Barrows"
     # An OCR slip of a player already in, a later shot, or a later hole: nobody new.
-    e._admit_player(Hud(player_text="Kro1l E Shot 1 150 YDS", shot_number=1, score_to_par="E"))
-    e._admit_player(Hud(player_text="Smith 1st (E) Shot 2 40 YDS", shot_number=2, score_to_par="E"))
+    e._note_player(Hud(player_text="Kro1l E Shot 1 150 YDS", shot_number=1, score_to_par="E"))
+    e._note_player(Hud(player_text="Smith 1st (E) Shot 2 40 YDS", shot_number=2, score_to_par="E"))
     e.round.seq = 2
-    e._admit_player(Hud(player_text="Jones E Shot 1 150 YDS", shot_number=1, score_to_par="E"))
+    e._note_player(Hud(player_text="Jones E Shot 1 150 YDS", shot_number=1, score_to_par="E"))
     assert list(e.round.roster) == ["Kroll", "Barrows"]
 
 
@@ -3611,7 +3611,7 @@ async def test_a_guest_admitted_late_takes_the_slot_before_players_not_up_yet(tm
                     scheduled_format=None, holes=18, start_hole=1, is_league=False)
     e.round.slot_names = ["Kroll", "Smith"]
     for who in ("Kroll", "Barrows", "Smith"):
-        e._admit_player(Hud(player_text=f"{who} E Shot 1 150 YDS", shot_number=1, score_to_par="E"))
+        e._note_player(Hud(player_text=f"{who} E Shot 1 150 YDS", shot_number=1, score_to_par="E"))
     assert e.round.slot_names == ["Kroll", "Barrows", "Smith"]
 
 
@@ -3623,5 +3623,230 @@ async def test_a_guest_isnt_added_to_a_league_round(tmp_path):
                                                        score_to_par="E", to_pin="400.3 yards")))
     assert e.round.is_league
     before = list(e.round.roster)
-    e._admit_player(Hud(player_text="Barrows E Shot 1 400 YDS", shot_number=1, score_to_par="E"))
+    e._note_player(Hud(player_text="Barrows E Shot 1 400 YDS", shot_number=1, score_to_par="E"))
     assert list(e.round.roster) == before
+
+
+def _guest_round(tmp_path, names):
+    from commentator.league import League
+    from commentator.round import Round
+
+    e = _engine_with(tmp_path, League({}))
+    e.round = Round(league=e.league, gspro_players=names, course="Pebble Beach", scheduled_format=None,
+                    holes=18, start_hole=1, is_league=False)
+    e.round.slot_names = list(names)
+    e.round.shot_floor = e.store.last_shot_id()
+    return e
+
+
+def _tee(name, shot=1, score="E"):
+    return Hud(player_text=f"{name} {score} Shot {shot} 150 YDS", shot_number=shot, score_to_par=score)
+
+
+async def test_a_guests_misread_name_is_still_theirs_and_a_misread_admission_is_renamed(tmp_path):
+    from commentator.models import Shot
+
+    e = _guest_round(tmp_path, ["Kroll"])
+    e._note_player(_tee("Barr0ws"))   # added under a misread
+    assert list(e.round.roster) == ["Kroll", "Barr0ws"]
+    for text in ("Barrows 2nd (E) Shot 2", "Barows 2nd (E) Shot 2", "BARROWS 2nd (E) Shot 2"):
+        assert e._player(text, None) == "Barr0ws"
+    e.store.record_shot(player="Barr0ws", hole="hole 1 par 3", shot=Shot(club="7I"), before=_tee("Barr0ws"),
+                        after=Hud(lie="green"), tags=[], carry_game_yards=None, total_yards=None,
+                        offline_yards=None, course="Pebble Beach", is_league=False)
+    for shot in (2, 3, 4):
+        e._note_player(_tee("Barrows", shot))
+    r = e.round
+    assert list(r.roster) == ["Kroll", "Barrows"] and r.slot_names == ["Kroll", "Barrows"]
+    assert [x[0] for x in e.store.db.execute("SELECT player FROM shots")] == ["Barrows"]
+    e.cfg.source.gspro_log_truth = True
+    assert e._gspro_idx("Barr0ws") == 1             # a shot in flight across the rename keeps its log index
+
+
+async def test_a_near_name_after_its_lookalike_teed_off_is_held_until_read_again(tmp_path):
+    e = _guest_round(tmp_path, ["Mike", "Smith"])
+    e._note_player(_tee("Mike"))
+    e._note_player(_tee("Mikey"))                   # Mike or a misread of him: held
+    assert list(e.round.roster) == ["Mike", "Smith"]
+    assert e._player("Mikey E Shot 1 150 YDS", None) != "Mike"
+    e._note_player(_tee("Smith"))
+    e._note_player(_tee("Mikey", 2, "E"))           # read again at another shot: a player
+    assert e.round.slot_names == ["Mike", "Mikey", "Smith"]
+    assert e._player("Mikey 2nd (E) Shot 2", None) == "Mikey"
+    # A re-read of Mike's own tee setup with look-alike characters is still Mike.
+    e._note_player(_tee("M1ke"))
+    assert list(e.round.roster) == ["Mike", "Smith", "Mikey"]
+
+
+async def test_the_scorecard_adds_a_player_the_round_missed_in_its_row_order(tmp_path):
+    from commentator.hud import Scorecard
+
+    e = _guest_round(tmp_path, ["Kroll", "Smith"])
+    r = e.round
+    card = Scorecard(holes=list(range(1, 19)), scores={"KROLL": {1: 3}, "BARROWS": {1: 4}, "SMITH": {1: 5}})
+    assert r.apply_scorecard(card) and e._admit_from_card(r, card)
+    r.apply_scorecard(card)
+    assert r.slot_names == ["Kroll", "Barrows", "Smith"] and r.card_scores["Barrows"] == {1: 4}
+    assert not e._admit_from_card(r, card)          # once
+
+
+async def test_a_lookalike_of_the_opening_player_is_held_and_the_card_doesnt_duplicate_a_misread(tmp_path):
+    from commentator.hud import Scorecard
+    from commentator.league import League
+    from commentator.models import RoundStartEvent
+
+    # Mike opens (the round start's setup); Mikey, missed at the start, is next: held, not Mike's.
+    e = _engine_with(tmp_path, League({}))
+    e.current_par, e.current_course = 3, "Pebble Beach"
+    await e.handle_round_start(RoundStartEvent(hud=_tee("Mike")))
+    e._note_player(_tee("Mikey"))
+    assert list(e.round.roster) == ["Mike"] and e._player("Mikey E Shot 1 150 YDS", None) != "Mike"
+    # Ambiguous between two players: held, not added.
+    e = _guest_round(tmp_path / "b", ["Barrows", "Barrow"])
+    e._note_player(_tee("Barows"))
+    assert list(e.round.roster) == ["Barrows", "Barrow"]
+    # A guest added under a look-alike misread is the card's row for that name, not a new player.
+    e = _guest_round(tmp_path / "c", ["M1ke", "Smith"])
+    card = Scorecard(holes=list(range(1, 19)), scores={"MIKE": {1: 3}, "SMITH": {1: 4}})
+    assert e.round.apply_scorecard(card) and not e._admit_from_card(e.round, card)
+    assert e.round.card_scores["M1ke"] == {1: 3}
+
+
+async def test_held_guests_and_card_rows_keep_gspros_order(tmp_path):
+    from commentator.hud import Scorecard
+
+    e = _guest_round(tmp_path, ["John", "Smith"])
+    for who in ("John", "John A", "John B", "Smith"):
+        e._note_player(_tee(who))
+    e._note_player(_tee("John B", 2))
+    e._note_player(_tee("John A", 2))
+    assert e.round.slot_names == ["John", "John A", "John B", "Smith"]
+
+    e = _guest_round(tmp_path / "b", ["Smith", "Jones"])
+    card = Scorecard(holes=list(range(1, 19)),
+                     scores={"SMITH": {1: 3}, "MIKE": {1: 4}, "MIKEY": {1: 5}, "JONES": {1: 6}})
+    assert e.round.apply_scorecard(card) and e._admit_from_card(e.round, card)
+    assert e.round.slot_names == ["Smith", "Mike", "Mikey", "Jones"]
+
+
+def test_renaming_back_and_forth_keeps_one_current_name(tmp_path):
+    e = _guest_round(tmp_path, ["Barr0ws"])
+    r = e.round
+    assert r.rename_player("Barr0ws", "Barrows") and r.rename_player("Barrows", "Barr0ws")
+    assert r.current_name("Barrows") == r.current_name("Barr0ws") == "Barr0ws"
+
+
+def test_a_misread_league_players_name_is_still_their_league_name(tmp_path):
+    from commentator.round import Round
+
+    e = _engine(tmp_path)
+    e.round = Round(league=e.league, gspro_players=["MikeD"], course="X", scheduled_format=None, holes=18,
+                    is_league=False)
+    assert e._player("M1keD 2nd (E) Shot 2 150 YDS", None) == e._player("MikeD 2nd (E) Shot 2 150 YDS", None) == "Mike"
+
+
+def test_a_card_row_a_letter_off_a_held_name_is_that_player(tmp_path):
+    from commentator.hud import Scorecard
+
+    e = _guest_round(tmp_path, ["Mike", "Smith"])
+    e._note_player(_tee("Mike"))
+    e._note_player(_tee("Mikey"))   # held
+    card = Scorecard(holes=list(range(1, 19)), scores={"MIKE": {1: 3}, "MIKEYY": {1: 4}, "SMITH": {1: 5}})
+    assert e.round.apply_scorecard(card) and e._admit_from_card(e.round, card)
+    assert e.round.slot_names == ["Mike", "Mikey", "Smith"] and not e.round.held
+
+
+def test_a_card_row_near_a_player_matched_only_loosely_isnt_added(tmp_path):
+    from commentator.hud import Scorecard
+
+    e = _guest_round(tmp_path, ["Mike", "Smith"])
+    card = Scorecard(holes=list(range(1, 19)), scores={"MIK": {1: 3}, "MIKEY": {1: 4}, "SMITH": {1: 5}})
+    assert e.round.apply_scorecard(card)
+    assert not e._admit_from_card(e.round, card) and list(e.round.roster) == ["Mike", "Smith"]
+    # A name a guest was renamed from is the new player's once they're added.
+    e.round.rename_player("Mike", "Jon")
+    assert e.round.add_player("Mike") and e.round.current_name("Mike") == "Mike"
+
+
+async def test_a_scorecard_read_missing_a_row_adds_nobody(tmp_path):
+    from commentator.hud import Scorecard
+
+    e = _guest_round(tmp_path, ["John", "Smith"])
+    r = e.round
+    card = Scorecard(holes=list(range(1, 19)), scores={"MIKE": {1: 4}, "SMITH": {1: 5}})   # JOHN's row unread
+    r.apply_scorecard(card)
+    assert not e._admit_from_card(r, card) and r.slot_names == ["John", "Smith"]
+
+
+async def test_a_name_with_letters_missing_read_twice_waits_for_the_card(tmp_path):
+    from commentator.hud import Scorecard
+
+    e = _guest_round(tmp_path, ["John A", "John B"])
+    e._note_player(_tee("John A"))
+    e._note_player(_tee("John"))          # John B, his last letter dropped
+    e._note_player(_tee("John", 2))       # and again
+    assert list(e.round.roster) == ["John A", "John B"]
+    card = Scorecard(holes=list(range(1, 19)), scores={"JOHN A": {1: 3}, "JOHN B": {1: 4}})
+    e.round.apply_scorecard(card)
+    assert not e._admit_from_card(e.round, card) and e.round.slot_names == ["John A", "John B"]
+
+
+async def test_no_card_row_below_an_unresolved_one_is_added(tmp_path):
+    from commentator.hud import Scorecard
+
+    e = _guest_round(tmp_path, ["John A", "Smith"])
+    r = e.round
+    r.slot_names = ["John A", None, None, "Smith"]
+    card = Scorecard(holes=list(range(1, 19)),
+                     scores={"JOHN": {1: 3}, "JOHN B": {1: 4}, "BARROWS": {1: 5}, "SMITH": {1: 6}})
+    r.apply_scorecard(card)
+    assert not e._admit_from_card(r, card) and r.slot_names == ["John A", None, None, "Smith"]
+
+
+async def test_no_card_row_below_one_without_scores_is_added(tmp_path):
+    from commentator.hud import Scorecard
+
+    e = _guest_round(tmp_path, ["Mike", "Smith"])
+    r = e.round
+    r.slot_names = ["Mike", None, None, "Smith"]
+    card = Scorecard(holes=list(range(1, 19)),
+                     scores={"MIKE": {1: 3}, "BARROWS": {}, "JONES": {1: 4}, "SMITH": {1: 6}})
+    r.apply_scorecard(card)
+    assert not e._admit_from_card(r, card) and r.slot_names == ["Mike", None, None, "Smith"]
+
+
+async def test_a_scorecard_with_fewer_rows_than_slots_adds_nobody(tmp_path):
+    from commentator.hud import Scorecard
+
+    e = _guest_round(tmp_path, ["Mike", "Smith"])
+    r = e.round
+    r.slot_names = ["Mike", None, None, "Smith"]
+    card = Scorecard(holes=list(range(1, 19)), scores={"MIKE": {1: 3}, "JONES": {1: 5}, "SMITH": {1: 6}})
+    r.apply_scorecard(card)   # BARROWS's name unread: his row isn't there at all
+    assert not e._admit_from_card(r, card) and r.slot_names == ["Mike", None, None, "Smith"]
+
+
+async def test_a_held_player_confirmed_late_takes_an_unread_slot_not_a_new_one(tmp_path):
+    e = _guest_round(tmp_path, ["Mike", "Smith"])
+    e.round.slot_names = ["Mike", None, None, "Smith"]
+    e.cfg.source.gspro_log_truth = True
+    for name in ("Mike", "Mikey", "Barrows", "Smith"):
+        e._note_player(_tee(name))
+    assert e._gspro_idx("Barrows") is None and e._gspro_idx("Mike") == 0   # Mikey may be a player
+    e._last_row[1] = ("barrows' shot",)
+    e._note_player(_tee("Mikey", 2))
+    assert e.round.slot_names == ["Mike", "Mikey", "Barrows", "Smith"]
+    assert e._gspro_idx("Barrows") == 2 and 1 not in e._last_row
+
+
+async def test_a_league_player_teed_after_a_held_name_waits_for_their_index_too(tmp_path):
+    from commentator.round import Round
+
+    e = _engine(tmp_path)
+    e.cfg.source.gspro_log_truth = True
+    e.round = Round(league=e.league, gspro_players=["Zed", "MikeD"], course="X", scheduled_format=None, holes=18,
+                    is_league=False)
+    e.round.slot_names = ["Zed", "MikeD"]
+    for name in ("Zed", "Zedd", "MikeD"):
+        e._note_player(_tee(name))
+    assert e.round.held and e._gspro_idx("Mike") is None
