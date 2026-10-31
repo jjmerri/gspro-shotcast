@@ -206,6 +206,7 @@ class GsproLogShotSource(ShotSource):
         ev = ShotEvent(shot=replace(shot, putter=fire.putter), landed=True)
         ev.impact_at, ev.impact_state, ev.impact_read, ev.impact_seq = (
             fire.event.impact_at, fire.event.impact_state, fire.event.impact_read, fire.event.impact_seq)
+        ev.setup_hud = fire.event.setup_hud
         return ev
 
     def _capture(self, now: float) -> None:
