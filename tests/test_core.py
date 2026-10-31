@@ -2961,6 +2961,26 @@ async def test_an_empty_setup_lie_is_read_again_unless_the_player_changes(tmp_pa
     assert engine._events.empty() and engine._setup_lies == {}
 
 
+async def test_a_setup_isnt_kept_for_the_impact_read_when_a_swing_lands_during_it(tmp_path):
+    engine, screen = _setup_engine(tmp_path)
+    hud = Hud(player_text="Josh 2nd (E) Shot 2 126 YDS", shot_number=2, score_to_par="E", to_pin="126 yards")
+    await engine._emit_setup(hud)
+    assert engine._setup_at_impact(time.monotonic()).player_text == hud.player_text
+
+    # Josh swings and Sam is up while the rest of Josh's setup is read: Sam's swing mustn't be Josh's.
+    engine, screen = _setup_engine(tmp_path / "b")
+    real = screen.read_hud_async
+
+    async def swung(parts):
+        engine._shot_seq += 1
+        engine.gspro.active_player = 1
+        return await real(parts)
+    screen.read_hud_async = swung
+    await engine._emit_setup(Hud(player_text="Josh 2nd (E) Shot 2 126 YDS", shot_number=2, score_to_par="E",
+                                 to_pin="126 yards"))
+    assert engine._setup_at_impact(time.monotonic()) is None
+
+
 async def test_emit_setup_reads_the_hud_before_the_model_and_skips_others_off_the_tee(tmp_path):
     engine, screen = _setup_engine(tmp_path)
     engine.cfg.commentary.preshot_rate = 1.0
@@ -4187,6 +4207,30 @@ def test_the_impact_lie_is_the_one_read_at_setup(tmp_path):
     e._use_setup_lie(other)
     assert other.lie == "green"   # no setup read for this stroke: the impact read stands
     assert other.slope_updown is None
+
+
+def test_an_impact_read_that_missed_the_player_box_takes_the_setup_read(tmp_path):
+    e = _mini_engine(tmp_path)
+    setup = Hud(player_text="Stefanski 2nd (E) Shot 2 247.0 YDS", shot_number=2, to_pin="247.0 yards",
+                score_to_par="E", lie="rough", elevation_yards=2.2)
+    e.gspro.active_player = 1
+    e._last_setup = (setup, e._shot_seq, 1, 100.0)
+    got = e._setup_at_impact(101.0)
+    # Monitor capture: GSPro hid the box for the flight before the impact read grabbed it.
+    hud = Hud()
+    e._fill_from_setup(hud, got)
+    assert (hud.player_text, hud.shot_number, hud.to_pin, hud.lie, hud.elevation_yards) == (
+        setup.player_text, 2, "247.0 yards", "rough", 2.2)
+    read = Hud(player_text="Heiser 3rd Shot 3 120 YDS", shot_number=3)
+    e._fill_from_setup(read, got)
+    assert read.player_text.startswith("Heiser")   # the impact read named someone: it stands
+    # Not this stroke's setup: read after the swing, a ball struck since, or the log has someone else up.
+    assert e._setup_at_impact(99.0) is None
+    e.gspro.active_player = 0
+    assert e._setup_at_impact(101.0) is None
+    e.gspro.active_player = 1
+    e._shot_seq += 1
+    assert e._setup_at_impact(101.0) is None
 
 
 def test_strategy_fact_is_offered_at_most_once_a_hole(tmp_path):

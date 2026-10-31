@@ -716,6 +716,9 @@ class Engine:
         self._opener_prepared_format: str | None = None
         # The last roster (and slot order) read off a setup screen's PLAYERS tab, for a setup that never shows it.
         self._last_setup_roster: tuple[list[str], list[str]] | None = None
+        # The last setup the booth read: (its HUD, the shot count then, GSPro's logged active player,
+        # when). The impact read's fallback when the player box is gone by the time it's grabbed.
+        self._last_setup: tuple | None = None
         # (when, frame, tones) of the latest PLAYERS-tab frame the quick sampler caught (see _sample_players_tab).
         self._players_snap: tuple | None = None
         self._idle_card_logged: dict | None = None
@@ -866,10 +869,14 @@ class Engine:
         undo = None   # (banner, hole number, number read, shots so far) before the last hole change
         last_setup = candidate = None
         candidate_since = 0.0
+        candidate_stamp: tuple | None = None
         setup_seq = moved_on = 0
         card_read_at = 0.0
         while True:
             await asyncio.sleep(self.cfg.screen.hud_poll_seconds)
+            # Who was up when this poll began: a setup is kept for the impact read only if no ball was
+            # struck, nor the log's player changed, from its first sighting to the end of its read.
+            stamp = (self._shot_seq, self.gspro.active_player, time.monotonic())
             try:
                 hud = await self.screen.read_hud_async(["player_box", "hole_box", "scorecard_title"])
             except Exception:
@@ -942,7 +949,7 @@ class Engine:
                 candidate = None
                 continue
             if setup != candidate:
-                candidate, candidate_since = setup, time.monotonic()
+                candidate, candidate_since, candidate_stamp = setup, time.monotonic(), stamp
                 continue
             if time.monotonic() - candidate_since >= self.cfg.commentary.preshot_settle_seconds:
                 last_setup, candidate, setup_seq, moved_on = setup, None, self._shot_seq, 0
@@ -951,7 +958,7 @@ class Engine:
                     await self._events.put(HoleChangeEvent(previous=None, current=hole_label(hud, logged),
                                                            course=hud.course, correction="log"))
                 self._prev_activity, self._last_activity = self._last_activity, time.monotonic()
-                await self._emit_setup(hud)
+                await self._emit_setup(hud, candidate_stamp)
 
     @property
     def putt_reader(self) -> bool:
@@ -1028,7 +1035,7 @@ class Engine:
         task.add_done_callback(lambda t: t.cancelled() or t.exception())
         return task
 
-    async def _emit_setup(self, hud: Hud) -> None:
+    async def _emit_setup(self, hud: Hud, stamp: tuple | None = None) -> None:
         """Read the rest of the HUD and start the pre-shot look. The model call is the longest step,
         so it's kicked off the moment the lie is known and runs while the slope (and, on the tee, the
         other players) are still being read, rather than after. The frame it sees is grabbed once."""
@@ -1037,6 +1044,9 @@ class Engine:
                      "GSPro is in the menus after End Round" if self._log_rounds and self.gspro.mode == "menu"
                      else f"round {self.round.id} is complete and this isn't a new tee", hud.shot_number)
             return
+        # Who was up when the player box was first read (the watcher's poll): the rest of the read
+        # takes a while, and a swing (and the next player up) meanwhile mustn't be stamped on it.
+        stamp = stamp or (self._shot_seq, self.gspro.active_player, time.monotonic())
         if hud.shot_number == 1:
             self._snap_hole(hud)
         # The minimap read starts first so it runs during the HUD read below. It's cancelled for a putt.
@@ -1124,6 +1134,10 @@ class Engine:
                  [(o.name, o.to_pin, o.score_to_par) for o in hud.others], hud.slope_updown, hud.slope_side,
                  hud.slope_side_degrees, None if hud.elevation_yards is None else round(hud.elevation_yards, 1),
                  f"{self.screen.last_read_seconds:.2f} (capture {self.screen.last_capture_seconds:.2f})")
+        if (self._shot_seq, self.gspro.active_player) == stamp[:2]:
+            self._last_setup = (replace(hud, others=[], tiles={}), *stamp)
+        else:
+            self._last_setup = None
         await self._events.put(PreShotEvent(hud=hud, image=image, model_task=model_task))
 
     async def _reread_setup_lie(self, name_sig: tuple | None, seq: int) -> str | None:
@@ -3709,6 +3723,7 @@ class Engine:
     def _capture_impact(self, event: ShotEvent) -> None:
         event.impact_at = time.monotonic()
         event.impact_state = (self._impact_state(), *self._impact_hole())
+        event.setup_hud = self._setup_at_impact(event.impact_at)
         # Read the screen now, while it still shows this shot's player, lie and tiles.
         if self.screen is not None and event.hud_hint is None:
             event.impact_read = asyncio.ensure_future(self._read_impact_hud("[held shot]"))
@@ -3735,6 +3750,8 @@ class Engine:
         self._shot_id = None  # set once this shot is recorded; mid-flight lines come before that
         self._apply_log_corrections()
         shot = event.shot
+        if held is None:
+            event.setup_hud = self._setup_at_impact(event.received_at or impact)
         self._shot_seq += 1
         my_seq = self._shot_seq   # this shot's order, to keep concurrent handlers from reordering finish
         tag = f"[shot {self._shot_seq}]"
@@ -3797,6 +3814,7 @@ class Engine:
         if use_screen:
             read = getattr(event, "impact_read", None)
             before, impact_image = await (read if read is not None else self._read_impact_hud(tag))
+            self._fill_from_setup(before, event.setup_hud, tag)
             self._use_setup_lie(before, tag)
         player = self._player(before.player_text, event.player_hint)
         # GSPro's own club box beats guessing the club from loft.
@@ -4707,6 +4725,35 @@ class Engine:
                 f"{lost:.0f}% of its speed, so the trees, not the swing, cut this shot short. Worth a word "
                 f"(an unlucky branch, a tree that jumped out). The height and distance are estimates: keep "
                 f"them loose, never exact."]
+
+    def _setup_at_impact(self, at: float) -> Hud | None:
+        """This stroke's setup read, taken at impact: the last setup, when no ball was struck since it,
+        it was read before `at`, and GSPro's log (when it names one) still has the same player up."""
+        if self._last_setup is None:
+            return None
+        hud, seq, active, read_at = self._last_setup
+        if seq != self._shot_seq or read_at > at:
+            return None
+        now = self.gspro.active_player
+        if active is not None and now is not None and active != now:
+            return None
+        return hud
+
+    def _fill_from_setup(self, before: Hud, setup: Hud | None, tag: str = "") -> None:
+        """The impact read missed the player box (GSPro can hide it for the flight before a slow read
+        grabs it): who hit this, which stroke, and from where come from the setup read for it."""
+        if setup is None or before.player_text or not setup.player_text:
+            return
+        log.info("%s the impact read missed the player box: %r shot %s from the setup read", tag,
+                 setup.player_text, setup.shot_number)
+        before.player_text, before.shot_number = setup.player_text, setup.shot_number
+        before.to_pin, before.score_to_par = setup.to_pin, setup.score_to_par
+        if before.elevation_yards is None:
+            before.elevation_yards = setup.elevation_yards
+        if not before.lie:
+            before.lie = setup.lie
+        if not before.handed:
+            before.handed = setup.handed
 
     def _use_setup_lie(self, before: Hud, tag: str = "") -> None:
         """The lie this stroke's setup read, while the player stood over the ball, over the impact

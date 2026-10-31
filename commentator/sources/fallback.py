@@ -126,6 +126,7 @@ class ConnectorWithLogFallback(ShotSource):
                                 ev.impact_at = twin[1].impact_at
                                 ev.impact_state = twin[1].impact_state
                                 ev.impact_read = twin[1].impact_read
+                                ev.setup_hud = twin[1].setup_hud
                         else:
                             sent.append((now, speed))
                     yield ev
