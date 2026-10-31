@@ -487,6 +487,7 @@ def _engine(tmp_path):
     from tests.test_core import FakeLLM
 
     cfg = Config(log_dir=str(tmp_path))
+    cfg.commentary.preround = True  # the setup watch's early opener
     llm = FakeLLM(cfg.llm.live)
     return Engine(cfg=cfg, league=LEAGUE, source=ReplaySource("data/sample_shots.jsonl"), live_llm=llm,
                   segment_llm=llm, speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0))
@@ -1518,6 +1519,7 @@ def _engine_with(tmp_path, league):
     from tests.test_core import FakeLLM
 
     cfg = Config(log_dir=str(tmp_path))
+    cfg.commentary.preround = True  # the setup watch's early opener
     llm = FakeLLM(cfg.llm.live)
     return Engine(cfg=cfg, league=league, source=ReplaySource("data/sample_shots.jsonl"), live_llm=llm,
                   segment_llm=llm, speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0))
@@ -3558,3 +3560,68 @@ def test_streak_facts_name_runs_the_score_line_hides(tmp_path):
     assert e._streak_facts("Mike") == []
     card(4, 3, 4)
     assert e._streak_facts("Mike") == []
+
+
+async def test_with_commentary_off_the_setup_screens_players_reach_the_round(tmp_path):
+    from commentator.league import League
+    from commentator.models import RoundStartEvent
+
+    # No early opener (preround off), but the setup screen is still read: a guest not up first on the
+    # tee is in the round, in the setup's slot order, so their shots and log scores are theirs.
+    frame = _players_tab("Pebble Beach", {1: "Kroll", 2: "Barrows"})
+    e = _engine_with(tmp_path, League({}))
+    e.cfg.commentary.preround = False
+    await _run_setup_watch(e, [frame, frame, {"load_course": "Pebble Beach"}],
+                           until=lambda p: e._played_setup is not None)
+    assert e._pending_opening is None and e._played_setup is not None
+    e.current_par, e.current_course = 3, "Pebble Beach"
+    await e.handle_round_start(RoundStartEvent(hud=Hud(player_text="Kroll E Shot 1 150 YDS", shot_number=1,
+                                                       score_to_par="E", to_pin="150 yards")))
+    assert list(e.round.roster) == ["Kroll", "Barrows"]
+    assert [n for n in e.round.slot_names if n] == ["Kroll", "Barrows"]
+
+
+async def test_a_guest_first_seen_on_the_first_tee_joins_the_round(tmp_path):
+    from commentator.league import League
+    from commentator.round import Round
+
+    e = _engine_with(tmp_path, League({}))
+    e.round = Round(league=e.league, gspro_players=["Kroll"], course="Pebble Beach", scheduled_format=None,
+                    holes=18, start_hole=1, is_league=False)
+    e.round.slot_names = ["Kroll"]
+    e._admit_player(Hud(player_text="Barrows E Shot 1 150 YDS", shot_number=1, score_to_par="E"))
+    assert list(e.round.roster) == ["Kroll", "Barrows"] and e.round.slot_names == ["Kroll", "Barrows"]
+    assert e._player("Barrows E Shot 1 150 YDS", None) == "Barrows"
+    # An OCR slip of a player already in, a later shot, or a later hole: nobody new.
+    e._admit_player(Hud(player_text="Kro1l E Shot 1 150 YDS", shot_number=1, score_to_par="E"))
+    e._admit_player(Hud(player_text="Smith 1st (E) Shot 2 40 YDS", shot_number=2, score_to_par="E"))
+    e.round.seq = 2
+    e._admit_player(Hud(player_text="Jones E Shot 1 150 YDS", shot_number=1, score_to_par="E"))
+    assert list(e.round.roster) == ["Kroll", "Barrows"]
+
+
+async def test_a_guest_admitted_late_takes_the_slot_before_players_not_up_yet(tmp_path):
+    from commentator.league import League
+    from commentator.round import Round
+
+    # The tee showed Kroll and Smith; Barrows (slot 2) was missed. He sets up after Kroll, before Smith,
+    # so he's GSPro's player 2 and Smith's log scores stay Smith's.
+    e = _engine_with(tmp_path, League({}))
+    e.round = Round(league=e.league, gspro_players=["Kroll", "Smith"], course="Pebble Beach",
+                    scheduled_format=None, holes=18, start_hole=1, is_league=False)
+    e.round.slot_names = ["Kroll", "Smith"]
+    for who in ("Kroll", "Barrows", "Smith"):
+        e._admit_player(Hud(player_text=f"{who} E Shot 1 150 YDS", shot_number=1, score_to_par="E"))
+    assert e.round.slot_names == ["Kroll", "Barrows", "Smith"]
+
+
+async def test_a_guest_isnt_added_to_a_league_round(tmp_path):
+    e = _engine(tmp_path)
+    e.current_par, e.current_course = 4, "Wynn"
+    from commentator.models import RoundStartEvent
+    await e.handle_round_start(RoundStartEvent(hud=Hud(player_text="MikeD E Shot 1 400.3 YDS", shot_number=1,
+                                                       score_to_par="E", to_pin="400.3 yards")))
+    assert e.round.is_league
+    before = list(e.round.roster)
+    e._admit_player(Hud(player_text="Barrows E Shot 1 400 YDS", shot_number=1, score_to_par="E"))
+    assert list(e.round.roster) == before

@@ -1,5 +1,6 @@
 import asyncio
 import bisect
+import difflib
 import json
 import logging
 import os
@@ -111,6 +112,12 @@ def hole_label(hud: Hud, number: int | None) -> str:
     if hud.hole_length:
         parts.append(hud.hole_length)
     return ", ".join(parts)
+
+
+def _gspro_name(player_text: str) -> str:
+    """GSPro's name in the player box: cut at the score or shot marker ("David E Shot 1" on the tee,
+    "David 2nd (E) Shot 2" after)."""
+    return re.split(r"\s+(?:(?:E|[+-]\d+|Shot|\d+(?:st|nd|rd|th))\b|\()", player_text.strip(), maxsplit=1)[0].strip()
 
 
 def _tile_values(tiles: dict[str, str], unit: str) -> tuple:
@@ -722,6 +729,8 @@ class Engine:
         self._opener_prepared_format: str | None = None
         # The last roster (and slot order) read off a setup screen's PLAYERS tab, for a setup that never shows it.
         self._last_setup_roster: tuple[list[str], list[str]] | None = None
+        # The setup screen Play was pressed on: (course, roster, slot order, when), for the round's start.
+        self._played_setup: tuple[str, list[str], list[str | None], float] | None = None
         # The last setup the booth read: (its HUD, the shot count then, GSPro's logged active player,
         # when). The impact read's fallback when the player box is gone by the time it's grabbed.
         self._last_setup: tuple | None = None
@@ -822,8 +831,9 @@ class Engine:
         self._start_live()
         if self.screen and self.cfg.screen.ocr:
             tasks.append(asyncio.create_task(self._watch_hud(), name="hud-watch"))
-            if self.cfg.commentary.preround:
-                tasks.append(asyncio.create_task(self._watch_setup(), name="setup-watch"))
+            # Always: the setup screen's players, holes and game mode are the round's stats too. Only the
+            # early opener it can compose needs commentary.preround.
+            tasks.append(asyncio.create_task(self._watch_setup(), name="setup-watch"))
         try:
             while (event := await self._events.get()) is not None:
                 try:
@@ -1123,6 +1133,7 @@ class Engine:
                 del self._setup_slopes[next(iter(self._setup_slopes))]
         if "others" in rest:
             hud.others = extra.others
+        self._admit_player(hud)
         player = self._player(hud.player_text, None)
         if player and hud.shot_number:
             swings = [x for x in self.state.shots if x.player == player]
@@ -2026,9 +2037,7 @@ class Engine:
         # Not on the league roster (no league file, or a guest): the round's own GSPro names.
         r = self.round
         if r and not r.ended and texts and texts[0]:
-            # Cut at the score or shot marker: "David E Shot 1" on the tee, "David 2nd (E) Shot 2" after.
-            raw = re.split(r"\s+(?:(?:E|[+-]\d+|Shot|\d+(?:st|nd|rd|th))\b|\()", texts[0].strip(),
-                           maxsplit=1)[0].strip().casefold()
+            raw = _gspro_name(texts[0]).casefold()
             if name := next((n for n in r.roster if n and n.casefold() == raw), None):
                 return name
         return next((t for t in texts[1:] if t), None)
@@ -5963,6 +5972,55 @@ class Engine:
             return f"made for the last roster {sorted(p.roster_key)}, tee reads {sorted(self._roster_key(names))}"
         return None
 
+    def _with_setup_players(self, names: list[str], course: str | None) -> tuple[list[str], list | None]:
+        """The tee's names plus anyone the setup screen had that the tee didn't show (guests not up
+        first), and the setup's slot order: when Play was pressed on this course recently and the tee's
+        players are all on it. Taken once."""
+        s, self._played_setup = self._played_setup, None
+        if not s:
+            return names, None
+        s_course, roster, slots, at = s
+        if time.monotonic() - at > self.cfg.commentary.preround_ttl_seconds or not self._same_course(s_course, course):
+            return names, None
+        tee = self._roster_key(names)
+        if not tee <= self._roster_key(roster):
+            log.info("Setup roster %s doesn't cover the tee's %s: not used", roster, names)
+            return names, None
+        extra = [n for n in roster if not self._roster_key([n]) <= tee]
+        if extra:
+            log.info("From the setup screen, not on the tee: %s", extra)
+        return names + extra, list(slots)
+
+    def _admit_player(self, hud: Hud) -> None:
+        """A first-tee setup for someone the round doesn't have (a guest who wasn't up first, the setup
+        screen unread): add them, so their shots and scores are theirs. A name a letter or two off a
+        player's already in is an OCR slip, not a new player."""
+        r = self.round
+        if not r or r.ended or r.seq != 1 or hud.shot_number != 1 or hud.score_to_par != "E":
+            return
+        raw = _gspro_name(hud.player_text or "")
+        if len(raw) < 2 or not re.search(r"[^\W\d_]", raw):
+            return
+        match = self.league.match_player(hud.player_text)
+        known = [g for g, p in r.roster.items() if g.casefold() == raw.casefold() or (match and p == match)]
+        near = known or [g for g in r.roster
+                         if difflib.SequenceMatcher(None, g.casefold(), raw.casefold()).ratio() >= 0.8]
+        if near:
+            if near[0] not in r.teed:
+                r.teed.append(near[0])
+            if not known:
+                log.info("First-tee setup for %r, close to %s already in round %s: not added", raw, near, r.id)
+            return
+        if r.is_league:
+            # The lineup was a scheduled league match; someone else in it makes it practice, which
+            # can't be redone mid-hole. The setup screen (always read) is what classifies it right.
+            log.info("First-tee setup for %r, not in league round %s: not added", raw, r.id)
+            return
+        if r.add_player(raw):
+            log.info("Round %s: %r is up on the first tee too; added (players now %s)", r.id, raw, list(r.roster))
+            if match:
+                self._bg(self._apply_live_handicaps(self._round_players([raw])))
+
     def _reconcile_slots(self, r: Round, names: list[str]) -> None:
         """Make sure the round has a GSPro player-index order. The setup-screen slots are the source
         when they cover everyone on the first tee; when they're missing or disagree with the tee (a
@@ -6008,6 +6066,7 @@ class Engine:
         first = self.league.match_player(hud.player_text) or raw or None
         names = [n for n in [raw or first] + [o.name for o in hud.others] if n]
         course = self._tee_course(hud)
+        names, slots = self._with_setup_players(names, course)
         await self._bookings_ready()
         entry, practice = self._classify_round(names, course)
         is_league = practice is None
@@ -6047,7 +6106,7 @@ class Engine:
             # Off the critical path: practice only needs the index for the closer's read on form.
             self._bg(self._apply_live_handicaps(self._round_players(names)))
             log.info("Practice, not a league round (%s): calling the golf without league framing", practice)
-        r = self._build_round(names, course, entry, is_league)
+        r = self._build_round(names, course, entry, is_league, slot_names=slots)
         self._reconcile_slots(r, names)
         self._apply_log_holes(r)
         self._start_round(r)
@@ -6079,6 +6138,7 @@ class Engine:
         raw = re.split(r"\s+(?:E|[+-]\d+|Shot)\b", (hud.player_text or "").strip(), maxsplit=1)[0].strip()
         names = [n for n in [raw or self.league.match_player(hud.player_text)] + [o.name for o in hud.others] if n]
         course = self._tee_course(hud)
+        names, slots = self._with_setup_players(names, course)
         await self._bookings_ready()
         entry, practice = self._classify_round(names, course)
         is_league = practice is None
@@ -6086,7 +6146,7 @@ class Engine:
             await self._apply_live_handicaps(self._round_players(names))
         else:
             self._bg(self._apply_live_handicaps(self._round_players(names)))
-        r = self._build_round(names, course, entry, is_league, use_current_hole=False)
+        r = self._build_round(names, course, entry, is_league, use_current_hole=False, slot_names=slots)
         g = self.gspro
         r.start_hole, r.start_hole_assumed = g.first_hole + 1, False   # the log's holes are 0-based
         if r.course_card:
@@ -6298,7 +6358,7 @@ class Engine:
                         log.exception("Setup game-mode read failed")
                     if (tab := tones.get("setup_holes_tab")) is not None and tab.mean >= _HOLES_TAB_LIT:
                         self._keep_fixture_frame("setup_holes", frame)
-                    if course and play_course == course and roster:
+                    if course and play_course == course and roster and c.preround:
                         self._maybe_front_load(play_course, roster, slot_order)   # recompose if the nines changed
                     states = {s: _slot_state(tones[s]) for s in slots if s in tones}
                     if not players_tab or "list" in states.values():
@@ -6350,7 +6410,8 @@ class Engine:
                 seen_setup, course = True, play_course
                 # Compose the league opener now, while still on the setup screen, so a fast course load
                 # doesn't catch the LLM mid-call. Recomposes if the roster changes.
-                self._maybe_front_load(play_course, roster, slot_order)
+                if c.preround:
+                    self._maybe_front_load(play_course, roster, slot_order)
                 continue
             # Not on the setup screen. Fire only when the course's load screen is up (a positive signal
             # that Play was pressed): the load-screen title matches the course we set up. A popup over
@@ -6363,6 +6424,11 @@ class Engine:
                            and course_match_score(load_title, course) >= 0.6)
             if loading and probed:
                 self._take_holes_sample(holes_since)   # nines changed in the moment before Play was pressed
+            if loading and roster:
+                self._played_setup = (course, list(roster), list(slot_order), time.monotonic())
+            if loading and not c.preround:
+                seen_setup, course, roster, slot_order, slot_cache = False, None, [], [], {}
+                continue
             if loading and not roster and self._last_setup_roster:
                 # Play was pressed without the PLAYERS tab ever being shown, so this setup read no players.
                 # GSPro keeps the players from the last round, so make the opener for the last roster read
