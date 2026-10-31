@@ -892,6 +892,12 @@ class Store:
         ).fetchone()
         return r["longest"] if r else None
 
+    def rename_shots(self, old: str, new: str, after_id: int) -> int:
+        """A player's shots since `after_id` (a round's) go to their right name. Returns how many."""
+        n = self.db.execute("UPDATE shots SET player = ? WHERE player = ? AND id > ?", (new, old, after_id)).rowcount
+        self.db.commit()
+        return n
+
     def last_shot_id(self) -> int:
         return self.db.execute("SELECT COALESCE(MAX(id), 0) FROM shots").fetchone()[0]
 

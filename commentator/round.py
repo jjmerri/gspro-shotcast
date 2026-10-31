@@ -64,6 +64,19 @@ def _norm(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
+_OCR_ALIKE = str.maketrans({"0": "o", "1": "l", "i": "l", "|": "l", "!": "l", "5": "s", "$": "s"})
+
+
+def name_key(name: str) -> str:
+    """A name as OCR's look-alike characters can't tell apart (0/o, 1/l/i, 5/s): letters and digits."""
+    return re.sub(r"[^a-z0-9]", "", name.casefold().translate(_OCR_ALIKE))
+
+
+def name_ratio(a: str, b: str) -> float:
+    """How alike two names read, look-alike characters aside (1.0: the same)."""
+    return difflib.SequenceMatcher(None, name_key(a), name_key(b)).ratio()
+
+
 def to_par(n: int) -> str:
     return "even par" if n == 0 else (f"{n} over par" if n > 0 else f"{-n} under par")
 
@@ -163,6 +176,16 @@ class Round:
         self.shot_floor: int | None = None
         # GSPro names seen setting up their first tee shot, in order: the first tee goes in slot order.
         self.teed: list[str] = []
+        # A first-tee name a letter or two off someone who'd already teed off: a misread, or another
+        # player (Mike and Mikey). Held (casefolded) with who'd teed off before it and where it was
+        # seen, until a read at another shot (or the scorecard) shows it's a player.
+        self.held: dict[str, tuple[str, list[str], tuple]] = {}
+        # A guest's name as each HUD read spelled it (league players go by the league's name), and the
+        # names guests were renamed from (a shot in flight then still has the old one).
+        self.spellings: dict[str, dict[str, int]] = {}
+        self.renamed: dict[str, str] = {}
+        # The last scorecard's rows in order, each with the round's player it went to (None: nobody's).
+        self.card_rows: list[tuple[str, str | None]] = []
 
         self.roster = {g: league.match_player(g) for g in gspro_players}
         teams: dict[str, list[str]] = {}
@@ -193,23 +216,36 @@ class Round:
             return None, "schedule says alternate shot but both partners are in GSPro; format not used"
         return scheduled, None
 
-    def add_player(self, g: str) -> bool:
+    def add_player(self, g: str, teed: list[str] | None = None, after: str | None = None,
+                   first: bool = False) -> bool:
         """A GSPro player the round's start missed (the setup screen unread and not first up on the
-        tee), setting up their first tee shot: into the roster as their own side, and into the slot
-        order right after the last player who's teed off (the first tee goes in slot order), ahead of
-        anyone not up yet. The format stays as it was. True if added."""
+        tee): into the roster as their own side, and into the slot order. That's right after `after`
+        (the scorecard row above theirs), first in it if `first`, or else right after the last of
+        `teed` (who'd set up their first tee shot before them: the first tee goes in slot order),
+        ahead of anyone not up yet. The format stays as it was. True if added."""
         if g in self.roster:
             return False
+        self.renamed.pop(g, None)   # a name someone was renamed from is now this player's
         player = self.roster[g] = self.league.match_player(g)
         team = self.league.player_team.get(player) if player else self.league.match_team(g)
         self.teams.setdefault(team or g, []).append(g)
         if self.slot_names is not None:
-            teed = set(self.teed) | set(self.slot_names[:1])  # whoever's first up has teed off
-            at = 1 + max((i for i, n in enumerate(self.slot_names) if n and n in teed), default=-1)
+            if first:
+                at = 0
+            elif after is not None and after in self.slot_names:
+                at = self.slot_names.index(after) + 1
+            else:
+                done = set(self.teed if teed is None else teed) | set(self.slot_names[:1])  # first up teed
+                at = 1 + max((i for i, n in enumerate(self.slot_names) if n and n in done), default=-1)
             if at < len(self.slot_names) and not self.slot_names[at]:
                 self.slot_names[at] = g
             else:
+                # Those after move down one, into the next unread slot if there is one: a slot count
+                # read from the setup screen stays, and the players past that gap keep theirs.
                 self.slot_names.insert(at, g)
+                gap = next((i for i in range(at + 1, len(self.slot_names)) if not self.slot_names[i]), None)
+                if gap is not None:
+                    del self.slot_names[gap]
         self.teed.append(g)
         self.sides = self._build_sides()
         if self.course_card:
@@ -217,6 +253,38 @@ class Round:
         elif self.week_card:
             self._allocate_hole_strokes()
         return True
+
+    def rename_player(self, old: str, new: str) -> bool:
+        """A guest admitted under a misread of their name: every record of the round goes to the name
+        GSPro shows. True if renamed."""
+        if old not in self.roster or new in self.roster:
+            return False
+        self.renamed = {k: (new if v == old else v) for k, v in self.renamed.items() if k != new}
+        self.renamed[old] = new
+        self.roster = {(new if g == old else g): p for g, p in self.roster.items()}
+        self.teams = {(new if t == old else t): [new if g == old else g for g in gs] for t, gs in self.teams.items()}
+        if self.slot_names is not None:
+            self.slot_names = [new if n == old else n for n in self.slot_names]
+        for d in (self.card_scores, self.log_scores, self.spellings):
+            if old in d:
+                d[new] = d.pop(old)
+        self.teed = [new if g == old else g for g in self.teed]
+        self.held = {k: (raw, [new if g == old else g for g in teed], at) for k, (raw, teed, at) in self.held.items()}
+        self.picked_up = {(new if g == old else g, seq) for g, seq in self.picked_up}
+        for results in self.ctp_results.values():
+            if old in results:
+                results[new] = results.pop(old)
+        self.card_rows = [(n, new if g == old else g) for n, g in self.card_rows]
+        self.sides = self._build_sides()
+        if self.course_card:
+            self.apply_course_card(self.course_card)
+        elif self.week_card:
+            self._allocate_hole_strokes()
+        return True
+
+    def current_name(self, g: str) -> str:
+        """`g`, or the name it was renamed to since."""
+        return self.renamed.get(g, g)
 
     def play_scramble(self, groups: list[list[str]]) -> bool:
         """GSPro's log showed a scramble (it copies the picked ball onto teammates). That's the format
@@ -401,18 +469,22 @@ class Round:
 
     def apply_scorecard(self, card: Scorecard) -> bool:
         """Takes the scorecard's numbers as the truth. Returns whether it held any of our players."""
-        rows = {}
+        rows, matched = {}, {}
         names = list(card.scores)
         for g, player in self.roster.items():
             wanted = {_norm(g)} | {_norm(a) for a in (self.league.names_for(player) if player else [])}
             match = next((n for n in names if _norm(n) in wanted), None)
             if match is None:
-                close = difflib.get_close_matches(_norm(g), [_norm(n) for n in names], n=1, cutoff=0.8)
-                match = next((n for n in names if close and _norm(n) == close[0]), None)
+                match = next((n for n in names if name_key(n) == name_key(g)), None)
+            if match is None:
+                close = difflib.get_close_matches(name_key(g), [name_key(n) for n in names], n=1, cutoff=0.8)
+                match = next((n for n in names if close and name_key(n) == close[0]), None)
             if match:
                 rows[g] = card.scores[match]
+                matched[g] = match
         if not rows:
             return False
+        self.card_rows = [(n, next((g for g, m in matched.items() if m == n), None)) for n in names]
         played = sorted({h for row in rows.values() for h in row})
         if self.start_hole_assumed and played:
             self.start_hole, self.start_hole_assumed = played[0], False
