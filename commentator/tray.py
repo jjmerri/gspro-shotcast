@@ -413,13 +413,13 @@ class Tray:
             obs.stop()
             self.notify("Stopping the live stream.")
             return
-        if not self.cfg.publish.bucket:
-            self.error("The live stream plays on the stats page's Live tab, so the stats page has to be "
-                       "published first: Settings, Sharing.")
+        if not (self.cfg.publish.bucket or self.cfg.live.local_keep_days):
+            self.error("The stream plays on the stats page's Live tab once the stats page is published "
+                       "(Settings, Sharing), or is kept on this PC (Settings, Video): neither is on.")
             return
         if up is False:
             obs.start()
-            self.notify("Starting the live stream: it's on the stats page in about 20 seconds.")
+            self.notify(self._live_starting())
             return
         threading.Thread(target=self._start_obs_and_stream, args=(obs,), name="live-start", daemon=True).start()
 
@@ -434,10 +434,24 @@ class Tray:
                 raise RuntimeError("OBS isn't installed: set up the live stream again (More menu)")
             obs_setup.wait_for(obs, 60)
             obs.start()
-            self.notify("Starting the live stream: it's on the stats page in about 20 seconds.")
+            self.notify(self._live_starting())
         except Exception as e:
             log.exception("Starting the live stream failed")
             self.error(f"That didn't work: {e}\n\nThe details are in logs\\tray-*.log.")
+
+    def _live_starting(self) -> str:
+        if self.cfg.publish.bucket:
+            return "Starting the live stream: it's on the stats page in about 20 seconds."
+        return "Recording GSPro: the video's kept on this PC (More, Open the recordings folder)."
+
+    def open_recordings(self, *_) -> None:
+        from . import local_video
+
+        where = local_video.folder(self.cfg.live, self.home)
+        if where is None:
+            return self.info("Round videos aren't kept on this PC: turn them on in Settings, Video.")
+        where.mkdir(parents=True, exist_ok=True)
+        open_file(where)
 
     def setup_live(self, *_) -> None:
         from . import obs_setup
@@ -487,10 +501,16 @@ class Tray:
             obs_setup.wait_for(obs)
             obs_setup.configure(obs)
             self.restart_booth()
+            kept = (f" Each round's video is kept on this PC for {cfg.live.local_keep_days} days "
+                    f"(More, Open the recordings folder)." if cfg.live.local_keep_days else "")
             if cfg.publish.bucket:
                 self.info("The live stream is set up. OBS starts with Shotcast, runs by the clock and streams "
                           "GSPro while rounds are played (on the stats page's Live tab); \"Start the live "
-                          "stream\" in this menu tries it now.")
+                          "stream\" in this menu tries it now." + kept)
+            elif kept:
+                self.info("OBS is set up. It starts with Shotcast, runs by the clock and records GSPro while "
+                          "rounds are played." + kept + " Publishing the stats page (Settings, Sharing) "
+                          "streams it on the page's Live tab too.")
             else:
                 self.info("OBS is set up. The live stream plays on the stats page's Live tab, so it starts "
                           "once the stats page is published (Settings, Sharing): then OBS starts with Shotcast "
@@ -653,7 +673,7 @@ class Tray:
     def quit(self, *_) -> None:
         self._stop.set()
         self.booth.stop()
-        if self.cfg.live.enabled and self.cfg.publish.bucket:
+        if self.cfg.live.enabled and (self.cfg.publish.bucket or self.cfg.live.local_keep_days):
             # Stopping the booth ends it outright, so it never got to take the stream off air.
             from .live_stream import off_air
 
@@ -723,6 +743,8 @@ class Tray:
                 item("Set up the live stream again (OBS)...", safe(self.setup_live),
                      visible=lambda _: self.cfg.live.enabled),
                 item("Open the Shotcast folder", safe(self.open_folder)),
+                item("Open the recordings folder", safe(self.open_recordings),
+                     visible=lambda _: self.cfg.live.enabled and bool(self.cfg.live.local_keep_days)),
                 item("Open logs", safe(self.open_logs)),
                 item("Edit config.yaml", safe(self.edit_config)),
                 item("Edit .env (API keys)", safe(self.edit_keys)),
@@ -758,6 +780,7 @@ class Tray:
 
     # -- running
     def start_stats(self) -> None:
+        from . import local_video
         from .stats_web import make_server
         from .store import Store
 
@@ -766,10 +789,12 @@ class Tray:
             Store(str(db), new_session=False).db.close()   # an empty season, so the page opens before round one
         names = {key: persona.name for key, persona in self.cfg.personas.items()}
         site = Path(self.cfg.log_dir) / "stats-web-site"
+        def videos():   # self.cfg as Settings last saved it
+            return local_video.folder(self.cfg.live, self.home), self.cfg.live.local_keep_days
         try:
-            server = make_server(db, STATS_PORT, names, site, self.cfg.publish.brand)
+            server = make_server(db, STATS_PORT, names, site, self.cfg.publish.brand, videos)
         except OSError:
-            server = make_server(db, 0, names, site, self.cfg.publish.brand)   # the usual port is taken
+            server = make_server(db, 0, names, site, self.cfg.publish.brand, videos)   # the usual port is taken
         self.stats_url = f"http://127.0.0.1:{server.server_address[1]}/"
         (Path(self.cfg.log_dir) / "stats-url.txt").write_text(self.stats_url, encoding="utf-8")
         threading.Thread(target=server.serve_forever, name="stats", daemon=True).start()

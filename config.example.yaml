@@ -269,6 +269,8 @@ live:
   # stop_after_seconds: 30
   # idle_minutes: 20           # stop it after this long with no shots (the round's next shot restarts it); 0: never
   # keep_days: 7               # keep each stream this long for the page's Round replays tab; 0: keep nothing
+  # local_keep_days: 7         # keep each stream on this PC too, one .ts per stream; 0: not kept here
+  # local_dir: recordings      # where, in the Shotcast folder unless a full path
   # launch_obs: true           # start OBS minimized when the booth starts, if it isn't running
   # dir: live                  # where OBS writes the stream, in the Shotcast folder
   # playlist: stream.m3u8

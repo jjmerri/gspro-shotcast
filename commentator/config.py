@@ -677,8 +677,8 @@ class PublishConfig(BaseModel):
 
 class LiveConfig(BaseModel):
     # The live stream on the stats page (docs/tracking.md#live-stream): OBS writes HLS into `dir`, and
-    # the booth mirrors it to publish.bucket under live/, behind the league password. Needs publish
-    # set up. OBS's WebSocket password goes in .env (OBS_WEBSOCKET_PASSWORD), never here.
+    # the booth mirrors it to publish.bucket under live/, behind the league password (with publish set
+    # up), and keeps it on the PC (local_dir). OBS's WebSocket password goes in .env (OBS_WEBSOCKET_PASSWORD), never here.
     enabled: bool = False
     dir: str = "live"
     playlist: str = "stream.m3u8"
@@ -702,6 +702,11 @@ class LiveConfig(BaseModel):
     # (about 1.2 GB an hour in the bucket). 0: nothing kept, the video deleted as it goes. The stack's
     # lifecycle rule (tools/aws/stats-site.yaml) must keep live/s/ at least a day longer.
     keep_days: int = Field(7, ge=0)
+    # Keep each stream on this PC too, this many days, as one .ts per stream in local_dir (relative to
+    # the Shotcast folder; plays in Windows Media Player or VLC). The stats page opened from the tray
+    # plays them from there. Works with or without the bucket. 0: not kept here.
+    local_dir: str = "recordings"
+    local_keep_days: int = Field(7, ge=0)
 
 
 class BackupConfig(BaseModel):

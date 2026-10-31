@@ -658,6 +658,7 @@ class Engine:
         self._publish_lock = asyncio.Lock()
         # The live stream on the stats page: OBS's output, mirrored to the bucket (live_stream.py).
         self.live_mirror = None
+        self.live_local = None   # the stream kept on the PC (live_stream.Mirror with a LocalRecorder)
         self._live_stop_task: asyncio.Task | None = None
         self._obs_lock = threading.Lock()
         self._live_held = False             # OFF AIR on the badge: no stream until it's back on air
@@ -918,8 +919,8 @@ class Engine:
             # early-returns then) still logs what TTS synthesized vs actually aired.
             if stats_obj := getattr(self.speech, "audio_stats", None):
                 log.info("%s", audio_summary(stats_obj))
-            if self.live_mirror is not None:
-                await asyncio.to_thread(self.live_mirror.close)
+            for m in self._live_mirrors():
+                await asyncio.to_thread(m.close)
 
     async def _pump_source(self) -> None:
         try:
@@ -4509,8 +4510,8 @@ class Engine:
             while len(self._tiles_due) > 4:
                 del self._tiles_due[next(iter(self._tiles_due))]
             self._apply_late_tiles(my_seq)
-        if self.live_mirror is not None:
-            self.live_mirror.shot()   # a stream with no shots on it isn't kept
+        for m in self._live_mirrors():
+            m.shot()   # a stream with no shots on it isn't kept
         # Not gated on the screen seeing touchdown: the finish comes from GSPro's log at the next shot,
         # and a water or OB ball is caught there by its penalty. (Gating on it lost half the finishes.)
         if in_order and not shot.is_putt:
@@ -7547,7 +7548,10 @@ class Engine:
 
     def _live_on(self) -> bool:
         lv = self.cfg.live
-        return lv.enabled and bool(self.cfg.publish.bucket) and self.cfg.source.type != "replay"
+        return lv.enabled and bool(self.cfg.publish.bucket or lv.local_keep_days) and self.cfg.source.type != "replay"
+
+    def _live_mirrors(self) -> list:
+        return [m for m in (self.live_mirror, self.live_local) if m is not None]
 
     def _obs(self):
         from .live_stream import Obs
@@ -7555,7 +7559,7 @@ class Engine:
         return Obs(self.cfg.live.obs_host, self.cfg.live.obs_port)
 
     def _start_live(self) -> None:
-        """Mirror OBS's stream folder to the bucket for as long as the booth runs."""
+        """Mirror OBS's stream folder to the bucket, and keep it on the PC, for as long as the booth runs."""
         from . import live_stream
 
         lv, p = self.cfg.live, self.cfg.publish
@@ -7578,16 +7582,31 @@ class Engine:
                     log.info("Started OBS for the live stream")
             except Exception:
                 log.exception("Starting OBS failed")
-        try:
-            import boto3
+        from .local_video import LocalRecorder
 
-            client = boto3.client("s3", region_name=p.region) if p.region else boto3.client("s3")
-            self.live_mirror = live_stream.Mirror(lv.dir, p.bucket, p.prefix, lv.playlist, client,
-                                                  status_file=Path(self.cfg.log_dir) / "live.json",
-                                                  keep_days=lv.keep_days)
-            self.live_mirror.start()
+        status = Path(self.cfg.log_dir) / "live.json"
+        if p.bucket:
+            try:
+                import boto3
+
+                client = boto3.client("s3", region_name=p.region) if p.region else boto3.client("s3")
+                self.live_mirror = live_stream.Mirror(lv.dir, p.bucket, p.prefix, lv.playlist, client,
+                                                      status_file=status, keep_days=lv.keep_days)
+            except Exception:
+                log.exception("The live stream can't upload")
+        try:
+            if lv.local_keep_days:
+                # Its own pass over OBS's folder, so the bucket (the internet down, its start-up tidy
+                # retrying) never holds up the copy here.
+                self.live_local = live_stream.Mirror(lv.dir, None, playlist=lv.playlist,
+                                                     status_file=None if self.live_mirror else status,
+                                                     local=LocalRecorder(lv.local_dir, lv.local_keep_days))
+            mirrors = self._live_mirrors()
+            for m in mirrors:
+                m.peers = [o for o in mirrors if o is not m]
+                m.start()
         except Exception:
-            log.exception("The live stream can't upload")
+            log.exception("The live stream's mirror didn't start")
             return
         asyncio.get_running_loop().create_task(self._live_idle_watch(), name="live-idle")
 
@@ -7613,8 +7632,9 @@ class Engine:
         return " · ".join(x for x in (r.course or "Round", ", ".join(names), kind) if x)
 
     def _live_mark(self, replace: bool = False) -> None:
-        if self.live_mirror is not None and (label := self._live_label()):
-            self.live_mirror.mark(label, replace=replace)
+        if label := self._live_label():
+            for m in self._live_mirrors():
+                m.mark(label, replace=replace)
 
     async def _live_call(self, what: str) -> None:
         if what == "start" and self._round_on():
@@ -7671,7 +7691,8 @@ class Engine:
         """A stream left on, a round abandoned on a hole: off after live.idle_minutes with no shots."""
         while True:
             await asyncio.sleep(every)
-            idle, m = self.cfg.live.idle_minutes * 60, self.live_mirror
+            idle = self.cfg.live.idle_minutes * 60
+            m = self.live_local or self.live_mirror   # the PC's copy: the bucket's can lag (or be stuck)
             session = m.session if m is not None else None
             if not idle or session is None or session == self._live_idle_session:
                 continue

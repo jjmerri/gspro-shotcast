@@ -722,6 +722,7 @@ def cmd_stats(cfg: Config, args) -> None:
 
 
 def cmd_stats_web(cfg: Config, args) -> None:
+    from . import local_video
     from .stats_web import serve
 
     path = Path(args.db or cfg.db_path)
@@ -730,7 +731,8 @@ def cmd_stats_web(cfg: Config, args) -> None:
     # A fixed folder, so a window closed without cleanup doesn't leave a copy behind each time.
     serve(path, port=args.port, open_browser=not args.no_browser,
           names={key: persona.name for key, persona in cfg.personas.items()},
-          site=Path(cfg.log_dir) / "stats-web-site", brand=cfg.publish.brand)
+          site=Path(cfg.log_dir) / "stats-web-site", brand=cfg.publish.brand,
+          videos=lambda: (local_video.folder(cfg.live), cfg.live.local_keep_days))
 
 
 def cmd_backfill_log(cfg: Config, args) -> None:

@@ -443,6 +443,19 @@ The booth starts OBS's output when a round starts and stops it 30 seconds after 
   shows off air within about 2 minutes of that stopping, rather than a frozen player. A booth
   starting goes off air, and clears `live/` of everything but the week's kept streams.
 
+#### Round videos on the PC
+
+Each stream is kept on the GSPro PC too, for a week (`live.local_keep_days`; 0 for not at all), as one
+`.ts` file per stream in the Shotcast folder's `recordings\` (`live.local_dir`, or a full path
+elsewhere), which plays in Windows Media Player or VLC. Both are in the tray's **Settings → Video**,
+and **More → Open the recordings folder** opens it. Beside each file a `.json` lists the rounds on it.
+This needs OBS set up (**Set up the live stream...**) but not the stats page published: without a
+bucket the stream is only recorded here. The stats page opened from the tray plays these in its
+**Round replays** tab and from the **Watch** buttons, the same as the published page plays the
+bucket's. The same rules as the bucket's apply: a stream under a minute or with no shot played on it
+isn't kept, one cut off by a crash is closed when the booth next starts, and files past the days set
+go as the next stream starts or stops, or when the booth starts. About 1.2 GB an hour.
+
 With `live.with_rounds: false` none of this follows rounds or the badge (only the idle stop
 applies): the stream is started and stopped by hand.
 

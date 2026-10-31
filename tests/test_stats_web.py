@@ -371,3 +371,36 @@ def test_the_pages_league_average_rounds_like_pythons_own_numbers():
     # on stdin: Windows caps a command line at 32k characters
     got = json.loads(subprocess.run([node], input=script, capture_output=True, text=True, check=True).stdout)
     assert got == [round(a / b, d) for a, b, d in cases]
+
+
+def test_the_local_page_plays_the_round_videos_kept_on_the_pc(tmp_path):
+    import time
+
+    from commentator.local_video import LocalRecorder
+
+    path, _ = _db(tmp_path)
+    videos = tmp_path / "recordings"
+    rec = LocalRecorder(videos, 14)
+    since = round(time.time()) - 3600
+    rec.begin("20261016-190000-abcdef", since)
+    rec.rec["shots"] = True
+    for i in range(16):
+        rec.add(b"seg%02d" % i, 4.0)
+    rec.end()
+    server = stats_web.make_server(path, port=0, site=tmp_path / "site", videos=lambda: (videos, 14))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}/live"
+    try:
+        index = json.loads(urllib.request.urlopen(base + "/recordings.json").read())
+        assert index["keep_days"] == 14 and [r["session"] for r in index["recordings"]] == ["20261016-190000-abcdef"]
+        assert "segments" not in index["recordings"][0] and index["recordings"][0]["ended"] == since + 64
+        full = urllib.request.urlopen(base + "/s/20261016-190000-abcdef/full.m3u8").read().decode()
+        assert full.count("#EXTINF:4.000,") == 16 and "seg15.ts" in full and full.rstrip().endswith("#EXT-X-ENDLIST")
+        assert urllib.request.urlopen(base + "/s/20261016-190000-abcdef/seg3.ts").read() == b"seg03"
+        for bad in ("/s/20261016-190000-abcdef/seg16.ts", "/s/..%2F..%2Fseason.db/full.m3u8", "/clips.json"):
+            with pytest.raises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(base + bad)
+            assert e.value.code == 404
+    finally:
+        server.shutdown()
+        server.server_close()

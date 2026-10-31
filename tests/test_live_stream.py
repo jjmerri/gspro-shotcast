@@ -415,7 +415,7 @@ def test_a_kept_stream_plays_from_the_start_with_its_rounds_marked(tmp_path):
     _playlist(m.folder, 0, ["stream0.ts"], ended=True, mtime=now[0])
     m.step()                                                         # too short to keep, and the old one's past
     assert not [k for k in s3.objects if k.startswith("live/s/")]
-    assert json.loads(s3.objects["live/recordings.json"][0]) == {"recordings": []}
+    assert json.loads(s3.objects["live/recordings.json"][0])["recordings"] == []
 
 
 def test_a_stream_cut_off_by_a_crash_is_closed_and_kept_on_the_next_start(tmp_path):
@@ -456,7 +456,7 @@ def test_a_stream_with_no_shots_on_it_isnt_kept(tmp_path):
     _playlist(m.folder, 19, ["stream19.ts"], ended=True, mtime=now[0])
     m.step()
     assert not [k for k in s3.objects if k.startswith("live/s/")]
-    assert json.loads(s3.objects["live/recordings.json"][0]) == {"recordings": []}
+    assert json.loads(s3.objects["live/recordings.json"][0])["recordings"] == []
 
     for i in range(20):                                              # again, and the booth's killed
         _playlist(m.folder, i, [f"stream{i}.ts"], mtime=now[0])
@@ -465,7 +465,7 @@ def test_a_stream_with_no_shots_on_it_isnt_kept(tmp_path):
     m2 = Mirror(tmp_path / "hls", "bkt", client=s3, status_file=status, clock=lambda: now[0], keep_days=7)
     m2.clear()
     assert not [k for k in s3.objects if k.startswith("live/s/")]
-    assert json.loads(s3.objects["live/recordings.json"][0]) == {"recordings": []}
+    assert json.loads(s3.objects["live/recordings.json"][0])["recordings"] == []
 
 
 def test_kept_streams_wait_for_the_start_up_tidy_before_streaming(tmp_path):
@@ -620,3 +620,157 @@ def test_downloads_trust_certifis_roots_when_the_system_store_has_none(tmp_path,
     monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path))
     monkeypatch.setattr(ssl.SSLContext, "load_default_certs", lambda self, purpose=None: None)
     assert tls.context().cert_store_stats()["x509_ca"] > 50
+
+
+def test_without_a_bucket_each_stream_is_kept_on_the_pc_as_one_file(tmp_path):
+    from commentator.local_video import LocalRecorder, recordings
+
+    now = [1000.0]
+    videos = tmp_path / "recordings"
+    rec = LocalRecorder(videos, 14, clock=lambda: now[0])
+    m = Mirror(tmp_path / "hls", None, status_file=tmp_path / "live.json", clock=lambda: now[0], local=rec)
+    m.folder.mkdir()
+    m.clear()
+    m.mark("Pebble Beach · Dan")
+    _playlist(m.folder, 0, ["stream0.ts"], mtime=now[0])
+    m.step()
+    sid = m.session
+    for i in range(1, 20):                                          # two minutes, rolling off the live playlist
+        now[0] += 6
+        _playlist(m.folder, i - 1, [f"stream{i - 1}.ts", f"stream{i}.ts"], mtime=now[0])
+        m.step()
+        if i == 5:
+            m.shot()
+    assert json.loads((videos / f"{sid}.json").read_bytes())["ended"] is None   # playable while it records
+    now[0] += 6
+    _playlist(m.folder, 19, ["stream19.ts"], ended=True, mtime=now[0])
+    m.step()
+    assert (videos / f"{sid}.ts").read_bytes() == b"".join(f"stream{i}.ts".encode() for i in range(20))
+    [kept] = recordings(videos)
+    assert {k: kept[k] for k in ("session", "since", "ended", "duration", "shots", "rounds")} == {
+        "session": sid, "since": 1000, "ended": 1120, "duration": 120, "shots": True,
+        "rounds": [{"at": 0, "label": "Pebble Beach · Dan"}]}
+    assert kept["segments"][1] == [len(b"stream0.ts"), len(b"stream1.ts"), 6.0]
+    assert not list(m.folder.glob("*.ts"))                          # OBS's own files still tidied
+
+    for i in range(20):                                              # no shots on this one: not kept
+        _playlist(m.folder, i, [f"stream{i}.ts"], mtime=now[0])
+        m.step()
+        now[0] += 6
+    _playlist(m.folder, 19, ["stream19.ts"], ended=True, mtime=now[0])
+    m.step()
+    assert [r["session"] for r in recordings(videos)] == [sid]
+
+    m.shot()                                                         # one the booth's killed in the middle of
+    for i in range(20):
+        _playlist(m.folder, i, [f"stream{i}.ts"], mtime=now[0])
+        m.step()
+        now[0] += 6
+    cut = m.session
+    now[0] += 15 * 86400                                             # two weeks on, the booth starts again
+    m2 = Mirror(tmp_path / "hls", None, status_file=tmp_path / "live.json", clock=lambda: now[0],
+                local=LocalRecorder(videos, 14, clock=lambda: now[0]))
+    m2.clear()
+    assert recordings(videos) == [] and not list(videos.iterdir())   # both past 14 days
+    assert cut != sid
+
+
+def test_a_stream_cut_off_is_closed_on_the_pc_on_the_next_start(tmp_path):
+    from commentator.local_video import LocalRecorder, recordings
+
+    now = [1000.0]
+    videos = tmp_path / "recordings"
+    m = Mirror(tmp_path / "hls", None, clock=lambda: now[0], local=LocalRecorder(videos, 14, clock=lambda: now[0]))
+    m.folder.mkdir()
+    m.clear()
+    m.shot()
+    for i in range(20):
+        _playlist(m.folder, i, [f"stream{i}.ts"], mtime=now[0])
+        m.step()
+        now[0] += 6
+    sid = m.session
+    Mirror(tmp_path / "hls", None, clock=lambda: now[0], local=LocalRecorder(videos, 14, clock=lambda: now[0])).clear()
+    [kept] = recordings(videos)
+    assert (kept["session"], kept["ended"], kept["duration"], kept["shots"]) == (sid, 1120, 120, True)
+
+
+def test_the_local_copy_goes_on_with_the_bucket_keeping_nothing(tmp_path):
+    from commentator.local_video import LocalRecorder, recordings
+
+    s3, now = FakeS3(), [1000.0]
+    videos = tmp_path / "recordings"
+    m = Mirror(tmp_path / "hls", "bkt", client=s3, clock=lambda: now[0], keep_days=0,
+               local=LocalRecorder(videos, 14, clock=lambda: now[0]))
+    m.folder.mkdir()
+    m.clear()
+    m.shot()
+    for i in range(20):
+        _playlist(m.folder, i, [f"stream{i}.ts"], mtime=now[0])
+        m.step()
+        now[0] += 6
+    _playlist(m.folder, 19, ["stream19.ts"], ended=True, mtime=now[0])
+    m.step()
+    assert not [k for k in s3.objects if k.startswith("live/s/")] and "live/recordings.json" not in s3.objects
+    assert recordings(videos)[0]["duration"] == 120 and m.recordings == []
+
+
+def test_obs_folder_is_emptied_once_both_copies_are_done_and_a_failing_bucket_doesnt_stop_the_pcs(tmp_path):
+    from commentator.local_video import LocalRecorder, recordings
+
+    class Down(FakeS3):
+        def put_object(self, **kw):
+            raise ConnectionError("no internet")
+
+    now = [1000.0]
+    videos = tmp_path / "recordings"
+    s3m = Mirror(tmp_path / "hls", "bkt", client=Down(), clock=lambda: now[0])
+    pc = Mirror(tmp_path / "hls", None, clock=lambda: now[0], local=LocalRecorder(videos, 14, clock=lambda: now[0]))
+    s3m.peers, pc.peers = [pc], [s3m]
+    pc.folder.mkdir()
+    pc.clear()
+    pc.shot()
+    for i in range(20):
+        _playlist(pc.folder, i, [f"stream{i}.ts"], mtime=now[0])
+        pc.step()
+        try:
+            s3m.step()
+        except ConnectionError:
+            pass
+        now[0] += 6
+    _playlist(pc.folder, 19, ["stream19.ts"], ended=True, mtime=now[0])
+    pc.step()
+    assert recordings(videos)[0]["duration"] == 120
+    assert s3m.session and (pc.folder / "stream19.ts").exists()     # left for the bucket's copy
+    s3m.client = FakeS3()                                            # the internet's back
+    s3m.step()
+    assert s3m.session is None and json.loads(s3m.client.objects["live/status.json"][0]) == {"live": False}
+    assert not list(pc.folder.iterdir())
+
+
+def test_a_video_windows_wont_let_go_of_stays_till_the_next_prune(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from commentator.local_video import LocalRecorder, recordings
+
+    now = [1000.0]
+    rec = LocalRecorder(tmp_path, 14, clock=lambda: now[0])
+    rec.begin("19700101-001640-aaaaaa", now[0])
+    rec.rec["shots"] = True
+    for _ in range(20):
+        rec.add(b"x", 6.0)
+    rec.end()
+    now[0] += 15 * 86400
+    real = Path.unlink
+
+    def locked(self, missing_ok=False):
+        if self.suffix == ".ts" and "aaaaaa" in self.name:
+            raise PermissionError("being watched")
+        real(self, missing_ok=missing_ok)
+    monkeypatch.setattr(Path, "unlink", locked)
+    rec.begin("19700116-001640-bbbbbb", now[0])                     # the new stream records all the same
+    rec.add(b"y", 6.0)
+    assert rec.rec["segments"] == [[0, 1, 6.0]]
+    assert [r["session"] for r in recordings(tmp_path)] == ["19700116-001640-bbbbbb", "19700101-001640-aaaaaa"]
+    monkeypatch.setattr(Path, "unlink", real)
+    rec.prune()
+    assert [r["session"] for r in recordings(tmp_path)] == ["19700116-001640-bbbbbb"]

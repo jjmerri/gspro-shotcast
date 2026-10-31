@@ -1595,7 +1595,8 @@ function attachLive() {
   if (player.unmute) slot.appendChild(player.unmute);
 }
 
-// Round replays (live_stream.py keeps each stream for a week): live/recordings.json lists them, each with
+const keptFor = () => state.keepDays === 7 ? "a week" : `${state.keepDays} day${state.keepDays === 1 ? "" : "s"}`;
+// Round replays (live_stream.py keeps each stream keep_days, a week by default; on the PC, local_video.py): live/recordings.json lists them, each with
 // where its rounds start. The schedule (schedule.json) is the sim's bookings, uploaded by the booth.
 const EXTRA_TABS = ["live", "vods", "schedule"];
 async function pollExtras() {
@@ -1606,6 +1607,7 @@ async function pollExtras() {
   const clips = cl && cl.clips && typeof cl.clips === "object" ? cl.clips : null;
   const was = JSON.stringify([state.vods, state.schedule, state.clips]);
   state.vods = vods; state.schedule = schedule; state.clips = clips;
+  state.keepDays = rec && rec.keep_days > 0 ? rec.keep_days : 7;
   if (JSON.stringify([vods, schedule, clips]) === was) return;
   const shown = state.tab;
   if ((state.tab === "vods" && !tabs().includes("vods")) || (state.tab === "schedule" && !schedule)) state.tab = "home";
@@ -1627,14 +1629,14 @@ function renderVods() {
     ${shareBtn(hashFor("vods", { clip: state.vod.clip, at: state.vod.at || 0, player: "" }), "this shot")}</p>` : "";
   const clipList = clips.length ? `<h2>Record shots <span class="sub">kept while they hold a record</span></h2><table>${clips.map(([id, c]) =>
     `<tr class="${state.vod && state.vod.clip === id ? "sel" : ""}"><td class="l"><button class="link" data-clip="${esc(id)}" data-vodat="${c.at}">${esc(clipName(c))}</button></td></tr>`).join("")}</table>` : "";
-  if (!vods.length) return clipHtml + `<h2>Round replays</h2><p class="sub">Nothing kept right now: each round streamed live is kept here for a week.</p>` + clipList;
+  if (!vods.length) return clipHtml + `<h2>Round replays</h2><p class="sub">Nothing kept right now: each round streamed is kept here for ${keptFor()}.</p>` + clipList;
   const sel = state.vod && vods.find(v => v.session === state.vod.session);
   const going = v => v.ended === null && state.live && state.live.live && state.live.session === v.session;
   const chapters = v => (v.rounds.length ? v.rounds : [{ at: 0, label: "From the start" }]).map(r =>
     `<button class="link" data-vod="${esc(v.session)}" data-vodat="${r.at}">${esc(r.label)}</button>`
     + (r.at ? ` <span class="sub">${hm(r.at)} in</span>` : "")).join("<br>");
   const day = { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
-  return clipHtml + `<h2>Round replays <span class="sub">the stream of every round, kept for a week</span></h2>
+  return clipHtml + `<h2>Round replays <span class="sub">the stream of every round, kept for ${keptFor()}</span></h2>
   ${sel ? `<h3>${esc((sel.rounds[0] || {}).label || "Stream")} <span class="sub">${esc(when(sel.since * 1000, day))}</span></h3>
     <div id="liveslot"></div>
     ${sel.rounds.length > 1 ? `<div class="controls">Jump to: ${sel.rounds.map(r =>
