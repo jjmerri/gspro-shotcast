@@ -264,6 +264,17 @@ def _build(cfg: Config, config_path: Path) -> Path:
             guard(f"GSPro log {p.name}", lambda p=p: add_file(f"gspro/{p.name}", p, GSPRO_LOG_CAP))
         guard("connector log", lambda: add_file("gspro/ConnectDebug.txt", Path(source.connector_log), 1_000_000))
 
+        def gspro_settings() -> None:
+            from .gspro_settings import read_game_settings
+
+            p = Path(source.gspro_log).expanduser().parent / "Settings.vgs"
+            if not p.is_file():
+                summary.append("GSPro settings: no Settings.vgs")
+                return
+            found = read_game_settings(p)
+            summary.append("GSPro settings: " + ", ".join(f"{k}={v}" for k, v in found.items()))
+        guard("GSPro settings", gspro_settings)
+
         summary += ["", "== Health =="]
 
         def health() -> None:
