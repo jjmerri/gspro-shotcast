@@ -130,6 +130,9 @@ class Round:
         # when the round was built from that screen. GSPro indexes players by slot, so this is the only
         # trustworthy source of a name -> GSPro index map; a tee-time roster is in honour order instead.
         self.slot_names = slot_names
+        # The slots as GSPro's setup screen showed them (not a guess, nor the tee's order): GSPro's log
+        # names its players by these, so a shot GSPro hid the name for can be named from the log at once.
+        self.setup_slots = list(slot_names) if slot_names else None
         # A real league match (scheduled course, in date, correct team and player count) versus a
         # practice round the booth still calls, minus the league framing (points, standings, handicap).
         self.is_league = is_league
@@ -184,6 +187,16 @@ class Round:
         # names guests were renamed from (a shot in flight then still has the old one).
         self.spellings: dict[str, dict[str, int]] = {}
         self.renamed: dict[str, str] = {}
+        # (GSPro slot index, GSPro name) -> screen reads that named the player GSPro's log had up: two
+        # confirm the slot, so a shot GSPro hid the name for goes to whoever the log has up.
+        self.log_agree: dict[tuple[int, str], int] = {}
+        # Slots a screen read contradicted: the setup screen's word for them doesn't count any more.
+        self.log_doubt: set[int] = set()
+        # Where each recorded shot's player came from (screen, setup read, GSPro's log, ...), for the
+        # round's summary in the log.
+        self.name_sources: dict[str, int] = {}
+        self.box_hidden = 0       # shots GSPro's player box was hidden for at impact
+        self.log_disagreed = 0    # shots the screen and GSPro's log named different players for
         # The last scorecard's rows in order, each with the round's player it went to (None: nobody's).
         self.card_rows: list[tuple[str, str | None]] = []
 
@@ -269,6 +282,9 @@ class Round:
             if old in d:
                 d[new] = d.pop(old)
         self.teed = [new if g == old else g for g in self.teed]
+        self.log_agree = {(i, new if g == old else g): n for (i, g), n in self.log_agree.items()}
+        if self.setup_slots is not None:
+            self.setup_slots = [new if n == old else n for n in self.setup_slots]
         self.held = {k: (raw, [new if g == old else g for g in teed], at) for k, (raw, teed, at) in self.held.items()}
         self.picked_up = {(new if g == old else g, seq) for g, seq in self.picked_up}
         for results in self.ctp_results.values():

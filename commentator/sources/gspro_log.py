@@ -383,6 +383,9 @@ class GsproState:
     # side's score from whichever partner has one (a shamble's partners finish on their own balls).
     hole_scores: dict = field(default_factory=dict)
     last_hole_scores: dict = field(default_factory=dict)   # the last ended round's, kept past its reset
+    last_penalties: dict = field(default_factory=dict)
+    last_players_seen: set = field(default_factory=set)
+    last_picked: set = field(default_factory=set)
     _end_next: bool = False
     _end_for: set = field(default_factory=set)
     # A scramble's picks. GSPro logs "Selecting shot for player: N" once everyone has hit (and on other
@@ -443,6 +446,8 @@ class GsproState:
             self.round_ends += 1
             self._finish_picked()
             self.last_hole_scores = dict(self.hole_scores)   # for the booth to settle the round with
+            self.last_penalties, self.last_players_seen = dict(self._penalties), set(self.players_seen)
+            self.last_picked = set(self._picked)
             self._reset_round()             # the next round, even on this same course, starts clean
             self.shots_since_course, self.first_hole, self.starts_late = 0, None, False
         elif ev.kind == "skip_hole":

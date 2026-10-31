@@ -3342,6 +3342,34 @@ def test_a_scramble_pick_inside_the_gimme_circle_records_the_teams_conceded_putt
     assert ra.outcome == "conceded"
 
 
+def test_a_scramble_pick_of_a_shot_with_no_name_yet_is_conceded_once_its_named(tmp_path):
+    from commentator.hud import Hud
+    from commentator.models import Shot
+    from commentator.state import ShotRecord
+
+    e = _engine(tmp_path)
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="Wynn", scheduled_format="scramble")
+    e.round = r
+    sid = e.store.record_shot(player=None, hole="Hole 2, par 4", shot=Shot(club="PT"),
+                              before=Hud(lie="green", shot_number=4), after=Hud(lie="green"), tags=[],
+                              carry_game_yards=None, total_yards=None, offline_yards=None, course="Wynn",
+                              to_pin_yards=4.0, gimme_yards=1.2, fmt="scramble", attributed=False,
+                              outcome="missed", is_league=False)
+    rec = ShotRecord("unknown", Shot(club="PT"), "Hole 2, par 4", Hud(), [], round_id=r.id,
+                     hole_seq=2, shot_number=4, shot_id=sid, outcome="missed")
+    e._fire_rows = {10: (sid, rec, None, None)}
+    e._unnamed.add(10)
+    e.gspro._fire_info[10] = {"player": 0, "hole": 1}
+    e.gspro.pick_gimmes.append((0, 1))           # GSPro picked it, inside the circle, before it had a name
+    e._apply_log_corrections()
+    assert e.store.db.execute("SELECT COUNT(*) FROM shots WHERE outcome = 'gimme'").fetchone()[0] == 0
+    e._void_watch.add(sid)                         # it had been given to the wrong player first
+    e._assign_row(10, 0, "MikeD", "GSPro's log (test)")
+    e._apply_log_corrections()
+    rows = e.store.db.execute("SELECT player, shot_number, outcome FROM shots ORDER BY id").fetchall()
+    assert [tuple(x) for x in rows] == [("MikeD", 4, "conceded"), ("MikeD", 5, "gimme")]
+
+
 def test_best_ball_team_gross_beside_each_partners_own_score(tmp_path):
     r = Round(league=LEAGUE, gspro_players=["MikeD", "SarahK"], course="X", scheduled_format="best_ball",
               holes=3, is_league=False)
@@ -3850,3 +3878,265 @@ async def test_a_league_player_teed_after_a_held_name_waits_for_their_index_too(
     for name in ("Zed", "Zedd", "MikeD"):
         e._note_player(_tee(name))
     assert e.round.held and e._gspro_idx("Mike") is None
+
+
+
+def test_a_shot_with_no_name_on_screen_goes_to_whoever_gspros_log_says_hit_it(tmp_path):
+    from commentator.models import Shot
+    from commentator.state import ShotRecord
+
+    e = _guest_round(tmp_path, ["Kroll"])
+    e.cfg.source.gspro_log_truth = True
+    assert e._solo_name() == "Kroll"                 # one player: every shot is theirs
+    e.gspro.players_seen.update({0, 1})
+    assert e._solo_name() is None                    # the log saw a second player
+
+    e = _guest_round(tmp_path, ["Kroll", "Barrows"])
+    e.cfg.source.gspro_log_truth = True
+    e.gspro.players_seen.update({0, 1})
+
+    def shot(fire, who, owner):
+        rec = ShotRecord(who or "unknown", Shot(club="PT"), "hole 1 par 3", Hud(), [], round_id=e.round.id)
+        sid = e.store.record_shot(player=who, hole="hole 1 par 3", shot=Shot(club="PT"), before=Hud(),
+                                  after=Hud(), tags=[], carry_game_yards=None, total_yards=None,
+                                  offline_yards=None, course="X", attributed=bool(who))
+        e._fire_rows[fire] = (sid, rec, None, None)
+        e._row_source[fire] = "screen" if who else "none yet"
+        e._owners_due.add(fire)
+        e.gspro._fire_info.setdefault(fire, {"player": owner})
+        e.gspro.fires = fire
+        e._apply_log_corrections()
+        return rec, e.store.db.execute("SELECT player, attributed FROM shots WHERE id = ?", (sid,)).fetchone()
+
+    first, _ = shot(1, None, 1)
+    assert first.player == "unknown"                          # not confirmed yet: unknown beats a guess
+    shot(2, "Barrows", 1)
+    assert shot(3, None, 1)[0].player == "unknown"
+    shot(4, "Barrows", 1)
+    assert first.player == "Barrows"                          # two reads agreed with the log: the earlier too
+    rec, row = shot(5, None, 1)
+    assert rec.player == "Barrows" and tuple(row) == ("Barrows", 1)
+    assert e._fire_rows[5][2] == 1                            # later corrections find it as theirs
+    e._last_row[1] = (1, None, None, None, None)
+    e.gspro._fire_info[6] = {"player": 1, "holed": True}
+    rec, row = shot(6, None, 1)
+    assert rec.outcome == "holed" and 1 not in e._last_row   # its result, and it's their last shot now
+    assert shot(7, None, 0)[0].player == "Kroll"              # the other slot's known: this one's the rest
+    assert shot(8, "Kroll", 1)[0].player == "Kroll"           # the screen wins a disagreement...
+    assert shot(9, None, 1)[0].player == "unknown"            # ...and the slot isn't trusted any more
+    rec, _ = shot(10, None, None)
+    assert 10 in e._owners_due                                # the shooter's line isn't in yet
+
+
+@pytest.mark.parametrize("at_once", [True, False])
+async def test_a_round_with_the_player_box_hidden_still_names_every_shot(tmp_path, monkeypatch, at_once):
+    import asyncio
+
+    from commentator.models import RoundEndEvent, ShotEvent
+    from commentator.sources.gspro_log import parse_events
+
+    # A reported round, replayed: one player, commentary off, GSPro hiding the player box for the
+    # flight, so six of nine shots were read with no name and went in the stats as "unknown". GSPro's
+    # log names them: as they're hit (the round's only player), or after (the log's shooter).
+    e, r = await _log_round(tmp_path)
+    c = e.cfg.commentary
+    c.hole_result_window_seconds = c.lag_result_window_seconds = 0.05
+    e._follower = type("Follower", (), {"primed": True})()
+    e.gspro.version = "3.1.6.20"
+    if not at_once:
+        monkeypatch.setattr(e, "_solo_name", lambda: None)
+    clubs = ["7I", "PW", "PT", "7I", "SW", "PT", "PT", "PW", "PT"]
+    named = {1, 2, 4}   # the shots whose player box the screen read
+    text = (Path(__file__).parent / "fixtures/logs/3.1.6.20-solo-player-box-hidden/output_log.txt").read_text()
+    e.commentary_on = False
+    shots = 0
+    for ev in parse_events(text):
+        if ev.kind == "end_round":
+            await asyncio.sleep(0.6)   # the named shots' background result watches poll twice a second
+            e._apply_log_corrections()
+            await e.handle_round_end(RoundEndEvent(reason="test"))
+        e.gspro.apply(ev)
+        if ev.kind == "launch_mode":   # the line after "Shot Fired": the shot's in, as the booth sees it
+            shots += 1
+            hud = Hud(player_text="MikeD E Shot 1 100 YDS", shot_number=1) if shots in named else Hud()
+            await e.handle_shot(ShotEvent(shot=Shot(club=clubs[shots - 1], carry=5.0 if clubs[shots - 1] == "PT"
+                                                    else 120.0), hud_hint=hud, impact_hud_hint=hud))
+        elif ev.kind == "state":
+            e._apply_log_corrections()
+    assert shots == 9
+    rows = e.store.db.execute("SELECT player, outcome FROM shots ORDER BY id").fetchall()
+    assert {p for p, _ in rows} == {"Mike"}
+    rows = [row for row in rows if row[1] != "gimme"]   # the conceded putts GSPro counted: 4, 5 and 3
+    assert len(rows) == 9
+    outcomes = {i + 1: o for i, (_, o) in enumerate(rows) if clubs[i] == "PT"}
+    assert outcomes == {3: "conceded", 6: "missed", 7: "conceded", 9: "conceded"}
+
+
+def _row_maker(e):
+    """Record a shot the way handle_shot does for GSPro's log (its fire, who the screen said), and run the
+    log corrections with the shooter's line (`owner`, `hole`) in."""
+    from commentator.state import ShotRecord
+
+    def shot(fire, who, owner, hole=0, outcome=None, club="7I"):
+        rec = ShotRecord(who or "unknown", Shot(club=club), "hole 1 par 4", Hud(), [], round_id=e.round.id)
+        rec.outcome = outcome
+        sid = e.store.record_shot(player=who, hole="hole 1 par 4", shot=Shot(club=club), before=Hud(),
+                                  after=Hud(), tags=[], carry_game_yards=None, total_yards=None,
+                                  offline_yards=None, course="X", attributed=bool(who))
+        e._fire_rows[fire] = (sid, rec, owner if who else None, hole if who else None)
+        e._row_source[fire] = "screen" if who else "none yet"
+        e._owners_due.add(fire)
+        e.gspro._fire_info[fire] = {"player": owner, "hole": hole}
+        e.gspro.fires = fire
+        e._apply_log_corrections()
+        return rec
+    return shot
+
+
+def test_the_setup_screens_slots_name_a_shot_gspro_hid_the_name_for(tmp_path):
+    e = _guest_round(tmp_path, ["Kroll", "Barrows"])
+    e.cfg.source.gspro_log_truth = True
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    assert shot(1, None, 1).player == "unknown"              # a tee-order guess at the slots isn't enough
+    e.round.setup_slots = ["Kroll", "Barrows"]               # read off GSPro's setup screen
+    assert shot(2, None, 1).player == "Barrows"
+    shot(3, "Kroll", 1)                                      # the screen says otherwise: that slot's in doubt
+    assert shot(4, None, 1).player == "unknown"
+    assert shot(5, None, 0).player == "Kroll"                # the other's still good
+
+
+def test_a_shot_no_one_else_could_have_hit_is_the_last_player_on_the_holes(tmp_path):
+    e = _guest_round(tmp_path, ["Kroll", "Barrows"])
+    e.cfg.source.gspro_log_truth = True
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    early = shot(1, None, 1, hole=0)
+    shot(2, "Kroll", 0, hole=0, outcome="holed", club="PT")
+    assert early.player == "unknown"                         # Kroll was still out when it was hit
+    assert shot(3, None, 1, hole=0).player == "Barrows"      # Kroll had holed out: it's Barrows's
+    assert e.round.log_agree[(1, "Barrows")] == 1            # and it vouches for the slot
+
+
+def test_a_shot_given_to_the_only_player_goes_back_when_gspros_log_has_someone_else_hit_it(tmp_path):
+    from commentator.state import ShotRecord
+
+    e = _guest_round(tmp_path, ["Alice"])
+    e.cfg.source.gspro_log_truth = True
+    e.gspro.players_seen.add(0)
+    e.gspro.mode = "course"
+    rec = ShotRecord("Alice", Shot(club="7I"), "hole 1 par 4", Hud(), [], round_id=e.round.id)   # no lie read
+    sid = e.store.record_shot(player="Alice", hole="hole 1 par 4", shot=Shot(club="7I"), before=Hud(),
+                              after=Hud(lie="rough"), tags=[], carry_game_yards=None, total_yards=None,
+                              offline_yards=None, course="X", attributed=True)
+    e._fire_rows[1] = (sid, rec, None, None)
+    e._row_source[1] = "the round's only player"
+    e._record_result(sid, "conceded", "[watch on Alice's line]", putt=False, rec=rec)
+    e.store.set_shot_result(sid, finish_yards=1.3)            # where Alice's ball stopped
+    assert e.store.finish_of(sid) == ("green", 1.3)
+    e._owners_due.add(1)
+    e.gspro._fire_info[1] = {"player": 1, "hole": 0}         # a second player, not on screen yet
+    e.gspro.players_seen.add(1)
+    e.gspro.fires = 1
+    e._apply_log_corrections()
+    assert rec.player == "unknown" and rec.outcome is None and 1 in e._unnamed
+    rows = e.store.db.execute("SELECT player, outcome, lie_after, finish_yards FROM shots ORDER BY id").fetchall()
+    assert [tuple(x) for x in rows] == [("unknown", None, "rough", None)]   # the gimme and its finish are gone
+    assert e._fire_rows[1][2:] == (None, None)                # nor is it slot 1's for a pickup to find
+    assert rec.hud.lie is None
+    e._record_result(sid, "holed", "[watch on Alice's line]", putt=False, rec=rec)
+    assert rec.outcome is None                                 # and that watch can't grade it again
+
+
+def test_a_hole_picked_up_before_the_round_ended_isnt_a_gimme_after(tmp_path):
+    from commentator.state import ShotRecord
+
+    e = _guest_round(tmp_path, ["Kroll", "Barrows"])
+    e.cfg.source.gspro_log_truth = True
+    rec = ShotRecord("Barrows", Shot(club="7I"), "hole 1 par 4", Hud(), [], round_id=e.round.id)
+    sid = e.store.record_shot(player="Barrows", hole="hole 1 par 4", shot=Shot(club="7I"), before=Hud(),
+                              after=Hud(), tags=[], carry_game_yards=None, total_yards=None,
+                              offline_yards=None, course="X", attributed=True)
+    e._fire_rows[1] = (sid, rec, 1, 0)
+    e._outcomes_due.add(1)
+    e.gspro._fire_info[1] = {"player": 1, "hole": 0}
+    e.gspro.fires = 1
+    e.gspro.mode = "menu"                                    # GSPro ended the round and reset its own
+    e.gspro.last_hole_scores = {(1, 0): 8}
+    e.gspro.last_picked = {(1, 0)}
+    e._settle_outcomes()
+    assert rec.outcome is None
+
+
+def test_a_shamble_players_last_shot_named_after_the_fact_is_conceded(tmp_path):
+    from commentator.state import ShotRecord
+
+    e = _guest_round(tmp_path, ["Kroll", "Barrows"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.no_scramble = True                               # a shamble, off the setup screen
+    e.gspro.team_scores = True                               # GSPro copied the drive picked
+    e.gspro.mode = "course"
+    rec = ShotRecord("Barrows", Shot(club="PT"), "hole 1 par 4", Hud(), [], round_id=e.round.id)
+    sid = e.store.record_shot(player="Barrows", hole="hole 1 par 4", shot=Shot(club="PT"), before=Hud(),
+                              after=Hud(), tags=[], carry_game_yards=None, total_yards=None,
+                              offline_yards=None, course="X", attributed=True)
+    e._fire_rows[1] = (sid, rec, 1, 0)
+    e._outcomes_due.add(1)
+    e.gspro._fire_info[1] = {"player": 1, "hole": 0}
+    e.gspro.fires = 1
+    e.gspro.hole_scores[(1, 0)] = 5
+    e._settle_outcomes()
+    assert rec.outcome == "conceded"
+
+
+def test_a_holes_strokes_on_gspros_log_place_the_shots_no_name_was_read_for(tmp_path):
+    e = _guest_round(tmp_path, ["Kroll", "Barrows", "Lee"])
+    e.cfg.source.gspro_log_truth = True
+    e.gspro.players_seen.update({0, 1, 2})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    a, b = shot(1, None, 1), shot(2, None, 1)
+    shot(3, "Kroll", 0)
+    shot(4, "Barrows", 1)
+    shot(5, "Kroll", 0, outcome="conceded", club="PT")
+    shot(6, "Lee", 2, outcome="holed")
+    assert (a.player, b.player) == ("unknown", "unknown")    # the log's slot 2 isn't known: no one's left over
+    e.gspro.hole_scores.update({(0, 0): 3, (1, 0): 6, (2, 0): 1})   # Kroll: 2 and the gimme
+    e._apply_log_corrections()
+    assert (a.player, b.player) == ("unknown", "unknown")    # Barrows 3 short of 6 with 2 unnamed: not theirs
+    e.gspro._penalties[(1, 0)] = 2                           # two were penalty strokes: the rest are the
+    e._apply_log_corrections()                               # 2 unnamed, Barrows's 1 and the gimme to come
+    assert (a.player, b.player) == ("Barrows", "Barrows")
+    rows = e.store.db.execute("SELECT player FROM shots WHERE id IN (1, 2)").fetchall()
+    assert [r[0] for r in rows] == ["Barrows", "Barrows"]
+
+
+def test_the_setup_read_is_used_when_its_load_screen_was_misread(tmp_path):
+    import time
+
+    e = _engine(tmp_path)
+    e._setup_seen = ("3s Greenville", ["Kroll", "Barrows"], ["Kroll", "Barrows"], time.monotonic())
+    assert e._with_setup_players(["Kroll"], "Pebble Beach") == (["Kroll"], None)   # another course
+    assert e._setup_seen is None
+    e._setup_seen = ("3s Greenville", ["Kroll", "Barrows"], ["Kroll", "Barrows"], time.monotonic())
+    assert e._with_setup_players(["Kroll"], "3s Greenville") == (["Kroll", "Barrows"], ["Kroll", "Barrows"])
+
+
+def test_round_end_keeps_the_end_of_gspros_log(tmp_path, monkeypatch):
+    import commentator.engine as engine_mod
+
+    e = _engine(tmp_path)
+    e.cfg.log_dir = str(tmp_path / "logs")
+    (tmp_path / "logs").mkdir()
+    src = tmp_path / "output_log.txt"
+    src.write_text("old\n" * 10 + "Shot Fired\n")
+    e.cfg.source.gspro_log = str(src)
+    monkeypatch.setattr(engine_mod, "GSPRO_LOG_KEEP_BYTES", 11)
+    for i in range(7):
+        (tmp_path / "logs" / f"gspro-2026-01-0{i + 1}-120000.log").write_text("x")
+    e._keep_gspro_log()
+    kept = sorted(p.name for p in (tmp_path / "logs").glob("gspro-*.log"))
+    assert len(kept) == engine_mod.KEEP_GSPRO_LOGS and kept[0] == "gspro-2026-01-04-120000.log"
+    assert (tmp_path / "logs" / kept[-1]).read_text() == "Shot Fired\n"

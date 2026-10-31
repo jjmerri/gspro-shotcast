@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import sys
 import threading
 import time
@@ -282,6 +283,8 @@ TREE_CALL_WATCH_SECONDS = 3.0
 # comes within about half a second): one it never logs was hit while GSPro couldn't take it.
 BANTER_WAIT_SECONDS = 40.0   # the most a routine shot's call waits for an aside on air to finish
 UNPLAYED_SHOT_WAIT_SECONDS = 2.5
+KEEP_GSPRO_LOGS = 5             # copies of GSPro's log kept from round ends (see _keep_gspro_log)
+GSPRO_LOG_KEEP_BYTES = 8_000_000   # from the end of it: a round's lines and plenty before
 TREE_CALLS = ("Oh, that's into the trees!", "That's caught a branch!", "Oh no, it's clipped the tree!",
               "Ooh, that's found the trees!")
 TREE_LOW_CALLS = ("Oh, that's clipped something low!", "That's into the bushes!")
@@ -672,6 +675,11 @@ class Engine:
         self._mulligans_done: set[int] = set()
         self._hazards_done: set[int] = set()   # fires whose penalty-area entry point is stored
         self._picks_done: set[int] = set()     # fires whose scramble pick (used or not) is stored
+        self._unnamed: set[int] = set()        # fires whose shooter the log has said, recorded with no name
+        self._outcomes_due: set[int] = set()   # fires named after the fact, their result still to read
+        self._row_source: dict[int, str] = {}  # fire -> where its recorded name came from
+        self._reconciled_holes: set[tuple] = set()   # (round id, hole) whose unnamed strokes were placed
+        self._owners_due: set[int] = set()     # fires recorded this round whose shooter the log hasn't said
         self._backup_lock = asyncio.Lock()
         self._backup_tasks: set[asyncio.Task] = set()
         # Recorded shots still waiting on their start position: GSPro attaches it only at the shooter's
@@ -680,6 +688,9 @@ class Engine:
         self._totals_due = False   # a logged position or mulligan since totals were last worked out from the log
         self._pickups_seen = 0   # GSPro pick-ups (score capped at the maximum) already applied
         self._pick_gimmes_seen = 0   # scramble picks inside the gimme circle already credited
+        self._marks_due: list[tuple[str, int, int]] = []   # pickups/picks waiting on a shot's name
+        self._void_watch: set[int] = set()   # shots whose result watch followed the wrong player's line
+        self._before_result: dict[int, tuple] = {}   # a shot's finish as it was before its outcome landed
         self._conceded_ids: set[int] = set()   # shots whose conceded putt row is stored
         self._form_said: dict[tuple, list[tuple[int, list[str]]]] = {}   # (round, side) -> [(hole of round, angles)]
         self._form_pending: tuple | None = None   # (round, side, players, hole of round) the sheet last went to
@@ -732,6 +743,9 @@ class Engine:
         self._last_setup_roster: tuple[list[str], list[str]] | None = None
         # The setup screen Play was pressed on: (course, roster, slot order, when), for the round's start.
         self._played_setup: tuple[str, list[str], list[str | None], float] | None = None
+        # The last setup read the watcher left the setup screen with, though no load screen it could read
+        # followed (its title misread): still this round's players and slots if the tee agrees.
+        self._setup_seen: tuple[str, list[str], list[str | None], float] | None = None
         # The last setup the booth read: (its HUD, the shot count then, GSPro's logged active player,
         # when). The impact read's fallback when the player box is gone by the time it's grabbed.
         self._last_setup: tuple | None = None
@@ -3164,6 +3178,269 @@ class Engine:
             return 0                           # genuinely one player (the log shows one too): index 0
         return None                            # no slot order and more than one player: don't attribute
 
+    def _log_name(self, idx: int | None) -> tuple[str, str] | None:
+        """(GSPro name, booth name) of the player in GSPro slot `idx`, when the round maps the log's
+        index to a name both ways (the same guards as `_gspro_idx`)."""
+        r = self.round
+        if idx is None or r is None or r.ended:
+            return None
+        order = r.slot_names or list(r.roster)
+        if not 0 <= idx < len(order) or not order[idx]:
+            return None
+        g = order[idx]
+        name = self._player(g) or g   # a league player goes by their league name, as the screen's read does
+        return (g, name) if self._gspro_idx(name) == idx else None
+
+    def _solo_name(self) -> str | None:
+        """The round's only player, when GSPro's log agrees there's only one: whoever hit, it was them."""
+        r = self.round
+        if not self._log_truth or r is None or r.ended or len(r.roster) != 1 or self.gspro.multiplayer:
+            return None
+        known = self._log_name(0)
+        return known[1] if known else None
+
+    def _log_view(self) -> tuple[dict, dict, set, set]:
+        """GSPro's log's (finished hole scores, penalties, players seen, holes picked up) for the round:
+        the live ones, or once GSPro has ended the round (and reset them for the next), the ended round's."""
+        g = self.gspro
+        if g.mode == "menu":
+            return g.last_hole_scores, g.last_penalties, g.last_players_seen, g.last_picked
+        return g.hole_scores, g._penalties, g.players_seen, g._picked
+
+    def _setup_slot(self, idx: int, g: str) -> bool:
+        """Whether GSPro's setup screen showed `g` in slot `idx` (and the round still has them there)."""
+        r = self.round
+        return bool(r.setup_slots) and idx < len(r.setup_slots) and r.setup_slots[idx] == g \
+            and idx not in r.log_doubt
+
+    def _slot_trust(self, owner: int, g: str) -> str | None:
+        """Why GSPro's log index `owner` is known to be `g`, or None:
+        - two screen reads named the player the log had up there;
+        - the setup screen showed them in that slot, and no read has said otherwise;
+        - every other player the log has seen is known, and the round, its slots and the log all
+          have the same number of players: the one slot left is theirs (a round's only player too)."""
+        r = self.round
+        if r.log_agree.get((owner, g), 0) >= 2:
+            return "screen reads agreed"
+        if owner in r.log_doubt:
+            return None
+        if self._setup_slot(owner, g):
+            return "the setup screen's slots"
+        seen = self._log_view()[2] | {owner}
+        named = [n for n in (r.slot_names or list(r.roster)) if n]
+        if len(named) != len(seen) or len(seen) != len(r.roster):
+            return None
+        for i in seen - {owner}:
+            k = self._log_name(i)
+            if k is None or i in r.log_doubt or not (r.log_agree.get((i, k[0]), 0) >= 2 or self._setup_slot(i, k[0])):
+                return None
+        return "every other slot is known" if len(seen) > 1 else "the round's only player"
+
+    def _own_shot(self, fire: int, owner: int) -> None:
+        """GSPro's log has said whose shot a recorded row was (its shooter's score line, after the ball
+        stopped). The screen's name stands whenever it was read: each read that matches the log confirms
+        that slot, one that doesn't unconfirms it. A shot recorded with no name (GSPro hid it for the
+        shot) waits in `_unnamed` for `_name_unnamed` to work out whose it was."""
+        shot_id, rec, _, _ = self._fire_rows[fire]
+        r = self.round
+        if self._row_source.get(fire) == "the round's only player" and owner != 0:
+            self._unassign_row(fire, owner)   # there's a second player after all, and it was theirs
+        if rec.player == "unknown":
+            if shot_id is not None:
+                # This player's earlier shot isn't their last any more: their next setup is where THIS
+                # ball stopped, not that one's.
+                for cache in (self._pending_finish, self._last_row):
+                    if (prev := cache.get(owner)) is not None and prev[0] is not None and prev[0] < shot_id:
+                        del cache[owner]
+            self._unnamed.add(fire)
+            return
+        if self._row_source.get(fire) not in ("screen", "setup read") or (known := self._log_name(owner)) is None:
+            return   # only a read of the screen confirms the log's slots, not a name the log gave
+        g, name = known
+        if r.current_name(rec.player) == name:
+            r.log_agree[(owner, g)] = r.log_agree.get((owner, g), 0) + 1
+        else:
+            for k in [k for k in r.log_agree if k[0] == owner]:
+                del r.log_agree[k]
+            r.log_doubt.add(owner)
+            r.log_disagreed += 1
+            log.info("Shot %s: the screen said %s hit it, GSPro's log has %s in slot %d: keeping the "
+                     "screen's, and not naming that slot's shots from the log", shot_id, rec.player, name, owner + 1)
+
+    def _name_unnamed(self) -> None:
+        """Name the shots recorded with no name, as soon as there's good reason (each also confirms the
+        slot): GSPro's log's shooter, when their slot is known (see _slot_trust); the only player still
+        on a hole everyone else had finished when it was hit; the one player a finished hole's strokes
+        on the log are short for, by just the unnamed shots on it."""
+        g, r = self.gspro, self.round
+        for fire in sorted(self._unnamed):
+            row = self._fire_rows.get(fire)
+            if row is None or row[1].player != "unknown" or row[1].round_id != r.id or fire < g.fires - 30:
+                self._unnamed.discard(fire)
+                continue
+            owner = g.fire_info(fire).get("player")
+            if (known := self._log_name(owner)) is None or self._anonymous(known[1]):
+                continue
+            if why := self._slot_trust(owner, known[0]):
+                self._assign_row(fire, owner, known[1], f"GSPro's log ({why})")
+            elif self._last_on_hole(fire, known[1]):
+                self._assign_row(fire, owner, known[1], "the last player on the hole")
+                r.log_agree[(owner, known[0])] = r.log_agree.get((owner, known[0]), 0) + 1
+        self._reconcile_strokes()
+
+    def _last_on_hole(self, fire: int, name: str) -> bool:
+        """Whether every other player had finished the hole (the screen named their last stroke, and it
+        holed or was conceded) before this shot was hit on it, leaving `name` the only one who could."""
+        r = self.round
+        hole = self.gspro.fire_info(fire).get("hole")
+        if hole is None or r.format in TEAM_BALL or len(r.roster) != len(self._log_view()[2]):
+            return False
+        names = {self._player(g) or g for g in r.roster}
+        done = {r.current_name(rec.player) for f, (_, rec, _, h) in self._fire_rows.items()
+                if f < fire and h == hole and rec.round_id == r.id and not rec.mulligan
+                and rec.outcome in ("holed", "conceded") and self._row_source.get(f) in ("screen", "setup read")}
+        return names - done == {name}
+
+    def _reconcile_strokes(self) -> None:
+        """A hole every player has finished on GSPro's log, with shots on it no one's name was read for:
+        when exactly one player's strokes (penalties aside) are short of their score, by just that many
+        shots, and everyone else's add up, they're that player's."""
+        g, r = self.gspro, self.round
+        if r.format in TEAM_BALL or g.team_scores or len(r.roster) < 2:
+            return   # one player's shots are named by _slot_trust; a shared ball's strokes aren't one player's
+        scores, pens, seen, picked = self._log_view()
+        unnamed: dict[int, list[int]] = {}
+        for fire in self._unnamed:
+            if (hole := g.fire_info(fire).get("hole")) is not None and (fire in self._fire_rows):
+                unnamed.setdefault(hole, []).append(fire)
+        names = {self._player(n) or n: self._gspro_idx(self._player(n) or n) for n in r.roster}
+        if None in names.values() or len(seen) != len(names):
+            return
+        for hole, fires in unnamed.items():
+            if (r.id, hole) in self._reconciled_holes or any((i, hole) not in scores or (i, hole) in picked
+                                                     for i in names.values()):
+                continue
+            live = [f for f in fires if not self._fire_rows[f][1].mulligan]
+            holed = any(g.fire_info(f).get("holed") for f in live)
+            short: list[str] = []
+            for name, idx in names.items():
+                rows = [rec for f, (_, rec, _, _) in self._fire_rows.items()
+                        if g.fire_info(f).get("hole") == hole and rec.round_id == r.id and not rec.mulligan
+                        and rec.player != "unknown" and r.current_name(rec.player) == name]
+                # GSPro counts the conceded putt nobody hits: on the row that ended inside the circle,
+                # or, when that's not on the record yet, still to account for.
+                ended = any(rec.outcome in ("holed", "conceded") for rec in rows)
+                gap = scores[(idx, hole)] - pens.get((idx, hole), 0) - len(rows) - any(
+                    rec.outcome == "conceded" for rec in rows)
+                if live and gap == len(live) + (not ended and not holed):
+                    short.append(name)
+                elif gap not in (0, 1) or (gap == 1 and ended):
+                    short = []
+                    break
+            if len(short) != 1:
+                continue
+            name = short[0]
+            if any((o := g.fire_info(f).get("player")) is not None and o != names[name] for f in live):
+                continue   # the log says one of them was someone else's: something else is off
+            self._reconciled_holes.add((r.id, hole))
+            for f in live:
+                self._assign_row(f, names[name], name, "the hole's strokes on GSPro's log")
+
+    def _assign_row(self, fire: int, owner: int, name: str, why: str) -> None:
+        """Name a shot recorded with no name: its row, the stats it counts in, and its index for the log
+        corrections that follow (mulligans, pickups, scramble picks)."""
+        shot_id, rec, _, _ = self._fire_rows[fire]
+        r = self.round
+        self._unnamed.discard(fire)
+        rec.player = name
+        shared = not r.solo(r.side_for(name)) and (r.format == "scramble" or r.no_scramble or self.gspro.team_scores)
+        self.store.set_shot_player(shot_id, name, attributed=True, fmt=r.player_format(name), shared_ball=shared)
+        self._fire_rows[fire] = (shot_id, rec, owner, self.gspro.fire_info(fire).get("hole"))
+        self._row_source[fire] = why
+        if r.name_sources.get("none yet"):
+            r.name_sources["none yet"] -= 1
+        r.name_sources[why.split(" (")[0]] = r.name_sources.get(why.split(" (")[0], 0) + 1
+        self._totals_due = True
+        self._outcomes_due.add(fire)
+        log.info("Shot %s had no name on screen: %s's, by %s", shot_id, name, why)
+
+    def _unassign_row(self, fire: int, owner: int) -> None:
+        """Take back the name a shot was given as the round's only player, when GSPro's log says another
+        slot hit it: it's unnamed until _name_unnamed works out whose it was."""
+        shot_id, rec, _, _ = self._fire_rows[fire]
+        self._fire_rows[fire] = (shot_id, rec, None, None)   # not the slot it was given to's any more
+        r = self.round
+        log.info("Shot %s went to %s as the round's only player, but GSPro's log has slot %d hitting it: "
+                 "unnamed until its player is known", shot_id, rec.player, owner + 1)
+        for cache in (self._pending_finish, self._last_row):
+            for k in [k for k, v in cache.items() if v is not None and v[0] == shot_id]:
+                del cache[k]
+        if shot_id is not None:
+            self._void_watch.add(shot_id)
+            if rec.outcome is not None:
+                before = self._before_result.pop(shot_id, None)
+                self.store.clear_shot_result(shot_id, rec.outcome, finish=before and before[:2])
+                if before and before[2]:
+                    rec.hud = replace(rec.hud, lie=before[3])
+                self._conceded_ids.discard(shot_id)
+        rec.player, rec.outcome = "unknown", None
+        self.store.set_shot_player(shot_id, "unknown", attributed=False, fmt=None, shared_ball=False)
+        self._row_source[fire] = "none yet"
+        if r.name_sources.get("the round's only player"):
+            r.name_sources["the round's only player"] -= 1
+        r.name_sources["none yet"] = r.name_sources.get("none yet", 0) + 1
+        self._totals_due = True
+
+    def _log_name_summary(self, r: Round) -> None:
+        """One line on how the round's shots got their players' names, for a report to start from."""
+        counts = ", ".join(f"{n} {k}" for k, n in sorted(r.name_sources.items(), key=lambda kv: -kv[1]) if n)
+        total = sum(r.name_sources.values())
+        log.info("Round %s: %d shots named by: %s; player box hidden at impact on %d of %d; the screen and "
+                 "GSPro's log disagreed on %d", r.id, total, counts or "nothing", r.box_hidden, total,
+                 r.log_disagreed)
+
+    def _keep_gspro_log(self) -> None:
+        """Copy GSPro's log into the booth's logs at round end: GSPro starts it afresh each time it opens,
+        so the round's lines are gone if it's restarted before a report is sent."""
+        try:
+            src = Path(getattr(self._follower, "path", None) or self.cfg.source.gspro_log).expanduser()
+            if not src.is_file():
+                return
+            log_dir = Path(self.cfg.log_dir)
+            with open(src, "rb") as f, open(log_dir / f"gspro-{time.strftime('%Y-%m-%d-%H%M%S')}.log", "wb") as out:
+                f.seek(max(0, os.path.getsize(src) - GSPRO_LOG_KEEP_BYTES))
+                shutil.copyfileobj(f, out)
+            for old in sorted(log_dir.glob("gspro-*.log"))[:-KEEP_GSPRO_LOGS]:
+                old.unlink(missing_ok=True)
+        except OSError:
+            log.exception("Keeping a copy of GSPro's log failed")
+
+    def _settle_outcomes(self) -> None:
+        """How the shots named after the fact ended, from GSPro's log: holed; a putt the player hit again
+        on the same hole missed; their last stroke on a hole that ended without holing was conceded."""
+        g, r = self.gspro, self.round
+        scores, _, _, picked = self._log_view()
+        for fire in sorted(self._outcomes_due):
+            shot_id, rec, owner, hole = self._fire_rows.get(fire, (None, None, None, None))
+            if rec is None or rec.round_id != r.id or rec.outcome is not None or rec.mulligan \
+                    or fire < g.fires - 30:
+                self._outcomes_due.discard(fire)
+                continue
+            putt, tag = rec.shot.is_putt, f"[shot {shot_id}]"
+            later = min((n for n, info in g._fire_info.items() if n > fire and info.get("player") == owner),
+                        default=None)
+            if g.fire_info(fire).get("holed"):
+                self._record_result(shot_id, "holed", tag, putt=putt, rec=rec, from_log=True)
+            elif later is not None and g.fire_info(later).get("hole") == hole:
+                if putt:
+                    self._record_result(shot_id, "missed", tag, putt=True, rec=rec, from_log=True)
+            elif (owner, hole) in scores and (owner, hole) not in picked and r.format not in TEAM_BALL \
+                    and (not g.team_scores or r.no_scramble):   # a shamble's balls are each player's own
+                self._record_result(shot_id, "conceded", tag, putt=putt, rec=rec, from_log=True)
+            elif later is None:
+                continue   # the hole's still going
+            self._outcomes_due.discard(fire)
+
     def _shot_wet(self, player: str | None, since: float | None = None) -> bool:
         """True when the GSPro log's Hit_water says this player's current shot went in the water. Used
         for the in-flight tease and the instant splash reaction. False when the log can't be attributed
@@ -3861,9 +4138,16 @@ class Engine:
         if use_screen:
             read = getattr(event, "impact_read", None)
             before, impact_image = await (read if read is not None else self._read_impact_hud(tag))
+            shown = bool(before.player_text)
             self._fill_from_setup(before, event.setup_hud, tag)
             self._use_setup_lie(before, tag)
+        else:
+            shown = bool(before.player_text)
         player = self._player(before.player_text, event.player_hint)
+        name_source = ("screen" if shown else "setup read") if player else "none yet"
+        if not player and (player := self._solo_name()):
+            name_source = "the round's only player"
+        log.info("%s player %s (%s)", tag, player or "unknown", name_source)
         # GSPro's own club box beats guessing the club from loft.
         if before.club:
             shot = replace(shot, club=before.club)
@@ -4178,10 +4462,17 @@ class Engine:
         if in_order:
             snap = self._idx_snap(impact_snap, idx)
             self._last_row[idx] = (shot_id, rec, snap["hole"], snap["pen"], snap["dropped"])
+        if r is not None and rec.round_id == r.id:
+            r.name_sources[name_source] = r.name_sources.get(name_source, 0) + 1
+            r.box_hidden += use_screen and not shown
         if fire is not None:
             self._fire_rows[fire] = (shot_id, rec, idx, impact_snap[1].get(idx) if idx is not None else None)
+            self._row_source[fire] = name_source
+            if r is not None and self._log_truth:
+                self._owners_due.add(fire)
             for old in [f for f in self._fire_rows if f <= fire - 60]:
                 del self._fire_rows[old]
+                self._row_source.pop(old, None)
             if not self.gspro.fire_info(fire).get("start"):
                 self._starts_due.add(fire)
             else:
@@ -5098,6 +5389,16 @@ class Engine:
                 self._picks_done.add(fire)
                 self.store.set_picked(row[0], picked)
                 row[1].picked = picked
+        for fire in sorted(self._owners_due):
+            owner = g.fire_info(fire).get("player")
+            if fire not in self._fire_rows or owner is not None or fire < g.fires - 20:
+                self._owners_due.discard(fire)
+            if fire in self._fire_rows and owner is not None and r is not None and not r.ended \
+                    and self._fire_rows[fire][1].round_id == r.id:
+                self._own_shot(fire, owner)
+        if r is not None and not r.ended and self._log_truth:
+            self._name_unnamed()
+            self._settle_outcomes()
         for fire, kind in list(g.mulligan_fires.items()):
             if fire in self._mulligans_done or fire not in self._fire_rows:
                 continue
@@ -5111,7 +5412,8 @@ class Engine:
             # No conceded-putt row to flag with it: a shot that ends in the gimme circle ends the hole,
             # and GSPro offers no shot options (so no mulligan) after that.
             # The re-hit replaces it: the same stroke, from the same spot.
-            nxt = next((v for f, v in sorted(self._fire_rows.items()) if f > fire and v[2] == idx), None)
+            nxt = next((v for f, v in sorted(self._fire_rows.items()) if f > fire and v[2] == idx), None) \
+                if idx is not None else None   # an unnamed shot's re-hit can't be told from anyone's
             if nxt and nxt[3] == hole and nxt[1].round_id == rec.round_id:
                 nxt[1].shot_number, nxt[1].lie_before = rec.shot_number, rec.lie_before
                 self.store.set_shot_start(nxt[0], rec.shot_number, rec.lie_before, replaced=shot_id)
@@ -5120,35 +5422,48 @@ class Engine:
             self._totals_due = False
             self._fill_log_totals()
         while self._pickups_seen < len(g.pickups):
-            idx, hole = g.pickups[self._pickups_seen]
+            self._marks_due.append(("pickup", *g.pickups[self._pickups_seen]))
             self._pickups_seen += 1
-            row = next((v for v in reversed(self._fire_rows.values()) if v[2] == idx and v[3] == hole), None)
-            if r and row and row[1].round_id == r.id and row[1].hole_seq:
-                r.picked_up.add((row[1].player, row[1].hole_seq))
-                log.info("%s picked up on hole %s of the round: scored at the maximum", row[1].player,
-                         row[1].hole_seq)
-        # A scramble pick inside the gimme circle concedes the picked ball's stroke. Its player usually
-        # hit before a teammate, so that stroke's watch had already settled (as a miss) when GSPro
-        # picked it, and the team's conceded putt went unrecorded.
         while self._pick_gimmes_seen < len(g.pick_gimmes):
-            idx, hole = g.pick_gimmes[self._pick_gimmes_seen]
+            if r and r.format == "scramble":
+                self._marks_due.append(("pick", *g.pick_gimmes[self._pick_gimmes_seen]))
             self._pick_gimmes_seen += 1
-            if not r or r.format != "scramble":
-                continue
-            row = next((v for v in reversed(self._fire_rows.values())
-                        if v[2] == idx and v[3] == hole and not v[1].mulligan), None)
-            if row and row[0] is not None and row[1].round_id == r.id and row[1].outcome in (None, "missed"):
+        for mark in list(self._marks_due):
+            kind, idx, hole = mark
+            live = kind == "pick"
+            at, row = next(((f, v) for f, v in sorted(self._fire_rows.items(), reverse=True)
+                            if v[2] == idx and v[3] == hole and not (live and v[1].mulligan)), (-1, None))
+            if any(f > at and f in self._unnamed and v[1].player == "unknown" and not (live and v[1].mulligan)
+                   and g.fire_info(f).get("player") == idx and g.fire_info(f).get("hole") == hole
+                   for f, v in self._fire_rows.items()):
+                continue   # the shot it's about has no name yet: once it has, it's settled here
+            self._marks_due.remove(mark)
+            if kind == "pickup":
+                if r and row and row[1].round_id == r.id and row[1].hole_seq:
+                    r.picked_up.add((row[1].player, row[1].hole_seq))
+                    log.info("%s picked up on hole %s of the round: scored at the maximum", row[1].player,
+                             row[1].hole_seq)
+            # A scramble pick inside the gimme circle concedes the picked ball's stroke. Its player usually
+            # hit before a teammate, so that stroke's watch had already settled (as a miss) when GSPro
+            # picked it, and the team's conceded putt went unrecorded.
+            elif r and row and row[0] is not None and row[1].round_id == r.id and row[1].outcome in (None, "missed"):
                 self._record_result(row[0], "conceded", f"[shot {row[0]}] (scramble pick)",
-                                    putt=row[1].shot.is_putt, rec=row[1])
+                                    putt=row[1].shot.is_putt, rec=row[1], from_log=True)
 
     def _record_result(self, shot_id: int | None, outcome: str, tag: str, putt: bool,
-                       rec: ShotRecord | None = None) -> None:
+                       rec: ShotRecord | None = None, from_log: bool = False) -> None:
         """Store how a stroke ended. A putt keeps its outcome, and so does a full shot that holed out;
         any stroke that ended inside the gimme circle also gets a row for the conceded putt GSPro
         counts but nobody hits, so putting stats (putts per hole, three-putts) see every putt on the
         card. A full shot that ended inside the circle finished on the green, whatever the HUD read."""
         if shot_id in self._conceded_ids:
             return   # a scramble pick already conceded it; a later watch can't undo or repeat that
+        if shot_id in self._void_watch and not from_log:
+            return   # its watch is on the player it was wrongly given to; _settle_outcomes grades it
+        if shot_id is not None and shot_id not in self._before_result:
+            self._before_result[shot_id] = (*self.store.finish_of(shot_id), rec is not None, rec and rec.hud.lie)
+            while len(self._before_result) > 100:
+                del self._before_result[next(iter(self._before_result))]
         if rec is not None:
             rec.outcome = outcome
         if putt or outcome == "holed":
@@ -5990,6 +6305,10 @@ class Engine:
         first), and the setup's slot order: when Play was pressed on this course recently and the tee's
         players are all on it. Taken once."""
         s, self._played_setup = self._played_setup, None
+        seen, self._setup_seen = self._setup_seen, None
+        if not s and seen and self._same_course(seen[0], course):
+            s = seen
+            log.info("Using the setup screen's players %s (its load screen wasn't read)", seen[1])
         if not s:
             return names, None
         s_course, roster, slots, at = s
@@ -6177,6 +6496,7 @@ class Engine:
         log.info("GSPro player order from the first tee, top to bottom: %s (setup slots were %s)",
                  names, r.slot_names)
         r.slot_names = list(names)
+        r.setup_slots = None   # the tee's order is a guess at GSPro's
 
     def _take_matching_pending(self, is_league: bool, course: str | None,
                                names: list[str]) -> PendingOpening | None:
@@ -6572,6 +6892,11 @@ class Engine:
                 self._take_holes_sample(holes_since)   # nines changed in the moment before Play was pressed
             if loading and roster:
                 self._played_setup = (course, list(roster), list(slot_order), time.monotonic())
+                self._setup_seen = None
+            elif seen_setup and course and roster and not search_bar:
+                left = (course, list(roster), list(slot_order))
+                if self._setup_seen is None or self._setup_seen[:3] != left:
+                    self._setup_seen = (*left, time.monotonic())
             if loading and not c.preround:
                 seen_setup, course, roster, slot_order, slot_cache = False, None, [], [], {}
                 continue
@@ -6773,6 +7098,8 @@ class Engine:
         r = self._build_round(names, sched.get("course") or course, entry if is_league else {}, is_league,
                               card_course=self._card_course(course), use_current_hole=False,
                               slot_names=slot_names)   # None (not the filtered roster) is the safe signal
+        if guessed:
+            r.setup_slots = None   # the last roster read, not this setup's
         # The first setup slot (top-left) is first on the tee, EXCEPT in alternate shot, where who tees
         # off isn't fixed to one person, so no starter is named there. An unplaceable practice round's
         # opening hole is still unknown until the tee, so _opener_io leaves the hole out too.
@@ -7079,7 +7406,11 @@ class Engine:
         await self._drain_shot_tasks(self.cfg.commentary.wrap_wait_seconds)
         if r.ended:
             return
+        self._apply_log_corrections()   # whose the last unnamed shots were, while the round still maps them
+        self._log_name_summary(r)
         r.ended = True
+        if self._log_truth and self.cfg.source.type != "replay":
+            self._bg(asyncio.to_thread(self._keep_gspro_log))
         self._round_ended_at = time.monotonic()
         # Asides can no longer play, so prep still in flight is money spent on nothing. The guards in
         # _prepare_news stop it starting another story; only a cancel stops the one already running

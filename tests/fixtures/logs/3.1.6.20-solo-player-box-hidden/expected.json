@@ -1,0 +1,434 @@
+[
+{
+"kind": "version",
+"display": "3.1.6.20"
+},
+{
+"kind": "course",
+"course": "3s_greenville"
+},
+{
+"kind": "course_display",
+"display": "3s Greenville"
+},
+{
+"kind": "skip_hole",
+"hole": 1
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": false
+},
+{
+"kind": "bounce",
+"descent": 37.8
+},
+{
+"kind": "material",
+"surface": "fairway"
+},
+{
+"kind": "altitude",
+"altitude_ft": 984.0
+},
+{
+"kind": "roll",
+"roll_ft": 15.673
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 9,
+"score": 1,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 0
+},
+{
+"kind": "position",
+"pos": [
+522.5349,
+22.48505,
+493.433
+]
+},
+{
+"kind": "tdist",
+"to_pin": 13.45728,
+"gimmie": 1.83
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": false
+},
+{
+"kind": "bounce",
+"descent": 23.1
+},
+{
+"kind": "material",
+"surface": "green"
+},
+{
+"kind": "altitude",
+"altitude_ft": 984.0
+},
+{
+"kind": "roll",
+"roll_ft": 19.615
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 9,
+"score": 2,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 0
+},
+{
+"kind": "position",
+"pos": [
+531.3997,
+22.72358,
+498.6352
+]
+},
+{
+"kind": "tdist",
+"to_pin": 3.212633,
+"gimmie": 1.83
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": true
+},
+{
+"kind": "roll",
+"roll_ft": 5.988
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 9,
+"score": 3,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 0
+},
+{
+"kind": "position",
+"pos": [
+532.7913,
+22.73301,
+499.8162
+]
+},
+{
+"kind": "tdist",
+"to_pin": 1.394195,
+"gimmie": 1.83
+},
+{
+"kind": "gimmie"
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 9,
+"score": 4,
+"strokes": 1
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": false
+},
+{
+"kind": "bounce",
+"descent": 35.6
+},
+{
+"kind": "material",
+"surface": "fairway"
+},
+{
+"kind": "altitude",
+"altitude_ft": 984.0
+},
+{
+"kind": "roll",
+"roll_ft": 15.892
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 10,
+"score": 1,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 0
+},
+{
+"kind": "position",
+"pos": [
+563.2305,
+24.60922,
+567.0747
+]
+},
+{
+"kind": "tdist",
+"to_pin": 28.46351,
+"gimmie": 1.83
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": false
+},
+{
+"kind": "penalty_surface",
+"surface": "sand",
+"lie_cost": [
+78,
+82
+]
+},
+{
+"kind": "bounce",
+"descent": 16.5
+},
+{
+"kind": "material",
+"surface": "fairway"
+},
+{
+"kind": "altitude",
+"altitude_ft": 984.0
+},
+{
+"kind": "roll",
+"roll_ft": 37.654
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 10,
+"score": 2,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 0
+},
+{
+"kind": "position",
+"pos": [
+588.3928,
+26.4402,
+565.8627
+]
+},
+{
+"kind": "tdist",
+"to_pin": 5.862665,
+"gimmie": 1.83
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": true
+},
+{
+"kind": "roll",
+"roll_ft": 12.253
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 10,
+"score": 3,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 0
+},
+{
+"kind": "position",
+"pos": [
+589.6812,
+26.51363,
+562.3582
+]
+},
+{
+"kind": "tdist",
+"to_pin": 2.170114,
+"gimmie": 1.83
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": true
+},
+{
+"kind": "roll",
+"roll_ft": 7.621
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 10,
+"score": 4,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 0
+},
+{
+"kind": "position",
+"pos": [
+590.8882,
+26.55732,
+560.3743
+]
+},
+{
+"kind": "tdist",
+"to_pin": 0.2515312,
+"gimmie": 1.83
+},
+{
+"kind": "gimmie"
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 10,
+"score": 5,
+"strokes": 1
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": false
+},
+{
+"kind": "bounce",
+"descent": 44.5
+},
+{
+"kind": "material",
+"surface": "green"
+},
+{
+"kind": "altitude",
+"altitude_ft": 984.0
+},
+{
+"kind": "roll",
+"roll_ft": 21.573
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 11,
+"score": 1,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 0
+},
+{
+"kind": "position",
+"pos": [
+607.6439,
+27.31395,
+477.5887
+]
+},
+{
+"kind": "tdist",
+"to_pin": 2.980484,
+"gimmie": 1.83
+},
+{
+"kind": "shot_fired"
+},
+{
+"kind": "launch_mode",
+"putting": true
+},
+{
+"kind": "roll",
+"roll_ft": 13.516
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 11,
+"score": 2,
+"strokes": 1
+},
+{
+"kind": "select",
+"player": 0
+},
+{
+"kind": "position",
+"pos": [
+608.6365,
+27.3237,
+473.5905
+]
+},
+{
+"kind": "tdist",
+"to_pin": 1.194452,
+"gimmie": 1.83
+},
+{
+"kind": "gimmie"
+},
+{
+"kind": "state",
+"player": 0,
+"hole": 11,
+"score": 3,
+"strokes": 1
+},
+{
+"kind": "end_round"
+}
+]
