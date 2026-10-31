@@ -7,6 +7,7 @@ export. Replays and evals use an in-memory database so made-up shots never reach
 import io
 import json
 import logging
+import math
 import re
 import sqlite3
 import time
@@ -14,6 +15,7 @@ from typing import Any
 
 from .hud import Hud
 from .models import Line, Shot
+from .sources.gspro_log import M_TO_YD
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +43,7 @@ CREATE TABLE IF NOT EXISTS shots (
     lie_after TEXT,
     carry_raw_tile_yards REAL,                   -- GSPro CARRY (raw): flat-ground, no lie penalty (~launch monitor carry)
     carry_game_yards REAL, total_yards REAL, offline_yards REAL,   -- GSPro, after landing
+    total_from_log INTEGER NOT NULL DEFAULT 0,   -- 1 = total_yards came from GSPro's logged positions, not the HUD
     tags TEXT,                                   -- JSON list from the interest scorer
     raw TEXT,                                    -- the Open Connect message
     -- Per-player stats, mostly from GSPro's own log (see sources/gspro_log.py). to_pin_yards is the
@@ -307,7 +310,7 @@ class Store:
                  "outcome": "TEXT", "fmt": "TEXT", "attributed": "INTEGER NOT NULL DEFAULT 1",
                  "is_league": "INTEGER NOT NULL DEFAULT 1", "mulligan": "INTEGER NOT NULL DEFAULT 0",
                  "shared_ball": "INTEGER NOT NULL DEFAULT 0", "left_out": "INTEGER NOT NULL DEFAULT 0", "handed": "TEXT",
-                 "picked": "INTEGER", "tree_hits": "INTEGER",
+                 "picked": "INTEGER", "tree_hits": "INTEGER", "total_from_log": "INTEGER NOT NULL DEFAULT 0",
                  **{col: "REAL" for col in CLUB_COLS}, **{col: "REAL" for col in POSITION_COLS},
                  **{col: "REAL" for col in HAZARD_COLS}}
         for col, decl in added.items():
@@ -437,6 +440,64 @@ class Store:
             added += 1
         self.db.commit()
         return added
+
+    def fill_log_totals(self, session_id: int | None = -1) -> int:
+        """Fill in a full shot's total from GSPro's logged positions when its TOTAL LENGTH tile was never
+        read (hidden for the shot by GSPro's "hide UI on shot"): the flat distance from where it was played
+        to where the same player's next stroke on the hole was played from. A tee shot starts on the tee
+        of this round's layout (logged when the round is complete; an earlier round's tee box may differ).
+        Not for a stroke followed by a penalty (the next stroke number is skipped), a ball teammates share,
+        a putt, or a pairing whose distance doesn't fit the carry. Totals filled this way are worked out
+        again each time (a mulligan or a corrected position can change the pairing); the HUD's never are.
+        Returns the shots whose total changed."""
+        sid = self.session_id if session_id == -1 else session_id
+        rows = self.db.execute(
+            "SELECT id, ts, player, course, hole, shot_number, is_putt, mulligan, shared_ball, attributed, fmt,"
+            " start_x, start_z, total_yards, total_from_log, COALESCE(carry_game_yards, carry_raw_tile_yards, carry_raw) AS carry"
+            " FROM shots WHERE session_id IS ? ORDER BY ts, id", (sid,)).fetchall()
+        ends = [e for (e,) in self.db.execute("SELECT ended_at FROM rounds WHERE session_id IS ? AND ended_at IS NOT NULL",
+                                               (sid,))]
+        mine: dict[tuple, list] = {}
+        for r in rows:
+            if r["player"] and r["player"] != "unknown" and not r["mulligan"]:
+                mine.setdefault((r["player"], r["course"], r["hole"]), []).append(r)
+        want: dict[int, float] = {}
+        for (_, course, hole), strokes in mine.items():
+            for r, nxt in zip(strokes, strokes[1:]):
+                if ((r["total_yards"] is not None and not r["total_from_log"]) or r["is_putt"] or r["shared_ball"] or not r["attributed"]
+                        or r["fmt"] in ("scramble", "alternate") or not r["carry"] or nxt["start_x"] is None
+                        or not r["shot_number"] or nxt["shot_number"] != r["shot_number"] + 1
+                        or nxt["ts"] - r["ts"] > 1800 or any(r["ts"] < e < nxt["ts"] for e in ends)):
+                    continue   # (the hole played again in a later round isn't this ball)
+                start = (r["start_x"], r["start_z"]) if r["start_x"] is not None and r["shot_number"] > 1 else None
+                if start is None and r["shot_number"] == 1 and (m := re.match(r"Hole (\d+)", hole or "")):
+                    tee = self.db.execute(
+                        "SELECT tee_x, tee_z FROM hole_layouts WHERE session_id IS ? AND course = ? COLLATE NOCASE"
+                        " AND hole = ? AND ts >= ? AND tee_x IS NOT NULL ORDER BY ts LIMIT 1",
+                        (sid, course, int(m.group(1)), nxt["ts"])).fetchone()
+                    if tee is not None and self.db.execute(   # the hole teed off again first: another round's
+                            "SELECT 1 FROM shots WHERE session_id IS ? AND course = ? COLLATE NOCASE AND (hole = ? OR hole LIKE ?)"
+                            " AND shot_number = 1 AND ts > ? AND ts < (SELECT MIN(ts) FROM hole_layouts WHERE"
+                            " session_id IS ? AND course = ? COLLATE NOCASE AND hole = ? AND ts >= ? AND tee_x IS NOT NULL)"
+                            " LIMIT 1", (sid, course, f"Hole {m.group(1)}", f"Hole {m.group(1)},%", nxt["ts"], sid, course, int(m.group(1)), nxt["ts"])).fetchone():
+                        tee = None
+                    start = (tee["tee_x"], tee["tee_z"]) if tee else None
+                if start is None:
+                    continue
+                total = math.hypot(nxt["start_x"] - start[0], nxt["start_z"] - start[1]) * M_TO_YD
+                if not 0.6 * r["carry"] <= total <= 1.6 * r["carry"] + 40:
+                    continue   # not this ball's rest (a mulligan the log didn't flag, a misattributed stroke)
+                want[r["id"]] = round(total, 1)
+        filled = 0
+        for r in rows:
+            if (r["total_yards"] is None or r["total_from_log"]) and want.get(r["id"]) != r["total_yards"]:
+                self.db.execute("UPDATE shots SET total_yards = ?, total_from_log = ? WHERE id = ?"
+                                " AND (total_yards IS NULL OR total_from_log = 1)",
+                                (want.get(r["id"]), int(r["id"] in want), r["id"]))
+                filled += 1
+        if filled:
+            self.db.commit()
+        return filled
 
     def has_hole_image(self, course: str | None, hole: int | None) -> bool:
         """Whether the hole's minimap is kept already, with its ball and pin found."""

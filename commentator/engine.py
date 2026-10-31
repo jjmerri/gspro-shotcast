@@ -664,6 +664,7 @@ class Engine:
         # Recorded shots still waiting on their start position: GSPro attaches it only at the shooter's
         # score line, logged once the ball stops, and a putt is recorded before that.
         self._starts_due: set[int] = set()
+        self._totals_due = False   # a logged position or mulligan since totals were last worked out from the log
         self._pickups_seen = 0   # GSPro pick-ups (score capped at the maximum) already applied
         self._pick_gimmes_seen = 0   # scramble picks inside the gimme circle already credited
         self._conceded_ids: set[int] = set()   # shots whose conceded putt row is stored
@@ -1302,6 +1303,7 @@ class Engine:
             course = self.current_course or g.course_display
             if (n := self.store.record_hole_layout(course, g.layout_holes)):
                 log.info("Stored the layout of %d holes at %s", n, course)
+                self._fill_log_totals()   # the tee shots: their start is the layout's tee
         if not self._log_rounds:
             return
         live = r is not None and not r.ended
@@ -4122,6 +4124,8 @@ class Engine:
                 del self._fire_rows[old]
             if not self.gspro.fire_info(fire).get("start"):
                 self._starts_due.add(fire)
+            else:
+                self._totals_due = True
             self._apply_log_corrections()   # a mulligan logged before this re-hit was recorded
         replay_facts = self._replay_facts(player, rec)
         must = ("misread" if "misread" in replay_facts[0] else "mulligan") if replay_facts else None
@@ -4966,6 +4970,14 @@ class Engine:
             rec.hud = replace(rec.hud, lie=lie)
             self.store.set_lie_after(shot_id, lie)
 
+    def _fill_log_totals(self) -> None:
+        """Totals from GSPro's logged positions for shots whose TOTAL LENGTH tile wasn't read."""
+        try:
+            if n := self.store.fill_log_totals():
+                log.info("Filled the total of %d shot(s) from GSPro's logged positions", n)
+        except Exception:
+            log.exception("Filling totals from the log failed")
+
     def _apply_log_corrections(self) -> None:
         """Apply what GSPro's log has since said about recorded shots: strokes it took back
         (mulligans), flagged so they leave the stats, and holes picked up (scored at the maximum)."""
@@ -4985,6 +4997,7 @@ class Engine:
             elif start := g.fire_info(fire).get("start"):
                 self._starts_due.discard(fire)
                 self.store.set_shot_position(self._fire_rows[fire][0], start)
+                self._totals_due = True
         for fire, row in self._fire_rows.items():
             if fire not in self._hazards_done and (entry := g.fire_info(fire).get("hazard")):
                 self._hazards_done.add(fire)
@@ -5000,6 +5013,7 @@ class Engine:
             self._mulligans_done.add(fire)
             if kind == "repeat" and team:
                 continue
+            self._totals_due = True
             shot_id, rec, idx, hole = self._fire_rows[fire]
             rec.mulligan = True
             self.store.set_mulligan(shot_id)
@@ -5011,6 +5025,9 @@ class Engine:
                 nxt[1].shot_number, nxt[1].lie_before = rec.shot_number, rec.lie_before
                 self.store.set_shot_start(nxt[0], rec.shot_number, rec.lie_before, replaced=shot_id)
             log.info("Shot %s was a mulligan (GSPro took it back): left out of the stats", shot_id)
+        if self._totals_due:   # once the positions and mulligans above are all in
+            self._totals_due = False
+            self._fill_log_totals()
         while self._pickups_seen < len(g.pickups):
             idx, hole = g.pickups[self._pickups_seen]
             self._pickups_seen += 1
