@@ -1,7 +1,9 @@
 import json
 import sqlite3
+import struct
 import zipfile
 
+import pytest
 import yaml
 
 from PIL import Image
@@ -143,3 +145,58 @@ def test_the_sent_box_copies_the_report_code():
         assert ui.root.clipboard_get() == "ABCD-2345"
     finally:
         ui.root.destroy()
+
+
+def _nrbf_string(s: str) -> bytes:
+    b = s.encode()
+    return bytes([len(b)]) + b
+
+
+def _settings_vgs() -> bytes:
+    """A small Settings.vgs: a player's name, then game options, one of them an enum."""
+    i32 = lambda n: struct.pack("<i", n)   # noqa: E731
+    out = b"\x00" + i32(1) + i32(-1) + i32(1) + i32(0)
+    out += b"\x0c" + i32(2) + _nrbf_string("Assembly-CSharp")
+    out += (b"\x05" + i32(1) + _nrbf_string("GameSettings") + i32(2) + _nrbf_string("PlayerData_a")
+            + _nrbf_string("Game_s") + bytes([1, 4]) + _nrbf_string("GameData") + i32(2) + i32(2))
+    out += b"\x06" + i32(3) + _nrbf_string("Jane Golfer") + b"\x09" + i32(4)
+    out += (b"\x05" + i32(4) + _nrbf_string("GameData") + i32(3) + _nrbf_string("BallReadyHideInterface")
+            + _nrbf_string("FollowCamDelay") + _nrbf_string("ScorecardStyle") + bytes([0, 0, 4]) + bytes([1, 11])
+            + _nrbf_string("ScorecardStyle") + i32(2) + i32(2))
+    out += b"\x01" + struct.pack("<f", 0.5)
+    out += (b"\x05" + i32(5) + _nrbf_string("ScorecardStyle") + i32(1) + _nrbf_string("value__") + bytes([0, 8])
+            + i32(2) + i32(3))
+    return out + b"\x0b"
+
+
+def test_report_lists_gspro_settings_but_not_its_players(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    gspro = tmp_path / "GSPro"
+    gspro.mkdir()
+    (gspro / "Settings.vgs").write_bytes(_settings_vgs())
+    cfg = Config(log_dir="logs", db_path="logs/season.db")
+    cfg.source.gspro_log = str(gspro / "Player.log")
+    cfg.source.connector_log = str(tmp_path / "missing.txt")
+
+    with zipfile.ZipFile(report.build(cfg, tmp_path / "config.yaml")) as z:
+        summary = z.read("summary.txt").decode()
+    assert "GSPro settings: BallReadyHideInterface=True, FollowCamDelay=0.5, ScorecardStyle=3" in summary
+    assert "Jane" not in summary
+
+
+def test_a_corrupt_settings_file_is_refused_rather_than_filling_memory():
+    from commentator.gspro_settings import _Reader
+
+    i32 = lambda n: struct.pack("<i", n)   # noqa: E731
+    header = b"\x00" + i32(1) + i32(-1) + i32(1) + i32(0)
+    for body in (b"\x10" + i32(1) + i32(1) + b"\x0e" + i32(2**31 - 1),   # a run of nulls past the array's end
+                 b"\x10" + i32(1) + i32(2**31 - 1) + b"\x0e" + i32(2**31 - 1)):   # an absurd array length
+        with pytest.raises(ValueError):
+            _Reader(header + body + b"\x0b").read()
+
+
+def test_a_settings_string_length_is_five_bytes_at_most():
+    from commentator.gspro_settings import _Reader
+
+    with pytest.raises(ValueError, match="string length"):
+        _Reader(b"\xff" * 100_000).string()
