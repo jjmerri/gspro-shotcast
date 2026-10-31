@@ -18,6 +18,7 @@ from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import date
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -543,12 +544,15 @@ def summary(db: sqlite3.Connection, context: str | None = None,
 
 
 def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | None = None,
-                site: str | Path | None = None, brand: dict[str, str] | None = None) -> ThreadingHTTPServer:
+                site: str | Path | None = None, brand: dict[str, str] | None = None,
+                videos: Callable[[], tuple[Path | None, int]] | None = None) -> ThreadingHTTPServer:
     """Serve the stats page on localhost only (port 0 picks a free one), the same static site that
     `publish` uploads (stats_site.py), built into `site` (a temp folder by default) and rebuilt when
     the database changes. `names` maps persona keys to on-air names; `brand` is build()'s site_name
-    and more_tab."""
-    from . import stats_site
+    and more_tab. `videos()`: where the round videos kept on the PC are (local_video.py; None if they
+    aren't) and for how many days, asked on each request so a change in Settings counts at once. They're
+    served as the bucket's live/ (recordings.json, s/<session>/full.m3u8), so the Watch buttons play them."""
+    from . import local_video, stats_site
 
     db_path = Path(db_path)
     site = Path(site) if site else Path(tempfile.mkdtemp(prefix="shotcast-stats-"))
@@ -594,8 +598,32 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
                 return self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
             self._send(200, json.dumps({"id": int(m.group(1)), "left_out": left_out}).encode(), "application/json")
 
+        def _video(self, rel: str) -> tuple[bytes, str] | None:
+            folder, keep_days = videos()
+            if folder is None:
+                return None
+            if rel == "live/recordings.json":
+                recs = [{k: v for k, v in r.items() if k != "segments"} for r in local_video.recordings(folder)]
+                return json.dumps({"recordings": recs, "keep_days": keep_days}).encode(), "application/json"
+            m = re.fullmatch(r"live/s/([^/]+)/(full\.m3u8|seg(\d+)\.ts)", rel)
+            rec = m and next((r for r in local_video.recordings(folder) if r["session"] == m.group(1)), None)
+            if not rec:
+                return None
+            if m.group(3) is None:
+                return local_video.playlist(rec), "application/vnd.apple.mpegurl"
+            data = local_video.segment(folder, rec, int(m.group(3)))
+            return None if data is None else (data, "video/mp2t")
+
         def _file(self, head: bool) -> None:
             rel = unquote(urlparse(self.path).path).lstrip("/") or "index.html"
+            if videos is not None and rel.startswith("live/"):
+                try:
+                    got = self._video(rel)
+                except OSError:
+                    got = None
+                if got is None:
+                    return self._send(404, b"not found", "text/plain", head)
+                return self._range(*got, head)
             if rel == "latest.json":
                 try:
                     refresh()
@@ -607,7 +635,9 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
             data = path.read_bytes()
             if rel == "latest.json":   # served from here, the page may leave shots out of the stats
                 data = json.dumps({**json.loads(data), "local": True}).encode()
-            kind = stats_site.CONTENT_TYPES.get(path.suffix, "application/octet-stream")
+            self._range(data, stats_site.CONTENT_TYPES.get(path.suffix, "application/octet-stream"), head)
+
+        def _range(self, data: bytes, kind: str, head: bool) -> None:
             m = re.fullmatch(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
             if m and int(m.group(1)) < len(data):
                 start = int(m.group(1))
@@ -637,8 +667,8 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
 
 def serve(db_path: str | Path, port: int = 8765, open_browser: bool = True,
           names: dict[str, str] | None = None, site: str | Path | None = None,
-          brand: dict[str, str] | None = None) -> None:
-    server = make_server(db_path, port, names, site, brand)
+          brand: dict[str, str] | None = None, videos: Callable[[], tuple[Path | None, int]] | None = None) -> None:
+    server = make_server(db_path, port, names, site, brand, videos)
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"Season stats from {db_path} at {url} (Ctrl+C to stop)")
     if open_browser:

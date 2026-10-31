@@ -197,14 +197,16 @@ def vod_playlist(track: list[tuple[str, float]], ended: bool) -> bytes:
 def off_air(cfg) -> None:
     """Take the page's Live tab off air from outside the booth (the tray, when it quits: that ends the
     booth without letting it clean up). Stops OBS's output too, so nothing keeps writing."""
-    import boto3
-
     try:
         Obs(cfg.live.obs_host, cfg.live.obs_port, timeout=2).stop()
     except Exception as e:
         log.info("Live stream: OBS not stopped: %s", e)
     p = cfg.publish
-    client = boto3.client("s3", region_name=p.region) if p.region else boto3.client("s3")
+    client = None
+    if p.bucket:
+        import boto3
+
+        client = boto3.client("s3", region_name=p.region) if p.region else boto3.client("s3")
     Mirror(cfg.live.dir, p.bucket, p.prefix, cfg.live.playlist, client, keep_days=cfg.live.keep_days,
            status_file=Path(cfg.log_dir) / "live.json").clear()
 
@@ -231,9 +233,13 @@ class Mirror:
 
     def __init__(self, folder: str | Path, bucket: str, prefix: str = "", playlist: str = "stream.m3u8",
                  client: Any = None, status_file: str | Path | None = None, stale_seconds: float = 20.0,
-                 clock=time.time, keep_days: float = 0) -> None:
+                 clock=time.time, keep_days: float = 0, local: Any = None) -> None:
         self.folder, self.bucket, self.playlist = Path(folder), bucket, playlist
-        self.keep = keep_days * 86400
+        self.keep = keep_days * 86400 if bucket else 0
+        self.local = local   # a local_video.LocalRecorder: the stream kept on the PC too (or only)
+        self.tracking = bool(self.keep or local)   # what's on each stream (rounds, shots) noted
+        self.peers: list[Mirror] = []   # others reading the same folder: it's emptied once they're done too
+        self.newest_ns = 0   # the stream's newest file read (its mtime), for that
         self.state_file = Path(status_file).with_name("live-recordings.json") if status_file else None
         self.root = (prefix.strip("/") + "/" if prefix.strip("/") else "") + "live/"
         self.client, self.status_file = client, Path(status_file) if status_file else None
@@ -255,10 +261,14 @@ class Mirror:
 
     # -- S3
     def _put(self, key: str, body: bytes, cache: str) -> None:
+        if not self.bucket:
+            return
         self.client.put_object(Bucket=self.bucket, Key=self.root + key, Body=body, CacheControl=cache,
                                ContentType=TYPES.get(Path(key).suffix, "application/octet-stream"))
 
     def _delete(self, keys: list[str]) -> None:
+        if not self.bucket:
+            return
         for i in range(0, len(keys), 1000):
             self.client.delete_objects(Bucket=self.bucket, Delete={"Objects": [{"Key": k} for k in keys[i:i + 1000]]})
 
@@ -276,7 +286,8 @@ class Mirror:
     def _save_index(self) -> None:
         """recordings.json to the bucket, and (with the stream so far) to the PC, so a booth killed
         mid-stream closes it from this on its next start."""
-        self._put("recordings.json", json.dumps({"recordings": self.recordings}).encode(), "no-cache")
+        self._put("recordings.json", json.dumps({"recordings": self.recordings,
+                                                 "keep_days": round(self.keep / 86400)}).encode(), "no-cache")
         self._save_state()
 
     def _save_state(self) -> None:
@@ -300,14 +311,14 @@ class Mirror:
     def mark(self, label: str, replace: bool = False) -> None:
         """A round starts (or, with replace, has its final name): label the stream from here, for the
         Round replays tab. Called from any thread; the mirror files it on its next pass."""
-        if self.keep:
+        if self.tracking:
             with self._marks_lock:
                 self._marks.append((self.clock(), label, replace))
 
     def shot(self) -> None:
         """A shot was played: the stream it's on is kept (one with no shots, a round that never got
         going, isn't). Called from any thread."""
-        if self.keep:
+        if self.tracking:
             now = self.clock()
             with self._marks_lock:   # off air, only the latest counts (for a stream about to start)
                 self._shots = [t for t in self._shots if t > now - SHOT_LEAD_SECONDS] + [now]
@@ -346,7 +357,13 @@ class Mirror:
         """Off air. With nothing kept, nothing left in the bucket from a stream that never stopped
         cleanly. Kept: a stream that never stopped cleanly is closed and listed, and any past
         keep_days, too short to keep, with no shots played on it, or not listed (its record lost) deleted."""
+        if self.local is not None:
+            self.local.recover()
         keys: dict[str, list[str]] = {}
+        if not self.bucket:
+            self.session, self.track, self.recordings = None, [], []
+            self._status(False)
+            return
         for page in self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=self.root + "s/"):
             for o in page.get("Contents", []):
                 keys.setdefault(o["Key"][len(self.root) + 2:].split("/", 1)[0], []).append(o["Key"])
@@ -404,9 +421,10 @@ class Mirror:
     def step(self) -> None:
         pl = self.folder / self.playlist
         try:
-            mtime = pl.stat().st_mtime
+            st = pl.stat()
+            mtime, mtime_ns = st.st_mtime, st.st_mtime_ns
         except FileNotFoundError:
-            mtime = None
+            mtime = mtime_ns = None
         now = self.clock()
         if self.session and (mtime is None or now - mtime > self.stale):
             self._end()   # OBS stopped without saying so (or crashed)
@@ -432,15 +450,21 @@ class Mirror:
         if self.session and (seq < self.seq or any(n in self.sent and self.sent[n] != t for n, t in stamps.items())):
             self._end(clean_local=False)
         new_session = self.session is None
+        self.newest_ns = max(self.newest_ns, mtime_ns, *stamps.values())
         if new_session:
             self.session, self.since, self.sent = _session_name(now), now, {}
             self.track = []
-            log.info("Live stream on: mirroring %s to s3://%s/%ss/%s/", self.folder, self.bucket, self.root, self.session)
+            if self.bucket:
+                log.info("Live stream on: mirroring %s to s3://%s/%ss/%s/", self.folder, self.bucket, self.root,
+                         self.session)
             if self.keep:
                 self._prune()   # a booth left running for days: a week-old stream goes as the next starts
+            if self.local is not None:
+                self._local(lambda: self.local.begin(self.session, now))
+            if self.tracking:
                 self.recordings.insert(0, {"session": self.session, "since": round(now), "ended": None,
                                            "duration": 0, "shots": False, "rounds": []})
-        durations = segment_durations(raw.decode("utf-8", "replace")) if self.keep else {}
+        durations = segment_durations(raw.decode("utf-8", "replace")) if self.tracking else {}
         added = False
         for name in segments:
             if name not in self.sent:
@@ -450,18 +474,22 @@ class Mirror:
                     return
                 self._put(f"s/{self.session}/{name}", data, "public, max-age=86400, immutable")
                 self.sent[name] = stamps[name]
-                if self.keep:
+                if self.tracking:
                     self.track.append((name, durations.get(name, 4.0)))
                     added = True
-        if added:
+                if self.local is not None:
+                    self._local(lambda: self.local.add(data, durations.get(name, 4.0)))
+        if added and self.keep:
             self._put(f"s/{self.session}/full.m3u8", vod_playlist(self.track, ended=False), "max-age=2")
             self._save_state()
         self._put(f"s/{self.session}/stream.m3u8", raw, "max-age=1")  # the page always asks for this name
         beat = not self._announced or self.clock() - self._beat >= HEARTBEAT_SECONDS
-        if self.keep and (self._file_marks() or new_session or beat):
+        if self.tracking and (self._file_marks() or new_session or beat):
             if rec := self._recording():
                 rec["duration"] = round(sum(d for _, d in self.track))
-            self._save_index()
+                self._sync_local(rec)
+            if self.keep:
+                self._save_index()
         if beat:   # once its playlist's there
             self._status(True)
             self._announced = True
@@ -476,12 +504,19 @@ class Mirror:
 
     def _end(self, clean_local: bool = True) -> None:
         log.info("Live stream off (session %s)", self.session)
+        # The stream's files are no newer than the newest it read; a new one a peer's started on is.
+        newest, self.newest_ns = self.newest_ns, 0
         prefix = f"{self.root}s/{self.session}/"
         self._status(False)
         duration = sum(d for _, d in self.track)
-        rec = self._recording() if self.keep and duration >= MIN_RECORDING_SECONDS else None
+        rec = self._recording() if self.tracking and duration >= MIN_RECORDING_SECONDS else None
         if rec is not None:
             self._file_marks()
+            self._sync_local(rec)
+        if self.local is not None:
+            self._local(self.local.end)
+        if not self.keep:
+            rec = None
         if rec is not None and rec.get("shots") is not False:
             self._put(f"s/{self.session}/full.m3u8", vod_playlist(self.track, ended=True), "max-age=300")
             self._delete([prefix + "stream.m3u8"])
@@ -500,18 +535,34 @@ class Mirror:
                 self.session = None
                 self._prune()
                 self._save_index()
+        if not self.keep:
+            self.recordings = []   # noted only for the local copy, which has its own
         self.session, self.sent, self.seq, self._announced, self.track = None, {}, -1, False, []
-        if clean_local:
+        if clean_local and all(p.session is None for p in self.peers):
             for p in self.folder.glob("*"):
                 if p.suffix in (".ts", ".m4s", ".m3u8", ".mp4", ".tmp"):
                     try:
-                        p.unlink()
+                        if p.stat().st_mtime_ns <= newest:
+                            p.unlink()
                     except OSError:
                         pass   # OBS still holds it: the next stream overwrites it
 
+    def _local(self, fn) -> None:
+        """A local copy that can't be written (the disk full, the folder gone) doesn't stop the stream."""
+        try:
+            fn()
+        except Exception as e:
+            log.warning("Live stream: the local copy failed: %s", e)
+
+    def _sync_local(self, rec: dict) -> None:
+        cur = self.local.rec if self.local is not None else None
+        if cur is not None and cur["session"] == rec["session"]:
+            cur["shots"], cur["rounds"] = rec.get("shots", False), [dict(r) for r in rec["rounds"]]
+            self._local(self.local.changed)
+
     # -- the thread
     def start(self, interval: float = 1.0) -> None:
-        if self.client is None:
+        if self.client is None and self.bucket:
             import boto3
 
             self.client = boto3.client("s3")

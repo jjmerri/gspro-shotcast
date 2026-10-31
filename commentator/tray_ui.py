@@ -267,6 +267,11 @@ CONFIG_FIELDS: list[tuple[str, str, tuple[str, ...], str, str]] = [
     ("Sharing", "Copy backups to the S3 bucket too", ("backup", "s3"), "bool", ""),
     ("Sharing", "Live stream on the stats page", ("live", "enabled"), "bool",
      "OBS streams each round to the page's Live tab: set it up per docs/tracking.md#live-stream."),
+    ("Video", "Keep round videos on this PC (days)", ("live", "local_keep_days"), "int",
+     "Each stream OBS records (the tray's \"Set up the live stream\") as a .ts file; 0: not kept. "
+     "About 1.2 GB an hour."),
+    ("Video", "Recordings folder", ("live", "local_dir"), "text",
+     "In the Shotcast folder unless it's a full path (like D:\\Golf videos)."),
 ]
 
 # (tab, label, .env key, secret, checkable)
@@ -284,7 +289,7 @@ ENV_FIELDS: list[tuple[str, str, str, bool, bool]] = [
     ("Sharing", "OBS WebSocket password (live stream)", "OBS_WEBSOCKET_PASSWORD", True, True),
 ]
 
-TABS = ["Booth", "API keys", "GSPro", "League", "Sharing", "Advanced"]
+TABS = ["Booth", "API keys", "GSPro", "League", "Sharing", "Video", "Advanced"]
 
 
 def _get(data: Any, keys: tuple[str, ...]) -> Any:
