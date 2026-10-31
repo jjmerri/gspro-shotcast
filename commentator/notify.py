@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.request
 
+from . import tls
 from .config import NotifyConfig
 from .health import Health, Issue
 
@@ -106,7 +107,7 @@ class Notifier:
         req = urllib.request.Request(
             f"{self.cfg.server.rstrip('/')}/{self.topic}", data=body.encode("utf-8"), method="POST",
             headers={"Title": title, "Priority": priority, "Tags": tags})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with tls.urlopen(req, timeout=10) as resp:
             resp.read()
 
     def test(self) -> None:

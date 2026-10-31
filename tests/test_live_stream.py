@@ -606,3 +606,17 @@ async def test_a_rounds_stream_checks_the_game_sound_first_and_starts_anyway(tmp
     eng._live_round_start()
     await asyncio.sleep(0.05)
     assert calls == [("game sound", "Realtek Digital Output", -10.0), "start"]
+
+
+def test_downloads_trust_certifis_roots_when_the_system_store_has_none(tmp_path, monkeypatch):
+    # A Windows PC that hasn't fetched a site's root yet: the default context's store comes up empty.
+    import ssl
+
+    from commentator import tls
+
+    empty = tmp_path / "none.pem"
+    empty.write_text("")
+    monkeypatch.setenv("SSL_CERT_FILE", str(empty))
+    monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path))
+    monkeypatch.setattr(ssl.SSLContext, "load_default_certs", lambda self, purpose=None: None)
+    assert tls.context().cert_store_stats()["x509_ca"] > 50

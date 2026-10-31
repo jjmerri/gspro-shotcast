@@ -13,11 +13,11 @@ import os
 import secrets
 import shutil
 import time
-import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Callable
 
+from . import tls
 from .live_stream import PORTABLE_OBS, Obs, ObsError, launch_obs
 
 log = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ def installed(home: str | Path) -> bool:
 
 
 def download(home: str | Path, url: str = OBS_ZIP_URL, sha256: str = OBS_ZIP_SHA256,
-             opener: Callable = urllib.request.urlopen) -> Path:
+             opener: Callable = tls.urlopen) -> Path:
     """OBS's portable build into <home>/obs, checked against its published SHA-256. The debug
     symbols (.pdb, over half the size) are left out."""
     home = Path(home)
