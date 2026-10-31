@@ -161,6 +161,8 @@ class Round:
         # The season store's last shot id when the round started: the week's earlier CTP tee shots
         # are the ones at or below it (this round's come from ctp_results instead).
         self.shot_floor: int | None = None
+        # GSPro names seen setting up their first tee shot, in order: the first tee goes in slot order.
+        self.teed: list[str] = []
 
         self.roster = {g: league.match_player(g) for g in gspro_players}
         teams: dict[str, list[str]] = {}
@@ -190,6 +192,31 @@ class Round:
         if scheduled == "alternate":
             return None, "schedule says alternate shot but both partners are in GSPro; format not used"
         return scheduled, None
+
+    def add_player(self, g: str) -> bool:
+        """A GSPro player the round's start missed (the setup screen unread and not first up on the
+        tee), setting up their first tee shot: into the roster as their own side, and into the slot
+        order right after the last player who's teed off (the first tee goes in slot order), ahead of
+        anyone not up yet. The format stays as it was. True if added."""
+        if g in self.roster:
+            return False
+        player = self.roster[g] = self.league.match_player(g)
+        team = self.league.player_team.get(player) if player else self.league.match_team(g)
+        self.teams.setdefault(team or g, []).append(g)
+        if self.slot_names is not None:
+            teed = set(self.teed) | set(self.slot_names[:1])  # whoever's first up has teed off
+            at = 1 + max((i for i, n in enumerate(self.slot_names) if n and n in teed), default=-1)
+            if at < len(self.slot_names) and not self.slot_names[at]:
+                self.slot_names[at] = g
+            else:
+                self.slot_names.insert(at, g)
+        self.teed.append(g)
+        self.sides = self._build_sides()
+        if self.course_card:
+            self.apply_course_card(self.course_card)
+        elif self.week_card:
+            self._allocate_hole_strokes()
+        return True
 
     def play_scramble(self, groups: list[list[str]]) -> bool:
         """GSPro's log showed a scramble (it copies the picked ball onto teammates). That's the format
