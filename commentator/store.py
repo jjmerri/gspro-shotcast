@@ -656,6 +656,36 @@ class Store:
                 self._unhole_if_played_on(shot_id, later=True)
         self.db.commit()
 
+    def set_shot_player(self, shot_id: int | None, player: str, *, attributed: bool, fmt: str | None,
+                        shared_ball: bool) -> None:
+        """Who hit a shot recorded with no name (GSPro's log said whose it was afterwards), and the
+        format they were playing."""
+        if shot_id is not None:
+            self.db.execute("UPDATE shots SET player = ?, attributed = ?, fmt = ?, shared_ball = ? WHERE id = ?",
+                            (player, int(attributed), fmt, int(shared_ball), shot_id))
+            self.db.commit()
+
+    def finish_of(self, shot_id: int) -> tuple[str | None, float | None]:
+        """A shot's stored (lie_after, finish_yards)."""
+        row = self.db.execute("SELECT lie_after, finish_yards FROM shots WHERE id = ?", (shot_id,)).fetchone()
+        return (row[0], row[1]) if row else (None, None)
+
+    def clear_shot_result(self, shot_id: int, outcome: str, finish: tuple | None = None) -> None:
+        """Take back a shot's `outcome`, and the conceded putt row it added (it was graded against the
+        wrong player's line on GSPro's log). Its finish goes back to `finish`: (lie_after, finish_yards)."""
+        row = self.db.execute("SELECT player, hole, shot_number FROM shots WHERE id = ?", (shot_id,)).fetchone()
+        if row is None:
+            return
+        if outcome == "conceded":
+            self.db.execute(
+                """DELETE FROM shots WHERE id = (SELECT MIN(id) FROM shots WHERE id > ? AND outcome = 'gimme'
+                       AND player IS ? AND hole IS ? AND shot_number IS ?)""",
+                (shot_id, row[0], row[1], None if row[2] is None else row[2] + 1))
+        self.db.execute("UPDATE shots SET outcome = NULL WHERE id = ?", (shot_id,))
+        if finish is not None:
+            self.db.execute("UPDATE shots SET lie_after = ?, finish_yards = ? WHERE id = ?", (*finish, shot_id))
+        self.db.commit()
+
     def set_mulligan(self, shot_id: int | None) -> None:
         """GSPro took this stroke back (a mulligan): it stays in the table, flagged, and drops out of
         every score and stat query. The club and launch numbers are still a real swing."""

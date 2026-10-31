@@ -153,3 +153,42 @@ def test_update_says_whether_it_took(tmp_path, monkeypatch):
     ok, text = updater.after_update(tmp_path, "0.1.0")
     assert not ok and "install.log" in text
     assert updater.after_update(tmp_path / "none", "0.1.0") is None
+
+
+def test_start_the_live_stream_starts_obs_when_it_isnt_running(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from commentator import live_stream, obs_setup, tray
+    from commentator.live_stream import ObsError
+
+    calls = []
+
+    class Obs:
+        running = False
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def live(self):
+            if not Obs.running:
+                raise ObsError("OBS isn't answering")
+            return False
+
+        def start(self):
+            calls.append("start")
+
+    monkeypatch.setattr(live_stream, "Obs", Obs)
+    monkeypatch.setattr(live_stream, "launch_obs", lambda exe: calls.append("launch") or True)
+    monkeypatch.setattr(obs_setup, "wait_for", lambda obs, seconds: setattr(Obs, "running", True))
+    errors, notes = [], []
+    app = SimpleNamespace(cfg=SimpleNamespace(live=SimpleNamespace(obs_host="h", obs_port=1, obs_path=None),
+                                              publish=SimpleNamespace(bucket=None)),
+                          home=tmp_path, error=errors.append, notify=notes.append)
+    app._start_obs_and_stream = lambda obs: tray.Tray._start_obs_and_stream(app, obs)
+    tray.Tray.toggle_live(app)
+    assert "Sharing" in errors[0] and not calls       # nowhere for it to go yet
+
+    app.cfg.publish.bucket = "b"
+    monkeypatch.setattr(tray.threading, "Thread", lambda target, args, **kw: SimpleNamespace(start=lambda: target(*args)))
+    tray.Tray.toggle_live(app)
+    assert calls == ["launch", "start"] and len(errors) == 1

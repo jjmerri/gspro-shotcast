@@ -302,7 +302,7 @@ def _build(cfg: Config, config_path: Path) -> Path:
 
         def logs() -> None:
             cutoff = time.time() - LOG_DAYS * 86400
-            for pattern in ("booth-*.log", "tray-*.log"):
+            for pattern in ("booth-*.log", "tray-*.log", "gspro-*.log"):
                 for p in sorted(log_dir.glob(pattern)):
                     if p.name != "booth-errors.log" and p.stat().st_mtime >= cutoff:
                         add_file(f"logs/{p.name}", p, LOG_CAP)

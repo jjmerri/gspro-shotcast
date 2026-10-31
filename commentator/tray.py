@@ -402,15 +402,42 @@ class Tray:
             return False
 
     def toggle_live(self, *_) -> None:
-        from .live_stream import Obs
+        from .live_stream import Obs, ObsError
 
         obs = Obs(self.cfg.live.obs_host, self.cfg.live.obs_port)
-        if obs.live():
+        try:
+            up = obs.live()
+        except ObsError:
+            up = None   # OBS isn't running (the booth starts it only once the stats page is published)
+        if up:
             obs.stop()
             self.notify("Stopping the live stream.")
-        else:
+            return
+        if not self.cfg.publish.bucket:
+            self.error("The live stream plays on the stats page's Live tab, so the stats page has to be "
+                       "published first: Settings, Sharing.")
+            return
+        if up is False:
             obs.start()
             self.notify("Starting the live stream: it's on the stats page in about 20 seconds.")
+            return
+        threading.Thread(target=self._start_obs_and_stream, args=(obs,), name="live-start", daemon=True).start()
+
+    def _start_obs_and_stream(self, obs) -> None:
+        from . import live_stream, obs_setup
+
+        try:
+            self.notify("Starting OBS, then the live stream.")
+            portable = obs_setup.portable_exe(self.home)
+            exe = self.cfg.live.obs_path or (portable if portable.exists() else None)
+            if not live_stream.launch_obs(exe) and not live_stream.obs_running():
+                raise RuntimeError("OBS isn't installed: set up the live stream again (More menu)")
+            obs_setup.wait_for(obs, 60)
+            obs.start()
+            self.notify("Starting the live stream: it's on the stats page in about 20 seconds.")
+        except Exception as e:
+            log.exception("Starting the live stream failed")
+            self.error(f"That didn't work: {e}\n\nThe details are in logs\\tray-*.log.")
 
     def setup_live(self, *_) -> None:
         from . import obs_setup
@@ -460,10 +487,14 @@ class Tray:
             obs_setup.wait_for(obs)
             obs_setup.configure(obs)
             self.restart_booth()
-            where = ("It goes on the stats page's Live tab" if cfg.publish.bucket else
-                     "It needs the stats page published to a bucket (Settings, Sharing) before it shows anywhere")
-            self.info(f"The live stream is set up. OBS runs by the clock and streams GSPro while rounds are "
-                      f"played; \"Start the live stream\" in this menu tries it now. {where}.")
+            if cfg.publish.bucket:
+                self.info("The live stream is set up. OBS starts with Shotcast, runs by the clock and streams "
+                          "GSPro while rounds are played (on the stats page's Live tab); \"Start the live "
+                          "stream\" in this menu tries it now.")
+            else:
+                self.info("OBS is set up. The live stream plays on the stats page's Live tab, so it starts "
+                          "once the stats page is published (Settings, Sharing): then OBS starts with Shotcast "
+                          "and streams GSPro while rounds are played.")
         except Exception as e:
             log.exception("Setting up the live stream failed")
             self.error(f"Setting up the live stream didn't finish: {e}\n\nThe details are in logs\\tray-*.log.")

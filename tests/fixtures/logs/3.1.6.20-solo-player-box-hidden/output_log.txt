@@ -1,0 +1,90 @@
+GSPro Version: 3.1.6.20
+Selected Course: 3s_greenville
+Loading course 3s Greenville
+Skipping hole 1
+ * ------- Shot Fired! ------- *
+LaunchExt - Regular Mode
+Force 17.71|| SurfMul 0.78|| BallSpeed 40.52|| AngleSpeedBounce 0.37|| descent angle 37.8|| ExitAngle 39.1
+Using Material TVGfairway
+magnitude: 5.3754 | yForce 3.587588 | material TVGfairway | SoundMultiplier 0.2375068 | SoundForceScale 0.4750136 | elevation 984
+Roll dist ft15.673
+ActivePlayer: 0  currentHole: 9  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Data for selected player: X 522.5349 Y 22.48505 Z 493.433
+Logging tdist: 13.45728 and ActiveGameGimmieDistance: 1.83
+ * ------- Shot Fired! ------- *
+LaunchExt - Regular Mode
+Force 6.90|| SurfMul 0.91|| BallSpeed 15.45|| AngleSpeedBounce 0.76|| descent angle 23.1|| ExitAngle 22.6
+Using Material TVGgreen
+magnitude: 4.984471 | yForce 2.165275 | material TVGgreen | SoundMultiplier 0.1280981 | SoundForceScale 0.2561961 | elevation 984
+Roll dist ft19.615
+ActivePlayer: 0  currentHole: 9  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Data for selected player: X 531.3997 Y 22.72358 Z 498.6352
+Logging tdist: 3.212633 and ActiveGameGimmieDistance: 1.83
+ * ------- Shot Fired! ------- *
+LaunchExt - Putting Mode
+Roll dist ft5.988
+ActivePlayer: 0  currentHole: 9  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Data for selected player: X 532.7913 Y 22.73301 Z 499.8162
+Logging tdist: 1.394195 and ActiveGameGimmieDistance: 1.83
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 0  currentHole: 9  strokes: 1  Previous Score: 3
+ * ------- Shot Fired! ------- *
+LaunchExt - Regular Mode
+Force 16.91|| SurfMul 0.78|| BallSpeed 38.71|| AngleSpeedBounce 0.39|| descent angle 35.6|| ExitAngle 36.0
+Using Material TVGfairway
+magnitude: 5.514651 | yForce 3.430813 | material TVGfairway | SoundMultiplier 0.2254472 | SoundForceScale 0.4508944 | elevation 984
+Roll dist ft15.892
+ActivePlayer: 0  currentHole: 10  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Data for selected player: X 563.2305 Y 24.60922 Z 567.0747
+Logging tdist: 28.46351 and ActiveGameGimmieDistance: 1.83
+ * ------- Shot Fired! ------- *
+LaunchExt - Regular Mode
+Penalty Surface TVGsand, Spin78%, Speed 82%, VLA 100%
+Force 11.97|| SurfMul 0.78|| BallSpeed 28.01|| AngleSpeedBounce 0.68|| descent angle 16.5|| ExitAngle 11.3
+Using Material TVGfairway
+magnitude: 8.706459 | yForce 1.727819 | material TVGfairway | SoundMultiplier 0.09444764 | SoundForceScale 0.1888953 | elevation 984
+Roll dist ft37.654
+ActivePlayer: 0  currentHole: 10  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Data for selected player: X 588.3928 Y 26.4402 Z 565.8627
+Logging tdist: 5.862665 and ActiveGameGimmieDistance: 1.83
+ * ------- Shot Fired! ------- *
+LaunchExt - Putting Mode
+Roll dist ft12.253
+ActivePlayer: 0  currentHole: 10  strokes: 1  Previous Score: 2
+Selecting shot for player: 0
+Data for selected player: X 589.6812 Y 26.51363 Z 562.3582
+Logging tdist: 2.170114 and ActiveGameGimmieDistance: 1.83
+ * ------- Shot Fired! ------- *
+LaunchExt - Putting Mode
+Roll dist ft7.621
+ActivePlayer: 0  currentHole: 10  strokes: 1  Previous Score: 3
+Selecting shot for player: 0
+Data for selected player: X 590.8882 Y 26.55732 Z 560.3743
+Logging tdist: 0.2515312 and ActiveGameGimmieDistance: 1.83
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 0  currentHole: 10  strokes: 1  Previous Score: 4
+ * ------- Shot Fired! ------- *
+LaunchExt - Regular Mode
+Force 19.29|| SurfMul 0.91|| BallSpeed 43.15|| AngleSpeedBounce 0.42|| descent angle 44.5|| ExitAngle 45.2
+Using Material TVGgreen
+magnitude: 6.416721 | yForce 4.711314 | material TVGgreen | SoundMultiplier 0.3239473 | SoundForceScale 0.6478945 | elevation 984
+Roll dist ft21.573
+ActivePlayer: 0  currentHole: 11  strokes: 1  Previous Score: 0
+Selecting shot for player: 0
+Data for selected player: X 607.6439 Y 27.31395 Z 477.5887
+Logging tdist: 2.980484 and ActiveGameGimmieDistance: 1.83
+ * ------- Shot Fired! ------- *
+LaunchExt - Putting Mode
+Roll dist ft13.516
+ActivePlayer: 0  currentHole: 11  strokes: 1  Previous Score: 1
+Selecting shot for player: 0
+Data for selected player: X 608.6365 Y 27.3237 Z 473.5905
+Logging tdist: 1.194452 and ActiveGameGimmieDistance: 1.83
+Select Shot - active user ball is within Gimmie distance
+ActivePlayer: 0  currentHole: 11  strokes: 1  Previous Score: 2
+End Round Button Click
