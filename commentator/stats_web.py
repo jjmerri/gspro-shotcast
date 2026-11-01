@@ -145,6 +145,25 @@ def _mark_round(db_path: str | Path, round_id: int, ended: float, value: int) ->
         return True
 
 
+def set_round_league(db_path: str | Path, round_id: int, ended: float, league: bool) -> bool:
+    """Make a round a league round or a practice one (every side, card and shot of it): which of the
+    League/Practice stats it counts in. False when there's no such round (or it was deleted)."""
+    from contextlib import closing
+
+    with closing(sqlite3.connect(db_path, timeout=10)) as db:
+        _ensure_excluded(db)
+        db.execute("BEGIN IMMEDIATE")   # the round checked is the round changed
+        rows = _round_rows(db, round_id, ended)
+        if rows is None:
+            db.rollback()
+            return False
+        for table, ids in zip(_ROUND_TABLES[:3], rows):   # lines carry no is_league
+            if ids:
+                db.execute(f"UPDATE {table} SET is_league = ? WHERE id IN ({_in(ids)})", (int(league),))
+        db.commit()
+        return True
+
+
 def set_round_excluded(db_path: str | Path, round_id: int, ended: float, excluded: bool) -> bool:
     """Exclude a round (every side, card, shot and line of it) from the stats, or put it back: it's
     still listed on the local page, so it can be. False when there's no such round."""
@@ -726,7 +745,7 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
                 return self._send(403, b"forbidden", "text/plain")
             path = urlparse(self.path).path
             routes = ((r"/api/shots/(\d+)/left-out", "left_out"), (r"/api/rounds/(\d+)/excluded", "excluded"),
-                      (r"/api/rounds/(\d+)/delete", "delete"))
+                      (r"/api/rounds/(\d+)/delete", "delete"), (r"/api/rounds/(\d+)/league", "league"))
             m, key = next(((m, key) for pat, key in routes if (m := re.fullmatch(pat, path))), (None, None))
             if not m:
                 return self._send(404, b"not found", "text/plain")
@@ -736,6 +755,9 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
                 if key == "left_out":
                     value = bool(body["left_out"])
                     found = set_left_out(db_path, ident, value, float(body["ts"]))
+                elif key == "league":
+                    value = bool(body["league"])
+                    found = set_round_league(db_path, ident, float(body["ended"]), value)
                 elif key == "excluded":
                     value = bool(body["excluded"])
                     found = set_round_excluded(db_path, ident, float(body["ended"]), value)

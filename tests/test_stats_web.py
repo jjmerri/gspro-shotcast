@@ -350,6 +350,18 @@ def test_the_local_page_can_exclude_a_round_and_delete_one(tmp_path):
             assert "excluded_rounds" not in stats_web.summary(ro)
             assert sorted(ln[0] for ln in ro.execute("SELECT text FROM lines")) == ["Nice", "Nice round"]
         assert post("/api/rounds/2/excluded", {"excluded": False, "ended": 5000}) == {"id": 2, "excluded": False}
+        # A practice round made a league one: every side, card and shot of it moves to the League stats.
+        assert post("/api/rounds/2/league", {"league": True, "ended": 5000}) == {"id": 2, "league": True}
+        assert [r[0] for r in db.execute("SELECT is_league FROM rounds ORDER BY id")] == [0, 1]
+        assert [r[0] for r in db.execute("SELECT is_league FROM player_rounds ORDER BY id")] == [0, 1]
+        assert [r[0] for r in db.execute("SELECT is_league FROM shots ORDER BY id")] == [0, 1, 0]
+        s = summary()
+        assert s["has_league"] and [(r["round"], r["league"]) for r in s["rounds"]] == [(2, True), (1, False)]
+        with pytest.raises(urllib.error.HTTPError) as e:   # not the round the page showed
+            post("/api/rounds/2/league", {"league": False, "ended": 100})
+        assert e.value.code == 404
+        assert post("/api/rounds/2/league", {"league": False, "ended": 5000}) == {"id": 2, "league": False}
+        assert db.execute("SELECT SUM(is_league) FROM shots").fetchone()[0] == 0
         assert [r["round"] for r in summary()["rounds"]] == [2, 1] and summary()["excluded_rounds"] == []
         with pytest.raises(urllib.error.HTTPError) as e:   # no confirmation: nothing deleted
             post("/api/rounds/2/delete", {"ended": 5000})

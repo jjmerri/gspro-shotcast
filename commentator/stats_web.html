@@ -1261,7 +1261,8 @@ function renderRound() {
   const acts = [`<button class="link" data-roundshots="${r.round}">Every shot</button>`, watchBtn(r.started, "▶ Watch the round"), said,
                 `<button class="link" data-sharecard="${r.id}" title="An image of this round to post or send">Share card</button>`,
                 shareBtn(hashFor("round", { id: r.id }), "this round", "Share link"),
-                ...(state.local ? [`<button class="link" data-exclround="${r.round}" data-ended="${r.round_end}" data-on="1" title="Keep it listed on this PC, but out of every stat (and off the published site)">Exclude from stats</button>`,
+                ...(state.local ? [`<button class="link" data-leagueround="${r.round}" data-ended="${r.round_end}" data-on="${r.league ? 0 : 1}" title="Which stats it counts in: League or Practice">${r.league ? "Make it a practice round" : "Make it a league round"}</button>`,
+                                   `<button class="link" data-exclround="${r.round}" data-ended="${r.round_end}" data-on="1" title="Keep it listed on this PC, but out of every stat (and off the published site)">Exclude from stats</button>`,
                                    `<button class="link" data-delround="${r.round}" data-ended="${r.round_end}" title="Remove the round and its shots for good">Delete round</button>`] : [])
                ].filter(Boolean).join(" · ");
   return back + `<h2>${esc(r.date)} · <a class="link" href="${esc(hashFor("courses", { course: r.course }))}">${esc(r.course)}</a></h2>${pick}
@@ -1809,7 +1810,7 @@ document.addEventListener("click", (e) => {
     return;
   }
   const t = e.target.closest("[data-tab],[data-section],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
-                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-exclround],[data-delround],[data-sharecard],[data-period],[data-vod],[data-clip],[data-link],[data-more],[data-onlyme]");
+                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-exclround],[data-delround],[data-leagueround],[data-sharecard],[data-period],[data-vod],[data-clip],[data-link],[data-more],[data-onlyme]");
   if (!t) return;
   if (t.dataset.link) {
     shareLink(t.dataset.link, t.dataset.linktitle, t);
@@ -1859,6 +1860,19 @@ document.addEventListener("click", (e) => {
                                                        body: JSON.stringify({ left_out: t.dataset.on === "1", ts: +t.dataset.ts }) })
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); load(); })
       .catch(e => { t.textContent = `Couldn't save (${e.message})`; });
+    return;
+  }
+  if (t.dataset.leagueround) {
+    t.disabled = true;
+    t.textContent = "Saving…";
+    fetch(`api/rounds/${t.dataset.leagueround}/league`, { method: "POST", headers: { "Content-Type": "application/json" },
+                                                         body: JSON.stringify({ ended: +t.dataset.ended, league: t.dataset.on === "1" }) })
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        if (state.ctx) state.ctx = t.dataset.on === "1" ? "league" : "practice";   // stay on the round
+        load();
+      })
+      .catch(e => { t.disabled = false; t.textContent = `Couldn't save (${e.message})`; });
     return;
   }
   if (t.dataset.exclround || t.dataset.delround) {
