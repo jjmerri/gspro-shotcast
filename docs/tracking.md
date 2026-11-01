@@ -352,11 +352,14 @@ folder and open a Command Prompt (or terminal) in that folder. Each command belo
    `._~!@#%^*+=-`):
 
    ```
-   aws cloudformation deploy --stack-name shotcast-stats --template-file stats-site.yaml --capabilities CAPABILITY_IAM --parameter-overrides SiteUser=league SitePassword=<password>
+   aws cloudformation deploy --stack-name shotcast-stats --template-file stats-site.yaml --capabilities CAPABILITY_IAM --parameter-overrides SiteUser=league SitePassword="<password>"
    aws cloudformation describe-stacks --stack-name shotcast-stats --query "Stacks[0].Outputs"
    ```
 
-   The outputs are the page's URL, the bucket, the region and the upload user. CloudFront takes a
+   Keep the quotes around the password. Shells change some symbols even inside them (Command
+   Prompt `%`, a Mac or Linux terminal `!`), so letters, digits and `._-` are the safe ones to type
+   there. The outputs are the page's URL, the
+   bucket, the region and the upload user. CloudFront takes a
    few minutes to come up.
 2. Make the upload user's keys:
 
