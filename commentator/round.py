@@ -717,9 +717,10 @@ class Round:
                 # that settled on the green in regulation, then the short putt conceded) is still a GIR,
                 # so check the regulation shot's settled finish lie: a non-putt that stopped on the
                 # green by the regulation stroke (<= par - 2) hit it; otherwise it's a miss (up-and-down
-                # from off the green, or the green reached late).
+                # from off the green, or the green reached late). The lie decides, not the club: a putter
+                # from the fringe that finished on the green reached it too.
                 reached = any((r.hud.lie or "").lower() == "green" for r in recs
-                              if not r.shot.is_putt and r.shot_number and r.shot_number <= par - 2)
+                              if r.shot_number and r.shot_number <= par - 2)
                 hole_gir = reached
                 gir_tries += 1
                 gir += reached
@@ -1294,10 +1295,10 @@ def _score_from_shots(recs: list, numbers: list, green: list) -> int | None:
 
 
 def _green_reached_at(recs: list) -> int | None:
-    """The stroke first played from the green (a full shot that finished there makes the next one), or
-    None if the ball isn't known to have reached it."""
+    """The stroke first played from the green (a shot from off it that finished there, putter or not,
+    makes the next one), or None if the ball isn't known to have reached it."""
     on = [r.shot_number for r in recs if r.shot_number and r.lie_before == "green"]
-    on += [r.shot_number + 1 for r in recs if r.shot_number and not r.shot.is_putt
+    on += [r.shot_number + 1 for r in recs if r.shot_number
            and r.lie_before != "green" and (r.hud.lie or "").lower() == "green"]
     return min(on, default=None)
 

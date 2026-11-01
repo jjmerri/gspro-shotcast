@@ -343,6 +343,23 @@ def test_missed_green_saved_with_a_fringe_putt_is_a_scramble():
     assert st.gir == (0, 1) and st.scramble == (1, 1) and st.putts == 1
 
 
+def test_fringe_putt_to_a_conceded_tap_in_in_regulation_is_a_gir():
+    # GIR goes by the lie: on a par 5 the approach stops on the fringe, the third stroke is a putter
+    # from there that finishes on the green, and the tap-in is conceded (no record). On in 3 -> a GIR,
+    # not a scramble.
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="Wynn", scheduled_format="best ball", holes=1)
+    card = Scorecard(holes=list(range(1, 19)), par={1: 5}, index={1: 5},
+                     scores={"MIKED": {1: 4}, "SARAH": {1: 5}, "SCORECARD": {}})
+    shots = [rec("Mike", 1, 5, 1, "tee", "fairway", "DR"), rec("Mike", 1, 5, 2, "fairway", "fringe", "3W"),
+             rec("Mike", 1, 5, 3, "fringe", "green", "PT")]
+    for s in shots:
+        s.round_id = r.id
+    r.apply_scorecard(card)
+    st = r.side_stats(r.side_for("Mike"), shots)
+    assert st.gir == (1, 1) and st.scramble == (0, 0)
+    assert r.side_stats(r.side_for("Mike"), shots, final_override=4).gir == (1, 1)
+
+
 def test_sand_save_is_up_and_down_from_the_bunker_whatever_the_score():
     # PGA: a greenside bunker, then holed in two strokes or fewer counting the bunker shot.
     r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="Wynn", scheduled_format="best ball", holes=3)
