@@ -4459,6 +4459,17 @@ def test_the_hud_buffer_reads_the_newest_address_frame_that_shows_the_player_box
     hud = s.read_buffered(buf.before(6.0, since=2.0))
     assert (hud.player_text, hud.shot_number, hud.club, hud.lie) == ("Stefanski Shot 4", 4, "PW", "rough")
     assert s.read_buffered(buf.before(6.0, since=5.0)) is None   # frames from the last shot's don't count
+    # Two seconds of flight view (the name cell blank) before the shot arrived: skipped without OCR,
+    # back to the address frame; a name that's nobody's doesn't stop the search either.
+    text, blank = Image.new("L", (96, 12), 0), Image.new("RGB", (96, 12), (120, 160, 220))
+    text.paste(255, (10, 3, 80, 9))
+    named = {"player_box": box["addr"], "player_name": text.convert("RGB")}
+    junk = Image.new("RGB", (4, 4))
+    reads[id(junk)] = Hud(player_text="Gerth Shot 1", shot_number=1)
+    hidden = [{"player_box": box["sky"], "player_name": blank} for _ in range(6)]
+    hud = s.read_buffered([{"player_box": junk, "player_name": text.convert("RGB")}, *hidden, named],
+                          accept=lambda h: not h.player_text.startswith("Gerth"), tries=2)
+    assert hud.player_text == "Stefanski Shot 4"
     buf.add(13.6, {"player_box": box["sky"]})
     assert len(buf.before(13.6)) == 2   # older than 8 s: dropped
 
@@ -4504,8 +4515,8 @@ async def test_a_hidden_player_box_with_no_setup_read_takes_the_address_frame(tm
                lie="rough")
 
     class Scr:
-        def read_buffered(self, frames):
-            return addr
+        def read_buffered(self, frames, accept):
+            return addr if accept(addr) else None
 
     e._hud_buffer, e.screen, frames = object(), Scr(), [{"player_box": None}]
     monkeypatch.setattr(e, "_player", lambda text, hint=None: "Stefanski" if text and "Stefanski" in text else None)

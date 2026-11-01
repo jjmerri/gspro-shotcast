@@ -4128,8 +4128,9 @@ class Engine:
         if not frames:
             return False
         started = time.monotonic()
-        hud = await asyncio.to_thread(self.screen.read_buffered, frames)
-        if hud is None or not self._player(hud.player_text):
+        hud = await asyncio.to_thread(self.screen.read_buffered, frames,
+                                      lambda h: self._player(h.player_text) is not None)
+        if hud is None:
             if not named:
                 log.info("%s no address frame in the HUD buffer shows the player box (%d frames)", tag, len(frames))
             return False

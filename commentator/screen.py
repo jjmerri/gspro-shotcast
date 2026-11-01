@@ -488,14 +488,16 @@ class Screen:
                 grabbed.append(((left, top, width, height), out[name]))
         return out
 
-    def read_buffered(self, frames: list[dict[str, Image.Image]], tries: int = 3) -> Hud | None:
+    def read_buffered(self, frames: list[dict[str, Image.Image]], accept=None, tries: int = 4) -> Hud | None:
         """The newest of `frames` (HudBuffer.before, newest first) whose player box reads a player and
-        a shot number, with its club and lie read too; None when none of the first `tries` does."""
-        for crops in frames[:tries]:
-            if "player_box" not in crops:
-                continue
+        a shot number (and passes `accept`, e.g. a known player), with its club and lie read too. A frame
+        whose name cell is blank (the box hidden: GSPro's flight view) is skipped by a pixel check, no
+        OCR, so the whole buffer is looked through; at most `tries` frames are OCR'd."""
+        shown = [c for c in frames if "player_box" in c
+                 and ("player_name" not in c or name_signature(c["player_name"]) != NAME_DARK)]
+        for crops in shown[:tries]:
             hud = self.read_hud(["player_box"], crops=crops, other_side=False)
-            if not hud.player_text or hud.shot_number is None:
+            if not hud.player_text or hud.shot_number is None or (accept is not None and not accept(hud)):
                 continue
             rest = self.read_hud([n for n in ("player_name", "club", "lie") if n in crops], crops=crops,
                                  other_side=False)
