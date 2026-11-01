@@ -1,12 +1,14 @@
 import json
 import sqlite3
 import threading
+import time
 import urllib.error
 import urllib.request
 
 import pytest
 
 from commentator import stats_web
+from commentator.models import Line
 from commentator.store import Store
 
 PARS = {str(h): p for h, p in zip(range(1, 10), [4, 4, 3, 5, 4, 3, 4, 5, 4])}   # par 36
@@ -269,7 +271,10 @@ def test_the_local_page_can_leave_a_shot_out(tmp_path):
                                                              headers={"Content-Type": kind, **headers}))
     try:
         assert json.loads(urllib.request.urlopen(base + "/latest.json").read())["local"] is True
-        assert json.loads(post({"left_out": True}).read()) == {"id": 1, "left_out": True}
+        with pytest.raises(urllib.error.HTTPError) as e:   # not the shot the page showed
+            post({"left_out": True, "ts": 5})
+        assert e.value.code == 404
+        assert json.loads(post({"left_out": True, "ts": 0}).read()) == {"id": 1, "left_out": True}
         assert db.execute("SELECT left_out FROM shots WHERE id = 1").fetchone()[0] == 1
         version = json.loads(urllib.request.urlopen(base + "/latest.json").read())["version"]
         summary = json.loads(urllib.request.urlopen(f"{base}/v/{version}/summary-all.json").read())
@@ -277,12 +282,114 @@ def test_the_local_page_can_leave_a_shot_out(tmp_path):
         for bad, code in (({"kind": "text/plain"}, 403), ({"Origin": "http://evil.example"}, 403),
                           ({"url": "/api/shots/99/left-out"}, 404)):
             with pytest.raises(urllib.error.HTTPError) as e:
-                post({"left_out": False}, **bad)
+                post({"left_out": False, "ts": 0}, **bad)
             assert e.value.code == code
         assert db.execute("SELECT left_out FROM shots WHERE id = 1").fetchone()[0] == 1
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_the_local_page_can_exclude_a_round_and_delete_one(tmp_path):
+    path, db = _db(tmp_path)
+    nine = {h: PARS[str(h)] for h in range(1, 10)}
+    for end, gross, course in ((100, 36, "Pebble"), (5000, 50, "Pebble")):   # the second is a test round
+        db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, holes_played, gross, scores,"
+                   " hole_pars, is_league) VALUES (1, ?, '2026-10-16', ?, 'Ann', 9, 9, ?, ?, ?, 0)",
+                   (end, course, gross, json.dumps({str(h): s for h, s in nine.items()}), json.dumps(PARS)))
+        db.execute("INSERT INTO player_rounds (session_id, ended_at, player, course, scores, hole_pars, is_league,"
+                   " holes_played) VALUES (1, ?, 'Ann', ?, ?, ?, 0, 9)",
+                   (end + 1, course, json.dumps({str(h): s for h, s in nine.items()}), json.dumps(PARS)))
+        _shot(db, "Ann", ts=end - 10, course=course, club="DR", shot_number=1, lie_before="tee",
+              total_yards=250 if end == 100 else 330)
+    # A putt conceded after the first round was recorded: the first round's, not the next one's on the course.
+    _shot(db, "Ann", ts=110, course="Pebble", club="PT", is_putt=1, outcome="gimme")
+    db.execute("INSERT INTO lines (session_id, shot_id, ts, kind, speaker, text) VALUES (1, 2, 4990, 'shot', 'a', 'Big one')")
+    db.execute("INSERT INTO lines (session_id, shot_id, ts, kind, speaker, text) VALUES (1, 1, 90, 'shot', 'a', 'Nice')")
+    db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text) VALUES (1, 4985, 'preshot', 'a', 'Here we go')")
+    db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text) VALUES (1, 5030, 'segment', 'a', 'What a round')")
+    db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text) VALUES (1, 130, 'segment', 'a', 'Nice round')")
+    db.commit()
+    server = stats_web.make_server(path, port=0, site=tmp_path / "site")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def post(url, body):
+        return json.loads(urllib.request.urlopen(urllib.request.Request(
+            base + url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})).read())
+
+    def summary():
+        version = json.loads(urllib.request.urlopen(base + "/latest.json").read())["version"]
+        return json.loads(urllib.request.urlopen(f"{base}/v/{version}/summary-all.json").read())
+    try:
+        with pytest.raises(urllib.error.HTTPError) as e:   # not the round the page showed: left alone
+            post("/api/rounds/2/excluded", {"excluded": True, "ended": 100})
+        assert e.value.code == 404
+        assert post("/api/rounds/2/excluded", {"excluded": True, "ended": 5000}) == {"id": 2, "excluded": True}
+        assert db.execute("SELECT SUM(excluded) FROM rounds").fetchone()[0] == 1
+        assert [r[0] for r in db.execute("SELECT excluded FROM shots ORDER BY id")] == [0, 1, 0]
+        assert db.execute("SELECT excluded FROM player_rounds WHERE id = 2").fetchone()[0] == 1
+        s = summary()
+        assert [r["round"] for r in s["rounds"]] == [1] and s["players"][0]["longest_drive"] == 250
+        assert [(x["round"], x["sides"]) for x in s["excluded_rounds"]] == [(2, [{"side": "Ann", "gross": 50}])]
+        # The booth's own season stats (from earlier days) leave it out too.
+        db.execute("UPDATE sessions SET started_at = 0, date = '2026-10-16' WHERE id = 1")
+        db.commit()
+        store = Store(str(path))
+        try:
+            assert store.season_longest_drive() == ("Ann", 250)
+            assert store.leaderboard()[0]["longest_drive"] == 250
+        finally:
+            store.close()
+        with stats_web.connect(path) as ro:   # a published site doesn't list it, or what was said on it
+            assert "excluded_rounds" not in stats_web.summary(ro)
+            assert sorted(ln[0] for ln in ro.execute("SELECT text FROM lines")) == ["Nice", "Nice round"]
+        assert post("/api/rounds/2/excluded", {"excluded": False, "ended": 5000}) == {"id": 2, "excluded": False}
+        assert [r["round"] for r in summary()["rounds"]] == [2, 1] and summary()["excluded_rounds"] == []
+        with pytest.raises(urllib.error.HTTPError) as e:   # no confirmation: nothing deleted
+            post("/api/rounds/2/delete", {"ended": 5000})
+        assert e.value.code == 400
+        assert post("/api/rounds/2/delete", {"confirm": True, "ended": 5000}) == {"id": 2, "deleted": True}
+        s = summary()
+        assert [r["round"] for r in s["rounds"]] == [1] and s["excluded_rounds"] == []
+        with stats_web.connect(path) as ro:
+            assert [r[0] for r in ro.execute("SELECT id FROM shots")] == [1, 3]
+            assert sorted(ln[0] for ln in ro.execute("SELECT text FROM lines")) == ["Nice", "Nice round"]
+        # The booth's closer, said after the round was deleted, goes with it.
+        db.execute("UPDATE rounds SET ended_at = ? WHERE id = 2", (time.time() - 5,))
+        db.commit()
+        store = Store(str(path))
+        try:
+            store.session_id = 1
+            store.record_lines("segment", [Line("a", "Late closer")])
+        finally:
+            store.close()
+        assert db.execute("SELECT excluded FROM lines WHERE text = 'Late closer'").fetchone()[0] == stats_web.DELETED
+        # Gone for good: it can't be put back, and its ids aren't freed for the next round's to take.
+        with pytest.raises(urllib.error.HTTPError) as e:
+            post("/api/rounds/2/excluded", {"excluded": False, "ended": 5000})
+        assert e.value.code == 404
+        _shot(db, "Bo", ts=9000)
+        assert db.execute("SELECT MAX(id) FROM shots").fetchone()[0] == 4
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_rounds_rows_take_its_own_late_gimme_and_its_lines_from_before_a_restart(tmp_path):
+    path, db = _db(tmp_path)
+    db.execute("INSERT INTO sessions (id, started_at, date) VALUES (2, 0, '2026-10-16')")
+    for sess, end, course in ((1, 100, "Pebble"), (2, 5000, "Augusta")):
+        db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes) VALUES (?, ?, '2026-10-16', ?, 'Ann', 9)",
+                   (sess, end, course))
+    _shot(db, "Ann", ts=50, course="Pebble")
+    _shot(db, "Ann", ts=200, course="Augusta", outcome="gimme")   # Augusta's first hole, in Pebble's session
+    _shot(db, "Ann", ts=4000, session_id=2, course="Augusta")
+    db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text) VALUES (1, 400, 'preshot', 'a', 'Augusta')")
+    db.commit()
+    db.row_factory = sqlite3.Row
+    assert stats_web._round_rows(db, 1, 100)[2:] == [[1], []]
+    assert stats_web._round_rows(db, 2, 5000)[2:] == [[2, 3], [1]]
 
 
 def test_a_players_round_is_summed_up_against_their_season(tmp_path):

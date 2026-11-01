@@ -4412,6 +4412,10 @@ def test_an_impact_read_that_missed_the_player_box_takes_the_setup_read(tmp_path
     read = Hud(player_text="Heiser 3rd Shot 3 120 YDS", shot_number=3)
     e._fill_from_setup(read, got)
     assert read.player_text.startswith("Heiser")   # the impact read named someone: it stands
+    # OCR of the flight's backdrop, not a player box: no shot number, so the setup read stands in.
+    junk = Hud(player_text="诚")
+    assert e._fill_from_setup(junk, got)
+    assert (junk.player_text, junk.shot_number) == (setup.player_text, 2)
     # Not this stroke's setup: read after the swing, a ball struck since, or the log has someone else up.
     assert e._setup_at_impact(99.0) is None
     e.gspro.active_player = 0

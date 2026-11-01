@@ -4196,7 +4196,8 @@ class Engine:
             read = getattr(event, "impact_read", None)
             before, impact_image = await (read if read is not None else self._read_impact_hud(tag))
             shown = bool(before.player_text)
-            self._fill_from_setup(before, event.setup_hud, tag)
+            if self._fill_from_setup(before, event.setup_hud, tag):
+                shown = False
             self._use_setup_lie(before, tag)
         else:
             shown = bool(before.player_text)
@@ -5151,12 +5152,15 @@ class Engine:
             return None
         return hud
 
-    def _fill_from_setup(self, before: Hud, setup: Hud | None, tag: str = "") -> None:
+    def _fill_from_setup(self, before: Hud, setup: Hud | None, tag: str = "") -> bool:
         """The impact read missed the player box (GSPro can hide it for the flight before a slow read
-        grabs it): who hit this, which stroke, and from where come from the setup read for it."""
-        if setup is None or before.player_text or not setup.player_text:
-            return
-        log.info("%s the impact read missed the player box: %r shot %s from the setup read", tag,
+        grabs it): who hit this, which stroke, and from where come from the setup read for it. A read
+        with no shot number missed it too: OCR of the flight's backdrop ('诚', '5') isn't a player box,
+        and a stroke left unnumbered breaks its hole's replay. True when the setup read was used."""
+        if setup is None or not setup.player_text or (before.player_text and before.shot_number is not None):
+            return False
+        log.info("%s the impact read missed the player box%s: %r shot %s from the setup read", tag,
+                 f" (read {before.player_text!r})" if before.player_text else "",
                  setup.player_text, setup.shot_number)
         before.player_text, before.shot_number = setup.player_text, setup.shot_number
         before.to_pin, before.score_to_par = setup.to_pin, setup.score_to_par
@@ -5166,6 +5170,7 @@ class Engine:
             before.lie = setup.lie
         if not before.handed:
             before.handed = setup.handed
+        return True
 
     def _use_setup_lie(self, before: Hud, tag: str = "") -> None:
         """The lie this stroke's setup read, while the player stood over the ball, over the impact

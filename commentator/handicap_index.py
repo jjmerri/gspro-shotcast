@@ -155,7 +155,7 @@ def indexes(db: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     tees, layouts = _tees(db), _distances(db)
     rows = db.execute("SELECT pr.player, pr.session_id, pr.ended_at, pr.course, pr.fmt, pr.scores, pr.hole_pars, s.date"
                       " FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
-                      " ORDER BY pr.ended_at, pr.id").fetchall()
+                      " WHERE pr.excluded = 0 ORDER BY pr.ended_at, pr.id").fetchall()
     diffs: dict[str, list[float]] = {}
     played_holes: dict[str, int] = {}
     out: dict[str, dict[str, Any]] = {}

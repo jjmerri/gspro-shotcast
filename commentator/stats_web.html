@@ -1220,7 +1220,20 @@ function renderRounds() {
       <td>${frac(r.fir)}</td><td>${frac(r.gir)}</td><td>${dash(r.putts)}</td></tr>`;
   const rows = state.me ? d.rounds.filter(r => r.players.includes(state.me)) : d.rounds;
   return `<h2>${meTitle("Rounds")}</h2><p class="sub">Tap a round for its page: the scorecard, hole replays, shots and video.${state.me ? " Includes team rounds they played in." : ""}</p>`
-    + sortable("rounds", rows, cols, row, { empty: "No rounds in this view.", cls: "rounds" });
+    + sortable("rounds", rows, cols, row, { empty: "No rounds in this view.", cls: "rounds" }) + excludedRounds();
+}
+
+// The local page only: the rounds excluded from the stats, to count again or delete for good.
+function excludedRounds() {
+  const xs = (state.local && state.data.excluded_rounds) || [];
+  if (!xs.length) return "";
+  return `<h2>Excluded from the stats</h2><p class="sub">Only on this PC. These rounds and their shots don't count anywhere and aren't published.</p>
+    <table><thead><tr><th>Date</th><th class="l">Course</th><th class="l">Player / side</th><th class="l">Format</th><th>Holes</th><th></th></tr></thead><tbody>
+    ${xs.map(x => `<tr><td>${esc(x.date)}</td><td class="l">${esc(x.course)}</td>
+      <td class="l">${x.sides.map(s => `${esc(s.side)}${s.gross != null ? ` <span class="sub">${s.gross}</span>` : ""}`).join(", ")}</td>
+      <td class="l">${esc(x.format.replace("_", " "))}</td><td>${x.played}${x.played !== x.holes ? `/${x.holes}` : ""}</td>
+      <td><button class="link" data-exclround="${x.round}" data-ended="${x.round_end}" data-on="0">Count it again</button> · <button class="link" data-delround="${x.round}" data-ended="${x.round_end}">Delete</button></td></tr>`).join("")}
+    </tbody></table>`;
 }
 
 // One side of a round on its own page, with the round's other sides a tap away.
@@ -1247,7 +1260,10 @@ function renderRound() {
     ? `<a class="link" href="${esc(hashFor("broadcasts", { session: r.session }))}">What the booth said</a>` : "";
   const acts = [`<button class="link" data-roundshots="${r.round}">Every shot</button>`, watchBtn(r.started, "▶ Watch the round"), said,
                 `<button class="link" data-sharecard="${r.id}" title="An image of this round to post or send">Share card</button>`,
-                shareBtn(hashFor("round", { id: r.id }), "this round", "Share link")].filter(Boolean).join(" · ");
+                shareBtn(hashFor("round", { id: r.id }), "this round", "Share link"),
+                ...(state.local ? [`<button class="link" data-exclround="${r.round}" data-ended="${r.round_end}" data-on="1" title="Keep it listed on this PC, but out of every stat (and off the published site)">Exclude from stats</button>`,
+                                   `<button class="link" data-delround="${r.round}" data-ended="${r.round_end}" title="Remove the round and its shots for good">Delete round</button>`] : [])
+               ].filter(Boolean).join(" · ");
   return back + `<h2>${esc(r.date)} · <a class="link" href="${esc(hashFor("courses", { course: r.course }))}">${esc(r.course)}</a></h2>${pick}
     <p>${who}${team} · ${esc(r.format.replace("_", " "))}${roundTags(r)}${freshTag(r)}</p>
     <div class="cards rcards">
@@ -1362,7 +1378,7 @@ function renderShots() {
       axis ${dash(s.spin_axis && s.spin_axis.toFixed(1), "°")} · start ${dash(s.start_direction && s.start_direction.toFixed(1), "°")} · total ${yd(s.total)}</p>`;
     const said = s.lines.length ? s.lines.map(l => `<div class="line"><div class="who ${COLOR_KEYS.has(l.speaker) ? "color" : ""}">${esc(nameOf(l.speaker))}</div><div>${esc(l.text)} <span class="tag">${esc(l.kind)}</span></div></div>`).join("")
       : '<p class="empty">The booth said nothing tied to this shot.</p>';
-    const leave = state.local && !s.mulligan ? `<p><button class="link" data-leaveout="${s.id}" data-on="${s.left_out ? 0 : 1}">${s.left_out ? "Count this shot in the stats again" : "Leave this shot out of the stats"}</button>
+    const leave = state.local && !s.mulligan ? `<p><button class="link" data-leaveout="${s.id}" data-ts="${s.ts}" data-on="${s.left_out ? 0 : 1}">${s.left_out ? "Count this shot in the stats again" : "Leave this shot out of the stats"}</button>
       <span class="sub">A bad read or a practice swing: it stays on the card and in the replay, but out of every average, record and strokes gained.</span></p>` : "";
     return head + `<tr class="detail"><td colspan="13">${brief}${launch}${said}${leave}</td></tr>`;
   };
@@ -1782,7 +1798,7 @@ document.addEventListener("click", (e) => {
     return;
   }
   const t = e.target.closest("[data-tab],[data-section],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
-                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-sharecard],[data-period],[data-vod],[data-clip],[data-link],[data-more],[data-onlyme]");
+                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-exclround],[data-delround],[data-sharecard],[data-period],[data-vod],[data-clip],[data-link],[data-more],[data-onlyme]");
   if (!t) return;
   if (t.dataset.link) {
     shareLink(t.dataset.link, t.dataset.linktitle, t);
@@ -1829,9 +1845,21 @@ document.addEventListener("click", (e) => {
     t.disabled = true;
     t.textContent = "Saving…";
     fetch(`api/shots/${t.dataset.leaveout}/left-out`, { method: "POST", headers: { "Content-Type": "application/json" },
-                                                       body: JSON.stringify({ left_out: t.dataset.on === "1" }) })
+                                                       body: JSON.stringify({ left_out: t.dataset.on === "1", ts: +t.dataset.ts }) })
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); load(); })
       .catch(e => { t.textContent = `Couldn't save (${e.message})`; });
+    return;
+  }
+  if (t.dataset.exclround || t.dataset.delround) {
+    const del = !!t.dataset.delround, id = t.dataset.delround || t.dataset.exclround;
+    if (del && !confirm("Delete this round, its scorecard and every shot in it? This can't be undone."
+                        + " (Exclude from stats keeps it, out of the stats.)")) return;
+    t.disabled = true;
+    t.textContent = "Saving…";
+    fetch(`api/rounds/${id}/${del ? "delete" : "excluded"}`, { method: "POST", headers: { "Content-Type": "application/json" },
+                                                         body: JSON.stringify({ ended: +t.dataset.ended, ...(del ? { confirm: true } : { excluded: t.dataset.on === "1" }) }) })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); state.tab = "rounds"; showTabs(); load(); })
+      .catch(e => { t.disabled = false; t.textContent = `Couldn't save (${e.message})`; });
     return;
   }
   if (t.dataset.share !== undefined) {

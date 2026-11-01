@@ -145,10 +145,12 @@ def page(site_name: str = SITE_NAME, more_tab: str = MORE_TAB) -> str:
 
 
 def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = None,
-          records: dict[int, dict] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB) -> str:
+          records: dict[int, dict] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB,
+          local: bool = False) -> str:
     """Build (or refresh) the site in `site` from the season database; returns the new version. With
     `records`, it's filled with every shot holding a record (id -> the record), for record_clips.
-    `site_name` and `more_tab` are publish.site_name and publish.more_tab."""
+    `site_name` and `more_tab` are publish.site_name and publish.more_tab. `local`: for the page served
+    on the PC (stats_web.make_server), which also lists the rounds excluded from the stats."""
     records = {} if records is None else records
     db_path, site = Path(db_path), Path(site)
     version = new_version()
@@ -156,7 +158,7 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
     vdir.mkdir(parents=True, exist_ok=True)
     with closing(stats_web.connect(db_path)) as src:
         for name, context in CONTEXTS.items():
-            body: dict[str, Any] = stats_web.summary(src, context, names)
+            body: dict[str, Any] = stats_web.summary(src, context, names, local)
             body["db"] = {"name": db_path.name, "modified": db_path.stat().st_mtime, "published": time.time()}
             pdir = vdir / "player" / name
             pdir.mkdir(parents=True, exist_ok=True)

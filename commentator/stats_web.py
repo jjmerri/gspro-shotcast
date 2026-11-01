@@ -24,6 +24,7 @@ from urllib.parse import unquote, urlparse
 
 from . import handicap_index
 from . import season_analytics as A
+from .store import CLOSER_SECONDS
 
 SHARED_BALL = ("scramble", "alternate")
 # Putt length bucket edges in feet (to_pin_yards is stored in yards); the first bucket starts at the
@@ -36,29 +37,145 @@ _TEE_DRIVER = ("club = 'DR' AND is_putt = 0 AND (shot_number = 1 OR lie_before =
                "OR (shot_number IS NULL AND lie_before IS NULL))")
 
 
+EXCLUDED, DELETED = 1, 2   # the `excluded` column: out of the stats but listed locally / deleted for good
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
-    """Read-only, so viewing can never change the copy (or a live booth's file)."""
+    """Read-only, so viewing can never change the copy (or a live booth's file). Rounds excluded from
+    the stats or deleted (set_round_excluded, delete_round), with their shots and what the booth said,
+    are left out: temp views shadow the tables, which also fill in columns an older database is missing
+    (a shot left out of the stats or excluded: none are; the player's hand: unknown). The tables
+    themselves stay reachable as main.<table>."""
     db = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
     db.row_factory = sqlite3.Row
-    # A database from before shots could be left out of the stats (none are) or kept the player's hand
-    # (unknown): a temp view shadows the table with the missing columns.
-    have = {r[1] for r in db.execute("PRAGMA table_info(shots)")}
-    extra = [f"{v} AS {c}" for c, v in (("left_out", "0"), ("handed", "NULL")) if c not in have]
-    if extra:
-        db.execute(f"CREATE TEMP VIEW shots AS SELECT *, {', '.join(extra)} FROM main.shots")
+    for table, missing in (("shots", (("left_out", "0"), ("handed", "NULL"), ("excluded", "0"))),
+                           ("rounds", (("excluded", "0"),)), ("player_rounds", (("excluded", "0"),)),
+                           ("lines", (("excluded", "0"),))):
+        have = {r[1] for r in db.execute(f"PRAGMA main.table_info({table})")}
+        if not have:
+            continue
+        extra = "".join(f", {v} AS {c}" for c, v in missing if c not in have)
+        where = " WHERE excluded = 0" if "excluded" in have else ""
+        db.execute(f"CREATE TEMP VIEW {table} AS SELECT *{extra} FROM main.{table}{where}")
     return db
 
 
-def set_left_out(db_path: str | Path, shot_id: int, left_out: bool) -> bool:
-    """Leave a shot out of the stats, or put it back (the local page's toggle). False when there's no such shot."""
+def set_left_out(db_path: str | Path, shot_id: int, left_out: bool, ts: float | None = None) -> bool:
+    """Leave a shot out of the stats, or put it back (the local page's toggle). False when there's no such
+    shot, or (with `ts`, its time on the page) it isn't the one the page showed."""
     from contextlib import closing
 
     with closing(sqlite3.connect(db_path, timeout=10)) as db:
         if "left_out" not in {r[1] for r in db.execute("PRAGMA table_info(shots)")}:
             db.execute("ALTER TABLE shots ADD COLUMN left_out INTEGER NOT NULL DEFAULT 0")
-        cur = db.execute("UPDATE shots SET left_out = ? WHERE id = ?", (int(left_out), shot_id))
+        cur = db.execute("UPDATE shots SET left_out = ? WHERE id = ? AND (? IS NULL OR ABS(ts - ?) <= 0.001)",
+                         (int(left_out), shot_id, ts, ts))
         db.commit()
         return cur.rowcount > 0
+
+
+_ROUND_TABLES = ("rounds", "player_rounds", "shots", "lines")
+
+
+def _round_rows(db: sqlite3.Connection, round_id: int, ended: float) -> list[list[int]] | None:
+    """A round's rows (as round_groups and the page number it: its lowest `rounds` id), per table of
+    _ROUND_TABLES: its sides, its players' cards, its shots, and what the booth said in it: the lines on
+    its shots, and the session's lines on no shot (the calls before a swing, the reactions, the closer)
+    from the round before's closer to its own. None when there's no such round, it didn't end at `ended`
+    (its `round_end` on the page), or it was deleted. Worked out over every row, excluded or not, so
+    it's the same round either way."""
+    db.row_factory = sqlite3.Row
+    groups, of_row = round_groups(db)
+    i = next((i for i, g in enumerate(groups) if g["round"] == round_id), None)
+    if i is None or abs(groups[i]["end"] - ended) > 0.001:
+        return None
+    g = groups[i]
+    sides = [rid for rid, rnd in of_row.items() if rnd == round_id]
+    if db.execute(f"SELECT 1 FROM rounds WHERE excluded = {DELETED} AND id IN ({_in(sides)})").fetchone():
+        return None
+    find = player_round_of(db)
+    cards = [r["id"] for r in db.execute("SELECT id, session_id, course, ended_at FROM player_rounds")
+             if find(r["session_id"], r["course"], r["ended_at"]) == round_id]
+    owner = shot_rounds(db)
+    # A putt conceded late (its result came in after the round was recorded) is that round's, not the next's.
+    for x in groups:
+        for sid, course in db.execute("SELECT id, course FROM shots WHERE session_id = ? AND outcome = 'gimme'"
+                                      " AND ts > ? AND ts <= ?", (x["session"], x["end"], x["end"] + CLOSER_SECONDS)):
+            if (course or "").casefold() == (x["course"] or "").casefold():
+                owner[sid] = x["round"]
+    shots = [sid for sid, rnd in owner.items() if rnd == round_id]
+    # The unlinked lines of every session it was played in (a round can span a booth restart), each
+    # from the closer of that session's round before.
+    sessions = {g["session"]} | {r[0] for r in db.execute(
+        f"SELECT DISTINCT session_id FROM shots WHERE id IN ({_in(shots)})")}
+    lines = {r[0] for r in db.execute(f"SELECT id FROM lines WHERE shot_id IN ({_in(shots)})")}
+    for sess in sessions:
+        since = max((x["end"] for x in groups[:i] if x["session"] == sess), default=float("-inf"))
+        lines |= {r[0] for r in db.execute(
+            "SELECT id FROM lines WHERE shot_id IS NULL AND session_id = ? AND ts > ? AND ts <= ?",
+            (sess, since + CLOSER_SECONDS, g["end"] + CLOSER_SECONDS))}
+    lines = sorted(lines)
+    return [sides, cards, shots, lines]
+
+
+def _ensure_excluded(db: sqlite3.Connection) -> None:
+    for table in _ROUND_TABLES:
+        if "excluded" not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
+
+
+def _in(ids: list[int]) -> str:
+    return ",".join(str(int(i)) for i in ids)
+
+
+def _mark_round(db_path: str | Path, round_id: int, ended: float, value: int) -> bool:
+    from contextlib import closing
+
+    with closing(sqlite3.connect(db_path, timeout=10)) as db:
+        _ensure_excluded(db)
+        db.execute("BEGIN IMMEDIATE")   # the round checked is the round changed
+        rows = _round_rows(db, round_id, ended)
+        if rows is None:
+            db.rollback()
+            return False
+        for table, ids in zip(_ROUND_TABLES, rows):
+            if ids:   # (a shot left out by hand, or a line, already deleted with another round stays so)
+                db.execute(f"UPDATE {table} SET excluded = ? WHERE excluded != {DELETED} AND id IN ({_in(ids)})", (value,))
+        db.commit()
+        return True
+
+
+def set_round_excluded(db_path: str | Path, round_id: int, ended: float, excluded: bool) -> bool:
+    """Exclude a round (every side, card, shot and line of it) from the stats, or put it back: it's
+    still listed on the local page, so it can be. False when there's no such round."""
+    return _mark_round(db_path, round_id, ended, EXCLUDED if excluded else 0)
+
+
+def delete_round(db_path: str | Path, round_id: int, ended: float) -> bool:
+    """Delete a round for good: gone from every stat, page and published site, and no longer listed.
+    The rows stay in the file, marked: a freed id would be reused for the next shot or round, which
+    a page left open (or a published record clip, keyed by shot id) would then take for the old one.
+    False when there's no such round."""
+    return _mark_round(db_path, round_id, ended, DELETED)
+
+
+def excluded_rounds(db: sqlite3.Connection) -> list[dict[str, Any]]:
+    """The rounds excluded from the stats, newest first, one per round (its sides' names joined): the
+    local page lists them so they can be put back. Read from the tables under connect()'s views."""
+    if "excluded" not in {r[1] for r in db.execute("PRAGMA main.table_info(rounds)")}:
+        return []
+    groups, of_row = round_groups(db, "main.rounds")
+    end_of = {g["round"]: g["end"] for g in groups}
+    out: dict[int, dict[str, Any]] = {}
+    for r in db.execute("SELECT id, ended_at, date, course, format, side, holes, holes_played, gross, is_league"
+                        f" FROM main.rounds WHERE excluded = {EXCLUDED} ORDER BY ended_at DESC, id DESC"):
+        rnd = of_row.get(r["id"], r["id"])
+        g = out.setdefault(rnd, {"round": rnd, "round_end": end_of[rnd], "date": r["date"], "course": r["course"],
+                                 "format": r["format"] or "individual", "holes": r["holes"],
+                                 "played": r["holes_played"] if r["holes_played"] is not None else r["holes"],
+                                 "league": bool(r["is_league"]), "sides": []})
+        g["sides"].append({"side": r["side"], "gross": r["gross"]})
+    return list(out.values())
 
 
 def _ctx(context: str | None) -> str:
@@ -106,13 +223,13 @@ ROUND_GAP_SECONDS = 30   # a round's sides are stored a moment apart; separate r
 ROUND_SPAN_SECONDS = 8 * 3600   # no round takes longer: an older shot was in a round never recorded
 
 
-def round_groups(db: sqlite3.Connection) -> tuple[list[dict[str, Any]], dict[int, int]]:
+def round_groups(db: sqlite3.Connection, table: str = "rounds") -> tuple[list[dict[str, Any]], dict[int, int]]:
     """The rounds as played: one per end of a round, whatever its number of sides (one row each in
-    `rounds`). Returns them oldest first ({round, end, course}; `round` is the lowest row id) and
-    each row's round."""
+    `rounds`, or `table`). Returns them oldest first ({round, end, course}; `round` is the lowest row
+    id) and each row's round."""
     groups: list[dict[str, Any]] = []
     of_row: dict[int, int] = {}
-    for r in db.execute("SELECT id, session_id, ended_at, course FROM rounds ORDER BY ended_at, id"):
+    for r in db.execute(f"SELECT id, session_id, ended_at, course FROM {table} ORDER BY ended_at, id"):
         g = groups[-1] if groups else None
         if not (g and g["session"] == r["session_id"] and g["course"] == r["course"]
                 and r["ended_at"] - g["end"] <= ROUND_GAP_SECONDS):
@@ -188,7 +305,8 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
            gimmes: dict[int, float] | None = None) -> list[dict[str, Any]]:
     out = []
     gimmes = round_gimmes(db) if gimmes is None else gimmes
-    _, of_row = round_groups(db)
+    groups, of_row = round_groups(db)
+    end_of = {g["round"]: g["end"] for g in groups}
     who: dict[int, set] = {}
     named = dict(db.execute("SELECT id, player FROM shots WHERE player IS NOT NULL AND player != 'unknown'").fetchall())
     of_shot = shot_rounds(db)
@@ -231,7 +349,7 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             longest = kept.get((rnd, r["side"]))
         out.append({
             "id": r["id"], "round": of_row.get(r["id"], r["id"]), "session": r["session_id"], "ended": r["ended_at"], "date": r["date"],
-            "started": started.get(of_row.get(r["id"], r["id"])),
+            "started": started.get(of_row.get(r["id"], r["id"])), "round_end": end_of.get(rnd),
             "course": r["course"],
             # who played in it (a team side's players too), so the page can show one player's rounds
             "players": sorted(who.get(rnd, set()) | ({r["side"]} if r["side"] else set()) | set(played_by or [])), "format": r["format"] or "individual",
@@ -507,7 +625,9 @@ def highlights_by_period(db: sqlite3.Connection, holes: list[dict], context: str
 
 
 def summary(db: sqlite3.Connection, context: str | None = None,
-            names: dict[str, str] | None = None) -> dict[str, Any]:
+            names: dict[str, str] | None = None, local: bool = False) -> dict[str, Any]:
+    """`local`: for the page served on the PC, which also lists the rounds excluded from the stats (a
+    published site leaves them out altogether)."""
     last = db.execute("SELECT MAX(date) FROM sessions").fetchone()[0]
     holes = A.holes_played(db, context)
     gimmes = round_gimmes(db)
@@ -538,7 +658,7 @@ def summary(db: sqlite3.Connection, context: str | None = None,
     add_round_summaries(db, rounds_, holes, people, usual)
     return {"context": context or "all", "last_session": last, "has_league": has_league, "gimme_ft": usual,
             "players": people,
-            "rounds": rounds_, **highlights_by_period(db, holes, context), "predictions": predictions(db, names),
+            "rounds": rounds_, **({"excluded_rounds": excluded_rounds(db)} if local else {}), **highlights_by_period(db, holes, context), "predictions": predictions(db, names),
             "courses": A.courses(db, context),
             "booth": A.booth(db, names), "broadcasts": A.broadcasts(db), "filters": filters}
 
@@ -563,7 +683,7 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
         with lock:
             mtime = db_path.stat().st_mtime
             if built["mtime"] != mtime:
-                stats_site.build(db_path, site, names, **(brand or {}))
+                stats_site.build(db_path, site, names, local=True, **(brand or {}))
                 built["mtime"] = mtime
 
     refresh()
@@ -583,20 +703,35 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
             if host.split(":")[0] not in ("127.0.0.1", "localhost") or (origin and urlparse(origin).netloc != host) \
                     or not self.headers.get("Content-Type", "").startswith("application/json"):
                 return self._send(403, b"forbidden", "text/plain")
-            m = re.fullmatch(r"/api/shots/(\d+)/left-out", urlparse(self.path).path)
+            path = urlparse(self.path).path
+            routes = ((r"/api/shots/(\d+)/left-out", "left_out"), (r"/api/rounds/(\d+)/excluded", "excluded"),
+                      (r"/api/rounds/(\d+)/delete", "delete"))
+            m, key = next(((m, key) for pat, key in routes if (m := re.fullmatch(pat, path))), (None, None))
             if not m:
                 return self._send(404, b"not found", "text/plain")
             try:
                 body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 1024)) or b"{}")
-                left_out = bool(body["left_out"])
-                if not set_left_out(db_path, int(m.group(1)), left_out):
-                    return self._send(404, b"no such shot", "text/plain")
+                ident = int(m.group(1))
+                if key == "left_out":
+                    value = bool(body["left_out"])
+                    found = set_left_out(db_path, ident, value, float(body["ts"]))
+                elif key == "excluded":
+                    value = bool(body["excluded"])
+                    found = set_round_excluded(db_path, ident, float(body["ended"]), value)
+                else:
+                    if body.get("confirm") is not True:   # a delete can't be undone: the page asks first
+                        raise ValueError("delete needs confirm: true")
+                    value = True
+                    found = delete_round(db_path, ident, float(body["ended"]))
+                if not found:
+                    return self._send(404, b"no such shot" if key == "left_out" else b"no such round", "text/plain")
                 refresh()
             except (ValueError, KeyError, TypeError) as e:
                 return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
             except (OSError, sqlite3.Error) as e:
                 return self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
-            self._send(200, json.dumps({"id": int(m.group(1)), "left_out": left_out}).encode(), "application/json")
+            self._send(200, json.dumps({"id": ident, {"delete": "deleted"}.get(key, key): value}).encode(),
+                       "application/json")
 
         def _video(self, rel: str) -> tuple[bytes, str] | None:
             folder, keep_days = videos()
