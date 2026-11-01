@@ -137,7 +137,7 @@ Advanced**).
 
 ## Quick checks
 
-From the tray's **More → Command prompt** (or `%LOCALAPPDATA%\Programs\Shotcast\Scripts\shotcast.exe`
+From the tray's **More → Command prompt** (or `%LOCALAPPDATA%\Programs\Shotcast\python\Scripts\shotcast.cmd`
 from `%LOCALAPPDATA%\Shotcast`):
 
 ```

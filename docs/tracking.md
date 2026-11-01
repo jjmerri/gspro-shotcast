@@ -342,41 +342,36 @@ config, keys or logs).
 ### Setting it up
 
 You need an AWS account and the [AWS CLI](https://aws.amazon.com/cli/) signed in as an admin, on
-any computer. The template, [`tools/aws/stats-site.yaml`](../tools/aws/stats-site.yaml), makes the
-bucket, the CloudFront distribution, the password check and an upload-only IAM user.
+any computer. The template, [`stats-site.yaml`](../tools/aws/stats-site.yaml), makes the bucket,
+the CloudFront distribution, the password check and an upload-only IAM user. You don't need the
+rest of the code: save the template
+([download it](https://github.com/jjmerri/gspro-shotcast/raw/main/tools/aws/stats-site.yaml)) into a
+folder and open a Command Prompt (or terminal) in that folder. Each command below is one line.
 
 1. Create the stack (pick the password you'll give the league; 8+ characters, letters, digits and
    `._~!@#%^*+=-`):
 
-   ```sh
-   aws cloudformation deploy --stack-name shotcast-stats --template-file tools/aws/stats-site.yaml \
-     --capabilities CAPABILITY_IAM --parameter-overrides SiteUser=league SitePassword='...'
+   ```
+   aws cloudformation deploy --stack-name shotcast-stats --template-file stats-site.yaml --capabilities CAPABILITY_IAM --parameter-overrides SiteUser=league SitePassword=<password>
    aws cloudformation describe-stacks --stack-name shotcast-stats --query "Stacks[0].Outputs"
    ```
 
    The outputs are the page's URL, the bucket, the region and the upload user. CloudFront takes a
    few minutes to come up.
-2. Make the upload user's keys and put them in the booth PC's `.env`:
+2. Make the upload user's keys:
 
-   ```sh
+   ```
    aws iam create-access-key --user-name <UploadUser>
    ```
 
-   ```
-   AWS_ACCESS_KEY_ID=...
-   AWS_SECRET_ACCESS_KEY=...
-   ```
-3. On the booth PC, install the uploader (`.venv\Scripts\python.exe -m pip install -e ".[publish]"`)
-   and turn it on in `config.yaml`:
-
-   ```yaml
-   publish:
-     enabled: true
-     bucket: <BucketName>
-     region: <Region>
-   ```
-4. Publish once by hand to check it: `.venv\Scripts\python.exe -m commentator publish`. Open the
-   URL, sign in, and click into the Shots and Broadcasts tabs.
+3. On the booth PC, in the tray's **Settings → Sharing**, turn on **Put the stats page online after
+   each round**, fill in the bucket and region from step 1, and the access key ID and secret access
+   key from step 2. (From source instead: install the uploader with
+   `.venv\Scripts\python.exe -m pip install -e ".[publish]"`, set `publish.enabled`, `bucket` and
+   `region` in `config.yaml`, and `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in `.env`.)
+4. Publish once by hand to check it: in the tray's **More → Command prompt**, `shotcast publish`
+   (from source: `.venv\Scripts\python.exe -m commentator publish`). Open the URL, sign in, and
+   click into the Shots and Broadcasts tabs.
 
 From then on the booth publishes after each round as soon as the sign-off has aired (if it never
 finishes, `publish.delay_seconds`, 3 minutes, after the round ends instead), in its own process so

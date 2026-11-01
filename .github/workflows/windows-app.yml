@@ -47,7 +47,9 @@ jobs:
           $app = "$env:LOCALAPPDATA\Programs\Shotcast"
           & "$app\python\python.exe" -m commentator tray --home "$env:RUNNER_TEMP\shotcast-home" --self-test
           if ($LASTEXITCODE -ne 0) { throw "self-test failed" }
-          & "$app\python\Scripts\shotcast.exe" --help | Out-Null
+          # The tray's Command prompt puts python\Scripts on PATH: `shotcast` must run from the installed copy.
+          if (Test-Path "$app\python\Scripts\shotcast.exe") { throw "shotcast.exe runs the build machine's Python" }
+          & cmd /c "`"$app\python\Scripts\shotcast.cmd`" --help" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "no shotcast command for the Command prompt" }
           if (-not (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name Shotcast -ErrorAction SilentlyContinue)) { throw "no Start with Windows entry" }
           if ((Get-ItemProperty "HKCU:\Software\Shotcast" -Name CheckForUpdates -ErrorAction SilentlyContinue).CheckForUpdates -ne 1) { throw "update checks not on" }

@@ -44,6 +44,11 @@ try {
     [IO.File]::WriteAllText($pyproject, $original)
 }
 
+# pip's shotcast.exe runs the python.exe it was built with (this machine's build folder), which
+# isn't there once installed: a .cmd beside it finds the app's Python wherever it's installed.
+Remove-Item (Join-Path $Build "python\Scripts\shotcast.exe")
+[IO.File]::WriteAllText((Join-Path $Build "python\Scripts\shotcast.cmd"), "@`"%~dp0..\python.exe`" -m commentator %*`r`n")
+
 Write-Host "Fetching the OCR models..."
 & $Python -c "from rapidocr import RapidOCR; RapidOCR()"; Check "OCR models"
 
