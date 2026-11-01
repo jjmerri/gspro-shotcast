@@ -943,3 +943,29 @@ async def test_a_minimap_without_a_pin_leaves_the_screen_for_a_problem_report(tm
     assert len(frames) == 1
     meta = json.loads(frames[0].with_suffix(".json").read_text())
     assert meta["course"] == "Pebble" and meta["hole"] == 3 and meta["monitor"] == 1
+
+
+async def test_an_impact_read_that_came_up_wrong_leaves_its_boxes_for_a_problem_report(tmp_path):
+    # Jarod, Apple Valley: the impact read was the flight's backdrop ('诚', '5'): no shot number, no pin.
+    # The boxes it was read from are kept, not just the screen grabbed after (the HUD gone by then).
+    from commentator.report import FRAMES_DIR
+
+    engine, _ = _engine(tmp_path)
+    engine.cfg.source.type = "connector_log"
+    engine.screen = SimpleNamespace(monitor=1, last_read_seconds=2.2,
+                                    grab=lambda region=None: Image.new("RGB", (64, 36)))
+    box = {"player_box": Image.new("RGB", (40, 10)), "other_side": {"mirrored": False}}
+    reads = {"impact-empty": Hud(player_text="", crops=box),
+             "impact-junk-player": Hud(player_text="诚", crops=box),
+             "impact-no-shot": Hud(player_text="Tony E 116.6 YDS", to_pin="116.6 yards", crops=box),
+             "impact-no-pin": Hud(player_text="Tony E Shot 2", shot_number=2, crops=box)}
+    for hud in [*reads.values(), Hud(player_text="Tony E Shot 2 9 FT", shot_number=2, to_pin="9 feet", crops=box),
+                Hud(player_text="诚")]:   # a good read; one with no boxes kept (read box by box)
+        engine._keep_impact_misread(hud, False, "[shot 48]")
+    for _ in range(20):
+        await asyncio.sleep(0.02)
+    d = tmp_path / FRAMES_DIR
+    assert sorted(p.name.rsplit("-", 2)[0] for p in d.glob("*.jpg")) == sorted(reads)
+    assert len(list(d.glob("impact-junk-player-*.player_box.png"))) == 1
+    meta = json.loads(next(d.glob("impact-junk-player-*.json")).read_text())
+    assert meta["hud_text"] == "诚" and meta["shot"] == "[shot 48]" and meta["read_seconds"] == 2.2

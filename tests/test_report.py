@@ -74,6 +74,12 @@ def test_keep_frame_keeps_only_the_newest_few(tmp_path, monkeypatch):
     kept = sorted(p.name for p in (tmp_path / report.FRAMES_DIR).glob("*.jpg"))
     assert kept == [f"minimap-miss-20990101-0000{i:02d}.jpg" for i in (3, 4, 5)]
     assert len(list((tmp_path / report.FRAMES_DIR).glob("*.json"))) == 3
+    # The boxes a read was made from go beside it, and out with it.
+    for _ in range(4):
+        report.keep_frame(tmp_path, "impact-no-shot", Image.new("RGB", (4, 4)), {}, keep=3,
+                          crops={"player_box": Image.new("RGB", (2, 2)), "other_side": {"mirrored": False}})
+    boxes = sorted(p.name for p in (tmp_path / report.FRAMES_DIR).glob("impact-no-shot-*.png"))
+    assert boxes == [f"impact-no-shot-20990101-0000{i:02d}.player_box.png" for i in (7, 8, 9)]
 
 
 class _Resp:

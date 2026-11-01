@@ -4365,6 +4365,15 @@ def test_an_unnumbered_opening_banner_gets_the_start_hole(tmp_path):
     assert e.hole_number == 11
     e._number_start_hole(r, opening=True)
     assert e.hole_number == 1 and e.state.current_hole == "Hole 1, par 5, 530 yards"
+    # Dan, Sheep Ranch: a round joined on its opening hole (the log's number, 1) numbers the banner too,
+    # taking along the tee shot struck before it was joined (no round's yet).
+    e.hole_number, e.state.current_hole = 1, "par 5, 524 yards"
+    early = ShotRecord("Dan", Shot(), "par 5, 524 yards", Hud(), [], shot_id=None)
+    e.state.record_shot(early)
+    e._number_start_hole(r)
+    assert e.state.current_hole == "par 5, 524 yards"   # the count already had it
+    e._number_start_hole(r, joined=True)
+    assert e.state.current_hole == "Hole 1, par 5, 524 yards" and early.hole == "Hole 1, par 5, 524 yards"
 
 
 def test_a_stroke_set_up_in_yards_is_off_the_green(tmp_path):

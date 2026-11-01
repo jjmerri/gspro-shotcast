@@ -2531,7 +2531,28 @@ def test_booth_started_mid_round_joins_it_without_an_opener(tmp_path):
     tee = Hud(player_text="MikeD E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards")
     e.gspro.mode, e.gspro.shots_since_course, e.gspro.first_hole, e.gspro.current_hole = "course", 30, 9, 12
     assert not e._is_round_start(tee)   # a level tee mid-round isn't a new round
-    assert e._should_join() and not e._should_join()   # tried once
+    assert e._should_join(tee) and not e._should_join(tee)   # tried once
+
+
+def test_a_tee_shot_struck_before_the_first_setup_read_still_starts_the_round(tmp_path):
+    # Dan, Sheep Ranch: he swung 2 s after the hole showed, before the booth's first setup read; then
+    # Derek's tee read shot 1, and the log's one shot on the course had the booth join "mid-round".
+    from commentator.hud import OtherPlayer
+    e = _log_engine(tmp_path)
+    tee = Hud(player_text="Derek E Shot 1 523.6 YDS", shot_number=1, score_to_par="E", to_pin="523.6 yards",
+              others=[OtherPlayer("Dan", "315.7 yards", "E")])
+    g = e.gspro
+    g.mode, g.shots_since_course, g.live_shots_since_course, g.first_hole, g.current_hole = "course", 1, 1, 0, 0
+    assert not e._should_join(tee) and e._is_round_start(tee)
+    g.current_hole = None   # GSPro hadn't logged the hole yet
+    assert e._is_round_start(tee)
+    g.shots_since_course = g.live_shots_since_course = 2   # more tee shots than the group's other players
+    assert not e._is_round_start(tee)
+    g.shots_since_course = g.live_shots_since_course = 1
+    g.current_hole = 1   # on the next hole: a round under way
+    assert not e._is_round_start(tee) and e._should_join(tee)
+    e._join_tried, g.current_hole, g.live_shots_since_course = False, 0, 0   # the shot was in the log at startup
+    assert not e._is_round_start(tee) and e._should_join(tee)
 
 
 async def test_joining_takes_the_start_and_current_hole_from_the_log(tmp_path):

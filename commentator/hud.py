@@ -15,6 +15,7 @@ Par 4 392 yds"); the handedness box says "RIGHT HAND"; the hole-out banner says 
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 # Documented on the GSPro HUD: Tee, Fairway, Rough, Deep Rough, Sand, Green. Pine straw and
 # concrete exist too (exact HUD spelling unconfirmed); the rest are surfaces courses may have.
@@ -80,6 +81,9 @@ class Hud:
     # live 3D scene beside the tile panel, which never holds still.
     tile_boxes: dict[str, tuple[int, int, int, int]] = field(default_factory=dict)
     tile_crop_size: tuple[int, int] | None = None   # the `tiles` crop those boxes are in
+    # The boxes this was read from (grab_regions), when they were grabbed before the OCR: what a
+    # problem report shows of a read that came up wrong.
+    crops: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
 
 
 NAME_DARK: tuple = ()

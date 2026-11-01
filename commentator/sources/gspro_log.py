@@ -347,6 +347,7 @@ class GsproState:
     # Since the current course was selected: shots fired, and the hole (0-based, as logged) of the first
     # score line. No shots means the group is still on its opening tee; some means a round under way.
     shots_since_course: int = 0
+    live_shots_since_course: int = 0   # of those, the ones fired while the booth was watching (not primed)
     first_hole: int | None = None
     starts_late: bool = False         # "Skipping hole 1" at the load: the round doesn't start on hole 1
     active_player: int | None = None
@@ -476,6 +477,7 @@ class GsproState:
             self.altitude_ft = None
             self.mode, self.active_holes = "course", None
             self.shots_since_course, self.first_hole, self.starts_late = 0, None, False
+            self.live_shots_since_course = 0
         elif ev.kind == "course_display":
             self.course_display = ev.display
             if ev.display == "Practice":    # the range's load line
@@ -532,6 +534,7 @@ class GsproState:
                 self._attach_lie(ev.player)
         elif ev.kind == "shot_fired":
             self.shots_since_course += 1
+            self.live_shots_since_course += 1
             self.fires += 1
             self._material_since_fire = False
             self._fire_at[self.fires] = time.monotonic()
@@ -634,6 +637,7 @@ class GsproState:
         self.last_picked = set(self._picked)
         self._reset_round()             # the next round, even on this same course, starts clean
         self.shots_since_course, self.first_hole, self.starts_late = 0, None, False
+        self.live_shots_since_course = 0
 
     def _reset_round(self) -> None:
         for d in (self.players_seen, self.lie_by, self.to_pin_by, self.gimme_by, self.hole_by,

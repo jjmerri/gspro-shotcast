@@ -334,6 +334,9 @@ def test_follower_learns_from_the_backlog_whether_play_has_begun(tmp_path):
     f = GsproLogFollower(str(path))
     f._prime()
     assert f.state.shots_since_course == 2 and f.state.first_hole == 9 and f.state.current_hole == 11
+    assert f.state.live_shots_since_course == 0   # fired before the booth was watching
+    f.state.apply(LogEvent("shot_fired"))
+    assert (f.state.shots_since_course, f.state.live_shots_since_course) == (3, 1)
     path.write_text(path.read_text() + "End Round Button Click\n")
     f = GsproLogFollower(str(path))
     f._prime()

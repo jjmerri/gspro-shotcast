@@ -1140,7 +1140,7 @@ class Engine:
         # and late in a league round, where _stakes_facts compares this player to the field.
         rr = self.round
         late = (rr is not None and not rr.ended and rr.is_league and 1 <= rr.holes - rr.seq + 1 <= 4)
-        join = self._should_join()
+        join = self._should_join(hud)
         rest = ["lie", "player_name", "slope"] + (["others"] if hud.shot_number == 1 or late or join else [])
         tiles_for = stamp[0] if self._tiles_wanted == stamp[0] == self._shot_seq else None
         if tiles_for is not None:
@@ -1260,7 +1260,7 @@ class Engine:
             return True
         return time.monotonic() - self._round_ended_at < AFTER_ROUND_QUIET_SECONDS
 
-    def _should_join(self) -> bool:
+    def _should_join(self, hud: Hud) -> bool:
         """The booth started with a round already under way (GSPro's log shows shots on this course
         and the booth isn't tracking a round): pick it up at the first setup, once."""
         if self._join_tried or not self._log_rounds or self.round is not None:
@@ -1268,8 +1268,16 @@ class Engine:
         g = self.gspro
         if g.mode != "course" or not g.shots_since_course or g.first_hole is None or g.current_hole is None:
             return False
+        if hud.shot_number == 1 and self._teed_off_before_setup():
+            return False   # a round start, whose first tee shot beat the first setup read (_is_round_start)
         self._join_tried = True
         return True
+
+    def _teed_off_before_setup(self) -> bool:
+        """Every shot GSPro logged on this course came while the booth was watching, all on the hole
+        the round started on."""
+        g = self.gspro
+        return g.shots_since_course <= g.live_shots_since_course and g.current_hole in (None, g.first_hole)
 
     def _is_round_start(self, hud: Hud) -> bool:
         """The opening-tee signal: everyone on shot 1 at even par, every other player still the
@@ -1282,11 +1290,15 @@ class Engine:
             # GSPro's last word was End Round: the tee on screen is a round on its way out, not a new one.
             log.info("Not a round start: GSPro is back in the menus (End Round), not on a course")
             return False
-        if self._log_rounds and self.round is None and self.gspro.shots_since_course:
-            # The booth came up after play began here: that's a round to join, not one to open.
-            log.info("Not a round start: GSPro's log has %s shots on this course already",
-                     self.gspro.shots_since_course)
-            return False
+        if self._log_rounds and self.round is None and (n := self.gspro.shots_since_course):
+            # The booth came up after play began here: that's a round to join, not one to open. Unless
+            # it saw every one of them, all tee shots on the opening hole by players other than this
+            # one: a quick first swing, struck before the first setup read (2 s after the hole showed).
+            if not (self._teed_off_before_setup() and n <= len(hud.others)):
+                log.info("Not a round start: GSPro's log has %s shots on this course already", n)
+                return False
+            log.info("Round start: the %s shot(s) GSPro logged on this course were opening tee shots, struck "
+                     "before the first setup read", n)
         if hud.score_to_par != "E":
             log.info("Not a round start: shot 1 but score reads %r, not E", hud.score_to_par)
             return False
@@ -1471,17 +1483,20 @@ class Engine:
         if r is self.round:
             self._number_start_hole(r)
 
-    def _number_start_hole(self, r: Round, opening: bool = False) -> None:
+    def _number_start_hole(self, r: Round, opening: bool = False, joined: bool = False) -> None:
         """The round's first hole when its banner was read without a number. OCR often misses a lone
         "1", and the count was reset at the last round's end, so the opening hole was labelled by par
         and yardage alone; once the start hole is known (setup screen or GSPro's log), number it and
         move anything already recorded there onto the numbered label. At the round's start (`opening`)
         a number already counted is replaced too: it was counted before the round, off menu banners or
-        a round quit and restarted on the same tee."""
+        a round quit and restarted on the same tee. A round `joined` on its opening hole: its number is
+        GSPro's log's, so only the label's missing; the tee shots struck before it was joined move too."""
         wrong = self.state.current_hole
         if r.ended or r.start_hole_assumed or not r.start_hole or r.seq != 1 or not wrong:
             return
-        if self.hole_number is not None and not (opening and self.hole_number != r.start_hole):
+        if joined and re.match(r"Hole \d+", wrong):
+            return
+        if not joined and self.hole_number is not None and not (opening and self.hole_number != r.start_hole):
             return
         if opening and self.hole_number is not None:
             log.info("Round %s: the hole counted before it started (%s) isn't its start hole %s",
@@ -1491,7 +1506,8 @@ class Engine:
         if label == wrong:
             return
         self.state.current_hole = label
-        moved = [x for x in self.state.shots if x.round_id == r.id and x.hole == wrong]
+        # (and a tee shot struck just before the round was picked up, not yet anyone's)
+        moved = [x for x in self.state.shots if x.round_id in (r.id, None) and x.hole == wrong]
         for x in moved:
             x.hole = label
         if ids := [x.shot_id for x in moved if x.shot_id is not None]:
@@ -4195,6 +4211,7 @@ class Engine:
         if use_screen:
             read = getattr(event, "impact_read", None)
             before, impact_image = await (read if read is not None else self._read_impact_hud(tag))
+            self._keep_impact_misread(before, shot.is_putt, tag)
             shown = bool(before.player_text)
             if self._fill_from_setup(before, event.setup_hud, tag):
                 shown = False
@@ -5151,6 +5168,25 @@ class Engine:
         if active is not None and now is not None and active != now:
             return None
         return hud
+
+    def _keep_impact_misread(self, before: Hud, is_putt: bool, tag: str = "") -> None:
+        """Leave the boxes behind for a problem report when the impact read came up wrong: the player
+        box hidden or unreadable, a name that's nobody's, or no shot number or distance in it."""
+        if before.crops is None:
+            return
+        if not before.player_text:
+            reason = "impact-empty"
+        elif not self._player(before.player_text):
+            reason = "impact-junk-player"
+        elif before.shot_number is None:
+            reason = "impact-no-shot"
+        elif before.to_pin is None:
+            reason = "impact-no-pin"
+        else:
+            return
+        self._keep_report_frame(reason, crops=before.crops, shot=tag, hud_text=before.player_text,
+                                shot_number=before.shot_number, to_pin=before.to_pin, putt=is_putt,
+                                read_seconds=self.screen.last_read_seconds if self.screen else None)
 
     def _fill_from_setup(self, before: Hud, setup: Hud | None, tag: str = "") -> bool:
         """The impact read missed the player box (GSPro can hide it for the flight before a slow read
@@ -6692,6 +6728,7 @@ class Engine:
         self.hole_number, self.hole_number_read = current + 1, True
         self._reconcile_slots(r, names)
         self._start_round(r)
+        self._number_start_hole(r, joined=True)
         self._note_player(hud)
         log.info("Round %s joined mid-round on %s (%s): %s; started on hole %s, now on hole %s (%s of %s); no opener",
                  r.id, r.course, "league" if is_league else "practice", ", ".join(s.label for s in r.sides),
@@ -7863,6 +7900,8 @@ class Engine:
                     hc.tiles_missing[t] = hc.tiles_missing.get(t, 0) + 1
             if hc.full_shots >= 3:
                 if absent := [t for t in self.cfg.health.required_tiles if t not in hc.tiles_seen]:
+                    # The tile panel as it is: whether the tile is on it at all (GSPro's tiles are the player's choice).
+                    self._keep_report_frame("tiles-missing", crops=after.crops or before.crops, absent=absent)
                     h.raise_issue("round.tiles_absent", "fail",
                                   f"no {', '.join(repr(t) for t in absent)} tile read in {hc.full_shots} shots: "
                                   f"a data tile changed or the HUD moved?")
@@ -7886,7 +7925,7 @@ class Engine:
         self._fixture_saved_at[kind] = now
         asyncio.create_task(asyncio.to_thread(self._save_fixture_frame, kind, frame), name=f"fixture-{kind}")
 
-    def _keep_report_frame(self, reason: str, **meta) -> None:
+    def _keep_report_frame(self, reason: str, crops: dict | None = None, **meta) -> None:
         """Leave the screen behind for the next problem report when a read came up empty (no player
         on a shot, no pin on the minimap): what the booth was looking at shows whether it's reading
         the wrong monitor or GSPro's screen changed. At most every ten minutes per reason."""
@@ -7903,7 +7942,7 @@ class Engine:
 
         def save() -> None:
             try:
-                problem_report.keep_frame(self.cfg.log_dir, reason, self.screen.grab(), meta)
+                problem_report.keep_frame(self.cfg.log_dir, reason, self.screen.grab(), meta, crops=crops)
             except Exception:
                 log.exception("Couldn't keep the %s screen for a problem report", reason)
 

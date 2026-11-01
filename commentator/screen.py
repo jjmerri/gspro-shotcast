@@ -476,7 +476,7 @@ class Screen:
                  crops: dict[str, Image.Image] | None = None, other_side: bool = True) -> Hud:
         """OCR the named HUD regions, from `crops` (grab_regions), `image` (a saved frame) or the live
         screen. `other_side`: an empty lie or club box may be read again on the other side (_other_side)."""
-        hud = Hud()
+        hud = Hud(crops=crops)
         # With a full frame (a saved image, or GSPro's window via WGC) crop each region from it;
         # otherwise (monitor mode, WGC off/stale) grab each small region box on its own, since grabbing
         # the whole 4K screen per read stutters the game. WGC's frame is captured on a background thread,

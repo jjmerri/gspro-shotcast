@@ -351,9 +351,12 @@ def _build(cfg: Config, config_path: Path) -> Path:
     return path
 
 
-def keep_frame(log_dir: str | Path, reason: str, image, meta: dict, keep: int = 4) -> Path:
+def keep_frame(log_dir: str | Path, reason: str, image, meta: dict, keep: int = 4,
+               crops: dict | None = None) -> Path:
     """Save a screen the booth found something wrong with, for the next problem report: a full-size
-    JPEG and a JSON note beside it, keeping the newest `keep` of each reason."""
+    JPEG and a JSON note beside it, keeping the newest `keep` of each reason. `crops`: the HUD boxes
+    the read was actually made from (the screen may have moved on by the time it's grabbed), each a
+    PNG beside it ({stem}.{box}.png)."""
     d = Path(log_dir) / FRAMES_DIR
     d.mkdir(parents=True, exist_ok=True)
     stem = f"{reason}-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -362,10 +365,13 @@ def keep_frame(log_dir: str | Path, reason: str, image, meta: dict, keep: int = 
     (d / f"{stem}.jpg").write_bytes(buf.getvalue())
     (d / f"{stem}.json").write_text(json.dumps({"captured": time.strftime("%Y-%m-%d %H:%M:%S"), "reason": reason,
                                                 "size": list(image.size), **meta}, default=str), encoding="utf-8")
+    for name, crop in (crops or {}).items():
+        if hasattr(crop, "save"):   # (not the other side's probe dict)
+            crop.save(d / f"{stem}.{name}.png")
     for old in sorted(d.glob(f"{reason}-*.jpg"))[:-keep]:
         try:
-            old.unlink(missing_ok=True)
-            old.with_suffix(".json").unlink(missing_ok=True)
+            for p in d.glob(f"{old.stem}.*"):
+                p.unlink(missing_ok=True)
         except OSError:
             log.warning("Couldn't remove the old screen %s", old.name)
     return d / f"{stem}.jpg"
