@@ -601,10 +601,25 @@ def record_shots(records_: dict[str, Any]) -> list[dict]:
 PERIODS = {"3m": 3, "6m": 6, "9m": 9, "1y": 12, "all": None}
 
 
-def period_starts(today: date | None = None) -> dict[str, str | None]:
-    """Each range's first night (YYYY-MM-DD), the same day of the month that many months back."""
+def season_start(start: str | None, today: date | None = None) -> str | None:
+    """The first day (YYYY-MM-DD) of the season under way, for a league whose season starts every
+    year on `start` (MM-DD, publish.season_start): this year's start once it's come, else last year's."""
+    if not start:
+        return None
     today = today or date.today()
-    out: dict[str, str | None] = {}
+    m, d = (int(x) for x in start.split("-"))
+
+    def on(y: int) -> date:
+        return date(y, m, min(d, calendar.monthrange(y, m)[1]))   # 02-29 in other years: the 28th
+
+    return (on(today.year) if on(today.year) <= today else on(today.year - 1)).isoformat()
+
+
+def period_starts(today: date | None = None, season: str | None = None) -> dict[str, str | None]:
+    """Each range's first night (YYYY-MM-DD), the same day of the month that many months back, and
+    with a season start (MM-DD), "season": since the season under way began."""
+    today = today or date.today()
+    out: dict[str, str | None] = {"season": season_start(season, today)} if season else {}
     for key, months in PERIODS.items():
         if months is None:
             out[key] = None
@@ -616,18 +631,20 @@ def period_starts(today: date | None = None) -> dict[str, str | None]:
 
 
 def highlights_by_period(db: sqlite3.Connection, holes: list[dict], context: str | None = None,
-                         player: str | None = None, today: date | None = None) -> dict[str, Any]:
+                         player: str | None = None, today: date | None = None,
+                         season: str | None = None) -> dict[str, Any]:
     """Records and highlights for each of the tab's date ranges: a top five can't be cut down to a
-    shorter range on the page, so each range is worked out on its own."""
-    starts = period_starts(today)
+    shorter range on the page, so each range is worked out on its own. `season`: publish.season_start."""
+    starts = period_starts(today, season)
     return {"records": {k: records(db, context, player, s) for k, s in starts.items()},
             "highlights": {k: A.highlights(db, holes, context, player, s) for k, s in starts.items()}}
 
 
 def summary(db: sqlite3.Connection, context: str | None = None,
-            names: dict[str, str] | None = None, local: bool = False) -> dict[str, Any]:
+            names: dict[str, str] | None = None, local: bool = False, season: str | None = None) -> dict[str, Any]:
     """`local`: for the page served on the PC, which also lists the rounds excluded from the stats (a
-    published site leaves them out altogether)."""
+    published site leaves them out altogether). `season`: publish.season_start (MM-DD), for the
+    records' This season range."""
     last = db.execute("SELECT MAX(date) FROM sessions").fetchone()[0]
     holes = A.holes_played(db, context)
     gimmes = round_gimmes(db)
@@ -658,18 +675,21 @@ def summary(db: sqlite3.Connection, context: str | None = None,
     add_round_summaries(db, rounds_, holes, people, usual)
     return {"context": context or "all", "last_session": last, "has_league": has_league, "gimme_ft": usual,
             "players": people,
-            "rounds": rounds_, **({"excluded_rounds": excluded_rounds(db)} if local else {}), **highlights_by_period(db, holes, context), "predictions": predictions(db, names),
+            "rounds": rounds_, **({"excluded_rounds": excluded_rounds(db)} if local else {}), **highlights_by_period(db, holes, context, season=season),
+            "season_from": season_start(season), "predictions": predictions(db, names),
             "courses": A.courses(db, context),
             "booth": A.booth(db, names), "broadcasts": A.broadcasts(db), "filters": filters}
 
 
 def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | None = None,
-                site: str | Path | None = None, brand: dict[str, str] | None = None,
+                site: str | Path | None = None,
+                brand: dict[str, Any] | Callable[[], dict[str, Any]] | None = None,
                 videos: Callable[[], tuple[Path | None, int]] | None = None) -> ThreadingHTTPServer:
     """Serve the stats page on localhost only (port 0 picks a free one), the same static site that
     `publish` uploads (stats_site.py), built into `site` (a temp folder by default) and rebuilt when
-    the database changes. `names` maps persona keys to on-air names; `brand` is build()'s site_name
-    and more_tab. `videos()`: where the round videos kept on the PC are (local_video.py; None if they
+    the database changes. `names` maps persona keys to on-air names; `brand` is build()'s site_name,
+    more_tab and season_start, or a function returning them, asked on each request so a change in
+    Settings rebuilds the page. `videos()`: where the round videos kept on the PC are (local_video.py; None if they
     aren't) and for how many days, asked on each request so a change in Settings counts at once. They're
     served as the bucket's live/ (recordings.json, s/<session>/full.m3u8), so the Watch buttons play them."""
     from . import local_video, stats_site
@@ -677,14 +697,15 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
     db_path = Path(db_path)
     site = Path(site) if site else Path(tempfile.mkdtemp(prefix="shotcast-stats-"))
     lock = threading.Lock()
-    built = {"mtime": None}
+    built: dict[str, Any] = {"key": None}
 
     def refresh() -> None:
         with lock:
-            mtime = db_path.stat().st_mtime
-            if built["mtime"] != mtime:
-                stats_site.build(db_path, site, names, local=True, **(brand or {}))
-                built["mtime"] = mtime
+            options = (brand() if callable(brand) else brand) or {}
+            key = (db_path.stat().st_mtime, sorted(options.items()))
+            if built["key"] != key:
+                stats_site.build(db_path, site, names, local=True, **options)
+                built["key"] = key
 
     refresh()
 
@@ -802,7 +823,7 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
 
 def serve(db_path: str | Path, port: int = 8765, open_browser: bool = True,
           names: dict[str, str] | None = None, site: str | Path | None = None,
-          brand: dict[str, str] | None = None, videos: Callable[[], tuple[Path | None, int]] | None = None) -> None:
+          brand: dict[str, Any] | None = None, videos: Callable[[], tuple[Path | None, int]] | None = None) -> None:
     server = make_server(db_path, port, names, site, brand, videos)
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"Season stats from {db_path} at {url} (Ctrl+C to stop)")

@@ -163,6 +163,16 @@ def test_highlights_and_records_by_date_range(db):
     assert [d["v"] for d in got["highlights"]["all"]["drives"]] == [320, 250]
     assert got["records"]["3m"]["longest_drive"]["v"] == 250 and got["records"]["all"]["longest_drive"]["v"] == 320
     assert got["records"]["all"] == stats_web.records(db) and got["highlights"]["all"] == A.highlights(db, A.holes_played(db))
+    # Jarod's league plays October to April: a putt from this autumn holds the season's record into
+    # the new year, and the next October it starts over.
+    assert "season" not in starts
+    assert stats_web.period_starts(date(2027, 1, 5), "10-01")["season"] == "2026-10-01"
+    assert stats_web.season_start("10-01", date(2026, 10, 1)) == "2026-10-01"
+    assert stats_web.season_start("10-01", date(2026, 9, 30)) == "2025-10-01"
+    assert stats_web.season_start("02-29", date(2027, 3, 1)) == "2027-02-28"
+    assert stats_web.season_start(None) is None
+    got = stats_web.highlights_by_period(db, A.holes_played(db), today=date(2026, 5, 31), season="05-01")
+    assert got["records"]["season"]["longest_drive"]["v"] == 250
 
 
 def test_recovery_counts_greens_found_from_trouble(db):

@@ -52,11 +52,12 @@ def player_key(name: str) -> str:
     return hashlib.sha1(name.encode("utf-8")).hexdigest()[:12]
 
 
-def player_file(src: sqlite3.Connection, name: str, context: str | None, holes: list[dict]) -> dict[str, Any]:
+def player_file(src: sqlite3.Connection, name: str, context: str | None, holes: list[dict],
+                season: str | None = None) -> dict[str, Any]:
     """What the page shows for one picked player beyond the summary: their courses (hole by hole),
     highlights and records."""
     return {"name": name, "courses": A.courses(src, context, name),
-            **stats_web.highlights_by_period(src, holes, context, name)}
+            **stats_web.highlights_by_period(src, holes, context, name, season=season)}
 
 
 def new_version() -> str:
@@ -146,11 +147,12 @@ def page(site_name: str = SITE_NAME, more_tab: str = MORE_TAB) -> str:
 
 def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = None,
           records: dict[int, dict] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB,
-          local: bool = False) -> str:
+          local: bool = False, season_start: str | None = None) -> str:
     """Build (or refresh) the site in `site` from the season database; returns the new version. With
     `records`, it's filled with every shot holding a record (id -> the record), for record_clips.
     `site_name` and `more_tab` are publish.site_name and publish.more_tab. `local`: for the page served
-    on the PC (stats_web.make_server), which also lists the rounds excluded from the stats."""
+    on the PC (stats_web.make_server), which also lists the rounds excluded from the stats.
+    `season_start`: publish.season_start (MM-DD), for the records' This season range."""
     records = {} if records is None else records
     db_path, site = Path(db_path), Path(site)
     version = new_version()
@@ -158,7 +160,7 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
     vdir.mkdir(parents=True, exist_ok=True)
     with closing(stats_web.connect(db_path)) as src:
         for name, context in CONTEXTS.items():
-            body: dict[str, Any] = stats_web.summary(src, context, names, local)
+            body: dict[str, Any] = stats_web.summary(src, context, names, local, season_start)
             body["db"] = {"name": db_path.name, "modified": db_path.stat().st_mtime, "published": time.time()}
             pdir = vdir / "player" / name
             pdir.mkdir(parents=True, exist_ok=True)
@@ -166,7 +168,7 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
             _note_records(records, body["records"])
             for p in body["players"]:
                 p["file"] = player_key(p["name"])
-                pf = player_file(src, p["name"], context, holes)
+                pf = player_file(src, p["name"], context, holes, season_start)
                 _note_records(records, pf["records"])
                 (pdir / f"{p['file']}.json").write_text(json.dumps(pf, separators=(",", ":")), encoding="utf-8")
             (vdir / f"summary-{name}.json").write_text(json.dumps(body, separators=(",", ":")), encoding="utf-8")
@@ -236,13 +238,14 @@ def _list(client: Any, bucket: str, prefix: str) -> set[str]:
 
 
 def publish(db_path: str | Path, site: str | Path, bucket: str, prefix: str = "", region: str | None = None,
-            names: dict[str, str] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB) -> str:
+            names: dict[str, str] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB,
+            season_start: str | None = None) -> str:
     """Build the site from the database and upload it, then keep the record shots' clips up to date
     (record_clips.py). Returns the published version."""
     import boto3
 
     records: dict[int, dict] = {}
-    build(db_path, site, names, records, site_name, more_tab)
+    build(db_path, site, names, records, site_name, more_tab, season_start=season_start)
     client = boto3.client("s3", region_name=region) if region else boto3.client("s3")
     version = upload(site, bucket, prefix, client)
     try:
@@ -266,8 +269,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--names", default="{}", help="persona keys to on-air names, as JSON")
     p.add_argument("--site-name", default=SITE_NAME)
     p.add_argument("--more-tab", default=MORE_TAB)
+    p.add_argument("--season-start", help="the league's season start, MM-DD")
     a = p.parse_args(argv)
-    version = publish(a.db, a.site, a.bucket, a.prefix, a.region, json.loads(a.names), a.site_name, a.more_tab)
+    version = publish(a.db, a.site, a.bucket, a.prefix, a.region, json.loads(a.names), a.site_name, a.more_tab,
+                      a.season_start)
     print(f"Published {version} to s3://{a.bucket}/{a.prefix}")
 
 

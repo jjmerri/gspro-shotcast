@@ -791,10 +791,12 @@ class Tray:
         site = Path(self.cfg.log_dir) / "stats-web-site"
         def videos():   # self.cfg as Settings last saved it
             return local_video.folder(self.cfg.live, self.home), self.cfg.live.local_keep_days
+        def brand():
+            return self.cfg.publish.brand
         try:
-            server = make_server(db, STATS_PORT, names, site, self.cfg.publish.brand, videos)
+            server = make_server(db, STATS_PORT, names, site, brand, videos)
         except OSError:
-            server = make_server(db, 0, names, site, self.cfg.publish.brand, videos)   # the usual port is taken
+            server = make_server(db, 0, names, site, brand, videos)   # the usual port is taken
         self.stats_url = f"http://127.0.0.1:{server.server_address[1]}/"
         (Path(self.cfg.log_dir) / "stats-url.txt").write_text(self.stats_url, encoding="utf-8")
         threading.Thread(target=server.serve_forever, name="stats", daemon=True).start()

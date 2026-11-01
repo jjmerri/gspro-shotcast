@@ -7798,7 +7798,8 @@ class Engine:
         cmd = [sys.executable, "-m", "commentator.stats_site", "--db", str(self.cfg.db_path),
                "--site", str(Path(self.cfg.log_dir) / "stats-site"), "--bucket", p.bucket, "--prefix", p.prefix,
                "--names", json.dumps(names), "--site-name", p.site_name, "--more-tab", p.more_tab] \
-            + (["--region", p.region] if p.region else [])
+            + (["--region", p.region] if p.region else []) \
+            + (["--season-start", p.season_start] if p.season_start else [])
         # Its own process, so building the stats never holds up the booth during the next round.
         proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
                                                     stderr=asyncio.subprocess.STDOUT)

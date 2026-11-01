@@ -152,8 +152,9 @@ def test_server_serves_the_page_and_summary(tmp_path):
                " VALUES (1, 0, '2026-10-16', 'Pebble', 'Ann', 9, 37, ?, ?, 0)",
                (json.dumps({"1": 5, "2": 4}), json.dumps(PARS)))
     db.commit()
+    brand = {"site_name": "Ann & Bo's", "more_tab": "The Shed"}
     server = stats_web.make_server(path, port=0, site=tmp_path / "site",   # season.db is next to site/
-                                   brand={"site_name": "Ann & Bo's", "more_tab": "The Shed"})
+                                   brand=lambda: brand)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
     try:
@@ -177,6 +178,10 @@ def test_server_serves_the_page_and_summary(tmp_path):
         with pytest.raises(urllib.error.HTTPError) as e:
             urllib.request.urlopen(base + "/../season.db")
         assert e.value.code == 404
+        brand = {**brand, "season_start": "10-01"}     # saved in Settings: the next visit has it
+        version = json.loads(urllib.request.urlopen(base + "/latest.json").read())["version"]
+        body = json.loads(urllib.request.urlopen(f"{base}/v/{version}/summary-practice.json").read())
+        assert body["season_from"]
     finally:
         server.shutdown()
         server.server_close()

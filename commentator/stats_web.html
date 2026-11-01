@@ -182,7 +182,7 @@ const state = { tab: "home", ctx: "", data: null, player: null, me: "", mine: nu
                 seen: Number(store.get("shotcast.seen")) || 0,
                 round: null, roundGroup: null, sort: {}, more: {}, course: null, versus: [null, null], shotFilter: {}, shots: null, shotOpen: null,
                 session: null, transcript: null, transcriptFor: null, replays: {}, replayHole: null, replayOnly: false,
-                vods: undefined, clips: undefined, vod: null, schedule: undefined, period: "1y" };
+                vods: undefined, clips: undefined, vod: null, schedule: undefined, period: null };
 
 // A link holds the view: #view?player=…&ctx=… and the view's own keys (hashFor): a shots filter and an
 // open shot, a round and hole, a course, a head-to-head pair, a player, a session, a video and a time
@@ -220,7 +220,7 @@ function applyHash() {
   if (state.tab === "courses" && q.get("course")) state.course = q.get("course");
   if (state.tab === "player") state.player = q.get("name") || q.get("show") || state.player;
   if (state.tab === "versus") state.versus = [q.get("a") || state.versus[0] || state.me || null, q.get("b") || state.versus[1]];
-  if (state.tab === "highlights") state.period = PERIODS.some(p => p[0] === q.get("period")) ? q.get("period") : "1y";
+  if (state.tab === "highlights") state.period = q.get("period") === "season" || PERIODS.some(p => p[0] === q.get("period")) ? q.get("period") : null;
   if (state.tab === "vods") state.vod = q.get("clip") ? { clip: q.get("clip"), at: +q.get("at") || 0 }
     : q.get("vod") ? { session: q.get("vod"), at: +q.get("at") || 0 } : null;
   if (state.tab === "broadcasts" && num("session")) state.session = num("session");
@@ -407,7 +407,7 @@ function hashFor(tab = state.tab, v = null) {
   else if (tab === "courses") set("course", state.course);
   else if (tab === "versus") { set("a", state.versus[0]); set("b", state.versus[1]); }
   else if (tab === "player") set("name", state.player);
-  else if (tab === "highlights" && state.period !== "1y") set("period", state.period);
+  else if (tab === "highlights" && state.period) set("period", state.period);
   else if (tab === "vods" && state.vod) { state.vod.clip ? set("clip", state.vod.clip) : set("vod", state.vod.session); if (state.vod.at) set("at", state.vod.at); }
   else if (tab === "broadcasts") set("session", state.session);
   return "#" + tab + "?" + q;
@@ -761,9 +761,9 @@ function renderHome() {
   if (!me) {   // the season's leaders, for everyone
     const ix = d.players.filter(p => p.index !== null && p.index !== undefined).sort((a, b) => a.index - b.index)[0];
     if (ix) cards.push(`<div class="card go" data-player="${esc(ix.name)}"><div class="k">Lowest handicap</div><div class="v">${hcp(ix.index)}</div><div class="sub">${esc(ix.name)} · ${toPar(ix.avg_to_par_9)} a nine</div></div>`);
-    const rec = d.records["1y"] || {};
+    const span = d.records.season ? "season" : "1y", rec = d.records[span] || {};
     for (const [k, label, v] of [["longest_drive", "Longest drive", x => Math.round(x.v) + " yd"], ["longest_putt", "Longest putt holed", x => Math.round(x.v * 3) + " ft"]])
-      if (rec[k]) cards.push(`<div class="card go" data-tab="highlights"><div class="k">${label} <span class="sub">this year</span></div><div class="v">${v(rec[k])}</div><div class="sub">${esc(rec[k].player)} · ${esc(rec[k].course || "")}</div></div>`);
+      if (rec[k]) cards.push(`<div class="card go" data-tab="highlights"><div class="k">${label} <span class="sub">${span === "season" ? "this season" : "past year"}</span></div><div class="v">${v(rec[k])}</div><div class="sub">${esc(rec[k].player)} · ${esc(rec[k].course || "")}</div></div>`);
   }
   // The latest rounds as played: each with its sides' scores.
   const groups = [];
@@ -1440,8 +1440,19 @@ function renderBroadcasts() {
   return `<h2>${meTitle("Broadcasts")}</h2>${pick}<div>${body || '<p class="empty">Nothing said in this session.</p>'}</div>`;
 }
 
+// The Records range shown: the one picked, else the season under way (publish.season_start), else a year.
+function periodShown() {
+  const season = !!(state.data.records || {}).season;
+  return state.period && (state.period !== "season" || season) ? state.period : season ? "season" : "1y";
+}
+
+function periodsOffered() {
+  const from = state.data.season_from;
+  return from ? [["season", `This season <span class="sub">since ${esc(when(from + "T12:00:00", { month: "short", day: "numeric" }))}</span>`], ...PERIODS] : PERIODS;
+}
+
 function renderHighlights() {
-  const p = state.period;
+  const p = periodShown();
   if (!state.me) return highlightsView(state.data.records[p], state.data.highlights[p]);
   return withMine(meTitle("Records"), m => highlightsView(m.records[p], m.highlights[p]));
 }
@@ -1453,8 +1464,8 @@ function highlightsView(r, h) {
   const top = (title, rows, fmt) => `<div><h3>${title}</h3><table><tbody>${rows.length ? rows.map((x, i) =>
     `<tr><td class="wrap">${i + 1}. <b>${esc(x.player)}</b><br><span class="sub">${esc(x.date)} · ${esc(where(x))}</span>${shotActions(x)}</td><td>${fmt(x)}</td></tr>`).join("")
     : '<tr><td class="empty">None yet</td></tr>'}</tbody></table></div>`;
-  const pick = `<div class="controls"><div class="seg">${PERIODS.map(([k, label]) =>
-    `<button data-period="${k}" class="${k === state.period ? "on" : ""}">${label}</button>`).join("")}</div></div>`;
+  const pick = `<div class="controls"><div class="seg">${periodsOffered().map(([k, label]) =>
+    `<button data-period="${k}" class="${k === periodShown() ? "on" : ""}">${label}</button>`).join("")}</div></div>`;
   return `<h2>${meTitle("Records")}</h2>${pick}<div class="cards">
     ${card("Longest drive", r.longest_drive, x => Math.round(x.v) + " yd")}
     ${(r.approaches || []).map(b => card(`Closest approach <span class="sub">${b.from}–${b.to} yd</span>`, b.best, x => `${x.outcome === "holed" ? "holed" : ft(x.v) + " ft"} <span class="sub">${esc(x.club || "")}${x.from_yd != null ? ` from ${x.from_yd} yd` : ""}</span>`)).join("")}

@@ -1,5 +1,7 @@
+import calendar
+import re
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -669,10 +671,25 @@ class PublishConfig(BaseModel):
     # Broadcasts, Booth), here and on the booth's own copy of the page.
     site_name: str = "Shotcast"
     more_tab: str = "More"
+    # The day the league's season starts each year (MM-DD, like "10-01"): the page's records get a
+    # This season range, from the latest such day. Empty: the ranges only go back months.
+    season_start: str | None = None
+
+    @field_validator("season_start", mode="before")
+    @classmethod
+    def _month_day(cls, v: Any) -> str | None:
+        if v is None or not str(v).strip():
+            return None
+        m = re.fullmatch(r"(\d{1,2})\s*[-/]\s*(\d{1,2})", str(v).strip())
+        month, day = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+        if not (1 <= month <= 12 and 1 <= day <= calendar.monthrange(2024, month)[1]):
+            raise ValueError(f"season_start should be a month and day like 10-01, not {v!r}")
+        return f"{month:02d}-{day:02d}"
 
     @property
-    def brand(self) -> dict[str, str]:
-        return {"site_name": self.site_name, "more_tab": self.more_tab}
+    def brand(self) -> dict[str, str | None]:
+        """build()'s options for the page: its name, last tab's name and season start."""
+        return {"site_name": self.site_name, "more_tab": self.more_tab, "season_start": self.season_start}
 
 
 class LiveConfig(BaseModel):

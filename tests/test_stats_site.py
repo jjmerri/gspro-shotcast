@@ -157,6 +157,31 @@ async def test_publish_goes_out_once_the_sign_off_has_aired_with_the_timer_as_a_
     assert ran == [1]
 
 
+async def test_the_publish_after_a_round_uses_the_season_start(tmp_path, monkeypatch):
+    from tests.test_round import _engine as make
+
+    eng = make(tmp_path)
+    eng.cfg.publish.bucket, eng.cfg.publish.season_start = "bkt", "10-01"
+    ran = []
+
+    class Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"Published v1", None
+
+    async def fake_exec(*cmd, **kw):
+        ran.append(cmd)
+        return Proc()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    await eng._publish()
+    assert ran[0][1:3] == ("-m", "commentator.stats_site")
+    got = {}
+    monkeypatch.setattr(stats_site, "publish", lambda *a: got.setdefault("args", a) and "v1")
+    stats_site.main(list(ran[0][3:]))
+    assert got["args"][-1] == "10-01"
+
+
 def test_shots_are_put_in_the_round_that_ended_next_on_their_course(tmp_path):
     path = tmp_path / "season.db"
     Store(str(path)).close()
@@ -221,3 +246,22 @@ def test_each_player_gets_a_file_of_just_their_courses_highlights_and_records(tm
     assert ann["records"]["all"]["longest_drive"]["player"] == "Ann"
     assert everyone["longest_drive"]["player"] == "Bob"   # the last shots are Bob's: the longest drives
     assert (vdir / "player" / "league").is_dir() and (vdir / "player" / "practice").is_dir()
+    assert body["season_from"] is None and "season" not in ann["records"]
+    vdir = site / "v" / stats_site.build(path, site, season_start="10-01")
+    body = json.loads((vdir / "summary-all.json").read_text())
+    ann = json.loads((vdir / "player" / "all" / f"{files['Ann']}.json").read_text())
+    assert body["season_from"] == stats_web.season_start("10-01") and "season" in body["records"]
+    assert "season" in ann["records"] and "season" in ann["highlights"]
+
+
+def test_a_season_start_is_a_month_and_day():
+    import pytest
+
+    from commentator.config import PublishConfig
+
+    assert PublishConfig(season_start="10/1").season_start == "10-01"
+    assert PublishConfig(season_start=" ").season_start is None
+    assert PublishConfig(season_start="2-29").brand["season_start"] == "02-29"
+    for bad in ("13-01", "04-31", "October", "2026-10-01"):
+        with pytest.raises(ValueError):
+            PublishConfig(season_start=bad)

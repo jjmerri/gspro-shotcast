@@ -780,14 +780,14 @@ def cmd_publish(cfg: Config, args) -> None:
     site = Path(args.out or Path(cfg.log_dir) / "stats-site")
     names = {key: persona.name for key, persona in cfg.personas.items()}
     if args.build_only:
-        version = stats_site.build(path, site, names, site_name=cfg.publish.site_name, more_tab=cfg.publish.more_tab)
+        version = stats_site.build(path, site, names, **cfg.publish.brand)
         print(f"Built {version} in {site}")
         return
     if not cfg.publish.bucket:
         sys.exit("Set publish.bucket in config.yaml first (docs/tracking.md#sharing-the-stats-page).")
     try:
         version = stats_site.publish(path, site, cfg.publish.bucket, cfg.publish.prefix, cfg.publish.region, names,
-                                     cfg.publish.site_name, cfg.publish.more_tab)
+                                     **cfg.publish.brand)
     except ImportError:
         sys.exit('Publishing needs boto3: pip install -e ".[publish]"')
     print(f"Published {version} to s3://{cfg.publish.bucket}/{cfg.publish.prefix}")

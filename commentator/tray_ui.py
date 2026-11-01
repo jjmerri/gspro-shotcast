@@ -257,6 +257,8 @@ CONFIG_FIELDS: list[tuple[str, str, tuple[str, ...], str, str]] = [
      "openai uses OPENAI_API_KEY; google uses GOOGLE_TTS_API_KEY."),
     ("League", "League file", ("league_file",), "file", "Players, handicaps and the schedule (optional)."),
     ("League", "Live handicaps from Squabbit", ("squabbit", "enabled"), "bool", ""),
+    ("League", "Season starts (month-day)", ("publish", "season_start"), "text",
+     "Like 10-01 for a season from October: the stats page's records get a This season range. Empty: none."),
     ("League", "SuperSaaS bookings", ("booking", "enabled"), "bool", "Practice bookings make a round practice."),
     ("League", "SuperSaaS account", ("booking", "account"), "text", ""),
     ("League", "SuperSaaS schedule ID", ("booking", "schedule_id"), "int", ""),

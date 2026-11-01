@@ -194,7 +194,7 @@ Broadcasts, Booth). A section with more than one view has its own row of tabs at
 
 - **Home**: what's on air, the next booking, the latest rounds with every side's score, and recent
   moments; with a player picked, their numbers and latest round too, and without one the season's
-  lowest handicap, longest drive and longest putt holed. Each is a tap to its round, player or tab.
+  lowest handicap, longest drive and longest putt holed (this season with a season start set, else the past year). Each is a tap to its round, player or tab.
 - **Players**: the season table; tapping a player opens their page: strokes gained per nine (off the tee, approach,
   around the green, putting), night-by-night trends, club gapping with each club's typical flight
   (from full swings only, so chips don't shrink a wedge), approach by club, putting by length, and
@@ -223,7 +223,9 @@ Broadcasts, Booth). A section with more than one view has its own row of tabs at
 - **Records**: records, aces, eagles, hole-outs, birdie streaks, bounce-backs, blow-ups, and
   top-five drives, approaches, chips and putts. An approach is a full shot from 51-250 yd that isn't
   a par-4/5 tee shot (a par-3 tee shot counts); a chip is from 50 yd and in, off the green. Pick the
-  last 3, 6 or 9 months, the last year (the default) or all time, counted back from when the page was built.
+  last 3, 6 or 9 months, the last year or all time, counted back from when the page was built. With a
+  season start set (Settings → League, `publish.season_start`, like `10-01` for a season from October),
+  there's **This season** too, from the latest such day, and it's the default (else the last year is).
   Closest approach has a card for each band (51-100, 100-150, 150-200 and 200-250 yd), since a
   2 ft leave from 200 yd beats a 1 ft one from 80. Each has **View shot**, which lists its round's
   shots with that one open.

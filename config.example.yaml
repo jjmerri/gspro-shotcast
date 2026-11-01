@@ -254,6 +254,7 @@ publish:
   # delay_seconds: 180                   # it publishes once the sign-off has aired; this is the backup
   # site_name: Shotcast                  # the page's title and header
   # more_tab: More                       # the tab for Schedule, Broadcasts and Booth
+  # season_start: "10-01"                # the league's season starts each Oct 1: Records gets This season
 
 # "Create a problem report" in the tray can send its zip to whoever supports Shotcast and give you
 # a code to pass on. Set upload_url to "" to only save it (DEPLOY.md#problem-report-drop).
