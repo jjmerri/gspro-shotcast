@@ -43,7 +43,8 @@ areas marked.
 Every swing goes into `logs/season.db` with its launch data,
 where it finished and what it scored, plus each round's card and stats. The stats page shows
 strokes gained, club gapping, approach and putting by distance, scorecards, every shot, and
-season highlights, plus each player's handicap index. A misread or practice swing can be left
+season highlights, plus each player's handicap index. Records run over the past year, or from
+your league's season start if you set one (Settings → League, like `10-01`). A misread or practice swing can be left
 out of the stats with a click. Works with any launch monitor GSPro supports; see
 [what's recorded with yours](docs/tracking.md#launch-monitors). Lefties who use GSPro's mirrored
 HUD are read too: the layout is detected per player, shot by shot.
