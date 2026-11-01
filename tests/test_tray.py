@@ -194,3 +194,34 @@ def test_start_the_live_stream_starts_obs_when_it_isnt_running(tmp_path, monkeyp
     monkeypatch.setattr(tray.threading, "Thread", lambda target, args, **kw: SimpleNamespace(start=lambda: target(*args)))
     tray.Tray.toggle_live(app)
     assert calls == ["launch", "start"] and len(errors) == 1 and "recordings folder" in notes[-1]
+
+
+def test_a_run_of_edits_on_the_local_page_publishes_once_after_the_last(tmp_path):
+    import threading
+    import time
+
+    ran, done = [], threading.Event()
+
+    class Done:
+        returncode, stdout, stderr = 0, "Published v1 to s3://b/\n", ""
+
+    def run(cmd, **kw):
+        ran.append(cmd)
+        done.set()
+        return Done()
+
+    pub = tray.AutoPublisher(lambda: ["py", "-m", "commentator.stats_site"], tmp_path, delay=0.2, run=run)
+    for _ in range(3):
+        pub.changed()
+        time.sleep(0.05)
+    assert pub.status()["due"] is not None and not ran
+    assert done.wait(2)
+    time.sleep(0.3)   # the replaced timers never publish
+    assert ran == [["py", "-m", "commentator.stats_site"]]
+    status = pub.status()
+    assert status["due"] is None and not status["publishing"]
+    assert status["last"]["ok"] and status["last"]["message"] == "Published v1 to s3://b/"
+
+    off = tray.AutoPublisher(lambda: None, tmp_path, delay=0.01, run=run)
+    off.changed()   # publishing isn't set up: nothing waits
+    assert not off.status()["enabled"] and off.status()["due"] is None

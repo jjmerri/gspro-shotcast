@@ -267,7 +267,9 @@ def test_the_local_page_can_leave_a_shot_out(tmp_path):
     _shot(db, "Ann", club="DR", shot_number=1, lie_before="tee", total_yards=330)
     _shot(db, "Ann", club="DR", shot_number=1, lie_before="tee", total_yards=250)
     db.commit()
-    server = stats_web.make_server(path, port=0, site=tmp_path / "site")
+    changes = []
+    server = stats_web.make_server(path, port=0, site=tmp_path / "site", on_change=lambda: changes.append(1),
+                                   publish_status=lambda: {"enabled": True, "due": 5})
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
 
@@ -290,6 +292,9 @@ def test_the_local_page_can_leave_a_shot_out(tmp_path):
                 post({"left_out": False, "ts": 0}, **bad)
             assert e.value.code == code
         assert db.execute("SELECT left_out FROM shots WHERE id = 1").fetchone()[0] == 1
+        assert changes == [1]   # only the edit that saved: the tray publishes after it
+        status = json.loads(urllib.request.urlopen(base + "/api/publish-status").read())
+        assert status == {"enabled": True, "due": 5}
     finally:
         server.shutdown()
         server.server_close()

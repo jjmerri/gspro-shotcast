@@ -122,8 +122,15 @@ per-player stats. Replays and evals use an in-memory DB and never touch the file
 shot on the Shots tab of the local stats page (the tray's Open stats) and click "Leave this shot
 out of the stats". It sets `shots.left_out = 1`: the stroke stays on the card, in the hole's score
 and in the replay, but drops out of every average, record, gapping table, highlight and strokes
-gained. Click again to count it. The published page is read-only and shows the tag; the change goes
-out with the next publish. Only the local page accepts the change (from this PC, JSON requests only).
+gained. Click again to count it. The published page is read-only and shows the tag. Only the local
+page accepts the change (from this PC, JSON requests only).
+
+**Edits go up on their own.** With publishing on (`publish.enabled` and a bucket), the tray publishes
+the site a minute after the last edit on the local page (a shot left out, a round excluded, deleted
+or switched between league and practice), so a run of edits goes up once. A note in the page's corner
+says when, and whether it worked. One publish runs at a time: the booth's after-round publish and the
+tray's wait for each other (`stats-site.lock` in the log folder). An edit made just before quitting
+the tray goes up with the next publish.
 
 Shots recorded before the booth stored positions can get them from a saved GSPro log:
 `python -m commentator backfill-log <output_log.txt>... [--db logs/season.db] [--dry-run] [--fix-starts]`. The log

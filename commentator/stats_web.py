@@ -9,6 +9,7 @@ only, since a scramble or alternate-shot score isn't one player's.
 import bisect
 import calendar
 import json
+import logging
 import re
 import sqlite3
 import tempfile
@@ -25,6 +26,8 @@ from urllib.parse import unquote, urlparse
 from . import handicap_index
 from . import season_analytics as A
 from .store import CLOSER_SECONDS
+
+log = logging.getLogger(__name__)
 
 SHARED_BALL = ("scramble", "alternate")
 # Putt length bucket edges in feet (to_pin_yards is stored in yards); the first bucket starts at the
@@ -703,14 +706,18 @@ def summary(db: sqlite3.Connection, context: str | None = None,
 def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | None = None,
                 site: str | Path | None = None,
                 brand: dict[str, Any] | Callable[[], dict[str, Any]] | None = None,
-                videos: Callable[[], tuple[Path | None, int]] | None = None) -> ThreadingHTTPServer:
+                videos: Callable[[], tuple[Path | None, int]] | None = None,
+                on_change: Callable[[], None] | None = None,
+                publish_status: Callable[[], dict[str, Any]] | None = None) -> ThreadingHTTPServer:
     """Serve the stats page on localhost only (port 0 picks a free one), the same static site that
     `publish` uploads (stats_site.py), built into `site` (a temp folder by default) and rebuilt when
     the database changes. `names` maps persona keys to on-air names; `brand` is build()'s site_name,
     more_tab and season_start, or a function returning them, asked on each request so a change in
     Settings rebuilds the page. `videos()`: where the round videos kept on the PC are (local_video.py; None if they
     aren't) and for how many days, asked on each request so a change in Settings counts at once. They're
-    served as the bucket's live/ (recordings.json, s/<session>/full.m3u8), so the Watch buttons play them."""
+    served as the bucket's live/ (recordings.json, s/<session>/full.m3u8), so the Watch buttons play them.
+    `on_change()` is called after an edit from the page is saved (the tray publishes the site a while
+    later); `publish_status()` is what GET api/publish-status answers, so the page can say when it's up."""
     from . import local_video, stats_site
 
     db_path = Path(db_path)
@@ -733,6 +740,9 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
             self._file(head=True)
 
         def do_GET(self):  # noqa: N802
+            if urlparse(self.path).path == "/api/publish-status":
+                status = publish_status() if publish_status else {"enabled": False}
+                return self._send(200, json.dumps(status).encode(), "application/json")
             self._file(head=False)
 
         def do_POST(self):  # noqa: N802
@@ -773,6 +783,11 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
                 return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
             except (OSError, sqlite3.Error) as e:
                 return self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
+            if on_change is not None:
+                try:
+                    on_change()
+                except Exception:   # the edit is saved either way
+                    log.exception("After a stats page edit")
             self._send(200, json.dumps({"id": ident, {"delete": "deleted"}.get(key, key): value}).encode(),
                        "application/json")
 

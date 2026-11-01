@@ -4,6 +4,8 @@ import json
 import sqlite3
 from contextlib import closing
 
+import pytest
+
 from commentator import season_analytics as A
 from commentator import stats_site, stats_web
 from commentator.store import Store
@@ -265,3 +267,25 @@ def test_a_season_start_is_a_month_and_day():
     for bad in ("13-01", "04-31", "October", "2026-10-01"):
         with pytest.raises(ValueError):
             PublishConfig(season_start=bad)
+
+
+def test_one_publish_at_a_time_holds_the_sites_lock(tmp_path):
+    import threading
+
+    held, release = threading.Event(), threading.Event()
+
+    def first():
+        with stats_site.site_lock(tmp_path / "stats-site"):
+            held.set()
+            release.wait(5)
+
+    t = threading.Thread(target=first)
+    t.start()
+    assert held.wait(5)
+    with pytest.raises(TimeoutError):   # the booth's publish waits for the tray's
+        with stats_site.site_lock(tmp_path / "stats-site", timeout=0.3):
+            pass
+    release.set()
+    t.join()
+    with stats_site.site_lock(tmp_path / "stats-site", timeout=1):
+        pass

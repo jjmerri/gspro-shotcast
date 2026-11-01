@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 APP = "Shotcast"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 STATS_PORT = 8765
+PUBLISH_AFTER_EDIT_S = 60.0   # a run of edits on the local page goes up once, this long after the last
 RESTARTS, RESTART_WINDOW_S = 3, 600      # crashes in that window before it stops restarting
 UPDATE_EVERY_S = 6 * 3600
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -314,6 +315,70 @@ class Booth:
         self.on_change()
 
 
+# ---- publishing after an edit on the local page ---------------------------------------------
+
+class AutoPublisher:
+    """Publishes the stats site PUBLISH_AFTER_EDIT_S after the last edit on the local page (an
+    exclude, a delete, a league/practice switch, a shot left out), so a run of edits goes up once.
+    The publish is the booth's own command (stats_site.publish_command) in its own process, which
+    takes stats_site.site_lock, so it never overlaps the booth's after-round publish. `command()`
+    is asked when it runs, so a change in Settings counts; None means publishing is off."""
+
+    def __init__(self, command, cwd: Path, delay: float = 60.0, run=subprocess.run, clock=time.time) -> None:
+        self._command, self._cwd, self.delay, self._run, self._clock = command, cwd, delay, run, clock
+        self._lock = threading.Lock()        # the status
+        self._one = threading.Lock()         # one publish at a time
+        self._timer: threading.Timer | None = None
+        self.due: float | None = None
+        self.publishing = False
+        self.last: dict | None = None        # {"ok", "at", "message"}
+
+    def changed(self) -> None:
+        if self._command() is None:
+            return
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+            self.due = self._clock() + self.delay
+            self._timer = threading.Timer(self.delay, self._fire)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def status(self) -> dict:
+        with self._lock:
+            return {"enabled": self._command() is not None, "due": self.due, "publishing": self.publishing,
+                    "last": self.last, "now": self._clock()}
+
+    def _fire(self) -> None:
+        with self._one:
+            with self._lock:
+                if self.due is None or self.due > self._clock() + 0.5:
+                    return   # a newer edit moved it: that timer publishes
+                self.due, self.publishing = None, True
+            ok, message = self.publish()
+            with self._lock:
+                self.publishing = False
+                self.last = {"ok": ok, "at": self._clock(), "message": message}
+
+    def publish(self) -> tuple[bool, str]:
+        cmd = self._command()
+        if cmd is None:
+            return False, "publishing is off"
+        try:
+            done = self._run(cmd, cwd=self._cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=900, creationflags=NO_WINDOW)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log.warning("Publishing after an edit failed: %s", e)
+            return False, str(e)
+        text = ((done.stdout or "") + (done.stderr or "")).strip()
+        last = text.splitlines()[-1] if text else f"exit {done.returncode}"
+        if done.returncode == 0:
+            log.info("Stats page after an edit: %s", last)
+            return True, last
+        log.warning("Publishing after an edit failed: %s", text[-2000:])
+        return False, last
+
+
 # ---- the tray --------------------------------------------------------------------------------
 
 class Tray:
@@ -330,6 +395,15 @@ class Tray:
         self.ui = None
         self._stop = threading.Event()
         self._live_setup = threading.Lock()
+        self.publisher = AutoPublisher(self._publish_command, home, PUBLISH_AFTER_EDIT_S)
+
+    def _publish_command(self) -> list[str] | None:
+        from .stats_site import publish_command
+
+        if not self.cfg.publish.enabled:   # self.cfg as Settings last saved it
+            return None
+        cmd = publish_command(self.cfg)
+        return cmd and [python_exe(), *cmd[1:]]   # python.exe: its output is caught
 
     # -- status
     def status(self) -> str:
@@ -793,10 +867,12 @@ class Tray:
             return local_video.folder(self.cfg.live, self.home), self.cfg.live.local_keep_days
         def brand():
             return self.cfg.publish.brand
+        publisher = self.publisher
+        hooks = {"on_change": publisher.changed, "publish_status": publisher.status}
         try:
-            server = make_server(db, STATS_PORT, names, site, brand, videos)
+            server = make_server(db, STATS_PORT, names, site, brand, videos, **hooks)
         except OSError:
-            server = make_server(db, 0, names, site, brand, videos)   # the usual port is taken
+            server = make_server(db, 0, names, site, brand, videos, **hooks)   # the usual port is taken
         self.stats_url = f"http://127.0.0.1:{server.server_address[1]}/"
         (Path(self.cfg.log_dir) / "stats-url.txt").write_text(self.stats_url, encoding="utf-8")
         threading.Thread(target=server.serve_forever, name="stats", daemon=True).start()

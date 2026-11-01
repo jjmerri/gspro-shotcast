@@ -10,6 +10,10 @@
   :root { --bg:#0f1715; --panel:#16211e; --line:#24332f; --text:#e6efe9; --dim:#8fa59b; --accent:#5fc58a;
           --bad:#e07a6b; --birdie:#d9534f; --eagle:#f0ad4e; --bogey:#3a7bd5; --double:#24539c; }
   * { box-sizing: border-box; }
+  #pubnote { position:fixed; right:14px; bottom:14px; z-index:50; max-width:min(420px, calc(100vw - 28px));
+             background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 12px;
+             font-size:13px; color:var(--dim); box-shadow:0 4px 14px rgba(0,0,0,.4); }
+  #pubnote.bad { color:var(--bad); }
   body { margin:0; font:14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
          background:var(--bg); color:var(--text); }
   header { display:flex; flex-wrap:wrap; gap:12px 16px; align-items:center; padding:12px 22px;
@@ -161,6 +165,7 @@
   <div class="meta" id="meta"></div>
 </header>
 <main id="main"></main>
+<div id="pubnote" role="status" hidden></div>
 <script src="vendor/sql.js-httpvfs-0.8.12/index.js"></script>
 <script>
 // The page's views, in five sections (the header's tabs); a section with more than one view has its
@@ -315,6 +320,30 @@ async function queryTranscript(id) {
 }
 
 let loading = 0;   // only the latest load() may show its data (a slow older one can finish last)
+// The booth's own page: an edit goes up to the published site a minute after the last one (the tray's
+// AutoPublisher). This note says when, polling while one is waiting or running.
+let pubPoll = null, pubSeen = false, pubAsk = 0;
+async function pubWatch() {
+  clearTimeout(pubPoll);
+  pubPoll = null;
+  if (!state.local) return;
+  const note = $("#pubnote"), mine = ++pubAsk;
+  let s = null;
+  try { const r = await fetch("api/publish-status", { cache: "no-store" }); s = r.ok ? await r.json() : null; } catch (e) { s = null; }
+  if (mine !== pubAsk) return;   // a newer check is on its way
+  if (!s || !s.enabled) { note.hidden = true; return; }
+  const busy = s.publishing || s.due != null;
+  note.classList.remove("bad");
+  if (s.publishing) note.textContent = "Publishing your changes to the site…";
+  else if (s.due != null) note.textContent = `Your changes go up to the site in ${Math.max(0, Math.ceil(s.due - s.now))}s`;
+  else if (pubSeen && s.last && s.last.ok) note.textContent = "Your changes are on the site";
+  else if (pubSeen && s.last) { note.textContent = `Couldn't publish your changes: ${s.last.message}`; note.classList.add("bad"); }
+  else { note.hidden = true; return; }
+  note.hidden = false;
+  if (busy) { pubSeen = true; pubPoll = setTimeout(pubWatch, 2000); }
+  else if (s.last && s.last.ok) { pubSeen = false; pubPoll = setTimeout(() => { pubPoll = null; note.hidden = true; }, 8000); }
+}
+
 async function load() {
   const mine = ++loading;
   $("#main").innerHTML = '<p class="sub">Loading…</p>';
@@ -322,6 +351,7 @@ async function load() {
     const latest = await getJSON("latest.json", { cache: "no-store" });
     if (mine !== loading) return;
     state.local = !!latest.local;   // served by the booth's own stats server, which can leave shots out
+    if (state.local && !pubPoll) pubWatch();
     if (!site || site.version !== latest.version) { site = { version: latest.version, db: null }; state.transcriptFor = null; state.replays = {}; }
     const body = await getJSON(`v/${site.version}/summary-${state.ctx || "all"}.json`);
     if (mine !== loading) return;
@@ -1858,7 +1888,7 @@ document.addEventListener("click", (e) => {
     t.textContent = "Saving…";
     fetch(`api/shots/${t.dataset.leaveout}/left-out`, { method: "POST", headers: { "Content-Type": "application/json" },
                                                        body: JSON.stringify({ left_out: t.dataset.on === "1", ts: +t.dataset.ts }) })
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); load(); })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); load(); pubWatch(); })
       .catch(e => { t.textContent = `Couldn't save (${e.message})`; });
     return;
   }
@@ -1871,6 +1901,7 @@ document.addEventListener("click", (e) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         if (state.ctx) state.ctx = t.dataset.on === "1" ? "league" : "practice";   // stay on the round
         load();
+        pubWatch();
       })
       .catch(e => { t.disabled = false; t.textContent = `Couldn't save (${e.message})`; });
     return;
@@ -1883,7 +1914,7 @@ document.addEventListener("click", (e) => {
     t.textContent = "Saving…";
     fetch(`api/rounds/${id}/${del ? "delete" : "excluded"}`, { method: "POST", headers: { "Content-Type": "application/json" },
                                                          body: JSON.stringify({ ended: +t.dataset.ended, ...(del ? { confirm: true } : { excluded: t.dataset.on === "1" }) }) })
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); state.tab = "rounds"; showTabs(); load(); })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); state.tab = "rounds"; showTabs(); load(); pubWatch(); })
       .catch(e => { t.disabled = false; t.textContent = `Couldn't save (${e.message})`; });
     return;
   }

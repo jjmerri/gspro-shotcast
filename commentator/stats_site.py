@@ -24,7 +24,7 @@ import shutil
 import sqlite3
 import time
 from html import escape
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -256,6 +256,52 @@ def publish(db_path: str | Path, site: str | Path, bucket: str, prefix: str = ""
     return version
 
 
+def publish_command(cfg: Any) -> list[str] | None:
+    """The command that publishes the site for this config (the booth after a round, the tray after
+    an edit on the local page), or None without a bucket."""
+    import sys
+
+    p = cfg.publish
+    if not p.bucket:
+        return None
+    names = {key: persona.name for key, persona in cfg.personas.items()}
+    return [sys.executable, "-m", "commentator.stats_site", "--db", str(cfg.db_path),
+            "--site", str(Path(cfg.log_dir) / "stats-site"), "--bucket", p.bucket, "--prefix", p.prefix,
+            "--names", json.dumps(names), "--site-name", p.site_name, "--more-tab", p.more_tab] \
+        + (["--region", p.region] if p.region else []) \
+        + (["--season-start", p.season_start] if p.season_start else [])
+
+
+@contextmanager
+def site_lock(site: str | Path, timeout: float = 300.0):
+    """One publish at a time, across processes (the booth's after a round, the tray's after an edit):
+    they build into the same folder and upload over each other. Each builds from the database once it
+    holds the lock, so the last to finish has the newest data."""
+    import sys
+
+    path = Path(str(site).rstrip("/\\") + ".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout
+    with open(path, "a+b") as f:
+        while True:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"another publish has held {path} for {timeout:.0f}s") from None
+                time.sleep(0.5)
+        yield   # closing the file releases the lock
+
+
 def main(argv: list[str] | None = None) -> None:
     """`python -m commentator.stats_site`: what the booth runs, in its own process, after a round."""
     import argparse
@@ -271,8 +317,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--more-tab", default=MORE_TAB)
     p.add_argument("--season-start", help="the league's season start, MM-DD")
     a = p.parse_args(argv)
-    version = publish(a.db, a.site, a.bucket, a.prefix, a.region, json.loads(a.names), a.site_name, a.more_tab,
-                      a.season_start)
+    with site_lock(a.site):
+        version = publish(a.db, a.site, a.bucket, a.prefix, a.region, json.loads(a.names), a.site_name,
+                          a.more_tab, a.season_start)
     print(f"Published {version} to s3://{a.bucket}/{a.prefix}")
 
 

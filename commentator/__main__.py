@@ -786,8 +786,9 @@ def cmd_publish(cfg: Config, args) -> None:
     if not cfg.publish.bucket:
         sys.exit("Set publish.bucket in config.yaml first (docs/tracking.md#sharing-the-stats-page).")
     try:
-        version = stats_site.publish(path, site, cfg.publish.bucket, cfg.publish.prefix, cfg.publish.region, names,
-                                     **cfg.publish.brand)
+        with stats_site.site_lock(site):
+            version = stats_site.publish(path, site, cfg.publish.bucket, cfg.publish.prefix, cfg.publish.region,
+                                         names, **cfg.publish.brand)
     except ImportError:
         sys.exit('Publishing needs boto3: pip install -e ".[publish]"')
     print(f"Published {version} to s3://{cfg.publish.bucket}/{cfg.publish.prefix}")
