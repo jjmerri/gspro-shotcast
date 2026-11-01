@@ -8,17 +8,6 @@ if TYPE_CHECKING:
 
 PUTTER_CODES = {"PT", "PUTTER"}
 
-# Dynamic loft at impact -> likely club, for monitors that don't report the club. Dynamic loft
-# runs a few degrees above the static loft, and players vary, so this is a best guess.
-LOFT_CLUBS = [(14, "DR"), (19, "3W"), (23, "4H"), (25, "5I"), (28, "6I"), (31, "7I"), (35, "8I"),
-              (40, "9I"), (46, "PW"), (52, "GW"), (58, "SW")]
-
-
-def club_from_loft(loft: float | None) -> str | None:
-    if not loft:
-        return None
-    return next((c for limit, c in LOFT_CLUBS if loft < limit), "LW")
-
 
 @dataclass
 class Shot:
@@ -94,8 +83,9 @@ class Shot:
             vertical_face_impact=club.get("VerticalFaceImpact"),
             horizontal_face_impact=club.get("HorizontalFaceImpact"),
             club_measured=bool((msg.get("ShotDataOptions") or {}).get("ContainsClubData")),
-            # Putters have little loft too, so only guess for full-speed shots.
-            club=info.get("Club") or (club_from_loft(club.get("Loft")) if (ball.get("Speed") or 0) >= 40 else None),
+            # No guess from the monitor's loft: that's dynamic loft, degrees above the club's own (a
+            # driver at 22° read as a 4-hybrid or 5-iron on every drive of a round). GSPro's club box wins.
+            club=info.get("Club"),
             handed=info.get("Handed"),
             distance_to_target=info.get("DistanceToTarget"),
             raw=msg,

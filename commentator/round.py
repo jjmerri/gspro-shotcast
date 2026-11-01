@@ -168,6 +168,9 @@ class Round:
         # The setup screen showed a shamble or alternate shot: GSPro copies balls between teammates in
         # those too, so its log mustn't turn the round into a scramble.
         self.no_scramble = False
+        # A practice scramble's teams as GSPro tied them (play_scramble); until then they're the league's,
+        # a guess: Josh played with Paul, not his league partner Corey.
+        self.teams_known = False
         self.ctp_holes = [int(h) for h in self.schedule.get("ctp_holes") or []]
         # Squabbit's card for this league week (`squabbit --cards`): its stroke index, tee rating and
         # slope, and the format's handicap settings are what the league's net scores use.
@@ -314,6 +317,7 @@ class Round:
             for g in self.roster:
                 if not any(g in grp for grp in groups):
                     teams[g] = [g]
+            self.teams_known = True
         if self.format == "scramble" and (teams is None or teams == self.teams):
             return False
         if teams:
@@ -860,6 +864,11 @@ class Round:
             return f"{side.label} ({' and '.join(side.players)}, one ball)"
         return side.label + (f" ({side.team})" if side.team and side.team != side.label else "")
 
+    def teams_guessed(self) -> bool:
+        """A practice scramble of several players whose teams GSPro hasn't shown yet: its sides are the
+        league teams, a guess."""
+        return not self.is_league and self.format == "scramble" and not self.teams_known and len(self.roster) > 1
+
     def format_facts(self) -> list[str]:
         if not self.format:
             return []
@@ -899,7 +908,16 @@ class Round:
         if self.is_league:
             facts.append("This is a handicap league: a round is judged on the net score (gross minus handicap "
                          "strokes), so a big gross number can still be a good round.")
+        guessed = self.teams_guessed()
+        if guessed:
+            facts.append("This scramble's teams aren't known yet: GSPro pairs the players after everyone's first "
+                         "tee shot, and they needn't be league partners. Don't say who's partnered with whom, or "
+                         "that anyone is playing alone or flying solo; any league team below is league history only.")
         for side in self.sides:
+            if guessed:
+                facts += [f"Playing: {p}." for p in side.players]
+                facts += _season_facts(side.label, season.get(side.key), self.holes, self.is_league)
+                continue
             line = f"Playing: {self.describe_side(side)}"
             if side.strokes is not None:
                 line += f", receiving {side.strokes} handicap strokes over these {self.holes} holes"

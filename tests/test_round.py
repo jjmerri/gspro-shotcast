@@ -3018,6 +3018,22 @@ def test_a_lone_league_player_in_a_practice_scramble_is_a_side_of_one(tmp_path):
     assert alt.side_for("Josh").players == ["Josh", "Sam"] and not e._absent_partners()
 
 
+def test_a_practice_scramble_keeps_the_league_teams_out_until_gspro_pairs_the_players(tmp_path):
+    # Josh played a practice scramble with Tony: until GSPro paired them, the sides were the league
+    # teams, and calls on Sam aired "Josh and Sam remain even par" all night.
+    e = _engine_with(tmp_path, _noted_league())
+    r = Round(league=e.league, gspro_players=["Josh", "Sam", "Tony", "Priya"], course="X",
+              scheduled_format="scramble", is_league=False, slot_names=["Josh", "Sam", "Tony", "Priya"])
+    e._start_round(r)
+    assert e._who("Sam") == ("Sam", None)
+    facts = r.opening_facts({}, None, None)
+    assert any("teams aren't known yet" in f for f in facts)
+    assert "Playing: Aces." not in facts and "Playing: Sam." in facts
+    r.play_scramble([["Josh", "Tony"], ["Sam", "Priya"]])
+    assert e._who("Sam") == ("Sam", "Sam & Priya")
+    assert not any("teams aren't known yet" in f for f in r.opening_facts({}, None, None))
+
+
 def test_a_one_person_scramble_team_is_recorded_as_an_individual_round(tmp_path):
     import json
     e = _engine_with(tmp_path, _noted_league())

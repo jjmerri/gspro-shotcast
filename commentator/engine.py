@@ -2119,6 +2119,12 @@ class Engine:
         # A team name like "Josh and Corey" on a solo round's every call kept Corey in the booth's mouth.
         if team and any(p in self.league.team_players.get(team, []) for p in self._absent_partners()):
             team = None
+        r = self.round
+        if r and not r.ended and not r.is_league and r.format == "scramble":
+            # A practice scramble's teams are GSPro's, not the league's: with Josh's league team on
+            # Corey's calls, a scramble Corey played with Frankie aired "Josh and Corey remain even par".
+            side = None if r.teams_guessed() else r.side_for(player)
+            team = side.label if side and len(side.players) > 1 else None
         return player, team
 
     def _absent_partners(self) -> list[str]:
@@ -4056,24 +4062,17 @@ class Engine:
         ocr = self.cfg.screen.ocr
         wants_image = self.cfg.screen.send_images and self.flight_llm.cfg.vision and self.commentary_on
         # Only what the reaction and the carry model actually use. Slope isn't read here (unused
-        # once the ball is struck). The club box: with local-CPU TTS (Kokoro) it's skipped and we
-        # fall back to the loft-guessed club, to keep OCR off the synth's back; with cloud audio
-        # nothing contends for the cores, so read GSPro's own club box (it beats the loft guess,
-        # which misfired as "driver" on a mishit).
+        # once the ball is struck). The club box: with local-CPU TTS (Kokoro) it's skipped (no club
+        # then), to keep OCR off the synth's back; with cloud audio nothing contends for the cores.
         regions = ["player_name", "player_box", "lie", "tiles", "tiles_left"]
         if self.cfg.tts.provider != "kokoro":
             regions.append("club")
+        # Every box grabbed at once, before any OCR: one by one, the club box (gone soon after the
+        # swing) was grabbed seconds late on a slow read, and the lie could be the next player's.
         before, impact_image = await asyncio.gather(
-            self.screen.read_hud_async(regions) if ocr else asyncio.sleep(0, Hud()),
+            self.screen.read_hud_async(regions, at_once=True) if ocr else asyncio.sleep(0, Hud()),
             self.screen.snapshot_jpeg() if wants_image else asyncio.sleep(0, None),
         )
-        if ocr and before.lie and before.name_sig not in (None, NAME_DARK):
-            # The regions are grabbed one after another, not from one frame: if the name cell
-            # changed by the end of the read, the lie may be the next player's ball.
-            after = await self.screen.read_hud_async(["player_name"])
-            if name_sig_changed(before.name_sig, after.name_sig):
-                log.info("%s the player box changed during the impact read; lie %s dropped", tag, before.lie)
-                before.lie = None
         return before, impact_image
 
     def _impact_hole(self) -> tuple:
@@ -7232,7 +7231,12 @@ class Engine:
             label = self.league.team_name(team)
             if not closing:
                 here = {p for side in r.sides if side.team == team for p in side.players}
-                if here and (away := [p for p in players if p not in here]):
+                if here and (away := [p for p in players if p not in here]) and r.teams_guessed():
+                    # Tonight's teams aren't known: "only Paul of Paul and Travis" aired as "Paul's
+                    # flying solo" in a scramble he played with Josh.
+                    facts.append(f"{_join_names(away)} ({label}) is not here: never say {_join_names(away)} "
+                                 "is playing, here or in the building.")
+                elif here and away:
                     # A practice round with part of the team: the team's history still counts, but
                     # the opener read "Corey and I are in the building" off it with Josh alone.
                     facts.append(f"Only {_join_names(sorted(here))} of {label} is playing this round; "

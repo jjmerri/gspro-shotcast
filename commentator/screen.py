@@ -421,6 +421,8 @@ class Screen:
         """The named HUD regions as they are right now, no OCR: a few ms, so they're near-simultaneous
         (read_hud grabs each region as it gets to it, over a second apart with OCR in between)."""
         base = self._hud_base()
+        if any(n in MIRRORED for n in names):
+            self.detect_mirror(base)   # where the mirrored boxes are, before they're cut out
         out = {}
         for name in names:
             if (region := self.region(name)) is not None:
@@ -438,7 +440,7 @@ class Screen:
         _c = time.perf_counter()
         base = image if image is not None or crops is not None else self._hud_base()
         self.last_capture_seconds = time.perf_counter() - _c
-        if any(n in MIRRORED for n in parts):
+        if crops is None and any(n in MIRRORED for n in parts):
             self.detect_mirror(base)
         for name in parts:
             region = self.region(name)
@@ -579,9 +581,13 @@ class Screen:
                 start = None
         return None
 
-    async def read_hud_async(self, parts: list[str]) -> Hud:
+    async def read_hud_async(self, parts: list[str], at_once: bool = False) -> Hud:
+        """`at_once`: grab every region first, then OCR them, so all of them show one moment. Grabbed
+        as it's read, the club box (last of an impact read) came ~3 s after the swing on a slow read,
+        gone by then, on 70 shots of one round."""
         started = time.perf_counter()
-        hud = await asyncio.to_thread(self.read_hud, parts)
+        hud = await asyncio.to_thread(
+            lambda: self.read_hud(parts, crops=self.grab_regions(parts)) if at_once else self.read_hud(parts))
         self.last_read_seconds = time.perf_counter() - started
         return hud
 

@@ -2033,6 +2033,32 @@ def test_read_region_lines_cached_only_ocrs_changed_regions():
     assert len(calls) == 3            # only region b re-read
 
 
+async def test_an_at_once_hud_read_grabs_every_box_before_the_ocr():
+    # The club box goes soon after the swing; grabbed last, after the other boxes' OCR, it read empty
+    # on a slow read. At once, every box is grabbed first, all from the moment of impact.
+    from PIL import Image
+    from commentator.config import Region, ScreenConfig
+    from commentator.hud import OcrItem
+    from commentator.screen import Screen
+
+    def read(at_once):
+        scr = Screen(ScreenConfig(regions={"tiles": Region(left=0, top=0, width=50, height=50),
+                                           "club": Region(left=50, top=0, width=50, height=50)}))
+        shown = {"club": True}
+        scr.detect_mirror = lambda base=None: False
+        scr.grab = lambda region=None: Image.new("RGB", (10, 10), "white" if shown["club"] else "black")
+
+        def ocr(img):
+            text = "Driver" if img.getpixel((0, 0)) == (255, 255, 255) else ""
+            shown["club"] = False   # the OCR takes long enough for the club box to go
+            return [OcrItem(text=text, x=5, y=5, h=5)] if text else []
+        scr.ocr_items = ocr
+        return scr.read_hud_async(["tiles", "club"], at_once=at_once)
+
+    assert (await read(True)).club == "DR"
+    assert (await read(False)).club is None
+
+
 def _mini_engine(tmp_path, live_llm=None):
     cfg = Config(log_dir=str(tmp_path))
     return Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
@@ -2926,10 +2952,10 @@ def test_connector_log_source_on_real_uneekor_messages():
     assert len(fresh) == len(real) + 1 and len(shots) == 2
 
     s = Shot.from_gspro(shots[0])
-    assert round(s.ball_speed, 1) == 133.5 and round(s.carry, 1) == 217.4 and s.club == "3W"
+    assert round(s.ball_speed, 1) == 133.5 and round(s.carry, 1) == 217.4 and s.club is None  # no guess from dynamic loft
     # EYE XO2 leaves SpinAxis/TotalSpin at 0 and sends back/side spin instead
     assert round(s.total_spin) == round((1656**2 + 592**2) ** 0.5) and round(s.spin_axis, 1) == -19.7
-    assert Shot.from_gspro(shots[1]).club == "4H"  # 20.9 degrees of dynamic loft
+    assert Shot.from_gspro(shots[1]).club is None  # 20.9 degrees of dynamic loft says nothing reliable
     putt = {"BallData": {"Speed": 8.0, "VLA": 2.0, "BackSpin": 100, "SideSpin": 0}, "ClubData": {"Loft": 3.0}}
     assert Shot.from_gspro(putt).club is None and Shot.from_gspro(putt).is_putt
     # A real EYE XO2 putt carries a sentinel VLA (99999) that from_gspro blanks to None, and the
