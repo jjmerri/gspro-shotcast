@@ -4406,6 +4406,33 @@ def test_the_impact_lie_is_the_one_read_at_setup(tmp_path):
     assert other.slope_updown is None
 
 
+def test_a_shot_with_no_number_on_screen_takes_the_stroke_gspro_logged_at_impact(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    e = _mini_engine(tmp_path)
+    e.cfg.source.gspro_log_truth = True
+    monkeypatch.setattr(e, "_gspro_idx", lambda player: 0 if player == "Kroll" else None)
+    snap = (None, {0: 0}) + (None,) * 4 + ({0: 4, 1: 1},)
+    e.hole_number = 1
+    # A quick chip: the player box hidden at impact and its setup not yet read.
+    hud = Hud()
+    e._number_from_log(hud, "Kroll", snap)
+    assert hud.shot_number == 4
+    # At the next tee the log still has hole 1 (it moves on once the tee shot is logged): its count isn't this hole's.
+    e.hole_number = 2
+    tee = Hud()
+    e._number_from_log(tee, "Kroll", snap)
+    assert tee.shot_number is None
+    e.hole_number = 1
+    unknown = Hud()
+    e._number_from_log(unknown, None, snap)
+    assert unknown.shot_number is None
+    e.round = SimpleNamespace(format="scramble", no_scramble=False)   # the HUD counts the team's strokes
+    team = Hud()
+    e._number_from_log(team, "Kroll", snap)
+    assert team.shot_number is None
+
+
 def test_an_impact_read_that_missed_the_player_box_takes_the_setup_read(tmp_path):
     e = _mini_engine(tmp_path)
     setup = Hud(player_text="Stefanski 2nd (E) Shot 2 247.0 YDS", shot_number=2, to_pin="247.0 yards",

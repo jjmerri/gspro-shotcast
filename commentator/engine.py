@@ -4223,6 +4223,8 @@ class Engine:
         if not player and (player := self._solo_name()):
             name_source = "the round's only player"
         log.info("%s player %s (%s)", tag, player or "unknown", name_source)
+        if use_screen and before.shot_number is None:
+            self._number_from_log(before, player, impact_snap, tag)
         # GSPro's own club box beats guessing the club from loft.
         if before.club:
             shot = replace(shot, club=before.club)
@@ -5207,6 +5209,22 @@ class Engine:
         if not before.handed:
             before.handed = setup.handed
         return True
+
+    def _number_from_log(self, before: Hud, player: str | None, impact_snap: tuple, tag: str = "") -> None:
+        """No shot number from the screen at impact or the setup read for it (a quick chip, hit while the
+        setup read was still retrying): GSPro's log counted this player's stroke at impact. A stroke
+        left unnumbered breaks its hole's replay line. Not in a scramble: its HUD counts the team's. Only
+        when the log had the player on this hole: it moves to a new hole only once its tee shot is logged,
+        so at a tee it still counts the hole before."""
+        r = self.round
+        if not self._log_truth or (r and r.format == "scramble" and not r.no_scramble):
+            return
+        if (idx := self._gspro_idx(player)) is None or (n := impact_snap[6].get(idx)) is None:
+            return
+        if self.hole_number is None or (hole := impact_snap[1].get(idx)) is None or hole + 1 != self.hole_number:
+            return
+        log.info("%s shot %s from GSPro's log (unread on screen)", tag, n)
+        before.shot_number = n
 
     def _use_setup_lie(self, before: Hud, tag: str = "") -> None:
         """The lie this stroke's setup read, while the player stood over the ball, over the impact

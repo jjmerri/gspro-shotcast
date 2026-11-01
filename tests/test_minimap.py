@@ -849,6 +849,14 @@ def test_locate_takes_a_hidden_ball_from_the_tee_view_only_when_the_pin_is_where
     assert locate(img) is None
 
 
+def test_locate_finds_the_pin_off_a_tee_set_to_one_side_of_it():
+    from commentator.minimap import snapshot
+
+    # 3s Greenville 2, mirrored HUD at 1920x1080: the tee right of centre, the pin left of it.
+    _, ball, pin = snapshot(Image.open("tests/fixtures/minimap_tee_offset.jpg"))
+    assert math.dist(ball, (0.585, 0.895)) < 0.01 and math.dist(pin, (0.43, 0.085)) < 0.01
+
+
 def _ball_painted(img, colour):
     """The tee view with the ball spot covered by the ground beside it, and a dot of `colour` drawn there."""
     from PIL import ImageDraw

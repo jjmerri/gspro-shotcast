@@ -1113,17 +1113,26 @@ def locate(img: Image.Image) -> tuple[tuple[float, float], tuple[float, float]] 
     def standard(d, spot):
         return math.dist(d[:2], spot) <= TEE_FRAME_SLACK
 
+    def under(b, d):
+        """d is the pin for ball b: above it near its column, or, off a tee whose hole bends, the tee
+        view's pair, on its rows and centred between them (the tee 0.09 right of the centre, the pin
+        0.06 left, on a 3s Greenville par 3)."""
+        if d[1] < b[1] - 0.05 and abs(d[0] - b[0]) <= 0.12:
+            return True
+        return (abs(b[1] - TEE_BALL[1]) <= 0.04 and abs(d[1] - TEE_PIN[1]) <= 0.04
+                and abs((b[0] + d[0]) / 2 - TEE_BALL[0]) <= 0.04)
+
     size = w * h
     balls = dots((r > 170) & (g < 90) & (b < 90), max(12, size // 20000), size // 400)
     whites = dots((r > 235) & (g > 235) & (b > 235), max(12, size // 20000), size // 400)
     if ball:
-        pins = [d for d in whites if d[1] < ball[1] - 0.05 and abs(d[0] - ball[0]) <= 0.12]
+        pins = [d for d in whites if under(ball, d)]
         return ball, min(pins, key=lambda d: d[1])[:2] if pins else TEE_PIN
     if pin:
         return TEE_BALL, pin
     if balls:
         bx, by, _ = max(balls, key=lambda d: (d[2], d[1]))
-        pins = [d for d in whites if d[1] < by - 0.05 and abs(d[0] - bx) <= 0.12]
+        pins = [d for d in whites if under((bx, by), d)]
         if pins:
             pin = min(pins, key=lambda d: d[1])
             return (bx, by), (pin[0], pin[1])
