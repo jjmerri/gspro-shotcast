@@ -55,7 +55,7 @@ jobs:
           # The uninstaller runs a copy of itself and returns at once: wait for it.
           for ($i = 0; $i -lt 60 -and (Test-Path "$app\python"); $i++) { Start-Sleep 2 }
           if (Test-Path "$app\python") { Get-ChildItem "$app" -Recurse | Select-Object -First 20 FullName; throw "uninstall left the app behind" }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Shotcast-Setup-${{ env.VERSION }}
           path: dist/*
