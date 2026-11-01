@@ -110,17 +110,23 @@ def mirrored_region(region: Region) -> Region:
     return region.model_copy(update={"left": round(1 - region.left - region.width, 4)})
 
 
-def _slope_bar(img: Image.Image) -> bool:
-    """The slope bar's look: GSPro's dark teal panel (blue level with green, both above red), either
-    with the slope's white text in it or, on the green where no slope is shown, empty and flat. Grass,
-    sand and trees have far less blue than green; a black loading screen or a scorecard has no teal."""
+def _corner_look(img: Image.Image) -> str | None:
+    """What a mirror probe shows: "text" (the slope bar with the slope's white text in it), "flat" (the
+    bar empty, as on the green, or any flat dark panel), "course" (grass, trees, sand: far less blue
+    than green), else None. The bar is a dark panel whose blue is at least near its green: 3.1's teal
+    (2,23,22) and 3.59's semi-transparent navy (41,47,56 with text, 12,20,32 empty), which an "even
+    blue and green" test missed. A scorecard's or menu's flat panel looks like an empty bar, so a side
+    is only told by the bar on one side and the course on the other (detect_mirror)."""
     from PIL import ImageStat
 
     st = ImageStat.Stat(img.convert("RGB"))
     (r, g, b), spread = st.mean, sum(st.stddev) / 3
-    teal = r < 60 and g - r >= 5 and b - r >= 4 and abs(g - b) <= 8
-    return teal and (spread > 35 or spread < 6)
+    if r < 70 and g - r >= 4 and b - r >= 8 and b >= g - 6 and (spread > 35 or spread < 6):
+        return "text" if spread > 35 else "flat"
+    return "course" if b < g - 8 else None
 
+
+OTHER_SIDE = "@other_side"   # grab_regions' key for the other side's boxes (Screen._other_side)
 
 FOLLOW_SECONDS = 3.0   # how often to look again for the monitor GSPro's window is on
 
@@ -170,6 +176,7 @@ class Screen:
         self.last_read_seconds = 0.0
         self.last_capture_seconds = 0.0
         self.mirrored = False   # the current player's HUD is in GSPro's lefty layout (see MIRRORED)
+        self._mirror_pending: bool | None = None   # one empty-bar read for the other side (detect_mirror)
         # Which GSPro menus are on screen: "classic" (3.1) or "new" (3.59's redesign, NEW_UI_REGIONS).
         # The engine sets it from the GSPro version in the log.
         self.ui = "classic"
@@ -236,21 +243,38 @@ class Screen:
 
     def detect_mirror(self, base: "Image.Image | None" = None) -> bool:
         """Check which side the minimap is on, from `base` (a full frame) or two tiny grabs. Runs on
-        every read, since a player's layout can change between shots. A frame where neither side (or
-        both) shows the slope bar (a loading screen, a scorecard) keeps the last answer."""
+        every read, since a player's layout can change between shots. A side counts only with the
+        slope bar on it and the course on the other: a scorecard, menu or loading screen (a dark panel
+        on both sides, or on neither) keeps the last answer. The bar with its slope text switches at
+        once; an empty bar (on the green, and alike to a flat panel) only on a second read in a row."""
         right = mirrored_region(_MIRROR_PROBE)
         try:
             left_img, right_img = ((self.crop(base, _MIRROR_PROBE), self.crop(base, right)) if base is not None
                                    else (self.grab(_MIRROR_PROBE), self.grab(right)))
         except Exception:
             log.exception("Mirrored-layout probe failed")
+            self._mirror_pending = None
             return self.mirrored
-        on_left, on_right = _slope_bar(left_img), _slope_bar(right_img)
-        if on_left != on_right and on_left != self.mirrored:
-            self.mirrored = on_left
-            log.info("GSPro HUD layout: %s", "mirrored (minimap bottom-left, club bottom-right)"
-                     if on_left else "standard (minimap bottom-right, club bottom-left)")
+        left, right_look = _corner_look(left_img), _corner_look(right_img)
+        if left in ("text", "flat") and right_look == "course":
+            side, look = True, left
+        elif right_look in ("text", "flat") and left == "course":
+            side, look = False, right_look
+        else:
+            self._mirror_pending = None   # only reads in a row confirm an empty bar
+            return self.mirrored
+        if side == self.mirrored:
+            self._mirror_pending = None
+        elif look == "text" or self._mirror_pending == side:
+            self._set_mirrored(side, "slope bar")
+        else:
+            self._mirror_pending = side
         return self.mirrored
+
+    def _set_mirrored(self, side: bool, why: str) -> None:
+        self.mirrored, self._mirror_pending = side, None
+        log.info("GSPro HUD layout: %s (%s)", "mirrored (minimap bottom-left, club bottom-right)"
+                 if side else "standard (minimap bottom-right, club bottom-left)", why)
 
     def base_region(self, name: str) -> Region | None:
         """A region as configured for this GSPro, before any mirroring. On GSPro's new menus (self.ui)
@@ -417,21 +441,41 @@ class Screen:
         """One full frame for the pre-round setup watcher (no OCR)."""
         return self._setup_frame()
 
-    def grab_regions(self, names: list[str]) -> dict[str, Image.Image]:
+    def grab_regions(self, names: list[str]) -> dict[str, Any]:
         """The named HUD regions as they are right now, no OCR: a few ms, so they're near-simultaneous
-        (read_hud grabs each region as it gets to it, over a second apart with OCR in between)."""
+        (read_hud grabs each region as it gets to it, over a second apart with OCR in between). With
+        the lie or club, the other side's boxes too, under OTHER_SIDE (read_hud's _other_side)."""
         base = self._hud_base()
         if any(n in MIRRORED for n in names):
             self.detect_mirror(base)   # where the mirrored boxes are, before they're cut out
-        out = {}
+        out: dict[str, Any] = {}
         for name in names:
             if (region := self.region(name)) is not None:
+                out[name] = self.crop(base, region) if base is not None else self.grab(region)
+        if "lie" in names or "club" in names:
+            try:
+                out[OTHER_SIDE] = self._other_side_crops(names, base)
+            except Exception:
+                log.exception("Grabbing the other side's HUD boxes failed")
+        return out
+
+    def _other_side_crops(self, names: list[str], base: "Image.Image | None") -> dict[str, Any]:
+        """The minimap-side probe and the named mirrored boxes on the side the layout doesn't say, with
+        the layout they were cut against."""
+        mirrored = self.mirrored
+        probe = _MIRROR_PROBE if mirrored else mirrored_region(_MIRROR_PROBE)
+        out: dict[str, Any] = {"mirrored": mirrored,
+                               "probe": self.crop(base, probe) if base is not None else self.grab(probe)}
+        for name in names:
+            if name in MIRRORED and name != "minimap" and (region := self.base_region(name)) is not None:
+                region = region if mirrored else mirrored_region(region)
                 out[name] = self.crop(base, region) if base is not None else self.grab(region)
         return out
 
     def read_hud(self, parts: list[str], image: Image.Image | None = None,
-                 crops: dict[str, Image.Image] | None = None) -> Hud:
-        """OCR the named HUD regions, from `crops` (grab_regions), `image` (a saved frame) or the live screen."""
+                 crops: dict[str, Image.Image] | None = None, other_side: bool = True) -> Hud:
+        """OCR the named HUD regions, from `crops` (grab_regions), `image` (a saved frame) or the live
+        screen. `other_side`: an empty lie or club box may be read again on the other side (_other_side)."""
         hud = Hud()
         # With a full frame (a saved image, or GSPro's window via WGC) crop each region from it;
         # otherwise (monitor mode, WGC off/stale) grab each small region box on its own, since grabbing
@@ -497,7 +541,36 @@ class Screen:
                     "GSPRO" in title.replace(" ", "") and re.search(r"\bOUT\b", title) is not None)
             elif name == "scorecard":
                 hud.scorecard = parse_scorecard(items)
+        if other_side:
+            self._other_side(parts, hud, base, crops)
         return hud
+
+    def _other_side(self, parts: list[str], hud: Hud, base: "Image.Image | None",
+                    crops: dict[str, Any] | None = None) -> None:
+        """A lie or club box that read empty, with the course rather than the slope bar in the
+        minimap's corner: the layout is stale (detect_mirror couldn't tell), so those boxes are read
+        on the other side, and that side kept when they read there. From grab_regions' crops the other
+        side is the one grabbed with them (one moment), never a later live grab."""
+        if not (("lie" in parts and not hud.lie) or ("club" in parts and not hud.club)):
+            return
+        try:
+            other_crops = crops.get(OTHER_SIDE) if crops is not None else self._other_side_crops(parts, base)
+            if not other_crops or _corner_look(other_crops["probe"]) != "course":
+                return
+            mirrored = other_crops["mirrored"]
+            names = [n for n in parts if n in other_crops and n not in ("mirrored", "probe")]
+            other = self.read_hud(names, crops={n: other_crops[n] for n in names}, other_side=False)
+        except Exception:
+            log.exception("Reading the other side's HUD boxes failed")
+            return
+        if not (other.lie or other.club) or self.mirrored != mirrored:
+            return
+        self._set_mirrored(not mirrored, "lie/club read on the other side")
+        hud.lie = hud.lie or other.lie
+        hud.club, hud.handed = hud.club or other.club, hud.handed or other.handed
+        if "slope" in names:
+            hud.slope_updown, hud.slope_side = other.slope_updown, other.slope_side
+            hud.slope_side_degrees = other.slope_side_degrees
 
     @staticmethod
     def _elevation(img: Image.Image, items: list[OcrItem], metric: bool) -> float | None:

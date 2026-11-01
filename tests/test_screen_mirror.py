@@ -1,7 +1,13 @@
-from PIL import Image, ImageDraw, ImageOps
+from pathlib import Path
+
+import pytest
+from PIL import Image, ImageDraw, ImageOps, ImageStat
 
 from commentator.config import DEFAULT_REGIONS, ScreenConfig
+from commentator.hud import OcrItem
 from commentator.screen import Screen, mirrored_region
+
+FRAMES = Path(__file__).parent / "fixtures" / "mirror"
 
 
 def _frame(mirrored: bool = False, bar: bool = True, text: bool = True) -> Image.Image:
@@ -34,10 +40,72 @@ def test_the_screen_follows_the_minimap_to_either_side():
     assert s.detect_mirror(_frame()) is False
 
 
-def test_an_empty_slope_bar_on_the_green_still_tells_the_side():
+def test_an_empty_slope_bar_on_the_green_tells_the_side_on_a_second_read():
     s = Screen(ScreenConfig())
+    assert s.detect_mirror(_frame(mirrored=True, text=False)) is False   # alike to a flat panel: once isn't enough
     assert s.detect_mirror(_frame(mirrored=True, text=False)) is True
+    assert s.detect_mirror(_frame(text=False)) is True
     assert s.detect_mirror(_frame(text=False)) is False
+
+
+@pytest.mark.parametrize("flip", [False, True])
+def test_gspro_359_frames_from_a_round(flip):
+    """Real 3.59 frames (scaled down): the navy slope bar with its text says standard at once, an empty
+    one on the green on a second read; the between-holes scorecard and the game menu, both with flat
+    dark panels in the corners, never move it. The scorecard flipped a 2v2 round to mirrored at every
+    hole, so its lie, club and minimap boxes were cut from the course."""
+    def frame(name):
+        img = Image.open(FRAMES / f"359-{name}.jpg").convert("RGB")
+        return ImageOps.mirror(img) if flip else img
+
+    s = Screen(ScreenConfig())
+    s.mirrored = not flip
+    assert s.detect_mirror(frame("course")) is flip
+    s.mirrored = not flip
+    for name in ("scorecard", "menu", "scorecard"):
+        assert s.detect_mirror(frame(name)) is not flip
+    assert s.detect_mirror(frame("green")) is not flip
+    assert s.detect_mirror(frame("menu")) is not flip
+    assert s.detect_mirror(frame("green")) is not flip   # the menu between: not two reads in a row
+    assert s.detect_mirror(frame("green")) is flip
+
+
+def test_an_empty_lie_and_club_with_the_course_in_the_minimaps_corner_are_read_on_the_other_side():
+    """The minimap's side couldn't be told (no slope bar showing), and the layout was stale: the lie
+    and club boxes read nothing there, so they're read on the other side and that side is kept."""
+    img = _frame(bar=False)
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, 450, 260, 1000), fill=(200, 30, 30))     # the HUD boxes, on the left: mirrored
+    d.rectangle((1445, 840, 1600, 1000), fill=(30, 30, 200))
+    s = Screen(ScreenConfig())
+
+    def ocr(crop):
+        r, g, b = ImageStat.Stat(crop).mean
+        text = "Fairway" if r > 150 else "7 Iron RH" if b > 150 else ""
+        return [OcrItem(text, 10, 10, 10)] if text else []
+
+    s.ocr_items = ocr
+    hud = s.read_hud(["lie", "club"], image=img)
+    assert (hud.lie, hud.club, hud.handed, s.mirrored) == ("fairway", "7I", "RH", True)
+    assert s.read_hud(["lie", "club"], image=img).lie == "fairway"     # and stays there
+
+    s = Screen(ScreenConfig())    # an at-once read: the other side as it was with the rest
+    s.ocr_items = ocr
+    s._hud_base = lambda: img
+    crops = s.grab_regions(["lie", "club"])
+    s._hud_base = lambda: _frame(bar=False)    # the boxes gone by the time they're read
+    hud = s.read_hud(["lie", "club"], crops=crops)
+    assert (hud.lie, hud.club, s.mirrored) == ("fairway", "7I", True)
+
+    s = Screen(ScreenConfig())
+    s.ocr_items = lambda crop: []
+    hud = s.read_hud(["lie", "club"], image=img)
+    assert (hud.lie, s.mirrored) == (None, False)    # nothing there either: the layout stays
+
+    s = Screen(ScreenConfig())
+    s.ocr_items = ocr
+    hud = s.read_hud(["lie", "club"], image=_frame(text=False))
+    assert (hud.lie, s.mirrored) == (None, False)    # the bar is in the minimap's corner: no second read
 
 
 def test_a_dark_grey_corner_is_not_the_slope_bar():
