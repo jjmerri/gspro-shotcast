@@ -719,7 +719,7 @@ class Round:
                 # green by the regulation stroke (<= par - 2) hit it; otherwise it's a miss (up-and-down
                 # from off the green, or the green reached late). The lie decides, not the club: a putter
                 # from the fringe that finished on the green reached it too.
-                reached = any((r.hud.lie or "").lower() == "green" for r in recs
+                reached = any(_finished_on_green(r) for r in recs
                               if r.shot_number and r.shot_number <= par - 2 and r.picked is not False)
                 hole_gir = reached
                 gir_tries += 1
@@ -756,7 +756,7 @@ class Round:
                 # strokes, not the records. The conceded tap-in counts once the team's ball was on the
                 # green (a stroke from it, or the last stroke's picked ball finished there).
                 strokes = {r.shot_number for r in putt_recs if r.shot_number}
-                on_green = bool(strokes) or any((r.hud.lie or "").lower() == "green" for r in recs
+                on_green = bool(strokes) or any(_finished_on_green(r) for r in recs
                                                 if numbers and r.shot_number == numbers[-1] and r.picked is not False)
                 putts = 0 if picked else len(strokes) + (conceded if on_green else 0)
                 holed_off = holed_off and not picked
@@ -1310,8 +1310,14 @@ def _green_reached_at(recs: list) -> int | None:
     to have reached it."""
     on = [r.shot_number for r in recs if r.shot_number and r.lie_before == "green"]
     on += [r.shot_number + 1 for r in recs if r.shot_number and r.picked is not False
-           and r.lie_before != "green" and (r.hud.lie or "").lower() == "green"]
+           and r.lie_before != "green" and _finished_on_green(r)]
     return min(on, default=None)
+
+
+def _finished_on_green(rec) -> bool:
+    """The shot stopped on the green: the HUD read it there, or GSPro conceded the next putt (the ball
+    was inside the gimme circle), which the HUD can miss after a putter from the fringe."""
+    return (rec.hud.lie or "").lower() == "green" or getattr(rec, "outcome", None) == "conceded"
 
 
 def _sand_save(recs: list, score: int | None) -> bool | None:

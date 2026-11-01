@@ -391,13 +391,14 @@ def test_missed_green_saved_with_a_fringe_putt_is_a_scramble():
 
 def test_fringe_putt_to_a_conceded_tap_in_in_regulation_is_a_gir():
     # GIR goes by the lie: on a par 5 the approach stops on the fringe, the third stroke is a putter
-    # from there that finishes on the green, and the tap-in is conceded (no record). On in 3 -> a GIR,
-    # not a scramble.
+    # from there that finishes inside the gimme circle, and the tap-in is conceded (no record). On in 3
+    # -> a GIR, not a scramble.
     r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="Wynn", scheduled_format="best ball", holes=1)
     card = Scorecard(holes=list(range(1, 19)), par={1: 5}, index={1: 5},
                      scores={"MIKED": {1: 4}, "SARAH": {1: 5}, "SCORECARD": {}})
     shots = [rec("Mike", 1, 5, 1, "tee", "fairway", "DR"), rec("Mike", 1, 5, 2, "fairway", "fringe", "3W"),
-             rec("Mike", 1, 5, 3, "fringe", "green", "PT")]
+             rec("Mike", 1, 5, 3, "fringe", "fringe", "PT")]
+    shots[-1].outcome = "conceded"   # inside the gimme circle; the HUD still read the fringe
     for s in shots:
         s.round_id = r.id
     r.apply_scorecard(card)
