@@ -4,6 +4,7 @@ import logging
 import re
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -459,6 +460,51 @@ class Screen:
                 log.exception("Grabbing the other side's HUD boxes failed")
         return out
 
+    def grab_boxes(self, names: tuple[str, ...] | list[str]) -> dict[str, Image.Image]:
+        """The named HUD regions off the monitor through one mss handle, as the layout stands (no
+        mirror probe: HudBuffer's thread mustn't move the layout under a read). Empty with window
+        capture, whose PrintWindow grabs stutter the game when polled."""
+        if self.cfg.capture != "monitor":
+            return {}
+        import mss
+
+        out: dict[str, Image.Image] = {}
+        grabbed: list[tuple[tuple[int, int, int, int], Image.Image]] = []
+        with mss.mss() as sct:
+            mon = self._mon(sct)
+            for name in names:
+                if (region := self.region(name)) is None:
+                    continue
+                left, top, width, height = region.to_pixels(mon["width"], mon["height"])
+                # Each grab waits on the compositor (~20 ms on the sim PC, whatever its size): a box
+                # inside one already grabbed (the name in the player box) is cut from that.
+                if (inside := next(((b, img) for b, img in grabbed if b[0] <= left and b[1] <= top
+                                    and left + width <= b[0] + b[2] and top + height <= b[1] + b[3]), None)):
+                    (bl, bt, _, _), img = inside
+                    out[name] = img.crop((left - bl, top - bt, left - bl + width, top - bt + height))
+                    continue
+                raw = sct.grab({"left": mon["left"] + left, "top": mon["top"] + top, "width": width, "height": height})
+                out[name] = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+                grabbed.append(((left, top, width, height), out[name]))
+        return out
+
+    def read_buffered(self, frames: list[dict[str, Image.Image]], tries: int = 3) -> Hud | None:
+        """The newest of `frames` (HudBuffer.before, newest first) whose player box reads a player and
+        a shot number, with its club and lie read too; None when none of the first `tries` does."""
+        for crops in frames[:tries]:
+            if "player_box" not in crops:
+                continue
+            hud = self.read_hud(["player_box"], crops=crops, other_side=False)
+            if not hud.player_text or hud.shot_number is None:
+                continue
+            rest = self.read_hud([n for n in ("player_name", "club", "lie") if n in crops], crops=crops,
+                                 other_side=False)
+            hud.name_sig, hud.club, hud.lie = rest.name_sig, rest.club, rest.lie
+            hud.handed = hud.handed or rest.handed
+            hud.crops = crops
+            return hud
+        return None
+
     def _other_side_crops(self, names: list[str], base: "Image.Image | None") -> dict[str, Any]:
         """The minimap-side probe and the named mirrored boxes on the side the layout doesn't say, with
         the layout they were cut against."""
@@ -795,3 +841,60 @@ class Screen:
             draw.rectangle([left, top, left + width, top + height], outline=(0, 255, 0), width=3)
             draw.text((left + 4, top + 4), name, fill=(0, 255, 0))
         return img
+
+
+class HudBuffer:
+    """The last few seconds of the HUD boxes that name a shot, grabbed a couple of times a second while
+    `active()` says so (a round is on). Some setups hide the player box (and the club box) the
+    moment the ball is struck, before the impact read can grab it: the address frames still show
+    who hit it, which stroke, with what club. Small crops only, no OCR until asked."""
+
+    # Two grabs a tick: the name is cut from the player box. Not the lie (the minimap, a big box): the
+    # setup read and GSPro's log have it.
+    REGIONS = ("player_box", "player_name", "club")
+
+    def __init__(self, screen: Screen, seconds: float = 8.0, interval: float = 0.5) -> None:
+        self.screen, self.seconds, self.interval = screen, seconds, interval
+        self._frames: deque[tuple[float, dict[str, Image.Image]]] = deque()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.grab_seconds = 0.0   # the last grab's cost
+
+    def start(self, active) -> None:
+        self._thread = threading.Thread(target=self._run, args=(active,), name="hud-buffer", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self, active) -> None:
+        failed = False
+        while not self._stop.wait(self.interval):
+            if not active():
+                with self._lock:
+                    self._frames.clear()
+                continue
+            started = time.perf_counter()
+            try:
+                crops = self.screen.grab_boxes(self.REGIONS)
+            except Exception:
+                if not failed:
+                    log.exception("HUD buffer grab failed")
+                failed = True
+                continue
+            failed = False
+            self.grab_seconds = time.perf_counter() - started
+            if crops:
+                self.add(time.monotonic(), crops)
+
+    def add(self, at: float, crops: dict[str, Image.Image]) -> None:
+        with self._lock:
+            self._frames.append((at, crops))
+            while self._frames and self._frames[0][0] < at - self.seconds:
+                self._frames.popleft()
+
+    def before(self, at: float, since: float | None = None) -> list[dict[str, Image.Image]]:
+        """The frames grabbed at or before `at` and after `since` (the last shot's impact), newest first."""
+        with self._lock:
+            return [c for t, c in reversed(self._frames) if t <= at and (since is None or t > since)]

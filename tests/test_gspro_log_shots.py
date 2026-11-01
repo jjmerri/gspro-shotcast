@@ -213,13 +213,14 @@ def test_a_connector_copy_after_the_capture_keeps_the_impact_state():
         src = ConnectorWithLogFallback(conn, _Feed([(0, ShotEvent(shot=putt))]), missed_after=0.5)
 
         def capture(ev):
-            ev.impact_at, ev.impact_state, ev.impact_read = 123.0, "state", "read"
+            ev.impact_at, ev.impact_state, ev.impact_read, ev.buffer_frames = 123.0, "state", "read", ["addr"]
         src.on_impact = capture
         got = _take_for(src, 0.8)
     finally:
         fallback.CAPTURE_AFTER = old
     assert len(got) == 1 and got[0].logged_at == 1.0   # GSPconnect's copy
-    assert (got[0].impact_at, got[0].impact_state, got[0].impact_read) == (123.0, "state", "read")
+    assert (got[0].impact_at, got[0].impact_state, got[0].impact_read, got[0].buffer_frames) == (
+        123.0, "state", "read", ["addr"])
 
 
 # ---- GSPro 3.59: the shot comes from the files GSPro saves once the ball stops ----------------
@@ -308,7 +309,7 @@ def test_a_beta_shot_comes_from_the_round_file_with_its_impact_snapshot(tmp_path
     snaps = []
 
     def capture(ev):
-        ev.impact_at, ev.impact_state = 7.0, f"in the air {len(snaps)}"
+        ev.impact_at, ev.impact_state, ev.buffer_frames = 7.0, f"in the air {len(snaps)}", []
         snaps.append(ev)
     src.on_impact = capture
 
@@ -325,7 +326,8 @@ def test_a_beta_shot_comes_from_the_round_file_with_its_impact_snapshot(tmp_path
     drive, putt = got
     assert (drive.shot.vla, drive.shot.carry, drive.shot.putter) == (12.6, 200.0, False)
     assert putt.shot.putter and putt.shot.is_putt
-    assert [(e.impact_at, e.impact_state) for e in got] == [(7.0, "in the air 0"), (7.0, "in the air 1")]
+    assert [(e.impact_at, e.impact_state, e.buffer_frames) for e in got] == [
+        (7.0, "in the air 0", []), (7.0, "in the air 1", [])]   # an empty snapshot is kept too
 
 
 def test_a_practice_shot_comes_from_lastshot_but_an_older_row_never_does(tmp_path, monkeypatch):

@@ -339,6 +339,10 @@ class ScreenConfig(BaseModel):
         return {**DEFAULT_REGIONS, **regions}
     # How often the HUD is polled for new shots and holes.
     hud_poll_seconds: float = 1.0
+    # Keep the last few seconds of the player and club boxes (small crops, a few grabs a second) while
+    # a round is on: a GSPro that hides them the moment the ball is struck still names the shot from
+    # the address frames. Monitor capture only.
+    impact_buffer: bool = True
 
 
 class SquabbitConfig(BaseModel):

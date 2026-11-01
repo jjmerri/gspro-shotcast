@@ -4433,6 +4433,108 @@ def test_a_shot_with_no_number_on_screen_takes_the_stroke_gspro_logged_at_impact
     assert team.shot_number is None
 
 
+def test_the_hud_buffer_reads_the_newest_address_frame_that_shows_the_player_box(monkeypatch):
+    from PIL import Image
+
+    from commentator.config import ScreenConfig
+    from commentator.screen import HudBuffer, Screen
+
+    s = Screen(ScreenConfig())
+    buf = HudBuffer(s, seconds=8.0)
+    box = {k: Image.new("RGB", (4, 4)) for k in ("old", "addr", "sky", "after")}
+    reads = {id(box["old"]): Hud(player_text="Heiser Shot 3", shot_number=3),
+             id(box["addr"]): Hud(player_text="Stefanski Shot 4", shot_number=4), id(box["sky"]): Hud(),
+             id(box["after"]): Hud(player_text="Heiser Shot 4", shot_number=4)}
+
+    def read_hud(parts, image=None, crops=None, other_side=True):
+        assert not other_side and set(parts) <= set(crops)   # never a live grab
+        if parts == ["player_box"]:
+            return reads[id(crops["player_box"])]
+        return Hud(club="PW", lie="rough")
+
+    monkeypatch.setattr(s, "read_hud", read_hud)
+    for t, k in ((1.0, "old"), (5.0, "addr"), (5.4, "sky"), (6.5, "after")):
+        buf.add(t, {"player_box": box[k], "club": box[k]})
+    # Struck at 6.0, with the box hidden from 5.4: the address frame before it, not the next player's after.
+    hud = s.read_buffered(buf.before(6.0, since=2.0))
+    assert (hud.player_text, hud.shot_number, hud.club, hud.lie) == ("Stefanski Shot 4", 4, "PW", "rough")
+    assert s.read_buffered(buf.before(6.0, since=5.0)) is None   # frames from the last shot's don't count
+    buf.add(13.6, {"player_box": box["sky"]})
+    assert len(buf.before(13.6)) == 2   # older than 8 s: dropped
+
+
+def test_the_hud_buffer_cuts_the_name_from_the_player_box_grab(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from commentator.config import ScreenConfig
+    from commentator.screen import HudBuffer, Screen
+
+    screen = Image.new("RGB", (1920, 1080), (40, 90, 40))
+    screen.paste((200, 10, 10), (60, 30, 300, 50))   # something in the name cell
+    grabs = []
+
+    class Sct:
+        monitors = [None, {"left": 0, "top": 0, "width": 1920, "height": 1080}]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def grab(self, box):
+            grabs.append(box)
+            img = screen.crop((box["left"], box["top"], box["left"] + box["width"], box["top"] + box["height"]))
+            return SimpleNamespace(size=img.size, bgra=img.convert("RGBX").tobytes("raw", "BGRX"))
+
+    monkeypatch.setitem(sys.modules, "mss", SimpleNamespace(mss=Sct))
+    s = Screen(ScreenConfig(follow_window=False))
+    crops = s.grab_boxes(HudBuffer.REGIONS)
+    assert len(grabs) == 2 and set(crops) == {"player_box", "player_name", "club"}
+    l, t, w, h = s.region("player_name").to_pixels(1920, 1080)
+    assert crops["player_name"].tobytes() == screen.crop((l, t, l + w, t + h)).tobytes()
+
+
+async def test_a_hidden_player_box_with_no_setup_read_takes_the_address_frame(tmp_path, monkeypatch):
+    e = _mini_engine(tmp_path)
+    addr = Hud(player_text="Stefanski 2nd (E) Shot 4 31.0 YDS", shot_number=4, to_pin="31.0 yards", club="SW",
+               lie="rough")
+
+    class Scr:
+        def read_buffered(self, frames):
+            return addr
+
+    e._hud_buffer, e.screen, frames = object(), Scr(), [{"player_box": None}]
+    monkeypatch.setattr(e, "_player", lambda text, hint=None: "Stefanski" if text and "Stefanski" in text else None)
+    hud = Hud(player_text="诚")
+    assert await e._fill_from_buffer(hud, frames)
+    assert (hud.player_text, hud.shot_number, hud.to_pin, hud.club, hud.lie) == (
+        addr.player_text, 4, "31.0 yards", "SW", "rough")
+    # Named at impact without the club box: just the club, and only from the same player's frame.
+    named = Hud(player_text="Stefanski 2nd (E) Shot 4 31.0 YDS", shot_number=4)
+    assert not await e._fill_from_buffer(named, frames)
+    assert named.club == "SW"
+    other = Hud(player_text="Heiser Shot 2", shot_number=2)
+    await e._fill_from_buffer(other, frames)
+    assert other.club is None
+    # Kept as the shot arrives: a shot waiting behind other work mustn't take the next player's frames,
+    # and the frames before the last shot's arrival go with that one.
+    from commentator.models import ShotEvent
+    from commentator.screen import HudBuffer
+
+    e._hud_buffer = buf = HudBuffer(None)
+    for t in (99.0, 99.6, 100.4, 102.5):
+        buf.add(t, {"t": t})
+    first, second = ShotEvent(shot=Shot()), ShotEvent(shot=Shot())
+    e._keep_buffer_frames(first, 100.0)
+    e._keep_buffer_frames(second, 103.0)
+    assert [f["t"] for f in first.buffer_frames] == [99.6, 99.0]
+    assert [f["t"] for f in second.buffer_frames] == [102.5, 100.4]
+
+
 def test_an_impact_read_that_missed_the_player_box_takes_the_setup_read(tmp_path):
     e = _mini_engine(tmp_path)
     setup = Hud(player_text="Stefanski 2nd (E) Shot 2 247.0 YDS", shot_number=2, to_pin="247.0 yards",

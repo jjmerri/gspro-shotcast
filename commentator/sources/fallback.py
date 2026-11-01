@@ -140,6 +140,7 @@ class ConnectorWithLogFallback(ShotSource):
                                 ev.impact_read = twin[1].impact_read
                                 ev.impact_seq = twin[1].impact_seq
                                 ev.setup_hud = twin[1].setup_hud
+                                ev.buffer_frames = twin[1].buffer_frames
                         else:
                             sent.append((now, speed))
                     yield ev

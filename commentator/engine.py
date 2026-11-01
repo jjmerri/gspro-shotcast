@@ -777,6 +777,8 @@ class Engine:
         # The last setup the booth read: (its HUD, the shot count then, GSPro's logged active player,
         # when). The impact read's fallback when the player box is gone by the time it's grabbed.
         self._last_setup: tuple | None = None
+        self._hud_buffer: Any = None   # HudBuffer: the HUD's last seconds, for an impact read GSPro hid
+        self._last_impact_at: float | None = None
         # GSPro's "hide UI on shot" keeps the tiles off screen until the next player is up, so the follow
         # can't read them; the next setup read does. The swing whose tiles are still wanted, the tiles a
         # setup read for a swing, and the recorded shot each swing's tiles go to: (shot id, record,
@@ -872,6 +874,7 @@ class Engine:
             asyncio.create_task(self._startup_health(), name="health")
         self._schedule_backup("startup")
         self._start_live()
+        self._start_hud_buffer()
         if self.screen and self.cfg.screen.ocr:
             tasks.append(asyncio.create_task(self._watch_hud(), name="hud-watch"))
             # Always: the setup screen's players, holes and game mode are the round's stats too. Only the
@@ -921,12 +924,15 @@ class Engine:
                 log.info("%s", audio_summary(stats_obj))
             for m in self._live_mirrors():
                 await asyncio.to_thread(m.close)
+            if self._hud_buffer is not None:
+                self._hud_buffer.stop()
 
     async def _pump_source(self) -> None:
         try:
             async for event in self.source.events():
                 if isinstance(event, ShotEvent):
                     event.received_at, event.received_fires = time.monotonic(), self.gspro.fires
+                    self._keep_buffer_frames(event, event.received_at)
                 await self._events.put(event)
         except Exception:
             log.exception("Shot source stopped; no more shots will come through")
@@ -3316,7 +3322,7 @@ class Engine:
                         del cache[owner]
             self._unnamed.add(fire)
             return
-        if self._row_source.get(fire) not in ("screen", "setup read") or (known := self._log_name(owner)) is None:
+        if self._row_source.get(fire) not in ("screen", "setup read", "address frame") or (known := self._log_name(owner)) is None:
             return   # only a read of the screen confirms the log's slots, not a name the log gave
         g, name = known
         if r.current_name(rec.player) == name:
@@ -3360,7 +3366,7 @@ class Engine:
         names = {self._player(g) or g for g in r.roster}
         done = {r.current_name(rec.player) for f, (_, rec, _, h) in self._fire_rows.items()
                 if f < fire and h == hole and rec.round_id == r.id and not rec.mulligan
-                and rec.outcome in ("holed", "conceded") and self._row_source.get(f) in ("screen", "setup read")}
+                and rec.outcome in ("holed", "conceded") and self._row_source.get(f) in ("screen", "setup read", "address frame")}
         return names - done == {name}
 
     def _reconcile_strokes(self) -> None:
@@ -4091,6 +4097,59 @@ class Engine:
         )
         return before, impact_image
 
+    def _start_hud_buffer(self) -> None:
+        sc = self.cfg.screen
+        if (not self.screen or not sc.ocr or not sc.impact_buffer or sc.capture != "monitor"
+                or self.cfg.source.type == "replay" or not callable(getattr(self.screen, "grab_boxes", None))):
+            return
+        from .screen import HudBuffer
+
+        self._hud_buffer = HudBuffer(self.screen)
+        self._hud_buffer.start(lambda: self.round is not None and not self.round.ended)
+
+    def _keep_buffer_frames(self, event: ShotEvent, at: float) -> None:
+        """Keep the HUD buffer's frames from before this shot (and after the last one) with it, at
+        impact or as it arrives: the buffer moves on (the next player's box, frames aged out) while the
+        shot waits behind other work or for its ball to stop."""
+        if self._hud_buffer is None or event.buffer_frames is not None:
+            return
+        since, self._last_impact_at = self._last_impact_at, max(at, self._last_impact_at or at)
+        event.buffer_frames = self._hud_buffer.before(at, since)
+
+    async def _fill_from_buffer(self, before: Hud, frames: list | None, tag: str = "") -> bool:
+        """The impact read missed the player box and there's no setup read for this stroke (or it missed
+        the club box): the newest address frame from the HUD buffer that shows them. True when it named
+        the shot."""
+        if self._hud_buffer is None:
+            return False
+        named = bool(before.player_text and before.shot_number is not None)
+        if named and (before.club or self.cfg.tts.provider == "kokoro"):
+            return False
+        if not frames:
+            return False
+        started = time.monotonic()
+        hud = await asyncio.to_thread(self.screen.read_buffered, frames)
+        if hud is None or not self._player(hud.player_text):
+            if not named:
+                log.info("%s no address frame in the HUD buffer shows the player box (%d frames)", tag, len(frames))
+            return False
+        if named:
+            if hud.club and self._player(hud.player_text) == self._player(before.player_text):
+                log.info("%s club %s from an address frame (the impact read missed the club box)", tag, hud.club)
+                before.club = hud.club
+            return False
+        log.info("%s the impact read missed the player box%s: %r shot %s, club %s, lie %s from an address frame "
+                 "(%.2fs)", tag, f" (read {before.player_text!r})" if before.player_text else "", hud.player_text,
+                 hud.shot_number, hud.club, hud.lie, time.monotonic() - started)
+        before.player_text, before.shot_number = hud.player_text, hud.shot_number
+        before.to_pin, before.score_to_par = hud.to_pin, hud.score_to_par
+        if before.elevation_yards is None:
+            before.elevation_yards = hud.elevation_yards
+        before.lie = before.lie or hud.lie
+        before.club = before.club or hud.club
+        before.handed = before.handed or hud.handed
+        return True
+
     def _impact_hole(self) -> tuple:
         """(hole, par, round, the round's hole number) the shot was struck on: a hole change while
         its handler is still reading mustn't move it to the next hole."""
@@ -4101,6 +4160,7 @@ class Engine:
         event.impact_at = time.monotonic()
         event.impact_state = (self._impact_state(), *self._impact_hole())
         event.setup_hud = self._setup_at_impact(event.impact_at)
+        self._keep_buffer_frames(event, event.impact_at)
         # The ball's in the air now, though the shot comes later: the setup's moment and its pending
         # lines are past (handle_shot reuses this count).
         self._cancel_preshot()
@@ -4118,6 +4178,7 @@ class Engine:
             return
         # A shot the feed held back (GSPconnect skipped it) carries its impact time and state.
         impact = event.impact_at or time.monotonic()
+        from_buffer = False
         held = event.impact_state
         impact_snap, fires0, setups0, lies0 = held[0] if held else self._impact_state()
         # The reaction runs in the background and may finish after the hole has changed; pin the
@@ -4215,11 +4276,13 @@ class Engine:
             shown = bool(before.player_text)
             if self._fill_from_setup(before, event.setup_hud, tag):
                 shown = False
+            if await self._fill_from_buffer(before, event.buffer_frames, tag):
+                shown, from_buffer = False, True
             self._use_setup_lie(before, tag)
         else:
             shown = bool(before.player_text)
         player = self._player(before.player_text, event.player_hint)
-        name_source = ("screen" if shown else "setup read") if player else "none yet"
+        name_source = ("screen" if shown else "address frame" if from_buffer else "setup read") if player else "none yet"
         if not player and (player := self._solo_name()):
             name_source = "the round's only player"
         log.info("%s player %s (%s)", tag, player or "unknown", name_source)
