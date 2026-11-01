@@ -534,18 +534,24 @@ function usedText(pl) {
     + (pl.used_pens ? ` + ${n(pl.used_pens, "penalty").replace("penaltys", "penalties")}` : "");
 }
 
-// A scramble round's strokes by partner, summed over the holes with shot data.
+// A scramble round's strokes by partner (this team's only), summed over the holes with shot data,
+// and whose drive the team played on.
 function shotsUsed(r, reps) {
   if (!reps || r.format !== "scramble") return "";
-  const tot = {}, holes = Object.values(reps).filter(rp => rp.players.some(p => p.used != null));
-  for (const rp of holes) for (const p of rp.players) if (p.used != null) {
-    const t = tot[p.name] || (tot[p.name] = { used: 0, used_gimmes: 0, used_pens: 0 });
+  const mine = r.side_players && r.side_players.length ? new Set(r.side_players) : null;
+  const ours = p => p.used != null && (!mine || mine.has(p.name));
+  const tot = {}, holes = Object.values(reps).filter(rp => rp.players.some(ours));
+  for (const rp of holes) for (const p of rp.players) if (ours(p)) {
+    const t = tot[p.name] || (tot[p.name] = { used: 0, used_gimmes: 0, used_pens: 0, drives: 0 });
     t.used += p.used; t.used_gimmes += p.used_gimmes || 0; t.used_pens += p.used_pens || 0;
+    t.drives += p.used_drives || 0;
   }
   if (!holes.length) return "";
   const missing = (r.card || []).length - holes.length;
+  const drives = Object.values(tot).some(t => t.drives)
+    ? `<p class="sub">Drives used: ${Object.entries(tot).map(([name, t]) => `${esc(name)} ${t.drives}`).join(" · ")}</p>` : "";
   return `<p class="sub">Shots used: ${Object.entries(tot).map(([name, t]) => `${esc(name)} ${t.used + t.used_gimmes + t.used_pens}`
-    + (t.used_gimmes || t.used_pens ? ` (${usedText(t)})` : "")).join(" · ")}${missing > 0 ? ` · ${missing} hole${missing > 1 ? "s" : ""} without shot data` : ""}</p>`;
+    + (t.used_gimmes || t.used_pens ? ` (${usedText(t)})` : "")).join(" · ")}${missing > 0 ? ` · ${missing} hole${missing > 1 ? "s" : ""} without shot data` : ""}</p>${drives}`;
 }
 
 function scorecard(holes, replays) {

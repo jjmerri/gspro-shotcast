@@ -375,6 +375,7 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
                 used = [r for r in mine if r["id"] in team_used]
                 entry["used"] = len(used)
                 entry["used_gimmes"] = gimmes
+                entry["used_drives"] = sum(r["shot_number"] == 1 for r in used)
                 entry["used_pens"] = sum(max(0, nxt - r["shot_number"] - 1) for r in used if r["shot_number"]
                                          if (nxt := next((n for n in numbers if n > r["shot_number"]), None)))
             players.append(entry)

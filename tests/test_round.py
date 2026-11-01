@@ -209,6 +209,52 @@ def test_a_scramble_fairway_is_the_picked_drive_s_not_the_partner_s():
     assert r.side_stats(r.side_for("MikeD"), shots).fir == (0, 1)
 
 
+def test_a_scramble_counts_the_team_ball_s_putts_once_and_its_sand_saves():
+    # Both partners putt every stroke, so the team's putts come from the card, not the putt records;
+    # a lifted ball that finished on the green says nothing about the team's.
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="X", scheduled_format="scramble", holes=2)
+    r.par = {1: 4, 2: 4}
+
+    def picked(x, yes):
+        x.picked = yes
+        return x
+
+    shots = [rec("MikeD", 1, 4, 1, "tee", "fairway", "DR"), rec("Sarah", 1, 4, 1, "tee", "rough", "DR"),
+             picked(rec("MikeD", 1, 4, 2, "fairway", "green", "9I"), True),
+             picked(rec("Sarah", 1, 4, 2, "fairway", "rough", "9I"), False),
+             rec("MikeD", 1, 4, 3, "green", "green", "PT"), rec("Sarah", 1, 4, 3, "green", "green", "PT"),
+             rec("MikeD", 1, 4, 4, "green", None, "PT"),
+             rec("MikeD", 2, 4, 1, "tee", "fairway", "DR"), rec("Sarah", 2, 4, 1, "tee", "fairway", "DR"),
+             picked(rec("MikeD", 2, 4, 2, "fairway", "sand", "8I"), True),
+             picked(rec("Sarah", 2, 4, 2, "fairway", "green", "8I"), False),
+             rec("MikeD", 2, 4, 3, "sand", "green", "SW"), rec("Sarah", 2, 4, 3, "sand", "rough", "SW"),
+             rec("MikeD", 2, 4, 4, "green", "green", "PT")]
+    shots[6].outcome, shots[-1].outcome = "holed", "conceded"
+    for x in shots:
+        x.round_id = r.id
+    st = r.side_stats(r.side_for("MikeD"), shots)
+    assert st.scores == {1: 4, 2: 5}
+    assert (st.putts, st.putt_holes, st.one_putts) == (4, 2, 0)
+    assert st.gir == (1, 2) and st.sand == (0, 1)
+
+
+def test_a_scramble_putt_count_skips_a_stroke_off_the_green_and_keeps_a_chip_in():
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="X", scheduled_format="scramble", holes=2)
+    r.par = {1: 4, 2: 4}
+    shots = [rec("MikeD", 1, 4, 1, "tee", "fairway", "DR"), rec("MikeD", 1, 4, 2, "fairway", "green"),
+             rec("MikeD", 1, 4, 3, "green", "fringe", "PT"), rec("Sarah", 1, 4, 3, "green", "fringe", "PT"),
+             rec("MikeD", 1, 4, 4, "fringe", "green", "PT"), rec("Sarah", 1, 4, 4, "fringe", "green", "PT"),
+             rec("MikeD", 1, 4, 5, "green", None, "PT"),
+             rec("MikeD", 2, 4, 1, "tee", "fairway", "DR"), rec("MikeD", 2, 4, 2, "fairway", "rough"),
+             rec("MikeD", 2, 4, 3, "rough", "green", "SW")]
+    shots[6].outcome, shots[-1].outcome = "holed", "holed"
+    for x in shots:
+        x.round_id = r.id
+    st = r.side_stats(r.side_for("MikeD"), shots)
+    assert st.scores == {1: 5, 2: 3}
+    assert (st.putts, st.putt_holes) == (2, 2)   # the fringe stroke isn't a putt; the chip-in is a 0
+
+
 def test_player_stats_counts_a_conceded_stiff_as_a_gir():
     # Par 3, tee shot stiff inside the gimme, tap-in conceded (card 2). There's no green-putt record,
     # but the tee shot reached the green in regulation, so it's a GIR hit, not a miss.

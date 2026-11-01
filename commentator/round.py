@@ -688,12 +688,12 @@ class Round:
                     gir_tries, gir = gir_tries + 1, gir + hole_gir
                     if not hole_gir:
                         scr_tries, scr = scr_tries + 1, scr + (score <= par)
-                    if (putts := score - reached + 1) > 0 and not scramble:
+                    if (putts := score - reached + 1) > 0:
                         stats.putts += putts
                         stats.putt_holes += 1
                         stats.one_putts += putts == 1
                         stats.three_putts += putts >= 3
-                if not scramble and (saved := _sand_save(recs, score)) is not None:
+                if (saved := _sand_save(recs, score)) is not None:
                     sand_tries, sand = sand_tries + 1, sand + saved
                 continue
             if par >= 4 and (hit := _fairway_hit(recs, scramble)) is not None:
@@ -720,7 +720,7 @@ class Round:
                 # from off the green, or the green reached late). The lie decides, not the club: a putter
                 # from the fringe that finished on the green reached it too.
                 reached = any((r.hud.lie or "").lower() == "green" for r in recs
-                              if r.shot_number and r.shot_number <= par - 2)
+                              if r.shot_number and r.shot_number <= par - 2 and r.picked is not False)
                 hole_gir = reached
                 gir_tries += 1
                 gir += reached
@@ -733,8 +733,9 @@ class Round:
             if score is not None and (hole_gir is False or (hole_gir is None and recoveries)):
                 scr_tries += 1
                 scr += score <= par
-            # Sand saves (skipped for scramble, where the pooled two balls can't say which the team played).
-            if not scramble and (saved := _sand_save(recs, score)) is not None:
+            # Sand saves. In a scramble every partner plays from the team's ball, so the lie a stroke was
+            # played from is the team's, whichever ball was then picked.
+            if (saved := _sand_save(recs, score)) is not None:
                 sand_tries += 1
                 sand += saved
             # Putts as the PGA Tour counts them: every stroke played from the green, whatever the club
@@ -750,7 +751,16 @@ class Round:
             putts = len(putt_recs) + (conceded if on_green else 0)
             # Holed from off the green (a chip-in, an ace): the card ends on a tracked full shot.
             holed_off = not putt_recs and bool(numbers) and score == numbers[-1] and all(r.lie_before for r in recs)
-            if (putts or holed_off) and not scramble:
+            if scramble:
+                # Both partners putt from the team's ball, so each putt has two records: count the
+                # strokes, not the records. The conceded tap-in counts once the team's ball was on the
+                # green (a stroke from it, or the last stroke's picked ball finished there).
+                strokes = {r.shot_number for r in putt_recs if r.shot_number}
+                on_green = bool(strokes) or any((r.hud.lie or "").lower() == "green" for r in recs
+                                                if numbers and r.shot_number == numbers[-1] and r.picked is not False)
+                putts = 0 if picked else len(strokes) + (conceded if on_green else 0)
+                holed_off = holed_off and not picked
+            if putts > 0 or holed_off:
                 stats.putts += putts
                 stats.putt_holes += 1
                 stats.one_putts += putts == 1
@@ -1296,9 +1306,10 @@ def _score_from_shots(recs: list, numbers: list, green: list) -> int | None:
 
 def _green_reached_at(recs: list) -> int | None:
     """The stroke first played from the green (a shot from off it that finished there, putter or not,
-    makes the next one), or None if the ball isn't known to have reached it."""
+    makes the next one; in a scramble, only a ball the team played on), or None if the ball isn't known
+    to have reached it."""
     on = [r.shot_number for r in recs if r.shot_number and r.lie_before == "green"]
-    on += [r.shot_number + 1 for r in recs if r.shot_number
+    on += [r.shot_number + 1 for r in recs if r.shot_number and r.picked is not False
            and r.lie_before != "green" and (r.hud.lie or "").lower() == "green"]
     return min(on, default=None)
 
