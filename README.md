@@ -90,7 +90,9 @@ while it's in the air, react to where it finished, read putts, open and close th
 track your league's standings, closest-to-the-pin and net scores. Each player is judged against
 their own game, not the longest hitter in the room: a drive is "short" only by that player's
 usual numbers. From a few holes in, the booth also gets a round-so-far stat sheet and picks out
-whatever pattern stands out tonight. About $0.40-0.60 per 18-hole round with the default cloud models,
+whatever pattern stands out tonight. The booth speaks English by default, or French, Spanish,
+German, Italian, Portuguese or Dutch with the cloud voices; see [Languages](docs/booth.md#languages).
+About $0.40-0.60 per 18-hole round with the default cloud models,
 or $0 fully local.
 
 Between shots they can drop in an aside, kept occasional so the golf stays first: a recent golf
@@ -109,6 +111,10 @@ If the sim is booked through [SuperSaaS](https://www.supersaas.com), the booth c
 bookings (optional, off by default, `booking:` in `config.yaml`, an API key in `.env`). A round
 played in a booking marked "Practice" is called as practice, even on this week's course with a full
 team; any other booking, or none, leaves the usual league matching to decide.
+
+A round GSPro reports to the [Simulator Golf Tour](https://simulatorgolftour.com) (SGT) is spotted from
+GSPro's log and called and recorded as a tournament round, so stats split league, tournament and
+practice; see [Leagues](docs/leagues.md).
 
 Excerpts from real league nights. The opener:
 
@@ -176,8 +182,9 @@ beyond that is supported on paper but not yet run live:
   Ultrawide and 4:3 screens are untested. Run `screen-check` first on any screen.
 - **GSPro must stay visible.** The screen is read live, so GSPro has to be on screen and not
   covered. A GSPro window smaller than the screen is only tested on saved screenshots.
-- **English and yards.** The screen and log reads expect GSPro's English labels, yards and mph.
-  Metres or another language will likely misread.
+- **English GSPro and yards.** The screen and log reads expect GSPro's interface in English, with
+  yards and mph. Metres or another interface language will likely misread. (The commentary itself
+  can be in another language.)
 - **GSPro updates.** Built against 3.1.x. The 3.59 public beta (new menus and HUD, its log in
   `Player.log`) is detected from the version GSPro logs, and the booth switches its log, setup
   screen and HUD reads to match; it has been checked on recordings of one 3.59.11 session, not yet
