@@ -337,6 +337,11 @@ class GsproState:
 
     course: str | None = None
     course_display: str | None = None
+    # The range on now is the selected course's own ("Go to Range" at setup: its "Practice" load comes
+    # with the course still selected, and no multi-range marker), so its Tee Off is onto that course.
+    own_range: bool = False
+    range_exits: int = 0   # score lines that took the log off the range (_left_range_unlogged)
+    range_exit_fire: int | None = None   # the fire the last of them credited: the new round's first shot
     pars: list[int] = field(default_factory=list)
     # Where GSPro is: "range" (the driving range), "course" (a round selected or being played), "menu"
     # (a round or the range was just left), or None (not seen yet).
@@ -472,18 +477,20 @@ class GsproState:
         elif ev.kind == "course":
             if ev.course != self.course:
                 self._reset_round()         # a real course change is a new round; forget the old one
-            self.course = ev.course
-            self.course_display = None      # until this course's load names it
-            self.altitude_ft = None
-            self.mode, self.active_holes = "course", None
-            self.shots_since_course, self.first_hole, self.starts_late = 0, None, False
-            self.live_shots_since_course = 0
+            self._on_course(ev.course, None)   # the display name waits for this course's load
         elif ev.kind == "course_display":
-            self.course_display = ev.display
             if ev.display == "Practice":    # the range's load line
+                self.own_range = self.mode == "course"
+                self.course_display = ev.display
                 self.mode = "range"
+            else:
+                if self.mode != "course":
+                    # A course loaded with no `Selected Course:` first (End Round on the multi range went
+                    # straight to one): it's a course all the same, though its folder name isn't known.
+                    self.enter_course(None, None)
+                self.course_display = ev.display
         elif ev.kind == "range":
-            self.mode = "range"
+            self.mode, self.own_range = "range", False
         elif ev.kind == "end_round":
             self.end_round()
         elif ev.kind == "skip_hole":
@@ -625,7 +632,34 @@ class GsproState:
                 # The shooter's score line follows the ball coming to rest: the rest time on 3.59,
                 # which logs no `Roll dist` line (3.1's, logged just before, is kept).
                 self._fire_info[self._unowned_fire].setdefault("rest_at", time.monotonic())
+            if self.mode == "range":
+                self._left_range_unlogged()
             self._apply_state(ev)
+
+    def _left_range_unlogged(self) -> None:
+        """A score line on the range, which logs none (it has no holes): this is a course's first shot,
+        after a Tee Off from the course's own range that GSPro didn't log. The range's shots aren't the
+        round's; the one this line credits is. With no score lines the range left no round state, so
+        nothing is reset: the shot's pending bookkeeping (its fire, a hole-out, its lie) carries on."""
+        shots = 1 if self._unowned_fire is not None else 0
+        live = min(self.live_shots_since_course, shots)
+        self._on_course(self.course if self.own_range else None, None)
+        self.shots_since_course, self.live_shots_since_course = shots, live
+        self.range_exits, self.range_exit_fire = self.range_exits + 1, self._unowned_fire
+
+    def enter_course(self, course: str | None, display: str | None) -> None:
+        """On a course from the range or the menus without a `Selected Course:` line: a course's load
+        logged on its own, or (leaving a course's own range for its first tee, which GSPro doesn't log)
+        a tee seen on screen. Anything played before, the range included, isn't this round's."""
+        self._reset_round()
+        self._on_course(course, display)
+
+    def _on_course(self, course: str | None, display: str | None) -> None:
+        self.course, self.course_display = course, display
+        self.altitude_ft = None
+        self.mode, self.active_holes = "course", None
+        self.shots_since_course, self.first_hole, self.starts_late = 0, None, False
+        self.live_shots_since_course = 0
 
     def end_round(self) -> None:
         """The round is over (End Round, or GSPro restarted as the other version mid-round)."""
@@ -1009,7 +1043,8 @@ class GsproLogFollower:
             past.apply(ev)
         s = self.state
         s.mode, s.shots_since_course, s.first_hole = past.mode, past.shots_since_course, past.first_hole
-        s.starts_late = past.starts_late
+        s.starts_late, s.own_range = past.starts_late, past.own_range
+        s.course = past.course if past.own_range else s.course   # the course its Tee Off goes to
         s.hole_scores = dict(past.hole_scores)   # holes already finished in a round being joined
         s._score.update({k: past._score[k] for k in past.hole_scores if k in past._score})   # so they can reopen
         s._picked = set(past._picked)   # picked-up holes: finished, though not yet in hole_scores

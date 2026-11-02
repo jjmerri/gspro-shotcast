@@ -313,6 +313,35 @@ def test_range_round_end_and_completion_are_tracked():
     assert s.mode == "menu" and s.round_ends == 2 and s.strokes_before(0) == 0
 
 
+def test_a_course_loaded_without_being_selected_is_still_a_course():
+    # End Round on the multi range went straight to a course: GSPro logged its load but no
+    # `Selected Course:`, and the range's shots don't count toward it.
+    s = GsproState()
+    for ev in parse_events("GSPro Multi Range\nRangeLevelLoaded()\nLoading course Practice\n"
+                           " * ------- Shot Fired! ------- *\nEnd Round Button Click\n"):
+        s.apply(ev)
+    assert s.mode == "menu"
+    for ev in parse_events("Loading course York Golf Club\n"):
+        s.apply(ev)
+    assert (s.mode, s.course_display, s.shots_since_course) == ("course", "York Golf Club", 0)
+    # Go to Range at setup: the course's own range loads with the course still selected (and no
+    # multi-range marker), and its Tee Off will be onto that course (see the engine).
+    for ev in parse_events("End Round Button Click\nSelected Course: yorkgc_gsp\nLoading course Practice\n"):
+        s.apply(ev)
+    assert (s.mode, s.own_range, s.course) == ("range", True, "yorkgc_gsp")
+    # Tee Off from there logs nothing, but the first score line does (the range logs none): the
+    # course's first shot, not the range's, so a booth started after it joins the round.
+    for ev in parse_events(" * ------- Shot Fired! ------- *\n" * 3 + "Hole out !!!\n"
+                           + "ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 0\n"):
+        s.apply(ev)
+    assert (s.mode, s.course) == ("course", "yorkgc_gsp")
+    assert (s.shots_since_course, s.first_hole, s.current_hole) == (1, 0, 0)
+    assert s.hole_scores == {(0, 0): 1} and s.fire_info(s.fires)["player"] == 0   # an ace, credited
+    for ev in parse_events("End Round Button Click\nGSPro Multi Range\nRangeLevelLoaded()\nLoading course Practice\n"):
+        s.apply(ev)
+    assert s.mode == "range" and not s.own_range
+
+
 def test_follower_learns_from_the_backlog_that_gspro_is_on_the_range(tmp_path):
     path = tmp_path / "output_log.txt"
     path.write_text("Selected Course: riviera_gsp\nEnd Round Button Click\nGSPro Multi Range\nRangeLevelLoaded()\n")

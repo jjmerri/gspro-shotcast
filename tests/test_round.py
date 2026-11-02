@@ -2210,6 +2210,123 @@ async def test_range_keeps_the_booth_off(tmp_path):
     assert e._is_round_start(tee)
 
 
+async def test_a_tee_shot_struck_while_the_log_says_its_courses_range_is_kept(tmp_path, monkeypatch):
+    import asyncio
+    import time
+
+    import commentator.engine as engine_mod
+    from commentator.models import Shot, ShotEvent
+    from commentator.sources.gspro_log import LogEvent, parse_events
+
+    # Tee Off from a course's own range logs nothing, so a quick drive comes in as a range shot. GSPro's
+    # score line for it (the range logs none) makes it the course's.
+    e = _engine(tmp_path)
+    e.cfg.source.gspro_log_truth = True
+    e._follower = type("Follower", (), {"primed": True})()
+    for ev in parse_events("GSPro Version: 3.1.6.20\nSelected Course: yorkgc_gsp\nLoading course Practice\n"):
+        e.gspro.apply(ev)
+
+    async def range_swing(score_line: bool):
+        e.gspro.apply(LogEvent("shot_fired"))
+        task = asyncio.create_task(e.handle_shot(ShotEvent(shot=Shot(club="DR", carry=250.0))))
+        await asyncio.sleep(0.3)
+        if score_line:
+            for ev in parse_events("ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 0\n"):
+                e.gspro.apply(ev)
+        else:
+            e.gspro.end_round()   # a real range shot, then off the range
+        await asyncio.wait_for(task, 10)
+
+    await range_swing(score_line=False)
+    assert e._shot_seq == 0
+    # The last round over and still held (its sign-off a minute ago): the drive begins a new one.
+    e.round = Round(league=e.league, gspro_players=["Josh"], course="York Golf Club", scheduled_format=None)
+    e.round.ended, e._round_ended_at, e._shots_at_round_end = True, time.monotonic(), e.gspro.fires
+    for ev in parse_events("Selected Course: yorkgc_gsp\nLoading course Practice\n"):
+        e.gspro.apply(ev)
+    # A swing GSPro never played (no fire as it was struck) can't claim the real drive's fire after it.
+    monkeypatch.setattr(engine_mod, "UNPLAYED_SHOT_WAIT_SECONDS", 0.2)
+    e.gspro._fire_at = {n: t - 10 for n, t in e.gspro._fire_at.items()}   # the range shot was a while ago
+    phantom = asyncio.create_task(e.handle_shot(ShotEvent(shot=Shot(club="DR", carry=3.0))))
+    await asyncio.sleep(0.4)
+    await range_swing(score_line=True)
+    await asyncio.wait_for(phantom, 10)
+    assert e.gspro.mode == "course" and e._shot_seq == 1 and len(e.state.shots) == 1
+    assert e.state.shots[0].shot.carry == 250.0
+    # Its shot 2 on screen can't open a round (not shot 1), so the booth joins the round at that setup.
+    second = Hud(player_text="Josh E Shot 2 75 YDS", shot_number=2, score_to_par="E", to_pin="75 yards")
+    assert not e._after_round(second) and e._should_join(second)
+    assert e._should_join(second)   # still, should that setup be dropped before it joined
+    from commentator.models import RoundStartEvent
+    await e.handle_round_start(RoundStartEvent(hud=second, joined=True))
+    joined = e.round
+    assert not joined.ended and not e._should_join(second)
+    drive = e.state.shots[0]
+    assert (drive.round_id, drive.hole_seq) == (joined.id, 1)   # recorded before the join, and the round's
+    await e.handle_round_start(RoundStartEvent(hud=second, joined=True))   # a second setup's, queued
+    assert e.round is joined
+    # GSPro 3.59 sends the shot after the ball stops: its score line has the log on the course before the
+    # booth sees the shot, and that line alone is the new round's word.
+    joined.ended, e._round_ended_at = True, time.monotonic()
+    for ev in parse_events("Selected Course: yorkgc_gsp\nLoading course Practice\n"):
+        e.gspro.apply(ev)
+    e.gspro.apply(LogEvent("shot_fired"))
+    for ev in parse_events("ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 0\n"):
+        e.gspro.apply(ev)
+    assert e.gspro.mode == "course" and not e._after_round(second) and e._should_join(second)
+
+
+def test_a_round_started_after_a_drive_off_its_courses_range_takes_the_drive(tmp_path):
+    from commentator.sources.gspro_log import LogEvent, parse_events
+
+    # Two players: the first drove off the course's own range before the booth saw the tee, and the
+    # second's opening tee starts the round normally. The drive, recorded with no round, is its.
+    e = _engine(tmp_path)
+    e.cfg.source.gspro_log_truth = True
+    for ev in parse_events("Selected Course: yorkgc_gsp\nLoading course Practice\n"):
+        e.gspro.apply(ev)
+    e.gspro.apply(LogEvent("shot_fired"))
+    for ev in parse_events("ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 0\n"):
+        e.gspro.apply(ev)
+    fire = e.gspro.range_exit_fire
+    # Struck before the log left the range: it carries the last round's closing hole.
+    drive = ShotRecord("Mike", Shot(carry=250.0), "Hole 9, par 5, 540 yards", Hud(), [], par=5)
+    drive.shot_id = e.store.db.execute(
+        "INSERT INTO shots (session_id, ts, player, course, hole, is_putt, is_league, attributed)"
+        " VALUES (?, 0, 'Mike', 'Wynn', 'Hole 9, par 5, 540 yards', 0, 0, 1)",
+        (e.store.session_id,)).lastrowid   # as recorded with no round: practice
+    e._fire_rows[fire] = (drive.shot_id, drive, None, None)
+    e._row_source[fire] = "screen"
+    r = Round(league=e.league, gspro_players=["Mike", "Josh"], course="York Golf Club", scheduled_format=None)
+    r.par[1], r.slot_names = 4, ["Mike", "Josh"]
+    assert r.is_league
+    e._start_round(r)
+    assert (drive.round_id, drive.hole_seq) == (r.id, 1) and fire in e._owners_due
+    assert (drive.hole, drive.par) == ("Hole 1, par 4", 4) and r.shot_floor == drive.shot_id - 1
+    assert tuple(e.store.db.execute("SELECT is_league, hole, course FROM shots WHERE id = ?",
+                                    (drive.shot_id,)).fetchone()) == (1, "Hole 1, par 4", "York Golf Club")
+    # It stopped inside the gimme: GSPro scored the hole in two. Named before it had a slot, its
+    # result is read like any of the round's.
+    e.gspro.hole_scores[(0, 0)] = 2
+    e._apply_log_corrections()
+    assert e._fire_rows[fire][2:] == (0, 0) and drive.outcome == "conceded"
+    # The second player's drive, struck as the round started and recorded once its ball was followed.
+    e.gspro.apply(LogEvent("shot_fired"))
+    # Struck before any banner was read: no hole yet, it gets the logged one.
+    late = ShotRecord("Josh", Shot(carry=240.0), None, Hud(), [])
+    e._fire_rows[fire + 1] = (None, late, None, None)
+    e.gspro._fire_info[fire + 1] = {"player": 1, "hole": 0}
+    e._adopt_late_shot(fire + 1)
+    assert (late.round_id, late.hole, late.par) == (r.id, "Hole 1, par 4", 4)
+    # One the round had already taken when it was recorded, still on the last round's hole.
+    e.gspro.apply(LogEvent("shot_fired"))
+    taken = ShotRecord("Josh", Shot(carry=230.0), "Hole 9, par 5, 540 yards", Hud(), [], round_id=r.id, par=5)
+    e._fire_rows[fire + 2] = (None, taken, None, None)
+    e.gspro._fire_info[fire + 2] = {"player": 1, "hole": 0}
+    e._adopt_late_shot(fire + 2)
+    assert (taken.hole, taken.par) == ("Hole 1, par 4", 4)
+
+
 async def test_a_swing_gspro_never_played_is_ignored(tmp_path, monkeypatch):
     import commentator.engine as engine_mod
     from commentator.models import Shot, ShotEvent

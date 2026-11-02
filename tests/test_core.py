@@ -4303,6 +4303,65 @@ async def test_a_banner_that_flips_back_with_no_shot_undoes_the_hole_change(tmp_
     assert e.hole_number == 13
 
 
+async def test_an_opening_tee_on_screen_takes_gspro_off_its_courses_range(tmp_path):
+    # Tee Off from a course's own range logs nothing: GSPro's log still says range at the first tee.
+    from commentator.sources.gspro_log import LogEvent, parse_events
+    e = _mini_engine(tmp_path)
+    e.cfg.source.gspro_log_truth, e.cfg.source.type = True, "gsprolog"
+    e.cfg.screen.hud_poll_seconds = 0
+    for ev in parse_events("Selected Course: yorkgc_gsp\nLoading course Practice\n"):
+        e.gspro.apply(ev)
+    tee = Hud(player_text="Josh E Shot 1 325.7 YDS", shot_number=1, score_to_par="E", to_pin="325.7 yards",
+              course="York Golf Club", par=4, hole_length="326 yards")
+    huds = []
+
+    class Screen:
+        last_read_seconds = last_capture_seconds = 0.0
+
+        async def read_hud_async(self, parts):
+            hud = huds.pop(0) if huds else Hud(player_text="QUICK CTP")
+            return hud() if callable(hud) else hud
+
+        async def snapshot_jpeg(self):
+            return None
+
+    e.screen = Screen()
+
+    async def watch(polls):
+        huds[:] = polls
+        task = asyncio.create_task(e._watch_hud())
+        for _ in range(200):
+            if not huds:
+                break
+            await asyncio.sleep(0.005)
+        task.cancel()
+
+    await watch([tee] * 5)   # the tee was already up when the booth looked: nothing shows it left the range
+    assert e.gspro.mode == "range"
+    await watch([Hud(player_text="QUICK CTP"), tee, Hud(player_text="QUICK CTP")] * 3)   # never held
+    assert e.gspro.mode == "range"
+    def swung():
+        e.gspro.apply(LogEvent("shot_fired"))
+        return tee
+
+    await watch([Hud(player_text="QUICK CTP"), tee, swung, tee, tee])   # in the air: its score line decides
+    assert e.gspro.mode == "range"
+    def range_then_swung():   # the read caught the range, then the drive fired before it finished
+        e.gspro.apply(LogEvent("shot_fired"))
+        return Hud(player_text="QUICK CTP")
+
+    await watch([range_then_swung, tee, tee, tee])
+    assert e.gspro.mode == "range"
+    await watch([Hud(player_text="QUICK CTP"), Hud(scorecard_open=True), tee])   # one tee poll, then:
+    e.gspro.end_round()                       # End Round with the tee still up: the quit round's
+    await watch([tee] * 3)
+    assert e.gspro.mode == "menu"
+    for ev in parse_events("Selected Course: yorkgc_gsp\nLoading course Practice\n"):
+        e.gspro.apply(ev)
+    await watch([Hud(player_text="QUICK CTP")] * 3 + [tee] * 3)
+    assert (e.gspro.mode, e.gspro.course) == ("course", "yorkgc_gsp")
+
+
 async def test_gsprolog_hole_corrects_the_count_and_moves_the_holes_shots(tmp_path):
     from commentator.course_card import CourseCard
     from commentator.models import HoleChangeEvent

@@ -107,6 +107,12 @@ def _setup_key(hud: Hud) -> tuple | None:
     return hud.player_text.split()[0], hud.shot_number, hud.to_pin
 
 
+def _opening_tee(hud: Hud) -> bool:
+    """A round's first tee on screen: a player on shot 1 at even par, under a hole banner. The range
+    shows neither a shot number nor a banner."""
+    return bool(hud.player_text and hud.shot_number == 1 and hud.score_to_par == "E" and hud.par)
+
+
 def hole_label(hud: Hud, number: int | None) -> str:
     parts = [f"Hole {number}"] if number else []
     if hud.par:
@@ -310,6 +316,9 @@ FLIGHT_CALL_LATE_SECONDS = 3.0
 # comes within about half a second): one it never logs was hit while GSPro couldn't take it.
 BANTER_WAIT_SECONDS = 40.0   # the most a routine shot's call waits for an aside on air to finish
 UNPLAYED_SHOT_WAIT_SECONDS = 2.5
+# How long a shot struck on a course's own range waits for GSPro's score line to say it was the course's
+# first tee shot (see _course_shot_off_own_range): a drive's flight and roll, with room to spare.
+RANGE_TEE_SHOT_WAIT_SECONDS = 30.0
 KEEP_GSPRO_LOGS = 5             # copies of GSPro's log kept from round ends (see _keep_gspro_log)
 GSPRO_LOG_KEEP_BYTES = 8_000_000   # from the end of it: a round's lines and plenty before
 TREE_CALLS = ("Oh, that's into the trees!", "That's caught a branch!", "Oh no, it's clipped the tree!",
@@ -821,6 +830,11 @@ class Engine:
         self._log_layouts = 0
         self._range_noted = False
         self._join_tried = False   # joining a round already under way is tried once, at the first setup
+        # GSPro's End Round count when an opening drive struck off a course's own range was taken: with
+        # no round open (or the last one over), that drive began one the booth must join.
+        self._new_round_struck: int | None = None
+        self._range_exits_seen = 0
+        self._opening_fire: tuple[int, int] | None = None   # (round id, its first fire): see _adopt_opening_shots
         # Shot handlers run in the background (the follow/reaction mustn't block the loop); keep
         # references so they aren't garbage-collected mid-flight.
         self._shot_tasks: set[asyncio.Task] = set()
@@ -948,11 +962,13 @@ class Engine:
         candidate_stamp: tuple | None = None
         setup_seq = moved_on = 0
         card_read_at = 0.0
+        away_at, away_seen, tee_polls, away_fires = None, False, 0, 0   # the screen leaving the range or menus
         while True:
             await asyncio.sleep(self.cfg.screen.hud_poll_seconds)
             # Who was up when this poll began: a setup is kept for the impact read only if no ball was
             # struck, nor the log's player changed, from its first sighting to the end of its read.
             stamp = (self._shot_seq, self.gspro.active_player, time.monotonic())
+            poll_fires = self.gspro.fires
             try:
                 hud = await self.screen.read_hud_async(["player_box", "hole_box", "scorecard_title"])
             except Exception:
@@ -960,6 +976,26 @@ class Engine:
                 continue
             self._check_log_round()
             self._check_round_idle()
+            if self._log_rounds and self.gspro.mode in ("range", "menu"):
+                # GSPro logs nothing on Tee Off from a course's own range, so its log can still say
+                # range (or menus) at the first tee. An opening tee on screen, held for two polls and
+                # after a poll with no player box (the range or the menus themselves, not a stale HUD),
+                # is a course. Each new stretch away (End Round included) needs its own such poll. A
+                # swing since that poll is left to GSPro's score line for it, which says course itself.
+                if (away := (self.gspro.mode, self.gspro.round_ends)) != away_at:
+                    away_at, away_seen, tee_polls = away, False, 0
+                if not hud.shot_number and not hud.scorecard_open:
+                    # Fires counted before the read: one during it is after this sighting of the range.
+                    away_seen, tee_polls, away_fires = True, 0, poll_fires
+                elif away_seen and _opening_tee(hud) and self.gspro.fires == away_fires:
+                    tee_polls += 1
+                    if tee_polls >= 2:
+                        self._tee_seen_unlogged(hud)
+                        away_seen, tee_polls = False, 0
+                else:
+                    tee_polls = 0
+            else:
+                away_at, away_seen, tee_polls = None, False, 0
             if self._on_range():
                 # The range isn't a round: no holes, no setups, no round start. Forget the last tee seen
                 # so the first one after the range reads as new.
@@ -1256,7 +1292,7 @@ class Engine:
         r = self.round
         if self._log_rounds and self.gspro.mode == "menu" and (r is None or r.ended):
             return True
-        if r is None or hud.shot_number == 1:
+        if r is None or hud.shot_number == 1 or self._struck_new_round():
             return False
         if not r.ended:
             return r.log_complete
@@ -1269,7 +1305,8 @@ class Engine:
     def _should_join(self, hud: Hud) -> bool:
         """The booth started with a round already under way (GSPro's log shows shots on this course
         and the booth isn't tracking a round): pick it up at the first setup, once."""
-        if self._join_tried or not self._log_rounds or self.round is not None:
+        struck = self._struck_new_round()
+        if not struck and (self._join_tried or not self._log_rounds or self.round is not None):
             return False
         g = self.gspro
         if g.mode != "course" or not g.shots_since_course or g.first_hole is None or g.current_hole is None:
@@ -1399,6 +1436,69 @@ class Engine:
             log.info("GSPro %s the range: booth %s", "is on" if on else "left",
                      "off until a round is set up" if on else "back on")
         return on
+
+    async def _course_shot_off_own_range(self, event: ShotEvent) -> bool:
+        """Whether a shot struck while GSPro's log says range was really its course's first: Tee Off from
+        a course's own range logs nothing, and a swing before the screen showed the tee came as a range
+        shot. GSPro logs a score line for it once the ball stops (the range logs none), and that line
+        crediting this shot's own fire (fired as it was struck) makes it a course shot, held since
+        impact. The screen is read now, while it still shows this shot rather than the next."""
+        g = self.gspro
+        if not (g.own_range and self._fire_log_followed()):
+            return False
+        impact = event.impact_at or event.received_at or time.monotonic()
+        base = event.received_fires if event.received_fires is not None else g.fires
+        state = event.impact_state[0] if event.impact_state else self._impact_state()
+        setup = event.setup_hud or self._setup_at_impact(impact)
+        read = event.impact_read
+        if read is None and self.screen is not None and self.cfg.screen.ocr:
+            read = asyncio.ensure_future(self._read_impact_hud("[range-held shot]"))
+        fired_by = impact + UNPLAYED_SHOT_WAIT_SECONDS
+        deadline = time.monotonic() + RANGE_TEE_SHOT_WAIT_SECONDS
+        while True:
+            n = g.fire_of(base, impact)
+            if n is None and time.monotonic() > fired_by or g._fire_at.get(n, float("-inf")) > fired_by:
+                taken = False   # GSPro never played it: a later fire is another swing's
+            elif g.mode == "course" and g.fire_info(n).get("player") is not None:
+                taken = True
+            elif g.mode == "menu" or time.monotonic() >= deadline:
+                taken = False
+            else:
+                await asyncio.sleep(0.2)
+                continue
+            break
+        if not taken:
+            if read is not None and read is not event.impact_read:
+                read.cancel()
+            return False
+        log.info("Shot struck with GSPro's log on the range: its score line puts it on the course; taking it "
+                 "as a course shot (club %s, carry %.1f)", event.shot.club, event.shot.carry or 0)
+        event.impact_at, event.impact_state = impact, (state, *self._impact_hole())
+        event.impact_read, event.setup_hud = read, setup
+        return True
+
+    def _struck_new_round(self) -> bool:
+        """An opening drive taken off a course's own range (GSPro's score line for it took the log off the
+        range) began a round the booth hasn't got: join it at the next setup, even with the last round
+        still held as over (its shot 2 can't open one)."""
+        g = self.gspro
+        if g.range_exits != self._range_exits_seen:
+            self._range_exits_seen = g.range_exits
+            if self.round is None or self.round.ended:
+                self._new_round_struck = g.round_ends
+        if self._new_round_struck is not None and (g.round_ends != self._new_round_struck or g.mode != "course"):
+            self._new_round_struck = None
+        return self._new_round_struck is not None and (self.round is None or self.round.ended)
+
+    def _tee_seen_unlogged(self, hud: Hud) -> None:
+        """An opening tee on screen while GSPro's log says range or menus: it's on a course. From a
+        course's own range that's the course selected before it; otherwise the tee's read names it."""
+        g = self.gspro
+        folder = g.course if g.mode == "range" and g.own_range else None
+        log.info("GSPro's log says %s, but the screen shows %r on the opening tee of %r (par %s): on a course "
+                 "(%s)", g.mode if g.mode == "range" else "menus", hud.player_text, hud.course, hud.par,
+                 folder or "course from the tee")
+        g.enter_course(folder, None)
 
     def _check_log_round(self) -> None:
         """Act on round-level lines in GSPro's log: a round holed out ("Round Is Complete", with the
@@ -3327,6 +3427,11 @@ class Engine:
         g, name = known
         if r.current_name(rec.player) == name:
             r.log_agree[(owner, g)] = r.log_agree.get((owner, g), 0) + 1
+            if self._fire_rows[fire][2] is None:
+                # Named before the round was open (struck off a course's range): with no slot then, its
+                # log corrections and result were never followed. The log agrees whose it is.
+                self._fire_rows[fire] = (shot_id, rec, owner, self.gspro.fire_info(fire).get("hole"))
+                self._outcomes_due.add(fire)
         else:
             for k in [k for k in r.log_agree if k[0] == owner]:
                 del r.log_agree[k]
@@ -4174,7 +4279,7 @@ class Engine:
             event.impact_read = asyncio.ensure_future(self._read_impact_hud("[held shot]"))
 
     async def handle_shot(self, event: ShotEvent) -> None:
-        if self._on_range():
+        if self._on_range() and not await self._course_shot_off_own_range(event):
             log.info("Range shot ignored (club %s, carry %.1f)", event.shot.club, event.shot.carry or 0)
             return
         # A shot the feed held back (GSPconnect skipped it) carries its impact time and state.
@@ -4202,7 +4307,8 @@ class Engine:
         self._apply_log_corrections()
         shot = event.shot
         if not counted:
-            event.setup_hud = self._setup_at_impact(event.received_at or impact)
+            if event.setup_hud is None:   # (a shot held on the range kept its own)
+                event.setup_hud = self._setup_at_impact(event.received_at or impact)
             self._shot_seq += 1
         my_seq = event.impact_seq if counted else self._shot_seq   # this shot's order, to keep concurrent handlers from reordering finish
         tag = f"[shot {my_seq}]"
@@ -4607,6 +4713,7 @@ class Engine:
         if fire is not None:
             self._fire_rows[fire] = (shot_id, rec, idx, impact_snap[1].get(idx) if idx is not None else None)
             self._row_source[fire] = name_source
+            self._adopt_late_shot(fire)
             if r is not None and self._log_truth:
                 self._owners_due.add(fire)
             for old in [f for f in self._fire_rows if f <= fire - 60]:
@@ -6398,10 +6505,17 @@ class Engine:
         if self.store.roll_session_if_idle():
             log.info("Booth idle for hours: round %s starts a new session (%s)", r.id, self.store.session_id)
             self.state.shots.clear()   # "today" starts over with the new session
+        struck = self._struck_new_round()
         self.round = r
         self._round_started_at = time.monotonic()
+        self._new_round_struck, self._range_exits_seen = None, self.gspro.range_exits
+        self._opening_fire = None
+        if struck:
+            self._adopt_opening_shots(r)
         self.state.recent_lines.words.reset()
         r.shot_floor = self.store.last_shot_id()
+        if adopted := [v[0] for v in self._fire_rows.values() if v[0] is not None and v[1].round_id == r.id]:
+            r.shot_floor = min(adopted) - 1   # the drives struck before it started are its own
         self._hc = RoundCounters(fires_at_start=self.gspro.fires, kinds_at_start=dict(self.gspro.kinds))
         if self.cfg.health.enabled and self.cfg.source.type != "replay":
             # The booth runs for days: what startup checked may have changed since (GSPro updated and
@@ -6694,6 +6808,9 @@ class Engine:
     async def handle_round_start(self, event: RoundStartEvent) -> None:
         hud, c = event.hud, self.cfg.commentary
         if event.joined:
+            if self.round is not None and not self.round.ended:
+                log.info("Round %s already joined: a second setup's join is set aside", self.round.id)
+                return
             await self._join_round(hud)
             if hud.shot_number == 1:
                 self._snap_hole(hud)
@@ -6814,6 +6931,54 @@ class Engine:
                  r.id, r.course, "league" if is_league else "practice", ", ".join(s.label for s in r.sides),
                  r.start_hole, self.hole_number, r.seq, r.holes)
         self._maybe_prep_asides(r)   # joined past a nine's second hole: no hole change will start it
+
+    def _adopt_opening_shots(self, r: Round) -> None:
+        """A round started (or joined) after its opening drive came off a course's own range: that drive
+        (and anything since) was recorded with no round open. They're this round's, on the holes GSPro's
+        log put them, and their owners are settled against its roster like any of its shots. One still
+        being followed when the round started is taken as it's recorded (_adopt_late_shot)."""
+        g = self.gspro
+        if (first := g.range_exit_fire) is None or g.first_hole is None:
+            return
+        self._opening_fire = (r.id, first)
+        n = sum(self._adopt_row(r, fire) for fire in sorted(self._fire_rows) if fire >= first)
+        if n:
+            log.info("Round %s: %s shot(s) struck before it started, from its opening drive, are its own", r.id, n)
+
+    def _adopt_late_shot(self, fire: int) -> None:
+        r, o = self.round, self._opening_fire
+        if o and r is not None and not r.ended and r.id == o[0] and fire >= o[1] and self._adopt_row(r, fire):
+            log.info("Round %s: a shot struck before it started, recorded since, is its own", r.id)
+
+    def _adopt_row(self, r: Round, fire: int) -> bool:
+        g = self.gspro
+        shot_id, rec, _, _ = self._fire_rows[fire]
+        if rec.round_id not in (None, r.id):
+            return False
+        # A drive whose handler only got to it once the round was open is the round's already, but its
+        # hole, par and course were read before the log left the range all the same.
+        attached = rec.round_id == r.id
+        hole = g.fire_info(fire).get("hole")
+        rec.round_id, rec.hole_seq = r.id, r.seq if hole is None or g.first_hole is None else hole - g.first_hole + 1
+        # Struck before the log left the range, it may carry the last round's hole and par: GSPro's log
+        # says which hole it was (0-based), the round's card its par.
+        label = None
+        if hole is not None:
+            par, m = r.par.get(rec.hole_seq), re.match(r"Hole (\d+)", rec.hole or "")
+            if not rec.hole or (m and int(m[1]) != hole + 1) or (par is not None and rec.par != par):
+                label = ", ".join([f"Hole {hole + 1}"] + ([f"par {par}"] if par else []))
+                rec.hole, rec.par = label, par
+        # Recorded as practice with no format: it's this round's (an unnamed one gets its format when the
+        # owner reconciliation names it).
+        name = rec.player if rec.player and rec.player != "unknown" else None
+        shared = bool(name) and not r.solo(r.side_for(name)) and bool(
+            r.format == "scramble" or r.no_scramble or g.team_scores)
+        self.store.set_shot_round_class(shot_id, is_league=r.is_league, fmt=r.player_format(name) if name else None,
+                                        attributed=bool(name) and not self._anonymous(name), shared_ball=shared,
+                                        hole=label, course=r.course)
+        if self._log_truth:
+            self._owners_due.add(fire)
+        return not attached
 
     async def _watch_setup(self) -> None:
         probed = callable(getattr(self.screen, "setup_frame", None)) and callable(

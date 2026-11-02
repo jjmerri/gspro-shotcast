@@ -699,6 +699,17 @@ class Store:
                             (player, int(attributed), fmt, int(shared_ball), shot_id))
             self.db.commit()
 
+    def set_shot_round_class(self, shot_id: int | None, *, is_league: bool, fmt: str | None, attributed: bool,
+                             shared_ball: bool, hole: str | None = None, course: str | None = None) -> None:
+        """A shot recorded before its round started, now taken into it: the round's league/practice
+        context and format, whether the stats can credit its player, and (`hole`, `course`) where it
+        was when it was labelled with the last round's."""
+        if shot_id is not None:
+            self.db.execute("UPDATE shots SET is_league = ?, fmt = ?, attributed = ?, shared_ball = ?,"
+                            " hole = coalesce(?, hole), course = coalesce(?, course) WHERE id = ?",
+                            (int(is_league), fmt, int(attributed), int(shared_ball), hole, course, shot_id))
+            self.db.commit()
+
     def finish_of(self, shot_id: int) -> tuple[str | None, float | None]:
         """A shot's stored (lie_after, finish_yards)."""
         row = self.db.execute("SELECT lie_after, finish_yards FROM shots WHERE id = ?", (shot_id,)).fetchone()
