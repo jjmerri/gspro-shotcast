@@ -255,6 +255,19 @@ def test_a_round_left_out_drive_is_not_its_longest(tmp_path):
         assert {r["side"]: r["longest_drive"] for r in stats_web.rounds(ro)} == {"Ann": 250, "Bob": 300}
 
 
+def test_a_round_card_takes_its_longest_drive_from_its_shots(tmp_path):
+    """Stored as none at the round's end (the club wasn't read), the drive counts once a rule does."""
+    path, db = _db(tmp_path)
+    _shot(db, "Win", ts=10, course="Pebble", hole="Hole 1, par 4", club=None, shot_number=1, lie_before="tee",
+          to_pin_yards=365, total_yards=319.5)
+    db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, gross, scores, hole_pars,"
+               " longest_drive, complete) VALUES (1, 100, '2026-10-01', 'Pebble', 'Win', 18, 4,"
+               " '{\"1\": 4}', '{\"1\": 4}', NULL, 0)")
+    db.commit()
+    with stats_web.connect(path) as ro:
+        assert [r["longest_drive"] for r in stats_web.rounds(ro)] == [319.5]
+
+
 def test_a_tee_shot_with_no_club_read_counts_as_a_drive_off_a_long_hole(tmp_path):
     """A booth that never read the club box: its 320-yard drive was missing from the stats. A par 3's
     tee shot (the pin under 250) and a second shot with no club still aren't drives."""

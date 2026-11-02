@@ -338,7 +338,8 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
     for sid, ts in db.execute("SELECT id, ts FROM shots"):
         if (rnd := of_shot.get(sid)) is not None and (rnd not in started or ts < started[rnd]):
             started[rnd] = ts
-    # A round with a drive left out of the stats gets its longest drive again from the drives kept.
+    # Each round's longest drive, from its drives in the stats: the one stored at the round's end misses
+    # a drive left out since, a total read after the swing, and drives a later rule counts (no club read).
     kept: dict[tuple, float | None] = {}
     left: set[tuple] = set()
     for sid, player, d, out_ in db.execute(f"SELECT id, player, {_DRIVE}, left_out FROM shots WHERE {_TEE_DRIVER}"
@@ -366,7 +367,7 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             holes, complete = 9, True
         longest = r["longest_drive"]
         # (a team side's players aren't on record per round, so its stored drive stands)
-        if (rnd, r["side"]) in left:
+        if (rnd, r["side"]) in kept or (rnd, r["side"]) in left:
             longest = kept.get((rnd, r["side"]))
         out.append({
             "id": r["id"], "round": of_row.get(r["id"], r["id"]), "session": r["session_id"], "ended": r["ended_at"], "date": r["date"],
