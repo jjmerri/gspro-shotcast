@@ -8,6 +8,9 @@ shots' logged distances to it, and the tee is the box whose distance to that pin
 shot's. From the tee GSPro measures along the hole's aim points (a dogleg's yardage, not the straight
 line), so that distance is too. A group tees off one box all round: the box most holes match is used
 where a hole's own match is unclear.
+
+A layout GSPro did log has its tee at one of the course file's boxes exactly, which names the box the
+round was played from (name_tee_boxes; the stats page and share card show it).
 """
 
 from __future__ import annotations
@@ -27,6 +30,8 @@ log = logging.getLogger(__name__)
 TEE_BOXES = ("Black", "White", "Green", "Blue", "Yellow", "Red", "Junior", "Par3")
 PIN_MATCH_M = 2.0        # a day's pin fits a hole when the shots' distances to it miss by at most this
 TEE_MATCH_M = 3.0        # a box fits a hole when its distance to the pin is within this of the tee shot's
+TEE_BOX_M = 0.05         # a logged tee is a box of the course file's when this close (they're the same point;
+                         # a hole's boxes can be 0.13 m apart)
 _HOLE = re.compile(r"Hole (\d+)")
 
 
@@ -153,9 +158,9 @@ def fill_missing(db: sqlite3.Connection, courses_dirs, since: float | None = Non
         for h, lo in found.items():
             last_row = missing[h][-1]
             db.execute("INSERT INTO hole_layouts (session_id, ts, course, hole, par, tee_x, tee_y, tee_z,"
-                       " pin_x, pin_y, pin_z) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                       " pin_x, pin_y, pin_z, tee_box) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                        (last_row["session_id"], last_row["ts"], course, h, lo["par"],
-                        *(lo["tee"] or none3), *lo["pin"]))
+                        *(lo["tee"] or none3), *lo["pin"], lo["box"] if lo["tee"] else None))
             filled += 1
         if found:
             log.info("Round %s at %s had no layout from GSPro: took %d holes' tee and pin from the course file"
@@ -164,3 +169,33 @@ def fill_missing(db: sqlite3.Connection, courses_dirs, since: float | None = Non
     if filled:
         db.commit()
     return filled
+
+
+def box_at(hole: dict | None, tee) -> str | None:
+    """The course file's box (Black, Blue, ...) a hole's logged tee (x, y, z) sits on, or None."""
+    near = [(_dist(p, tee), b) for b, p in ((hole or {}).get("tees") or {}).items()]
+    best = min(near, default=None)
+    return best[1] if best and best[0] <= TEE_BOX_M else None
+
+
+def name_tee_boxes(db: sqlite3.Connection, courses_dirs) -> int:
+    """Name the tee box of each stored hole layout that has a tee but no box yet, from the course
+    file: GSPro logs the tee as the box's own position. Returns the layouts named."""
+    from . import course_card
+
+    rows = db.execute("SELECT id, course, hole, tee_x, tee_y, tee_z FROM hole_layouts"
+                      " WHERE tee_box IS NULL AND tee_x IS NOT NULL AND tee_z IS NOT NULL").fetchall()
+    geometry: dict[str, dict | None] = {}
+    named = 0
+    for r in rows:
+        key = (r["course"] or "").casefold()
+        if key not in geometry:
+            folder = course_card.find(courses_dirs, r["course"])
+            geometry[key] = load(folder) if folder else None
+        if (box := box_at((geometry[key] or {}).get(r["hole"]), (r["tee_x"], r["tee_y"] or 0.0, r["tee_z"]))):
+            db.execute("UPDATE hole_layouts SET tee_box = ? WHERE id = ?", (box, r["id"]))
+            named += 1
+    if named:
+        db.commit()
+        log.info("Named the tee box of %d hole layouts from the course files", named)
+    return named

@@ -82,7 +82,9 @@ CREATE TABLE IF NOT EXISTS hole_layouts (            -- each hole's geometry, lo
     par INTEGER,
     tee_x REAL, tee_y REAL, tee_z REAL,          -- world metres, as shots.start_*
     pin_x REAL, pin_y REAL, pin_z REAL,          -- this round's pin
-    wp_x REAL, wp_y REAL, wp_z REAL              -- the course designer's aim waypoint (not the player's aim)
+    wp_x REAL, wp_y REAL, wp_z REAL,             -- the course designer's aim waypoint (not the player's aim)
+    tee_box TEXT                                 -- the course file's box at the tee (Black, Blue, ...); NULL
+                                                 -- until matched (course_layout.name_tee_boxes)
 );
 CREATE TABLE IF NOT EXISTS hole_images (             -- GSPro's minimap off the tee, the hole replay's background
     id INTEGER PRIMARY KEY,                      -- one per course and hole: the map is the same every round
@@ -375,6 +377,8 @@ class Store:
                 self.db.execute(f"ALTER TABLE player_rounds ADD COLUMN {col} {decl}")
         if "excluded" not in {r["name"] for r in self.db.execute("PRAGMA table_info(lines)")}:
             self.db.execute("ALTER TABLE lines ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
+        if "tee_box" not in {r["name"] for r in self.db.execute("PRAGMA table_info(hole_layouts)")}:
+            self.db.execute("ALTER TABLE hole_layouts ADD COLUMN tee_box TEXT")
         # A round's course read off the scorecard was stored in capitals: file it under the shots' name.
         for table in ("rounds", "player_rounds"):
             for (course,) in self.db.execute(f"SELECT DISTINCT course FROM {table} WHERE course IS NOT NULL").fetchall():

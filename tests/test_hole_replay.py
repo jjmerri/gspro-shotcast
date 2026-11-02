@@ -364,8 +364,6 @@ def test_a_round_quit_early_estimates_its_pin_from_the_shots_distances(tmp_path)
 
 
 def test_a_round_quit_early_takes_its_tee_and_pin_from_the_course_file(tmp_path):
-    import json
-
     from commentator.course_layout import fill_missing
     path, st = _season(tmp_path)
     # A dogleg: from the tee GSPro measures through the aim point (60, 150), 323.1 m, not the 300 straight.
@@ -374,6 +372,20 @@ def test_a_round_quit_early_takes_its_tee_and_pin_from_the_course_file(tmp_path)
     st.db.execute("UPDATE shots SET start_x = 10, start_z = 200 WHERE shot_number = 2")
     st.db.execute("UPDATE shots SET start_x = 2, start_z = 295 WHERE shot_number = 3")
     st.db.commit()
+    _course_file(tmp_path)
+    assert hole_replays(st.db)[(1, 1)]["tee"] is None
+    assert fill_missing(st.db, [str(tmp_path / "Courses")]) == 1
+    rp = hole_replays(st.db)[(1, 1)]
+    assert rp["tee"] == [0, 0] and rp["pin"] == [0, 300] and not rp["pin_estimated"]
+    assert st.db.execute("SELECT tee_box FROM hole_layouts").fetchone()[0] == "White"
+    assert fill_missing(st.db, [str(tmp_path / "Courses")]) == 0   # once
+
+
+def _course_file(tmp_path):
+    """Test Links' course file: hole 1's Black tee at (0, -40), White at (0, 0), a dogleg aim point and
+    two days' pins."""
+    import json
+
     folder = tmp_path / "Courses" / "test_gsp"
     folder.mkdir(parents=True)
     (folder / "coursedetails.txt").write_text("Test Links|Somewhere\n")
@@ -383,11 +395,25 @@ def test_a_round_quit_early_takes_its_tee_and_pin_from_the_course_file(tmp_path)
         "Tees": [{"TeeType": "Black", "Position": pos(0, -40)}, {"TeeType": "White", "Position": pos(0, 0)},
                  {"TeeType": "AimPoint1", "Enabled": True, "Position": pos(60, 150)}],
         "Pins": [{"Day": "Thursday", "Position": pos(0, 300)}, {"Day": "Friday", "Position": pos(8, 290)}]}]}))
-    assert hole_replays(st.db)[(1, 1)]["tee"] is None
-    assert fill_missing(st.db, [str(tmp_path / "Courses")]) == 1
-    rp = hole_replays(st.db)[(1, 1)]
-    assert rp["tee"] == [0, 0] and rp["pin"] == [0, 300] and not rp["pin_estimated"]
-    assert fill_missing(st.db, [str(tmp_path / "Courses")]) == 0   # once
+
+
+def test_a_rounds_tees_are_the_course_files_box_its_logged_tee_sits_on(tmp_path):
+    from commentator import stats_web
+    from commentator.course_layout import name_tee_boxes
+    path, st = _season(tmp_path)
+    log = tmp_path / "output_log.txt"
+    log.write_text(_hole_log())    # its logged tee is (0, 0): the White box
+    backfill(path, [str(log)])
+    _course_file(tmp_path)
+    # A later round on the hole from the Black box, and one from a tee no box is at.
+    for n, tee in enumerate([(0.0, 1.0, -40.0), (0.0, 1.0, -20.0)], 1):
+        st.record_hole_layout("Test Links", [{"par": 4, "played": True, "tee": tee, "pin": (0.0, 1.0, 300.0)}],
+                              session_id=st.session_id + n, ts=9e9)
+    assert stats_web.rounds(st.db)[0]["tee"] is None
+    assert name_tee_boxes(st.db, [str(tmp_path / "Courses")]) == 2
+    assert [r[0] for r in st.db.execute("SELECT tee_box FROM hole_layouts ORDER BY id")] == ["White", "Black", None]
+    assert stats_web.rounds(st.db)[0]["tee"] == "White"
+    assert name_tee_boxes(st.db, [str(tmp_path / "Courses")]) == 0
 
 
 def test_estimate_pin_is_none_when_the_distances_dont_agree():
@@ -570,3 +596,75 @@ def test_a_logged_total_follows_later_corrections_and_a_read_total_is_kept(tmp_p
     assert st.fill_log_totals() == 1 and total(2) is None
     st.db.execute("UPDATE shots SET mulligan = 0, total_yards = 99 WHERE shot_number = 2")   # read off the HUD
     assert st.fill_log_totals() == 0 and total(2) == 99
+
+
+def test_a_round_doesnt_take_the_tees_of_a_later_round_left_out_of_the_stats(tmp_path):
+    from commentator import stats_web
+    path, st = _season(tmp_path)     # no layout of its own
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, raw, excluded)"
+                  " VALUES (?, 3000, 'Dan', 'Test Links', 'Hole 1, par 4, 328 yards', 1, 'DR', 0, '{}', 1)", (st.session_id,))
+    st.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, excluded)"
+                  " VALUES (?, 4000, '2025-10-20', 'Test Links', 'Dan', 1, 1)", (st.session_id,))
+    st.db.commit()
+    st.record_hole_layout("Test Links", [{"par": 4, "played": True, "tee": (0.0, 1.0, -40.0), "pin": (0.0, 1.0, 300.0)}],
+                          session_id=st.session_id, ts=3500)
+    st.db.execute("UPDATE hole_layouts SET tee_box = 'Black'")
+    st.db.commit()
+    [r] = stats_web.rounds(stats_web.connect(path))
+    assert r["tee"] is None
+
+
+def test_a_stray_shot_before_the_rounds_layout_is_logged_doesnt_lose_its_tees(tmp_path):
+    from commentator import stats_web
+    path, st = _season(tmp_path)     # the round ends at 2000
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, raw)"
+                  " VALUES (?, 2500, 'Dan', 'Test Links', 'Hole 1, par 4, 328 yards', 1, 'DR', 0, '{}')", (st.session_id,))
+    st.db.commit()
+    st.record_hole_layout("Test Links", [{"par": 4, "played": True, "tee": (0.0, 1.0, 0.0), "pin": (0.0, 1.0, 300.0)}],
+                          session_id=st.session_id, ts=2600)
+    st.db.execute("UPDATE hole_layouts SET tee_box = 'White'")
+    # and the next round, which the stray shot is taken to have started
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, raw)"
+                  " VALUES (?, 3000, 'Dan', 'Test Links', 'Hole 1, par 4, 328 yards', 1, 'DR', 0, '{}')", (st.session_id,))
+    st.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes)"
+                  " VALUES (?, 4000, '2025-10-20', 'Test Links', 'Dan', 1)", (st.session_id,))
+    st.db.commit()
+    st.record_hole_layout("Test Links", [{"par": 4, "played": True, "tee": (0.0, 1.0, -40.0), "pin": (0.0, 1.0, 310.0)}],
+                          session_id=st.session_id, ts=3100)
+    st.db.execute("UPDATE hole_layouts SET tee_box = 'Black' WHERE tee_box IS NULL")
+    st.db.commit()
+    assert [r["tee"] for r in stats_web.rounds(stats_web.connect(path))] == ["Black", "White"]
+
+
+def test_a_round_doesnt_take_the_tees_worked_out_from_the_next_rounds_shots(tmp_path):
+    from commentator import stats_web
+    path, st = _season(tmp_path)     # no layout of its own
+    for ts, hole in [(3000, 1), (3200, 1), (3300, 2)]:
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, raw)"
+                      " VALUES (?, ?, 'Dan', 'Test Links', ?, 1, 'DR', 0, '{}')",
+                      (st.session_id, ts, f"Hole {hole}, par 4, 328 yards"))
+    st.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes)"
+                  " VALUES (?, 4000, '2025-10-20', 'Test Links', 'Dan', 2)", (st.session_id,))
+    # course_layout.fill_missing's for the next round's first hole, stamped with its last shot there
+    st.db.execute("INSERT INTO hole_layouts (session_id, ts, course, hole, par, tee_x, tee_y, tee_z, pin_x, pin_y,"
+                  " pin_z, tee_box) VALUES (?, 3200, 'Test Links', 1, 4, 0, 1, -40, 0, 1, 300, 'Black')", (st.session_id,))
+    st.db.commit()
+    assert [r["tee"] for r in stats_web.rounds(stats_web.connect(path))] == ["Black", None]
+
+
+def test_a_round_started_just_after_another_doesnt_take_its_tees(tmp_path):
+    from commentator import stats_web
+    path = str(tmp_path / "season.db")
+    st = Store(path)
+    for shot, layout, end, box in [(1000, 1001, 1020, "White"), (1060, 1061, 1070, "Black")]:
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, raw)"
+                      " VALUES (?, ?, 'Dan', 'Test Links', 'Hole 1, par 4, 328 yards', 1, 'DR', 0, '{}')",
+                      (st.session_id, shot))
+        st.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes)"
+                      " VALUES (?, ?, '2025-10-20', 'Test Links', 'Dan', 1)", (st.session_id, end))
+        st.db.commit()
+        st.record_hole_layout("Test Links", [{"par": 4, "played": True, "tee": (0.0, 1.0, float(-shot)),
+                                              "pin": (0.0, 1.0, 300.0)}], session_id=st.session_id, ts=layout)
+        st.db.execute("UPDATE hole_layouts SET tee_box = ? WHERE tee_box IS NULL", (box,))
+        st.db.commit()
+    assert [r["tee"] for r in stats_web.rounds(stats_web.connect(path))] == ["Black", "White"]

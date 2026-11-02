@@ -1544,6 +1544,7 @@ class Engine:
             if (n := self.store.record_hole_layout(course, g.layout_holes)):
                 log.info("Stored the layout of %d holes at %s", n, course)
                 self._fill_log_totals()   # the tee shots: their start is the layout's tee
+                self._name_tee_boxes()
         if not self._log_rounds:
             return
         live = r is not None and not r.ended
@@ -6471,13 +6472,24 @@ class Engine:
 
     def _fill_course_layouts(self, since: float | None = None) -> None:
         """Take the tee and pin of each hole of a round quit early (which GSPro logs no layout for) from
-        the course file, for its hole replays (see course_layout). Best-effort."""
+        the course file, for its hole replays (see course_layout), then name the layouts' tee boxes.
+        Best-effort."""
         try:
             from . import course_layout
 
             course_layout.fill_missing(self.store.db, self.cfg.source.gspro_courses_dirs, since=since)
         except Exception as e:
             log.warning("Couldn't fill hole layouts from the course files (%s)", e)
+        self._name_tee_boxes()
+
+    def _name_tee_boxes(self) -> None:
+        """Name the tee box (Black, Blue, ...) of the stored layouts not named yet. Best-effort."""
+        try:
+            from . import course_layout
+
+            course_layout.name_tee_boxes(self.store.db, self.cfg.source.gspro_courses_dirs)
+        except Exception as e:
+            log.warning("Couldn't name the tee boxes from the course files (%s)", e)
 
     def _refresh_own_handicaps(self, backfill: bool = False) -> None:
         """Work out each player's own handicap index from the rounds on record, for anyone the league

@@ -28,6 +28,7 @@ import json
 import math
 import re
 import sqlite3
+from collections import Counter
 from typing import Any
 
 from . import shot_shape, stats_web
@@ -144,6 +145,56 @@ def hole_image_sources(db: sqlite3.Connection, ids: set[int]) -> dict[int, str]:
 
 def _r(p: tuple[float, float] | None) -> list[float] | None:
     return [round(p[0], 2), round(p[1], 2)] if p else None
+
+
+def round_tees(db: sqlite3.Connection, round_of: dict[int, int] | None = None) -> dict[int, str]:
+    """Each round's tee box (Black, Blue, ...), keyed as stats_web.shot_rounds numbers rounds: the box
+    most of its holes' own layouts were named (hole_layouts.tee_box). Rounds with none named are left out."""
+    by_hole: dict[tuple[str, int], list[sqlite3.Row]] = {}
+    for lo in _layouts(db):
+        if "tee_box" in lo.keys():
+            by_hole.setdefault(((lo["course"] or "").casefold(), lo["hole"]), []).append(lo)
+    if not any(lo["tee_box"] for los in by_hole.values() for lo in los):
+        return {}
+    round_of = stats_web.shot_rounds(db) if round_of is None else round_of
+    every_round = stats_web.shot_rounds(db, every=True)
+    holes: dict[tuple[int, int], list] = {}   # (round, hole) -> [course, first ts, last ts]
+    span: dict[int, list] = {}                # round -> [sessions, first ts, last ts]
+    for sid, ses, ts, course, hole in db.execute("SELECT id, session_id, ts, course, hole FROM shots ORDER BY id"):
+        m = _HOLE.match(hole or "")
+        if (rnd := round_of.get(sid)) is None or not m:
+            continue
+        h = holes.setdefault((rnd, int(m.group(1))), [course, ts, ts])
+        h[1], h[2] = min(h[1], ts), max(h[2], ts)
+        sp = span.setdefault(rnd, [set(), ts, ts])
+        sp[0].add(ses)
+        sp[1], sp[2] = min(sp[1], ts), max(sp[2], ts)
+    # GSPro logs a round's layouts as it completes, so a round's own are its holes' earliest after it was
+    # played (and the round started: not the round before's, logged a moment before) and before the next recorded round in its sessions ended (one left out of the stats too:
+    # a stray shot after the round can't move an end, as it can a start). Layouts worked out from a
+    # round's shots (course_layout.fill_missing) are stamped with one of its shots: another round's
+    # aren't this one's.
+    ends: dict[int, list] = {}                # every recorded round -> [sessions, last ts]
+    shot_ts: dict[float, set] = {}            # a shot's ts -> the rounds of shots then
+    for sid, ses, ts in db.execute("SELECT id, session_id, ts FROM main.shots"):
+        rnd = every_round.get(sid)
+        shot_ts.setdefault(ts, set()).add(round_of.get(sid, rnd))
+        if rnd is not None:
+            e = ends.setdefault(rnd, [set(), ts])
+            e[0].add(ses)
+            e[1] = max(e[1], ts)
+    votes: dict[int, Counter] = {}
+    for (rnd, hole), (course, first, last) in holes.items():
+        ses, start, end = span[rnd]
+        until = min((e for s, e in ends.values() if s & ses and e > end), default=None)
+        top = min(first + ROUND_HOURS, until) if until is not None else first + ROUND_HOURS
+        own = [lo for lo in by_hole.get(((course or "").casefold(), hole), [])
+               if lo["session_id"] in ses and lo["ts"] is not None and max(last - 60, start) <= lo["ts"] < top
+               and shot_ts.get(lo["ts"], {rnd}) <= {rnd}]
+        lo = min(own, key=lambda lo: (lo["ts"], lo["id"]), default=None)
+        if lo is not None and lo["tee_box"]:
+            votes.setdefault(rnd, Counter())[lo["tee_box"]] += 1
+    return {rnd: c.most_common(1)[0][0] for rnd, c in votes.items()}
 
 
 def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]]:

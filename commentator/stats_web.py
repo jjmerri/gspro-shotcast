@@ -285,15 +285,16 @@ def player_round_of(db: sqlite3.Connection):
     return find
 
 
-def shot_rounds(db: sqlite3.Connection) -> dict[int, int]:
+def shot_rounds(db: sqlite3.Connection, every: bool = False) -> dict[int, int]:
     """Each shot's round: shots aren't stored with one, so it's the round that ended next after the
     shot (and after the round before it), when that round was on the shot's course and ended within a
     round's length of it (a booth restart mid-round keeps its shots). Shots of a round that was never
-    finished and recorded have none."""
-    groups, _ = round_groups(db)
+    finished and recorded have none. `every` takes in the rounds left out of the stats too (connect's
+    views hide them)."""
+    groups, _ = round_groups(db, "main.rounds" if every else "rounds")
     ends = [g["end"] for g in groups]
     out = {}
-    for sid, ts, course in db.execute("SELECT id, ts, course FROM shots"):
+    for sid, ts, course in db.execute(f"SELECT id, ts, course FROM {'main.shots' if every else 'shots'}"):
         i = bisect.bisect_left(ends, ts)
         # (a course name read off the scorecard is in capitals)
         if i < len(groups) and (groups[i]["course"] or "").casefold() == (course or "").casefold() \
@@ -340,6 +341,8 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
     who: dict[int, set] = {}
     named = dict(db.execute("SELECT id, player FROM shots WHERE player IS NOT NULL AND player != 'unknown'").fetchall())
     of_shot = shot_rounds(db)
+    from . import hole_replay
+    tees = hole_replay.round_tees(db, of_shot)
     for sid, rnd in of_shot.items():
         if sid in named:
             who.setdefault(rnd, set()).add(named[sid])
@@ -392,7 +395,7 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             "fir": [r["fir_hit"], r["fir_tries"]], "gir": [r["gir_hit"], r["gir_tries"]],
             "scramble": [r["scramble_hit"], r["scramble_tries"]], "sand": [r["sand_hit"], r["sand_tries"]],
             "putts": r["putts"], "penalties": r["penalties"], "longest_drive": longest,
-            "card": card["holes"], "gimme_ft": gimmes.get(rnd),
+            "card": card["holes"], "gimme_ft": gimmes.get(rnd), "tee": tees.get(rnd),
         })
     return out
 
