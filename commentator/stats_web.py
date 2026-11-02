@@ -25,7 +25,7 @@ from urllib.parse import unquote, urlparse
 
 from . import handicap_index
 from . import season_analytics as A
-from .store import CLOSER_SECONDS
+from .store import CLOSER_SECONDS, DRIVE_SQL
 
 log = logging.getLogger(__name__)
 
@@ -36,8 +36,7 @@ PUTT_EDGES = (6, 10, 20, 40)
 # Approach-by-club only counts shots from this close, so a 3-wood off a par-5 tee isn't an "approach".
 APPROACH_MAX_YARDS = 250
 _DRIVE = "COALESCE(total_yards, carry_game_yards, carry_raw)"
-_TEE_DRIVER = ("club = 'DR' AND is_putt = 0 AND (shot_number = 1 OR lie_before = 'tee' "
-               "OR (shot_number IS NULL AND lie_before IS NULL))")
+_TEE_DRIVER = DRIVE_SQL
 
 
 EXCLUDED, DELETED = 1, 2   # the `excluded` column: out of the stats but listed locally / deleted for good

@@ -488,13 +488,17 @@ class Screen:
                 grabbed.append(((left, top, width, height), out[name]))
         return out
 
-    def read_buffered(self, frames: list[dict[str, Image.Image]], accept=None, tries: int = 4) -> Hud | None:
+    def read_buffered(self, frames: list[dict[str, Image.Image]], accept=None, tries: int = 4,
+                      want_club: bool = False) -> Hud | None:
         """The newest of `frames` (HudBuffer.before, newest first) whose player box reads a player and
         a shot number (and passes `accept`, e.g. a known player), with its club and lie read too. A frame
         whose name cell is blank (the box hidden: GSPro's flight view) is skipped by a pixel check, no
-        OCR, so the whole buffer is looked through; at most `tries` frames are OCR'd."""
+        OCR, so the whole buffer is looked through; at most `tries` frames are OCR'd. `want_club`: a
+        frame whose club box reads nothing is passed over for an older one that does (GSPro can hide the
+        club box at the swing while the player box still shows), falling back to the newest."""
         shown = [c for c in frames if "player_box" in c
                  and ("player_name" not in c or name_signature(c["player_name"]) != NAME_DARK)]
+        first = None
         for crops in shown[:tries]:
             hud = self.read_hud(["player_box"], crops=crops, other_side=False)
             if not hud.player_text or hud.shot_number is None or (accept is not None and not accept(hud)):
@@ -504,8 +508,11 @@ class Screen:
             hud.name_sig, hud.club, hud.lie = rest.name_sig, rest.club, rest.lie
             hud.handed = hud.handed or rest.handed
             hud.crops = crops
+            if want_club and not hud.club:
+                first = first or hud
+                continue
             return hud
-        return None
+        return first
 
     def _other_side_crops(self, names: list[str], base: "Image.Image | None") -> dict[str, Any]:
         """The minimap-side probe and the named mirrored boxes on the side the layout doesn't say, with

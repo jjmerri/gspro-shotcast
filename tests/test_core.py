@@ -4515,7 +4515,7 @@ async def test_a_hidden_player_box_with_no_setup_read_takes_the_address_frame(tm
                lie="rough")
 
     class Scr:
-        def read_buffered(self, frames, accept):
+        def read_buffered(self, frames, accept, want_club=False):
             return addr if accept(addr) else None
 
     e._hud_buffer, e.screen, frames = object(), Scr(), [{"player_box": None}]
@@ -5091,3 +5091,23 @@ def test_a_booth_left_running_overnight_starts_the_morning_in_a_new_session(tmp_
     assert s.roll_session_if_idle(now=last + 10 * 3600) and s.session_id != night
     assert s.db.execute("SELECT date FROM sessions WHERE id = ?", (s.session_id,)).fetchone()[0] == \
         _time.strftime("%Y-%m-%d", _time.localtime(last + 10 * 3600))
+
+
+def test_a_named_shot_looks_past_a_frame_whose_club_box_was_already_hidden(monkeypatch):
+    """GSPro hid the club box at the swing while the player box still showed: the newest frame reads
+    no club, so an older one of the same buffer gives it; without one, the newest still comes back."""
+    from PIL import Image
+
+    from commentator.config import ScreenConfig
+    from commentator.screen import Screen
+
+    s = Screen(ScreenConfig())
+    swing, addr = Image.new("RGB", (4, 4)), Image.new("RGB", (4, 4))
+    monkeypatch.setattr(s, "read_hud", lambda parts, crops=None, **kw: (
+        Hud(player_text="Winker Shot 1", shot_number=1) if parts == ["player_box"]
+        else Hud(club="DR" if crops["club"] is addr else None, lie="tee")))
+    frames = [{"player_box": swing, "club": swing}, {"player_box": addr, "club": addr}]
+    assert s.read_buffered(frames).club is None
+    hud = s.read_buffered(frames, want_club=True)
+    assert hud.club == "DR" and hud.crops is frames[1]
+    assert s.read_buffered(frames[:1], want_club=True).crops is frames[0]

@@ -15,6 +15,7 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from . import shot_shape
+from .store import DRIVE_SQL
 
 SHARED_BALL = ("scramble", "alternate")
 
@@ -471,8 +472,8 @@ def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = 
         "streaks": sorted(streaks, key=lambda s: (-s["length"], s["date"] or ""))[:10],
         "bounce_backs": sorted(bounce, key=lambda b: b["date"] or "", reverse=True)[:10],
         "blowups": sorted(blowups, key=lambda b: (-b["over"], b["date"] or ""))[:5],
-        "drives": top(f"SELECT shots.id, ts, player, ROUND({drive}) AS v, course, hole, date{j} WHERE club = 'DR' AND is_putt = 0"
-                      f" AND (shot_number = 1 OR lie_before = 'tee') AND {drive} IS NOT NULL{base} ORDER BY v DESC LIMIT 5"),
+        "drives": top(f"SELECT shots.id, ts, player, ROUND({drive}) AS v, course, hole, date{j} WHERE {DRIVE_SQL}"
+                      f" AND {drive} IS NOT NULL{base} ORDER BY v DESC LIMIT 5"),
         "approaches": top(f"SELECT shots.id, ts, player, ROUND(finish_yards * 3) AS v, outcome, club, ROUND(to_pin_yards) AS from_yd, course,"
                           f" hole, date{j} WHERE {APPROACH_SQL} AND finish_yards IS NOT NULL{base} ORDER BY finish_yards LIMIT 5"),
         "chips": top(f"SELECT shots.id, ts, player, ROUND(finish_yards * 3) AS v, outcome, club, ROUND(to_pin_yards) AS from_yd, lie_before AS lie,"

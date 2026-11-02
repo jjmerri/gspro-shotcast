@@ -63,7 +63,7 @@ from .sources.base import ShotSource
 from .sources.gspro_log import M_TO_YD, MATERIAL_TO_LIE, GsproLogFollower, GsproState, live_log
 from .speech import SpeechQueue
 from .state import SessionState, ShotRecord
-from .store import COUNTS_AS_ROUND_HOLES, Store
+from .store import COUNTS_AS_ROUND_HOLES, Store, is_drive
 from .usage import UsageLog, audio_summary
 
 log = logging.getLogger(__name__)
@@ -4129,7 +4129,7 @@ class Engine:
             return False
         started = time.monotonic()
         hud = await asyncio.to_thread(self.screen.read_buffered, frames,
-                                      lambda h: self._player(h.player_text) is not None)
+                                      lambda h: self._player(h.player_text) is not None, want_club=named)
         if hud is None:
             if not named:
                 log.info("%s no address frame in the HUD buffer shows the player box (%d frames)", tag, len(frames))
@@ -4482,9 +4482,7 @@ class Engine:
         # Drives are measured by total distance (carry and roll), as the season records are.
         drive = (tile_yards("total length") if landed else None) or carry_game or shot.carry
         # Only a drive off the tee counts against the driving records, never a putt or a fairway driver.
-        tee_drive = ((shot.club or "").upper() == "DR" and not shot.is_putt
-                     and (before.shot_number == 1 or (before.lie or "").lower() == "tee"
-                          or (before.shot_number is None and not before.lie)))
+        tee_drive = is_drive(shot.club, shot.is_putt, before.shot_number, before.lie, to_yards(before.to_pin))
         if tee_drive and drive and season.get("longest_drive"):
             # Earlier weeks are the record, but a longer drive earlier today already broke it: every
             # drive past last week's best was "a personal best" all night, the shorter ones included.

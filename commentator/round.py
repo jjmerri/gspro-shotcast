@@ -14,7 +14,7 @@ from . import handicap
 from .facts import to_yards
 from .hud import Scorecard
 from .league import League
-from .store import COUNTS_AS_ROUND_HOLES
+from .store import COUNTS_AS_ROUND_HOLES, is_drive
 
 log = logging.getLogger(__name__)
 
@@ -667,9 +667,8 @@ class Round:
                 if any("in_water" in r.tags for r in recs):
                     stats.water_holes.append(seq)
                 for r in recs:
-                    if (r.shot.club or "").upper() == "DR" and not r.shot.is_putt and (
-                            r.shot_number == 1 or (r.lie_before or "").lower() == "tee"
-                            or (r.shot_number is None and not r.lie_before)):
+                    if is_drive(r.shot.club, r.shot.is_putt, r.shot_number, r.lie_before,
+                                to_yards(r.to_pin_before or (r.hud.to_pin if r.hud else None))):
                         drive = _drive_yards(r)
                         if drive and (stats.longest_drive is None or drive > stats.longest_drive):
                             stats.longest_drive = drive

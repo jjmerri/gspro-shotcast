@@ -222,6 +222,26 @@ _DRIVE = "COALESCE(total_yards, carry_game_yards, carry_raw)"
 # or neither read), never a putt: a late club read can tag a putt "DR", and one such row dragged a
 # driving average to 208. And "earlier weeks" means earlier DAYS: every booth restart starts a new session,
 # so excluding only the current session counted tonight's earlier holes as history.
+# A tee shot whose club was never read (a HUD that hides the club box before the impact read) counts
+# too when the pin was DRIVE_MIN_TO_PIN+ away, so not a par 3: a 320-yard drive was missing from the
+# stats of a booth that read no club all season. Its tee shot must be known (shot 1, or the tee lie).
+DRIVE_MIN_TO_PIN = 250
+_TEE_SHOT = "(shot_number = 1 OR lie_before = 'tee' OR (shot_number IS NULL AND lie_before IS NULL))"
+UNKNOWN_CLUB_DRIVE_SQL = (f"(club IS NULL AND (shot_number = 1 OR lie_before = 'tee')"
+                          f" AND to_pin_yards >= {DRIVE_MIN_TO_PIN})")
+DRIVE_SQL = f"(is_putt = 0 AND ((club = 'DR' AND {_TEE_SHOT}) OR {UNKNOWN_CLUB_DRIVE_SQL}))"
+
+
+def is_drive(club: str | None, is_putt: bool, shot_number: int | None, lie: str | None,
+             to_pin_yards: float | None) -> bool:
+    """DRIVE_SQL for a shot in hand."""
+    if is_putt:
+        return False
+    lie = (lie or "").lower()
+    if (club or "").upper() == "DR":
+        return shot_number == 1 or lie == "tee" or (shot_number is None and not lie)
+    return (not club and (shot_number == 1 or lie == "tee")
+            and to_pin_yards is not None and to_pin_yards >= DRIVE_MIN_TO_PIN)
 
 
 POSITION_COLS = ("start_x", "start_y", "start_z", "aim_map_x", "aim_map_y")
@@ -922,10 +942,10 @@ class Store:
         """Season numbers for one player, in yards, excluding tonight so 'season best' means before tonight."""
         r = self.db.execute(
             """SELECT COUNT(*) AS shots,
-                      MAX(CASE WHEN club = 'DR' AND is_putt = 0 AND (shot_number = 1 OR lie_before = 'tee' OR (shot_number IS NULL AND lie_before IS NULL)) THEN {_DRIVE} END) AS longest_drive,
-                      AVG(CASE WHEN club = 'DR' AND is_putt = 0 AND (shot_number = 1 OR lie_before = 'tee' OR (shot_number IS NULL AND lie_before IS NULL)) THEN {_DRIVE} END) AS avg_drive,
+                      MAX(CASE WHEN {DRIVE_SQL} THEN {_DRIVE} END) AS longest_drive,
+                      AVG(CASE WHEN {DRIVE_SQL} THEN {_DRIVE} END) AS avg_drive,
                       COUNT(DISTINCT session_id) AS nights
-               FROM shots WHERE player = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND mulligan = 0 AND left_out = 0 AND excluded = 0""".format(_DRIVE=_DRIVE) + _ctx_sql(context),
+               FROM shots WHERE player = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND mulligan = 0 AND left_out = 0 AND excluded = 0""".format(_DRIVE=_DRIVE, DRIVE_SQL=DRIVE_SQL) + _ctx_sql(context),
             (player, self.session_id),
         ).fetchone()
         return {k: r[k] for k in r.keys()}
@@ -935,7 +955,7 @@ class Store:
         another 'personal best' when an earlier one tonight went further."""
         r = self.db.execute(
             f"""SELECT MAX({_DRIVE}) AS longest FROM shots
-               WHERE player = ? AND club = 'DR' AND is_putt = 0 AND (shot_number = 1 OR lie_before = 'tee' OR (shot_number IS NULL AND lie_before IS NULL))
+               WHERE player = ? AND {DRIVE_SQL}
                      AND session_id IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))
                      AND mulligan = 0 AND left_out = 0 AND excluded = 0""",
             (player, self.session_id),
@@ -986,7 +1006,7 @@ class Store:
     def season_longest_drive(self, context: str | None = None) -> tuple[str, float] | None:
         r = self.db.execute(
             f"""SELECT player, {_DRIVE} AS carry FROM shots
-               WHERE club = 'DR' AND is_putt = 0 AND (shot_number = 1 OR lie_before = 'tee' OR (shot_number IS NULL AND lie_before IS NULL)) AND player IS NOT NULL AND player != 'unknown' AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))
+               WHERE {DRIVE_SQL} AND player IS NOT NULL AND player != 'unknown' AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))
                      AND mulligan = 0 AND left_out = 0 AND excluded = 0"""
             + _ctx_sql(context) + " ORDER BY carry DESC LIMIT 1",
             (self.session_id,),
@@ -1013,12 +1033,12 @@ class Store:
     def leaderboard(self) -> list[sqlite3.Row]:
         return self.db.execute(
             """SELECT player, COUNT(*) AS shots, COUNT(DISTINCT session_id) AS nights,
-                      ROUND(MAX(CASE WHEN club = 'DR' AND is_putt = 0 AND (shot_number = 1 OR lie_before = 'tee' OR (shot_number IS NULL AND lie_before IS NULL)) THEN {_DRIVE} END)) AS longest_drive,
-                      ROUND(AVG(CASE WHEN club = 'DR' AND is_putt = 0 AND (shot_number = 1 OR lie_before = 'tee' OR (shot_number IS NULL AND lie_before IS NULL)) THEN {_DRIVE} END)) AS avg_drive,
-                      ROUND(100.0 * SUM(CASE WHEN club = 'DR' AND lie_after = 'fairway' THEN 1 ELSE 0 END)
-                            / NULLIF(SUM(CASE WHEN club = 'DR' AND lie_after IS NOT NULL THEN 1 ELSE 0 END), 0)) AS fairway_pct
+                      ROUND(MAX(CASE WHEN {DRIVE_SQL} THEN {_DRIVE} END)) AS longest_drive,
+                      ROUND(AVG(CASE WHEN {DRIVE_SQL} THEN {_DRIVE} END)) AS avg_drive,
+                      ROUND(100.0 * SUM(CASE WHEN (club = 'DR' OR {UNKNOWN}) AND lie_after = 'fairway' THEN 1 ELSE 0 END)
+                            / NULLIF(SUM(CASE WHEN (club = 'DR' OR {UNKNOWN}) AND lie_after IS NOT NULL THEN 1 ELSE 0 END), 0)) AS fairway_pct
                FROM shots WHERE player IS NOT NULL AND player != 'unknown' AND mulligan = 0 AND left_out = 0 AND excluded = 0
-               GROUP BY player ORDER BY longest_drive DESC""".format(_DRIVE=_DRIVE)
+               GROUP BY player ORDER BY longest_drive DESC""".format(_DRIVE=_DRIVE, DRIVE_SQL=DRIVE_SQL, UNKNOWN=UNKNOWN_CLUB_DRIVE_SQL)
         ).fetchall()
 
     def player_profile(self, player: str, context: str | None = None) -> dict[str, Any]:
@@ -1201,9 +1221,9 @@ class Store:
         A per-player SHOT stat, so it works in a TWO-ball scramble too; it's empty only for the shared-
         ball formats (alternate, and a one-ball scramble), which are not attributed to a single player."""
         r = self.db.execute(
-            """SELECT COUNT(*) AS tries, SUM(CASE WHEN lie_after = 'fairway' THEN 1 ELSE 0 END) AS hit
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 0 AND club = 'DR'
-                     AND shot_number = 1 AND lie_after IS NOT NULL""" + _ctx_sql(context),
+            f"""SELECT COUNT(*) AS tries, SUM(CASE WHEN lie_after = 'fairway' THEN 1 ELSE 0 END) AS hit
+               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 0
+                     AND ((club = 'DR' AND shot_number = 1) OR {UNKNOWN_CLUB_DRIVE_SQL}) AND lie_after IS NOT NULL""" + _ctx_sql(context),
             (player,),
         ).fetchone()
         return {k: r[k] for k in r.keys()}

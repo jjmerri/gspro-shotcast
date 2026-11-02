@@ -255,6 +255,26 @@ def test_a_round_left_out_drive_is_not_its_longest(tmp_path):
         assert {r["side"]: r["longest_drive"] for r in stats_web.rounds(ro)} == {"Ann": 250, "Bob": 300}
 
 
+def test_a_tee_shot_with_no_club_read_counts_as_a_drive_off_a_long_hole(tmp_path):
+    """A booth that never read the club box: its 320-yard drive was missing from the stats. A par 3's
+    tee shot (the pin under 250) and a second shot with no club still aren't drives."""
+    from commentator import season_analytics as A
+
+    path, db = _db(tmp_path)
+    _shot(db, "Win", ts=1, club=None, shot_number=1, lie_before="tee", to_pin_yards=365, total_yards=319.5)
+    _shot(db, "Win", ts=2, club=None, shot_number=1, lie_before="tee", to_pin_yards=180, total_yards=400)
+    _shot(db, "Win", ts=3, club=None, shot_number=2, lie_before="fairway", to_pin_yards=300, total_yards=450)
+    _shot(db, "Win", ts=4, club="3W", shot_number=1, lie_before="tee", to_pin_yards=380, total_yards=500)
+    db.commit()
+    with stats_web.connect(path) as ro:
+        p = stats_web.player(ro, "Win")
+        assert (p["longest_drive"], p["drives"]) == (320, 1)
+        assert [d["v"] for d in A.highlights(ro, A.holes_played(ro))["drives"]] == [320]
+    store = Store(None)
+    _shot(store.db, "Win", club=None, shot_number=1, lie_before="tee", to_pin_yards=365, total_yards=319.5)
+    assert store.leaderboard()[0]["longest_drive"] == 320
+
+
 def test_the_booth_round_sheet_drops_a_left_out_drive():
     store = Store(None)
     for yards, out in ((999, 1), (250, 0)):
