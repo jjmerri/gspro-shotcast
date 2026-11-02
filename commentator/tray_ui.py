@@ -253,6 +253,8 @@ CONFIG_FIELDS: list[tuple[str, str, tuple[str, ...], str, str]] = [
      "The booth talks through each shot (needs API keys). Off: shots and rounds are still recorded."),
     ("Booth", "ON AIR badge over GSPro", ("overlay", "enabled"), "bool",
      "Click the badge to take the booth off air and back on."),
+    ("Booth", "Language", ("commentary", "language"), "choice:en|fr|es|de|it|pt|nl",
+     "What the booth speaks: en English, fr French, es Spanish, de German, it Italian, pt Portuguese, nl Dutch."),
     ("Booth", "Voices", ("tts", "provider"), "choice:openai|google",
      "openai uses OPENAI_API_KEY; google uses GOOGLE_TTS_API_KEY."),
     ("League", "League file", ("league_file",), "file", "Players, handicaps and the schedule (optional)."),

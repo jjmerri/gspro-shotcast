@@ -4,7 +4,9 @@ import re
 from dataclasses import dataclass
 
 # No trailing \b, so ordinals ("2nd") and club codes ("7-iron") still yield their number.
-NUMBER = re.compile(r"(?<![\w.])\d+(?:\.\d+)?")
+# A comma with one or two digits after it is a decimal comma ("7,5 mètres" in French); three digits is
+# English's thousands separator ("1,200"), read as two numbers as before.
+NUMBER = re.compile(r"(?<![\w.])\d+(?:\.\d+|,\d{1,2}(?!\d))?")
 NUMBER_WORDS = {
     "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
     "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
@@ -188,7 +190,17 @@ class Check:
 def _numbers(text: str) -> set[float]:
     """Digits, plus spelled-out numbers ("five points off the lead" in the league notes)."""
     words = re.findall(r"[a-z]+", text.lower())
-    return {float(n) for n in NUMBER.findall(text)} | {float(NUMBER_WORDS[w]) for w in words if w in NUMBER_WORDS}
+    found = set()
+    for n in NUMBER.findall(text):
+        found |= _readings(n)
+    return found | {float(NUMBER_WORDS[w]) for w in words if w in NUMBER_WORDS}
+
+
+def _readings(raw: str) -> set[float]:
+    """What a matched number could mean: "7,5" is 7.5 in French, or 7 and 5 ("holes 7,5")."""
+    if "," not in raw:
+        return {float(raw)}
+    return {float(raw.replace(",", ".")), *(float(p) for p in raw.split(","))}
 
 
 def ngrams(text: str, n: int = 5) -> set[tuple[str, ...]]:
@@ -232,7 +244,8 @@ def check_line(
         return any(abs(n - a) <= 5 if a >= 40 else abs(n - a) < 1 for a in allowed)
 
     for raw in NUMBER.findall(line):
-        if not near_a_fact(float(raw)):
+        whole = float(raw.replace(",", "."))
+        if not (near_a_fact(whole) or ("," in raw and all(near_a_fact(float(p)) for p in raw.split(",")))):
             problems.append(f'the number "{raw}" is not in the facts')
     for word, _unit in WORD_CLAIM.findall(lowered):
         if not near_a_fact(float(NUMBER_WORDS[word])):

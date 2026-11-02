@@ -17,7 +17,7 @@ to know (a file with just `league_name` and `storylines` is fine too). Fields th
 | `teams[].players[].name` | The roster (required) |
 | `players[].gspro_name`, `players[].aliases` | Matching the name GSPro shows to a roster player |
 | `players[].handicap` | 18-hole index, for net scores |
-| `pronunciations` | Respellings for the voice only (`{"Szabo": "Sah-bo"}`); plurals and possessives follow, and the transcript keeps the real spelling |
+| `pronunciations` | Respellings for the voice only (`{"Szabo": "Sah-bo"}`); plurals and possessives follow, and the transcript keeps the real spelling. Spell them for the booth's language |
 | `handicap_allowances` | Per-format allowance override (`{"scramble": [0.35, 0.15], ...}`) |
 | `schedule[]` | Per week: `week`, `course`, `format`, `end_date` (deadline), `date` (fallback match), `holes`/`hole_count`/`start_hole`, `tees`, `ctp_holes`, and `gspro_course` when GSPro's course name differs |
 | `ctp_prize`, `week_winner_prize` | Prize amounts the booth can mention |

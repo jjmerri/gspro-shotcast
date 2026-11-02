@@ -190,6 +190,24 @@ class LLMSection(BaseModel):
     closer: LLMConfig | None = None
 
 
+# Commentary languages: code -> (name, Google voice locale). English keeps the configured voices'
+# locales (an en-GB and an en-US voice); another language swaps each Chirp voice to its locale.
+LANGUAGES: dict[str, tuple[str, str | None]] = {
+    "en": ("English", None), "fr": ("French", "fr-FR"), "es": ("Spanish", "es-ES"), "de": ("German", "de-DE"),
+    "it": ("Italian", "it-IT"), "pt": ("Portuguese", "pt-BR"), "nl": ("Dutch", "nl-NL"),
+}
+Language = Literal["en", "fr", "es", "de", "it", "pt", "nl"]
+
+
+def localized_voice(voice: str, language: str) -> str:
+    """A Google voice in the commentary language: "en-GB-Chirp3-HD-Iapetus" becomes "fr-FR-Chirp3-HD-Iapetus"
+    for French. A voice already in another language, or one that isn't a locale-named Google voice, is kept."""
+    locale = LANGUAGES[language][1]
+    if locale and re.match(r"en-[A-Z]{2}-", voice):
+        return locale + voice[5:]
+    return voice
+
+
 class TTSConfig(BaseModel):
     # Cloud voices by default (OPENAI_API_KEY); `google` for Google's Chirp 3 HD voices
     # (GOOGLE_TTS_API_KEY); `kokoro` voices on the PC's CPU instead.
@@ -412,6 +430,10 @@ class CommentaryConfig(BaseModel):
     # forces a retry when it doesn't, which can be too eager and drop otherwise-good lines.
     block_repeats: bool = True
     max_words_per_line: int = 18
+    # What the booth speaks (LANGUAGES). The models are prompted in English and answer in this
+    # language; the checks that read a line's words for mistakes only understand English, so in
+    # another language they mostly let lines through. League-file pronunciations apply as written.
+    language: Language = "en"
     # News, trivia and score asides tell a whole story in one line, so they get more room; at 18
     # most lines ran over and were retried or dropped.
     aside_max_words: int = 30

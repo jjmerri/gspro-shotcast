@@ -117,6 +117,54 @@ def test_tts_active_voices_follows_the_provider():
     assert TTSConfig(provider="google").active_instructions == {}
 
 
+def test_the_booth_speaks_the_configured_language():
+    from commentator.engine import TREE_CALLS_BY_LANGUAGE
+    from commentator.models import Line
+    from commentator.prompts import system_prompt
+
+    league = League.load("data/league.example.json")
+    english = Config()
+    assert "Plain conversational English" in system_prompt(english, league)
+    assert "The broadcast is in" not in system_prompt(english, league)
+    french = Config.model_validate({"commentary": {"language": "fr"}})
+    assert "Plain conversational French" in system_prompt(french, league)
+    assert "The broadcast is in French" in system_prompt(french, league)
+
+    def voice(cfg, speaker):
+        return SpeechQueue(cfg, ConsoleTTS())._voice_for(Line(speaker=speaker, text=""))
+
+    # Google: the same Chirp voice in the booth's language, unless one in another language was set.
+    google = Config.model_validate({"commentary": {"language": "fr"}, "tts": {"provider": "google"}})
+    assert voice(google, "pbp") == ("fr-FR-Chirp3-HD-Iapetus", None)
+    assert voice(google, "color") == ("fr-FR-Chirp3-HD-Orus", None)
+    google.tts.google_voices["color"] = "fr-CA-Chirp3-HD-Orus"
+    assert voice(google, "color")[0] == "fr-CA-Chirp3-HD-Orus"
+    portuguese = Config.model_validate({"commentary": {"language": "pt"}, "tts": {"provider": "google"}})
+    assert voice(portuguese, "pbp")[0] == "pt-BR-Chirp3-HD-Iapetus"
+    assert voice(Config.model_validate({"tts": {"provider": "google"}}), "pbp")[0] == "en-GB-Chirp3-HD-Iapetus"
+    # OpenAI's voices speak any language; their British/American direction gets a native accent.
+    assert "native French accent" in voice(french, "pbp")[1]
+    assert "Language:" not in voice(english, "pbp")[1]
+    # Every language the setting takes has its voice locale and stock tree calls.
+    from typing import get_args
+    from commentator.config import LANGUAGES, Language
+    assert set(get_args(Language)) == set(LANGUAGES) == set(TREE_CALLS_BY_LANGUAGE)
+
+
+async def test_an_opener_in_another_language_needs_no_english_welcome(tmp_path):
+    class OneLLM(FakeLLM):
+        async def complete_json(self, system, user, schema, images=None):
+            self.prompts.append(user)
+            return LLMResult(text=json.dumps({"lines": [
+                {"speaker": "pbp", "text": "Bonsoir à tous, et bienvenue à Loudon."}]}))
+
+    e = _mini_engine(tmp_path)
+    e.cfg.commentary.language = "fr"
+    llm = OneLLM(e.cfg.llm.live)
+    lines = await e._compose("opener", llm, "THE ROUND IS ABOUT TO START.", "", [], mode="round")
+    assert len(llm.prompts) == 1 and [l.text for l in lines] == ["Bonsoir à tous, et bienvenue à Loudon."]
+
+
 async def test_google_stream_rejoins_split_samples_and_cancels_the_call_when_closed(monkeypatch):
     pytest.importorskip("google.cloud.texttospeech")
     from types import SimpleNamespace
@@ -1182,6 +1230,9 @@ def test_grounding_rejects_invented_numbers_counts_and_outcomes():
     assert check_line("A gentle touch, and it drops for par.", "The putt went in the hole: holed.", "").ok
     assert check_line("It drops onto the green.", "The ball is now on the green.", "").ok
     assert check_line("It rolls in the rough.", "The ball is now in the rough.", "").ok
+    # A decimal comma (French, Spanish...) is one number, not two.
+    assert check_line("Il reste 7,5 pieds pour le putt.", "To the pin: 7.5 feet.", "").ok
+    assert not check_line("Il reste 9,5 pieds pour le putt.", "To the pin: 7.5 feet.", "").ok
 
     facts = "Player: Tony\nClub: 7-iron. Carry: 96 yards.\nWhere the ball finished: not known.\nThis is Tony's 2nd shot today."
     league = "points: 31\nhandicap: 12.0"
@@ -2143,6 +2194,10 @@ def test_prewritten_putt_reactions_may_quote_the_putt_length_only(tmp_path):
     assert out["holed"] == "Drains it from 28 feet!"
     assert "short" not in out                                   # 3 feet is a guess, not a fact
     assert out["past"] == "Runs it by."
+    # A decimal comma (a French booth) quotes the same length.
+    out = e._build_reactions({"reaction_lines": {"holed": "Il rentre ce putt de 7,5 pieds !",
+                                                 "short": "Il reste court, à 2,5 pieds."}}, True, "Putt length: 7.5 feet.")
+    assert out == {"holed": "Il rentre ce putt de 7,5 pieds !"}
 
 
 def test_prewritten_putt_reactions_name_the_comeback_for_the_next_score(tmp_path):

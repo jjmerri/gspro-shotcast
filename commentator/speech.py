@@ -5,7 +5,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from .config import Config
+from .config import LANGUAGES, Config, localized_voice
 from .models import Line
 from .tts import TTS, Audio, StreamedAudio
 from .usage import tts_cost
@@ -287,7 +287,16 @@ class SpeechQueue:
     def _voice_for(self, line: Line) -> tuple[str, str | None]:
         voices = self.cfg.tts.active_voices
         voice = voices.get(line.speaker) or next(iter(voices.values()))
-        return voice, self.cfg.tts.active_instructions.get(line.speaker)
+        instructions = self.cfg.tts.active_instructions.get(line.speaker)
+        language = self.cfg.commentary.language
+        if language != "en":
+            if self.cfg.tts.provider == "google":
+                voice = localized_voice(voice, language)
+            if instructions:
+                name = LANGUAGES[language][0]
+                instructions += (f"\nLanguage: The text is {name}. Speak it as a native {name} speaker, with a "
+                                 f"native {name} accent, whatever accent is described above.")
+        return voice, instructions
 
     async def _synthesize(self, line: Line, until: float | None = None, live: bool = False) -> tuple[bool, Audio | None]:
         """Voice a line, returning (ok, audio). A cloud voice's requests either answer in a second or

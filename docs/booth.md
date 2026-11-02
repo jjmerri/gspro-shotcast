@@ -158,6 +158,24 @@ the free tier lasts about 15 rounds.
 There's no delivery direction, so `openai_instructions` don't apply. Create a Google Cloud project
 with billing on, enable the Cloud Text-to-Speech API, and make an API key restricted to it.
 
+### Languages
+
+`commentary.language` (the tray's Settings > Booth > Language) sets what the booth speaks: `en`
+English (the default), `fr` French, `es` Spanish, `de` German, `it` Italian, `pt` Portuguese or `nl`
+Dutch. The models still get English instructions and facts and answer in that language.
+
+- **Google voices** switch to the same Chirp 3 HD voice in that language (`fr-FR-Chirp3-HD-Iapetus`,
+  and `pt-BR` for Portuguese). A voice set in `tts.google_voices` for another language is kept as is.
+- **OpenAI voices** speak any language; their delivery instructions get a line asking for a native
+  accent. Kokoro (`tts.provider: kokoro`) only speaks English here, so another language needs the
+  Google or OpenAI voices.
+- **Names** are respelled from the league file's `pronunciations` exactly as written, so spell them
+  for that language's voice.
+- **Checks:** the code that catches a wrong line (a number or score the facts don't give, a result
+  called before the ball lands, a reused phrase) mostly reads English words. In another language it
+  still catches wrong digits, but lets most other mistakes through, so expect more of them on air.
+- The stats page, the tray and the logs stay in English.
+
 ## Cost
 
 With the default cloud setup, expect roughly (measured on real rounds):

@@ -324,6 +324,28 @@ GSPRO_LOG_KEEP_BYTES = 8_000_000   # from the end of it: a round's lines and ple
 TREE_CALLS = ("Oh, that's into the trees!", "That's caught a branch!", "Oh no, it's clipped the tree!",
               "Ooh, that's found the trees!")
 TREE_LOW_CALLS = ("Oh, that's clipped something low!", "That's into the bushes!")
+# The stock tree calls in each commentary language (config.LANGUAGES): (in the trees, low).
+TREE_CALLS_BY_LANGUAGE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "en": (TREE_CALLS, TREE_LOW_CALLS),
+    "fr": (("Oh, c'est dans les arbres !", "Il a touché une branche !", "Oh non, il a accroché l'arbre !",
+            "Aïe, il a trouvé les arbres !"),
+           ("Oh, il a accroché quelque chose au ras du sol !", "C'est dans les buissons !")),
+    "es": (("¡Oh, se ha ido a los árboles!", "¡Ha tocado una rama!", "¡Oh no, ha golpeado el árbol!",
+            "¡Uy, ha encontrado los árboles!"),
+           ("¡Oh, ha tocado algo abajo!", "¡Se ha metido en los arbustos!")),
+    "de": (("Oh, der ist in den Bäumen!", "Der hat einen Ast erwischt!", "Oh nein, der hat den Baum getroffen!",
+            "Uh, der hat die Bäume gefunden!"),
+           ("Oh, der hat unten etwas erwischt!", "Der ist in den Büschen!")),
+    "it": (("Oh, è finita tra gli alberi!", "Ha preso un ramo!", "Oh no, ha colpito l'albero!",
+            "Uh, ha trovato gli alberi!"),
+           ("Oh, ha preso qualcosa in basso!", "È finita nei cespugli!")),
+    "pt": (("Ah, foi para as árvores!", "Pegou num galho!", "Ah não, bateu na árvore!",
+            "Opa, achou as árvores!"),
+           ("Ah, pegou em algo baixo!", "Foi parar nos arbustos!")),
+    "nl": (("Oh, die zit in de bomen!", "Die raakt een tak!", "Oh nee, die tikt de boom aan!",
+            "Oei, die vindt de bomen!"),
+           ("Oh, die raakt iets laag!", "Die zit in de struiken!")),
+}
 
 # Calls whose prompt cache costs more to write (1.25x) than it saves: the closer runs once a round,
 # so its cache is rarely read back before it expires (usage log, Oct 2026).
@@ -4164,7 +4186,8 @@ class Engine:
             # A number from the facts (the putt's length) is fine; any other is a guess at a
             # distance we don't have yet.
             known = set(re.findall(r"\d+(?:\.\d+)?", facts_text))
-            if any(n not in known for n in re.findall(r"\d+(?:\.\d+)?", body)):
+            said = re.findall(r"\d+(?:\.\d+|,\d{1,2}(?!\d))?", body)   # "7,5": a decimal comma
+            if any(n.replace(",", ".") not in known for n in said):
                 log.info("Dropped the pre-written %s reaction (quotes a number not in the facts): %r", outcome, body)
                 continue
             if phrase := repeats(body, [self.system_examples]) or repeats(body, recent):
@@ -6072,7 +6095,8 @@ class Engine:
             t = hits[0][0]
             p = point_at(shot.ball_speed, shot.vla, shot.total_spin, shot.spin_axis, self._raw_yards(shot), t)
             low = p is not None and (p.landed or p.height_ft < 10)
-            return impact + t, TREE_LOW_CALLS if low else TREE_CALLS
+            high, low_calls = TREE_CALLS_BY_LANGUAGE[self.cfg.commentary.language]
+            return impact + t, low_calls if low else high
         return None
 
     async def _tree_flight_call(self, fires0: int, impact: float, shot: Shot, seq: int, tag: str) -> None:
@@ -8351,11 +8375,14 @@ class Engine:
         aired as non-sequiturs ("Quite the pedigree." to nothing)."""
         seen = bool(images)
 
+        # Both demand English words; in another language the prompt alone asks for them.
+        english = self.cfg.commentary.language == "en"
+
         def needs(lines: list[Line]) -> list[str]:
             out = []
-            if must and lines and not any(must in l.text.lower() for l in lines):
+            if english and must and lines and not any(must in l.text.lower() for l in lines):
                 out.append(f'none of the lines says "{must}": say it in so many words')
-            if kind == "opener" and lines and not WELCOME.search(lines[0].text):
+            if english and kind == "opener" and lines and not WELCOME.search(lines[0].text):
                 out.append("the opener has to start with a line welcoming everyone to the broadcast")
             return out
 

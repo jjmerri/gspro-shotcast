@@ -152,6 +152,7 @@ commentary:
   min_seconds_between_comments: 4
   recent_lines: 30   # shown to the model; a season-wide check catches older repeats
   max_words_per_line: 28
+  language: en   # en, fr, es, de, it, pt or nl: see docs/booth.md#languages
   aside_max_words: 30   # news, trivia and score asides: room to tell the story in one line
   opener_max_words: 25  # the opener's welcome runs long; it plays over the load screen
   opener_max_lines: 3

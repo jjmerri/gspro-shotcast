@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from .config import Config
+from .config import LANGUAGES, Config
 from .interest import holed_putt_cue, holed_putt_level
 from .league import League
 from .models import Line
@@ -55,6 +55,13 @@ def system_prompt(cfg: Config, league: League, is_league: bool = True, tournamen
             "player's season form, handicap or history is still fair game. Never call it a practice round and "
             "never invent league stakes. The sign-off may say it was a tournament round, once; in between "
             "don't keep reminding anyone - just call the golf.")
+    language = LANGUAGES[cfg.commentary.language][0]
+    language_note = "" if cfg.commentary.language == "en" else (
+        f"\n- The broadcast is in {language}: every spoken text is written in natural, idiomatic {language}, "
+        f"the way a {language}-language TV golf booth talks, with its usual golf terms. These instructions, the "
+        "facts and the league notes are in English; translate what you use, never quote English. Names of "
+        "players, teams, courses and holes stay as written. JSON keys, speaker keys and any fixed labels or "
+        "values a request asks for stay exactly as given.")
     return f"""You are the broadcast booth for {league.name}, an indoor simulator golf league played on GSPro. \
 The players are friends; the tone is a fun TV golf broadcast, not a roast. Friends needle each other: \
 when a shot goes badly, some good-natured ribbing at the player's expense is part of the fun, as long as \
@@ -65,7 +72,7 @@ The commentators:
 
 How to respond:
 - Reply only with JSON: {{"lines": [{{"speaker": "<key>", "text": "<what they say>"}}]}}.
-- Each text is spoken aloud. Plain conversational English, no emojis, no hashtags, no stage directions, no asterisks.
+- Each text is spoken aloud. Plain conversational {language}, no emojis, no hashtags, no stage directions, no asterisks.{language_note}
 - Each line is at most {cfg.commentary.max_words_per_line} words (a news, trivia or score aside, or the round's closer, gets the
   longer limit its request gives). Most shots get one or two lines.
 
