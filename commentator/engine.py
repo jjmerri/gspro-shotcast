@@ -5706,7 +5706,7 @@ class Engine:
         if not r or r.ended or r.start_hole_assumed or self.hole_number is None or not hud.shot_number \
                 or hud.shot_number < 2:
             return None
-        raw = re.split(r"\s+(?:E|[+-]\d+|Shot)\b", (hud.player_text or "").strip(), maxsplit=1)[0].strip()
+        raw = _gspro_name(hud.player_text or "")
         idx = self._gspro_idx(self._player(hud.player_text, raw or None))
         g = self.gspro
         if idx is None or g.hole_by.get(idx) is None or g.shot_number(idx) != hud.shot_number:
@@ -7066,7 +7066,7 @@ class Engine:
         # ready to swing. Skip it for that one shot; the in-flight call still covers the shot.
         self._skip_opening_preshot = c.opener
         # GSPro's own name for the player (the text before the score badge), which the scorecard uses.
-        raw = re.split(r"\s+(?:E|[+-]\d+|Shot)\b", (hud.player_text or "").strip(), maxsplit=1)[0].strip()
+        raw = _gspro_name(hud.player_text or "")
         first = self.league.match_player(hud.player_text) or raw or None
         names = [n for n in [raw or first] + [o.name for o in hud.others] if n]
         course = self._tee_course(hud)
@@ -7141,7 +7141,7 @@ class Engine:
     async def _join_round(self, hud: Hud) -> None:
         """Track a round the booth came up in the middle of: same roster and course as a fresh start,
         but the start hole and current hole come from GSPro's log, and there's no opener."""
-        raw = re.split(r"\s+(?:E|[+-]\d+|Shot)\b", (hud.player_text or "").strip(), maxsplit=1)[0].strip()
+        raw = _gspro_name(hud.player_text or "")
         names = [n for n in [raw or self.league.match_player(hud.player_text)] + [o.name for o in hud.others] if n]
         course = self._tee_course(hud)
         names, slots = self._with_setup_players(names, course)

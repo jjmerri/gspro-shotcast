@@ -2761,6 +2761,19 @@ async def test_joining_takes_the_start_and_current_hole_from_the_log(tmp_path):
     assert r and r.start_hole == 10 and not r.start_hole_assumed and r.seq == 4 and e.hole_number == 13
 
 
+async def test_joining_on_a_green_takes_the_players_name_without_his_stroke_and_score(tmp_path):
+    from commentator.hud import OtherPlayer
+    from commentator.models import RoundStartEvent
+
+    e = _log_engine(tmp_path)
+    g = e.gspro
+    g.mode, g.shots_since_course, g.first_hole, g.current_hole = "course", 30, 0, 3
+    hud = Hud(player_text="Dan 4th (E) Shot 4 11 FT", shot_number=4, score_to_par="E", to_pin="11 feet",
+              others=[OtherPlayer("Drew", "18 feet", "+1"), OtherPlayer("Derek", "20 feet", "E")])
+    await e.handle_round_start(RoundStartEvent(hud=hud, joined=True))
+    assert e.round.slot_names == ["Dan", "Drew", "Derek"] and "Dan" in e.round.roster
+
+
 async def test_joining_on_the_next_tee_before_its_first_shot_takes_the_huds_hole(tmp_path):
     """GSPro 3.59 logs nothing on a new tee until its first shot: a booth started there learns from
     the log that the hole just finished is the current one, while the HUD shows the next."""
