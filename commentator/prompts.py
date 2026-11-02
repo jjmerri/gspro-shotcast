@@ -50,7 +50,7 @@ def system_prompt(cfg: Config, league: League, is_league: bool = True, tournamen
         "the golf.")
     if tournament:
         practice_note = (
-            "\n- This is a TOURNAMENT round, played on Sim Golf Tournaments (SGT), not a league match: no league "
+            "\n- This is a TOURNAMENT round, played on the Simulator Golf Tour (SGT), not a league match: no league "
             "points or standings ride on it, but the player's tournament score does, so every stroke counts. A "
             "player's season form, handicap or history is still fair game. Never call it a practice round and "
             "never invent league stakes. The sign-off may say it was a tournament round, once; in between "

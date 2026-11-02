@@ -241,7 +241,7 @@ def parse_events(text: str) -> list[LogEvent]:
                 # Leaving a round (finished or quit early) or leaving the range, back to the menus.
                 out.append(LogEvent("end_round"))
             elif line.startswith("SGT Sync()"):
-                # GSPro reporting the round to Sim Golf Tournaments (each stroke, hole and stat), so this
+                # GSPro reporting the round to the Simulator Golf Tour (each stroke, hole and stat), so this
                 # is a tournament round. The first is logged just after the round's first stroke.
                 out.append(LogEvent("sgt"))
             elif line.startswith("Skipping hole "):
@@ -351,7 +351,7 @@ class GsproState:
     # (a round or the range was just left), or None (not seen yet).
     mode: str | None = None
     round_ends: int = 0               # "End Round Button Click"s seen (a finished or abandoned round)
-    sgt: bool = False                 # this round is being played on Sim Golf Tournaments (an SGT Sync logged)
+    sgt: bool = False                 # this round is being played on the Simulator Golf Tour (an SGT Sync logged)
     last_sgt: bool = False            # the last ended round's, kept past its reset like last_hole_scores
     round_completes: int = 0          # "Round Is Complete"s seen (every hole in the round holed out)
     active_holes: int | None = None   # holes in the round, from the end-of-round layout's active flags

@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS shots (
     to_pin_yards REAL, finish_yards REAL, gimme_yards REAL, outcome TEXT, fmt TEXT,
     attributed INTEGER NOT NULL DEFAULT 1,
     is_league INTEGER NOT NULL DEFAULT 1,        -- 1 = league round, 0 = practice; for the stat context split
-    is_tournament INTEGER NOT NULL DEFAULT 0,    -- 1 = a tournament round (Sim Golf Tournaments), never a league one
+    is_tournament INTEGER NOT NULL DEFAULT 0,    -- 1 = a tournament round (Simulator Golf Tour), never a league one
     mulligan INTEGER NOT NULL DEFAULT 0,         -- 1 = GSPro took the stroke back; excluded from every stat
     left_out INTEGER NOT NULL DEFAULT 0,         -- 1 = left out of the stats by hand (a misread, a practice
                                                  -- swing); still a stroke on the card, unlike a mulligan
@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS rounds (
     hole_pars TEXT,                              -- JSON: hole number -> par, for scores-vs-par season stats
     source TEXT,                                 -- scorecard / shots
     is_league INTEGER NOT NULL DEFAULT 1,        -- 1 = league round, 0 = practice; for the stat context split
-    is_tournament INTEGER NOT NULL DEFAULT 0,    -- 1 = a tournament round (Sim Golf Tournaments), never a league one
+    is_tournament INTEGER NOT NULL DEFAULT 0,    -- 1 = a tournament round (Simulator Golf Tour), never a league one
     complete INTEGER NOT NULL DEFAULT 1,         -- 0 = quit early in GSPro (holes_played < holes)
     holes_played INTEGER,                        -- holes actually scored (NULL on older rows: use holes)
     nine_to_par INTEGER,                         -- gross to par over the first nine played, set only on a
@@ -185,7 +185,7 @@ CREATE TABLE IF NOT EXISTS player_rounds (
     scores TEXT,                                 -- JSON: hole number -> this player's strokes
     hole_pars TEXT,                              -- JSON: hole number -> par, for scores-vs-par season stats
     is_league INTEGER NOT NULL DEFAULT 1,        -- 1 = league round, 0 = practice; for the stat context split
-    is_tournament INTEGER NOT NULL DEFAULT 0,    -- 1 = a tournament round (Sim Golf Tournaments), never a league one
+    is_tournament INTEGER NOT NULL DEFAULT 0,    -- 1 = a tournament round (Simulator Golf Tour), never a league one
     complete INTEGER NOT NULL DEFAULT 1,         -- 0 = quit early in GSPro
     holes_played INTEGER,                        -- holes this player actually scored
     nine_to_par INTEGER,                         -- gross to par over the first nine played, on a

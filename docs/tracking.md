@@ -114,7 +114,7 @@ counts toward fairways hit: the team's second stroke is played from the drive it
 stroke's lie says where it finished. A hole picked up is scored at GSPro's maximum, and
 those capped strokes are not counted as putts or penalties. Driving-range
 shots are not recorded, only rounds. Practice rounds are recorded and flagged
-(`is_league = 0`), and tournament rounds (played on Sim Golf Tournaments) also `is_tournament = 1`,
+(`is_league = 0`), and tournament rounds (played on the Simulator Golf Tour) also `is_tournament = 1`,
 so stats can be split league, tournament and practice. On an alternate-shot round the log
 can't say which partner hit, so those shots are kept (`attributed = 0`) but left out of
 per-player stats. Replays and evals use an in-memory DB and never touch the file.

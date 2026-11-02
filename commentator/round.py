@@ -180,7 +180,7 @@ class Round:
         # The season store's last shot id when the round started: the week's earlier CTP tee shots
         # are the ones at or below it (this round's come from ctp_results instead).
         self.shot_floor: int | None = None
-        # Played on Sim Golf Tournaments (GSPro syncs it there, from just after its first stroke): a
+        # Played on the Simulator Golf Tour (GSPro syncs it there, from just after its first stroke): a
         # tournament round, which counts in neither the league's stats nor practice's.
         self.is_tournament = False
         # GSPro names seen setting up their first tee shot, in order: the first tee goes in slot order.
@@ -893,7 +893,7 @@ class Round:
     def opening_facts(self, season: dict[str, dict], first_up: str | None, hole: str | None) -> list[str]:
         facts = []
         if self.is_tournament and not self.is_league:
-            facts.append("This is a tournament round on Sim Golf Tournaments, not a league match: no league points, "
+            facts.append("This is a tournament round on the Simulator Golf Tour, not a league match: no league points, "
                          "standings, handicap strokes or closest-to-the-pin in this round. Say it's a tournament "
                          "round once, in passing; never call it practice. League history is still fair game for color.")
         elif not self.is_league:

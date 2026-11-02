@@ -2703,7 +2703,7 @@ class Engine:
         return self._system_league if r.is_league else self._system_tournament if r.is_tournament else self._system_practice
 
     def _note_tournament(self, r) -> None:
-        """GSPro is reporting round `r` (the one being played, or just ended) to Sim Golf Tournaments:
+        """GSPro is reporting round `r` (the one being played, or just ended) to the Simulator Golf Tour:
         it's a tournament round (a league one stays league, its schedule decides that), and so are its
         shots so far. GSPro's first sync comes just after the round's first stroke; once the round's
         over, the log has the ended round's until the next course is entered."""
@@ -2712,7 +2712,7 @@ class Engine:
             return
         r.is_tournament = True
         n = self.store.mark_tournament(r.shot_floor) if r.shot_floor is not None else 0
-        log.info("Round %s is a tournament round: GSPro is syncing it to Sim Golf Tournaments (%d shots so far marked)",
+        log.info("Round %s is a tournament round: GSPro is syncing it to the Simulator Golf Tour (%d shots so far marked)",
                  r.id, n)
 
     def _round_ctx(self) -> str:
