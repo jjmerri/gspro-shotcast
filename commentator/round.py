@@ -180,6 +180,9 @@ class Round:
         # The season store's last shot id when the round started: the week's earlier CTP tee shots
         # are the ones at or below it (this round's come from ctp_results instead).
         self.shot_floor: int | None = None
+        # Played on Sim Golf Tournaments (GSPro syncs it there, from just after its first stroke): a
+        # tournament round, which counts in neither the league's stats nor practice's.
+        self.is_tournament = False
         # GSPro names seen setting up their first tee shot, in order: the first tee goes in slot order.
         self.teed: list[str] = []
         # A first-tee name a letter or two off someone who'd already teed off: a misread, or another
@@ -889,7 +892,11 @@ class Round:
 
     def opening_facts(self, season: dict[str, dict], first_up: str | None, hole: str | None) -> list[str]:
         facts = []
-        if not self.is_league:
+        if self.is_tournament and not self.is_league:
+            facts.append("This is a tournament round on Sim Golf Tournaments, not a league match: no league points, "
+                         "standings, handicap strokes or closest-to-the-pin in this round. Say it's a tournament "
+                         "round once, in passing; never call it practice. League history is still fair game for color.")
+        elif not self.is_league:
             facts.append("This is a practice round, not a league match: no points, standings, handicap strokes "
                          "or closest-to-the-pin in this round, just the golf. Say it's practice once, in passing, "
                          "not repeatedly. League history and past results are still fair game for color.")
@@ -926,13 +933,13 @@ class Round:
         for side in self.sides:
             if guessed:
                 facts += [f"Playing: {p}." for p in side.players]
-                facts += _season_facts(side.label, season.get(side.key), self.holes, self.is_league)
+                facts += _season_facts(side.label, season.get(side.key), self.holes, self.is_league, self.is_tournament)
                 continue
             line = f"Playing: {self.describe_side(side)}"
             if side.strokes is not None:
                 line += f", receiving {side.strokes} handicap strokes over these {self.holes} holes"
             facts.append(line + ".")
-            facts += _season_facts(side.label, season.get(side.key), self.holes, self.is_league)
+            facts += _season_facts(side.label, season.get(side.key), self.holes, self.is_league, self.is_tournament)
         if first_up:
             facts.append(f"First on the tee: {first_up}.")
         return facts
@@ -1162,10 +1169,11 @@ class Round:
         elif (season and season.get("gross_rounds") and not self.is_league and s.par
               and s.holes_scored >= self.holes and all(seq in self.par for seq in s.scores)):
             gross, avg, best = s.gross - s.par, season.get("avg_gross_to_par"), season.get("best_gross_to_par")
+            kind = "non-league" if self.is_tournament else "practice"
             if best is not None and gross < best * scale:
-                facts.append(f"That's {possessive(who)} best practice round of the season so far, against par.")
+                facts.append(f"That's {possessive(who)} best {kind} round of the season so far, against par.")
             elif avg is not None:
-                facts.append(f"{possessive(who)} average in {season['gross_rounds']} earlier practice rounds"
+                facts.append(f"{possessive(who)} average in {season['gross_rounds']} earlier {kind} rounds"
                              f"{_scaled_note(self.holes)}: {to_par(round(avg * scale))}.")
         return facts
 
@@ -1224,10 +1232,11 @@ def _best_note(best: float, label: str = "") -> str:
     return f"best{label}: {to_par(round(best))} over nine holes"
 
 
-def _season_facts(who: str, season: dict | None, holes: int = 9, league: bool = True) -> list[str]:
+def _season_facts(who: str, season: dict | None, holes: int = 9, league: bool = True,
+                  tournament: bool = False) -> list[str]:
     """The opener's season line for a side, from season_rounds sliced to this round's kind: league
-    rounds (judged net) for a league round, practice rounds (judged gross) for a practice one."""
-    kind = "league" if league else "practice"
+    rounds (judged net) for a league round, non-league rounds (judged gross) otherwise."""
+    kind = "league" if league else "non-league" if tournament else "practice"
     if not season or not season.get("rounds"):
         return [f"{who} has no earlier {kind} rounds recorded this season."]
     facts = [f"{possessive(who)} earlier {kind} rounds this season: {season['rounds']}."]

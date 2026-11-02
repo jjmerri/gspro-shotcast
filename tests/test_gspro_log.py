@@ -313,6 +313,26 @@ def test_range_round_end_and_completion_are_tracked():
     assert s.mode == "menu" and s.round_ends == 2 and s.strokes_before(0) == 0
 
 
+def test_a_round_synced_to_sim_golf_tournaments_is_a_tournament_one():
+    s = GsproState()
+    for ev in parse_events("Selected Course: yorkgc_gsp\nLoading course York Golf Club\n"
+                           " * ------- Shot Fired! ------- *\n"):
+        s.apply(ev)
+    assert not s.sgt
+    # GSPro reports each stroke to SGT just after it's struck.
+    for ev in parse_events("SGT Sync() EP:sendSaveGame  Hole:0  Shot: 1\n"
+                           '[{"ActiveHole":0,"SGTRefID":877,"playerName":"Steve","currentHoleShotNum":1}]\n'
+                           "SGT Sync Success\n"):
+        s.apply(ev)
+    assert s.sgt and not s.last_sgt
+    for ev in parse_events("End Round Button Click\n"):
+        s.apply(ev)
+    assert (s.sgt, s.last_sgt) == (False, True)   # the ended round's, for the booth to settle it with
+    for ev in parse_events("Selected Course: yorkgc_gsp\nLoading course York Golf Club\n"):
+        s.apply(ev)
+    assert (s.sgt, s.last_sgt) == (False, False)   # the next round, unsynced, isn't (even left for the range)
+
+
 def test_a_course_loaded_without_being_selected_is_still_a_course():
     # End Round on the multi range went straight to a course: GSPro logged its load but no
     # `Selected Course:`, and the range's shots don't count toward it.

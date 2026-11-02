@@ -50,8 +50,9 @@ def connect(path: str | Path) -> sqlite3.Connection:
     themselves stay reachable as main.<table>."""
     db = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
     db.row_factory = sqlite3.Row
-    for table, missing in (("shots", (("left_out", "0"), ("handed", "NULL"), ("excluded", "0"))),
-                           ("rounds", (("excluded", "0"),)), ("player_rounds", (("excluded", "0"),)),
+    for table, missing in (("shots", (("left_out", "0"), ("handed", "NULL"), ("excluded", "0"), ("is_tournament", "0"))),
+                           ("rounds", (("excluded", "0"), ("is_tournament", "0"))),
+                           ("player_rounds", (("excluded", "0"), ("is_tournament", "0"))),
                            ("lines", (("excluded", "0"),))):
         have = {r[1] for r in db.execute(f"PRAGMA main.table_info({table})")}
         if not have:
@@ -147,13 +148,17 @@ def _mark_round(db_path: str | Path, round_id: int, ended: float, value: int) ->
         return True
 
 
-def set_round_league(db_path: str | Path, round_id: int, ended: float, league: bool) -> bool:
-    """Make a round a league round or a practice one (every side, card and shot of it): which of the
-    League/Practice stats it counts in. False when there's no such round (or it was deleted)."""
+def set_round_league(db_path: str | Path, round_id: int, ended: float, league: bool, tournament: bool = False) -> bool:
+    """Make a round a league, tournament or practice one (every side, card and shot of it): which of
+    the League/Tournament/Practice stats it counts in. A league round is never a tournament one.
+    False when there's no such round (or it was deleted)."""
     from contextlib import closing
 
     with closing(sqlite3.connect(db_path, timeout=10)) as db:
         _ensure_excluded(db)
+        for table in _ROUND_TABLES[:3]:
+            if "is_tournament" not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN is_tournament INTEGER NOT NULL DEFAULT 0")
         db.execute("BEGIN IMMEDIATE")   # the round checked is the round changed
         rows = _round_rows(db, round_id, ended)
         if rows is None:
@@ -161,7 +166,8 @@ def set_round_league(db_path: str | Path, round_id: int, ended: float, league: b
             return False
         for table, ids in zip(_ROUND_TABLES[:3], rows):   # lines carry no is_league
             if ids:
-                db.execute(f"UPDATE {table} SET is_league = ? WHERE id IN ({_in(ids)})", (int(league),))
+                db.execute(f"UPDATE {table} SET is_league = ?, is_tournament = ? WHERE id IN ({_in(ids)})",
+                           (int(league), int(tournament and not league)))
         db.commit()
         return True
 
@@ -188,19 +194,22 @@ def excluded_rounds(db: sqlite3.Connection) -> list[dict[str, Any]]:
     groups, of_row = round_groups(db, "main.rounds")
     end_of = {g["round"]: g["end"] for g in groups}
     out: dict[int, dict[str, Any]] = {}
-    for r in db.execute("SELECT id, ended_at, date, course, format, side, holes, holes_played, gross, is_league"
-                        f" FROM main.rounds WHERE excluded = {EXCLUDED} ORDER BY ended_at DESC, id DESC"):
+    have = {r[1] for r in db.execute("PRAGMA main.table_info(rounds)")}
+    tour = "is_tournament" if "is_tournament" in have else "0 AS is_tournament"
+    for r in db.execute("SELECT id, ended_at, date, course, format, side, holes, holes_played, gross, is_league,"
+                        f" {tour} FROM main.rounds WHERE excluded = {EXCLUDED} ORDER BY ended_at DESC, id DESC"):
         rnd = of_row.get(r["id"], r["id"])
         g = out.setdefault(rnd, {"round": rnd, "round_end": end_of[rnd], "date": r["date"], "course": r["course"],
                                  "format": r["format"] or "individual", "holes": r["holes"],
                                  "played": r["holes_played"] if r["holes_played"] is not None else r["holes"],
-                                 "league": bool(r["is_league"]), "sides": []})
+                                 "league": bool(r["is_league"]), "tournament": bool(r["is_tournament"]),
+                                 "sides": []})
         g["sides"].append({"side": r["side"], "gross": r["gross"]})
     return list(out.values())
 
 
 def _ctx(context: str | None) -> str:
-    return {"league": " AND is_league = 1", "practice": " AND is_league = 0"}.get(context or "", "")
+    return A._ctx(context)
 
 
 def _json(text: str | None) -> dict[int, int]:
@@ -377,6 +386,7 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             "players": sorted(who.get(rnd, set()) | ({r["side"]} if r["side"] else set()) | set(played_by or [])), "format": r["format"] or "individual",
             "side": r["side"], "side_players": played_by, "team": r["team"], "holes": holes,
             "played": played, "complete": complete, "league": bool(r["is_league"]),
+            "tournament": bool(r["is_tournament"]) and not r["is_league"],
             "gross": card["gross"] if card["played"] else r["gross"],
             "to_par": card["to_par"] if card["played"] else None,
             "fir": [r["fir_hit"], r["fir_tries"]], "gir": [r["gir_hit"], r["gir_tries"]],
@@ -690,12 +700,17 @@ def summary(db: sqlite3.Connection, context: str | None = None,
         "lies": [r[0] for r in db.execute("SELECT DISTINCT lie_before FROM shots WHERE lie_before IS NOT NULL ORDER BY 1")],
     }
     # No league rounds at all (no league file, or the season hasn't started): the page drops the
-    # league/practice filter and tags, since every round would be practice.
+    # League filter, and with no tournament rounds either, the filter and tags, since every round
+    # would be practice.
     has_league = db.execute("SELECT EXISTS (SELECT 1 FROM rounds WHERE is_league = 1)"
                             " OR EXISTS (SELECT 1 FROM shots WHERE is_league = 1)").fetchone()[0] == 1
+    has_tournament = db.execute("SELECT EXISTS (SELECT 1 FROM rounds WHERE is_league = 0 AND is_tournament = 1)"
+                                " OR EXISTS (SELECT 1 FROM shots WHERE is_league = 0 AND is_tournament = 1)"
+                                ).fetchone()[0] == 1
     rounds_ = rounds(db, context, gimmes)
     add_round_summaries(db, rounds_, holes, people, usual)
-    return {"context": context or "all", "last_session": last, "has_league": has_league, "gimme_ft": usual,
+    return {"context": context or "all", "last_session": last, "has_league": has_league,
+            "has_tournament": has_tournament, "gimme_ft": usual,
             "players": people,
             "rounds": rounds_, **({"excluded_rounds": excluded_rounds(db)} if local else {}), **highlights_by_period(db, holes, context, season=season),
             "season_from": season_start(season), "predictions": predictions(db, names),
@@ -767,7 +782,8 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
                     found = set_left_out(db_path, ident, value, float(body["ts"]))
                 elif key == "league":
                     value = bool(body["league"])
-                    found = set_round_league(db_path, ident, float(body["ended"]), value)
+                    found = set_round_league(db_path, ident, float(body["ended"]), value,
+                                             bool(body.get("tournament")))
                 elif key == "excluded":
                     value = bool(body["excluded"])
                     found = set_round_excluded(db_path, ident, float(body["ended"]), value)

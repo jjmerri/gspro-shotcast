@@ -7,7 +7,7 @@ query needs over HTTP range requests, so the page stays fast however long the se
 
     index.html                      the page
     vendor/sql.js-httpvfs-<v>/      the browser SQLite library
-    v/<version>/summary-<ctx>.json  ctx: all, league, practice
+    v/<version>/summary-<ctx>.json  ctx: all, league, tournament, practice
     v/<version>/player/<ctx>/<key>.json   one player's courses, highlights and records
     v/<version>/stats.db            shots and transcripts
     latest.json                     {"version": ...}: which v/ the page reads
@@ -36,7 +36,7 @@ from . import stats_web
 PAGE = Path(__file__).with_name("stats_web.html")
 SITE_NAME, MORE_TAB = "Shotcast", "More"   # publish.site_name, publish.more_tab
 VENDOR = Path(__file__).with_name("stats_vendor")
-CONTEXTS = {"all": None, "league": "league", "practice": "practice"}
+CONTEXTS = {"all": None, "league": "league", "tournament": "tournament", "practice": "practice"}
 SHOT_FILTERS = ("date", "player", "course", "club", "lie", "round")   # the page's exact-match filters
 SHOT_RANGE = {"from": ">=", "to": "<="}                               # and its date range (YYYY-MM-DD)
 PAGE_SIZE = 1024   # small pages: a lookup fetches little more than the rows it needs
@@ -71,14 +71,15 @@ def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | No
     tmp = out.with_name(out.name + ".tmp")
     tmp.unlink(missing_ok=True)
     shots = A.shot_log(src, None, limit=-1)
-    league = {r[0]: r[1] for r in src.execute("SELECT id, is_league FROM shots")}
+    kind = {r[0]: "league" if r[1] else "tournament" if r[2] else "practice"
+            for r in src.execute("SELECT id, is_league, is_tournament FROM shots")}
     round_of = stats_web.shot_rounds(src)
     sessions = [r[0] for r in src.execute("SELECT DISTINCT session_id FROM lines WHERE session_id IS NOT NULL")]
     with closing(sqlite3.connect(tmp)) as db:
         db.execute(f"PRAGMA page_size = {PAGE_SIZE}")
         db.execute("PRAGMA journal_mode = DELETE")
         db.executescript("""
-            CREATE TABLE pub_shot (ord INTEGER PRIMARY KEY, id INTEGER, is_league INTEGER, date TEXT,
+            CREATE TABLE pub_shot (ord INTEGER PRIMARY KEY, id INTEGER, kind TEXT, date TEXT,
                                    player TEXT, course TEXT, club TEXT, lie TEXT, round INTEGER);
             CREATE TABLE pub_shot_json (ord INTEGER PRIMARY KEY, json TEXT NOT NULL);
             CREATE TABLE pub_transcript (session_id INTEGER PRIMARY KEY, json TEXT NOT NULL);
@@ -86,7 +87,7 @@ def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | No
             CREATE TABLE pub_hole_image (id INTEGER PRIMARY KEY, src TEXT NOT NULL);
         """)
         db.executemany("INSERT INTO pub_shot VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                       [(i, s["id"], league.get(s["id"]), s["date"], s["player"], s["course"], s["club"],
+                       [(i, s["id"], kind.get(s["id"]), s["date"], s["player"], s["course"], s["club"],
                          s["lie_before"], round_of.get(s["id"])) for i, s in enumerate(shots)])
         db.executemany("INSERT INTO pub_shot_json VALUES (?, ?)",
                        [(i, json.dumps(s, separators=(",", ":"))) for i, s in enumerate(shots)])
@@ -100,7 +101,7 @@ def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | No
         db.executemany("INSERT INTO pub_hole_image VALUES (?, ?)", hole_replay.hole_image_sources(
             src, {rp["map"]["id"] for rp in replays.values() if "map" in rp}).items())
         # Each filter walks its own index in the page's order, so the newest matches come first.
-        for col in (*SHOT_FILTERS, "is_league"):
+        for col in (*SHOT_FILTERS, "kind"):
             db.execute(f"CREATE INDEX pub_shot_{col} ON pub_shot ({col}, ord)")
         db.execute("CREATE INDEX pub_shot_id ON pub_shot (id)")   # a link to one shot finds its round
         db.execute("ANALYZE")   # lets SQLite pick the most selective filter's index
@@ -112,9 +113,9 @@ def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | No
 def shot_query(context: str | None, filters: dict[str, str], limit: int = 500) -> tuple[str, list]:
     """The page's shot query (stats_web.html builds the same SQL): newest first, up to `limit`."""
     where, args = [], []
-    if context in ("league", "practice"):
-        where.append("s.is_league = ?")
-        args.append(1 if context == "league" else 0)
+    if context in ("league", "tournament", "practice"):
+        where.append("s.kind = ?")
+        args.append(context)
     for key in SHOT_FILTERS:
         if filters.get(key):
             where.append(f"s.{key} = ?")

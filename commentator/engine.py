@@ -612,11 +612,13 @@ class Engine:
         self.speakers = list(cfg.personas)
         self._persona_names = [p.name for p in cfg.personas.values()]  # for stripping leaked speaker labels
         self.schema = output_schema(self.speakers)
-        # Two cached variants: a practice round has no stakes on the line (see system_prompt). The
-        # `system` property picks per the current round; both are byte-identical across calls within a
-        # round type, so provider prompt-caching still holds.
+        # Three cached variants: a practice round has no stakes on the line, a tournament one has its
+        # score but no league stakes (see system_prompt). The `system` property picks per the current
+        # round; each is byte-identical across calls within a round type, so provider prompt-caching
+        # still holds.
         self._system_league = system_prompt(cfg, league, is_league=True)
         self._system_practice = system_prompt(cfg, league, is_league=False)
+        self._system_tournament = system_prompt(cfg, league, is_league=False, tournament=True)
         self.league_text = league.prompt_text()
         # The example lines a model might lift verbatim; the BAD ones are what not to say, so a
         # line sharing words with them isn't copying.
@@ -2672,7 +2674,24 @@ class Engine:
         unless a real league round is in progress. Defaults to practice when no round is live, so the
         booth never invents league stakes before one is confirmed."""
         r = self.round
-        return self._system_league if (r is not None and not r.ended and r.is_league) else self._system_practice
+        return self._system_of(r) if (r is not None and not r.ended) else self._system_practice
+
+    def _system_of(self, r) -> str:
+        """The round's own system prompt variant: league, tournament or practice."""
+        return self._system_league if r.is_league else self._system_tournament if r.is_tournament else self._system_practice
+
+    def _note_tournament(self, r) -> None:
+        """GSPro is reporting round `r` (the one being played, or just ended) to Sim Golf Tournaments:
+        it's a tournament round (a league one stays league, its schedule decides that), and so are its
+        shots so far. GSPro's first sync comes just after the round's first stroke; once the round's
+        over, the log has the ended round's until the next course is entered."""
+        g = self.gspro
+        if r is None or r.is_league or r.is_tournament or not (g.sgt or (g.mode != "course" and g.last_sgt)):
+            return
+        r.is_tournament = True
+        n = self.store.mark_tournament(r.shot_floor) if r.shot_floor is not None else 0
+        log.info("Round %s is a tournament round: GSPro is syncing it to Sim Golf Tournaments (%d shots so far marked)",
+                 r.id, n)
 
     def _round_ctx(self) -> str:
         """The current round's stat context: 'league' under a live league round, else 'practice'. Used
@@ -4679,6 +4698,8 @@ class Engine:
             self._finish_seq[idx] = my_seq
             self._resolve_pending_finish(idx, impact_snap)
             self._correct_last_finish(idx, impact_snap, before.lie, shot_hole, before.shot_number, fmt)
+        if r is not None and not r.ended:   # a shot of no round (or an ended one) says nothing of the next
+            self._note_tournament(r)
         shot_id = self.store.record_shot(
             player=player, hole=shot_hole, shot=shot, before=before, after=hud, tags=tags,
             carry_game_yards=carry_game, total_yards=tile_yards("total length"), offline_yards=tile_yards("offline (raw)"),
@@ -4686,7 +4707,7 @@ class Engine:
             to_pin_yards=to_yards(before.to_pin),
             finish_yards=None,   # filled in on this player's next shot (see _resolve_pending_finish)
             gimme_yards=self.gspro.gimme_of(idx), fmt=fmt, attributed=attributed,
-            is_league=bool(r and r.is_league), shared_ball=shared,
+            is_league=bool(r and r.is_league), shared_ball=shared, is_tournament=bool(r and r.is_tournament),
             # where GSPro's log had the ball for this shot, and the player's minimap aim, for the replay
             start=self.gspro.fire_info(fire).get("start"), aim=self.gspro.fire_info(fire).get("aim"),
             handed=before.handed or shot.handed or self.handed.get(player or ""), tree_hits=tree_hits or None,
@@ -6519,6 +6540,7 @@ class Engine:
         r.shot_floor = self.store.last_shot_id()
         if adopted := [v[0] for v in self._fire_rows.values() if v[0] is not None and v[1].round_id == r.id]:
             r.shot_floor = min(adopted) - 1   # the drives struck before it started are its own
+        self._note_tournament(r)   # a round joined mid-way already has its syncs in the log
         self._hc = RoundCounters(fires_at_start=self.gspro.fires, kinds_at_start=dict(self.gspro.kinds))
         if self.cfg.health.enabled and self.cfg.source.type != "replay":
             # The booth runs for days: what startup checked may have changed since (GSPro updated and
@@ -6978,7 +7000,7 @@ class Engine:
             r.format == "scramble" or r.no_scramble or g.team_scores)
         self.store.set_shot_round_class(shot_id, is_league=r.is_league, fmt=r.player_format(name) if name else None,
                                         attributed=bool(name) and not self._anonymous(name), shared_ball=shared,
-                                        hole=label, course=r.course)
+                                        hole=label, course=r.course, is_tournament=r.is_tournament)
         if self._log_truth:
             self._owners_due.add(fire)
         return not attached
@@ -7715,6 +7737,7 @@ class Engine:
     def _record_round_stats(self, r: Round, reason: str, complete: bool = True) -> dict:
         """Log and store each side's (and individual's) round. A round quit early is stored as
         incomplete, with net to par over just the holes played."""
+        self._note_tournament(r)
         self._apply_log_corrections()
         if not complete:
             done = all(r.card_score(side, r.seq) is not None for side in r.sides)
@@ -7740,7 +7763,7 @@ class Engine:
                                         holes=r.holes, players=side.players,
                                         stats=st, strokes=side.strokes, net_to_par=net[side.key],
                                         hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
-                                        complete=complete,
+                                        is_tournament=r.is_tournament, complete=complete,
                                         first_nine=r.first_nine(st, r.hole_strokes_for(side)))
         # Per-player FIR/GIR/scrambling/sand-save for individual season stats. Alternate shot isn't
         # attributed to one player, so skip it; otherwise record each individual (distinct names from
@@ -7756,7 +7779,7 @@ class Engine:
                     nine = r.first_nine(pst)
                     self.store.record_player_round(player=name, course=r.course, fmt=r.player_format(name), stats=pst,
                                                    hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
-                                                   complete=complete, nine_to_par=nine[0] if nine else None)
+                                                   is_tournament=r.is_tournament, complete=complete, nine_to_par=nine[0] if nine else None)
         self._refresh_own_handicaps()
         return stats
 
@@ -7836,7 +7859,7 @@ class Engine:
         # r.ended is set above, so the `system` property would pick practice; pass the round's own
         # variant so a league round's sign-off keeps its stakes framing.
         await self._speak("closer", self.closer_llm, user, facts_text, [], mode="round",
-                          system=self._system_league if r.is_league else self._system_practice, max_words=cap)
+                          system=self._system_of(r), max_words=cap)
 
     # ---- the live stream ----------------------------------------------------------------------
 
@@ -7922,7 +7945,7 @@ class Engine:
         if r is None:
             return None
         names = list(dict.fromkeys(p for side in r.sides for p in (side.players or side.gspro)))
-        kind = "" if r.is_league else "practice"
+        kind = "" if r.is_league else "tournament" if r.is_tournament else "practice"
         return " · ".join(x for x in (r.course or "Round", ", ".join(names), kind) if x)
 
     def _live_mark(self, replace: bool = False) -> None:

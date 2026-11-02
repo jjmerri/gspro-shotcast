@@ -70,8 +70,13 @@ def expected(lie: str | None, yards: float | None) -> float | None:
     return y0 + (y1 - y0) * (x - x0) / (x1 - x0) + extra
 
 
-def _ctx(context: str | None) -> str:
-    return {"league": " AND is_league = 1", "practice": " AND is_league = 0"}.get(context or "", "")
+def _ctx(context: str | None, table: str = "") -> str:
+    """A WHERE fragment for the round context (league / tournament / practice: neither), on `table`'s
+    columns when given. A tournament round is never a league one."""
+    t = f"{table}." if table else ""
+    return {"league": f" AND {t}is_league = 1",
+            "tournament": f" AND {t}is_league = 0 AND {t}is_tournament = 1",
+            "practice": f" AND {t}is_league = 0 AND {t}is_tournament = 0"}.get(context or "", "")
 
 
 def _par_of(label: str | None) -> int | None:
@@ -296,8 +301,7 @@ def trends(db: sqlite3.Connection, holes: list[dict], context: str | None = None
     and strokes gained per nine. From individual-ball rounds."""
     nights: dict[tuple, dict] = {}
     for r in db.execute("SELECT pr.*, s.date FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
-                        " WHERE (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))" + _ctx(context).replace(
-                            "is_league", "pr.is_league") + " ORDER BY pr.ended_at"):
+                        " WHERE (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))" + _ctx(context, "pr") + " ORDER BY pr.ended_at"):
         try:
             scores = {int(k): v for k, v in json.loads(r["scores"] or "{}").items()}
             pars = {int(k): v for k, v in json.loads(r["hole_pars"] or "{}").items()}
@@ -341,7 +345,7 @@ def courses(db: sqlite3.Connection, context: str | None = None, player: str | No
     who = " AND pr.player = ?" if player else ""
     for r in db.execute("SELECT pr.*, s.date FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
                         " WHERE course IS NOT NULL AND (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))"
-                        + _ctx(context).replace("is_league", "pr.is_league") + who + " ORDER BY pr.ended_at",
+                        + _ctx(context, "pr") + who + " ORDER BY pr.ended_at",
                         (player,) if player else ()):
         try:
             scores = {int(k): v for k, v in json.loads(r["scores"] or "{}").items() if isinstance(v, int)}
@@ -418,7 +422,7 @@ def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = 
 
     for r in db.execute("SELECT pr.*, s.date FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
                         " WHERE (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))"
-                        + _ctx(context).replace("is_league", "pr.is_league")
+                        + _ctx(context, "pr")
                         + (" AND pr.player = ?" if player else "") + (" AND s.date >= ?" if since else "")
                         + " ORDER BY pr.ended_at", args):
         try:
@@ -538,7 +542,7 @@ def shot_log(db: sqlite3.Connection, context: str | None = None, *, player: str 
         " club_speed, launch_angle, total_spin, spin_axis, start_direction, outcome, mulligan, left_out, fmt,"
         " handed, COALESCE(carry_game_yards, carry_raw_tile_yards, carry_raw) AS flight"
         " FROM shots JOIN sessions ON sessions.id = shots.session_id WHERE " + " AND ".join(where)
-        + _ctx(context).replace("is_league", "shots.is_league") + " ORDER BY shots.ts DESC, shots.id DESC LIMIT ?",
+        + _ctx(context, "shots") + " ORDER BY shots.ts DESC, shots.id DESC LIMIT ?",
         (*args, limit)).fetchall()
     out = [dict(r) for r in rows]
     for r in out:

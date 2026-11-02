@@ -151,7 +151,7 @@ def test_news_trivia_and_scores_are_one_bucket_picked_at_random(tmp_path):
     e = _engine(tmp_path)
     e.rng = random.Random(0)
     e.cfg.news.banter_rate = 1.0
-    e.round = SimpleNamespace(holes=9, seq=3, ended=False, is_league=False)
+    e.round = SimpleNamespace(holes=9, seq=3, ended=False, is_league=False, is_tournament=False)
     routine = {"tags": [], "routine": True}
     news, trivia, score = _bit("news"), _bit("trivia"), _bit("score", expires=time.monotonic() + 60)
     e._news_bits = [news, trivia, score]
@@ -168,7 +168,7 @@ def test_news_trivia_and_scores_are_one_bucket_picked_at_random(tmp_path):
 async def test_a_score_check_in_moves_past_a_recent_aside(tmp_path):
     e = _engine(tmp_path)
     e.scores = _Scores([])
-    r = SimpleNamespace(holes=9, seq=4, ended=False, is_league=False)
+    r = SimpleNamespace(holes=9, seq=4, ended=False, is_league=False, is_tournament=False)
     e.round, e._score_holes, e._news_aired = r, [4], [3]
     e._score_hole_started(r)
     assert e._score_holes == [6] and not e._aside_tasks           # written when it can actually play
@@ -182,7 +182,7 @@ async def test_a_score_check_in_moves_past_a_recent_aside(tmp_path):
 def test_a_story_about_one_hole_plays_on_that_hole_even_late(tmp_path):
     e = _engine(tmp_path)
     e.cfg.news.banter_rate = 1.0
-    e.round = SimpleNamespace(holes=18, seq=17, ended=False, is_league=False)
+    e.round = SimpleNamespace(holes=18, seq=17, ended=False, is_league=False, is_tournament=False)
     seventeen = _bit("trivia", hole=17)
     e._news_bits = [seventeen]
     e.hole_number = 16
@@ -222,7 +222,7 @@ async def test_scores_are_planned_at_round_start_but_fetched_and_written_as_thei
     e.closer_llm = llm = _AsideLLM()
     item = ScoreItem("nhl:5", "team", "in", "NHL, live as of 6:05 pm: Bruins 2, Stars 1, 8:14 left in the 2nd.", "2-1")
     e.scores = _Scores([item])
-    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
+    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, is_tournament=False)
     e.round = r
     await e._plan_scores(r)
     [hole] = e._score_holes
@@ -242,7 +242,7 @@ async def test_scores_are_planned_at_round_start_but_fetched_and_written_as_thei
 async def test_nothing_on_tonight_means_no_score_holes(tmp_path):
     e = _engine(tmp_path)
     e.scores = _Scores([])
-    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
+    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, is_tournament=False)
     e.round = r
     await e._plan_scores(r)
     assert e._score_holes == []
@@ -259,7 +259,7 @@ async def test_course_trivia_is_written_from_the_article_and_remembers_what_aire
 
     e.trivia = _Trivia()
     e.cfg.trivia.per_round = 1
-    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, course="The Ancient Course")
+    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, is_tournament=False, course="The Ancient Course")
     e.round = r
     await e._prepare_trivia(r)
     [bit] = e._news_bits
@@ -277,7 +277,7 @@ def test_an_aside_lands_on_what_the_round_just_did_not_only_on_ball_flight(tmp_p
 
     def _round(holes, seq, scores):
         side = SimpleNamespace()
-        return SimpleNamespace(holes=holes, seq=seq, ended=False, is_league=False, sides=[side],
+        return SimpleNamespace(holes=holes, seq=seq, ended=False, is_league=False, is_tournament=False, sides=[side],
                                par={h: 4 for h in scores}, card_score=lambda s, q: scores.get(q))
 
     assert e._round_moment_tags(_round(9, 3, {1: 4, 2: 3})) == {"birdie_posted"}
@@ -302,7 +302,7 @@ def test_an_aside_held_for_a_long_putt_doesnt_air_on_a_short_one(tmp_path):
 
     e = _engine(tmp_path)
     e.cfg.news.banter_rate = 1.0
-    e.round = SimpleNamespace(holes=9, seq=3, ended=False, is_league=False)
+    e.round = SimpleNamespace(holes=9, seq=3, ended=False, is_league=False, is_tournament=False)
     e._news_bits = [held := _bit("news", trigger="long_putt")]
     assert "makeable_putt" not in NEWS_TRIGGER_TAGS["long_putt"]
     assert e._news_pick({"tags": ["putt", "makeable_putt"], "routine": False}) is None
@@ -316,7 +316,7 @@ async def test_each_nine_writes_its_asides_at_its_second_hole_to_its_airtime(tmp
     assert e._aside_slots(18) == 5 and e._aside_slots(9) == 2
     e.news, e.trivia = object(), object()
     e.cfg.news.per_nine, e.cfg.trivia.per_round = 2, 1
-    r = SimpleNamespace(holes=18, seq=1, ended=False, is_league=False)
+    r = SimpleNamespace(holes=18, seq=1, ended=False, is_league=False, is_tournament=False)
     e.round = r
     written = []
 
@@ -347,7 +347,7 @@ async def test_each_nine_writes_its_asides_at_its_second_hole_to_its_airtime(tmp
     item = ScoreItem("nhl:5", "team", "in", "NHL, live: Bruins 2, Stars 1.", "2-1")
     e.scores = _Scores([item])
     e.cfg.scores.per_nine, e.cfg.trivia.per_round = 1, 2
-    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
+    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, is_tournament=False)
     e.round, e._news_bits, written[:] = r, [], []
     e._start_round_asides(r)
     await _hole(2)
@@ -359,8 +359,8 @@ async def test_a_superseded_round_start_doesnt_pay_for_its_asides(tmp_path):
 
     e = _news_engine(tmp_path, llm := _NewsLLM())
     e.cfg.news.per_nine = 3
-    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
-    e.round = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)   # already replaced
+    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, is_tournament=False)
+    e.round = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, is_tournament=False)   # already replaced
     await e._prepare_news(r)
     assert llm.prompts == [] and e._news_bits == []      # not one call spent on a round that's gone
 
@@ -399,7 +399,7 @@ async def test_an_expired_check_in_doesnt_block_an_update(tmp_path):
     e = _engine(tmp_path)
     e.closer_llm = _AsideLLM()
     e.scores = _Scores([ScoreItem("nhl:5", "team", "in", "NHL: Bruins 2, Stars 1.", "2-1")])
-    r = SimpleNamespace(holes=9, seq=4, ended=False, is_league=False)
+    r = SimpleNamespace(holes=9, seq=4, ended=False, is_league=False, is_tournament=False)
     e.round = r
     e._news_bits = [_bit("score", expires=time.monotonic() - 1)]
     e._news_bits[0].topic = "nhl:5"
@@ -412,7 +412,7 @@ async def test_an_aside_picked_for_a_hole_doesnt_air_once_the_hole_has_moved_on(
 
     e = _engine(tmp_path)
     e.cfg.news.banter_rate = 1.0
-    e.round = SimpleNamespace(holes=18, seq=17, ended=False, is_league=False)
+    e.round = SimpleNamespace(holes=18, seq=17, ended=False, is_league=False, is_tournament=False)
     e.hole_number, e._shot_seq = 17, 1
     e._news_bits = [_bit("trivia", hole=17)]
     e.speech.is_idle = lambda: True
@@ -464,7 +464,7 @@ def test_a_withdrawn_leader_isnt_the_winner():
 async def test_off_air_an_aside_is_kept_and_a_postponed_game_is_no_result(tmp_path):
     e = _engine(tmp_path)
     e.cfg.news.banter_rate = 1.0
-    e.round = SimpleNamespace(holes=9, seq=4, ended=False, is_league=False)
+    e.round = SimpleNamespace(holes=9, seq=4, ended=False, is_league=False, is_tournament=False)
     e._shot_seq = 1
     e._news_bits = [_bit("trivia")]
     e.speech.is_idle = lambda: True

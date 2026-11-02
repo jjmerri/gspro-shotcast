@@ -68,6 +68,27 @@ def test_practice_round_doesnt_infer_a_team_format():
     assert r.format_facts() == []
 
 
+def test_a_tournament_round_is_never_called_practice_in_its_facts():
+    # Its season history is the non-league rounds (practice and tournament together), but the round
+    # itself isn't practice: the tournament prompt forbids saying so, so the facts mustn't either.
+    def nine(tournament):
+        r = Round(league=LEAGUE, gspro_players=["MikeD"], course="York", scheduled_format=None,
+                  holes=9, is_league=False)
+        r.is_tournament = tournament
+        r.apply_scorecard(Scorecard(holes=list(range(1, 10)), par={k: 4 for k in range(1, 10)},
+                                    index={k: k for k in range(1, 10)},
+                                    scores={"MIKED": {k: 4 for k in range(1, 10)}, "SCORECARD": {}}))
+        return r
+    season = {"Mike": {"rounds": 3, "gross_rounds": 3, "avg_gross_to_par": 8.0, "best_gross_to_par": 5}}
+    practice, tournament = nine(False), nine(True)
+    assert "best practice round" in " ".join(practice.closing_facts([], season))
+    closing = " ".join(tournament.closing_facts([], season))
+    opening = " ".join(tournament.opening_facts(season, first_up=None, hole=None))
+    assert "best non-league round" in closing
+    assert "tournament round" in opening
+    assert "practice round" not in closing + opening
+
+
 def test_one_ball_per_team_is_alternate_shot_and_hides_names():
     r = Round(league=LEAGUE, gspro_players=["MikeD"], course="Wynn", scheduled_format=None, holes=9)
     assert r.format == "alternate"
@@ -1908,7 +1929,7 @@ async def test_news_asides_are_written_and_voiced_at_round_start(tmp_path):
 
     llm = _NewsLLM()
     e = _news_engine(tmp_path, llm)
-    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
+    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, is_tournament=False)
     e.round = r
     await e._prepare_news(r)
     assert "Scheffler won by five shots" in llm.prompts[0]   # the real story, fed in verbatim
@@ -1922,7 +1943,7 @@ async def test_an_empty_reply_is_retried_then_the_aside_dropped(tmp_path):
 
     llm = _NewsLLM(reply="Absolutely, Nigel.")
     e = _news_engine(tmp_path, llm)
-    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
+    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, is_tournament=False)
     e.round = r
     await e._prepare_news(r)
     assert len(llm.prompts) == 2 and e._news_bits == []
@@ -1937,7 +1958,7 @@ async def test_a_news_line_too_long_to_air_whole_is_retried_not_cut_to_its_tease
                            "Sunday and nobody else got close.")
     e = _news_engine(tmp_path, llm)
     e.cfg.commentary.aside_max_words = 18
-    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
+    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, is_tournament=False)
     e.round = r
     await e._prepare_news(r)
     assert len(llm.prompts) == 2 and "at most 18 words" in llm.prompts[1] and e._news_bits == []
@@ -1951,7 +1972,7 @@ async def test_a_news_aside_gets_more_words_than_a_live_line(tmp_path):
                            "Interesting bit of news this morning, I must say.")
     e = _news_engine(tmp_path, llm)
     e.cfg.commentary.max_words_per_line = 18
-    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False)
+    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, is_tournament=False)
     e.round = r
     await e._prepare_news(r)
     assert len(llm.prompts) == 1 and "up to 30 words" in llm.prompts[0]
@@ -1962,7 +1983,7 @@ async def test_a_news_story_isnt_told_again_to_anyone_who_heard_it(tmp_path):
     from types import SimpleNamespace
 
     def _round(*players):
-        return SimpleNamespace(holes=9, seq=1, ended=False, is_league=False,
+        return SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, is_tournament=False,
                                sides=[SimpleNamespace(players=[p]) for p in players])
 
     e = _news_engine(tmp_path, llm := _NewsLLM())
@@ -2422,6 +2443,58 @@ async def test_quitting_a_round_early_ends_it_quietly_and_a_new_tee_opens(tmp_pa
     assert e.store.season_rounds("MikeD")["rounds"] == 0
     tee = Hud(player_text="MikeD E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards")
     assert e._is_round_start(tee)
+
+
+async def test_a_round_gspro_syncs_to_sgt_is_a_tournament_round_from_its_first_shot(tmp_path):
+    from commentator.models import Shot, ShotEvent
+
+    e, r = await _log_round(tmp_path)
+    tee = Hud(player_text="MikeD E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards", lie="tee")
+    await e.handle_shot(ShotEvent(shot=Shot(club="DR", carry=250.0), hud_hint=tee, impact_hud_hint=tee))
+    assert not r.is_tournament and e.system is e._system_practice
+    e.gspro.sgt = True   # GSPro's first SGT sync, logged just after the opening stroke
+    second = Hud(player_text="MikeD E Shot 2 150 YDS", shot_number=2, score_to_par="E", to_pin="150 yards", lie="fairway")
+    await e.handle_shot(ShotEvent(shot=Shot(club="8I", carry=150.0), hud_hint=second, impact_hud_hint=second))
+    assert r.is_tournament and e.system is e._system_tournament
+    assert [x[0] for x in e.store.db.execute("SELECT is_tournament FROM shots ORDER BY id")] == [1, 1]
+    r.apply_scorecard(Scorecard(holes=list(range(1, 19)), scores={"MikeD": {1: 4, 2: 5}}))
+    r.seq = 3
+    e.gspro.end_round()   # End Round: the sync flag is kept as the ended round's
+    e._check_log_round()
+    (ev,) = _queued(e)
+    await e.handle_round_end(ev)
+    assert e.store.db.execute("SELECT is_league, is_tournament FROM rounds").fetchone()[:] == (0, 1)
+
+
+async def test_a_tournaments_opening_shot_before_its_round_starts_leaves_the_last_rounds_shots_alone(tmp_path):
+    from commentator.models import Shot, ShotEvent
+
+    e, r = await _log_round(tmp_path)
+    tee = Hud(player_text="MikeD E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards", lie="tee")
+    await e.handle_shot(ShotEvent(shot=Shot(club="DR", carry=250.0), hud_hint=tee, impact_hud_hint=tee))
+    r.apply_scorecard(Scorecard(holes=list(range(1, 19)), scores={"MikeD": {1: 4, 2: 5}}))
+    r.seq = 3
+    e.gspro.end_round()
+    e._check_log_round()
+    (ev,) = _queued(e)
+    await e.handle_round_end(ev)
+    e.gspro.sgt = True   # the next course is an SGT round; its opening drive lands before its round starts
+    await e.handle_shot(ShotEvent(shot=Shot(club="DR", carry=240.0), hud_hint=tee, impact_hud_hint=tee))
+    assert not r.is_tournament
+    assert [x[0] for x in e.store.db.execute("SELECT is_tournament FROM shots ORDER BY id")] == [0, 0]
+
+
+async def test_a_round_whose_sync_is_only_seen_once_its_over_is_still_a_tournament_round(tmp_path):
+    e, r = await _log_round(tmp_path)
+    r.apply_scorecard(Scorecard(holes=list(range(1, 19)), scores={"MikeD": {1: 4, 2: 5}}))
+    r.seq = 3
+    e.gspro.sgt = True
+    e.gspro.end_round()
+    e._check_log_round()
+    (ev,) = _queued(e)
+    await e.handle_round_end(ev)
+    assert r.is_tournament
+    assert e.store.db.execute("SELECT is_tournament FROM rounds").fetchone()[0] == 1
 
 
 async def test_a_front_nine_of_an_eighteen_counts_as_a_round(tmp_path):

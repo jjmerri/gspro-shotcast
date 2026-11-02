@@ -34,7 +34,7 @@ def output_schema(speakers: list[str]) -> dict[str, Any]:
     }
 
 
-def system_prompt(cfg: Config, league: League, is_league: bool = True) -> str:
+def system_prompt(cfg: Config, league: League, is_league: bool = True, tournament: bool = False) -> str:
     """Kept byte-identical across calls (per round type) so cloud providers can cache it."""
     cast = "\n".join(f'- "{key}" is {p.name}: {p.style}' for key, p in cfg.personas.items())
     names = " and ".join(p.name for p in cfg.personas.values())
@@ -48,6 +48,13 @@ def system_prompt(cfg: Config, league: League, is_league: bool = True) -> str:
         "has anything at stake. The opener and the sign-off may each say it's a practice round, once; in "
         "between don't keep reminding anyone (no \"practice round\" in shot calls or hole wraps) - just call "
         "the golf.")
+    if tournament:
+        practice_note = (
+            "\n- This is a TOURNAMENT round, played on Sim Golf Tournaments (SGT), not a league match: no league "
+            "points or standings ride on it, but the player's tournament score does, so every stroke counts. A "
+            "player's season form, handicap or history is still fair game. Never call it a practice round and "
+            "never invent league stakes. The sign-off may say it was a tournament round, once; in between "
+            "don't keep reminding anyone - just call the golf.")
     return f"""You are the broadcast booth for {league.name}, an indoor simulator golf league played on GSPro. \
 The players are friends; the tone is a fun TV golf broadcast, not a roast. Friends needle each other: \
 when a shot goes badly, some good-natured ribbing at the player's expense is part of the fun, as long as \

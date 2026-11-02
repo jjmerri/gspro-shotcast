@@ -2069,8 +2069,8 @@ def test_system_prompt_variant_follows_the_round(tmp_path):
     e = _mini_engine(tmp_path)
 
     class R:
-        def __init__(self, is_league, ended=False):
-            self.is_league, self.ended = is_league, ended
+        def __init__(self, is_league, ended=False, is_tournament=False):
+            self.is_league, self.ended, self.is_tournament = is_league, ended, is_tournament
 
     assert e.system is e._system_practice              # no round -> practice (never invents stakes)
     e.round = R(is_league=True)
@@ -2079,6 +2079,9 @@ def test_system_prompt_variant_follows_the_round(tmp_path):
     assert e.system is e._system_practice              # an ENDED league round -> practice, not league
     e.round = R(is_league=False)
     assert e.system is e._system_practice
+    e.round = R(is_league=False, is_tournament=True)
+    assert e.system is e._system_tournament
+    assert "TOURNAMENT round" in e._system_tournament and "PRACTICE round" not in e._system_tournament
 
 
 async def test_compose_threads_the_given_system_prompt(tmp_path):

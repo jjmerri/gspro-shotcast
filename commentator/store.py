@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS shots (
     to_pin_yards REAL, finish_yards REAL, gimme_yards REAL, outcome TEXT, fmt TEXT,
     attributed INTEGER NOT NULL DEFAULT 1,
     is_league INTEGER NOT NULL DEFAULT 1,        -- 1 = league round, 0 = practice; for the stat context split
+    is_tournament INTEGER NOT NULL DEFAULT 0,    -- 1 = a tournament round (Sim Golf Tournaments), never a league one
     mulligan INTEGER NOT NULL DEFAULT 0,         -- 1 = GSPro took the stroke back; excluded from every stat
     left_out INTEGER NOT NULL DEFAULT 0,         -- 1 = left out of the stats by hand (a misread, a practice
                                                  -- swing); still a stroke on the card, unlike a mulligan
@@ -152,6 +153,7 @@ CREATE TABLE IF NOT EXISTS rounds (
     hole_pars TEXT,                              -- JSON: hole number -> par, for scores-vs-par season stats
     source TEXT,                                 -- scorecard / shots
     is_league INTEGER NOT NULL DEFAULT 1,        -- 1 = league round, 0 = practice; for the stat context split
+    is_tournament INTEGER NOT NULL DEFAULT 0,    -- 1 = a tournament round (Sim Golf Tournaments), never a league one
     complete INTEGER NOT NULL DEFAULT 1,         -- 0 = quit early in GSPro (holes_played < holes)
     holes_played INTEGER,                        -- holes actually scored (NULL on older rows: use holes)
     nine_to_par INTEGER,                         -- gross to par over the first nine played, set only on a
@@ -183,6 +185,7 @@ CREATE TABLE IF NOT EXISTS player_rounds (
     scores TEXT,                                 -- JSON: hole number -> this player's strokes
     hole_pars TEXT,                              -- JSON: hole number -> par, for scores-vs-par season stats
     is_league INTEGER NOT NULL DEFAULT 1,        -- 1 = league round, 0 = practice; for the stat context split
+    is_tournament INTEGER NOT NULL DEFAULT 0,    -- 1 = a tournament round (Sim Golf Tournaments), never a league one
     complete INTEGER NOT NULL DEFAULT 1,         -- 0 = quit early in GSPro
     holes_played INTEGER,                        -- holes this player actually scored
     nine_to_par INTEGER,                         -- gross to par over the first nine played, on a
@@ -271,7 +274,8 @@ CLOSER_SECONDS = 180
 
 def _ctx_sql(context: str | None) -> str:
     """A WHERE-clause fragment slicing a stat by round context: None = lifetime (league + practice),
-    'league' = league rounds only (the 'under pressure' slice), 'practice' = practice rounds only.
+    'league' = league rounds only (the 'under pressure' slice), 'practice' = every other round (a
+    tournament one included: the booth's split is league play or not; the stats site splits three ways).
     Appended to a query whose table carries is_league (shots / rounds / player_rounds), which is 1/0
     with legacy rows defaulted to 1, so no NULL handling is needed. No bind params (literal filter).
     Every context leaves out the rounds excluded on the stats page (and their shots)."""
@@ -338,7 +342,8 @@ class Store:
         have = {r["name"] for r in self.db.execute("PRAGMA table_info(shots)")}
         added = {"to_pin_yards": "REAL", "finish_yards": "REAL", "gimme_yards": "REAL",
                  "outcome": "TEXT", "fmt": "TEXT", "attributed": "INTEGER NOT NULL DEFAULT 1",
-                 "is_league": "INTEGER NOT NULL DEFAULT 1", "mulligan": "INTEGER NOT NULL DEFAULT 0",
+                 "is_league": "INTEGER NOT NULL DEFAULT 1", "is_tournament": "INTEGER NOT NULL DEFAULT 0",
+                 "mulligan": "INTEGER NOT NULL DEFAULT 0",
                  "shared_ball": "INTEGER NOT NULL DEFAULT 0", "left_out": "INTEGER NOT NULL DEFAULT 0", "handed": "TEXT",
                  "excluded": "INTEGER NOT NULL DEFAULT 0",
                  "picked": "INTEGER", "tree_hits": "INTEGER", "total_from_log": "INTEGER NOT NULL DEFAULT 0",
@@ -352,6 +357,7 @@ class Store:
         have_rounds = {r["name"] for r in self.db.execute("PRAGMA table_info(rounds)")}
         rounds_added = {"scramble_hit": "INTEGER", "scramble_tries": "INTEGER", "sand_hit": "INTEGER",
                         "sand_tries": "INTEGER", "hole_pars": "TEXT", "is_league": "INTEGER NOT NULL DEFAULT 1",
+                        "is_tournament": "INTEGER NOT NULL DEFAULT 0",
                         "complete": "INTEGER NOT NULL DEFAULT 1", "holes_played": "INTEGER",
                         "nine_to_par": "INTEGER", "nine_net_to_par": "INTEGER", "players": "TEXT",
                         "excluded": "INTEGER NOT NULL DEFAULT 0"}
@@ -362,8 +368,8 @@ class Store:
         # the table; an older file has it without these columns).
         have_pr = {r["name"] for r in self.db.execute("PRAGMA table_info(player_rounds)")}
         pr_added = {"putts": "INTEGER", "putt_holes": "INTEGER", "scores": "TEXT", "hole_pars": "TEXT",
-                    "is_league": "INTEGER NOT NULL DEFAULT 1", "complete": "INTEGER NOT NULL DEFAULT 1",
-                    "holes_played": "INTEGER", "nine_to_par": "INTEGER", "excluded": "INTEGER NOT NULL DEFAULT 0"}
+                    "is_league": "INTEGER NOT NULL DEFAULT 1", "is_tournament": "INTEGER NOT NULL DEFAULT 0",
+                    "complete": "INTEGER NOT NULL DEFAULT 1", "holes_played": "INTEGER", "nine_to_par": "INTEGER", "excluded": "INTEGER NOT NULL DEFAULT 0"}
         for col, decl in pr_added.items():
             if col not in have_pr:
                 self.db.execute(f"ALTER TABLE player_rounds ADD COLUMN {col} {decl}")
@@ -410,7 +416,7 @@ class Store:
         to_pin_yards: float | None = None, finish_yards: float | None = None,
         gimme_yards: float | None = None, outcome: str | None = None, fmt: str | None = None,
         attributed: bool = True, is_league: bool = True, shared_ball: bool = False,
-        start: tuple | None = None, aim: tuple | None = None, handed: str | None = None,
+        is_tournament: bool = False, start: tuple | None = None, aim: tuple | None = None, handed: str | None = None,
         tree_hits: int | None = None,
     ) -> int:
         cur = self.db.execute(
@@ -420,9 +426,9 @@ class Store:
                    score_to_par, lie_after, carry_raw_tile_yards, carry_game_yards, total_yards, offline_yards,
                    tags, raw, to_pin_yards, finish_yards, gimme_yards, outcome, fmt, attributed, is_league,
                    shared_ball, club_path, angle_of_attack, face_to_target, dynamic_loft, face_impact_h,
-                   face_impact_v, start_x, start_y, start_z, aim_map_x, aim_map_y, handed, tree_hits)
+                   face_impact_v, start_x, start_y, start_z, aim_map_x, aim_map_y, handed, tree_hits, is_tournament)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                       ?,?,?,?,?,?,?)""",
+                       ?,?,?,?,?,?,?,?)""",
             (self.session_id, shot.timestamp, player, course, hole, before.shot_number or after.shot_number, shot.club,
              int(shot.is_putt), shot.ball_speed, shot.vla, shot.hla, shot.total_spin, shot.spin_axis,
              shot.club_speed, shot.carry, shot.units, before.lie, before.slope_updown, before.slope_side,
@@ -432,7 +438,7 @@ class Store:
              json.dumps(tags), json.dumps(shot.raw),
              to_pin_yards, finish_yards, gimme_yards, outcome, fmt, int(attributed), int(is_league),
              int(shared_ball), *_club_values(shot), *_position_values(start, aim),
-             (handed or before.handed or shot.handed or "").strip().upper() or None, tree_hits),
+             (handed or before.handed or shot.handed or "").strip().upper() or None, tree_hits, int(is_tournament)),
         )
         self._unhole_if_played_on(cur.lastrowid, later=False)
         self._fill_previous_finish(cur.lastrowid)
@@ -700,15 +706,24 @@ class Store:
             self.db.commit()
 
     def set_shot_round_class(self, shot_id: int | None, *, is_league: bool, fmt: str | None, attributed: bool,
-                             shared_ball: bool, hole: str | None = None, course: str | None = None) -> None:
+                             shared_ball: bool, hole: str | None = None, course: str | None = None,
+                             is_tournament: bool = False) -> None:
         """A shot recorded before its round started, now taken into it: the round's league/practice
         context and format, whether the stats can credit its player, and (`hole`, `course`) where it
         was when it was labelled with the last round's."""
         if shot_id is not None:
             self.db.execute("UPDATE shots SET is_league = ?, fmt = ?, attributed = ?, shared_ball = ?,"
-                            " hole = coalesce(?, hole), course = coalesce(?, course) WHERE id = ?",
-                            (int(is_league), fmt, int(attributed), int(shared_ball), hole, course, shot_id))
+                            " hole = coalesce(?, hole), course = coalesce(?, course), is_tournament = ? WHERE id = ?",
+                            (int(is_league), fmt, int(attributed), int(shared_ball), hole, course,
+                             int(is_tournament), shot_id))
             self.db.commit()
+
+    def mark_tournament(self, after_id: int) -> int:
+        """A round found to be a tournament one after it started (GSPro's first SGT sync follows its
+        first stroke): every shot since `after_id` (the round's shot floor) is its, and is marked."""
+        cur = self.db.execute("UPDATE shots SET is_tournament = 1 WHERE id > ? AND is_tournament = 0", (after_id,))
+        self.db.commit()
+        return cur.rowcount
 
     def finish_of(self, shot_id: int) -> tuple[str | None, float | None]:
         """A shot's stored (lie_after, finish_yards)."""
@@ -860,9 +875,10 @@ class Store:
         cur = self.db.execute(
             """INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, units,
                    lie_before, to_pin, score_to_par, tags, raw, gimme_yards, outcome, fmt, attributed, is_league,
-                   excluded)
+                   is_tournament, excluded)
                SELECT session_id, ?, player, course, hole, shot_number + 1, NULL, 1, units, 'green', NULL,
-                      score_to_par, '["gimme"]', '{}', gimme_yards, 'gimme', fmt, attributed, is_league, excluded
+                      score_to_par, '["gimme"]', '{}', gimme_yards, 'gimme', fmt, attributed, is_league,
+                      is_tournament, excluded
                FROM shots WHERE id = ?""",
             (time.time(), shot_id),
         )
@@ -1257,7 +1273,7 @@ class Store:
 
     def record_round(self, *, course, fmt, side, team, holes, stats, strokes, net_to_par, hole_number,
                      hole_pars=None, is_league: bool = True, complete: bool = True, players: list[str] | None = None,
-                     first_nine: tuple[int, int | None] | None = None) -> None:
+                     is_tournament: bool = False, first_nine: tuple[int, int | None] | None = None) -> None:
         """One side's round. A round quit early is recorded too (complete=0, holes_played short): its
         per-hole and per-try stats count, but it only counts as a round in the season totals once a
         full nine was played (see _COUNTS_AS_ROUND), and those totals are scored per nine holes.
@@ -1277,14 +1293,14 @@ class Store:
             """INSERT INTO rounds (session_id, ended_at, date, course, format, side, team, holes, gross, par, strokes,
                    net_to_par, fir_hit, fir_tries, gir_hit, gir_tries, scramble_hit, scramble_tries, sand_hit,
                    sand_tries, putts, putt_holes, penalties, longest_drive, scores, hole_pars, source, is_league,
-                   complete, holes_played, nine_to_par, nine_net_to_par, players)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   complete, holes_played, nine_to_par, nine_net_to_par, players, is_tournament)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (self.session_id, time.time(), time.strftime("%Y-%m-%d"), self.course_name(course), fmt, side, team, holes,
              stats.gross if stats.holes_scored else None, stats.par or None, strokes, net_to_par,
              *stats.fir, *stats.gir, *stats.scramble, *stats.sand,
              stats.putts if stats.putt_holes else None, stats.putt_holes, stats.penalties, stats.longest_drive,
              scores_json, pars_json, stats.source, int(is_league), int(complete), stats.holes_scored,
-             nine, nine_net, json.dumps(players) if players else None),
+             nine, nine_net, json.dumps(players) if players else None, int(is_tournament)),
         )
         self.db.commit()
 
@@ -1302,7 +1318,7 @@ class Store:
 
     def record_player_round(self, *, player: str, course: str | None, fmt: str | None, stats,
                             hole_number, hole_pars=None, is_league: bool = True, complete: bool = True,
-                            nine_to_par: int | None = None) -> None:
+                            nine_to_par: int | None = None, is_tournament: bool = False) -> None:
         """One individual player's round for per-player season stats: FIR/GIR/scrambling/sand-save
         counts, putts, and the per-hole scores and pars (keyed by real hole number, like record_round)
         for the scores-vs-par stats. Scrambling/sand and the hole-score stats are only meaningful in an
@@ -1315,12 +1331,12 @@ class Store:
         self.db.execute(
             """INSERT INTO player_rounds (session_id, ended_at, player, course, fmt, fir_hit, fir_tries,
                    gir_hit, gir_tries, scramble_hit, scramble_tries, sand_hit, sand_tries,
-                   putts, putt_holes, scores, hole_pars, is_league, complete, holes_played, nine_to_par)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   putts, putt_holes, scores, hole_pars, is_league, complete, holes_played, nine_to_par, is_tournament)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (self.session_id, time.time(), player, self.course_name(course), fmt,
              *stats.fir, *stats.gir, *stats.scramble, *stats.sand,
              stats.putts if stats.putt_holes else None, stats.putt_holes, scores_json, pars_json, int(is_league),
-             int(complete), stats.holes_scored, None if complete else nine_to_par),
+             int(complete), stats.holes_scored, None if complete else nine_to_par, int(is_tournament)),
         )
         self.db.commit()
 

@@ -240,6 +240,10 @@ def parse_events(text: str) -> list[LogEvent]:
             elif line.startswith("End Round Button Click"):
                 # Leaving a round (finished or quit early) or leaving the range, back to the menus.
                 out.append(LogEvent("end_round"))
+            elif line.startswith("SGT Sync()"):
+                # GSPro reporting the round to Sim Golf Tournaments (each stroke, hole and stat), so this
+                # is a tournament round. The first is logged just after the round's first stroke.
+                out.append(LogEvent("sgt"))
             elif line.startswith("Skipping hole "):
                 # Logged at the course load when hole 1 isn't in the round (a back-nine start).
                 out.append(LogEvent("skip_hole", hole=int(line.split()[2])))
@@ -347,6 +351,8 @@ class GsproState:
     # (a round or the range was just left), or None (not seen yet).
     mode: str | None = None
     round_ends: int = 0               # "End Round Button Click"s seen (a finished or abandoned round)
+    sgt: bool = False                 # this round is being played on Sim Golf Tournaments (an SGT Sync logged)
+    last_sgt: bool = False            # the last ended round's, kept past its reset like last_hole_scores
     round_completes: int = 0          # "Round Is Complete"s seen (every hole in the round holed out)
     active_holes: int | None = None   # holes in the round, from the end-of-round layout's active flags
     # Since the current course was selected: shots fired, and the hole (0-based, as logged) of the first
@@ -474,6 +480,8 @@ class GsproState:
             self.unparsed = (self.unparsed + [ev.display])[-5:]
         elif ev.kind == "altitude":
             self.altitude_ft = ev.altitude_ft
+        elif ev.kind == "sgt":
+            self.sgt = True
         elif ev.kind == "course":
             if ev.course != self.course:
                 self._reset_round()         # a real course change is a new round; forget the old one
@@ -656,6 +664,7 @@ class GsproState:
 
     def _on_course(self, course: str | None, display: str | None) -> None:
         self.course, self.course_display = course, display
+        self.last_sgt = False   # the ended round's: a new course is a new round
         self.altitude_ft = None
         self.mode, self.active_holes = "course", None
         self.shots_since_course, self.first_hole, self.starts_late = 0, None, False
@@ -669,6 +678,7 @@ class GsproState:
         self.last_hole_scores = dict(self.hole_scores)   # for the booth to settle the round with
         self.last_penalties, self.last_players_seen = dict(self._penalties), set(self.players_seen)
         self.last_picked = set(self._picked)
+        self.last_sgt = self.sgt
         self._reset_round()             # the next round, even on this same course, starts clean
         self.shots_since_course, self.first_hole, self.starts_late = 0, None, False
         self.live_shots_since_course = 0
@@ -690,6 +700,7 @@ class GsproState:
         self.active_player = self.current_hole = self.lie = self.to_pin = self.gimmie = None
         self.hole_outs = self.gimmies = 0
         self.team_scores = False
+        self.sgt = False
 
     def _mark_pick(self, player: int, mates: list[int] | None = None) -> None:
         """In a shared-ball round, the player's last shot is the one the team played on (GSPro picked
@@ -1043,7 +1054,7 @@ class GsproLogFollower:
             past.apply(ev)
         s = self.state
         s.mode, s.shots_since_course, s.first_hole = past.mode, past.shots_since_course, past.first_hole
-        s.starts_late, s.own_range = past.starts_late, past.own_range
+        s.starts_late, s.own_range, s.sgt = past.starts_late, past.own_range, past.sgt
         s.course = past.course if past.own_range else s.course   # the course its Tee Off goes to
         s.hole_scores = dict(past.hole_scores)   # holes already finished in a round being joined
         s._score.update({k: past._score[k] for k in past.hole_scores if k in past._score})   # so they can reopen

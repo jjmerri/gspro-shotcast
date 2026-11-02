@@ -79,7 +79,7 @@ What's recorded, and from where:
 
 | Table | One row per | What's in it |
 |---|---|---|
-| `shots` | swing | Player, course, hole, shot number, club; launch monitor ball speed, launch angle, start direction, spin, spin axis, club speed, carry; club path, attack angle, face to target, dynamic loft and strike location on the face, when the monitor reported club data (NULL otherwise); lie before and after, slope, pin elevation, distance to the pin before and where it finished; GSPro's carry/total/offline; putt or full shot; a putt's result (holed, conceded, missed), or `holed` on a full shot that went in (a stroke the same player hits again on the same hole is never left `holed`: a putt becomes `missed`, a full shot loses its outcome); where GSPro had the ball before it (`start_x/y/z`, world metres, from the log's setup block; NULL on a tee shot, which has none) and the player's minimap aim click, if they moved it (`aim_map_x/y`); league or practice; `mulligan = 1` on a stroke GSPro took back; `left_out = 1` on a stroke left out of the stats (see below). `handed`: the player's hand, `RH` or `LH`. `tree_hits`: how many times GSPro's log had the ball hit a tree in flight, foliage or a trunk (NULL for none); such a shot's carry is left out of the carry model. A conceded tap-in gets its own putt row (`outcome = 'gimme'`, no ball data), so every putt on the card is here |
+| `shots` | swing | Player, course, hole, shot number, club; launch monitor ball speed, launch angle, start direction, spin, spin axis, club speed, carry; club path, attack angle, face to target, dynamic loft and strike location on the face, when the monitor reported club data (NULL otherwise); lie before and after, slope, pin elevation, distance to the pin before and where it finished; GSPro's carry/total/offline; putt or full shot; a putt's result (holed, conceded, missed), or `holed` on a full shot that went in (a stroke the same player hits again on the same hole is never left `holed`: a putt becomes `missed`, a full shot loses its outcome); where GSPro had the ball before it (`start_x/y/z`, world metres, from the log's setup block; NULL on a tee shot, which has none) and the player's minimap aim click, if they moved it (`aim_map_x/y`); league, tournament or practice; `mulligan = 1` on a stroke GSPro took back; `left_out = 1` on a stroke left out of the stats (see below). `handed`: the player's hand, `RH` or `LH`. `tree_hits`: how many times GSPro's log had the ball hit a tree in flight, foliage or a trunk (NULL for none); such a shot's carry is left out of the carry model. A conceded tap-in gets its own putt row (`outcome = 'gimme'`, no ball data), so every putt on the card is here |
 | `hole_layouts` | hole of a completed round | Each played hole's tee, pin (as set that round) and GSPro's aim waypoint, in world metres, from the hole list GSPro logs when a round is complete; a round quit early logs none, so its holes are filled from the course's GKD file (see Rounds below) |
 | `hole_images` | course and hole | GSPro's minimap off the tee (JPEG, title bar trimmed), with where the ball and pin sit on it: the background of every replay of the hole. Kept at the first tee setup on a hole that has none yet, on or off air, once the round has started (an opening tee is snapped as the round starts, under its course and start hole) |
 | `course_tees` | course and tee | Each tee's course rating, slope and par from the course's `coursedetails.txt`, kept whenever a course loads; used for the handicap index |
@@ -114,7 +114,8 @@ counts toward fairways hit: the team's second stroke is played from the drive it
 stroke's lie says where it finished. A hole picked up is scored at GSPro's maximum, and
 those capped strokes are not counted as putts or penalties. Driving-range
 shots are not recorded, only rounds. Practice rounds are recorded and flagged
-(`is_league = 0`), so stats can be split league vs practice. On an alternate-shot round the log
+(`is_league = 0`), and tournament rounds (played on Sim Golf Tournaments) also `is_tournament = 1`,
+so stats can be split league, tournament and practice. On an alternate-shot round the log
 can't say which partner hit, so those shots are kept (`attributed = 0`) but left out of
 per-player stats. Replays and evals use an in-memory DB and never touch the file.
 
@@ -127,7 +128,7 @@ page accepts the change (from this PC, JSON requests only).
 
 **Edits go up on their own.** With publishing on (`publish.enabled` and a bucket), the tray publishes
 the site a minute after the last edit on the local page (a shot left out, a round excluded, deleted
-or switched between league and practice), so a run of edits goes up once. A note in the page's corner
+or switched between league, tournament and practice), so a run of edits goes up once. A note in the page's corner
 says when, and whether it worked. One publish runs at a time: the booth's after-round publish and the
 tray's wait for each other (`stats-site.lock` in the log folder). An edit made just before quitting
 the tray goes up with the next publish.
@@ -262,7 +263,7 @@ their numbers and rounds on Home, their row and page on Players, them on the lef
 too), their own hole-by-hole averages on Courses next to everyone's, only their shots, only nights
 they were on air, and their own records and highlights. The browser remembers the pick. The Shots
 tab's own player filter (with Everyone picked) is just a filter: it doesn't change the pick. The
-address bar always holds the view (tab, player, league/practice, the Shots filters and open shot,
+address bar always holds the view (tab, player, league/tournament/practice, the Shots filters and open shot,
 the round and hole, the player, the course, the head-to-head pair, the broadcast, e.g.
 `#shots?player=Ann&club=DR`), so
 **Share link** gives a link that opens exactly that. Each round, hole replay and shot (on Rounds,
@@ -273,7 +274,7 @@ hole's replay (older `#rounds?round=45` and `#players?show=Ann` links still work
 move between the views opened, back to where the page was scrolled. While a round's stream is still kept (a week), its rounds, holes and shots also get
 **▶ Watch**, which opens **Round replays** about a second before that swing (the back button returns).
 A player can bookmark `#home?player=Their+Name`. Rounds that ended since this browser's last visit are tagged
-**new**, with a count in the header. On a phone, the sections are one row that swipes sideways and stays at the top of the screen, Rounds keeps the score next to the player, Shots drops its secondary columns (they're in a tapped shot's detail), and other wide tables scroll sideways. Shots lists 100 at a time, with a button for more. The All/League/Practice and player pickers show only on the tabs they narrow: Booth covers every session and player, Broadcasts every session, and a round's page is that round whoever's picked. Tapping a course scrolls to its hole-by-hole.
+**new**, with a count in the header. On a phone, the sections are one row that swipes sideways and stays at the top of the screen, Rounds keeps the score next to the player, Shots drops its secondary columns (they're in a tapped shot's detail), and other wide tables scroll sideways. Shots lists 100 at a time, with a button for more. The All/League/Tournament/Practice and player pickers show only on the tabs they narrow: Booth covers every session and player, Broadcasts every session, and a round's page is that round whoever's picked. Tapping a course scrolls to its hole-by-hole.
 
 Strokes gained is measured against an approximate PGA Tour baseline (Broadie-style expected
 strokes by lie and distance), so negative numbers are normal; it's for comparing players and
@@ -282,7 +283,7 @@ for most of its shots, and the usual one is the radius most league rounds were p
 round counted once). A round with a different circle is tagged on Rounds (e.g. **6 ft gimmes**),
 putting by length starts at the usual circle, and in strokes gained a stroke that stops in a bigger
 circle than usual is charged for the longer putt it was spared (holing out from 2/3 of the radius,
-beyond the usual circle's), so a generous circle doesn't inflate it. Click a column header to sort a table. It filters league, practice or all rounds (the filter and the league/practice tags only show once the database has a league round). It's the same static page that
+beyond the usual circle's), so a generous circle doesn't inflate it. Click a column header to sort a table. It filters league, tournament, practice or all rounds (the filter and the round kind tags only show once the database has a league or tournament round, and League and Tournament each only once there's one of that kind). It's the same static page that
 [gets published](#sharing-the-stats-page): the local server opens the database read-only, builds
 the page's files into `logs/stats-web-site` (again whenever the database changes) and serves them. It
 follows the booth's own stat rules: mulligans are left out, and scoring, GIR, scrambling, sand and putting
@@ -334,9 +335,9 @@ to look at):
 
 - `index.html` and the browser SQLite library ([sql.js-httpvfs](https://github.com/phiresky/sql.js-httpvfs),
   vendored in `commentator/stats_vendor`).
-- `v/<version>/summary-{all,league,practice}.json`: the season tables, strokes gained, cards,
+- `v/<version>/summary-{all,league,tournament,practice}.json`: the season tables, strokes gained, cards,
   highlights and booth stats, computed on the PC.
-- `v/<version>/player/<all|league|practice>/<key>.json`: one player's courses, highlights and
+- `v/<version>/player/<all|league|tournament|practice>/<key>.json`: one player's courses, highlights and
   records, fetched when they're picked (a few KB each).
 - `v/<version>/stats.db`: the shots and broadcast transcripts. The Shots and Broadcasts tabs query it
   in the browser, which reads only the parts of the file a query needs, so a season of 90,000 shots

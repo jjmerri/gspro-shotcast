@@ -159,6 +159,7 @@
   <div class="seg" id="ctx">
     <button data-ctx="" class="on">All</button>
     <button data-ctx="league">League</button>
+    <button data-ctx="tournament">Tournament</button>
     <button data-ctx="practice">Practice</button>
   </div>
   <select id="me" data-me title="Show one player's rounds, shots and stats (remembered on this device)"></select>
@@ -198,7 +199,7 @@ function applyHash() {
   const num = k => Number(q.get(k)) || null;
   const was = [state.me, state.ctx];
   state.me = q.get("player") ?? store.get("shotcast.me") ?? "";
-  state.ctx = ["league", "practice"].includes(q.get("ctx")) ? q.get("ctx") : "";
+  state.ctx = ["league", "tournament", "practice"].includes(q.get("ctx")) ? q.get("ctx") : "";
   state.tab = VIEWS[view] ? view : "home";
   state.scrollTo = null;
   // Older links: a round opened on Rounds, a profile under Players.
@@ -289,7 +290,7 @@ const SHOT_FILTERS = ["date", "player", "course", "club", "lie", "round"];
 const SHOT_RANGE = { from: ">=", to: "<=" };
 async function queryShots(ctx, f) {
   const where = [], args = [];
-  if (ctx === "league" || ctx === "practice") { where.push("s.is_league = ?"); args.push(ctx === "league" ? 1 : 0); }
+  if (["league", "tournament", "practice"].includes(ctx)) { where.push("s.kind = ?"); args.push(ctx); }
   for (const key of SHOT_FILTERS) if (f[key]) { where.push(`s.${key} = ?`); args.push(key === "round" ? Number(f[key]) : f[key]); }
   for (const [key, op] of Object.entries(SHOT_RANGE)) if (f[key]) { where.push(`s.date ${op} ?`); args.push(f[key]); }
   const sql = "SELECT j.json FROM pub_shot s JOIN pub_shot_json j ON j.ord = s.ord"
@@ -1227,9 +1228,12 @@ async function shareRound(r, btn) {
   setTimeout(() => (btn.textContent = "Share card"), 2000);
 }
 
+const roundKind = r => r.league ? "league" : r.tournament ? "tournament" : "practice";
+const KIND_NAMES = { league: "League", tournament: "Tournament", practice: "Practice" };
+
 function roundTags(r) {
   const d = state.data;
-  return (!d.has_league ? "" : r.league ? '<span class="tag">league</span>' : '<span class="tag">practice</span>') + (r.complete ? "" : '<span class="tag">quit early</span>')
+  return (!d.has_league && !d.has_tournament ? "" : `<span class="tag">${roundKind(r)}</span>`) + (r.complete ? "" : '<span class="tag">quit early</span>')
     + (r.gimme_ft != null && d.gimme_ft != null && r.gimme_ft !== d.gimme_ft ? `<span class="tag" title="This round's gimme circle differs from the usual ${d.gimme_ft} ft">${r.gimme_ft} ft gimmes</span>` : "");
 }
 const freshTag = r => state.seen && r.ended > state.seen ? '<span class="tag new">new</span>' : "";
@@ -1291,7 +1295,8 @@ function renderRound() {
   const acts = [`<button class="link" data-roundshots="${r.round}">Every shot</button>`, watchBtn(r.started, "▶ Watch the round"), said,
                 `<button class="link" data-sharecard="${r.id}" title="An image of this round to post or send">Share card</button>`,
                 shareBtn(hashFor("round", { id: r.id }), "this round", "Share link"),
-                ...(state.local ? [`<button class="link" data-leagueround="${r.round}" data-ended="${r.round_end}" data-on="${r.league ? 0 : 1}" title="Which stats it counts in: League or Practice">${r.league ? "Make it a practice round" : "Make it a league round"}</button>`,
+                ...(state.local ? [...Object.keys(KIND_NAMES).filter(k => k !== roundKind(r)).map(k =>
+                                     `<button class="link" data-leagueround="${r.round}" data-ended="${r.round_end}" data-kind="${k}" title="Which stats it counts in: League, Tournament or Practice">Make it a ${k} round</button>`),
                                    `<button class="link" data-exclround="${r.round}" data-ended="${r.round_end}" data-on="1" title="Keep it listed on this PC, but out of every stat (and off the published site)">Exclude from stats</button>`,
                                    `<button class="link" data-delround="${r.round}" data-ended="${r.round_end}" title="Remove the round and its shots for good">Delete round</button>`] : [])
                ].filter(Boolean).join(" · ");
@@ -1791,13 +1796,17 @@ function subTabs() {
     + `${v === "live" && state.live && state.live.live ? '<span class="livedot"></span>' : ""}${VIEWS[v]}</button>`).join("")}</nav>`;
 }
 
-// The header's All/League/Practice and player picker, on the views they narrow: the booth's are about
+// The header's All/League/Tournament/Practice and player picker, on the views they narrow: the booth's are about
 // every session (Broadcasts can still pick a player's); the video and the schedule are the sim's. A
 // round is the round whatever's picked; a player's page is theirs (in the context picked).
 const CTX_TABS = ["home", "players", "player", "versus", "rounds", "courses", "shots", "highlights"];
 const ME_TABS = ["home", "players", "versus", "rounds", "courses", "shots", "highlights", "broadcasts"];
 function showScope() {
-  $("#ctx").style.display = state.data && state.data.has_league && CTX_TABS.includes(state.tab) ? "" : "none";
+  const d = state.data;
+  $("#ctx").style.display = d && (d.has_league || d.has_tournament) && CTX_TABS.includes(state.tab) ? "" : "none";
+  // Only the kinds there are rounds of (and whichever is picked, so it can be seen and left).
+  if (d) for (const k of ["league", "tournament"])
+    $(`#ctx button[data-ctx="${k}"]`).style.display = d[`has_${k}`] || state.ctx === k ? "" : "none";
   $("#me").style.display = ME_TABS.includes(state.tab) ? "" : "none";
   if (state.data) showMe();
 }
@@ -1896,10 +1905,11 @@ document.addEventListener("click", (e) => {
     t.disabled = true;
     t.textContent = "Saving…";
     fetch(`api/rounds/${t.dataset.leagueround}/league`, { method: "POST", headers: { "Content-Type": "application/json" },
-                                                         body: JSON.stringify({ ended: +t.dataset.ended, league: t.dataset.on === "1" }) })
+                                                         body: JSON.stringify({ ended: +t.dataset.ended, league: t.dataset.kind === "league",
+                                                                                tournament: t.dataset.kind === "tournament" }) })
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        if (state.ctx) state.ctx = t.dataset.on === "1" ? "league" : "practice";   // stay on the round
+        if (state.ctx) state.ctx = t.dataset.kind;   // stay on the round
         load();
         pubWatch();
       })

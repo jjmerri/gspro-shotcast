@@ -211,6 +211,28 @@ def test_summary_says_whether_there_are_league_rounds(tmp_path):
         assert stats_web.summary(ro)["has_league"] is True
 
 
+def test_tournament_rounds_are_their_own_context(tmp_path):
+    from contextlib import closing
+
+    from commentator import season_analytics as A, stats_site
+
+    path, db = _db(tmp_path)
+    _shot(db, "Ann")
+    _shot(db, "Bob", is_tournament=1)
+    db.commit()
+    with stats_web.connect(path) as ro:
+        s = stats_web.summary(ro)
+        assert (s["has_league"], s["has_tournament"]) == (False, True)   # the filter shows, without League
+        assert [r["player"] for r in A.shot_log(ro, "tournament")] == ["Bob"]
+        assert [r["player"] for r in A.shot_log(ro, "practice")] == ["Ann"]
+    out = tmp_path / "data.db"
+    with stats_web.connect(path) as ro:
+        stats_site.build_data_db(ro, out)
+    sql, args = stats_site.shot_query("tournament", {})
+    with closing(sqlite3.connect(out)) as pub:
+        assert [json.loads(j)["player"] for (j,) in pub.execute(sql, args)] == ["Bob"]
+
+
 def test_a_shot_left_out_drops_out_of_the_stats_but_stays_in_its_hole(tmp_path):
     from commentator import season_analytics as A
 
@@ -401,6 +423,13 @@ def test_the_local_page_can_exclude_a_round_and_delete_one(tmp_path):
         assert post("/api/rounds/2/league", {"league": False, "ended": 5000}) == {"id": 2, "league": False}
         assert db.execute("SELECT SUM(is_league) FROM shots").fetchone()[0] == 0
         assert [r["round"] for r in summary()["rounds"]] == [2, 1] and summary()["excluded_rounds"] == []
+        # A tournament one, and back: a league round is never a tournament one.
+        assert post("/api/rounds/2/league", {"league": False, "tournament": True, "ended": 5000}) == {"id": 2, "league": False}
+        assert [r[0] for r in db.execute("SELECT is_tournament FROM rounds ORDER BY id")] == [0, 1]
+        assert [(r["round"], r["tournament"]) for r in summary()["rounds"]] == [(2, True), (1, False)]
+        post("/api/rounds/2/league", {"league": True, "tournament": True, "ended": 5000})
+        assert db.execute("SELECT SUM(is_tournament), SUM(is_league) FROM shots").fetchone() == (0, 1)
+        post("/api/rounds/2/league", {"league": False, "ended": 5000})
         with pytest.raises(urllib.error.HTTPError) as e:   # no confirmation: nothing deleted
             post("/api/rounds/2/delete", {"ended": 5000})
         assert e.value.code == 400
