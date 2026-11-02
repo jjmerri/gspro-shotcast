@@ -133,6 +133,12 @@ class Round:
         # The slots as GSPro's setup screen showed them (not a guess, nor the tee's order): GSPro's log
         # names its players by these, so a shot GSPro hid the name for can be named from the log at once.
         self.setup_slots = list(slot_names) if slot_names else None
+        # slot_names is only a guess at GSPro's order (the tee's top-to-bottom order, or the last setup's
+        # players): GSPro's log is attributed to a player only once screen reads have placed them.
+        self.slot_guess = False
+        # GSPro name -> GSPro log slot -> screen reads that named them on a shot the log gave that slot.
+        self.slot_reads: dict[str, dict[int, int]] = {}
+        self.slot_held: dict[str, int] = {}   # the slots GSPro's log was last read by, in a guessed order
         # A real league match (scheduled course, in date, correct team and player count) versus a
         # practice round the booth still calls, minus the league framing (points, standings, handicap).
         self.is_league = is_league
@@ -284,7 +290,8 @@ class Round:
         self.teams = {(new if t == old else t): [new if g == old else g for g in gs] for t, gs in self.teams.items()}
         if self.slot_names is not None:
             self.slot_names = [new if n == old else n for n in self.slot_names]
-        for d in (self.card_scores, self.log_scores, self.spellings):
+        for d in (self.card_scores, self.log_scores, self.spellings, self.slot_reads,
+                  self.slot_held):
             if old in d:
                 d[new] = d.pop(old)
         self.teed = [new if g == old else g for g in self.teed]
@@ -425,6 +432,45 @@ class Round:
             if player and (player in side.players or player in side.gspro or player == side.key):
                 return side
         return None
+
+    def note_slot_read(self, g: str, idx: int) -> None:
+        """A screen read named GSPro player `g` on a shot GSPro's log gave slot `idx`."""
+        reads = self.slot_reads.setdefault(g, {})
+        reads[idx] = reads.get(idx, 0) + 1
+
+    def _slot_reads_say(self, g: str | None) -> int | None:
+        reads = self.slot_reads.get(g) if g else None
+        if not reads:
+            return None
+        idx, n = max(reads.items(), key=lambda kv: kv[1])
+        return idx if n >= 2 and n >= 3 * (sum(reads.values()) - n) else None
+
+    def slot_read(self, g: str) -> int | None:
+        """The GSPro slot the screen reads place `g` in: two or more reads there, and at least three
+        times as many as anywhere else (one misread doesn't move anyone). None when another player's
+        reads claim the same slot too: one of them is misread, and the reads can't say which."""
+        idx = self._slot_reads_say(g)
+        if idx is None or any(n != g and self._slot_reads_say(n) == idx for n in self.slot_reads):
+            return None
+        return idx
+
+    def learn_slots(self) -> list[str] | None:
+        """Move each player the screen reads have placed into their slot of a guessed order. The new
+        order when it changed, else None."""
+        if not self.slot_guess or not self.slot_names:
+            return None
+        placed = {g: i for g in self.slot_names if g and (i := self.slot_read(g)) is not None}
+        order = list(self.slot_names)
+        for g, i in placed.items():
+            order += [None] * (i + 1 - len(order))
+            j = order.index(g)
+            order[i], order[j] = g, order[i]
+        while len(order) > len(self.slot_names) and order[-1] is None:
+            order.pop()
+        if order == self.slot_names:
+            return None
+        self.slot_names = order
+        return order
 
     def roster_position(self, name: str | None) -> int | None:
         """This name's 0-based GSPro slot index (GSPro names its players by setup slot). Uses the

@@ -935,9 +935,12 @@ async def test_tee_order_assigns_gspro_indexes_when_setup_slots_missing_or_wrong
     e.current_course = "Pebble Beach"  # best ball, two balls
     tee = Hud(player_text="Sarah E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards",
               others=[OtherPlayer("MikeD", "400 yards", "E")])
-    # No setup-screen read at all: the tee's top-to-bottom order (up first, then the others) is the index.
+    # No setup-screen read at all: the tee's top-to-bottom order (up first, then the others) is a guess
+    # at the index, and GSPro's log isn't attributed until screen reads place each player.
     await e.handle_round_start(RoundStartEvent(hud=tee))
-    assert e.round.slot_names == ["Sarah", "MikeD"]
+    assert e.round.slot_names == ["Sarah", "MikeD"] and e.round.slot_guess
+    assert e._gspro_idx("Sarah") is None and e._gspro_idx("Mike") is None
+    e.round.slot_reads = {"Sarah": {0: 2}, "MikeD": {1: 2}}
     assert e._gspro_idx("Sarah") == 0 and e._gspro_idx("Mike") == 1
 
     # Setup slots that disagree with the tee (a misread "Connor") give way to the tee order.
@@ -3592,6 +3595,7 @@ async def test_log_scores_end_a_complete_round_without_waiting_for_end_round(tmp
               others=[OtherPlayer("MikeD", "400 yards", "E")])
     await e.handle_round_start(RoundStartEvent(hud=tee))
     r = e.round
+    r.slot_guess = False                                  # the tee's order is GSPro's (screen reads placed them)
     r.set_holes(2)
     g = e.gspro
     g.first_hole = 0
@@ -3633,6 +3637,7 @@ async def test_an_ended_rounds_log_scores_survive_the_end_round_reset(tmp_path):
     tee = Hud(player_text="Sarah E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards",
               others=[OtherPlayer("MikeD", "400 yards", "E")])
     await e.handle_round_start(RoundStartEvent(hud=tee))
+    e.round.slot_guess = False                            # the tee's order is GSPro's (screen reads placed them)
     g = e.gspro
     g.first_hole = 0
     e._check_log_round()
@@ -4381,6 +4386,307 @@ def test_the_setup_screens_slots_name_a_shot_gspro_hid_the_name_for(tmp_path):
     shot(3, "Kroll", 1)                                      # the screen says otherwise: that slot's in doubt
     assert shot(4, None, 1).player == "unknown"
     assert shot(5, None, 0).player == "Kroll"                # the other's still good
+
+
+def test_screen_reads_correct_a_guessed_slot_order_and_its_log_scores(tmp_path):
+    # Joined mid-round on a green: the HUD's list put Dan first, but GSPro has Derek in slot 0, Dan in 2.
+    e = _guest_round(tmp_path, ["Dan", "Drew", "Derek"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.slot_guess = True
+    e.gspro.players_seen.update({0, 1, 2})
+    e.gspro.mode = "course"
+    e.gspro.first_hole = 0
+    e.gspro.hole_scores = {(0, 0): 5, (1, 0): 6, (2, 0): 4}   # Derek 5, Drew 6, Dan 4
+    shot = _row_maker(e)
+    first = shot(1, "Dan", 2, outcome="holed", club="PT")
+    e._fire_rows[1] = (*e._fire_rows[1][:2], None, None)     # as recorded: Dan had no slot yet
+    e._scramble_pairs = {frozenset({0, 1})}                   # teams read off the log under the guess
+    e._sync_log_scores(e.round)
+    assert e._gspro_idx("Dan") is None and e.round.log_scores == {}   # nobody's placed: no guessing
+    shot(2, "Derek", 0)
+    shot(3, "Dan", 2)                                        # Dan's second read: placed in slot 2
+    assert e.round.slot_names == ["Derek", "Drew", "Dan"]
+    assert e._gspro_idx("Dan") == 2 and e._gspro_idx("Derek") is None   # Derek has one read so far
+    assert e._fire_rows[1][2:] == (2, 0)                     # Dan's first shot is followed from the log now
+    assert first.player == "Dan"
+    assert e._scramble_pairs == set()                        # re-read under the new order
+    assert shot(6, None, 2).player == "Dan"                  # the reads vouch for his slot: a hidden name is his
+    shot(4, "Derek", 0)
+    assert e._gspro_idx("Derek") == 0 and e._gspro_idx("Drew") == 1   # the last slot is the one left
+    e._sync_log_scores(e.round)                              # the booth's next poll of the log
+    assert e.round.log_scores == {"Dan": {1: 4}, "Drew": {1: 6}, "Derek": {1: 5}}
+    shot(5, "Dan", 0)                                        # one stray read doesn't move anyone
+    assert e.round.slot_names == ["Derek", "Drew", "Dan"]
+
+
+def test_a_player_is_not_placed_in_the_slot_left_when_the_log_has_slots_the_order_lacks(tmp_path):
+    e = _guest_round(tmp_path, ["Alice", "Carol"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.slot_guess = True
+    e.gspro.players_seen.update({0, 2})                      # GSPro's slot 1 is someone the round doesn't have
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    shot(1, "Alice", 0)
+    shot(2, "Alice", 0)
+    assert e._gspro_idx("Alice") == 0 and e._gspro_idx("Carol") is None
+    shot(3, "Carol", 2)
+    shot(4, "Carol", 2)
+    assert e.round.slot_names == ["Alice", None, "Carol"] and e._gspro_idx("Carol") == 2
+
+
+def test_two_players_read_into_one_slot_place_neither(tmp_path):
+    e = _guest_round(tmp_path, ["Alice", "Bob"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.slot_guess = True
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    for fire, who in enumerate(["Alice", "Alice", "Bob", "Bob"], 1):
+        shot(fire, who, 0)                                   # one of them is misread: no telling which
+    assert e._gspro_idx("Alice") is None and e._gspro_idx("Bob") is None
+    assert shot(5, None, 0).player == "unknown"
+
+
+def test_scores_read_under_a_placement_the_reads_take_back_are_dropped(tmp_path):
+    e = _guest_round(tmp_path, ["Alice", "Bob"])             # GSPro really has Bob in slot 0
+    e.cfg.source.gspro_log_truth = True
+    e.round.slot_guess = True
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    e.gspro.first_hole = 0
+    e.gspro.hole_scores = {(0, 0): 4, (1, 0): 5}
+    shot = _row_maker(e)
+    shot(1, "Alice", 0)
+    shot(2, "Alice", 0)                                      # misreads: Alice placed in 0, Bob in the slot left
+    e._sync_log_scores(e.round)
+    assert e.round.log_scores == {"Alice": {1: 4}, "Bob": {1: 5}}
+    shot(3, "Bob", 0)
+    shot(4, "Bob", 0)                                        # the reads now conflict: nobody's placed
+    assert e.round.log_scores == {}
+
+
+def test_a_slot_the_log_shows_later_unplaces_the_player_left_for_the_last_slot(tmp_path):
+    e = _guest_round(tmp_path, ["Alice", "Bob"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.slot_guess = True
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    e.gspro.first_hole = 0
+    e.gspro.hole_scores = {(0, 0): 4, (1, 0): 5}
+    shot = _row_maker(e)
+    shot(1, "Alice", 0)
+    shot(2, "Alice", 0)
+    e._sync_log_scores(e.round)
+    assert e.round.log_scores == {"Alice": {1: 4}, "Bob": {1: 5}}   # Bob by elimination
+    e.gspro.players_seen.add(2)                              # a third slot: slot 1 needn't be Bob's
+    e._sync_log_scores(e.round)
+    assert e.round.log_scores == {"Alice": {1: 4}}
+
+
+def test_a_pick_up_follows_its_shot_when_the_reads_change_whose_slot_it_was(tmp_path):
+    e = _guest_round(tmp_path, ["Alice", "Bob"])             # the guess; GSPro has Bob in slot 0
+    e.cfg.source.gspro_log_truth = True
+    e.round.slot_guess = True
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    shot(1, "Alice", 0)
+    shot(2, "Alice", 0)                                      # misreads place Alice in slot 0
+    rec = shot(3, None, 0)
+    assert rec.player == "Alice"
+    rec.hole_seq = 1
+    bob = shot(4, None, 1)                                   # Bob's, by the slot left
+    assert bob.player == "Bob"
+    bob.hole_seq = 1
+    e.gspro.pickups.append((0, 0))
+    e._apply_log_corrections()
+    assert e.round.picked_up == {("Alice", 1)}
+    for fire in range(5, 11):
+        shot(fire, "Alice", 1, hole=1)                       # the reads now say slot 1 is Alice's
+    assert e.round.slot_names == ["Bob", "Alice"]
+    e._apply_log_corrections()
+    assert (rec.player, bob.player) == ("Bob", "Alice")      # the two swap: the pick-up stays with slot 0
+    assert e.round.picked_up == {("Bob", 1)}
+
+
+@pytest.mark.parametrize("both", [False, True])
+def test_a_pick_up_stays_with_its_shot_when_a_swap_is_learned_over_two_polls(tmp_path, both):
+    e = _guest_round(tmp_path, ["Alice", "Bob"])             # the guess; GSPro has Bob in slot 0
+    e.cfg.source.gspro_log_truth = True
+    e.round.slot_guess = True
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    shot(1, "Alice", 0)
+    shot(2, "Alice", 0)                                      # misreads place Alice in slot 0, Bob in 1
+    a, b = shot(3, None, 0), shot(4, None, 1)
+    a.hole_seq = b.hole_seq = 1
+    e.gspro.pickups.append((1, 0))                           # slot 1 picked up (and slot 0, `both`)
+    if both:
+        e.gspro.pickups.append((0, 0))
+    e._apply_log_corrections()
+    want = {("Alice", 1), ("Bob", 1)} if both else {("Alice", 1)}
+    assert e.round.picked_up == ({("Alice", 1), ("Bob", 1)} if both else {("Bob", 1)})
+    e.gspro.players_seen.add(2)                              # a third slot: Bob's no longer placed by elimination
+    e._sync_log_scores(e.round)
+    for fire in range(5, 11):
+        shot(fire, "Alice", 1, hole=1)                       # slot 1 is Alice's
+    e._sync_log_scores(e.round)
+    assert b.player == "Alice" and e.round.picked_up == {("Alice", 1)}   # a's still Alice's, too
+    shot(11, "Bob", 0, hole=1)
+    shot(12, "Bob", 0, hole=1)                               # a poll later, slot 0 is Bob's
+    e._sync_log_scores(e.round)
+    assert a.player == "Bob" and e.round.picked_up == want
+
+
+def test_a_re_map_renames_a_log_named_shot_however_long_ago_it_was(tmp_path):
+    e = _guest_round(tmp_path, ["Alice", "Bob"])             # the guess; GSPro has Bob in slot 0
+    e.cfg.source.gspro_log_truth = True
+    e.round.slot_guess = True
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    shot(1, "Alice", 0)
+    shot(2, "Alice", 0)                                      # misreads place Alice in slot 0
+    rec = shot(3, None, 0)
+    assert rec.player == "Alice"
+    e._forget_fires(30)                                      # long after shot 3, the booth has let its row go
+    for fire in range(70, 76):                               # when the reads come round to slot 1 being Alice's
+        shot(fire, "Alice", 1, hole=1)
+    assert e.store.db.execute("SELECT player FROM shots WHERE id = 3").fetchone()[0] == "Bob"
+    e._apply_log_corrections()
+    assert rec.player == "Bob"
+
+
+def test_a_pick_up_waits_for_the_screen_named_shot_it_ends_to_be_placed(tmp_path):
+    e = _guest_round(tmp_path, ["Alice", "Bob"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.slot_guess = True
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    shot(1, "Alice", 0).hole_seq = 1
+    e._fire_rows[1] = (*e._fire_rows[1][:2], None, None)     # as recorded: Alice had no slot yet
+    e.gspro.pickups.append((0, 0))                           # and she picked up after it
+    e._apply_log_corrections()
+    shot(2, "Alice", 0, hole=1)                              # next hole: her second read places her
+    e._apply_log_corrections()
+    assert e.round.picked_up == {("Alice", 1)}
+
+
+def test_a_scramble_pick_follows_its_shot_when_the_reads_change_whose_slot_it_was(tmp_path):
+    e = _guest_round(tmp_path, ["Alice", "Bob"])             # the guess; GSPro has Bob in slot 0
+    e.round.format = "scramble"
+    e.cfg.source.gspro_log_truth = True
+    e.round.slot_guess = True
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    shot(1, "Alice", 0)
+    shot(2, "Alice", 0)                                      # misreads place Alice in slot 0
+    rec = shot(3, None, 0)
+    assert rec.player == "Alice"
+    e.gspro.pick_gimmes.append((0, 0))                       # GSPro picked it (a chip) inside the circle
+    e._apply_log_corrections()
+    gimmes = "SELECT COUNT(*) FROM shots WHERE outcome = 'gimme'"
+    assert rec.outcome == "conceded" and e.store.db.execute(gimmes).fetchone()[0] == 1
+    for fire in range(4, 10):
+        shot(fire, "Alice", 1, hole=1)
+    shot(10, "Bob", 0, hole=1)
+    shot(11, "Bob", 0, hole=1)                               # the reads now say slot 0 is Bob's
+    e._apply_log_corrections()
+    assert rec.player == "Bob" and rec.outcome == "conceded"
+    assert e.store.db.execute("SELECT player FROM shots WHERE outcome = 'gimme'").fetchall()[0][0] == "Bob"
+
+
+def test_swapped_players_conceded_putts_each_follow_their_own_shot(tmp_path):
+    e = _guest_round(tmp_path, ["Alice", "Bob"])             # the guess; GSPro has Bob in slot 0
+    e.round.format = "scramble"
+    e.cfg.source.gspro_log_truth = True
+    e.round.slot_guess = True
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    shot(1, "Alice", 0)
+    shot(2, "Alice", 0)                                      # misreads place Alice in slot 0, Bob in 1
+    a, b = shot(3, None, 0), shot(4, None, 1)
+    e.gspro.pick_gimmes.extend([(0, 0), (1, 0)])             # both picked inside the circle
+    e._apply_log_corrections()
+    gimmes = "SELECT player FROM shots WHERE outcome = 'gimme' ORDER BY id"
+    assert [x[0] for x in e.store.db.execute(gimmes)] == ["Alice", "Bob"]
+    for fire in range(5, 11):
+        shot(fire, "Alice", 1, hole=1)                       # the reads now say slot 1 is Alice's
+    assert (a.player, b.player) == ("Bob", "Alice")
+    assert [x[0] for x in e.store.db.execute(gimmes)] == ["Bob", "Alice"]
+
+
+def test_a_screen_named_shot_followed_on_the_wrong_slot_is_graded_again_on_its_own(tmp_path):
+    e = _guest_round(tmp_path, ["Alice", "Bob"])             # the guess; GSPro has Bob in slot 0
+    e.cfg.source.gspro_log_truth = True
+    e.round.slot_guess = True
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    shot(1, "Alice", 0)
+    shot(2, "Alice", 0)                                      # misreads place Alice in slot 0
+    putt = shot(3, "Alice", 1, club="PT")
+    sid = e._fire_rows[3][0]
+    e._fire_rows[3] = (sid, putt, 0, 0)                      # as recorded: followed on her guessed slot, 0
+    e._record_result(sid, "missed", "[test]", putt=True, rec=putt)   # Bob's next putt: "missed"
+    e.gspro._fire_info[3]["holed"] = True                    # her own line: she holed it
+    old = shot(4, "Alice", 1, club="PT")
+    e._fire_rows[4] = (e._fire_rows[4][0], old, 0, 0)
+    del e.gspro._fire_info[4]                                # GSPro's log has let this one's line go
+    for fire in range(5, 10):
+        shot(fire, "Alice", 1, hole=1)                       # the reads now say slot 1 is Alice's
+    assert e.round.slot_names == ["Bob", "Alice"]
+    e._apply_log_corrections()
+    assert putt.outcome == "holed" and e._fire_rows[3][2:] == (1, 0)
+    assert e.store.db.execute("SELECT outcome FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "holed"
+    assert e._fire_rows[4][2:] == (1, 0)                     # followed on her slot, as its line was owned
+
+
+def test_a_screen_named_shot_on_its_own_log_line_keeps_its_result_through_a_re_map(tmp_path):
+    e = _guest_round(tmp_path, ["Alice", "Bob"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.slot_guess = True
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    putt = shot(1, "Alice", 0, club="PT")
+    sid = e._fire_rows[1][0]
+    e._record_result(sid, "holed", "[test]", putt=True, rec=putt)
+    shot(2, "Alice", 0)                                      # Alice placed in slot 0
+    for fire in range(35, 37):
+        shot(fire, "Bob", 0, hole=1)                         # misreads: the reads conflict, nobody's placed
+    for fire in range(37, 45):
+        shot(fire, "Alice", 0, hole=1)                       # and settle back on Alice
+    e._apply_log_corrections()
+    assert putt.outcome == "holed"
+    assert e.store.db.execute("SELECT outcome FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "holed"
+
+
+def test_a_scramble_pick_a_re_map_voids_is_given_again(tmp_path):
+    e = _guest_round(tmp_path, ["Alice", "Bob"])             # the guess; GSPro has Bob in slot 0
+    e.round.format = "scramble"
+    e.cfg.source.gspro_log_truth = True
+    e.round.slot_guess = True
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    shot(1, "Alice", 0)
+    shot(2, "Alice", 0)                                      # misreads place Alice in slot 0
+    chip = shot(3, "Alice", 1)
+    e._fire_rows[3] = (e._fire_rows[3][0], chip, 0, 0)       # as recorded: followed on her guessed slot, 0
+    e.gspro.pick_gimmes.append((0, 0))                       # slot 0 picked inside the circle
+    e._apply_log_corrections()
+    gimmes = "SELECT COUNT(*) FROM shots WHERE outcome = 'gimme'"
+    assert chip.outcome == "conceded" and e.store.db.execute(gimmes).fetchone()[0] == 1
+    for fire in range(4, 10):
+        shot(fire, "Alice", 1, hole=1)                       # the reads now say slot 1 is Alice's
+    e._apply_log_corrections()
+    assert chip.outcome is None                              # not slot 0's shot after all
+    assert e.store.db.execute(gimmes).fetchone()[0] == 1     # the pick goes to slot 0's own shot
 
 
 def test_a_shot_no_one_else_could_have_hit_is_the_last_player_on_the_holes(tmp_path):

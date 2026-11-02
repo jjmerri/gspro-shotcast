@@ -730,13 +730,28 @@ class Store:
         row = self.db.execute("SELECT lie_after, finish_yards FROM shots WHERE id = ?", (shot_id,)).fetchone()
         return (row[0], row[1]) if row else (None, None)
 
-    def clear_shot_result(self, shot_id: int, outcome: str, finish: tuple | None = None) -> None:
-        """Take back a shot's `outcome`, and the conceded putt row it added (it was graded against the
-        wrong player's line on GSPro's log). Its finish goes back to `finish`: (lie_after, finish_yards)."""
+    def move_shot_player(self, shot_id: int, player: str, *, fmt: str | None, shared_ball: bool,
+                         gimme_id: int | None) -> None:
+        """A named shot was someone else's: it, and the conceded putt row it added (`gimme_id`), go to
+        `player`."""
+        if gimme_id is not None:
+            self.db.execute("UPDATE shots SET player = ?, fmt = ? WHERE id = ? AND outcome = 'gimme'",
+                            (player, fmt, gimme_id))
+        self.db.execute("UPDATE shots SET player = ?, fmt = ?, shared_ball = ? WHERE id = ?",
+                        (player, fmt, int(shared_ball), shot_id))
+        self.db.commit()
+
+    def clear_shot_result(self, shot_id: int, outcome: str, finish: tuple | None = None,
+                          gimme_id: int | None = None) -> None:
+        """Take back a shot's `outcome`, and the conceded putt row it added (`gimme_id`, when known; it
+        was graded against the wrong player's line on GSPro's log). Its finish goes back to `finish`:
+        (lie_after, finish_yards)."""
         row = self.db.execute("SELECT player, hole, shot_number FROM shots WHERE id = ?", (shot_id,)).fetchone()
         if row is None:
             return
-        if outcome == "conceded":
+        if outcome == "conceded" and gimme_id is not None:
+            self.db.execute("DELETE FROM shots WHERE id = ? AND outcome = 'gimme'", (gimme_id,))
+        elif outcome == "conceded":
             self.db.execute(
                 """DELETE FROM shots WHERE id = (SELECT MIN(id) FROM shots WHERE id > ? AND outcome = 'gimme'
                        AND player IS ? AND hole IS ? AND shot_number IS ?)""",
