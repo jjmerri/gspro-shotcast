@@ -648,7 +648,7 @@ function replaySvg(rp, animate = false, { colors = {}, only = null, focus = null
     if (!drawn.includes(pl)) return;
     const c = color(pl, i);
     for (const s of pl.shots) {
-      const tip = esc(`${pl.name} · shot ${s.n}${s.club ? " · " + s.club : ""}${s.lie ? " from the " + s.lie : ""}${s.to_pin != null ? ` · ${s.to_pin} yd to the pin` : ""}`);
+      const tip = esc(`${pl.name}${s.n != null ? ` · shot ${s.n}` : ""}${s.club ? " · " + s.club : ""}${s.lie ? " from the " + s.lie : ""}${s.to_pin != null ? ` · ${s.to_pin} yd to the pin` : ""}`);
       if (s.from && s.aim) { const [x1, y1] = P(s.from), [x2, y2] = P(s.aim);
         g += `<g${at("rp-in", s.n)}><line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${c}" stroke-opacity=".45" stroke-dasharray="3 3"/><circle cx="${x2}" cy="${y2}" r="2.5" fill="none" stroke="${c}" stroke-opacity=".6"><title>${tip} · aim</title></circle></g>`; }
       if (s.from && s.to) { const [x1, y1] = P(s.from), [x2, y2] = P(s.to);

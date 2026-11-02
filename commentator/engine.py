@@ -5697,9 +5697,12 @@ class Engine:
             # No conceded-putt row to flag with it: a shot that ends in the gimme circle ends the hole,
             # and GSPro offers no shot options (so no mulligan) after that.
             # The re-hit replaces it: the same stroke, from the same spot.
-            nxt = next((v for f, v in sorted(self._fire_rows.items()) if f > fire and v[2] == idx), None) \
-                if idx is not None else None   # an unnamed shot's re-hit can't be told from anyone's
-            if nxt and nxt[3] == hole and nxt[1].round_id == rec.round_id:
+            f2, nxt = next(((f, v) for f, v in sorted(self._fire_rows.items()) if f > fire and v[2] == idx),
+                           (None, None)) if idx is not None else (None, None)   # an unnamed shot's re-hit can't be told from anyone's
+            # On the hole GSPro's log credited each to: the hole read at impact is the last one's until the
+            # new hole's first score line, so a tee shot and its re-hit can be read on different holes.
+            if nxt and g.fire_info(f2).get("hole", nxt[3]) == g.fire_info(fire).get("hole", hole) \
+                    and nxt[1].round_id == rec.round_id:
                 nxt[1].shot_number, nxt[1].lie_before = rec.shot_number, rec.lie_before
                 self.store.set_shot_start(nxt[0], rec.shot_number, rec.lie_before, replaced=shot_id)
             log.info("Shot %s was a mulligan (GSPro took it back): left out of the stats", shot_id)

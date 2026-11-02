@@ -3960,6 +3960,22 @@ def test_a_mulligan_is_flagged_and_its_re_hit_takes_its_place(tmp_path):
     assert e.store.fairways_hit("Paul")["tries"] == 1
 
 
+def test_a_tee_shots_re_hit_takes_its_place_though_the_hole_read_at_impact_was_the_last_ones(tmp_path):
+    # A drive out of bounds, taken back on the next hole's tee: at both impacts GSPro still had the last
+    # hole (it moves on at the hole's first score line), and only the re-hit's read caught up. Its log
+    # says both were on the new hole.
+    e = _mini_engine(tmp_path)
+    r = _log_round(e)
+    sid1, rec1 = _row(e, r, 7, 1, "tee", hole=0)
+    sid2, rec2 = _row(e, r, 8, None, "fairway", hole=1)
+    e.gspro._fire_info.update({7: {"player": 0, "hole": 1}, 8: {"player": 0, "hole": 1}})
+    e.gspro.mulligan_fires[7] = "repeat"
+    e._apply_log_corrections()
+    assert rec1.mulligan and (rec2.shot_number, rec2.lie_before) == (1, "tee")
+    assert tuple(e.store.db.execute("SELECT shot_number, lie_before FROM shots WHERE id = ?", (sid2,)).fetchone()) \
+        == (1, "tee")
+
+
 def test_a_repeated_score_in_a_scramble_is_a_mulligan(tmp_path):
     e = _mini_engine(tmp_path)
     r = _log_round(e, "scramble")
