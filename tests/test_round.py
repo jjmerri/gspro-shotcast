@@ -4113,6 +4113,74 @@ def test_streak_facts_name_runs_the_score_line_hides(tmp_path):
     assert e._streak_facts("Mike") == []
 
 
+def _earlier_round(store, side, course, day, scores, pars=None, **cols):
+    pars = pars or {h: 4 for h in scores}
+    import datetime
+    ended = datetime.datetime.fromisoformat(day).timestamp()
+    row = {"session_id": store.session_id, "ended_at": ended, "date": day, "course": course, "side": side, "holes": 9,
+           "holes_played": len(scores), "complete": 1, "gross": sum(scores.values()), "par": sum(pars.values()),
+           "scores": json.dumps({str(h): s for h, s in scores.items()}),
+           "hole_pars": json.dumps({str(h): p for h, p in pars.items()}), "is_league": 0, **cols}
+    store.db.execute(f"INSERT INTO rounds ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
+    store.db.commit()
+
+
+def test_hole_history_is_rationed_and_goes_to_one_side_a_hole(tmp_path):
+    from commentator.hud import Hud
+
+    e = _engine_with(tmp_path, LEAGUE)
+    for day in ("2026-10-01", "2026-10-08"):   # bogey or worse on every hole, both times
+        _earlier_round(e.store, "Mike", "Pebble", day, {h: 5 for h in range(1, 10)})
+    e._start_round(Round(league=LEAGUE, gspro_players=["Mike", "Sarah"], course="Pebble", scheduled_format=None,
+                         holes=9, start_hole=1, is_league=False))
+    r = e.round
+    told = {}
+    for seq in range(1, 10):
+        r.seq = seq
+        told[seq] = e._hole_recall_facts("Mike")
+        assert e._hole_recall_facts("Mike") == told[seq]   # a rebuilt setup keeps its own
+        assert e._hole_recall_facts("Sarah") == []          # one side a hole (and Sarah has no history)
+    # A nine gets one, though every hole qualifies.
+    assert [q for q, f in told.items() if f] == [1]
+    assert told[1] == ["Mike has made bogey or worse on this hole both times they've played it before."]
+    # An eighteen gets three, spaced.
+    e._start_round(Round(league=LEAGUE, gspro_players=["Mike"], course="Pebble", scheduled_format=None,
+                         holes=18, start_hole=1, is_league=False))
+    got = []
+    for seq in range(1, 10):
+        e.round.seq = seq
+        got += [seq] if e._hole_recall_facts("Mike") else []
+    assert got == [1, 4, 7]
+    # The last round's standout putting comes once a round, on a putt from the second hole on.
+    _earlier_round(e.store, "Mike", "Pebble", "2026-10-15", {h: 4 for h in range(1, 10)}, putts=24, putt_holes=9)
+    for day in ("2026-09-01", "2026-09-02", "2026-09-03"):
+        _earlier_round(e.store, "Mike", "Augusta", day, {h: 4 for h in range(1, 10)}, putts=16, putt_holes=9)
+    e._start_round(Round(league=LEAGUE, gspro_players=["Mike"], course="Pebble", scheduled_format=None,
+                         holes=18, start_hole=1, is_league=False))
+    e.rng.random = lambda: 0.0
+    putt, tee = Hud(shot_number=3, lie="green"), Hud(shot_number=1)
+    e.round.seq = 1
+    assert e._recall_moment_facts("Mike", True, putt) == []
+    e.round.seq = 2
+    assert e._recall_moment_facts("Mike", False, tee) == []
+    # A missed roll stands for that shot even when its setup is rebuilt.
+    e.rng.random = lambda: 0.9
+    assert e._recall_moment_facts("Mike", True, Hud(shot_number=2, lie="green")) == []
+    e.rng.random = lambda: 0.0
+    assert e._recall_moment_facts("Mike", True, Hud(shot_number=2, lie="green")) == []
+    told = ["Mike took 24 putts over 9 holes last round, 2.7 a hole against 1.8 usually."]
+    assert e._recall_moment_facts("Mike", True, putt) == told
+    assert e._recall_moment_facts("Mike", True, putt) == told   # rebuilt setup, same shot
+    assert e._recall_moment_facts("Mike", True, Hud(shot_number=4, lie="green")) == []
+    e.round.seq = 3
+    assert e._recall_moment_facts("Mike", True, putt) == []
+    # The opener has the last round, and, the round as a whole being unremarkable, the course record.
+    last, here = e._recall_opener_facts(e.round)
+    assert last.startswith("Mike's last round: on October 15") and last.endswith(", 36 (even par) for 9 holes at Pebble.")
+    assert here.startswith("Mike has played Pebble 3 times before, most recently on October 15")
+    assert here.endswith("; best: 36 (even par) for 9 holes.")
+
+
 async def test_with_commentary_off_the_setup_screens_players_reach_the_round(tmp_path):
     from commentator.league import League
     from commentator.models import RoundStartEvent

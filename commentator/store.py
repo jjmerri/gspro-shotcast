@@ -1488,6 +1488,18 @@ class Store:
         ).fetchone()
         return {k: r[k] for k in r.keys()}
 
+    def side_rounds(self, side: str) -> list[dict[str, Any]]:
+        """A side's earlier rounds that count (a full nine or more), newest first, earlier today's
+        included: the booth's memory of when and where they last played and how. `to_par9` is the gross
+        score to par per nine holes (None when a par is missing), so a 9 and an 18 compare."""
+        rows = self.db.execute(
+            f"""SELECT id, ended_at, date, course, holes, COALESCE(holes_played, holes) AS played, complete,
+                      gross, par, putts, putt_holes, fir_hit, fir_tries, gir_hit, gir_tries, penalties,
+                      scores, hole_pars, is_league, {_GROSS_PER_NINE} AS to_par9
+               FROM rounds WHERE side = ? AND gross IS NOT NULL AND {_COUNTS_AS_ROUND}""" + _ctx_sql(None)
+            + " ORDER BY ended_at DESC, id DESC", (side,)).fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
+
     def team_course_history(self, side: str, course: str | None, context: str | None = None) -> dict[str, Any]:
         """A side's record on one course this season (before tonight): rounds played, average and best
         net to par per nine holes. For the 'they love this track' line. None course -> no history."""

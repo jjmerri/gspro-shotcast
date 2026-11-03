@@ -1,5 +1,6 @@
 import asyncio
 import bisect
+import datetime
 import json
 import logging
 import os
@@ -35,6 +36,7 @@ from .league import League, course_match_score
 from .llm import LLMClient
 from .minimap import JevMinimap, MinimapRead, same_map, snapshot as minimap_snapshot
 from .putt_read import REGION as PUTT_REGION, PuttRead, read_break
+from . import recall
 from . import report as problem_report
 from .models import (
     HoleChangeEvent, Line, PreShotEvent, RoundEndEvent, RoundStartEvent, ScorecardEvent, Shot, ShotEvent,
@@ -632,6 +634,9 @@ class Engine:
         self._aside_nines: set[int] = set()          # nines of this round whose asides are written
         self._trivia_planned = 0                     # trivia asides written this round (per_round caps it)
         self._signature_told: tuple | None = None    # (round id, hole, player) the famous-hole note went to
+        # The booth's memory of earlier rounds, for one round: each side's rows, and which hole-history
+        # and last-round facts went out (so they're rationed, and a rebuilt setup keeps its own).
+        self._recall: dict[str, Any] = {"round": None}
         self.speakers = list(cfg.personas)
         self._persona_names = [p.name for p in cfg.personas.values()]  # for stripping leaked speaker labels
         self.schema = output_schema(self.speakers)
@@ -3294,6 +3299,88 @@ class Engine:
         return [f"Famous hole: this is GSPro's version of {note} Worth a line if it fits the moment; "
                 "tell only what this says."]
 
+    # Hole-history facts a round may get: one per this many holes (3 in 18), at least this far apart.
+    RECALL_HOLES_PER_FACT = 6
+    RECALL_HOLE_GAP = 3
+    RECALL_MOMENT_CHANCE = 0.4   # each fitting moment's chance at the last round's standout stat
+
+    def _recall_state(self, r: Round) -> dict[str, Any]:
+        if self._recall["round"] != r.id:
+            self._recall = {"round": r.id, "rows": {}, "holes": {}, "moment": {}, "moment_told": set()}
+        return self._recall
+
+    def _recall_rows(self, r: Round, side) -> list[dict]:
+        """A side's earlier rounds (Store.side_rounds), read once a round: this one isn't stored until
+        it ends. Filed as record_round files them (a one-person scramble team under the player)."""
+        rows = self._recall_state(r)["rows"]
+        key = side.players[0] if r.solo(side) else side.key
+        if key not in rows:
+            rows[key] = self.store.side_rounds(key)
+        return rows[key]
+
+    def _recall_opener_facts(self, r: Round) -> list[str]:
+        """Each side's last round (when, where, the score) plus one more: what stood out about the
+        round as a whole, else their record on this course (a league round has the team's already)."""
+        today = datetime.date.today()
+        course = self.store.course_name(r.course)
+        facts: list[str] = []
+        for side in r.sides:
+            rows = self._recall_rows(r, side)
+            if not (last := recall.last_round_fact(side.label, rows, today)):
+                continue
+            facts.append(last)
+            st = recall.standout(side.label, rows)
+            if st and st.moment == "score":
+                facts.append(st.text)
+            elif not r.is_league and (cf := recall.course_fact(side.label, rows, course, today)):
+                facts.append(cf)
+        return facts
+
+    def _recall_moment_facts(self, player: str | None, is_putt: bool, hud: Hud) -> list[str]:
+        """The last round's standout putting, driving or greens stat, once a round, at a moment it fits
+        (a putt, a par 4 or 5's tee shot, an approach) from the second hole on: the opener has the first."""
+        r = self.round
+        side = r.side_for(player) if r and not r.ended and player else None
+        if side is None or r.seq < 2:
+            return []
+        state = self._recall_state(r)
+        shot = (r.seq, player, hud.shot_number)
+        if shot in state["moment"]:   # a rebuilt setup for the same shot gets the same decision
+            return state["moment"][shot]
+        facts: list[str] = []
+        if side.key not in state["moment_told"]:   # once a round
+            st = recall.standout(side.label, self._recall_rows(r, side))
+            fits = {"putt": is_putt,
+                    "tee": hud.shot_number == 1 and not is_putt and (self.current_par or 4) >= 4,
+                    "approach": (not is_putt and (hud.shot_number or 0) >= 2
+                                 and (to_yards(hud.to_pin) or 999) <= 200)}
+            if st is not None and fits.get(st.moment) and self.rng.random() < self.RECALL_MOMENT_CHANCE:
+                facts = [st.text]
+                state["moment_told"].add(side.key)
+        state["moment"][shot] = facts
+        return facts
+
+    def _hole_recall_facts(self, player: str | None) -> list[str]:
+        """On a hole's first tee shot: this side's pattern on the hole in earlier rounds here, when it
+        has a clear one. Rationed: one hole per RECALL_HOLES_PER_FACT, RECALL_HOLE_GAP holes apart, one
+        side a hole (a rebuilt setup for the same player keeps it)."""
+        r = self.round
+        side = r.side_for(player) if r and not r.ended and player else None
+        if side is None or (hole := r.hole_number(r.seq)) is None:
+            return []
+        told = self._recall_state(r)["holes"]
+        if r.seq in told:
+            who, facts = told[r.seq]
+            return facts if who == player else []
+        if (len(told) >= max(1, r.holes // self.RECALL_HOLES_PER_FACT)
+                or any(abs(r.seq - q) < self.RECALL_HOLE_GAP for q in told)):
+            return []
+        fact = recall.hole_fact(side.label, self._recall_rows(r, side), self.store.course_name(r.course), hole)
+        if not fact:
+            return []
+        told[r.seq] = (player, [fact])
+        return [fact]
+
     def _hole_field_facts(self, player: str | None) -> list[str]:
         """On the first shot of a hole: the hole's difficulty (stroke index), how the league has
         scored it this season, and whether this player gets a handicap stroke here (so the booth can
@@ -4018,12 +4105,13 @@ class Engine:
                  + self._profile_facts(player, is_putt, hud) + self._prediction_facts(player, is_putt, hud)
                  + self._stakes_facts(hud, player) + self._team_score_facts(player)
                  + self._finish_correction_facts(hud, player)
-                 + self._round_form_facts(player, is_putt, hud)
+                 + self._round_form_facts(player, is_putt, hud) + self._recall_moment_facts(player, is_putt, hud)
                  + ([] if is_putt else self._length_norm_facts(player, hud.club, self._is_drive(hud),
                                                                        to_yards(hud.to_pin)))
                  + (self._bunker_facts(player) if (hud.lie or "").lower() in ("sand", "bunker")
                     and self.rng.random() < 0.5 else [])
                  + (self._hole_field_facts(player) + self._streak_facts(player) + self._signature_facts(player)
+                    + self._hole_recall_facts(player)
                     if hud.shot_number == 1 else [])
                  + (minimap.facts(to_yards(hud.to_pin), hud.lie) if minimap else [])
                  + (["The tree on the line to the pin is the story of this shot: say how it blocks the way."]
@@ -6837,7 +6925,7 @@ class Engine:
         else:
             hole = None if preround else self.state.current_hole
         facts = (r.opening_facts(season, first_up=self._display(first), hole=hole)
-                 + self._league_facts(r) + self._weather_facts())
+                 + self._recall_opener_facts(r) + self._league_facts(r) + self._weather_facts())
         if self._no_members(r):   # the practice-round framing assumes league players
             facts = [f for f in facts if not f.startswith("This is a practice round, not a league match")]
         c = self.cfg.commentary
