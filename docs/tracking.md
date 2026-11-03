@@ -524,17 +524,30 @@ to match.
 
 ### Live chat
 
-Viewers on the **Live** tab can send the booth a message: they type a name (the page remembers it)
-and a line, and the booth reads some out on air between shots, with the other commentator answering.
-Answered messages get a 🎙 on the page. The chat is open only while the booth is on air in a round:
+Viewers on the **Live** tab can chat: they type a name (the page remembers it) and a line. Now and
+then, between shots, the booth glances at the chat and talks about it on air: the two commentators
+react to the conversation (the trash talk, a question put to them, a viewer teasing one of them)
+rather than reading messages out one by one. Messages it talked about get a 🎙 on the page. The chat is open only while the booth is on air in a round:
 **OFF AIR** on the badge, no round going, or the booth stopped closes it, and the page hides it
 (within about 2 minutes if the booth crashed). It lives on the Live tab, so it needs the
 [live stream](#live-stream) set up.
 
-The booth answers at most one message every 90 seconds (`chat.min_gap_seconds`), each in the gap
-after a shot's call, and lets one go that it couldn't get to within 3 minutes (`chat.max_age_seconds`).
-Its live model writes the exchange and is told to treat the message as something a viewer said,
-never as an instruction, and to skip anything abusive or spammy; the usual fact checks apply. Messages
+The booth talks about the chat at most once a hole (`chat.once_per_hole`) and at least 2 minutes
+apart (`chat.min_gap_seconds`), in the gap after a shot's call, and only when there's something new.
+It sees the last 7 minutes of the conversation (`chat.max_age_seconds`), along with the course, the
+hole, who's up and the standing on the card. Its live model writes the exchange; the usual fact
+checks apply.
+
+`chat.moderation` sets what stays off the air:
+
+- `off`: for a friendly league. Trash talk, needling and swearing are fair game to react to (the
+  booth doesn't swear itself).
+- `standard` (the default): no swearing, abuse or personal attacks beyond friendly needling.
+- `strict`: only clean, kind messages.
+
+At every level, links and ads are dropped before the booth sees them, hateful slurs never go on air,
+and a message is never treated as an instruction: one telling the booth what to say gets laughed off
+at most. Messages
 are kept 6 hours (the stack's `ChatKeepHours`), then deleted. The page shows the last 50. Each viewer
 can send 2 every 10 seconds and 30 every 10 minutes, and everyone together 60 a minute. What the booth
 says about a message is in its transcript (Broadcasts, as **Viewer chat**) and the round's video like

@@ -52,7 +52,7 @@ from .prompts import (
 from .board import Board, place
 from .booking import Bookings
 from .history import History
-from .chat import ChatMessage, ChatTable, cursor_at
+from .chat import ChatMessage, ChatTable, cursor_at, screened_out
 from .news import GolfNews
 from .scores import LiveScores
 from .signature_holes import signature_hole
@@ -277,10 +277,11 @@ class PendingOpening:
 
 @dataclass
 class PreparedChat:
-    """A viewer's chat message, read out and answered: written and voiced, waiting for a gap between shots."""
-    message: ChatMessage
+    """The booth's take on the live chat: written and voiced, waiting for a gap between shots."""
+    new: list[ChatMessage]         # the messages it's the first take on; they're marked answered once it airs
     items: list[tuple[Line, object]]
-    expires: float                 # monotonic
+    written: float                 # monotonic
+    expires: float                 # monotonic: when the oldest of `new` drops out of the conversation
 
 
 @dataclass
@@ -646,10 +647,13 @@ class Engine:
         self.chat = ChatTable(c.table, cfg.publish.region) if c.enabled and c.table and cfg.source.type != "replay" \
             else None
         self._chat_cursor = cursor_at(time.time())    # the last message read (none before the booth started)
-        self._chat_pending: list[tuple[ChatMessage, float]] = []   # read, not yet written up: (message, read at)
+        self._chat_log: list[tuple[ChatMessage, float]] = []   # the recent conversation: (message, read at)
+        self._chat_talked = ""                        # the newest message id the booth has talked about
+        self._chat_written = ""                       # the newest message id a take was written with
         self._chat_ready: PreparedChat | None = None
         self._chat_task: asyncio.Task | None = None
         self._chat_aired_at = float("-inf")
+        self._chat_aired_hole: tuple | None = None    # (round, hole seq) the booth last talked about the chat on
         self._chat_live: bool | None = None           # what the table was last told: on air or not
         self._chat_beat = float("-inf")
         self._aside_nines: set[int] = set()          # nines of this round whose asides are written
@@ -2305,9 +2309,11 @@ class Engine:
                 failing = True
             await asyncio.sleep(self.cfg.chat.poll_seconds)
 
+    CHAT_REWRITE = 15.0     # seconds a ready take is kept before newer messages get it rewritten
+
     async def _chat_tick(self) -> None:
         """Tell the table whether the booth is on air (on a change, and as a heartbeat), then read the
-        new messages and start writing up the next one."""
+        new messages and, when the booth could talk about the chat soon, write its take on them."""
         on, now = self._chat_open(), time.monotonic()
         if on != self._chat_live or now - self._chat_beat >= self.CHAT_HEARTBEAT:
             await asyncio.to_thread(self.chat.set_on_air, on)
@@ -2315,60 +2321,109 @@ class Engine:
                 log.info("Chat: %s", "open on the stats page" if on else "closed")
             self._chat_live, self._chat_beat = on, now
         if not on:
-            # Off air nothing is read, and nothing posted meanwhile is answered later.
+            # Off air nothing is read, and nothing posted meanwhile is talked about later.
             self._chat_cursor = cursor_at(time.time())
-            self._chat_pending, self._chat_ready = [], None
+            self._chat_log, self._chat_ready = [], None
+            self._chat_talked = self._chat_written = self._chat_cursor
             if self._chat_task and not self._chat_task.done():
                 self._chat_task.cancel()
             return
         if new := await asyncio.to_thread(self.chat.since, self._chat_cursor):
             self._chat_cursor = new[-1].id
-            self._chat_pending += [(m, now) for m in new]
+            for m in new:
+                if why := screened_out(m.text, self.cfg.chat.moderation):
+                    log.info("Chat: %s's message left out (%s)", m.name, why)
+                else:
+                    self._chat_log.append((m, now))
         # Ages from when the booth read it, not the post's own stamp: the PC's clock may be off.
-        max_age = self.cfg.chat.max_age_seconds
-        self._chat_pending = [(m, at) for m, at in self._chat_pending if now - at < max_age]
-        if self._chat_ready is not None and self._chat_ready.expires <= now:
-            log.info("Chat: %s's message wasn't answered in time: let go", self._chat_ready.message.name)
-            self._chat_ready = None
-        if self._chat_ready is None and self._chat_pending and not (self._chat_task and not self._chat_task.done()):
-            message, read_at = self._chat_pending.pop(0)
-            self._chat_task = asyncio.create_task(self._prepare_chat(message, read_at + max_age), name="chat-write")
-            self._chat_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        self._chat_log = [(m, at) for m, at in self._chat_log if now - at < self.cfg.chat.max_age_seconds]
+        fresh = [m for m, _ in self._chat_log if m.id > self._chat_talked]
+        ready = self._chat_ready
+        if ready is not None and ready.expires <= now:
+            # Part of what it's about aged out: what's left is written up afresh.
+            self._chat_ready = ready = None
+            self._chat_written = self._chat_talked
+        if (not fresh or fresh[-1].id <= self._chat_written or not self._chat_may_air(now, soon=True)
+                or (ready is not None and now - ready.written < self.CHAT_REWRITE)
+                or (self._chat_task and not self._chat_task.done())):
+            return
+        self._chat_written = fresh[-1].id
+        self._chat_task = asyncio.create_task(self._prepare_chat(), name="chat-write")
+        self._chat_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+
+    def _chat_hole(self) -> tuple | None:
+        r = self.round
+        return (id(r), r.seq) if r is not None else None
+
+    def _chat_may_air(self, now: float, soon: bool = False) -> bool:
+        """Whether the booth can talk about the chat now (or, `soon`, within the time a take is written):
+        once a hole at most (chat.once_per_hole), and chat.min_gap_seconds after the last time."""
+        c = self.cfg.chat
+        if c.once_per_hole and self._chat_aired_hole is not None and self._chat_aired_hole == self._chat_hole():
+            return False
+        return now - self._chat_aired_at >= c.min_gap_seconds - (20.0 if soon else 0.0)
 
     def _chat_context(self) -> list[str]:
+        """What the booth knows to talk about the chat with: the round, the card, who's up and the
+        last few things it said."""
         r = self.round
-        out = []
+        out = [*self._roster_facts()]
         if course := (r.course if r is not None else None) or self.current_course:
             out.append(f"Course: {course}")
         if self.hole_number:
-            out.append(f"They're on hole {self.hole_number}")
+            out.append(f"They're on hole {self.hole_number}" + (f", a par {self.current_par}" if self.current_par else ""))
         if r is not None and (sides := [s.label for s in r.sides]):
-            out.append("Playing: " + ", ".join(sides))
+            out.append(("Playing as teams: " if any(len(s.players) > 1 for s in r.sides) else "Playing: ")
+                       + "; ".join(sides))
+        if r is not None and (standing := r.standing_fact(r.seq - 1)):
+            out.append(standing)
+        if self._last_setup is not None and self._last_setup[1] == self._shot_seq:
+            hud = self._last_setup[0]
+            if hud.player_text and (who := self._player(hud.player_text)):
+                shot = f"{who} is up, shot {hud.shot_number}" if hud.shot_number else f"{who} is up"
+                if hud.to_pin:
+                    shot += f", {hud.to_pin} to the pin"
+                if hud.lie:
+                    shot += f", from the {hud.lie.lower()}"
+                if hud.club:
+                    shot += f", with {hud.club}"
+                out.append(shot)
+        if said := [ln.text for ln in list(self.state.recent_lines)[-4:]]:
+            out.append("The booth just said: " + " / ".join(said))
         return out
 
-    async def _prepare_chat(self, message: ChatMessage, expires: float) -> None:
-        r = self.round
-        user, facts_text = chat_prompt(name=message.name, message=message.text, context=self._chat_context())
+    async def _prepare_chat(self) -> None:
+        r, talked = self.round, self._chat_talked
+        log_ = list(self._chat_log)
+        new = [(m, at) for m, at in log_ if m.id > talked]
+        if not new:
+            return
+        user, facts_text = chat_prompt(messages=[(m.name, m.text, m.id > talked) for m, _ in log_],
+                                       context=self._chat_context(), moderation=self.cfg.chat.moderation,
+                                       commentators=self._persona_names)
         try:
-            good, _ = await self._write_aside(f"Chat from {message.name!r}", user, facts_text,
-                                              chat_schema(self.speakers), kind="chat", llm=self.live_llm,
-                                              declined=lambda data: data.get("air") is False)
+            good, _ = await self._write_aside("Chat", user, facts_text, chat_schema(self.speakers), kind="chat",
+                                              llm=self.live_llm, declined=lambda data: data.get("air") is False)
         except Exception as e:
-            log.warning("Chat: couldn't write up %s's message: %r", message.name, e)
+            log.warning("Chat: couldn't write a take on the chat: %r", e)
             return
-        if not good:
+        if good and self._chat_talked == talked:
+            kept, audio = await self._voice_ahead(good)
+        if self._chat_talked != talked:
+            # The chat went on air while this was written: what it hasn't covered is written up afresh.
+            self._chat_written = self._chat_talked
             return
-        kept, audio = await self._voice_ahead(good)
-        if len(kept) != 2 or self.round is not r or not self._chat_open():
+        if not good or len(kept) != 2 or self.round is not r or not self._chat_open():
             return
-        self._chat_ready = PreparedChat(message, list(zip(kept, audio)), expires)
-        log.info("Chat: %s's message is ready for the next gap", message.name)
+        self._chat_ready = PreparedChat([m for m, _ in new], list(zip(kept, audio)), time.monotonic(),
+                                        min(at for _, at in new) + self.cfg.chat.max_age_seconds)
+        log.info("Chat: a take on %d new message(s) is ready for the next gap", len(new))
 
     async def _chat_after_shot(self, seq: int) -> bool:
-        """Air the viewer's message that's ready once this shot's call is done, at most one every
-        chat.min_gap_seconds. Returns whether it played."""
+        """Air the take on the chat that's ready once this shot's call is done (once a hole, at most,
+        and chat.min_gap_seconds apart). Returns whether it played."""
         bit = self._chat_ready
-        if bit is None or time.monotonic() - self._chat_aired_at < self.cfg.chat.min_gap_seconds:
+        if bit is None or not self._chat_may_air(time.monotonic()):
             return False
         deadline = time.monotonic() + 8.0
         while not self.speech.is_idle() and time.monotonic() < deadline and self._shot_seq == seq:
@@ -2377,15 +2432,17 @@ class Engine:
         if not self.speech.is_idle() or self._shot_seq != seq or self._chat_ready is not bit or not self._chat_open():
             return False
         if bit.expires <= time.monotonic():
-            self._chat_ready = None
+            self._chat_ready, self._chat_written = None, self._chat_talked
             return False
-        self._chat_ready, self._chat_aired_at = None, time.monotonic()
+        self._chat_ready, self._chat_aired_at, self._chat_aired_hole = None, time.monotonic(), self._chat_hole()
+        self._chat_talked = max(self._chat_talked, bit.new[-1].id)
         lines = [line for line, _ in bit.items]
         self.state.record_lines(lines)
         self._air_exchange(bit.items, banter=True)
         self._write_transcript(lines, "chat")
-        log.info("Chat: answered %s's message on air", bit.message.name)
-        self._bg(self._chat_mark_aired(bit.message.id))
+        log.info("Chat: talked about %d new message(s) on air", len(bit.new))
+        for m in bit.new:
+            self._bg(self._chat_mark_aired(m.id))
         return True
 
     async def _chat_mark_aired(self, message_id: str) -> None:

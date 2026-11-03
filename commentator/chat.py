@@ -8,6 +8,7 @@ while it is), reads the messages since the last it saw, and marks the ones it an
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 
@@ -67,3 +68,24 @@ class ChatTable:
             UpdateExpression="SET aired = :t", ConditionExpression="attribute_exists(pk)",
             ExpressionAttributeValues={":t": {"BOOL": True}},
         )
+
+
+# Always kept off the air, whatever the moderation: a link or an ad has nothing for the booth.
+_LINK = re.compile(r"https?://|www\.|\b[\w-]+\.(?:com|net|org|biz|info|io|co|xyz|ru|shop|store|link|ly|gg|tv|me)\b",
+                   re.IGNORECASE)
+# Swearing, starred out or not: kept off the air under standard and strict moderation.
+# Whole words only, so a name or a word that starts the same ("Dickinson", "shitake") isn't caught.
+_SWEAR = re.compile(r"\b(?:f[\W_]*[u*@][\W_]*[c*][\W_]*k(?:s|ed|er|ers|in|ing)?|f\*{2,}(?:ing|ed|er|in)?|motherf\w*|"
+                    r"sh[i*!1]t(?:s|ty|ter|head|heads|show)?|c[u*]nts?|b[i*!1]tch(?:es|y|ing)?|ass[\W_]*holes?|"
+                    r"dickheads?|puss(?:y|ies)(?![\W_]*willow)|bastards?|wank(?:s|er|ers|ing)?|twats?)(?![\w*])",
+                    re.IGNORECASE)
+
+
+def screened_out(text: str, moderation: str) -> str | None:
+    """Why a message can't go to the booth at this moderation level, or None if it can. The model
+    applies the rest of the level (abuse, put-downs) to what's left."""
+    if _LINK.search(text):
+        return "a link"
+    if moderation != "off" and _SWEAR.search(text):
+        return "swearing"
+    return None

@@ -5040,6 +5040,9 @@ def test_lead_change_facts_call_a_new_leader_a_tie_and_a_comeback():
     r.set_log_scores("MikeD", {1: 7, 2: 4, 3: 3, 4: 3})
     r.set_log_scores("Sarah", {1: 4, 2: 4, 3: 4, 4: 5})
     assert r.lead_change_facts(3) == []          # Sarah still leads
+    assert r.standing_fact(3) == "On the card after 3 holes: Sarah leads by 2 shots."
+    assert r.standing_fact(4) == "On the card after 4 holes: Mike and Sarah are tied for the lead."
+    assert r.standing_fact(5) is None            # Mike's 5 isn't on the card yet
     assert r.lead_change_facts(4) == ["Tied for the lead on the card after 4 holes: Mike and Sarah. "
                                       "Before this hole Sarah led alone."]
     # A wrap branch built while Mike putts on 5, with Sarah already in with a 5.

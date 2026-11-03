@@ -1131,9 +1131,54 @@ class Round:
         strokes are known in a league round. `extra` = (side key, seq, strokes): a pre-built wrap
         branch's score for a hole the card doesn't have yet. Nothing unless every competitor has a score
         on every hole through `through`."""
-        comps = self._competitors()
-        if through < 2 or len(comps) < 2:
+        if through < 2 or (run := self._running_totals(through, extra)) is None:
             return []
+        names, totals, net = run
+
+        def leaders(i: int) -> list[int]:
+            low = min(t[i] for t in totals)
+            return [c for c, t in enumerate(totals) if t[i] == low]
+
+        before, now = leaders(through - 2), leaders(through - 1)
+        if set(before) == set(now):
+            return []
+        card = f"on the card ({'net' if net else 'gross'})" if self.is_league else "on the card"
+        was = (f"{names[before[0]]} led alone" if len(before) == 1
+               else f"{_join([names[c] for c in before])} were tied for the lead")
+        if len(now) == 1:
+            lead = now[0]
+            margin = min(t[through - 1] for c, t in enumerate(totals) if c != lead) - totals[lead][through - 1]
+            fact = (f"Lead change {card} with this hole: {names[lead]} now leads outright, by {margin} "
+                    f"shot{'s' if margin != 1 else ''}, after {through} holes. Before this hole {was}.")
+            back = max(totals[lead][i] - min(t[i] for t in totals) for i in range(through - 1))
+            facts = [fact]
+            if back >= self.COMEBACK_SHOTS:
+                facts.append(f"Comeback: {names[lead]} was {back} shots off the lead earlier in this round.")
+            return facts
+        return [f"Tied for the lead {card} after {through} holes: {_join([names[c] for c in now])}. "
+                f"Before this hole {was}."]
+
+    def standing_fact(self, through: int) -> str | None:
+        """Who leads on the card after hole `through`, and by how much (the same count as lead changes)."""
+        if through < 1 or (run := self._running_totals(through)) is None:
+            return None
+        names, totals, net = run
+        now = [t[through - 1] for t in totals]
+        low = min(now)
+        leads = [names[c] for c, v in enumerate(now) if v == low]
+        card = f" ({'net' if net else 'gross'})" if self.is_league else ""
+        n = f"{through} hole{'s' if through != 1 else ''}"
+        if len(leads) > 1:
+            return f"On the card{card} after {n}: {_join(leads)} are tied for the lead."
+        margin = min(v for v in now if v != low) - low
+        return f"On the card{card} after {n}: {leads[0]} leads by {margin} shot{'s' if margin != 1 else ''}."
+
+    def _running_totals(self, through: int, extra: tuple[str, int, int] | None = None):
+        """(competitor names, each one's running total after holes 1..through, net or not), or None
+        with fewer than two competitors or a score missing."""
+        comps = self._competitors()
+        if len(comps) < 2:
+            return None
         sides = [s for _, g in comps for s in g]
         net = self.is_league and all(s.strokes is not None and (s.strokes == 0 or s.hole_strokes) for s in sides)
 
@@ -1153,34 +1198,11 @@ class Round:
             for q in range(1, through + 1):
                 vals = [hole(s, q) for s in g]
                 if None in vals:
-                    return []
+                    return None
                 run += min(vals) if self.format == "best_ball" and len(g) > 1 else sum(vals)
                 out.append(run)
             totals.append(out)
-
-        def leaders(i: int) -> list[int]:
-            low = min(t[i] for t in totals)
-            return [c for c, t in enumerate(totals) if t[i] == low]
-
-        before, now = leaders(through - 2), leaders(through - 1)
-        if set(before) == set(now):
-            return []
-        names = [n for n, _ in comps]
-        card = f"on the card ({'net' if net else 'gross'})" if self.is_league else "on the card"
-        was = (f"{names[before[0]]} led alone" if len(before) == 1
-               else f"{_join([names[c] for c in before])} were tied for the lead")
-        if len(now) == 1:
-            lead = now[0]
-            margin = min(t[through - 1] for c, t in enumerate(totals) if c != lead) - totals[lead][through - 1]
-            fact = (f"Lead change {card} with this hole: {names[lead]} now leads outright, by {margin} "
-                    f"shot{'s' if margin != 1 else ''}, after {through} holes. Before this hole {was}.")
-            back = max(totals[lead][i] - min(t[i] for t in totals) for i in range(through - 1))
-            facts = [fact]
-            if back >= self.COMEBACK_SHOTS:
-                facts.append(f"Comeback: {names[lead]} was {back} shots off the lead earlier in this round.")
-            return facts
-        return [f"Tied for the lead {card} after {through} holes: {_join([names[c] for c in now])}. "
-                f"Before this hole {was}."]
+        return [n for n, _ in comps], totals, net
 
     def _capped_score(self, side: Side, seq: int) -> int:
         score = self.card_score(side, seq)

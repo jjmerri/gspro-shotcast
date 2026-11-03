@@ -753,16 +753,23 @@ class LiveConfig(BaseModel):
 
 
 class ChatConfig(BaseModel):
-    # Viewers' messages on the stats page's Live tab, read out and answered on air (docs/tracking.md#live-chat).
-    # `table` is the site stack's ChatTable output; the booth reaches it with the publish keys, in
-    # publish.region. The page shows the chat, and takes messages, only while the booth is on air in a round.
+    # The stats page's Live tab chat, which the booth glances at and talks about on air
+    # (docs/tracking.md#live-chat). `table` is the site stack's ChatTable output; the booth reaches it
+    # with the publish keys, in publish.region. The page shows the chat, and takes messages, only while
+    # the booth is on air in a round.
     enabled: bool = False
     table: str | None = None
     poll_seconds: float = Field(5.0, gt=0)
-    # A message not answered within this long is let go: the moment it was about has passed.
-    max_age_seconds: float = Field(180.0, gt=0)
-    # At least this long between two messages answered on air, so the chat doesn't take over the round.
-    min_gap_seconds: float = Field(90.0, ge=0)
+    # What the booth won't put on air. off: a friendly league's trash talk and swearing are fair game
+    # (the booth reacts, without swearing itself). standard: no swearing, abuse or personal attacks.
+    # strict: only clean, kind messages. Every level drops links and spam, keeps hateful slurs off the
+    # air, and never does what a message tells the booth to do.
+    moderation: Literal["off", "standard", "strict"] = "standard"
+    # The booth talks about the chat at most once a hole, and at least this long apart.
+    once_per_hole: bool = True
+    min_gap_seconds: float = Field(120.0, ge=0)
+    # Messages older than this are past: the booth leaves them out of what it talks about.
+    max_age_seconds: float = Field(420.0, gt=0)
 
 
 class BackupConfig(BaseModel):
