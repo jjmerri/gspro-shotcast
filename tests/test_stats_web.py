@@ -291,6 +291,27 @@ def test_a_round_counts_each_players_mulligans_but_a_misread_putt(tmp_path):
         assert stats_web.rounds(ro)[0]["mulligans"] == {"Ann": 3, "Bob": 0}
 
 
+def test_a_one_player_round_splits_its_holes_by_putts_when_its_shots_add_up(tmp_path):
+    path, db = _db(tmp_path)
+    for ts, hole, lie in ((10, 1, "green"), (11, 2, "green"), (12, 2, "green"), (13, 3, "green"), (14, 3, "green"),
+                          (15, 3, "green"), (16, 3, "green"), (17, 4, "fairway")):   # a chip-in on 4
+        _shot(db, "Ann", ts=ts, course="Pebble", hole=f"Hole {hole}, par 4", lie_before=lie, is_putt=lie == "green")
+    _shot(db, "Ann", ts=18, course="Pebble", hole="Hole 1, par 4", lie_before="green", is_putt=1, mulligan=1)
+    db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, players, holes, gross, putts, scores,"
+               " hole_pars, complete) VALUES (1, 100, '2026-10-01', 'Pebble', 'Ann', '[\"Ann\"]', 4, 16, 7,"
+               " '{\"1\": 4, \"2\": 4, \"3\": 5, \"4\": 3}', '{\"1\": 4, \"2\": 4, \"3\": 4, \"4\": 4}', 1)")
+    db.commit()
+
+    def split():
+        with stats_web.connect(path) as ro:
+            return stats_web.rounds(ro)[0]["putt_split"]
+    assert split() == [1, 1, 1]
+    # A putt short of the round's count (a shot not read) leaves the split out rather than show it wrong.
+    db.execute("UPDATE rounds SET putts = 8")
+    db.commit()
+    assert split() is None
+
+
 def test_a_round_s_length_from_its_tees_sums_its_holes_labels_when_all_are_read(tmp_path):
     path, db = _db(tmp_path)
     for who, lengths in (("Ann", (410, 160, 530)), ("Bob", (350, 140, 450))):   # Bob off the forward tees
@@ -374,19 +395,23 @@ def test_the_pages_handicap_toggle_swaps_in_the_index_without_mulligans():
     page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
     fns = re.search(r"\nfunction useHcp\(.*?\n}\n", page, re.S).group(0) \
         + re.search(r"\nconst leftForMulligans = .*?\n", page).group(0) \
-        + re.search(r"\nfunction mulliganText\(.*?\n}\n", page, re.S).group(0)
+        + re.search(r"\nfunction mulliganTotal\(.*?\n}\n", page, re.S).group(0) \
+        + re.search(r"\nfunction mulliganText\(.*?\n}\n", page, re.S).group(0) \
+        + re.search(r"\nfunction puttText\(.*?\n}\n", page, re.S).group(0)
     script = "const esc = s => s, state = {hcpClean: false, data: {players: [{index: 7.0, index_history: [1, 2, 3, 4],"\
         " index_clean: 5.0, index_history_clean: [1, 2, 3]}]}};" + fns + """
 const p = state.data.players[0], seen = [];
 useHcp(); seen.push([p.index, p.index_history.length, leftForMulligans(p)]);
 state.hcpClean = true; useHcp(); seen.push([p.index, p.index_history.length, leftForMulligans(p)]);
 state.hcpClean = false; useHcp(); seen.push([p.index, p.index_history.length, leftForMulligans(p)]);
-seen.push(mulliganText({mulligans: {Ann: 2}}), mulliganText({mulligans: {Ann: 2, Bob: 1}}),
-          mulliganText({mulligans: {Ann: 0, Bob: 0}}), mulliganText({}));
+const one = {mulligans: {Ann: 2}}, two = {mulligans: {Ann: 2, Bob: 1}}, none = {mulligans: {Ann: 0, Bob: 0}};
+seen.push([mulliganTotal(one), mulliganText(one)], [mulliganTotal(two), mulliganText(two)],
+          [mulliganTotal(none), mulliganText(none)], [mulliganTotal({}), mulliganText({})],
+          puttText({putt_split: [4, 12, 2]}), puttText({putt_split: null}));
 console.log(JSON.stringify(seen));"""
     got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
-    assert got == [[7.0, 4, 0], [5.0, 3, 1], [7.0, 4, 0], " · mulligans 2", " · mulligans 3 (Ann 2, Bob 1)",
-                   " · mulligans 0", ""]
+    assert got == [[7.0, 4, 0], [5.0, 3, 1], [7.0, 4, 0], [2, ""], [3, "Ann 2, Bob 1"], [0, ""], ["—", ""],
+                   "1-putts 4 · 2-putts 12 · 3-putts 2", ""]
 
 
 def test_a_round_card_takes_its_longest_drive_from_its_shots(tmp_path):

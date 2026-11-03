@@ -1310,12 +1310,20 @@ function excludedRounds() {
 }
 
 // One side of a round on its own page, with the round's other sides a tap away.
-// A side's mulligans (a misread putt aside): its one player's count, or each of its players'.
+// A side's mulligans (a misread putt aside): the total, and each player's when it has more than one.
+function mulliganTotal(r) {
+  const m = Object.values(r.mulligans || {});
+  return m.length ? m.reduce((t, n) => t + n, 0) : "—";
+}
 function mulliganText(r) {
   const m = Object.entries(r.mulligans || {});
-  if (!m.length) return "";
-  const total = m.reduce((t, [, n]) => t + n, 0);
-  return ` · mulligans ${total}${m.length > 1 && total ? ` (${m.map(([p, n]) => `${esc(p)} ${n}`).join(", ")})` : ""}`;
+  return m.length > 1 && m.some(([, n]) => n) ? m.map(([p, n]) => `${esc(p)} ${n}`).join(", ") : "";
+}
+
+// A one-player side's holes by putts taken: one, two, three or more.
+function puttText(r) {
+  const s = r.putt_split;
+  return s ? `1-putts ${s[0]} · 2-putts ${s[1]} · 3-putts ${s[2]}` : "";
 }
 
 function renderRound() {
@@ -1352,7 +1360,8 @@ function renderRound() {
     <div class="cards rcards">
       <div class="card"><div class="k">Score</div><div class="v">${dash(r.gross)} <span class="sub">${toPar(r.to_par)}</span></div><div class="sub">${r.played}${r.played !== r.holes ? ` of ${r.holes}` : ""} holes</div></div>
       <div class="card"><div class="k">Fairways · greens</div><div class="v">${frac(r.fir)} · ${frac(r.gir)}</div><div class="sub">scrambling ${frac(r.scramble)} · sand ${frac(r.sand)}</div></div>
-      <div class="card"><div class="k">Putts</div><div class="v">${dash(r.putts)}</div><div class="sub">penalties ${dash(r.penalties)}${mulliganText(r)}${r.longest_drive ? ` · longest drive ${Math.round(r.longest_drive)} yd` : ""}</div></div>
+      <div class="card"><div class="k">Putts</div><div class="v">${dash(r.putts)}</div><div class="sub">${puttText(r)}</div></div>
+      <div class="card"><div class="k">Penalties · mulligans</div><div class="v">${dash(r.penalties)} · ${mulliganTotal(r)}</div><div class="sub">${[mulliganText(r), r.longest_drive ? `longest drive ${Math.round(r.longest_drive)} yd` : ""].filter(Boolean).join(" · ")}</div></div>
     </div>
     <p class="ractions">${acts}</p>
     <h2>Scorecard</h2><div class="round">${scorecard(r.card, reps)}${shotsUsed(r, reps)}${replayPart(reps, r)}${roundSummary(r)}</div>`;

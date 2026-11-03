@@ -38,6 +38,7 @@ APPROACH_MAX_YARDS = 250
 _DRIVE = "COALESCE(total_yards, carry_game_yards, carry_raw)"
 _TEE_DRIVER = DRIVE_SQL
 _HOLE_YARDS = re.compile(r"Hole (\d+), par \d+, (\d+) yards")
+_HOLE = re.compile(r"Hole (\d+)\b")
 
 
 EXCLUDED, DELETED = 1, 2   # the `excluded` column: out of the stats but listed locally / deleted for good
@@ -397,6 +398,14 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
                                   " AND player IS NOT NULL AND player != 'unknown'"):
         if (rnd := of_shot.get(sid)) is not None:
             mulligans.setdefault(rnd, Counter())[player] += 1
+    # Each player's putts on each hole of each round, counted as three_putts does (their own ball only).
+    hole_putts: Counter = Counter()
+    for sid, player, hole in db.execute(
+            "SELECT id, player, hole FROM shots WHERE attributed = 1 AND mulligan = 0 AND left_out = 0"
+            " AND shared_ball = 0 AND COALESCE(fmt, '') NOT IN ('scramble', 'alternate') AND player IS NOT NULL"
+            " AND (lie_before = 'green' OR (is_putt = 1 AND lie_before IS NULL))"):
+        if (rnd := of_shot.get(sid)) is not None and (m := _HOLE.match(hole or "")):
+            hole_putts[(rnd, player, int(m.group(1)))] += 1
     sides = Counter(of_row.values())
     for r in db.execute("SELECT * FROM rounds WHERE 1=1" + _ctx(context) + " ORDER BY ended_at DESC, id DESC"):
         card = _card(_json(r["scores"]), _json(r["hole_pars"]))
@@ -422,6 +431,13 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
         # (a team side's players aren't on record per round, so its stored drive stands)
         if (rnd, r["side"]) in kept or (rnd, r["side"]) in left:
             longest = kept.get((rnd, r["side"]))
+        # A one-player side's one-, two- and three-or-more-putt holes, when its shots add up to its putts.
+        putt_split = None
+        if played_by and len(played_by) == 1 and r["putts"]:
+            per_hole = [hole_putts[(rnd, played_by[0], h["hole"])] for h in card["holes"]]
+            if sum(per_hole) == r["putts"]:
+                putt_split = [sum(n == 1 for n in per_hole), sum(n == 2 for n in per_hole),
+                              sum(n >= 3 for n in per_hole)]
         out.append({
             "id": r["id"], "round": of_row.get(r["id"], r["id"]), "session": r["session_id"], "ended": r["ended_at"], "date": r["date"],
             "started": started.get(of_row.get(r["id"], r["id"])), "round_end": end_of.get(rnd),
@@ -435,7 +451,7 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             "to_par": card["to_par"] if card["played"] else None,
             "fir": [r["fir_hit"], r["fir_tries"]], "gir": [r["gir_hit"], r["gir_tries"]],
             "scramble": [r["scramble_hit"], r["scramble_tries"]], "sand": [r["sand_hit"], r["sand_tries"]],
-            "putts": r["putts"], "penalties": r["penalties"], "longest_drive": longest,
+            "putts": r["putts"], "putt_split": putt_split, "penalties": r["penalties"], "longest_drive": longest,
             "card": card["holes"], "gimme_ft": gimmes.get(rnd), "tee": tees.get(rnd),
             "tee_yards": tee_yards, "course_yards": course_yards, "course_holes": course_holes,
             # this side's players' mulligans (a team side's players aren't always on record: its own)
