@@ -226,6 +226,7 @@ def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]
     teams = {rnd: _scramble_teams(rows) for rnd, rows in by_round.items()}
     out = {}
     for key, rows in groups.items():
+        rows = _fill_gaps(rows)
         drawn = [r for r in rows if not r["mulligan"] and r["outcome"] != "gimme"]
         one_stroke = (drawn and all(r["shot_number"] == 1 for r in drawn)
                       and any(r["outcome"] in ("holed", "gimme", "conceded") for r in rows))
@@ -238,6 +239,100 @@ def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]
                 rp["map"] = m
             rp["ts"] = min(r["ts"] for r in rows)   # the hole's first shot, for the page's video link
             out[key] = rp
+    return out
+
+
+_ENDS_HOLE = ("holed", "gimme")
+ANON_MAX = 6                       # more shots than this with no player on a hole are left unattributed
+FIT_MIN_M, FIT_SHARE = 5.0, 0.15   # a shot fits a gap when its length misses the next start by at most this
+
+
+def _penalised(r: dict) -> bool:
+    """A shot that may have cost a penalty stroke, so its next stroke's number can't be known."""
+    return r["hazard_x"] is not None or "in_water" in json.loads(r["tags"] or "[]")
+
+
+def _fit(a: dict, b: dict) -> bool | None:
+    """Whether shot a ends where shot b starts (its length against the distance between their starts),
+    or None when either position or a's length is unknown."""
+    t = _travel_m(a)
+    if t is None or a["start_x"] is None or b["start_x"] is None:
+        return None
+    return abs(math.dist((a["start_x"], a["start_z"]), (b["start_x"], b["start_z"])) - t) <= max(FIT_MIN_M, FIT_SHARE * t)
+
+
+def _numbering(seq: list[dict], tail_open: bool = True) -> dict[int, int] | None:
+    """Stroke numbers for one player's unnumbered shots on a hole (in the order played), by index,
+    where the numbered strokes around them leave no doubt: a run between two numbers that leave exactly
+    room for it, a run before the first number that counts up to it, and (unless tail_open is False: a
+    stroke nobody could be given may be in it) a run after the last number when nothing there may have
+    cost a penalty, the hole wasn't over and no shot's length contradicts where the next was played
+    from. None when the numbers can't be right: they don't rise, or leave too little room for the
+    unnumbered shots between or before them."""
+    known = [(i, r["shot_number"]) for i, r in enumerate(seq) if r["shot_number"]]
+    if any(b <= a for (_, a), (_, b) in zip(known, known[1:])):
+        return None
+    out: dict[int, int] = {}
+    if not known:
+        return out
+    if known[0][0] > known[0][1] - 1 or any(j - i > b - a for (i, a), (j, b) in zip(known, known[1:])):
+        return None
+    for (i, a), (j, b) in zip(known, known[1:]):
+        if b - a - 1 == j - i - 1:
+            out.update({k: a + k - i for k in range(i + 1, j)})
+    j, b = known[0]
+    if j and b - 1 == j and all(_fit(x, y) is not False for x, y in zip(seq[:j], seq[1:j + 1])):
+        out.update({k: k + 1 for k in range(j)})
+    i, a = known[-1]
+    tail = seq[i:]
+    if (tail_open and len(tail) > 1 and not any(_penalised(r) for r in tail[:-1])
+            and not any(r["outcome"] in _ENDS_HOLE for r in tail[:-1])
+            and all(_fit(x, y) is not False for x, y in zip(tail, tail[1:]))):
+        out.update({k: a + k - i for k in range(i + 1, len(seq))})
+    return out
+
+
+def _fill_gaps(rows: list) -> list:
+    """A hole's shots with the stroke numbers and players a misread left out filled in where the rest
+    of the hole leaves no doubt, so its replay still runs shot to shot. A shot with no player goes to the
+    one player it fits: one whose numbering then accounts for it and, when the hole has more than one
+    player, whose ball it was by position (the shot before ends where it starts, or it ends where the
+    next one starts); a stray swing after the hole is over fits nobody. A player it could be along with
+    other shots that have no player (two of them filling one gap) counts, so those stay unattributed. Shared-ball holes are left as
+    they are: their partners' shots share numbers by design. Only the replay sees this; the shots keep
+    what was recorded."""
+    if not any(r["shot_number"] is None or r["player"] is None for r in rows) or any(_shared(r) for r in rows):
+        return rows
+    out = [dict(r) for r in rows]
+    seq = [r for r in out if not r["mulligan"]]
+    names = list(dict.fromkeys(r["player"] for r in seq if r["player"]))
+    def takes(name, u, extra):
+        mine = [r for r in seq if r["player"] == name or r is u or any(r is e for e in extra)]
+        k = next(i for i, r in enumerate(mine) if r is u)
+        num = _numbering(mine)
+        if num is None or (u["shot_number"] is None and k not in num):
+            return False
+        if any(r["outcome"] in _ENDS_HOLE for r in mine[:k]):
+            return False
+        by_pos = [f for f in (_fit(mine[k - 1], u) if k else None,
+                              _fit(u, mine[k + 1]) if k + 1 < len(mine) else None) if f is not None]
+        return False not in by_pos and (len(names) == 1 or bool(by_pos))
+    if len(anon := [r for r in seq if r["player"] is None]) <= ANON_MAX:
+        for u in anon:
+            others = [r for r in seq if r["player"] is None and r is not u]
+            fits = [name for name in names
+                    if any(takes(name, u, [o for b, o in enumerate(others) if m >> b & 1]) for m in range(1 << len(others)))]
+            if len(fits) == 1:
+                u["player"] = fits[0]
+    anon = [i for i, r in enumerate(seq) if r["player"] is None]
+    for name in names:
+        mine = [r for r in seq if r["player"] == name]
+        # A stroke left without a player could be one of this player's after their last number.
+        last = max((i for i, r in enumerate(seq) if r["player"] == name and r["shot_number"]), default=None)
+        end = next((i for i, r in enumerate(seq) if r["player"] == name and r["outcome"] in _ENDS_HOLE), len(seq))
+        tail_open = last is None or not any(last < i < end for i in anon)
+        for k, n in (_numbering(mine, tail_open) or {}).items():
+            mine[k]["shot_number"] = n
     return out
 
 

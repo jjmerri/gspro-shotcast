@@ -353,6 +353,92 @@ def test_a_replay_counts_the_gimme_it_cant_draw_in_the_score(tmp_path):
     assert (len(pl["shots"]), pl["strokes"], pl["gimmes"]) == (3, 4, 1)
 
 
+def _numbers(db, name="Dan"):
+    pl = next(p for p in hole_replays(db)[(1, 1)]["players"] if p["name"] == name)
+    return [s["n"] for s in pl["shots"]], [s["to"] for s in pl["shots"]], pl["strokes"]
+
+
+def test_a_replay_numbers_a_misread_stroke_when_the_hole_leaves_no_doubt(tmp_path):
+    path, st = _season(tmp_path)
+    log = tmp_path / "output_log.txt"
+    log.write_text(_hole_log())
+    backfill(path, [str(log)])
+    st.db.execute("UPDATE shots SET shot_number = NULL, player = NULL WHERE shot_number = 2")
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, is_putt, raw)"   # a swing after holing
+                  " VALUES (?, 1010, NULL, 'Test Links', 'Hole 1, par 4, 328 yards', 0, '{}')", (st.session_id,))
+    st.db.commit()
+    assert _numbers(st.db) == ([1, 2, 3], [[10.0, 200.0], [2.0, 295.0], [0.0, 300.0]], 3)
+    assert _numbers(st.db, "unknown")[0] == [None]
+    # The last putt conceded and both it and the gimme unnumbered: they follow on from stroke 2.
+    st.db.execute("DELETE FROM shots WHERE ts = 1010")
+    st.db.execute("UPDATE shots SET player = 'Dan', shot_number = 2 WHERE ts = 1002")
+    st.db.execute("UPDATE shots SET outcome = 'conceded', shot_number = NULL WHERE ts = 1003")
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, is_putt, outcome, raw)"
+                  " VALUES (?, 1004, 'Dan', 'Test Links', 'Hole 1, par 4, 328 yards', 1, 'gimme', '{}')", (st.session_id,))
+    st.db.commit()
+    assert _numbers(st.db) == ([1, 2, 3], [[10.0, 200.0], [2.0, 295.0], [0.0, 300.0]], 4)
+    # A stroke that may have cost a penalty leaves the next number unknown.
+    st.db.execute("UPDATE shots SET hazard_x = 5.0, hazard_z = 290.0 WHERE ts = 1002")
+    st.db.commit()
+    assert _numbers(st.db)[0] == [1, 2, None]
+    # Nor is a run numbered on when a shot's length doesn't reach where the next was played from.
+    st.db.execute("UPDATE shots SET hazard_x = NULL, hazard_z = NULL, shot_number = NULL, total_yards = 30 WHERE ts = 1002")
+    st.db.execute("UPDATE shots SET outcome = 'holed' WHERE ts = 1003")
+    st.db.execute("DELETE FROM shots WHERE ts = 1004")
+    st.db.commit()
+    assert _numbers(st.db)[0] == [1, None, None]
+
+
+def test_a_replay_gives_a_stroke_with_no_player_only_to_the_player_whose_ball_it_was(tmp_path):
+    path, st = _season(tmp_path)
+    log = tmp_path / "output_log.txt"
+    log.write_text(_hole_log())
+    backfill(path, [str(log)])
+    # Eve's second ran 142 m from (-30, 150) to (-5, 290); the next stroke, read without a player or
+    # number, was played from there between Dan's second and third, so it's Eve's third, not Dan's.
+    for who, n, ts, x, z, total_m in (("Eve", 1, 1001.5, None, None, 150.0),
+                                      ("Eve", 2, 1002.3, -30.0, 150.0, math.hypot(25, 140)),
+                                      (None, None, 1002.6, -5.0, 290.0, 9.0)):
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, start_x, start_z,"
+                      " total_yards, raw) VALUES (?, ?, ?, 'Test Links', 'Hole 1, par 4, 328 yards', ?, 0, ?, ?, ?, '{}')",
+                      (st.session_id, ts, who, n, x, z, round(total_m * M_TO_YD, 1)))
+    st.db.commit()
+    assert _numbers(st.db, "Eve")[:2] == ([1, 2, 3], [[-30.0, 150.0], [-5.0, 290.0], None])
+    assert _numbers(st.db)[0] == [1, 2, 3]
+    # With two players and no position to tell whose ball it was, it stays unattributed.
+    st.db.execute("UPDATE shots SET start_x = NULL, start_z = NULL WHERE ts = 1002.6")
+    st.db.commit()
+    assert _numbers(st.db, "Eve")[0] == [1, 2]
+    # ...and as it may be Dan's, his holing stroke after it can't be numbered on from his second.
+    cols = "session_id, ts, player, course, hole, club, is_putt, to_pin_yards, outcome, start_x, start_z, raw"
+    st.db.execute(f"INSERT INTO shots ({cols}) SELECT {cols} FROM shots WHERE ts = 1003")   # unnumbered, in play order
+    st.db.execute("DELETE FROM shots WHERE ts = 1003 AND shot_number = 3")
+    st.db.commit()
+    assert _numbers(st.db)[0] == [1, 2, None]
+
+
+def test_a_stroke_with_no_player_is_left_alone_when_another_reading_of_the_hole_fits(tmp_path):
+    path, st = _season(tmp_path)
+
+    def hole(shots):
+        st.db.execute("DELETE FROM shots WHERE hole LIKE 'Hole 2,%'")
+        for i, (who, n, z, total, outcome) in enumerate(s + (10, None)[len(s) - 3:] for s in shots):
+            st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, start_x, start_z,"
+                          " total_yards, outcome, raw) VALUES (?, ?, ?, 'Test Links', 'Hole 2, par 4, 300 yards', ?, 0, 0.0, ?, ?, ?, '{}')",
+                          (st.session_id, 1100.0 + i, who, n, z, round(total * M_TO_YD, 1), outcome))
+        st.db.commit()
+        return {p["name"]: [s["n"] for s in p["shots"]] for p in hole_replays(st.db)[(1, 2)]["players"]}
+    # Two unattributed strokes could be Eve's next two or the two Dan's numbers leave room for: neither is given.
+    assert hole([("Dan", 1, 0.0), ("Eve", 1, 0.0), (None, None, 10.0), (None, None, 20.0), ("Dan", 4, 30.0)]) == {
+        "Dan": [1, 4], "Eve": [1], "unknown": [None, None]}
+    # Stroke 2 after Dan's unnumbered second can only be Eve's, though either ball could have been there.
+    assert hole([("Dan", 1, 0.0), ("Eve", 1, 0.0, 20), ("Dan", None, 10.0), (None, 2, 20.0)]) == {
+        "Dan": [1, 2], "Eve": [1, 2]}
+    # A swing after Dan holed isn't his, even with a numbered stroke after it making it look like a gap.
+    got = hole([("Dan", 1, 0.0, 10, "holed"), ("Eve", 1, 0.0, 20), (None, None, 10.0), (None, 3, 20.0)])
+    assert (got["Dan"], got["unknown"]) == ([1], [None])
+
+
 def test_a_round_quit_early_estimates_its_pin_from_the_shots_distances(tmp_path):
     path, st = _season(tmp_path)
     st.db.execute("UPDATE shots SET start_x = 10, start_z = 200 WHERE shot_number = 2")
