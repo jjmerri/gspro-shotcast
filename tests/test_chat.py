@@ -10,7 +10,7 @@ from tests.test_round import _engine
 
 REPLY = [{"speaker": "pbp", "text": "Paul in the chat wants to know who is buying the drinks tonight."},
          {"speaker": "color", "text": "Whoever loses the match, and I have a feeling I know who that is."}]
-AGAIN = [{"speaker": "pbp", "text": "Corey wonders whether anybody up here is still awake."},
+AGAIN = [{"speaker": "pbp", "text": "Over to the chat, where Corey wonders whether anybody up here is still awake."},
          {"speaker": "color", "text": "Wide awake, my friend, and enjoying every swing of it so far."}]
 
 
@@ -280,3 +280,35 @@ def test_the_swearing_screen_takes_whole_words_only():
         assert screened_out(ok, "standard") is None, ok
     for bad in ("that was a sh*t putt", "f***ing hell", "what a dickhead", "absolute bastards", "shitty lie"):
         assert screened_out(bad, "standard") == "swearing", bad
+
+
+async def test_a_take_that_doesnt_turn_to_the_chat_first_is_sent_back(tmp_path):
+    e = _booth(tmp_path)
+    _in_a_round(e)
+    cold = [{"speaker": "pbp", "text": "Frankie reckons my voice is putting him to sleep tonight."},
+            {"speaker": "color", "text": "Brave words from a man who has three-putted twice already."}]
+    replies = iter([cold, REPLY])
+
+    async def complete_json(system, user, schema, images=None, **_):
+        from commentator.llm.base import LLMResult
+        e.live_llm.prompts.append(user)
+        return LLMResult(text=json.dumps({"lines": next(replies), "air": True}), input_tokens=1, output_tokens=1)
+
+    e.live_llm.complete_json = complete_json
+    _post(e.chat, "Frankie", "nigel your voice is putting me to sleep", 1_500_000)
+    await e._chat_tick()
+    await _settle(e)
+    assert len(e.live_llm.prompts) == 2 and "turning to the live chat" in e.live_llm.prompts[1]
+    assert e._chat_ready.items[0][0].text == REPLY[0]["text"]
+
+
+def test_the_lead_in_has_to_name_the_chat_in_the_first_sentence():
+    from commentator.chat import chat_lead_in_problems
+    from commentator.models import Line
+    for ok in ("Mr. Mulligan in the chat reckons Paul owes everyone a drink.", "Let's check in with the chat.",
+               "The viewers are lively tonight, and Paul wants a prediction.", "Some folks at home have opinions."):
+        assert chat_lead_in_problems([Line(speaker="pbp", text=ok)]) == [], ok
+    for cold in ("Frankie thinks that was awful! The chat is getting lively tonight.",
+                 "Frankie calls that putt \u201ca disaster.\u201d The chat agrees with him.",
+                 "I am watching Paul lose his patience out there.", "Paul is chatting with Jarod about that putt."):
+        assert chat_lead_in_problems([Line(speaker="pbp", text=cold)]), cold

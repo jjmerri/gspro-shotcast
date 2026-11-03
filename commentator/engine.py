@@ -52,7 +52,7 @@ from .prompts import (
 from .board import Board, place
 from .booking import Bookings
 from .history import History
-from .chat import ChatMessage, ChatTable, cursor_at, screened_out
+from .chat import ChatMessage, ChatTable, chat_lead_in_problems, cursor_at, screened_out
 from .news import GolfNews
 from .scores import LiveScores
 from .signature_holes import signature_hole
@@ -654,6 +654,7 @@ class Engine:
         self._chat_task: asyncio.Task | None = None
         self._chat_aired_at = float("-inf")
         self._chat_aired_hole: tuple | None = None    # (round, hole seq) the booth last talked about the chat on
+        self._chat_openers: list[str] = []            # the first lines of the chat takes aired this session
         self._chat_live: bool | None = None           # what the table was last told: on air or not
         self._chat_beat = float("-inf")
         self._aside_nines: set[int] = set()          # nines of this round whose asides are written
@@ -1987,9 +1988,10 @@ class Engine:
                  "; ".join(f"{b.title!r} ({b.trigger or 'any quiet moment'})" for b in self._news_bits))
 
     async def _write_aside(self, label: str, user: str, facts_text: str, schema: dict, kind: str = "news",
-                           llm: LLMClient | None = None, declined=None) -> tuple[list[Line], dict]:
+                           llm: LLMClient | None = None, declined=None, check=None) -> tuple[list[Line], dict]:
         """A two-line exchange from the closer's model (or `llm`), checked against its facts; ([], {}) if
-        none. `declined(data)`: the model chose to write nothing, so don't retry."""
+        none. `declined(data)`: the model chose to write nothing, so don't retry. `check(lines)`: any
+        further problems with the two lines, to retry on."""
         cap = self.cfg.commentary.aside_max_words
         # The system prompt's shorter per-line limit is for live calls; an aside gets its own.
         user = user + aside_room(cap)
@@ -2016,6 +2018,8 @@ class Engine:
                 problems = problems + ["write exactly two lines, one from each commentator"]
             elif len(good[1].text.split()) < 6:
                 problems = problems + ["the reply must give a take of its own, in at least one full sentence"]
+            elif check is not None:
+                problems = problems + check(good)
             if not problems:
                 return good, data
             self.stats["retries"] += 1
@@ -2400,10 +2404,13 @@ class Engine:
             return
         user, facts_text = chat_prompt(messages=[(m.name, m.text, m.id > talked) for m, _ in log_],
                                        context=self._chat_context(), moderation=self.cfg.chat.moderation,
-                                       commentators=self._persona_names)
+                                       commentators=self._persona_names, openers=self._chat_openers[-4:])
         try:
             good, _ = await self._write_aside("Chat", user, facts_text, chat_schema(self.speakers), kind="chat",
-                                              llm=self.live_llm, declined=lambda data: data.get("air") is False)
+                                              llm=self.live_llm, declined=lambda data: data.get("air") is False,
+                                              # English words only: another language relies on the prompt.
+                                              check=chat_lead_in_problems if self.cfg.commentary.language == "en"
+                                              else None)
         except Exception as e:
             log.warning("Chat: couldn't write a take on the chat: %r", e)
             return
@@ -2436,6 +2443,7 @@ class Engine:
             return False
         self._chat_ready, self._chat_aired_at, self._chat_aired_hole = None, time.monotonic(), self._chat_hole()
         self._chat_talked = max(self._chat_talked, bit.new[-1].id)
+        self._chat_openers.append(bit.items[0][0].text)
         lines = [line for line, _ in bit.items]
         self.state.record_lines(lines)
         self._air_exchange(bit.items, banter=True)

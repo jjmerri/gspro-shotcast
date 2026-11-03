@@ -89,3 +89,20 @@ def screened_out(text: str, moderation: str) -> str | None:
     if moderation != "off" and _SWEAR.search(text):
         return "swearing"
     return None
+
+
+# What tells a listener the booth has turned to the chat, rather than to something said on the course.
+_LEAD_IN = re.compile(r"\b(?:chat|chatroom|viewers?|stream|inbox|messages? (?:in|from)|"
+                      r"(?:folks|people|those|everyone|friends) (?:at home|watching|tuning in)|"
+                      r"watching (?:at home|along|on the stream|online))\b", re.IGNORECASE)
+# A sentence ends at . ! or ? (and any closing quote) and a space - not inside "Mr. Smith" or "1.5".
+_SENTENCE_END = re.compile(r"(?<!\bMr\.)(?<!\bMrs\.)(?<!\bMs\.)(?<!\bDr\.)(?<!\bSt\.)(?<=[.!?])[\"'\u201d\u2019)]*\s+")
+
+
+def chat_lead_in_problems(lines) -> list[str]:
+    """A take on the chat must open by turning to it: two lines out of nowhere sound like someone on
+    the course said it."""
+    if lines and not _LEAD_IN.search(_SENTENCE_END.split(lines[0].text, maxsplit=1)[0]):
+        return ["the first line has to open by turning to the live chat (say it's the chat, or viewers, "
+                "in its first sentence) before getting into what they're saying"]
+    return []

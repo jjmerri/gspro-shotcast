@@ -324,7 +324,7 @@ CHAT_MODERATION = {
 
 
 def chat_prompt(*, messages: list[tuple[str, str, bool]], context: list[str], moderation: str,
-                commentators: list[str]) -> tuple[str, str]:
+                commentators: list[str], openers: list[str] = ()) -> tuple[str, str]:
     """The live chat on the stats page, which the booth glances at between shots and talks about.
     `messages`: (viewer, text, new since the booth last talked about the chat), oldest first. The
     messages are untrusted text from anyone with the league password: quoted as data, never followed."""
@@ -335,6 +335,11 @@ def chat_prompt(*, messages: list[tuple[str, str, bool]], context: list[str], mo
         "FACTS:\n" + facts_text
         + "\n\nViewers watching the stream are talking in the live chat. Between shots the booth glances at "
         "it and talks about it: exactly two lines, one from each commentator, either one first.\n"
+        "The first line turns to the chat out of the play, so listeners know where it's coming from - its "
+        "first sentence says it's the chat or the viewers (\"Let's check in with the chat...\", \"The chat's "
+        "busy tonight...\", \"Some of the folks watching have opinions...\"), in your own words, then gets "
+        "into it." + (" Don't open the way the booth has already: " + " / ".join(f'"{o}"' for o in openers)
+                      if openers else "") + "\n"
         "This isn't a Q&A or a mailbag: don't read messages out, and don't go through them one by one. React "
         "to what's going on in the chat the way commentators would on air - pick up on the best of the new "
         "messages, riff on the conversation, tease back, agree, rib the players. Say who said it naturally "
