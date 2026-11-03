@@ -1,7 +1,10 @@
 """The static scorecard (par, stroke index, tee yardages and ratings, altitude) for a GSPro course.
 
 GSPro ships this per course in two files, between them covering every course: a labelled, tab
-separated `<course>.unity3d.csv` (also has yardages), and a pipe-delimited `coursedetails.txt`.
+separated CSV (also has yardages, in metres like every course file), and a pipe-delimited
+`coursedetails.txt`. The CSV is `<course>.gspcrse.csv` for a course in GSPro's current format, and
+`<course>.unity3d.csv` for one in the old: a folder with both keeps the old beside the current, maybe
+from an earlier version of the course (another par, other tees), so the current one is read first.
 Reading either is exact and needs no OCR, so handicap stroke allocation and par-based scoring
 don't depend on catching the on-screen scorecard.
 
@@ -17,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .league import course_match_score
+from .sources.gspro_log import M_TO_YD
 
 log = logging.getLogger(__name__)
 
@@ -60,8 +64,6 @@ def tee_lengths(folder: Path) -> dict[str, tuple[int, int]]:
     """Each tee box's length over the whole course, as the course file (GKD) gives it hole by hole, in
     yards (it stores metres), with its hole count: tee box -> (yards, holes). The CSV's tee rows can't
     say this: their units vary by course, and many courses have none. Boxes missing a hole are left out."""
-    from .sources.gspro_log import M_TO_YD
-
     files = [f for f in folder.glob("*") if f.suffix.lower() == ".gkd" and "par3" not in f.stem.lower()]
     if not files:
         return {}
@@ -152,7 +154,7 @@ def _canonical_name(folder: Path) -> str | None:
                 return name
         except OSError:
             pass
-    for csv in folder.glob("*.unity3d.csv"):
+    for csv in _csvs(folder):
         try:
             cells = _first_line(csv).split("\t")
             if len(cells) > 1 and cells[0].strip() == "CourseName" and cells[1].strip():
@@ -165,7 +167,7 @@ def _canonical_name(folder: Path) -> str | None:
 def _load_folder(folder: Path) -> CourseCard | None:
     details_file = folder / "coursedetails.txt"
     details = _parse_details(details_file) if details_file.is_file() else None
-    for csv in folder.glob("*.unity3d.csv"):  # preferred: also carries yardages
+    for csv in _csvs(folder):  # preferred: also carries yardages
         card = _parse_csv(csv)
         if card:
             if details and details.ratings:
@@ -177,6 +179,11 @@ def _load_folder(folder: Path) -> CourseCard | None:
 
 
 # ---- the labelled CSV -------------------------------------------------------------------------
+
+def _csvs(folder: Path) -> list[Path]:
+    """The folder's scorecard CSVs, the current course format's first (see the module docstring)."""
+    return [*folder.glob("*.gspcrse.csv"), *folder.glob("*.unity3d.csv")]
+
 
 _META = {"coursename", "courselocation", "author", "version", "hole", "par", "index"}
 
@@ -222,7 +229,7 @@ def _parse_csv(path: Path) -> CourseCard | None:
         elif order and label and label.lower() not in _META:
             row = _by_hole(order, values)
             if row:
-                yards[label] = row
+                yards[label] = {h: round(m * M_TO_YD) for h, m in row.items()}   # it's metres
     if not par:
         return None
     return CourseCard(name=name or path.stem, par=par, index=index, location=location,

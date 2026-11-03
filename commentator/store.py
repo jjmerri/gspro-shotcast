@@ -16,6 +16,7 @@ from typing import Any
 from .hud import Hud
 from .models import Line, Shot
 from .sources.gspro_log import M_TO_YD
+from .sources.gspro_log import M_TO_YD
 
 log = logging.getLogger(__name__)
 
@@ -387,6 +388,16 @@ class Store:
             self.db.execute("ALTER TABLE lines ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
         if "tee_box" not in {r["name"] for r in self.db.execute("PRAGMA table_info(hole_layouts)")}:
             self.db.execute("ALTER TABLE hole_layouts ADD COLUMN tee_box TEXT")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 1:
+            # Tee yardages were kept as the course CSV gives them, in metres, and from its old-format
+            # file where a course has both: make them yards, and have the courses read again (see
+            # courses_without_tees) for the current file's par, index and yardages.
+            for course, tee, yards in self.db.execute("SELECT course, tee, yards FROM course_tees").fetchall():
+                metres = json.loads(yards or "{}")
+                self.db.execute("UPDATE course_tees SET yards = ? WHERE course = ? AND tee = ?",
+                                (json.dumps({h: round(m * M_TO_YD) for h, m in metres.items()}), course, tee))
+            self.db.execute("DELETE FROM tee_lengths")
+            self.db.execute("PRAGMA user_version = 1")
         # A round's course read off the scorecard was stored in capitals: file it under the shots' name.
         for table in ("rounds", "player_rounds"):
             for (course,) in self.db.execute(f"SELECT DISTINCT course FROM {table} WHERE course IS NOT NULL").fetchall():

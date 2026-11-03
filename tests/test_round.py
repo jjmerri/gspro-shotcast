@@ -686,7 +686,7 @@ def test_course_card_reads_par_and_index_from_gspro_files(tmp_path):
     assert card and card.name == "Wynn Golf Club"
     assert sum(card.par.values()) == 70 and card.par[3] == 5 and card.par[18] == 3
     assert card.index[3] == 1 and card.index[12] == 16 and len(card.index) == 18
-    assert card.altitude_ft == 2080 and card.yards["Black"][9] == 424
+    assert card.altitude_ft == 2080 and card.yards["Black"][9] == 464   # the CSV's 424 is metres
     # A name that matches nothing in the directory gives nothing, not a wrong course.
     assert course_card.load(tmp_path, "Pebble Beach") is None
 
@@ -727,6 +727,31 @@ def test_course_card_reads_each_tee_boxs_whole_length_from_the_course_file(tmp_p
     assert store.courses_without_tees() == []
 
 
+def test_a_season_kept_with_metre_tee_yardages_has_them_made_yards_once(tmp_path):
+    import json
+
+    from commentator.store import Store
+
+    path = str(tmp_path / "season.db")
+    st = Store(path)
+    st.db.execute("INSERT INTO course_tees (course, tee, yards) VALUES ('Wynn Golf Club', 'Black', '{\"9\": 424}')")
+    st.db.execute("INSERT INTO tee_lengths VALUES ('Wynn Golf Club', 'Black', 6721, 18)")
+    st.db.execute("PRAGMA user_version = 0")   # as kept before
+    st.db.commit()
+    st.db.close()
+    st = Store(path, new_session=False)
+    assert json.loads(st.db.execute("SELECT yards FROM course_tees").fetchone()[0]) == {"9": 464}
+    # Its lengths go, so the startup backfill reads the course again.
+    assert st.db.execute("SELECT count(*) FROM tee_lengths").fetchone()[0] == 0
+    st.db.execute("INSERT INTO tee_lengths VALUES ('Wynn Golf Club', 'Black', 6721, 18)")
+    st.db.commit()
+    st.db.close()
+    # Once.
+    st = Store(path, new_session=False)
+    assert json.loads(st.db.execute("SELECT yards FROM course_tees").fetchone()[0]) == {"9": 464}
+    assert st.db.execute("SELECT count(*) FROM tee_lengths").fetchone()[0] == 1
+
+
 DETAILS = ("Test Links|Someone|1010|A scenic place, links style.|Erin, WI|1|1|72|"
            "5|4|4|4|4|3|5|4|3|4|4|4|3|5|4|3|4|5|"
            "13|7|11|9|15|1|5|17|4|14|10|18|2|12|16|8|6|3|"
@@ -756,7 +781,20 @@ def test_course_card_merges_the_details_ratings_into_the_csv_card(tmp_path):
     (folder / "wynn_gsp.unity3d.csv").write_text(WYNN_CSV, encoding="utf-8")
     (folder / "coursedetails.txt").write_text(DETAILS.replace("Test Links", "Wynn Golf Club"), encoding="utf-8")
     card = course_card.load(tmp_path, "Wynn Golf Club")
-    assert card.yards["Black"][9] == 424 and card.ratings["Black"] == (76.9, 145)
+    assert card.yards["Black"][9] == 464 and card.ratings["Black"] == (76.9, 145)
+
+
+def test_course_card_reads_the_current_format_csv_over_an_old_one_beside_it(tmp_path):
+    from commentator import course_card
+
+    folder = tmp_path / "wynn_gsp"
+    folder.mkdir()
+    # The old-format file left from an earlier version of the course: another par on 18, other yards.
+    (folder / "wynn_gsp.unity3d.csv").write_text(WYNN_CSV.replace("\t4\t3\t35\t70\t", "\t4\t4\t36\t71\t")
+                                                 .replace("\t228\t0.0", "\t300\t0.0"), encoding="utf-8")
+    (folder / "wynn_gsp.gspcrse.csv").write_text(WYNN_CSV, encoding="utf-8")
+    card = course_card.load(tmp_path, "Wynn Golf Club")
+    assert card.par[18] == 3 and card.yards["Black"][18] == 249
 
 
 def test_course_card_takes_the_folder_gspro_logged_when_two_names_match(tmp_path):
