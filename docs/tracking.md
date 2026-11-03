@@ -535,8 +535,11 @@ rather than reading messages out one by one. Messages it talked about get a 🎙
 The booth talks about the chat at most once a hole (`chat.once_per_hole`) and at least 2 minutes
 apart (`chat.min_gap_seconds`), in the gap after a shot's call, and only when there's something new.
 It sees the last 7 minutes of the conversation (`chat.max_age_seconds`), along with the course, the
-hole, who's up and the standing on the card. Its live model writes the exchange; the usual fact
-checks apply.
+hole, who's up and the standing on the card. Claude Sonnet writes it (`llm.chat`, which needs
+`ANTHROPIC_API_KEY`; about a cent a take), well ahead of the gap, so the slower model costs no
+delay. Each line gets up to 45 words (`chat.max_words`), and the first one always turns to the chat
+("Let's check in with the chat...") so listeners know where it's coming from. Once it starts, it
+plays out: a shot struck meanwhile, even a big moment, waits for it. The usual fact checks apply.
 
 `chat.moderation` sets what stays off the air:
 

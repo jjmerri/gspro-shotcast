@@ -43,6 +43,8 @@ llm:
   opener:  { provider: anthropic, model: claude-sonnet-5-5, effort: low }
   closer:  { provider: anthropic, model: claude-opus-5-5, effort: low, max_tokens: 2000 }
   # segment: { ... }   # between-hole segments; omit to reuse `live`
+  # The booth's takes on the live chat (chat.enabled), written ahead of the gap: this is the default.
+  # chat:    { provider: anthropic, model: claude-sonnet-5-5, effort: low, max_tokens: 700 }
 
   # --- Alternative: one key (Anthropic) -------------------------------------
   # Claude for every call, with Kokoro voices on the PC (set `tts: provider: kokoro` below), so
@@ -290,6 +292,7 @@ chat:
   # table: shotcast-stats-ChatTable-XXXX   # the stack's ChatTable output
   # moderation: standard       # off (friendly trash talk and swearing are fair game), standard, or strict
   # once_per_hole: true        # the booth talks about the chat at most once a hole
+  # max_words: 45              # each line's word limit (news asides get commentary.aside_max_words)
   # min_gap_seconds: 120       # and at least this long apart
   # max_age_seconds: 420       # older messages drop out of what it talks about
   # poll_seconds: 5

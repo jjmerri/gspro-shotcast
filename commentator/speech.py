@@ -198,6 +198,7 @@ class SpeechQueue:
         # of it, and the engine holds a routine shot's calls until it's done (it's long, and paid for).
         self._banter_gen: int | None = None
         self._banter_lines: set[int] = set()   # id()s of its lines still to air
+        self._banter_hold = False              # no shot cuts it off, not even a big moment (the engine's call)
         # Per-session audio tally, for the cost estimate. "synth" counts every clip actually run
         # through TTS (including pre-voiced branches that never air); "spoken" counts only the clips
         # that reached the speakers. The gap is the pre-voicing waste. Non-blocking dict increments.
@@ -253,7 +254,7 @@ class SpeechQueue:
         self.audio_stats["spoken_seconds"] += _aired_seconds(audio)
 
     def say(self, lines: list[Line], interrupt: bool = False, deadline: float | None = None,
-            banter: bool = False) -> None:
+            banter: bool = False, hold: bool = False) -> None:
         """Queue lines to voice and play. `deadline` (a time.monotonic()) is when they stop being worth
         saying; each line is also dropped if its voice isn't ready within live_deadline_seconds."""
         if self.muted:
@@ -262,6 +263,7 @@ class SpeechQueue:
             self.interrupt()
             if banter:
                 self._banter_gen, self._banter_lines = self._generation, {id(line) for line in lines}
+                self._banter_hold = hold
         else:
             # Commentary on a shot from two shots ago is worse than none.
             backlog = self._text_q.qsize() + self._audio_q.qsize()
@@ -520,7 +522,8 @@ class SpeechQueue:
         self._audio_q.put_nowait((self._generation, line, audio, None, None))
         self._pending += 1
 
-    def say_prepared_sequence(self, items: list[tuple[Line, Audio | None]], banter: bool = False) -> None:
+    def say_prepared_sequence(self, items: list[tuple[Line, Audio | None]], banter: bool = False,
+                              hold: bool = False) -> None:
         """Play several already-voiced lines in order. Cuts off whatever's playing once, then feeds
         the clips to the play loop one at a time (the audio queue holds only one, so a background task
         awaits each put, like the synth loop does). A later interrupt supersedes the rest of the
@@ -533,6 +536,7 @@ class SpeechQueue:
         self._sequencing = gen
         if banter:
             self._banter_gen, self._banter_lines = gen, {id(line) for line, _ in items}
+            self._banter_hold = hold
         self._pending += len(items)
 
         async def feed() -> None:
@@ -573,6 +577,10 @@ class SpeechQueue:
     def banter_airing(self) -> bool:
         """An aside is still on air (or queued to finish), and nothing has cut it off."""
         return self._banter_gen == self._generation and bool(self._banter_lines)
+
+    def banter_held(self) -> bool:
+        """The aside on air is one the engine lets no shot cut off."""
+        return self._banter_hold and self.banter_airing()
 
     async def wait_banter(self, limit: float) -> bool:
         """Wait (up to `limit`) for the aside to finish. False if something else cut it off and took

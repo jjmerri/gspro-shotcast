@@ -188,6 +188,10 @@ class LLMSection(BaseModel):
     round: LLMConfig | None = None
     opener: LLMConfig | None = None
     closer: LLMConfig | None = None
+    # The booth's takes on the live chat (chat.enabled). Written ahead of the gap they air in, so a
+    # richer, slower model costs no latency: it has to follow who said what in a busy conversation.
+    chat: LLMConfig = Field(default_factory=lambda: LLMConfig(
+        provider="anthropic", model="claude-sonnet-5-5", effort="low", temperature=None, max_tokens=700))
 
 
 # Commentary languages: code -> (name, Google voice locale). English keeps the configured voices'
@@ -768,6 +772,9 @@ class ChatConfig(BaseModel):
     # The booth talks about the chat at most once a hole, and at least this long apart.
     once_per_hole: bool = True
     min_gap_seconds: float = Field(120.0, ge=0)
+    # Each line's word limit: more room than a news aside's (commentary.aside_max_words), for the
+    # turn to the chat and the conversation itself.
+    max_words: int = Field(45, ge=10)
     # Messages older than this are past: the booth leaves them out of what it talks about.
     max_age_seconds: float = Field(420.0, gt=0)
 

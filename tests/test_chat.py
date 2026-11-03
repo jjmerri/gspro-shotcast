@@ -49,6 +49,7 @@ def _post(table, name, text, ms):
 def _booth(tmp_path, air=True):
     e = _engine(tmp_path)
     e.chat, e.live_llm = _Table(), _ChatLLM(air)
+    e.chat_llm = e.live_llm
     e._chat_cursor = cursor_at(1_000)
     return e
 
@@ -100,6 +101,7 @@ async def test_the_booth_talks_about_the_chat_once_a_hole_after_a_shot_and_only_
     assert await e._chat_after_shot(7)
     said = [tuple(r) for r in e.store.db.execute("SELECT kind, text FROM lines")]
     assert e._chat_ready is None and said == [("chat", REPLY[0]["text"]), ("chat", REPLY[1]["text"])]
+    assert e._banter_held()                                       # no shot, big moment or not, cuts it off
     await asyncio.gather(*e._bg_tasks)
     assert e.chat.aired == [f"{now + 1:013d}-abcdef", f"{now + 2:013d}-abcdef"]
 

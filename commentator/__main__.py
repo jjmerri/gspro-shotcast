@@ -112,6 +112,7 @@ def _build_live_engine(cfg: Config):
         round_llm=build_llm(cfg.round_llm),
         opener_llm=build_llm(cfg.opener_llm),
         closer_llm=build_llm(cfg.closer_llm),
+        chat_llm=build_llm(cfg.llm.chat) if cfg.chat.enabled else None,
         speech=SpeechQueue(cfg, build_tts(cfg.tts)),
         screen=Screen(cfg.screen) if needs_screen else None,
         await_preshot=cfg.source.type == "replay",
@@ -584,7 +585,8 @@ async def cmd_check(cfg: Config, args) -> None:
         print("League: none set (fine: every round is practice, players go by their GSPro names)")
     # Every model the booth can call, each tried once (roles sharing a model share the call).
     roles = {"live": cfg.llm.live, "segment": cfg.segment_llm, "flight": cfg.flight_llm,
-             "preshot": cfg.preshot_llm, "opener": cfg.opener_llm, "closer": cfg.closer_llm}
+             "preshot": cfg.preshot_llm, "opener": cfg.opener_llm, "closer": cfg.closer_llm,
+             **({"chat": cfg.llm.chat} if cfg.chat.enabled else {})}
     by_model: dict[tuple, tuple[list[str], object]] = {}
     for role, llm_cfg in roles.items():
         key = (llm_cfg.provider, llm_cfg.model, llm_cfg.base_url)

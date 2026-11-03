@@ -574,6 +574,7 @@ class Engine:
         round_llm: LLMClient | None = None,
         opener_llm: LLMClient | None = None,
         closer_llm: LLMClient | None = None,
+        chat_llm: LLMClient | None = None,
         health: Health | None = None,
         commentary_unavailable: str | None = None,
     ) -> None:
@@ -595,6 +596,7 @@ class Engine:
         # last hole, so it can be a richer, slower model. Both fall back to round_llm.
         self.opener_llm = opener_llm or self.round_llm
         self.closer_llm = closer_llm or self.round_llm
+        self.chat_llm = chat_llm or live_llm
         self.speech = speech
         # Commentary off records shots and rounds but never calls a model or speaks (see _complete).
         # Why the model and voice clients couldn't be built (missing API keys): recording only, and the
@@ -1988,11 +1990,13 @@ class Engine:
                  "; ".join(f"{b.title!r} ({b.trigger or 'any quiet moment'})" for b in self._news_bits))
 
     async def _write_aside(self, label: str, user: str, facts_text: str, schema: dict, kind: str = "news",
-                           llm: LLMClient | None = None, declined=None, check=None) -> tuple[list[Line], dict]:
+                           llm: LLMClient | None = None, declined=None, check=None,
+                           cap: int | None = None) -> tuple[list[Line], dict]:
         """A two-line exchange from the closer's model (or `llm`), checked against its facts; ([], {}) if
         none. `declined(data)`: the model chose to write nothing, so don't retry. `check(lines)`: any
-        further problems with the two lines, to retry on."""
-        cap = self.cfg.commentary.aside_max_words
+        further problems with the two lines, to retry on. `cap`: each line's word limit, if not
+        commentary.aside_max_words."""
+        cap = cap or self.cfg.commentary.aside_max_words
         # The system prompt's shorter per-line limit is for live calls; an aside gets its own.
         user = user + aside_room(cap)
         prompt, data = user, {}
@@ -2407,7 +2411,8 @@ class Engine:
                                        commentators=self._persona_names, openers=self._chat_openers[-4:])
         try:
             good, _ = await self._write_aside("Chat", user, facts_text, chat_schema(self.speakers), kind="chat",
-                                              llm=self.live_llm, declined=lambda data: data.get("air") is False,
+                                              llm=self.chat_llm, cap=self.cfg.chat.max_words,
+                                              declined=lambda data: data.get("air") is False,
                                               # English words only: another language relies on the prompt.
                                               check=chat_lead_in_problems if self.cfg.commentary.language == "en"
                                               else None)
@@ -2446,7 +2451,8 @@ class Engine:
         self._chat_openers.append(bit.items[0][0].text)
         lines = [line for line, _ in bit.items]
         self.state.record_lines(lines)
-        self._air_exchange(bit.items, banter=True)
+        # Viewers hear their chat talked about whole: a shot struck meanwhile waits its turn.
+        self._air_exchange(bit.items, banter=True, hold=True)
         self._write_transcript(lines, "chat")
         log.info("Chat: talked about %d new message(s) on air", len(bit.new))
         for m in bit.new:
@@ -2644,11 +2650,11 @@ class Engine:
             return await self.speech.prepare_exchange(lines)
         return list(lines), [None] * len(lines)
 
-    def _air_exchange(self, items: list[tuple[Line, object]], banter: bool = False) -> None:
+    def _air_exchange(self, items: list[tuple[Line, object]], banter: bool = False, hold: bool = False) -> None:
         """Play an exchange from _voice_ahead: its clips if they were voiced ahead, else voiced now
         (streamed, line by line) the same way a live line is. `banter` (an aside) isn't cut off by a
-        routine shot (_banter_on)."""
-        extra = {"banter": True} if banter else {}
+        routine shot (_banter_on); `hold`ing it, by no shot at all (_banter_held)."""
+        extra = {"banter": True, "hold": hold} if banter else {}
         if self._prevoicing():
             self.speech.say_prepared_sequence(items, **extra)
         else:
@@ -2657,6 +2663,18 @@ class Engine:
     def _banter_on(self) -> bool:
         """An aside is on air: only a big moment cuts it off; a routine shot's calls wait or skip."""
         return self.speech is not None and getattr(self.speech, "banter_airing", lambda: False)()
+
+    HELD_BANTER_WAIT = 60.0   # seconds the wrap waits for a chat take on air (two 45-word lines run ~40)
+
+    async def _wait_out_held_banter(self) -> None:
+        """Let a chat take on air finish before the wrap, which cuts off what's playing (bounded)."""
+        if self._banter_held():
+            await self.speech.wait_banter(self.HELD_BANTER_WAIT)
+
+    def _banter_held(self) -> bool:
+        """The aside on air is one no shot cuts off (the booth talking to the chat): even a big moment
+        waits for it."""
+        return self.speech is not None and getattr(self.speech, "banter_held", lambda: False)()
 
     def _kick_wrap_branches(self, side_key: str, scores: list[int], other_facts: list[str]) -> None:
         """(Re)start the background pre-build of the hole wrap, branched by the one side still to
@@ -5456,8 +5474,9 @@ class Engine:
             log.info("%s reaction skipped: a newer shot was hit %.1fs after this one", tag, time.monotonic() - impact)
             return
         if self._banter_on():
-            # An aside is long and paid for: only a big moment cuts it off; a routine call waits for it.
-            if score >= c.big_moment_threshold:
+            # An aside is long and paid for: only a big moment cuts it off (and not a held one, the
+            # booth talking to the chat); a routine call waits for it.
+            if score >= c.big_moment_threshold and not self._banter_held():
                 log.info("%s a big moment (excitement %s): the call cuts the aside off", tag, score)
             else:
                 waited = time.monotonic()
@@ -5468,6 +5487,9 @@ class Engine:
                     return
                 if self._shot_seq != my_seq:
                     log.info("%s reaction skipped: a newer shot was hit while the aside played", tag)
+                    return
+                if self._banter_held():
+                    log.info("%s reaction skipped: the chat take held the air past the wait", tag)
                     return
 
         # A ball in the water gets its splash reaction instantly, from the plan, off the GSPro log's
@@ -5666,6 +5688,12 @@ class Engine:
         if self._shot_seq != my_seq:
             log.info("%s reaction dropped: a newer shot was hit while it was written", tag)
             return
+        if lines and self._banter_held():
+            # A held aside ran past the wait: the call goes on after it, not over it.
+            await self.speech.wait_banter(BANTER_WAIT_SECONDS)
+            if self._shot_seq != my_seq or self._banter_held():
+                log.info("%s reaction dropped: the chat take held the air", tag)
+                return
         if lines and self._banter_on():
             # Only a big moment (or an aside past its wait) gets here with the aside still on air.
             self.speech.interrupt()
@@ -6638,7 +6666,7 @@ class Engine:
         if not self._prevoicing():
             # Voiced as it plays: start it early enough to land near the hit, and never past it by 2 s.
             await asyncio.sleep(max(0.0, hit_at - 0.8 - time.monotonic()))
-            if self._shot_seq != seq:
+            if self._shot_seq != seq or self._banter_held():
                 return
             self.state.record_lines([line])
             self.speech.say([line], interrupt=True, deadline=hit_at + 2.0)
@@ -6649,7 +6677,7 @@ class Engine:
         kept, audio = await self._voice_ahead([line])
         # Land the word a beat before the ball reaches the branches; skip it once that's long gone.
         await asyncio.sleep(max(0.0, hit_at - 0.2 - time.monotonic()))
-        if self._shot_seq != seq or time.monotonic() > hit_at + 2.0:
+        if self._shot_seq != seq or time.monotonic() > hit_at + 2.0 or self._banter_held():
             return
         self.state.record_lines(kept)
         self._air_exchange(list(zip(kept, audio)))
@@ -6749,6 +6777,7 @@ class Engine:
             # The hole's last reaction is queued now; let it finish airing (bounded) so the wrap's
             # interrupt doesn't cut a big exchange off mid-sentence.
             await self._drain_speech(self.cfg.commentary.wrap_wait_seconds + 10)
+            await self._wait_out_held_banter()
         if self.round and self._play_prepared_wrap(previous, self.round.seq - 1):
             self._wrapped_hole = None
             await self._tee_up(event.current)  # pre-made recap is recap-only; introduce the new hole
@@ -8298,6 +8327,7 @@ class Engine:
             return False
         await self._drain_shot_tasks(self.cfg.commentary.wrap_wait_seconds)
         await self._drain_speech(self.cfg.commentary.wrap_wait_seconds + 10)
+        await self._wait_out_held_banter()
         return self._play_prepared_wrap(finished_hole, finished_seq)
 
     def _record_round_stats(self, r: Round, reason: str, complete: bool = True) -> dict:

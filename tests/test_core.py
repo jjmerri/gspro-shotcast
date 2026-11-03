@@ -647,7 +647,7 @@ async def test_a_new_shot_lets_an_aside_on_air_play_out_and_a_routine_call_waits
     while played != ["start"]:
         await asyncio.sleep(0.01)
     speech.drop_queued()   # the next shot is struck mid-aside
-    assert speech.banter_airing()
+    assert speech.banter_airing() and not speech.banter_held()   # a big moment could still cut this one
     waiting = asyncio.create_task(speech.wait_banter(5))
     gate.set()
     await waiting
