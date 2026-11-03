@@ -10,6 +10,7 @@ Golf club"), so a course is found by the real name inside these files, not the f
 """
 
 import difflib
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -33,6 +34,7 @@ class CourseCard:
     yards: dict[str, dict[int, int]] = field(default_factory=dict)  # tee name -> hole -> yards
     folder: str | None = None   # the GSPro course folder it was read from
     ratings: dict[str, tuple[float, float]] = field(default_factory=dict)  # tee name -> (course rating, slope)
+    lengths: dict[str, tuple[int, int]] = field(default_factory=dict)  # GKD tee box -> (yards, holes): see tee_lengths
 
 
 # The tees coursedetails.txt rates, in its order: the same as the CSV's tee rows.
@@ -46,7 +48,37 @@ def load(courses_dirs: str | Path | list, course_name: str | None, folder: str |
     card = _load_folder(path) if path else None
     if card:
         card.folder = path.name
+        card.lengths = tee_lengths(path)
     return card
+
+
+# The course file's (GKD) tee boxes, as hole_layouts.tee_box names them.
+GKD_TEES = ("Black", "White", "Green", "Blue", "Yellow", "Red", "Junior", "Par3")
+
+
+def tee_lengths(folder: Path) -> dict[str, tuple[int, int]]:
+    """Each tee box's length over the whole course, as the course file (GKD) gives it hole by hole, in
+    yards (it stores metres), with its hole count: tee box -> (yards, holes). The CSV's tee rows can't
+    say this: their units vary by course, and many courses have none. Boxes missing a hole are left out."""
+    from .sources.gspro_log import M_TO_YD
+
+    files = [f for f in folder.glob("*") if f.suffix.lower() == ".gkd" and "par3" not in f.stem.lower()]
+    if not files:
+        return {}
+    try:
+        data = json.loads(min(files, key=lambda f: len(f.name)).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as e:
+        log.info("Couldn't read the course file in %s (%s)", folder, e)
+        return {}
+    holes = [h for h in data.get("Holes") or [] if isinstance(h, dict) and h.get("HoleNumber")
+             and h.get("Enabled", True)]
+    per: dict[str, list[float]] = {}
+    for h in holes:
+        for t in h.get("Tees") or []:
+            d = t.get("Distance")
+            if t.get("TeeType") in GKD_TEES and t.get("Enabled", True) and isinstance(d, (int, float)) and d > 0:
+                per.setdefault(t["TeeType"], []).append(d)
+    return {tee: (round(sum(ds) * M_TO_YD), len(ds)) for tee, ds in per.items() if len(ds) == len(holes)}
 
 
 def find(courses_dirs: str | Path | list, course_name: str | None, folder: str | None = None) -> Path | None:

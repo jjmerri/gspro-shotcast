@@ -344,6 +344,16 @@ def _tee_yards(players: list[dict[int, Counter]], card: set[int]) -> int | None:
     return totals.pop() if len(totals) == 1 else None
 
 
+def _course_lengths(db: sqlite3.Connection) -> dict[tuple[str, str], tuple[int, int]]:
+    """Each course's tee boxes' whole-course lengths from GSPro's course files (store.tee_lengths):
+    (course, tee box) -> (yards, holes)."""
+    try:
+        rows = db.execute("SELECT course, tee, yards, holes FROM tee_lengths").fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {((course or "").casefold(), tee): (yards, holes) for course, tee, yards, holes in rows}
+
+
 def rounds(db: sqlite3.Connection, context: str | None = None,
            gimmes: dict[int, float] | None = None) -> list[dict[str, Any]]:
     out = []
@@ -355,6 +365,7 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
     of_shot = shot_rounds(db)
     from . import hole_replay
     tees = hole_replay.round_tees(db, of_shot)
+    course_lengths = _course_lengths(db)
     for sid, rnd in of_shot.items():
         if sid in named:
             who.setdefault(rnd, set()).add(named[sid])
@@ -398,6 +409,9 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             holes, complete = 9, True
         tee_yards = _tee_yards([lengths[(rnd, p)] for p in played_by or [] if (rnd, p) in lengths],
                                {h["hole"] for h in card["holes"]}) if complete and len(card["holes"]) == holes else None
+        # The tee's full length on the course's scorecard, however much of it this round played.
+        course_yards, course_holes = course_lengths.get(((r["course"] or "").casefold(), tees.get(rnd)),
+                                                        (None, None))
         longest = r["longest_drive"]
         # (a team side's players aren't on record per round, so its stored drive stands)
         if (rnd, r["side"]) in kept or (rnd, r["side"]) in left:
@@ -417,7 +431,7 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             "scramble": [r["scramble_hit"], r["scramble_tries"]], "sand": [r["sand_hit"], r["sand_tries"]],
             "putts": r["putts"], "penalties": r["penalties"], "longest_drive": longest,
             "card": card["holes"], "gimme_ft": gimmes.get(rnd), "tee": tees.get(rnd),
-            "tee_yards": tee_yards,
+            "tee_yards": tee_yards, "course_yards": course_yards, "course_holes": course_holes,
         })
     return out
 

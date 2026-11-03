@@ -691,6 +691,42 @@ def test_course_card_reads_par_and_index_from_gspro_files(tmp_path):
     assert course_card.load(tmp_path, "Pebble Beach") is None
 
 
+def test_course_card_reads_each_tee_boxs_whole_length_from_the_course_file(tmp_path):
+    import json
+
+    from commentator import course_card
+    from commentator.store import Store
+
+    folder = tmp_path / "wynn_gsp"
+    folder.mkdir()
+    (folder / "wynn_gsp.unity3d.csv").write_text(WYNN_CSV, encoding="utf-8")
+
+    def tee(box, metres, on=True):
+        return {"TeeType": box, "Enabled": on, "Distance": metres}
+    holes = [{"HoleNumber": h, "Enabled": True, "Tees": [tee("Blue", 320), tee("Red", 250), tee("AimPoint1", 99),
+                                                         tee("White", 300 if h < 3 else 0)]} for h in (1, 2, 3)]
+    holes.append({"HoleNumber": 4, "Enabled": False, "Tees": [tee("Blue", 999), tee("White", 999)]})
+    holes[2]["Tees"][1]["Enabled"] = False   # no Red box on hole 3
+    (folder / "wynn_gsp.gkd").write_text(json.dumps({"Holes": holes}), encoding="utf-8")
+    (folder / "par3.gkd").write_text(json.dumps({"Holes": holes[:1]}), encoding="utf-8")   # its par-3 course
+    card = course_card.load(tmp_path, "Wynn Golf Club")
+    # Metres to yards, over the course's own holes; a box missing one isn't the course's length.
+    assert card.lengths == {"Blue": (1050, 3)}
+
+    store = Store(None)
+    store.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes) VALUES (1, 1, '2026-10-01', 'Wynn Golf Club', 'Ann', 18)")
+    store.record_course_tees("Wynn Golf Club", card)
+    assert [tuple(r) for r in store.db.execute("SELECT tee, yards, holes FROM tee_lengths")] == [("Blue", 1050, 3)]
+    # A course kept before lengths were is filled again by the startup backfill.
+    assert store.courses_without_tees() == []
+    store.db.execute("DELETE FROM tee_lengths")
+    assert store.courses_without_tees() == ["Wynn Golf Club"]
+    # One whose file has no box on every hole isn't read again at each start.
+    card.lengths = {}
+    store.record_course_tees("Wynn Golf Club", card)
+    assert store.courses_without_tees() == []
+
+
 DETAILS = ("Test Links|Someone|1010|A scenic place, links style.|Erin, WI|1|1|72|"
            "5|4|4|4|4|3|5|4|3|4|4|4|3|5|4|3|4|5|"
            "13|7|11|9|15|1|5|17|4|14|10|18|2|12|16|8|6|3|"

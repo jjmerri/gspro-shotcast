@@ -300,6 +300,54 @@ def test_a_round_s_length_from_its_tees_sums_its_holes_labels_when_all_are_read(
     assert lengths() == {"Ann": 1100, "Bob": None}
 
 
+def test_a_round_has_its_tee_boxs_whole_course_length_from_the_course_file(tmp_path, monkeypatch):
+    from commentator import hole_replay
+
+    path, db = _db(tmp_path)
+    _shot(db, "Ann", ts=10, course="Pebble", hole="Hole 1, par 4", shot_number=1)
+    db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, complete, scores, hole_pars)"
+               " VALUES (1, 100, '2026-10-01', 'Pebble', 'Ann', 9, 1, '{\"1\": 4}', '{\"1\": 4}')")
+    db.execute("INSERT INTO tee_lengths VALUES ('PEBBLE', 'Blue', 6115, 18), ('Pebble', 'Red', 5000, 18)")
+    db.commit()
+    monkeypatch.setattr(hole_replay, "round_tees", lambda db, of_shot: dict.fromkeys(of_shot.values(), "Blue"))
+    with stats_web.connect(path) as ro:
+        r = stats_web.rounds(ro)[0]
+    assert (r["tee"], r["course_yards"], r["course_holes"]) == ("Blue", 6115, 18)
+
+
+def test_the_pages_tee_line_gives_the_whole_course_and_the_nine_played():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = re.search(r"\nconst teeName = .*?\nfunction teeText\(.*?\n}\n", page, re.S).group(0)
+    card = lambda holes: [{"hole": h} for h in holes]
+    cases = [
+        ({"tee": "Blue", "holes": 9, "card": card(range(1, 10)), "tee_yards": 3170, "course_yards": 6115,
+          "course_holes": 18}, False),
+        ({"tee": "Blue", "holes": 9, "card": card(range(10, 19)), "tee_yards": 3170, "course_yards": 6115,
+          "course_holes": 18}, True),
+        ({"tee": "Blue", "holes": 18, "card": card(range(1, 19)), "tee_yards": 6100, "course_yards": 6115,
+          "course_holes": 18}, False),
+        ({"tee": "Blue", "holes": 9, "card": card(range(10, 19)), "tee_yards": 3170, "course_yards": None,
+          "course_holes": None}, False),
+        ({"tee": "Blue", "holes": 9, "card": card(range(1, 10)), "tee_yards": 3100, "course_yards": 3105,
+          "course_holes": 9}, False),   # a nine-hole course, played through
+        ({"tee": "Par3", "holes": 1, "card": card([1]), "tee_yards": 116, "course_yards": None,
+          "course_holes": None}, False),
+    ]
+    script = fns + "console.log(JSON.stringify(%s.map(([r, s]) => teeText(r, s))))" % json.dumps(cases)
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, text=True, check=True).stdout)
+    assert got == ["Blue tees · 6,115 yds · front 9: 3,170", "Blue tees · 6,115 yds",
+                   "Blue tees · 6,115 yds", "Blue tees · back 9: 3,170 yds", "Blue tees · 3,105 yds",
+                   "Par 3 tees · 1 hole: 116 yds"]
+
+
 def test_a_round_card_takes_its_longest_drive_from_its_shots(tmp_path):
     """Stored as none at the round's end (the club wasn't read), the drive counts once a rule does."""
     path, db = _db(tmp_path)

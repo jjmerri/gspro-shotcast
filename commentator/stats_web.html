@@ -1151,12 +1151,27 @@ function drawLogo(g, x, y, size) {
   g.restore();
 }
 
-// A round as an image to post: course, player, score, the card, and the round's numbers.
 // GSPro's tee box names: Black, Blue, ... and "Par3" for its par-3 course tees.
 const teeName = t => t === "Par3" ? "Par 3 tees" : `${t} tees`;
-// The tees and the round's length from them, e.g. "Blue tees · 6,412 yds" (either alone when that's all known).
-const teeText = r => [r.tee && teeName(r.tee), r.tee_yards && `${r.tee_yards.toLocaleString("en-US")} yds`].filter(Boolean).join(" · ");
+// The tees and their length on the course's scorecard, e.g. "Blue tees · 6,115 yds", plus the
+// length played when the round covered part of the course: "· front 9: 3,170" (not on the share
+// card: `short`). Without the scorecard's, the length played names its nine.
+const yds = n => n.toLocaleString("en-US");
+function ninePart(r) {
+  const h = (r.card || []).map(x => x.hole);
+  if (h.length === 9 && h.every(n => n <= 9)) return "front 9";
+  if (h.length === 9 && h.every(n => n >= 10)) return "back 9";
+  return `${h.length} hole${h.length === 1 ? "" : "s"}`;
+}
+function teeText(r, short = false) {
+  const partial = r.tee_yards && (r.course_holes ? (r.card || []).length < r.course_holes : r.holes < 18);
+  let len = null;
+  if (r.course_yards) len = `${yds(r.course_yards)} yds` + (partial && !short ? ` · ${ninePart(r)}: ${yds(r.tee_yards)}` : "");
+  else if (r.tee_yards) len = partial ? `${ninePart(r)}: ${yds(r.tee_yards)} yds` : `${yds(r.tee_yards)} yds`;
+  return [r.tee && teeName(r.tee), len].filter(Boolean).join(" · ");
+}
 
+// A round as an image to post: course, player, score, the card, and the round's numbers.
 function shareCard(r) {
   const holes = r.card || [], nines = [holes.slice(0, 9), holes.slice(9, 18)].filter(n => n.length);
   const W = 1080, cell = 84, left = 140, top = 360, rowH = 54, block = rowH * 3 + 30;
@@ -1173,7 +1188,7 @@ function shareCard(r) {
   font(30); text(r.date || "", W - 60, 70, "#8fa59b", "right");
   font(58, 700); text(r.course || "", 60, 150);
   font(38, 500); text(sideName(r) + (r.format && r.format !== "individual" ? ` · ${r.format.replace("_", " ")}` : "")
-                       + (teeText(r) ? ` · ${teeText(r)}` : ""), 60, 205, "#8fa59b");
+                       + (teeText(r, true) ? ` · ${teeText(r, true)}` : ""), 60, 205, "#8fa59b");
   font(120, 700); text(String(r.gross ?? "–"), 60, 330);
   const grossW = g.measureText(String(r.gross ?? "–")).width;
   font(64, 600); text(r.to_par === null || r.to_par === undefined ? "" : toPar(r.to_par), 60 + grossW + 30, 330,

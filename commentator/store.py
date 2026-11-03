@@ -105,6 +105,14 @@ CREATE TABLE IF NOT EXISTS course_tees (            -- each tee's rating and slo
     hole_index TEXT,                             -- JSON: hole number -> stroke index
     PRIMARY KEY (course, tee)
 );
+CREATE TABLE IF NOT EXISTS tee_lengths (           -- each tee box's whole-course length, from GSPro's course files
+    course TEXT NOT NULL,                        -- as the season names the course (shots.course)
+    tee TEXT NOT NULL,                           -- the course file's tee box: Black, Blue, ..., Par3; '' when
+                                                 -- its file was read and no box had every hole (not to read again)
+    yards INTEGER NOT NULL,                      -- summed over its holes
+    holes INTEGER NOT NULL,
+    PRIMARY KEY (course, tee)
+);
 CREATE TABLE IF NOT EXISTS lines (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES sessions(id),
@@ -782,9 +790,13 @@ class Store:
     def record_course_tees(self, course: str, card: Any) -> None:
         """A course's tees (course_card.CourseCard): rating, slope, yards and par, for our own handicap
         index. Replaces what was kept for the course, so a corrected course file wins."""
-        if not course or not (card.yards or card.ratings):
+        if not course or not (card.yards or card.ratings or getattr(card, "lengths", None)):
             return
         course = self.course_name(course)
+        self.db.execute("DELETE FROM tee_lengths WHERE course = ? COLLATE NOCASE", (course,))
+        lengths = getattr(card, "lengths", None) or {"": (0, 0)}
+        self.db.executemany("INSERT INTO tee_lengths VALUES (?, ?, ?, ?)",
+                            [(course, tee, y, n) for tee, (y, n) in lengths.items()])
         par = json.dumps({str(h): p for h, p in card.par.items()})
         index = json.dumps({str(h): i for h, i in card.index.items()})
         rows = []
@@ -799,10 +811,12 @@ class Store:
         self.db.commit()
 
     def courses_without_tees(self) -> list[str]:
-        """Courses with a round on record but no tees kept yet, to fill from GSPro's course files."""
+        """Courses with a round on record but no tees (or tee lengths) kept yet, to fill from GSPro's
+        course files."""
         return [r[0] for r in self.db.execute(
-            "SELECT DISTINCT course FROM rounds WHERE course IS NOT NULL AND NOT EXISTS"
-            " (SELECT 1 FROM course_tees t WHERE t.course = rounds.course COLLATE NOCASE)")]
+            "SELECT DISTINCT course FROM rounds WHERE course IS NOT NULL AND (NOT EXISTS"
+            " (SELECT 1 FROM course_tees t WHERE t.course = rounds.course COLLATE NOCASE) OR NOT EXISTS"
+            " (SELECT 1 FROM tee_lengths t WHERE t.course = rounds.course COLLATE NOCASE))")]
 
     def set_shot_position(self, shot_id: int | None, start: tuple) -> None:
         """Where GSPro's log had the ball for this shot, once its score line arrived after it was recorded."""
