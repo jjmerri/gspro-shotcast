@@ -1112,6 +1112,76 @@ class Round:
         own = [(s, sum(self.card_score(s, q) - self.par[q] for q in seqs)) for s in sides]
         return team_total, len(seqs), own
 
+    COMEBACK_SHOTS = 3   # a new leader who was this far back earlier in the round has come back
+
+    def _competitors(self) -> list[tuple[str, list[Side]]]:
+        """Who's racing on the card: each team in a league best ball or team sum, else each side."""
+        if self.format in ("best_ball", "aggregate"):
+            groups: dict[str, list[Side]] = {}
+            for s in self.sides:
+                groups.setdefault(s.team or s.key, []).append(s)
+            if any(len(g) > 1 for g in groups.values()):
+                return [(self.league.team_name(k) if g[0].team else g[0].label, g) for k, g in groups.items()]
+        return [(s.label, [s]) for s in self.sides]
+
+    def lead_change_facts(self, through: int, extra: tuple[str, int, int] | None = None) -> list[str]:
+        """A change at the top of the card with hole `through` (a new outright leader, a tie for the lead,
+        a tie broken), and a comeback when the new leader was COMEBACK_SHOTS or more back earlier on.
+        Totals strokes, not to par (par cancels out between sides), net when every side's handicap
+        strokes are known in a league round. `extra` = (side key, seq, strokes): a pre-built wrap
+        branch's score for a hole the card doesn't have yet. Nothing unless every competitor has a score
+        on every hole through `through`."""
+        comps = self._competitors()
+        if through < 2 or len(comps) < 2:
+            return []
+        sides = [s for _, g in comps for s in g]
+        net = self.is_league and all(s.strokes is not None and (s.strokes == 0 or s.hole_strokes) for s in sides)
+
+        def hole(s: Side, q: int) -> int | None:
+            v = extra[2] if extra and extra[0] == s.key and extra[1] == q else self.card_score(s, q)
+            if v is None:
+                return None
+            got = s.hole_strokes.get(q, 0)
+            # The league's blow-up cap, as team_net and the leaderboard score it.
+            if self.week_card and self.par.get(q) and (cap := handicap.hole_cap(self.week_card, self.par[q], got)) is not None:
+                v = min(v, cap)
+            return v - (got if net else 0)
+
+        totals: list[list[int]] = []   # per competitor: running total after each hole 1..through
+        for _, g in comps:
+            run, out = 0, []
+            for q in range(1, through + 1):
+                vals = [hole(s, q) for s in g]
+                if None in vals:
+                    return []
+                run += min(vals) if self.format == "best_ball" and len(g) > 1 else sum(vals)
+                out.append(run)
+            totals.append(out)
+
+        def leaders(i: int) -> list[int]:
+            low = min(t[i] for t in totals)
+            return [c for c, t in enumerate(totals) if t[i] == low]
+
+        before, now = leaders(through - 2), leaders(through - 1)
+        if set(before) == set(now):
+            return []
+        names = [n for n, _ in comps]
+        card = f"on the card ({'net' if net else 'gross'})" if self.is_league else "on the card"
+        was = (f"{names[before[0]]} led alone" if len(before) == 1
+               else f"{_join([names[c] for c in before])} were tied for the lead")
+        if len(now) == 1:
+            lead = now[0]
+            margin = min(t[through - 1] for c, t in enumerate(totals) if c != lead) - totals[lead][through - 1]
+            fact = (f"Lead change {card} with this hole: {names[lead]} now leads outright, by {margin} "
+                    f"shot{'s' if margin != 1 else ''}, after {through} holes. Before this hole {was}.")
+            back = max(totals[lead][i] - min(t[i] for t in totals) for i in range(through - 1))
+            facts = [fact]
+            if back >= self.COMEBACK_SHOTS:
+                facts.append(f"Comeback: {names[lead]} was {back} shots off the lead earlier in this round.")
+            return facts
+        return [f"Tied for the lead {card} after {through} holes: {_join([names[c] for c in now])}. "
+                f"Before this hole {was}."]
+
     def _capped_score(self, side: Side, seq: int) -> int:
         score = self.card_score(side, seq)
         if self.week_card:

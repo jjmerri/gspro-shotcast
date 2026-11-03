@@ -203,6 +203,10 @@ ANGLES = [
 PRACTICE_ANGLES = [a for a in ANGLES if "standings" not in a]
 
 
+LEAD_CHANGE = (" If the facts give a lead change, a tie for the lead or a comeback, that's the headline: lead "
+               "with it, excitement 8 out of 10.")
+
+
 def segment_prompt(*, previous_hole: str | None, current_hole: str, recap: list[str], recent_lines,
                    result: list[str] | None = None) -> tuple[str, str]:
     facts_text = "\n".join(
@@ -216,7 +220,7 @@ def segment_prompt(*, previous_hole: str | None, current_hole: str, recap: list[
         "Between holes: a short two-or-three line exchange. Sum up the hole that just finished if there "
         "was anything notable, then bring in the next one however suits the moment (not the same way the "
         "last hole was introduced), using standings or storylines where they fit."
-        + BREVITY
+        + LEAD_CHANGE + BREVITY
         + "\n\nFACTS:\n" + facts_text
         + _recent_block(recent_lines)
     )
@@ -235,7 +239,7 @@ def wrap_recap_prompt(*, finished_hole: str | None, result: list[str], recap: li
     prompt = (
         "The hole just finished on the score in the facts. Give a short two-line exchange between the "
         "commentators summing up how it played out and the result. Don't mention or tee up the next hole."
-        "\n\nFACTS:\n" + facts_text
+        + LEAD_CHANGE + "\n\nFACTS:\n" + facts_text
         + _recent_block(recent_lines)
     )
     return prompt, facts_text
@@ -557,7 +561,7 @@ def preshot_hazard_prompt(*, player, hole, facts: list[str], speaker: str) -> tu
 def preshot_branch_prompt(
     *, player, team, hole, facts: list[str], recent_lines, speaker: str,
     second: str | None = None, is_putt: bool = False, named: dict[str, str] | None = None, lag: bool = False,
-    putt_feet: float | None = None, reply: bool = False,
+    putt_feet: float | None = None, reply: bool = False, putt_to_par: int | None = None,
 ) -> tuple[str, str]:
     """The pre-rendered branches (mid-flight line per flight, reaction per finish), written now so the
     call is instant once the ball moves. Text-only: it runs beside the setup call, so there's no image
@@ -572,7 +576,7 @@ def preshot_branch_prompt(
             + " says the instant the ball stops, at most 12 words each, written now for each way it can finish. "
             "Each value is the spoken words themselves, never a speaker name or label. "
             "Match the putt number in the facts (a made first putt is a one-putt, a made second putt is a two-putt, "
-            "and so on). holed (it drops" + holed_putt_cue(putt_feet) + "), short (left short of the hole), past (misses and runs past or by), "
+            "and so on). holed (it drops" + holed_putt_cue(putt_feet, putt_to_par) + "), short (left short of the hole), past (misses and runs past or by), "
             "lip_out (it catches the cup and spins out: react to how close it came, without saying how far "
             "it finished or what's left; if the facts count earlier lip-outs this round, it can say this is another, "
             "and which one counting this), lip_in (it drops, but only just, catching the edge on the way in). "
@@ -581,7 +585,7 @@ def preshot_branch_prompt(
             + (" gimme (a long lag that stops inside the gimme circle, conceded as a tap-in: credit the lag "
                "and say what score it leaves, without claiming it dropped)." if lag else "")
             + (f' holed_reply ({second} jumps in straight after the holed call, excitement '
-               f"{holed_putt_level(putt_feet) or 6} out of 10 too, with their own reaction rather than a repeat "
+               f"{holed_putt_level(putt_feet, putt_to_par) or 6} out of 10 too, with their own reaction rather than a repeat "
                "of it; at most 12 words)." if reply and second else "")
             + "\n\nFACTS:\n" + facts_text + recent
         )

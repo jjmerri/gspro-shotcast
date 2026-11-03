@@ -95,17 +95,36 @@ LONG_HOLED_PUTT_FEET = 20   # ...a big moment
 MONSTER_HOLED_PUTT_FEET = 40   # ...as big as putting gets
 
 
-def holed_putt_level(feet: float | None) -> int | None:
-    """How excited (out of 10) the booth should be if a putt from this far drops; None for a routine make."""
-    if not feet or feet <= GOOD_HOLED_PUTT_FEET:
+REPLY_PUTT_LEVEL = 8   # a holed putt this big gets the colour voice's reply too (a 20-footer, any eagle)
+TAP_IN_FEET = 3   # a putt inside this is a tap-in: the shot before it was the moment
+
+
+def putt_to_par(shot_number: int | None, par: int | None) -> int | None:
+    """What holing this putt scores on the hole against par (-1 a birdie, -2 an eagle); None unknown."""
+    return shot_number - par if shot_number and par else None
+
+
+def holed_putt_level(feet: float | None, to_par: int | None = None) -> int | None:
+    """How excited (out of 10) the booth should be if a putt from this far drops; None for a routine make.
+    `to_par` is what holing it scores on the hole: a putt for eagle or better is always a big call (a
+    tap-in one less, the shot before it got the hype), and one for birdie is a notch above the same
+    putt for par, but never a tap-in. Unknown distance (0/None) counts as makeable for those."""
+    length = (None if not feet or feet <= GOOD_HOLED_PUTT_FEET
+              else 10 if feet > MONSTER_HOLED_PUTT_FEET else 8 if feet > LONG_HOLED_PUTT_FEET else 6)
+    if to_par is None or to_par > -1:
+        return length
+    tap_in = bool(feet) and feet < TAP_IN_FEET
+    if to_par <= -2:
+        return 8 if tap_in else 10 if length else 9
+    if tap_in:
         return None
-    return 10 if feet > MONSTER_HOLED_PUTT_FEET else 8 if feet > LONG_HOLED_PUTT_FEET else 6
+    return min(length + 1, 10) if length else 6
 
 
-def holed_putt_cue(feet: float | None) -> str:
+def holed_putt_cue(feet: float | None, to_par: int | None = None) -> str:
     """The pre-written "holed" line's excitement cue. A number, not adjectives, so the model scales
     its call without echoing the cue's wording."""
-    level = holed_putt_level(feet)
+    level = holed_putt_level(feet, to_par)
     return f"; excitement {level} out of 10 if it drops" if level else ""
 
 
@@ -154,13 +173,16 @@ SEASON_BEST_DRIVE_LEVEL = 7
 LEAGUE_BEST_DRIVE_LEVEL = 8
 
 
-def holed_putt_score(score: float, hud: Hud, tags: list[str], notable: float, big: float) -> float:
+def holed_putt_score(score: float, hud: Hud, tags: list[str], notable: float, big: float,
+                     to_par: int | None = None) -> float:
     """A putt that drops is never routine: a makeable one always gets a word, and one from outside
-    20 feet (or a fast, long roll when the distance wasn't read) is a big moment. A tap-in stays as is."""
+    20 feet (or a fast, long roll when the distance wasn't read) is a big moment. So is any putt for
+    eagle or better; a birdie always gets a word. Any other tap-in stays as is."""
     feet = _to_feet(hud.to_pin)
-    if (feet is not None and feet > LONG_HOLED_PUTT_FEET) or (feet is None and "long_putt" in tags):
+    if (feet is not None and feet > LONG_HOLED_PUTT_FEET) or (feet is None and "long_putt" in tags) \
+            or (to_par is not None and to_par <= -2):
         return max(score, big)
-    if feet is None or feet >= 3:
+    if feet is None or feet >= TAP_IN_FEET or to_par == -1:
         return max(score, notable)
     return score
 

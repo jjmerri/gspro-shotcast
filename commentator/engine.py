@@ -29,8 +29,9 @@ from .health import Health, RoundCounters, check_changed, check_files, evaluate_
 from .grounding import (SCENERY, bare_acknowledgement, check_line, meta_talk, ngrams, note_keywords, repeats, uses_note,
                         wrong_round_score)
 from .hud import NAME_DARK, Hud, Scorecard, describe, hole_key, name_sig_changed
-from .interest import (LEAGUE_BEST_DRIVE_LEVEL, LONG_HOLED_PUTT_FEET, SEASON_BEST_DRIVE_LEVEL,
-                       approach_gimme_level, holed_out_level, holed_putt_score, score_shot,
+from .interest import (LEAGUE_BEST_DRIVE_LEVEL, REPLY_PUTT_LEVEL, SEASON_BEST_DRIVE_LEVEL,
+                       approach_gimme_level, holed_out_level, holed_putt_level, holed_putt_score,
+                       putt_to_par, score_shot,
                        short_game_gimme_level, stuffed_level)
 from .league import League, course_match_score
 from .llm import LLMClient
@@ -2408,7 +2409,8 @@ class Engine:
         r = self.round
         if not r or r.ended or r.seq <= 1:
             return []
-        return self._hole_penalty_facts(r.seq - 1) + self._par_type_facts(r.seq - 1)
+        return (self._hole_penalty_facts(r.seq - 1) + self._par_type_facts(r.seq - 1)
+                + r.lead_change_facts(r.seq - 1))
 
     def _prevoicing(self) -> bool:
         return getattr(self.speech, "prevoicing", True)
@@ -2465,7 +2467,8 @@ class Engine:
             # "round" mode: a recap spans several lies, so skip the single-finishing-lie check that
             # would otherwise reject "found the green, then the rough".
             result = (other_facts + [self._score_fact(side, strokes, par)] + self._hole_penalty_facts(r.seq)
-                      + self._par_type_facts(r.seq, (side.key, r.seq, strokes, par)) + theme + roster)
+                      + self._par_type_facts(r.seq, (side.key, r.seq, strokes, par))
+                      + r.lead_change_facts(r.seq, (side.key, r.seq, strokes)) + theme + roster)
             user, facts = wrap_recap_prompt(finished_hole=finished, result=result,
                                             recap=recap, recent_lines=self.state.recent_lines)
             return self._grounded(await self._generate("segment", self.segment_llm, user, []), facts, "round", False)[0]
@@ -4123,8 +4126,10 @@ class Engine:
         lag_feet = self.cfg.commentary.gimme_lag_feet
         lag = is_putt and lag_feet > 0 and (to_yards(hud.to_pin) or 0) * 3 >= lag_feet
         putt_feet = (to_yards(hud.to_pin) or 0) * 3 if is_putt else None
-        # A long putt that drops gets the colour voice's reply too, so the booth reacts together.
-        reply = bool(putt_feet and putt_feet > LONG_HOLED_PUTT_FEET and second)
+        to_par = putt_to_par(hud.shot_number, self.current_par) if is_putt else None
+        # A big putt that drops (a long one, or any for eagle) gets the colour voice's reply too, so
+        # the booth reacts together.
+        reply = bool(is_putt and second and (holed_putt_level(putt_feet, to_par) or 0) >= REPLY_PUTT_LEVEL)
         line_user, facts_text = preshot_line_prompt(
             player=who, team=team, hole=self.state.current_hole, facts=facts,
             recent_lines=self.state.recent_lines, speaker=self.speakers[0], second=second, is_putt=is_putt,
@@ -4136,7 +4141,7 @@ class Engine:
             recent_lines=self.state.recent_lines, speaker=name(self.speakers[0]),
             second=name(second) if second else None, is_putt=is_putt,
             named=minimap.named(to_yards(hud.to_pin)) if minimap else None, lag=lag,
-            putt_feet=putt_feet, reply=reply,
+            putt_feet=putt_feet, reply=reply, putt_to_par=to_par,
         )
         # Three concurrent calls: the spoken line (live_llm, text) and the branches (flight_llm, text)
         # always run; the hazard read (preshot_llm, vision) runs only for a full shot with an image to
@@ -5123,7 +5128,8 @@ class Engine:
                              time.monotonic() - impact)
                     if holed:
                         score = holed_putt_score(score, before, tags, c.interest_threshold,
-                                                 c.big_moment_threshold)
+                                                 c.big_moment_threshold,
+                                                 putt_to_par(before.shot_number, shot_par))
             else:
                 # No log attribution (practice/range mode, or an unmapped multiplayer slot): fall back to
                 # the on-screen result banner. It only says the hole ENDED - a conceded miss inside the

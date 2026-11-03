@@ -5032,3 +5032,41 @@ def test_round_end_keeps_the_end_of_gspros_log(tmp_path, monkeypatch):
     kept = sorted(p.name for p in (tmp_path / "logs").glob("gspro-*.log"))
     assert len(kept) == engine_mod.KEEP_GSPRO_LOGS and kept[0] == "gspro-2026-01-04-120000.log"
     assert (tmp_path / "logs" / kept[-1]).read_bytes() == b"Shot Fired\n"
+
+
+def test_lead_change_facts_call_a_new_leader_a_tie_and_a_comeback():
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="X", scheduled_format=None, holes=5,
+              is_league=False)
+    r.set_log_scores("MikeD", {1: 7, 2: 4, 3: 3, 4: 3})
+    r.set_log_scores("Sarah", {1: 4, 2: 4, 3: 4, 4: 5})
+    assert r.lead_change_facts(3) == []          # Sarah still leads
+    assert r.lead_change_facts(4) == ["Tied for the lead on the card after 4 holes: Mike and Sarah. "
+                                      "Before this hole Sarah led alone."]
+    # A wrap branch built while Mike putts on 5, with Sarah already in with a 5.
+    r.set_log_scores("Sarah", {1: 4, 2: 4, 3: 4, 4: 5, 5: 5})
+    assert r.lead_change_facts(5, (r.side_for("Mike").key, 5, 3)) == [
+        "Lead change on the card with this hole: Mike now leads outright, by 2 shots, after 5 holes. "
+        "Before this hole Mike and Sarah were tied for the lead.",
+        "Comeback: Mike was 3 shots off the lead earlier in this round."]
+    assert r.lead_change_facts(5) == []          # Mike's 5 isn't on the card yet
+
+
+def test_lead_change_facts_race_the_teams_in_a_scramble():
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah", "Josh", "Corey"], course="X",
+              scheduled_format=None, holes=3, is_league=False)
+    r.play_scramble([["MikeD", "Sarah"], ["Josh", "Corey"]])
+    r.set_log_scores("MikeD", {1: 4, 2: 5})
+    r.set_log_scores("Josh", {1: 5, 2: 3})
+    assert r.lead_change_facts(2) == [
+        "Lead change on the card with this hole: Josh & Corey now leads outright, by 1 shot, after 2 holes. "
+        "Before this hole MikeD & Sarah led alone."]
+
+
+def test_lead_change_facts_count_a_blow_up_hole_at_the_leagues_cap():
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="X", scheduled_format=None, holes=3,
+              is_league=False)
+    r.par = {1: 4, 2: 4, 3: 4}
+    r.week_card = {"handicap": {"max_hole_score": {"amountOverPar": 2, "isGross": True}}}
+    r.set_log_scores("MikeD", {1: 3, 2: 10})     # the 10 counts as a 6
+    r.set_log_scores("Sarah", {1: 4, 2: 8})      # ...and the 8
+    assert r.lead_change_facts(2) == []          # Mike still leads by one

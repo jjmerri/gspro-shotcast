@@ -268,6 +268,17 @@ def test_holed_putt_cue_scales_with_length():
     assert "10 out of 10" in holed_putt_cue(45)
 
 
+def test_a_putt_for_eagle_or_birdie_is_a_bigger_call_than_the_same_putt_for_par():
+    from commentator.interest import holed_putt_level, holed_putt_score
+    assert [holed_putt_level(ft, -2) for ft in (2, 8, 15, None)] == [8, 9, 10, 9]   # eagle
+    assert [holed_putt_level(ft, -1) for ft in (2, 8, 15, 25, 45, None)] == [None, 6, 7, 9, 10, 6]   # birdie
+    assert [holed_putt_level(ft, 0) for ft in (8, 15, 25)] == [None, 6, 8]          # par: length only
+    tap_in = Hud(lie="green", to_pin="2 feet")
+    assert holed_putt_score(0.1, tap_in, [], 0.5, 0.9, to_par=-2) == 0.9
+    assert holed_putt_score(0.1, tap_in, [], 0.5, 0.9, to_par=-1) == 0.5
+    assert holed_putt_score(0.1, tap_in, [], 0.5, 0.9, to_par=0) == 0.1
+
+
 def test_player_matching_tolerates_ocr_noise():
     league = League.load("data/league.example.json")
     assert league.match_player("MikeD") == "Mike"
