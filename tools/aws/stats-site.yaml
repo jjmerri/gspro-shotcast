@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   GSPro Shotcast stats page: a private S3 bucket served through CloudFront behind one shared
-  username and password, plus an IAM user that can only upload to the bucket.
-  See docs/tracking.md#sharing-the-stats-page.
+  username and password, plus an IAM user that can only upload to the bucket, and the live chat
+  that feeds the booth (a small function and table under /chat/, behind the same password).
+  See docs/tracking.md#sharing-the-stats-page and docs/tracking.md#live-chat.
 
 Parameters:
   SiteUser:
@@ -35,6 +36,13 @@ Parameters:
     Description: >-
       Days a browser stays signed in after entering the password (a cookie; browsers cap it at
       400). Changing the password signs every browser out.
+
+  ChatKeepHours:
+    Type: Number
+    Default: 6
+    MinValue: 1
+    MaxValue: 168
+    Description: Hours a live chat message is kept (the table deletes it after).
 
 Conditions:
   HasDomain: !Not [!Equals [!Ref DomainName, ""]]
@@ -152,6 +160,201 @@ Resources:
             Fn::Sub: "${SiteUser}:${SitePassword}"
           Days: !Ref LoginDays
 
+  # ---- Live chat (docs/tracking.md#live-chat) ---------------------------------------------------
+  # Viewers post from the page (POST /chat/messages) and read it (GET); the booth heartbeats into the
+  # table while it's commentating a round, reads new messages straight from the table, and marks the
+  # ones it answered. Rows: pk "booth"/sk "state" (the heartbeat), pk "msg"/sk "<ms>-<rand>" (a
+  # message), pk "rate"/sk "<key>" (rate-limit counts). All but the heartbeat expire on their ttl.
+  ChatTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  ChatRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: chat
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query, dynamodb:UpdateItem]
+                Resource: !GetAtt ChatTable.Arn
+
+  Chat:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt ChatRole.Arn
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE: !Ref ChatTable
+          # CloudFront sends this on every request; anything without it (the function URL called
+          # directly, around the password) is turned away.
+          ORIGIN_SECRET: !Select [2, !Split ["/", !Ref AWS::StackId]]
+          KEEP_HOURS: !Sub "${ChatKeepHours}"
+      Code:
+        ZipFile: |
+          import base64, json, os, re, secrets, time
+          import boto3
+
+          db = boto3.client("dynamodb")
+          TABLE = os.environ["TABLE"]
+          KEEP = int(os.environ["KEEP_HOURS"]) * 3600
+          BOOTH_FRESH = 90        # seconds a booth heartbeat counts as on air
+          NAME_MAX, TEXT_MAX, SHOWN = 24, 200, 50
+          # (window seconds, most posts in it): per viewer, then everyone together.
+          PER_IP = ((10, 2), (600, 30))
+          PER_ALL = ((60, 60),)
+
+          def reply(status, body):
+              return {"statusCode": status, "headers": {"content-type": "application/json", "cache-control": "no-store"},
+                      "body": json.dumps(body)}
+
+          def clean(text, most):
+              text = re.sub(r"[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202e\u2066-\u2069]", " ", str(text or ""))
+              return " ".join(text.split())[:most]
+
+          def on_air(now):
+              item = db.get_item(TableName=TABLE, Key={"pk": {"S": "booth"}, "sk": {"S": "state"}}).get("Item")
+              return bool(item) and item.get("on", {}).get("BOOL") is True and now - int(item["at"]["N"]) <= BOOTH_FRESH
+
+          def count(key, window, limit, now):
+              """One more post in key's current window, unless it's full: False when it is."""
+              try:
+                  db.update_item(TableName=TABLE, Key={"pk": {"S": "rate"}, "sk": {"S": f"{key}#{window}#{now // window}"}},
+                                 UpdateExpression="ADD n :one SET #t = :ttl",
+                                 ConditionExpression="attribute_not_exists(n) OR n < :limit",
+                                 ExpressionAttributeNames={"#t": "ttl"},
+                                 ExpressionAttributeValues={":one": {"N": "1"}, ":limit": {"N": str(limit)},
+                                                            ":ttl": {"N": str(now + window + 3600)}})
+                  return True
+              except db.exceptions.ConditionalCheckFailedException:
+                  return False
+
+          def viewer_ip(event):
+              addr = (event.get("headers") or {}).get("cloudfront-viewer-address", "")
+              return addr.rsplit(":", 1)[0] if addr else event.get("requestContext", {}).get("http", {}).get("sourceIp", "?")
+
+          def message(item):
+              return {"id": item["sk"]["S"], "name": item["name"]["S"], "text": item["text"]["S"],
+                      "at": int(item["sk"]["S"].split("-")[0]) / 1000, "aired": item.get("aired", {}).get("BOOL") is True}
+
+          def messages(now, after):
+              args = {"TableName": TABLE, "KeyConditionExpression": "pk = :p AND sk > :s",
+                      "ExpressionAttributeValues": {":p": {"S": "msg"}, ":s": {"S": after or f"{(now - KEEP) * 1000:013d}"}},
+                      "ScanIndexForward": False, "Limit": SHOWN}
+              items = db.query(**args).get("Items", [])
+              return [message(i) for i in reversed(items) if int(i["ttl"]["N"]) > now]
+
+          def post(event, now):
+              body = event.get("body") or ""
+              if event.get("isBase64Encoded"):
+                  body = base64.b64decode(body).decode("utf-8", "replace")
+              try:
+                  data = json.loads(body)
+              except ValueError:
+                  data = None
+              if not isinstance(data, dict):
+                  return reply(400, {"error": "Send a name and a message."})
+              name, text = clean(data.get("name"), NAME_MAX), clean(data.get("text"), TEXT_MAX)
+              if not name or not text:
+                  return reply(400, {"error": "Send a name and a message."})
+              if not on_air(now):
+                  return reply(409, {"error": "The booth is off air."})
+              ip = viewer_ip(event)
+              if not all(count(f"ip#{ip}", w, n, now) for w, n in PER_IP):
+                  return reply(429, {"error": "Slow down a little: try again in a few seconds."})
+              if not all(count("all", w, n, now) for w, n in PER_ALL):
+                  return reply(429, {"error": "The chat is busy: try again in a minute."})
+              sk = f"{int(time.time() * 1000):013d}-{secrets.token_hex(3)}"
+              item = {"pk": {"S": "msg"}, "sk": {"S": sk}, "name": {"S": name}, "text": {"S": text},
+                      "ttl": {"N": str(now + KEEP)}}
+              db.put_item(TableName=TABLE, Item=item)
+              return reply(200, {"message": message(item)})
+
+          def handler(event, context):
+              headers = event.get("headers") or {}
+              if not secrets.compare_digest(headers.get("x-chat-origin", ""), os.environ["ORIGIN_SECRET"]):
+                  return reply(403, {"error": "Forbidden"})
+              http = event.get("requestContext", {}).get("http", {})
+              if not event.get("rawPath", "").rstrip("/").endswith("/chat/messages"):
+                  return reply(404, {"error": "Not found"})
+              now = int(time.time())
+              if http.get("method") == "POST":
+                  return post(event, now)
+              if http.get("method") != "GET":
+                  return reply(405, {"error": "GET or POST"})
+              if not on_air(now):
+                  return reply(200, {"on": False, "messages": []})
+              after = (event.get("queryStringParameters") or {}).get("after") or ""
+              after = after if re.fullmatch(r"\d{13}-[0-9a-f]{6}", after) else ""
+              return reply(200, {"on": True, "messages": messages(now, after)})
+
+  ChatUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt Chat.Arn
+      AuthType: NONE
+
+  ChatUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Chat
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  # Function URLs made since October 2025 need this as well as InvokeFunctionUrl.
+  ChatUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Chat
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+  # What CloudFront passes on to the chat function: the viewer's address (for the rate limits) and
+  # the body's type, never the Host (a function URL answers only to its own) or the password.
+  ChatRequests:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub "${AWS::StackName}-chat"
+        HeadersConfig:
+          HeaderBehavior: whitelist
+          Headers: [CloudFront-Viewer-Address, Content-Type]
+        QueryStringsConfig:
+          QueryStringBehavior: all
+        CookiesConfig:
+          CookieBehavior: none
+
   Distribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -177,6 +380,27 @@ Resources:
             OriginAccessControlId: !GetAtt OriginAccess.Id
             S3OriginConfig:
               OriginAccessIdentity: ""
+          - Id: chat
+            DomainName: !Select [2, !Split ["/", !GetAtt ChatUrl.FunctionUrl]]
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+            OriginCustomHeaders:
+              - HeaderName: X-Chat-Origin
+                HeaderValue: !Select [2, !Split ["/", !Ref AWS::StackId]]
+        # The chat, behind the same password, never cached.
+        CacheBehaviors:
+          - PathPattern: /chat/*
+            TargetOriginId: chat
+            ViewerProtocolPolicy: https-only
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad   # Managed-CachingDisabled
+            OriginRequestPolicyId: !Ref ChatRequests
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt BasicAuth.FunctionMetadata.FunctionARN
         DefaultCacheBehavior:
           TargetOriginId: site
           ViewerProtocolPolicy: redirect-to-https
@@ -234,6 +458,10 @@ Resources:
               - Effect: Allow
                 Action: s3:ListBucket
                 Resource: !GetAtt Bucket.Arn
+              # The live chat: the booth's heartbeat, reading new messages, marking the ones answered.
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:Query, dynamodb:UpdateItem]
+                Resource: !GetAtt ChatTable.Arn
 
 Outputs:
   Url:
@@ -251,6 +479,9 @@ Outputs:
   Region:
     Description: "config.yaml: publish.region"
     Value: !Ref AWS::Region
+  ChatTable:
+    Description: "config.yaml: chat.table"
+    Value: !Ref ChatTable
   UploadUser:
     Description: "aws iam create-access-key --user-name <this>, then the keys go in the PC's .env"
     Value: !Ref Uploader

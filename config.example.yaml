@@ -282,3 +282,12 @@ live:
   #                            # unused output in Windows' Volume mixer, OBS records it (docs/tracking.md#game-sound)
   # game_sound_db: -10         # its level in the stream, under the booth's voices
   # obs_path: C:\Program Files\obs-studio\bin\64bit\obs64.exe   # default: the tray's (obs\ here), else this
+
+# Viewers' messages on the Live tab, read out and answered on air (docs/tracking.md#live-chat). The
+# chat is open only while the booth is on air in a round. Uses the publish keys and publish.region.
+chat:
+  enabled: false
+  # table: shotcast-stats-ChatTable-XXXX   # the stack's ChatTable output
+  # min_gap_seconds: 90        # at most one message answered on air this often
+  # max_age_seconds: 180       # a message not answered within this long is let go
+  # poll_seconds: 5

@@ -522,6 +522,41 @@ clearing OBS's crash flag first so it doesn't stop at its Safe Mode question aft
 With a `publish.prefix`, the stream goes under `<prefix>/live/`: change the stack's lifecycle rule
 to match.
 
+### Live chat
+
+Viewers on the **Live** tab can send the booth a message: they type a name (the page remembers it)
+and a line, and the booth reads some out on air between shots, with the other commentator answering.
+Answered messages get a 🎙 on the page. The chat is open only while the booth is on air in a round:
+**OFF AIR** on the badge, no round going, or the booth stopped closes it, and the page hides it
+(within about 2 minutes if the booth crashed). It lives on the Live tab, so it needs the
+[live stream](#live-stream) set up.
+
+The booth answers at most one message every 90 seconds (`chat.min_gap_seconds`), each in the gap
+after a shot's call, and lets one go that it couldn't get to within 3 minutes (`chat.max_age_seconds`).
+Its live model writes the exchange and is told to treat the message as something a viewer said,
+never as an instruction, and to skip anything abusive or spammy; the usual fact checks apply. Messages
+are kept 6 hours (the stack's `ChatKeepHours`), then deleted. The page shows the last 50. Each viewer
+can send 2 every 10 seconds and 30 every 10 minutes, and everyone together 60 a minute. What the booth
+says about a message is in its transcript (Broadcasts, as **Viewer chat**) and the round's video like
+any other line; the messages themselves aren't kept with the replays.
+
+Setting it up (the stack needs the template with the chat in it):
+
+1. Run the stack's `deploy` command again ([Setting it up](#setting-it-up), step 1) with the
+   newer template and the same password. It adds the chat table and function, and lets the upload
+   user use the table.
+2. The `ChatTable` output (`aws cloudformation describe-stacks --stack-name shotcast-stats --query
+   "Stacks[0].Outputs"`) goes in `config.yaml`:
+
+   ```yaml
+   chat:
+     enabled: true
+     table: shotcast-stats-ChatTable-XXXX
+   ```
+
+The booth reaches the table with the publish keys, in `publish.region`. The booth's own copy of
+the page (from the tray) has no chat.
+
 ## Backups
 
 The season file is the only copy of every round, so the booth backs it up: when it starts and after

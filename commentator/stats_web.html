@@ -73,6 +73,15 @@
   #liveslot .unmute { position:absolute; top:12px; left:12px; background:rgba(0,0,0,.7); color:#fff; border:1px solid var(--line);
                       border-radius:6px; padding:8px 12px; font:inherit; cursor:pointer; }
   #liveslot video { width:100%; max-height:78vh; background:#000; border-radius:8px; }
+  .chat { margin-top:14px; }
+  .chat .log { max-height:260px; overflow-y:auto; margin:6px 0 8px; }
+  .chat .msg { padding:4px 0; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
+  .chat .msg b { color:var(--accent); margin-right:6px; }
+  .chat form { display:flex; flex-wrap:wrap; gap:8px; }
+  .chat input { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; min-width:0; }
+  .chat input[name=name] { flex:0 1 9em; } .chat input[name=text] { flex:1 1 14em; }
+  .chat form button { background:var(--accent); color:var(--bg); border:none; border-radius:6px; padding:7px 14px; font:inherit; cursor:pointer; }
+  .chat .note { color:var(--dim); font-size:13px; min-height:1.2em; margin-top:4px; }
   .empty { color:var(--dim); padding:10px 0; }
   .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:8px 0 14px; }
   select { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; }
@@ -245,7 +254,7 @@ const frac = (pair) => pair && pair[1] ? `${pair[0]}/${pair[1]}` : "–";
 const ordinal = (n) => n + (["th", "st", "nd", "rd"][(n % 100 - 20) % 10] || ["th", "st", "nd", "rd"][n % 100] || "th");
 const holeName = (label) => label ? label.replace(/, \d+ yards$/, "") : "";
 const COLOR_KEYS = new Set(["color"]);
-const KIND_LABEL = { banter: "News banter", closer: "Sign-off", flight: "Ball in flight", opener: "Opening", preshot: "Pre-shot",
+const KIND_LABEL = { banter: "News banter", chat: "Viewer chat", closer: "Sign-off", flight: "Ball in flight", opener: "Opening", preshot: "Pre-shot",
                      reaction: "Reaction", segment: "Between shots", shot: "Shot call" };
 
 async function getJSON(url, opts) {
@@ -1648,13 +1657,77 @@ async function pollLive() {
 function renderLive() {
   const s = state.live;
   if (!s) return `<h2>Live</h2><p class="sub">There's no live stream on this page.</p>`;
-  if (!s.live) return `<h2>Live</h2><p class="sub">Off air. The stream comes on when a round starts at the sim.</p>`;
+  if (!s.live) return `<h2>Live</h2><p class="sub">Off air. The stream comes on when a round starts at the sim.</p><div id="chatslot"></div>`;
   return `<h2>Live <span class="sub">since ${esc(new Date(s.since * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}</span></h2>
   <div id="liveslot"></div>
   <p class="sub">About 20 seconds behind the sim. It starts muted: tap for sound.${
     (state.vods || []).some(v => v.session === s.session)
       ? ` Missed the start? <button class="link" data-vod="${esc(s.session)}" data-vodat="0">Watch from the beginning</button>.`
-      : " Nothing is recorded."}</p>`;
+      : " Nothing is recorded."}</p><div id="chatslot"></div>`;
+}
+
+// The live chat (docs/tracking.md#live-chat): the site stack's chat function at /chat/messages, behind
+// the same password. It's open only while the booth is on air in a round, which reads some messages out
+// and answers them; a page without it (the booth's own copy, a stack without chat) gets a 404 and no chat.
+// One element, moved into each render's slot like the player, so a redraw doesn't lose what's being typed.
+const CHAT_URL = "/chat/messages", CHAT_POLL_MS = 4000, CHAT_ABSENT_MS = 300000;
+const chat = { on: false, absentUntil: 0, shown: "", el: null, busy: false };
+function chatEl() {
+  if (chat.el) return chat.el;
+  const el = chat.el = document.createElement("section");
+  el.className = "card chat";
+  el.innerHTML = `<h3>Chat <span class="sub">to the booth: it reads some out on air</span></h3><div class="log"></div>
+    <form><input name="name" maxlength="24" placeholder="Your name" autocomplete="nickname">
+    <input name="text" maxlength="200" placeholder="Say something to the booth" autocomplete="off" enterkeyhint="send">
+    <button>Send</button></form><div class="note"></div>`;
+  const form = el.querySelector("form"), note = el.querySelector(".note");
+  const nameIn = form.querySelector("[name=name]"), textIn = form.querySelector("[name=text]");
+  nameIn.value = store.get("chatName") || "";
+  form.addEventListener("submit", async e => {
+    e.preventDefault();
+    const name = nameIn.value.trim(), text = textIn.value.trim();
+    if (!name) { note.textContent = "Put your name in first."; nameIn.focus(); return; }
+    if (!text || chat.busy) return;
+    store.set("chatName", name);
+    chat.busy = true; note.textContent = "";
+    try {
+      const r = await fetch(CHAT_URL, { method: "POST", headers: { "content-type": "application/json" },
+                                        body: JSON.stringify({ name, text }) });
+      const body = await r.json().catch(() => ({}));
+      if (r.ok) { textIn.value = ""; await pollChat(); }
+      else note.textContent = body.error || `Not sent (HTTP ${r.status}).`;
+      if (r.status === 409) await pollChat();
+    } catch (err) { note.textContent = "Not sent: no connection."; }
+    chat.busy = false;
+  });
+  return el;
+}
+function attachChat() {
+  const slot = $("#chatslot");
+  if (!slot) return;
+  slot.style.display = chat.on ? "" : "none";
+  if (chat.on) slot.appendChild(chatEl());
+}
+async function pollChat() {
+  if (state.tab !== "live" || document.visibilityState !== "visible" || Date.now() < chat.absentUntil) return;
+  let got = null;
+  try {
+    const r = await fetch(CHAT_URL, { cache: "no-store" });
+    if (r.status === 404 || r.status === 403) chat.absentUntil = Date.now() + CHAT_ABSENT_MS;
+    else if (r.ok) got = await r.json();
+  } catch (e) { got = null; }
+  const on = !!(got && got.on);
+  if (on !== chat.on) { chat.on = on; attachChat(); }
+  if (!on) return;
+  const list = Array.isArray(got.messages) ? got.messages : [];
+  const key = JSON.stringify(list.map(m => [m.id, m.aired]));
+  if (key === chat.shown) return;
+  chat.shown = key;
+  const log = chatEl().querySelector(".log"), atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 30;
+  log.innerHTML = list.length ? list.map(m => `<div class="msg"><b>${esc(m.name)}</b>${esc(m.text)}${
+    m.aired ? ' <span class="tag" title="Read out on air">🎙 on air</span>' : ""}</div>`).join("")
+    : '<p class="empty">No messages yet. Say hello to the booth.</p>';
+  if (atEnd) log.scrollTop = log.scrollHeight;
 }
 
 function stopLive() {
@@ -1813,6 +1886,8 @@ function render() {
   if (!PAGES[state.tab]) state.lastView[sectionOf(state.tab)] = state.tab;
   $("#main").innerHTML = subTabs() + RENDER[state.tab]();
   attachLive();
+  attachChat();
+  if (state.tab === "live") pollChat();
   writeHash();
   // A link to a round, hole or shot: bring it into view once it's drawn (replays and shots load later).
   const go = state.scrollTo;
@@ -2076,6 +2151,8 @@ showTabs();
 load();
 pollLive();
 setInterval(pollLive, 15000);
+setInterval(pollChat, CHAT_POLL_MS);
+document.addEventListener("visibilitychange", () => pollChat());
 pollExtras();
 setInterval(pollExtras, 60000);
 </script>

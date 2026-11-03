@@ -125,6 +125,7 @@ class ShotEvent:
     impact_state: Any = None
     impact_read: Any = None     # the booth's screen read at impact (a task)
     impact_seq: int | None = None   # the booth's shot count it took at impact
+    seq: int | None = None          # its place in the booth's shot count, once handle_shot has counted it
     setup_hud: Any = None       # this stroke's setup read, kept at impact for an impact read that misses
     buffer_frames: Any = None   # the HUD buffer's frames before this shot, kept at impact (HudBuffer)
     landed: bool = False        # the feed only had it once the ball came to rest (GSPro 3.59's shot files)

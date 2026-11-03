@@ -45,13 +45,14 @@ from .models import (
 from .prompts import (
     ANGLES, FLIGHT_OUTCOMES, PRACTICE_ANGLES, NEWS_TRIGGERS, aside_room, closer_prompt, flight_prompt, opener_prompt, output_schema,
     parse_lines, preshot_line_prompt, preshot_line_schema, preshot_hazard_prompt, preshot_hazard_schema,
-    news_prompt, news_schema, preshot_branch_prompt, preshot_branch_schema,
+    chat_prompt, chat_schema, news_prompt, news_schema, preshot_branch_prompt, preshot_branch_schema,
     reaction_outcomes, retry_prompt, segment_prompt, shot_prompt, system_prompt,
     wrap_recap_prompt, hole_intro_prompt, scores_prompt, trivia_prompt, trivia_schema,
 )
 from .board import Board, place
 from .booking import Bookings
 from .history import History
+from .chat import ChatMessage, ChatTable, cursor_at
 from .news import GolfNews
 from .scores import LiveScores
 from .signature_holes import signature_hole
@@ -272,6 +273,14 @@ class PendingOpening:
     # Composed for the last roster read on an earlier setup screen (this one's PLAYERS tab was never
     # opened), so the tee must show exactly that roster, guests included, before it airs.
     guessed: bool = False
+
+
+@dataclass
+class PreparedChat:
+    """A viewer's chat message, read out and answered: written and voiced, waiting for a gap between shots."""
+    message: ChatMessage
+    items: list[tuple[Line, object]]
+    expires: float                 # monotonic
 
 
 @dataclass
@@ -632,6 +641,17 @@ class Engine:
         self._score_said: dict[str, list[str]] = {}  # event key -> what the booth said about it, this session
         self._score_written: set[str] = set()       # "key@version": scores already written up, this session
         self._aside_tasks: set[asyncio.Task] = set()
+        # The stats page's live chat (docs/tracking.md#live-chat); None when it's off.
+        c = cfg.chat
+        self.chat = ChatTable(c.table, cfg.publish.region) if c.enabled and c.table and cfg.source.type != "replay" \
+            else None
+        self._chat_cursor = cursor_at(time.time())    # the last message read (none before the booth started)
+        self._chat_pending: list[tuple[ChatMessage, float]] = []   # read, not yet written up: (message, read at)
+        self._chat_ready: PreparedChat | None = None
+        self._chat_task: asyncio.Task | None = None
+        self._chat_aired_at = float("-inf")
+        self._chat_live: bool | None = None           # what the table was last told: on air or not
+        self._chat_beat = float("-inf")
         self._aside_nines: set[int] = set()          # nines of this round whose asides are written
         self._trivia_planned = 0                     # trivia asides written this round (per_round caps it)
         self._signature_told: tuple | None = None    # (round id, hole, player) the famous-hole note went to
@@ -911,6 +931,8 @@ class Engine:
             asyncio.create_task(self._news_loop(), name="news")
         if self.weather is not None:
             asyncio.create_task(self._weather_loop(), name="weather")
+        if self.chat is not None:
+            asyncio.create_task(self._chat_loop(), name="chat")
         if self.bookings is not None:
             self._fetch_bookings("startup")
         if self.cfg.publish.enabled and self.cfg.publish.bucket and self.cfg.source.type != "replay":
@@ -978,6 +1000,11 @@ class Engine:
                 log.info("%s", audio_summary(stats_obj))
             for m in self._live_mirrors():
                 await asyncio.to_thread(m.close)
+            if self.chat is not None and self._chat_live:
+                try:   # close the page's chat now, rather than when the heartbeat goes stale
+                    await asyncio.wait_for(asyncio.to_thread(self.chat.set_on_air, False), 5)
+                except Exception as e:
+                    log.info("Chat: couldn't close the chat: %s", e)
             if self._hud_buffer is not None:
                 self._hud_buffer.stop()
 
@@ -1695,8 +1722,20 @@ class Engine:
 
     async def _shot_then_news(self, event: ShotEvent) -> None:
         await self.handle_shot(event)
-        if self._asides_on() and (m := self._news_moment) and m["seq"] == self._shot_seq:
-            self._bg(self._news_after_shot(m))
+        # Only a shot that ran to its reaction, and is still the latest: an older handler finishing (early,
+        # or late) must not start an aside under a newer shot's call, even one that set the moment already.
+        m = self._news_moment
+        if not (m and event.seq is not None and m["seq"] == event.seq == self._shot_seq):
+            return
+        if self._asides_on() or self._chat_ready is not None:
+            self._bg(self._after_shot(m if self._asides_on() else None, m["seq"]))
+
+    async def _after_shot(self, moment: dict | None, seq: int) -> None:
+        """Between this shot and the next: a prepared aside if one suits the moment, else a viewer's
+        message. Never both, so the two don't talk over each other."""
+        if moment is not None and await self._news_after_shot(moment):
+            return
+        await self._chat_after_shot(seq)
 
     def _on_shot_task_done(self, task: asyncio.Task) -> None:
         self._shot_tasks.discard(task)
@@ -1943,18 +1982,23 @@ class Engine:
         log.info("News: %d of %d asides ready for this round: %s", len(self._news_bits), len(picks),
                  "; ".join(f"{b.title!r} ({b.trigger or 'any quiet moment'})" for b in self._news_bits))
 
-    async def _write_aside(self, label: str, user: str, facts_text: str, schema: dict) -> tuple[list[Line], dict]:
-        """A two-line exchange from the closer's model, checked against its facts; ([], {}) if none."""
+    async def _write_aside(self, label: str, user: str, facts_text: str, schema: dict, kind: str = "news",
+                           llm: LLMClient | None = None, declined=None) -> tuple[list[Line], dict]:
+        """A two-line exchange from the closer's model (or `llm`), checked against its facts; ([], {}) if
+        none. `declined(data)`: the model chose to write nothing, so don't retry."""
         cap = self.cfg.commentary.aside_max_words
         # The system prompt's shorter per-line limit is for live calls; an aside gets its own.
         user = user + aside_room(cap)
         prompt, data = user, {}
         for _ in range(2):
-            raw = await self._complete("news", self.closer_llm, prompt, [], schema=schema, system=self.system)
+            raw = await self._complete(kind, llm or self.closer_llm, prompt, [], schema=schema, system=self.system)
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
                 data = {}
+            if declined is not None and isinstance(data, dict) and declined(data):
+                log.info("%s: the model chose not to air it", label)
+                return [], {}
             lines = parse_lines(raw, self.speakers, cap, self._persona_names)
             good, problems = self._grounded(lines, facts_text, mode="news")
             # An over-long line is cut back to its last full sentence, which can leave just a teaser
@@ -2236,6 +2280,119 @@ class Engine:
     def _listeners(r) -> list[str]:
         """Everyone playing this round (both partners on a one-ball team), by roster name."""
         return sorted({p for side in getattr(r, "sides", None) or [] for p in side.players})
+
+    # ---- live chat ----------------------------------------------------------------------
+
+    CHAT_HEARTBEAT = 30.0   # seconds; the chat function counts the booth on air for 90 after one
+
+    def _chat_open(self) -> bool:
+        """Whether the page's chat is open: the booth on air (not muted) in a round."""
+        r = self.round
+        return bool(self.commentary_on and self.speech is not None and not self.speech.muted
+                    and r is not None and not r.ended)
+
+    async def _chat_loop(self) -> None:
+        failing = False
+        while True:
+            try:
+                await self._chat_tick()
+                if failing:
+                    log.info("Chat: reaching the chat table again")
+                failing = False
+            except Exception as e:
+                if not failing:   # once per outage, not every few seconds
+                    log.warning("Chat: couldn't reach the chat table (chat.table %r): %s", self.cfg.chat.table, e)
+                failing = True
+            await asyncio.sleep(self.cfg.chat.poll_seconds)
+
+    async def _chat_tick(self) -> None:
+        """Tell the table whether the booth is on air (on a change, and as a heartbeat), then read the
+        new messages and start writing up the next one."""
+        on, now = self._chat_open(), time.monotonic()
+        if on != self._chat_live or now - self._chat_beat >= self.CHAT_HEARTBEAT:
+            await asyncio.to_thread(self.chat.set_on_air, on)
+            if on != self._chat_live:
+                log.info("Chat: %s", "open on the stats page" if on else "closed")
+            self._chat_live, self._chat_beat = on, now
+        if not on:
+            # Off air nothing is read, and nothing posted meanwhile is answered later.
+            self._chat_cursor = cursor_at(time.time())
+            self._chat_pending, self._chat_ready = [], None
+            if self._chat_task and not self._chat_task.done():
+                self._chat_task.cancel()
+            return
+        if new := await asyncio.to_thread(self.chat.since, self._chat_cursor):
+            self._chat_cursor = new[-1].id
+            self._chat_pending += [(m, now) for m in new]
+        # Ages from when the booth read it, not the post's own stamp: the PC's clock may be off.
+        max_age = self.cfg.chat.max_age_seconds
+        self._chat_pending = [(m, at) for m, at in self._chat_pending if now - at < max_age]
+        if self._chat_ready is not None and self._chat_ready.expires <= now:
+            log.info("Chat: %s's message wasn't answered in time: let go", self._chat_ready.message.name)
+            self._chat_ready = None
+        if self._chat_ready is None and self._chat_pending and not (self._chat_task and not self._chat_task.done()):
+            message, read_at = self._chat_pending.pop(0)
+            self._chat_task = asyncio.create_task(self._prepare_chat(message, read_at + max_age), name="chat-write")
+            self._chat_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+
+    def _chat_context(self) -> list[str]:
+        r = self.round
+        out = []
+        if course := (r.course if r is not None else None) or self.current_course:
+            out.append(f"Course: {course}")
+        if self.hole_number:
+            out.append(f"They're on hole {self.hole_number}")
+        if r is not None and (sides := [s.label for s in r.sides]):
+            out.append("Playing: " + ", ".join(sides))
+        return out
+
+    async def _prepare_chat(self, message: ChatMessage, expires: float) -> None:
+        r = self.round
+        user, facts_text = chat_prompt(name=message.name, message=message.text, context=self._chat_context())
+        try:
+            good, _ = await self._write_aside(f"Chat from {message.name!r}", user, facts_text,
+                                              chat_schema(self.speakers), kind="chat", llm=self.live_llm,
+                                              declined=lambda data: data.get("air") is False)
+        except Exception as e:
+            log.warning("Chat: couldn't write up %s's message: %r", message.name, e)
+            return
+        if not good:
+            return
+        kept, audio = await self._voice_ahead(good)
+        if len(kept) != 2 or self.round is not r or not self._chat_open():
+            return
+        self._chat_ready = PreparedChat(message, list(zip(kept, audio)), expires)
+        log.info("Chat: %s's message is ready for the next gap", message.name)
+
+    async def _chat_after_shot(self, seq: int) -> bool:
+        """Air the viewer's message that's ready once this shot's call is done, at most one every
+        chat.min_gap_seconds. Returns whether it played."""
+        bit = self._chat_ready
+        if bit is None or time.monotonic() - self._chat_aired_at < self.cfg.chat.min_gap_seconds:
+            return False
+        deadline = time.monotonic() + 8.0
+        while not self.speech.is_idle() and time.monotonic() < deadline and self._shot_seq == seq:
+            await asyncio.sleep(0.2)
+        await asyncio.sleep(0.8)   # a beat after the call
+        if not self.speech.is_idle() or self._shot_seq != seq or self._chat_ready is not bit or not self._chat_open():
+            return False
+        if bit.expires <= time.monotonic():
+            self._chat_ready = None
+            return False
+        self._chat_ready, self._chat_aired_at = None, time.monotonic()
+        lines = [line for line, _ in bit.items]
+        self.state.record_lines(lines)
+        self._air_exchange(bit.items, banter=True)
+        self._write_transcript(lines, "chat")
+        log.info("Chat: answered %s's message on air", bit.message.name)
+        self._bg(self._chat_mark_aired(bit.message.id))
+        return True
+
+    async def _chat_mark_aired(self, message_id: str) -> None:
+        try:
+            await asyncio.to_thread(self.chat.mark_aired, message_id)
+        except Exception as e:
+            log.info("Chat: couldn't mark a message answered: %s", e)
 
     async def _drain_speech(self, timeout: float | None = None) -> None:
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -4645,6 +4802,7 @@ class Engine:
                 event.setup_hud = self._setup_at_impact(event.received_at or impact)
             self._shot_seq += 1
         my_seq = event.impact_seq if counted else self._shot_seq   # this shot's order, to keep concurrent handlers from reordering finish
+        event.seq = my_seq
         tag = f"[shot {my_seq}]"
         if self.speech is not None and not superseded:
             self.speech.drop_queued()   # the ball's in the air: the last shot's calls are old news

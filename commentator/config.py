@@ -752,6 +752,19 @@ class LiveConfig(BaseModel):
     local_keep_days: int = Field(7, ge=0)
 
 
+class ChatConfig(BaseModel):
+    # Viewers' messages on the stats page's Live tab, read out and answered on air (docs/tracking.md#live-chat).
+    # `table` is the site stack's ChatTable output; the booth reaches it with the publish keys, in
+    # publish.region. The page shows the chat, and takes messages, only while the booth is on air in a round.
+    enabled: bool = False
+    table: str | None = None
+    poll_seconds: float = Field(5.0, gt=0)
+    # A message not answered within this long is let go: the moment it was about has passed.
+    max_age_seconds: float = Field(180.0, gt=0)
+    # At least this long between two messages answered on air, so the chat doesn't take over the round.
+    min_gap_seconds: float = Field(90.0, ge=0)
+
+
 class BackupConfig(BaseModel):
     # Copies of the season database (commentator/backup.py), taken when the booth starts and after
     # every round, only when something changed. Kept: the newest of each of the last `daily` days with
@@ -814,6 +827,7 @@ class Config(BaseModel):
     putt_read: PuttReadConfig = Field(default_factory=PuttReadConfig)
     publish: PublishConfig = Field(default_factory=PublishConfig)
     live: LiveConfig = Field(default_factory=LiveConfig)
+    chat: ChatConfig = Field(default_factory=ChatConfig)
     backup: BackupConfig = Field(default_factory=BackupConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     log_dir: str = "logs"
