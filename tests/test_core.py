@@ -3521,6 +3521,8 @@ def test_club_box_parsing():
     assert parse_club(["L Wedge", "CLUB", "LH"]) == {"club": "LW", "handed": "LH"}   # GSPro's short names
     assert parse_club(["P Wedge"])["club"] == "PW" and parse_club(["GWedge"])["club"] == "GW"
     assert parse_club(["CLUB"]) == {}
+    assert parse_club(["5 lron", "RIGHT", "HAND"]) == {"club": "5I", "handed": "RH"}   # OCR'd capital I
+    assert parse_club(["4 1ron"])["club"] == "4I"
 
 
 def test_regions_adjust_to_the_screen_shape():

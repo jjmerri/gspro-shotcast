@@ -126,6 +126,16 @@ def test_gapping_uses_full_swings_and_reads_the_flight(db):
     assert pw["miss"] == "starts straight, draw" and dr["miss"] == "starts 3° right, slice"
 
 
+def test_gapping_takes_the_game_carry_when_no_raw_carry_was_sent_or_read(db):
+    # A launch monitor that sends a carry of 0 and no CARRY (raw) tile on screen.
+    for carry in (100, 104, 98):
+        shot(db, club="PW", carry_raw=0, carry_game_yards=carry, ball_speed=90)
+    shot(db, club="PW", carry_raw=110, carry_game_yards=120, ball_speed=91)
+    db.commit()
+    [pw] = A.gapping(db, "Ann")
+    assert (pw["n"], pw["game"], pw["carry"]) == (4, 3, 102)
+
+
 def test_a_lefty_s_shots_are_named_for_their_hand(db, tmp_path):
     from commentator import shot_shape
     from commentator.hud import Hud

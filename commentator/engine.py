@@ -319,6 +319,7 @@ UNPLAYED_SHOT_WAIT_SECONDS = 2.5
 # How long a shot struck on a course's own range waits for GSPro's score line to say it was the course's
 # first tee shot (see _course_shot_off_own_range): a drive's flight and roll, with room to spare.
 RANGE_TEE_SHOT_WAIT_SECONDS = 30.0
+LAYOUT_WAIT_SECONDS = 20.0     # after a round's end, for GSPro 3.1's logged layout before the course file's
 KEEP_GSPRO_LOGS = 5             # copies of GSPro's log kept from round ends (see _keep_gspro_log)
 GSPRO_LOG_KEEP_BYTES = 8_000_000   # from the end of it: a round's lines and plenty before
 TREE_CALLS = ("Oh, that's into the trees!", "That's caught a branch!", "Oh no, it's clipped the tree!",
@@ -6470,17 +6471,26 @@ class Engine:
             except Exception as e:
                 log.warning("Couldn't keep %s's tees (%s)", course, e)
 
-    def _fill_course_layouts(self, since: float | None = None) -> None:
-        """Take the tee and pin of each hole of a round quit early (which GSPro logs no layout for) from
-        the course file, for its hole replays (see course_layout), then name the layouts' tee boxes.
-        Best-effort."""
+    def _fill_course_layouts(self, since: float | None = None) -> int:
+        """Take the tee and pin of each hole of a round GSPro logged no layout for (one quit early; on
+        3.59 any round) from the course file, for its hole replays (see course_layout), then name the
+        layouts' tee boxes. Best-effort. Returns the holes filled."""
+        filled = 0
         try:
             from . import course_layout
 
-            course_layout.fill_missing(self.store.db, self.cfg.source.gspro_courses_dirs, since=since)
+            filled = course_layout.fill_missing(self.store.db, self.cfg.source.gspro_courses_dirs, since=since)
         except Exception as e:
             log.warning("Couldn't fill hole layouts from the course files (%s)", e)
         self._name_tee_boxes()
+        return filled
+
+    async def _fill_course_layouts_later(self) -> None:
+        """After a round played to the end: GSPro 3.1 logs its layout as it completes, 3.59 doesn't.
+        Give the log's a moment to be read, then fill whatever holes still have none, and publish them."""
+        await asyncio.sleep(LAYOUT_WAIT_SECONDS)
+        if self._fill_course_layouts(since=time.time() - 12 * 3600):
+            self._schedule_publish(after_speech=True)
 
     def _name_tee_boxes(self) -> None:
         """Name the tee box (Black, Blue, ...) of the stored layouts not named yet. Best-effort."""
@@ -8071,6 +8081,7 @@ class Engine:
         if stats_obj := getattr(self.speech, "audio_stats", None):
             log.info("%s", audio_summary(stats_obj))
         stats = self._record_round_stats(r, event.reason)
+        self._bg(self._fill_course_layouts_later())
         self._schedule_publish()   # the backup, if the sign-off never finishes
         try:
             await self._sign_off(r, stats)

@@ -218,12 +218,15 @@ FULL_SWING = 0.8   # a swing counts toward gapping when its ball speed is this s
 def gapping(db: sqlite3.Connection, player: str, context: str | None = None) -> list[dict]:
     """Per club, carry and launch numbers from the launch monitor, over full swings only: a chip or a
     knock-down (ball speed well under the club's best) would drag a wedge's carry down. Every real swing
-    counts, a mulligan's too. Medians and the middle half, so one mishit doesn't move the numbers."""
+    counts, a mulligan's too. Medians and the middle half, so one mishit doesn't move the numbers.
+    A swing with no raw carry (a launch monitor that sends none, and no CARRY (raw) tile on screen) uses
+    GSPro's game carry, slope and weather in it: `game` counts those."""
+    raw = "COALESCE(NULLIF(carry_raw_tile_yards, 0), NULLIF(carry_raw, 0))"
     rows = db.execute(
-        "SELECT club, COALESCE(carry_raw_tile_yards, carry_raw) AS carry, total_yards, ball_speed, club_speed,"
-        " launch_angle, total_spin, spin_axis, start_direction, handed FROM shots WHERE player = ? AND attributed = 1"
-        " AND is_putt = 0 AND left_out = 0 AND club IS NOT NULL AND club != 'PT'"
-        " AND COALESCE(carry_raw_tile_yards, carry_raw) > 0" + _ctx(context), (player,)).fetchall()
+        f"SELECT club, COALESCE({raw}, carry_game_yards) AS carry, {raw} IS NULL AS game, total_yards, ball_speed,"
+        " club_speed, launch_angle, total_spin, spin_axis, start_direction, handed FROM shots WHERE player = ?"
+        " AND attributed = 1 AND is_putt = 0 AND left_out = 0 AND club IS NOT NULL AND club != 'PT'"
+        f" AND COALESCE({raw}, carry_game_yards) > 0" + _ctx(context), (player,)).fetchall()
     by_club: dict[str, list] = defaultdict(list)
     for r in rows:
         by_club[r["club"]].append(r)
@@ -241,7 +244,7 @@ def gapping(db: sqlite3.Connection, player: str, context: str | None = None) -> 
         carries = sorted(r["carry"] for r in rs)
         q = statistics.quantiles(carries, n=4) if len(carries) >= 2 else [carries[0]] * 3
         smash = [r["ball_speed"] / r["club_speed"] for r in rs if r["ball_speed"] and r["club_speed"]]
-        out.append({"club": club, "n": len(rs), "swings": len(every), "carry": med("carry"), "carry_lo": round(q[0]), "carry_hi": round(q[2]),
+        out.append({"club": club, "n": len(rs), "swings": len(every), "game": sum(r["game"] for r in rs), "carry": med("carry"), "carry_lo": round(q[0]), "carry_hi": round(q[2]),
                     "carry_max": round(carries[-1]), "total": med("total_yards"), "ball_speed": med("ball_speed"),
                     "club_speed": med("club_speed"), "smash": round(statistics.median(smash), 2) if smash else None,
                     "launch": med("launch_angle"), "spin": med("total_spin"), "spin_axis": med("spin_axis"),

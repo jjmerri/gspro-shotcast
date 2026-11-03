@@ -218,3 +218,23 @@ def test_a_settings_string_length_is_five_bytes_at_most():
 
     with pytest.raises(ValueError, match="string length"):
         _Reader(b"\xff" * 100_000).string()
+
+
+def test_the_report_says_what_pc_it_is():
+    info = {"cpu": [{"Name": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz ", "NumberOfCores": 4,
+                     "NumberOfLogicalProcessors": 8, "MaxClockSpeed": 1800, "LoadPercentage": 87}],
+            "os": {"Caption": "Microsoft Windows 10 Home", "TotalVisibleMemorySize": 8 * 2**20, "FreePhysicalMemory": 2**20},
+            "gpu": [{"Name": "Intel(R) UHD Graphics 620", "DriverVersion": "27.20.100.8681", "Memory": None,
+                     "Mode": "1920 x 1200 x 4294967296 colors", "RefreshRate": 60},
+                    {"Name": "NVIDIA GeForce RTX 3060", "DriverVersion": "32.0.15.6094", "Memory": 12 * 2**30,
+                     "Mode": None, "RefreshRate": None}],
+            "power": "Power saver\r\n", "battery": [{"BatteryStatus": 1, "EstimatedChargeRemaining": 40}],
+            "procs": {"Name": "GSPro", "Id": 4120, "CPU": 812.4, "WorkingSet64": 3 * 2**30}}   # one: no list
+    assert report.pc_lines(info) == [
+        "CPU: Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz, 4 cores / 8 threads, 1800 MHz, 87% busy now",
+        "Memory: 8.0 GB total, 1.0 GB free (Microsoft Windows 10 Home)",
+        "Video card: Intel(R) UHD Graphics 620, ?, driver 27.20.100.8681, 1920 x 1200 x 4294967296 colors at 60 Hz",
+        "Video card: NVIDIA GeForce RTX 3060, 12.0 GB, driver 32.0.15.6094",
+        "Power plan: Power saver",
+        "Battery: 40%, ON BATTERY",
+        "Process GSPro (4120): 812 s of CPU, 3.0 GB in memory"]

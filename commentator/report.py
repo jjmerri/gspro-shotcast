@@ -14,8 +14,10 @@ import json
 import logging
 import platform
 import re
+import os
 import secrets
 import sqlite3
+import subprocess
 import time
 import threading
 import zipfile
@@ -117,6 +119,68 @@ def _describe(path: Path) -> str:
     except OSError as e:
         return f"{path}: can't look ({e.strerror or e!r})"
     return f"{path}: {st.st_size:,} bytes, modified {time.strftime('%Y-%m-%d %H:%M', time.localtime(st.st_mtime))}"
+
+
+# The PC, as PowerShell's CIM sees it, in one JSON object. A video card's AdapterRAM stops at 4 GB, so
+# its memory comes from the driver's registry key. Processes: GSPro's and the booth's (python).
+_PC_SCRIPT = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$cls = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0*'
+$vram = @{}
+Get-ItemProperty $cls | ForEach-Object { if ($_.DriverDesc) { $vram[$_.DriverDesc] = $_.'HardwareInformation.qwMemorySize' } }
+[pscustomobject]@{
+  cpu = @(Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, LoadPercentage)
+  os = Get-CimInstance Win32_OperatingSystem | Select-Object Caption, TotalVisibleMemorySize, FreePhysicalMemory
+  gpu = @(Get-CimInstance Win32_VideoController | ForEach-Object { [pscustomobject]@{ Name = $_.Name;
+        DriverVersion = $_.DriverVersion; Memory = $vram[$_.Name]; Mode = $_.VideoModeDescription;
+        RefreshRate = $_.CurrentRefreshRate } })
+  power = ((powercfg /getactivescheme) -replace '.*\((.*)\).*', '$1')
+  battery = @(Get-CimInstance Win32_Battery | Select-Object BatteryStatus, EstimatedChargeRemaining)
+  procs = @(Get-Process GSPro, python, pythonw | Select-Object Name, Id, CPU, WorkingSet64)
+} | ConvertTo-Json -Depth 4 -Compress
+"""
+
+
+def _gb(n) -> str:
+    return f"{n / 2**30:.1f} GB" if isinstance(n, (int, float)) and n > 0 else "?"
+
+
+def pc_lines(info: dict) -> list[str]:
+    """The PC's processor, memory, video cards, power and the processes that matter, from _PC_SCRIPT's
+    JSON: why one booth reads the screen slower than another."""
+    as_list = lambda v: v if isinstance(v, list) else [v] if v else []   # noqa: E731 (one item: no list)
+    lines = []
+    for c in as_list(info.get("cpu")):
+        lines.append(f"CPU: {(c.get('Name') or '?').strip()}, {c.get('NumberOfCores')} cores /"
+                     f" {c.get('NumberOfLogicalProcessors')} threads, {c.get('MaxClockSpeed')} MHz,"
+                     f" {c.get('LoadPercentage')}% busy now")
+    os_ = info.get("os") or {}
+    if os_:
+        total, free = os_.get("TotalVisibleMemorySize"), os_.get("FreePhysicalMemory")
+        lines.append(f"Memory: {_gb(total * 1024 if total else None)} total, {_gb(free * 1024 if free else None)} free"
+                     f" ({os_.get('Caption') or 'Windows'})")
+    for g in as_list(info.get("gpu")):
+        mode = f", {g['Mode']} at {g.get('RefreshRate')} Hz" if g.get("Mode") else ""   # blank: no display on it
+        lines.append(f"Video card: {g.get('Name')}, {_gb(g.get('Memory'))}, driver {g.get('DriverVersion')}{mode}")
+    if info.get("power"):
+        lines.append(f"Power plan: {str(info['power']).strip()}")
+    for b in as_list(info.get("battery")):   # BatteryStatus 1 is on battery, 2 on mains
+        lines.append(f"Battery: {b.get('EstimatedChargeRemaining')}%,"
+                     f" {'ON BATTERY' if b.get('BatteryStatus') == 1 else 'plugged in'}")
+    for p in as_list(info.get("procs")):
+        lines.append(f"Process {p.get('Name')} ({p.get('Id')}): {p.get('CPU') or 0:.0f} s of CPU,"
+                     f" {_gb(p.get('WorkingSet64'))} in memory")
+    return lines
+
+
+def pc_info() -> list[str]:
+    """pc_lines for this PC (Windows); elsewhere what Python knows."""
+    if os.name != "nt":
+        return [f"CPU: {platform.processor() or platform.machine()}, {os.cpu_count()} threads"]
+    out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _PC_SCRIPT],
+                         capture_output=True, text=True, timeout=60,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    return pc_lines(json.loads(out))
 
 
 def screen_layout(cfg: Config) -> list[str]:
@@ -254,6 +318,9 @@ def _build(cfg: Config, config_path: Path) -> Path:
                     add_text(name, tail(p, cap) if cap else p.read_bytes())
 
         guard("screen layout", lambda: summary.extend(screen_layout(cfg)))
+
+        summary += ["", "== PC =="]
+        guard("PC", lambda: summary.extend(pc_info()))
 
         summary += ["", "== GSPro =="]
         source = cfg.source

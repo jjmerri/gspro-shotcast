@@ -248,7 +248,9 @@ CLUB_WORDS = [
     (r"\bgap\s*wedge\b", "GW"), (r"\bapproach\s*wedge\b", "AW"), (r"\bpitching\s*wedge\b", "PW"),
     # GSPro's own short names: "P Wedge", "G Wedge", "S Wedge", "L Wedge".
     (r"\b([pgsla])\s*-?\s*wedge\b", "{}W"),
-    (r"\b(\d)\s*wood\b", "{}W"), (r"\b(\d)\s*hybrid\b", "{}H"), (r"\b(\d)\s*iron\b", "{}I"),
+    (r"\b(\d)\s*wood\b", "{}W"), (r"\b(\d)\s*hybrid\b", "{}H"),
+    # OCR reads "Iron"'s capital I as an l, a 1 or a bar on some screens: "5 lron".
+    (r"\b(\d)\s*[il1|]r[o0]n\b", "{}I"),
     (r"\b(\d)\s*([whi])\b", "{}{}"), (r"\b(lw|sw|gw|aw|pw)\b", "{}"),
 ]
 

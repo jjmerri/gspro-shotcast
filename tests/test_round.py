@@ -305,6 +305,27 @@ async def test_round_end_records_per_player_stats(tmp_path):
                and row["fmt"] == "best_ball" for row in rows)
 
 
+async def test_a_round_played_to_the_end_takes_layouts_gspro_didnt_log_from_the_course_file(tmp_path, monkeypatch):
+    # GSPro 3.59 logs no layout even for a finished round: its hole replays need the course file's.
+    import asyncio
+
+    from commentator import course_layout, engine as engine_mod
+    from commentator.models import RoundEndEvent
+
+    monkeypatch.setattr(engine_mod, "LAYOUT_WAIT_SECONDS", 0.01)
+    calls = []
+    monkeypatch.setattr(course_layout, "fill_missing", lambda db, dirs, since=None: calls.append(since) or 0)
+    e = _engine(tmp_path)
+    e.cfg.commentary.closer = False
+    r, card, shots = _three_hole_round()
+    r.apply_scorecard(card)
+    e.round, e.state.shots = r, shots
+    await e.handle_round_end(RoundEndEvent(reason="final scorecard"))
+    assert calls == []                  # not before GSPro's own can be read
+    await asyncio.sleep(0.05)
+    assert len(calls) == 1 and calls[0] is not None
+
+
 def test_side_stats_final_override_sets_the_last_hole_score():
     # The closer is pre-built before the last putt; final_override supplies the hypothetical last-hole
     # score so each branch's whole-round totals are right.
