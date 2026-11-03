@@ -1154,6 +1154,8 @@ function drawLogo(g, x, y, size) {
 // A round as an image to post: course, player, score, the card, and the round's numbers.
 // GSPro's tee box names: Black, Blue, ... and "Par3" for its par-3 course tees.
 const teeName = t => t === "Par3" ? "Par 3 tees" : `${t} tees`;
+// The tees and the round's length from them, e.g. "Blue tees · 6,412 yds" (either alone when that's all known).
+const teeText = r => [r.tee && teeName(r.tee), r.tee_yards && `${r.tee_yards.toLocaleString("en-US")} yds`].filter(Boolean).join(" · ");
 
 function shareCard(r) {
   const holes = r.card || [], nines = [holes.slice(0, 9), holes.slice(9, 18)].filter(n => n.length);
@@ -1171,7 +1173,7 @@ function shareCard(r) {
   font(30); text(r.date || "", W - 60, 70, "#8fa59b", "right");
   font(58, 700); text(r.course || "", 60, 150);
   font(38, 500); text(sideName(r) + (r.format && r.format !== "individual" ? ` · ${r.format.replace("_", " ")}` : "")
-                       + (r.tee ? ` · ${teeName(r.tee)}` : ""), 60, 205, "#8fa59b");
+                       + (teeText(r) ? ` · ${teeText(r)}` : ""), 60, 205, "#8fa59b");
   font(120, 700); text(String(r.gross ?? "–"), 60, 330);
   const grossW = g.measureText(String(r.gross ?? "–")).width;
   font(64, 600); text(r.to_par === null || r.to_par === undefined ? "" : toPar(r.to_par), 60 + grossW + 30, 330,
@@ -1305,7 +1307,7 @@ function renderRound() {
                                    `<button class="link" data-delround="${r.round}" data-ended="${r.round_end}" title="Remove the round and its shots for good">Delete round</button>`] : [])
                ].filter(Boolean).join(" · ");
   return back + `<h2>${esc(r.date)} · <a class="link" href="${esc(hashFor("courses", { course: r.course }))}">${esc(r.course)}</a></h2>${pick}
-    <p>${who}${team} · ${esc(r.format.replace("_", " "))}${r.tee ? ` · ${esc(teeName(r.tee))}` : ""}${roundTags(r)}${freshTag(r)}</p>
+    <p>${who}${team} · ${esc(r.format.replace("_", " "))}${teeText(r) ? ` · ${esc(teeText(r))}` : ""}${roundTags(r)}${freshTag(r)}</p>
     <div class="cards rcards">
       <div class="card"><div class="k">Score</div><div class="v">${dash(r.gross)} <span class="sub">${toPar(r.to_par)}</span></div><div class="sub">${r.played}${r.played !== r.holes ? ` of ${r.holes}` : ""} holes</div></div>
       <div class="card"><div class="k">Fairways · greens</div><div class="v">${frac(r.fir)} · ${frac(r.gir)}</div><div class="sub">scrambling ${frac(r.scramble)} · sand ${frac(r.sand)}</div></div>

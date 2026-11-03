@@ -277,6 +277,29 @@ def test_a_round_left_out_drive_is_not_its_longest(tmp_path):
         assert {r["side"]: r["longest_drive"] for r in stats_web.rounds(ro)} == {"Ann": 250, "Bob": 300}
 
 
+def test_a_round_s_length_from_its_tees_sums_its_holes_labels_when_all_are_read(tmp_path):
+    path, db = _db(tmp_path)
+    for who, lengths in (("Ann", (410, 160, 530)), ("Bob", (350, 140, 450))):   # Bob off the forward tees
+        for h, yards in enumerate(lengths, 1):
+            _shot(db, who, ts=10 + h, course="Pebble", hole=f"Hole {h}, par 4, {yards} yards", shot_number=1)
+    _shot(db, "Ann", ts=14, course="Pebble", hole="Hole 2, par 4, 524 yards", shot_number=2)   # a misread
+    _shot(db, "Ann", ts=15, course="Pebble", hole="Hole 2, par 4, 160 yards", shot_number=3)
+    for side in ("Ann", "Bob"):
+        db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, complete, scores, hole_pars)"
+                   " VALUES (1, 100, '2026-10-01', 'Pebble', ?, 3, 1, '{\"1\": 4, \"2\": 3, \"3\": 5}',"
+                   " '{\"1\": 4, \"2\": 3, \"3\": 5}')", (side,))
+    db.commit()
+
+    def lengths():
+        with stats_web.connect(path) as ro:
+            return {r["side"]: r["tee_yards"] for r in stats_web.rounds(ro)}
+    assert lengths() == {"Ann": 1100, "Bob": 940}
+    # A hole of the card without its label leaves the length unknown, whatever other hole was read.
+    db.execute("UPDATE shots SET hole = 'Hole 9, par 4, 400 yards' WHERE player = 'Bob' AND hole LIKE 'Hole 3,%'")
+    db.commit()
+    assert lengths() == {"Ann": 1100, "Bob": None}
+
+
 def test_a_round_card_takes_its_longest_drive_from_its_shots(tmp_path):
     """Stored as none at the round's end (the club wasn't read), the drive counts once a rule does."""
     path, db = _db(tmp_path)

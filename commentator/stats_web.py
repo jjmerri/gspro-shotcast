@@ -37,6 +37,7 @@ PUTT_EDGES = (6, 10, 20, 40)
 APPROACH_MAX_YARDS = 250
 _DRIVE = "COALESCE(total_yards, carry_game_yards, carry_raw)"
 _TEE_DRIVER = DRIVE_SQL
+_HOLE_YARDS = re.compile(r"Hole (\d+), par \d+, (\d+) yards")
 
 
 EXCLUDED, DELETED = 1, 2   # the `excluded` column: out of the stats but listed locally / deleted for good
@@ -332,6 +333,17 @@ def putt_buckets(gimme_ft: float | None) -> list[tuple[float, float | None]]:
     return list(zip([lo, *edges], [*edges, None]))
 
 
+def _tee_yards(players: list[dict[int, Counter]], card: set[int]) -> int | None:
+    """A side's length from its tees over its card's holes: one total its players' hole labels all
+    give (a team on different tees has none), or None when any hole's length is missing."""
+    totals = set()
+    for yards in players:
+        if not card <= yards.keys():
+            return None
+        totals.add(sum(yards[h].most_common(1)[0][0] for h in card))
+    return totals.pop() if len(totals) == 1 else None
+
+
 def rounds(db: sqlite3.Connection, context: str | None = None,
            gimmes: dict[int, float] | None = None) -> list[dict[str, Any]]:
     out = []
@@ -346,6 +358,13 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
     for sid, rnd in of_shot.items():
         if sid in named:
             who.setdefault(rnd, set()).add(named[sid])
+    # Each player's hole lengths from their tees, as GSPro's hole label read with their shots gave them
+    # (the most read, past a misread): a side's distance when every hole on its card has one.
+    lengths: dict[tuple[int, str], dict[int, Counter]] = {}
+    for sid, player, hole in db.execute("SELECT id, player, hole FROM shots WHERE hole LIKE 'Hole %yards'"
+                                        " AND player IS NOT NULL"):
+        if (rnd := of_shot.get(sid)) is not None and (m := _HOLE_YARDS.match(hole)):
+            lengths.setdefault((rnd, player), {}).setdefault(int(m.group(1)), Counter())[int(m.group(2))] += 1
     started: dict[int, float] = {}   # each round's first shot, for the page's video links
     for sid, ts in db.execute("SELECT id, ts FROM shots"):
         if (rnd := of_shot.get(sid)) is not None and (rnd not in started or ts < started[rnd]):
@@ -377,6 +396,8 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
         if not complete and holes == 18 and played == 9:
             # Stopped right at the turn: a nine with the back left switched on in GSPro, not a quit.
             holes, complete = 9, True
+        tee_yards = _tee_yards([lengths[(rnd, p)] for p in played_by or [] if (rnd, p) in lengths],
+                               {h["hole"] for h in card["holes"]}) if complete and len(card["holes"]) == holes else None
         longest = r["longest_drive"]
         # (a team side's players aren't on record per round, so its stored drive stands)
         if (rnd, r["side"]) in kept or (rnd, r["side"]) in left:
@@ -396,6 +417,7 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             "scramble": [r["scramble_hit"], r["scramble_tries"]], "sand": [r["sand_hit"], r["sand_tries"]],
             "putts": r["putts"], "penalties": r["penalties"], "longest_drive": longest,
             "card": card["holes"], "gimme_ft": gimmes.get(rnd), "tee": tees.get(rnd),
+            "tee_yards": tee_yards,
         })
     return out
 
