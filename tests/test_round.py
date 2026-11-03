@@ -2529,7 +2529,7 @@ async def test_a_swing_gspro_never_played_mid_round_is_not_recorded(tmp_path, mo
                                   received_at=fired_at + 0.5, received_fires=e.gspro.fires))
     assert len(e.state.shots) == 2
     # A phantom whose window closed before the next real swing fired: that fire isn't its.
-    phantom_at, fires = time.monotonic() - 6, e.gspro.fires
+    phantom_at, fires = fired_at - 2, e.gspro.fires   # tied to the last fire, however long that shot took
     e.gspro.apply(LogEvent("shot_fired"))
     await e.handle_shot(ShotEvent(shot=Shot(club="DR", carry=2.0), hud_hint=drive,
                                   received_at=phantom_at, received_fires=fires))
