@@ -841,7 +841,7 @@ function renderPlayers() {
   const cols = [
     { key: "name", label: "Player" },
     { key: "rounds", label: "Rounds", title: "Finished rounds, or a full nine from one quit early" },
-    { key: "index", label: "Index", title: "Handicap index worked out from rounds on record (World Handicap System rules, GSPro's tee ratings); 'Handicap from' picks every round or only the no-mulligan ones" },
+    { key: "index", label: "Index", title: "Handicap index worked out from rounds on record (World Handicap System rules, GSPro's tee ratings), with the rounds it counts (individual rounds of 9+ holes); 'Handicap from' picks every round or only the no-mulligan ones" },
     { key: "avg_to_par_9", label: "Avg / 9", title: "Average score to par per nine holes (individual-ball rounds)" },
     { key: "best_to_par_9", label: "Best / 9" },
     { key: "sg_total", label: "SG / 9", title: "Strokes gained per nine vs. the PGA Tour baseline", val: p => p.sg ? p.sg.per_nine.total : null },
@@ -855,7 +855,7 @@ function renderPlayers() {
     { key: "avg_drive", label: "Avg drive" },
     { key: "longest_drive", label: "Longest" },
   ];
-  const row = p => `<tr class="click${p.name === state.player ? " sel" : ""}" data-player="${esc(p.name)}"><td><b>${esc(p.name)}</b></td><td>${p.rounds}</td><td>${hcp(p.index)}</td>
+  const row = p => `<tr class="click${p.name === state.player ? " sel" : ""}" data-player="${esc(p.name)}"><td><b>${esc(p.name)}</b></td><td>${p.rounds}</td><td>${hcp(p.index)}${(p.index_history || []).length ? ` <span class="sub">${p.index_history.length}</span>` : ""}</td>
     <td>${toPar(p.avg_to_par_9)}</td><td>${toPar(p.best_to_par_9)}</td>
     <td class="${p.sg && p.sg.per_nine.total >= 0 ? "good" : ""}">${p.sg ? signed(p.sg.per_nine.total, 1) : "–"}</td>
     <td>${dash(p.fir_pct, "%")} <span class="sub">${frac(p.fir)}</span></td>
