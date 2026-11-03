@@ -277,6 +277,20 @@ def test_a_round_left_out_drive_is_not_its_longest(tmp_path):
         assert {r["side"]: r["longest_drive"] for r in stats_web.rounds(ro)} == {"Ann": 250, "Bob": 300}
 
 
+def test_a_round_counts_each_players_mulligans_but_a_misread_putt(tmp_path):
+    path, db = _db(tmp_path)
+    for ts, player, putt, mph in ((10, "Ann", 0, 150.0), (11, "Ann", 1, 1.2), (12, "Ann", 1, 3.5),
+                                  (13, "Ann", 1, None), (14, "Bob", 1, 0.9)):
+        _shot(db, player, ts=ts, course="Pebble", mulligan=1, is_putt=putt, ball_speed=mph)
+    db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, players, holes, gross, scores,"
+               " hole_pars, complete) VALUES (1, 100, '2026-10-01', 'Pebble', 'Team', '[\"Ann\", \"Bob\"]', 18, 8,"
+               " '{\"1\": 4, \"2\": 4}', '{\"1\": 4, \"2\": 4}', 0)")
+    db.commit()
+    with stats_web.connect(path) as ro:
+        # the drive, the 3.5 mph putt and a putt with no speed read count; the putts under 2 mph don't
+        assert stats_web.rounds(ro)[0]["mulligans"] == {"Ann": 3, "Bob": 0}
+
+
 def test_a_round_s_length_from_its_tees_sums_its_holes_labels_when_all_are_read(tmp_path):
     path, db = _db(tmp_path)
     for who, lengths in (("Ann", (410, 160, 530)), ("Bob", (350, 140, 450))):   # Bob off the forward tees
@@ -346,6 +360,33 @@ def test_the_pages_tee_line_gives_the_whole_course_and_the_nine_played():
     assert got == ["Blue tees · 6,115 yds · front 9: 3,170", "Blue tees · 6,115 yds",
                    "Blue tees · 6,115 yds", "Blue tees · back 9: 3,170 yds", "Blue tees · 3,105 yds",
                    "Par 3 tees · 1 hole: 116 yds"]
+
+
+def test_the_pages_handicap_toggle_swaps_in_the_index_without_mulligans():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = re.search(r"\nfunction useHcp\(.*?\n}\n", page, re.S).group(0) \
+        + re.search(r"\nconst leftForMulligans = .*?\n", page).group(0) \
+        + re.search(r"\nfunction mulliganText\(.*?\n}\n", page, re.S).group(0)
+    script = "const esc = s => s, state = {hcpClean: false, data: {players: [{index: 7.0, index_history: [1, 2, 3, 4],"\
+        " index_clean: 5.0, index_history_clean: [1, 2, 3]}]}};" + fns + """
+const p = state.data.players[0], seen = [];
+useHcp(); seen.push([p.index, p.index_history.length, leftForMulligans(p)]);
+state.hcpClean = true; useHcp(); seen.push([p.index, p.index_history.length, leftForMulligans(p)]);
+state.hcpClean = false; useHcp(); seen.push([p.index, p.index_history.length, leftForMulligans(p)]);
+seen.push(mulliganText({mulligans: {Ann: 2}}), mulliganText({mulligans: {Ann: 2, Bob: 1}}),
+          mulliganText({mulligans: {Ann: 0, Bob: 0}}), mulliganText({}));
+console.log(JSON.stringify(seen));"""
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    assert got == [[7.0, 4, 0], [5.0, 3, 1], [7.0, 4, 0], " · mulligans 2", " · mulligans 3 (Ann 2, Bob 1)",
+                   " · mulligans 0", ""]
 
 
 def test_a_round_card_takes_its_longest_drive_from_its_shots(tmp_path):

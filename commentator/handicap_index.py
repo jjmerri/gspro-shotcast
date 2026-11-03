@@ -14,6 +14,11 @@ logged, so it's the tee whose card yardages best match the round's logged tee-to
 (hole_layouts, from the batch GSPro logged as that round ended); with no yardages, the rated tee
 whose rating best fits the length played. A course with no rated tee plays to its par on a 113 slope.
 
+Every such round counts, mulligans or not; `without_mulligans` is the index without the rounds with
+a mulligan (a stroke not taken), for the page's toggle. A putt GSPro read under MISREAD_PUTT_MPH
+never holds a round out: that's the launch monitor catching the ball being set, not a putt (a
+deliberate putt that slow would roll under two feet, inside every gimme).
+
 The league's handicaps (its file, refreshed from Squabbit) come first wherever the booth uses one;
 this index stands in for a player who has none there, and is what the stats page shows.
 """
@@ -39,6 +44,11 @@ WHS_TABLE = {3: (1, -2.0), 4: (1, -1.0), 5: (1, 0.0), 6: (2, -1.0), 7: (2, 0.0),
              9: (3, 0.0), 10: (3, 0.0), 11: (3, 0.0), 12: (4, 0.0), 13: (4, 0.0), 14: (4, 0.0),
              15: (5, 0.0), 16: (5, 0.0), 17: (6, 0.0), 18: (6, 0.0), 19: (7, 0.0), 20: (8, 0.0)}
 JUNIOR_TEES = ("Junior", "Par 3")   # GSPro's placeholder-rated forward tees: only by yardage
+MISREAD_PUTT_MPH = 2.0
+# A mulligan that counts against a round: any but a misread putt (see the module docstring).
+COUNTED_MULLIGAN = (f"mulligan = 1 AND NOT (COALESCE(is_putt, 0) = 1"
+                    f" AND COALESCE(ball_speed, {MISREAD_PUTT_MPH}) < {MISREAD_PUTT_MPH})")
+MULLIGAN_SPAN_S = 8 * 3600   # a mulligan this long before the round's end was in a round never recorded
 
 
 def index_from(diffs: list[float]) -> float | None:
@@ -149,21 +159,35 @@ def _differential(scores: dict[int, int], pars: dict[int, int], tee: dict | None
     return round(diff, 1), len(holes)
 
 
+def mulligans_by_round(db: sqlite3.Connection) -> dict[int, int]:
+    """Counted mulligans (COUNTED_MULLIGAN) per player_rounds row: each one in the player's first round
+    of that session on that course ending after it."""
+    ends: dict[tuple, list[tuple[float, int]]] = {}
+    for rid, sid, player, course, ended in db.execute(
+            "SELECT id, session_id, player, course, ended_at FROM player_rounds ORDER BY ended_at, id"):
+        ends.setdefault((sid, player, (course or "").casefold()), []).append((ended, rid))
+    out: dict[int, int] = {}
+    for sid, player, course, ts in db.execute(
+            f"SELECT session_id, player, course, ts FROM shots WHERE {COUNTED_MULLIGAN} AND player IS NOT NULL"):
+        for ended, rid in ends.get((sid, player, (course or "").casefold()), []):
+            if ended >= ts:
+                if ended - ts <= MULLIGAN_SPAN_S:
+                    out[rid] = out.get(rid, 0) + 1
+                break
+    return out
+
+
 def indexes(db: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     """Per player: the current index (None until three differentials), how many differentials, and the
-    history, one point per counted round: {date, course, holes, tee, differential, index}."""
+    history, one point per counted round: {date, course, holes, tee, differential, index, mulligans},
+    and the same without the rounds with a counted mulligan, under `without_mulligans`."""
     tees, layouts = _tees(db), _distances(db)
-    rows = db.execute("SELECT pr.player, pr.session_id, pr.ended_at, pr.course, pr.fmt, pr.scores, pr.hole_pars, s.date"
+    rows = db.execute("SELECT pr.id, pr.player, pr.session_id, pr.ended_at, pr.course, pr.fmt, pr.scores, pr.hole_pars, s.date"
                       " FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
                       " WHERE pr.excluded = 0 ORDER BY pr.ended_at, pr.id").fetchall()
-    diffs: dict[str, list[float]] = {}
-    played_holes: dict[str, int] = {}
-    out: dict[str, dict[str, Any]] = {}
-
-    def current(player: str) -> float | None:
-        return index_from(diffs.get(player, [])) if played_holes.get(player, 0) >= FIRST_HOLES else None
-
-    for player, sid, ended, course, fmt, scores, pars, date in rows:
+    mulligans = mulligans_by_round(db)
+    cards = []
+    for rid, player, sid, ended, course, fmt, scores, pars, date in rows:
         if (fmt or "") in SHARED_BALL or not player:
             continue
         sc = {h: v for h, v in _json(scores).items() if isinstance(v, int)}
@@ -172,13 +196,28 @@ def indexes(db: sqlite3.Connection) -> dict[str, dict[str, Any]]:
         if len(holes) < 9:
             continue
         key = (course or "").casefold()
-        played = _round_layout(layouts, key, sid, ended)
-        tee = pick_tee(tees.get(key, []), played, holes[:18])
+        tee = pick_tee(tees.get(key, []), _round_layout(layouts, key, sid, ended), holes[:18])
+        cards.append((player, course, date, sc, pa, tee, mulligans.get(rid, 0)))
+    every = _index_of(cards)
+    clean = _index_of([c for c in cards if not c[6]])
+    empty = {"index": None, "rounds": 0, "history": []}
+    return {p: {**every[p], "without_mulligans": clean.get(p, empty)} for p in every}
+
+
+def _index_of(cards: list[tuple]) -> dict[str, dict[str, Any]]:
+    diffs: dict[str, list[float]] = {}
+    played_holes: dict[str, int] = {}
+    out: dict[str, dict[str, Any]] = {}
+
+    def current(player: str) -> float | None:
+        return index_from(diffs.get(player, [])) if played_holes.get(player, 0) >= FIRST_HOLES else None
+
+    for player, course, date, sc, pa, tee, mulls in cards:
         diff, counted = _differential(sc, pa, tee, current(player))
         diffs.setdefault(player, []).append(diff)
         played_holes[player] = played_holes.get(player, 0) + counted
         p = out.setdefault(player, {"index": None, "rounds": 0, "history": []})
         p["index"], p["rounds"] = current(player), len(diffs[player])
         p["history"].append({"date": date, "course": course, "holes": counted, "tee": tee and tee["tee"],
-                             "differential": diff, "index": p["index"]})
+                             "differential": diff, "index": p["index"], "mulligans": mulls})
     return out

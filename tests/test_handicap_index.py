@@ -94,6 +94,24 @@ def _rounds(store, rounds, layouts=()):
     return HI.indexes(store.db)["Ann"]
 
 
+def test_without_mulligans_leaves_out_a_round_with_one_but_never_for_a_misread_putt():
+    store = Store(None)
+    nine = {h: 5 for h in range(1, 10)}
+    sid = store.db.execute("INSERT INTO sessions (started_at, date) VALUES (0, '2026-10-01')").lastrowid
+    for i, (putt, mph) in enumerate(((0, 150.0), (1, 1.5), (None, None), (1, 2.5), (1, None))):
+        ended = 1000.0 * (i + 1)
+        store.db.execute("INSERT INTO player_rounds (session_id, ended_at, player, course, scores, hole_pars)"
+                         " VALUES (?, ?, 'Ann', 'Test Links', ?, ?)", (sid, ended, json.dumps(nine), json.dumps(PARS)))
+        if putt is not None:
+            store.db.execute("INSERT INTO shots (session_id, ts, player, course, mulligan, is_putt, ball_speed)"
+                             " VALUES (?, ?, 'Ann', 'Test Links', 1, ?, ?)", (sid, ended - 500, putt, mph))
+    ann = HI.indexes(store.db)["Ann"]
+    assert ann["rounds"] == 5 and [h["mulligans"] for h in ann["history"]] == [1, 0, 0, 1, 1]
+    # Kept: the round with only a misread putt and the round with none.
+    clean = ann["without_mulligans"]
+    assert clean["rounds"] == 2 and [h["mulligans"] for h in clean["history"]] == [0, 0]
+
+
 def test_the_first_index_waits_for_54_holes():
     nine = {h: 5 for h in range(1, 10)}
     ann = _rounds(Store(None), [(i, nine) for i in range(6)])

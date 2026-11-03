@@ -391,6 +391,12 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             left.add(key)
         else:
             kept[key] = max(kept.get(key) or 0, d)
+    # Each player's mulligans in each round, but a misread putt (handicap_index.COUNTED_MULLIGAN).
+    mulligans: dict[int, Counter] = {}
+    for sid, player in db.execute(f"SELECT id, player FROM shots WHERE {handicap_index.COUNTED_MULLIGAN}"
+                                  " AND player IS NOT NULL AND player != 'unknown'"):
+        if (rnd := of_shot.get(sid)) is not None:
+            mulligans.setdefault(rnd, Counter())[player] += 1
     sides = Counter(of_row.values())
     for r in db.execute("SELECT * FROM rounds WHERE 1=1" + _ctx(context) + " ORDER BY ended_at DESC, id DESC"):
         card = _card(_json(r["scores"]), _json(r["hole_pars"]))
@@ -432,6 +438,8 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             "putts": r["putts"], "penalties": r["penalties"], "longest_drive": longest,
             "card": card["holes"], "gimme_ft": gimmes.get(rnd), "tee": tees.get(rnd),
             "tee_yards": tee_yards, "course_yards": course_yards, "course_holes": course_holes,
+            # this side's players' mulligans (a team side's players aren't always on record: its own)
+            "mulligans": {p: mulligans.get(rnd, Counter())[p] for p in played_by or [r["side"]] if p},
         })
     return out
 
@@ -722,11 +730,15 @@ def summary(db: sqlite3.Connection, context: str | None = None,
     usual = usual_gimme(db, gimmes)
     sg, rec, trend = A.sg_summary(holes, usual), A.recovery(holes), A.trends(db, holes, context, usual)
     people = players(db, context, usual)
-    # Our own handicap index (handicap_index) goes by every counting round, whatever the context.
+    # Our own handicap index (handicap_index) goes by every counting round, whatever the context:
+    # every such round, and without the rounds with a mulligan.
     own = handicap_index.indexes(db)
     for p in people:
-        p["index"] = (own.get(p["name"]) or {}).get("index")
-        p["index_history"] = (own.get(p["name"]) or {}).get("history", [])
+        mine = own.get(p["name"]) or {}
+        clean = mine.get("without_mulligans") or {}
+        p["index"], p["index_history"] = mine.get("index"), mine.get("history", [])
+        # without the rounds a mulligan was taken in, for the page's toggle
+        p["index_clean"], p["index_history_clean"] = clean.get("index"), clean.get("history", [])
         p["sg"] = sg.get(p["name"])
         p["gapping"] = A.gapping(db, p["name"], context)
         p["recovery"] = rec.get(p["name"], [])

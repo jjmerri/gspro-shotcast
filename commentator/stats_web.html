@@ -185,7 +185,7 @@ const store = { get: k => { try { return localStorage.getItem(k); } catch (e) { 
 // The shots filter in a link; `who` is the Shots tab's own player filter, not the picked player.
 const SHOT_LINK_KEYS = ["round", "from", "to", "course", "club", "lie", "who"];
 const state = { tab: "home", ctx: "", data: null, player: null, me: "", mine: null, lastView: {},
-                seen: Number(store.get("shotcast.seen")) || 0,
+                seen: Number(store.get("shotcast.seen")) || 0, hcpClean: store.get("shotcast.hcpclean") === "1",
                 round: null, roundGroup: null, sort: {}, more: {}, course: null, versus: [null, null], shotFilter: {}, shots: null, shotOpen: null,
                 session: null, transcript: null, transcriptFor: null, replays: {}, replayHole: null, replayOnly: false,
                 vods: undefined, clips: undefined, vod: null, schedule: undefined, period: null };
@@ -357,6 +357,7 @@ async function load() {
     const body = await getJSON(`v/${site.version}/summary-${state.ctx || "all"}.json`);
     if (mine !== loading) return;
     state.data = body;
+    useHcp();
     state.shots = null;
     // The tabs read from their own files may not have loaded yet: they settle it themselves.
     if (!tabs().includes(state.tab) && !EXTRA_TABS.includes(state.tab)) state.tab = "home";
@@ -741,6 +742,18 @@ function threePuttChart(bands) {
 
 // A handicap index as golfers write it: better than scratch is "+".
 const hcp = v => v === null || v === undefined ? "–" : v < 0 ? "+" + (-v).toFixed(1) : v.toFixed(1);
+// The handicap index the toggle picks: from every round, or without the rounds with a mulligan
+// (index_clean; a misread putt aside). Everything else reads p.index and p.index_history.
+function useHcp() {
+  for (const p of state.data.players) {
+    if (!("index_all" in p)) [p.index_all, p.index_history_all] = [p.index, p.index_history || []];
+    [p.index, p.index_history] = state.hcpClean && "index_clean" in p ? [p.index_clean, p.index_history_clean || []]
+                                                                      : [p.index_all, p.index_history_all];
+  }
+}
+const hcpToggle = () => `<label class="sub" title="Work out the handicap index without the rounds a mulligan was taken in. A putt GSPro read under 2 mph is a misread (the ball being set), never held against a round."><input type="checkbox" data-hcpclean${state.hcpClean ? " checked" : ""}> Leave out rounds with mulligans</label>`;
+// How many of a player's rounds the index leaves out for a mulligan.
+const leftForMulligans = p => state.hcpClean ? (p.index_history_all || []).length - (p.index_history || []).length : 0;
 
 const SG_LABELS = { off_tee: "Off the tee", approach: "Approach", around_green: "Around the green", putting: "Putting", total: "Total" };
 function sgBars(sg) {
@@ -823,7 +836,7 @@ function renderPlayers() {
   const cols = [
     { key: "name", label: "Player" },
     { key: "rounds", label: "Rounds", title: "Finished rounds, or a full nine from one quit early" },
-    { key: "index", label: "Index", title: "Handicap index worked out from rounds on record (World Handicap System rules, GSPro's tee ratings)" },
+    { key: "index", label: "Index", title: "Handicap index worked out from rounds on record (World Handicap System rules, GSPro's tee ratings); the toggle leaves out rounds with a mulligan" },
     { key: "avg_to_par_9", label: "Avg / 9", title: "Average score to par per nine holes (individual-ball rounds)" },
     { key: "best_to_par_9", label: "Best / 9" },
     { key: "sg_total", label: "SG / 9", title: "Strokes gained per nine vs. the PGA Tour baseline", val: p => p.sg ? p.sg.per_nine.total : null },
@@ -854,7 +867,7 @@ function renderPlayers() {
     return `<h2>${meTitle("Players")}</h2>` + sortable("players", d.players.filter(p => p.name === state.me), cols, row)
       + renderPlayer(d.players.find(p => p.name === state.me));
   }
-  return `<h2>Players</h2><p class="sub">Tap a player for their page: scoring, strokes gained, gapping, putting and every round.</p>`
+  return `<h2>Players</h2><p class="sub">Tap a player for their page: scoring, strokes gained, gapping, putting and every round.</p><p>${hcpToggle()}</p>`
     + sortable("players", d.players, cols, row, { key: "avg_to_par_9" });
 }
 
@@ -878,7 +891,7 @@ function renderPlayer(p) {
   return `<h2 id="profile">${esc(p.name)}</h2><p class="sub">${links}</p>
   <div class="cards">
     <div class="card"><div class="k">Scoring / 9</div><div class="v">${toPar(p.avg_to_par_9)}</div><div class="sub">best ${toPar(p.best_to_par_9)} · ${p.rounds} round${p.rounds === 1 ? "" : "s"} · ${p.holes} holes</div></div>
-    <div class="card"><div class="k">Handicap index</div><div class="v">${hcp(p.index)}</div><div class="sub">${p.index === null || p.index === undefined ? `needs 3 rounds of 9+ holes (${(p.index_history || []).length} so far)` : `from ${p.index_history.length} round${p.index_history.length === 1 ? "" : "s"} on record`}</div></div>
+    <div class="card"><div class="k">Handicap index</div><div class="v">${hcp(p.index)}</div><div class="sub">${p.index === null || p.index === undefined ? `needs 3 rounds of 9+ holes (${(p.index_history || []).length} so far)` : `from ${p.index_history.length} round${p.index_history.length === 1 ? "" : "s"} on record`}${leftForMulligans(p) ? ` · ${leftForMulligans(p)} with a mulligan left out` : ""}<br>${hcpToggle()}</div></div>
     <div class="card"><div class="k">By par</div><div class="v" style="font-size:16px">P3 ${toPar(pa["3"])} · P4 ${toPar(pa["4"])} · P5 ${toPar(pa["5"])}</div><div class="sub">average to par per hole</div></div>
     <div class="card"><div class="k">Hole outcomes</div><div class="v" style="font-size:16px">${dash(p.birdie_pct, "%")} / ${dash(p.par_pct, "%")} / ${dash(p.bogey_pct, "%")} / ${dash(p.double_pct, "%")}</div><div class="sub">birdie+ / par / bogey / double+</div></div>
     <div class="card"><div class="k">Driving</div><div class="v">${dash(p.avg_drive, " yd")}</div><div class="sub">longest ${dash(p.longest_drive, " yd")} · ${p.drives} drives · ${dash(p.fir_pct, "%")} fairways</div></div>
@@ -1292,6 +1305,14 @@ function excludedRounds() {
 }
 
 // One side of a round on its own page, with the round's other sides a tap away.
+// A side's mulligans (a misread putt aside): its one player's count, or each of its players'.
+function mulliganText(r) {
+  const m = Object.entries(r.mulligans || {});
+  if (!m.length) return "";
+  const total = m.reduce((t, [, n]) => t + n, 0);
+  return ` · mulligans ${total}${m.length > 1 && total ? ` (${m.map(([p, n]) => `${esc(p)} ${n}`).join(", ")})` : ""}`;
+}
+
 function renderRound() {
   const d = state.data;
   if (state.roundGroup) {   // a link to the round as a whole: the picked player's side, else the first
@@ -1326,7 +1347,7 @@ function renderRound() {
     <div class="cards rcards">
       <div class="card"><div class="k">Score</div><div class="v">${dash(r.gross)} <span class="sub">${toPar(r.to_par)}</span></div><div class="sub">${r.played}${r.played !== r.holes ? ` of ${r.holes}` : ""} holes</div></div>
       <div class="card"><div class="k">Fairways · greens</div><div class="v">${frac(r.fir)} · ${frac(r.gir)}</div><div class="sub">scrambling ${frac(r.scramble)} · sand ${frac(r.sand)}</div></div>
-      <div class="card"><div class="k">Putts</div><div class="v">${dash(r.putts)}</div><div class="sub">penalties ${dash(r.penalties)}${r.longest_drive ? ` · longest drive ${Math.round(r.longest_drive)} yd` : ""}</div></div>
+      <div class="card"><div class="k">Putts</div><div class="v">${dash(r.putts)}</div><div class="sub">penalties ${dash(r.penalties)}${mulliganText(r)}${r.longest_drive ? ` · longest drive ${Math.round(r.longest_drive)} yd` : ""}</div></div>
     </div>
     <p class="ractions">${acts}</p>
     <h2>Scorecard</h2><div class="round">${scorecard(r.card, reps)}${shotsUsed(r, reps)}${replayPart(reps, r)}${roundSummary(r)}</div>`;
@@ -2021,6 +2042,11 @@ document.addEventListener("change", (e) => {
     loadShots();
   } else if (t.dataset.session !== undefined) {
     loadTranscript(+t.value);
+  } else if (t.dataset.hcpclean !== undefined) {
+    state.hcpClean = t.checked;
+    store.set("shotcast.hcpclean", t.checked ? "1" : null);
+    useHcp();
+    render();
   }
 });
 
