@@ -2239,6 +2239,40 @@ async def test_a_tee_shot_struck_just_before_the_round_starts_is_its_opening_sho
     assert rec.hole == "Hole 1, par 4, 400 yards"
 
 
+async def test_a_rounds_shots_keep_its_course_when_a_hole_box_read_cuts_it_short(tmp_path):
+    from commentator.models import Shot, ShotEvent
+
+    e = _engine(tmp_path)
+    e.cfg.commentary.closer = e.cfg.commentary.opener = False
+    tee = Hud(player_text="MikeD E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards", lie="tee")
+    e.state.current_hole, e.current_course = "Hole 2, par 4, 400 yards", "Cochecho Country C"
+
+    async def drive():
+        await e.handle_shot(ShotEvent(shot=Shot(club="DR", carry=250.0), hud_hint=tee))
+        return e.store.db.execute("SELECT course FROM shots ORDER BY id DESC").fetchone()[0]
+
+    assert await drive() == "Cochecho Country C"   # no round: the screen's read is all there is
+    e.round = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="Cochecho Country Club",
+                    scheduled_format=None)
+    assert await drive() == "Cochecho Country Club"
+    # So do its holes' tees and pins, logged as it completes on a hole whose read was cut short.
+    e.gspro.layouts += 1
+    e.gspro.layout_holes = [{"par": 4, "played": True, "tee": (0.0, 2.0, 0.0), "pin": (10.0, 1.0, 300.0),
+                             "waypoint": None}]
+    e._check_log_round()
+    assert [x[0] for x in e.store.db.execute("SELECT course FROM hole_layouts")] == ["Cochecho Country Club"]
+    # After it ended: still its course for a cut-short read of it, but another course's round (its
+    # start missed) keeps that course.
+    e.round.ended = True
+    for n, read in enumerate(("Cochecho Country", "Bethpage Black"), 1):
+        e.current_course = read
+        e.gspro.layouts += 1
+        e.gspro.layout_holes = [dict(e.gspro.layout_holes[0], pin=(10.0 + n, 1.0, 300.0))]
+        e._check_log_round()
+    assert [x[0] for x in e.store.db.execute("SELECT course FROM hole_layouts ORDER BY id")] == [
+        "Cochecho Country Club", "Cochecho Country Club", "Bethpage Black"]
+
+
 async def test_range_keeps_the_booth_off(tmp_path):
     from commentator.models import Shot, ShotEvent
 

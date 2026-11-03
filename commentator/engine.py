@@ -1541,7 +1541,11 @@ class Engine:
         if g.layouts != self._log_layouts:
             # The completed round's hole list: each played hole's tee and pin, for the hole replays.
             self._log_layouts = g.layouts
-            course = self.current_course or g.course_display
+            # Under the round's course, as its shots are (a hole box read can be cut short), unless the
+            # round has ended and this is another course's: one whose start the booth missed.
+            read = self.current_course or g.course_display
+            mine = r is not None and r.course and (not r.ended or not read or self._same_course(r.course, read))
+            course = r.course if mine else read
             if (n := self.store.record_hole_layout(course, g.layout_holes)):
                 log.info("Stored the layout of %d holes at %s", n, course)
                 self._fill_log_totals()   # the tee shots: their start is the layout's tee
@@ -4921,7 +4925,8 @@ class Engine:
         shot_id = self.store.record_shot(
             player=player, hole=shot_hole, shot=shot, before=before, after=hud, tags=tags,
             carry_game_yards=carry_game, total_yards=tile_yards("total length"), offline_yards=tile_yards("offline (raw)"),
-            course=self.current_course, carry_raw_tile_yards=carry_flat,
+            # The round's course, fixed at its start: the hole box's read each hole can be cut short.
+            course=(r.course if r is not None else None) or self.current_course, carry_raw_tile_yards=carry_flat,
             to_pin_yards=to_yards(before.to_pin),
             finish_yards=None,   # filled in on this player's next shot (see _resolve_pending_finish)
             gimme_yards=self.gspro.gimme_of(idx), fmt=fmt, attributed=attributed,
