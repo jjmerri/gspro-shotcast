@@ -342,7 +342,7 @@ def test_the_pages_tee_line_gives_the_whole_course_and_the_nine_played():
           "course_holes": None}, False),
     ]
     script = fns + "console.log(JSON.stringify(%s.map(([r, s]) => teeText(r, s))))" % json.dumps(cases)
-    got = json.loads(subprocess.run([node], input=script, capture_output=True, text=True, check=True).stdout)
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
     assert got == ["Blue tees · 6,115 yds · front 9: 3,170", "Blue tees · 6,115 yds",
                    "Blue tees · 6,115 yds", "Blue tees · back 9: 3,170 yds", "Blue tees · 3,105 yds",
                    "Par 3 tees · 1 hole: 116 yds"]
