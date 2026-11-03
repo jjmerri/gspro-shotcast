@@ -25,6 +25,8 @@
            border-radius:6px; cursor:pointer; font:inherit; }
   nav button.on, .seg button.on { color:var(--text); border-color:var(--accent); background:#1d2c27; }
   nav, .seg { display:flex; flex-wrap:wrap; gap:6px; }
+  .seg.small { align-items:center; margin-top:6px; }
+  .seg.small button { padding:2px 8px; font-size:12px; }
   main { padding:16px 22px 60px; max-width:1300px; margin:0 auto; }
   h2 { font-size:15px; margin:26px 0 10px; color:var(--dim); text-transform:uppercase; letter-spacing:.6px; }
   h3 { font-size:14px; margin:18px 0 8px; }
@@ -751,7 +753,10 @@ function useHcp() {
                                                                       : [p.index_all, p.index_history_all];
   }
 }
-const hcpToggle = () => `<label class="sub" title="Work out the handicap index without the rounds a mulligan was taken in. A putt GSPro read under 2 mph is a misread (the ball being set), never held against a round."><input type="checkbox" data-hcpclean${state.hcpClean ? " checked" : ""}> Leave out rounds with mulligans</label>`;
+// `card`: in the Handicap index card, which says what it is: no label, shorter buttons.
+const hcpToggle = (card = false) => `<div class="seg small" title="Which rounds the handicap index is worked out from: every one, or only those with no mulligan taken. A putt GSPro read under 2 mph is a misread (the ball being set), never held against a round.">${card ? "" : '<span class="sub">Handicap from</span>'}${
+  [["0", card ? "All" : "All rounds"], ["1", card ? "No mulligans" : "No-mulligan rounds"]].map(([v, label]) =>
+    `<button data-hcpclean="${v}" class="${(v === "1") === state.hcpClean ? "on" : ""}">${label}</button>`).join("")}</div>`;
 // How many of a player's rounds the index leaves out for a mulligan.
 const leftForMulligans = p => state.hcpClean ? (p.index_history_all || []).length - (p.index_history || []).length : 0;
 
@@ -836,7 +841,7 @@ function renderPlayers() {
   const cols = [
     { key: "name", label: "Player" },
     { key: "rounds", label: "Rounds", title: "Finished rounds, or a full nine from one quit early" },
-    { key: "index", label: "Index", title: "Handicap index worked out from rounds on record (World Handicap System rules, GSPro's tee ratings); the toggle leaves out rounds with a mulligan" },
+    { key: "index", label: "Index", title: "Handicap index worked out from rounds on record (World Handicap System rules, GSPro's tee ratings); 'Handicap from' picks every round or only the no-mulligan ones" },
     { key: "avg_to_par_9", label: "Avg / 9", title: "Average score to par per nine holes (individual-ball rounds)" },
     { key: "best_to_par_9", label: "Best / 9" },
     { key: "sg_total", label: "SG / 9", title: "Strokes gained per nine vs. the PGA Tour baseline", val: p => p.sg ? p.sg.per_nine.total : null },
@@ -867,7 +872,7 @@ function renderPlayers() {
     return `<h2>${meTitle("Players")}</h2>` + sortable("players", d.players.filter(p => p.name === state.me), cols, row)
       + renderPlayer(d.players.find(p => p.name === state.me));
   }
-  return `<h2>Players</h2><p class="sub">Tap a player for their page: scoring, strokes gained, gapping, putting and every round.</p><p>${hcpToggle()}</p>`
+  return `<h2>Players</h2><p class="sub">Tap a player for their page: scoring, strokes gained, gapping, putting and every round.</p>${hcpToggle()}`
     + sortable("players", d.players, cols, row, { key: "avg_to_par_9" });
 }
 
@@ -891,7 +896,7 @@ function renderPlayer(p) {
   return `<h2 id="profile">${esc(p.name)}</h2><p class="sub">${links}</p>
   <div class="cards">
     <div class="card"><div class="k">Scoring / 9</div><div class="v">${toPar(p.avg_to_par_9)}</div><div class="sub">best ${toPar(p.best_to_par_9)} · ${p.rounds} round${p.rounds === 1 ? "" : "s"} · ${p.holes} holes</div></div>
-    <div class="card"><div class="k">Handicap index</div><div class="v">${hcp(p.index)}</div><div class="sub">${p.index === null || p.index === undefined ? `needs 3 rounds of 9+ holes (${(p.index_history || []).length} so far)` : `from ${p.index_history.length} round${p.index_history.length === 1 ? "" : "s"} on record`}${leftForMulligans(p) ? ` · ${leftForMulligans(p)} with a mulligan left out` : ""}<br>${hcpToggle()}</div></div>
+    <div class="card"><div class="k">Handicap index</div><div class="v">${hcp(p.index)}</div><div class="sub">${p.index === null || p.index === undefined ? `needs 3 rounds of 9+ holes (${(p.index_history || []).length} so far)` : `from ${p.index_history.length} round${p.index_history.length === 1 ? "" : "s"} on record`}${leftForMulligans(p) ? ` · ${leftForMulligans(p)} with a mulligan left out` : ""}${hcpToggle(true)}</div></div>
     <div class="card"><div class="k">By par</div><div class="v" style="font-size:16px">P3 ${toPar(pa["3"])} · P4 ${toPar(pa["4"])} · P5 ${toPar(pa["5"])}</div><div class="sub">average to par per hole</div></div>
     <div class="card"><div class="k">Hole outcomes</div><div class="v" style="font-size:16px">${dash(p.birdie_pct, "%")} / ${dash(p.par_pct, "%")} / ${dash(p.bogey_pct, "%")} / ${dash(p.double_pct, "%")}</div><div class="sub">birdie+ / par / bogey / double+</div></div>
     <div class="card"><div class="k">Driving</div><div class="v">${dash(p.avg_drive, " yd")}</div><div class="sub">longest ${dash(p.longest_drive, " yd")} · ${p.drives} drives · ${dash(p.fir_pct, "%")} fairways</div></div>
@@ -1891,8 +1896,15 @@ document.addEventListener("click", (e) => {
     return;
   }
   const t = e.target.closest("[data-tab],[data-section],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
-                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-exclround],[data-delround],[data-leagueround],[data-sharecard],[data-period],[data-vod],[data-clip],[data-link],[data-more],[data-onlyme]");
+                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-exclround],[data-delround],[data-leagueround],[data-sharecard],[data-period],[data-vod],[data-clip],[data-link],[data-more],[data-onlyme],[data-hcpclean]");
   if (!t) return;
+  if (t.dataset.hcpclean) {
+    state.hcpClean = t.dataset.hcpclean === "1";
+    store.set("shotcast.hcpclean", state.hcpClean ? "1" : null);
+    useHcp();
+    render();
+    return;
+  }
   if (t.dataset.link) {
     shareLink(t.dataset.link, t.dataset.linktitle, t);
     return;
@@ -2042,11 +2054,6 @@ document.addEventListener("change", (e) => {
     loadShots();
   } else if (t.dataset.session !== undefined) {
     loadTranscript(+t.value);
-  } else if (t.dataset.hcpclean !== undefined) {
-    state.hcpClean = t.checked;
-    store.set("shotcast.hcpclean", t.checked ? "1" : null);
-    useHcp();
-    render();
   }
 });
 
