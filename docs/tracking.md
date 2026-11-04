@@ -257,10 +257,14 @@ record. A record shot whose stream was already gone has no clip, and one near th
 still uploading gets its clip at a later publish. Its **▶ Watch** and share link play the clip. Clips need the uploader to read `live/`. Stacks made before 0.1.39
 can't, so update the stack; until then each publish skips the clips and says why.
 It also has **Highlights**: each publish picks up to 8 moments from every round with at least two
-(holed putts and hole-outs, approaches and chips stopped close, the round's longest drive; the
-booth's own excitement scale picks them, with a player's or a hole's next pick counting for a little
-less so one player or one hole doesn't fill the reel, and at most one bad shot a player: a penalty,
-a missed short putt, a three-putt, a shot far off line). Their stretches of stream are copied
+(holed putts and hole-outs, approaches and chips stopped close, the round's longest drive, a
+player's personal best: their longest drive or holed putt yet, once they've 10 before the round to
+beat; then, to fill in, solid ones: a par-or-better putt from beyond 6 ft, a green found within
+25 ft from 100+ yd, a chip to 6 ft, a 280+ yd drive in the fairway, a drive or holed putt close to
+their best. The booth's own excitement scale picks them, with a player's or a hole's next pick
+counting for a little less so one player or one hole doesn't fill the reel, and at most one bad
+shot a player, never more bad than good: a penalty, a missed short putt, a three-putt (shown from
+its first putt), a shot far off line). Their stretches of stream are copied
 back to back into `live/reels/<round>/` (listed in `live/reels.json`), and the round's page gets a
 **▶ Highlights** button that plays the reel, with each moment listed to jump to. A league round's
 reel stays for the season (`publish.season_start`), any other round's for as long as its stream

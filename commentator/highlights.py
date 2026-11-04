@@ -25,7 +25,8 @@ from . import interest as I
 from .live_stream import TYPES, segment_durations
 
 MAX_MOMENTS = 8
-MIN_LEVEL = 6             # a moment the booth rates under this (out of 10) isn't a highlight
+MIN_LEVEL = 6             # a moment the booth rates under this (out of 10) isn't a big one...
+OK_LEVEL = 5              # ...and a solid shot under it (OK_*) fills the reel's other places
 MIN_FINAL = 4.5           # ...nor one whose score, less what's already picked, is this or less (a bad 5 is 4.75)
 PRE = 3.0                 # seconds of the stream before a shot's time (it shows ~4 s after it)
 POST_PUTT, POST_SHOT, POST_BIG = 12.0, 16.0, 20.0   # ...and after: a putt, a full shot, a 9 or 10's call
@@ -33,11 +34,19 @@ CLOSE_FROM_YARDS, CLOSE_FEET = 100.0, 15.0          # the booth's close_approach
 BIG_DRIVE_YARDS = 300.0   # a round's longest drive from here is a moment
 SHORT_MISS_FEET = 4.0     # a putt missed from inside this is a bad moment
 OFFLINE_MISS_YARDS = 45.0  # ...and a full shot this far off line
+OK_PUTT_FEET = 6.0        # solid shots: a putt holed from beyond this for par or better,
+OK_GREEN_FEET = 25.0      # an approach (CLOSE_FROM_YARDS and up) to inside this,
+OK_CHIP_FEET = 6.0        # a chip or pitch to inside this,
+OK_DRIVE_YARDS = 280.0    # a drive this long in the fairway (a notch under the others)
+PB_LEVEL = 7              # a player's longest drive or holed putt yet...
+PB_HISTORY = 10           # ...once they've this many of them before the round to beat
+NEAR_PB = {"drive": 0.95, "putt": 0.85}   # this share of it: close, a solid shot a notch up
+NEAR_PB_LEVEL = 5.5
 NOT_PUTT_COUNTED = ("scramble", "alternate")       # one ball between partners: nobody three-putts alone
 # A shot's columns an older database may not have (stats_web.connect's views fill in only some).
 DEFAULTS = {"picked": None, "hazard_x": None, "shared_ball": 0, "gimme_yards": None, "mulligan": 0, "left_out": 0,
             "fmt": None, "offline_yards": None, "outcome": None, "finish_yards": None, "total_yards": None,
-            "to_pin_yards": None, "lie_before": None, "tags": None, "is_putt": 0, "shot_number": None}
+            "to_pin_yards": None, "lie_before": None, "lie_after": None, "tags": None, "is_putt": 0, "shot_number": None}
 
 
 def _par(label: str | None) -> int | None:
@@ -105,15 +114,21 @@ def _good(s: dict, par: int | None, hole: int | None, longest: dict | None) -> t
             feet = start * 3 if start else None
             level = I.holed_putt_level(feet, to_par)
             what = f"{who} holes {f'a {round(feet)} ft putt' if feet else 'the putt'}{f' for {name}' if name else ''}{on}"
+            if not level and feet and feet > OK_PUTT_FEET and to_par is not None and to_par <= 0:
+                level = OK_LEVEL
             return (level, what, POST_PUTT) if level else None
         if s["shot_number"] == 1:
             return 10, f"Hole in one! {who}{on}", POST_BIG
         level = I.holed_out_level(start, s["shot_number"], par, CLOSE_FROM_YARDS)
         return level, f"{who} holes out from {round(start) if start else '?'} yd{f' for {name}' if name else ''}{on}", POST_BIG
+    split = (lie == "tee" and (par or 0) >= 4 and (s["total_yards"] or 0) >= OK_DRIVE_YARDS
+             and (s.get("lie_after") or "").lower() == "fairway")
     if s["is_putt"] or lie == "green" or finish is None:
         if longest is s:
             yd = s["total_yards"]
             return (7 if yd >= BIG_DRIVE_YARDS + 30 else 6), f"{who} bombs a {round(yd)} yd drive{on}", POST_SHOT
+        if split:
+            return OK_LEVEL - 0.2, f"{who} splits the fairway, {round(s['total_yards'])} yd{on}", POST_SHOT
         return None
     feet = finish * 3
     if start and start >= CLOSE_FROM_YARDS and feet <= CLOSE_FEET:
@@ -128,6 +143,12 @@ def _good(s: dict, par: int | None, hole: int | None, longest: dict | None) -> t
     if longest is s:
         yd = s["total_yards"]
         return (7 if yd >= BIG_DRIVE_YARDS + 30 else 6), f"{who} bombs a {round(yd)} yd drive{on}", POST_SHOT
+    if start and start >= CLOSE_FROM_YARDS and feet <= OK_GREEN_FEET and (s.get("lie_after") or "").lower() == "green":
+        return OK_LEVEL, f"{who} finds the green, {round(feet)} ft from {round(start)} yd{on}", POST_SHOT
+    if start and start < CLOSE_FROM_YARDS and feet <= OK_CHIP_FEET:
+        return OK_LEVEL, f"{who} chips to {max(1, round(feet))} ft from {round(start)} yd{on}", POST_SHOT
+    if split:
+        return OK_LEVEL - 0.2, f"{who} splits the fairway, {round(s['total_yards'])} yd{on}", POST_SHOT
     return None
 
 
@@ -143,6 +164,7 @@ def _bad(s: dict, hole: list[dict], team_ball: bool, penalised: bool) -> tuple[i
         if team_ball:
             return None   # one ball between partners: nobody three-putts alone
         putts = sum(1 for x in hole if x["is_putt"])   # the conceded tap-in counts
+        # (pick() plays it from the first putt)
         if putts >= 3 and s is [x for x in hole if x["is_putt"] and x["outcome"] != "gimme"][-1]:
             return (6 if putts >= 4 else 5), f"{who} {'four' if putts >= 4 else 'three'}-putts{on}", POST_PUTT
         return None
@@ -160,12 +182,47 @@ def _result(hole: list[dict], par: int | None) -> int | None:
     return last["shot_number"] - par
 
 
-def pick(shots: list[dict], most: int = MAX_MOMENTS, sides: dict[str, int] | None = None) -> list[dict]:
+def _is_drive(s: dict) -> bool:
+    return (s["lie_before"] or "").lower() == "tee" and not s["is_putt"] and (_par(s["hole"]) or 0) >= 4 \
+        and bool(s["total_yards"]) and s["picked"] != 0
+
+
+def _is_holed_putt(s: dict) -> bool:
+    return bool(s["is_putt"]) and s["outcome"] == "holed" and bool(s["to_pin_yards"])
+
+
+def _bests(shots: list[dict], before: dict[str, dict]) -> tuple[set[int], dict[int, float]]:
+    """The round's personal bests: each player's longest drive and longest holed putt of the round,
+    when it beats their every one before it (`before`: player -> {"drive": [most, count], "putt": ...},
+    in yards) and they'd PB_HISTORY of them to beat; and the ones that came close (NEAR_PB), with how
+    far short (yards)."""
+    out, near = set(), {}
+    for kind, test, val in (("drive", _is_drive, lambda s: s["total_yards"]),
+                            ("putt", _is_holed_putt, lambda s: s["to_pin_yards"])):
+        top: dict[str, dict] = {}
+        for s in shots:
+            if test(s) and (s["player"] not in top or val(s) > val(top[s["player"]])):
+                top[s["player"]] = s
+        for who, s in top.items():
+            most, count = (before.get(who) or {}).get(kind, (0.0, 0))
+            if count < PB_HISTORY or (kind == "putt" and val(s) * 3 <= OK_PUTT_FEET):
+                continue
+            if val(s) > most:
+                out.add(s["id"])
+            elif val(s) >= NEAR_PB[kind] * most:
+                near[s["id"]] = most - val(s)
+    return out, near
+
+
+def pick(shots: list[dict], most: int = MAX_MOMENTS, sides: dict[str, int] | None = None,
+         before: dict[str, dict] | None = None) -> list[dict]:
     """A round's highlight moments, in the order they happened. Picked best first (the booth's
-    excitement, a notch more for a shot that set up a birdie or better), a player's next pick past the
-    others' and a hole's next counting for a little less, so one hot hand or a scramble's chips on one
-    hole don't fill it: at most `most`, two a hole, one bad one a player. `shots` are the round's, in
+    excitement, a notch more for a shot that set up a birdie or better; solid shots, OK_*, fill in), a
+    player's next pick past the others' and a hole's next counting for a little less, so one hot hand
+    or a scramble's chips on one hole don't fill it: at most `most`, two a hole, one bad one a player,
+    and no more bad ones than good. `shots` are the round's, in
     order (dicts with the shots table's columns); mulligans and strokes left out of the stats are skipped.
+    `before`: each player's bests before the round (_bests), for a personal best to count as a big one.
     `sides`: each player's side, when the round had more than one (a team's one ball is holed by
     whoever holed it; with a player's side unknown, nobody else's result counts for theirs)."""
     shots = [{**DEFAULTS, **s} for s in shots]
@@ -176,6 +233,7 @@ def pick(shots: list[dict], most: int = MAX_MOMENTS, sides: dict[str, int] | Non
               and s["id"] not in wet and s["picked"] != 0
               and s["total_yards"] and s["total_yards"] >= BIG_DRIVE_YARDS]
     longest = max(drives, key=lambda s: s["total_yards"], default=None)
+    pbs, near = _bests([s for s in shots if s["id"] not in wet], before or {})
     side = (lambda p: 0) if sides is None else sides.get
     team_done = {(side(h[0]["player"]), _hole(h[-1]["hole"])): h[-1]["shot_number"] for h in holes
                  if (h[0]["fmt"] or "") in NOT_PUTT_COUNTED and h[-1]["outcome"] in ("holed", "gimme")
@@ -191,26 +249,53 @@ def pick(shots: list[dict], most: int = MAX_MOMENTS, sides: dict[str, int] | Non
         for s in hole:
             if s["outcome"] == "gimme":
                 continue   # the conceded tap-in: never struck, nothing to watch
-            if s["picked"] != 0 and (g := _good(s, par, number, longest)) and g[0] >= MIN_LEVEL:
+            # (a penalty's never a good one, however close it ends up)
+            g = _good(s, par, number, longest) if s["picked"] != 0 and s["id"] not in wet else None
+            if s["id"] in pbs:
+                if s["is_putt"]:
+                    g = (max(g[0] if g else 0, PB_LEVEL), (g[1] if g else
+                         f"{s['player']} holes a {round(s['to_pin_yards'] * 3)} ft putt{f' on {number}' if number else ''}")
+                         + ", a personal best", POST_PUTT)
+                elif g and g[0] > PB_LEVEL:   # (a hole in one, say: keep it, and its clip)
+                    g = (g[0], f"{g[1]}, {s['player']}'s longest drive yet", g[2])
+                else:
+                    g = (PB_LEVEL, f"{s['player']}'s longest drive yet: {round(s['total_yards'])} yd"
+                         f"{f' on {number}' if number else ''}", POST_SHOT)
+            elif s["id"] in near and (not g or g[0] < NEAR_PB_LEVEL):
+                short = round(near[s["id"]] * (3 if s["is_putt"] else 1))
+                unit = "ft" if s["is_putt"] else "yd"
+                if s["is_putt"]:
+                    base = g[1] if g else f"{s['player']} holes a {round(s['to_pin_yards'] * 3)} ft putt{f' on {number}' if number else ''}"
+                else:
+                    base = f"{s['player']} hits a {round(s['total_yards'])} yd drive{f' on {number}' if number else ''}"
+                g = (NEAR_PB_LEVEL, f"{base}, {max(1, short)} {unit} off a personal best",
+                     POST_PUTT if s["is_putt"] else POST_SHOT)
+            if g and g[0] >= OK_LEVEL - 0.2:
                 what, score = g[1], g[0]
-                if s["outcome"] != "holed" and s is not longest and result is not None and result <= 0:
+                if s["outcome"] != "holed" and s is not longest and s["id"] not in pbs and s["id"] not in near and result is not None and result <= 0:
                     what += {-3: " to set up albatross", -2: " to set up eagle", -1: " to set up birdie"}.get(
                         result, " to save par" if (s["lie_before"] or "").lower() != "fairway" or result == 0 else "")
                     score += result < 0
                 pool.append({"shot": s, "level": g[0], "score": score, "what": what, "post": g[2], "bad": False,
                              "hole": number if number is not None else -i})
             elif (b := _bad(s, hole, team_ball, s["id"] in wet)) and b[0] >= MIN_LEVEL - 1:
-                pool.append({"shot": s, "level": b[0], "score": b[0] - 0.25, "what": b[1], "post": b[2], "bad": True,
+                at, post = s, b[2]
+                if "-putts" in b[1]:   # the whole run of putts, from the first
+                    at = next(x for x in hole if x["is_putt"])
+                    post += max(0.0, s["ts"] - at["ts"])
+                pool.append({"shot": at, "level": b[0], "score": b[0] - 0.25, "what": b[1], "post": post, "bad": True,
                              "hole": number if number is not None else -i})
     picked: list[dict] = []
-    per_player = dict.fromkeys({s["player"] for s in shots}, 0)
+    per_player = dict.fromkeys({m["shot"]["player"] for m in pool}, 0)   # (one with nothing to show: no say)
     per_hole: dict[int, list[dict]] = {}
     bad_by: set[str] = set()
     while len(picked) < most:
         best, best_score = None, MIN_FINAL
         for m in pool:
             who, on = m["shot"]["player"], per_hole.get(m["hole"], [])
-            if m in picked or len(on) >= 2 or (m["bad"] and who in bad_by) or any(x["shot"] is m["shot"] for x in on):
+            # (a bad one only behind as many good ones: the reel's never mostly mistakes)
+            if m in picked or len(on) >= 2 or (m["bad"] and (who in bad_by or len(bad_by) >= len(picked) - len(bad_by))) \
+                    or any(x["shot"] is m["shot"] for x in on):
                 continue
             # (against the player with fewest: a solo round isn't held back)
             score = m["score"] - 0.75 * (per_player[who] - min(per_player.values())) - 1.0 * len(on)
@@ -242,6 +327,20 @@ def rounds(db: sqlite3.Connection) -> dict[int, dict]:
     for r in db.execute("SELECT * FROM rounds"):
         league |= {of_row[r["id"]]} if "is_league" in r.keys() and r["is_league"] else set()
         rows.setdefault(of_row[r["id"]], []).append(r)
+    # Each round's players' bests before it: every shot of theirs before its first, any round or none.
+    before_round: dict[int, dict] = {}
+    running: dict[str, dict] = {}
+    for r in db.execute("SELECT * FROM shots ORDER BY ts, id"):
+        s = {**DEFAULTS, **dict(r)}
+        g = of_shot.get(s["id"])
+        if g is not None and g not in before_round:
+            before_round[g] = {p: {k: tuple(v) for k, v in b.items()} for p, b in running.items()}
+        if s["mulligan"] or s["left_out"] or not s["player"]:
+            continue
+        for kind, test, val in (("drive", _is_drive, "total_yards"), ("putt", _is_holed_putt, "to_pin_yards")):
+            if test(s):
+                b = running.setdefault(s["player"], {}).setdefault(kind, [0.0, 0])
+                b[0], b[1] = max(b[0], s[val]), b[1] + 1
     out: dict[int, dict] = {}
     for g in groups:
         shots = by_round.get(g["round"], [])
@@ -249,7 +348,7 @@ def rounds(db: sqlite3.Connection) -> dict[int, dict]:
         if len(rows.get(g["round"], [])) > 1:   # sides by the players each named (an older row: none)
             sides = {n: i for i, r in enumerate(rows[g["round"]])
                      for n in (_names(r["players"]) if "players" in r.keys() else None) or []}
-        moments = pick(shots, sides=sides)
+        moments = pick(shots, sides=sides, before=before_round.get(g["round"], {}))
         if len(moments) < 2:
             continue
         players = list(dict.fromkeys(s["player"] for s in shots if s["player"] and s["player"] != "unknown"))

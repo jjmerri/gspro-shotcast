@@ -44,9 +44,13 @@ def test_three_putts_misses_off_line_and_long_penalty_drives_are_bad_ones():
              shot("Cal", 4, 2, 40, putt=True, to_pin=10, outcome="conceded"),
              shot("Cal", 4, 3, 50, putt=True, to_pin=3, outcome="conceded"),
              shot("Cal", 4, 4, 55, putt=True, outcome="gimme")]
+    assert H.pick(shots) == []   # no good ones to go with them: no more bad ones than good
+    shots += [shot(p, h, 3, ts, putt=True, to_pin=10, outcome="holed") for p, h, ts in
+              (("Ann", 5, 60), ("Bob", 6, 70), ("Cal", 7, 80))]   # 30 ft for par: big ones
     got = H.pick(shots)
-    assert [(m["shot"]["ts"], m["bad"]) for m in got] == [(10, True), (30, True), (50, True)]
-    assert [m["what"] for m in got[1:]] == ["Bob sprays one 60 yd off line on 3", "Cal three-putts on 4"]
+    assert [(m["shot"]["ts"], m["bad"]) for m in got if m["bad"]] == [(10, True), (30, True), (40, True)]
+    assert [m["what"] for m in got if m["bad"]][1:] == ["Bob sprays one 60 yd off line on 3", "Cal three-putts on 4"]
+    assert [m["post"] for m in got if m["shot"]["ts"] == 40] == [H.POST_PUTT + 10]   # from the first putt
 
 
 def test_a_dry_hazard_entry_isnt_a_penalty_and_a_scramble_putt_can_miss():
@@ -54,6 +58,40 @@ def test_a_dry_hazard_entry_isnt_a_penalty_and_a_scramble_putt_can_miss():
              shot("Ann", 1, 2, 20, to_pin=100),
              shot("Bob", 2, 3, 30, putt=True, to_pin=1, outcome="missed", fmt="scramble")]
     assert [m["what"] for m in H.pick(shots)] == ["Ann bombs a 340 yd drive on 1", "Bob misses from 3 ft on 2"]
+
+
+def test_solid_shots_fill_in_and_personal_bests_are_big():
+    shots = [shot("Ann", 1, 1, 10, lie="tee", total=285),                     # in the fairway: solid
+             shot("Ann", 1, 2, 20, to_pin=150, finish=7),                    # 21 ft from 150: solid
+             shot("Ann", 1, 3, 30, putt=True, to_pin=3, outcome="holed"),   # 9 ft for birdie
+             shot("Ann", 2, 5, 40, putt=True, to_pin=3, outcome="holed"),   # 9 ft for bogey: no
+             shot("Bob", 3, 1, 50, lie="tee", total=270),                    # Bob's longest yet
+             shot("Ann", 4, 4, 60, putt=True, to_pin=3, outcome="holed")]   # 9 ft for par: solid
+    shots[0]["lie_after"], shots[1]["lie_after"] = "fairway", "green"
+    said = lambda before: [m["what"] for m in H.pick(shots, before=before)]
+    assert said({}) == ["Ann finds the green, 21 ft from 150 yd on 1 to set up birdie",
+                        "Ann holes a 9 ft putt for birdie on 1", "Ann holes a 9 ft putt for par on 4"]   # two a hole
+    pb = {"Bob": {"drive": (265, 40)}}
+    assert said(pb)[-1] == "Bob's longest drive yet: 270 yd on 3"
+    assert "Ann holes a 9 ft putt for par on 4" not in said(pb)   # Bob gets his turn first
+    assert "Bob's longest drive yet: 270 yd on 3" not in said({"Bob": {"drive": (265, 3)}})   # too few to beat
+    assert said({"Bob": {"drive": (265, 3)}})[-1] != "Bob's longest drive yet: 270 yd on 3"   # too few to beat
+    assert said({"Bob": {"drive": (280, 40)}})[-1] == "Bob hits a 270 yd drive on 3, 10 yd off a personal best"
+    assert not any("Bob" in x for x in said({"Bob": {"drive": (300, 40)}}))   # not that close
+    shots[1]["lie_after"] = "sand"   # 21 ft away, but not on the green
+    assert not any("finds the green" in x for x in said({}))
+    del shots[:4]   # no pin distances to go on: a drive in the fairway still counts
+    shots[0].update(total_yards=285, lie_after="fairway", finish_yards=None)
+    assert "Bob splits the fairway, 285 yd on 3" in said({})
+    chip = [shot("Dee", 6, 3, 80, to_pin=30, finish=1.8, wet=True)]
+    assert H.pick(chip) == []   # in the water, however close: not a good one
+    big = [shot("Eve", 7, 1, 90, lie="tee", total=340, to_pin=340, finish=7),
+           shot("Eve", 8, 4, 100, putt=True, to_pin=3, outcome="holed")]
+    big[0]["lie_after"] = "green"
+    assert H.pick(big, most=1)[0]["what"].startswith("Eve bombs a 340 yd drive")
+    ace = [shot("Cal", 5, 1, 70, lie="tee", total=340, outcome="holed")]
+    assert H.pick(ace, before={"Cal": {"drive": (330, 40)}})[0]["what"] == "Hole in one! Cal on 5, Cal's longest drive yet"
+    assert H.pick(ace, before={"Cal": {"drive": (330, 40)}})[0]["post"] == H.POST_BIG
 
 
 def test_a_scramble_ball_not_played_isnt_the_longest_drive():
