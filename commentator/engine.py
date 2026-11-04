@@ -20,9 +20,9 @@ from .carry_model import CarryModel, correct_for_elevation
 from .config import ROUND_STATUS, ROUND_STATUS_CHECK_S, ROUND_STATUS_EVERY_S, Config
 from .flight import point_at
 from .facts import (
-    PUTT_FOR_FACT, SCORE_NAMES, _fmt_to_par, _to_par_value, club_delivery_facts, club_delivery_notable, club_name, flight_facts,
-    gimme_edge, history_facts, lie_cost_fact, moment_facts, ordinal, preshot_facts, putt_elevation_inches, shot_facts, to_yards, WRONG_GREEN_YARDS, wrong_green_fact,
-    wrong_conceded_score, wrong_green_yards, wrong_putt_score,
+    PUTT_COUNT_FACT, PUTT_FOR_FACT, SCORE_NAMES, _PUTT_WORDS, _fmt_to_par, _to_par_value, club_delivery_facts, club_delivery_notable, club_name, flight_facts,
+    gimme_edge, history_facts, lie_cost_fact, moment_facts, ordinal, preshot_facts, putt_count_fact, putt_elevation_inches, shot_facts, to_yards, WRONG_GREEN_YARDS, wrong_green_fact,
+    wrong_conceded_score, wrong_green_yards, wrong_holed_putt, wrong_putt_score,
 )
 from .flight_pick import FlightPlan, Hazard, pick_line, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
@@ -1323,7 +1323,17 @@ class Engine:
         if player and hud.shot_number:
             swings = [x for x in self.state.shots if x.player == player]
             stroke = (player, hud.shot_number)
-            if (last := self._replayed_swing(player, hud)) is None:
+            last = self._replayed_swing(player, hud)
+            if last is not None and last.outcome in ("holed", "conceded"):
+                # That stroke finished the hole, so it can't be replayed: the HUD just hadn't moved on
+                # from it yet (a conceded putt was called a mulligan, and its replay announced).
+                log.info("Setup dropped: %r's stroke %s already finished the hole (a late read, not a mulligan)",
+                         self._display(player), hud.shot_number)
+                for task in (minimap_task, putt_task):
+                    if task is not None:
+                        task.cancel()
+                return
+            if last is None:
                 self._set_up[stroke] = id(swings[-1]) if swings else None
                 while len(self._set_up) > 32:
                     del self._set_up[next(iter(self._set_up))]
@@ -3095,7 +3105,7 @@ class Engine:
         the re-hit's setup because GSPro's log often says nothing about a mulligan until the re-hit has
         been played. Marks the HUD so the setup line is always voiced."""
         last = self._replayed_swing(player, hud)
-        if last is None or id(last) in self._mulligans_called:
+        if last is None or id(last) in self._mulligans_called or last.outcome in ("holed", "conceded"):
             return []
         self._mulligans_called.add(id(last))
         hud._mulligan = True
@@ -3112,6 +3122,25 @@ class Engine:
                     f"bad putt."]
         return [f"{who} is taking a mulligan: the last swing{went} was taken back, and {who} is replaying "
                 f"stroke {hud.shot_number} from the same spot. Mention the mulligan."]
+
+    def _putt_count_facts(self, player: str | None, is_putt: bool, hud: Hud) -> list[str]:
+        """Which putt on the hole this is, counted from this player's own ball (strokes from the green,
+        taken-back swings left out, including the one this setup replays before GSPro's log flags it).
+        Not in a one-ball team format, where a partner's putts count too."""
+        r = self.round
+        if not is_putt or not player or not r or r.ended or r.format in TEAM_BALL:
+            return []
+        replayed = self._replayed_swing(player, hud)
+        mine = [x for x in self._round_shots(player)
+                if x.hole_seq == r.seq and not x.mulligan and x is not replayed]
+        # Only when every stroke before this one is on record (a booth that joined mid-hole, a missed
+        # read, or a penalty stroke would leave a gap and miscount).
+        played = [x.shot_number for x in mine]
+        if not hud.shot_number or sorted(played, key=lambda s: s or 0) != list(range(1, hud.shot_number)) \
+                or any(not x.lie_before for x in mine):
+            return []
+        n = 1 + sum(1 for x in mine if (x.lie_before or "").lower() == "green")
+        return [f] if (f := putt_count_fact(self._display(player), n)) else []
 
     def _penalty_facts(self, player: str | None, shot_number: int | None, hud: Hud | None = None) -> list[str]:
         """A fact when a penalty stroke was taken, so the booth counts it instead of swings.
@@ -3542,12 +3571,15 @@ class Engine:
         return on_tee and (to_yards(hud.to_pin) or 0) >= 250
 
     def _length_norm_facts(self, player: str | None, club: str | None, tee: bool, to_pin: float | None,
-                           total: float | None = None) -> list[str]:
+                           total: float | None = None, lie: str | None = None) -> list[str]:
         """The player's usual length (drives off a par-4/5 tee, else this club's full swings), so the
         booth judges a shot against this player's game, not a long hitter's. With `total` (after the
         shot), how this one compared. Nothing until there's a sample; the prompt then says to leave
-        length alone."""
+        length alone. A club's norm is off the tee or fairway only, so it says nothing about a swing
+        from any other `lie` (the rough or sand takes distance off)."""
         if not player or player == "unknown" or self._anonymous(player):
+            return []
+        if not tee and (lie or "").lower() not in ("tee", "fairway"):
             return []
         who = self._display(player)
         if tee:
@@ -4527,7 +4559,7 @@ class Engine:
         putt = await self._await_putt(putt_task, is_putt)
         self._use_own_scores(hud, player)
         facts = (preshot_facts(hud, self.current_par, self.handed.get(player or ""))
-                 + self._mulligan_facts(player, hud)
+                 + self._mulligan_facts(player, hud) + self._putt_count_facts(player, is_putt, hud)
                  + self._penalty_facts(player, hud.shot_number, hud) + self._truth_context_facts(is_putt, idx)
                  + history_facts(self._display(player), self.state.player_shots(player or "unknown"))
                  + moment_facts(self._display(player), self._round_shots(player), putt=is_putt,
@@ -4538,7 +4570,7 @@ class Engine:
                  + self._finish_correction_facts(hud, player)
                  + self._round_form_facts(player, is_putt, hud) + self._recall_moment_facts(player, is_putt, hud)
                  + ([] if is_putt else self._length_norm_facts(player, hud.club, self._is_drive(hud),
-                                                                       to_yards(hud.to_pin)))
+                                                                       to_yards(hud.to_pin), lie=hud.lie))
                  + (self._bunker_facts(player) if (hud.lie or "").lower() in ("sand", "bunker")
                     and self.rng.random() < 0.5 else [])
                  + (self._hole_field_facts(player) + self._streak_facts(player) + self._signature_facts(player)
@@ -4890,6 +4922,9 @@ class Engine:
         # (this putt's score, the comeback's): a holed reaction may only name the first, a miss or a
         # conceded lag only the second ("the comeback putt for par" when the comeback was for bogey).
         putt_for = m.groups() if is_putt and (m := PUTT_FOR_FACT.search(facts_text)) else None
+        # Which N-putt holing it makes (and the conceded tap-in after a lag), when the facts count them.
+        putts = (m.group(1) if is_putt and (m := PUTT_COUNT_FACT.search(facts_text)) else None)
+        next_putts = _PUTT_WORDS[_PUTT_WORDS.index(putts) + 1] if putts in _PUTT_WORDS[:-1] else None
         for outcome, text in (data.get("reaction_lines") or {}).items():
             if outcome not in reaction_outcomes(is_putt, lag=True) + (("holed_reply",) if is_putt else ()) \
                     or not text:
@@ -4913,12 +4948,20 @@ class Engine:
             if phrase := repeats(body, [self.system_examples]) or repeats(body, recent):
                 log.info("Dropped the pre-written %s reaction (reuses %r): %r", outcome, phrase, body)
                 continue
-            if putt_for and (named := wrong_putt_score(body, *putt_for, holed=outcome in ("holed", "lip_in"))):
+            if putt_for and (named := wrong_putt_score(body, *putt_for, holed=outcome in ("holed", "lip_in", "holed_reply"))):
                 log.info("Dropped the pre-written %s reaction (calls a putt for %s): %r", outcome, named, body)
                 continue
-            if putt_for and outcome == "gimme" and (named := wrong_conceded_score(body, *putt_for)):
+            if outcome in ("holed", "lip_in", "holed_reply") \
+                    and (named := wrong_holed_putt(body, putt_for[0] if putt_for else None, putts)):
+                log.info("Dropped the pre-written %s reaction (holing it makes %s, not %s): %r", outcome,
+                         " / ".join(x for x in (putt_for and putt_for[0], putts and f"a {putts}-putt") if x),
+                         named, body)
+                continue
+            if outcome == "gimme" and (named := (putt_for and wrong_conceded_score(body, *putt_for))
+                                       or wrong_holed_putt(body, putt_for[1] if putt_for else None, next_putts)):
                 log.info("Dropped the pre-written gimme reaction (the hole is %s, not %s): %r",
-                         putt_for[1], named, body)
+                         " / ".join(x for x in (putt_for and putt_for[1], next_putts and f"a {next_putts}-putt") if x),
+                         named, body)
                 continue
             if said := wrong_round_score(body, facts_text):
                 log.info("Dropped the pre-written %s reaction (round score %r isn't in the facts): %r", outcome, said, body)
@@ -5873,7 +5916,8 @@ class Engine:
         if not shot.is_putt:
             club += self._length_norm_facts(
                 player, shot.club, self._is_drive(before), to_yards(before.to_pin),
-                tile_yards("total length") if landed and "total length" in hud.tiles else None)
+                tile_yards("total length") if landed and "total length" in hud.tiles else None,
+                lie=before.lie)
         sand_theme = (self._bunker_facts(player) if (hud.lie or "").lower() in ("sand", "bunker")
                       and not shot.is_putt else [])
         facts = (lead + replay_facts + flight + club + result + sand_theme

@@ -2249,6 +2249,67 @@ def test_putts_past_double_bogey_name_their_score_and_a_gimme_lag_counts_the_con
     assert wrong_conceded_score("His bogey putt dies by the cup on this par 4.", "bogey", "double bogey") is None
 
 
+def test_a_prewritten_holed_putt_names_the_score_and_putt_count_it_makes(tmp_path):
+    from commentator.facts import preshot_facts, putt_count_fact
+    e = _mini_engine(tmp_path)
+    # Drew's second putt, for bogey on a par 3: "Drew drains the bogey putt. That's a one-putt and a
+    # double on the hole." And Matt's two-putt triple was "A one-putt triple bogey".
+    facts = "\n".join(preshot_facts(Hud(shot_number=4, lie="green", to_pin="9 feet 2 inches"), 3)
+                      + [putt_count_fact("Drew", 2)])
+    out = e._build_reactions({"reaction_lines": {
+        "holed": "Drew drains the bogey putt. That’s a one-putt and a double on the hole.",
+        "lip_in": "It curls in for bogey, a two-putt to finish.",
+        "gimme": "Lag stops close; conceded for a three-putt double bogey.",
+        "holed_reply": "A one-putt to save it!"}}, True, facts)
+    assert out == {"lip_in": "It curls in for bogey, a two-putt to finish.",
+                   "gimme": "Lag stops close; conceded for a three-putt double bogey."}
+    out = e._build_reactions({"reaction_lines": {"holed": "Drew drains it. A two-putt bogey, and level par is gone."}},
+                             True, facts)
+    assert out == {"holed": "Drew drains it. A two-putt bogey, and level par is gone."}
+    assert "holed_reply" not in e._build_reactions({"reaction_lines": {"holed_reply": "Right in for double bogey!"}},
+                                                   True, facts)
+    for line in ("Drew drains it; a triple-bogey six.", "It drops for a triple-bogey.", "A two-putt double bogey five."):
+        assert "holed" not in e._build_reactions({"reaction_lines": {"holed": line}}, True, facts)
+    assert "holed" in e._build_reactions({"reaction_lines": {"holed": "A two-putt bogey on the par 3."}}, True, facts)
+    # No score pair (par unknown), but the putt count still holds.
+    out = e._build_reactions({"reaction_lines": {"holed": "What a one-putt finish!", "lip_in": "In it goes, a two-putt.",
+                                                 "gimme": "Conceded, a one-putt."}},
+                             True, putt_count_fact("Drew", 2))
+    assert out == {"lip_in": "In it goes, a two-putt."}
+
+
+def test_the_putt_count_fact_counts_this_players_putts_on_the_hole(tmp_path):
+    e = _mini_engine(tmp_path)
+    r = _log_round(e)
+    r.seq = 12
+    for n, lie, mull in ((1, "tee", False), (2, "pine straw", False), (3, "green", True), (3, "green", False)):
+        e.state.record_shot(ShotRecord("Paul", Shot(ball_speed=5, club="PT"), "Hole 12", Hud(lie="green"), [],
+                                       round_id=r.id, hole_seq=12, par=3, lie_before=lie, shot_number=n, mulligan=mull,
+                                       to_pin_before="6 feet 0 inches"))
+    nxt = Hud(shot_number=4, lie="green", to_pin="6 feet 0 inches")
+    assert e._putt_count_facts("Paul", True, nxt) == [
+        "This is Paul's 2nd putt on this hole: if it drops, that's a two-putt, and if it misses, the next putt "
+        "would be the 3rd."]
+    # Replaying stroke 3 before GSPro's log flags the take-back: that attempt isn't counted.
+    assert "1st putt" in e._putt_count_facts("Paul", True, Hud(shot_number=3, lie="green", to_pin="6 feet 0 inches"))[0]
+    assert e._putt_count_facts("Paul", False, nxt) == []
+    assert e._putt_count_facts("Paul", True, Hud(shot_number=6, lie="green", to_pin="6 feet 0 inches")) == []   # strokes 4-5 unseen
+    for n, lie in ((1, "tee"), (3, "green")):   # Ann's stroke 2 (maybe a putt) was never read
+        e.state.record_shot(ShotRecord("Ann", Shot(ball_speed=5, club="PT"), "Hole 12", Hud(lie="green"), [],
+                                       round_id=r.id, hole_seq=12, par=3, lie_before=lie, shot_number=n))
+    assert e._putt_count_facts("Ann", True, nxt) == []
+    e.state.record_shot(ShotRecord("Bo", Shot(ball_speed=5, club="PT"), "Hole 12", Hud(lie="green"), [],
+                                   round_id=r.id, hole_seq=12, par=3, lie_before="tee", shot_number=1))
+    e.state.record_shot(ShotRecord("Bo", Shot(ball_speed=5, club="PT"), "Hole 12", Hud(lie="green"), [],
+                                   round_id=r.id, hole_seq=12, par=3, lie_before=None, shot_number=2))
+    assert e._putt_count_facts("Bo", True, Hud(shot_number=3, lie="green", to_pin="2 feet 0 inches")) == []
+    e.state.record_shot(ShotRecord("Paul", Shot(ball_speed=5, club="PT"), "Hole 12", Hud(lie="green"), [],
+                                   round_id=r.id, hole_seq=12, par=3, lie_before="green", shot_number=None))
+    assert e._putt_count_facts("Paul", True, Hud(shot_number=5, lie="green", to_pin="2 feet 0 inches")) == []
+    r.format = "scramble"
+    assert e._putt_count_facts("Paul", True, nxt) == []
+
+
 async def test_follow_shot_moves_on_at_the_next_player_placeholder(tmp_path):
     # The next player's address HUD shows carry AND total as "--.--" (non-empty tiles, both parse to
     # None). The follow must read that reset as moved-on and return THIS shot's last read, never theirs.
@@ -3509,7 +3570,29 @@ async def test_a_stroke_played_before_its_setup_settled_is_not_a_mulligan(tmp_pa
     assert isinstance(await engine._events.get(), PreShotEvent)
 
 
-async def test_emit_setup_reads_others_and_opens_the_round_on_the_tee(tmp_path):
+async def test_a_setup_still_showing_a_stroke_that_finished_the_hole_is_dropped(tmp_path):
+    # Drew's 10-footer was conceded, but the next setup read still showed "Shot 6, 9 FT 9": it was called
+    # a mulligan and the booth announced a replay that never happened.
+    from commentator.round import Round
+    engine, _ = _setup_engine(tmp_path)
+    r = engine.round = Round(league=engine.league, gspro_players=["Toby"], course="X", scheduled_format=None,
+                             holes=18)
+
+    def putt(n, outcome):
+        engine.state.record_shot(ShotRecord("Toby", Shot(ball_speed=5, club="PT"), "Hole 1",
+                                            Hud(lie="green", to_pin="9 feet 9 inches"), [], round_id=r.id,
+                                            hole_seq=r.seq, lie_before="rough", shot_number=n,
+                                            to_pin_before="9 feet 9 inches", outcome=outcome))   # the test screen reads rough
+
+    def setup():
+        return Hud(player_text="Toby 6th (+1) Shot 6 9 FT 9", shot_number=6, score_to_par="+1", to_pin="9 feet 9 inches")
+
+    putt(5, "missed")
+    await engine._emit_setup(setup())
+    await (await engine._events.get()).model_task
+    putt(6, "conceded")
+    await engine._emit_setup(setup())
+    assert engine._events.empty()
     engine, screen = _setup_engine(tmp_path)
     hud = Hud(player_text="Toby E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards")
     await engine._emit_setup(hud)

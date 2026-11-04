@@ -4131,14 +4131,20 @@ def test_length_norm_judges_a_shot_against_the_players_own_game(tmp_path):
         eng.store.record_shot(player="Kathy", hole="Hole 2", shot=Shot(club="7I"), before=Hud(lie="fairway"),
                               after=Hud(), tags=[], carry_game_yards=None, total_yards=20, offline_yards=None,
                               to_pin_yards=150)
+    for _ in range(3):   # out of the rough: the lie took the distance, so it's no measure of a full 7-iron
+        eng.store.record_shot(player="Kathy", hole="Hole 2", shot=Shot(club="7I"), before=Hud(lie="rough"),
+                              after=Hud(), tags=[], carry_game_yards=None, total_yards=25, offline_yards=None,
+                              to_pin_yards=150)
     assert eng._is_drive(tee) and not eng._is_drive(Hud(lie="tee", to_pin="140 yards", shot_number=1))
     assert eng._length_norm_facts("Kathy", "DR", True, 400, 112) == [
         "Kathy's drives usually go about 105 yards in total. This one was about that, a normal length for them: nothing to remark on."]
     assert eng._length_norm_facts("Kathy", "DR", True, 400, 80) == [
         "Kathy's drives usually go about 105 yards in total. This one went 25 yards shorter than that."]
-    assert eng._length_norm_facts("Kathy", "7I", False, 150) == ["Kathy's full 7-iron shots usually go about 59 yards in total."]
-    assert eng._length_norm_facts("Kathy", "7I", False, 30, 20) == []   # a bump-and-run isn't a short 7-iron
-    assert eng._length_norm_facts("Kathy", None, False, 150) == []
+    assert eng._length_norm_facts("Kathy", "7I", False, 150, lie="fairway") == [
+        "Kathy's full 7-iron shots usually go about 59 yards in total."]
+    assert eng._length_norm_facts("Kathy", "7I", False, 150, lie="rough") == []
+    assert eng._length_norm_facts("Kathy", "7I", False, 30, 20, lie="fairway") == []   # a bump-and-run isn't a short 7-iron
+    assert eng._length_norm_facts("Kathy", None, False, 150, lie="fairway") == []
     assert "Judge a player's distance against their own game" in system_prompt(eng.cfg, LEAGUE)
 
 

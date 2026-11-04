@@ -253,10 +253,16 @@ _NEXT_PUTT = re.compile(r"comeback|come-back|\bnext\b|another|return|tap-in|left
 _CLAUSE = re.compile(r"[;.!?\u2014\u2013]|,\s|\bbut\b|\band\b")
 
 
+def _unhyphen_scores(text: str) -> str:
+    """ "triple-bogey" as "triple bogey" (same length, so match positions still line up)."""
+    return re.sub(r"\b(double|triple|quadruple)-(bogey)", r"\1 \2", text, flags=re.I)
+
+
 def wrong_putt_score(text: str, this: str, nxt: str, holed: bool) -> str | None:
     """The score a pre-written putt reaction says a putt is "for" when that's wrong: a holed putt is
     for `this`; after a miss, the putt just missed is still for `this` ("that was for par, and it
     slides by") but the one left over is for `nxt` (not "the comeback putt for par" on a bogey putt)."""
+    text = _unhyphen_scores(text)
     for m in _PUTT_FOR_SAID.finditer(text):
         said = m.group(1).lower()
         if holed:
@@ -273,18 +279,59 @@ def wrong_putt_score(text: str, this: str, nxt: str, holed: bool) -> str | None:
 # A hole score named in a line, unless it's a "for" phrase or a putt's label ("his par putt", "a par 4").
 _HOLE_SCORE_SAID = re.compile(
     r"(?<!\bfor )(?<!\bfor an )(?<!\bfor a )(?<!double )(?<!triple )(?<!quadruple )(?<!over )(?<!under )(?<!even )"
+    r"(?<!level )(?<!below )(?<!above )"
     r"\b(albatross|eagle|birdie|par|(?:double |triple |quadruple )?bogey)\b"
-    r"(?![\s-]+(?:putts?|try|tries|chance|look|attempt|effort|save|\d|three|four|five)\b)", re.I)
+    r"(?![\s-]+(?:putts?|try|tries|chance|look|attempt|effort|save)\b)"
+    r"(?!(?<=par)[\s-]+(?:\d|three|four|five)\b)", re.I)   # "par 4" is the hole; "birdie four" a score
 
 
 def wrong_conceded_score(text: str, this: str, nxt: str) -> str | None:
     """The hole score a pre-written "gimme" reaction gives when that's wrong: the lag stopped inside
     the gimme circle, so the conceded putt makes the hole `nxt` ("leaving Bob a two-putt bogey" on a
     lag for bogey that went down as a double). A "for" phrase is checked by wrong_putt_score."""
-    for m in _HOLE_SCORE_SAID.finditer(text):
-        if (said := m.group(1).lower()) != nxt:
+    for said in _hole_scores_said(text):
+        if said != nxt:
             return said
     return wrong_putt_score(text, this, nxt, holed=False)
+
+
+# A bare "a double" / "the triple" names a hole score too ("a one-putt and a double on the hole").
+_BARE_MULTIPLE_SAID = re.compile(
+    r"\b(?:a|the|his|her|their|for|with|makes?|cards?|signs? for)\s+(double|triple|quadruple)\b"
+    r"(?![\s-]*(?:bogey|break|breaker|breaking|digits|figures|take|check|whammy|act|cross|trouble)\b)", re.I)
+# Bare "one-putt" etc., so a holed reaction can be held to the putt it actually was.
+_N_PUTT_SAID = re.compile(r"\b(one|two|three|four|five|six)[\s-]putt", re.I)
+PUTT_COUNT_FACT = re.compile(r"if it drops, that's a (\w+)-putt")
+_PUTT_WORDS = ("one", "two", "three", "four", "five", "six")
+
+
+def _hole_scores_said(text: str) -> list[str]:
+    text = _unhyphen_scores(text)
+    return ([m.group(1).lower() for m in _HOLE_SCORE_SAID.finditer(text)]
+            + [f"{m.group(1).lower()} bogey" for m in _BARE_MULTIPLE_SAID.finditer(text)])
+
+
+def putt_count_fact(who: str, n: int) -> str | None:
+    """Which putt on the hole this is, so a made one is called the right N-putt (two made after a
+    lag were each called "a one-putt")."""
+    if not 1 <= n <= len(_PUTT_WORDS):
+        return None
+    return (f"This is {who}'s {ordinal(n)} putt on this hole: if it drops, that's a {_PUTT_WORDS[n - 1]}-putt, "
+            f"and if it misses, the next putt would be the {ordinal(n + 1)}.")
+
+
+def wrong_holed_putt(text: str, this: str | None, putts: str | None) -> str | None:
+    """What a pre-written holed reaction gets wrong: a hole score other than `this` (what holing it
+    makes: "drains the bogey putt... a double on the hole" on a bogey), or an N-putt other than
+    `putts` (the putt count from the facts, when known). Either can be unknown (None)."""
+    for said in _hole_scores_said(text) if this else ():
+        if said != this:
+            return said
+    if putts:
+        for m in _N_PUTT_SAID.finditer(text):
+            if m.group(1).lower() != putts:
+                return f"{m.group(1).lower()}-putt"
+    return None
 
 
 def to_yards(distance: str | None) -> float | None:
