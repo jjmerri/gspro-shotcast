@@ -359,8 +359,10 @@ def chat_prompt(*, messages: list[tuple[str, str, bool, str | None, str | None]]
            if watched else "")
         + ("\"Next on their screen\" is who was over the ball on that viewer's screen as they sent it (what the "
            "shot was for, and the trouble the booth's map read showed, when it knows), and what that shot did if "
-           "it's been played since. Trouble not listed there may still be on the hole: don't tell a viewer it "
-           "isn't. Read the message for which shot it means: a warning, a tip or "
+           "it's been played since. That trouble is only what the map read was sure of, never all there is: a viewer "
+           "who warns about trouble not listed may well be right, so never tell them it isn't there or that "
+           "they're looking at the wrong side - take the warning as given. Talk about the trouble as what's on the "
+           "hole, never as a map, a read or a list. Read the message for which shot it means: a warning, a tip or "
            "a prediction (\"watch the water left\", \"he's hooking this\") is about the one set up next - and "
            "if it's been played, say whether they called it - while a reaction (\"right in the drink!\", \"what "
            "a strike\") is about the shot they'd just watched.\n"

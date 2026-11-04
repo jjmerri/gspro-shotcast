@@ -404,6 +404,28 @@ def test_the_lead_in_has_to_name_the_chat_in_the_first_sentence():
         assert chat_lead_in_problems([Line(speaker="pbp", text=cold)]), cold
 
 
+
+def test_a_take_cant_tell_a_viewer_the_trouble_they_warned_about_isnt_there():
+    from commentator.chat import chat_hazard_denial_problems
+    from commentator.models import Line
+    for ok in ("Cy called it: water left, and that's where it went.", "Dave's worried about the OB right.",
+               "Easy going for Frankie there, right down the middle.",
+               "A bunker lurking left, and he's in the rough.", "Nothing wrong with that swing.",
+               "Dave called it: he missed on the wrong side of the green and found the bunker.",
+               "Dave was right about the water, but Frankie had no trouble clearing it.",
+               "The chat's right: there's no escaping the water on that line.",
+               "There's no avoiding that bunker from there.",
+               "The chat's right: there's no shortage of water on this hole.",
+               "Dave in chat has no doubt the water is in play.",
+               "Water left all day. Frankie is not in play for the lead yet."):
+        assert chat_hazard_denial_problems([Line(speaker="pbp", text=ok)]) == [], ok
+    for bad in ("Dave's watching the wrong side of the hole.", "There's no OB on this hole, Dave.",
+                "The water isn't in play from there.", "No out of bounds right, the trouble's all left.",
+                "Relax, Dave, there is no water out there.", "There's no O.B. on this hole, Dave.",
+                "The O.B. isn't in play from there.", "There's no water at all on this hole.",
+                "There's no real trouble out there, Dave.", "No greenside bunkers on this one."):
+        assert chat_hazard_denial_problems([Line(speaker="pbp", text=bad)]), bad
+
 async def test_a_message_is_tied_to_the_shot_the_viewer_was_watching(tmp_path, monkeypatch):
     _clock(monkeypatch)
     e = _booth(tmp_path)

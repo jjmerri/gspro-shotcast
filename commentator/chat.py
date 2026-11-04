@@ -135,3 +135,29 @@ def chat_lead_in_problems(lines) -> list[str]:
         return ["the first line has to open by turning to the live chat (say it's the chat, or viewers, "
                 "in its first sentence) before getting into what they're saying"]
     return []
+
+
+# The booth's map read lists the trouble it's sure of, not all there is: a take mustn't tell a viewer
+# their warning is about trouble that isn't there ("Dave's watching the wrong side of the hole").
+_TROUBLE = r"(?:water|ob|o\.b\.|out[- ]of[- ]bounds|bunkers?|sand|hazards?|trouble|penalty areas?|red stakes|white stakes)"
+_DENIAL = re.compile(
+    # Someone watching or worried about the wrong side, not a ball that missed on the wrong side.
+    r"\b(?:watching|looking at|looking|worried about|eyeing|eyes on|on about|got|has) the wrong "
+    r"(?:side|hazard|trouble|hole)\b|"
+    # "No trouble clearing it" and "no trouble for Frankie" are about the shot, not the hole; only
+    # modifiers may come between, so "no escaping the water" or "no shortage of water" agree it's there.
+    rf"\b(?:no|isn't any|aren't any|there's no|there is no|nothing like)\s+"
+    r"(?:(?:real|actual|big|serious|much|more|other|such|extra|hidden|greenside|fairway|left|right|"
+    rf"left-side|right-side)\s+){{0,2}}{_TROUBLE}(?!\w)"
+    r"(?!(?<=trouble)\s+(?:\w+ing|for|with)\b)|"
+    # Within the sentence: a period inside "O.B." doesn't end it.
+    rf"\b{_TROUBLE}(?!\w)(?:[^.!?]|\.(?=\S)){{0,40}}?\b(?:isn't there|is not there|aren't there|doesn't exist|isn't in play|"
+    r"not in play|doesn't come into play|nowhere to be (?:seen|found))\b", re.IGNORECASE)
+
+
+def chat_hazard_denial_problems(lines) -> list[str]:
+    """A take that says trouble a viewer warned about isn't on the hole: the booth can't know that."""
+    if any(_DENIAL.search(line.text) for line in lines):
+        return ["don't say trouble a viewer mentioned isn't there or that they're watching the wrong side: the "
+                "booth's map only lists what it's sure of, and there may be more on the hole"]
+    return []

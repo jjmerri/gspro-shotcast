@@ -52,7 +52,7 @@ from .prompts import (
 from .board import Board, place
 from .booking import Bookings
 from .history import History
-from .chat import ChatMessage, ChatTable, chat_lead_in_problems, cursor_at, screened_out
+from .chat import ChatMessage, ChatTable, chat_hazard_denial_problems, chat_lead_in_problems, cursor_at, screened_out
 from .news import GolfNews
 from .scores import LiveScores
 from .signature_holes import signature_hole
@@ -2668,7 +2668,8 @@ class Engine:
                                               llm=self.chat_llm, cap=self.cfg.chat.max_words,
                                               declined=lambda data: data.get("air") is False,
                                               # English words only: another language relies on the prompt.
-                                              check=chat_lead_in_problems if self.cfg.commentary.language == "en"
+                                              check=(lambda ls: chat_lead_in_problems(ls) + chat_hazard_denial_problems(ls))
+                                              if self.cfg.commentary.language == "en"
                                               else None)
         except Exception as e:
             log.warning("Chat: couldn't write a take on the chat: %r", e)
