@@ -5171,7 +5171,7 @@ def test_the_round_status_counts_the_sign_off_and_a_new_round_at_once(tmp_path, 
         await done.wait()          # composing the sign-off: nothing in the speech queue yet
 
     app = SimpleNamespace(round=None, speech=SimpleNamespace(is_idle=lambda: True), _round_handling=0, _live_stop_task=None,
-                          cfg=SimpleNamespace(log_dir=str(tmp_path)), _handle_round_end=handle)
+                          cfg=SimpleNamespace(log_dir=str(tmp_path)), _handle_round_end=handle, live_mirror=None)
     app._in_round = lambda: Engine._in_round(app)
     path = tmp_path / engine_mod.ROUND_STATUS
 

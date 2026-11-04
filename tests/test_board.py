@@ -172,6 +172,26 @@ def test_week_board_facts_for_opener_closer_and_standings(tmp_path):
     assert "The best week 6 score posted on Squabbit: Duffers at net 3 under par." in stakes
 
 
+def test_the_live_tabs_week_board_shows_the_week_and_the_team_on_the_sim(tmp_path):
+    league = League(LEAGUE_DATA)
+    e = _engine(tmp_path, league)
+    assert e._week_panel() is None                        # no round
+    r, _ = _round()
+    e.round = r
+    assert e._week_panel() is None                        # no Squabbit board read
+    e.board = Board.from_squabbit(
+        [week(6, [("x1", ["a", "b"], "Team 1", None), ("x2", ["c", "d"], "Team 2", -3),
+                  ("x3", ["e", "f"], "Hackers", None)])], league, POINTS)
+    assert e._week_panel() == {"week": 6, "course": "Test Links", "deadline": "2026-12-06", "holes": 9,
+                               "rows": [{"team": "Duffers", "net": -3},
+                                        {"team": "Aces", "net": None, "thru": 0, "on": True}],
+                               "waiting": ["Hackers"]}
+    r.apply_scorecard(Scorecard(holes=[10, 11], scores={"Mike": {10: 4, 11: 4}, "Sarah": {10: 4, 11: 4}}))
+    assert e._week_panel()["rows"][1] == {"team": "Aces", "net": r.team_net("Aces")[0], "thru": 2, "on": True}
+    r.ended = True
+    assert e._week_panel() is None
+
+
 def test_distance_text():
     assert _distance_text(4.0) == "12 feet" and _distance_text(3.0556) == "9 feet 2 inches"
     assert _distance_text(25.04) == "25.0 yards"

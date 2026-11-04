@@ -10,6 +10,8 @@ are deleted from the bucket as they leave the playlist, and the whole session wh
     live/recordings.json           {"recordings": [{"session", "since", "ended", "duration", "shots",
                                    "rounds": [{"at": seconds in, "label"}]}]}, newest first ("shots":
                                    whether a shot was played on it; one with none isn't kept)
+    live/week.json                 {"session": ..., "week": {...} or null}: a league round's week board
+                                   for the Live tab (Engine._week_panel), null outside one
     live/s/<session>/stream.m3u8   the live playlist, re-uploaded as OBS rewrites it
     live/s/<session>/full.m3u8     every segment so far (kept streams only), ENDLIST once it's over
     live/s/<session>/stream12.ts   its segments
@@ -276,6 +278,8 @@ class Mirror:
         self._marks: list[tuple[float, str, bool]] = []   # from mark(), for the thread to file
         self._shots: list[float] = []   # from shot(), when each was played
         self._marks_lock = threading.Lock()
+        self._week_body: dict | None = None   # from week(): live/week.json's board
+        self._week_sent: bytes | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -334,6 +338,22 @@ class Mirror:
         if self.tracking:
             with self._marks_lock:
                 self._marks.append((self.clock(), label, replace))
+
+    def week(self, body: dict | None) -> None:
+        """The league week's board for the page's Live tab (Engine._week_panel), or None outside a league
+        round. Called from any thread; uploaded as live/week.json on the next pass that changes it."""
+        with self._marks_lock:
+            self._week_body = body
+
+    def _send_week(self) -> None:
+        if not self.bucket or not self.session:
+            return
+        with self._marks_lock:
+            body = self._week_body
+        out = json.dumps({"session": self.session, "week": body}).encode()
+        if out != self._week_sent:
+            self._put("week.json", out, "no-cache")
+            self._week_sent = out
 
     def watched_at(self, session: str | None, segment: str | None, offset: float | None) -> float | None:
         """When (the PC's clock) the moment `offset` seconds into this stream's `segment` was recorded:
@@ -599,6 +619,7 @@ class Mirror:
         if beat:   # once its playlist's there
             self._status(True)
             self._announced = True
+        self._send_week()
         gone = sorted(set(self.sent) - set(segments))
         if gone and not self.keep:
             self._delete([f"{self.root}s/{self.session}/{n}" for n in gone])

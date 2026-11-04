@@ -213,6 +213,27 @@ def test_mirror_keeps_saying_its_live_so_the_page_can_tell_a_killed_booth(tmp_pa
     assert json.loads(s3.objects["live/status.json"][0])["at"] == 1032
 
 
+def test_mirror_puts_the_week_board_up_for_its_stream_only_when_it_changes(tmp_path):
+    s3, now = FakeS3(), [1000.0]
+    puts = []
+    put = s3.put_object
+    s3.put_object = lambda **kw: (puts.append(kw["Key"]), put(**kw))
+    m = Mirror(tmp_path, "bkt", client=s3, clock=lambda: now[0])
+    m.week({"week": 6})
+    m.step()                                     # off air: nothing to show it with
+    assert "live/week.json" not in s3.objects
+    _playlist(tmp_path, 0, ["stream0.ts"], mtime=now[0])
+    m.step()
+    assert json.loads(s3.objects["live/week.json"][0]) == {"session": m.session, "week": {"week": 6}}
+    for i, body in enumerate(({"week": 6}, None), 1):
+        now[0] += 4
+        _playlist(tmp_path, i, [f"stream{i}.ts"], mtime=now[0])
+        m.week(body)
+        m.step()
+    assert puts.count("live/week.json") == 2     # once more, for the round that ended
+    assert json.loads(s3.objects["live/week.json"][0]) == {"session": m.session, "week": None}
+
+
 async def test_off_air_and_idle_stop_the_stream_and_on_air_or_a_shot_starts_it(tmp_path, monkeypatch):
     from tests.test_round import _engine as make
 

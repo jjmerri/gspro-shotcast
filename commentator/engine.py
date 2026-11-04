@@ -2394,6 +2394,11 @@ class Engine:
                     written, at = now, time.monotonic()
                 except Exception as e:
                     log.debug("Couldn't write the round status: %s", e)
+                if self.live_mirror is not None:
+                    try:
+                        self.live_mirror.week(self._week_panel())
+                    except Exception as e:
+                        log.debug("Couldn't work out the week board: %s", e)
             await asyncio.sleep(ROUND_STATUS_CHECK_S)
 
     def _chat_open(self) -> bool:
@@ -8500,6 +8505,26 @@ class Engine:
             return []
         here = {t for t in r.teams if t}
         return [e for e in self.board.posted(week) if e.team not in here]
+
+    def _week_panel(self) -> dict | None:
+        """The Live tab's week board while a league round is on (live/week.json): every team that's
+        posted this week on Squabbit, the team(s) on the sim now with their running net, and who's yet to
+        play. None outside a league round, or with no Squabbit board for its week."""
+        r = self.round
+        if r is None or r.ended or not r.is_league or not self.board:
+            return None
+        week = r.schedule.get("week")
+        if not week or week not in self.board.weeks:
+            return None
+        here = [t for t in r.teams if t in self.league.team_players]
+        name = self.league.team_name
+        rows = [{"team": name(e.team), "net": e.net} for e in self._week_others(r)]
+        for t in here:
+            tn = r.team_net(t)
+            rows.append({"team": name(t), "net": tn[0] if tn else None, "thru": tn[1] if tn else 0, "on": True})
+        return {"week": week, "course": r.schedule.get("course") or r.course, "deadline": r.schedule.get("end_date"),
+                "holes": r.holes, "rows": rows,
+                "waiting": [name(e.team) for e in self.board.weeks[week] if e.net is None and e.team not in here]}
 
     def _board_standings(self, r: Round) -> list[str] | None:
         """The season standings from Squabbit's final weeks. None when the board can't say (no fetch,

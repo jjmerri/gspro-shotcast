@@ -547,6 +547,35 @@ console.log(JSON.stringify(seen));"""
                    [True, ""], 500, [1, True, ""], [False, "none"], [1, True, ""], [1, True], [1.25, True]]
 
 
+def test_the_live_tabs_week_board_places_the_team_on_the_sim_among_the_posted():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = "\n".join(re.search(rf"\nconst {n} = .*?\n", page).group(0) for n in ("esc", "toPar")) \
+        + re.search(r"\nfunction weekPanel\(.*?\n}\n", page, re.S).group(0)
+    script = "const state = {};" + fns + """
+const text = h => h.replace(/<[^>]+>/g, " ").replace(/\\s+/g, " ").trim();
+const out = [weekPanel()];
+state.week = {week: 6, course: "Test Links", deadline: "2026-12-06", holes: 9, waiting: ["Hackers"],
+              rows: [{team: "Duffers", net: -3}, {team: "Birdies", net: 1}, {team: "Aces", net: -3, thru: 7, on: true}]};
+out.push(text(weekPanel()));
+state.week.rows[2] = {team: "Aces", net: null, thru: 0, on: true};
+state.week.waiting = [];
+out.push(text(weekPanel()));
+console.log(JSON.stringify(out));"""
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    assert got[0] == ""
+    assert got[1].startswith("Week 6 Test Links · due ") and got[1].endswith(
+        "Team Net T1 Duffers -3 T1 Aces -3 thru 7 · on now 3 Birdies +1 Yet to play: Hackers")
+    assert got[2].endswith("Team Net 1 Duffers -3 2 Birdies +1 Aces – on now")
+
+
 def test_a_round_card_takes_its_longest_drive_from_its_shots(tmp_path):
     """Stored as none at the round's end (the club wasn't read), the drive counts once a rule does."""
     path, db = _db(tmp_path)

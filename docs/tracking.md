@@ -458,6 +458,12 @@ opening tee shot is on it, however quickly it's hit), or when a round starts, an
   shows off air within about 2 minutes of that stopping, rather than a frozen player. A booth
   starting goes off air, and clears `live/` of everything but the week's kept streams.
 
+During a league round, the Live tab shows the week's board under the video. It lists the teams that
+have posted the week on Squabbit and the team on the sim with its running net and holes played (placed
+among them, ties shared). The teams yet to play are listed under it. The booth writes it to
+`live/week.json` as the score changes, from the same Squabbit read the booth's week facts use. With no
+league round, or no Squabbit read for its week, there's no board.
+
 #### Round videos on the PC
 
 Each stream is kept on the GSPro PC too, for a week (`live.local_keep_days`; 0 for not at all), as one

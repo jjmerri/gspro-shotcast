@@ -76,6 +76,8 @@
                       border-radius:6px; padding:8px 12px; font:inherit; cursor:pointer; }
   #liveslot video { width:100%; max-height:78vh; background:#000; border-radius:8px; }
   .chat { margin-top:14px; }
+  .week { margin-top:14px; } .week h3 { margin:0 0 8px; } .week table { background:none; }
+  .week tr.on td { color:var(--accent); font-weight:600; } .week .sub { font-weight:400; }
   .chat .log { max-height:260px; overflow-y:auto; margin:6px 0 8px; }
   .chat .msg { padding:4px 0; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
   .chat .msg b { color:var(--accent); margin-right:6px; }
@@ -1667,6 +1669,7 @@ async function pollLive() {
     if (now - beat.seen > LIVE_QUIET_MS || now / 1000 - s.at > LIVE_DEAD_S) s = { live: false };
   }
   if (s) delete s.at;
+  await pollWeek(s);
   const was = JSON.stringify(state.live);
   state.live = s;
   if (JSON.stringify(s) === was) return;
@@ -1685,7 +1688,43 @@ function renderLive() {
   <p class="sub">About 20 seconds behind the sim. It starts muted: tap for sound.${
     (state.vods || []).some(v => v.session === s.session)
       ? ` Missed the start? <button class="link" data-vod="${esc(s.session)}" data-vodat="0">Watch from the beginning</button>.`
-      : " Nothing is recorded."}</p><div id="chatslot"></div>`;
+      : " Nothing is recorded."}</p><div id="weekslot">${weekPanel()}</div><div id="chatslot"></div>`;
+}
+
+// A league round on the stream: the week so far (live/week.json, from the booth's Squabbit board) under
+// the video. Teams that have posted, the team on the sim now with its running net, and who's still to play.
+// Only for this stream's session, so a board left from an earlier one never shows.
+async function pollWeek(s) {
+  let w = null;
+  if (s && s.live) {
+    try {
+      const r = await fetch("live/week.json", { cache: "no-store" });
+      if (r.ok) { const b = await r.json(); if (b && b.session === s.session && b.week) w = b.week; }
+    } catch (e) { w = null; }
+  }
+  if (JSON.stringify(w) === JSON.stringify(state.week ?? null)) return;
+  state.week = w;
+  const slot = document.getElementById("weekslot");
+  if (slot) slot.innerHTML = weekPanel();
+}
+function weekPanel() {
+  const w = state.week;
+  if (!w || !(w.rows || []).length) return "";
+  const nets = w.rows.filter(r => r.net !== null && r.net !== undefined).map(r => r.net);
+  const rows = [...w.rows].sort((a, b) => (a.net ?? Infinity) - (b.net ?? Infinity) || !!a.on - !!b.on);
+  const place = n => {
+    if (n === null || n === undefined) return "";
+    const p = 1 + nets.filter(x => x < n).length;
+    return (nets.filter(x => x === n).length > 1 ? "T" : "") + p;
+  };
+  const due = w.deadline ? new Date(`${w.deadline}T12:00:00`) : null;
+  const sub = [w.course, due && !isNaN(due) ? `due ${due.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}` : ""]
+    .filter(Boolean).map(esc).join(" · ");
+  return `<section class="card week"><h3>Week ${esc(w.week)} <span class="sub">${sub}</span></h3>
+  <table><thead><tr><th></th><th class="l">Team</th><th>Net</th><th></th></tr></thead><tbody>${rows.map(r =>
+    `<tr${r.on ? ` class="on"` : ""}><td>${place(r.net)}</td><td class="l">${esc(r.team)}</td><td>${toPar(r.net)}</td>
+    <td class="l sub">${r.on ? (r.thru ? `${r.thru === w.holes ? "finished" : `thru ${r.thru}`} · <span class="livedot"></span>on now` : `<span class="livedot"></span>on now`) : ""}</td></tr>`).join("")}
+  </tbody></table>${(w.waiting || []).length ? `<p class="sub">Yet to play: ${w.waiting.map(esc).join(", ")}</p>` : ""}</section>`;
 }
 
 // The live chat (docs/tracking.md#live-chat): the site stack's chat function at /chat/messages, behind
