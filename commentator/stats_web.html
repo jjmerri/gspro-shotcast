@@ -77,6 +77,7 @@
   .chat .log { max-height:260px; overflow-y:auto; margin:6px 0 8px; }
   .chat .msg { padding:4px 0; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
   .chat .msg b { color:var(--accent); margin-right:6px; }
+  .chat .msg time { color:var(--dim); font-size:12px; margin-right:6px; font-variant-numeric:tabular-nums; }
   .chat form { display:flex; flex-wrap:wrap; gap:8px; }
   .chat input { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; min-width:0; }
   .chat input[name=name] { flex:0 1 9em; } .chat input[readonly] { color:var(--dim); cursor:not-allowed; } .chat input[name=text] { flex:1 1 14em; }
@@ -1719,6 +1720,11 @@ function lockChatName() {
   nameIn.readOnly = locked;
   nameIn.title = locked ? "Your name stays the same until this chat closes" : "";
 }
+function chatTime(at) {
+  const d = new Date(Number(at) * 1000);
+  if (!at || !Number.isFinite(d.getTime())) return "";
+  return `<time datetime="${esc(d.toISOString())}">${esc(d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}</time>`;
+}
 function attachChat() {
   const slot = $("#chatslot");
   if (!slot) return;
@@ -1743,7 +1749,7 @@ async function pollChat() {
   if (key === chat.shown) return;
   chat.shown = key;
   const log = chatEl().querySelector(".log"), atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 30;
-  log.innerHTML = list.length ? list.map(m => `<div class="msg"><b>${esc(m.name)}</b>${esc(m.text)}${
+  log.innerHTML = list.length ? list.map(m => `<div class="msg">${chatTime(m.at)}<b>${esc(m.name)}</b>${esc(m.text)}${
     m.aired ? ' <span class="tag" title="Read out on air">🎙 on air</span>' : ""}</div>`).join("")
     : '<p class="empty">No messages yet. Say hello to the booth.</p>';
   if (atEnd) log.scrollTop = log.scrollHeight;
