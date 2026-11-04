@@ -117,6 +117,13 @@ def _opening_tee(hud: Hud) -> bool:
     return bool(hud.player_text and hud.shot_number == 1 and hud.score_to_par == "E" and hud.par)
 
 
+def _practice_toolbar(text: str | None) -> bool:
+    """GSPro's practice mode on screen: its toolbar (… ROUND EDIT, QUICK CTP) sits where a round's
+    player box would be. The range's own toolbar reads DRIVING RANGE … QUICK CTP, with no ROUND EDIT."""
+    words = set((text or "").upper().split())
+    return {"ROUND", "EDIT"} <= words
+
+
 def hole_label(hud: Hud, number: int | None) -> str:
     parts = [f"Hole {number}"] if number else []
     if hud.par:
@@ -901,6 +908,8 @@ class Engine:
         self._log_round_completes = 0
         self._log_layouts = 0
         self._range_noted = False
+        self._practice = False   # GSPro's practice mode on screen: no round, so no commentary and nothing saved
+        self._round_box_seen = False   # a round's player box has been on screen: practice isn't the first word
         self._join_tried = False   # joining a round already under way is tried once, at the first setup
         # GSPro's End Round count when an opening drive struck off a course's own range was taken: with
         # no round open (or the last one over), that drive began one the booth must join.
@@ -1077,9 +1086,10 @@ class Engine:
                     tee_polls = 0
             else:
                 away_at, away_seen, tee_polls = None, False, 0
-            if self._on_range():
-                # The range isn't a round: no holes, no setups, no round start. Forget the last tee seen
-                # so the first one after the range reads as new.
+            self._note_practice(hud.player_text, hud.shot_number)
+            if self._on_range() or self._practice:
+                # The range (and practice mode) isn't a round: no holes, no setups, no round start. Forget
+                # the last tee seen so the first one after it reads as new.
                 holes, last_setup, candidate = HoleWatch(), None, None
                 continue
             if hud.scorecard_open:
@@ -1408,7 +1418,7 @@ class Engine:
         full hole away. The hole number doesn't matter, so a round can start on the front or the
         back nine. The one look-alike is the next tee after everyone pars the opening hole, told
         apart by the scorecard already showing a played hole."""
-        if hud.shot_number != 1 or self._on_range():
+        if hud.shot_number != 1 or self._on_range() or self._practice:
             return False
         if self._log_rounds and self.gspro.mode == "menu":
             # GSPro's last word was End Round: the tee on screen is a round on its way out, not a new one.
@@ -1517,6 +1527,28 @@ class Engine:
             log.info("GSPro %s the range: booth %s", "is on" if on else "left",
                      "off until a round is set up" if on else "back on")
         return on
+
+    def _note_practice(self, player_text: str | None, shot_number: int | None) -> None:
+        """Track GSPro's practice mode from the player box: its toolbar there means practice; a real
+        player box (a shot number) means a round's course. Anything else (menus, a blank read) keeps
+        the last word."""
+        if _practice_toolbar(player_text):
+            on = True
+        elif player_text and shot_number is not None:
+            on, self._round_box_seen = False, True
+        else:
+            return
+        if on != self._practice:
+            self._practice = on
+            if on:
+                self.plan = None   # a setup's flight lines are for a round's shot, not a practice swing
+            log.info("GSPro %s practice mode: booth %s", "is in" if on else "left",
+                     "off (no commentary, no shots saved)" if on else "back on")
+
+    def _practice_or_unseen(self) -> bool:
+        """No early call (one before the impact read): GSPro's in practice mode, or the screen's never
+        shown a round's player box, so it may be practice's first swing, struck before a HUD poll."""
+        return self._practice or (self.screen is not None and self.cfg.screen.ocr and not self._round_box_seen)
 
     async def _course_shot_off_own_range(self, event: ShotEvent) -> bool:
         """Whether a shot struck while GSPro's log says range was really its course's first: Tee Off from
@@ -4906,6 +4938,17 @@ class Engine:
         # The reaction runs in the background and may finish after the hole has changed; pin the
         # hole and par to this shot so a late reaction still talks about the right hole.
         shot_hole, shot_par, shot_round, round_hole = held[1:] if held else self._impact_hole()
+        if self._practice and self.screen is not None and self.cfg.screen.ocr and event.hud_hint is None:
+            # This swing's own impact read has the last word: a round's player box ends practice. Taken
+            # after the impact state above (a slow read mustn't age it), and kept on the event, so the
+            # read further on is this one.
+            if getattr(event, "impact_read", None) is None:
+                event.impact_read = asyncio.ensure_future(self._read_impact_hud("[practice check]"))
+            hud0 = (await event.impact_read)[0]
+            self._note_practice(hud0.player_text, hud0.shot_number)
+        if self._practice:
+            log.info("Practice-mode shot ignored (club %s, carry %.1f)", event.shot.club, event.shot.carry or 0)
+            return
         if not held and not await self._gspro_played(fires0, impact):
             log.info("Shot ignored: GSPro never played it (struck in the menus or while a course loads; "
                      "club %s, ball %.1f mph, carry %.1f)", event.shot.club, event.shot.ball_speed or 0,
@@ -4996,6 +5039,10 @@ class Engine:
         if use_screen:
             read = getattr(event, "impact_read", None)
             before, impact_image = await (read if read is not None else self._read_impact_hud(tag))
+            self._note_practice(before.player_text, before.shot_number)
+            if self._practice:   # the first swing in practice mode, struck before a HUD poll saw it
+                log.info("%s practice-mode shot ignored (club %s, carry %.1f)", tag, shot.club, shot.carry or 0)
+                return
             self._keep_impact_misread(before, shot.is_putt, tag)
             shown = bool(before.player_text)
             if self._fill_from_setup(before, event.setup_hud, tag):
@@ -6705,7 +6752,7 @@ class Engine:
             if (found := self._tree_hit_logged(fires0, impact, shot)) or time.monotonic() >= deadline:
                 break
             await asyncio.sleep(0.1)
-        if found is None or self._shot_seq != seq:
+        if found is None or self._shot_seq != seq or self._practice_or_unseen():
             return
         hit_at, choices = found
         self._tree_called = seq
@@ -6713,7 +6760,7 @@ class Engine:
         if not self._prevoicing():
             # Voiced as it plays: start it early enough to land near the hit, and never past it by 2 s.
             await asyncio.sleep(max(0.0, hit_at - 0.8 - time.monotonic()))
-            if self._shot_seq != seq or self._banter_held():
+            if self._shot_seq != seq or self._banter_held() or self._practice_or_unseen():
                 return
             self.state.record_lines([line])
             self.speech.say([line], interrupt=True, deadline=hit_at + 2.0)
@@ -6724,7 +6771,7 @@ class Engine:
         kept, audio = await self._voice_ahead([line])
         # Land the word a beat before the ball reaches the branches; skip it once that's long gone.
         await asyncio.sleep(max(0.0, hit_at - 0.2 - time.monotonic()))
-        if self._shot_seq != seq or time.monotonic() > hit_at + 2.0 or self._banter_held():
+        if self._shot_seq != seq or time.monotonic() > hit_at + 2.0 or self._banter_held() or self._practice_or_unseen():
             return
         self.state.record_lines(kept)
         self._air_exchange(list(zip(kept, audio)))

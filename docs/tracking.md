@@ -18,6 +18,8 @@ what GSPro scored. Shotcast puts three feeds together (see `commentator/sources/
 3. **Screen OCR** (`screen.ocr`, on by default). RapidOCR/ONNX on the CPU reads GSPro's HUD: who
    is up, the club, the carry/total/offline tiles, the minimap and the slope. Nothing leaves the
    PC (with the booth on, the pre-shot hazard look also sends a screenshot to the vision model).
+   GSPro's practice mode (its ROUND EDIT / QUICK CTP toolbar where the player box goes) is told
+   from the screen: the booth stays quiet and saves nothing until a round's player box is back.
    GSPro's mirrored (lefty) HUD, with the minimap bottom-left and the club box bottom-right, is
    a per-player setting; each read checks which side the slope bar is on and swaps the lie, club,
    minimap and slope regions to match.

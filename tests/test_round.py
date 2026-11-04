@@ -2394,6 +2394,49 @@ async def test_range_keeps_the_booth_off(tmp_path):
     assert e._is_round_start(tee)
 
 
+async def test_practice_mode_keeps_the_booth_off(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    from commentator.models import Shot, ShotEvent
+
+    e = _engine(tmp_path)
+    toolbar = "自 T 口 ROUND QUICK EDIT CTP"   # GSPro's practice toolbar where the player box goes
+    e._note_practice("DRIVING RANGE DISTANCE QUICK CTP", None)   # the range's own toolbar isn't practice
+    assert not e._practice
+    # The first swing, before a HUD poll saw the toolbar: the impact read finds it, and nothing is kept.
+    e.screen = SimpleNamespace(last_read_seconds=0.0)
+    e.cfg.screen.ocr = False
+    shot = ShotEvent(shot=Shot(club="DR", carry=60.0))
+    shot.impact_read = asyncio.get_running_loop().create_future()
+    shot.impact_read.set_result((Hud(player_text=toolbar), None))
+    await e.handle_shot(shot)
+    assert e._practice
+    await e.handle_shot(ShotEvent(shot=Shot(club="7I", carry=20.0)))
+    assert e.store.db.execute("SELECT COUNT(*) FROM shots").fetchone()[0] == 0
+    assert e.state.shots == [] and e._shot_seq == 1   # the second never got a number at all
+    tee = Hud(player_text="MikeD E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards")
+    assert not e._is_round_start(tee)
+    e._note_practice("", None)   # the menus on the way out: still the last word
+    assert e._practice
+    # A swing (none read at impact yet, as the connector's come) whose own read shows a round's player
+    # box ends practice and is played.
+    e.cfg.screen.ocr = True
+
+    async def blank(*a, **k):
+        return Hud()
+    e.screen.read_hud_async = blank
+    reads = []
+
+    async def read(tag):
+        reads.append(tag)
+        return tee, None
+    e._read_impact_hud = read
+    await e.handle_shot(ShotEvent(shot=Shot(club="DR", carry=250.0)))
+    assert reads == ["[practice check]"]   # read once, and that read kept for the shot
+    assert not e._practice and e._shot_seq == 2 and e._is_round_start(tee)
+
+
 async def test_a_tee_shot_struck_while_the_log_says_its_courses_range_is_kept(tmp_path, monkeypatch):
     import asyncio
     import time
