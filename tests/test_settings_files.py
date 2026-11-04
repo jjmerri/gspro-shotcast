@@ -82,3 +82,47 @@ def test_env_values_read_as_the_booth_reads_them():
     assert env_value(text, "NTFY_TOPIC") == "b"
     assert env_value("NTFY_TOPIC=a\nNTFY_TOPIC=\n", "NTFY_TOPIC") == "a"
     assert set_env(text, "OPENAI_API_KEY", "sk-2") == "\ufeffOPENAI_API_KEY=sk-2\nNTFY_TOPIC=a\nNTFY_TOPIC=b\n"
+
+
+def test_every_setting_in_the_window_saves_into_the_example_config():
+    from commentator.config import Config
+    from commentator.tray_ui import CONFIG_FIELDS, config_value, field_text, parse_field
+
+    cfg = Config.model_validate(yaml.safe_load(EXAMPLE))
+    for _tab, label, keys, kind, _note in CONFIG_FIELDS:
+        if kind == "heading":
+            continue
+        current = config_value(cfg, keys)
+        if kind == "list" and not isinstance(current, list):
+            continue   # per-league teams: shown, edited in config.yaml
+        value = parse_field(kind, label, field_text(kind, current) if kind != "bool" else current, current)
+        text, _ = apply_changes(EXAMPLE, "", {keys: value}, {}, None)
+        assert config_value(Config.model_validate(yaml.safe_load(text)), keys) == current, label
+
+
+def test_boxes_read_as_their_settings():
+    from commentator.tray_ui import parse_field
+
+    assert parse_field("list", "Tours", " pga, lpga ,, ", ["pga"]) == ["pga", "lpga"]
+    assert parse_field("float", "Pace", " 1.1 ", 1.0) == 1.1 and parse_field("int", "Cores", "", 4) is None
+    assert parse_field("choice:|scramble", "Format", "", "scramble") is None   # empty: from the schedule
+    with pytest.raises(ValueError, match="Words per line should be a whole number"):
+        parse_field("int", "Words per line", "1.5", 18)
+
+
+def test_renaming_a_commentator_without_a_personas_block_keeps_their_style():
+    from commentator.config import Config
+
+    text, _ = apply_changes("league_file: null\n", "", {("personas", "color", "name"): "Rex"}, {}, None)
+    personas = Config.model_validate(yaml.safe_load(text)).personas
+    assert personas["color"].name == "Rex" and personas["color"].style == Config().personas["color"].style
+    assert personas["pbp"].name == "Nigel"
+
+
+def test_a_commentator_config_yaml_leaves_out_shows_as_their_default():
+    from commentator.config import Config
+    from commentator.tray_ui import config_value
+
+    cfg = Config(personas={"pbp": {"name": "Jim", "style": "Dry."}})
+    assert config_value(cfg, ("personas", "pbp", "name")) == "Jim"
+    assert config_value(cfg, ("personas", "color", "name")) == "Duke"

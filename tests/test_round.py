@@ -5076,3 +5076,46 @@ def test_lead_change_facts_count_a_blow_up_hole_at_the_leagues_cap():
     r.set_log_scores("MikeD", {1: 3, 2: 10})     # the 10 counts as a 6
     r.set_log_scores("Sarah", {1: 4, 2: 8})      # ...and the 8
     assert r.lead_change_facts(2) == []          # Mike still leads by one
+
+
+def test_the_round_status_counts_the_sign_off_and_a_new_round_at_once(tmp_path, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from commentator import engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "ROUND_STATUS_CHECK_S", 0.01)
+    signing = asyncio.Event()
+    done = asyncio.Event()
+
+    async def handle(event):
+        app.round.ended = True
+        signing.set()
+        await done.wait()          # composing the sign-off: nothing in the speech queue yet
+
+    app = SimpleNamespace(round=None, speech=SimpleNamespace(is_idle=lambda: True), _round_handling=0, _live_stop_task=None,
+                          cfg=SimpleNamespace(log_dir=str(tmp_path)), _handle_round_end=handle)
+    app._in_round = lambda: Engine._in_round(app)
+    path = tmp_path / engine_mod.ROUND_STATUS
+
+    async def status(want):
+        for _ in range(500):   # up to 5 s: a busy test run is slow to schedule the loop
+            if path.exists() and json.loads(path.read_text())["round"] is want:
+                return True
+            await asyncio.sleep(0.01)
+        return False
+
+    async def go():
+        loop = asyncio.create_task(Engine._round_status_loop(app))
+        assert await status(False)
+        app.round = SimpleNamespace(ended=False)       # a round starts: written well before the 5 s rewrite
+        assert await status(True)
+        end = asyncio.create_task(Engine.handle_round_end(app, None))
+        await signing.wait()
+        await asyncio.sleep(0.05)
+        assert await status(True)                      # ended, but still signing off
+        done.set()
+        await end
+        assert await status(False)
+        loop.cancel()
+    asyncio.run(go())

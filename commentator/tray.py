@@ -21,6 +21,7 @@ import webbrowser
 from collections import deque
 from pathlib import Path
 
+from .config import ROUND_STATUS, ROUND_STATUS_EVERY_S
 from .settings_files import env_value, set_commentary, set_env, set_yaml
 
 log = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ APP = "Shotcast"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 STATS_PORT = 8765
 PUBLISH_AFTER_EDIT_S = 60.0   # a run of edits on the local page goes up once, this long after the last
+ROUND_STATUS_STALE_S = 4 * ROUND_STATUS_EVERY_S   # older than this: the booth may have stopped
 RESTARTS, RESTART_WINDOW_S = 3, 600      # crashes in that window before it stops restarting
 UPDATE_EVERY_S = 6 * 3600
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -467,6 +469,17 @@ class Tray:
                       "save and restart the booth. Until then it records shots as before.")
             self.settings("API keys")
         self.restart_booth()
+
+    def round_in_progress(self) -> bool | None:
+        """Whether the booth is in a round (or still talking after one), from the status it keeps in
+        log_dir/round.json; None when that can't be told (no status, or none written lately)."""
+        try:
+            status = json.loads((Path(self.cfg.log_dir) / ROUND_STATUS).read_text(encoding="utf-8"))
+            if time.time() - float(status["updated"]) > ROUND_STATUS_STALE_S:
+                return None
+            return bool(status["round"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
 
     def live_now(self) -> bool:
         """On air, as the booth's stream mirror last wrote it."""

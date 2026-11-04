@@ -247,35 +247,136 @@ def check_key(name: str, values: dict[str, str], cfg) -> str:
 
 # ---- the Settings window ---------------------------------------------------------------------
 
-# (tab, label, config keys, kind, note). Kinds: bool, text, int, choice:<a>|<b>, file.
+# (tab, label, config keys, kind, note). Kinds: bool, text, int, float, list (comma-separated),
+# choice:<a>|<b> (an empty choice means unset), file, and heading (a section title; no keys).
+# Feature settings only: screen calibration, timings and the per-role models stay in config.yaml.
 CONFIG_FIELDS: list[tuple[str, str, tuple[str, ...], str, str]] = [
     ("Booth", "AI commentary", ("commentary", "enabled"), "bool",
      "The booth talks through each shot (needs API keys). Off: shots and rounds are still recorded."),
     ("Booth", "ON AIR badge over GSPro", ("overlay", "enabled"), "bool",
      "Click the badge to take the booth off air and back on."),
+    ("Booth", "Badge size", ("overlay", "scale"), "float", "1.0 is the standard size."),
     ("Booth", "Language", ("commentary", "language"), "choice:en|fr|es|de|it|pt|nl",
      "What the booth speaks: en English, fr French, es Spanish, de German, it Italian, pt Portuguese, nl Dutch."),
+    ("Booth", "Play-by-play commentator", ("personas", "pbp", "name"), "text", ""),
+    ("Booth", "Colour commentator", ("personas", "color", "name"), "text", ""),
     ("Booth", "Voices", ("tts", "provider"), "choice:openai|google",
      "openai uses OPENAI_API_KEY; google uses GOOGLE_TTS_API_KEY."),
+    ("Booth", "Speaking pace (OpenAI voices)", ("tts", "speed"), "float", "1.0 is normal; 1.1 a little quicker."),
+    ("Booth", "Speaking pace (Google voices)", ("tts", "google_speaking_rate"), "float", "0.25 to 2.0; 1.0 is normal."),
+    ("Booth", "What the booth calls", (), "heading", ""),
+    ("Booth", "Opener at the first tee", ("commentary", "opener"), "bool", ""),
+    ("Booth", "Early opener from GSPro's setup screen", ("commentary", "preround"), "bool",
+     "Writes the opener while the course loads. Needs the setup-screen regions calibrated (calibrate --out setup)."),
+    ("Booth", "Sign-off when the round ends", ("commentary", "closer"), "bool", ""),
+    ("Booth", "Between-holes wrap", ("commentary", "segments_on_hole_change"), "bool", ""),
+    ("Booth", "Lines while a player sets up", ("commentary", "preshot"), "bool", ""),
+    ("Booth", "Share of setups that get a line", ("commentary", "preshot_rate"), "float", "0 to 1."),
+    ("Booth", "Calls while the ball is in the air", ("commentary", "in_flight"), "bool", ""),
+    ("Booth", "Instant calls when the ball stops", ("commentary", "pre_reactions"), "bool",
+     "Written at setup, so routine shots get a call with no wait."),
+    ("Booth", "Chance of a line on an ordinary shot", ("commentary", "routine_comment_rate"), "float", "0 to 1."),
+    ("Booth", "Words per line", ("commentary", "max_words_per_line"), "int", ""),
+    ("Booth", "Block repeated phrases", ("commentary", "block_repeats"), "bool",
+     "Rewrites a line that reuses a phrase said earlier this season."),
+    ("Booth", "Lag putt call from (feet)", ("commentary", "gimme_lag_feet"), "float",
+     "A putt from this far that stops inside the gimme circle gets a word. 0: off."),
+    ("Booth", "Round-form stats from (holes in)", ("commentary", "round_form_after_holes"), "int",
+     "Three-putts, greens hit and the like, when well off a player's norm. 0: off."),
+    ("Asides", "Golf news", (), "heading", ""),
+    ("Asides", "Talk about golf headlines", ("news", "enabled"), "bool", "Real, current headlines from the feeds below."),
+    ("Asides", "News feeds", ("news", "feeds"), "list", "RSS or Atom feed addresses, separated by commas."),
+    ("Asides", "News asides per nine", ("news", "per_nine"), "int", ""),
+    ("Asides", "Skip stories older than (days)", ("news", "max_age_days"), "float", ""),
+    ("Asides", "Chance of an aside on a quiet shot", ("news", "banter_rate"), "float",
+     "0 to 1. Shared by news, scores and course trivia."),
+    ("Asides", "Weather", (), "heading", ""),
+    ("Asides", "Mention the weather outside", ("weather", "enabled"), "bool", ""),
+    ("Asides", "Location", ("weather", "location"), "text", "A town or postal code, like 03290 or Nottingham, NH."),
+    ("Asides", "Country code", ("weather", "country"), "text", "Like US or GB; empty searches everywhere."),
+    ("Asides", "Place name on air", ("weather", "place"), "text", "Empty: the town the location is in."),
+    ("Asides", "Between-holes weather chance", ("weather", "between_holes_rate"), "float", "0 to 1."),
+    ("Asides", "Live scores", (), "heading", ""),
+    ("Asides", "Tour and local team scores", ("scores", "enabled"), "bool", ""),
+    ("Asides", "Tours", ("scores", "tours"), "list", "pga, lpga, eur, champions-tour."),
+    ("Asides", "Local teams", ("scores", "teams"), "list", "Names or ESPN abbreviations, like Bruins, Celtics, Red Sox."),
+    ("Asides", "Score asides per nine", ("scores", "per_nine"), "int", ""),
+    ("Asides", "Course trivia", (), "heading", ""),
+    ("Asides", "Stories about the real course", ("trivia", "enabled"), "bool", "From the course's Wikipedia article."),
+    ("Asides", "Trivia per round", ("trivia", "per_round"), "int", ""),
+    ("Chat", "Live chat on the stats page", ("chat", "enabled"), "bool",
+     "Viewers chat on the Live tab and the booth talks about it. Open only while the booth is on air in a round."),
+    ("Chat", "Chat table", ("chat", "table"), "text", "The site stack's ChatTable output (docs/tracking.md#live-chat)."),
+    ("Chat", "Moderation", ("chat", "moderation"), "choice:off|standard|strict",
+     "off: trash talk and swearing are fair game. standard: no swearing or personal attacks. strict: only "
+     "clean, kind messages. Links, spam and slurs never air."),
+    ("Chat", "At most once a hole", ("chat", "once_per_hole"), "bool", ""),
+    ("Chat", "At least this far apart (seconds)", ("chat", "min_gap_seconds"), "float", ""),
+    ("Chat", "Words per line", ("chat", "max_words"), "int", ""),
+    ("Chat", "Ignore messages older than (seconds)", ("chat", "max_age_seconds"), "float", ""),
+    ("GSPro", "Shot data from", ("source", "type"), "choice:connector_log|gspro_log|gspro_sniffer",
+     "connector_log: GSPconnect's log (Uneekor and the other built-in connectors). gspro_log: GSPro's own log, "
+     "any launch monitor, ball data only. gspro_sniffer: Open Connect traffic (needs Npcap)."),
+    ("GSPro", "Hazard read before a shot", ("minimap", "provider"), "choice:llm|jev",
+     "llm: the pre-shot model reads the screenshot. jev: TypeSafe's Jev reads the minimap (TYPESAFE_API_KEY)."),
+    ("GSPro", "Read the break on putts", ("putt_read", "enabled"), "bool", "Needs GSPro's green grid showing."),
     ("League", "League file", ("league_file",), "file", "Players, handicaps and the schedule (optional)."),
+    ("League", "Tonight's format", ("commentary", "round_format"), "choice:|scramble|best_ball|aggregate|alternate",
+     "Empty: from the league schedule."),
+    ("League", "Schedule week", ("commentary", "round_week"), "int",
+     "Forces a week's format, nine and CTP holes when the course can't be matched. Empty: matched by course."),
+    ("League", "Holes in a round", ("commentary", "round_holes"), "int", ""),
     ("League", "Live handicaps from Squabbit", ("squabbit", "enabled"), "bool", ""),
     ("League", "Season starts (month-day)", ("publish", "season_start"), "text",
      "Like 10-01 for a season from October: the stats page's records get a This season range. Empty: none."),
     ("League", "SuperSaaS bookings", ("booking", "enabled"), "bool", "Practice bookings make a round practice."),
     ("League", "SuperSaaS account", ("booking", "account"), "text", ""),
     ("League", "SuperSaaS schedule ID", ("booking", "schedule_id"), "int", ""),
+    ("League", "Booking slack (minutes)", ("booking", "slack_minutes"), "float",
+     "A round this close before or after a booking still counts as in it."),
+    ("League", "Schedule tab days", ("booking", "schedule_days"), "int",
+     "Bookings shown on the stats page's Schedule tab. 0: none."),
     ("Sharing", "Put the stats page online after each round", ("publish", "enabled"), "bool",
      "Needs the S3 bucket from docs/tracking.md#sharing-the-stats-page."),
     ("Sharing", "S3 bucket", ("publish", "bucket"), "text", ""),
     ("Sharing", "AWS region", ("publish", "region"), "text", ""),
+    ("Sharing", "Publish as soon as a round ends", ("publish", "after_round"), "bool", ""),
+    ("Sharing", "Site name", ("publish", "site_name"), "text", "The stats page's title and header."),
+    ("Sharing", "Last tab's name", ("publish", "more_tab"), "text", ""),
+    ("Sharing", "Backups", (), "heading", ""),
+    ("Sharing", "Back up the season file", ("backup", "enabled"), "bool", "When the booth starts and after each round."),
+    ("Sharing", "Backup folder", ("backup", "dir"), "text",
+     "Empty: logs\\backups. A synced or other drive keeps them safe if this one dies."),
+    ("Sharing", "Daily copies kept", ("backup", "daily"), "int", ""),
+    ("Sharing", "Weekly copies kept", ("backup", "weekly"), "int", ""),
     ("Sharing", "Copy backups to the S3 bucket too", ("backup", "s3"), "bool", ""),
-    ("Sharing", "Live stream on the stats page", ("live", "enabled"), "bool",
+    ("Video", "Live stream on the stats page", ("live", "enabled"), "bool",
      "OBS streams each round to the page's Live tab: set it up per docs/tracking.md#live-stream."),
+    ("Video", "Stream with each round", ("live", "with_rounds"), "bool",
+     "Start OBS's output when a round starts and stop it after the sign-off."),
+    ("Video", "Stop after the sign-off (seconds)", ("live", "stop_after_seconds"), "float", ""),
+    ("Video", "Stop after no shots for (minutes)", ("live", "idle_minutes"), "float", "0: never."),
+    ("Video", "Start OBS with the booth", ("live", "launch_obs"), "bool", ""),
+    ("Video", "OBS program", ("live", "obs_path"), "text", "Empty: the one Shotcast set up, else Program Files."),
+    ("Video", "GSPro's sound device", ("live", "game_sound_device"), "text",
+     "The Windows output GSPro plays to, for its sound in the stream (docs/tracking.md#game-sound). Empty: none."),
+    ("Video", "Game sound level (dB)", ("live", "game_sound_db"), "float", "Below the voices, like -10."),
+    ("Video", "Keep round videos online (days)", ("live", "keep_days"), "int",
+     "For the page's Round replays tab; about 1.2 GB an hour in the bucket. 0: not kept."),
     ("Video", "Keep round videos on this PC (days)", ("live", "local_keep_days"), "int",
      "Each stream OBS records (the tray's \"Set up the live stream\") as a .ts file; 0: not kept. "
      "About 1.2 GB an hour."),
     ("Video", "Recordings folder", ("live", "local_dir"), "text",
      "In the Shotcast folder unless it's a full path (like D:\\Golf videos)."),
+    ("Alerts", "Health checks", ("health", "enabled"), "bool",
+     "Warns on the ON AIR badge when the booth stops reading GSPro the way it should."),
+    ("Alerts", "Phone pushes", ("notify", "provider"), "choice:ntfy|none", "ntfy sends them to NTFY_TOPIC."),
+    ("Alerts", "Push levels", ("notify", "levels"), "list", "fail, warn."),
+    ("Alerts", "Push when it's all cleared", ("notify", "cleared"), "bool", ""),
+    ("Alerts", "Don't repeat a push for (hours)", ("notify", "repeat_hours"), "float", ""),
+    ("Advanced", "Shotcast's CPU priority", ("process_priority",), "choice:below_normal|normal|idle",
+     "below_normal keeps GSPro smooth."),
+    ("Advanced", "CPU cores for Shotcast", ("max_cpu_cores",), "int", "Empty: all of them."),
 ]
 
 # (tab, label, .env key, secret, checkable)
@@ -289,11 +390,11 @@ ENV_FIELDS: list[tuple[str, str, str, bool, bool]] = [
     ("League", "SuperSaaS API key", "SUPERSAAS_API_KEY", True, False),
     ("Sharing", "AWS access key ID", "AWS_ACCESS_KEY_ID", False, True),
     ("Sharing", "AWS secret access key", "AWS_SECRET_ACCESS_KEY", True, False),
-    ("Sharing", "ntfy topic (phone pushes)", "NTFY_TOPIC", True, True),
-    ("Sharing", "OBS WebSocket password (live stream)", "OBS_WEBSOCKET_PASSWORD", True, True),
+    ("Alerts", "ntfy topic (phone pushes)", "NTFY_TOPIC", True, True),
+    ("Video", "OBS WebSocket password (live stream)", "OBS_WEBSOCKET_PASSWORD", True, True),
 ]
 
-TABS = ["Booth", "API keys", "GSPro", "League", "Sharing", "Video", "Advanced"]
+TABS = ["Booth", "Asides", "Chat", "API keys", "GSPro", "League", "Sharing", "Video", "Alerts", "Advanced"]
 
 
 def _get(data: Any, keys: tuple[str, ...]) -> Any:
@@ -306,9 +407,42 @@ def _get(data: Any, keys: tuple[str, ...]) -> Any:
 
 def config_value(cfg, keys: tuple[str, ...]) -> Any:
     obj = cfg
-    for k in keys:
-        obj = getattr(obj, k)
+    for i, k in enumerate(keys):
+        if isinstance(obj, dict):
+            if k not in obj and keys[:i] == ("personas",):
+                obj = type(cfg)().personas   # a commentator config.yaml leaves out: their default
+            obj = obj.get(k)
+        else:
+            obj = getattr(obj, k)
     return obj
+
+
+def field_text(kind: str, value: Any) -> str:
+    """How a setting's value shows in its box."""
+    if value is None:
+        return ""
+    if kind == "list":
+        return ", ".join(str(v) for v in value)
+    return str(value)
+
+
+def parse_field(kind: str, label: str, text: str, current: Any) -> Any:
+    """A box's text as the setting's value. Raises ValueError, naming the setting, if it doesn't read."""
+    if kind == "bool":
+        return bool(text)
+    v = text.strip()
+    if kind == "list":
+        return [x.strip() for x in v.split(",") if x.strip()]
+    if kind in ("int", "float"):
+        if not v:
+            return None
+        try:
+            return int(v) if kind == "int" else float(v)
+        except ValueError:
+            raise ValueError(f"{label} should be a {'whole ' if kind == 'int' else ''}number") from None
+    if kind.startswith("choice:"):
+        return v or None
+    return v or (None if current is None else "")
 
 
 def apply_changes(config_text: str, env_text: str, config_changes: dict[tuple[str, ...], Any],
@@ -316,6 +450,15 @@ def apply_changes(config_text: str, env_text: str, config_changes: dict[tuple[st
     """The new config.yaml and .env texts. Raises ValueError if the config wouldn't load."""
     from .config import Config
 
+    if any(keys[0] == "personas" for keys in config_changes):
+        # A name alone isn't a persona, and a personas block replaces the defaults whole: a commentator
+        # config.yaml leaves out gets their default written in full first.
+        have = (yaml.safe_load(config_text) or {}).get("personas")
+        have = have if isinstance(have, dict) else {}
+        for role, persona in Config().personas.items():
+            if not have or (role not in have and any(k[:2] == ("personas", role) for k in config_changes)):
+                for field, value in persona.model_dump().items():
+                    config_text = set_yaml(config_text, ("personas", role, field), value)
     for keys, value in config_changes.items():
         config_text = set_yaml(config_text, keys, value)
     if gspro is not None:
@@ -352,16 +495,16 @@ class SettingsWindow:
         w.protocol("WM_DELETE_WINDOW", self.close)
         self.vars: dict[Any, Any] = {}
         self.orig: dict[Any, Any] = {}
+        self.labels: dict[Any, str] = {}
         self.nb = ttk.Notebook(w)
         self.nb.pack(fill="both", expand=True, padx=self._px(10), pady=(self._px(10), 0))
         self.frames = {}
+        bg = ttk.Style().lookup("TFrame", "background") or None
         for name in TABS:
-            f = ttk.Frame(self.nb, padding=self._px(12))
-            f.columnconfigure(1, weight=1)
-            self.nb.add(f, text=name)
-            self.frames[name] = f
+            self.nb.add(self._scrolling(name, bg), text=name)
         self.rows = {name: 0 for name in TABS}
 
+        self._gspro_tab()
         for tab_name, label, keys, kind, note in CONFIG_FIELDS:
             self._config_row(tab_name, label, keys, kind, note)
         self._note("API keys", "Keys stay on this PC, in .env in the Shotcast folder. "
@@ -369,7 +512,6 @@ class SettingsWindow:
         for tab_name, label, key, secret, checkable in ENV_FIELDS:
             self._env_row(tab_name, label, key, secret, checkable)
         self._link("API keys", "Where to get them", KEYS_HELP)
-        self._gspro_tab()
         self._advanced_tab()
 
         bar = ttk.Frame(w, padding=self._px(10))
@@ -382,6 +524,32 @@ class SettingsWindow:
         self.show(tab)
 
     # -- layout helpers
+    def _scrolling(self, name: str, bg: str | None):
+        """A tab whose rows scroll when they don't fit; its rows go in self.frames[name]."""
+        import tkinter as tk
+        from tkinter import ttk
+
+        outer = ttk.Frame(self.nb)
+        canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0, width=self._px(600), height=self._px(460),
+                           **({"background": bg} if bg else {}))
+        bar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        f = ttk.Frame(canvas, padding=self._px(12))
+        f.columnconfigure(1, weight=1)
+        item = canvas.create_window((0, 0), window=f, anchor="nw")
+        canvas.configure(yscrollcommand=bar.set)
+        f.bind("<Configure>", lambda _: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(item, width=e.width))
+
+        def wheel(e):
+            if canvas.yview() != (0.0, 1.0):
+                canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        outer.bind("<Enter>", lambda _: canvas.bind_all("<MouseWheel>", wheel))
+        outer.bind("<Leave>", lambda _: canvas.unbind_all("<MouseWheel>"))
+        canvas.pack(side="left", fill="both", expand=True)
+        bar.pack(side="right", fill="y")
+        self.frames[name] = f
+        return outer
+
     def _px(self, n: int) -> int:
         return self.ui.px(n)
 
@@ -408,13 +576,22 @@ class SettingsWindow:
         from tkinter import filedialog, ttk
 
         f, r = self.frames[tab], self._next(tab)
+        if kind == "heading":
+            ttk.Label(f, text=label, font=("Segoe UI", 10, "bold")).grid(
+                row=r, column=0, columnspan=4, sticky="w", pady=(self._px(14), self._px(2)))
+            return
         value = config_value(self.cfg, keys)
+        if kind == "list" and not isinstance(value, list):
+            # Set per league in config.yaml ({nhl: [BOS]}): shown, but only editable there.
+            ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=self._px(4), padx=(0, self._px(8)))
+            ttk.Label(f, text=f"{value} (edit in config.yaml)", foreground="#555").grid(row=r, column=1, sticky="w")
+            return
         if kind == "bool":
             var = tk.BooleanVar(value=bool(value))
             ttk.Checkbutton(f, text=label, variable=var).grid(row=r, column=0, columnspan=3, sticky="w", pady=(self._px(6), 0))
         else:
             ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=self._px(4), padx=(0, self._px(8)))
-            var = tk.StringVar(value="" if value is None else str(value))
+            var = tk.StringVar(value=field_text(kind, value))
             if kind.startswith("choice:"):
                 options = kind.split(":", 1)[1].split("|")
                 if var.get() and var.get() not in options:
@@ -440,6 +617,7 @@ class SettingsWindow:
                 row=self._next(tab), column=0, columnspan=4, sticky="w", padx=(self._px(22) if kind == "bool" else 0, 0))
         self.vars[keys] = (var, kind)
         self.orig[keys] = var.get()
+        self.labels[keys] = label
 
     def _env_row(self, tab: str, label: str, key: str, secret: bool, checkable: bool) -> None:
         import tkinter as tk
@@ -561,15 +739,8 @@ class SettingsWindow:
                 continue
             if kind == "env":
                 env_changes[k] = v.strip()
-            elif kind == "bool":
-                config_changes[k] = bool(v)
-            elif kind == "int":
-                v = v.strip()
-                if v and not v.isdigit():
-                    raise ValueError(f"{k[-1]} should be a number")
-                config_changes[k] = int(v) if v else None
             else:
-                config_changes[k] = v.strip() or (None if config_value(self.cfg, k) is None else "")
+                config_changes[k] = parse_field(kind, self.labels[k], v, config_value(self.cfg, k))
         gspro = self.gspro.get().strip()
         if not gspro and self.gspro_orig:
             raise ValueError("The GSPro folder is empty: choose GSPro's folder (or Cancel to keep it as it was).")
@@ -612,6 +783,15 @@ class SettingsWindow:
                                                   + (["GSPro folder"] if gspro else [])))
         self.tray.settings_saved()
         self.close()
-        if messagebox.askyesno("Shotcast settings", "Saved. Restart the booth now to use them?\n\n"
-                               "(It takes a few seconds; not in the middle of a shot.)", parent=self.ui.root):
+        if self.tray.booth.state in ("stopped", "crashed"):
+            return   # it reads them when it next starts
+        if self.tray.round_in_progress() is False:
+            # Known to be between rounds: nothing to interrupt.
+            log.info("Settings saved between rounds: restarting the booth to use them")
+            threading.Thread(target=self.tray.restart_booth, daemon=True).start()
+            return
+        if messagebox.askyesno("Shotcast settings", "Saved. The booth uses them once it restarts, and a round "
+                               "may be in progress.\n\nRestart the booth now? (It takes a few seconds; "
+                               "No keeps the round going, and they apply at the next restart.)",
+                               parent=self.ui.root):
             threading.Thread(target=self.tray.restart_booth, daemon=True).start()

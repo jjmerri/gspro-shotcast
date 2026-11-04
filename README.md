@@ -212,9 +212,12 @@ beyond that is supported on paper but not yet run live:
    - **Check the screen read...**: start GSPro, get to a hole, choose this and bring GSPro to the
      front. Every line should say OK (see [Checking the screen read](docs/setup.md#checking-the-screen-read)).
    - **Turn the AI booth on**: asks for the OpenAI and Anthropic keys the first time.
-   - **Settings...**: the AI booth, voices and ON AIR badge; API keys (each with a **Check**); the
-     GSPro folder; the league file, Squabbit and SuperSaaS; sharing the stats page, S3 backups and
-     phone alerts. Everything else is in `config.yaml` (**Settings → Advanced**).
+   - **Settings...**: every feature setting. The booth (what it calls, voices, the ON AIR badge),
+     asides (news, weather, scores, course trivia), the live chat, API keys (each with a **Check**),
+     the GSPro folder and shot source, the league, sharing and backups, the live stream and videos,
+     and health alerts. Screen calibration, timings and the AI models stay in `config.yaml`
+     (**Settings → Advanced**). After Save the booth restarts on its own between rounds; during a
+     round (or when it can't tell) it asks first.
    - **Set up the live stream...** (needs the stats page shared): downloads OBS Studio (224 MB) into
      the Shotcast folder and sets it up for the page's Live tab. If Windows Firewall then asks
      about OBS Studio, choose **Cancel**: nothing needs it reachable from other machines.

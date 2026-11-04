@@ -802,6 +802,13 @@ class BackupConfig(BaseModel):
         return v
 
 
+# In log_dir: whether the booth is in a round, rewritten every ROUND_STATUS_EVERY_S, so the tray only
+# restarts it unasked between rounds (commentator/tray.py round_in_progress).
+ROUND_STATUS = "round.json"
+ROUND_STATUS_EVERY_S = 5.0
+ROUND_STATUS_CHECK_S = 0.5   # how often the booth looks; a change is written straight away
+
+
 # The maintainer's problem-report drop (tools/aws/report-drop.yaml's UploadUrl).
 REPORT_DROP_URL = "https://l3wyufawstioeuhs7wz6tztgqq0ehaek.lambda-url.us-east-1.on.aws/"
 

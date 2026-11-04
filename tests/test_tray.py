@@ -225,3 +225,18 @@ def test_a_run_of_edits_on_the_local_page_publishes_once_after_the_last(tmp_path
     off = tray.AutoPublisher(lambda: None, tmp_path, delay=0.01, run=run)
     off.changed()   # publishing isn't set up: nothing waits
     assert not off.status()["enabled"] and off.status()["due"] is None
+
+
+def test_the_booth_restarts_unasked_only_when_its_status_says_between_rounds(tmp_path):
+    import time
+    from types import SimpleNamespace
+
+    app = SimpleNamespace(cfg=SimpleNamespace(log_dir=str(tmp_path)))
+    status = tmp_path / tray.ROUND_STATUS
+    assert tray.Tray.round_in_progress(app) is None                    # no status: can't tell
+    status.write_text(json.dumps({"round": False, "updated": time.time()}))
+    assert tray.Tray.round_in_progress(app) is False
+    status.write_text(json.dumps({"round": True, "updated": time.time()}))
+    assert tray.Tray.round_in_progress(app) is True
+    status.write_text(json.dumps({"round": False, "updated": time.time() - 60}))
+    assert tray.Tray.round_in_progress(app) is None                    # stale: the booth may be gone

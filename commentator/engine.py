@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .carry_model import CarryModel, correct_for_elevation
-from .config import Config
+from .config import ROUND_STATUS, ROUND_STATUS_CHECK_S, ROUND_STATUS_EVERY_S, Config
 from .flight import point_at
 from .facts import (
     PUTT_FOR_FACT, SCORE_NAMES, _fmt_to_par, _to_par_value, club_delivery_facts, club_delivery_notable, club_name, flight_facts,
@@ -887,6 +887,7 @@ class Engine:
         self._putted_on_last_hole = False
         self._round_end_queued = False
         self._round_ended_at = 0.0
+        self._round_handling = 0   # round starts and ends still being handled (bookings, the sign-off)
         self._shots_at_round_end = 0
         self._fixture_saved_at: dict[str, float] = {}
         self._strategy_hole: str | None = None   # the hole a where-to-miss read was last offered on
@@ -958,6 +959,8 @@ class Engine:
         self._schedule_backup("startup")
         self._start_live()
         self._start_hud_buffer()
+        if self.cfg.source.type != "replay":
+            asyncio.create_task(self._round_status_loop(), name="round-status")
         if self.screen and self.cfg.screen.ocr:
             tasks.append(asyncio.create_task(self._watch_hud(), name="hud-watch"))
             # Always: the setup screen's players, holes and game mode are the round's stats too. Only the
@@ -2296,6 +2299,37 @@ class Engine:
     # ---- live chat ----------------------------------------------------------------------
 
     CHAT_HEARTBEAT = 30.0   # seconds; the chat function counts the booth on air for 90 after one
+
+    def _in_round(self) -> bool:
+        """In a round, or still finishing one (the sign-off, stopping the stream): a restart now would cut
+        into it."""
+        r = self.round
+        stopping = self._live_stop_task
+        return bool((r is not None and not r.ended) or self._round_handling
+                    or (self.speech is not None and not self.speech.is_idle())
+                    or (stopping is not None and not stopping.done()))
+
+    async def _round_status_loop(self) -> None:
+        """Keeps log_dir/ROUND_STATUS current, so the tray knows when a restart would interrupt nothing."""
+        path = Path(self.cfg.log_dir) / ROUND_STATUS
+
+        def write(status: dict) -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(status), encoding="utf-8")
+            os.replace(tmp, path)
+        # Checked often and written the moment it changes, so a round that just started reads as one;
+        # rewritten every ROUND_STATUS_EVERY_S anyway, which tells the tray the booth is still there.
+        written, at = None, 0.0
+        while True:
+            now = self._in_round()
+            if now != written or time.monotonic() - at >= ROUND_STATUS_EVERY_S:
+                try:
+                    await asyncio.to_thread(write, {"round": now, "updated": time.time()})
+                    written, at = now, time.monotonic()
+                except Exception as e:
+                    log.debug("Couldn't write the round status: %s", e)
+            await asyncio.sleep(ROUND_STATUS_CHECK_S)
 
     def _chat_open(self) -> bool:
         """Whether the page's chat is open: the booth on air (not muted) in a round."""
@@ -7425,6 +7459,13 @@ class Engine:
         return p
 
     async def handle_round_start(self, event: RoundStartEvent) -> None:
+        self._round_handling += 1   # in a round for the round status while bookings and handicaps load
+        try:
+            await self._handle_round_start(event)
+        finally:
+            self._round_handling -= 1
+
+    async def _handle_round_start(self, event: RoundStartEvent) -> None:
         hud, c = event.hud, self.cfg.commentary
         if event.joined:
             if self.round is not None and not self.round.ended:
@@ -8380,6 +8421,13 @@ class Engine:
         return stats
 
     async def handle_round_end(self, event: RoundEndEvent) -> None:
+        self._round_handling += 1   # in a round for the round status until the sign-off is written
+        try:
+            await self._handle_round_end(event)
+        finally:
+            self._round_handling -= 1
+
+    async def _handle_round_end(self, event: RoundEndEvent) -> None:
         r = self.round
         if not r or r.ended:
             return
