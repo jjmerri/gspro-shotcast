@@ -131,6 +131,32 @@ def set_checks_for_updates(on: bool) -> None:
         winreg.SetValueEx(key, "CheckForUpdates", 0, winreg.REG_DWORD, int(on))
 
 
+def _flag(name: str, default: bool) -> bool:
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, SETTINGS_KEY) as key:
+            return bool(winreg.QueryValueEx(key, name)[0])
+    except (OSError, ImportError):
+        return default
+
+
+def _set_flag(name: str, on: bool) -> None:
+    import winreg
+
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, SETTINGS_KEY) as key:
+        winreg.SetValueEx(key, name, 0, winreg.REG_DWORD, int(on))
+
+
+def notifies_when_ready() -> bool:
+    """Whether a notification says the booth is ready after it starts (the menu's tick box)."""
+    return _flag("NotifyWhenReady", True)
+
+
+def set_notifies_when_ready(on: bool) -> None:
+    _set_flag("NotifyWhenReady", on)
+
+
 def remember_gspro_dir(folder: str) -> None:
     """The GSPro folder chosen in Settings, so the installer offers it next time."""
     try:
@@ -721,6 +747,10 @@ class Tray:
         set_starts_with_windows(not starts_with_windows(), self.home)
         self._refresh()
 
+    def toggle_ready_notice(self, *_) -> None:
+        set_notifies_when_ready(not notifies_when_ready())
+        self._refresh()
+
     def toggle_update_checks(self, *_) -> None:
         set_checks_for_updates(not checks_for_updates())
         self._refresh()
@@ -894,6 +924,7 @@ class Tray:
             item("Check for updates automatically", safe(self.toggle_update_checks),
                  checked=lambda _: checks_for_updates()),
             item("Start with Windows", safe(self.toggle_start_with_windows), checked=lambda _: starts_with_windows()),
+            item("Notify when the booth is ready", safe(self.toggle_ready_notice), checked=lambda _: notifies_when_ready()),
             item(f"About Shotcast {self.version}", safe(self.about)),
             item("Quit", self.quit),
         )
@@ -960,7 +991,7 @@ class Tray:
         next_update = time.monotonic() + 60
         last = None
         while not self._stop.wait(1 if self.booth.state == "starting" else 3):
-            if self.booth.poll():
+            if self.booth.poll() and notifies_when_ready():
                 self.notify(self._ready_notice())
             now = (self.booth.state, self._light(), self.status())
             if now != last:

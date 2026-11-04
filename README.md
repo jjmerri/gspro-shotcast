@@ -239,10 +239,10 @@ beyond that is supported on paper but not yet run live:
    - **Warnings** (when there are any), **Restart the booth**, **Back up now** (the menu shows the
      last backup),
      **Check for updates** / **Restart to update**, **Check for updates automatically**,
-     **Start with Windows**, **Quit**.
+     **Start with Windows**, **Notify when the booth is ready**, **Quit**.
 
    The icon's light is grey while the booth starts (a few seconds; a notification says when it's
-   ready, with any warnings), then green when everything's fine, orange with warnings, red when
+   ready, with any warnings, unless you untick **Notify when the booth is ready** in the menu), then green when everything's fine, orange with warnings, red when
    the booth isn't running. Updates are checked every few hours (unless you untick it; see the
    [privacy policy](PRIVACY.md)) and offered in the menu, never installed on their own (not
    mid-round). Updating copies the season database to `pre-update-*.db.gz` in the backup folder
