@@ -183,13 +183,71 @@ def test_the_live_tabs_week_board_shows_the_week_and_the_team_on_the_sim(tmp_pat
         [week(6, [("x1", ["a", "b"], "Team 1", None), ("x2", ["c", "d"], "Team 2", -3),
                   ("x3", ["e", "f"], "Hackers", None)])], league, POINTS)
     assert e._week_panel() == {"week": 6, "course": "Test Links", "deadline": "2026-12-06", "holes": 9,
-                               "rows": [{"team": "Duffers", "net": -3},
-                                        {"team": "Aces", "net": None, "thru": 0, "on": True}],
+                               "rows": [{"team": "Duffers", "players": ["Tony", "Priya"], "net": -3},
+                                        {"team": "Aces", "players": ["Mike", "Sarah"], "net": None, "thru": 0,
+                                         "on": True}],
                                "waiting": ["Hackers"]}
     r.apply_scorecard(Scorecard(holes=[10, 11], scores={"Mike": {10: 4, 11: 4}, "Sarah": {10: 4, 11: 4}}))
-    assert e._week_panel()["rows"][1] == {"team": "Aces", "net": r.team_net("Aces")[0], "thru": 2, "on": True}
+    assert e._week_panel()["rows"][1] == {"team": "Aces", "players": ["Mike", "Sarah"],
+                                          "net": r.team_net("Aces")[0], "thru": 2, "on": True}
     r.ended = True
     assert e._week_panel() is None
+
+
+def test_the_home_tabs_league_cards_show_this_week_and_the_standings():
+    league = League(LEAGUE_DATA)
+    items = [week(6, [("x1", ["a", "b"], "Team 1", -4), ("x2", ["c", "d"], "Team 2", -4),
+                      ("x3", ["e", "f"], "Hackers", 1)]),
+             week(7, [("x1", ["a", "b"], "Team 1", 2), ("x2", ["c", "d"], "Team 2", None),
+                      ("x3", ["e", "f"], "Hackers", None)])]
+    b = Board.from_squabbit(items, league, POINTS)
+    page = b.page("2026-11-01")
+    # Week 7 has a post and isn't final: it's this week's.
+    assert page["week"] == {"week": 7, "course": "Other", "deadline": "2026-12-06", "final": False,
+                            "rows": [{"team": "Aces", "players": ["Mike", "Sarah"], "net": 2}],
+                            "waiting": ["Duffers", "Hackers"]}
+    assert page["standings"] == {"weeks": 1, "rows": [
+        {"team": "Aces", "players": ["Mike", "Sarah"], "points": 65.0, "place": 1},
+        {"team": "Duffers", "players": ["Tony", "Priya"], "points": 65.0, "place": 1},
+        {"team": "Hackers", "players": ["Lou", "Dee"], "points": 50.0, "place": 3}]}
+    # Past week 7's deadline both weeks are final: the latest one shows, with who never posted.
+    after = b.page("2026-12-07")["week"]
+    assert (after["week"], after["final"], after["waiting"]) == (7, True, ["Duffers", "Hackers"])
+    assert Board({}, league, POINTS).page("2026-11-01") == {"week": None, "standings": None}
+
+
+def test_the_league_page_loop_reads_squabbit_and_puts_league_json_up(tmp_path, monkeypatch):
+    import asyncio
+    import json
+
+    from commentator import engine as engine_mod
+
+    league = League(LEAGUE_DATA)
+    e = _engine(tmp_path, league)
+    e.cfg.publish.bucket, e.cfg.publish.prefix = "b", "site/"
+    puts, reads = [], []
+    board = Board.from_squabbit([week(6, [("x1", ["a", "b"], "Team 1", -4)])], league, POINTS)
+
+    async def refresh():
+        reads.append(1)
+        e.board, e._board_at = board, 1000.4
+
+    class S3:
+        def put_object(self, **kw):
+            puts.append(kw)
+
+    e._refresh_board, e._s3 = refresh, S3
+
+    async def stop(_):
+        raise asyncio.CancelledError
+    monkeypatch.setattr(engine_mod.asyncio, "sleep", stop)
+    try:
+        asyncio.run(e._league_page_loop())
+    except asyncio.CancelledError:
+        pass
+    assert reads == [1] and [(p["Key"], p["CacheControl"]) for p in puts] == [("site/league.json", "no-cache")]
+    body = json.loads(puts[0]["Body"])
+    assert body["updated"] == 1000 and body["week"]["week"] == 6 and body["week"]["rows"][0]["team"] == "Aces"
 
 
 def test_distance_text():

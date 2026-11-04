@@ -464,6 +464,13 @@ among them, ties shared). The teams yet to play are listed under it. The booth w
 `live/week.json` as the score changes, from the same Squabbit read the booth's week facts use. With no
 league round, or no Squabbit read for its week, there's no board.
 
+The Home tab carries the league too: this week's board (the earliest week not yet final with a post,
+else the latest final week, naming who didn't post) and the season's points standings. A viewer who
+picked themselves sees their team in bold. With Squabbit on and the league's `squabbit_invite` set, the
+booth re-reads Squabbit every 20 minutes while it runs and writes `league.json` beside `schedule.json`,
+so a team that posts between rounds shows up; the page says when it was read. Without a Squabbit
+league the booth removes it, and Home shows no league.
+
 #### Round videos on the PC
 
 Each stream is kept on the GSPro PC too, for a week (`live.local_keep_days`; 0 for not at all), as one

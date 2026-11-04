@@ -547,7 +547,7 @@ console.log(JSON.stringify(seen));"""
                    [True, ""], 500, [1, True, ""], [False, "none"], [1, True, ""], [1, True], [1.25, True]]
 
 
-def test_the_live_tabs_week_board_places_the_team_on_the_sim_among_the_posted():
+def test_the_league_cards_place_ties_mark_the_sim_and_the_viewers_team():
     import re
     import shutil
     import subprocess
@@ -557,9 +557,9 @@ def test_the_live_tabs_week_board_places_the_team_on_the_sim_among_the_posted():
     if not node:
         pytest.skip("needs node")
     page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
-    fns = "\n".join(re.search(rf"\nconst {n} = .*?\n", page).group(0) for n in ("esc", "toPar")) \
-        + re.search(r"\nfunction weekPanel\(.*?\n}\n", page, re.S).group(0)
-    script = "const state = {};" + fns + """
+    fns = "\n".join(re.search(rf"\nconst {n} = .*?\n", page).group(0) for n in ("esc", "toPar", "weekPanel", "myTeam")) \
+        + "".join(re.search(rf"\nfunction {n}\(.*?\n}}\n", page, re.S).group(0) for n in ("weekCard", "standingsCard"))
+    script = "const state = {}, when = () => 'Sun 9:00 AM';" + fns + """
 const text = h => h.replace(/<[^>]+>/g, " ").replace(/\\s+/g, " ").trim();
 const out = [weekPanel()];
 state.week = {week: 6, course: "Test Links", deadline: "2026-12-06", holes: 9, waiting: ["Hackers"],
@@ -568,12 +568,23 @@ out.push(text(weekPanel()));
 state.week.rows[2] = {team: "Aces", net: null, thru: 0, on: true};
 state.week.waiting = [];
 out.push(text(weekPanel()));
+// Home's cards: a final week names who never posted; the viewer's team is bold; tied places shared.
+state.me = "Mike";
+out.push(weekCard({week: 5, course: "Old", final: true, waiting: ["Hackers"],
+                   rows: [{team: "Aces", players: ["Mike", "Sarah"], net: -2}]}));
+out.push(text(standingsCard({weeks: 1, rows: [{team: "Aces", players: ["Mike"], points: 65, place: 1},
+  {team: "Duffers", players: [], points: 65, place: 1}, {team: "Hackers", players: [], points: 50, place: 3}]})));
+out.push(standingsCard(null) + weekCard(null));
 console.log(JSON.stringify(out));"""
     got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
     assert got[0] == ""
     assert got[1].startswith("Week 6 Test Links · due ") and got[1].endswith(
         "Team Net T1 Duffers -3 T1 Aces -3 thru 7 · on now 3 Birdies +1 Yet to play: Hackers")
     assert got[2].endswith("Team Net 1 Duffers -3 2 Birdies +1 Aces – on now")
+    assert '<tr class="mine">' in got[3] and "Week 5 <span class=\"sub\">Old · final</span>" in got[3]
+    assert "Didn't post: Hackers" in got[3] and "on now" not in got[3]
+    assert got[4] == "Standings after 1 week Team Points T1 Aces 65 T1 Duffers 65 3 Hackers 50"
+    assert got[5] == ""
 
 
 def test_a_round_card_takes_its_longest_drive_from_its_shots(tmp_path):

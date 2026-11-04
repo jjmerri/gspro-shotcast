@@ -77,7 +77,8 @@
   #liveslot video { width:100%; max-height:78vh; background:#000; border-radius:8px; }
   .chat { margin-top:14px; }
   .week { margin-top:14px; } .week h3 { margin:0 0 8px; } .week table { background:none; }
-  .week tr.on td { color:var(--accent); font-weight:600; } .week .sub { font-weight:400; }
+  .week tr.on td { color:var(--accent); font-weight:600; } .week tr.mine td { font-weight:600; } .week .sub { font-weight:400; }
+  .league { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:12px; } .league .week { margin-top:0; }
   .chat .log { max-height:260px; overflow-y:auto; margin:6px 0 8px; }
   .chat .msg { padding:4px 0; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
   .chat .msg b { color:var(--accent); margin-right:6px; }
@@ -856,7 +857,9 @@ function renderHome() {
     <div class="sub">${esc(m.date)} · ${esc(m.course)}${m.hole ? ` · hole ${m.hole}` : ""}${shotActions(m)}</div></div></div>`).join("")
     + `<p class="sub"><button class="link" data-tab="highlights">All records and moments →</button></p>` : "";
   const pickHint = me ? "" : `<p class="sub">Pick yourself in the “Everyone” menu at the top to see your own numbers here and on every tab.</p>`;
+  const lg = state.league, league = lg ? weekCard(lg.week) + standingsCard(lg.standings) : "";
   return `<div class="home"><h2>${meTitle("Home")}</h2>${pickHint}${cards.length ? `<div class="cards">${cards.join("")}</div>` : ""}
+    ${league ? `<h2>League <span class="sub">from Squabbit · read ${esc(when(lg.updated * 1000, { weekday: "short", hour: "numeric", minute: "2-digit" }))}</span></h2><div class="league">${league}</div>` : ""}
     <h2>${me ? "Their latest rounds" : "Latest rounds"}</h2>${recent}
     ${moments ? `<h2>Moments <span class="sub">last 3 months</span></h2>${moments}` : ""}</div>`;
 }
@@ -1707,8 +1710,10 @@ async function pollWeek(s) {
   const slot = document.getElementById("weekslot");
   if (slot) slot.innerHTML = weekPanel();
 }
-function weekPanel() {
-  const w = state.week;
+const weekPanel = () => weekCard(state.week);
+// A league week's results (the Live tab's during a league round, Home's from league.json): place (ties
+// shared), team, net, and on the Live tab the team on the sim now. A viewer's own team in bold.
+function weekCard(w) {
   if (!w || !(w.rows || []).length) return "";
   const nets = w.rows.filter(r => r.net !== null && r.net !== undefined).map(r => r.net);
   const rows = [...w.rows].sort((a, b) => (a.net ?? Infinity) - (b.net ?? Infinity) || !!a.on - !!b.on);
@@ -1718,13 +1723,24 @@ function weekPanel() {
     return (nets.filter(x => x === n).length > 1 ? "T" : "") + p;
   };
   const due = w.deadline ? new Date(`${w.deadline}T12:00:00`) : null;
-  const sub = [w.course, due && !isNaN(due) ? `due ${due.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}` : ""]
+  const sub = [w.course, w.final ? "final" : due && !isNaN(due) ? `due ${due.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}` : ""]
     .filter(Boolean).map(esc).join(" · ");
+  const cls = r => [r.on && "on", myTeam(r) && "mine"].filter(Boolean).join(" ");
   return `<section class="card week"><h3>Week ${esc(w.week)} <span class="sub">${sub}</span></h3>
-  <table><thead><tr><th></th><th class="l">Team</th><th>Net</th><th></th></tr></thead><tbody>${rows.map(r =>
-    `<tr${r.on ? ` class="on"` : ""}><td>${place(r.net)}</td><td class="l">${esc(r.team)}</td><td>${toPar(r.net)}</td>
-    <td class="l sub">${r.on ? (r.thru ? `${r.thru === w.holes ? "finished" : `thru ${r.thru}`} · <span class="livedot"></span>on now` : `<span class="livedot"></span>on now`) : ""}</td></tr>`).join("")}
-  </tbody></table>${(w.waiting || []).length ? `<p class="sub">Yet to play: ${w.waiting.map(esc).join(", ")}</p>` : ""}</section>`;
+  <table><thead><tr><th></th><th class="l">Team</th><th>Net</th>${w.rows.some(r => r.on) ? "<th></th>" : ""}</tr></thead><tbody>${rows.map(r =>
+    `<tr${cls(r) ? ` class="${cls(r)}"` : ""}><td>${place(r.net)}</td><td class="l">${esc(r.team)}</td><td>${toPar(r.net)}</td>
+    ${w.rows.some(r => r.on) ? `<td class="l sub">${r.on ? (r.thru ? `${r.thru === w.holes ? "finished" : `thru ${r.thru}`} · <span class="livedot"></span>on now` : `<span class="livedot"></span>on now`) : ""}</td>` : ""}</tr>`).join("")}
+  </tbody></table>${Array.isArray(w.waiting) && w.waiting.length ? `<p class="sub">${w.final ? "Didn't post" : "Yet to play"}: ${w.waiting.map(esc).join(", ")}</p>` : ""}</section>`;
+}
+const myTeam = r => !!(state.me && Array.isArray(r.players) && r.players.includes(state.me));
+// The season's points standings over its final weeks (league.json).
+function standingsCard(s) {
+  if (!s || !(s.rows || []).length) return "";
+  const tied = pl => s.rows.filter(r => r.place === pl).length > 1;
+  return `<section class="card week"><h3>Standings <span class="sub">after ${s.weeks} week${s.weeks === 1 ? "" : "s"}</span></h3>
+  <table><thead><tr><th></th><th class="l">Team</th><th>Points</th></tr></thead><tbody>${s.rows.map(r =>
+    `<tr${myTeam(r) ? ` class="mine"` : ""}><td>${tied(r.place) ? "T" : ""}${r.place}</td><td class="l">${esc(r.team)}</td><td>${Math.round(r.points * 10) / 10}</td></tr>`).join("")}
+  </tbody></table></section>`;
 }
 
 // The live chat (docs/tracking.md#live-chat): the site stack's chat function at /chat/messages, behind
@@ -1961,15 +1977,17 @@ const vodOut = v => {
 const shownVods = () => state.vodsAll ? state.vodsAll.filter(v => !vodOut(v)) : null;
 async function pollExtras() {
   const get = async url => { try { const r = await fetch(url, { cache: "no-store" }); return r.ok ? await r.json() : null; } catch (e) { return null; } };
-  const [rec, sched, cl] = await Promise.all([get("live/recordings.json"), get("schedule.json"), get("live/clips.json")]);
+  const [rec, sched, cl, lg] = await Promise.all([get("live/recordings.json"), get("schedule.json"), get("live/clips.json"), get("league.json")]);
   state.vodsAll = rec && Array.isArray(rec.recordings) ? rec.recordings.filter(v => v.duration > 0 || v.ended === null) : null;
   const vods = shownVods();
   const schedule = sched && Array.isArray(sched.bookings) ? sched : null;
   const clips = cl && cl.clips && typeof cl.clips === "object" ? cl.clips : null;
-  const was = JSON.stringify([state.vods, state.schedule, state.clips]);
-  state.vods = vods; state.schedule = schedule; state.clips = clips;
+  const rowsOk = c => c && Array.isArray(c.rows) && c.rows.every(r => r && typeof r === "object") ? c : null;
+  const league = lg && lg.updated ? { ...lg, week: rowsOk(lg.week), standings: rowsOk(lg.standings) } : null;
+  const was = JSON.stringify([state.vods, state.schedule, state.clips, state.league]);
+  state.vods = vods; state.schedule = schedule; state.clips = clips; state.league = league;
   state.keepDays = rec && rec.keep_days > 0 ? rec.keep_days : 7;
-  if (JSON.stringify([vods, schedule, clips]) === was) return;
+  if (JSON.stringify([vods, schedule, clips, league]) === was) return;
   const shown = state.tab;
   if ((state.tab === "vods" && !tabs().includes("vods")) || (state.tab === "schedule" && !schedule)) state.tab = "home";
   showTabs();

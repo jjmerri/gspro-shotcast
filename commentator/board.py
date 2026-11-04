@@ -95,6 +95,34 @@ class Board:
         end = (self.league.week_entry(week) or {}).get("end_date")
         return bool(end) and str(end) < today
 
+    def current_week(self, today: str) -> int | None:
+        """The week to show as this week's: the earliest one teams have started posting that isn't final,
+        else the latest final one (its result stands till the next week's first post)."""
+        live = [w for w in sorted(self.weeks) if self.posted(w) and not self.final(w, today)]
+        if live:
+            return live[0]
+        done = [w for w in sorted(self.weeks) if self.final(w, today)]
+        return done[-1] if done else None
+
+    def page(self, today: str) -> dict[str, Any]:
+        """The stats page's Home tab league cards (league.json): this week's posted results and who's yet
+        to play, and the season standings. Teams by their display names, each with its players, so the
+        page can pick out a viewer's own team."""
+        def team(t: str) -> dict[str, Any]:
+            return {"team": self.league.team_name(t), "players": self.league.team_players.get(t, [])}
+        out: dict[str, Any] = {"week": None, "standings": None}
+        if (w := self.current_week(today)) is not None:
+            entry = self.league.week_entry(w) or {}
+            out["week"] = {"week": w, "course": entry.get("course"), "deadline": entry.get("end_date"),
+                           "final": self.final(w, today),
+                           "rows": [{**team(e.team), "net": e.net} for e in self.posted(w)],
+                           "waiting": [self.league.team_name(e.team) for e in self.weeks[w] if e.net is None]}
+        table, weeks = self.standings(today)
+        if weeks:
+            out["standings"] = {"weeks": weeks,
+                                "rows": [{**team(t), "points": round(p, 2), "place": pl} for t, p, pl in table]}
+        return out
+
     def standings(self, today: str | None = None) -> tuple[list[tuple[str, float, int]], int]:
         """[(team, points, place)] best first over the final weeks, and how many weeks that is."""
         today = today or datetime.date.today().isoformat()

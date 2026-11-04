@@ -400,6 +400,7 @@ def _names_other_scenery(text: str, allowed_kind: str | None) -> bool:
 
 # How much longer than the handicap fetch the league opener waits for Squabbit's leaderboards.
 BOARD_WAIT_SECONDS = 3.0
+LEAGUE_PAGE_MINUTES = 20   # how often the stats page's league cards (league.json) re-read Squabbit
 
 
 _RATE_WORDS = ((0.0, "never"), (1 / 10, "one time in ten"), (1 / 5, "one time in five"),
@@ -892,6 +893,7 @@ class Engine:
         # The league's week results and standings from Squabbit, refreshed with the handicaps at each
         # round start. None until a fetch works; the history file's standings stand in.
         self.board: Board | None = None
+        self._board_at = 0.0   # when self.board was read
         self._board_task: asyncio.Task | None = None
         self.hole_number: int | None = None
         # Whether the current hole's number was read off the screen rather than counted on.
@@ -967,6 +969,10 @@ class Engine:
                 asyncio.create_task(self._schedule_loop(), name="schedule")
             else:
                 asyncio.create_task(asyncio.to_thread(self._remove_schedule), name="schedule-remove")
+            if self.cfg.squabbit.enabled and self.league.squabbit_invite:
+                asyncio.create_task(self._league_page_loop(), name="league-page")
+            else:
+                asyncio.create_task(asyncio.to_thread(self._remove_league_page), name="league-page-remove")
         tasks = [asyncio.create_task(self.speech.run(), name="speech")]
         if self.source is not None:
             tasks.append(asyncio.create_task(self._pump_source(), name="source"))
@@ -1938,6 +1944,43 @@ class Engine:
             except Exception as e:
                 log.warning("Schedule: couldn't update the stats page's schedule: %s", e)
             await asyncio.sleep(b.schedule_refresh_minutes * 60)
+
+    def _league_page_key(self) -> str:
+        p = self.cfg.publish.prefix.strip("/")
+        return (p + "/" if p else "") + "league.json"
+
+    def _remove_league_page(self) -> None:
+        """No Squabbit league: take the Home tab's league cards off the page."""
+        try:
+            self._s3().delete_objects(Bucket=self.cfg.publish.bucket,
+                                      Delete={"Objects": [{"Key": self._league_page_key()}]})
+        except Exception as e:
+            log.info("League page: couldn't remove the stats page's league cards: %s", e)
+
+    async def _league_page_loop(self) -> None:
+        """Keep the stats page's Home tab league cards (league.json: this week's results, the season
+        standings) current with Squabbit, so a team that posts between rounds shows. A failed read leaves
+        the last one up; the page says when it was read."""
+        client = None
+        while True:
+            try:
+                if self._board_task is None or self._board_task.done():
+                    self._board_task = asyncio.create_task(self._refresh_board())
+                await asyncio.wait({self._board_task})
+                if self.board is not None and self._board_at:
+                    body = json.dumps({**self.board.page(time.strftime("%Y-%m-%d")),
+                                       "updated": round(self._board_at)}).encode()
+
+                    def put() -> None:
+                        nonlocal client
+                        if client is None:
+                            client = self._s3()
+                        client.put_object(Bucket=self.cfg.publish.bucket, Key=self._league_page_key(), Body=body,
+                                          ContentType="application/json", CacheControl="no-cache")
+                    await asyncio.to_thread(put)
+            except Exception as e:
+                log.warning("League page: couldn't update the stats page's league cards: %s", e)
+            await asyncio.sleep(LEAGUE_PAGE_MINUTES * 60)
 
     async def _bookings_ready(self, timeout: float = 5.0, stale_after: float = 600.0) -> None:
         """Let a fetch in flight land before a round is classified, so it decides on fresh bookings.
@@ -7250,6 +7293,7 @@ class Engine:
                 return
             season = self.history.current() or {}
             self.board = Board.from_squabbit(items, self.league, season.get("points_table"))
+            self._board_at = time.time()
             log.info("Squabbit leaderboards: %s", "; ".join(
                 f"week {w} {len(self.board.posted(w))}/{self.board.team_count(w)} posted"
                 for w in sorted(self.board.weeks) if self.board.posted(w)) or "no week posted yet")
@@ -8518,10 +8562,12 @@ class Engine:
             return None
         here = [t for t in r.teams if t in self.league.team_players]
         name = self.league.team_name
-        rows = [{"team": name(e.team), "net": e.net} for e in self._week_others(r)]
+        players = self.league.team_players.get
+        rows = [{"team": name(e.team), "players": players(e.team, []), "net": e.net} for e in self._week_others(r)]
         for t in here:
             tn = r.team_net(t)
-            rows.append({"team": name(t), "net": tn[0] if tn else None, "thru": tn[1] if tn else 0, "on": True})
+            rows.append({"team": name(t), "players": players(t, []), "net": tn[0] if tn else None,
+                         "thru": tn[1] if tn else 0, "on": True})
         return {"week": week, "course": r.schedule.get("course") or r.course, "deadline": r.schedule.get("end_date"),
                 "holes": r.holes, "rows": rows,
                 "waiting": [name(e.team) for e in self.board.weeks[week] if e.net is None and e.team not in here]}
