@@ -255,6 +255,7 @@ publish:
   # bucket: shotcast-stats-bucket-xxxx   # the stack's BucketName output
   # region: us-east-1
   # delay_seconds: 180                   # it publishes once the sign-off has aired; this is the backup
+  # recaps: true                         # a narrated recap of each final league week (docs/tracking.md)
   # site_name: Shotcast                  # the page's title and header
   # more_tab: More                       # the tab for Schedule, Broadcasts and Booth
   # season_start: "10-01"                # the league's season starts each Oct 1: Records gets This season

@@ -1416,13 +1416,20 @@ class Store:
         """This season's finished league weeks by the sim's count: week -> team -> net to par, the
         team's latest round of the week. A week matches the schedule's by number and deadline. A round
         since deleted, excluded or made a practice one on the stats page doesn't count."""
+        return self._week_rows(schedule, "net")
+
+    def week_rounds(self, schedule: list[dict]) -> dict[int, dict[str, int]]:
+        """week_results' rounds: week -> team -> the rounds row its net is from."""
+        return self._week_rows(schedule, "round_id")
+
+    def _week_rows(self, schedule: list[dict], field: str) -> dict[int, dict[str, int]]:
         ends = {e["week"]: e.get("end_date") for e in schedule if e.get("week")}
         out: dict[int, dict[str, int]] = {}
-        for week, end, team, net in self.db.execute(
-                "SELECT w.week, w.end_date, w.team, w.net FROM week_results w JOIN rounds r ON r.id = w.round_id"
+        for week, end, team, value in self.db.execute(
+                f"SELECT w.week, w.end_date, w.team, w.{field} FROM week_results w JOIN rounds r ON r.id = w.round_id"
                 " WHERE r.excluded = 0 AND r.is_league = 1 ORDER BY w.ended_at, w.id"):
             if week in ends and ends[week] == end:
-                out.setdefault(week, {})[team] = net
+                out.setdefault(week, {})[team] = value
         return out
 
     def league_round_courses(self, team: str) -> list[str]:

@@ -273,6 +273,17 @@ back to back into `live/reels/<round>/` (listed in `live/reels.json`), and the r
 **▶ Highlights** button that plays the reel, with each moment listed to jump to. A league round's
 reel stays for the season (`publish.season_start`), any other round's for as long as its stream
 would have. A round whose stream is already gone gets none.
+Once a league week is final (every team posted, or its deadline passed), the booth builds its
+**League recap** (`publish.recaps`, on by default): about 3 minutes of the two commentators
+running through the week over the teams' moments from their rounds' reels. Every team whose round
+was streamed here gets its best moment (a bad one only if it has nothing else), and the leaders and
+big movers in the standings up to three; teams play from last place to the winner. It opens over
+the week's results, plays the clips (muted, the booth's new lines over them, the video waiting for
+a line that runs long) and closes over the standings. It's built after the round's publish has cut
+its reel, with one model call and the lines voiced; it's built again only if the week's numbers or
+footage change (Squabbit's net replacing the sim's). It's kept under `live/recaps/<end date>-w<week>/`
+(listed in `live/recaps.json`) for the season. Home's league cards get a **▶ Week N recap** button
+and the Watch tab a list of them; the lines play from the **▶ Play recap** tap.
 **Schedule** lists the sim's SuperSaaS bookings for the next two weeks (time, the booker's name
 and the booking type), when [bookings](leagues.md) are on (`booking.schedule_days`, 0 for none);
 the booth refreshes it every 30 minutes while it runs.

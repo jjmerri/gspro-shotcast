@@ -697,6 +697,9 @@ class PublishConfig(BaseModel):
     # round ends is the backup, in case the sign-off never finishes.
     after_round: bool = True
     delay_seconds: float = 180.0
+    # Once a league week is final, a narrated recap of it over the teams' highlight-reel moments
+    # (commentator/recap.py), on the page's Home and Watch tabs. Its lines cost a model call and voicing.
+    recaps: bool = True
     # The page's name (its title and header) and the name of its last section's tab (Schedule,
     # Broadcasts, Booth), here and on the booth's own copy of the page.
     site_name: str = "Shotcast"

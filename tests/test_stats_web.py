@@ -961,3 +961,116 @@ def test_the_local_page_plays_the_round_videos_kept_on_the_pc(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_the_recap_player_times_its_lines_over_the_clips():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = re.search(r"\nfunction recapPlayer\(.*?\n}\n", page, re.S).group(0)
+    body = {"week": 6, "course": "Test Links", "rows": [{"name": "Aces", "net": -5, "place": 1, "tied": False, "points": 70}],
+            "standings": [{"name": "Aces", "points": 70, "place": 1, "was": 3}],
+            "intro": [{"text": "i1", "audio": "a/0.wav"}, {"text": "i2", "audio": "a/1.wav"}],
+            "clips": [{"at": 0, "lines": [{"text": "c1", "at": 1.5, "audio": "a/2.wav"}, {"text": "c2", "at": 4, "audio": "a/3.wav"},
+                                          {"text": "c2b", "at": 10.5, "audio": "a/3b.wav"}]},
+                      {"at": 10, "lines": [{"text": "c3", "at": 11.5, "audio": "a/4.wav"}, {"text": "c4", "at": 30, "audio": "a/5.wav"}]}],
+            "outro": [{"text": "o1", "audio": "a/6.wav"}]}
+    script = """
+const esc = s => String(s), toPar = n => String(n), state = {};
+const on = o => { o.ev = {}; o.addEventListener = (k, f) => (o.ev[k] ||= []).push(f); o.fire = k => (o.ev[k] || []).forEach(f => f({ target: o.t })); return o; };
+const document = { createElement: () => on({}) };
+const heard = [], log = [];
+let audio;
+class Audio { constructor() { audio = on(this); this.paused = true; }
+  play() { this.paused = false; heard.push(this.src.split("/").pop()); return Promise.resolve(); }
+  pause() { this.paused = true; } removeAttribute() {} }
+const video = on({ currentTime: 0, paused: true, muted: true,
+  play() { this.paused = false; log.push("play@" + this.currentTime); return Promise.resolve(); },
+  pause() { this.paused = true; log.push("pause@" + this.currentTime); this.fire("pause"); } });
+const BODY = %s;
+const fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(BODY) });
+const me = { video }; let player = me;
+%s
+recapPlayer(me, "2026-12-06-w6");
+const at = t => { video.currentTime = t; video.fire("timeupdate"); };
+setTimeout(() => {
+  const r = me.recap, start = r.card.innerHTML.includes("Play recap");
+  r.card.t = { dataset: { recapplay: "1" } }; r.card.fire("click");
+  audio.fire("ended");             // i1 -> i2
+  audio.fire("ended");             // i2 -> the clips
+  const playing = r.phase;
+  at(1); at(1.6);                  // c1 due
+  at(4.2);                         // c2 due while c1 still going: the video holds
+  const held = video.paused;
+  audio.fire("ended");             // c1 done -> the video goes on, c2 plays
+  at(10.1);                        // c2 still going into the next clip: the video holds
+  audio.fire("ended");             // c2 done -> c2b, due later but its clip is over: still held
+  const stillHeld = video.paused;
+  audio.fire("ended");             // c2b done -> the next clip
+  at(11.6);                        // c3, still going as the video ends (a pause, then the end)
+  video.ended = true; video.pause(); video.fire("ended");
+  const tail = [audio.paused, r.phase];
+  audio.fire("ended");             // c3 done: c4, which the video ended before, still plays
+  audio.fire("ended");             // then the outro
+  const outro = r.card.innerHTML.includes("Standings");
+  audio.fire("ended");
+  console.log(JSON.stringify({ stillHeld, start, playing, held, heard, log, tail, outro, done: r.phase, again: r.card.innerHTML.includes("Watch again") }));
+}, 0);
+""" % (json.dumps(body), fns)
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    # A seek into the next clip mid-line: the line's left behind, and the video goes on (its timeupdate
+    # comes before the seeked, the line looking past its clip then).
+    seek = script[:script.index("setTimeout(")] + """setTimeout(() => {
+  const r = me.recap; r.card.t = { dataset: { recapplay: "1" } }; r.card.fire("click");
+  audio.fire("ended"); audio.fire("ended");
+  at(1.6);
+  video.seeking = true; at(12); video.seeking = false; video.fire("seeked");
+  const after = [video.paused, audio.paused, r.line];
+  at(12.3);                        // c3
+  video.ended = true; video.fire("ended");
+  video.ended = false; video.seeking = true; at(1); video.seeking = false; video.fire("seeked");
+  at(1.6); audio.fire("ended");    // back to c1, the video going on from there
+  console.log(JSON.stringify({ after, heard, back: [r.phase, video.paused] }));
+}, 0);"""
+    sought = json.loads(subprocess.run([node], input=seek, capture_output=True, encoding="utf-8", check=True).stdout)
+    # A line that won't load (its play rejected, and an error) is skipped once, not twice.
+    bad = script[:script.index("setTimeout(")].replace("play() { this.paused = false;",
+        "play() { if (this.src.endsWith('/0.wav')) { this.error = {}; queueMicrotask(() => this.fire('error')); return Promise.reject(new Error('x')); }"
+        " this.error = null; this.paused = false;", 1) + """setTimeout(() => {
+  const r = me.recap; r.card.t = { dataset: { recapplay: "1" } }; r.card.fire("click");
+  setTimeout(() => console.log(JSON.stringify([r.phase, r.line && r.line.text])), 0);
+}, 0);"""
+    assert json.loads(subprocess.run([node], input=bad, capture_output=True, encoding="utf-8", check=True).stdout) == ["intro", "i2"]
+    # A play the video's buffering cuts off (its pause aborting it): the line's still going, picked up after.
+    cut = script[:script.index("setTimeout(")].replace("play() { this.paused = false;",
+        "play() { if (this.src.endsWith('/2.wav') && !this.once) { this.once = true; const e = new Error('x'); e.name = 'AbortError';"
+        " return Promise.reject(e); } this.paused = false;", 1) + """setTimeout(() => {
+  const r = me.recap; r.card.t = { dataset: { recapplay: "1" } }; r.card.fire("click");
+  audio.fire("ended"); audio.fire("ended");
+  at(1.6);
+  setTimeout(() => { video.fire("playing"); console.log(JSON.stringify([r.line && r.line.text, audio.paused])); }, 0);
+}, 0);"""
+    assert json.loads(subprocess.run([node], input=cut, capture_output=True, encoding="utf-8", check=True).stdout) == ["c1", False]
+    # One that fails resumed at the video's end: skipped once, the next line still heard out.
+    end = script[:script.index("setTimeout(")].replace("play() { this.paused = false;",
+        "play() { if (this.src.endsWith('/4.wav') && this.again) { this.error = {}; queueMicrotask(() => this.fire('error'));"
+        " return Promise.reject(new Error('x')); } if (this.src.endsWith('/4.wav')) this.again = true; this.error = null; this.paused = false;", 1) + """setTimeout(() => {
+  const r = me.recap; r.card.t = { dataset: { recapplay: "1" } }; r.card.fire("click");
+  audio.fire("ended"); audio.fire("ended");
+  at(1.6); audio.fire("ended"); at(4.2); audio.fire("ended"); at(10.6); audio.fire("ended");
+  at(11.6); audio.paused = true; video.ended = true; video.fire("ended");
+  setTimeout(() => console.log(JSON.stringify([r.phase, r.line && r.line.text])), 0);
+}, 0);"""
+    assert json.loads(subprocess.run([node], input=end, capture_output=True, encoding="utf-8", check=True).stdout) == ["clips", "c4"]
+    assert sought["after"] == [False, True, None] and sought["heard"] == ["0.wav", "1.wav", "2.wav", "4.wav", "2.wav"]
+    assert sought["back"] == ["clips", False]
+    assert got["start"] and got["playing"] == "clips" and got["held"] and got["outro"] and got["again"]
+    assert got["heard"] == ["0.wav", "1.wav", "2.wav", "3.wav", "3b.wav", "4.wav", "5.wav", "6.wav"]
+    assert got["log"] == ["play@0", "pause@4.2", "play@4.2", "pause@10.1", "play@10.1", "pause@11.6"] and got["done"] == "done"
+    assert got["tail"] == [False, "clips"] and got["stillHeld"]

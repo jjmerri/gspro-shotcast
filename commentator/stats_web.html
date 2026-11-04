@@ -76,6 +76,14 @@
   #liveslot .unmute { position:absolute; top:12px; left:12px; background:rgba(0,0,0,.7); color:#fff; border:1px solid var(--line);
                       border-radius:6px; padding:8px 12px; font:inherit; cursor:pointer; }
   #liveslot video { width:100%; max-height:78vh; background:#000; border-radius:8px; }
+  #liveslot .recapcard { position:absolute; inset:0; background:rgba(0,0,0,.85); border-radius:8px; overflow:auto;
+                         display:flex; flex-direction:column; align-items:center; justify-content:center; padding:12px; text-align:center; }
+  #liveslot .recapcard[hidden], #liveslot .recapcap[hidden] { display:none; }
+  #liveslot .recapcard table { background:none; margin:8px auto; } #liveslot .recapcard h3 { margin:0 0 4px; }
+  #liveslot .recapcard .play { font:inherit; font-size:16px; padding:10px 18px; border-radius:8px; cursor:pointer;
+                               background:var(--accent); color:#000; border:0; margin-top:8px; }
+  #liveslot .recapcap { position:absolute; left:50%; bottom:56px; transform:translateX(-50%); max-width:90%; pointer-events:none;
+                        background:rgba(0,0,0,.75); color:#fff; padding:6px 10px; border-radius:6px; text-align:center; }
   .chat { margin-top:14px; }
   .week { margin-top:14px; } .week h3 { margin:0 0 8px; } .week table { background:none; }
   .week tr.on td { color:var(--accent); font-weight:600; } .week tr.mine td { font-weight:600; } .week .sub { font-weight:400; }
@@ -256,7 +264,8 @@ function applyHash() {
   if (state.tab === "player") state.player = q.get("name") || q.get("show") || state.player;
   if (state.tab === "versus") state.versus = [q.get("a") || state.versus[0] || state.me || null, q.get("b") || state.versus[1]];
   if (state.tab === "highlights") state.period = q.get("period") === "season" || PERIODS.some(p => p[0] === q.get("period")) ? q.get("period") : null;
-  if (state.tab === "vods") state.vod = q.get("reel") ? { reel: q.get("reel"), at: +q.get("at") || 0 }
+  if (state.tab === "vods") state.vod = q.get("recap") ? { recap: q.get("recap"), at: 0 }
+    : q.get("reel") ? { reel: q.get("reel"), at: +q.get("at") || 0 }
     : q.get("clip") ? { clip: q.get("clip"), at: +q.get("at") || 0 }
     : q.get("vod") ? { session: q.get("vod"), at: +q.get("at") || 0 } : null;
   if (state.tab === "broadcasts" && num("session")) state.session = num("session");
@@ -472,7 +481,7 @@ function hashFor(tab = state.tab, v = null) {
   else if (tab === "player") set("name", state.player);
   else if (tab === "highlights" && state.period) set("period", state.period);
   else if (tab === "vods" && state.vod) {
-    state.vod.reel ? set("reel", state.vod.reel) : state.vod.clip ? set("clip", state.vod.clip) : set("vod", state.vod.session);
+    state.vod.recap ? set("recap", state.vod.recap) : state.vod.reel ? set("reel", state.vod.reel) : state.vod.clip ? set("clip", state.vod.clip) : set("vod", state.vod.session);
     if (state.vod.at) set("at", state.vod.at);
   }
   else if (tab === "broadcasts") set("session", state.session);
@@ -863,8 +872,9 @@ function renderHome() {
     + `<p class="sub"><button class="link" data-tab="highlights">All records and moments →</button></p>` : "";
   const pickHint = me ? "" : `<p class="sub">Pick yourself in the “Everyone” menu at the top to see your own numbers here and on every tab.</p>`;
   const lg = state.league, league = lg ? weekCard(lg.week) + standingsCard(lg.standings) : "";
+  const latest = recapList()[0], recap = latest ? `<p>${recapBtn(latest[0], latest[1])}</p>` : "";
   return `<div class="home"><h2>${meTitle("Home")}</h2>${pickHint}${cards.length ? `<div class="cards">${cards.join("")}</div>` : ""}
-    ${league ? `<h2>League <span class="sub">from Squabbit and the sim · updated ${esc(when(lg.updated * 1000, { weekday: "short", hour: "numeric", minute: "2-digit" }))}</span></h2><div class="league">${league}</div>` : ""}
+    ${league ? `<h2>League <span class="sub">from Squabbit and the sim · updated ${esc(when(lg.updated * 1000, { weekday: "short", hour: "numeric", minute: "2-digit" }))}</span></h2>${recap}<div class="league">${league}</div>` : ""}
     <h2>${me ? "Their latest rounds" : "Latest rounds"}</h2>${recent}
     ${moments ? `<h2>Moments <span class="sub">last 3 months</span></h2>${moments}` : ""}</div>`;
 }
@@ -1871,6 +1881,7 @@ function stopLive() {
   if (!player) return;
   clearInterval(player.catchUp);
   if (player.golive) player.golive.remove();
+  if (player.recap) player.recap.stop();
   if (player.hls) player.hls.destroy();
   player.video.removeAttribute("src");
   player.video.load();
@@ -1893,6 +1904,10 @@ function loadHls() {
 function wantedVideo() {
   const s = state.live;
   if (state.tab === "live" && s && s.live) return { key: s.session, src: `live/s/${encodeURIComponent(s.session)}/stream.m3u8`, live: true };
+  const rc = state.tab === "vods" && state.vod && state.vod.recap && state.recaps && state.recaps[state.vod.recap];
+  // Pinned to the build the index names: a rebuild later doesn't swap the playlist under its lines.
+  if (rc) return { key: "recap:" + state.vod.recap, src: `live/recaps/${encodeURIComponent(state.vod.recap)}/recap-${encodeURIComponent(rc.built)}.m3u8`,
+                   at: 0, recap: state.vod.recap, built: rc.built };
   const hl = state.tab === "vods" && state.vod && state.vod.reel && state.reels && state.reels[state.vod.reel];
   if (hl) return { key: "reel:" + state.vod.reel, src: `live/reels/${encodeURIComponent(state.vod.reel)}/reel.m3u8`, at: state.vod.at || 0 };
   const c = state.tab === "vods" && state.vod && state.vod.clip && state.clips && state.clips[state.vod.clip];
@@ -1908,16 +1923,19 @@ function attachLive() {
   if (!want || !slot) { stopLive(); return; }
   if (player && player.session !== want.key) stopLive();
   if (!player) {
-    const video = Object.assign(document.createElement("video"), { controls: true, autoplay: true, muted: true, playsInline: true });
-    const me = player = { session: want.key, video, hls: null, unmute: null, frag: null, golive: null, edge: null };
-    // Every video starts muted, with a button to turn the sound on.
-    const b = me.unmute = Object.assign(document.createElement("button"), { className: "unmute", textContent: "🔊 Tap for sound" });
-    b.onclick = () => { video.muted = false; };
-    video.addEventListener("volumechange", () => { if (!video.muted && me.unmute) { b.remove(); me.unmute = null; } });
+    const video = Object.assign(document.createElement("video"), { controls: true, autoplay: !want.recap, muted: true, playsInline: true });
+    const me = player = { session: want.key, video, hls: null, unmute: null, frag: null, golive: null, edge: null, recap: null };
     video.addEventListener("webkitendfullscreen", afterFullscreen);   // iPhone's own player
-    video.addEventListener("canplay", () => {
-      if (video.paused && player === me) video.play().catch(() => {});
-    }, { once: true });
+    if (want.recap) recapPlayer(me, want.recap, want.built);   // it starts the video itself, and its sound is the recap's
+    else {
+      // Every other video starts muted, with a button to turn the sound on.
+      const b = me.unmute = Object.assign(document.createElement("button"), { className: "unmute", textContent: "🔊 Tap for sound" });
+      b.onclick = () => { video.muted = false; };
+      video.addEventListener("volumechange", () => { if (!video.muted && me.unmute) { b.remove(); me.unmute = null; } });
+      video.addEventListener("canplay", () => {
+        if (video.paused && player === me) video.play().catch(() => {});
+      }, { once: true });
+    }
     if (want.live) {
       const g = me.golive = Object.assign(document.createElement("button"), { className: "golive", hidden: true });
       g.onclick = () => liveCatchUp(me, true);
@@ -1940,6 +1958,7 @@ function attachLive() {
   slot.appendChild(player.video);
   if (player.unmute) slot.appendChild(player.unmute);
   if (player.golive) slot.appendChild(player.golive);
+  if (player.recap) slot.append(player.recap.card, player.recap.cap);
 }
 
 // Everyone watching the live stream should be on the same shot, so the chat is about the same thing:
@@ -1986,8 +2005,8 @@ const vodOut = v => {
 const shownVods = () => state.vodsAll ? state.vodsAll.filter(v => !vodOut(v)) : null;
 async function pollExtras() {
   const get = async url => { try { const r = await fetch(url, { cache: "no-store" }); return r.ok ? await r.json() : null; } catch (e) { return null; } };
-  const [rec, sched, cl, lg, rl] = await Promise.all([get("live/recordings.json"), get("schedule.json"), get("live/clips.json"),
-                                                       get("league.json"), get("live/reels.json")]);
+  const [rec, sched, cl, lg, rl, rc] = await Promise.all([get("live/recordings.json"), get("schedule.json"), get("live/clips.json"),
+                                                           get("league.json"), get("live/reels.json"), get("live/recaps.json")]);
   state.vodsAll = rec && Array.isArray(rec.recordings) ? rec.recordings.filter(v => v.duration > 0 || v.ended === null) : null;
   const vods = shownVods();
   const schedule = sched && Array.isArray(sched.bookings) ? sched : null;
@@ -1996,10 +2015,12 @@ async function pollExtras() {
   const league = lg && lg.updated ? { ...lg, week: rowsOk(lg.week), standings: rowsOk(lg.standings) } : null;
   const reels = rl && rl.reels && typeof rl.reels === "object" ? Object.fromEntries(Object.entries(rl.reels).filter(([, x]) =>
     x && typeof x === "object" && Array.isArray(x.moments) && x.moments.every(m => m && typeof m === "object"))) : null;
-  const was = JSON.stringify([state.vods, state.schedule, state.clips, state.league, state.reels]);
-  state.vods = vods; state.schedule = schedule; state.clips = clips; state.league = league; state.reels = reels;
+  const recaps = rc && rc.recaps && typeof rc.recaps === "object" ? Object.fromEntries(Object.entries(rc.recaps).filter(([, x]) =>
+    x && typeof x === "object" && x.week && x.built)) : null;
+  const was = JSON.stringify([state.vods, state.schedule, state.clips, state.league, state.reels, state.recaps]);
+  state.vods = vods; state.schedule = schedule; state.clips = clips; state.league = league; state.reels = reels; state.recaps = recaps;
   state.keepDays = rec && rec.keep_days > 0 ? rec.keep_days : 7;
-  if (JSON.stringify([vods, schedule, clips, league, reels]) === was) return;
+  if (JSON.stringify([vods, schedule, clips, league, reels, recaps]) === was) return;
   const shown = state.tab;
   if ((state.tab === "vods" && !tabs().includes("vods")) || (state.tab === "schedule" && !schedule)) state.tab = "home";
   showTabs();
@@ -2028,9 +2049,128 @@ function reelPart() {
     <td>${r.moments.length} moments${r.duration ? ` · ${hm(r.duration)}` : ""}</td></tr>`).join("")}</table>` : "";
   return [head, rows];
 }
+// A league week's recap (recap.py): newest first, each a button to its own player.
+const recapList = () => Object.entries(state.recaps || {}).sort((a, b) => String(b[1].end_date || "").localeCompare(String(a[1].end_date || "")) || (b[1].week - a[1].week));
+const recapBtn = (k, r, label) => `<button class="link" data-recap="${esc(k)}" title="The week told by the booth over its best moments">${label || `▶ Week ${esc(r.week)} recap`}</button>`;
+function recapPart() {
+  const id = state.vod && state.vod.recap, x = id && state.recaps && state.recaps[id], list = recapList();
+  const head = x ? `<h2>Week ${esc(x.week)} recap <span class="sub">${[x.course, x.end_date].filter(Boolean).map(esc).join(" · ")}</span></h2><div id="liveslot"></div>
+    <p class="sub">${shareBtn(hashFor("vods", { recap: id, player: "" }), "this recap")}</p>` : "";
+  const rows = list.length ? `<h2>League recaps <span class="sub">each final week, told by the booth</span></h2>
+    <table>${list.map(([k, r]) => `<tr class="${k === id ? "sel" : ""}"><td>${esc(r.end_date || "")}</td><td class="l wrap">${recapBtn(k, r, `Week ${esc(r.week)}${r.course ? ` · ${esc(r.course)}` : ""}`)}</td>
+    <td class="l">${r.winner ? `won by ${esc(r.winner)}` : ""}</td></tr>`).join("")}</table>` : "";
+  return [head, rows];
+}
+// The recap's player: an intro over the week's results, the clips (muted) with the booth's lines
+// played over them at their times, an outro over the standings. One Audio element plays every line,
+// started from the Play tap, which is what lets a phone play it. A line still going when the next is
+// due, or when its clip gives way to the next (or the video ends), holds the video till it's done.
+function recapPlayer(me, key, built) {
+  const base = `live/recaps/${encodeURIComponent(key)}/`, v = me.video, audio = new Audio();
+  const r = me.recap = { card: Object.assign(document.createElement("div"), { className: "recapcard", innerHTML: '<p class="sub">Loading…</p>' }),
+                         cap: Object.assign(document.createElement("div"), { className: "recapcap", hidden: true }),
+                         body: null, phase: "load", line: null, list: [], held: false, played: new Set(), seq: 0, over: 0,
+                         stop() { r.phase = "stopped"; audio.pause(); audio.removeAttribute("src"); } };
+  const live = () => player === me && r.phase !== "stopped";
+  const results = b => `<h3>Week ${esc(b.week)}</h3><div class="sub">${[b.course, "final"].filter(Boolean).map(esc).join(" · ")}</div>
+    <table><tbody>${b.rows.map(x => `<tr><td>${x.tied ? "T" : ""}${x.place}</td><td class="l">${esc(x.name)}</td><td>${toPar(x.net)}</td>${
+      x.points !== null && x.points !== undefined ? `<td class="sub">${Math.round(x.points * 10) / 10} pts</td>` : ""}</tr>`).join("")}</tbody></table>`;
+  const table = b => `<h3>Standings</h3><table><tbody>${b.standings.map(x => {
+    const d = x.was ? x.was - x.place : 0;
+    return `<tr><td>${x.place}</td><td class="l">${esc(x.name)}</td><td>${Math.round(x.points * 10) / 10}</td><td class="sub">${d > 0 ? `▲${d}` : d < 0 ? `▼${-d}` : ""}</td></tr>`;
+  }).join("")}</tbody></table>`;
+  const show = html => { r.card.innerHTML = html; r.card.hidden = !html; };
+  // A line's over once: a load that fails both rejects its play and fires an error. A play cut short
+  // by a pause (the video buffering, say) isn't: the line's picked up again when the video goes on.
+  const over = n => { if (r.seq !== n || r.over === n) return; r.over = n; done(); };
+  const go = () => { const n = r.seq; audio.play().catch(e => { if (!(e && e.name === "AbortError")) over(n); }); };
+  const say = line => {
+    r.seq++;
+    r.line = line;
+    r.cap.textContent = line.text;
+    r.cap.hidden = false;
+    audio.src = base + line.audio;
+    go();
+  };
+  // A card's lines one after the other, then `next`.
+  const run = (lines, next) => { r.list = [...lines]; r.after = next; r.list.length ? say(r.list.shift()) : next(); };
+  const done = () => {
+    if (!live()) return;
+    r.line = null;
+    r.cap.hidden = true;
+    if (r.phase === "clips") {
+      if (r.ending) { const left = unplayed(); if (left) speak(left); else { r.ending = false; finish(); } return; }
+      tick();
+      if (r.held && !(r.line && pastClip(r.line))) { r.held = false; v.play().catch(() => {}); }
+    } else if (r.list.length) say(r.list.shift());
+    else if (r.after) { const next = r.after; r.after = null; next(); }
+  };
+  audio.addEventListener("ended", () => over(r.seq));
+  audio.addEventListener("error", () => { if (r.line && audio.error) over(r.seq); });   // a new load clears .error
+  const clipLines = () => r.body.clips.flatMap(c => c.lines);
+  const unplayed = () => clipLines().find(l => !r.played.has(l));
+  const speak = l => { r.played.add(l); say(l); };
+  const hold = () => { if (!v.paused) { r.held = true; v.pause(); } };
+  // Whether the video's into the clip after this line's: its clip was cut short of its lines.
+  const pastClip = l => {
+    const i = r.body.clips.findIndex(c => c.lines.includes(l)), next = r.body.clips[i + 1];
+    return !!next && v.currentTime >= next.at;
+  };
+  // A line's due at its time, or once the video's past its clip: a clip's lines all go before the next's.
+  const isDue = l => !r.played.has(l) && (l.at <= v.currentTime || pastClip(l));
+  const tick = () => {
+    if (!live() || r.phase !== "clips" || v.seeking) return;
+    if (r.line) { if (pastClip(r.line) || clipLines().some(isDue)) hold(); return; }
+    const due = clipLines().find(isDue);
+    if (!due) return;
+    speak(due);
+    if (pastClip(due)) hold();
+  };
+  const start = () => {
+    r.phase = "intro"; r.played = new Set(); r.held = false; r.ending = false;
+    show(results(r.body));
+    run(r.body.intro, () => {
+      r.phase = "clips"; show("");
+      v.currentTime = 0;
+      v.play().catch(() => {});
+    });
+  };
+  const finish = () => {
+    r.phase = "outro";
+    show(table(r.body));
+    run(r.body.outro, () => { r.phase = "done"; show(table(r.body) + '<button class="play" data-recapplay="1">▶ Watch again</button>'); });
+  };
+  r.card.addEventListener("click", e => { if (e.target.dataset.recapplay && r.body) start(); });
+  v.addEventListener("timeupdate", tick);
+  // At its end the video pauses, then ends: a line still going finishes before the outro.
+  v.addEventListener("ended", () => {
+    if (!live() || r.phase !== "clips") return;
+    r.ending = true;
+    if (r.line) { if (audio.paused) go(); }
+    else { const left = unplayed(); if (left) speak(left); else { r.ending = false; finish(); } }
+  });
+  v.addEventListener("pause", () => { if (live() && r.phase === "clips" && !r.held && !v.ended && r.line) audio.pause(); });
+  v.addEventListener("waiting", () => { if (live() && r.phase === "clips" && !r.held && r.line) audio.pause(); });
+  v.addEventListener("playing", () => { if (live() && r.phase === "clips" && r.line && audio.paused) go(); });
+  v.addEventListener("seeked", () => {
+    if (!live() || r.phase !== "clips") return;
+    // A seek leaves what was being said, and the clips before the one it lands in, behind.
+    const t = v.currentTime, here = r.body.clips.filter(c => c.at <= t).length - 1, wasHeld = r.held;
+    audio.pause(); r.line = null; r.cap.hidden = true; r.held = false; r.ending = false;
+    r.played = new Set(r.body.clips.flatMap((c, i) => i < here ? c.lines : c.lines.filter(l => l.at < t - 1)));
+    if (wasHeld) v.play().catch(() => {});
+  });
+  v.addEventListener("volumechange", () => { if (!v.muted) v.muted = true; });   // the clips' own sound is the live booth's
+  fetch(base + `recap-${encodeURIComponent(built)}.json`, { cache: "no-store" }).then(x => x.ok ? x.json() : Promise.reject(new Error(`the timeline: ${x.status}`))).then(b => {
+    if (!live()) return;
+    r.body = { ...b, intro: b.intro || [], outro: b.outro || [], clips: b.clips || [], rows: b.rows || [], standings: b.standings || [] };
+    r.phase = "start";
+    show(results(r.body) + '<button class="play" data-recapplay="1">▶ Play recap</button>');
+  }).catch(e => { if (live()) show(`<div class="err">The recap didn't load: ${esc(e.message)}</div>`); });
+}
 function renderVods() {
-  const [reelHead, reelList] = reelPart();
-  return reelHead + vodsBody() + reelList;
+  const [recapHead, recapRows] = recapPart(), [reelHead, reelList] = reelPart();
+  return recapHead + reelHead + vodsBody() + recapRows + reelList;
 }
 function vodsBody() {
   const vods = state.vods || [], clips = Object.entries(state.clips || {});
@@ -2118,7 +2258,7 @@ function tabs() {
   const d = state.data;
   const has = { live: state.live !== null && state.live !== undefined,
                 vods: !!(state.vods && state.vods.length) || !!(state.clips && Object.keys(state.clips).length)
-                      || !!(state.reels && Object.keys(state.reels).length),
+                      || !!(state.reels && Object.keys(state.reels).length) || !!(state.recaps && Object.keys(state.recaps).length),
                 schedule: !!state.schedule };
   if (d) Object.assign(has, { broadcasts: d.broadcasts.length > 0,
                               booth: d.booth.commentators.length > 0 || d.booth.calls.length > 0 || d.predictions.length > 0 });
@@ -2195,7 +2335,7 @@ document.addEventListener("click", (e) => {
     return;
   }
   const t = e.target.closest("[data-tab],[data-section],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
-                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-exclround],[data-delround],[data-delvod],[data-leagueround],[data-sharecard],[data-period],[data-vod],[data-clip],[data-link],[data-more],[data-onlyme],[data-hcpclean]");
+                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-exclround],[data-delround],[data-delvod],[data-leagueround],[data-sharecard],[data-period],[data-vod],[data-clip],[data-link],[data-more],[data-onlyme],[data-hcpclean],[data-recap]");
   if (!t) return;
   if (t.dataset.hcpclean) {
     state.hcpClean = t.dataset.hcpclean === "1";
@@ -2206,6 +2346,16 @@ document.addEventListener("click", (e) => {
   }
   if (t.dataset.link) {
     shareLink(t.dataset.link, t.dataset.linktitle, t);
+    return;
+  }
+  if (t.dataset.recap) {
+    if (state.tab !== "vods") remember();
+    if (!(player && player.session === "recap:" + t.dataset.recap)) stopLive();
+    state.vod = { recap: t.dataset.recap, at: 0 };
+    state.tab = "vods";
+    showTabs();
+    render();
+    window.scrollTo({ top: 0, behavior: "smooth" });
     return;
   }
   if (t.dataset.vod || t.dataset.clip || t.dataset.reel) {

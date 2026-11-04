@@ -414,7 +414,7 @@ def pick(shots: list[dict], most: int = MAX_MOMENTS, sides: dict[str, int] | Non
 
 def rounds(db: sqlite3.Connection) -> dict[int, dict]:
     """Every round's reel: round -> {label, date, league, ended, moments: [{id, ts, player, hole, what,
-    bad, post}]}, for rounds with two moments or more (`db`: stats_web.connect's)."""
+    bad, level, post, stop, must}]}, for rounds with two moments or more (`db`: stats_web.connect's)."""
     from .stats_web import round_groups, shot_rounds
 
     groups, of_row = round_groups(db)
@@ -459,7 +459,8 @@ def rounds(db: sqlite3.Connection) -> dict[int, dict]:
             "date": time.strftime("%Y-%m-%d", time.localtime(g["end"])), "ended": g["end"],
             "league": g["round"] in league,
             "moments": [{"id": m["shot"]["id"], "ts": m["shot"]["ts"], "player": m["shot"]["player"],
-                         "hole": _hole(m["shot"]["hole"]), "what": m["what"], "bad": m["bad"], "post": m["post"],
+                         "hole": _hole(m["shot"]["hole"]), "what": m["what"], "bad": m["bad"], "level": m["level"],
+                         "post": m["post"],
                          "stop": m["stop"], "must": m["must"]}
                         for m in moments]}
     return out
@@ -515,7 +516,7 @@ def sync(client: Any, bucket: str, prefix: str, reels: dict[int, dict], season_f
         if old_entry and old_entry.get("cuts") == cuts:
             # The same stretches of stream: only what's said about them can have changed.
             fresh = {**old_entry, **{k: reel[k] for k in ("label", "date", "league", "ended")},
-                     "moments": [{**o, **{k: m[k] for k in ("player", "hole", "what", "bad")}}
+                     "moments": [{**o, **{k: m[k] for k in ("player", "hole", "what", "bad", "level") if k in m}}
                                  for o, m in zip(old_entry.get("moments") or [], reel["moments"])], "cuts": cuts}
             if fresh != old_entry:
                 index[key], changed = fresh, changed + 1
@@ -600,7 +601,7 @@ def _cut(client: Any, bucket: str, root: str, recordings: list[dict], playlists:
         first = sum(d for _, d in track[:a])
         for m in ms:
             moments.append({"at": round(offset + max(0.0, m["_t"] - first - 1.0), 1),
-                            **{k: m[k] for k in ("id", "player", "hole", "what", "bad")}})
+                            **{k: m[k] for k in ("id", "player", "hole", "what", "bad", "level") if k in m}})
         part = [(session, name, d) for name, d in track[a:b + 1]]
         parts.append(part)
         offset += sum(d for *_, d in part)

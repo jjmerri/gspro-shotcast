@@ -1,6 +1,7 @@
 import asyncio
 import bisect
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -339,6 +340,7 @@ UNPLAYED_SHOT_WAIT_SECONDS = 2.5
 # How long a shot struck on a course's own range waits for GSPro's score line to say it was the course's
 # first tee shot (see _course_shot_off_own_range): a drive's flight and roll, with room to spare.
 RANGE_TEE_SHOT_WAIT_SECONDS = 30.0
+RECAP_POLL_SECONDS = 30.0      # how often a league recap waiting on a round or its publish looks again
 LAYOUT_WAIT_SECONDS = 20.0     # after a round's end, for GSPro 3.1's logged layout before the course file's
 KEEP_GSPRO_LOGS = 5             # copies of GSPro's log kept from round ends (see _keep_gspro_log)
 GSPRO_LOG_KEEP_BYTES = 8_000_000   # from the end of it: a round's lines and plenty before
@@ -897,6 +899,9 @@ class Engine:
         self._league_page_on = False   # keeping the stats page's league.json (_publish_league_page)
         self._league_body: bytes | None = None   # the newest league.json to put up
         self._league_uploading = False
+        self._recap_task: asyncio.Task | None = None   # building a league week's recap (_build_recap)
+        self._recap_again = False   # something changed while it was: look again after
+        self._recap_tried: tuple | None = None   # the last recap built or tried, (key, digest)
         self._board_task: asyncio.Task | None = None
         self.hole_number: int | None = None
         # Whether the current hole's number was read off the screen rather than counted on.
@@ -1982,6 +1987,7 @@ class Engine:
         if not self._league_uploading:
             self._league_uploading = True
             self._bg(self._upload_league_page())
+        self._recap_soon()
 
     async def _upload_league_page(self) -> None:
         try:
@@ -1996,6 +2002,140 @@ class Engine:
                     log.warning("League page: couldn't update the stats page's league cards: %s", e)
         finally:
             self._league_uploading = False
+
+    # ---- the league week's recap (commentator/recap.py) ------------------------------------
+
+    def _recap_soon(self) -> None:
+        """See whether the latest final league week needs its recap built (or rebuilt: its results or
+        footage changed), once the booth's quiet. One build at a time; a call during one looks again
+        after it."""
+        p = self.cfg.publish
+        if not (p.enabled and p.bucket and p.recaps and self._league_page_on and self.commentary_on
+                and self.speech is not None) or self.cfg.source.type == "replay":
+            return
+        if self._recap_task and not self._recap_task.done():
+            self._recap_again = True
+            return
+        self._recap_task = asyncio.create_task(self._recap_when_quiet(), name="recap")
+
+    def _recap_busy(self) -> bool:
+        """A round on, or its stats page publish (which cuts its reel) still to come."""
+        r = self.round
+        return bool(self._round_handling or (r is not None and not r.ended)
+                    or (self._publish_task and not self._publish_task.done()))
+
+    async def _recap_when_quiet(self) -> None:
+        while True:
+            self._recap_again = False
+            while self._recap_busy():
+                await asyncio.sleep(RECAP_POLL_SECONDS)
+            try:
+                await self._build_recap()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("League recap failed")
+            if not self._recap_again:
+                return
+
+    async def _build_recap(self) -> None:
+        from . import recap
+        from .stats_web import round_groups, season_start
+
+        board = self._league_board()
+        today = time.strftime("%Y-%m-%d")
+        if board is None:
+            return
+        season = season_start(self.cfg.publish.season_start)
+        weeks = [w for w in board.weeks if board.final(w, today)
+                 and (not season or str((self.league.week_entry(w) or {}).get("end_date") or "") >= season)]
+        if not weeks:
+            return
+        week = max(weeks)
+        facts = recap.week_facts(board, week, today)
+        if not facts["rows"]:
+            return
+        key = recap.key_of(facts)
+        _, of_row = round_groups(self.store.db)
+        rows = self.store.week_rounds(self.league.data.get("schedule") or []).get(week, {})
+        team_reel = {t: str(of_row[rid]) for t, rid in rows.items() if rid in of_row}
+        p = self.cfg.publish
+        client = self._s3()
+        reels, index = await asyncio.to_thread(recap.load, client, p.bucket, p.prefix)
+        found = recap.footage(reels, team_reel, self.league.team_players)
+        digest = recap.digest(facts, found)
+        if (index.get(key) or {}).get("hash") == digest or self._recap_tried == (key, digest):
+            return
+        self._recap_tried = (key, digest)   # a build that fails isn't paid for again till something changes
+        clips = recap.choose(facts, found)
+        if not clips:
+            log.info("League recap of week %s: no footage of any team's round", week)
+            return
+        lines = await self._write_recap(facts, clips)
+        if lines is None:
+            return
+        # Every line voiced: (where, Line), where = ("intro", n) / ("clip", i, n) / ("outro", n).
+        said = [(("intro", n), l) for n, l in enumerate(lines["intro"])]
+        said += [(("clip", i, n), l) for i, ls in sorted(lines["clips"].items()) for n, l in enumerate(ls)]
+        said += [(("outro", n), l) for n, l in enumerate(lines["outro"])]
+        voiced = await asyncio.gather(*(self.speech._synthesize(Line(speaker=s, text=t)) for _, (s, t) in said))
+        voices, audio = {}, []
+        for (where, _), (ok, a) in zip(said, voiced):
+            samples = getattr(a, "samples", None) if ok else None
+            if samples is None or not len(samples):
+                continue
+            # Named for what's in it: a rebuild's new audio is under new names, the files being cached for good.
+            data = recap.wav(samples, a.sample_rate)
+            voices[where] = (len(samples) / a.sample_rate, f"a/{hashlib.sha1(data).hexdigest()[:16]}.wav")
+            audio.append((voices[where][1], data))
+        if not any(w[0] == "intro" for w in voices):
+            log.info("League recap of week %s: its lines couldn't be voiced", week)
+            return
+        playlists = {}
+        for c in clips:
+            if c["key"] not in playlists:
+                playlists[c["key"]] = await asyncio.to_thread(recap.reel_playlist, client, p.bucket, p.prefix, c["key"])
+        cuts = []
+        for i, c in enumerate(clips):
+            spoken = sum(voices[w][0] + recap.LINE_GAP for w in voices if w[:2] == ("clip", i))
+            cuts.append(recap.cut(c, playlists[c["key"]], found[c["team"]]["ats"], spoken))
+        body, video, sources = recap.timeline(facts, clips, lines, voices, cuts)
+        if not body["clips"]:
+            log.info("League recap of week %s: none of its clips are in their reels", week)
+            return
+        entry = await asyncio.to_thread(recap.publish, client, p.bucket, p.prefix, key, body, video, sources, audio,
+                                        digest, season)
+        log.info("League recap of week %s up: %s clips, %.0fs of video", week, entry["clips"], entry["duration"])
+
+    async def _write_recap(self, facts: dict, clips: list[dict]) -> dict | None:
+        """The recap's lines from the closer's model, checked against the week's facts and retried
+        once: {intro, clips: {i: lines}, outro} of (speaker, text), with any line that still fails
+        its check left out. None when there's no intro left to air."""
+        from . import recap
+
+        user, facts_text = recap.prompt(facts, clips, dict(zip(self.speakers, self._persona_names)))
+        ask, lines = user, None
+        for attempt in range(2):
+            raw = await self._complete("recap", self.closer_llm, ask, [], schema=recap.schema(self.speakers),
+                                       system=self._system_league)
+            lines, problems = recap.script(raw, clips, self.speakers)
+            checked = {}
+            for part, ls in [("intro", lines["intro"]), ("outro", lines["outro"])] + [
+                    (i, ls) for i, ls in lines["clips"].items()]:
+                good, bad = self._grounded([Line(speaker=s, text=t) for s, t in ls], facts_text, mode="news")
+                checked[part] = [(l.speaker, l.text) for l in good]
+                problems += bad
+            lines = {"intro": checked.get("intro", []), "outro": checked.get("outro", []),
+                     "clips": {i: v for i, v in checked.items() if isinstance(i, int)}}
+            if not problems:
+                return lines
+            if attempt == 0:
+                self.stats["retries"] += 1
+                ask = retry_prompt(user, problems)
+        if not lines or not lines["intro"]:
+            log.info("League recap of week %s dropped: no usable lines (%s)", facts["week"], "; ".join(problems))
+            return None
+        return lines
 
     async def _league_page_midnight(self) -> None:
         """Re-write the league cards just after each midnight, from the board already read: a week whose
@@ -9120,6 +9260,7 @@ class Engine:
                 await self._publish()
             except Exception:
                 log.exception("Stats page publish failed")
+        self._recap_soon()   # a league round's reel is up now
 
     async def _publish(self) -> None:
         from .stats_site import publish_command
