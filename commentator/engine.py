@@ -10,7 +10,7 @@ import shutil
 import sys
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -867,6 +867,8 @@ class Engine:
         # The last setup the booth read: (its HUD, the shot count then, GSPro's logged active player,
         # when). The impact read's fallback when the player box is gone by the time it's grabbed.
         self._last_setup: tuple | None = None
+        # Each player set up over the ball, for the chat: (when, on the PC's clock; who and the shot).
+        self._setups_seen: deque[tuple[float, str]] = deque(maxlen=60)
         self._hud_buffer: Any = None   # HudBuffer: the HUD's last seconds, for an impact read GSPro hid
         self._last_impact_at: float | None = None
         # GSPro's "hide UI on shot" keeps the tiles off screen until the next player is up, so the follow
@@ -1364,6 +1366,9 @@ class Engine:
                  [(o.name, o.to_pin, o.score_to_par) for o in hud.others], hud.slope_updown, hud.slope_side,
                  hud.slope_side_degrees, None if hud.elevation_yards is None else round(hud.elevation_yards, 1),
                  f"{self.screen.last_read_seconds:.2f} (capture {self.screen.last_capture_seconds:.2f})")
+        if player and stamp[0] == self._shot_seq:
+            # Timed from when the player box was first read; a read a swing overtook isn't a setup to come.
+            self._setups_seen.append((time.time() - (time.monotonic() - stamp[2]), self._setup_brief(hud, player)))
         if (self._shot_seq, self.gspro.active_player) == stamp[:2]:
             self._last_setup = (replace(hud, others=[], tiles={}), *stamp)
         else:
@@ -2473,6 +2478,48 @@ class Engine:
             log.debug("Chat: couldn't look up the shot a message was sent on: %s", e)
             return None
 
+    @staticmethod
+    def _setup_brief(hud: Hud, who: str, up: bool = False) -> str:
+        """'Frankie setting up shot 2, 150 yards to the pin, from the fairway' (`up`: 'Frankie is up, shot 2...')."""
+        if up:
+            shot = f"{who} is up, shot {hud.shot_number}" if hud.shot_number else f"{who} is up"
+        else:
+            shot = f"{who} setting up shot {hud.shot_number}" if hud.shot_number else f"{who} setting up a shot"
+        if hud.to_pin:
+            shot += f", {hud.to_pin} to the pin"
+        if hud.lie:
+            shot += f", from the {hud.lie.lower()}"
+        if hud.club:
+            shot += f", with {hud.club}"
+        return shot
+
+    def _chat_upcoming(self, at: float, shot_id: int | None) -> str | None:
+        """Who was over the ball on a viewer's screen at `at`, after the shot they'd watched (`shot_id`),
+        and what that shot did, once it's been played: a warning or a prediction is about this one."""
+        after = -1.0
+        if shot_id is not None:
+            row, _ = self.store.shot_brief(shot_id)
+            after = row["ts"] if row is not None and row["ts"] is not None else after
+        setup = next(((t, brief) for t, brief in reversed(self._setups_seen)
+                      if after < t <= at and at - t <= self.CHAT_SHOT_WINDOW), None)
+        if setup is None:
+            return None
+        try:
+            next_id = self.store.shot_struck_after(setup[0], self.CHAT_SHOT_WINDOW)
+            row = self.store.shot_brief(next_id)[0] if next_id is not None else None
+            played = self._chat_shot_brief(next_id)
+        except Exception as e:
+            log.debug("Chat: couldn't look up the shot a viewer saw set up: %s", e)
+            row = played = None
+        # One struck earlier, but not recorded yet, is the one set up, not the one recorded after it.
+        unrecorded = min((t for t in self._shots_unrecorded.values() if t > setup[0]), default=None)
+        if unrecorded is not None and (row is None or row["ts"] is None or unrecorded < row["ts"]):
+            return setup[1] + " (just played, result not in yet)"
+        if played:
+            # A mulligan's still what came of the shot they saw set up; the re-hit has a setup of its own.
+            return setup[1] + f" (since played: {played}" + ("; then taken back, a mulligan)" if row["mulligan"] else ")")
+        return setup[1] + " (not played yet)"
+
     def _chat_shot_brief(self, shot_id: int | None) -> str | None:
         """'Frankie's shot 2 on hole 4 (7I), from the fairway to the green; the booth called it: "..."'."""
         if shot_id is None:
@@ -2570,14 +2617,7 @@ class Engine:
         if self._last_setup is not None and self._last_setup[1] == self._shot_seq:
             hud = self._last_setup[0]
             if hud.player_text and (who := self._player(hud.player_text)):
-                shot = f"{who} is up, shot {hud.shot_number}" if hud.shot_number else f"{who} is up"
-                if hud.to_pin:
-                    shot += f", {hud.to_pin} to the pin"
-                if hud.lie:
-                    shot += f", from the {hud.lie.lower()}"
-                if hud.club:
-                    shot += f", with {hud.club}"
-                out.append(shot)
+                out.append(self._setup_brief(hud, who, up=True))
         if said := [ln.text for ln in list(self.state.recent_lines)[-4:]]:
             out.append("The booth just said: " + " / ".join(said))
         return out
@@ -2589,19 +2629,21 @@ class Engine:
         if not new:
             return
         # A shot struck before what a viewer was watching may not be recorded yet (its call is still
-        # being read, or GSPro saved it only once the ball stopped): wait for it, briefly.
-        watched = max((m.watched for m, _ in log_ if m.shot is None and m.watched is not None), default=None)
+        # being read, or GSPro saved it only once the ball stopped), nor one struck since, which is
+        # what came of the shot they saw set up: wait for them, briefly.
         deadline = time.monotonic() + self.CHAT_RECORD_WAIT
-        while (watched is not None and time.monotonic() < deadline
-               and any(t <= watched for t in self._shots_unrecorded.values())):
+        while (any(m.watched is not None for m, _ in new) and time.monotonic() < deadline
+               and self._shots_unrecorded):
             await asyncio.sleep(0.1)
         pending = min(self._shots_unrecorded.values(), default=None)
         for m, _ in log_:
             # Still not recorded: no shot for it this time (the last one recorded isn't it), a later take may.
             if m.shot is None and m.watched is not None and (pending is None or m.watched < pending):
                 m.shot = self._chat_shot_watched(m.watched)
-        user, facts_text = chat_prompt(messages=[(m.name, m.text, m.id > talked, self._chat_shot_brief(m.shot))
-                                                 for m, _ in log_],
+            if m.watched is not None and (pending is None or m.watched < pending):
+                m.upcoming = self._chat_upcoming(m.watched, m.shot)
+        user, facts_text = chat_prompt(messages=[(m.name, m.text, m.id > talked, self._chat_shot_brief(m.shot),
+                                                  m.upcoming) for m, _ in log_],
                                        context=self._chat_context(), moderation=self.cfg.chat.moderation,
                                        commentators=self._persona_names, openers=self._chat_openers[-4:])
         try:

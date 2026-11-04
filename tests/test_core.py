@@ -3593,6 +3593,9 @@ async def test_a_setup_still_showing_a_stroke_that_finished_the_hole_is_dropped(
     putt(6, "conceded")
     await engine._emit_setup(setup())
     assert engine._events.empty()
+
+
+async def test_emit_setup_reads_others_and_opens_the_round_on_the_tee(tmp_path):
     engine, screen = _setup_engine(tmp_path)
     hud = Hud(player_text="Toby E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards")
     await engine._emit_setup(hud)
@@ -3603,6 +3606,20 @@ async def test_a_setup_still_showing_a_stroke_that_finished_the_hole_is_dropped(
     while not engine._events.empty():
         kinds.append(type(await engine._events.get()).__name__)
     assert kinds == ["RoundStartEvent", "PreShotEvent"]
+
+
+async def test_a_setup_a_swing_overtook_isnt_kept_for_the_chat(tmp_path):
+    import time
+    engine, _ = _setup_engine(tmp_path)
+    hud = lambda: Hud(player_text="Toby E Shot 2 150 YDS", shot_number=2, score_to_par="E", to_pin="150 yards")
+    engine._shot_seq, engine._player = 5, lambda *_: "Toby"
+    await engine._emit_setup(hud(), (4, None, time.monotonic()))   # Toby swung while it was read
+    assert not engine._setups_seen
+    engine, _ = _setup_engine(tmp_path)
+    engine._shot_seq, engine._player = 5, lambda *_: "Toby"
+    await engine._emit_setup(hud(), (5, None, time.monotonic() - 2))
+    (at, brief), = engine._setups_seen
+    assert abs(time.time() - 2 - at) < 0.5 and brief.startswith("Toby setting up shot 2, 150 yards to the pin")
 
 
 def test_club_box_parsing():

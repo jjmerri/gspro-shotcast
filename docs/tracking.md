@@ -427,7 +427,9 @@ the Shotcast folder; the booth uploads each file to the bucket's `live/` folder 
 the page plays it with
 [hls.js](https://github.com/video-dev/hls.js) (vendored, like the SQLite library). Viewers are
 about 20 seconds behind, and the player (live or a replay) starts muted, with a button to turn the
-sound on. Any number of people can watch at once.
+sound on. Any number of people can watch at once. A viewer who pauses or goes back plays a little
+fast (1.25x) until they're back to the usual delay, and one more than 30 seconds behind gets a
+**Jump to live** button, so everyone in the chat is on the same shot.
 Each stream is kept for a week (`live.keep_days`) for the **Round replays** tab, with a second
 playlist (`full.m3u8`) of every file from the start and `live/recordings.json` listing the streams
 and where each round in them starts. A stream under a minute isn't kept, and nor is one with no
@@ -555,7 +557,10 @@ shot the viewer was watching when they sent it, since the stream runs about 20 s
 varies by viewer: the page sends the stream segment on screen and how far into it (the mirror knows
 when each segment was recorded), or, from an iPhone's own player, how far behind the live edge it is;
 failing both, 20 seconds is taken off. The booth's take sees that shot (who, which stroke, from where to
-where, and its call), so "what a strike" lands on the right swing even a few shots later. Each line gets up to 45 words (`chat.max_words`), and the first one always turns to the chat
+where, and its call), so "what a strike" lands on the right swing even a few shots later. If a player
+was already over the next ball on their screen, the take sees that too, and what that shot then did:
+"watch the water left" is about the shot being set up, not the one before (and the booth can say
+whether they called it). Each line gets up to 45 words (`chat.max_words`), and the first one always turns to the chat
 ("Let's check in with the chat...") so listeners know where it's coming from. Once it starts, it
 plays out: a shot struck meanwhile, even a big moment, waits for it. The usual fact checks apply.
 

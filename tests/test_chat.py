@@ -438,6 +438,67 @@ async def test_a_message_is_tied_to_the_shot_the_viewer_was_watching(tmp_path, m
     assert e._chat_shot_brief(shared) == "shot 1 on hole 5 (DR)"
 
 
+async def test_a_message_also_knows_who_was_over_the_ball_next(tmp_path, monkeypatch):
+    _clock(monkeypatch)
+    e = _booth(tmp_path)
+    _in_a_round(e)
+    await e._chat_tick()
+    db, sid, wall = e.store.db, e.store.session_id, time.time()
+    for ts, n, lie in ((wall - 70, 1, "fairway"), (wall - 30, 2, "water")):
+        db.execute("INSERT INTO shots (session_id, ts, player, hole, shot_number, club, is_putt, lie_before, lie_after) "
+                   "VALUES (?, ?, 'Frankie', 'Hole 4, par 4, 410 yards', ?, '7I', 0, 'tee', ?)", (sid, ts, n, lie))
+    e._setups_seen.extend([(wall - 90, "Frankie setting up shot 1, 410 yards to the pin, from the tee"),
+                           (wall - 50, "Frankie setting up shot 2, 160 yards to the pin, from the fairway"),
+                           (wall - 10, "Frankie setting up shot 3, 160 yards to the pin, from the drop zone")])
+    at = {"stream1.ts": wall - 85, "stream5.ts": wall - 60, "stream8.ts": wall - 45, "stream9.ts": wall - 5}
+    e.live_mirror = SimpleNamespace(session="s1", watched_at=lambda sess, seg, off: at.get(seg))
+    for i, (name, text, seg) in enumerate((("Ann", "first tee nerves", "stream1.ts"), ("Bob", "wow what a drive", "stream5.ts"),
+                                           ("Cy", "watch the water left", "stream8.ts"), ("Di", "come on Frankie", "stream9.ts"))):
+        e.chat.rows.append(ChatMessage(f"{int(wall * 1000) + i:013d}-aaaaaa", name, text, wall, 0.0, "s1", seg, 1.0))
+    await e._chat_glance()
+    await _settle(e)
+    prompt = e.live_llm.prompts[0]
+    # Before any shot: only who's on the tee.
+    assert ('- Ann (next on their screen: Frankie setting up shot 1, 410 yards to the pin, from the tee (since played: '
+            "Frankie's shot 1 on hole 4 (7I), from the tee to the fairway)): \"first tee nerves\"") in prompt
+    # Just after the drive, before the next setup: the drive only.
+    assert '- Bob (sent watching Frankie\'s shot 1 on hole 4 (7I), from the tee to the fairway): "wow what a drive"' in prompt
+    # Over the second shot: both, and what the second shot did.
+    assert ("- Cy (sent watching Frankie's shot 1 on hole 4 (7I), from the tee to the fairway; next on their screen: "
+            "Frankie setting up shot 2, 160 yards to the pin, from the fairway (since played: Frankie's shot 2 on "
+            'hole 4 (7I), from the tee to the water)): "watch the water left"') in prompt
+    assert "next on their screen: Frankie setting up shot 3, 160 yards to the pin, from the drop zone (not played yet)" in prompt
+    assert "say whether they called it" in prompt
+    # The water ball taken back: still what came of the shot Cy saw set up, not the re-hit.
+    first, second = (r[0] for r in db.execute("SELECT id FROM shots ORDER BY ts"))
+    e.store.set_mulligan(second)
+    assert e._chat_upcoming(wall - 45, first).endswith("to the water; then taken back, a mulligan)")
+
+
+async def test_a_take_waits_for_what_came_of_the_shot_a_viewer_saw_set_up(tmp_path, monkeypatch):
+    _clock(monkeypatch)
+    e = _booth(tmp_path)
+    _in_a_round(e)
+    await e._chat_tick()
+    wall = time.time()
+    e._setups_seen.append((wall - 30, "Frankie setting up shot 2, 160 yards to the pin, from the fairway"))
+    e._shots_unrecorded[1] = wall - 2   # struck just now, after what the viewer was watching
+    e.live_mirror = SimpleNamespace(session="s1", watched_at=lambda sess, seg, off: wall - 20)
+    e.chat.rows.append(ChatMessage(f"{int(wall * 1000):013d}-aaaaaa", "Cy", "watch the water left", wall, 0.0,
+                                   "s1", "stream8.ts", 1.0))
+    await e._chat_glance()
+    await asyncio.sleep(0.3)
+    assert not e.live_llm.prompts   # held for it
+    e.CHAT_RECORD_WAIT = 0.0
+    await e._prepare_chat()         # gave up waiting: it was played, not "not played yet"
+    assert "from the fairway (just played, result not in yet)" in e.live_llm.prompts[-1]
+    # Toby's shot, struck after Frankie's, recorded first: it isn't what came of Frankie's.
+    e.store.db.execute("INSERT INTO shots (session_id, ts, player, hole, shot_number, club, is_putt) "
+                       "VALUES (?, ?, 'Toby', 'Hole 4, par 4, 410 yards', 2, '8I', 0)", (e.store.session_id, wall - 1))
+    assert e._chat_upcoming(wall - 20, None).endswith("(just played, result not in yet)")
+    e.live_llm.prompts.clear()
+
+
 async def test_a_take_waits_for_the_shot_the_viewer_watched_to_be_recorded(tmp_path, monkeypatch):
     _clock(monkeypatch)
     e = _booth(tmp_path)

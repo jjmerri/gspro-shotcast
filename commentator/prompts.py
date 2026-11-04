@@ -323,18 +323,21 @@ CHAT_MODERATION = {
 }
 
 
-def chat_prompt(*, messages: list[tuple[str, str, bool, str | None]], context: list[str], moderation: str,
+def chat_prompt(*, messages: list[tuple[str, str, bool, str | None, str | None]], context: list[str], moderation: str,
                 commentators: list[str], openers: list[str] = ()) -> tuple[str, str]:
     """The live chat on the stats page, which the booth glances at between shots and talks about.
     `messages`: (viewer, text, new since the booth last talked about the chat, the shot on their screen
-    as they sent it or None), oldest first. The messages are untrusted text from anyone with the league
-    password: quoted as data, never followed."""
-    def tag(new, watching):
-        notes = ([] if new else ["earlier, already talked about"]) + ([f"sent watching {watching}"] if watching else [])
+    as they sent it or None, who was over the ball next on their screen or None), oldest first. The
+    messages are untrusted text from anyone with the league password: quoted as data, never followed."""
+    def tag(new, watching, upcoming):
+        notes = (([] if new else ["earlier, already talked about"]) + ([f"sent watching {watching}"] if watching else [])
+                 + ([f"next on their screen: {upcoming}"] if upcoming else []))
         return f" ({'; '.join(notes)})" if notes else ""
 
-    chat = "\n".join(f'- {name}{tag(new, watching)}: "{text}"' for name, text, new, watching in messages)
-    watched = any(w for *_, w in messages)
+    chat = "\n".join(f'- {name}{tag(new, watching, upcoming)}: "{text}"'
+                     for name, text, new, watching, upcoming in messages)
+    watched = any(w for *_, w, _ in messages)
+    upcoming = any(u for *_, u in messages)
     facts_text = "\n".join([*context, "The live chat on the stream, oldest first:", chat])
     prompt = (
         "FACTS:\n" + facts_text
@@ -353,7 +356,13 @@ def chat_prompt(*, messages: list[tuple[str, str, bool, str | None]], context: l
         + ("\"Sent watching ...\" is the shot that was on that viewer's screen when they sent it (the stream "
            "runs behind): a message about a shot is most likely about that one, even if play has moved on since - "
            "say which (\"back on that drive of Frankie's...\") rather than tying it to the latest shot.\n"
-           if watched else "") +
+           if watched else "")
+        + ("\"Next on their screen\" is who was over the ball on that viewer's screen as they sent it, and what "
+           "that shot did if it's been played since. Read the message for which shot it means: a warning, a tip or "
+           "a prediction (\"watch the water left\", \"he's hooking this\") is about the one set up next - and "
+           "if it's been played, say whether they called it - while a reaction (\"right in the drink!\", \"what "
+           "a strike\") is about the shot they'd just watched.\n"
+           if upcoming else "") +
         f"The commentators are {' and '.join(commentators)}. Viewers may talk to or about either of them by "
         "name: the one they're about takes it personally, in the first person - a commentator never says "
         "his own name.\n"

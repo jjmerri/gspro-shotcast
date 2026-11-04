@@ -508,6 +508,40 @@ console.log(JSON.stringify(seen));"""
                    "1-putts 4 · 2-putts 12 · 3-putts 2", ""]
 
 
+def test_the_live_player_catches_up_a_viewer_who_fell_behind():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = re.search(r"\nconst LIVE_SLACK = .*?\nfunction liveCatchUp\(.*?\n}\n", page, re.S).group(0)
+    script = "let player;" + fns + """
+const seen = [], hls = {latency: 12, targetLatency: 10, liveSyncPosition: 500};
+const p = player = {hls, golive: {hidden: true, textContent: ""}, edge: null,
+                    video: {paused: false, playbackRate: 1, currentTime: 490, play: () => Promise.resolve()}};
+const look = () => seen.push([p.video.playbackRate, p.golive.hidden, p.golive.hidden ? "" : p.golive.textContent]);
+liveCatchUp(p); look();                                   // 2 s over: left alone
+hls.latency = 25; liveCatchUp(p); look();                 // 15 s behind: plays fast
+p.video.paused = true; liveCatchUp(p); look();            // paused: normal speed
+p.video.paused = false; hls.latency = 90; liveCatchUp(p); look();   // 80 s behind: offered a jump
+liveCatchUp(p, true); seen.push(p.video.currentTime); look();       // jumped to the usual delay
+hls.latency = 10.2; liveCatchUp(p); look();               // caught up
+// An iPhone's own player: behind measured against where it started.
+const v = {paused: false, playbackRate: 1, currentTime: 100, seekable: {length: 1, end: () => 120}, play: () => Promise.resolve()};
+const q = player = {hls: null, golive: {hidden: true}, edge: null, video: v};
+const look2 = () => seen.push([v.playbackRate, q.golive.hidden]);
+liveCatchUp(q); look2();
+v.currentTime = 90; liveCatchUp(q); look2();
+console.log(JSON.stringify(seen));"""
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    assert got == [[1, True, ""], [1.25, True, ""], [1, True, ""], [1.25, False, "1:20 behind live · Jump to live"],
+                   500, [1, True, ""], [1, True, ""], [1, True], [1.25, True]]
+
+
 def test_a_round_card_takes_its_longest_drive_from_its_shots(tmp_path):
     """Stored as none at the round's end (the club wasn't read), the drive counts once a rule does."""
     path, db = _db(tmp_path)

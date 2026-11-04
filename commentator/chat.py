@@ -30,6 +30,7 @@ class ChatMessage:
     behind: float | None = None
     watched: float | None = None   # the booth's: the moment on their screen (the PC's clock)
     shot: int | None = None    # the booth's: the shot they were watching (shots.id), once it's worked out
+    upcoming: str | None = None   # the booth's: who was over the ball on their screen after that shot
 
 
 def cursor_at(epoch: float) -> str:

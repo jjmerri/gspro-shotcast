@@ -441,9 +441,16 @@ class Store:
                               "AND outcome IS NOT 'gimme' ORDER BY ts DESC LIMIT 1", (self.session_id, at, at - within)).fetchone()
         return row["id"] if row else None
 
+    def shot_struck_after(self, at: float, within: float) -> int | None:
+        """This session's first shot struck after `at` (and within `within` seconds of it), taken back
+        or not, but not a gimme the booth added: its id."""
+        row = self.db.execute("SELECT id FROM shots WHERE session_id = ? AND ts > ? AND ts <= ? "
+                              "AND outcome IS NOT 'gimme' ORDER BY ts LIMIT 1", (self.session_id, at, at + within)).fetchone()
+        return row["id"] if row else None
+
     def shot_brief(self, shot_id: int) -> tuple[sqlite3.Row | None, list[str]]:
         """A shot's row and what the booth said about it (its call), for a word on it later."""
-        row = self.db.execute("SELECT player, attributed, hole, shot_number, club, is_putt, lie_before, lie_after, outcome "
+        row = self.db.execute("SELECT ts, player, attributed, hole, shot_number, club, is_putt, lie_before, lie_after, outcome, mulligan "
                               "FROM shots WHERE id = ?", (shot_id,)).fetchone()
         said = [r["text"] for r in self.db.execute("SELECT text FROM lines WHERE shot_id = ? AND kind = 'shot' "
                                                    "ORDER BY id LIMIT 2", (shot_id,))]
