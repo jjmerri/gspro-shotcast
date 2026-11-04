@@ -518,8 +518,11 @@ def test_the_live_player_catches_up_a_viewer_who_fell_behind():
     if not node:
         pytest.skip("needs node")
     page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
-    fns = re.search(r"\nconst LIVE_SLACK = .*?\nfunction liveCatchUp\(.*?\n}\n", page, re.S).group(0)
-    script = "let player;" + fns + """
+    fns = re.search(r"\nconst LIVE_SLACK = .*?\nfunction liveCatchUp\(.*?\n}\n", page, re.S).group(0) \
+        + re.search(r"\nfunction chatBehind\(.*?\nfunction gateChat\(.*?\n}\n", page, re.S).group(0)
+    script = "let player; const state = {tab: 'live'};" + fns + """
+const behind = {style: {display: "none"}}, send = {disabled: false};
+const chat = {el: {querySelector: q => q === ".behind" ? behind : send}};
 const seen = [], hls = {latency: 12, targetLatency: 10, liveSyncPosition: 500};
 const p = player = {hls, golive: {hidden: true, textContent: ""}, edge: null,
                     video: {paused: false, playbackRate: 1, currentTime: 490, play: () => Promise.resolve()}};
@@ -528,7 +531,9 @@ liveCatchUp(p); look();                                   // 2 s over: left alon
 hls.latency = 25; liveCatchUp(p); look();                 // 15 s behind: plays fast
 p.video.paused = true; liveCatchUp(p); look();            // paused: normal speed
 p.video.paused = false; hls.latency = 90; liveCatchUp(p); look();   // 80 s behind: offered a jump
+seen.push([send.disabled, behind.style.display]);         // and can't send to the chat
 liveCatchUp(p, true); seen.push(p.video.currentTime); look();       // jumped to the usual delay
+seen.push([send.disabled, behind.style.display]);
 hls.latency = 10.2; liveCatchUp(p); look();               // caught up
 // An iPhone's own player: behind measured against where it started.
 const v = {paused: false, playbackRate: 1, currentTime: 100, seekable: {length: 1, end: () => 120}, play: () => Promise.resolve()};
@@ -539,7 +544,7 @@ v.currentTime = 90; liveCatchUp(q); look2();
 console.log(JSON.stringify(seen));"""
     got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
     assert got == [[1, True, ""], [1.25, True, ""], [1, True, ""], [1.25, False, "1:20 behind live · Jump to live"],
-                   500, [1, True, ""], [1, True, ""], [1, True], [1.25, True]]
+                   [True, ""], 500, [1, True, ""], [False, "none"], [1, True, ""], [1, True], [1.25, True]]
 
 
 def test_a_round_card_takes_its_longest_drive_from_its_shots(tmp_path):

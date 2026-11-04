@@ -84,6 +84,8 @@
   .chat input { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; min-width:0; }
   .chat input[name=name] { flex:0 1 9em; } .chat input[readonly] { color:var(--dim); cursor:not-allowed; } .chat input[name=text] { flex:1 1 14em; }
   .chat form button { background:var(--accent); color:var(--bg); border:none; border-radius:6px; padding:7px 14px; font:inherit; cursor:pointer; }
+  .chat form button:disabled { opacity:.5; cursor:not-allowed; }
+  .chat .behind { font-size:13px; margin-top:4px; }
   .chat .note { color:var(--dim); font-size:13px; min-height:1.2em; margin-top:4px; }
   .empty { color:var(--dim); padding:10px 0; }
   .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:8px 0 14px; }
@@ -1714,13 +1716,16 @@ function chatEl() {
   el.innerHTML = `<h3>Chat <span class="sub">to the booth: it reads some out on air</span></h3><div class="log"></div>
     <form><input name="name" maxlength="24" placeholder="Your name" autocomplete="nickname">
     <input name="text" maxlength="200" placeholder="Say something to the booth" autocomplete="off" enterkeyhint="send">
-    <button>Send</button></form><div class="note"></div>`;
+    <button>Send</button></form><div class="behind" style="display:none">You're behind live, so the chat
+    would be about an old shot. <button class="link">Jump to live</button> to chat.</div><div class="note"></div>`;
   const form = el.querySelector("form"), note = el.querySelector(".note");
   const nameIn = form.querySelector("[name=name]"), textIn = form.querySelector("[name=text]");
   nameIn.value = store.get("chatName") || "";
   lockChatName();
+  el.querySelector(".behind button").onclick = () => { if (player) liveCatchUp(player, true); };
   form.addEventListener("submit", async e => {
     e.preventDefault();
+    if (chatBehind()) return;
     const name = nameIn.value.trim(), text = textIn.value.trim();
     if (!name) { note.textContent = "Put your name in first."; nameIn.focus(); return; }
     if (!text || chat.busy) return;
@@ -1741,6 +1746,18 @@ function chatEl() {
     chat.busy = false;
   });
   return el;
+}
+// Someone well behind live (paused, or gone back) would be talking about a shot everyone else saw a
+// while ago: they can type, but not send, until they're caught up.
+function chatBehind() {
+  const p = player;
+  return !!(p && p.golive && !p.golive.hidden && state.tab === "live");
+}
+function gateChat() {
+  if (!chat.el) return;
+  const far = chatBehind();
+  chat.el.querySelector(".behind").style.display = far ? "" : "none";
+  chat.el.querySelector("form button").disabled = far;
 }
 // Once you've said something your name stays put until the chat closes (the round's over), so
 // nobody turns into someone else mid-conversation. A lock left by a chat this page never saw close
@@ -1796,6 +1813,7 @@ function stopLive() {
   player.video.removeAttribute("src");
   player.video.load();
   player = null;
+  gateChat();
 }
 
 let hlsLoading = null;   // one download, however many times the tab is opened while it runs
@@ -1862,7 +1880,7 @@ function attachLive() {
 
 // Everyone watching the live stream should be on the same shot, so the chat is about the same thing:
 // a viewer who paused or went back plays a little fast until they're back to the usual delay, and
-// one well behind is offered a jump straight there.
+// one well behind is offered a jump straight there (and can't send to the chat till then).
 const LIVE_SLACK = 3, LIVE_FAR = 30, LIVE_RATE = 1.25;
 // [seconds behind the usual delay, where the usual delay is], or null while it can't tell.
 function liveLag(p) {
@@ -1885,6 +1903,7 @@ function liveCatchUp(p, jump = false) {
   const far = extra > LIVE_FAR, m = Math.floor(extra / 60), sec = String(Math.floor(extra % 60)).padStart(2, "0");
   p.golive.hidden = !far;
   if (far) p.golive.textContent = `${m ? `${m}:${sec}` : `${Math.round(extra)}s`} behind live · Jump to live`;
+  gateChat();
   const rate = v.paused ? 1 : extra > LIVE_SLACK ? LIVE_RATE : extra < 0.5 ? 1 : v.playbackRate;
   if (v.playbackRate !== rate) v.playbackRate = rate;
 }

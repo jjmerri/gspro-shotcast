@@ -429,7 +429,9 @@ the page plays it with
 about 20 seconds behind, and the player (live or a replay) starts muted, with a button to turn the
 sound on. Any number of people can watch at once. A viewer who pauses or goes back plays a little
 fast (1.25x) until they're back to the usual delay, and one more than 30 seconds behind gets a
-**Jump to live** button, so everyone in the chat is on the same shot.
+**Jump to live** button, so everyone in the chat is on the same shot. Until they jump (or catch up)
+they can type in the chat but not send: what they'd say would be about a shot everyone else saw a
+while ago.
 Each stream is kept for a week (`live.keep_days`) for the **Round replays** tab, with a second
 playlist (`full.m3u8`) of every file from the start and `live/recordings.json` listing the streams
 and where each round in them starts. A stream under a minute isn't kept, and nor is one with no
@@ -451,7 +453,7 @@ opening tee shot is on it, however quickly it's hit), or when a round starts, an
   mid-round.
 - **Idle**: after 20 minutes with no shots (`live.idle_minutes`; 0 for never), a round left on a hole
   or a stream started by hand and forgotten. The round's next shot starts it again.
-- **Quit** in the tray stops OBS's output and takes the page off air at once. A booth that crashed
+- **Quit** in the tray (once confirmed) stops OBS's output and takes the page off air at once. A booth that crashed
   or was killed can't: while live it refreshes `live/status.json` every 30 seconds, and the page
   shows off air within about 2 minutes of that stopping, rather than a frozen player. A booth
   starting goes off air, and clears `live/` of everything but the week's kept streams.

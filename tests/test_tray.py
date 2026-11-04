@@ -309,3 +309,17 @@ async def test_the_booth_says_its_ready_once_its_startup_checks_are_done(tmp_pat
     checks.set()
     await told
     assert (tmp_path / "booth-ready").exists()
+
+
+def test_quit_from_the_menu_asks_first():
+    from types import SimpleNamespace
+
+    quits, answers = [], [False, True]
+    app = SimpleNamespace(ui=SimpleNamespace(ok=True, ask=lambda text: answers.pop(0)), quit=lambda: quits.append(1))
+    tray.Tray.quit_asked(app)
+    assert not quits   # said no
+    tray.Tray.quit_asked(app)
+    assert quits == [1]
+    app.ui.ok = False   # no window to ask in: quits all the same
+    tray.Tray.quit_asked(app)
+    assert quits == [1, 1]

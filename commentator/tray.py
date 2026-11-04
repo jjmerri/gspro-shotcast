@@ -835,6 +835,16 @@ class Tray:
     def about(self, *_) -> None:
         webbrowser.open("https://github.com/jjmerri/gspro-shotcast#readme")
 
+    def quit_asked(self, *_) -> None:
+        """Quit from the menu: it's the last item, easy to hit by mistake, and takes the booth and the
+        stream off air, so it asks first."""
+        if self.ui is not None and self.ui.ok and not self.ui.ask(
+                "Quit Shotcast?\n\nThe booth stops commenting and the live stream goes off air until it's started again."):
+            log.info("Quit from the menu: cancelled")
+            return
+        log.info("Quit from the menu")
+        self.quit()
+
     def quit(self, *_) -> None:
         self._stop.set()
         self.booth.stop()
@@ -926,7 +936,7 @@ class Tray:
             item("Start with Windows", safe(self.toggle_start_with_windows), checked=lambda _: starts_with_windows()),
             item("Notify when the booth is ready", safe(self.toggle_ready_notice), checked=lambda _: notifies_when_ready()),
             item(f"About Shotcast {self.version}", safe(self.about)),
-            item("Quit", self.quit),
+            item("Quit...", self.quit_asked),
         )
 
     def _refresh(self) -> None:
