@@ -357,8 +357,10 @@ def chat_prompt(*, messages: list[tuple[str, str, bool, str | None, str | None]]
            "runs behind): a message about a shot is most likely about that one, even if play has moved on since - "
            "say which (\"back on that drive of Frankie's...\") rather than tying it to the latest shot.\n"
            if watched else "")
-        + ("\"Next on their screen\" is who was over the ball on that viewer's screen as they sent it, and what "
-           "that shot did if it's been played since. Read the message for which shot it means: a warning, a tip or "
+        + ("\"Next on their screen\" is who was over the ball on that viewer's screen as they sent it (what the "
+           "shot was for, and the trouble the booth's map read showed, when it knows), and what that shot did if "
+           "it's been played since. Trouble not listed there may still be on the hole: don't tell a viewer it "
+           "isn't. Read the message for which shot it means: a warning, a tip or "
            "a prediction (\"watch the water left\", \"he's hooking this\") is about the one set up next - and "
            "if it's been played, say whether they called it - while a reaction (\"right in the drink!\", \"what "
            "a strike\") is about the shot they'd just watched.\n"

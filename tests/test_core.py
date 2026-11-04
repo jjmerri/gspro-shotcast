@@ -3622,6 +3622,33 @@ async def test_a_setup_a_swing_overtook_isnt_kept_for_the_chat(tmp_path):
     assert abs(time.time() - 2 - at) < 0.5 and brief.startswith("Toby setting up shot 2, 150 yards to the pin")
 
 
+async def test_a_setup_the_chat_knows_says_what_its_for_and_the_trouble_on_the_map(tmp_path):
+    from types import SimpleNamespace
+
+    from commentator.engine import Engine
+
+    brief = Engine._setup_brief
+    assert brief(Hud(shot_number=5, lie="Green", to_pin="4 yards"), "Toby", hole=7, par=4) \
+        == "Toby setting up shot 5 on hole 7 (par 4), a 12-foot putt, for bogey"
+    assert brief(Hud(shot_number=3, lie="Rough", to_pin="30 yards", club="SW"), "Toby", hole=7, par=4) \
+        == "Toby setting up shot 3 on hole 7 (par 4), 30 yards to the pin, from the rough, with SW, up and down for par"
+    assert brief(Hud(shot_number=2, lie="Fairway", to_pin="150 yards"), "Toby", up=True, hole=7, par=4) \
+        == "Toby is up, shot 2 on hole 7 (par 4), 150 yards to the pin, from the fairway"
+    engine, _ = _setup_engine(tmp_path)
+    hud = Hud(player_text="Toby E Shot 2 150 YDS", shot_number=2, score_to_par="E", to_pin="150 yards", lie="Fairway")
+    hud._chat_setup = entry = [0.0, "Toby setting up shot 2"]
+    facts = ["Hole layout: water down the left.", "Pin: on the back left of the green.",
+             "Hole layout: a bunker right, about 140 to 150 yards out."]
+    read = SimpleNamespace(seconds=0.1, facts=lambda *_: facts, stymied=lambda *_: False, named=lambda *_: None,
+                           hazards=lambda *_: [], strategy=lambda *_: None)
+
+    async def minimap():
+        return read
+    await engine._preshot_model(hud, "Toby", [], asyncio.create_task(minimap()))
+    assert entry[1] == ("Toby setting up shot 2; trouble: water down the left; "
+                        "a bunker right, about 140 to 150 yards out")
+
+
 def test_club_box_parsing():
     from commentator.hud import parse_club
 

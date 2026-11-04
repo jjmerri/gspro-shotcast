@@ -20,7 +20,7 @@ from .carry_model import CarryModel, correct_for_elevation
 from .config import ROUND_STATUS, ROUND_STATUS_CHECK_S, ROUND_STATUS_EVERY_S, Config
 from .flight import point_at
 from .facts import (
-    PUTT_COUNT_FACT, PUTT_FOR_FACT, SCORE_NAMES, _PUTT_WORDS, _fmt_to_par, _to_par_value, club_delivery_facts, club_delivery_notable, club_name, flight_facts,
+    PUTT_COUNT_FACT, PUTT_FOR, PUTT_FOR_FACT, SCORE_NAMES, _PUTT_WORDS, _fmt_to_par, _to_par_value, club_delivery_facts, club_delivery_notable, club_name, flight_facts,
     gimme_edge, history_facts, lie_cost_fact, moment_facts, ordinal, preshot_facts, putt_count_fact, putt_elevation_inches, shot_facts, to_yards, WRONG_GREEN_YARDS, wrong_green_fact,
     wrong_conceded_score, wrong_green_yards, wrong_holed_putt, wrong_putt_score,
 )
@@ -868,7 +868,8 @@ class Engine:
         # when). The impact read's fallback when the player box is gone by the time it's grabbed.
         self._last_setup: tuple | None = None
         # Each player set up over the ball, for the chat: (when, on the PC's clock; who and the shot).
-        self._setups_seen: deque[tuple[float, str]] = deque(maxlen=60)
+        # [wall time, brief] of each setup, for the chat; the minimap's trouble is added once it's read.
+        self._setups_seen: deque[list] = deque(maxlen=60)
         self._hud_buffer: Any = None   # HudBuffer: the HUD's last seconds, for an impact read GSPro hid
         self._last_impact_at: float | None = None
         # GSPro's "hide UI on shot" keeps the tiles off screen until the next player is up, so the follow
@@ -1351,6 +1352,11 @@ class Engine:
                 return
             else:   # a mulligan, set up again: the stroke can be taken back again
                 self._set_up[stroke] = id(last)
+        if player and stamp[0] == self._shot_seq:
+            # Timed from when the player box was first read; a read a swing overtook isn't a setup to come.
+            hud._chat_setup = [time.time() - (time.monotonic() - stamp[2]),
+                               self._setup_brief(hud, player, hole=self.hole_number, par=self.current_par)]
+            self._setups_seen.append(hud._chat_setup)
         model_task = asyncio.create_task(self._preshot_model(hud, player, [image] if image else [], minimap_task,
                                                              putt_task))
         # If this setup is superseded before handle_preshot awaits the call, the task is orphaned;
@@ -1366,9 +1372,6 @@ class Engine:
                  [(o.name, o.to_pin, o.score_to_par) for o in hud.others], hud.slope_updown, hud.slope_side,
                  hud.slope_side_degrees, None if hud.elevation_yards is None else round(hud.elevation_yards, 1),
                  f"{self.screen.last_read_seconds:.2f} (capture {self.screen.last_capture_seconds:.2f})")
-        if player and stamp[0] == self._shot_seq:
-            # Timed from when the player box was first read; a read a swing overtook isn't a setup to come.
-            self._setups_seen.append((time.time() - (time.monotonic() - stamp[2]), self._setup_brief(hud, player)))
         if (self._shot_seq, self.gspro.active_player) == stamp[:2]:
             self._last_setup = (replace(hud, others=[], tiles={}), *stamp)
         else:
@@ -2479,18 +2482,32 @@ class Engine:
             return None
 
     @staticmethod
-    def _setup_brief(hud: Hud, who: str, up: bool = False) -> str:
-        """'Frankie setting up shot 2, 150 yards to the pin, from the fairway' (`up`: 'Frankie is up, shot 2...')."""
+    def _setup_brief(hud: Hud, who: str, up: bool = False, hole: int | None = None, par: int | None = None) -> str:
+        """'Frankie setting up shot 2 on hole 4 (par 4), 150 yards to the pin, from the fairway, with 7I'
+        (`up`: 'Frankie is up, shot 2...'), and what holing it (a putt) or getting up and down (inside
+        60 yards) would make."""
         if up:
             shot = f"{who} is up, shot {hud.shot_number}" if hud.shot_number else f"{who} is up"
         else:
             shot = f"{who} setting up shot {hud.shot_number}" if hud.shot_number else f"{who} setting up a shot"
-        if hud.to_pin:
-            shot += f", {hud.to_pin} to the pin"
-        if hud.lie:
-            shot += f", from the {hud.lie.lower()}"
-        if hud.club:
-            shot += f", with {hud.club}"
+        if hole:
+            shot += f" on hole {hole}" + (f" (par {par})" if par else "")
+        pin = to_yards(hud.to_pin)
+        putting = (hud.lie or "").lower() == "green" and wrong_green_yards(hud.lie, hud.to_pin) is None
+        if putting and pin is not None:
+            shot += f", a {max(1, round(pin * 3))}-foot putt"
+        else:
+            if hud.to_pin:
+                shot += f", {hud.to_pin} to the pin"
+            if hud.lie:
+                shot += f", from the {hud.lie.lower()}"
+            if hud.club:
+                shot += f", with {hud.club}"
+        diff = hud.shot_number - par if hud.shot_number and par else None
+        if diff is not None and putting and (name := PUTT_FOR.get(diff)):
+            shot += f", for {name}"
+        elif diff is not None and pin is not None and pin < 60 and (name := PUTT_FOR.get(diff + 1)):
+            shot += f", up and down for {name}"
         return shot
 
     def _chat_upcoming(self, at: float, shot_id: int | None) -> str | None:
@@ -2617,7 +2634,7 @@ class Engine:
         if self._last_setup is not None and self._last_setup[1] == self._shot_seq:
             hud = self._last_setup[0]
             if hud.player_text and (who := self._player(hud.player_text)):
-                out.append(self._setup_brief(hud, who, up=True))
+                out.append(self._setup_brief(hud, who, up=True, hole=self.hole_number, par=self.current_par))
         if said := [ln.text for ln in list(self.state.recent_lines)[-4:]]:
             out.append("The booth just said: " + " / ".join(said))
         return out
@@ -4594,6 +4611,10 @@ class Engine:
                         "Log to_pin %.1f yd diverges from HUD %.1f yd for idx %s (%r); keeping HUD "
                         "(likely a mis-attributed slot)", tp, ocr_pin, idx, self._display(player))
         minimap = await self._await_minimap(minimap_task, is_putt)
+        if minimap and (entry := getattr(hud, "_chat_setup", None)) and (trouble := [
+                f.removeprefix("Hole layout: ").rstrip(".") for f in minimap.facts(to_yards(hud.to_pin), hud.lie)
+                if f.startswith("Hole layout: ")][:4]):
+            entry[1] += "; trouble: " + "; ".join(trouble)   # what a viewer's warning may be about
         if minimap and minimap.stymied(to_yards(hud.to_pin)):
             hud._stymie = True   # a tree on the line always gets its setup line
         if is_putt and putt_task is None and self.putt_reader:
