@@ -41,10 +41,12 @@ class ChatTable:
             self._client = boto3.client("dynamodb", region_name=self.region) if self.region else boto3.client("dynamodb")
         return self._client
 
-    def set_on_air(self, on: bool) -> None:
-        self._db().put_item(TableName=self.table, Item={
-            "pk": {"S": "booth"}, "sk": {"S": "state"}, "on": {"BOOL": on}, "at": {"N": str(int(time.time()))},
-        })
+    def set_on_air(self, on: bool, since: str | None = None) -> None:
+        """`since`: the round's chat opened there (a cursor_at key); the page shows only what came after."""
+        item = {"pk": {"S": "booth"}, "sk": {"S": "state"}, "on": {"BOOL": on}, "at": {"N": str(int(time.time()))}}
+        if since:
+            item["since"] = {"S": since}
+        self._db().put_item(TableName=self.table, Item=item)
 
     def since(self, after: str, limit: int = 50) -> list[ChatMessage]:
         """Messages posted after the sort key `after`, oldest first; the newest `limit` of them if more."""

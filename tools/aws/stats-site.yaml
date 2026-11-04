@@ -241,9 +241,11 @@ Resources:
               text = re.sub(r"[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202e\u2066-\u2069]", " ", str(text or ""))
               return " ".join(text.split())[:most]
 
-          def on_air(now):
+          def booth(now):
+              """The booth's state while it's on air, else None."""
               item = db.get_item(TableName=TABLE, Key={"pk": {"S": "booth"}, "sk": {"S": "state"}}).get("Item")
-              return bool(item) and item.get("on", {}).get("BOOL") is True and now - int(item["at"]["N"]) <= BOOTH_FRESH
+              on = bool(item) and item.get("on", {}).get("BOOL") is True and now - int(item["at"]["N"]) <= BOOTH_FRESH
+              return item if on else None
 
           def count(key, window, limit, now):
               """One more post in key's current window, unless it's full: False when it is."""
@@ -266,9 +268,13 @@ Resources:
               return {"id": item["sk"]["S"], "name": item["name"]["S"], "text": item["text"]["S"],
                       "at": int(item["sk"]["S"].split("-")[0]) / 1000, "aired": item.get("aired", {}).get("BOOL") is True}
 
-          def messages(now, after):
+          def messages(now, after, state):
+              # Only this round's: nothing from before its chat opened (the booth's "since").
+              since = state.get("since", {}).get("S", "")
+              since = since if re.fullmatch(r"\d{13}-[0-9a-f]{0,6}", since) else ""
+              floor = max(after, since, f"{(now - KEEP) * 1000:013d}")
               args = {"TableName": TABLE, "KeyConditionExpression": "pk = :p AND sk > :s",
-                      "ExpressionAttributeValues": {":p": {"S": "msg"}, ":s": {"S": after or f"{(now - KEEP) * 1000:013d}"}},
+                      "ExpressionAttributeValues": {":p": {"S": "msg"}, ":s": {"S": floor}},
                       "ScanIndexForward": False, "Limit": SHOWN}
               items = db.query(**args).get("Items", [])
               return [message(i) for i in reversed(items) if int(i["ttl"]["N"]) > now]
@@ -286,7 +292,7 @@ Resources:
               name, text = clean(data.get("name"), NAME_MAX), clean(data.get("text"), TEXT_MAX)
               if not name or not text:
                   return reply(400, {"error": "Send a name and a message."})
-              if not on_air(now):
+              if not booth(now):
                   return reply(409, {"error": "The booth is off air."})
               ip = viewer_ip(event)
               if not all(count(f"ip#{ip}", w, n, now) for w, n in PER_IP):
@@ -311,11 +317,12 @@ Resources:
                   return post(event, now)
               if http.get("method") != "GET":
                   return reply(405, {"error": "GET or POST"})
-              if not on_air(now):
+              state = booth(now)
+              if not state:
                   return reply(200, {"on": False, "messages": []})
               after = (event.get("queryStringParameters") or {}).get("after") or ""
               after = after if re.fullmatch(r"\d{13}-[0-9a-f]{6}", after) else ""
-              return reply(200, {"on": True, "messages": messages(now, after)})
+              return reply(200, {"on": True, "messages": messages(now, after, state)})
 
   ChatUrl:
     Type: AWS::Lambda::Url

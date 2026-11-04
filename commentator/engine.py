@@ -659,6 +659,9 @@ class Engine:
         self._chat_openers: list[str] = []            # the first lines of the chat takes aired this session
         self._chat_live: bool | None = None           # what the table was last told: on air or not
         self._chat_beat = float("-inf")
+        self._chat_round: int | None = None           # the round the chat was last open for
+        self._chat_since = ""                         # when that round's chat opened (a cursor_at key)
+        self._chat_sent_since: str | None = None      # the one the table was last told
         self._aside_nines: set[int] = set()          # nines of this round whose asides are written
         self._trivia_planned = 0                     # trivia asides written this round (per_round caps it)
         self._signature_told: tuple | None = None    # (round id, hole, player) the famous-hole note went to
@@ -2358,11 +2361,15 @@ class Engine:
         """Tell the table whether the booth is on air (on a change, and as a heartbeat), then read the
         new messages and, when the booth could talk about the chat soon, write its take on them."""
         on, now = self._chat_open(), time.monotonic()
-        if on != self._chat_live or now - self._chat_beat >= self.CHAT_HEARTBEAT:
-            await asyncio.to_thread(self.chat.set_on_air, on)
+        if on and self._chat_round != self.round.id:
+            # A round's chat is its own: the page shows nothing from before this round's opened.
+            self._chat_round, self._chat_since = self.round.id, cursor_at(time.time())
+        since = self._chat_since if on else None
+        if on != self._chat_live or since != self._chat_sent_since or now - self._chat_beat >= self.CHAT_HEARTBEAT:
+            await asyncio.to_thread(self.chat.set_on_air, on, since)
             if on != self._chat_live:
                 log.info("Chat: %s", "open on the stats page" if on else "closed")
-            self._chat_live, self._chat_beat = on, now
+            self._chat_live, self._chat_beat, self._chat_sent_since = on, now, since
         if not on:
             # Off air nothing is read, and nothing posted meanwhile is talked about later.
             self._chat_cursor = cursor_at(time.time())

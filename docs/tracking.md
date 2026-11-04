@@ -559,7 +559,9 @@ plays out: a shot struck meanwhile, even a big moment, waits for it. The usual f
 At every level, links and ads are dropped before the booth sees them, hateful slurs never go on air,
 and a message is never treated as an instruction: one telling the booth what to say gets laughed off
 at most. Messages
-are kept 6 hours (the stack's `ChatKeepHours`), then deleted. The page shows the last 50. Each viewer
+are kept 6 hours (the stack's `ChatKeepHours`), then deleted. Each round has its own chat: the page shows the
+last 50 messages since this round's chat opened, never the last round's (muting and coming back on air
+keeps the round's chat). Each viewer
 can send 2 every 10 seconds and 30 every 10 minutes, and everyone together 60 a minute. What the booth
 says about a message is in its transcript (Broadcasts, as **Viewer chat**) and the round's video like
 any other line; the messages themselves aren't kept with the replays.
@@ -579,7 +581,8 @@ Setting it up (the stack needs the template with the chat in it):
    ```
 
 The booth reaches the table with the publish keys, in `publish.region`. The booth's own copy of
-the page (from the tray) has no chat.
+the page (from the tray) has no chat. A stack deployed before the chat was per round keeps showing
+the last 6 hours until it's redeployed (step 1) with the current template.
 
 ## Backups
 

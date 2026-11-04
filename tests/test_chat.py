@@ -29,10 +29,11 @@ class _ChatLLM:
 
 class _Table:
     def __init__(self):
-        self.on, self.rows, self.aired, self.after = [], [], [], []
+        self.on, self.rows, self.aired, self.after, self.opened = [], [], [], [], []
 
-    def set_on_air(self, on):
+    def set_on_air(self, on, since=None):
         self.on.append(on)
+        self.opened.append(since)
 
     def since(self, after):
         self.after.append(after)
@@ -54,8 +55,8 @@ def _booth(tmp_path, air=True):
     return e
 
 
-def _in_a_round(e):
-    e.round = SimpleNamespace(ended=False, is_league=False, is_tournament=False, course="Pebble Beach", seq=4,
+def _in_a_round(e, rid=1):
+    e.round = SimpleNamespace(id=rid, ended=False, is_league=False, is_tournament=False, course="Pebble Beach", seq=4,
                               format="stroke", roster={"Paul": "Paul"},
                               standing_fact=lambda through: f"On the card after {through} holes: Paul leads by 2 shots.",
                               sides=[SimpleNamespace(label="Paul", players=["Paul"], key="Paul")])
@@ -122,6 +123,33 @@ async def test_the_booth_talks_about_the_chat_once_a_hole_after_a_shot_and_only_
     e.set_commentary(False)
     await e._chat_tick()
     assert e.chat.on[-1] is False and e._chat_ready is None and e._chat_log == []
+
+
+async def test_each_round_gets_its_own_chat(tmp_path, monkeypatch):
+    clock = _clock(monkeypatch)
+    e = _booth(tmp_path)
+    _in_a_round(e)
+    await e._chat_tick()
+    first = e.chat.opened[-1]
+    assert first and first <= cursor_at(time.time())
+    clock[0] += 40                                              # a heartbeat, then muted and back on
+    await e._chat_tick()
+    e.set_commentary(False)
+    await e._chat_tick()
+    e.set_commentary(True)
+    await e._chat_tick()
+    assert e.chat.on[1:] == [True, False, True] and e.chat.opened[1:] == [first, None, first]
+    e.round.ended = True
+    await e._chat_tick()
+    time.sleep(0.002)
+    _in_a_round(e, rid=2)                                       # the next round: nothing from the last
+    await e._chat_tick()
+    assert e.chat.opened[-2:] == [None, e.chat.opened[-1]] and e.chat.opened[-1] > first
+    third = len(e.chat.on)
+    time.sleep(0.002)
+    _in_a_round(e, rid=3)                                       # straight into another, never seen closed
+    await e._chat_tick()
+    assert len(e.chat.on) == third + 1 and e.chat.opened[-1] > e.chat.opened[-2]
 
 
 async def test_the_gap_holds_the_next_take_even_on_a_new_hole(tmp_path, monkeypatch):

@@ -70,9 +70,23 @@ def call(fn, method="GET", body=None, query=None, ip="203.0.113.5", secret=SECRE
     return r["statusCode"], json.loads(r["body"])
 
 
-def booth(fn, on=True, ago=0):
-    fn.table.put_item("chat", {"pk": {"S": "booth"}, "sk": {"S": "state"}, "on": {"BOOL": on},
-                               "at": {"N": str(int(NOW) - ago)}})
+def booth(fn, on=True, ago=0, since=None):
+    item = {"pk": {"S": "booth"}, "sk": {"S": "state"}, "on": {"BOOL": on}, "at": {"N": str(int(NOW) - ago)}}
+    if since is not None:
+        item["since"] = {"S": since}
+    fn.table.put_item("chat", item)
+
+
+def test_a_new_round_starts_with_an_empty_chat(chat):
+    booth(chat)
+    paul = call(chat, "POST", {"name": "Paul", "text": "last round"})[1]["message"]["id"]
+    opened = f"{int(paul[:13]) + 1:013d}-"                     # the next round's chat opens
+    booth(chat, since=opened)
+    assert call(chat)[1]["messages"] == []
+    call(chat, "POST", {"name": "Corey", "text": "this round"}, ip="203.0.113.9")
+    assert [m["text"] for m in call(chat)[1]["messages"]] == ["this round"]
+    booth(chat, since="junk")                                  # an unreadable stamp: the last few hours
+    assert [m["text"] for m in call(chat)[1]["messages"]] == ["last round", "this round"]
 
 
 def test_the_chat_is_hidden_and_closed_while_the_booth_is_off(chat):
