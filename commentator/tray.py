@@ -32,6 +32,7 @@ STATS_PORT = 8765
 PUBLISH_AFTER_EDIT_S = 60.0   # a run of edits on the local page goes up once, this long after the last
 ROUND_STATUS_STALE_S = 4 * ROUND_STATUS_EVERY_S   # older than this: the booth may have stopped
 RESTARTS, RESTART_WINDOW_S = 3, 600      # crashes in that window before it stops restarting
+STARTING_LIMIT_S = 120   # a booth that hasn't said it's ready by then is taken as running anyway
 UPDATE_EVERY_S = 6 * 3600
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
@@ -255,29 +256,39 @@ class Booth:
         self.home, self.on_change, self._popen, self._clock = home, on_change or (lambda: None), popen, clock
         self.proc = None
         self.crashes: deque[float] = deque()
-        self.state = "starting"   # running / stopped / crashed / other
+        self.state = "starting"   # starting / running / stopped / crashed / other
         self._lock = threading.RLock()
         self._wanted = False
+        # The booth writes this once it's up (its startup checks done): until then it's "starting".
+        self.ready_file = home / "logs" / "booth-ready"
+        self._started_at = 0.0
+        self._announce = False   # say so when it's ready: started from here, not a crash's restart
 
     def start(self) -> None:
         with self._lock:
             self._wanted = True
             self._spawn()
+            self._announce = True
         self.on_change()
 
     def _spawn(self) -> None:
         with self._lock:
             if self.proc is not None and self.proc.poll() is None:
                 return
+            try:
+                self.ready_file.unlink(missing_ok=True)
+            except OSError:
+                pass
             err = open(self.home / "logs" / "booth-errors.log", "a", encoding="utf-8")
             try:
                 self.proc = self._popen([python_exe(), "-m", "commentator", "run"], cwd=self.home,
                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
-                                        env={**os.environ, "SHOTCAST_FILE_LOG_ONLY": "1"},
+                                        env={**os.environ, "SHOTCAST_FILE_LOG_ONLY": "1",
+                                             "SHOTCAST_READY_FILE": str(self.ready_file)},
                                         creationflags=NO_WINDOW)
             finally:
                 err.close()   # the child has its own handle
-            self.state = "running"
+            self.state, self._started_at, self._announce = "starting", self._clock(), False
 
     def stop(self) -> None:
         with self._lock:
@@ -297,11 +308,31 @@ class Booth:
         self.crashes.clear()
         self.start()
 
-    def poll(self) -> None:
-        """Called every few seconds: restart a booth that died, within the limit."""
+    def poll(self) -> bool:
+        """Called every few seconds: restart a booth that died, within the limit, and see whether a
+        starting one is up. True when one started from here (not a crash's restart) just got ready."""
         with self._lock:
-            if not self._wanted or self.proc is None or self.proc.poll() is None:
-                return
+            if not self._wanted or self.proc is None:
+                return False
+            if self.proc.poll() is None:
+                if self.state != "starting":
+                    return False
+                if self.ready_file.exists():
+                    self.state = "running"
+                elif self._clock() - self._started_at > STARTING_LIMIT_S:
+                    log.warning("The booth hasn't said it's ready after %ds: taking it as running", STARTING_LIMIT_S)
+                    self.state, self._announce = "running", False
+                else:
+                    return False
+                announce, self._announce = self._announce, False
+            else:
+                self._restart_crashed()
+                announce = False
+        self.on_change()
+        return announce
+
+    def _restart_crashed(self) -> None:
+        with self._lock:
             code = self.proc.returncode
             now = self._clock()
             self.crashes.append(now)
@@ -314,7 +345,6 @@ class Booth:
                 log.error("The booth keeps stopping: not restarting it until Restart in the menu")
             else:
                 self._spawn()   # under the lock, so a Quit meanwhile can't be undone
-        self.on_change()
 
 
 # ---- publishing after an edit on the local page ---------------------------------------------
@@ -416,9 +446,18 @@ class Tray:
             return "The booth keeps stopping: see Open logs"
         if s == "stopped":
             return "Stopped"
+        if s == "starting":
+            return "Starting the booth\u2026"
         issues = health_issues(self.cfg.log_dir)
         mode = "Commentary on" if self._commentary_on() else "Recording shots"
         return f"{mode} \u00b7 {len(issues)} warning{'s' * (len(issues) != 1)}" if issues else f"{mode} \u00b7 all good"
+
+    def _ready_notice(self) -> str:
+        issues = health_issues(self.cfg.log_dir)
+        if not issues:
+            return "The booth is ready: all good."
+        n = len(issues)
+        return f"The booth is ready, with {n} warning{'s' * (n != 1)}: {issues[0][1]}"[:250]
 
     def _commentary_on(self) -> bool:
         from .config import load_config
@@ -871,6 +910,8 @@ class Tray:
     def _light(self) -> str:
         if self.booth.state in ("crashed", "stopped", "other"):
             return "red"
+        if self.booth.state == "starting":
+            return "grey"
         issues = health_issues(self.cfg.log_dir)
         return "orange" if issues else "green"
 
@@ -918,8 +959,9 @@ class Tray:
     def _watch(self) -> None:
         next_update = time.monotonic() + 60
         last = None
-        while not self._stop.wait(3):
-            self.booth.poll()
+        while not self._stop.wait(1 if self.booth.state == "starting" else 3):
+            if self.booth.poll():
+                self.notify(self._ready_notice())
             now = (self.booth.state, self._light(), self.status())
             if now != last:
                 last = now
@@ -1001,12 +1043,13 @@ def _logo(size: int):
 
 
 def icon_image(light: str = "green", size: int = 64):
-    """The tray icon: the logo with a status light (green, orange or red) in the corner."""
+    """The tray icon: the logo with a status light (green, orange, red, or grey while starting) in the corner."""
     from PIL import ImageDraw
 
     img = _logo(size)
     s = size
-    color = {"green": (40, 200, 90), "orange": (245, 160, 20), "red": (220, 40, 40)}.get(light, (40, 200, 90))
+    color = {"green": (40, 200, 90), "orange": (245, 160, 20), "red": (220, 40, 40),
+             "grey": (150, 150, 150)}.get(light, (40, 200, 90))
     ImageDraw.Draw(img).ellipse((s * .60, s * .60, s - 1, s - 1), fill=color + (255,),
                                 outline=(255, 255, 255, 255), width=max(1, s // 20))
     return img

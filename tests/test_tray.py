@@ -102,12 +102,12 @@ def test_the_booth_restarts_after_a_crash_but_not_endlessly(tmp_path):
         started[-1].returncode = 1
         now[0] += 10
         booth.poll()
-    assert len(started) == tray.RESTARTS + 1 and booth.state == "running"
+    assert len(started) == tray.RESTARTS + 1 and booth.state == "starting"
     started[-1].returncode = 1
     booth.poll()
     assert len(started) == tray.RESTARTS + 1 and booth.state == "crashed"
     booth.restart()   # the menu's Restart tries again
-    assert len(started) == tray.RESTARTS + 2 and booth.state == "running"
+    assert len(started) == tray.RESTARTS + 2 and booth.state == "starting"
 
 
 def test_crashes_spread_out_keep_restarting(tmp_path):
@@ -119,7 +119,30 @@ def test_crashes_spread_out_keep_restarting(tmp_path):
         started[-1].returncode = 1
         now[0] += tray.RESTART_WINDOW_S
         booth.poll()
-    assert booth.state == "running"
+    assert booth.state == "starting"
+
+
+def test_the_booth_is_starting_until_it_says_its_ready(tmp_path):
+    (tmp_path / "logs").mkdir()
+    started, now = [], [0.0]
+    booth = tray.Booth(tmp_path, popen=lambda *a, **k: started.append((_Proc(), k["env"])) or started[-1][0],
+                       clock=lambda: now[0])
+    booth.ready_file.write_text("1")   # the last run's
+    booth.start()
+    assert booth.state == "starting" and started[0][1]["SHOTCAST_READY_FILE"] == str(booth.ready_file)
+    assert not booth.poll() and booth.state == "starting"
+    booth.ready_file.write_text("1")
+    assert booth.poll() and booth.state == "running"   # started from the menu: say so
+    assert not booth.poll()
+    started[-1][0].returncode = 1
+    booth.poll()                                        # crashed and restarted: starting, quietly
+    assert booth.state == "starting"
+    booth.ready_file.write_text("1")
+    assert not booth.poll() and booth.state == "running"
+    started[-1][0].returncode = 1
+    booth.poll()
+    now[0] += tray.STARTING_LIMIT_S + 1                 # never said: taken as running, not announced
+    assert not booth.poll() and booth.state == "running"
 
 
 def test_env_beside_the_config_wins(tmp_path, monkeypatch):
@@ -268,3 +291,21 @@ def test_the_booth_restarts_unasked_only_when_its_status_says_between_rounds(tmp
     assert tray.Tray.round_in_progress(app) is True
     status.write_text(json.dumps({"round": False, "updated": time.time() - 60}))
     assert tray.Tray.round_in_progress(app) is None                    # stale: the booth may be gone
+
+
+async def test_the_booth_says_its_ready_once_its_startup_checks_are_done(tmp_path):
+    import asyncio
+
+    from commentator.engine import Engine
+
+    checks = asyncio.Event()
+
+    async def startup_health():
+        await checks.wait()
+    health = asyncio.create_task(startup_health())
+    told = asyncio.create_task(Engine._say_ready(str(tmp_path / "booth-ready"), health))
+    await asyncio.sleep(0.05)
+    assert not (tmp_path / "booth-ready").exists()
+    checks.set()
+    await told
+    assert (tmp_path / "booth-ready").exists()

@@ -970,8 +970,11 @@ class Engine:
         if self._log_truth:
             self._follower = GsproLogFollower(self.cfg.source.gspro_log, self.gspro)
             tasks.append(asyncio.create_task(self._follower.run(), name="gspro-log"))
+        health = None
         if self.cfg.health.enabled and self.cfg.source.type != "replay":
-            asyncio.create_task(self._startup_health(), name="health")
+            health = asyncio.create_task(self._startup_health(), name="health")
+        if ready := os.environ.get("SHOTCAST_READY_FILE"):
+            asyncio.create_task(self._say_ready(ready, health), name="ready")
         self._schedule_backup("startup")
         self._start_live()
         self._start_hud_buffer()
@@ -8950,6 +8953,17 @@ class Engine:
         self.health.clear("backup.failed", why="backed up")
 
     # ---- health checks --------------------------------------------------------------------
+
+    @staticmethod
+    async def _say_ready(path: str, health: asyncio.Task | None) -> None:
+        """Tell the tray (which started this booth) it's up: its startup checks done, so the tray's
+        warnings are this run's."""
+        if health is not None:
+            await asyncio.wait([health])
+        try:
+            Path(path).write_text(f"{time.time():.0f}\n", encoding="utf-8")
+        except OSError as e:
+            log.warning("Couldn't tell the tray the booth is ready (%s): %s", path, e)
 
     async def _startup_health(self) -> None:
         # The version comes from the log's backlog, so wait (bounded) for the follower to read it.

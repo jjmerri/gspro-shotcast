@@ -241,8 +241,9 @@ beyond that is supported on paper but not yet run live:
      **Check for updates** / **Restart to update**, **Check for updates automatically**,
      **Start with Windows**, **Quit**.
 
-   The icon's light is green when everything's fine, orange with warnings, red when the booth
-   isn't running. Updates are checked every few hours (unless you untick it; see the
+   The icon's light is grey while the booth starts (a few seconds; a notification says when it's
+   ready, with any warnings), then green when everything's fine, orange with warnings, red when
+   the booth isn't running. Updates are checked every few hours (unless you untick it; see the
    [privacy policy](PRIVACY.md)) and offered in the menu, never installed on their own (not
    mid-round). Updating copies the season database to `pre-update-*.db.gz` in the backup folder
    (the last three are kept), shows the installer's progress, then Shotcast starts again, says it's
