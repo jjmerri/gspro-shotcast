@@ -329,3 +329,55 @@ def test_the_leaderboard_drawn_in_keeps_off_the_recordings_bars(tmp_path):
     start = lambda f: re.search(r"start: ([\d.]+)", subprocess.run([ff, "-hide_banner", "-i", str(f)], capture_output=True,
                                                                    text=True).stderr).group(1)
     assert float(start(seg)) > 100 and start(out) == start(seg)   # its timestamps as they were
+
+
+def test_the_opening_and_closing_cards_are_made_into_the_video(monkeypatch):
+    from commentator import burn
+
+    s3 = FakeS3({ROOT + "reels/7/s1/a.ts": b"A"})
+    body = {"week": 6, "course": "X", "rows": [], "standings": [], "duration": 4.0,
+            "intro": [{"text": "i1", "seconds": 2.0}, {"text": "i2", "seconds": 3.0}],
+            "clips": [{"at": 0.0, "lines": [{"text": "c", "at": 1.5}]}], "outro": [{"text": "o", "seconds": 1.0}]}
+    made = []
+    monkeypatch.setattr(burn, "ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(burn, "probe", lambda ff, seg: {"width": 32, "height": 18, "fps": 30.0, "audio": None})
+    monkeypatch.setattr(burn, "card_png", lambda kind, b, w, h: kind.encode())
+    monkeypatch.setattr(burn, "card", lambda ff, png, s, like: made.append((png, s)) or [(png + b"%d" % i, d) for i, d in enumerate(burn.card_plan(s))])
+    video, sources, segs = recap.burn_cards(s3, "b", "", "w6", json.loads(json.dumps(body)) | {}, [[("s1/a.ts", 4.0)]], ["reels/7"])
+    assert made == [(b"intro", 7.6), (b"outro", 3.3)]   # its lines, from CARD_LEAD in, and a TAIL after
+    assert sources == ["card", "reels/7", "card"] and [[d for _, d in p] for p in video] == [[4.0, 3.6], [4.0], [3.3]]
+    assert sorted(segs.values()) == [b"intro0", b"intro1", b"outro0"]
+    out = dict(body)
+    video, sources, segs = recap.burn_cards(s3, "b", "", "w6", out, [[("s1/a.ts", 4.0)]], ["reels/7"])
+    assert out["cards"] and out["intro"] == out["outro"] == [] and out["duration"] == 14.9
+    assert [(c.get("card"), c["at"], [ln["at"] for ln in c["lines"]]) for c in out["clips"]] == \
+        [("intro", 0.0, [0.8, 3.1]), (None, 7.6, [9.1]), ("outro", 11.6, [12.4])]
+    # Up already: not made again. Without ffmpeg, as it was.
+    s3.objects.update({ROOT + "recaps/w6/" + u: b"x" for p in (video[0], video[2]) for u, _ in p})
+    made.clear()
+    assert recap.burn_cards(s3, "b", "", "w6", dict(body), [[("s1/a.ts", 4.0)]], ["reels/7"])[2] == {} and made == []
+    monkeypatch.setattr(burn, "ffmpeg", lambda: None)
+    assert recap.burn_cards(s3, "b", "", "w6", dict(body), [[("s1/a.ts", 4.0)]], ["reels/7"]) == ([[("s1/a.ts", 4.0)]], ["reels/7"], {})
+
+
+def test_a_card_is_made_as_segments_like_the_clips(tmp_path):
+    from commentator import burn
+
+    ff = burn.ffmpeg()
+    if not ff:
+        pytest.skip("needs ffmpeg")
+    import subprocess
+
+    clip = tmp_path / "clip.ts"
+    subprocess.run([ff, "-v", "error", "-f", "lavfi", "-i", "testsrc=s=320x180:d=1:r=25", "-f", "lavfi", "-i",
+                    "sine=r=44100:d=1", "-c:v", "libx264", "-c:a", "aac", "-f", "mpegts", str(clip)], check=True)
+    like = burn.probe(ff, clip)
+    assert like == {"width": 320, "height": 180, "fps": 25.0, "audio": (44100, "mono")}
+    body = {"week": 6, "course": "X", "rows": [{"place": 1, "tied": False, "name": "Aces", "net": -2, "points": 10}],
+            "standings": [{"place": 1, "name": "Aces", "points": 10, "was": 2}]}
+    segs = burn.card(ff, burn.card_png("outro", body, 320, 180), 5.0, like)
+    assert [d for _, d in segs] == [4.0, 1.0]
+    for i, (data, _) in enumerate(segs):
+        (tmp_path / f"c{i}.ts").write_bytes(data)
+        info = subprocess.run([ff, "-hide_banner", "-i", str(tmp_path / f"c{i}.ts")], capture_output=True, text=True).stderr
+        assert "320x180" in info and "44100 Hz, mono" in info

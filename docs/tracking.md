@@ -292,7 +292,9 @@ that set up its birdie), so league rounds' streams are kept to their week's dead
 turns on holes no clip shows are caught up on over the next clip; a sole winner's finish plays last, where the win is called. It opens over
 the week's results, plays the clips (their own sound off, the booth's new lines over them, the video waiting for
 a line that runs long; the video's mute and volume control the lines, and **CC**, above the player,
-shows them as subtitles, off by default) and closes over the standings. It's built after the round's publish has cut
+shows them as subtitles, off by default) and closes over the standings. With ffmpeg, the results and
+standings cards are made into the video too (still frames, as long as their lines), so the recap is
+one video from its first line to its last: seekable back to the opening, and full screen throughout. It's built after the round's publish has cut
 its reel, with one model call and the lines voiced; it's built again only if the week's numbers or
 footage change (Squabbit's net replacing the sim's). It's kept under `live/recaps/<end date>-w<week>/`
 (listed in `live/recaps.json`) for the season. Home's league cards get a **▶ Week N recap** button

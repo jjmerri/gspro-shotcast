@@ -23,8 +23,10 @@ import hashlib
 import io
 import json
 import logging
+import tempfile
 import time
 import wave
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
@@ -50,7 +52,8 @@ CLIP_WORDS = 26         # a clip's lines, together
 CATCH_UP_WORDS = 16     # more for a clip that first catches up on turns no clip showed
 CARD_WORDS = 35         # an intro or outro line
 BOARD_ROWS = 5          # the TV-style net leaderboard over a clip: the top this many, and the clip's team
-BUILD = 4               # how a recap's made: a change to it builds every recap again
+BUILD = 5               # how a recap's made: a change to it builds every recap again
+CARD_LEAD = 0.8         # a card's first line this long into it
 RETIRE_SECONDS = 3600.0  # a rebuild's leftovers stay this long (a player open on the last build still plays them)
 
 
@@ -708,6 +711,73 @@ def burn_boards(client: Any, bucket: str, prefix: str, key: str, body: dict,
     return out, made
 
 
+def burn_cards(client: Any, bucket: str, prefix: str, key: str, body: dict, video: list[list[tuple[str, float]]],
+               sources: list[str]) -> tuple[list[list[tuple[str, float]]], list[str], dict[str, bytes]]:
+    """The intro's results and the outro's standings made video (burn.card) at the recap's start and
+    end, so it's one video, seekable through and full screen: each a clip of the body's (`card`:
+    "intro"/"outro", its lines at their times, the clips after it moved on), the body's intro and outro
+    left empty (`cards`: True). Under b/, named for what's in them (one already up isn't made again).
+    Returns the playlist's parts, their sources and the segments made, by uri. Without ffmpeg, or if
+    it fails, all as it was: the page shows the cards over the player."""
+    from . import burn
+
+    ff = burn.ffmpeg()
+    if not ff or not video or not (body["intro"] or body["outro"]):
+        return video, sources, {}
+    root, base = _root(prefix), f"{_root(prefix)}recaps/{key}/"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp, "first.ts")
+            first.write_bytes(client.get_object(Bucket=bucket, Key=f"{root}{sources[0]}/{video[0][0][0]}")["Body"].read())
+            like = burn.probe(ff, first)
+        there = set(_keys(client, bucket, base + "b/"))
+        made, cards = {}, {}
+        for kind in ("intro", "outro"):
+            lines = body[kind]
+            if not lines:
+                continue
+            at, timed = CARD_LEAD, []
+            for line in lines:
+                timed.append({**line, "at": round(at, 2)})
+                at += line["seconds"] + LINE_GAP
+            seconds = round(at - LINE_GAP + TAIL, 2)
+            what = {"week": body["week"], "course": body.get("course"), "rows": body["rows"], "standings": body["standings"]}
+            tag = hashlib.sha1(json.dumps([burn.CARD_LOOK, kind, what, seconds, like], sort_keys=True).encode()).hexdigest()[:16]
+            plan = burn.card_plan(seconds)
+            names = [f"b/{kind}-{tag}-{n}.ts" for n in range(len(plan))]
+            if not all(base + n in there for n in names):
+                segs = burn.card(ff, burn.card_png(kind, body, like["width"], like["height"]), seconds, like)
+                made.update(zip(names, (b for b, _ in segs)))
+            cards[kind] = ({"at": 0.0, "card": kind, "team": None, "player": None, "hole": None, "what": None,
+                            "bad": False, "lines": timed}, list(zip(names, plan)))
+    except Exception as e:
+        log.warning("League recap: couldn't make its opening and closing cards into video (%s); the page shows them", e)
+        return video, sources, {}
+    clips = [{**c, "lines": [dict(ln) for ln in c["lines"]]} for c in body["clips"]]
+    video, sources = list(video), list(sources)
+    if "intro" in cards:
+        shift = sum(d for _, d in cards["intro"][1])
+        for c in clips:
+            c["at"] = round(c["at"] + shift, 2)
+            for line in c["lines"]:
+                line["at"] = round(line["at"] + shift, 2)
+        clips.insert(0, cards["intro"][0])
+        video.insert(0, cards["intro"][1])
+        sources.insert(0, "card")
+    if "outro" in cards:
+        end = sum(d for p in video for _, d in p)
+        c = cards["outro"][0]
+        c["at"] = round(end, 2)
+        for line in c["lines"]:
+            line["at"] = round(line["at"] + end, 2)
+        clips.append(c)
+        video.append(cards["outro"][1])
+        sources.append("card")
+    body.update(clips=clips, cards=True, duration=round(sum(d for p in video for _, d in p), 1),
+                **{k: [] for k in cards})
+    return video, sources, made
+
+
 def publish(client: Any, bucket: str, prefix: str, key: str, body: dict, video: list[list[tuple[str, float]]],
             sources: list[str], audio: list[tuple[str, bytes]], digest_: str, season_from: str | None = None,
             clock=time.time, made: dict[str, bytes] | None = None) -> dict:
@@ -762,7 +832,7 @@ def publish(client: Any, bucket: str, prefix: str, key: str, body: dict, video: 
                 del v["retired"]
         _delete(client, bucket, sorted(gone_now))
     entry = {"week": body["week"], "course": body.get("course"), "end_date": body.get("end_date"), "built": built,
-             "duration": body["duration"], "clips": len(body["clips"]), "hash": digest_,
+             "duration": body["duration"], "clips": sum(1 for c in body["clips"] if not c.get("card")), "hash": digest_,
              "winner": body["rows"][0]["name"] if body["rows"] else None}
     if retired:
         entry["retired"] = retired

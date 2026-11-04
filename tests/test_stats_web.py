@@ -1106,3 +1106,54 @@ setTimeout(() => {
     # The net board's up through a clip with one (from the second hole on), gone in the outro.
     assert got["boards"] == [True, False, True, False, True] and got["fit"] == ["50px", "36px"]
     assert got["drawnIn"]   # a board drawn into the video isn't drawn over it again
+
+
+def test_a_recap_with_its_cards_in_the_video_plays_them_as_its_first_and_last_clips():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = re.search(r"\nfunction recapPlayer\(.*?\n}\n", page, re.S).group(0)
+    body = {"week": 6, "cards": True, "rows": [{"name": "Aces", "net": -5, "place": 1, "tied": False}],
+            "standings": [{"name": "Aces", "points": 70, "place": 1, "was": 1}], "intro": [], "outro": [],
+            "clips": [{"at": 0, "card": "intro", "lines": [{"text": "i1", "at": 0.8, "audio": "a/0.wav"}]},
+                      {"at": 6, "lines": [{"text": "c1", "at": 7.5, "audio": "a/1.wav"}]},
+                      {"at": 16, "card": "outro", "lines": [{"text": "o1", "at": 16.8, "audio": "a/2.wav"}]}]}
+    script = """
+const esc = s => String(s), toPar = n => String(n), state = {};
+const on = o => { o.ev = {}; o.addEventListener = (k, f) => (o.ev[k] ||= []).push(f); o.fire = k => (o.ev[k] || []).forEach(f => f({ target: o.t })); return o; };
+const document = { createElement: () => on({ classList: { toggle() {} }, style: { setProperty() {} } }) };
+const store = { get: () => null, set() {} };
+const heard = [];
+let audio;
+class Audio { constructor() { audio = on(this); this.paused = true; }
+  play() { this.paused = false; heard.push(this.src.split("/").pop()); return Promise.resolve(); }
+  pause() { this.paused = true; } removeAttribute() {} }
+const video = on({ currentTime: 0, paused: true, muted: true, readyState: 4, clientWidth: 0, clientHeight: 0,
+  play() { this.paused = false; return Promise.resolve(); }, pause() { this.paused = true; this.fire("pause"); } });
+const BODY = %s;
+const fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(BODY) });
+const me = { video }; let player = me;
+%s
+recapPlayer(me, "2026-12-06-w6");
+const at = t => { video.currentTime = t; video.fire("timeupdate"); };
+setTimeout(() => {
+  const r = me.recap; r.card.t = { dataset: { recapplay: "1" } }; r.card.fire("click");
+  const straight = [r.phase, video.paused, r.card.hidden, heard.length];   // into the video, no card over it, its line from the tap
+  at(0.9); audio.fire("ended");                               // the intro's line, over its card
+  at(7.6); audio.fire("ended");
+  video.seeking = true; at(0); video.seeking = false; video.fire("seeked");   // back to the start
+  at(0.9); audio.fire("ended");                               // the intro again
+  at(7.6); audio.fire("ended");
+  at(16.9); audio.fire("ended");                              // the outro's, over the standings
+  video.ended = true; video.fire("ended");
+  console.log(JSON.stringify({ straight, heard, done: r.phase, again: r.card.innerHTML.includes("Watch again") }));
+}, 0);
+""" % (json.dumps(body), fns)
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    assert got == {"straight": ["clips", False, True, 1], "heard": ["0.wav", "1.wav", "0.wav", "1.wav", "2.wav"], "done": "done", "again": True}

@@ -2124,7 +2124,9 @@ class Engine:
         if not body["clips"]:
             log.info("League recap of week %s: none of its clips are in their reels", week)
             return
+        video, sources, cards = await asyncio.to_thread(recap.burn_cards, client, p.bucket, p.prefix, key, body, video, sources)
         video, made = await asyncio.to_thread(recap.burn_boards, client, p.bucket, p.prefix, key, body, video, sources)
+        made.update(cards)
         entry = await asyncio.to_thread(recap.publish, client, p.bucket, p.prefix, key, body, video, sources, audio,
                                         digest, season, made=made)
         log.info("League recap of week %s up: %s clips, %.0fs of video", week, entry["clips"], entry["duration"])

@@ -1,5 +1,7 @@
-"""A league recap's net leaderboard drawn into its video (recap.burn), so it's there full screen too:
-a phone's player shows only the video itself, none of the page laid over it.
+"""A league recap's net leaderboard drawn into its video (recap.burn_boards), and its opening results
+and closing standings made video of their own (recap.burn_cards), so they're there full screen too (a
+phone's player shows only the video itself, none of the page laid over it) and the recap's one video,
+seekable from its start to its end.
 
 Needs ffmpeg: imageio-ffmpeg's (the `publish` extra), or one on the PATH. Without, the recap goes up
 as it was, the page drawing the board over the video."""
@@ -22,6 +24,9 @@ ACCENT = (95, 197, 138)   # the stats page's --accent
 ROW = 0.028               # a row's text, as a share of the frame's height
 BOTTOM = 0.12             # the board's bottom, up off the frame's (clear of a player's controls)
 INSET = 0.04              # in from the picture's right edge, as a share of its width
+CARD_LOOK = 1             # how a card's drawn and made: a change to it makes every recap's again
+CARD_SEGMENT = 4.0        # a card's video, in segments this long
+BG = (17, 19, 24)         # the stats page's background
 
 
 @lru_cache(maxsize=1)
@@ -118,3 +123,110 @@ def clip(ff: str, segs: list[bytes], board: dict) -> list[bytes]:
                   "-c:a", "copy", "-muxdelay", "0", "-muxpreload", "0", "-f", "mpegts", str(out)])
             done.append(out.read_bytes())
         return done
+
+
+def _arrow(d, x: float, y: float, size: float, up: bool, fill) -> None:
+    h = size * 0.8
+    pts = [(x, y + h), (x + size, y + h), (x + size / 2, y)] if up else [(x, y), (x + size, y), (x + size / 2, y + h)]
+    d.polygon(pts, fill=fill)
+
+
+def card_png(kind: str, body: dict, width: int, height: int) -> bytes:
+    """The recap's opening card (`kind` "intro": the week's results) or closing one ("outro": the season
+    standings), a frame `width` x `height`, as the page draws them."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    fs = max(12, round(height * 0.042))
+    font, big, small = (ImageFont.load_default(size=fs), ImageFont.load_default(size=round(fs * 1.5)),
+                        ImageFont.load_default(size=round(fs * 0.75)))
+    white, grey, accent = (255, 255, 255), (160, 166, 178), ACCENT
+    if kind == "intro":
+        title = f"Week {body.get('week')}"
+        sub = " · ".join(str(x) for x in (body.get("course"), "final results") if x)
+        rows = [(f"{'T' if r.get('tied') else ''}{r['place']}", str(r["name"]), _par(int(r["net"])),
+                 f"{round(r['points'] * 10) / 10:g} pts" if r.get("points") is not None else "", None)
+                for r in body.get("rows") or []]
+    else:
+        title, sub = "Standings", f"after week {body.get('week')}"
+        rows = []
+        for r in body.get("standings") or []:
+            move = (r["was"] - r["place"]) if r.get("was") else 0
+            rows.append((str(r["place"]), str(r["name"]), f"{round(r['points'] * 10) / 10:g}", str(abs(move)) if move else "",
+                         move > 0 if move else None))
+    img = Image.new("RGB", (width, height), BG)
+    d = ImageDraw.Draw(img)
+    w = lambda s, f=font: d.textlength(s, font=f)
+    line = round(fs * 1.5)
+    most = max(1, int((height * 0.62) // line))
+    rows = rows[:most]
+    gap = fs * 1.2
+    cols = [max([w(r[i]) for r in rows] + [0]) for i in range(4)]
+    arrow = fs * 0.6 if any(r[4] is not None for r in rows) else 0
+    table = sum(cols) + arrow + 3 * gap + (fs * 0.3 if arrow else 0)
+    head = round(fs * 1.5) + round(fs * 1.2)
+    total = head + fs + line * len(rows)
+    x0, y = (width - max(table, w(title, big), w(sub, small))) / 2, (height - total) / 2
+    d.rectangle((x0, y - fs * 0.5, x0 + fs * 2.5, y - fs * 0.5 + max(2, fs // 6)), fill=accent)
+    d.text((x0, y), title, font=big, fill=white)
+    y += round(fs * 1.5) + fs * 0.3
+    d.text((x0, y), sub, font=small, fill=grey)
+    y += round(fs * 1.2) + fs
+    for place, name, num, extra, up in rows:
+        x = x0
+        d.text((x, y), place, font=font, fill=grey)
+        x += cols[0] + gap
+        d.text((x, y), name, font=font, fill=white)
+        x += cols[1] + gap
+        d.text((x + cols[2] - w(num), y), num, font=font, fill=accent if kind == "intro" else white)
+        x += cols[2] + gap
+        if up is not None:
+            _arrow(d, x, y + fs * 0.25, arrow, up, accent if up else (224, 122, 107))
+            x += arrow + fs * 0.3
+        d.text((x, y + (fs * 0.2 if kind == "intro" else 0)), extra, font=small if kind == "intro" else font, fill=grey)
+        y += line
+    out = BytesIO()
+    img.save(out, "PNG")
+    return out.getvalue()
+
+
+def probe(ff: str, seg: Path) -> dict:
+    """A segment's frame size, frame rate and audio (rate, channel layout; None with none), for a
+    card made to play on from it."""
+    info = subprocess.run([ff, "-hide_banner", "-i", str(seg)], capture_output=True, text=True, timeout=60).stderr
+    m = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", info)
+    if not m:
+        raise ValueError(f"no video in {seg.name}")
+    fps = re.search(r"([\d.]+) fps", info)
+    a = re.search(r"Audio:.*?(\d{4,6}) Hz, ([a-z0-9.()]+)", info)
+    return {"width": int(m.group(1)) // 2 * 2, "height": int(m.group(2)) // 2 * 2,
+            "fps": min(60.0, float(fps.group(1))) if fps else 30.0,
+            "audio": (int(a.group(1)), a.group(2).split("(")[0]) if a else None}
+
+
+def card_plan(seconds: float) -> list[float]:
+    """A card's segments' lengths: CARD_SEGMENT each, and what's left (at least half a second)."""
+    import math
+
+    n = max(1, math.ceil(seconds / CARD_SEGMENT - 0.05))
+    return [round(CARD_SEGMENT if i < n - 1 else max(0.5, seconds - CARD_SEGMENT * i), 3) for i in range(n)]
+
+
+def card(ff: str, png: bytes, seconds: float, like: dict) -> list[tuple[bytes, float]]:
+    """`png` held still for `seconds`, as segments (bytes, seconds) of CARD_SEGMENT and what's left,
+    made like the clips' (probe()'s `like`), with silence for sound if they have any."""
+    with tempfile.TemporaryDirectory() as tmp:
+        img, seg = Path(tmp, "card.png"), Path(tmp, "out.ts")
+        img.write_bytes(png)
+        fps, out = like["fps"], []
+        for i, d in enumerate(card_plan(seconds)):
+            args = [ff, "-hide_banner", "-loglevel", "error", "-y", "-loop", "1", "-framerate", f"{fps:g}", "-i", str(img)]
+            if like["audio"]:
+                rate, layout = like["audio"]
+                args += ["-f", "lavfi", "-i", f"anullsrc=r={rate}:cl={layout}", "-c:a", "aac", "-b:a", "64k"]
+            args += ["-t", f"{d:.3f}", "-vf", f"scale={like['width']}:{like['height']},format=yuv420p",
+                     "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage", "-r", f"{fps:g}",
+                     "-output_ts_offset", f"{CARD_SEGMENT * i:.3f}", "-muxdelay", "0", "-muxpreload", "0",
+                     "-f", "mpegts", str(seg)]
+            _run(args)
+            out.append((seg.read_bytes(), d))
+        return out

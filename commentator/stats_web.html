@@ -2078,7 +2078,8 @@ function recapPart() {
   return [head, rows];
 }
 // The recap's player: an intro over the week's results, the clips (muted) with the booth's lines
-// played over them at their times, an outro over the standings. One Audio element plays every line,
+// played over them at their times, an outro over the standings. A recap whose cards are in its video
+// (`cards`) has them as its first and last clips, their lines with the rest: one video, start to end. One Audio element plays every line,
 // started from the Play tap, which is what lets a phone play it. A line still going when the next is
 // due, or when its clip gives way to the next (or the video ends), holds the video till it's done.
 function recapPlayer(me, key, built) {
@@ -2201,6 +2202,10 @@ function recapPlayer(me, key, built) {
         // A phone that won't play it with sound: muted, the commentary still heard.
         if (e && e.name === "NotAllowedError" && !v.muted) { r.forced = true; v.muted = true; v.play().catch(() => {}); }
       });
+      // Cards in the video: its first line started by the Play tap itself, as a phone lets the lines' Audio
+      // play only from a tap.
+      const first = r.body.cards && r.body.clips.length && r.body.clips[0].lines[0];
+      if (first) speak(first);
     });
   };
   const finish = () => {
