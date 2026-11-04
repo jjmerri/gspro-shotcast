@@ -21,6 +21,7 @@ class ChatMessage:
     name: str
     text: str
     at: float      # epoch seconds
+    age: float | None = None   # seconds old when read, on the table's own clock (None: unknown)
 
 
 def cursor_at(epoch: float) -> str:
@@ -50,16 +51,19 @@ class ChatTable:
 
     def since(self, after: str, limit: int = 50) -> list[ChatMessage]:
         """Messages posted after the sort key `after`, oldest first; the newest `limit` of them if more."""
-        rows = self._db().query(
+        resp = self._db().query(
             TableName=self.table, KeyConditionExpression="pk = :p AND sk > :s",
             ExpressionAttributeValues={":p": {"S": "msg"}, ":s": {"S": after}},
             ScanIndexForward=False, Limit=limit,
-        ).get("Items", [])
+        )
+        server_now = _server_time(resp)
         out = []
-        for row in reversed(rows):
+        for row in reversed(resp.get("Items", [])):
             try:
                 sk = row["sk"]["S"]
-                out.append(ChatMessage(sk, row["name"]["S"], row["text"]["S"], int(sk.split("-")[0]) / 1000))
+                at = int(sk.split("-")[0]) / 1000
+                age = None if server_now is None else max(0.0, server_now - at)
+                out.append(ChatMessage(sk, row["name"]["S"], row["text"]["S"], at, age))
             except (KeyError, ValueError):
                 log.debug("Chat: skipped a malformed row %r", row)
         return out
@@ -70,6 +74,17 @@ class ChatTable:
             UpdateExpression="SET aired = :t", ConditionExpression="attribute_exists(pk)",
             ExpressionAttributeValues={":t": {"BOOL": True}},
         )
+
+
+def _server_time(resp) -> float | None:
+    """AWS's clock when it answered (its Date header, to the second): the messages' stamps are on it,
+    the PC's may not be."""
+    try:
+        from email.utils import parsedate_to_datetime
+
+        return parsedate_to_datetime(resp["ResponseMetadata"]["HTTPHeaders"]["date"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 # Always kept off the air, whatever the moderation: a link or an ad has nothing for the booth.

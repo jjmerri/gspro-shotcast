@@ -763,6 +763,8 @@ class ChatConfig(BaseModel):
     # the booth is on air in a round.
     enabled: bool = False
     table: str | None = None
+    # How often the booth checks whether the page's chat should be open. The messages themselves are
+    # read only when a shot is struck and the booth could talk about them after its call.
     poll_seconds: float = Field(5.0, gt=0)
     # What the booth won't put on air. off: a friendly league's trash talk and swearing are fair game
     # (the booth reacts, without swearing itself). standard: no swearing, abuse or personal attacks.

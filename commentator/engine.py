@@ -661,6 +661,8 @@ class Engine:
         self._chat_written = ""                       # the newest message id a take was written with
         self._chat_ready: PreparedChat | None = None
         self._chat_task: asyncio.Task | None = None
+        self._chat_glancing: asyncio.Task | None = None
+        self._chat_read_at = time.monotonic()         # when the chat was last read (or opened, unread)
         self._chat_aired_at = float("-inf")
         self._chat_aired_hole: tuple | None = None    # (round, hole seq) the booth last talked about the chat on
         self._chat_openers: list[str] = []            # the first lines of the chat takes aired this session
@@ -1767,13 +1769,14 @@ class Engine:
             self._events.put_nowait(RoundEndEvent(reason="quiet after the last hole"))
 
     async def _shot_then_news(self, event: ShotEvent) -> None:
+        self._chat_glance_on_shot()
         await self.handle_shot(event)
         # Only a shot that ran to its reaction, and is still the latest: an older handler finishing (early,
         # or late) must not start an aside under a newer shot's call, even one that set the moment already.
         m = self._news_moment
         if not (m and event.seq is not None and m["seq"] == event.seq == self._shot_seq):
             return
-        if self._asides_on() or self._chat_ready is not None:
+        if self._asides_on() or self._chat_ready is not None or self._chat_writing():
             self._bg(self._after_shot(m if self._asides_on() else None, m["seq"]))
 
     async def _after_shot(self, moment: dict | None, seq: int) -> None:
@@ -2390,12 +2393,14 @@ class Engine:
     CHAT_REWRITE = 15.0     # seconds a ready take is kept before newer messages get it rewritten
 
     async def _chat_tick(self) -> None:
-        """Tell the table whether the booth is on air (on a change, and as a heartbeat), then read the
-        new messages and, when the booth could talk about the chat soon, write its take on them."""
+        """Tell the table whether the booth is on air (on a change, and as a heartbeat). The messages
+        themselves are read only when a shot gives the booth a gap it could talk about them in
+        (_chat_glance)."""
         on, now = self._chat_open(), time.monotonic()
         if on and self._chat_round != self.round.id:
             # A round's chat is its own: the page shows nothing from before this round's opened.
             self._chat_round, self._chat_since = self.round.id, cursor_at(time.time())
+            self._chat_read_at = now
         since = self._chat_since if on else None
         if on != self._chat_live or since != self._chat_sent_since or now - self._chat_beat >= self.CHAT_HEARTBEAT:
             await asyncio.to_thread(self.chat.set_on_air, on, since)
@@ -2405,19 +2410,50 @@ class Engine:
         if not on:
             # Off air nothing is read, and nothing posted meanwhile is talked about later.
             self._chat_cursor = cursor_at(time.time())
-            self._chat_log, self._chat_ready = [], None
+            self._chat_log, self._chat_ready, self._chat_read_at = [], None, now
             self._chat_talked = self._chat_written = self._chat_cursor
             if self._chat_task and not self._chat_task.done():
                 self._chat_task.cancel()
+
+    def _chat_glance_on_shot(self) -> None:
+        """A shot was struck: if the booth could talk about the chat once its call is done, read the
+        chat now (a quick query) and write a take while the ball flies and the call plays."""
+        if (self.chat is None or not self._chat_live or not self._chat_open()
+                or not self._chat_may_air(time.monotonic(), soon=True)
+                or (self._chat_glancing is not None and not self._chat_glancing.done())):
             return
-        if new := await asyncio.to_thread(self.chat.since, self._chat_cursor):
+        self._chat_glancing = t = asyncio.create_task(self._chat_glance(), name="chat-read")
+        t.add_done_callback(lambda t: t.cancelled() or t.exception())
+
+    def _chat_writing(self) -> bool:
+        """Whether a read, or a take on it, is under way."""
+        return any(t is not None and not t.done() for t in (self._chat_glancing, self._chat_task))
+
+    async def _chat_glance(self) -> None:
+        """Read the new messages and, when the booth could talk about the chat soon, write its take."""
+        if not self._chat_open() or self._chat_round != (r := self.round).id:
+            return
+        cursor = self._chat_cursor
+        try:
+            new = await asyncio.to_thread(self.chat.since, cursor)
+        except Exception as e:
+            log.info("Chat: couldn't read the chat (chat.table %r): %s", self.cfg.chat.table, e)
+            return
+        now, wall = time.monotonic(), time.time()
+        if not self._chat_open() or self.round is not r or self._chat_cursor != cursor:
+            return   # closed, or reopened, while it read
+        if new:
             self._chat_cursor = new[-1].id
+            # Aged on the table's clock when it said what that was (the PC's may be off), else the PC's;
+            # never older than the last read either way: they weren't there then.
+            since_read = max(0.0, now - self._chat_read_at)
             for m in new:
                 if why := screened_out(m.text, self.cfg.chat.moderation):
                     log.info("Chat: %s's message left out (%s)", m.name, why)
                 else:
-                    self._chat_log.append((m, now))
-        # Ages from when the booth read it, not the post's own stamp: the PC's clock may be off.
+                    age = m.age if m.age is not None else max(0.0, wall - m.at)
+                    self._chat_log.append((m, now - min(age, since_read)))
+        self._chat_read_at = now
         self._chat_log = [(m, at) for m, at in self._chat_log if now - at < self.cfg.chat.max_age_seconds]
         fresh = [m for m, _ in self._chat_log if m.id > self._chat_talked]
         ready = self._chat_ready
@@ -2508,14 +2544,17 @@ class Engine:
     async def _chat_after_shot(self, seq: int) -> bool:
         """Air the take on the chat that's ready once this shot's call is done (once a hole, at most,
         and chat.min_gap_seconds apart). Returns whether it played."""
-        bit = self._chat_ready
-        if bit is None or not self._chat_may_air(time.monotonic()):
+        if (self._chat_ready is None and not self._chat_writing()) or not self._chat_may_air(time.monotonic()):
             return False
+        # The take is written while the ball flies and the call plays: one still being written gets
+        # until the call's done, and a little after, to be ready.
         deadline = time.monotonic() + 8.0
-        while not self.speech.is_idle() and time.monotonic() < deadline and self._shot_seq == seq:
+        while ((not self.speech.is_idle() or (self._chat_ready is None and self._chat_writing()))
+               and time.monotonic() < deadline and self._shot_seq == seq):
             await asyncio.sleep(0.2)
         await asyncio.sleep(0.8)   # a beat after the call
-        if not self.speech.is_idle() or self._shot_seq != seq or self._chat_ready is not bit or not self._chat_open():
+        bit = self._chat_ready
+        if bit is None or not self.speech.is_idle() or self._shot_seq != seq or self._chat_ready is not bit or not self._chat_open():
             return False
         if bit.expires <= time.monotonic():
             self._chat_ready, self._chat_written = None, self._chat_talked
