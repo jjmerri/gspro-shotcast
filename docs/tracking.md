@@ -256,6 +256,15 @@ a week like the streams. A clip is deleted at the next publish once its shot no 
 record. A record shot whose stream was already gone has no clip, and one near the end of a stream
 still uploading gets its clip at a later publish. Its **▶ Watch** and share link play the clip. Clips need the uploader to read `live/`. Stacks made before 0.1.39
 can't, so update the stack; until then each publish skips the clips and says why.
+It also has **Highlights**: each publish picks up to 8 moments from every round with at least two
+(holed putts and hole-outs, approaches and chips stopped close, the round's longest drive; the
+booth's own excitement scale picks them, with a player's or a hole's next pick counting for a little
+less so one player or one hole doesn't fill the reel, and at most one bad shot a player: a penalty,
+a missed short putt, a three-putt, a shot far off line). Their stretches of stream are copied
+back to back into `live/reels/<round>/` (listed in `live/reels.json`), and the round's page gets a
+**▶ Highlights** button that plays the reel, with each moment listed to jump to. A league round's
+reel stays for the season (`publish.season_start`), any other round's for as long as its stream
+would have. A round whose stream is already gone gets none.
 **Schedule** lists the sim's SuperSaaS bookings for the next two weeks (time, the booker's name
 and the booking type), when [bookings](leagues.md) are on (`booking.schedule_days`, 0 for none);
 the booth refreshes it every 30 minutes while it runs.

@@ -65,6 +65,7 @@
   .detail .cards { grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:8px; }
   .detail .card { padding:8px 10px; }
   .moments { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:8px 16px; margin:8px 0; }
+  .reelmoments { margin:8px 0; padding-left:22px; } .reelmoments li { margin:4px 0; }
   .bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; min-width:80px; }
   .bar i { display:block; height:100%; background:var(--accent); }
   .err { color:#ff8a80; padding:20px; }
@@ -255,7 +256,8 @@ function applyHash() {
   if (state.tab === "player") state.player = q.get("name") || q.get("show") || state.player;
   if (state.tab === "versus") state.versus = [q.get("a") || state.versus[0] || state.me || null, q.get("b") || state.versus[1]];
   if (state.tab === "highlights") state.period = q.get("period") === "season" || PERIODS.some(p => p[0] === q.get("period")) ? q.get("period") : null;
-  if (state.tab === "vods") state.vod = q.get("clip") ? { clip: q.get("clip"), at: +q.get("at") || 0 }
+  if (state.tab === "vods") state.vod = q.get("reel") ? { reel: q.get("reel"), at: +q.get("at") || 0 }
+    : q.get("clip") ? { clip: q.get("clip"), at: +q.get("at") || 0 }
     : q.get("vod") ? { session: q.get("vod"), at: +q.get("at") || 0 } : null;
   if (state.tab === "broadcasts" && num("session")) state.session = num("session");
   return !state.data || was[0] !== state.me || was[1] !== state.ctx;
@@ -469,7 +471,10 @@ function hashFor(tab = state.tab, v = null) {
   else if (tab === "versus") { set("a", state.versus[0]); set("b", state.versus[1]); }
   else if (tab === "player") set("name", state.player);
   else if (tab === "highlights" && state.period) set("period", state.period);
-  else if (tab === "vods" && state.vod) { state.vod.clip ? set("clip", state.vod.clip) : set("vod", state.vod.session); if (state.vod.at) set("at", state.vod.at); }
+  else if (tab === "vods" && state.vod) {
+    state.vod.reel ? set("reel", state.vod.reel) : state.vod.clip ? set("clip", state.vod.clip) : set("vod", state.vod.session);
+    if (state.vod.at) set("at", state.vod.at);
+  }
   else if (tab === "broadcasts") set("session", state.session);
   return "#" + tab + "?" + q;
 }
@@ -1387,7 +1392,7 @@ function renderRound() {
         `<button class="link" data-leagueround="${r.round}" data-ended="${r.round_end}" data-kind="${k}" title="Which stats it counts in: League, Tournament or Practice">Make it a ${k} round</button>`),
       `<button class="link" data-exclround="${r.round}" data-ended="${r.round_end}" data-on="1" title="Keep it listed on this PC, but out of every stat (and off the published site)">Exclude from stats</button>`,
       `<button class="link danger" data-delround="${r.round}" data-ended="${r.round_end}" title="Remove the round and its shots for good">Delete round</button>`].join("")}</div></details>` : "";
-  const acts = group("Watch", [`<button class="link" data-roundshots="${r.round}">Every shot</button>`, watchBtn(r.started, "▶ Watch the round"), said])
+  const acts = group("Watch", [reelBtn(r.round), `<button class="link" data-roundshots="${r.round}">Every shot</button>`, watchBtn(r.started, "▶ Watch the round"), said])
     + group("Share", [`<button class="link" data-sharecard="${r.id}" title="An image of this round to post or send">Share card</button>`,
                       shareBtn(hashFor("round", { id: r.id }), "this round", "Share link")])
     + manage;
@@ -1888,6 +1893,8 @@ function loadHls() {
 function wantedVideo() {
   const s = state.live;
   if (state.tab === "live" && s && s.live) return { key: s.session, src: `live/s/${encodeURIComponent(s.session)}/stream.m3u8`, live: true };
+  const hl = state.tab === "vods" && state.vod && state.vod.reel && state.reels && state.reels[state.vod.reel];
+  if (hl) return { key: "reel:" + state.vod.reel, src: `live/reels/${encodeURIComponent(state.vod.reel)}/reel.m3u8`, at: state.vod.at || 0 };
   const c = state.tab === "vods" && state.vod && state.vod.clip && state.clips && state.clips[state.vod.clip];
   if (c) return { key: "clip:" + state.vod.clip, src: `live/clips/${encodeURIComponent(state.vod.clip)}/clip.m3u8`, at: state.vod.at || 0 };
   if (state.tab === "vods" && state.vod && (state.vods || []).some(v => v.session === state.vod.session))
@@ -1979,17 +1986,20 @@ const vodOut = v => {
 const shownVods = () => state.vodsAll ? state.vodsAll.filter(v => !vodOut(v)) : null;
 async function pollExtras() {
   const get = async url => { try { const r = await fetch(url, { cache: "no-store" }); return r.ok ? await r.json() : null; } catch (e) { return null; } };
-  const [rec, sched, cl, lg] = await Promise.all([get("live/recordings.json"), get("schedule.json"), get("live/clips.json"), get("league.json")]);
+  const [rec, sched, cl, lg, rl] = await Promise.all([get("live/recordings.json"), get("schedule.json"), get("live/clips.json"),
+                                                       get("league.json"), get("live/reels.json")]);
   state.vodsAll = rec && Array.isArray(rec.recordings) ? rec.recordings.filter(v => v.duration > 0 || v.ended === null) : null;
   const vods = shownVods();
   const schedule = sched && Array.isArray(sched.bookings) ? sched : null;
   const clips = cl && cl.clips && typeof cl.clips === "object" ? cl.clips : null;
   const rowsOk = c => c && Array.isArray(c.rows) && c.rows.every(r => r && typeof r === "object") ? c : null;
   const league = lg && lg.updated ? { ...lg, week: rowsOk(lg.week), standings: rowsOk(lg.standings) } : null;
-  const was = JSON.stringify([state.vods, state.schedule, state.clips, state.league]);
-  state.vods = vods; state.schedule = schedule; state.clips = clips; state.league = league;
+  const reels = rl && rl.reels && typeof rl.reels === "object" ? Object.fromEntries(Object.entries(rl.reels).filter(([, x]) =>
+    x && typeof x === "object" && Array.isArray(x.moments) && x.moments.every(m => m && typeof m === "object"))) : null;
+  const was = JSON.stringify([state.vods, state.schedule, state.clips, state.league, state.reels]);
+  state.vods = vods; state.schedule = schedule; state.clips = clips; state.league = league; state.reels = reels;
   state.keepDays = rec && rec.keep_days > 0 ? rec.keep_days : 7;
-  if (JSON.stringify([vods, schedule, clips, league]) === was) return;
+  if (JSON.stringify([vods, schedule, clips, league, reels]) === was) return;
   const shown = state.tab;
   if ((state.tab === "vods" && !tabs().includes("vods")) || (state.tab === "schedule" && !schedule)) state.tab = "home";
   showTabs();
@@ -2002,7 +2012,27 @@ const when = (t, opts) => new Date(t).toLocaleString([], opts);
 
 // A record shot's clip (record_clips.py): who, where, and the record's hole.
 const clipName = c => [c.player, c.course, c.hole && holeName(c.hole)].filter(Boolean).join(" · ");
+// A round's highlight reel (highlights.py): its best moments back to back, each one a jump.
+function reelBtn(round, label = "▶ Highlights") {
+  const x = state.reels && state.reels[round];
+  return x ? `<button class="link" data-reel="${esc(String(round))}" data-vodat="0" title="The round's best moments, ${x.moments.length} of them">${label}</button>` : "";
+}
+function reelPart() {
+  const id = state.vod && state.vod.reel, x = id && state.reels && state.reels[id];
+  const list = Object.entries(state.reels || {}).sort((a, b) => (b[1].ended || 0) - (a[1].ended || 0));
+  const head = x ? `<h2>Highlights <span class="sub">${esc(x.label || "")} · ${esc(x.date || "")}</span></h2><div id="liveslot"></div>
+    <ol class="reelmoments">${x.moments.map(m => `<li><button class="link" data-reel="${esc(id)}" data-vodat="${+m.at || 0}">${esc(m.what || "")}</button>${m.bad ? ' <span class="sub">(oops)</span>' : ""}</li>`).join("")}</ol>
+    <p class="sub">${shareBtn(hashFor("vods", { reel: id, player: "" }), "these highlights")} <a class="link" href="${esc(hashFor("round", { r: id }))}">View round</a></p>` : "";
+  const rows = list.length ? `<h2>Highlights <span class="sub">each round's best moments${list.some(([, r]) => r.league) ? "; league rounds' kept all season" : ""}</span></h2>
+    <table>${list.map(([k, r]) => `<tr class="${k === id ? "sel" : ""}"><td>${esc(r.date || "")}</td><td class="l wrap">${reelBtn(k, esc(r.label || "Round"))}${r.league ? ' <span class="tag">league</span>' : ""}</td>
+    <td>${r.moments.length} moments${r.duration ? ` · ${hm(r.duration)}` : ""}</td></tr>`).join("")}</table>` : "";
+  return [head, rows];
+}
 function renderVods() {
+  const [reelHead, reelList] = reelPart();
+  return reelHead + vodsBody() + reelList;
+}
+function vodsBody() {
   const vods = state.vods || [], clips = Object.entries(state.clips || {});
   const clip = state.vod && state.vod.clip && state.clips && state.clips[state.vod.clip];
   const clipHtml = clip ? `<h2>Record shot <span class="sub">${esc(clipName(clip))}</span></h2><div id="liveslot"></div>
@@ -2087,7 +2117,8 @@ function render() {
 function tabs() {
   const d = state.data;
   const has = { live: state.live !== null && state.live !== undefined,
-                vods: !!(state.vods && state.vods.length) || !!(state.clips && Object.keys(state.clips).length),
+                vods: !!(state.vods && state.vods.length) || !!(state.clips && Object.keys(state.clips).length)
+                      || !!(state.reels && Object.keys(state.reels).length),
                 schedule: !!state.schedule };
   if (d) Object.assign(has, { broadcasts: d.broadcasts.length > 0,
                               booth: d.booth.commentators.length > 0 || d.booth.calls.length > 0 || d.predictions.length > 0 });
@@ -2177,17 +2208,17 @@ document.addEventListener("click", (e) => {
     shareLink(t.dataset.link, t.dataset.linktitle, t);
     return;
   }
-  if (t.dataset.vod || t.dataset.clip) {
+  if (t.dataset.vod || t.dataset.clip || t.dataset.reel) {
     // From another view: a history entry to come back to.
     if (state.tab !== "vods") remember();
-    const at = +t.dataset.vodat || 0, clip = t.dataset.clip;
-    if (player && player.session === (clip ? "clip:" + clip : "vod:" + t.dataset.vod)) {
+    const at = +t.dataset.vodat || 0, clip = t.dataset.clip, reel = t.dataset.reel;
+    if (player && player.session === (reel ? "reel:" + reel : clip ? "clip:" + clip : "vod:" + t.dataset.vod)) {
       player.video.currentTime = at;   // the same stream: just jump
       player.video.play().catch(() => {});
     } else {
       stopLive();
     }
-    state.vod = clip ? { clip, at } : { session: t.dataset.vod, at };
+    state.vod = reel ? { reel, at } : clip ? { clip, at } : { session: t.dataset.vod, at };
     state.tab = "vods";
     showTabs();
     render();

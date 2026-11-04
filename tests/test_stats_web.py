@@ -590,6 +590,39 @@ console.log(JSON.stringify(out));"""
     assert got[5] == ""
 
 
+def test_a_rounds_highlights_list_its_moments_to_jump_to():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = "\n".join(re.search(rf"\nconst {n} = .*?\n", page).group(0) for n in ("esc", "hm")) \
+        + "".join(re.search(rf"\nfunction {n}\(.*?\n}}\n", page, re.S).group(0) for n in ("reelBtn", "reelPart"))
+    script = "const state = {}, hashFor = (t, o) => t + JSON.stringify(o), shareBtn = (h, t) => `[share ${h}]`;" + fns + """
+const out = [reelPart(), reelBtn(7)];
+state.reels = {"7": {label: "Pebble · Ann & <Bob>", date: "2026-11-01", ended: 2, league: true, duration: 95,
+                     moments: [{at: 3, what: "Ann holes a 30 ft putt"}, {at: 41.5, what: "Bob finds the water", bad: true}]},
+               "9": {label: "Riviera · Cal", date: "2026-11-02", ended: 3, moments: [{at: 0, what: "x"}, {at: 9, what: "y"}]}};
+out.push(reelBtn(7), reelBtn(8));
+state.vod = {reel: "7", at: 0};
+out.push(...reelPart());
+console.log(JSON.stringify(out));"""
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    assert got[:2] == [["", ""], ""]
+    assert got[2] == '<button class="link" data-reel="7" data-vodat="0" title="The round\'s best moments, 2 of them">▶ Highlights</button>'
+    assert got[3] == ""
+    head, rows = got[4], got[5]
+    assert "Pebble · Ann &amp; &lt;Bob&gt;" in head and 'id="liveslot"' in head
+    assert 'data-reel="7" data-vodat="41.5">Bob finds the water</button> <span class="sub">(oops)</span>' in head
+    assert '[share vods{"reel":"7","player":""}]' in head and 'round{&quot;r&quot;:&quot;7&quot;}' in head
+    assert rows.index("Riviera") < rows.index("Pebble") and '<tr class="sel">' in rows and "2 min" in rows
+    assert "league rounds' kept all season" in rows
+
+
 def test_a_round_card_takes_its_longest_drive_from_its_shots(tmp_path):
     """Stored as none at the round's end (the club wasn't read), the drive counts once a rule does."""
     path, db = _db(tmp_path)

@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from . import hole_replay
-from . import record_clips
+from . import highlights, record_clips
 from . import season_analytics as A
 from . import stats_web
 
@@ -148,9 +148,10 @@ def page(site_name: str = SITE_NAME, more_tab: str = MORE_TAB) -> str:
 
 def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = None,
           records: dict[int, dict] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB,
-          local: bool = False, season_start: str | None = None) -> str:
+          local: bool = False, season_start: str | None = None, reels: dict[int, dict] | None = None) -> str:
     """Build (or refresh) the site in `site` from the season database; returns the new version. With
-    `records`, it's filled with every shot holding a record (id -> the record), for record_clips.
+    `records`, it's filled with every shot holding a record (id -> the record), for record_clips; with
+    `reels`, with every round's highlight moments (round -> its reel), for highlights.sync.
     `site_name` and `more_tab` are publish.site_name and publish.more_tab. `local`: for the page served
     on the PC (stats_web.make_server), which also lists the rounds excluded from the stats.
     `season_start`: publish.season_start (MM-DD), for the records' This season range."""
@@ -174,6 +175,8 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
                 (pdir / f"{p['file']}.json").write_text(json.dumps(pf, separators=(",", ":")), encoding="utf-8")
             (vdir / f"summary-{name}.json").write_text(json.dumps(body, separators=(",", ":")), encoding="utf-8")
         build_data_db(src, vdir / "stats.db", names)
+        if reels is not None:
+            reels.update(highlights.rounds(src))
     (site / "index.html").write_text(page(site_name, more_tab), encoding="utf-8")
     for lib in VENDOR.iterdir():
         if lib.is_dir():
@@ -241,12 +244,13 @@ def _list(client: Any, bucket: str, prefix: str) -> set[str]:
 def publish(db_path: str | Path, site: str | Path, bucket: str, prefix: str = "", region: str | None = None,
             names: dict[str, str] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB,
             season_start: str | None = None) -> str:
-    """Build the site from the database and upload it, then keep the record shots' clips up to date
-    (record_clips.py). Returns the published version."""
+    """Build the site from the database and upload it, then keep the record shots' clips and the
+    rounds' highlight reels up to date (record_clips.py, highlights.py). Returns the published version."""
     import boto3
 
     records: dict[int, dict] = {}
-    build(db_path, site, names, records, site_name, more_tab, season_start=season_start)
+    reels: dict[int, dict] = {}
+    build(db_path, site, names, records, site_name, more_tab, season_start=season_start, reels=reels)
     client = boto3.client("s3", region_name=region) if region else boto3.client("s3")
     version = upload(site, bucket, prefix, client)
     try:
@@ -254,6 +258,11 @@ def publish(db_path: str | Path, site: str | Path, bucket: str, prefix: str = ""
         print(f"Record clips: {n['kept']} kept, {n['added']} new, {n['removed']} removed")
     except Exception as e:   # the stats are up: the clips are tried again next publish
         print(f"Record clips not updated: {e}")
+    try:
+        n = highlights.sync(client, bucket, prefix, reels, stats_web.season_start(season_start))
+        print(f"Highlight reels: {n['kept']} kept, {n['added']} new, {n['removed']} removed")
+    except Exception as e:   # ...and the reels
+        print(f"Highlight reels not updated: {e}")
     return version
 
 
