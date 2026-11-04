@@ -265,8 +265,9 @@ their best. The booth's own excitement scale picks them, with a player's or a ho
 counting for a little less so one player or one hole doesn't fill the reel, and at most one bad
 shot a player, never more bad than good: a penalty, a missed short putt, a three-putt (shown from
 its first putt), a shot far off line). Each runs on till the booth is done talking about it (its
-call and any reaction, timed from when the booth logged each line as playing and for how long, or
-from its words in a round from before that), finishing a line under way at the cut; and a reel
+call, any reaction, or with neither its flight lines; timed from when the booth logged each line as
+playing and for how long, or from its words in a round from before that), and stops before
+whatever the booth says next (the next shot's setup, a segment, banter) or the next swing; and a reel
 keeps to under 3 minutes, dropping its least moments to fit. Their stretches of stream are copied
 back to back into `live/reels/<round>/` (listed in `live/reels.json`), and the round's page gets a
 **▶ Highlights** button that plays the reel, with each moment listed to jump to. A league round's

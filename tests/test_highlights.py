@@ -156,6 +156,14 @@ def test_a_reel_is_cut_from_the_stream_with_a_break_between_moments():
     longer = _reel(1020, 1026, 1150)
     longer["moments"][2]["post"] = 20.0   # a longer cut: a new playlist
     assert H.sync(s3, "b", "", {7: longer}, clock=lambda: 1300)["added"] == 1
+    stopped = _reel(1020, 1026, 1150)   # the booth's next line starts 13 s on: not its segment (160-164 s)
+    stopped["moments"][2].update(stop=13.0, must=5.0)
+    H.sync(s3, "b", "", {7: stopped}, clock=lambda: 1300)
+    pl = s3.objects[ROOT + "reels/7/reel.m3u8"].decode()
+    assert "s1/stream39.ts" in pl and "s1/stream40.ts" not in pl
+    stopped["moments"][2]["must"] = 10.0 + H.MUST_GRACE + 1   # ...unless its own talk runs well into it
+    H.sync(s3, "b", "", {7: stopped}, clock=lambda: 1300)
+    assert "s1/stream40.ts" in s3.objects[ROOT + "reels/7/reel.m3u8"].decode()
     # Gone off the page (or past its keep): deleted.
     assert H.sync(s3, "b", "", {}, clock=lambda: 1300) == {"kept": 0, "added": 0, "removed": 1}
     assert not [k for k in s3.objects if k.startswith(ROOT + "reels/")]
@@ -189,7 +197,7 @@ def test_the_build_finds_each_rounds_reel(tmp_path):
     assert list(reels) and all(r["league"] and len(r["moments"]) >= 2 for r in reels.values())
 
 
-def test_a_clip_runs_till_the_booth_is_done_talking_about_it_and_never_stops_mid_line():
+def test_a_clip_runs_till_the_booth_is_done_talking_about_it_and_stops_before_whatever_follows():
     db = sqlite3.connect(":memory:")
     db.execute("CREATE TABLE lines (id INTEGER PRIMARY KEY, session_id, shot_id, ts, kind, text)")
     words = lambda n: " ".join(["word"] * n)   # 27 words: 10 s said
@@ -198,28 +206,30 @@ def test_a_clip_runs_till_the_booth_is_done_talking_about_it_and_never_stops_mid
     db.executemany("INSERT INTO lines (session_id, shot_id, ts, kind, text) VALUES (?,?,?,?,?)",
                    [(1, chip["id"], 108.0, "shot", words(27)),
                     (1, None, 103.0, "reaction", words(27)),    # (no shot logged with it: the chip's)
-                    (1, None, 125.0, "segment", words(27))])    # starts just after: it finishes too
-    talk = H._talk(db, [chip, nxt])
-    assert talk[0][chip["id"]] == 103.0 + 10 + 10   # the call waits for the reaction
-    post = lambda at, last=None: H._post(H.POST_SHOT, at, last or at, talk)
-    assert post(chip) == round(125 + 10 + H.TALK_TAIL + H.TALK_LAG - 100, 1)
-    db.execute("UPDATE lines SET ts = 133 WHERE kind = 'segment'")   # well after: not waited for
-    talk = H._talk(db, [chip, nxt])
-    assert post(chip) == round(123 + H.TALK_TAIL + H.TALK_LAG - 100, 1)
-    nxt["ts"] = 125.5   # ...nor one after the next swing
-    db.execute("UPDATE lines SET ts = 125 WHERE kind = 'segment'")
-    talk = H._talk(db, [chip, nxt])
-    assert post(chip) == round(123 + H.TALK_TAIL + H.TALK_LAG - 100, 1)
-    first = {**chip, "ts": 40.0}   # a three-putt played from its first putt: not capped short of the last
-    assert post(first, chip) == round(123 + H.TALK_TAIL + H.TALK_LAG - 40, 1)
-    assert H._post(H.POST_SHOT, chip, chip, H._talk(sqlite3.connect(":memory:"), [chip])) == H.POST_SHOT
-    db.execute("DELETE FROM lines WHERE kind != 'segment'")
-    db.execute("UPDATE lines SET ts = 113 WHERE kind = 'segment'")   # nothing about it: heard just after the cut
+                    (1, None, 133.0, "segment", words(27))])
+    post = lambda at, last=None: H._post(H.POST_SHOT, at, last or at, H._talk(db, [chip, nxt]))
+    heard = lambda t, at=100: round(t + H.TALK_LAG - at, 1)
+    done = 123 + H.TALK_TAIL   # the call waits for the reaction: 113-123
+    assert post(chip) == {"post": heard(done), "stop": heard(133 - H.STOP_MARGIN), "must": heard(done)}
+    db.execute("UPDATE lines SET ts = 124 WHERE kind = 'segment'")   # straight after: never waited for
+    assert post(chip) == {"post": heard(done), "stop": heard(done), "must": heard(done)}
+    db.execute("UPDATE lines SET ts = 128 WHERE kind = 'segment'")
+    assert post(chip)["stop"] == heard(128 - H.STOP_MARGIN)
+    db.execute("UPDATE lines SET ts = 133 WHERE kind = 'segment'")
+    nxt["ts"] = 130   # ...nor the next swing
+    assert post(chip)["stop"] == heard(130 + H.STREAM_LAG - H.TALK_LAG - H.STOP_MARGIN)
     nxt["ts"] = 140
-    assert H._post(H.POST_SHOT, chip, chip, H._talk(db, [chip, nxt])) == round(123 + H.TALK_TAIL + H.TALK_LAG - 100, 1)
-    nxt["ts"] = 113   # already in the clip, as is the line under way after it
-    db.execute("UPDATE lines SET ts = 113.5 WHERE kind = 'segment'")
-    assert H._post(20.0, chip, chip, H._talk(db, [chip, nxt])) == round(123.5 + H.TALK_TAIL + H.TALK_LAG - 100, 1)
+    first = {**chip, "ts": 40.0}   # a three-putt played from its first putt: not capped short of the last
+    assert post(first, chip)["post"] == heard(done, 40)
+    long_talk = ({1: [(100.0, 200.0, 100.0)]}, {1: [100.0]})   # on and on: capped
+    assert H._post(H.POST_SHOT, chip, chip, long_talk)["post"] == H.TALK_MAX
+    assert H._post(H.POST_SHOT, chip, chip, H._talk(sqlite3.connect(":memory:"), [chip]))["post"] == H.POST_SHOT
+    # Not called, only its flight: on past that, but not into the banter after it.
+    db.execute("DELETE FROM lines")
+    db.executemany("INSERT INTO lines (session_id, shot_id, ts, kind, text) VALUES (?,?,?,?,?)",
+                   [(1, None, 100.0, "flight", words(6)), (1, None, 108.0, "banter", words(40))])
+    assert post(chip) == {"post": heard(108 - H.STOP_MARGIN), "stop": heard(108 - H.STOP_MARGIN),
+                          "must": heard(100 + 6 / H.TALK_WORDS_PER_SECOND + H.TALK_TAIL)}
 
 
 def test_the_booths_logged_air_times_place_its_lines_and_one_never_aired_is_skipped():
@@ -230,12 +240,10 @@ def test_the_booths_logged_air_times_place_its_lines_and_one_never_aired_is_skip
                    " VALUES (?,?,?,?,?,?,?)",
                    [(1, chip["id"], 108.0, "shot", "a few words", 109.0, 12.0),   # longer than its words
                     (1, chip["id"], 108.0, "shot", " ".join(["word"] * 50), None, None)])   # cut off
-    talk = H._talk(db, [chip])
-    assert H._post(H.POST_SHOT, chip, chip, talk) == round(121.0 + H.TALK_TAIL + H.STREAM_LAG - 100, 1)
-    shift = H.STREAM_LAG - H.TALK_LAG
-    assert talk[1][1] == [(109.0 + shift, 121.0 + shift)]
+    got = H._post(H.POST_SHOT, chip, chip, H._talk(db, [chip]))
+    assert got["post"] == got["must"] == round(121.0 + H.TALK_TAIL + H.STREAM_LAG - 100, 1)
     db.execute("ALTER TABLE lines DROP COLUMN aired_at")   # an older database: by its words
-    assert H._talk(db, [chip])[0][chip["id"]] > 121.0
+    assert H._post(H.POST_SHOT, chip, chip, H._talk(db, [chip]))["post"] > got["post"]
 
 
 def test_a_reel_keeps_to_its_length():

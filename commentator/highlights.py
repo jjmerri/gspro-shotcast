@@ -33,15 +33,18 @@ OK_LEVEL = 5              # ...and a solid shot under it (OK_*) fills the reel's
 MIN_FINAL = 4.5           # ...nor one whose score, less what's already picked, is this or less (a bad 5 is 4.75)
 PRE = 3.0                 # seconds of the stream before a shot's time (it shows ~4 s after it)
 POST_PUTT, POST_SHOT, POST_BIG = 12.0, 16.0, 20.0   # ...and after: a putt, a full shot, a 9 or 10's call
-# ...or, where the booth's lines were logged, till it's done talking about it, and never mid-line:
-# each line logged as it goes to air, an exchange's back to back, at about this many words a second,
-# heard on the stream TALK_LAG later (the stream's own delay, and the call's voicing); and as a cut
-# lands on the segment after (TALK_LOOKAHEAD), a line starting that soon finishes too, up to the
-# next swing
+# ...or, where the booth's lines were logged, till it's done talking about it (its call, reaction
+# and flight lines), stopping before anything else it says (the next shot's setup, a segment,
+# banter) or the next swing: each line logged as it goes to air, an exchange's back to back, at about
+# this many words a second, heard on the stream TALK_LAG later (the stream's own delay, and the
+# call's voicing)
 TALK_WORDS_PER_SECOND, TALK_GAP, TALK_TAIL, TALK_LAG, TALK_MAX = 2.7, 0.6, 1.5, 6.0, 45.0
-TALK_LOOKAHEAD = 4.0
 STREAM_LAG = 4.5          # where the booth logged when a line played (aired_at): heard this much later
+STOP_MARGIN = 2.0         # a clip ends this far ahead of the next thing said (a line's start can be early)
+MUST_GRACE = 2.5         # ...and drops a segment holding both it and only this much of the clip's own talk
+MIN_AFTER = 8.0           # ...but not before this long after its last shot (the ball comes to rest)
 REACTION_SECONDS = 30.0   # a reaction (logged with no shot) is to the last shot this recently before it
+FLIGHT_SECONDS = 15.0     # ...and a flight line to the one this recently
 CLOSE_FROM_YARDS, CLOSE_FEET = 100.0, 15.0          # the booth's close_approach_* defaults
 BIG_DRIVE_YARDS = 300.0   # a round's longest drive from here is a moment
 SHORT_MISS_FEET = 4.0     # a putt missed from inside this is a bad moment
@@ -227,10 +230,10 @@ def _bests(shots: list[dict], before: dict[str, dict]) -> tuple[set[int], dict[i
 
 
 def _talk(db: sqlite3.Connection, shots: list[dict]) -> tuple:
-    """(shot id -> when the booth was done talking about it: its call and any reaction to it;
-    session -> every line's (started, done); session -> its shots' times), in logged time. A line
-    the booth noted the air time of is placed by that (and in a session with any, one without never
-    aired: an interrupted exchange's rest); others by their words, after the exchange before."""
+    """(session -> every line's (started, done, the time of the shot it's about: its call, a reaction
+    or flight line, or None); session -> its shots' times), in logged time. A line the booth noted
+    the air time of is placed by that (and in a session with any, one without never aired: an
+    interrupted exchange's rest); others by their words, after the exchange before."""
     try:
         rows = db.execute("SELECT session_id, shot_id, ts, kind, text, aired_at, aired_seconds FROM lines"
                           " ORDER BY ts, id").fetchall()
@@ -242,66 +245,69 @@ def _talk(db: sqlite3.Connection, shots: list[dict]) -> tuple:
             return ()   # (a database from before the booth logged its lines)
     noted = {r[0] for r in rows if r[5] is not None}
     shift = STREAM_LAG - TALK_LAG   # (an aired time, as the logged time it's heard the same as)
-    by_session: dict[int, list[dict]] = {}
+    times: dict[int, list[float]] = {}
     for s in shots:
-        by_session.setdefault(s["session_id"], []).append(s)
-    times = {k: [s["ts"] for s in v] for k, v in by_session.items()}
+        times.setdefault(s["session_id"], []).append(s["ts"])
+    ts_of = {s["id"]: s["ts"] for s in shots}
     batches: dict[tuple[int, float], list] = {}   # an exchange's lines share the time they're logged
     for session, shot_id, ts, kind, text, aired_at, aired_seconds in rows:
         if session in noted and aired_at is None:
             continue
-        b = batches.setdefault((session, ts), [[], set()])
-        b[0].append((aired_at + shift, aired_at + shift + (aired_seconds or 0.0)) if aired_at is not None
-                    else len((text or "").split()) / TALK_WORDS_PER_SECOND)
-        if shot_id is None and kind == "reaction":
+        about = ts_of.get(shot_id) if kind in ("shot", "reaction") else None
+        if about is None and kind in ("reaction", "flight"):
             i = bisect.bisect_right(times.get(session, []), ts) - 1
-            if i >= 0 and ts - times[session][i] <= REACTION_SECONDS:
-                shot_id = by_session[session][i]["id"]
-        if shot_id is not None and kind in ("shot", "reaction"):
-            b[1].add(shot_id)
-    per_shot: dict[int, float] = {}
-    spoken: dict[int, list[tuple[float, float]]] = {}
+            if i >= 0 and ts - times[session][i] <= (REACTION_SECONDS if kind == "reaction" else FLIGHT_SECONDS):
+                about = times[session][i]
+        batches.setdefault((session, ts), []).append(
+            ((aired_at + shift, aired_at + shift + (aired_seconds or 0.0)) if aired_at is not None
+             else len((text or "").split()) / TALK_WORDS_PER_SECOND, about))
+    spoken: dict[int, list[tuple[float, float, float | None]]] = {}
     busy: dict[int, float] = {}
-    for (session, ts), (lines, about) in sorted(batches.items(), key=lambda kv: kv[0][1]):
+    for (session, ts), lines in sorted(batches.items(), key=lambda kv: kv[0][1]):
         at = max(ts, busy.get(session, 0.0))   # (an exchange waits for the one before it)
         done = at
-        for seconds in lines:
+        for seconds, about in lines:
             if isinstance(seconds, tuple):
-                spoken.setdefault(session, []).append(seconds)
+                spoken.setdefault(session, []).append((*seconds, about))
                 done = at = max(done, seconds[1])
                 at += TALK_GAP
                 continue
-            spoken.setdefault(session, []).append((at, at + seconds))
+            spoken.setdefault(session, []).append((at, at + seconds, about))
             done = at + seconds
             at = done + TALK_GAP
         busy[session] = done
-        for shot_id in about:
-            per_shot[shot_id] = max(per_shot.get(shot_id, 0.0), done)
     for v in spoken.values():
-        v.sort()
-    return per_shot, spoken, times
+        v.sort(key=lambda x: x[:2])
+    return spoken, times
 
 
-def _post(post: float, at: dict, last: dict, talk: tuple | None) -> float:
-    """Seconds of stream after `at`: `post`, or on till the booth's done talking about `last`; and
-    never stopping mid-line (one under way at the cut finishes, though not whatever follows it)."""
+def _post(post: float, at: dict, last: dict, talk: tuple | None) -> dict:
+    """The stretch of stream after `at` (seconds): `post`, or on till the booth's done talking about
+    the shots from `at` to `last`; and where the booth logged its lines, `stop` before whatever it says
+    next or the next swing, though never before `must` (its own lines' end; None: no stop)."""
     if not talk:
-        return post
-    per_shot, spoken, swings = talk
+        return {"post": post, "stop": None, "must": 0.0}
+    spoken, swings = talk
+    session = at.get("session_id")
+    lo, hi = at["ts"], last["ts"]
     end = at["ts"] + post - TALK_LAG   # (when what's heard at the cut was logged)
-    if (done := per_shot.get(last["id"])) is not None:
-        end = max(end, done + TALK_TAIL)
-    times = swings.get(at.get("session_id"), [])
-    for start, done in spoken.get(at.get("session_id"), []):
-        if done <= end - TALK_TAIL:
-            continue
-        i = bisect.bisect_right(times, max(end, last["ts"]))
-        swing = times[i] if i < len(times) else float("inf")   # the next shot not already in it
-        if start >= end + TALK_LOOKAHEAD or (start >= end and start >= swing - 1):
+    own = [done for _, done, about in spoken.get(session, []) if about is not None and lo <= about <= hi]
+    must = max(hi + MIN_AFTER - TALK_LAG, *(d + TALK_TAIL for d in own)) if own else hi + MIN_AFTER - TALK_LAG
+    end = max(end, must)
+    times = swings.get(session, [])
+    i = bisect.bisect_right(times, hi)
+    stop = times[i] + STREAM_LAG - TALK_LAG if i < len(times) else None   # (the next swing, as heard)
+    for start, _, about in spoken.get(session, []):
+        if start > hi and not (about is not None and lo <= about <= hi):
+            stop = start if stop is None else min(stop, start)
             break
-        end = done + TALK_TAIL
+    if stop is not None:
+        stop -= STOP_MARGIN
+        end = min(end, max(stop, must))
     # (at most TALK_MAX after the last shot of it: a three-putt's run of putts comes first)
-    return round(max(post, min(TALK_MAX + last["ts"] - at["ts"], end + TALK_LAG - at["ts"])), 1)
+    cap = TALK_MAX + hi - TALK_LAG   # (as logged)
+    rel = lambda t: round(min(cap, t) + TALK_LAG - at["ts"], 1)
+    return {"post": rel(end), "stop": None if stop is None else rel(max(stop, must)), "must": rel(must)}
 
 
 def pick(shots: list[dict], most: int = MAX_MOMENTS, sides: dict[str, int] | None = None,
@@ -367,14 +373,14 @@ def pick(shots: list[dict], most: int = MAX_MOMENTS, sides: dict[str, int] | Non
                     what += {-3: " to set up albatross", -2: " to set up eagle", -1: " to set up birdie"}.get(
                         result, " to save par" if (s["lie_before"] or "").lower() != "fairway" or result == 0 else "")
                     score += result < 0
-                pool.append({"shot": s, "level": g[0], "score": score, "what": what, "post": _post(g[2], s, s, talk), "bad": False,
+                pool.append({"shot": s, "level": g[0], "score": score, "what": what, **_post(g[2], s, s, talk), "bad": False,
                              "hole": number if number is not None else -i})
             elif (b := _bad(s, hole, team_ball, s["id"] in wet)) and b[0] >= MIN_LEVEL - 1:
                 at, post = s, b[2]
                 if "-putts" in b[1]:   # the whole run of putts, from the first
                     at = next(x for x in hole if x["is_putt"])
                     post += max(0.0, s["ts"] - at["ts"])
-                pool.append({"shot": at, "level": b[0], "score": b[0] - 0.25, "what": b[1], "post": _post(post, at, s, talk), "bad": True,
+                pool.append({"shot": at, "level": b[0], "score": b[0] - 0.25, "what": b[1], **_post(post, at, s, talk), "bad": True,
                              "hole": number if number is not None else -i})
     picked: list[dict] = []
     per_player = dict.fromkeys({m["shot"]["player"] for m in pool}, 0)   # (one with nothing to show: no say)
@@ -453,7 +459,8 @@ def rounds(db: sqlite3.Connection) -> dict[int, dict]:
             "date": time.strftime("%Y-%m-%d", time.localtime(g["end"])), "ended": g["end"],
             "league": g["round"] in league,
             "moments": [{"id": m["shot"]["id"], "ts": m["shot"]["ts"], "player": m["shot"]["player"],
-                         "hole": _hole(m["shot"]["hole"]), "what": m["what"], "bad": m["bad"], "post": m["post"]}
+                         "hole": _hole(m["shot"]["hole"]), "what": m["what"], "bad": m["bad"], "post": m["post"],
+                         "stop": m["stop"], "must": m["must"]}
                         for m in moments]}
     return out
 
@@ -503,7 +510,7 @@ def sync(client: Any, bucket: str, prefix: str, reels: dict[int, dict], season_f
     added = changed = 0
     for key, reel in wanted.items():
         ids = [m["id"] for m in reel["moments"]]
-        cuts = [[m["id"], m["post"]] for m in reel["moments"]]   # what the playlist is cut from
+        cuts = [[m["id"], m["post"], m.get("stop"), m.get("must")] for m in reel["moments"]]   # what the playlist is cut from
         old_entry = index.get(key)
         if old_entry and old_entry.get("cuts") == cuts:
             # The same stretches of stream: only what's said about them can have changed.
@@ -574,7 +581,10 @@ def _cut(client: Any, bucket: str, root: str, recordings: list[dict], playlists:
         track, ended = playlists[session]
         t, start, idx = m["ts"] - rec["since"], 0.0, []
         for i, (_, dur) in enumerate(track):
-            if start + dur > t - PRE and start < t + m["post"]:
+            # (rounded out to whole segments, but not past the stop unless it's needed for `must`)
+            if start + dur > t - PRE and start < t + m["post"] and (
+                    m.get("stop") is None or start + dur <= t + m["stop"]
+                    or start < t + m.get("must", 0.0) - MUST_GRACE or not idx):
                 idx.append(i)
             start += dur
         if not idx or (start < t + m["post"] and not ended):
