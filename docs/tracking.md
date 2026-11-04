@@ -524,7 +524,8 @@ to match.
 
 ### Live chat
 
-Viewers on the **Live** tab can chat: they type a name (the page remembers it) and a line. Now and
+Viewers on the **Live** tab can chat: they type a name (the page remembers it, and locks it once they've sent a message until the chat
+closes, so nobody switches names mid-conversation) and a line. Now and
 then, between shots, the booth glances at the chat and talks about it on air: the two commentators
 react to the conversation (the trash talk, a question put to them, a viewer teasing one of them)
 rather than reading messages out one by one. Messages it talked about get a 🎙 on the page. The chat is open only while the booth is on air in a round:

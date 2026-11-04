@@ -79,7 +79,7 @@
   .chat .msg b { color:var(--accent); margin-right:6px; }
   .chat form { display:flex; flex-wrap:wrap; gap:8px; }
   .chat input { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; min-width:0; }
-  .chat input[name=name] { flex:0 1 9em; } .chat input[name=text] { flex:1 1 14em; }
+  .chat input[name=name] { flex:0 1 9em; } .chat input[readonly] { color:var(--dim); cursor:not-allowed; } .chat input[name=text] { flex:1 1 14em; }
   .chat form button { background:var(--accent); color:var(--bg); border:none; border-radius:6px; padding:7px 14px; font:inherit; cursor:pointer; }
   .chat .note { color:var(--dim); font-size:13px; min-height:1.2em; margin-top:4px; }
   .empty { color:var(--dim); padding:10px 0; }
@@ -1671,7 +1671,8 @@ function renderLive() {
 // and answers them; a page without it (the booth's own copy, a stack without chat) gets a 404 and no chat.
 // One element, moved into each render's slot like the player, so a redraw doesn't lose what's being typed.
 const CHAT_URL = "/chat/messages", CHAT_POLL_MS = 4000, CHAT_ABSENT_MS = 300000;
-const chat = { on: false, absentUntil: 0, shown: "", el: null, busy: false };
+const chat = { on: false, absentUntil: 0, shown: "", el: null, busy: false,
+               lockedAt: Number(store.get("chatNameLocked") || 0) };
 function chatEl() {
   if (chat.el) return chat.el;
   const el = chat.el = document.createElement("section");
@@ -1683,6 +1684,7 @@ function chatEl() {
   const form = el.querySelector("form"), note = el.querySelector(".note");
   const nameIn = form.querySelector("[name=name]"), textIn = form.querySelector("[name=text]");
   nameIn.value = store.get("chatName") || "";
+  lockChatName();
   form.addEventListener("submit", async e => {
     e.preventDefault();
     const name = nameIn.value.trim(), text = textIn.value.trim();
@@ -1694,13 +1696,28 @@ function chatEl() {
       const r = await fetch(CHAT_URL, { method: "POST", headers: { "content-type": "application/json" },
                                         body: JSON.stringify({ name, text }) });
       const body = await r.json().catch(() => ({}));
-      if (r.ok) { textIn.value = ""; await pollChat(); }
+      if (r.ok) {
+        textIn.value = ""; nameIn.value = name;   // the name it went out under, even if edited meanwhile
+        chat.lockedAt = Date.now(); store.set("chatNameLocked", String(chat.lockedAt)); lockChatName();
+        await pollChat();
+      }
       else note.textContent = body.error || `Not sent (HTTP ${r.status}).`;
       if (r.status === 409) await pollChat();
     } catch (err) { note.textContent = "Not sent: no connection."; }
     chat.busy = false;
   });
   return el;
+}
+// Once you've said something your name stays put until the chat closes (the round's over), so
+// nobody turns into someone else mid-conversation. A lock left by a chat this page never saw close
+// lapses after CHAT_NAME_LOCK_MS.
+const CHAT_NAME_LOCK_MS = 6 * 3600 * 1000;
+function lockChatName() {
+  if (!chat.el) return;
+  const nameIn = chat.el.querySelector("[name=name]");
+  const locked = !!nameIn.value && Date.now() - chat.lockedAt < CHAT_NAME_LOCK_MS;
+  nameIn.readOnly = locked;
+  nameIn.title = locked ? "Your name stays the same until this chat closes" : "";
 }
 function attachChat() {
   const slot = $("#chatslot");
@@ -1718,6 +1735,8 @@ async function pollChat() {
   } catch (e) { got = null; }
   const on = !!(got && got.on);
   if (on !== chat.on) { chat.on = on; attachChat(); }
+  if (got && !on && chat.lockedAt) { chat.lockedAt = 0; store.set("chatNameLocked", ""); }
+  lockChatName();
   if (!on) return;
   const list = Array.isArray(got.messages) ? got.messages : [];
   const key = JSON.stringify(list.map(m => [m.id, m.aired]));
