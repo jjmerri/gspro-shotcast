@@ -264,7 +264,9 @@ beat; then, to fill in, solid ones: a par-or-better putt from beyond 6 ft, a gre
 their best. The booth's own excitement scale picks them, with a player's or a hole's next pick
 counting for a little less so one player or one hole doesn't fill the reel, and at most one bad
 shot a player, never more bad than good: a penalty, a missed short putt, a three-putt (shown from
-its first putt), a shot far off line). Their stretches of stream are copied
+its first putt), a shot far off line). Each runs on till the booth is done talking about it (its
+call and any reaction, timed from the lines the booth logged), finishing a line under way at the
+cut. Their stretches of stream are copied
 back to back into `live/reels/<round>/` (listed in `live/reels.json`), and the round's page gets a
 **▶ Highlights** button that plays the reel, with each moment listed to jump to. A league round's
 reel stays for the season (`publish.season_start`), any other round's for as long as its stream

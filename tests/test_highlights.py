@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 from commentator import highlights as H
 from test_record_clips import FakeS3, _stream
@@ -186,3 +187,36 @@ def test_the_build_finds_each_rounds_reel(tmp_path):
                    " hole = 'Hole ' || id || ', par 4, 400 yards', shot_number = 3 WHERE session_id = 1")
     stats_site.build(path, tmp_path / "site", reels=reels)
     assert list(reels) and all(r["league"] and len(r["moments"]) >= 2 for r in reels.values())
+
+
+def test_a_clip_runs_till_the_booth_is_done_talking_about_it_and_never_stops_mid_line():
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE lines (id INTEGER PRIMARY KEY, session_id, shot_id, ts, kind, text)")
+    words = lambda n: " ".join(["word"] * n)   # 27 words: 10 s said
+    chip = {**shot("Ann", 1, 3, 100, to_pin=30, finish=1.5), "session_id": 1}
+    nxt = {**shot("Bob", 1, 3, 140), "session_id": 1}
+    db.executemany("INSERT INTO lines (session_id, shot_id, ts, kind, text) VALUES (?,?,?,?,?)",
+                   [(1, chip["id"], 108.0, "shot", words(27)),
+                    (1, None, 103.0, "reaction", words(27)),    # (no shot logged with it: the chip's)
+                    (1, None, 125.0, "segment", words(27))])    # starts just after: it finishes too
+    talk = H._talk(db, [chip, nxt])
+    assert talk[0][chip["id"]] == 103.0 + 10 + 10   # the call waits for the reaction
+    post = lambda at, last=None: H._post(H.POST_SHOT, at, last or at, talk)
+    assert post(chip) == round(125 + 10 + H.TALK_TAIL + H.TALK_LAG - 100, 1)
+    db.execute("UPDATE lines SET ts = 133 WHERE kind = 'segment'")   # well after: not waited for
+    talk = H._talk(db, [chip, nxt])
+    assert post(chip) == round(123 + H.TALK_TAIL + H.TALK_LAG - 100, 1)
+    nxt["ts"] = 125.5   # ...nor one after the next swing
+    db.execute("UPDATE lines SET ts = 125 WHERE kind = 'segment'")
+    talk = H._talk(db, [chip, nxt])
+    assert post(chip) == round(123 + H.TALK_TAIL + H.TALK_LAG - 100, 1)
+    first = {**chip, "ts": 40.0}   # a three-putt played from its first putt: not capped short of the last
+    assert post(first, chip) == round(123 + H.TALK_TAIL + H.TALK_LAG - 40, 1)
+    assert H._post(H.POST_SHOT, chip, chip, H._talk(sqlite3.connect(":memory:"), [chip])) == H.POST_SHOT
+    db.execute("DELETE FROM lines WHERE kind != 'segment'")
+    db.execute("UPDATE lines SET ts = 113 WHERE kind = 'segment'")   # nothing about it: heard just after the cut
+    nxt["ts"] = 140
+    assert H._post(H.POST_SHOT, chip, chip, H._talk(db, [chip, nxt])) == round(123 + H.TALK_TAIL + H.TALK_LAG - 100, 1)
+    nxt["ts"] = 113   # already in the clip, as is the line under way after it
+    db.execute("UPDATE lines SET ts = 113.5 WHERE kind = 'segment'")
+    assert H._post(20.0, chip, chip, H._talk(db, [chip, nxt])) == round(123.5 + H.TALK_TAIL + H.TALK_LAG - 100, 1)

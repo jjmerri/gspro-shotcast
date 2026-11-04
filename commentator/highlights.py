@@ -15,6 +15,7 @@ is gone gets no reel; one whose stream hasn't reached its last moment yet gets i
 """
 from __future__ import annotations
 
+import bisect
 import json
 import re
 import sqlite3
@@ -30,6 +31,14 @@ OK_LEVEL = 5              # ...and a solid shot under it (OK_*) fills the reel's
 MIN_FINAL = 4.5           # ...nor one whose score, less what's already picked, is this or less (a bad 5 is 4.75)
 PRE = 3.0                 # seconds of the stream before a shot's time (it shows ~4 s after it)
 POST_PUTT, POST_SHOT, POST_BIG = 12.0, 16.0, 20.0   # ...and after: a putt, a full shot, a 9 or 10's call
+# ...or, where the booth's lines were logged, till it's done talking about it, and never mid-line:
+# each line logged as it goes to air, an exchange's back to back, at about this many words a second,
+# heard on the stream TALK_LAG later (the stream's own delay, and the call's voicing); and as a cut
+# lands on the segment after (TALK_LOOKAHEAD), a line starting that soon finishes too, up to the
+# next swing
+TALK_WORDS_PER_SECOND, TALK_GAP, TALK_TAIL, TALK_LAG, TALK_MAX = 2.7, 0.6, 1.5, 6.0, 45.0
+TALK_LOOKAHEAD = 4.0
+REACTION_SECONDS = 30.0   # a reaction (logged with no shot) is to the last shot this recently before it
 CLOSE_FROM_YARDS, CLOSE_FEET = 100.0, 15.0          # the booth's close_approach_* defaults
 BIG_DRIVE_YARDS = 300.0   # a round's longest drive from here is a moment
 SHORT_MISS_FEET = 4.0     # a putt missed from inside this is a bad moment
@@ -214,8 +223,65 @@ def _bests(shots: list[dict], before: dict[str, dict]) -> tuple[set[int], dict[i
     return out, near
 
 
+def _talk(db: sqlite3.Connection, shots: list[dict]) -> tuple:
+    """(shot id -> when the booth was done talking about it: its call and any reaction to it;
+    session -> every line's (started, done); session -> its shots' times), in logged time."""
+    try:
+        rows = db.execute("SELECT session_id, shot_id, ts, kind, text FROM lines ORDER BY ts, id").fetchall()
+    except sqlite3.OperationalError:
+        return ()   # (a database from before the booth logged its lines)
+    by_session: dict[int, list[dict]] = {}
+    for s in shots:
+        by_session.setdefault(s["session_id"], []).append(s)
+    times = {k: [s["ts"] for s in v] for k, v in by_session.items()}
+    batches: dict[tuple[int, float], list] = {}   # an exchange's lines share the time they're logged
+    for session, shot_id, ts, kind, text in rows:
+        b = batches.setdefault((session, ts), [[], set()])
+        b[0].append(len((text or "").split()) / TALK_WORDS_PER_SECOND)
+        if shot_id is None and kind == "reaction":
+            i = bisect.bisect_right(times.get(session, []), ts) - 1
+            if i >= 0 and ts - times[session][i] <= REACTION_SECONDS:
+                shot_id = by_session[session][i]["id"]
+        if shot_id is not None and kind in ("shot", "reaction"):
+            b[1].add(shot_id)
+    per_shot: dict[int, float] = {}
+    spoken: dict[int, list[tuple[float, float]]] = {}
+    busy: dict[int, float] = {}
+    for (session, ts), (lines, about) in sorted(batches.items(), key=lambda kv: kv[0][1]):
+        at = max(ts, busy.get(session, 0.0))   # (an exchange waits for the one before it)
+        for seconds in lines:
+            spoken.setdefault(session, []).append((at, at + seconds))
+            at += seconds + TALK_GAP
+        done = busy[session] = at - TALK_GAP
+        for shot_id in about:
+            per_shot[shot_id] = max(per_shot.get(shot_id, 0.0), done)
+    return per_shot, spoken, times
+
+
+def _post(post: float, at: dict, last: dict, talk: tuple | None) -> float:
+    """Seconds of stream after `at`: `post`, or on till the booth's done talking about `last`; and
+    never stopping mid-line (one under way at the cut finishes, though not whatever follows it)."""
+    if not talk:
+        return post
+    per_shot, spoken, swings = talk
+    end = at["ts"] + post - TALK_LAG   # (when what's heard at the cut was logged)
+    if (done := per_shot.get(last["id"])) is not None:
+        end = max(end, done + TALK_TAIL)
+    times = swings.get(at.get("session_id"), [])
+    for start, done in spoken.get(at.get("session_id"), []):
+        if done <= end - TALK_TAIL:
+            continue
+        i = bisect.bisect_right(times, max(end, last["ts"]))
+        swing = times[i] if i < len(times) else float("inf")   # the next shot not already in it
+        if start >= end + TALK_LOOKAHEAD or (start >= end and start >= swing - 1):
+            break
+        end = done + TALK_TAIL
+    # (at most TALK_MAX after the last shot of it: a three-putt's run of putts comes first)
+    return round(max(post, min(TALK_MAX + last["ts"] - at["ts"], end + TALK_LAG - at["ts"])), 1)
+
+
 def pick(shots: list[dict], most: int = MAX_MOMENTS, sides: dict[str, int] | None = None,
-         before: dict[str, dict] | None = None) -> list[dict]:
+         before: dict[str, dict] | None = None, talk: tuple | None = None) -> list[dict]:
     """A round's highlight moments, in the order they happened. Picked best first (the booth's
     excitement, a notch more for a shot that set up a birdie or better; solid shots, OK_*, fill in), a
     player's next pick past the others' and a hole's next counting for a little less, so one hot hand
@@ -276,14 +342,14 @@ def pick(shots: list[dict], most: int = MAX_MOMENTS, sides: dict[str, int] | Non
                     what += {-3: " to set up albatross", -2: " to set up eagle", -1: " to set up birdie"}.get(
                         result, " to save par" if (s["lie_before"] or "").lower() != "fairway" or result == 0 else "")
                     score += result < 0
-                pool.append({"shot": s, "level": g[0], "score": score, "what": what, "post": g[2], "bad": False,
+                pool.append({"shot": s, "level": g[0], "score": score, "what": what, "post": _post(g[2], s, s, talk), "bad": False,
                              "hole": number if number is not None else -i})
             elif (b := _bad(s, hole, team_ball, s["id"] in wet)) and b[0] >= MIN_LEVEL - 1:
                 at, post = s, b[2]
                 if "-putts" in b[1]:   # the whole run of putts, from the first
                     at = next(x for x in hole if x["is_putt"])
                     post += max(0.0, s["ts"] - at["ts"])
-                pool.append({"shot": at, "level": b[0], "score": b[0] - 0.25, "what": b[1], "post": post, "bad": True,
+                pool.append({"shot": at, "level": b[0], "score": b[0] - 0.25, "what": b[1], "post": _post(post, at, s, talk), "bad": True,
                              "hole": number if number is not None else -i})
     picked: list[dict] = []
     per_player = dict.fromkeys({m["shot"]["player"] for m in pool}, 0)   # (one with nothing to show: no say)
@@ -320,9 +386,11 @@ def rounds(db: sqlite3.Connection) -> dict[int, dict]:
     groups, of_row = round_groups(db)
     of_shot = shot_rounds(db)
     by_round: dict[int, list[dict]] = {}
-    for r in db.execute("SELECT * FROM shots ORDER BY ts, id"):
+    every = [dict(r) for r in db.execute("SELECT * FROM shots ORDER BY ts, id")]
+    for r in every:
         if (g := of_shot.get(r["id"])) is not None:
-            by_round.setdefault(g, []).append(dict(r))
+            by_round.setdefault(g, []).append(r)
+    talk = _talk(db, every)
     league, rows = set(), {}
     for r in db.execute("SELECT * FROM rounds"):
         league |= {of_row[r["id"]]} if "is_league" in r.keys() and r["is_league"] else set()
@@ -348,7 +416,7 @@ def rounds(db: sqlite3.Connection) -> dict[int, dict]:
         if len(rows.get(g["round"], [])) > 1:   # sides by the players each named (an older row: none)
             sides = {n: i for i, r in enumerate(rows[g["round"]])
                      for n in (_names(r["players"]) if "players" in r.keys() else None) or []}
-        moments = pick(shots, sides=sides, before=before_round.get(g["round"], {}))
+        moments = pick(shots, sides=sides, before=before_round.get(g["round"], {}), talk=talk)
         if len(moments) < 2:
             continue
         players = list(dict.fromkeys(s["player"] for s in shots if s["player"] and s["player"] != "unknown"))
