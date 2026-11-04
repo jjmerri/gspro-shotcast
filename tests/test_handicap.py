@@ -70,6 +70,12 @@ def test_validate_recomputes_team_nets():
     # 4,4,3,4,4,3,4,5,4 = 35 on a par 36.
     [(week, team, ours, theirs)] = H.validate_season([item], [a, b])["best_ball"]
     assert ours == theirs == -1
+    # Hole by hole for the recap's story, by the league team the Squabbit team's players are on.
+    from commentator.board import squabbit_holes
+    from tests.test_board import LEAGUE_DATA
+    card = H.week_card(t, ROUND)
+    assert squabbit_holes(t, [a, b], card, League(LEAGUE_DATA)) == \
+        {"Aces": {10: 0, 11: -1, 12: 0, 13: 0, 14: 0, 15: 0, 16: 0, 17: 0, 18: 0}}
 
 
 def test_net_max_hole_score_caps_a_blow_up():

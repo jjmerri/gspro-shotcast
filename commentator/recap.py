@@ -45,6 +45,7 @@ CLIP_MIN = 10.0         # long enough to see where the ball went
 CLIP_MAX = 25.0
 CLIP_WORDS = 26         # a clip's lines, together
 CARD_WORDS = 35         # an intro or outro line
+BOARD_ROWS = 5          # the TV-style net leaderboard over a clip: the top this many, and the clip's team
 RETIRE_SECONDS = 3600.0  # a rebuild's leftovers stay this long (a player open on the last build still plays them)
 
 
@@ -102,42 +103,212 @@ def footage(reels: dict[str, dict], team_reel: dict[str, str], players: dict[str
     return out
 
 
-def _ranked(moments: list[dict]) -> list[dict]:
-    """A team's moments, the best first: the good by how big (a reel from before levels counts each
-    the same), then the bad."""
-    return sorted(moments, key=lambda m: (bool(m.get("bad")), -(m.get("level") or 1), m["at"]))
+# ---- the story: the week as one leaderboard, hole by hole ------------------------------------
+
+def _num(v: Any) -> int | None:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def race(facts: dict) -> dict | None:
+    """The week told as one tournament: every team's running net to par after each hole, as if
+    they'd gone out together (they play on their own schedules), and the turns in it. From
+    facts["holes"] (team -> {hole number: that hole's team net to par}). Every team in the results
+    needs one, adding up to its result, all on the same holes: one left out could have led or tied,
+    making the story's leads untrue. None otherwise, or with fewer than two teams.
+    {holes, teams (best first), after: [{team: running net}] per hole, events: [{hole, teams, text}],
+    key: team -> the holes its story turned on}."""
+    nets = {r["team"]: r["net"] for r in facts["rows"]}
+    cards: dict[str, dict[int, int]] = {}
+    for t, hs in (facts.get("holes") or {}).items():
+        card = {h: v for h, v in ((_num(h), _num(v)) for h, v in (hs or {}).items()) if h is not None and v is not None}
+        if t in nets and card and sum(card.values()) == nets[t]:
+            cards[t] = card
+    if len(nets) < 2 or set(cards) != set(nets) or len({frozenset(c) for c in cards.values()}) != 1:
+        return None
+    teams = [r["team"] for r in facts["rows"]]
+    holes = sorted(next(iter(cards.values())))
+    name = {r["team"]: r["name"] for r in facts["rows"]}
+    run = {t: 0 for t in teams}
+    after = []
+    for h in holes:
+        for t in teams:
+            run[t] += cards[t][h]
+        after.append(dict(run))
+    events: list[dict] = []
+    key: dict[str, set[int]] = {t: set() for t in teams}
+
+    def note(hole: int, who: list[str], text: str) -> None:
+        events.append({"hole": hole, "teams": who, "text": text})
+        for t in who:
+            key[t].add(hole)
+
+    def names(ts) -> str:   # team names have "and" in them: a list is by commas
+        return ", ".join(name[t] for t in ts)
+
+    prev: set[str] = set()
+    for i, h in enumerate(holes):
+        best = min(after[i].values())
+        leaders = {t for t in teams if after[i][t] == best}
+        lost = [t for t in teams if t in prev - leaders]
+        if len(leaders) == 1 and leaders != prev:
+            (t,) = leaders
+            verb = "lead" if i == 0 else "pull clear alone" if t in prev else "take the lead"
+            note(h, [t] + lost, f"{name[t]} {verb} after hole {h} at {_net(best)}"
+                 + (f" (falling back: {names(lost)})" if lost else ""))
+        elif len(leaders) > 1 and leaders - prev:
+            caught = [t for t in teams if t in prev] if len(prev) == 1 else []   # a lone lead gone
+            note(h, [t for t in teams if t in leaders - prev] + caught + lost,
+                 f"Tied for the lead after hole {h} at {_net(best)}: {names([t for t in teams if t in leaders])}"
+                 + (f" (falling back: {names(lost)})" if lost else ""))
+        prev = leaders
+
+    def margin(i: int) -> tuple[str | None, int]:
+        order = sorted(teams, key=lambda t: after[i][t])
+        gap = after[i][order[1]] - after[i][order[0]]
+        return (order[0], gap) if gap > 0 else (None, 0)
+
+    half = (len(holes) + 1) // 2 - 1
+    if len(holes) >= 4:
+        top, gap = margin(half)
+        if top:
+            note(holes[half], [top], f"Halfway, after hole {holes[half]}: {name[top]} lead by {gap} at {_net(after[half][top])}")
+    widest = max(range(len(holes)), key=lambda i: (margin(i)[1], -i))
+    top, gap = margin(widest)
+    if top and gap >= 2 and not (len(holes) >= 4 and widest == half):
+        note(holes[widest], [top], f"{name[top]}'s biggest lead: {gap} after hole {holes[widest]}")
+
+    winners = [r["team"] for r in facts["rows"] if r["place"] == 1 and r["team"] in run]
+    if len(winners) == 1:
+        w = winners[0]
+        alone = [i for i in range(len(holes)) if margin(i)[0] == w]
+        since = len(holes) - 1
+        while since > 0 and since - 1 in alone:
+            since -= 1
+        if alone and alone[-1] == len(holes) - 1:
+            if since == 0:
+                note(holes[0], [w], f"{name[w]} led alone after every hole: wire to wire")
+            elif since == len(holes) - 1:
+                note(holes[since], [w], f"{name[w]} won it on the last hole")
+            else:
+                note(holes[since], [w], f"{name[w]} led alone from hole {holes[since]} to the finish")
+        behind = max(range(len(holes)), key=lambda i: (after[i][w] - min(after[i].values()), -i))
+        down = after[behind][w] - min(after[behind].values())
+        if down >= 2:
+            note(holes[behind], [w], f"{name[w]} were {down} back after hole {holes[behind]} and came back to win")
+
+    swings = []
+    for i, h in enumerate(holes):
+        for t in teams:
+            v = cards[t][h]
+            if v <= -2 or v >= 3:
+                was = 1 + sum(1 for o in teams if (after[i - 1][o] if i else 0) < (after[i - 1][t] if i else 0))
+                now = 1 + sum(1 for o in teams if after[i][o] < after[i][t])
+                swings.append((abs(v), h, t, v, was, now))
+    for _, h, t, v, was, now in sorted(swings, key=lambda x: (-x[0], x[1]))[:6]:
+        move = f", {_ordinal(was)} to {_ordinal(now)}" if was != now else ""
+        note(h, [t], f"{name[t]}: {_hole_net(v)} as a team on hole {h}, net{move}")
+    events.sort(key=lambda e: holes.index(e["hole"]))
+    return {"holes": holes, "teams": teams, "after": after, "events": events, "key": key}
+
+
+def _ordinal(n: int) -> str:
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+def _hole_net(v: int) -> str:
+    # Not "birdie": an aggregate team's -2 can be two players' birdies.
+    return "even" if v == 0 else f"{abs(v)} {'under' if v < 0 else 'over'}"
+
+
+def standing(story: dict, team: str, i: int) -> str:
+    """Where `team` stood after the race's i-th hole (i -1: before the first): its running net and
+    place, "leading by 2" / "tied for the lead" / "3rd, 2 back"."""
+    run = story["after"][i] if i >= 0 else {t: 0 for t in story["teams"]}
+    mine = run[team]
+    best_other = min(v for t, v in run.items() if t != team)
+    if mine < best_other:
+        where = f"leading by {best_other - mine}"
+    elif mine == best_other:
+        where = "tied for the lead"
+    else:
+        pos = 1 + sum(1 for v in run.values() if v < mine)
+        where = f"{_ordinal(pos)}, {mine - min(run.values())} back"
+    return f"{_net(mine)}, {where}"
+
+
+def board(story: dict, i: int, team: str, rows: dict[str, dict]) -> dict:
+    """The net leaderboard after the race's i-th hole, as a broadcast puts it up going to the next:
+    {thru, rows: [{place, tied, name, net, on}]}, the top BOARD_ROWS and `team` (`on`) wherever it is."""
+    run = story["after"][i]
+    nets = list(run.values())
+    out = []
+    for n, t in enumerate(sorted(run, key=lambda t: (run[t], story["teams"].index(t)))):
+        if n < BOARD_ROWS or t == team:
+            pos, tied = place(run[t], nets)
+            out.append({"place": pos, "tied": tied, "name": rows.get(t, {}).get("name", t), "net": run[t],
+                        **({"on": True} if t == team else {})})
+    return {"thru": story["holes"][i], "rows": out}
+
+
+def _ranked(moments: list[dict], key: set[int] | None = None) -> list[dict]:
+    """A team's moments, the best first. With the holes its story turned on (`key`): those first, a
+    rough one among them too (it may be how a lead went), then the rest. Otherwise the good by how
+    big (a reel from before levels counts each the same), then the bad."""
+    key = key or set()
+    return sorted(moments, key=lambda m: (_num(m.get("hole")) not in key, bool(m.get("bad")),
+                                          -(m.get("level") or 1), m["at"]))
 
 
 def choose(facts: dict, footage: dict[str, dict], budget: float = RECAP_SECONDS) -> list[dict]:
-    """The recap's clips in the order they play: the teams from last place to the winner, each team's
-    in the order they were hit. Every team with footage gets its best moment (a bad one only when it
-    has nothing good) while they fit; then, a round at a time, another good one, the leaders and big
-    movers first, up to PER_TEAM for them and two for the rest. Each: {team, key, **moment}."""
-    order = [r["team"] for r in facts["rows"] if r["team"] in footage]
+    """The recap's clips in the order they play. Every team with footage gets its best moment (a bad
+    one only when it has nothing good) while they fit; then, a round at a time, another good one, the
+    leaders and big movers first, up to PER_TEAM for them and two for the rest. Each: {team, key, **moment}.
+
+    With the week's story (race()), a broadcast of it: the shots on the holes it turned on come first
+    (a rough one there too), the teams in it get the most, a shot off the week's holes isn't one, and
+    the clips run in hole order across the field. Without, the teams from last place to the winner,
+    each team's in the order they were hit."""
+    story = race(facts)
+    holes = story["holes"] if story else []
+    if story:
+        footage = {t: {**f, "moments": [m for m in f["moments"] if t not in story["teams"]
+                                        or _num(m.get("hole")) in holes]} for t, f in footage.items()}
+    order = [r["team"] for r in facts["rows"] if footage.get(r["team"], {}).get("moments")]
     if not order:
         return []
     place_of = {r["team"]: r["place"] for r in facts["rows"]}
     moved = {s["team"]: (s["was"] - s["place"]) if s.get("was") else 0 for s in facts.get("standings") or []}
     lead = {s["team"] for s in facts.get("standings") or [] if s["place"] <= 2}
-    cap = {t: PER_TEAM if (t in lead or place_of[t] == 1 or moved.get(t, 0) >= 2) else 2 for t in order}
-    ranked = {t: _ranked(footage[t]["moments"]) for t in order}
+    key = story["key"] if story else {}
+    told = {t for t, hs in key.items() if hs}
+    cap = {t: PER_TEAM if (t in lead or place_of[t] == 1 or moved.get(t, 0) >= 2 or t in told) else 2 for t in order}
+    ranked = {t: _ranked(footage[t]["moments"], key.get(t)) for t in order}
     room = budget - INTRO_SECONDS - OUTRO_SECONDS
     picked: dict[str, list[dict]] = {t: [] for t in order}
     for t in order:
         if room >= CLIP_SECONDS:
             picked[t].append(ranked[t][0])
             room -= CLIP_SECONDS
-    priority = sorted(order, key=lambda t: place_of[t] - 2 * max(0, moved.get(t, 0)))
+    priority = sorted(order, key=lambda t: (-len(key.get(t) or ()), place_of[t] - 2 * max(0, moved.get(t, 0))))
     while room >= CLIP_SECONDS:
         added = False
         for t in priority:
-            more = [m for m in ranked[t] if m not in picked[t] and not m.get("bad")]
+            more = [m for m in ranked[t] if m not in picked[t]
+                    and (not m.get("bad") or _num(m.get("hole")) in (key.get(t) or ()))]
             if more and len(picked[t]) < cap[t] and room >= CLIP_SECONDS:
                 picked[t].append(more[0])
                 room -= CLIP_SECONDS
                 added = True
         if not added:
             break
+    if story:
+        def when(c: dict) -> tuple:
+            h = _num(c.get("hole"))
+            return (holes.index(h) if h in holes else len(holes), -place_of[c["team"]], c["at"])
+        return sorted(({"team": t, "key": footage[t]["key"], **m} for t in order for m in picked[t]), key=when)
     return [{"team": t, "key": footage[t]["key"], **m}
             for t in reversed(order) for m in sorted(picked[t], key=lambda m: m["at"])]
 
@@ -147,6 +318,7 @@ def digest(facts: dict, footage: dict[str, dict]) -> str:
     in its reel, and what it is). A change to either (Squabbit's net replacing the sim's, a team's
     reel cut late or cut again) rebuilds it."""
     body = {"rows": [[r["team"], r["net"]] for r in facts["rows"]],
+            "holes": {t: {str(h): v for h, v in hs.items()} for t, hs in sorted((facts.get("holes") or {}).items())},
             "standings": [[s["team"], s["points"]] for s in facts["standings"]],
             "footage": {t: [f["key"], f.get("cuts"), [[m.get(k) for k in ("id", "at", "what", "level", "bad", "player", "hole")]
                                                       for m in f["moments"]]] for t, f in sorted(footage.items())}}
@@ -186,24 +358,53 @@ def prompt(facts: dict, clips: list[dict], names: dict[str, str]) -> tuple[str, 
                 d = s["was"] - s["place"]
                 move = f" (up {d} from {s['was']})" if d > 0 else f" (down {-d} from {s['was']})" if d < 0 else " (same place)"
             out.append(f"- {s['place']}. {s['name']}: {s['points']:g} points{move}")
-    out.append("The clips, in the order they play:")
     by_team = {r["team"]: r["name"] for r in facts["rows"]}
+    story = race(facts)
+    if story:
+        out.append("How the week played out hole by hole: each team's running net to par after every hole, "
+                   "the leader first. The teams played at different times, so this is the leaderboard as if "
+                   "they'd gone out together" + (" (left off: " + ", ".join(
+                       by_team[r["team"]] for r in facts["rows"] if r["team"] not in story["teams"]) + ", "
+                       "no hole by hole card)" if len(story["teams"]) < len(facts["rows"]) else "") + ":")
+        for h, run in zip(story["holes"], story["after"]):
+            out.append(f"- after hole {h}: " + ", ".join(f"{by_team[t]} {_net(v)}" for t, v in
+                                                          sorted(run.items(), key=lambda tv: tv[1])))
+        out.append("The turns in it:")
+        out += [f"- {e['text']}" for e in story["events"]]
+    out.append("The clips, in the order they play:")
     for i, c in enumerate(clips):
-        out.append(f"- clip {i}: {by_team.get(c['team'], c['team'])}, {c.get('player') or 'a player'}"
-                   + (f" on hole {c['hole']}" if c.get("hole") else "") + f": {c.get('what') or 'a shot'}"
-                   + (" (a rough moment)" if c.get("bad") else ""))
+        line = (f"- clip {i}: {by_team.get(c['team'], c['team'])}, {c.get('player') or 'a player'}"
+                + (f" on hole {c['hole']}" if c.get("hole") else "") + f": {c.get('what') or 'a shot'}"
+                + (" (a rough moment)" if c.get("bad") else ""))
+        h = _num(c.get("hole"))
+        if story and c["team"] in story["teams"] and h in story["holes"]:
+            n = story["holes"].index(h)
+            v = story["after"][n][c["team"]] - (story["after"][n - 1][c["team"]] if n else 0)
+            line += (f". Going to the hole: {standing(story, c['team'], n - 1)}. The hole: {_hole_net(v)} as a team, net, "
+                     f"leaving them {standing(story, c['team'], n)}")
+        out.append(line)
     facts_text = "\n".join(out)
     who = " and ".join(names.values()) or "the booth"
     ask = (
         f"\n\nWrite the week's recap package, voiced by {who}, as they would on a highlights show the day "
         "after. It plays as a short video: an intro over the results, then the clips, then an outro over "
         "the standings.\n"
-        f"- intro: two or three lines, at most {CARD_WORDS} words each: the week, the course, who won it "
-        "and by what, and how the field finished.\n"
-        f"- clips: for every clip listed, by its number, one or two lines, at most {CLIP_WORDS} words "
-        "between them. They play as the shot is hit, so call it the way the clip says it went, and tie it "
-        "to that team's week. Go through the teams as the clips run, last place to the winner.\n"
-        f"- outro: two or three lines, at most {CARD_WORDS} words each, on the season standings now: who "
+        + (f"- intro: two or three lines, at most {CARD_WORDS} words each: the week, the course, who won "
+           "it, and the story of how (a wire to wire win, a comeback, a lead that changed hands late), told "
+           "as the hook that the clips will play out.\n"
+           f"- clips: for every clip listed, by its number, one or two lines, at most {CLIP_WORDS} words "
+           "between them. The clips run in hole order, the way a tournament broadcast follows the "
+           "leaderboard through the round: call the shot the way the clip says it went, and put it in the "
+           "race (where the team stood going to the hole and what it did to the board). Carry the story "
+           "from clip to clip: who led early, where the lead changed, who pulled away or fell back, and "
+           "how it was decided. Don't call a clip in isolation.\n"
+           if story else
+           f"- intro: two or three lines, at most {CARD_WORDS} words each: the week, the course, who won it "
+           "and by what, and how the field finished.\n"
+           f"- clips: for every clip listed, by its number, one or two lines, at most {CLIP_WORDS} words "
+           "between them. They play as the shot is hit, so call it the way the clip says it went, and tie it "
+           "to that team's week. Go through the teams as the clips run, last place to the winner.\n")
+        + f"- outro: two or three lines, at most {CARD_WORDS} words each, on the season standings now: who "
         "leads, who moved, what's ahead.\n"
         "Trade lines between the commentators, as they do live. Use only the facts here: no other scores, "
         "points or shots. Say nets the way golf does (\"four under\", \"even par\").")
@@ -300,6 +501,7 @@ def timeline(facts: dict, clips: list[dict], lines: dict, voices: dict[tuple, tu
                 for n, (s, t) in enumerate(ls) if (*where, n) in voices]
 
     by_team = {r["team"]: r for r in facts["rows"]}
+    story, shown = race(facts), None
     out_clips, out_parts, sources, offset = [], [], [], 0.0
     for i, (c, cu) in enumerate(zip(clips, cuts)):
         said = voiced(("clip", i), lines["clips"].get(i, []))
@@ -314,6 +516,10 @@ def timeline(facts: dict, clips: list[dict], lines: dict, voices: dict[tuple, tu
         out_clips.append({"at": round(offset, 2), "team": r.get("name", c["team"]), "player": c.get("player"),
                           "hole": c.get("hole"), "what": c.get("what"), "bad": bool(c.get("bad")),
                           "lines": said, "src": [c["key"], c.get("id")]})
+        h = _num(c.get("hole"))
+        if story and h in story["holes"] and story["holes"].index(h) > 0 and h != shown:
+            out_clips[-1]["board"] = board(story, story["holes"].index(h) - 1, c["team"], by_team)
+            shown = h
         out_parts.append(segs)
         sources.append(c["key"])
         offset += sum(d for _, d in segs)

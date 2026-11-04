@@ -43,6 +43,31 @@ def week_of(tournament: dict[str, Any]) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def squabbit_holes(tournament: dict[str, Any], rounds: list[dict[str, Any]], card: dict[str, Any],
+                   league: League) -> dict[str, dict[int, int]]:
+    """Each team's net to par hole by hole in a league week, from its players' Squabbit rounds the way
+    the leaderboard scores them (handicap.team_holes): league team -> {hole number: net}. `rounds`:
+    the league's player rounds (any week's); `card`: the week's (handicap.week_card). A team whose
+    rounds can't be scored is left out."""
+    from .handicap import _format, team_holes
+
+    fmt = _format(tournament)
+    tid = tournament.get("id") or tournament.get("_id")
+    by_user = {r["userId"]: r for r in rounds if r.get("tournamentId") == tid and r.get("userId")}
+    out: dict[str, dict[int, int]] = {}
+    for team in (fmt.get("teams") or {}).values():
+        members = [by_user[u] for u in team.get("userIds") or [] if u in by_user]
+        if not members:
+            continue
+        try:
+            holes = team_holes(card, members, fmt.get("formatType"))
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        if holes:
+            out[Board._team(league, team, team.get("name"))] = holes
+    return out
+
+
 class Board:
     def __init__(self, weeks: dict[int, list[Entry]], league: League, points_table: list[float] | None) -> None:
         self.weeks = weeks

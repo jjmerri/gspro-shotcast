@@ -277,7 +277,12 @@ Once a league week is final (every team posted, or its deadline passed), the boo
 **League recap** (`publish.recaps`, on by default): about 3 minutes of the two commentators
 running through the week over the teams' moments from their rounds' reels. Every team whose round
 was streamed here gets its best moment (a bad one only if it has nothing else), and the leaders and
-big movers in the standings up to three; teams play from last place to the winner. It opens over
+big movers in the standings up to three; teams play from last place to the winner. When the week's
+teams all have hole-by-hole nets (the sim's rounds, kept with each week result, and Squabbit's posted
+rounds), it's told as one tournament instead: the running net leaderboard after each hole, its lead
+changes, ties, big swings and how it was won (wire to wire, a comeback, on the last hole); clips on
+the holes it turned on go first, and all play in hole order, each new hole's opening with a TV-style
+net leaderboard (thru the hole before, top five and the clip's team) for its first 6 seconds. It opens over
 the week's results, plays the clips (muted, the booth's new lines over them, the video waiting for
 a line that runs long) and closes over the standings. It's built after the round's publish has cut
 its reel, with one model call and the lines voiced; it's built again only if the week's numbers or

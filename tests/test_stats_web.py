@@ -973,13 +973,15 @@ def test_the_recap_player_times_its_lines_over_the_clips():
     if not node:
         pytest.skip("needs node")
     page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
-    fns = re.search(r"\nfunction recapPlayer\(.*?\n}\n", page, re.S).group(0)
+    fns = re.search(r"\nconst BOARD_SECONDS = .*?\n", page).group(0) + \
+        re.search(r"\nfunction recapPlayer\(.*?\n}\n", page, re.S).group(0)
     body = {"week": 6, "course": "Test Links", "rows": [{"name": "Aces", "net": -5, "place": 1, "tied": False, "points": 70}],
             "standings": [{"name": "Aces", "points": 70, "place": 1, "was": 3}],
             "intro": [{"text": "i1", "audio": "a/0.wav"}, {"text": "i2", "audio": "a/1.wav"}],
             "clips": [{"at": 0, "lines": [{"text": "c1", "at": 1.5, "audio": "a/2.wav"}, {"text": "c2", "at": 4, "audio": "a/3.wav"},
                                           {"text": "c2b", "at": 10.5, "audio": "a/3b.wav"}]},
-                      {"at": 10, "lines": [{"text": "c3", "at": 11.5, "audio": "a/4.wav"}, {"text": "c4", "at": 30, "audio": "a/5.wav"}]}],
+                      {"at": 10, "board": {"thru": 4, "rows": [{"place": 1, "tied": False, "name": "Aces", "net": -3, "on": True}]},
+                       "lines": [{"text": "c3", "at": 11.5, "audio": "a/4.wav"}, {"text": "c4", "at": 30, "audio": "a/5.wav"}]}],
             "outro": [{"text": "o1", "audio": "a/6.wav"}]}
     script = """
 const esc = s => String(s), toPar = n => String(n), state = {};
@@ -1006,6 +1008,7 @@ setTimeout(() => {
   audio.fire("ended");             // i2 -> the clips
   const playing = r.phase;
   at(1); at(1.6);                  // c1 due
+  const boards = [r.board.hidden];  // no board on the first hole's clip
   at(4.2);                         // c2 due while c1 still going: the video holds
   const held = video.paused;
   audio.fire("ended");             // c1 done -> the video goes on, c2 plays
@@ -1014,13 +1017,16 @@ setTimeout(() => {
   const stillHeld = video.paused;
   audio.fire("ended");             // c2b done -> the next clip
   at(11.6);                        // c3, still going as the video ends (a pause, then the end)
+  boards.push(r.board.hidden, r.board.innerHTML.includes("thru 4") && r.board.innerHTML.includes('class="on"'));
+  at(16.5); boards.push(r.board.hidden); at(11.6);
   video.ended = true; video.pause(); video.fire("ended");
   const tail = [audio.paused, r.phase];
   audio.fire("ended");             // c3 done: c4, which the video ended before, still plays
   audio.fire("ended");             // then the outro
   const outro = r.card.innerHTML.includes("Standings");
+  boards.push(r.board.hidden);
   audio.fire("ended");
-  console.log(JSON.stringify({ stillHeld, start, playing, held, heard, log, tail, outro, done: r.phase, again: r.card.innerHTML.includes("Watch again") }));
+  console.log(JSON.stringify({ boards, stillHeld, start, playing, held, heard, log, tail, outro, done: r.phase, again: r.card.innerHTML.includes("Watch again") }));
 }, 0);
 """ % (json.dumps(body), fns)
     got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
@@ -1074,3 +1080,5 @@ setTimeout(() => {
     assert got["heard"] == ["0.wav", "1.wav", "2.wav", "3.wav", "3b.wav", "4.wav", "5.wav", "6.wav"]
     assert got["log"] == ["play@0", "pause@4.2", "play@4.2", "pause@10.1", "play@10.1", "pause@11.6"] and got["done"] == "done"
     assert got["tail"] == [False, "clips"] and got["stillHeld"]
+    # The net board's up for the first seconds of a clip starting a hole, gone after and in the outro.
+    assert got["boards"] == [True, False, True, True, True]

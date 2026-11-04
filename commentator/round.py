@@ -1074,6 +1074,12 @@ class Round:
         Aggregate: both nets. A format's max hole score caps a blow-up hole. Counts the holes every one
         of the team's sides has scored. None without strokes, or with a partner missing from the round
         (the leaderboard's team score needs both)."""
+        holes = self.team_holes(team)
+        return (sum(holes.values()), len(holes)) if holes else None
+
+    def team_holes(self, team: str) -> dict[int, int] | None:
+        """team_net hole by hole: each counted hole's team net to par, keyed by the round's hole
+        sequence (1..holes). None when team_net would be."""
         if self.format is None or not self.is_league:
             return None
         sides = [s for s in self.sides if (s.team or s.key) == team]
@@ -1087,12 +1093,12 @@ class Round:
                 if self.par.get(q) and all(self.card_score(s, q) is not None for s in sides)]
         if not seqs:
             return None
-        total = 0
+        out = {}
         for q in seqs:
             par = self.par[q]
             nets = [self._capped_score(s, q) - s.hole_strokes.get(q, 0) - par for s in sides]
-            total += min(nets) if self.format == "best_ball" else sum(nets)
-        return total, len(seqs)
+            out[q] = min(nets) if self.format == "best_ball" else sum(nets)
+        return out
 
     def team_gross(self, team: str) -> tuple[int, int, list[tuple[Side, int]]] | None:
         """A best-ball team's running GROSS score to par: (team to par, holes counted, each partner's own

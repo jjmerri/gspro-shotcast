@@ -191,6 +191,11 @@ def validate_season(tournaments: list[dict[str, Any]], rounds: list[dict[str, An
 
 def team_net(card: dict[str, Any], members: list[dict[str, Any]], format_type: str | None) -> int:
     """A team's net to par from its players' Squabbit rounds, under the week card's rules."""
+    return sum(team_holes(card, members, format_type).values())
+
+
+def team_holes(card: dict[str, Any], members: list[dict[str, Any]], format_type: str | None) -> dict[int, int]:
+    """team_net hole by hole: each hole's team net to par, by the course's hole number."""
     first = members[0]
     holes = sorted(int(h) for h in first["holeScoresV2"])
     pars = {h: int(card["par"][str(h)]) for h in holes}
@@ -198,8 +203,7 @@ def team_net(card: dict[str, Any], members: list[dict[str, Any]], format_type: s
     if format_type in TEAM_BALL_TYPES:
         strokes = strokes_for(card, [m["userHandicap"] for m in members], holes, True, first.get("tee"))
         given = allocate(strokes, order)
-        gross = sum(_capped(card, first["holeScoresV2"][str(h)], pars[h], given[h]) for h in holes)
-        return gross - strokes - sum(pars.values())
+        return {h: _capped(card, first["holeScoresV2"][str(h)], pars[h], given[h]) - given[h] - pars[h] for h in holes}
     nets = []
     for m in members:
         s = strokes_for(card, [m["userHandicap"]], holes, False, m.get("tee"))
@@ -207,8 +211,8 @@ def team_net(card: dict[str, Any], members: list[dict[str, Any]], format_type: s
         nets.append({h: _capped(card, m["holeScoresV2"][str(h)], pars[h], given[h]) - given[h]
                      for h in holes if str(h) in m["holeScoresV2"]})
     if format_type == "BestBall":
-        return sum(min(n[h] for n in nets if h in n) - pars[h] for h in holes)
-    return sum(v - pars[h] for n in nets for h, v in n.items())
+        return {h: min(n[h] for n in nets if h in n) - pars[h] for h in holes}
+    return {h: sum(n[h] - pars[h] for n in nets if h in n) for h in holes}
 
 
 def _capped(card: dict[str, Any], gross: int, par: int, strokes: int) -> int:

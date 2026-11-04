@@ -182,7 +182,8 @@ CREATE TABLE IF NOT EXISTS week_results (       -- a league team's finished week
     end_date TEXT,                               -- the week's deadline: week numbers repeat each season
     team TEXT NOT NULL,
     net INTEGER NOT NULL,                        -- team net to par, scored the way Squabbit does
-    round_id INTEGER                             -- one of the team's rounds rows: it counts while that does
+    round_id INTEGER,                            -- one of the team's rounds rows: it counts while that does
+    holes TEXT                                   -- JSON {hole number: team net to par on it}, for the recap's story
 );
 CREATE TABLE IF NOT EXISTS predictions (
     id INTEGER PRIMARY KEY,
@@ -401,6 +402,8 @@ class Store:
         for col, decl in {"excluded": "INTEGER NOT NULL DEFAULT 0", "aired_at": "REAL", "aired_seconds": "REAL"}.items():
             if col not in have_lines:
                 self.db.execute(f"ALTER TABLE lines ADD COLUMN {col} {decl}")
+        if "holes" not in {r["name"] for r in self.db.execute("PRAGMA table_info(week_results)")}:
+            self.db.execute("ALTER TABLE week_results ADD COLUMN holes TEXT")
         if "tee_box" not in {r["name"] for r in self.db.execute("PRAGMA table_info(hole_layouts)")}:
             self.db.execute("ALTER TABLE hole_layouts ADD COLUMN tee_box TEXT")
         if self.db.execute("PRAGMA user_version").fetchone()[0] < 1:
@@ -1407,9 +1410,11 @@ class Store:
         self.db.commit()
         return cur.lastrowid
 
-    def record_week_result(self, week: int, end_date: str | None, team: str, net: int, round_id: int) -> None:
-        self.db.execute("INSERT INTO week_results (ended_at, week, end_date, team, net, round_id) VALUES (?,?,?,?,?,?)",
-                        (time.time(), week, end_date, team, net, round_id))
+    def record_week_result(self, week: int, end_date: str | None, team: str, net: int, round_id: int,
+                           holes: dict[int, int] | None = None) -> None:
+        self.db.execute("INSERT INTO week_results (ended_at, week, end_date, team, net, round_id, holes) VALUES (?,?,?,?,?,?,?)",
+                        (time.time(), week, end_date, team, net, round_id,
+                         json.dumps({str(h): v for h, v in holes.items()}) if holes else None))
         self.db.commit()
 
     def week_results(self, schedule: list[dict]) -> dict[int, dict[str, int]]:
@@ -1421,6 +1426,20 @@ class Store:
     def week_rounds(self, schedule: list[dict]) -> dict[int, dict[str, int]]:
         """week_results' rounds: week -> team -> the rounds row its net is from."""
         return self._week_rows(schedule, "round_id")
+
+    def week_holes(self, schedule: list[dict]) -> dict[int, dict[str, dict[int, int]]]:
+        """week_results' hole by hole nets: week -> team -> {hole number: net to par}. A team whose
+        latest round of the week has none (recorded before they were kept) is left out."""
+        out: dict[int, dict[str, dict[int, int]]] = {}
+        for week, teams in self._week_rows(schedule, "holes").items():
+            for team, raw in teams.items():
+                try:
+                    holes = {int(h): int(v) for h, v in json.loads(raw).items()} if raw else None
+                except (TypeError, ValueError, AttributeError):
+                    holes = None
+                if holes:
+                    out.setdefault(week, {})[team] = holes
+        return out
 
     def _week_rows(self, schedule: list[dict], field: str) -> dict[int, dict[str, int]]:
         ends = {e["week"]: e.get("end_date") for e in schedule if e.get("week")}

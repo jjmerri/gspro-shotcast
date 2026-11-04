@@ -275,6 +275,10 @@ def test_a_finished_league_round_is_kept_by_week_and_puts_the_league_cards_up(tm
     # Another season's week 6 (another deadline) doesn't count.
     e.store.record_week_result(6, "2025-12-06", "Duffers", -9, duffers)
     assert e.store.week_results(LEAGUE_DATA["schedule"]) == {6: {"Aces": net[0], "Duffers": -1}}
+    # The sim's hole by hole nets, by the course's hole number, for the recap's story.
+    holes = e.store.week_holes(LEAGUE_DATA["schedule"])
+    assert set(holes) == {6} and set(holes[6]) == {"Aces"}
+    assert sorted(holes[6]["Aces"]) == list(range(10, 19)) and sum(holes[6]["Aces"].values()) == net[0]
     # A round deleted (or excluded, or made practice) on the stats page drops out.
     e.store.db.execute("UPDATE rounds SET excluded = 2 WHERE id = ?", (duffers,))
     e.store.db.execute("UPDATE rounds SET is_league = 0 WHERE id = ?", (aces,))

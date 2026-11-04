@@ -78,7 +78,12 @@
   #liveslot video { width:100%; max-height:78vh; background:#000; border-radius:8px; }
   #liveslot .recapcard { position:absolute; inset:0; background:rgba(0,0,0,.85); border-radius:8px; overflow:auto;
                          display:flex; flex-direction:column; align-items:center; justify-content:center; padding:12px; text-align:center; }
-  #liveslot .recapcard[hidden], #liveslot .recapcap[hidden] { display:none; }
+  #liveslot .recapcard[hidden], #liveslot .recapcap[hidden], #liveslot .recapboard[hidden] { display:none; }
+  #liveslot .recapboard { position:absolute; top:12px; left:12px; pointer-events:none; background:rgba(0,0,0,.8); color:#fff;
+                          border-left:3px solid var(--accent); border-radius:4px; padding:6px 10px; font-size:13px; }
+  #liveslot .recapboard h4 { margin:0 0 4px; font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); }
+  #liveslot .recapboard table { background:none; margin:0; } #liveslot .recapboard td { padding:1px 6px; border:0; }
+  #liveslot .recapboard tr.on td { color:var(--accent); font-weight:700; }
   #liveslot .recapcard table { background:none; margin:8px auto; } #liveslot .recapcard h3 { margin:0 0 4px; }
   #liveslot .recapcard .play { font:inherit; font-size:16px; padding:10px 18px; border-radius:8px; cursor:pointer;
                                background:var(--accent); color:#000; border:0; margin-top:8px; }
@@ -1958,7 +1963,7 @@ function attachLive() {
   slot.appendChild(player.video);
   if (player.unmute) slot.appendChild(player.unmute);
   if (player.golive) slot.appendChild(player.golive);
-  if (player.recap) slot.append(player.recap.card, player.recap.cap);
+  if (player.recap) slot.append(player.recap.board, player.recap.card, player.recap.cap);
 }
 
 // Everyone watching the live stream should be on the same shot, so the chat is about the same thing:
@@ -2065,10 +2070,12 @@ function recapPart() {
 // played over them at their times, an outro over the standings. One Audio element plays every line,
 // started from the Play tap, which is what lets a phone play it. A line still going when the next is
 // due, or when its clip gives way to the next (or the video ends), holds the video till it's done.
+const BOARD_SECONDS = 6;   // a recap clip's net leaderboard stays up this long
 function recapPlayer(me, key, built) {
   const base = `live/recaps/${encodeURIComponent(key)}/`, v = me.video, audio = new Audio();
   const r = me.recap = { card: Object.assign(document.createElement("div"), { className: "recapcard", innerHTML: '<p class="sub">Loading…</p>' }),
                          cap: Object.assign(document.createElement("div"), { className: "recapcap", hidden: true }),
+                         board: Object.assign(document.createElement("div"), { className: "recapboard", hidden: true }), shownBoard: null,
                          body: null, phase: "load", line: null, list: [], held: false, played: new Set(), seq: 0, over: 0,
                          stop() { r.phase = "stopped"; audio.pause(); audio.removeAttribute("src"); } };
   const live = () => player === me && r.phase !== "stopped";
@@ -2118,7 +2125,18 @@ function recapPlayer(me, key, built) {
   };
   // A line's due at its time, or once the video's past its clip: a clip's lines all go before the next's.
   const isDue = l => !r.played.has(l) && (l.at <= v.currentTime || pastClip(l));
+  // The net leaderboard going to a new hole, up for the start of its clip, as a broadcast does.
+  const scoreboard = () => {
+    const t = v.currentTime, c = r.phase === "clips" ? r.body.clips.filter(c => c.at <= t + 0.05).pop() : null;
+    const b = c && c.board && t < c.at + BOARD_SECONDS ? c.board : null;
+    if (b === r.shownBoard) return;
+    r.shownBoard = b;
+    r.board.hidden = !b;
+    if (b) r.board.innerHTML = `<h4>Net · thru ${esc(b.thru)}</h4><table><tbody>${b.rows.map(x =>
+      `<tr${x.on ? ' class="on"' : ""}><td>${x.tied ? "T" : ""}${esc(x.place)}</td><td class="l">${esc(x.name)}</td><td>${toPar(x.net)}</td></tr>`).join("")}</tbody></table>`;
+  };
   const tick = () => {
+    if (live()) scoreboard();
     if (!live() || r.phase !== "clips" || v.seeking) return;
     if (r.line) { if (pastClip(r.line) || clipLines().some(isDue)) hold(); return; }
     const due = clipLines().find(isDue);
@@ -2128,6 +2146,7 @@ function recapPlayer(me, key, built) {
   };
   const start = () => {
     r.phase = "intro"; r.played = new Set(); r.held = false; r.ending = false;
+    scoreboard();
     show(results(r.body));
     run(r.body.intro, () => {
       r.phase = "clips"; show("");
@@ -2137,6 +2156,7 @@ function recapPlayer(me, key, built) {
   };
   const finish = () => {
     r.phase = "outro";
+    scoreboard();
     show(table(r.body));
     run(r.body.outro, () => { r.phase = "done"; show(table(r.body) + '<button class="play" data-recapplay="1">▶ Watch again</button>'); });
   };

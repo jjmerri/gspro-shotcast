@@ -57,6 +57,46 @@ def test_every_team_with_footage_gets_a_moment_and_the_leaders_more_within_the_b
     assert sorted(c["team"] for c in small) == ["Aces", "Aces", "Duffers", "Hackers", "Yips"]
 
 
+def test_the_week_is_told_as_one_tournament_hole_by_hole():
+    facts = recap.week_facts(_board(nets={"Aces": -3, "Duffers": -2, "Hackers": 1, "Yips": 3}), 6, "2026-12-07")
+    facts["holes"] = {"Aces": {1: 0, 2: 0, 3: -1, 4: -1, 5: -1}, "Duffers": {1: -1, 2: -1, 3: 0, 4: 0, 5: 0},
+                      "Hackers": {1: 0, 2: 0, 3: 0, 4: 0, 5: 0},
+                      "Yips": {1: 1, 2: 1, 3: 1, 4: 0, 5: 0}}
+    # A team's card that doesn't add up to its net (or is missing, or on other holes): no story, as
+    # it might have led.
+    assert recap.race(facts) is None
+    facts["holes"]["Hackers"] = {1: 0, 2: 0, 3: 1, 4: 0, 5: 0}
+    story = recap.race(facts)
+    assert story["teams"] == ["Aces", "Duffers", "Hackers", "Yips"] and story["holes"] == [1, 2, 3, 4, 5]
+    texts = [e["text"] for e in story["events"]]
+    for want in ("Duffers lead after hole 1 at -1", "Aces were 2 back after hole 2 and came back to win",
+                 "Tied for the lead after hole 4 at -2: Aces, Duffers",
+                 "Aces pull clear alone after hole 5 at -3 (falling back: Duffers)", "Aces won it on the last hole"):
+        assert want in texts
+    assert story["key"]["Duffers"] >= {1, 4} and 5 in story["key"]["Aces"]
+    assert recap.standing(story, "Duffers", 1) == "-2, leading by 2" and recap.standing(story, "Aces", 3) == "-2, tied for the lead"
+
+    moments = {"Aces": [{"id": 1, "player": "Mike", "at": 0, "level": 4, "bad": False, "what": "a", "hole": 1},
+                        {"id": 2, "player": "Mike", "at": 20, "level": 1, "bad": False, "what": "b", "hole": 5},
+                        {"id": 3, "player": "Mike", "at": 40, "level": 4, "bad": False, "what": "c", "hole": 12}],
+               "Duffers": [{"id": 1, "player": "Tony", "at": 0, "level": 4, "bad": False, "what": "d", "hole": 2},
+                           {"id": 2, "player": "Tony", "at": 30, "level": 1, "bad": True, "what": "e", "hole": 4}],
+               "Hackers": [{"id": 1, "player": "Lou", "at": 0, "level": 2, "bad": False, "what": "f", "hole": 3}]}
+    found = {t: {"key": t, "moments": ms, "ats": [m["at"] for m in ms]} for t, ms in moments.items()}
+    clips = recap.choose(facts, found)
+    # The holes the story turned on first (Duffers' rough 4th, where the lead went), none off the
+    # week's holes, and the whole field in hole order.
+    assert [(c["team"], c["hole"]) for c in clips] == [("Aces", 1), ("Duffers", 2), ("Hackers", 3), ("Duffers", 4), ("Aces", 5)]
+    user, facts_text = recap.prompt(facts, clips, {"pbp": "Ann"})
+    assert "- after hole 4: Aces -2, Duffers -2, Hackers +1, Yips +3" in facts_text
+    assert "Going to the hole: -2, leading by 1. The hole: even as a team, net, leaving them -2, tied for the lead" in facts_text
+    assert "broadcast" in user
+    # The net leaderboard going to a hole, the clip's team marked.
+    assert recap.board(story, 3, "Yips", {r["team"]: r for r in facts["rows"]}) == {"thru": 4, "rows": [
+        {"place": 1, "tied": True, "name": "Aces", "net": -2}, {"place": 1, "tied": True, "name": "Duffers", "net": -2},
+        {"place": 3, "tied": False, "name": "Hackers", "net": 1}, {"place": 4, "tied": False, "name": "Yips", "net": 3, "on": True}]}
+
+
 def test_a_reel_two_teams_share_gives_each_its_own_players_shots():
     reels = {"7": {"moments": _moments(("Mike", 0, 2, False), ("tony", 20, 2, False), ("Ghost", 40, 2, False))},
              "8": {"moments": _moments(("Lou B", 0, 2, False), ("Mike", 20, 2, False))}}

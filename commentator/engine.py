@@ -902,6 +902,7 @@ class Engine:
         self._recap_task: asyncio.Task | None = None   # building a league week's recap (_build_recap)
         self._recap_again = False   # something changed while it was: look again after
         self._recap_tried: tuple | None = None   # the last recap built or tried, (key, digest)
+        self._recap_holes: dict[tuple[int, str], tuple[int, dict]] = {}   # (week, team) -> (net, Squabbit's holes)
         self._board_task: asyncio.Task | None = None
         self.hole_number: int | None = None
         # Whether the current hole's number was read off the screen rather than counted on.
@@ -2055,6 +2056,7 @@ class Engine:
         facts = recap.week_facts(board, week, today)
         if not facts["rows"]:
             return
+        facts["holes"] = await self._week_holes(board, week)
         key = recap.key_of(facts)
         _, of_row = round_groups(self.store.db)
         rows = self.store.week_rounds(self.league.data.get("schedule") or []).get(week, {})
@@ -2106,6 +2108,43 @@ class Engine:
         entry = await asyncio.to_thread(recap.publish, client, p.bucket, p.prefix, key, body, video, sources, audio,
                                         digest, season)
         log.info("League recap of week %s up: %s clips, %.0fs of video", week, entry["clips"], entry["duration"])
+
+    async def _week_holes(self, board: Board, week: int) -> dict[str, dict[int, int]]:
+        """Each posted team's week hole by hole, for the recap's story (recap.race): the sim's card for
+        a net it counted, the players' Squabbit rounds for one posted there (read once per team and
+        net). Best-effort: a team without one is left out of the story."""
+        sim = self.store.week_holes(self.league.data.get("schedule") or []).get(week, {})
+        posted = board.posted(week)
+        out = {e.team: sim[e.team] for e in posted if e.sim and e.team in sim}
+        theirs = {e.team: e.net for e in posted if not e.sim}
+        if any(self._recap_holes.get((week, t), (None,))[0] != n for t, n in theirs.items()):
+            invite = self.league.squabbit_invite
+
+            def fetch() -> dict[str, dict[int, int]]:
+                from .board import squabbit_holes, week_of
+                from .handicap import week_card
+                from .squabbit import SquabbitClient
+
+                with SquabbitClient() as client:
+                    league = client.league_by_invite(invite)
+                    t = next((t for t in client.tournaments(league["_id"]) if week_of(t) == week), None) if league else None
+                    if t is None:
+                        return {}
+                    card = self.league.week_card(week)
+                    if not card:
+                        rounds = client.tournament_rounds(t["_id"])
+                        card = week_card(t, rounds[0]) if rounds else None
+                    return squabbit_holes(t, client.league_rounds(league["_id"]), card, self.league) if card else {}
+
+            try:
+                got = await asyncio.wait_for(asyncio.to_thread(fetch), timeout=self.cfg.squabbit.timeout_seconds)
+                for t, n in theirs.items():   # one Squabbit can't score is kept as none, not asked again
+                    self._recap_holes[(week, t)] = (n, got.get(t) or {})
+            except Exception as e:
+                log.warning("League recap: Squabbit hole scores fetch failed (%s); the story leaves those teams out", e)
+        out.update({t: holes for t, n in theirs.items()
+                    if (cached := self._recap_holes.get((week, t))) and cached[0] == n and (holes := cached[1])})
+        return out
 
     async def _write_recap(self, facts: dict, clips: list[dict]) -> dict | None:
         """The recap's lines from the closer's model, checked against the week's facts and retried
@@ -8723,7 +8762,8 @@ class Engine:
         done = False
         for t in dict.fromkeys(t for t in r.teams if t in self.league.team_players):
             if (tn := r.team_net(t)) and tn[1] == r.holes and t in row_of:
-                self.store.record_week_result(week, r.schedule.get("end_date"), t, tn[0], row_of[t])
+                holes = {r.start_hole + q - 1: v for q, v in (r.team_holes(t) or {}).items()}
+                self.store.record_week_result(week, r.schedule.get("end_date"), t, tn[0], row_of[t], holes)
                 done = True
         if done:
             self._publish_league_page()
