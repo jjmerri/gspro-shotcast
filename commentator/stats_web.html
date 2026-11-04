@@ -81,7 +81,7 @@
   /* Centered by auto margins, not justify-content: a card taller than a phone's video scrolls from its top. */
   #liveslot .recapcard > :first-child { margin-top:auto; } #liveslot .recapcard > :last-child { margin-bottom:auto; }
   #liveslot .recapcard[hidden], #liveslot .recapcap[hidden], #liveslot .recapboard[hidden], #liveslot .recapcc[hidden] { display:none; }
-  #liveslot .recapboard { position:absolute; bottom:56px; right:12px; pointer-events:none; background:rgba(0,0,0,.8); color:#fff;
+  #liveslot .recapboard { position:absolute; bottom:56px; right:4%; pointer-events:none; background:rgba(0,0,0,.8); color:#fff;
                           border-left:3px solid var(--accent); border-radius:4px; padding:6px 10px; font-size:13px; }
   #liveslot .recapboard h4 { margin:0 0 4px; font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); }
   #liveslot .recapboard table { background:none; margin:0; } #liveslot .recapboard td { padding:1px 6px; border:0; }
@@ -92,7 +92,7 @@
   @media (max-height:560px), (max-width:600px) {
     #liveslot .recapcard { padding:8px; font-size:12px; } #liveslot .recapcard td { padding:1px 6px; }
     #liveslot .recapcard .play { font-size:14px; padding:8px 14px; margin-bottom:6px; }
-    #liveslot .recapboard { bottom:44px; right:6px; padding:3px 6px; font-size:10px; } #liveslot .recapboard h4 { font-size:9px; margin-bottom:2px; }
+    #liveslot .recapboard { bottom:44px; right:3%; padding:3px 6px; font-size:10px; } #liveslot .recapboard h4 { font-size:9px; margin-bottom:2px; }
     #liveslot .recapboard td { padding:0 4px; }
   }
   #liveslot .recapcap { position:absolute; left:12px; bottom:56px; max-width:55%; pointer-events:none;
@@ -2081,7 +2081,6 @@ function recapPart() {
 // played over them at their times, an outro over the standings. One Audio element plays every line,
 // started from the Play tap, which is what lets a phone play it. A line still going when the next is
 // due, or when its clip gives way to the next (or the video ends), holds the video till it's done.
-const BOARD_SECONDS = 6;   // a recap clip's net leaderboard stays up this long
 function recapPlayer(me, key, built) {
   const base = `live/recaps/${encodeURIComponent(key)}/`, v = me.video, audio = new Audio();
   const r = me.recap = { card: Object.assign(document.createElement("div"), { className: "recapcard", innerHTML: '<p class="sub">Loading…</p>' }),
@@ -2140,10 +2139,10 @@ function recapPlayer(me, key, built) {
   };
   // A line's due at its time, or once the video's past its clip: a clip's lines all go before the next's.
   const isDue = l => !r.played.has(l) && (l.at <= v.currentTime || pastClip(l));
-  // The net leaderboard going to a new hole, up for the start of its clip, as a broadcast does.
+  // The net leaderboard (thru the hole before the clip's), up through the clips as a broadcast has it.
   const scoreboard = () => {
     const t = v.currentTime, c = r.phase === "clips" ? r.body.clips.filter(c => c.at <= t + 0.05).pop() : null;
-    const b = c && c.board && t < c.at + BOARD_SECONDS ? c.board : null;
+    const b = c && c.board || null;
     if (b === r.shownBoard) return;
     r.shownBoard = b;
     r.board.hidden = !b;

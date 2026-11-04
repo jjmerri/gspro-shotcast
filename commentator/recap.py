@@ -530,7 +530,7 @@ def timeline(facts: dict, clips: list[dict], lines: dict, voices: dict[tuple, tu
                 for n, (s, t) in enumerate(ls) if (*where, n) in voices]
 
     by_team = {r["team"]: r for r in facts["rows"]}
-    story, shown = race(facts), None
+    story = race(facts)
     out_clips, out_parts, sources, offset = [], [], [], 0.0
     for i, (c, cu) in enumerate(zip(clips, cuts)):
         said = voiced(("clip", i), lines["clips"].get(i, []))
@@ -546,9 +546,8 @@ def timeline(facts: dict, clips: list[dict], lines: dict, voices: dict[tuple, tu
                           "hole": c.get("hole"), "what": c.get("what"), "bad": bool(c.get("bad")),
                           "lines": said, "src": [c["key"], c.get("id")]})
         h = _num(c.get("hole"))
-        if story and h in story["holes"] and story["holes"].index(h) > 0 and h != shown:
+        if story and h in story["holes"] and story["holes"].index(h) > 0:   # (up all through, as on TV)
             out_clips[-1]["board"] = board(story, story["holes"].index(h) - 1, c["team"], by_team)
-            shown = h
         out_parts.append(segs)
         sources.append(c["key"])
         offset += sum(d for _, d in segs)

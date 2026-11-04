@@ -93,6 +93,12 @@ def test_the_week_is_told_as_one_tournament_hole_by_hole():
     assert [(c["team"], c["hole"], bool(c.get("finish"))) for c in fin] == \
         [("Aces", 1, False), ("Duffers", 2, False), ("Hackers", 3, False), ("Duffers", 4, False), ("Aces", 5, True)]
     assert "THE WINNING FINISH" in recap.prompt(facts, fin, {"pbp": "Ann"})[1]
+    # The board's on every clip from the second hole on, two on a hole each with it.
+    two = [*fin[:3], {**fin[2], "team": "Duffers"}, *fin[3:]]
+    body, _, _ = recap.timeline(facts, two, {"intro": [], "outro": [], "clips": {i: [("pbp", "x")] for i in range(6)}},
+                                {("clip", i, 0): (1.0, f"{i}.wav") for i in range(6)}, [([("s.ts", 4.0)], 0.0)] * 6)
+    assert [(c["hole"], c.get("board", {}).get("thru")) for c in body["clips"]] == \
+        [(1, None), (2, 1), (3, 2), (3, 2), (4, 3), (5, 4)]
     user, facts_text = recap.prompt(facts, clips, {"pbp": "Ann"})
     assert "- after hole 4: Aces -2, Duffers -2, Hackers +1, Yips +3" in facts_text
     assert "Going to the hole: -2, leading by 1. How the hole ends (still to come as this shot's hit): even as a team, net, leaving them -2, tied for the lead" in facts_text

@@ -973,8 +973,7 @@ def test_the_recap_player_times_its_lines_over_the_clips():
     if not node:
         pytest.skip("needs node")
     page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
-    fns = re.search(r"\nconst BOARD_SECONDS = .*?\n", page).group(0) + \
-        re.search(r"\nfunction recapPlayer\(.*?\n}\n", page, re.S).group(0)
+    fns = re.search(r"\nfunction recapPlayer\(.*?\n}\n", page, re.S).group(0)
     body = {"week": 6, "course": "Test Links", "rows": [{"name": "Aces", "net": -5, "place": 1, "tied": False, "points": 70}],
             "standings": [{"name": "Aces", "points": 70, "place": 1, "was": 3}],
             "intro": [{"text": "i1", "audio": "a/0.wav"}, {"text": "i2", "audio": "a/1.wav"}],
@@ -1095,5 +1094,5 @@ setTimeout(() => {
     assert got["heard"] == ["0.wav", "1.wav", "2.wav", "3.wav", "3b.wav", "4.wav", "5.wav", "6.wav"]
     assert got["log"] == ["play@0", "pause@4.2", "play@4.2", "pause@10.1", "play@10.1", "pause@11.6"] and got["done"] == "done"
     assert got["tail"] == [False, "clips"] and got["stillHeld"]
-    # The net board's up for the first seconds of a clip starting a hole, gone after and in the outro.
-    assert got["boards"] == [True, False, True, True, True]
+    # The net board's up through a clip with one (from the second hole on), gone in the outro.
+    assert got["boards"] == [True, False, True, False, True]
