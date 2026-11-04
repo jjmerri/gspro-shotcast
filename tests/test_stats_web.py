@@ -985,7 +985,7 @@ def test_the_recap_player_times_its_lines_over_the_clips():
     script = """
 const esc = s => String(s), toPar = n => String(n), state = {};
 const on = o => { o.ev = {}; o.addEventListener = (k, f) => (o.ev[k] ||= []).push(f); o.fire = k => (o.ev[k] || []).forEach(f => f({ target: o.t })); return o; };
-const document = { createElement: () => on({ classList: { toggle() {} } }) };
+const document = { createElement: () => on({ classList: { toggle() {} }, style: { setProperty(k, v) { this[k] = v; } } }) };
 const saved = {}, store = { get: k => saved[k] ?? null, set: (k, v) => { saved[k] = v; } };
 const heard = [], log = [];
 let audio;
@@ -1083,11 +1083,15 @@ setTimeout(() => {
   const shown = [r.cap.hidden, store.get("recapSubs")];
   const unmuted = [routed.length, video.muted, audio.muted];
   video.muted = true; video.volume = 0.5; video.fire("volumechange");
+  // A 16:9 picture in a wide, short player: the board's kept off the bars either side.
+  Object.assign(video, { clientWidth: 1000, clientHeight: 400, videoWidth: 1600, videoHeight: 900 }); video.fire("loadedmetadata");
+  const fit = [r.board.style["--px"], r.board.style["--py"], r.board.style["--in"]];
   r.stop();
-  console.log(JSON.stringify({ off, shown, unmuted, muted: [audio.muted, audio.volume], closed: routed.length === 2 && routed[1] }));
+  console.log(JSON.stringify({ off, shown, unmuted, muted: [audio.muted, audio.volume], closed: routed.length === 2 && routed[1], fit }));
 }, 0);"""
     assert json.loads(subprocess.run([node], input=sub, capture_output=True, encoding="utf-8", check=True).stdout) == \
-        {"off": True, "shown": [False, "1"], "unmuted": [1, False, None], "muted": [True, 0.5], "closed": "closed"}
+        {"off": True, "shown": [False, "1"], "unmuted": [1, False, None], "muted": [True, 0.5], "closed": "closed",
+         "fit": ["144.44444444444446px", "0px", "28px"]}
     assert sought["after"] == [False, True, None] and sought["heard"] == ["0.wav", "1.wav", "2.wav", "4.wav", "2.wav"]
     assert sought["back"] == ["clips", False]
     assert got["start"] and got["playing"] == "clips" and got["held"] and got["outro"] and got["again"]

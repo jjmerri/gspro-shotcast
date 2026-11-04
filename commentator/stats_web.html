@@ -81,7 +81,7 @@
   /* Centered by auto margins, not justify-content: a card taller than a phone's video scrolls from its top. */
   #liveslot .recapcard > :first-child { margin-top:auto; } #liveslot .recapcard > :last-child { margin-bottom:auto; }
   #liveslot .recapcard[hidden], #liveslot .recapcap[hidden], #liveslot .recapboard[hidden], #liveslot .recapcc[hidden] { display:none; }
-  #liveslot .recapboard { position:absolute; bottom:56px; right:4%; pointer-events:none; background:rgba(0,0,0,.8); color:#fff;
+  #liveslot .recapboard { position:absolute; bottom:calc(var(--py, 0px) + 56px); right:calc(var(--px, 0px) + var(--in, 4%)); pointer-events:none; background:rgba(0,0,0,.8); color:#fff;
                           border-left:3px solid var(--accent); border-radius:4px; padding:6px 10px; font-size:13px; }
   #liveslot .recapboard h4 { margin:0 0 4px; font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); }
   #liveslot .recapboard table { background:none; margin:0; } #liveslot .recapboard td { padding:1px 6px; border:0; }
@@ -92,12 +92,12 @@
   @media (max-height:560px), (max-width:600px) {
     #liveslot .recapcard { padding:8px; font-size:12px; } #liveslot .recapcard td { padding:1px 6px; }
     #liveslot .recapcard .play { font-size:14px; padding:8px 14px; margin-bottom:6px; }
-    #liveslot .recapboard { bottom:44px; right:3%; padding:3px 6px; font-size:10px; } #liveslot .recapboard h4 { font-size:9px; margin-bottom:2px; }
+    #liveslot .recapboard { bottom:calc(var(--py, 0px) + 44px); right:calc(var(--px, 0px) + var(--in, 3%)); padding:3px 6px; font-size:10px; } #liveslot .recapboard h4 { font-size:9px; margin-bottom:2px; }
     #liveslot .recapboard td { padding:0 4px; }
   }
-  #liveslot .recapcap { position:absolute; left:12px; bottom:56px; max-width:55%; pointer-events:none;
+  #liveslot .recapcap { position:absolute; left:calc(var(--px, 0px) + 12px); bottom:calc(var(--py, 0px) + 56px); max-width:55%; pointer-events:none;
                         background:rgba(0,0,0,.75); color:#fff; padding:6px 10px; border-radius:6px; }
-  #liveslot .recapcc { position:absolute; top:12px; left:12px; background:rgba(0,0,0,.7); color:#fff; border:1px solid var(--line);
+  #liveslot .recapcc { position:absolute; top:calc(var(--py, 0px) + 12px); left:calc(var(--px, 0px) + 12px); background:rgba(0,0,0,.7); color:#fff; border:1px solid var(--line);
                        border-radius:6px; padding:4px 8px; font:inherit; font-size:12px; cursor:pointer; opacity:.6; }
   #liveslot .recapcc.on { opacity:1; border-color:var(--accent); color:var(--accent); }
   .chat { margin-top:14px; }
@@ -2140,7 +2140,20 @@ function recapPlayer(me, key, built) {
   // A line's due at its time, or once the video's past its clip: a clip's lines all go before the next's.
   const isDue = l => !r.played.has(l) && (l.at <= v.currentTime || pastClip(l));
   // The net leaderboard (thru the hole before the clip's), up through the clips as a broadcast has it.
+  // The overlays kept on the picture, not the bars either side of (or above and below) it.
+  const fit = () => {
+    const w = v.clientWidth, h = v.clientHeight, ar = v.videoWidth / v.videoHeight;
+    if (!w || !h || !ar) return;
+    const pw = Math.min(w, h * ar), ph = Math.min(h, w / ar);
+    for (const el of [r.board, r.cap, r.cc]) {
+      el.style.setProperty("--px", `${(w - pw) / 2}px`); el.style.setProperty("--py", `${(h - ph) / 2}px`);
+      el.style.setProperty("--in", `${Math.round(pw * 0.04)}px`);
+    }
+  };
+  v.addEventListener("loadedmetadata", fit);
+  if (typeof ResizeObserver === "function") new ResizeObserver(fit).observe(v);   // (gone with the video)
   const scoreboard = () => {
+    fit();
     const t = v.currentTime, c = r.phase === "clips" ? r.body.clips.filter(c => c.at <= t + 0.05).pop() : null;
     const b = c && c.board || null;
     if (b === r.shownBoard) return;
