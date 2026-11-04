@@ -271,7 +271,8 @@ whatever the booth says next (the next shot's setup, a segment, banter) or the n
 keeps to under 3 minutes, dropping its least moments to fit. Their stretches of stream are copied
 back to back into `live/reels/<round>/` (listed in `live/reels.json`), and the round's page gets a
 **▶ Highlights** button that plays the reel, with each moment listed to jump to. A league round's
-reel stays for the season (`publish.season_start`), any other round's for as long as its stream
+finish (its last hole's holing or gimme shot) is also cut on its own, outside the reel, for the
+week's recap; its reel stays for the season (`publish.season_start`), any other round's for as long as its stream
 would have. A round whose stream is already gone gets none.
 Once a league week is final (every team posted, or its deadline passed), the booth builds its
 **League recap** (`publish.recaps`, on by default): about 3 minutes of the two commentators
@@ -282,9 +283,11 @@ teams all have hole-by-hole nets (the sim's rounds, kept with each week result, 
 rounds), it's told as one tournament instead: the running net leaderboard after each hole, its lead
 changes, ties, big swings and how it was won (wire to wire, a comeback, on the last hole); clips on
 the holes it turned on go first, and all play in hole order, each new hole's opening with a TV-style
-net leaderboard (thru the hole before, top five and the clip's team) for its first 6 seconds. It opens over
-the week's results, plays the clips (muted, the booth's new lines over them, the video waiting for
-a line that runs long) and closes over the standings. It's built after the round's publish has cut
+net leaderboard in the bottom right (thru the hole before, top five and the clip's team) for its first 6 seconds;
+a sole winner's finish plays last, where the win is called. It opens over
+the week's results, plays the clips (their own sound off, the booth's new lines over them, the video waiting for
+a line that runs long; the video's mute and volume control the lines, and **CC** shows them as
+subtitles, off by default) and closes over the standings. It's built after the round's publish has cut
 its reel, with one model call and the lines voiced; it's built again only if the week's numbers or
 footage change (Squabbit's net replacing the sim's). It's kept under `live/recaps/<end date>-w<week>/`
 (listed in `live/recaps.json`) for the season. Home's league cards get a **▶ Week N recap** button

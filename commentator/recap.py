@@ -85,7 +85,8 @@ def footage(reels: dict[str, dict], team_reel: dict[str, str], players: dict[str
     key): team -> {key, moments, ats}. A reel two teams share (one round, a side each) gives each the
     shots its players hit; one of a single team's, all of them (a name the league file spells
     differently still counts) but another team's players' (a round shared that the other team has
-    since played again). `ats`: where every moment of the reel starts, for where a clip has to end."""
+    since played again). `ats`: where every moment of the reel starts, for where a clip has to end.
+    `finish`: the round's last shot, cut on its own (highlights._finish), when it's the team's."""
     shared = {k for k in team_reel.values() if list(team_reel.values()).count(k) > 1}
     out: dict[str, dict] = {}
     for team, key in team_reel.items():
@@ -97,9 +98,14 @@ def footage(reels: dict[str, dict], team_reel: dict[str, str], players: dict[str
         moments = [m for m in reel["moments"] if isinstance(m, dict) and isinstance(m.get("at"), (int, float))
                    and (who := str(m.get("player") or "").casefold()) not in others
                    and (key not in shared or who in names)]
-        if moments:
+        f = reel.get("finish")
+        if not (isinstance(f, dict) and isinstance(f.get("at"), (int, float))
+                and (who := str(f.get("player") or "").casefold()) not in others and (key not in shared or who in names)):
+            f = None
+        if moments or f:
             out[team] = {"key": key, "moments": moments, "cuts": reel.get("cuts"), "ats": sorted(m["at"] for m in reel["moments"]
-                                                                       if isinstance(m.get("at"), (int, float)))}
+                                                                       if isinstance(m.get("at"), (int, float))),
+                         **({"finish": f} if f else {})}
     return out
 
 
@@ -270,14 +276,15 @@ def choose(facts: dict, footage: dict[str, dict], budget: float = RECAP_SECONDS)
     With the week's story (race()), a broadcast of it: the shots on the holes it turned on come first
     (a rough one there too), the teams in it get the most, a shot off the week's holes isn't one, and
     the clips run in hole order across the field. Without, the teams from last place to the winner,
-    each team's in the order they were hit."""
+    each team's in the order they were hit. Either way, a winner alone with its round's finish ends on
+    that, its room kept first (`finish`: True)."""
     story = race(facts)
     holes = story["holes"] if story else []
     if story:
         footage = {t: {**f, "moments": [m for m in f["moments"] if t not in story["teams"]
                                         or _num(m.get("hole")) in holes]} for t, f in footage.items()}
     order = [r["team"] for r in facts["rows"] if footage.get(r["team"], {}).get("moments")]
-    if not order:
+    if not order and not any(f.get("finish") for f in footage.values()):
         return []
     place_of = {r["team"]: r["place"] for r in facts["rows"]}
     moved = {s["team"]: (s["was"] - s["place"]) if s.get("was") else 0 for s in facts.get("standings") or []}
@@ -287,6 +294,16 @@ def choose(facts: dict, footage: dict[str, dict], budget: float = RECAP_SECONDS)
     cap = {t: PER_TEAM if (t in lead or place_of[t] == 1 or moved.get(t, 0) >= 2 or t in told) else 2 for t in order}
     ranked = {t: _ranked(footage[t]["moments"], key.get(t)) for t in order}
     room = budget - INTRO_SECONDS - OUTRO_SECONDS
+    winners = [r["team"] for r in facts["rows"] if r["place"] == 1]
+    last = None
+    if len(winners) == 1 and (f := (footage.get(winners[0]) or {}).get("finish")) and room >= CLIP_SECONDS:
+        w = winners[0]
+        last = {"team": w, "key": footage[w]["key"], **f, "finish": True}
+        room -= CLIP_SECONDS
+        if w in ranked:   # (the same shot in its reel isn't shown twice)
+            ranked[w] = [m for m in ranked[w] if m.get("id") is None or m.get("id") != f.get("id")]
+            if not ranked[w]:
+                order.remove(w)
     picked: dict[str, list[dict]] = {t: [] for t in order}
     for t in order:
         if room >= CLIP_SECONDS:
@@ -308,9 +325,11 @@ def choose(facts: dict, footage: dict[str, dict], budget: float = RECAP_SECONDS)
         def when(c: dict) -> tuple:
             h = _num(c.get("hole"))
             return (holes.index(h) if h in holes else len(holes), -place_of[c["team"]], c["at"])
-        return sorted(({"team": t, "key": footage[t]["key"], **m} for t in order for m in picked[t]), key=when)
-    return [{"team": t, "key": footage[t]["key"], **m}
-            for t in reversed(order) for m in sorted(picked[t], key=lambda m: m["at"])]
+        out = sorted(({"team": t, "key": footage[t]["key"], **m} for t in order for m in picked[t]), key=when)
+    else:
+        out = [{"team": t, "key": footage[t]["key"], **m}
+               for t in reversed(order) for m in sorted(picked[t], key=lambda m: m["at"])]
+    return out + ([last] if last else [])
 
 
 def digest(facts: dict, footage: dict[str, dict]) -> str:
@@ -321,7 +340,9 @@ def digest(facts: dict, footage: dict[str, dict]) -> str:
             "holes": {t: {str(h): v for h, v in hs.items()} for t, hs in sorted((facts.get("holes") or {}).items())},
             "standings": [[s["team"], s["points"]] for s in facts["standings"]],
             "footage": {t: [f["key"], f.get("cuts"), [[m.get(k) for k in ("id", "at", "what", "level", "bad", "player", "hole")]
-                                                      for m in f["moments"]]] for t, f in sorted(footage.items())}}
+                                                      for m in f["moments"]],
+                            [(f.get("finish") or {}).get(k) for k in ("id", "at", "what", "player", "hole", "cut")]]
+                        for t, f in sorted(footage.items())}}
     return hashlib.sha1(json.dumps(body, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -380,8 +401,12 @@ def prompt(facts: dict, clips: list[dict], names: dict[str, str]) -> tuple[str, 
         if story and c["team"] in story["teams"] and h in story["holes"]:
             n = story["holes"].index(h)
             v = story["after"][n][c["team"]] - (story["after"][n - 1][c["team"]] if n else 0)
-            line += (f". Going to the hole: {standing(story, c['team'], n - 1)}. The hole: {_hole_net(v)} as a team, net, "
-                     f"leaving them {standing(story, c['team'], n)}")
+            line += (f". Going to the hole: {standing(story, c['team'], n - 1)}. "
+                     + ("The hole, finished with this shot: " if c.get("finish") else
+                        "How the hole ends (still to come as this shot's hit): ")
+                     + f"{_hole_net(v)} as a team, net, leaving them {standing(story, c['team'], n)}")
+        if c.get("finish"):
+            line += ". THE WINNING FINISH: the shot that ended the winners' week"
         out.append(line)
     facts_text = "\n".join(out)
     who = " and ".join(names.values()) or "the booth"
@@ -406,7 +431,11 @@ def prompt(facts: dict, clips: list[dict], names: dict[str, str]) -> tuple[str, 
            "to that team's week. Go through the teams as the clips run, last place to the winner.\n")
         + f"- outro: two or three lines, at most {CARD_WORDS} words each, on the season standings now: who "
         "leads, who moved, what's ahead.\n"
-        "Trade lines between the commentators, as they do live. Use only the facts here: no other scores, "
+        + ("- The last clip is the winners' finish: call the win there, over that shot, and nowhere "
+           "before it. On a clip whose shot didn't finish its hole, the hole's result is still to come: "
+           "don't call it as done.\n" if any(c.get("finish") for c in clips) else
+           "- On a clip whose shot didn't finish its hole, the hole's result is still to come: don't call it as done.\n")
+        + "Trade lines between the commentators, as they do live. Use only the facts here: no other scores, "
         "points or shots. Say nets the way golf does (\"four under\", \"even par\").")
     return facts_text + ask, facts_text
 
@@ -564,9 +593,12 @@ def load(client: Any, bucket: str, prefix: str) -> tuple[dict[str, dict], dict[s
     return out[0], out[1]
 
 
-def reel_playlist(client: Any, bucket: str, prefix: str, key: str) -> list[list[tuple[str, float]]]:
-    raw = _get(client, bucket, f"{_root(prefix)}reels/{key}/reel.m3u8")
-    return parts(raw.decode("utf-8", "replace")) if raw else []
+def reel_playlist(client: Any, bucket: str, prefix: str, key: str, finish: bool = False) -> list[list[tuple[str, float]]]:
+    """A reel's playlist parts, or (`finish`) its round's finish's, its uris from the reel's folder."""
+    name = "finish/finish.m3u8" if finish else "reel.m3u8"
+    raw = _get(client, bucket, f"{_root(prefix)}reels/{key}/{name}")
+    got = parts(raw.decode("utf-8", "replace")) if raw else []
+    return [[(f"finish/{u}", d) for u, d in p] for p in got] if finish else got
 
 
 def _keys(client: Any, bucket: str, prefix: str) -> list[str]:

@@ -2095,12 +2095,14 @@ class Engine:
             return
         playlists = {}
         for c in clips:
-            if c["key"] not in playlists:
-                playlists[c["key"]] = await asyncio.to_thread(recap.reel_playlist, client, p.bucket, p.prefix, c["key"])
+            pk = (c["key"], bool(c.get("finish")))
+            if pk not in playlists:
+                playlists[pk] = await asyncio.to_thread(recap.reel_playlist, client, p.bucket, p.prefix, *pk)
         cuts = []
         for i, c in enumerate(clips):
             spoken = sum(voices[w][0] + recap.LINE_GAP for w in voices if w[:2] == ("clip", i))
-            cuts.append(recap.cut(c, playlists[c["key"]], found[c["team"]]["ats"], spoken))
+            ats = [c["at"]] if c.get("finish") else found[c["team"]]["ats"]
+            cuts.append(recap.cut(c, playlists[(c["key"], bool(c.get("finish")))], ats, spoken))
         body, video, sources = recap.timeline(facts, clips, lines, voices, cuts)
         if not body["clips"]:
             log.info("League recap of week %s: none of its clips are in their reels", week)

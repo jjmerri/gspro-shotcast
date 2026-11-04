@@ -986,7 +986,8 @@ def test_the_recap_player_times_its_lines_over_the_clips():
     script = """
 const esc = s => String(s), toPar = n => String(n), state = {};
 const on = o => { o.ev = {}; o.addEventListener = (k, f) => (o.ev[k] ||= []).push(f); o.fire = k => (o.ev[k] || []).forEach(f => f({ target: o.t })); return o; };
-const document = { createElement: () => on({}) };
+const document = { createElement: () => on({ classList: { toggle() {} } }) };
+const saved = {}, store = { get: k => saved[k] ?? null, set: (k, v) => { saved[k] = v; } };
 const heard = [], log = [];
 let audio;
 class Audio { constructor() { audio = on(this); this.paused = true; }
@@ -1074,6 +1075,20 @@ setTimeout(() => {
   setTimeout(() => console.log(JSON.stringify([r.phase, r.line && r.line.text])), 0);
 }, 0);"""
     assert json.loads(subprocess.run([node], input=end, capture_output=True, encoding="utf-8", check=True).stdout) == ["clips", "c4"]
+    # Subtitles off till the CC button's tapped (and remembered). The video's mute and volume are the
+    # commentary's, its own sound going nowhere: unmuted from the Play tap.
+    sub = script[:script.index("setTimeout(")].replace("const BODY", "const window = { AudioContext: class { createMediaElementSource(v) { routed.push(v); } close() { routed.push('closed'); return Promise.resolve(); } } }, routed = [];\nconst BODY", 1) + """setTimeout(() => {
+  const r = me.recap; r.card.t = { dataset: { recapplay: "1" } }; r.card.fire("click");
+  const off = r.cap.hidden;
+  r.cc.fire("click");
+  const shown = [r.cap.hidden, store.get("recapSubs")];
+  const unmuted = [routed.length, video.muted, audio.muted];
+  video.muted = true; video.volume = 0.5; video.fire("volumechange");
+  r.stop();
+  console.log(JSON.stringify({ off, shown, unmuted, muted: [audio.muted, audio.volume], closed: routed.length === 2 && routed[1] }));
+}, 0);"""
+    assert json.loads(subprocess.run([node], input=sub, capture_output=True, encoding="utf-8", check=True).stdout) == \
+        {"off": True, "shown": [False, "1"], "unmuted": [1, False, None], "muted": [True, 0.5], "closed": "closed"}
     assert sought["after"] == [False, True, None] and sought["heard"] == ["0.wav", "1.wav", "2.wav", "4.wav", "2.wav"]
     assert sought["back"] == ["clips", False]
     assert got["start"] and got["playing"] == "clips" and got["held"] and got["outro"] and got["again"]

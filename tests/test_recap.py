@@ -87,14 +87,25 @@ def test_the_week_is_told_as_one_tournament_hole_by_hole():
     # The holes the story turned on first (Duffers' rough 4th, where the lead went), none off the
     # week's holes, and the whole field in hole order.
     assert [(c["team"], c["hole"]) for c in clips] == [("Aces", 1), ("Duffers", 2), ("Hackers", 3), ("Duffers", 4), ("Aces", 5)]
+    # The winners' finish, cut on its own: last, its shot not shown again from their reel.
+    found["Aces"]["finish"] = {"at": 2.0, "id": 2, "player": "Mike", "hole": 5, "what": "Mike holes a 6 ft putt on 5 to finish"}
+    fin = recap.choose(facts, found)
+    assert [(c["team"], c["hole"], bool(c.get("finish"))) for c in fin] == \
+        [("Aces", 1, False), ("Duffers", 2, False), ("Hackers", 3, False), ("Duffers", 4, False), ("Aces", 5, True)]
+    assert "THE WINNING FINISH" in recap.prompt(facts, fin, {"pbp": "Ann"})[1]
     user, facts_text = recap.prompt(facts, clips, {"pbp": "Ann"})
     assert "- after hole 4: Aces -2, Duffers -2, Hackers +1, Yips +3" in facts_text
-    assert "Going to the hole: -2, leading by 1. The hole: even as a team, net, leaving them -2, tied for the lead" in facts_text
+    assert "Going to the hole: -2, leading by 1. How the hole ends (still to come as this shot's hit): even as a team, net, leaving them -2, tied for the lead" in facts_text
     assert "broadcast" in user
     # The net leaderboard going to a hole, the clip's team marked.
     assert recap.board(story, 3, "Yips", {r["team"]: r for r in facts["rows"]}) == {"thru": 4, "rows": [
         {"place": 1, "tied": True, "name": "Aces", "net": -2}, {"place": 1, "tied": True, "name": "Duffers", "net": -2},
         {"place": 3, "tied": False, "name": "Hackers", "net": 1}, {"place": 4, "tied": False, "name": "Yips", "net": 3, "on": True}]}
+
+
+def test_a_finish_plays_from_its_own_playlist():
+    s3 = FakeS3({ROOT + "reels/7/finish/finish.m3u8": b"#EXTM3U\n#EXTINF:4.000,\ns1/stream36.ts\n#EXT-X-ENDLIST\n"})
+    assert recap.reel_playlist(s3, "b", "", "7", finish=True) == [[("finish/s1/stream36.ts", 4.0)]]
 
 
 def test_a_reel_two_teams_share_gives_each_its_own_players_shots():
@@ -106,6 +117,12 @@ def test_a_reel_two_teams_share_gives_each_its_own_players_shots():
     assert {t: [m["player"] for m in f["moments"]] for t, f in found.items()} == \
         {"Aces": ["Mike"], "Duffers": ["tony"], "Hackers": ["Lou B"]}
     assert found["Aces"]["ats"] == [0, 20, 40]
+    # The Duffers' finish in it, though none of its highlights are theirs, is still theirs to end on.
+    reels["7"]["moments"] = reels["7"]["moments"][:1]
+    reels["7"]["finish"] = {"at": 60.0, "id": 9, "player": "Tony", "hole": 9, "what": "Tony holes out to finish"}
+    found = recap.footage(reels, {"Aces": "7", "Duffers": "7"}, League(FOUR).team_players)
+    assert (found["Duffers"]["moments"], found["Duffers"]["finish"]["id"]) == ([], 9)
+    assert "finish" not in found["Aces"]
 
 
 def test_a_moment_moved_or_rescored_in_its_reel_rebuilds_the_recap():

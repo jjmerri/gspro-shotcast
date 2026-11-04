@@ -412,10 +412,45 @@ def pick(shots: list[dict], most: int = MAX_MOMENTS, sides: dict[str, int] | Non
     return sorted(picked, key=lambda m: (m["shot"]["ts"], m["shot"]["id"]))
 
 
+def finish(shots: list[dict], talk: tuple | None = None) -> dict | None:
+    """The shot that finished a round, for a league recap to close on (not one of its reel's moments):
+    the last struck on the round's last hole that holed out, or left a gimme. None if it wasn't finished."""
+    shots = [{**DEFAULTS, **s} for s in shots]
+    shots = [s for s in shots if not s["mulligan"] and not s["left_out"] and s["player"] and s["player"] != "unknown"]
+    number = _hole(shots[-1]["hole"]) if shots else None
+    if number is None:
+        return None
+    ends = []
+    for h in _holes(shots):
+        struck = [s for s in h if s["outcome"] != "gimme"]
+        if _hole(h[-1]["hole"]) == number and h[-1]["outcome"] in ("holed", "gimme") and struck:
+            ends.append((h, struck[-1]))
+    if not ends:
+        return None
+    hole, s = max(ends, key=lambda e: (e[1]["ts"], e[1]["id"]))
+    result = _result(hole, _par(hole[0]["hole"]))
+    score = (_ordinal_score(result) or {1: "bogey", 2: "double bogey"}.get(result, "")) if result is not None else ""
+    end = (f" for {score}" if score else "") + " to finish"
+    if s["outcome"] == "holed" and s["is_putt"] and s["to_pin_yards"]:
+        what = f"{s['player']} holes a {round(s['to_pin_yards'] * 3)} ft putt on {number}{end}"
+    elif s["outcome"] == "holed":
+        what = f"{s['player']} holes out on {number}{end}"
+    else:
+        what = f"{s['player']} rolls it up for a gimme on {number}{end}"
+    return {"shot": s, "level": OK_LEVEL, "what": what, "bad": False, "hole": number,
+            **_post(POST_PUTT if s["is_putt"] else POST_SHOT, s, s, talk)}
+
+
+def _entry(m: dict) -> dict:
+    return {"id": m["shot"]["id"], "ts": m["shot"]["ts"], "player": m["shot"]["player"], "hole": _hole(m["shot"]["hole"]),
+            "what": m["what"], "bad": m["bad"], "level": m["level"], "post": m["post"], "stop": m["stop"], "must": m["must"]}
+
+
 def rounds(db: sqlite3.Connection) -> dict[int, dict]:
     """Every round's reel: round -> {label, date, league, ended, moments: [{id, ts, player, hole, what,
-    bad, level, post, stop, must}]}, for rounds with two moments or more (`db`: stats_web.connect's)."""
-    from .stats_web import round_groups, shot_rounds
+    bad, level, post, stop, must}]}, for rounds with two moments or more (`db`: stats_web.connect's);
+    a league round's also `finish` (finish()'s, the same shape), cut on its own for the week's recap."""
+    from .stats_web import _late_gimmes, round_groups, shot_rounds
 
     groups, of_row = round_groups(db)
     of_shot = shot_rounds(db)
@@ -424,6 +459,8 @@ def rounds(db: sqlite3.Connection) -> dict[int, dict]:
     for r in every:
         if (g := of_shot.get(r["id"])) is not None:
             by_round.setdefault(g, []).append(r)
+    # (a putt conceded after its round was recorded is that round's finish, though not in its reel)
+    late = {sid: g for sid, g in _late_gimmes(db, groups, {}).items() if sid not in of_shot or of_shot[sid] != g}
     talk = _talk(db, every)
     league, rows = set(), {}
     for r in db.execute("SELECT * FROM rounds"):
@@ -458,11 +495,10 @@ def rounds(db: sqlite3.Connection) -> dict[int, dict]:
             "label": " · ".join(x for x in (g["course"], " & ".join(players)) if x),
             "date": time.strftime("%Y-%m-%d", time.localtime(g["end"])), "ended": g["end"],
             "league": g["round"] in league,
-            "moments": [{"id": m["shot"]["id"], "ts": m["shot"]["ts"], "player": m["shot"]["player"],
-                         "hole": _hole(m["shot"]["hole"]), "what": m["what"], "bad": m["bad"], "level": m["level"],
-                         "post": m["post"],
-                         "stop": m["stop"], "must": m["must"]}
-                        for m in moments]}
+            "moments": [_entry(m) for m in moments]}
+        ends = sorted(shots + [r for r in every if late.get(r["id"]) == g["round"]], key=lambda r: (r["ts"], r["id"]))
+        if g["round"] in league and (f := finish(ends, talk)):
+            out[g["round"]]["finish"] = _entry(f)
     return out
 
 
@@ -512,44 +548,27 @@ def sync(client: Any, bucket: str, prefix: str, reels: dict[int, dict], season_f
     for key, reel in wanted.items():
         ids = [m["id"] for m in reel["moments"]]
         cuts = [[m["id"], m["post"], m.get("stop"), m.get("must")] for m in reel["moments"]]   # what the playlist is cut from
-        old_entry = index.get(key)
+        meta = {k: reel[k] for k in ("label", "date", "league", "ended")}
+        old_entry = entry = index.get(key)
         if old_entry and old_entry.get("cuts") == cuts:
             # The same stretches of stream: only what's said about them can have changed.
-            fresh = {**old_entry, **{k: reel[k] for k in ("label", "date", "league", "ended")},
+            entry = {**old_entry, **meta,
                      "moments": [{**o, **{k: m[k] for k in ("player", "hole", "what", "bad", "level") if k in m}}
                                  for o, m in zip(old_entry.get("moments") or [], reel["moments"])], "cuts": cuts}
-            if fresh != old_entry:
-                index[key], changed = fresh, changed + 1
-            continue
-        cut = _cut(client, bucket, root, recordings, playlists, reel, now)
-        if cut is None:
-            if old_entry:   # the old reel stands, as the round is now (a league round's keep goes by it)
-                fresh = {**old_entry, **{k: reel[k] for k in ("label", "date", "league", "ended")}}
-                if fresh != old_entry:
-                    index[key], changed = fresh, changed + 1
-            continue   # not streamed (yet, or any more): the next publish
-        parts, moments = cut
-        old = [o["Key"] for page in client.get_paginator("list_objects_v2").paginate(
-            Bucket=bucket, Prefix=f"{root}reels/{key}/") for o in page.get("Contents", [])]
-        new = set()
-        for part in parts:
-            for session, name, _ in part:
-                k = f"{root}reels/{key}/{session}/{name}"
-                new.add(k)
-                if k not in old:
-                    client.copy_object(Bucket=bucket, Key=k, CopySource={"Bucket": bucket, "Key": f"{root}s/{session}/{name}"},
-                                       MetadataDirective="REPLACE", CacheControl="public, max-age=31536000, immutable",
-                                       ContentType=TYPES.get("." + name.rsplit(".", 1)[-1], "application/octet-stream"))
-        client.put_object(Bucket=bucket, Key=f"{root}reels/{key}/reel.m3u8",
-                          Body=playlist([[(f"{s}/{n}", d) for s, n, d in p] for p in parts]),
-                          CacheControl="no-cache", ContentType=TYPES[".m3u8"])
-        new.add(f"{root}reels/{key}/reel.m3u8")
-        stale = [k for k in old if k not in new]
-        for i in range(0, len(stale), 1000):
-            client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in stale[i:i + 1000]]})
-        index[key] = {**{k: reel[k] for k in ("label", "date", "league", "ended")}, "ids": ids, "cuts": cuts,
-                      "duration": round(sum(d for p in parts for *_, d in p), 1), "moments": moments}
-        added += 1
+        elif (cut := _cut(client, bucket, root, recordings, playlists, reel, now)) is not None:
+            parts, moments = cut
+            base = f"{root}reels/{key}/"
+            _put(client, bucket, root, base, "reel.m3u8", parts, skip=base + "finish/")
+            entry = {**meta, "ids": ids, "cuts": cuts, "duration": round(sum(d for p in parts for *_, d in p), 1),
+                     "moments": moments, **({"finish": old_entry["finish"]} if old_entry and "finish" in old_entry else {})}
+            added += 1
+        elif old_entry:   # not streamed (any more): the old reel stands, as the round is now (a league round's keep goes by it)
+            entry = {**old_entry, **meta}
+        if entry is None:
+            continue   # not streamed (yet): the next publish
+        entry = _finish(client, bucket, root, recordings, playlists, key, reel.get("finish"), entry, now)
+        if entry != old_entry:
+            index[key], changed = entry, changed + 1
     gone = [k for k in index if k not in wanted]
     for k in gone:
         del index[k]
@@ -562,6 +581,52 @@ def sync(client: Any, bucket: str, prefix: str, reels: dict[int, dict], season_f
     for i in range(0, len(stale), 1000):
         client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in stale[i:i + 1000]]})
     return {"kept": len(index), "added": added, "removed": len(gone)}
+
+
+def _put(client: Any, bucket: str, root: str, base: str, name: str, parts: list[list[tuple[str, str, float]]],
+         skip: str | None = None) -> None:
+    """`parts`' segments copied from their streams (`root`s/) under `base` (as base/session/segment), its playlist
+    `name` there, and what was there before and isn't now (bar under `skip`) deleted."""
+    old = [o["Key"] for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=base)
+           for o in page.get("Contents", []) if not (skip and o["Key"].startswith(skip))]
+    new = {base + name}
+    for part in parts:
+        for session, seg, _ in part:
+            k = f"{base}{session}/{seg}"
+            new.add(k)
+            if k not in old:
+                client.copy_object(Bucket=bucket, Key=k, CopySource={"Bucket": bucket, "Key": f"{root}s/{session}/{seg}"},
+                                   MetadataDirective="REPLACE", CacheControl="public, max-age=31536000, immutable",
+                                   ContentType=TYPES.get("." + seg.rsplit(".", 1)[-1], "application/octet-stream"))
+    client.put_object(Bucket=bucket, Key=base + name, Body=playlist([[(f"{s}/{n}", d) for s, n, d in p] for p in parts]),
+                      CacheControl="no-cache", ContentType=TYPES[".m3u8"])
+    stale = [k for k in old if k not in new]
+    for i in range(0, len(stale), 1000):
+        client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in stale[i:i + 1000]]})
+
+
+def _finish(client: Any, bucket: str, root: str, recordings: list[dict], playlists: dict, key: str,
+            f: dict | None, entry: dict, now: float) -> dict:
+    """The reel's entry with its round's finish (rounds()'s) cut on its own, under reels/<key>/finish/
+    (finish.m3u8), not in the reel: {at, id, player, hole, what, bad, level, cut}. One not streamed
+    (any more) keeps what was cut; a round with none any more has it deleted."""
+    base, old = f"{root}reels/{key}/finish/", entry.get("finish")
+    if not f:
+        if old:
+            stale = [o["Key"] for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=base)
+                     for o in page.get("Contents", [])]
+            for i in range(0, len(stale), 1000):
+                client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in stale[i:i + 1000]]})
+        return {k: v for k, v in entry.items() if k != "finish"}
+    cut = [f["id"], f["post"], f.get("stop"), f.get("must")]
+    if old and old.get("cut") == cut:
+        return {**entry, "finish": {**old, **{k: f[k] for k in ("player", "hole", "what", "bad", "level") if k in f}}}
+    got = _cut(client, bucket, root, recordings, playlists, {"moments": [f]}, now)
+    if got is None:
+        return entry
+    parts, (m,) = got
+    _put(client, bucket, root, base, "finish.m3u8", parts)
+    return {**entry, "finish": {**m, "cut": cut, "duration": round(sum(d for p in parts for *_, d in p), 1)}}
 
 
 def _cut(client: Any, bucket: str, root: str, recordings: list[dict], playlists: dict, reel: dict,

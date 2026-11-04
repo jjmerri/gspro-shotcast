@@ -195,6 +195,16 @@ def test_the_build_finds_each_rounds_reel(tmp_path):
                    " hole = 'Hole ' || id || ', par 4, 400 yards', shot_number = 3 WHERE session_id = 1")
     stats_site.build(path, tmp_path / "site", reels=reels)
     assert list(reels) and all(r["league"] and len(r["moments"]) >= 2 for r in reels.values())
+    assert all(r["finish"]["what"].endswith("to finish") for r in reels.values())   # a league round's, for its recap
+    # Its last putt left a gimme, the gimme in after the round was recorded: still its finish.
+    with closing(sqlite3.connect(path)) as db, db:
+        last = db.execute("SELECT id FROM shots WHERE session_id = 1 ORDER BY ts DESC, id DESC LIMIT 1").fetchone()[0]
+        db.execute("UPDATE shots SET outcome = 'conceded' WHERE id = ?", (last,))
+        db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, lie_before, outcome)"
+                   " SELECT session_id, 31, player, course, hole, 4, 1, 'green', 'gimme' FROM shots WHERE id = ?", (last,))
+    reels.clear()
+    stats_site.build(path, tmp_path / "site", reels=reels)
+    assert [(r["finish"]["id"], "gimme" in r["finish"]["what"]) for r in reels.values()] == [(last, True)]
 
 
 def test_a_clip_runs_till_the_booth_is_done_talking_about_it_and_stops_before_whatever_follows():
@@ -250,3 +260,34 @@ def test_a_reel_keeps_to_its_length():
     shots = [shot("Ann", h, 2, h * 100, putt=True, to_pin=15, outcome="holed") for h in range(1, 13)]
     clip = H.PRE + H.POST_PUTT + H.CLIP_SLACK
     assert len(H.pick(shots, seconds=3 * clip + 1)) == 3
+
+
+def test_a_league_rounds_finish_is_cut_on_its_own_for_the_recap():
+    # Its last hole: Bo's putt left a gimme, Ann holed hers after: Ann's finished it.
+    shots = [shot("Ann", 8, 1, 10, lie="tee"), shot("Ann", 9, 1, 20, lie="tee"), shot("Bo", 9, 1, 25, lie="tee"),
+             shot("Bo", 9, 2, 40, putt=True, to_pin=4.0, outcome="gimme"),
+             shot("Ann", 9, 3, 50, putt=True, to_pin=4.0, outcome="holed"), shot("Bo", 9, 3, 41, putt=True, outcome="gimme")]
+    f = H.finish(shots)
+    assert f["shot"] is not None and f["shot"]["ts"] == 50 and f["what"] == "Ann holes a 12 ft putt on 9 for birdie to finish"
+    assert H.finish(shots[:3]) is None   # not finished
+    s3 = FakeS3(_stream(60))
+    reel = {**_reel(1020, 1026), "league": True,
+            "finish": {"id": 99, "ts": 1150, "player": "Ann", "hole": 9, "what": "fin", "bad": False, "level": 5, "post": 12.0}}
+    odd = FakeS3({"golf-reels/" + k: v for k, v in _stream(60).items()})   # (a prefix with "reels" in it)
+    H.sync(odd, "b", "golf-reels", {7: reel}, clock=lambda: 1300)
+    assert "golf-reels/" + ROOT + "reels/7/finish/s1/stream36.ts" in odd.objects
+    H.sync(s3, "b", "", {7: reel}, clock=lambda: 1300)
+    # Not in the reel: its own playlist, under finish/.
+    assert "stream36.ts" not in s3.objects[ROOT + "reels/7/reel.m3u8"].decode()
+    assert "s1/stream36.ts" in s3.objects[ROOT + "reels/7/finish/finish.m3u8"].decode()
+    assert s3.objects[ROOT + "reels/7/finish/s1/stream36.ts"] == b"stream36.ts"
+    entry = json.loads(s3.objects[ROOT + "reels.json"])["reels"]["7"]
+    assert entry["finish"]["at"] == 5.0 and entry["finish"]["cut"] == [99, 12.0, None, None] and len(entry["moments"]) == 2
+    # The reel cut again: the finish stays. Gone from the round: deleted.
+    longer = {**reel, "moments": [{**m, "post": 20.0} for m in reel["moments"]]}
+    H.sync(s3, "b", "", {7: longer}, clock=lambda: 1300)
+    assert ROOT + "reels/7/finish/s1/stream36.ts" in s3.objects
+    assert json.loads(s3.objects[ROOT + "reels.json"])["reels"]["7"]["finish"]["what"] == "fin"
+    H.sync(s3, "b", "", {7: {k: v for k, v in longer.items() if k != "finish"}}, clock=lambda: 1300)
+    assert not [k for k in s3.objects if "/finish/" in k]
+    assert "finish" not in json.loads(s3.objects[ROOT + "reels.json"])["reels"]["7"]
