@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import time
 import wave
 from typing import Any
@@ -31,6 +32,8 @@ import numpy as np
 from .board import Board, place, place_points
 from .highlights import _get, playlist
 from .live_stream import TYPES
+
+log = logging.getLogger(__name__)
 
 RECAP_SECONDS = 180.0   # the whole recap, cards and clips
 INTRO_SECONDS = 22.0    # what the intro and outro take, for picking how many clips fit
@@ -46,6 +49,7 @@ CLIP_MAX = 25.0
 CLIP_WORDS = 26         # a clip's lines, together
 CARD_WORDS = 35         # an intro or outro line
 BOARD_ROWS = 5          # the TV-style net leaderboard over a clip: the top this many, and the clip's team
+BUILD = 2               # how a recap's made: a change to it builds every recap again
 RETIRE_SECONDS = 3600.0  # a rebuild's leftovers stay this long (a player open on the last build still plays them)
 
 
@@ -336,7 +340,7 @@ def digest(facts: dict, footage: dict[str, dict]) -> str:
     """What a recap is built from: the week's numbers and the moments it could show (where each is
     in its reel, and what it is). A change to either (Squabbit's net replacing the sim's, a team's
     reel cut late or cut again) rebuilds it."""
-    body = {"rows": [[r["team"], r["net"]] for r in facts["rows"]],
+    body = {"v": BUILD, "rows": [[r["team"], r["net"]] for r in facts["rows"]],
             "holes": {t: {str(h): v for h, v in hs.items()} for t, hs in sorted((facts.get("holes") or {}).items())},
             "standings": [[s["team"], s["points"]] for s in facts["standings"]],
             "footage": {t: [f["key"], f.get("cuts"), [[m.get(k) for k in ("id", "at", "what", "level", "bad", "player", "hole")]
@@ -610,14 +614,50 @@ def _delete(client: Any, bucket: str, keys: list[str]) -> None:
         client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in keys[i:i + 1000]]})
 
 
+def burn_boards(client: Any, bucket: str, prefix: str, key: str, body: dict,
+                video: list[list[tuple[str, float]]], sources: list[str]) -> tuple[list[list[tuple[str, float]]], dict[str, bytes]]:
+    """Each clip with a board (timeline's) drawn into its video, so it's there full screen: its part's
+    segments made again under b/ (named for what's in them: one already up isn't made again), and the
+    clip marked `burned` (the page draws no board over it). Returns the playlist's parts and the
+    segments made, by uri. Without ffmpeg, or for a clip it fails on, the page draws the board."""
+    from . import burn
+
+    ff = burn.ffmpeg()
+    if not ff:
+        if any(c.get("board") for c in body["clips"]):
+            log.warning("League recap: no ffmpeg, so its leaderboard isn't in the video (pip install imageio-ffmpeg)")
+        return video, {}
+    root, base = _root(prefix), f"{_root(prefix)}recaps/{key}/"
+    there = set(_keys(client, bucket, base + "b/"))
+    out, made = [], {}
+    for c, part, src in zip(body["clips"], video, sources):
+        if not c.get("board"):
+            out.append(part)
+            continue
+        tag = hashlib.sha1(json.dumps([BUILD, src, [u for u, _ in part], c["board"]], sort_keys=True).encode()).hexdigest()[:16]
+        names = [f"b/{tag}-{n}.ts" for n in range(len(part))]
+        if not all(base + n in there for n in names):
+            try:
+                segs = [client.get_object(Bucket=bucket, Key=f"{root}reels/{src}/{u}")["Body"].read() for u, _ in part]
+                made.update(zip(names, burn.clip(ff, segs, c["board"])))
+            except Exception as e:
+                log.warning("League recap: couldn't draw the leaderboard into the clip at %ss (%s)", c["at"], e)
+                out.append(part)
+                continue
+        c["burned"] = True
+        out.append([(n, d) for n, (_, d) in zip(names, part)])
+    return out, made
+
+
 def publish(client: Any, bucket: str, prefix: str, key: str, body: dict, video: list[list[tuple[str, float]]],
             sources: list[str], audio: list[tuple[str, bytes]], digest_: str, season_from: str | None = None,
-            clock=time.time) -> dict:
+            clock=time.time, made: dict[str, bytes] | None = None) -> dict:
     """Put a recap up: its clips' segments copied from their reels (`sources`: each part's reel key;
     a reel's segments go when it's cut again), its playlist, lines' audio, timeline and an entry in
     recaps.json; then the recaps of past seasons go. An earlier build's leftovers are retired (listed
     in the entry) and go at a build RETIRE_SECONDS on, a page that loaded it still playing them till
-    then. Returns the index entry."""
+    then. `made`: segments made for it (burn_boards'), by uri, put up instead of copied. Returns the
+    index entry."""
     root = _root(prefix)
     base = f"{root}recaps/{key}/"
     old = set(_keys(client, bucket, base))
@@ -625,7 +665,10 @@ def publish(client: Any, bucket: str, prefix: str, key: str, body: dict, video: 
     for part, src in zip(video, sources):
         for uri, _ in part:
             k = base + uri
-            if k not in old and k not in new:
+            if k not in old and k not in new and made and uri in made:
+                client.put_object(Bucket=bucket, Key=k, Body=made[uri], CacheControl="public, max-age=31536000, immutable",
+                                  ContentType=TYPES[".ts"])
+            elif k not in old and k not in new:
                 client.copy_object(Bucket=bucket, Key=k, CopySource={"Bucket": bucket, "Key": f"{root}reels/{src}/{uri}"},
                                    MetadataDirective="REPLACE", CacheControl="public, max-age=31536000, immutable",
                                    ContentType=TYPES.get("." + uri.rsplit(".", 1)[-1], "application/octet-stream"))

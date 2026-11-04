@@ -1022,6 +1022,7 @@ setTimeout(() => {
   at(11.6);                        // c3, still going as the video ends (a pause, then the end)
   boards.push(r.board.hidden, r.board.innerHTML.includes("thru 4") && r.board.innerHTML.includes('class="on"'));
   const fit = [r.board.style["--px"], r.board.style["--in"]];   // in from the recording's own bars
+  r.body.clips[1].burned = true; at(11.7); const drawnIn = r.board.hidden; r.body.clips[1].burned = false; at(11.6);
   at(16.5); boards.push(r.board.hidden); at(11.6);
   video.ended = true; video.pause(); video.fire("ended");
   const tail = [audio.paused, r.phase];
@@ -1030,7 +1031,7 @@ setTimeout(() => {
   const outro = r.card.innerHTML.includes("Standings");
   boards.push(r.board.hidden);
   audio.fire("ended");
-  console.log(JSON.stringify({ fit, boards, stillHeld, start, playing, held, heard, log, tail, outro, done: r.phase, again: r.card.innerHTML.includes("Watch again") }));
+  console.log(JSON.stringify({ drawnIn, fit, boards, stillHeld, start, playing, held, heard, log, tail, outro, done: r.phase, again: r.card.innerHTML.includes("Watch again") }));
 }, 0);
 """ % (json.dumps(body), fns)
     got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
@@ -1104,3 +1105,4 @@ setTimeout(() => {
     assert got["tail"] == [False, "clips"] and got["stillHeld"]
     # The net board's up through a clip with one (from the second hole on), gone in the outro.
     assert got["boards"] == [True, False, True, False, True] and got["fit"] == ["50px", "36px"]
+    assert got["drawnIn"]   # a board drawn into the video isn't drawn over it again

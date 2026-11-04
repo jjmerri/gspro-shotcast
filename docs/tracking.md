@@ -283,11 +283,13 @@ teams all have hole-by-hole nets (the sim's rounds, kept with each week result, 
 rounds), it's told as one tournament instead: the running net leaderboard after each hole, its lead
 changes, ties, big swings and how it was won (wire to wire, a comeback, on the last hole); clips on
 the holes it turned on go first, and all play in hole order, from the second hole on under a TV-style
-net leaderboard in the bottom right (thru the hole before, top five and the clip's team);
+net leaderboard in the bottom right (thru the hole before, top five and the clip's team), drawn
+into the video so it shows full screen too (with ffmpeg, from the `publish` extra; without it the
+page draws it over the player);
 a sole winner's finish plays last, where the win is called. It opens over
 the week's results, plays the clips (their own sound off, the booth's new lines over them, the video waiting for
-a line that runs long; the video's mute and volume control the lines, and **CC** shows them as
-subtitles, off by default) and closes over the standings. It's built after the round's publish has cut
+a line that runs long; the video's mute and volume control the lines, and **CC**, above the player,
+shows them as subtitles, off by default) and closes over the standings. It's built after the round's publish has cut
 its reel, with one model call and the lines voiced; it's built again only if the week's numbers or
 footage change (Squabbit's net replacing the sim's). It's kept under `live/recaps/<end date>-w<week>/`
 (listed in `live/recaps.json`) for the season. Home's league cards get a **▶ Week N recap** button

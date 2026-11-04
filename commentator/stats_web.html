@@ -97,8 +97,8 @@
   }
   #liveslot .recapcap { position:absolute; left:calc(var(--px, 0px) + 12px); bottom:calc(var(--py, 0px) + 56px); max-width:55%; pointer-events:none;
                         background:rgba(0,0,0,.75); color:#fff; padding:6px 10px; border-radius:6px; }
-  #liveslot .recapcc { position:absolute; top:calc(var(--py, 0px) + 12px); left:calc(var(--px, 0px) + 12px); background:rgba(0,0,0,.7); color:#fff; border:1px solid var(--line);
-                       border-radius:6px; padding:4px 8px; font:inherit; font-size:12px; cursor:pointer; opacity:.6; }
+  #liveslot .recapcc { position:absolute; bottom:calc(100% + 4px); right:0; background:rgba(0,0,0,.7); color:#fff; border:1px solid var(--line);
+                       border-radius:6px; padding:1px 8px; font:inherit; font-size:12px; cursor:pointer; opacity:.6; }
   #liveslot .recapcc.on { opacity:1; border-color:var(--accent); color:var(--accent); }
   .chat { margin-top:14px; }
   .week { margin-top:14px; } .week h3 { margin:0 0 8px; } .week table { background:none; }
@@ -2140,7 +2140,7 @@ function recapPlayer(me, key, built) {
   // A line's due at its time, or once the video's past its clip: a clip's lines all go before the next's.
   const isDue = l => !r.played.has(l) && (l.at <= v.currentTime || pastClip(l));
   // The net leaderboard (thru the hole before the clip's), up through the clips as a broadcast has it.
-  // The overlays kept on the picture, not the bars either side of (or above and below) it.
+  // The board and captions kept on the picture, not the bars either side of (or above and below) it.
   // And off any bars in the recording itself (the sim's window narrower than the stream): an even
   // black margin each side of a frame, as a fraction of it; null when it can't tell (a dark frame).
   const bars = () => {
@@ -2163,7 +2163,7 @@ function recapPlayer(me, key, built) {
     const w = v.clientWidth, h = v.clientHeight, ar = v.videoWidth / v.videoHeight;
     if (!w || !h || !ar) return;
     const pw = Math.min(w, h * ar), ph = Math.min(h, w / ar), sx = r.bars ? r.bars.x : 0, sy = r.bars ? r.bars.y : 0;
-    for (const el of [r.board, r.cap, r.cc]) {
+    for (const el of [r.board, r.cap]) {
       el.style.setProperty("--px", `${(w - pw) / 2 + sx * pw}px`); el.style.setProperty("--py", `${(h - ph) / 2 + sy * ph}px`);
       el.style.setProperty("--in", `${Math.round(pw * (1 - 2 * sx) * 0.04)}px`);
     }
@@ -2174,7 +2174,7 @@ function recapPlayer(me, key, built) {
     const t = v.currentTime, c = r.phase === "clips" ? r.body.clips.filter(c => c.at <= t + 0.05).pop() : null;
     if (c && c !== r.sampled && v.readyState >= 2 && t > c.at + 0.5) { r.bars = bars() || r.bars; r.sampled = c; }
     fit();
-    const b = c && c.board || null;
+    const b = c && c.board && !c.burned ? c.board : null;   // (or it's in the video)
     if (b === r.shownBoard) return;
     r.shownBoard = b;
     r.board.hidden = !b;

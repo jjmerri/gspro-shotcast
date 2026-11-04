@@ -32,8 +32,8 @@ cloud = ["anthropic", "google-cloud-texttospeech>=2.27"]
 jev = ["typesafe-sdk>=0.7"]
 # Optional: voices on the PC's own CPU (Kokoro) instead of the OpenAI voices.
 local = ["kokoro-onnx>=0.4"]
-# Uploading the stats page to S3 (`publish`).
-publish = ["boto3"]
+# Uploading the stats page to S3 (`publish`); ffmpeg, for the league recap's leaderboard drawn into its video.
+publish = ["boto3", "imageio-ffmpeg>=0.5"]
 # The live stream on the stats page: starting and stopping OBS over its WebSocket server.
 live = ["websocket-client>=1.7"]
 # Importing the league's yearly spreadsheets.

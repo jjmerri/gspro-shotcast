@@ -2107,8 +2107,9 @@ class Engine:
         if not body["clips"]:
             log.info("League recap of week %s: none of its clips are in their reels", week)
             return
+        video, made = await asyncio.to_thread(recap.burn_boards, client, p.bucket, p.prefix, key, body, video, sources)
         entry = await asyncio.to_thread(recap.publish, client, p.bucket, p.prefix, key, body, video, sources, audio,
-                                        digest, season)
+                                        digest, season, made=made)
         log.info("League recap of week %s up: %s clips, %.0fs of video", week, entry["clips"], entry["duration"])
 
     async def _week_holes(self, board: Board, week: int) -> dict[str, dict[int, int]]:

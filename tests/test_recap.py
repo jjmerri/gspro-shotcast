@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import numpy as np
+import pytest
 
 from commentator import recap
 from commentator.board import Board, Entry
@@ -251,3 +252,54 @@ def test_a_rebuilds_leftovers_stay_an_hour_for_a_page_still_playing_the_last():
     recap.publish(s3, "b", "", "w7", {**body, "week": 7}, [], [], [], "w7", clock=lambda: 1060 + 3 * recap.RETIRE_SECONDS)
     assert base + "two.wav" not in s3.objects and base + "three.wav" in s3.objects
     assert "retired" not in json.loads(s3.objects[f"{ROOT}recaps.json"])["recaps"]["w6"]
+
+
+def test_a_clips_leaderboard_is_drawn_into_its_video(monkeypatch):
+    from commentator import burn
+
+    s3 = FakeS3({ROOT + "reels/7/s1/a.ts": b"A", ROOT + "reels/7/s1/b.ts": b"B", ROOT + "reels/8/s2/c.ts": b"C"})
+    board = {"thru": 1, "rows": [{"place": 1, "tied": False, "name": "Aces", "net": -1, "on": True}]}
+    body = {"week": 6, "duration": 12.0, "rows": [], "clips": [{"at": 0.0}, {"at": 4.0, "board": board}]}
+    video, sources = [[("s2/c.ts", 4.0)], [("s1/a.ts", 4.0), ("s1/b.ts", 4.0)]], ["8", "7"]
+    drawn = []
+    monkeypatch.setattr(burn, "ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(burn, "clip", lambda ff, segs, b: drawn.append(segs) or [x + b"+board" for x in segs])
+    parts, made = recap.burn_boards(s3, "b", "", "w6", body, video, sources)
+    assert drawn == [[b"A", b"B"]] and parts[0] == video[0] and [d for _, d in parts[1]] == [4.0, 4.0]
+    assert sorted(made.values()) == [b"A+board", b"B+board"] and body["clips"][1]["burned"] and "burned" not in body["clips"][0]
+    recap.publish(s3, "b", "", "w6", body, parts, sources, [], "h", clock=lambda: 1000, made=made)
+    assert {s3.objects[f"{ROOT}recaps/w6/{u}"] for u, _ in parts[1]} == {b"A+board", b"B+board"}
+    assert s3.objects[f"{ROOT}recaps/w6/s2/c.ts"] == b"C"
+    # Built again: the clip already drawn isn't drawn again. Without ffmpeg, the page draws the board.
+    assert recap.burn_boards(s3, "b", "", "w6", {**body, "clips": [{"at": 4.0, "board": board}]}, video[1:], ["7"])[1] == {}
+    assert len(drawn) == 1
+    monkeypatch.setattr(burn, "ffmpeg", lambda: None)
+    plain = {**body, "clips": [{"at": 4.0, "board": board}]}
+    assert recap.burn_boards(s3, "b", "", "w6", plain, video[1:], ["7"]) == (video[1:], {}) and "burned" not in plain["clips"][0]
+
+
+def test_the_leaderboard_drawn_in_keeps_off_the_recordings_bars(tmp_path):
+    from commentator import burn
+
+    ff = burn.ffmpeg()
+    if not ff:
+        pytest.skip("needs ffmpeg")
+    import re
+    import subprocess
+
+    # 2 s of a grey 4:3 picture in a 16:9 frame, black either side, timestamps from 100 s.
+    seg = tmp_path / "in.ts"
+    subprocess.run([ff, "-v", "error", "-f", "lavfi", "-i", "color=c=gray:s=240x180:d=2:r=10", "-vf", "pad=320:180:40:0:black",
+                    "-c:v", "libx264", "-output_ts_offset", "100", "-f", "mpegts", str(seg)], check=True)
+    board = {"thru": 3, "rows": [{"place": 1, "tied": False, "name": "Aces", "net": -2, "on": True}]}
+    out = tmp_path / "out.ts"
+    out.write_bytes(burn.clip(ff, [seg.read_bytes()], board)[0])
+    assert burn.frame(ff, seg)[2] == 40 / 320
+    raw = subprocess.run([ff, "-v", "error", "-i", str(out), "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                         capture_output=True, check=True).stdout
+    img = np.frombuffer(raw, np.uint8).reshape(180, 320)
+    dark = np.argwhere(img[:, 40:280] < 60)   # the board, on the grey picture
+    assert len(dark) and dark[:, 1].max() + 40 < 280 and img[:, 282:].max() < 30   # inside the picture, the bar still black
+    start = lambda f: re.search(r"start: ([\d.]+)", subprocess.run([ff, "-hide_banner", "-i", str(f)], capture_output=True,
+                                                                   text=True).stderr).group(1)
+    assert float(start(seg)) > 100 and start(out) == start(seg)   # its timestamps as they were
