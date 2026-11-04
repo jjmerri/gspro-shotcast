@@ -103,7 +103,17 @@ def test_the_week_is_told_as_one_tournament_hole_by_hole():
     user, facts_text = recap.prompt(facts, clips, {"pbp": "Ann"})
     assert "- after hole 4: Aces -2, Duffers -2, Hackers +1, Yips +3" in facts_text
     assert "Going to the hole: -2, leading by 1. How the hole ends (still to come as this shot's hit): even as a team, net, leaving them -2, tied for the lead" in facts_text
-    assert "broadcast" in user
+    assert "broadcast" in user and "off camera" not in facts_text   # every hole shown
+    # Holes no clip showed: the next clip catches up on their turns (the lead changing hands), with
+    # the words to.
+    gap = recap.choose(facts, {t: {**f, "moments": [m for m in f["moments"] if m["hole"] in (1, 5)]} for t, f in found.items()})
+    assert [(c["hole"], c.get("since")) for c in gap] == [(1, None), (5, [
+        "Duffers's biggest lead: 2 after hole 2", "Aces were 2 back after hole 2 and came back to win",
+        "Halfway, after hole 3: Duffers lead by 1 at -2", "Tied for the lead after hole 4 at -2: Aces, Duffers"])]
+    assert "Before it, off camera (no clip showed these): Duffers's biggest lead" in recap.prompt(facts, gap, {"pbp": "Ann"})[1]
+    say = lambda n: json.dumps({"intro": [{"speaker": "pbp", "text": "i"}], "outro": [{"speaker": "pbp", "text": "o"}],
+                                "clips": [{"clip": i, "lines": [{"speaker": "pbp", "text": "w " * n}]} for i in (0, 1)]})
+    assert recap.script(say(recap.CLIP_WORDS + 10), gap, ["pbp"])[1] == ["keep each clip's lines to 26 words between them, 42 catching up off camera (clip 0)"]
     # The net leaderboard going to a hole, the clip's team marked.
     assert recap.board(story, 3, "Yips", {r["team"]: r for r in facts["rows"]}) == {"thru": 4, "rows": [
         {"place": 1, "tied": True, "name": "Aces", "net": -2}, {"place": 1, "tied": True, "name": "Duffers", "net": -2},

@@ -286,7 +286,7 @@ the holes it turned on go first, and all play in hole order, from the second hol
 net leaderboard in the bottom right (thru the hole before, top five and the clip's team), drawn
 into the video so it shows full screen too (with ffmpeg, from the `publish` extra; without it the
 page draws it over the player);
-a sole winner's finish plays last, where the win is called. It opens over
+turns on holes no clip shows are caught up on over the next clip; a sole winner's finish plays last, where the win is called. It opens over
 the week's results, plays the clips (their own sound off, the booth's new lines over them, the video waiting for
 a line that runs long; the video's mute and volume control the lines, and **CC**, above the player,
 shows them as subtitles, off by default) and closes over the standings. It's built after the round's publish has cut

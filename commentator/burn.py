@@ -17,6 +17,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+LOOK = 2                  # how a board's drawn: a change to it draws every recap's again
 ACCENT = (95, 197, 138)   # the stats page's --accent
 ROW = 0.028               # a row's text, as a share of the frame's height
 BOTTOM = 0.12             # the board's bottom, up off the frame's (clear of a player's controls)

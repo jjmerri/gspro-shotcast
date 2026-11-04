@@ -47,9 +47,10 @@ TAIL = 1.5              # the clip runs this long past its last line
 CLIP_MIN = 10.0         # long enough to see where the ball went
 CLIP_MAX = 25.0
 CLIP_WORDS = 26         # a clip's lines, together
+CATCH_UP_WORDS = 16     # more for a clip that first catches up on turns no clip showed
 CARD_WORDS = 35         # an intro or outro line
 BOARD_ROWS = 5          # the TV-style net leaderboard over a clip: the top this many, and the clip's team
-BUILD = 2               # how a recap's made: a change to it builds every recap again
+BUILD = 3               # how a recap's made: a change to it builds every recap again
 RETIRE_SECONDS = 3600.0  # a rebuild's leftovers stay this long (a player open on the last build still plays them)
 
 
@@ -281,7 +282,8 @@ def choose(facts: dict, footage: dict[str, dict], budget: float = RECAP_SECONDS)
     (a rough one there too), the teams in it get the most, a shot off the week's holes isn't one, and
     the clips run in hole order across the field. Without, the teams from last place to the winner,
     each team's in the order they were hit. Either way, a winner alone with its round's finish ends on
-    that, its room kept first (`finish`: True)."""
+    that, its room kept first (`finish`: True). A story's clip after holes no clip showed carries the
+    turns on them (`since`: their texts), for the booth to catch up on before its shot."""
     story = race(facts)
     holes = story["holes"] if story else []
     if story:
@@ -333,7 +335,18 @@ def choose(facts: dict, footage: dict[str, dict], budget: float = RECAP_SECONDS)
     else:
         out = [{"team": t, "key": footage[t]["key"], **m}
                for t in reversed(order) for m in sorted(picked[t], key=lambda m: m["at"])]
-    return out + ([last] if last else [])
+    out += [last] if last else []
+    if story:
+        shown = -1   # the index of the last hole a clip was on
+        for c in out:
+            h = _num(c.get("hole"))
+            if h not in holes:
+                continue
+            n = holes.index(h)
+            if since := [e["text"] for e in story["events"] if shown < holes.index(e["hole"]) < n]:
+                c["since"] = since
+            shown = max(shown, n)
+    return out
 
 
 def digest(facts: dict, footage: dict[str, dict]) -> str:
@@ -409,6 +422,8 @@ def prompt(facts: dict, clips: list[dict], names: dict[str, str]) -> tuple[str, 
                      + ("The hole, finished with this shot: " if c.get("finish") else
                         "How the hole ends (still to come as this shot's hit): ")
                      + f"{_hole_net(v)} as a team, net, leaving them {standing(story, c['team'], n)}")
+        if c.get("since"):
+            line += ". Before it, off camera (no clip showed these): " + "; ".join(c["since"])
         if c.get("finish"):
             line += ". THE WINNING FINISH: the shot that ended the winners' week"
         out.append(line)
@@ -426,7 +441,9 @@ def prompt(facts: dict, clips: list[dict], names: dict[str, str]) -> tuple[str, 
            "leaderboard through the round: call the shot the way the clip says it went, and put it in the "
            "race (where the team stood going to the hole and what it did to the board). Carry the story "
            "from clip to clip: who led early, where the lead changed, who pulled away or fell back, and "
-           "how it was decided. Don't call a clip in isolation.\n"
+           "how it was decided. Don't call a clip in isolation. Where a clip has turns off camera before it, "
+           "catch the viewer up on them first (\"Meanwhile on seven...\"): every lead change and tie gets "
+           f"told; such a clip can take {CATCH_UP_WORDS} more words.\n"
            if story else
            f"- intro: two or three lines, at most {CARD_WORDS} words each: the week, the course, who won it "
            "and by what, and how the field finished.\n"
@@ -468,8 +485,11 @@ def script(raw: str, clips: list[dict], speakers: list[str]) -> tuple[dict, list
         problems.append("write the outro")
     if missing := [str(i) for i in range(len(clips)) if not out["clips"].get(i)]:
         problems.append("write lines for clip " + ", ".join(missing))
-    if long := [str(i) for i, ls in out["clips"].items() if sum(len(t.split()) for _, t in ls) > CLIP_WORDS + 4]:
-        problems.append(f"keep each clip's lines to {CLIP_WORDS} words between them (clip {', '.join(long)})")
+    def room(i: int) -> int:
+        return CLIP_WORDS + (CATCH_UP_WORDS if clips[i].get("since") else 0)
+    if long := [str(i) for i, ls in out["clips"].items() if sum(len(t.split()) for _, t in ls) > room(i) + 4]:
+        problems.append(f"keep each clip's lines to {CLIP_WORDS} words between them, {CLIP_WORDS + CATCH_UP_WORDS} "
+                        f"catching up off camera (clip {', '.join(long)})")
     if long := [t[:30] for _, t in out["intro"] + out["outro"] if len(t.split()) > CARD_WORDS + 5]:
         problems.append(f"keep each intro and outro line to {CARD_WORDS} words")
     return out, problems
@@ -634,7 +654,7 @@ def burn_boards(client: Any, bucket: str, prefix: str, key: str, body: dict,
         if not c.get("board"):
             out.append(part)
             continue
-        tag = hashlib.sha1(json.dumps([BUILD, src, [u for u, _ in part], c["board"]], sort_keys=True).encode()).hexdigest()[:16]
+        tag = hashlib.sha1(json.dumps([burn.LOOK, src, [u for u, _ in part], c["board"]], sort_keys=True).encode()).hexdigest()[:16]
         names = [f"b/{tag}-{n}.ts" for n in range(len(part))]
         if not all(base + n in there for n in names):
             try:
