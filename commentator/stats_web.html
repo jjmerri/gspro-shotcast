@@ -131,7 +131,16 @@
   .subtabs button.on { border-color:var(--accent); background:none; }
   .rcards { grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); }
   .subtabs + h2, .subtabs + p + h2 { margin-top:16px; }
-  .ractions { line-height:2; }
+  .ractions { margin:14px 0; display:flex; flex-direction:column; gap:8px; }
+  .agroup { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; }
+  .agroup .k { color:var(--dim); font-size:12px; text-transform:uppercase; letter-spacing:.5px; min-width:64px; }
+  .agroup > .link, .agroup > a.link { border:1px solid var(--line); border-radius:999px; padding:5px 12px; background:var(--panel); }
+  .agroup > .link:hover { border-color:var(--accent); text-decoration:none; }
+  .agroup > .link:hover, .agroup > a.link:hover { text-decoration:none; }
+  .manage summary { cursor:pointer; list-style:none; color:var(--dim); font-size:12px; text-transform:uppercase; letter-spacing:.5px; }
+  .manage summary::-webkit-details-marker { display:none; }
+  .manage[open] summary { margin-bottom:6px; }
+  .agroup .link.danger { color:var(--bad); } .agroup .link.danger:hover { border-color:var(--bad); }
   .round .cards { grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:8px; }
   .home .cards { grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); }
   .home .card.go { cursor:pointer; } .home .card.go:hover { border-color:var(--accent); }
@@ -1362,14 +1371,17 @@ function renderRound() {
   const team = r.league && r.team && r.team !== r.side ? ` <span class="sub">${esc(r.team)}</span>` : "";
   const said = d.broadcasts.some(b => b.id === r.session)
     ? `<a class="link" href="${esc(hashFor("broadcasts", { session: r.session }))}">What the booth said</a>` : "";
-  const acts = [`<button class="link" data-roundshots="${r.round}">Every shot</button>`, watchBtn(r.started, "▶ Watch the round"), said,
-                `<button class="link" data-sharecard="${r.id}" title="An image of this round to post or send">Share card</button>`,
-                shareBtn(hashFor("round", { id: r.id }), "this round", "Share link"),
-                ...(state.local ? [...Object.keys(KIND_NAMES).filter(k => k !== roundKind(r)).map(k =>
-                                     `<button class="link" data-leagueround="${r.round}" data-ended="${r.round_end}" data-kind="${k}" title="Which stats it counts in: League, Tournament or Practice">Make it a ${k} round</button>`),
-                                   `<button class="link" data-exclround="${r.round}" data-ended="${r.round_end}" data-on="1" title="Keep it listed on this PC, but out of every stat (and off the published site)">Exclude from stats</button>`,
-                                   `<button class="link" data-delround="${r.round}" data-ended="${r.round_end}" title="Remove the round and its shots for good">Delete round</button>`] : [])
-               ].filter(Boolean).join(" · ");
+  const group = (label, items) => (items = items.filter(Boolean)).length
+    ? `<div class="agroup"><span class="k">${label}</span>${items.join("")}</div>` : "";
+  const manage = state.local ? `<details class="manage"><summary>Manage ▾</summary><div class="agroup">${[
+      ...Object.keys(KIND_NAMES).filter(k => k !== roundKind(r)).map(k =>
+        `<button class="link" data-leagueround="${r.round}" data-ended="${r.round_end}" data-kind="${k}" title="Which stats it counts in: League, Tournament or Practice">Make it a ${k} round</button>`),
+      `<button class="link" data-exclround="${r.round}" data-ended="${r.round_end}" data-on="1" title="Keep it listed on this PC, but out of every stat (and off the published site)">Exclude from stats</button>`,
+      `<button class="link danger" data-delround="${r.round}" data-ended="${r.round_end}" title="Remove the round and its shots for good">Delete round</button>`].join("")}</div></details>` : "";
+  const acts = group("Watch", [`<button class="link" data-roundshots="${r.round}">Every shot</button>`, watchBtn(r.started, "▶ Watch the round"), said])
+    + group("Share", [`<button class="link" data-sharecard="${r.id}" title="An image of this round to post or send">Share card</button>`,
+                      shareBtn(hashFor("round", { id: r.id }), "this round", "Share link")])
+    + manage;
   return back + `<h2>${esc(r.date)} · <a class="link" href="${esc(hashFor("courses", { course: r.course }))}">${esc(r.course)}</a></h2>${pick}
     <p>${who}${team} · ${esc(r.format.replace("_", " "))}${teeText(r) ? ` · ${esc(teeText(r))}` : ""}${roundTags(r)}${freshTag(r)}</p>
     <div class="cards rcards">
@@ -1378,7 +1390,7 @@ function renderRound() {
       <div class="card"><div class="k">Putts</div><div class="v">${dash(r.putts)}</div><div class="sub">${puttText(r)}</div></div>
       <div class="card"><div class="k">Penalties · mulligans</div><div class="v">${dash(r.penalties)} · ${mulliganTotal(r)}</div><div class="sub">${[mulliganText(r), r.longest_drive ? `longest drive ${Math.round(r.longest_drive)} yd` : ""].filter(Boolean).join(" · ")}</div></div>
     </div>
-    <p class="ractions">${acts}</p>
+    <div class="ractions">${acts}</div>
     <h2>Scorecard</h2><div class="round">${scorecard(r.card, reps)}${shotsUsed(r, reps)}${replayPart(reps, r)}${roundSummary(r)}</div>`;
 }
 
