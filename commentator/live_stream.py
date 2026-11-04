@@ -8,8 +8,11 @@ are deleted from the bucket as they leave the playlist, and the whole session wh
                                    ("at" is refreshed every HEARTBEAT_SECONDS while live, so the page can
                                    tell a booth that was killed mid-stream)
     live/recordings.json           {"recordings": [{"session", "since", "ended", "duration", "shots",
-                                   "rounds": [{"at": seconds in, "label"}]}]}, newest first ("shots":
-                                   whether a shot was played on it; one with none isn't kept)
+                                   "rounds": [{"at": seconds in, "label"}], "keep_until"}]}, newest first
+                                   ("shots": whether a shot was played on it; one with none isn't kept;
+                                   "keep_until": a league round's week's deadline, YYYY-MM-DD: kept past
+                                   keep_days till LEAGUE_GRACE_DAYS after it, for the week's recap to cut
+                                   the shots its story turned on)
     live/week.json                 {"session": ..., "week": {...} or null}: a league round's week board
                                    for the Live tab (Engine._week_panel), null outside one
     live/s/<session>/stream.m3u8   the live playlist, re-uploaded as OBS rewrites it
@@ -26,6 +29,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import threading
@@ -41,6 +45,7 @@ MIN_RECORDING_SECONDS = 60   # a stream shorter than this (OBS started and stopp
 SHOT_LEAD_SECONDS = 60       # a shot this long before a stream is first seen counts as on it
 SEGMENTS_KEPT = 300          # the newest segments' times kept for watched_at (20 minutes of 4 s ones)
 SAME_STREAM_SECONDS = 10     # a copy on the PC and one in the bucket that overlap by more are the same stream
+LEAGUE_GRACE_DAYS = 7        # a league round's stream is kept till its week's deadline and this long on
 DELETE_DIR = "live-delete"   # beside the status file: kept streams the stats page asked to delete
 OBS_EXE = Path(r"C:\Program Files\obs-studio\bin\64bit\obs64.exe")
 PORTABLE_OBS = Path("obs", "bin", "64bit", "obs64.exe")   # the tray's setup (obs_setup.py), in the home folder
@@ -279,6 +284,7 @@ class Mirror:
         self._shots: list[float] = []   # from shot(), when each was played
         self._marks_lock = threading.Lock()
         self._week_body: dict | None = None   # from week(): live/week.json's board
+        self._deadline: str | None = None     # from league(): the league round's week's deadline
         self._week_sent: bytes | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -345,6 +351,12 @@ class Mirror:
         with self._marks_lock:
             self._week_body = body
 
+    def league(self, deadline: str | None) -> None:
+        """The league round on now's week's deadline (YYYY-MM-DD; None outside one): its stream's kept
+        till then (keep_until). Called from any thread."""
+        with self._marks_lock:
+            self._deadline = deadline
+
     def _send_week(self) -> None:
         if not self.bucket or not self.session:
             return
@@ -388,6 +400,10 @@ class Mirror:
         changed = False
         if rec.get("shots") is False and any(t >= self.since - SHOT_LEAD_SECONDS for t in shots):
             rec["shots"], changed = True, True
+        with self._marks_lock:
+            deadline = str(self._deadline or "")
+        if shots and re.fullmatch(r"\d{4}-\d{2}-\d{2}", deadline) and deadline > str(rec.get("keep_until") or ""):
+            rec["keep_until"], changed = deadline, True   # a league round's shots on it
         for at, label, replace in marks:
             if at < self.since - 1800:
                 continue   # a round that started long before this stream: not what's on it
@@ -436,7 +452,7 @@ class Mirror:
                 if duration >= MIN_RECORDING_SECONDS:
                     self._put(f"s/{session}/full.m3u8", vod_playlist(track, ended=True), "max-age=300")
                     log.info("Live stream: closed session %s, cut off after %.0f minutes", session, duration / 60)
-            if (rec is None or rec["duration"] < MIN_RECORDING_SECONDS or now - rec["since"] > self.keep
+            if (rec is None or rec["duration"] < MIN_RECORDING_SECONDS or self._expired(rec, now)
                     or rec.get("shots") is False):
                 gone += ks
                 continue
@@ -448,10 +464,20 @@ class Mirror:
         self._save_index()
         self._status(False)
 
+    def _expired(self, rec: dict, now: float) -> bool:
+        """Past keep_days, and a league round's past its week's deadline and LEAGUE_GRACE_DAYS."""
+        if now - rec["since"] <= self.keep:
+            return False
+        try:
+            until = time.mktime(time.strptime(str(rec.get("keep_until") or ""), "%Y-%m-%d"))
+        except ValueError:
+            return True
+        return now > until + (1 + LEAGUE_GRACE_DAYS) * 86400
+
     def _prune(self) -> None:
-        """Delete the kept streams past keep_days."""
+        """Delete the kept streams past keep_days (a league round's, past its week's deadline)."""
         now = self.clock()
-        old = [r for r in self.recordings if now - r["since"] > self.keep and r["session"] != self.session]
+        old = [r for r in self.recordings if self._expired(r, now) and r["session"] != self.session]
         if not old:
             return
         keys: list[str] = []

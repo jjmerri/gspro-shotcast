@@ -285,7 +285,10 @@ changes, ties, big swings and how it was won (wire to wire, a comeback, on the l
 the holes it turned on go first, and all play in hole order, from the second hole on under a TV-style
 net leaderboard in the bottom right (thru the hole before, top five and the clip's team), drawn
 into the video so it shows full screen too (with ffmpeg, from the `publish` extra; without it the
-page draws it over the player);
+page draws it over the player); where the lead changed hands or was tied, the shot it turned on is
+cut from that round's kept stream even if its reel skipped it (the losing team's bogey: its penalty
+or last missed putt, not the tap-in; the winning team's long putt or hole-out, else the approach
+that set up its birdie), so league rounds' streams are kept to their week's deadline;
 turns on holes no clip shows are caught up on over the next clip; a sole winner's finish plays last, where the win is called. It opens over
 the week's results, plays the clips (their own sound off, the booth's new lines over them, the video waiting for
 a line that runs long; the video's mute and volume control the lines, and **CC**, above the player,
@@ -473,10 +476,12 @@ while ago.
 Each stream is kept for a week (`live.keep_days`) for the **Round replays** tab, with a second
 playlist (`full.m3u8`) of every file from the start and `live/recordings.json` listing the streams
 and where each round in them starts. A stream under a minute isn't kept, and nor is one with no
-shot played on it (or in the minute before it started), such as a round that never got past GSPro's menu. Streams past a week are
-deleted as the next one starts or stops, or when the booth starts, and a lifecycle rule in the stack
-deletes anything under `live/s/` after 8 days (stacks made before 0.1.16 had 1 day: update the stack,
-or kept streams vanish after a day). A stream cut off by a crash is closed and listed when the booth
+shot played on it (or in the minute before it started), such as a round that never got past GSPro's menu.
+A league round's stream is kept longer, till a week past its week's deadline (teams can play a week
+early, so that can be months), for the week's recap to cut the shots its story turned on. Streams past
+their keep are deleted as the next one starts or stops, or when the booth starts, and a lifecycle rule
+in the stack deletes anything under `live/s/` after 180 days (stacks made before 0.1.84 had 8 days,
+and before 0.1.16 one: update the stack, or league streams go after that). A stream cut off by a crash is closed and listed when the booth
 next starts. With `live.keep_days: 0` nothing is kept: each file goes from the bucket once it drops
 off the playlist, and the rest when the stream stops. Either way the PC's `live\` folder is emptied
 when a stream stops.

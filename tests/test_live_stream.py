@@ -872,3 +872,29 @@ def test_a_video_windows_wont_let_go_of_stays_till_the_next_prune(tmp_path, monk
     monkeypatch.setattr(Path, "unlink", real)
     rec.prune()
     assert [r["session"] for r in recordings(tmp_path)] == ["19700116-001640-bbbbbb"]
+
+
+def test_a_league_rounds_stream_is_kept_till_its_weeks_deadline(tmp_path):
+    import time as _t
+
+    day = 86400
+    start = _t.mktime(_t.strptime("2026-11-01", "%Y-%m-%d"))
+    s3, now = FakeS3(), [start]
+    status = tmp_path / "live.json"
+    m = Mirror(tmp_path / "hls", "bkt", client=s3, status_file=status, clock=lambda: now[0], keep_days=7)
+    m.folder.mkdir()
+    m.clear()
+    m.league("2026-12-06")                                          # played five weeks early (no board needed)
+    for i in range(20):
+        _playlist(m.folder, i, [f"stream{i}.ts"], ended=i == 19, mtime=now[0])
+        m.step()
+        if i == 0:
+            sid = m.session
+            m.shot()
+        now[0] += 6
+    recs, _ = _kept(s3, sid)
+    assert recs[0]["keep_until"] == "2026-12-06"
+    for days, kept in ((30, True), (35 + 7, True), (35 + 9, False)):   # past keep_days, till a week past the deadline
+        now[0] = start + days * day
+        Mirror(tmp_path / "hls", "bkt", client=s3, status_file=status, clock=lambda: now[0], keep_days=7).clear()
+        assert bool([k for k in s3.objects if k.startswith(f"live/s/{sid}/")]) is kept, days

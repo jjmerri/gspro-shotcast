@@ -291,3 +291,36 @@ def test_a_league_rounds_finish_is_cut_on_its_own_for_the_recap():
     H.sync(s3, "b", "", {7: {k: v for k, v in longer.items() if k != "finish"}}, clock=lambda: 1300)
     assert not [k for k in s3.objects if "/finish/" in k]
     assert "finish" not in json.loads(s3.objects[ROOT + "reels.json"])["reels"]["7"]
+
+
+def test_the_shot_a_league_lead_turned_on_is_cut_from_the_rounds_stream():
+    bogey = [shot("Ann", 6, 1, 1010, lie="tee"), shot("Ann", 6, 2, 1030, to_pin=150, finish=12),
+             shot("Ann", 6, 3, 1050, putt=True, to_pin=12, outcome="missed"),
+             shot("Ann", 6, 4, 1070, putt=True, to_pin=2, outcome="missed"),
+             shot("Ann", 6, 5, 1090, putt=True, to_pin=1, outcome="holed")]
+    # The bogey: its last missed putt, not the tap-in.
+    m = H.turn_shot(bogey, 6, "miss")
+    assert m["ts"] == 1070 and m["what"] == "Ann misses from 6 ft on 6" and m["bad"] and m["post"] == H.TURN_POST
+    wet = [shot("Bo", 6, 1, 1010, lie="tee", wet=True, outcome="water"), *bogey[1:]]
+    assert H.turn_shot(wet, 6, "miss")["what"] == "Bo finds a penalty area on 6"
+    left = [shot("Bo", 6, 1, 1005, lie="tee", wet=True, outcome="water", fmt="scramble", picked=0), *bogey]
+    assert H.turn_shot(left, 6, "miss")["ts"] == 1070   # a scramble ball not played didn't cost them
+    # A birdie from a long putt shows the putt; a tap-in birdie doesn't, but the approach that set it up.
+    long = [shot("Ann", 7, 1, 1010, lie="tee"), shot("Ann", 7, 2, 1030, to_pin=150, finish=6),
+            shot("Ann", 7, 3, 1050, putt=True, to_pin=6, outcome="holed")]
+    assert H.turn_shot(long, 7, "made")["what"] == "Ann holes a 18 ft putt on 7"
+    tap = [*long[:1], shot("Ann", 7, 2, 1030, to_pin=150, finish=1), shot("Ann", 7, 3, 1050, putt=True, to_pin=1, outcome="holed")]
+    assert H.turn_shot(tap, 7, "made") is None
+    assert H.turn_shot(tap, 7, "setup")["what"] == "Ann hits it to 3 ft from 150 yd on 7"
+    assert H.turn_shot(long, 8, "miss") is None   # nothing on that hole
+    # Best ball: Ann's birdie putt counted, not Bo's tap-in for bogey after it, nor his approach.
+    both = [*long, shot("Bo", 7, 1, 1012, lie="tee"), shot("Bo", 7, 2, 1032, to_pin=160, finish=2),
+            shot("Bo", 7, 3, 1060, putt=True, to_pin=2, outcome="missed"), shot("Bo", 7, 4, 1070, putt=True, to_pin=1, outcome="holed")]
+    assert H.turn_shot(sorted(both, key=lambda s: s["ts"]), 7, "made")["ts"] == 1050
+    assert H.turn_shot(sorted(both, key=lambda s: s["ts"]), 7, "setup")["player"] == "Ann"   # Bo's closer one 2-putted
+    # Cut on its own from the round's stream, where it's kept.
+    s3 = FakeS3(_stream(60))
+    cut = H.cut_alone(s3, "b", "", [H.turn_shot(long, 7, "made")], clock=lambda: 1300)
+    ((parts, at),) = cut.values()
+    assert [u for p in parts for u, _ in p][0].startswith("s1/stream") and 0 < at < 12
+    assert H.cut_alone(FakeS3({}), "b", "", [H.turn_shot(long, 7, "made")]) == {}

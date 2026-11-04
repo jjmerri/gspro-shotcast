@@ -749,8 +749,9 @@ class LiveConfig(BaseModel):
     game_sound_device: str | None = None
     game_sound_db: float = -10.0
     # Keep each stream this many days, so the page's Round replays tab can play whole rounds from the start
-    # (about 1.2 GB an hour in the bucket). 0: nothing kept, the video deleted as it goes. The stack's
-    # lifecycle rule (tools/aws/stats-site.yaml) must keep live/s/ at least a day longer.
+    # (about 1.2 GB an hour in the bucket); a league round's till a week past its week's deadline, for
+    # the week's recap. 0: nothing kept, the video deleted as it goes. The stack's lifecycle rule
+    # (tools/aws/stats-site.yaml) must keep live/s/ longer than both (180 days).
     keep_days: int = Field(7, ge=0)
     # Keep each stream on this PC too, this many days, as one .ts per stream in local_dir (relative to
     # the Shotcast folder; plays in Windows Media Player or VLC). The stats page opened from the tray

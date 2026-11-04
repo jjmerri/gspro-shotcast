@@ -2065,10 +2065,26 @@ class Engine:
         client = self._s3()
         reels, index = await asyncio.to_thread(recap.load, client, p.bucket, p.prefix)
         found = recap.footage(reels, team_reel, self.league.team_players)
-        digest = recap.digest(facts, found)
+        story = recap.race(facts)
+        turns = recap.turn_moments(story, self._turn_finder(team_reel)) if story else {}
+        digest = recap.digest(facts, found, turns)
         if (index.get(key) or {}).get("hash") == digest or self._recap_tried == (key, digest):
             return
         self._recap_tried = (key, digest)   # a build that fails isn't paid for again till something changes
+        if turns:   # (cut from the streams: one no longer kept shows nothing, the booth catching up over the next clip)
+            from . import highlights
+
+            got = await asyncio.to_thread(highlights.cut_alone, client, p.bucket, p.prefix,
+                                          [m for ms in turns.values() for m in ms])
+            for t, ms in turns.items():
+                f = found.setdefault(t, {"key": team_reel[t], "moments": [], "ats": []})
+                turned = {m["id"] for m in ms}
+                have = {m.get("id") for m in f["moments"]}
+                # (one its reel already has plays from the reel, picked first as a turn)
+                f["moments"] = [{**m, "turn": True} if m.get("id") in turned else m for m in f["moments"]]
+                f["moments"] += [{**m, "at": got[m["id"]][1], "parts": got[m["id"]][0], "src": "s"}
+                                 for m in ms if m["id"] in got and m["id"] not in have]
+            found = {t: f for t, f in found.items() if f["moments"] or f.get("finish")}
         clips = recap.choose(facts, found)
         if not clips:
             log.info("League recap of week %s: no footage of any team's round", week)
@@ -2096,13 +2112,14 @@ class Engine:
         playlists = {}
         for c in clips:
             pk = (c["key"], bool(c.get("finish")))
-            if pk not in playlists:
+            if pk not in playlists and not c.get("parts"):
                 playlists[pk] = await asyncio.to_thread(recap.reel_playlist, client, p.bucket, p.prefix, *pk)
         cuts = []
         for i, c in enumerate(clips):
             spoken = sum(voices[w][0] + recap.LINE_GAP for w in voices if w[:2] == ("clip", i))
-            ats = [c["at"]] if c.get("finish") else found[c["team"]]["ats"]
-            cuts.append(recap.cut(c, playlists[(c["key"], bool(c.get("finish")))], ats, spoken))
+            alone = c.get("finish") or c.get("parts")   # (its own playlist: nothing else in it)
+            ats = [c["at"]] if alone else found[c["team"]]["ats"]
+            cuts.append(recap.cut(c, c.get("parts") or playlists[(c["key"], bool(c.get("finish")))], ats, spoken))
         body, video, sources = recap.timeline(facts, clips, lines, voices, cuts)
         if not body["clips"]:
             log.info("League recap of week %s: none of its clips are in their reels", week)
@@ -2111,6 +2128,32 @@ class Engine:
         entry = await asyncio.to_thread(recap.publish, client, p.bucket, p.prefix, key, body, video, sources, audio,
                                         digest, season, made=made)
         log.info("League recap of week %s up: %s clips, %.0fs of video", week, entry["clips"], entry["duration"])
+
+    def _turn_finder(self, team_reel: dict[str, str]):
+        """recap.turn_moments' `find`: a team's shot on a hole of its week's round (highlights.turn_shot),
+        of its players' when it shared the round with another team, and none of another team's."""
+        from . import highlights
+        from .stats_web import _late_gimmes, round_groups, shot_rounds
+
+        # (a putt conceded after its round was recorded is that round's, finishing its last hole)
+        of_shot = _late_gimmes(self.store.db, round_groups(self.store.db)[0], shot_rounds(self.store.db))
+        wanted = set(team_reel.values())
+        by_round: dict[str, list[dict]] = {}
+        for r in self.store.db.execute("SELECT * FROM shots ORDER BY ts, id"):
+            if (g := of_shot.get(r["id"])) is not None and str(g) in wanted:
+                by_round.setdefault(str(g), []).append(dict(r))
+        players = self.league.team_players
+        shared = {k for k in team_reel.values() if list(team_reel.values()).count(k) > 1}
+
+        def find(team: str, hole: int, want: str) -> dict | None:
+            if (key := team_reel.get(team)) is None:
+                return None
+            names = {n.casefold() for n in players.get(team, [])}
+            others = {n.casefold() for t, ps in players.items() if t != team for n in ps} - names
+            shots = [s for s in by_round.get(key, []) if (who := str(s["player"] or "").casefold()) not in others
+                     and (key not in shared or who in names)]
+            return highlights.turn_shot(shots, hole, want)
+        return find
 
     async def _week_holes(self, board: Board, week: int) -> dict[str, dict[int, int]]:
         """Each posted team's week hole by hole, for the recap's story (recap.race): the sim's card for
@@ -2645,6 +2688,9 @@ class Engine:
                     log.debug("Couldn't write the round status: %s", e)
                 if self.live_mirror is not None:
                     try:
+                        r = self.round
+                        league = r is not None and not r.ended and r.is_league
+                        self.live_mirror.league(r.schedule.get("end_date") if league else None)
                         self.live_mirror.week(self._week_panel())
                     except Exception as e:
                         log.debug("Couldn't work out the week board: %s", e)

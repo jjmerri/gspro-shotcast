@@ -75,6 +75,22 @@ def test_the_week_is_told_as_one_tournament_hole_by_hole():
                  "Aces pull clear alone after hole 5 at -3 (falling back: Duffers)", "Aces won it on the last hole"):
         assert want in texts
     assert story["key"]["Duffers"] >= {1, 4} and 5 in story["key"]["Aces"]
+    assert [(e["hole"], e["gained"], e["lost"]) for e in story["events"] if "gained" in e] == \
+        [(4, ["Aces"], ["Duffers"]), (5, ["Aces"], ["Duffers"])]
+    # The shots the lead turned on: a team losing it over par on the hole, its miss; one taking it,
+    # its long putt, else what set up its birdie.
+    asked = []
+
+    def find(team, hole, want):
+        asked.append((team, hole, want))
+        return {"id": hole, "hole": hole, "what": want} if (hole, want) in {(4, "setup"), (5, "made")} else None
+    assert recap.turn_moments(story, find) == {"Aces": [{"id": 4, "hole": 4, "what": "setup", "turn": True},
+                                                        {"id": 5, "hole": 5, "what": "made", "turn": True}]}
+    assert asked == [("Aces", 4, "made"), ("Aces", 4, "setup"), ("Aces", 5, "made")]   # Duffers made par: no miss
+    over = {**story, "after": [*story["after"][:3], {**story["after"][3], "Duffers": -1}, *story["after"][4:]]}
+    asked.clear()
+    recap.turn_moments(over, lambda t, h, w: asked.append((t, h, w)) or ({"id": 9} if w == "miss" else None))
+    assert ("Duffers", 4, "miss") in asked and ("Aces", 4, "setup") not in asked   # their bogey shown: no setup
     assert recap.standing(story, "Duffers", 1) == "-2, leading by 2" and recap.standing(story, "Aces", 3) == "-2, tied for the lead"
 
     moments = {"Aces": [{"id": 1, "player": "Mike", "at": 0, "level": 4, "bad": False, "what": "a", "hole": 1},
@@ -270,7 +286,7 @@ def test_a_clips_leaderboard_is_drawn_into_its_video(monkeypatch):
     s3 = FakeS3({ROOT + "reels/7/s1/a.ts": b"A", ROOT + "reels/7/s1/b.ts": b"B", ROOT + "reels/8/s2/c.ts": b"C"})
     board = {"thru": 1, "rows": [{"place": 1, "tied": False, "name": "Aces", "net": -1, "on": True}]}
     body = {"week": 6, "duration": 12.0, "rows": [], "clips": [{"at": 0.0}, {"at": 4.0, "board": board}]}
-    video, sources = [[("s2/c.ts", 4.0)], [("s1/a.ts", 4.0), ("s1/b.ts", 4.0)]], ["8", "7"]
+    video, sources = [[("s2/c.ts", 4.0)], [("s1/a.ts", 4.0), ("s1/b.ts", 4.0)]], ["reels/8", "reels/7"]
     drawn = []
     monkeypatch.setattr(burn, "ffmpeg", lambda: "ffmpeg")
     monkeypatch.setattr(burn, "clip", lambda ff, segs, b: drawn.append(segs) or [x + b"+board" for x in segs])
@@ -281,11 +297,11 @@ def test_a_clips_leaderboard_is_drawn_into_its_video(monkeypatch):
     assert {s3.objects[f"{ROOT}recaps/w6/{u}"] for u, _ in parts[1]} == {b"A+board", b"B+board"}
     assert s3.objects[f"{ROOT}recaps/w6/s2/c.ts"] == b"C"
     # Built again: the clip already drawn isn't drawn again. Without ffmpeg, the page draws the board.
-    assert recap.burn_boards(s3, "b", "", "w6", {**body, "clips": [{"at": 4.0, "board": board}]}, video[1:], ["7"])[1] == {}
+    assert recap.burn_boards(s3, "b", "", "w6", {**body, "clips": [{"at": 4.0, "board": board}]}, video[1:], ["reels/7"])[1] == {}
     assert len(drawn) == 1
     monkeypatch.setattr(burn, "ffmpeg", lambda: None)
     plain = {**body, "clips": [{"at": 4.0, "board": board}]}
-    assert recap.burn_boards(s3, "b", "", "w6", plain, video[1:], ["7"]) == (video[1:], {}) and "burned" not in plain["clips"][0]
+    assert recap.burn_boards(s3, "b", "", "w6", plain, video[1:], ["reels/7"]) == (video[1:], {}) and "burned" not in plain["clips"][0]
 
 
 def test_the_leaderboard_drawn_in_keeps_off_the_recordings_bars(tmp_path):

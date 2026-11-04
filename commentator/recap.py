@@ -25,7 +25,7 @@ import json
 import logging
 import time
 import wave
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -35,7 +35,7 @@ from .live_stream import TYPES
 
 log = logging.getLogger(__name__)
 
-RECAP_SECONDS = 180.0   # the whole recap, cards and clips
+RECAP_SECONDS = 240.0   # the whole recap, cards and clips
 INTRO_SECONDS = 22.0    # what the intro and outro take, for picking how many clips fit
 OUTRO_SECONDS = 22.0
 CLIP_SECONDS = 14.0     # what a clip takes, for picking how many fit
@@ -50,7 +50,7 @@ CLIP_WORDS = 26         # a clip's lines, together
 CATCH_UP_WORDS = 16     # more for a clip that first catches up on turns no clip showed
 CARD_WORDS = 35         # an intro or outro line
 BOARD_ROWS = 5          # the TV-style net leaderboard over a clip: the top this many, and the clip's team
-BUILD = 3               # how a recap's made: a change to it builds every recap again
+BUILD = 4               # how a recap's made: a change to it builds every recap again
 RETIRE_SECONDS = 3600.0  # a rebuild's leftovers stay this long (a player open on the last build still plays them)
 
 
@@ -129,7 +129,8 @@ def race(facts: dict) -> dict | None:
     facts["holes"] (team -> {hole number: that hole's team net to par}). Every team in the results
     needs one, adding up to its result, all on the same holes: one left out could have led or tied,
     making the story's leads untrue. None otherwise, or with fewer than two teams.
-    {holes, teams (best first), after: [{team: running net}] per hole, events: [{hole, teams, text}],
+    {holes, teams (best first), after: [{team: running net}] per hole, events: [{hole, teams, text}]
+    (a lead changing hands or tied, also `gained`/`lost`: the teams that took it, and that lost it),
     key: team -> the holes its story turned on}."""
     nets = {r["team"]: r["net"] for r in facts["rows"]}
     cards: dict[str, dict[int, int]] = {}
@@ -151,8 +152,9 @@ def race(facts: dict) -> dict | None:
     events: list[dict] = []
     key: dict[str, set[int]] = {t: set() for t in teams}
 
-    def note(hole: int, who: list[str], text: str) -> None:
-        events.append({"hole": hole, "teams": who, "text": text})
+    def note(hole: int, who: list[str], text: str, gained: list[str] | None = None, lost_: list[str] | None = None) -> None:
+        events.append({"hole": hole, "teams": who, "text": text,
+                       **({"gained": gained, "lost": lost_ or []} if gained is not None else {})})
         for t in who:
             key[t].add(hole)
 
@@ -168,12 +170,13 @@ def race(facts: dict) -> dict | None:
             (t,) = leaders
             verb = "lead" if i == 0 else "pull clear alone" if t in prev else "take the lead"
             note(h, [t] + lost, f"{name[t]} {verb} after hole {h} at {_net(best)}"
-                 + (f" (falling back: {names(lost)})" if lost else ""))
+                 + (f" (falling back: {names(lost)})" if lost else ""), [t] if i else None, lost)
         elif len(leaders) > 1 and leaders - prev:
             caught = [t for t in teams if t in prev] if len(prev) == 1 else []   # a lone lead gone
-            note(h, [t for t in teams if t in leaders - prev] + caught + lost,
+            joined = [t for t in teams if t in leaders - prev]
+            note(h, joined + caught + lost,
                  f"Tied for the lead after hole {h} at {_net(best)}: {names([t for t in teams if t in leaders])}"
-                 + (f" (falling back: {names(lost)})" if lost else ""))
+                 + (f" (falling back: {names(lost)})" if lost else ""), joined if i else None, caught + lost)
         prev = leaders
 
     def margin(i: int) -> tuple[str | None, int]:
@@ -225,6 +228,40 @@ def race(facts: dict) -> dict | None:
     return {"holes": holes, "teams": teams, "after": after, "events": events, "key": key}
 
 
+def turn_moments(story: dict, find: Callable[[str, int, str], dict | None]) -> dict[str, list[dict]]:
+    """The shots each lead change or tie turned on, cut from the rounds' streams for the clips that show
+    it (the reels' picks are a round's best shots, not the race's): the miss of a team that lost the
+    lead going over par on the hole; the long putt or hole-out of one that took it (not its tap-in);
+    and with neither, the shot that set up a team's birdie that took it. `find(team, hole, want)`:
+    highlights.turn_shot of that team's round. Returns team -> moments, `turn`: True."""
+    out: dict[str, list[dict]] = {}
+
+    def add(team: str, m: dict | None) -> bool:
+        if m is None:
+            return False
+        have = out.setdefault(team, [])
+        if all(x["id"] != m["id"] for x in have):
+            have.append({**m, "turn": True})
+        return True
+
+    for e in story["events"]:
+        if "gained" not in e:
+            continue
+        i = story["holes"].index(e["hole"])
+        v = {t: story["after"][i][t] - (story["after"][i - 1][t] if i else 0) for t in story["teams"]}
+        shown = False
+        for t in e["lost"]:
+            if v[t] > 0:
+                shown |= add(t, find(t, e["hole"], "miss"))
+        for t in e["gained"]:
+            shown |= add(t, find(t, e["hole"], "made"))
+        if not shown:
+            for t in e["gained"]:
+                if v[t] < 0:
+                    add(t, find(t, e["hole"], "setup"))
+    return out
+
+
 def _ordinal(n: int) -> str:
     return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
 
@@ -269,7 +306,7 @@ def _ranked(moments: list[dict], key: set[int] | None = None) -> list[dict]:
     rough one among them too (it may be how a lead went), then the rest. Otherwise the good by how
     big (a reel from before levels counts each the same), then the bad."""
     key = key or set()
-    return sorted(moments, key=lambda m: (_num(m.get("hole")) not in key, bool(m.get("bad")),
+    return sorted(moments, key=lambda m: (_num(m.get("hole")) not in key, not m.get("turn"), bool(m.get("bad")),
                                           -(m.get("level") or 1), m["at"]))
 
 
@@ -349,17 +386,18 @@ def choose(facts: dict, footage: dict[str, dict], budget: float = RECAP_SECONDS)
     return out
 
 
-def digest(facts: dict, footage: dict[str, dict]) -> str:
+def digest(facts: dict, footage: dict[str, dict], turns: dict[str, list[dict]] | None = None) -> str:
     """What a recap is built from: the week's numbers and the moments it could show (where each is
-    in its reel, and what it is). A change to either (Squabbit's net replacing the sim's, a team's
-    reel cut late or cut again) rebuilds it."""
+    in its reel, and what it is; `turns`: turn_moments'). A change to any (Squabbit's net replacing
+    the sim's, a team's reel cut late or cut again) rebuilds it."""
     body = {"v": BUILD, "rows": [[r["team"], r["net"]] for r in facts["rows"]],
             "holes": {t: {str(h): v for h, v in hs.items()} for t, hs in sorted((facts.get("holes") or {}).items())},
             "standings": [[s["team"], s["points"]] for s in facts["standings"]],
             "footage": {t: [f["key"], f.get("cuts"), [[m.get(k) for k in ("id", "at", "what", "level", "bad", "player", "hole")]
                                                       for m in f["moments"]],
                             [(f.get("finish") or {}).get(k) for k in ("id", "at", "what", "player", "hole", "cut")]]
-                        for t, f in sorted(footage.items())}}
+                        for t, f in sorted(footage.items())},
+            "turns": {t: [[m["id"], m["what"]] for m in ms] for t, ms in sorted((turns or {}).items())}}
     return hashlib.sha1(json.dumps(body, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -546,7 +584,8 @@ def cut(clip: dict, reel: list[list[tuple[str, float]]], ats: list[float], spoke
 
 def timeline(facts: dict, clips: list[dict], lines: dict, voices: dict[tuple, tuple[float, str]],
              cuts: list[tuple[list[tuple[str, float]], float] | None]) -> tuple[dict, list[list[tuple[str, float]]], list[str]]:
-    """recap.json's body (bar its key), the playlist's parts and each part's reel. `lines`: script()'s;
+    """recap.json's body (bar its key), the playlist's parts and where each part's segments are (under
+    live/: a reel's folder, or a clip's own `src`, s for one cut from its stream). `lines`: script()'s;
     `voices`: each voiced line's (seconds, audio file) by ("intro", n), ("clip", i, n), ("outro", n);
     `cuts`: each clip's cut() (a clip that's None, or has no voiced lines, is left out)."""
     def voiced(where: tuple, ls) -> list[dict]:
@@ -573,7 +612,7 @@ def timeline(facts: dict, clips: list[dict], lines: dict, voices: dict[tuple, tu
         if story and h in story["holes"] and story["holes"].index(h) > 0:   # (up all through, as on TV)
             out_clips[-1]["board"] = board(story, story["holes"].index(h) - 1, c["team"], by_team)
         out_parts.append(segs)
-        sources.append(c["key"])
+        sources.append(c.get("src") or f"reels/{c['key']}")
         offset += sum(d for _, d in segs)
     body = {"week": facts["week"], "course": facts.get("course"), "end_date": facts.get("end_date"),
             "rows": [{k: r[k] for k in ("name", "players", "net", "place", "tied", "points")} for r in facts["rows"]],
@@ -654,11 +693,11 @@ def burn_boards(client: Any, bucket: str, prefix: str, key: str, body: dict,
         if not c.get("board"):
             out.append(part)
             continue
-        tag = hashlib.sha1(json.dumps([burn.LOOK, src, [u for u, _ in part], c["board"]], sort_keys=True).encode()).hexdigest()[:16]
+        tag = hashlib.sha1(json.dumps([burn.LOOK, src.removeprefix("reels/"), [u for u, _ in part], c["board"]], sort_keys=True).encode()).hexdigest()[:16]
         names = [f"b/{tag}-{n}.ts" for n in range(len(part))]
         if not all(base + n in there for n in names):
             try:
-                segs = [client.get_object(Bucket=bucket, Key=f"{root}reels/{src}/{u}")["Body"].read() for u, _ in part]
+                segs = [client.get_object(Bucket=bucket, Key=f"{root}{src}/{u}")["Body"].read() for u, _ in part]
                 made.update(zip(names, burn.clip(ff, segs, c["board"])))
             except Exception as e:
                 log.warning("League recap: couldn't draw the leaderboard into the clip at %ss (%s)", c["at"], e)
@@ -672,8 +711,8 @@ def burn_boards(client: Any, bucket: str, prefix: str, key: str, body: dict,
 def publish(client: Any, bucket: str, prefix: str, key: str, body: dict, video: list[list[tuple[str, float]]],
             sources: list[str], audio: list[tuple[str, bytes]], digest_: str, season_from: str | None = None,
             clock=time.time, made: dict[str, bytes] | None = None) -> dict:
-    """Put a recap up: its clips' segments copied from their reels (`sources`: each part's reel key;
-    a reel's segments go when it's cut again), its playlist, lines' audio, timeline and an entry in
+    """Put a recap up: its clips' segments copied from their reels or streams (`sources`: timeline's;
+    a reel's segments go when it's cut again, a stream's past its keep), its playlist, lines' audio, timeline and an entry in
     recaps.json; then the recaps of past seasons go. An earlier build's leftovers are retired (listed
     in the entry) and go at a build RETIRE_SECONDS on, a page that loaded it still playing them till
     then. `made`: segments made for it (burn_boards'), by uri, put up instead of copied. Returns the
@@ -689,7 +728,7 @@ def publish(client: Any, bucket: str, prefix: str, key: str, body: dict, video: 
                 client.put_object(Bucket=bucket, Key=k, Body=made[uri], CacheControl="public, max-age=31536000, immutable",
                                   ContentType=TYPES[".ts"])
             elif k not in old and k not in new:
-                client.copy_object(Bucket=bucket, Key=k, CopySource={"Bucket": bucket, "Key": f"{root}reels/{src}/{uri}"},
+                client.copy_object(Bucket=bucket, Key=k, CopySource={"Bucket": bucket, "Key": f"{root}{src}/{uri}"},
                                    MetadataDirective="REPLACE", CacheControl="public, max-age=31536000, immutable",
                                    ContentType=TYPES.get("." + uri.rsplit(".", 1)[-1], "application/octet-stream"))
             new.add(k)
