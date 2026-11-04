@@ -92,6 +92,9 @@ def test_the_build_finds_the_seasons_records_and_each_players(tmp_path):
     path, found = _season(tmp_path), {}
     with closing(sqlite3.connect(path)) as db, db:
         db.execute("UPDATE shots SET total_yards = 200 + ts WHERE club = 'DR'")   # Bob's are the longest
+        for sess, end, course in ((1, 30, "Pebble"), (2, 60, "Riviera")):        # in recorded rounds: players
+            db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, is_league)"
+                       " VALUES (?, ?, '2026-10-17', ?, 'Ann', 9, 0)", (sess, end, course))
     stats_site.build(path, tmp_path / "site", records=found)
     with closing(stats_web.connect(path)) as src:
         want = {s["id"] for who in (None, "Ann", "Bob") for s in stats_web.record_shots(stats_web.records(src, None, who))}

@@ -784,6 +784,7 @@ class GsproState:
             if n in self._fire_info:
                 self._fire_info[n]["player"] = ev.player
                 self._fire_info[n]["hole"] = ev.hole
+                self._fire_info[n]["score"] = ev.score   # the player's strokes on the hole with it
                 if rest is not None and rest["hole"] == ev.hole:   # a hole's tee shot has none
                     self._fire_info[n].update({k: rest[k] for k in ("start", "to_pin") if k in rest})
             self._fires_by[ev.player] = (self._fires_by.get(ev.player, []) + [n])[-3:]

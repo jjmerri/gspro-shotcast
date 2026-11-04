@@ -1864,9 +1864,10 @@ function renderVods() {
     <div id="liveslot"></div>
     ${sel.rounds.length > 1 ? `<div class="controls">Jump to: ${sel.rounds.map(r =>
       `<button class="link" data-vod="${esc(sel.session)}" data-vodat="${r.at}">${esc(r.label)}</button>`).join(" · ")}</div>` : ""}` : ""}
-  <table><tr><th>Started</th><th class="l">Rounds</th><th>Length</th></tr>
+  <table><tr><th>Started</th><th class="l">Rounds</th><th>Length</th>${state.local ? "<th></th>" : ""}</tr>
   ${vods.map(v => `<tr class="${sel === v ? "sel" : ""}"><td>${esc(when(v.since * 1000, day))}</td><td class="l wrap">${chapters(v)}</td>
-    <td>${going(v) ? '<span class="livedot"></span>live' : v.duration ? hm(v.duration) : "–"}</td></tr>`).join("")}
+    <td>${going(v) ? '<span class="livedot"></span>live' : v.duration ? hm(v.duration) : "–"}</td>${state.local
+      ? `<td>${v.ended === null ? "" : `<button class="link" data-delvod="${esc(v.session)}" title="Delete this video, here and on the published page">Delete</button>`}</td>` : ""}</tr>`).join("")}
   </table>` + clipList;
 }
 
@@ -2005,7 +2006,7 @@ document.addEventListener("click", (e) => {
     return;
   }
   const t = e.target.closest("[data-tab],[data-section],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
-                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-exclround],[data-delround],[data-leagueround],[data-sharecard],[data-period],[data-vod],[data-clip],[data-link],[data-more],[data-onlyme],[data-hcpclean]");
+                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-exclround],[data-delround],[data-delvod],[data-leagueround],[data-sharecard],[data-period],[data-vod],[data-clip],[data-link],[data-more],[data-onlyme],[data-hcpclean]");
   if (!t) return;
   if (t.dataset.hcpclean) {
     state.hcpClean = t.dataset.hcpclean === "1";
@@ -2077,6 +2078,18 @@ document.addEventListener("click", (e) => {
         pubWatch();
       })
       .catch(e => { t.disabled = false; t.textContent = `Couldn't save (${e.message})`; });
+    return;
+  }
+  if (t.dataset.delvod) {
+    if (!confirm("Delete this round video? It goes from the published page too. This can't be undone.")) return;
+    if (state.vod && state.vod.session === t.dataset.delvod) { state.vod = null; stopLive(); }
+    t.disabled = true;
+    t.textContent = "Deleting…";
+    fetch(`api/recordings/${encodeURIComponent(t.dataset.delvod)}/delete`, { method: "POST", headers: { "Content-Type": "application/json" },
+                                                                            body: JSON.stringify({ confirm: true }) })
+      .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+                         pollExtras(); })
+      .catch(e => { t.disabled = false; t.textContent = `Couldn't delete (${e.message})`; });
     return;
   }
   if (t.dataset.exclround || t.dataset.delround) {

@@ -526,7 +526,7 @@ def test_penalty_surface_is_kept_per_shot():
                 + _line(1, 1, 1))
     info = dict(s.fire_info(s.fire_of(s.fires, time.monotonic())))
     assert info.pop("rest_at")
-    assert info == {"player": 0, "hole": 1, "putting": False, "penalty": "sand", "lie_cost": (71, 78)}
+    assert info == {"player": 0, "hole": 1, "putting": False, "penalty": "sand", "lie_cost": (71, 78), "score": 2}
 
 
 def test_a_repeated_score_in_a_team_format_is_a_mulligan_only_when_it_repeats_the_players_last_shot():

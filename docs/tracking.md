@@ -437,7 +437,8 @@ next starts. With `live.keep_days: 0` nothing is kept: each file goes from the b
 off the playlist, and the rest when the stream stops. Either way the PC's `live\` folder is emptied
 when a stream stops.
 
-The booth starts OBS's output when a round starts and stops it 30 seconds after the sign-off
+The booth starts OBS's output when GSPro's round setup screen comes up with a course on it (so the
+opening tee shot is on it, however quickly it's hit), or when a round starts, and stops it 30 seconds after the sign-off
 (`live.stop_after_seconds`), over OBS's WebSocket server; a round quit early stops it the same way,
 30 seconds after its sign-off or after the quit if it's too short for one. The tray's
 **Start/Stop the live stream** does it by hand. It also stops:
@@ -462,7 +463,9 @@ bucket the stream is only recorded here. The stats page opened from the tray pla
 **Round replays** tab and from the **Watch** buttons, the same as the published page plays the
 bucket's. The same rules as the bucket's apply: a stream under a minute or with no shot played on it
 isn't kept, one cut off by a crash is closed when the booth next starts, and files past the days set
-go as the next stream starts or stops, or when the booth starts. About 1.2 GB an hour.
+go as the next stream starts or stops, or when the booth starts. About 1.2 GB an hour. Each one
+there has a **Delete**, which takes it off the PC and (once the booth's running) out of the bucket, so
+it leaves the published page too.
 
 With `live.with_rounds: false` none of this follows rounds or the badge (only the idle stop
 applies): the stream is started and stopped by hand.
@@ -608,6 +611,8 @@ own AWS credentials (`aws s3 cp s3://<BucketName>/backups/<file> .`).
 `python -m commentator backup` takes a copy now. To restore, stop the booth and run
 `python -m commentator restore logs/backups/season-....db.gz`; it checks the copy, saves the
 current file (even a corrupted one) as `pre-restore-*.db.gz` in the backup folder, then swaps it in.
+The tray's Restart to update also saves the file, with the booth stopped, as
+`pre-update-<when>-from-<version>.db.gz` there (the last three kept), to restore the same way.
 
 ## Recording only
 

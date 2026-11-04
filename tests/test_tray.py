@@ -155,6 +155,34 @@ def test_update_says_whether_it_took(tmp_path, monkeypatch):
     assert updater.after_update(tmp_path / "none", "0.1.0") is None
 
 
+def test_an_update_backs_up_the_season_first_and_publishes_once_it_took(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from commentator import backup, tray
+
+    order = []
+    monkeypatch.setattr(backup, "pre_update", lambda cfg, version: order.append(("backup", version)))
+    monkeypatch.setattr(updater, "install", lambda *a: order.append("install"))
+    app = SimpleNamespace(update=(SimpleNamespace(version="0.2.0"), tmp_path / "x.exe"), version="0.1.0",
+                          home=tray.default_home(), cfg=None, booth=SimpleNamespace(stop=lambda: order.append("stop")),
+                          quit=lambda: order.append("quit"))
+    tray.Tray.apply_update(app)
+    assert order == ["stop", ("backup", "0.1.0"), "install", "quit"]
+
+    monkeypatch.setattr(backup, "pre_update", lambda cfg, version: 1 / 0)   # a failed copy doesn't stop it
+    order.clear()
+    tray.Tray.apply_update(app)
+    assert order == ["stop", "install", "quit"]
+
+    published, said = [], []
+    app.publisher = SimpleNamespace(changed=lambda: published.append(1))
+    app.info = app.error = said.append
+    for took in (True, False):
+        monkeypatch.setattr(updater, "after_update", lambda folder, version: (took, "text"))
+        tray.Tray._after_update(app)
+    assert published == [1] and said == ["text", "text"]
+
+
 def test_start_the_live_stream_starts_obs_when_it_isnt_running(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

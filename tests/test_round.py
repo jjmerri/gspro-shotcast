@@ -2316,6 +2316,34 @@ async def test_a_tee_shot_struck_just_before_the_round_starts_is_its_opening_sho
     assert rec.hole == "Hole 1, par 4, 400 yards"
 
 
+async def test_an_opening_tee_shot_with_no_setup_read_before_it_is_the_rounds_by_gspros_log(tmp_path):
+    from commentator.models import RoundStartEvent, Shot, ShotEvent
+    from commentator.sources.gspro_log import LogEvent, parse_events
+
+    # Straight on from the last round: the first drive goes before any setup read of the new course.
+    async def drive(previous_score):
+        (tmp_path / str(previous_score)).mkdir()
+        e = _engine(tmp_path / str(previous_score))
+        e.cfg.commentary.closer = e.cfg.commentary.opener = False
+        for ev in parse_events("Loading course Longbow GC\n"):
+            e.gspro.apply(ev)
+        e.gspro.apply(LogEvent("shot_fired"))
+        blank = Hud()
+        shot = ShotEvent(shot=Shot(club="9I", carry=90.0), hud_hint=blank, impact_hud_hint=blank)
+        e.state.current_hole = "Hole 7, par 3, 129 yards"
+        e._capture_impact(shot)
+        for ev in parse_events(f"ActivePlayer: 0  currentHole: 6  strokes: 1  Previous Score: {previous_score}\n"):
+            e.gspro.apply(ev)
+        tee = Hud(player_text="MikeD E Shot 1 129 YDS", shot_number=1, score_to_par="E", to_pin="129 yards", lie="tee")
+        await e.handle_round_start(RoundStartEvent(hud=tee))
+        await e.handle_shot(shot)
+        return e.state.shots[-1].round_id, e.round.id
+
+    rid, round_id = await drive(0)
+    assert rid == round_id
+    assert (await drive(1))[0] is None   # a later stroke on the hole isn't its opening shot
+
+
 async def test_a_rounds_shots_keep_its_course_when_a_hole_box_read_cuts_it_short(tmp_path):
     from commentator.models import Shot, ShotEvent
 

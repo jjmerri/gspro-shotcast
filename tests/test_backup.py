@@ -194,3 +194,19 @@ async def test_a_failed_backup_raises_a_health_warning_and_a_good_one_clears_it(
     monkeypatch.setattr(backup, "run", lambda cfg, force=False: None)
     await engine._backup("round end")
     assert engine.health.get("backup.failed") is None
+
+
+def test_a_copy_before_an_update_outlives_the_new_versions_first_copy(tmp_path):
+    cfg = Config(log_dir=str(tmp_path), db_path=str(tmp_path / "season.db"))
+    assert backup.pre_update(cfg, "0.1.0") is None              # no season yet
+    _db(cfg.db_path, "before")
+    start = datetime(2026, 1, 1, 12)
+    pres = [backup.pre_update(cfg, f"0.1.{i}", now=start + timedelta(minutes=i)) for i in range(5)]
+    _db(cfg.db_path, "migrated")
+    backup.back_up(cfg.db_path, backup.folder(cfg), daily=1, weekly=0, now=start + timedelta(hours=1))
+    backup.pre_update(cfg, "0.1.9", now=start + timedelta(hours=2))
+    left = sorted(p.name for p in backup.folder(cfg).glob(backup.PRE_UPDATE + "*"))
+    assert len(left) == backup.PRE_UPDATE_KEPT and pres[0].name not in left and pres[4].name in left
+    with gzip.open(pres[4]) as fin:
+        (tmp_path / "restored.db").write_bytes(fin.read())
+    assert _value(tmp_path / "restored.db") == "before"

@@ -167,7 +167,25 @@ async def test_the_stream_starts_with_a_round_and_stops_after_the_sign_off(tmp_p
     eng._schedule_live_stop()
     await asyncio.wait_for(eng._live_stop_task, 2)
     assert calls == ["start", "start", "stop"]
-
+    # The next course's setup screen: on air before its round starts (its opening tee shot can come
+    # first), and a stop still pending from the round before is called off.
+    eng._schedule_live_stop()
+    eng._live_preroll()
+    await asyncio.sleep(0.2)
+    assert calls == ["start", "start", "stop", "start"] and eng._live_stop_task.cancelled()
+    eng._schedule_live_stop()                             # the last round's sign-off, finishing after it
+    await asyncio.sleep(0.2)
+    assert calls == ["start", "start", "stop", "start"]
+    eng._live_round_start()                               # once that round's on, its own sign-off stops it
+    eng._schedule_live_stop()
+    await asyncio.wait_for(eng._live_stop_task, 2)
+    assert calls[-1] == "stop"
+    eng._live_on_air(False)
+    await asyncio.sleep(0.05)
+    calls.clear()
+    eng._live_preroll()                                   # held off air: stays off
+    await asyncio.sleep(0.05)
+    assert calls == []
 
 
 def test_mirror_keeps_saying_its_live_so_the_page_can_tell_a_killed_booth(tmp_path):
@@ -416,6 +434,53 @@ def test_a_kept_stream_plays_from_the_start_with_its_rounds_marked(tmp_path):
     m.step()                                                         # too short to keep, and the old one's past
     assert not [k for k in s3.objects if k.startswith("live/s/")]
     assert json.loads(s3.objects["live/recordings.json"][0])["recordings"] == []
+
+
+def test_a_kept_stream_deleted_on_the_stats_page_goes_from_the_bucket(tmp_path):
+    from commentator.live_stream import request_delete
+
+    s3, now = FakeS3(), [1000.0]
+    m = Mirror(tmp_path / "hls", "bkt", client=s3, status_file=tmp_path / "live.json", clock=lambda: now[0], keep_days=7)
+    m.folder.mkdir()
+    m.clear()
+    sessions = []
+    for start in (0, 1000):                                          # two kept streams
+        now[0] = 1000.0 + start
+        for i in range(12):
+            _playlist(m.folder, i, [f"stream{i}.ts"], ended=i == 11, mtime=now[0])
+            m.step()
+            if i == 0:
+                sessions.append(m.session)
+                m.shot()
+            now[0] += 6
+    assert [r["session"] for r in m.recordings] == sessions[::-1]
+    now[0] = 3000.0
+    _playlist(m.folder, 0, ["stream0.ts"], mtime=now[0])               # a third, on air
+    m.step()
+    on_air = m.session
+    m.recordings[1]["since"] -= 950                                   # the second ran up to the first's end + 16 s
+    request_delete(tmp_path, "pc-copy", 965, 1069)                    # the PC's copy of the first: named apart,
+    request_delete(tmp_path, "pc-copy-b", 3002, 3100)                 # and seen 35 s earlier; the one on air waits
+    put = s3.put_object
+    s3.put_object = lambda **kw: (_ for _ in ()).throw(OSError("offline")) if kw["Key"].endswith("recordings.json") else put(**kw)
+    m.step()                                                         # the list can't go up: tried again later
+    assert [r["session"] for r in m.recordings] == [on_air, sessions[1], sessions[0]]
+    s3.put_object = put
+    now[0] += 61
+    _playlist(m.folder, 1, ["stream1.ts"], mtime=now[0])               # still on air
+    m.step()
+    assert not [k for k in s3.objects if k.startswith(f"live/s/{sessions[0]}/")]
+    assert [k for k in s3.objects if k.startswith(f"live/s/{sessions[1]}/")]
+    recs, _ = _kept(s3, sessions[1])
+    assert [r["session"] for r in recs] == [on_air, sessions[1]]
+    assert [p.name for p in (tmp_path / "live-delete").iterdir()] == ["pc-copy-b.json"]
+    request_delete(tmp_path, "gone-already", 100, 700)                  # nothing left to delete: just dropped
+    request_delete(tmp_path, "not-kept-there", 2060, 2160)             # only a neighbour's last seconds: not it
+    retry = tmp_path / "live-delete" / "retry.json"                    # one already done, its note left behind:
+    retry.write_text(json.dumps({"session": "x", "since": 2000, "ended": 2072, "resolved": [sessions[0]]}))
+    m.step()                                                           # it doesn't match the next best
+    assert [r["session"] for r in m.recordings] == [on_air, sessions[1]]
+    assert sorted(p.name for p in (tmp_path / "live-delete").iterdir()) == ["pc-copy-b.json"]
 
 
 def test_a_stream_cut_off_by_a_crash_is_closed_and_kept_on_the_next_start(tmp_path):

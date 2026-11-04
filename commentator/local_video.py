@@ -123,6 +123,23 @@ def _delete(side: Path, video: Path) -> bool:
         return False
 
 
+def delete(folder: str | Path, session: str) -> dict | None:
+    """Delete a kept recording (from the local stats page). Its record, or None if there's no such one;
+    ValueError for one still being recorded, OSError if it can't go yet (open in a player)."""
+    if not SESSION.fullmatch(session):
+        return None
+    rec = next((r for r in recordings(folder) if r["session"] == session), None)
+    if rec is None:
+        return None
+    if rec["ended"] is None:
+        raise ValueError("it's still being recorded")
+    video = Path(folder) / f"{session}.ts"
+    if not _delete(video.with_suffix(".json"), video):
+        raise OSError(f"couldn't delete {video.name} (is it open in a player?)")
+    log.info("Deleted the round video %s from the stats page", video)
+    return rec
+
+
 def folder(live, home: str | Path = ".") -> Path | None:
     """Where the booth keeps the round videos (config live.local_dir, from the Shotcast folder), or None
     when they aren't kept."""

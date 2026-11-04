@@ -138,6 +138,32 @@ def back_up(db_path: str | Path, dest: str | Path, daily: int = 14, weekly: int 
     return dest / name
 
 
+PRE_UPDATE, PRE_UPDATE_KEPT = "pre-update-", 3
+
+
+def pre_update(cfg: Config, version: str, now: datetime | None = None) -> Path | None:
+    """A copy of the season file as it was before an update (taken with the booth stopped), named apart
+    from the daily/weekly copies so the new version's first copy, after any change it makes to the
+    file, can't prune it. The newest PRE_UPDATE_KEPT are kept. None if there's no database yet."""
+    db_path, dest = Path(cfg.db_path), folder(cfg)
+    if not db_path.exists():
+        return None
+    dest.mkdir(parents=True, exist_ok=True)
+    safe = "".join(c if c.isalnum() or c in ".-_" else "_" for c in version)
+    name = f"{PRE_UPDATE}{(now or datetime.now()).strftime(STAMP)}-from-{safe}{SUFFIX}"
+    with tempfile.TemporaryDirectory(dir=dest) as tmp:
+        raw = Path(tmp) / "season.db"
+        _snapshot(db_path, raw)
+        part = Path(tmp) / name
+        with open(raw, "rb") as fin, gzip.open(part, "wb", compresslevel=6) as fout:
+            shutil.copyfileobj(fin, fout, 1 << 20)
+        os.replace(part, dest / name)
+    olds = sorted(dest.glob(f"{PRE_UPDATE}*{SUFFIX}"), reverse=True)   # by their stamp
+    for old in olds[PRE_UPDATE_KEPT:]:
+        old.unlink(missing_ok=True)
+    return dest / name
+
+
 def upload(path: Path, bucket: str, prefix: str = "backups/", daily: int = 14, weekly: int = 4,
            client: Any = None) -> None:
     """Upload a backup to s3://bucket/prefix and prune the copies there the same way."""

@@ -725,6 +725,13 @@ class Tray:
         if not self.update:
             return
         self.booth.stop()
+        try:
+            from . import backup
+
+            path = backup.pre_update(self.cfg, self.version)
+            log.info("Season backup before the update: %s", path.name if path else "no database yet")
+        except Exception:
+            log.exception("Season backup before the update failed (updating anyway: it doesn't touch the season)")
         custom = self.home.resolve() != default_home().resolve()
         updater.install(self.update[1], self.update[0].version, self.home.resolve() if custom else None)
         self.quit()
@@ -740,6 +747,8 @@ class Tray:
         if done is not None:
             ok, text = done
             log.info("Update: %s", text)
+            if ok:
+                self.publisher.changed()   # the new version's page and figures, without waiting for a round
             (self.info if ok else self.error)(text)
 
     def open_folder(self, *_) -> None:
@@ -881,7 +890,12 @@ class Tray:
         def brand():
             return self.cfg.publish.brand
         publisher = self.publisher
-        hooks = {"on_change": publisher.changed, "publish_status": publisher.status}
+        def video_deleted(rec):   # the bucket's copy, if streams are kept there, goes too
+            if self.cfg.publish.bucket and self.cfg.live.keep_days:
+                from .live_stream import request_delete
+
+                request_delete(self.cfg.log_dir, rec["session"], rec["since"], rec["ended"])
+        hooks = {"on_change": publisher.changed, "publish_status": publisher.status, "video_deleted": video_deleted}
         try:
             server = make_server(db, STATS_PORT, names, site, brand, videos, **hooks)
         except OSError:

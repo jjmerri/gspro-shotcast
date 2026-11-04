@@ -37,6 +37,8 @@ PASSWORD_ENV = "OBS_WEBSOCKET_PASSWORD"
 HEARTBEAT_SECONDS = 30
 MIN_RECORDING_SECONDS = 60   # a stream shorter than this (OBS started and stopped) isn't kept
 SHOT_LEAD_SECONDS = 60       # a shot this long before a stream is first seen counts as on it
+SAME_STREAM_SECONDS = 10     # a copy on the PC and one in the bucket that overlap by more are the same stream
+DELETE_DIR = "live-delete"   # beside the status file: kept streams the stats page asked to delete
 OBS_EXE = Path(r"C:\Program Files\obs-studio\bin\64bit\obs64.exe")
 PORTABLE_OBS = Path("obs", "bin", "64bit", "obs64.exe")   # the tray's setup (obs_setup.py), in the home folder
 TYPES = {".m3u8": "application/vnd.apple.mpegurl", ".ts": "video/mp2t", ".m4s": "video/iso.segment",
@@ -225,6 +227,18 @@ def _session_name(now: float) -> str:
     return time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + "-" + secrets.token_hex(3)
 
 
+def request_delete(log_dir: str | Path, session: str, since: float, ended: float) -> None:
+    """Ask the booth's mirror to delete a kept stream from the bucket: the PC's copy of it was deleted
+    on the local stats page. The copies are named apart, and each starts when its mirror first sees
+    the stream, so it's matched by the time it covers (OBS has one stream at a time). The booth may
+    be another process, or not running: it's done on the mirror's next pass."""
+    folder = Path(log_dir, DELETE_DIR)
+    folder.mkdir(parents=True, exist_ok=True)
+    tmp = folder / f"{session}.tmp"
+    tmp.write_text(json.dumps({"session": session, "since": since, "ended": ended}), encoding="utf-8")
+    tmp.replace(folder / f"{session}.json")
+
+
 class Mirror:
     """Copies OBS's HLS folder to s3://bucket/<prefix>live/ while it's being written. step() does one
     pass; run() calls it every `interval` seconds on its own thread."""
@@ -241,6 +255,8 @@ class Mirror:
         self.peers: list[Mirror] = []   # others reading the same folder: it's emptied once they're done too
         self.newest_ns = 0   # the stream's newest file read (its mtime), for that
         self.state_file = Path(status_file).with_name("live-recordings.json") if status_file else None
+        self.delete_dir = Path(status_file).with_name(DELETE_DIR) if status_file else None
+        self._delete_after = 0.0   # a failed delete request: not tried again till then
         self.root = (prefix.strip("/") + "/" if prefix.strip("/") else "") + "live/"
         self.client, self.status_file = client, Path(status_file) if status_file else None
         self.stale, self.clock = stale_seconds, clock
@@ -417,8 +433,81 @@ class Mirror:
         self.recordings = [r for r in self.recordings if r not in old]
         log.info("Live stream: deleted %d kept stream(s) older than %g days", len(old), self.keep / 86400)
 
+    def _delete_match(self, ask: dict, since: float, ended: float) -> list[dict]:
+        """The bucket's copy of the stream the PC's (ask, since to ended) was: the same session, or the
+        one it overlaps most, by most of either's length. One on the PC is one in the bucket, and a span
+        can run past its stream's end by OBS's buffered segments, into the next one's start."""
+        def end(r: dict) -> float:
+            return r["ended"] if r.get("ended") is not None else self.clock()   # still going
+
+        def overlap(r: dict) -> float:
+            return min(end(r), ended) - max(r["since"], since)
+        same = [r for r in self.recordings if r["session"] == ask.get("session")]
+        best = max(self.recordings, key=overlap, default=None)
+        # Most of the shorter of the two: a neighbour's few buffered seconds don't make it the same stream.
+        return same or ([best] if best is not None and overlap(best) > max(
+            SAME_STREAM_SECONDS, min(ended - since, end(best) - best["since"]) / 2) else [])
+
+    def _deletes(self) -> None:
+        """The kept streams the stats page asked to delete (request_delete): their files and their place
+        in recordings.json. One still on air waits till it's over; one no longer kept just goes."""
+        if not (self.keep and self.delete_dir is not None and self.clock() >= self._delete_after
+                and self.delete_dir.is_dir()):
+            return
+        for req in sorted(self.delete_dir.glob("*.json")):
+            try:
+                ask = json.loads(req.read_text(encoding="utf-8"))
+                since, ended = float(ask["since"]), float(ask["ended"])
+            except (OSError, ValueError, KeyError, TypeError):
+                req.unlink(missing_ok=True)
+                continue
+            if (done := ask.get("resolved")) is not None:   # matched on an earlier pass: only that one
+                hits = [r for r in self.recordings if r["session"] in done]
+                if not hits:
+                    req.unlink(missing_ok=True)
+                    continue
+                if any(r["session"] == self.session for r in hits):
+                    continue
+            elif self.session and ended > self.since:
+                continue   # the stream on air may be its copy: once it's over
+            else:
+                hits = self._delete_match(ask, since, ended)
+            if hits and done is None:
+                try:   # what it matched, kept before anything goes, so a retry can't match another
+                    tmp = req.with_suffix(".tmp")
+                    tmp.write_text(json.dumps({**ask, "resolved": [r["session"] for r in hits]}), encoding="utf-8")
+                    tmp.replace(req)
+                except OSError as e:
+                    log.info("Live stream: couldn't note the stream to delete (trying again): %s", e)
+                    continue
+            if hits:
+                # Off the list first: once it's off the page, files left behind (a failed delete) aren't
+                # listed, so the next clear() deletes them.
+                before = self.recordings
+                self.recordings = [r for r in before if r not in hits]
+                try:
+                    self._save_index()
+                except Exception as e:
+                    self.recordings = before
+                    log.warning("Live stream: deleting a stream asked for on the stats page failed: %s", e)
+                    self._delete_after = self.clock() + 60
+                    return
+                log.info("Live stream: deleted %s, as asked on the stats page", ", ".join(r["session"] for r in hits))
+                try:
+                    keys: list[str] = []
+                    for r in hits:
+                        for page in self.client.get_paginator("list_objects_v2").paginate(
+                                Bucket=self.bucket, Prefix=f"{self.root}s/{r['session']}/"):
+                            keys += [o["Key"] for o in page.get("Contents", [])]
+                    self._delete(keys)
+                except Exception as e:
+                    log.warning("Live stream: deleting %s's files failed (they go when the booth next starts): %s",
+                                ", ".join(r["session"] for r in hits), e)
+            req.unlink(missing_ok=True)
+
     # -- one pass
     def step(self) -> None:
+        self._deletes()
         pl = self.folder / self.playlist
         try:
             st = pl.stat()

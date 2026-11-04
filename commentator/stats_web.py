@@ -521,12 +521,16 @@ def add_round_summaries(db: sqlite3.Connection, rounds_: list[dict[str, Any]], h
 
 def players(db: sqlite3.Connection, context: str | None = None,
             gimme_ft: float | None = None) -> list[dict[str, Any]]:
-    """One row per player: season scoring, ball-striking, driving and putting."""
-    names = [r[0] for r in db.execute(
-        "SELECT player FROM player_rounds WHERE 1=1" + _ctx(context)
-        + " UNION SELECT player FROM shots WHERE player IS NOT NULL AND player != 'unknown'"
-          " AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context) + " ORDER BY 1")]
-    return [player(db, name, context, gimme_ft) for name in names]
+    """One row per player: season scoring, ball-striking, driving and putting. A player is someone in a
+    recorded round: with a card of their own, or shots in one (an alternate-shot or shared-ball round
+    files no card per player). Shots outside any round (a session whose round was never recorded)
+    don't make a player on their own, so deleting someone's rounds takes them off the list."""
+    in_round = shot_rounds(db)
+    names = {r[0] for r in db.execute("SELECT player FROM player_rounds WHERE 1=1" + _ctx(context))}
+    names |= {r[1] for r in db.execute(
+        "SELECT id, player FROM shots WHERE player IS NOT NULL AND player != 'unknown'"
+        " AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)) if r[0] in in_round}
+    return [player(db, name, context, gimme_ft) for name in sorted(names)]
 
 
 def player(db: sqlite3.Connection, name: str, context: str | None = None,
@@ -790,7 +794,8 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
                 brand: dict[str, Any] | Callable[[], dict[str, Any]] | None = None,
                 videos: Callable[[], tuple[Path | None, int]] | None = None,
                 on_change: Callable[[], None] | None = None,
-                publish_status: Callable[[], dict[str, Any]] | None = None) -> ThreadingHTTPServer:
+                publish_status: Callable[[], dict[str, Any]] | None = None,
+                video_deleted: Callable[[dict], None] | None = None) -> ThreadingHTTPServer:
     """Serve the stats page on localhost only (port 0 picks a free one), the same static site that
     `publish` uploads (stats_site.py), built into `site` (a temp folder by default) and rebuilt when
     the database changes. `names` maps persona keys to on-air names; `brand` is build()'s site_name,
@@ -799,7 +804,9 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
     aren't) and for how many days, asked on each request so a change in Settings counts at once. They're
     served as the bucket's live/ (recordings.json, s/<session>/full.m3u8), so the Watch buttons play them.
     `on_change()` is called after an edit from the page is saved (the tray publishes the site a while
-    later); `publish_status()` is what GET api/publish-status answers, so the page can say when it's up."""
+    later); `publish_status()` is what GET api/publish-status answers, so the page can say when it's up.
+    POST api/recordings/<session>/delete deletes a round video kept on the PC, then calls
+    `video_deleted(record)` with its sidecar's record (the tray asks the booth to delete the bucket's copy too)."""
     from . import local_video, stats_site
 
     db_path = Path(db_path)
@@ -836,6 +843,8 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
                     or not self.headers.get("Content-Type", "").startswith("application/json"):
                 return self._send(403, b"forbidden", "text/plain")
             path = urlparse(self.path).path
+            if m := re.fullmatch(r"/api/recordings/([^/]+)/delete", path):
+                return self._delete_video(m.group(1))
             routes = ((r"/api/shots/(\d+)/left-out", "left_out"), (r"/api/rounds/(\d+)/excluded", "excluded"),
                       (r"/api/rounds/(\d+)/delete", "delete"), (r"/api/rounds/(\d+)/league", "league"))
             m, key = next(((m, key) for pat, key in routes if (m := re.fullmatch(pat, path))), (None, None))
@@ -873,6 +882,28 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
                     log.exception("After a stats page edit")
             self._send(200, json.dumps({"id": ident, {"delete": "deleted"}.get(key, key): value}).encode(),
                        "application/json")
+
+        def _delete_video(self, session: str) -> None:
+            folder = videos()[0] if videos is not None else None
+            if folder is None:
+                return self._send(404, b"round videos aren't kept on this PC", "text/plain")
+            try:
+                body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 1024)) or b"{}")
+                if body.get("confirm") is not True:   # it can't be undone: the page asks first
+                    raise ValueError("delete needs confirm: true")
+                rec = local_video.delete(folder, session)
+            except (ValueError, TypeError, AttributeError) as e:
+                return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+            except OSError as e:
+                return self._send(409, json.dumps({"error": str(e)}).encode(), "application/json")
+            if rec is None:
+                return self._send(404, b"no such recording", "text/plain")
+            if video_deleted is not None:
+                try:
+                    video_deleted(rec)
+                except Exception:   # the PC's copy is gone either way
+                    log.exception("Asking for the bucket's copy of %s to go", session)
+            self._send(200, json.dumps({"session": session, "deleted": True}).encode(), "application/json")
 
         def _video(self, rel: str) -> tuple[bytes, str] | None:
             folder, keep_days = videos()

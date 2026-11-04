@@ -140,6 +140,17 @@ def test_context_filter_splits_league_and_practice(tmp_path):
         assert [p["name"] for p in stats_web.players(ro)] == ["Ann", "Bob"]
 
 
+def test_a_player_needs_a_recorded_round_not_just_stray_shots(tmp_path):
+    path, db = _db(tmp_path)
+    _shot(db, "Kroll", ts=100, course=None)              # a session whose round was never recorded
+    _shot(db, "Pat", ts=900, course="Pebble")            # alternate shot: shots in a round, no card of her own
+    db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, is_league)"
+               " VALUES (1, 1000, '2026-10-01', 'Pebble', 'Pat & Lou', 9, 0)")
+    db.commit()
+    with stats_web.connect(path) as ro:
+        assert [p["name"] for p in stats_web.players(ro)] == ["Pat"]
+
+
 def test_viewer_opens_the_database_read_only(tmp_path):
     path, _ = _db(tmp_path)
     with stats_web.connect(path) as ro, pytest.raises(sqlite3.OperationalError):
@@ -458,6 +469,7 @@ def test_the_local_page_can_leave_a_shot_out(tmp_path):
     path, db = _db(tmp_path)
     _shot(db, "Ann", club="DR", shot_number=1, lie_before="tee", total_yards=330)
     _shot(db, "Ann", club="DR", shot_number=1, lie_before="tee", total_yards=250)
+    db.execute("INSERT INTO rounds (session_id, ended_at, date, side, holes, is_league) VALUES (1, 10, '2026-10-01', 'Ann', 9, 0)")
     db.commit()
     changes = []
     server = stats_web.make_server(path, port=0, site=tmp_path / "site", on_change=lambda: changes.append(1),
@@ -715,13 +727,24 @@ def test_the_local_page_plays_the_round_videos_kept_on_the_pc(tmp_path):
     for i in range(16):
         rec.add(b"seg%02d" % i, 4.0)
     rec.end()
-    server = stats_web.make_server(path, port=0, site=tmp_path / "site", videos=lambda: (videos, 14))
+    rec.begin("20261016-210000-fedcba", since + 7200)              # still recording
+    asked = []
+    server = stats_web.make_server(path, port=0, site=tmp_path / "site", videos=lambda: (videos, 14),
+                                   video_deleted=lambda r: asked.append((r["session"], r["since"], r["ended"])))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}/live"
+
+    def delete(session, body=b'{"confirm": true}'):
+        req = urllib.request.Request(f"http://127.0.0.1:{server.server_address[1]}/api/recordings/{session}/delete",
+                                     data=body, headers={"Content-Type": "application/json"})
+        try:
+            return urllib.request.urlopen(req).status
+        except urllib.error.HTTPError as e:
+            return e.code
     try:
         index = json.loads(urllib.request.urlopen(base + "/recordings.json").read())
-        assert index["keep_days"] == 14 and [r["session"] for r in index["recordings"]] == ["20261016-190000-abcdef"]
-        assert "segments" not in index["recordings"][0] and index["recordings"][0]["ended"] == since + 64
+        assert index["keep_days"] == 14 and [r["session"] for r in index["recordings"]][1:] == ["20261016-190000-abcdef"]
+        assert "segments" not in index["recordings"][1] and index["recordings"][1]["ended"] == since + 64
         full = urllib.request.urlopen(base + "/s/20261016-190000-abcdef/full.m3u8").read().decode()
         assert full.count("#EXTINF:4.000,") == 16 and "seg15.ts" in full and full.rstrip().endswith("#EXT-X-ENDLIST")
         assert urllib.request.urlopen(base + "/s/20261016-190000-abcdef/seg3.ts").read() == b"seg03"
@@ -729,6 +752,14 @@ def test_the_local_page_plays_the_round_videos_kept_on_the_pc(tmp_path):
             with pytest.raises(urllib.error.HTTPError) as e:
                 urllib.request.urlopen(base + bad)
             assert e.value.code == 404
+        assert delete("20261016-190000-abcdef", b"{}") == 400                 # the page asks first
+        assert delete("20261016-210000-fedcba") == 400                         # still recording
+        assert delete("20261016-190000-000000") == 404 and delete("..%2F..%2Fseason") == 404 and not asked
+        assert delete("20261016-190000-abcdef") == 200
+        assert asked == [("20261016-190000-abcdef", since, since + 64)]        # the bucket's copy goes too
+        assert not (videos / "20261016-190000-abcdef.ts").exists() and not (videos / "20261016-190000-abcdef.json").exists()
+        index = json.loads(urllib.request.urlopen(base + "/recordings.json").read())
+        assert [r["session"] for r in index["recordings"]] == ["20261016-210000-fedcba"]
     finally:
         server.shutdown()
         server.server_close()

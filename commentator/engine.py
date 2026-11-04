@@ -730,6 +730,7 @@ class Engine:
         self._obs_lock = threading.Lock()
         self._live_held = False             # OFF AIR on the badge: no stream until it's back on air
         self._live_last_shot = time.monotonic()
+        self._live_prerolled = False        # on air for the next round's setup: the last one's sign-off doesn't stop it
         self._live_idle_session: str | None = None   # the mirror session the idle watch stopped
         self._live_resume_on_shot = False   # stopped for being idle mid-round: the next shot restarts it
         # Every 6-word phrase said this season, so a line can't come back weeks later.
@@ -5131,7 +5132,12 @@ class Engine:
         player = player or self._player(hud.player_text, event.player_hint)
         # The opening tee shot can be struck before the round starts: the round is only known from the
         # setup read that follows the swing (a round quit and restarted, the first player swinging fast).
-        if shot_round is None and before.shot_number == 1 and (cur := self.round) and not cur.ended \
+        # With no setup read before the swing (straight on from the last round), GSPro's log says it
+        # was the first stroke on the hole the round started on.
+        opening = before.shot_number == 1
+        if before.shot_number is None and (info := self.gspro.fire_info(self.gspro.fire_of(fires0, impact))):
+            opening = info.get("score") == 1 and info.get("hole") is not None and info["hole"] == self.gspro.first_hole
+        if shot_round is None and opening and (cur := self.round) and not cur.ended \
                 and cur.seq == 1 and self._round_started_at >= impact:
             shot_round, round_hole = cur, cur.seq
             if _hole_key(shot_hole) == _hole_key(self.state.current_hole):
@@ -7805,6 +7811,7 @@ class Engine:
             if play_course:
                 if not seen_setup:
                     self._fetch_bookings("setup screen", fresh_within=BOOKINGS_FRESH_SECONDS)
+                    self._live_preroll()
                 to_read = slots
                 slot_frame = frame
                 if probed and not players_tab and (snap := self._players_snap) is not None \
@@ -8574,6 +8581,7 @@ class Engine:
 
     def _live_round_start(self) -> None:
         self._live_last_shot, self._live_resume_on_shot = time.monotonic(), False
+        self._live_prerolled = False
         if not (self._live_on() and self.cfg.live.with_rounds) or self._live_held:
             return
         try:
@@ -8583,6 +8591,22 @@ class Engine:
         if self._live_stop_task and not self._live_stop_task.done():
             self._live_stop_task.cancel()   # back-to-back rounds: stay on air
         loop.create_task(self._live_call("start"), name="live-start")
+
+    def _live_preroll(self) -> None:
+        """On the setup screen for a course: on air now, so a tee shot struck the moment the course
+        loads (before the round's own start, a few seconds on) is on the recording. Straight from the
+        last round, its stream stays on. No round following, the idle stop takes it off again (and a
+        recording with no shots isn't kept)."""
+        if not (self._live_on() and self.cfg.live.with_rounds) or self._live_held or self._round_on():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._live_stop_task and not self._live_stop_task.done():
+            self._live_stop_task.cancel()
+        self._live_last_shot, self._live_prerolled = time.monotonic(), True
+        loop.create_task(self._live_call("start"), name="live-preroll")
 
     def _live_label(self) -> str | None:
         """The round on the stream, for the Round replays tab: course, then who's playing."""
@@ -8670,8 +8694,8 @@ class Engine:
     def _schedule_live_stop(self) -> None:
         """Off air once the sign-off has aired, and a little after."""
         self._live_mark(replace=True)   # the course and players as the round ended, read in full by now
-        if not (self._live_on() and self.cfg.live.with_rounds):
-            return
+        if not (self._live_on() and self.cfg.live.with_rounds) or self._live_prerolled:
+            return   # (the next round's setup is on air already: its round, or the idle stop, ends it)
         if self._live_stop_task and not self._live_stop_task.done():
             self._live_stop_task.cancel()
 

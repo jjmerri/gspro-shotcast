@@ -264,6 +264,7 @@ def test_booth_phrases_shot_log_and_transcript(db):
 def test_published_site_has_the_summary_shots_and_transcripts(db, tmp_path):
     from commentator import stats_site
 
+    player_round(db, "Ann", {1: 4})   # listed under Players: she has a round
     shot(db, hole="Hole 1, par 4, 400 yards", shot_number=1, club="DR", lie_before="tee", to_pin_yards=400)
     db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text) VALUES (1, 0, 'opener', 'pbp', 'Hello.')")
     db.commit()
