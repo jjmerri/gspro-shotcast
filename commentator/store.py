@@ -309,7 +309,9 @@ class Store:
     def __init__(self, path: str | None, new_session: bool = True) -> None:
         """Open (creating or upgrading) the season file. new_session=False opens it for maintenance, such
         as a backfill, without starting a booth session in it."""
-        self.db = sqlite3.connect(path or ":memory:")
+        # Long enough to outwait anything else holding the file (a backup's copy, a page edit), so the booth
+        # doesn't stop over a busy moment.
+        self.db = sqlite3.connect(path or ":memory:", timeout=30)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         self._migrate()

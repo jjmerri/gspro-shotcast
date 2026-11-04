@@ -157,6 +157,18 @@ def test_viewer_opens_the_database_read_only(tmp_path):
         ro.execute("INSERT INTO sessions (started_at, date) VALUES (0, 'x')")
 
 
+def test_a_page_being_built_doesnt_lock_the_booth_out_of_the_database(tmp_path):
+    path, db = _db(tmp_path)
+    for i in range(3):
+        _shot(db, "Ann", ts=i)
+    db.commit()
+    with stats_web.connect(path) as ro:
+        reading = ro.execute("SELECT id FROM shots")
+        reading.fetchone()                      # a long build, part way through a read
+        with sqlite3.connect(path, timeout=0.2) as booth:
+            booth.execute("INSERT INTO sessions (started_at, date) VALUES (0, 'x')")
+        assert len(reading.fetchall()) == 2     # it reads what it started with
+
 def test_server_serves_the_page_and_summary(tmp_path):
     path, db = _db(tmp_path)
     db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, gross, scores, hole_pars, is_league)"

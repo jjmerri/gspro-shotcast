@@ -45,12 +45,18 @@ EXCLUDED, DELETED = 1, 2   # the `excluded` column: out of the stats but listed 
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
-    """Read-only, so viewing can never change the copy (or a live booth's file). Rounds excluded from
+    """A read-only snapshot of the database, copied into memory: building the page reads it for a
+    minute or more, and reading the file itself that long would lock out the booth's writes (a booth
+    starting up, or a shot) till it gave up. Rounds excluded from
     the stats or deleted (set_round_excluded, delete_round), with their shots and what the booth said,
     are left out: temp views shadow the tables, which also fill in columns an older database is missing
     (a shot left out of the stats or excluded: none are; the player's hand: unknown). The tables
     themselves stay reachable as main.<table>."""
-    db = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
+    from contextlib import closing
+
+    db = sqlite3.connect(":memory:")
+    with closing(sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True, timeout=30)) as src:
+        src.backup(db)
     db.row_factory = sqlite3.Row
     for table, missing in (("shots", (("left_out", "0"), ("handed", "NULL"), ("excluded", "0"), ("is_tournament", "0"))),
                            ("rounds", (("excluded", "0"), ("is_tournament", "0"))),
@@ -62,6 +68,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
         extra = "".join(f", {v} AS {c}" for c, v in missing if c not in have)
         where = " WHERE excluded = 0" if "excluded" in have else ""
         db.execute(f"CREATE TEMP VIEW {table} AS SELECT *{extra} FROM main.{table}{where}")
+    db.execute("PRAGMA query_only = ON")   # a slip can't change the snapshot either
     return db
 
 
