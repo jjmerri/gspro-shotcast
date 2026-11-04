@@ -400,7 +400,6 @@ def _names_other_scenery(text: str, allowed_kind: str | None) -> bool:
 
 # How much longer than the handicap fetch the league opener waits for Squabbit's leaderboards.
 BOARD_WAIT_SECONDS = 3.0
-LEAGUE_PAGE_MINUTES = 20   # how often the stats page's league cards (league.json) re-read Squabbit
 
 
 _RATE_WORDS = ((0.0, "never"), (1 / 10, "one time in ten"), (1 / 5, "one time in five"),
@@ -893,7 +892,9 @@ class Engine:
         # The league's week results and standings from Squabbit, refreshed with the handicaps at each
         # round start. None until a fetch works; the history file's standings stand in.
         self.board: Board | None = None
-        self._board_at = 0.0   # when self.board was read
+        self._league_page_on = False   # keeping the stats page's league.json (_publish_league_page)
+        self._league_body: bytes | None = None   # the newest league.json to put up
+        self._league_uploading = False
         self._board_task: asyncio.Task | None = None
         self.hole_number: int | None = None
         # Whether the current hole's number was read off the screen rather than counted on.
@@ -969,8 +970,9 @@ class Engine:
                 asyncio.create_task(self._schedule_loop(), name="schedule")
             else:
                 asyncio.create_task(asyncio.to_thread(self._remove_schedule), name="schedule-remove")
-            if self.cfg.squabbit.enabled and self.league.squabbit_invite:
-                asyncio.create_task(self._league_page_loop(), name="league-page")
+            self._league_page_on = bool(self.cfg.squabbit.enabled and self.league.squabbit_invite)
+            if self._league_page_on:
+                asyncio.create_task(self._league_page_midnight(), name="league-page-midnight")
             else:
                 asyncio.create_task(asyncio.to_thread(self._remove_league_page), name="league-page-remove")
         tasks = [asyncio.create_task(self.speech.run(), name="speech")]
@@ -1957,30 +1959,50 @@ class Engine:
         except Exception as e:
             log.info("League page: couldn't remove the stats page's league cards: %s", e)
 
-    async def _league_page_loop(self) -> None:
-        """Keep the stats page's Home tab league cards (league.json: this week's results, the season
-        standings) current with Squabbit, so a team that posts between rounds shows. A failed read leaves
-        the last one up; the page says when it was read."""
-        client = None
-        while True:
-            try:
-                if self._board_task is None or self._board_task.done():
-                    self._board_task = asyncio.create_task(self._refresh_board())
-                await asyncio.wait({self._board_task})
-                if self.board is not None and self._board_at:
-                    body = json.dumps({**self.board.page(time.strftime("%Y-%m-%d")),
-                                       "updated": round(self._board_at)}).encode()
+    def _league_board(self) -> Board | None:
+        """Squabbit's board with the sim's finished league rounds standing in for teams that haven't
+        posted yet: what the stats page shows. None before a Squabbit read. Read fresh each time, so a
+        round deleted or excluded on the stats page drops out."""
+        if self.board is None:
+            return None
+        return self.board.with_sim(self.store.week_results(self.league.data.get("schedule") or []))
 
-                    def put() -> None:
-                        nonlocal client
-                        if client is None:
-                            client = self._s3()
-                        client.put_object(Bucket=self.cfg.publish.bucket, Key=self._league_page_key(), Body=body,
-                                          ContentType="application/json", CacheControl="no-cache")
-                    await asyncio.to_thread(put)
-            except Exception as e:
-                log.warning("League page: couldn't update the stats page's league cards: %s", e)
-            await asyncio.sleep(LEAGUE_PAGE_MINUTES * 60)
+    def _publish_league_page(self) -> None:
+        """Put the stats page's Home tab league cards (league.json: this week's results, the season
+        standings) up. Written when they can change: after the round-start Squabbit read, when a league
+        round finishes, and at midnight (a passed deadline makes a week final). Before a Squabbit read
+        this run, the last one up stands. One upload at a time, the newest last."""
+        board = self._league_board() if self._league_page_on else None
+        if board is None:
+            return
+        self._league_body = json.dumps({**board.page(time.strftime("%Y-%m-%d")),
+                                        "updated": round(time.time())}).encode()
+        if not self._league_uploading:
+            self._league_uploading = True
+            self._bg(self._upload_league_page())
+
+    async def _upload_league_page(self) -> None:
+        try:
+            sent = None
+            while self._league_body is not sent:
+                sent = body = self._league_body
+                try:
+                    await asyncio.to_thread(self._s3().put_object, Bucket=self.cfg.publish.bucket,
+                                            Key=self._league_page_key(), Body=body,
+                                            ContentType="application/json", CacheControl="no-cache")
+                except Exception as e:
+                    log.warning("League page: couldn't update the stats page's league cards: %s", e)
+        finally:
+            self._league_uploading = False
+
+    async def _league_page_midnight(self) -> None:
+        """Re-write the league cards just after each midnight, from the board already read: a week whose
+        deadline has passed is final, and its points count, without a new Squabbit read."""
+        while True:
+            now = datetime.datetime.now()
+            nxt = datetime.datetime.combine(now.date() + datetime.timedelta(days=1), datetime.time(0, 1))
+            await asyncio.sleep((nxt - now).total_seconds())
+            self._publish_league_page()
 
     async def _bookings_ready(self, timeout: float = 5.0, stale_after: float = 600.0) -> None:
         """Let a fetch in flight land before a round is classified, so it decides on fresh bookings.
@@ -7293,7 +7315,7 @@ class Engine:
                 return
             season = self.history.current() or {}
             self.board = Board.from_squabbit(items, self.league, season.get("points_table"))
-            self._board_at = time.time()
+            self._publish_league_page()
             log.info("Squabbit leaderboards: %s", "; ".join(
                 f"week {w} {len(self.board.posted(w))}/{self.board.team_count(w)} posted"
                 for w in sorted(self.board.weeks) if self.board.posted(w)) or "no week posted yet")
@@ -8550,27 +8572,41 @@ class Engine:
         here = {t for t in r.teams if t}
         return [e for e in self.board.posted(week) if e.team not in here]
 
+    def _record_week_results(self, r: Round, row_of: dict[str, int]) -> None:
+        """Keep each league team's finished week net from this round (the stats page shows it until the
+        team posts on Squabbit), and put the page's league cards up with it."""
+        week = r.schedule.get("week") if r.is_league else None
+        if not week:
+            return
+        done = False
+        for t in dict.fromkeys(t for t in r.teams if t in self.league.team_players):
+            if (tn := r.team_net(t)) and tn[1] == r.holes and t in row_of:
+                self.store.record_week_result(week, r.schedule.get("end_date"), t, tn[0], row_of[t])
+                done = True
+        if done:
+            self._publish_league_page()
+
     def _week_panel(self) -> dict | None:
         """The Live tab's week board while a league round is on (live/week.json): every team that's
-        posted this week on Squabbit, the team(s) on the sim now with their running net, and who's yet to
-        play. None outside a league round, or with no Squabbit board for its week."""
+        posted this week on Squabbit or finished it on the sim, the team(s) on the sim now with their
+        running net, and who's yet to play. None outside a league round, or with no board for its week."""
         r = self.round
-        if r is None or r.ended or not r.is_league or not self.board:
-            return None
-        week = r.schedule.get("week")
-        if not week or week not in self.board.weeks:
+        board = self._league_board() if r is not None and not r.ended and r.is_league else None
+        week = r.schedule.get("week") if board else None
+        if not week or week not in board.weeks:
             return None
         here = [t for t in r.teams if t in self.league.team_players]
         name = self.league.team_name
         players = self.league.team_players.get
-        rows = [{"team": name(e.team), "players": players(e.team, []), "net": e.net} for e in self._week_others(r)]
+        rows = [{"team": name(e.team), "players": players(e.team, []), "net": e.net, **({"sim": True} if e.sim else {})}
+                for e in board.posted(week) if e.team not in here]
         for t in here:
             tn = r.team_net(t)
             rows.append({"team": name(t), "players": players(t, []), "net": tn[0] if tn else None,
                          "thru": tn[1] if tn else 0, "on": True})
         return {"week": week, "course": r.schedule.get("course") or r.course, "deadline": r.schedule.get("end_date"),
                 "holes": r.holes, "rows": rows,
-                "waiting": [name(e.team) for e in self.board.weeks[week] if e.net is None and e.team not in here]}
+                "waiting": [name(e.team) for e in board.weeks[week] if e.net is None and e.team not in here]}
 
     def _board_standings(self, r: Round) -> list[str] | None:
         """The season standings from Squabbit's final weeks. None when the board can't say (no fetch,
@@ -8746,17 +8782,20 @@ class Engine:
                      "over %s holes, penalties %s, scores %s (from %s)%s", r.id, reason, side.label, st.gross,
                      side.strokes, net[side.key], *st.fir, *st.gir, st.putts, st.putt_holes, st.penalties,
                      st.scores, st.source, "" if complete else f"; incomplete, {st.holes_scored} of {r.holes} holes")
+        row_of: dict[str, int] = {}   # each team's rounds row, for its week result
         for side in r.sides:
             st = stats[side.key]
             if st.holes_scored:
                 # A one-person scramble team is an individual round, filed under the player.
-                self.store.record_round(course=r.course, fmt=r.side_format(side),
+                row_of[side.team or side.key] = self.store.record_round(course=r.course, fmt=r.side_format(side),
                                         side=side.players[0] if r.solo(side) else side.key, team=side.team,
                                         holes=r.holes, players=side.players,
                                         stats=st, strokes=side.strokes, net_to_par=net[side.key],
                                         hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
                                         is_tournament=r.is_tournament, complete=complete,
                                         first_nine=r.first_nine(st, r.hole_strokes_for(side)))
+        if complete:
+            self._record_week_results(r, row_of)
         # Per-player FIR/GIR/scrambling/sand-save for individual season stats. Alternate shot isn't
         # attributed to one player, so skip it; otherwise record each individual (distinct names from
         # this round's own shots, so a two-ball team isn't double-counted), skipping any shared-ball

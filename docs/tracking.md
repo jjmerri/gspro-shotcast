@@ -459,17 +459,21 @@ opening tee shot is on it, however quickly it's hit), or when a round starts, an
   starting goes off air, and clears `live/` of everything but the week's kept streams.
 
 During a league round, the Live tab shows the week's board under the video. It lists the teams that
-have posted the week on Squabbit and the team on the sim with its running net and holes played (placed
+have posted the week on Squabbit (or finished it on the sim) and the team on the sim with its running net and holes played (placed
 among them, ties shared). The teams yet to play are listed under it. The booth writes it to
 `live/week.json` as the score changes, from the same Squabbit read the booth's week facts use. With no
 league round, or no Squabbit read for its week, there's no board.
 
-The Home tab carries the league too: this week's board (the earliest week not yet final with a post,
+The Home tab carries the league too: this week's board (the earliest week not yet final with a result,
 else the latest final week, naming who didn't post) and the season's points standings. A viewer who
-picked themselves sees their team in bold. With Squabbit on and the league's `squabbit_invite` set, the
-booth re-reads Squabbit every 20 minutes while it runs and writes `league.json` beside `schedule.json`,
-so a team that posts between rounds shows up; the page says when it was read. Without a Squabbit
-league the booth removes it, and Home shows no league.
+picked themselves sees their team in bold. Both boards (Home's and the Live tab's) count a league round
+finished on the sim for a team that hasn't posted it on Squabbit yet, marked * as the sim's count (the
+booth keeps each team's finished week net, scored the way Squabbit does, in `week_results`); Squabbit's
+number replaces it once posted, and standings that lean on one say so. With Squabbit on and the
+league's `squabbit_invite` set, the booth writes `league.json` beside `schedule.json` when it can
+change: after the Squabbit read at a round's start, when a league round finishes, and just after midnight
+(from the board already read, so a week whose deadline passed shows final). Squabbit isn't polled in
+between. Without a Squabbit league the booth removes it, and Home shows no league.
 
 #### Round videos on the PC
 

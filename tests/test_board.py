@@ -209,45 +209,80 @@ def test_the_home_tabs_league_cards_show_this_week_and_the_standings():
     assert page["standings"] == {"weeks": 1, "rows": [
         {"team": "Aces", "players": ["Mike", "Sarah"], "points": 65.0, "place": 1},
         {"team": "Duffers", "players": ["Tony", "Priya"], "points": 65.0, "place": 1},
-        {"team": "Hackers", "players": ["Lou", "Dee"], "points": 50.0, "place": 3}]}
+        {"team": "Hackers", "players": ["Lou", "Dee"], "points": 50.0, "place": 3}], "provisional": False}
     # Past week 7's deadline both weeks are final: the latest one shows, with who never posted.
     after = b.page("2026-12-07")["week"]
     assert (after["week"], after["final"], after["waiting"]) == (7, True, ["Duffers", "Hackers"])
     assert Board({}, league, POINTS).page("2026-11-01") == {"week": None, "standings": None}
 
 
-def test_the_league_page_loop_reads_squabbit_and_puts_league_json_up(tmp_path, monkeypatch):
+def test_the_sims_finished_rounds_stand_in_until_a_team_posts_on_squabbit():
+    league = League(LEAGUE_DATA)
+    b = Board.from_squabbit([week(6, [("x1", ["a", "b"], "Team 1", -4), ("x2", ["c", "d"], "Team 2", None),
+                                      ("x3", ["e", "f"], "Hackers", None)])], league, POINTS)
+    m = b.with_sim({6: {"Aces": 0, "Duffers": -2}, 7: {"Hackers": 3}})
+    # Squabbit's posted number wins; the sim fills in a team that hasn't posted.
+    assert [(e.team, e.net, e.sim) for e in m.weeks[6]] == [("Aces", -4, False), ("Duffers", -2, True),
+                                                            ("Hackers", None, False)]
+    # A week Squabbit has no board for yet: every league team, the sim's in.
+    assert [(e.team, e.net, e.sim) for e in m.weeks[7]] == [("Aces", None, False), ("Duffers", None, False),
+                                                            ("Hackers", 3, True)]
+    page = m.page("2026-12-07")      # both weeks past their deadline: final
+    assert page["week"]["rows"][-1] == {"team": "Hackers", "players": ["Lou", "Dee"], "net": 3, "sim": True}
+    assert page["standings"]["provisional"] is True
+    assert b.page("2026-12-07")["standings"]["provisional"] is False
+    assert b.weeks[6][1].net is None                     # the Squabbit board itself is untouched
+
+
+def test_a_finished_league_round_is_kept_by_week_and_puts_the_league_cards_up(tmp_path):
     import asyncio
     import json
-
-    from commentator import engine as engine_mod
 
     league = League(LEAGUE_DATA)
     e = _engine(tmp_path, league)
     e.cfg.publish.bucket, e.cfg.publish.prefix = "b", "site/"
-    puts, reads = [], []
-    board = Board.from_squabbit([week(6, [("x1", ["a", "b"], "Team 1", -4)])], league, POINTS)
-
-    async def refresh():
-        reads.append(1)
-        e.board, e._board_at = board, 1000.4
+    e._league_page_on = True
+    puts = []
 
     class S3:
         def put_object(self, **kw):
             puts.append(kw)
+    e._s3 = S3
+    r, _ = _round()
+    holes = list(range(10, 19))
+    r.apply_scorecard(Scorecard(holes=holes, scores={"Mike": {h: 4 for h in holes}, "Sarah": {h: 4 for h in holes}}))
+    net = r.team_net("Aces")
+    assert net and net[1] == 9
 
-    e._refresh_board, e._s3 = refresh, S3
+    def row():
+        return e.store.db.execute("INSERT INTO rounds (session_id, ended_at, date, side, holes, is_league)"
+                                  " VALUES (?, 0, '2026-12-01', 'x', 9, 1)", (e.store.session_id,)).lastrowid
+    aces, duffers = row(), row()
 
-    async def stop(_):
-        raise asyncio.CancelledError
-    monkeypatch.setattr(engine_mod.asyncio, "sleep", stop)
-    try:
-        asyncio.run(e._league_page_loop())
-    except asyncio.CancelledError:
-        pass
-    assert reads == [1] and [(p["Key"], p["CacheControl"]) for p in puts] == [("site/league.json", "no-cache")]
-    body = json.loads(puts[0]["Body"])
-    assert body["updated"] == 1000 and body["week"]["week"] == 6 and body["week"]["rows"][0]["team"] == "Aces"
+    async def go():
+        e._record_week_results(r, {"Aces": aces})   # no Squabbit read yet: kept, nothing put up
+        assert puts == []
+        e.board = Board.from_squabbit([week(6, [("x1", ["a", "b"], "Team 1", None)])], league, POINTS)
+        e._publish_league_page()
+        # Another result while that's going up: one upload at a time, the newest last.
+        e.store.record_week_result(6, "2026-12-06", "Duffers", -1, duffers)
+        e._publish_league_page()
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            if not e._league_uploading:
+                break
+    asyncio.run(go())
+    # Another season's week 6 (another deadline) doesn't count.
+    e.store.record_week_result(6, "2025-12-06", "Duffers", -9, duffers)
+    assert e.store.week_results(LEAGUE_DATA["schedule"]) == {6: {"Aces": net[0], "Duffers": -1}}
+    # A round deleted (or excluded, or made practice) on the stats page drops out.
+    e.store.db.execute("UPDATE rounds SET excluded = 2 WHERE id = ?", (duffers,))
+    e.store.db.execute("UPDATE rounds SET is_league = 0 WHERE id = ?", (aces,))
+    assert e.store.week_results(LEAGUE_DATA["schedule"]) == {}
+    assert {p["Key"] for p in puts} == {"site/league.json"}
+    body = json.loads(puts[-1]["Body"])
+    assert {r["team"]: (r["net"], r.get("sim")) for r in body["week"]["rows"]} == {"Aces": (net[0], True),
+                                                                                    "Duffers": (-1, True)}
 
 
 def test_distance_text():

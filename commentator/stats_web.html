@@ -859,7 +859,7 @@ function renderHome() {
   const pickHint = me ? "" : `<p class="sub">Pick yourself in the “Everyone” menu at the top to see your own numbers here and on every tab.</p>`;
   const lg = state.league, league = lg ? weekCard(lg.week) + standingsCard(lg.standings) : "";
   return `<div class="home"><h2>${meTitle("Home")}</h2>${pickHint}${cards.length ? `<div class="cards">${cards.join("")}</div>` : ""}
-    ${league ? `<h2>League <span class="sub">from Squabbit · read ${esc(when(lg.updated * 1000, { weekday: "short", hour: "numeric", minute: "2-digit" }))}</span></h2><div class="league">${league}</div>` : ""}
+    ${league ? `<h2>League <span class="sub">from Squabbit and the sim · updated ${esc(when(lg.updated * 1000, { weekday: "short", hour: "numeric", minute: "2-digit" }))}</span></h2><div class="league">${league}</div>` : ""}
     <h2>${me ? "Their latest rounds" : "Latest rounds"}</h2>${recent}
     ${moments ? `<h2>Moments <span class="sub">last 3 months</span></h2>${moments}` : ""}</div>`;
 }
@@ -1712,7 +1712,8 @@ async function pollWeek(s) {
 }
 const weekPanel = () => weekCard(state.week);
 // A league week's results (the Live tab's during a league round, Home's from league.json): place (ties
-// shared), team, net, and on the Live tab the team on the sim now. A viewer's own team in bold.
+// shared), team, net (* the sim's count of a team not on Squabbit yet), and on the Live tab the team on
+// the sim now. A viewer's own team in bold.
 function weekCard(w) {
   if (!w || !(w.rows || []).length) return "";
   const nets = w.rows.filter(r => r.net !== null && r.net !== undefined).map(r => r.net);
@@ -1728,9 +1729,10 @@ function weekCard(w) {
   const cls = r => [r.on && "on", myTeam(r) && "mine"].filter(Boolean).join(" ");
   return `<section class="card week"><h3>Week ${esc(w.week)} <span class="sub">${sub}</span></h3>
   <table><thead><tr><th></th><th class="l">Team</th><th>Net</th>${w.rows.some(r => r.on) ? "<th></th>" : ""}</tr></thead><tbody>${rows.map(r =>
-    `<tr${cls(r) ? ` class="${cls(r)}"` : ""}><td>${place(r.net)}</td><td class="l">${esc(r.team)}</td><td>${toPar(r.net)}</td>
+    `<tr${cls(r) ? ` class="${cls(r)}"` : ""}><td>${place(r.net)}</td><td class="l">${esc(r.team)}</td><td>${toPar(r.net)}${r.sim ? "*" : ""}</td>
     ${w.rows.some(r => r.on) ? `<td class="l sub">${r.on ? (r.thru ? `${r.thru === w.holes ? "finished" : `thru ${r.thru}`} · <span class="livedot"></span>on now` : `<span class="livedot"></span>on now`) : ""}</td>` : ""}</tr>`).join("")}
-  </tbody></table>${Array.isArray(w.waiting) && w.waiting.length ? `<p class="sub">${w.final ? "Didn't post" : "Yet to play"}: ${w.waiting.map(esc).join(", ")}</p>` : ""}</section>`;
+  </tbody></table>${Array.isArray(w.waiting) && w.waiting.length ? `<p class="sub">${w.final ? "Didn't post" : "Yet to play"}: ${w.waiting.map(esc).join(", ")}</p>` : ""}${
+    w.rows.some(r => r.sim) ? `<p class="sub">* the sim's count: not on Squabbit yet</p>` : ""}</section>`;
 }
 const myTeam = r => !!(state.me && Array.isArray(r.players) && r.players.includes(state.me));
 // The season's points standings over its final weeks (league.json).
@@ -1740,7 +1742,7 @@ function standingsCard(s) {
   return `<section class="card week"><h3>Standings <span class="sub">after ${s.weeks} week${s.weeks === 1 ? "" : "s"}</span></h3>
   <table><thead><tr><th></th><th class="l">Team</th><th>Points</th></tr></thead><tbody>${s.rows.map(r =>
     `<tr${myTeam(r) ? ` class="mine"` : ""}><td>${tied(r.place) ? "T" : ""}${r.place}</td><td class="l">${esc(r.team)}</td><td>${Math.round(r.points * 10) / 10}</td></tr>`).join("")}
-  </tbody></table></section>`;
+  </tbody></table>${s.provisional ? `<p class="sub">Counts the sim's score for a team not on Squabbit yet.</p>` : ""}</section>`;
 }
 
 // The live chat (docs/tracking.md#live-chat): the site stack's chat function at /chat/messages, behind

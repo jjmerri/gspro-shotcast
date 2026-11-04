@@ -571,9 +571,10 @@ out.push(text(weekPanel()));
 // Home's cards: a final week names who never posted; the viewer's team is bold; tied places shared.
 state.me = "Mike";
 out.push(weekCard({week: 5, course: "Old", final: true, waiting: ["Hackers"],
-                   rows: [{team: "Aces", players: ["Mike", "Sarah"], net: -2}]}));
+                   rows: [{team: "Aces", players: ["Mike", "Sarah"], net: -2}, {team: "Birdies", net: 0, sim: true}]}));
 out.push(text(standingsCard({weeks: 1, rows: [{team: "Aces", players: ["Mike"], points: 65, place: 1},
-  {team: "Duffers", players: [], points: 65, place: 1}, {team: "Hackers", players: [], points: 50, place: 3}]})));
+  {team: "Duffers", players: [], points: 65, place: 1}, {team: "Hackers", players: [], points: 50, place: 3}],
+  provisional: true})));
 out.push(standingsCard(null) + weekCard(null));
 console.log(JSON.stringify(out));"""
     got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
@@ -583,7 +584,9 @@ console.log(JSON.stringify(out));"""
     assert got[2].endswith("Team Net 1 Duffers -3 2 Birdies +1 Aces – on now")
     assert '<tr class="mine">' in got[3] and "Week 5 <span class=\"sub\">Old · final</span>" in got[3]
     assert "Didn't post: Hackers" in got[3] and "on now" not in got[3]
-    assert got[4] == "Standings after 1 week Team Points T1 Aces 65 T1 Duffers 65 3 Hackers 50"
+    assert "<td>E*</td>" in got[3] and "* the sim's count: not on Squabbit yet" in got[3]
+    assert got[4] == ("Standings after 1 week Team Points T1 Aces 65 T1 Duffers 65 3 Hackers 50 "
+                      "Counts the sim's score for a team not on Squabbit yet.")
     assert got[5] == ""
 
 

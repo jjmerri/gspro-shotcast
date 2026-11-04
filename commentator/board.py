@@ -24,6 +24,7 @@ from .league import League
 class Entry:
     team: str            # the league file's team name (Squabbit's when it can't be matched)
     net: int | None      # net to par; None until the team posts
+    sim: bool = False    # the net is the sim's count of the team's round, not yet posted on Squabbit
 
 
 def place(net: int, nets: list[int]) -> tuple[int, bool]:
@@ -78,6 +79,19 @@ class Board:
             return teams.pop()
         return league.match_team(name) or name or "?"
 
+    def with_sim(self, results: dict[int, dict[str, int]]) -> "Board":
+        """This board with the sim's finished rounds (Store.week_results) standing in for teams that
+        haven't posted on Squabbit yet. Squabbit's number wins once it's there."""
+        weeks: dict[int, list[Entry]] = {}
+        for w in sorted(set(self.weeks) | set(results)):
+            sim = results.get(w, {})
+            entries = self.weeks.get(w) or [Entry(t, None) for t in self.league.team_players]
+            known = {e.team for e in entries}
+            weeks[w] = [Entry(e.team, sim[e.team], sim=True) if e.net is None and e.team in sim else e
+                        for e in entries] + [Entry(t, n, sim=True) for t, n in sim.items()
+                                             if t not in known and t in self.league.team_players]
+        return Board(weeks, self.league, self.points_table)
+
     def posted(self, week: int, exclude: str | None = None) -> list[Entry]:
         """The week's posted results, best first."""
         return sorted((e for e in self.weeks.get(week, []) if e.net is not None and e.team != exclude),
@@ -105,8 +119,9 @@ class Board:
         return done[-1] if done else None
 
     def page(self, today: str) -> dict[str, Any]:
-        """The stats page's Home tab league cards (league.json): this week's posted results and who's yet
-        to play, and the season standings. Teams by their display names, each with its players, so the
+        """The stats page's Home tab league cards (league.json): this week's results and who's yet to
+        play, and the season standings (a sim-counted net is marked "sim", and standings that use one
+        "provisional"). Teams by their display names, each with its players, so the
         page can pick out a viewer's own team."""
         def team(t: str) -> dict[str, Any]:
             return {"team": self.league.team_name(t), "players": self.league.team_players.get(t, [])}
@@ -115,12 +130,15 @@ class Board:
             entry = self.league.week_entry(w) or {}
             out["week"] = {"week": w, "course": entry.get("course"), "deadline": entry.get("end_date"),
                            "final": self.final(w, today),
-                           "rows": [{**team(e.team), "net": e.net} for e in self.posted(w)],
+                           "rows": [{**team(e.team), "net": e.net, **({"sim": True} if e.sim else {})}
+                                    for e in self.posted(w)],
                            "waiting": [self.league.team_name(e.team) for e in self.weeks[w] if e.net is None]}
         table, weeks = self.standings(today)
         if weeks:
+            counted = [w for w in self.weeks if self.final(w, today)]
             out["standings"] = {"weeks": weeks,
-                                "rows": [{**team(t), "points": round(p, 2), "place": pl} for t, p, pl in table]}
+                                "rows": [{**team(t), "points": round(p, 2), "place": pl} for t, p, pl in table],
+                                "provisional": any(e.sim for w in counted for e in self.weeks[w])}
         return out
 
     def standings(self, today: str | None = None) -> tuple[list[tuple[str, float, int]], int]:

@@ -173,6 +173,15 @@ CREATE TABLE IF NOT EXISTS rounds (
     players TEXT,                                -- JSON: the side's players (NULL on older rows)
     excluded INTEGER NOT NULL DEFAULT 0          -- 1 = excluded from the stats on the local page (stats_web)
 );
+CREATE TABLE IF NOT EXISTS week_results (       -- a league team's finished week, by the sim's count
+    id INTEGER PRIMARY KEY,
+    ended_at REAL NOT NULL,
+    week INTEGER NOT NULL,
+    end_date TEXT,                               -- the week's deadline: week numbers repeat each season
+    team TEXT NOT NULL,
+    net INTEGER NOT NULL,                        -- team net to par, scored the way Squabbit does
+    round_id INTEGER                             -- one of the team's rounds rows: it counts while that does
+);
 CREATE TABLE IF NOT EXISTS predictions (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES sessions(id),
@@ -1344,7 +1353,7 @@ class Store:
 
     def record_round(self, *, course, fmt, side, team, holes, stats, strokes, net_to_par, hole_number,
                      hole_pars=None, is_league: bool = True, complete: bool = True, players: list[str] | None = None,
-                     is_tournament: bool = False, first_nine: tuple[int, int | None] | None = None) -> None:
+                     is_tournament: bool = False, first_nine: tuple[int, int | None] | None = None) -> int:
         """One side's round. A round quit early is recorded too (complete=0, holes_played short): its
         per-hole and per-try stats count, but it only counts as a round in the season totals once a
         full nine was played (see _COUNTS_AS_ROUND), and those totals are scored per nine holes.
@@ -1360,7 +1369,7 @@ class Store:
         # Only a part-played round needs its own nine: a finished one is already a whole number of
         # nines, and halving an 18 is a fair rate, where prorating an 11 is not.
         nine, nine_net = first_nine if first_nine and not complete else (None, None)
-        self.db.execute(
+        cur = self.db.execute(
             """INSERT INTO rounds (session_id, ended_at, date, course, format, side, team, holes, gross, par, strokes,
                    net_to_par, fir_hit, fir_tries, gir_hit, gir_tries, scramble_hit, scramble_tries, sand_hit,
                    sand_tries, putts, putt_holes, penalties, longest_drive, scores, hole_pars, source, is_league,
@@ -1374,6 +1383,25 @@ class Store:
              nine, nine_net, json.dumps(players) if players else None, int(is_tournament)),
         )
         self.db.commit()
+        return cur.lastrowid
+
+    def record_week_result(self, week: int, end_date: str | None, team: str, net: int, round_id: int) -> None:
+        self.db.execute("INSERT INTO week_results (ended_at, week, end_date, team, net, round_id) VALUES (?,?,?,?,?,?)",
+                        (time.time(), week, end_date, team, net, round_id))
+        self.db.commit()
+
+    def week_results(self, schedule: list[dict]) -> dict[int, dict[str, int]]:
+        """This season's finished league weeks by the sim's count: week -> team -> net to par, the
+        team's latest round of the week. A week matches the schedule's by number and deadline. A round
+        since deleted, excluded or made a practice one on the stats page doesn't count."""
+        ends = {e["week"]: e.get("end_date") for e in schedule if e.get("week")}
+        out: dict[int, dict[str, int]] = {}
+        for week, end, team, net in self.db.execute(
+                "SELECT w.week, w.end_date, w.team, w.net FROM week_results w JOIN rounds r ON r.id = w.round_id"
+                " WHERE r.excluded = 0 AND r.is_league = 1 ORDER BY w.ended_at, w.id"):
+            if week in ends and ends[week] == end:
+                out.setdefault(week, {})[team] = net
+        return out
 
     def league_round_courses(self, team: str) -> list[str]:
         """The course of every full league round this team has posted (one row per round, not per side)."""
