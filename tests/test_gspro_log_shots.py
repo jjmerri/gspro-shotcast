@@ -356,7 +356,8 @@ def test_a_round_file_entry_goes_to_the_fire_before_it_not_a_later_one(tmp_path)
     src._files_events(time.monotonic())   # primes
     now = time.monotonic()
     # The drive's fire, then (read in the same poll as the drive's entry) the putt's.
-    src._waiting = [_Fire(at=now, putter=False, wall=0.0), _Fire(at=now, putter=True, wall=time.time() + 60)]
+    struck = time.time() + 60
+    src._waiting = [_Fire(at=now, putter=False, wall=0.0), _Fire(at=now, putter=True, wall=struck)]
     beta.entries.append(_entry("drive", 135.51))
     beta.write_round()
     [drive] = src._files_events(now)
@@ -367,6 +368,7 @@ def test_a_round_file_entry_goes_to_the_fire_before_it_not_a_later_one(tmp_path)
     os.utime(tmp_path / "currentRound.dat", (time.time() + 120, time.time() + 120))
     [putt] = src._files_events(now)
     assert (putt.shot.ball_speed, putt.shot.putter) == (6.0, True)
+    assert putt.shot.timestamp == struck   # when it was hit, not when the ball stopped and GSPro saved it
 
 
 def test_a_round_shots_late_lastshot_row_doesnt_take_the_next_fire(tmp_path, monkeypatch):

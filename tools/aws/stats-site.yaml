@@ -264,6 +264,21 @@ Resources:
               addr = (event.get("headers") or {}).get("cloudfront-viewer-address", "")
               return addr.rsplit(":", 1)[0] if addr else event.get("requestContext", {}).get("http", {}).get("sourceIp", "?")
 
+          def number(x, top):
+              return isinstance(x, (int, float)) and not isinstance(x, bool) and 0 <= x <= top
+
+          def watching(w):
+              """What the viewer was watching as they sent it: the stream's segment and how far into it,
+              or (a player that won't say) how far behind the live edge. Stored for the booth only."""
+              if not isinstance(w, dict) or not isinstance(sess := w.get("sess"), str) or not re.fullmatch(r"[\w.-]{1,40}", sess):
+                  return {}
+              seg = w.get("seg")
+              if isinstance(seg, str) and re.fullmatch(r"[\w.-]{1,40}\.(?:ts|m4s)", seg) and number(w.get("off"), 60):
+                  return {"sess": {"S": sess}, "seg": {"S": seg}, "off": {"N": f"{w['off']:.2f}"}}
+              if number(w.get("behind"), 600):
+                  return {"sess": {"S": sess}, "behind": {"N": f"{w['behind']:.2f}"}}
+              return {}
+
           def message(item):
               return {"id": item["sk"]["S"], "name": item["name"]["S"], "text": item["text"]["S"],
                       "at": int(item["sk"]["S"].split("-")[0]) / 1000, "aired": item.get("aired", {}).get("BOOL") is True}
@@ -301,7 +316,7 @@ Resources:
                   return reply(429, {"error": "The chat is busy: try again in a minute."})
               sk = f"{int(time.time() * 1000):013d}-{secrets.token_hex(3)}"
               item = {"pk": {"S": "msg"}, "sk": {"S": sk}, "name": {"S": name}, "text": {"S": text},
-                      "ttl": {"N": str(now + KEEP)}}
+                      "ttl": {"N": str(now + KEEP)}, **watching(data.get("watch"))}
               db.put_item(TableName=TABLE, Item=item)
               return reply(200, {"message": message(item)})
 

@@ -203,7 +203,8 @@ class GsproLogShotSource(ShotSource):
 
     @staticmethod
     def _aired(fire: _Fire, shot: Shot) -> ShotEvent:
-        ev = ShotEvent(shot=replace(shot, putter=fire.putter), landed=True)
+        # Stamped when it was struck, not when GSPro saved it once the ball stopped.
+        ev = ShotEvent(shot=replace(shot, putter=fire.putter, timestamp=fire.wall or shot.timestamp), landed=True)
         ev.impact_at, ev.impact_state, ev.impact_read, ev.impact_seq = (
             fire.event.impact_at, fire.event.impact_state, fire.event.impact_read, fire.event.impact_seq)
         ev.setup_hud, ev.buffer_frames = fire.event.setup_hud, fire.event.buffer_frames

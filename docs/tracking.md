@@ -550,7 +550,12 @@ the booth could talk about it after that shot's call (a quick query); every 5 se
 (`chat.poll_seconds`) it only checks whether the page's chat should be open, and tells the table on a
 change or every 30 seconds. Claude Sonnet writes the take (`llm.chat`, which needs
 `ANTHROPIC_API_KEY`; about a cent a take) while the ball flies and the call plays, so the slower
-model costs no delay; one not ready in time waits for the next shot. Each line gets up to 45 words (`chat.max_words`), and the first one always turns to the chat
+model costs no delay; one not ready in time waits for the next shot. Each message is tied to the
+shot the viewer was watching when they sent it, since the stream runs about 20 seconds behind and
+varies by viewer: the page sends the stream segment on screen and how far into it (the mirror knows
+when each segment was recorded), or, from an iPhone's own player, how far behind the live edge it is;
+failing both, 20 seconds is taken off. The booth's take sees that shot (who, which stroke, from where to
+where, and its call), so "what a strike" lands on the right swing even a few shots later. Each line gets up to 45 words (`chat.max_words`), and the first one always turns to the chat
 ("Let's check in with the chat...") so listeners know where it's coming from. Once it starts, it
 plays out: a shot struck meanwhile, even a big moment, waits for it. The usual fact checks apply.
 

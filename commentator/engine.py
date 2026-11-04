@@ -662,6 +662,7 @@ class Engine:
         self._chat_ready: PreparedChat | None = None
         self._chat_task: asyncio.Task | None = None
         self._chat_glancing: asyncio.Task | None = None
+        self._shots_unrecorded: dict[int, float] = {}   # id(event) -> when struck, for shots being handled
         self._chat_read_at = time.monotonic()         # when the chat was last read (or opened, unread)
         self._chat_aired_at = float("-inf")
         self._chat_aired_hole: tuple | None = None    # (round, hole seq) the booth last talked about the chat on
@@ -1769,8 +1770,12 @@ class Engine:
             self._events.put_nowait(RoundEndEvent(reason="quiet after the last hole"))
 
     async def _shot_then_news(self, event: ShotEvent) -> None:
+        self._shots_unrecorded[id(event)] = event.shot.timestamp
         self._chat_glance_on_shot()
-        await self.handle_shot(event)
+        try:
+            await self.handle_shot(event)
+        finally:
+            self._shots_unrecorded.pop(id(event), None)
         # Only a shot that ran to its reaction, and is still the latest: an older handler finishing (early,
         # or late) must not start an aside under a newer shot's call, even one that set the moment already.
         m = self._news_moment
@@ -2425,6 +2430,59 @@ class Engine:
         self._chat_glancing = t = asyncio.create_task(self._chat_glance(), name="chat-read")
         t.add_done_callback(lambda t: t.cancelled() or t.exception())
 
+    CHAT_STREAM_DELAY = 20.0   # seconds the stream runs behind, for a viewer whose player can't say
+    CHAT_EDGE_LAG = 6.0        # the stream's live edge behind the PC: a segment's length and its upload
+    CHAT_SHOT_WINDOW = 600.0   # a shot watched longer ago than this before a message isn't what it's about
+
+    CHAT_RECORD_WAIT = 10.0    # seconds a take waits for a shot struck before a message to be recorded
+
+    def _chat_watched_at(self, m: ChatMessage, posted: float) -> float:
+        """The moment on the viewer's screen (the PC's clock) as they sent `m`, posted at `posted`. The
+        page says where in the stream they were (its segment, which the mirror knows the recording time
+        of, or how far behind the live edge); failing that the stream's usual delay is taken off."""
+        at = posted
+        if live := [x for x in self._live_mirrors() if x.session]:
+            at = posted - self.CHAT_STREAM_DELAY
+            for x in live:
+                if (t := x.watched_at(m.sess, m.seg, m.off)) is not None:
+                    at = t
+                    break
+                if m.sess == x.session and m.behind is not None:
+                    at = posted - m.behind - self.CHAT_EDGE_LAG
+                    break
+        return at
+
+    def _chat_shot_watched(self, at: float) -> int | None:
+        """The shot on a viewer's screen at `at`: the last one struck before it."""
+        try:
+            return self.store.shot_struck_before(at, self.CHAT_SHOT_WINDOW)
+        except Exception as e:
+            log.debug("Chat: couldn't look up the shot a message was sent on: %s", e)
+            return None
+
+    def _chat_shot_brief(self, shot_id: int | None) -> str | None:
+        """'Frankie's shot 2 on hole 4 (7I), from the fairway to the green; the booth called it: "..."'."""
+        if shot_id is None:
+            return None
+        row, said = self.store.shot_brief(shot_id)
+        if row is None:
+            return None
+        hole = (row["hole"] or "").split(",")[0].strip()
+        # A shared ball (alternate shot) can't say which partner hit: no name then.
+        who = f"{row['player']}'s " if row["attributed"] and row["player"] and row["player"] != "unknown" else ""
+        text = who + ("putt" if row["is_putt"] else f"shot {row['shot_number']}" if row["shot_number"] else "shot")
+        if hole:
+            text += f" on {hole.lower()}" if hole.lower().startswith("hole") else f" on hole {hole}"
+        if row["club"] and not row["is_putt"]:
+            text += f" ({row['club']})"
+        if row["is_putt"] and row["outcome"] in ("holed", "missed"):
+            text += f", {row['outcome']}"
+        elif row["lie_before"] and row["lie_after"]:
+            text += f", from the {row['lie_before'].lower()} to the {row['lie_after'].lower()}"
+        if said:
+            text += "; the booth called it: " + " / ".join(f'"{t}"' for t in said)
+        return text
+
     def _chat_writing(self) -> bool:
         """Whether a read, or a take on it, is under way."""
         return any(t is not None and not t.done() for t in (self._chat_glancing, self._chat_task))
@@ -2451,8 +2509,9 @@ class Engine:
                 if why := screened_out(m.text, self.cfg.chat.moderation):
                     log.info("Chat: %s's message left out (%s)", m.name, why)
                 else:
-                    age = m.age if m.age is not None else max(0.0, wall - m.at)
-                    self._chat_log.append((m, now - min(age, since_read)))
+                    age = min(m.age if m.age is not None else max(0.0, wall - m.at), since_read)
+                    self._chat_log.append((m, now - age))
+                    m.watched = self._chat_watched_at(m, wall - age)
         self._chat_read_at = now
         self._chat_log = [(m, at) for m, at in self._chat_log if now - at < self.cfg.chat.max_age_seconds]
         fresh = [m for m, _ in self._chat_log if m.id > self._chat_talked]
@@ -2516,7 +2575,20 @@ class Engine:
         new = [(m, at) for m, at in log_ if m.id > talked]
         if not new:
             return
-        user, facts_text = chat_prompt(messages=[(m.name, m.text, m.id > talked) for m, _ in log_],
+        # A shot struck before what a viewer was watching may not be recorded yet (its call is still
+        # being read, or GSPro saved it only once the ball stopped): wait for it, briefly.
+        watched = max((m.watched for m, _ in log_ if m.shot is None and m.watched is not None), default=None)
+        deadline = time.monotonic() + self.CHAT_RECORD_WAIT
+        while (watched is not None and time.monotonic() < deadline
+               and any(t <= watched for t in self._shots_unrecorded.values())):
+            await asyncio.sleep(0.1)
+        pending = min(self._shots_unrecorded.values(), default=None)
+        for m, _ in log_:
+            # Still not recorded: no shot for it this time (the last one recorded isn't it), a later take may.
+            if m.shot is None and m.watched is not None and (pending is None or m.watched < pending):
+                m.shot = self._chat_shot_watched(m.watched)
+        user, facts_text = chat_prompt(messages=[(m.name, m.text, m.id > talked, self._chat_shot_brief(m.shot))
+                                                 for m, _ in log_],
                                        context=self._chat_context(), moderation=self.cfg.chat.moderation,
                                        commentators=self._persona_names, openers=self._chat_openers[-4:])
         try:
@@ -5403,6 +5475,7 @@ class Engine:
             handed=before.handed or shot.handed or self.handed.get(player or ""), tree_hits=tree_hits or None,
         )
         rec.shot_id = shot_id
+        self._shots_unrecorded.pop(id(event), None)
         if ocr and not shot.is_putt and shot_id is not None and not follow_tiles:
             self._tiles_due[my_seq] = (shot_id, rec, shown_before, unit, self._hc)
             while len(self._tiles_due) > 4:

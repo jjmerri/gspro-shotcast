@@ -22,6 +22,14 @@ class ChatMessage:
     text: str
     at: float      # epoch seconds
     age: float | None = None   # seconds old when read, on the table's own clock (None: unknown)
+    # What the viewer was watching as they sent it (the page says, when its player can): the stream
+    # session, and its segment and how far into it, or how far behind the live edge it was.
+    sess: str | None = None
+    seg: str | None = None
+    off: float | None = None
+    behind: float | None = None
+    watched: float | None = None   # the booth's: the moment on their screen (the PC's clock)
+    shot: int | None = None    # the booth's: the shot they were watching (shots.id), once it's worked out
 
 
 def cursor_at(epoch: float) -> str:
@@ -63,7 +71,10 @@ class ChatTable:
                 sk = row["sk"]["S"]
                 at = int(sk.split("-")[0]) / 1000
                 age = None if server_now is None else max(0.0, server_now - at)
-                out.append(ChatMessage(sk, row["name"]["S"], row["text"]["S"], at, age))
+                num = lambda k: float(row[k]["N"]) if k in row else None  # noqa: E731
+                out.append(ChatMessage(sk, row["name"]["S"], row["text"]["S"], at, age,
+                                       row.get("sess", {}).get("S"), row.get("seg", {}).get("S"),
+                                       num("off"), num("behind")))
             except (KeyError, ValueError):
                 log.debug("Chat: skipped a malformed row %r", row)
         return out

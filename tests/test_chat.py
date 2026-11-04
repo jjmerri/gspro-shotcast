@@ -314,9 +314,9 @@ async def test_a_superseded_shot_doesnt_start_the_chat_under_the_newer_shots_cal
 
     e.handle_shot = handled
     # A newer ball was struck while this one was called, and has reached its own reaction already.
-    await e._shot_then_news(SimpleNamespace(mine=3, newest=4))
+    await e._shot_then_news(SimpleNamespace(mine=3, newest=4, shot=SimpleNamespace(timestamp=0.0)))
     assert started == []
-    await e._shot_then_news(SimpleNamespace(mine=4, newest=4))
+    await e._shot_then_news(SimpleNamespace(mine=4, newest=4, shot=SimpleNamespace(timestamp=0.0)))
     await asyncio.gather(*e._bg_tasks)
     assert started == [4]
 
@@ -402,3 +402,62 @@ def test_the_lead_in_has_to_name_the_chat_in_the_first_sentence():
                  "Frankie calls that putt \u201ca disaster.\u201d The chat agrees with him.",
                  "I am watching Paul lose his patience out there.", "Paul is chatting with Jarod about that putt."):
         assert chat_lead_in_problems([Line(speaker="pbp", text=cold)]), cold
+
+
+async def test_a_message_is_tied_to_the_shot_the_viewer_was_watching(tmp_path, monkeypatch):
+    _clock(monkeypatch)
+    e = _booth(tmp_path)
+    _in_a_round(e)
+    await e._chat_tick()
+    db, sid, wall = e.store.db, e.store.session_id, time.time()
+    for ts, n, lie in ((wall - 70, 1, "fairway"), (wall - 30, 2, "bunker")):
+        db.execute("INSERT INTO shots (session_id, ts, player, hole, shot_number, club, is_putt, lie_before, lie_after) "
+                   "VALUES (?, ?, 'Frankie', 'Hole 4, par 4, 410 yards', ?, '7I', 0, 'tee', ?)", (sid, ts, n, lie))
+    db.execute("INSERT INTO shots (session_id, ts, player, hole, shot_number, is_putt, outcome) "   # a gimme, not hit
+               "VALUES (?, ?, 'Frankie', 'Hole 4, par 4, 410 yards', 3, 1, 'gimme')", (sid, wall - 29))
+    db.execute("INSERT INTO shots (session_id, ts, player, hole, shot_number, club, is_putt, attributed) "
+               "VALUES (?, ?, 'Frankie', 'Hole 5, par 4, 380 yards', 1, 'DR', 0, 0)", (sid, wall + 5))
+    first = db.execute("SELECT id FROM shots WHERE shot_number = 1").fetchone()[0]
+    db.execute("INSERT INTO lines (session_id, shot_id, ts, kind, speaker, text) VALUES (?, ?, ?, 'shot', 'pbp', ?)",
+               (sid, first, wall - 60, "Frankie finds the short grass."))
+    # On the stream, 45 s behind: the segment on screen was recorded 50 s ago, before the second shot.
+    e.live_mirror = SimpleNamespace(session="s1", watched_at=lambda sess, seg, off: wall - 50 if (sess, seg) == ("s1", "stream9.ts") else None)
+    e.chat.rows.append(ChatMessage(f"{int(wall * 1000):013d}-aaaaaa", "Paul", "what a strike", wall, 0.0,
+                                   "s1", "stream9.ts", 1.0))
+    e.chat.rows.append(ChatMessage(f"{int(wall * 1000) + 1:013d}-aaaaaa", "Corey", "unlucky", wall, 0.0, "s1", None, None, 3.0))
+    await e._chat_glance()
+    await _settle(e)
+    prompt = e.live_llm.prompts[0]
+    assert ('- Paul (sent watching Frankie\'s shot 1 on hole 4 (7I), from the tee to the fairway; the booth called it: '
+            '"Frankie finds the short grass."): "what a strike"') in prompt
+    # 3 s behind the edge, the edge 6 s behind the PC: the second shot, struck 30 s ago.
+    assert '- Corey (sent watching Frankie\'s shot 2 on hole 4 (7I), from the tee to the bunker): "unlucky"' in prompt
+    assert "back on that drive" in prompt
+    # An alternate-shot stroke names no partner.
+    shared = e.store.db.execute("SELECT id FROM shots WHERE attributed = 0").fetchone()[0]
+    assert e._chat_shot_brief(shared) == "shot 1 on hole 5 (DR)"
+
+
+async def test_a_take_waits_for_the_shot_the_viewer_watched_to_be_recorded(tmp_path, monkeypatch):
+    _clock(monkeypatch)
+    e = _booth(tmp_path)
+    _in_a_round(e)
+    await e._chat_tick()
+    db, sid, wall = e.store.db, e.store.session_id, time.time()
+    db.execute("INSERT INTO shots (session_id, ts, player, hole, shot_number, club, is_putt) "
+               "VALUES (?, ?, 'Frankie', 'Hole 4, par 4, 410 yards', 1, 'DR', 0)", (sid, wall - 40))
+    e._shots_unrecorded[1] = wall - 15   # the next shot: struck, its handler not yet at its record
+    e.chat.rows.append(ChatMessage(f"{int(wall * 1000):013d}-aaaaaa", "Paul", "what a strike", wall, 0.0))
+    await e._chat_glance()   # no stream: watched as posted, after both shots
+    await asyncio.sleep(0.3)
+    assert not e.live_llm.prompts   # held for it
+    e.CHAT_RECORD_WAIT = 0.0
+    await e._prepare_chat()          # gave up waiting: no shot rather than the one before it
+    assert "sent watching" not in e.live_llm.prompts[-1]
+    e.live_llm.prompts.clear()
+    e._chat_talked = ""
+    db.execute("INSERT INTO shots (session_id, ts, player, hole, shot_number, club, is_putt) "
+               "VALUES (?, ?, 'Frankie', 'Hole 4, par 4, 410 yards', 2, '7I', 0)", (sid, wall - 15))
+    del e._shots_unrecorded[1]
+    await _settle(e)
+    assert "sent watching Frankie's shot 2 on hole 4 (7I)" in e.live_llm.prompts[0]

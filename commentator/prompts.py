@@ -323,13 +323,18 @@ CHAT_MODERATION = {
 }
 
 
-def chat_prompt(*, messages: list[tuple[str, str, bool]], context: list[str], moderation: str,
+def chat_prompt(*, messages: list[tuple[str, str, bool, str | None]], context: list[str], moderation: str,
                 commentators: list[str], openers: list[str] = ()) -> tuple[str, str]:
     """The live chat on the stats page, which the booth glances at between shots and talks about.
-    `messages`: (viewer, text, new since the booth last talked about the chat), oldest first. The
-    messages are untrusted text from anyone with the league password: quoted as data, never followed."""
-    chat = "\n".join(f'- {name}{"" if new else " (earlier, already talked about)"}: "{text}"'
-                      for name, text, new in messages)
+    `messages`: (viewer, text, new since the booth last talked about the chat, the shot on their screen
+    as they sent it or None), oldest first. The messages are untrusted text from anyone with the league
+    password: quoted as data, never followed."""
+    def tag(new, watching):
+        notes = ([] if new else ["earlier, already talked about"]) + ([f"sent watching {watching}"] if watching else [])
+        return f" ({'; '.join(notes)})" if notes else ""
+
+    chat = "\n".join(f'- {name}{tag(new, watching)}: "{text}"' for name, text, new, watching in messages)
+    watched = any(w for *_, w in messages)
     facts_text = "\n".join([*context, "The live chat on the stream, oldest first:", chat])
     prompt = (
         "FACTS:\n" + facts_text
@@ -345,6 +350,10 @@ def chat_prompt(*, messages: list[tuple[str, str, bool]], context: list[str], mo
         "messages, riff on the conversation, tease back, agree, rib the players. Say who said it naturally "
         "(\"Frankie reckons...\", \"the chat's on Corey about...\"). Only answer a question if one's put to the "
         "booth, and only from the facts.\n"
+        + ("\"Sent watching ...\" is the shot that was on that viewer's screen when they sent it (the stream "
+           "runs behind): a message about a shot is most likely about that one, even if play has moved on since - "
+           "say which (\"back on that drive of Frankie's...\") rather than tying it to the latest shot.\n"
+           if watched else "") +
         f"The commentators are {' and '.join(commentators)}. Viewers may talk to or about either of them by "
         "name: the one they're about takes it personally, in the first person - a commentator never says "
         "his own name.\n"

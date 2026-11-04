@@ -434,6 +434,21 @@ class Store:
         if updates:
             log.info("Backfilled club data on %d shots", len(updates))
 
+    def shot_struck_before(self, at: float, within: float) -> int | None:
+        """This session's last shot struck at or before `at` (and no more than `within` seconds
+        before), not taken back nor a gimme the booth added: its id."""
+        row = self.db.execute("SELECT id FROM shots WHERE session_id = ? AND ts <= ? AND ts >= ? AND mulligan = 0 "
+                              "AND outcome IS NOT 'gimme' ORDER BY ts DESC LIMIT 1", (self.session_id, at, at - within)).fetchone()
+        return row["id"] if row else None
+
+    def shot_brief(self, shot_id: int) -> tuple[sqlite3.Row | None, list[str]]:
+        """A shot's row and what the booth said about it (its call), for a word on it later."""
+        row = self.db.execute("SELECT player, attributed, hole, shot_number, club, is_putt, lie_before, lie_after, outcome "
+                              "FROM shots WHERE id = ?", (shot_id,)).fetchone()
+        said = [r["text"] for r in self.db.execute("SELECT text FROM lines WHERE shot_id = ? AND kind = 'shot' "
+                                                   "ORDER BY id LIMIT 2", (shot_id,))]
+        return row, said
+
     def record_shot(
         self, *, player: str | None, hole: str | None, shot: Shot, before: Hud, after: Hud, tags: list[str],
         carry_game_yards: float | None, total_yards: float | None, offline_yards: float | None,

@@ -119,3 +119,20 @@ def test_the_chat_turns_away_bad_posts_floods_and_requests_around_cloudfront(cha
     assert call(chat, "POST", {"name": "Corey", "text": "hi"}, ip="198.51.100.7")[0] == 200   # per viewer
     assert call(chat, secret="guess")[0] == 403
     assert call(chat, path="/chat/other")[0] == 404
+
+
+def test_what_the_viewer_was_watching_is_kept_for_the_booth_only_when_its_well_formed(chat):
+    booth(chat)
+    sent = [{"sess": "20261103-2010", "seg": "stream12.ts", "off": 2.5},
+            {"sess": "20261103-2010", "behind": 9},
+            {"sess": "20261103-2010", "seg": "../x.ts", "off": 1},
+            {"sess": "20261103-2010", "seg": "stream12.ts", "off": float("nan")},
+            {"sess": "bad session", "behind": 9}, "junk", None]
+    for i, watch in enumerate(sent):
+        assert call(chat, "POST", {"name": "Paul", "text": f"m{i}", "watch": watch}, ip=f"203.0.113.{i}")[0] == 200
+    rows = sorted((v for (p, _), v in chat.table.items.items() if p == "msg"), key=lambda i: i["text"]["S"])
+    kept = [{k: next(iter(v[k].values())) for k in ("sess", "seg", "off", "behind") if k in v} for v in rows]
+    assert kept == [{"sess": "20261103-2010", "seg": "stream12.ts", "off": "2.50"},
+                    {"sess": "20261103-2010", "behind": "9.00"}, {}, {}, {}, {}, {}]
+    _, body = call(chat)
+    assert all(set(m) == {"id", "name", "text", "at", "aired"} for m in body["messages"])   # not shown to viewers

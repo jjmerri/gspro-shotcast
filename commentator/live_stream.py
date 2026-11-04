@@ -37,6 +37,7 @@ PASSWORD_ENV = "OBS_WEBSOCKET_PASSWORD"
 HEARTBEAT_SECONDS = 30
 MIN_RECORDING_SECONDS = 60   # a stream shorter than this (OBS started and stopped) isn't kept
 SHOT_LEAD_SECONDS = 60       # a shot this long before a stream is first seen counts as on it
+SEGMENTS_KEPT = 300          # the newest segments' times kept for watched_at (20 minutes of 4 s ones)
 SAME_STREAM_SECONDS = 10     # a copy on the PC and one in the bucket that overlap by more are the same stream
 DELETE_DIR = "live-delete"   # beside the status file: kept streams the stats page asked to delete
 OBS_EXE = Path(r"C:\Program Files\obs-studio\bin\64bit\obs64.exe")
@@ -268,6 +269,9 @@ class Mirror:
         self._announced = False
         self._beat = 0.0
         self.track: list[tuple[str, float]] = []   # kept streams: every segment so far, with its length
+        # This stream's recent segments: when each finished (the PC's clock) and its length, so what a
+        # viewer was watching can be put on the booth's clock (watched_at).
+        self.seg_ends: dict[str, tuple[float, float]] = {}
         self.recordings: list[dict] = []           # live/recordings.json, newest first
         self._marks: list[tuple[float, str, bool]] = []   # from mark(), for the thread to file
         self._shots: list[float] = []   # from shot(), when each was played
@@ -330,6 +334,16 @@ class Mirror:
         if self.tracking:
             with self._marks_lock:
                 self._marks.append((self.clock(), label, replace))
+
+    def watched_at(self, session: str | None, segment: str | None, offset: float | None) -> float | None:
+        """When (the PC's clock) the moment `offset` seconds into this stream's `segment` was recorded:
+        what a viewer watching it then was seeing. None if it isn't this stream's, or is long gone."""
+        if not session or session != self.session or offset is None:
+            return None
+        if (seg := self.seg_ends.get(segment or "")) is None:
+            return None
+        end, length = seg
+        return end - length + min(offset, length)
 
     def shot(self) -> None:
         """A shot was played: the stream it's on is kept (one with no shots, a round that never got
@@ -542,6 +556,7 @@ class Mirror:
         self.newest_ns = max(self.newest_ns, mtime_ns, *stamps.values())
         if new_session:
             self.session, self.since, self.sent = _session_name(now), now, {}
+            self.seg_ends = {}
             self.track = []
             if self.bucket:
                 log.info("Live stream on: mirroring %s to s3://%s/%ss/%s/", self.folder, self.bucket, self.root,
@@ -553,7 +568,7 @@ class Mirror:
             if self.tracking:
                 self.recordings.insert(0, {"session": self.session, "since": round(now), "ended": None,
                                            "duration": 0, "shots": False, "rounds": []})
-        durations = segment_durations(raw.decode("utf-8", "replace")) if self.tracking else {}
+        durations = segment_durations(raw.decode("utf-8", "replace"))
         added = False
         for name in segments:
             if name not in self.sent:
@@ -563,6 +578,8 @@ class Mirror:
                     return
                 self._put(f"s/{self.session}/{name}", data, "public, max-age=86400, immutable")
                 self.sent[name] = stamps[name]
+                ends = {**self.seg_ends, name: (stamps[name] / 1e9, durations.get(name, 4.0))}
+                self.seg_ends = dict(list(ends.items())[-SEGMENTS_KEPT:])   # replaced whole: read from other threads
                 if self.tracking:
                     self.track.append((name, durations.get(name, 4.0)))
                     added = True

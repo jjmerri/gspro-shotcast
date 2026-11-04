@@ -81,6 +81,18 @@ def test_mirror_uploads_the_stream_as_it_goes_and_leaves_nothing_behind(tmp_path
     assert not list(m.folder.iterdir())                              # and the PC's copy too
 
 
+def test_mirror_says_when_a_moment_in_a_segment_was_recorded(tmp_path):
+    s3, now = FakeS3(), [1000.0]
+    m = Mirror(tmp_path, "bkt", client=s3, clock=lambda: now[0])
+    _playlist(tmp_path, 0, ["stream0.ts"], mtime=now[0])
+    os.utime(tmp_path / "stream0.ts", (994.0, 994.0))               # finished at 994, 6 s long
+    m.step()
+    assert m.watched_at(m.session, "stream0.ts", 2.5) == 990.5
+    assert m.watched_at(m.session, "stream0.ts", 30) == 994.0       # never past its end
+    assert m.watched_at("another", "stream0.ts", 2.5) is None        # not this stream
+    assert m.watched_at(m.session, "stream9.ts", 2.5) is None
+
+
 def test_mirror_publishes_a_renamed_playlist_where_the_page_looks(tmp_path):
     s3, now = FakeS3(), [1000.0]
     m = Mirror(tmp_path, "bkt", playlist="obs.m3u8", client=s3, clock=lambda: now[0])
