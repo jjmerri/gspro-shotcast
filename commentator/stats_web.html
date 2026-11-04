@@ -77,16 +77,24 @@
                       border-radius:6px; padding:8px 12px; font:inherit; cursor:pointer; }
   #liveslot video { width:100%; max-height:78vh; background:#000; border-radius:8px; }
   #liveslot .recapcard { position:absolute; inset:0; background:rgba(0,0,0,.85); border-radius:8px; overflow:auto;
-                         display:flex; flex-direction:column; align-items:center; justify-content:center; padding:12px; text-align:center; }
+                         display:flex; flex-direction:column; align-items:center; padding:12px; text-align:center; }
+  /* Centered by auto margins, not justify-content: a card taller than a phone's video scrolls from its top. */
+  #liveslot .recapcard > :first-child { margin-top:auto; } #liveslot .recapcard > :last-child { margin-bottom:auto; }
   #liveslot .recapcard[hidden], #liveslot .recapcap[hidden], #liveslot .recapboard[hidden] { display:none; }
   #liveslot .recapboard { position:absolute; top:12px; left:12px; pointer-events:none; background:rgba(0,0,0,.8); color:#fff;
                           border-left:3px solid var(--accent); border-radius:4px; padding:6px 10px; font-size:13px; }
   #liveslot .recapboard h4 { margin:0 0 4px; font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); }
   #liveslot .recapboard table { background:none; margin:0; } #liveslot .recapboard td { padding:1px 6px; border:0; }
   #liveslot .recapboard tr.on td { color:var(--accent); font-weight:700; }
-  #liveslot .recapcard table { background:none; margin:8px auto; } #liveslot .recapcard h3 { margin:0 0 4px; }
-  #liveslot .recapcard .play { font:inherit; font-size:16px; padding:10px 18px; border-radius:8px; cursor:pointer;
-                               background:var(--accent); color:#000; border:0; margin-top:8px; }
+  #liveslot .recapcard table { background:none; margin:8px auto; display:table; width:auto; } #liveslot .recapcard h3 { margin:0 0 4px; }
+  #liveslot .recapcard .play { font:inherit; font-size:16px; padding:10px 18px; border-radius:8px; cursor:pointer; flex:none;
+                               background:var(--accent); color:#000; border:0; margin-bottom:8px; }
+  @media (max-height:560px), (max-width:600px) {
+    #liveslot .recapcard { padding:8px; font-size:12px; } #liveslot .recapcard td { padding:1px 6px; }
+    #liveslot .recapcard .play { font-size:14px; padding:8px 14px; margin-bottom:6px; }
+    #liveslot .recapboard { top:6px; left:6px; padding:3px 6px; font-size:10px; } #liveslot .recapboard h4 { font-size:9px; margin-bottom:2px; }
+    #liveslot .recapboard td { padding:0 4px; }
+  }
   #liveslot .recapcap { position:absolute; left:50%; bottom:56px; transform:translateX(-50%); max-width:90%; pointer-events:none;
                         background:rgba(0,0,0,.75); color:#fff; padding:6px 10px; border-radius:6px; text-align:center; }
   .chat { margin-top:14px; }
@@ -2158,7 +2166,7 @@ function recapPlayer(me, key, built) {
     r.phase = "outro";
     scoreboard();
     show(table(r.body));
-    run(r.body.outro, () => { r.phase = "done"; show(table(r.body) + '<button class="play" data-recapplay="1">▶ Watch again</button>'); });
+    run(r.body.outro, () => { r.phase = "done"; show('<button class="play" data-recapplay="1">▶ Watch again</button>' + table(r.body)); });
   };
   r.card.addEventListener("click", e => { if (e.target.dataset.recapplay && r.body) start(); });
   v.addEventListener("timeupdate", tick);
@@ -2185,7 +2193,7 @@ function recapPlayer(me, key, built) {
     if (!live()) return;
     r.body = { ...b, intro: b.intro || [], outro: b.outro || [], clips: b.clips || [], rows: b.rows || [], standings: b.standings || [] };
     r.phase = "start";
-    show(results(r.body) + '<button class="play" data-recapplay="1">▶ Play recap</button>');
+    show('<button class="play" data-recapplay="1">▶ Play recap</button>' + results(r.body));
   }).catch(e => { if (live()) show(`<div class="err">The recap didn't load: ${esc(e.message)}</div>`); });
 }
 function renderVods() {
