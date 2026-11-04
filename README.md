@@ -45,7 +45,9 @@ where it finished and what it scored, plus each round's card and stats. The stat
 strokes gained, club gapping, approach and putting by distance, scorecards, every shot, and
 season highlights, plus each player's handicap index. Records run over the past year, or from
 your league's season start if you set one (Settings → League, like `10-01`). A misread or practice swing can be left
-out of the stats with a click. Works with any launch monitor GSPro supports; see
+out of the stats with a click, and on the sim PC a whole round can be excluded, deleted or moved
+between league, tournament and practice. On GSPro's driving range or in its practice mode the booth
+stays quiet and records nothing. Works with any launch monitor GSPro supports; see
 [what's recorded with yours](docs/tracking.md#launch-monitors). Lefties who use GSPro's mirrored
 HUD are read too: the layout is detected per player, shot by shot.
 
@@ -64,7 +66,9 @@ with no shots); no YouTube or Twitch account is needed. Each stream is kept for 
 **Round replays** tab, to watch a round from its first tee shot, then deleted; a round, hole
 or shot on the stats page has a **▶ Watch** button that jumps to that moment in it. It costs about a cent
 and a half an hour of uploads plus about 50 cents a month to keep a busy week, and watching is
-within CloudFront's free tier for a league. See [Live stream](docs/tracking.md#live-stream). With
+within CloudFront's free tier for a league. See [Live stream](docs/tracking.md#live-stream). Viewers
+can chat alongside it, and the booth talks about the chat on air between shots; each round starts
+with an empty chat. See [Live chat](docs/tracking.md#live-chat). With
 SuperSaaS bookings on, a **Schedule** tab shows who has the sim booked for the next two weeks.
 
 **Local vs published.** The tray's stats page is local: it runs on the sim PC over the database and
@@ -75,10 +79,11 @@ needs no setup. Publishing it puts the same page online and adds the rest:
 | Home; Rounds, Courses, Shots; Players, Head-to-head, Records; Broadcasts, Booth; round and player pages | ✅ | ✅ |
 | Hole replays, round summaries, Share card | ✅ | ✅ |
 | Leave a shot out of the stats | ✅ | shows the tag only |
+| Exclude, delete or re-tag a round (league, tournament, practice) | ✅ | |
 | Updated | whenever the database changes | after every round |
 | Open from a phone or anywhere, behind a password | | ✅ |
 | Share links other people can open | | ✅ |
-| **Live** tab (needs the [live stream](docs/tracking.md#live-stream)) | | ✅ |
+| **Live** tab and its chat (needs the [live stream](docs/tracking.md#live-stream)) | | ✅ |
 | **Round replays** tab and **▶ Watch** buttons (needs the live stream) | | ✅ |
 | **Schedule** tab (needs SuperSaaS bookings) | | ✅ |
 
