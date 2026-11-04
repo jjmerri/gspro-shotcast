@@ -200,7 +200,7 @@ const state = { tab: "home", ctx: "", data: null, player: null, me: "", mine: nu
                 seen: Number(store.get("shotcast.seen")) || 0, hcpClean: store.get("shotcast.hcpclean") === "1",
                 round: null, roundGroup: null, sort: {}, more: {}, course: null, versus: [null, null], shotFilter: {}, shots: null, shotOpen: null,
                 session: null, transcript: null, transcriptFor: null, replays: {}, replayHole: null, replayOnly: false,
-                vods: undefined, clips: undefined, vod: null, schedule: undefined, period: null };
+                vods: undefined, vodsAll: null, clips: undefined, vod: null, schedule: undefined, period: null };
 
 // A link holds the view: #view?player=…&ctx=… and the view's own keys (hashFor): a shots filter and an
 // open shot, a round and hole, a course, a head-to-head pair, a player, a session, a video and a time
@@ -369,6 +369,7 @@ async function load() {
     const body = await getJSON(`v/${site.version}/summary-${state.ctx || "all"}.json`);
     if (mine !== loading) return;
     state.data = body;
+    state.vods = shownVods();
     useHcp();
     state.shots = null;
     // The tabs read from their own files may not have loaded yet: they settle it themselves.
@@ -1822,10 +1823,19 @@ const keptFor = () => state.keepDays === 7 ? "a week" : `${state.keepDays} day${
 // Round replays (live_stream.py keeps each stream keep_days, a week by default; on the PC, local_video.py): live/recordings.json lists them, each with
 // where its rounds start. The schedule (schedule.json) is the sim's bookings, uploaded by the booth.
 const EXTRA_TABS = ["live", "vods", "schedule"];
+// A replay whose rounds were all left out of the stats or deleted goes with them (stats_web.round_spans:
+// [first shot, end, out]); one still recording, or with no round on it, stays.
+const vodOut = v => {
+  if (v.ended === null) return false;
+  const on = ((state.data && state.data.vod_rounds) || []).filter(([s, e]) => Math.min(v.ended, e) - Math.max(v.since, s) >= Math.min(10, e - s));
+  return on.length > 0 && on.every(r => r[2]);
+};
+const shownVods = () => state.vodsAll ? state.vodsAll.filter(v => !vodOut(v)) : null;
 async function pollExtras() {
   const get = async url => { try { const r = await fetch(url, { cache: "no-store" }); return r.ok ? await r.json() : null; } catch (e) { return null; } };
   const [rec, sched, cl] = await Promise.all([get("live/recordings.json"), get("schedule.json"), get("live/clips.json")]);
-  const vods = rec && Array.isArray(rec.recordings) ? rec.recordings.filter(v => v.duration > 0 || v.ended === null) : null;
+  state.vodsAll = rec && Array.isArray(rec.recordings) ? rec.recordings.filter(v => v.duration > 0 || v.ended === null) : null;
+  const vods = shownVods();
   const schedule = sched && Array.isArray(sched.bookings) ? sched : null;
   const clips = cl && cl.clips && typeof cl.clips === "object" ? cl.clips : null;
   const was = JSON.stringify([state.vods, state.schedule, state.clips]);
@@ -2094,7 +2104,7 @@ document.addEventListener("click", (e) => {
   }
   if (t.dataset.exclround || t.dataset.delround) {
     const del = !!t.dataset.delround, id = t.dataset.delround || t.dataset.exclround;
-    if (del && !confirm("Delete this round, its scorecard and every shot in it? This can't be undone."
+    if (del && !confirm("Delete this round, its scorecard, every shot in it and its replay (unless another round is on the same video)? This can't be undone."
                         + " (Exclude from stats keeps it, out of the stats.)")) return;
     t.disabled = true;
     t.textContent = "Saving…";

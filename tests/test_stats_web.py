@@ -361,6 +361,77 @@ def test_a_round_has_its_tee_boxs_whole_course_length_from_the_course_file(tmp_p
     assert (r["tee"], r["course_yards"], r["course_holes"]) == ("Blue", 6115, 18)
 
 
+def test_a_rounds_replay_hides_with_it_and_goes_when_every_round_on_it_is_deleted(tmp_path):
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    path, db = _db(tmp_path)
+    # (first shot, end): A alone on one video, B and C on another, D on a third; a fourth has no round.
+    for first, end in ((1000, 2000), (4000, 5000), (7000, 8000), (10000, 11000)):
+        db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, holes_played, gross, scores,"
+                   " hole_pars, is_league) VALUES (1, ?, '2026-10-16', 'Pebble', 'Ann', 9, 9, 36, '{}', ?, 0)",
+                   (end, json.dumps(PARS)))
+        _shot(db, "Ann", ts=first, course="Pebble", club="DR", shot_number=1, lie_before="tee")
+        _shot(db, "Ann", ts=end - 60, course="Pebble", club="PT", is_putt=1)
+    _shot(db, "Ann", ts=2010, course="Pebble", club="PT", is_putt=1, outcome="gimme")   # A's, conceded late
+    db.commit()
+    videos = tmp_path / "recordings"
+    videos.mkdir()
+    spans = {"20261016-190000-aaaaaa": (900, 2100), "20261016-200000-bbbbbb": (3900, 8200),
+             "20261016-210000-cccccc": (9900, 11200), "20261016-220000-dddddd": (20000, 21000),
+             "20261016-230000-eeeeee": (2095, 3800)}   # starts in A's closer, a few buffered seconds in
+    for session, (since, ended) in spans.items():
+        (videos / f"{session}.ts").write_bytes(b"x")
+        (videos / f"{session}.json").write_text(json.dumps({"session": session, "since": since, "ended": ended,
+                                                            "duration": ended - since, "shots": True}))
+    bucket = [{"session": "20261016-190001-111111", "since": 905, "ended": 2100},
+              {"session": "20261016-200001-222222", "since": 3905, "ended": 8200},
+              {"session": "20261016-210001-333333", "since": 9905, "ended": None}]   # still going
+    asked = []
+    server = stats_web.make_server(path, port=0, site=tmp_path / "site", videos=lambda: (videos, 14),
+                                   video_deleted=lambda r: asked.append(r["session"]), bucket_videos=lambda: bucket)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def post(url, body):
+        return json.loads(urllib.request.urlopen(urllib.request.Request(
+            base + url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})).read())
+
+    def kept():
+        return sorted(p.stem for p in videos.glob("*.ts"))
+    try:
+        post("/api/rounds/1/delete", {"ended": 2000, "confirm": True})
+        assert kept() == sorted(set(spans) - {"20261016-190000-aaaaaa"})
+        assert asked == ["20261016-190001-111111"]          # the bucket's copy, by its own name
+        post("/api/rounds/2/delete", {"ended": 5000, "confirm": True})   # C is still on that video
+        post("/api/rounds/4/excluded", {"excluded": True, "ended": 11000})   # hidden, not deleted
+        # (asked again each time till the booth's mirror deletes it: the same request file)
+        assert kept() == sorted(set(spans) - {"20261016-190000-aaaaaa"}) and set(asked) == {"20261016-190001-111111"}
+        version = json.loads(urllib.request.urlopen(base + "/latest.json").read())["version"]
+        out = json.loads(urllib.request.urlopen(f"{base}/v/{version}/summary-all.json").read())["vod_rounds"]
+        assert out == [[1000, 2000, 1], [4000, 5000, 1], [7000, 8000, 0], [10000, 11000, 1]]
+        post("/api/rounds/4/delete", {"ended": 11000, "confirm": True})
+        assert "20261016-210000-cccccc" not in kept()
+        assert set(asked) == {"20261016-190001-111111"}     # the bucket's is still on air
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = re.search(r"\nconst vodOut = .*?\nconst shownVods = .*?\n", page, re.S).group(0)
+    recs = [{"session": s, "since": a, "ended": b} for s, (a, b) in spans.items()]
+    recs.append({"session": "live", "since": 9900, "ended": None})
+    script = (f"const state = {{ data: {{ vod_rounds: {json.dumps(out)} }}, vodsAll: {json.dumps(recs)} }};" + fns
+              + "console.log(JSON.stringify(shownVods().map(v => v.session)))")
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    assert got == ["20261016-200000-bbbbbb", "20261016-220000-dddddd", "20261016-230000-eeeeee", "live"]
+
+
 def test_the_pages_tee_line_gives_the_whole_course_and_the_nine_played():
     import re
     import shutil

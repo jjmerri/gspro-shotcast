@@ -467,6 +467,9 @@ go as the next stream starts or stops, or when the booth starts. About 1.2 GB an
 there has a **Delete**, which takes it off the PC and (once the booth's running) out of the bucket, so
 it leaves the published page too.
 
+A replay goes with its rounds: one whose rounds were all excluded from the stats or deleted is hidden
+on both pages (and back if a round is put back), and deleting the last round on it deletes the video,
+the PC's and the bucket's. A replay with another round still on it stays.
 With `live.with_rounds: false` none of this follows rounds or the badge (only the idle stop
 applies): the stream is started and stopped by hand.
 

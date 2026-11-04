@@ -101,13 +101,7 @@ def _round_rows(db: sqlite3.Connection, round_id: int, ended: float) -> list[lis
     find = player_round_of(db)
     cards = [r["id"] for r in db.execute("SELECT id, session_id, course, ended_at FROM player_rounds")
              if find(r["session_id"], r["course"], r["ended_at"]) == round_id]
-    owner = shot_rounds(db)
-    # A putt conceded late (its result came in after the round was recorded) is that round's, not the next's.
-    for x in groups:
-        for sid, course in db.execute("SELECT id, course FROM shots WHERE session_id = ? AND outcome = 'gimme'"
-                                      " AND ts > ? AND ts <= ?", (x["session"], x["end"], x["end"] + CLOSER_SECONDS)):
-            if (course or "").casefold() == (x["course"] or "").casefold():
-                owner[sid] = x["round"]
+    owner = _late_gimmes(db, groups, shot_rounds(db))
     shots = [sid for sid, rnd in owner.items() if rnd == round_id]
     # The unlinked lines of every session it was played in (a round can span a booth restart), each
     # from the closer of that session's round before.
@@ -121,6 +115,18 @@ def _round_rows(db: sqlite3.Connection, round_id: int, ended: float) -> list[lis
             (sess, since + CLOSER_SECONDS, g["end"] + CLOSER_SECONDS))}
     lines = sorted(lines)
     return [sides, cards, shots, lines]
+
+
+def _late_gimmes(db: sqlite3.Connection, groups: list[dict[str, Any]], owner: dict[int, int],
+                 table: str = "shots") -> dict[int, int]:
+    """shot_rounds' `owner`, with each putt conceded late (its result came in after the round was
+    recorded) given to that round, not the next one."""
+    for x in groups:
+        for sid, course in db.execute(f"SELECT id, course FROM {table} WHERE session_id = ? AND outcome = 'gimme'"
+                                      " AND ts > ? AND ts <= ?", (x["session"], x["end"], x["end"] + CLOSER_SECONDS)):
+            if (course or "").casefold() == (x["course"] or "").casefold():
+                owner[sid] = x["round"]
+    return owner
 
 
 def _ensure_excluded(db: sqlite3.Connection) -> None:
@@ -186,6 +192,47 @@ def delete_round(db_path: str | Path, round_id: int, ended: float) -> bool:
     a page left open (or a published record clip, keyed by shot id) would then take for the old one.
     False when there's no such round."""
     return _mark_round(db_path, round_id, ended, DELETED)
+
+
+VOD_OVERLAP_SECONDS = 10   # a stream running a few buffered seconds into a round isn't its replay
+
+
+def round_spans(db: sqlite3.Connection) -> list[list[float]]:
+    """Every round as played, deleted ones too, oldest first: [first shot, end, state], state 0 when
+    it counts, else EXCLUDED or DELETED. The Watch tab hides a replay whose rounds are all out, and
+    deleting the last of them deletes it (videos_of_deleted). Read from the tables under connect()'s views."""
+    if not {r[1] for r in db.execute("PRAGMA main.table_info(rounds)")}:
+        return []
+    groups, of_row = round_groups(db, "main.rounds")
+    has_excluded = "excluded" in {r[1] for r in db.execute("PRAGMA main.table_info(rounds)")}
+    state: dict[int, int] = {}
+    for rid, ex in db.execute(f"SELECT id, {'excluded' if has_excluded else '0'} FROM main.rounds"):
+        g = of_row[rid]
+        state[g] = min(state.get(g, ex), ex)   # one side still counting keeps the round
+    start = {g["round"]: g["end"] for g in groups}
+    owner = _late_gimmes(db, groups, shot_rounds(db, every=True), "main.shots")
+    for sid, ts in db.execute("SELECT id, ts FROM main.shots"):
+        if (rnd := owner.get(sid)) in start:
+            start[rnd] = min(start[rnd], ts)
+    return [[start[g["round"]], g["end"], state[g["round"]]] for g in groups]
+
+
+def _vod_rounds(spans: list[list[float]], since: float, ended: float) -> list[int]:
+    """The states of the rounds played on a stream from `since` to `ended`."""
+    return [st for start, end, st in spans
+            if min(ended, end) - max(since, start) >= min(VOD_OVERLAP_SECONDS, end - start)]
+
+
+def videos_of_deleted(spans: list[list[float]], recs: list[dict]) -> list[dict]:
+    """The finished recordings (local_video's or the bucket's) of rounds that were all deleted."""
+    out = []
+    for rec in recs:
+        if not isinstance(rec.get("since"), (int, float)) or not isinstance(rec.get("ended"), (int, float)):
+            continue
+        states = _vod_rounds(spans, rec["since"], rec["ended"])
+        if states and all(st == DELETED for st in states):
+            out.append(rec)
+    return out
 
 
 def excluded_rounds(db: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -786,7 +833,8 @@ def summary(db: sqlite3.Connection, context: str | None = None,
             "rounds": rounds_, **({"excluded_rounds": excluded_rounds(db)} if local else {}), **highlights_by_period(db, holes, context, season=season),
             "season_from": season_start(season), "predictions": predictions(db, names),
             "courses": A.courses(db, context),
-            "booth": A.booth(db, names), "broadcasts": A.broadcasts(db), "filters": filters}
+            "booth": A.booth(db, names), "broadcasts": A.broadcasts(db), "filters": filters,
+            "vod_rounds": [[s, e, int(st > 0)] for s, e, st in round_spans(db)]}
 
 
 def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | None = None,
@@ -795,7 +843,8 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
                 videos: Callable[[], tuple[Path | None, int]] | None = None,
                 on_change: Callable[[], None] | None = None,
                 publish_status: Callable[[], dict[str, Any]] | None = None,
-                video_deleted: Callable[[dict], None] | None = None) -> ThreadingHTTPServer:
+                video_deleted: Callable[[dict], None] | None = None,
+                bucket_videos: Callable[[], list[dict]] | None = None) -> ThreadingHTTPServer:
     """Serve the stats page on localhost only (port 0 picks a free one), the same static site that
     `publish` uploads (stats_site.py), built into `site` (a temp folder by default) and rebuilt when
     the database changes. `names` maps persona keys to on-air names; `brand` is build()'s site_name,
@@ -806,7 +855,9 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
     `on_change()` is called after an edit from the page is saved (the tray publishes the site a while
     later); `publish_status()` is what GET api/publish-status answers, so the page can say when it's up.
     POST api/recordings/<session>/delete deletes a round video kept on the PC, then calls
-    `video_deleted(record)` with its sidecar's record (the tray asks the booth to delete the bucket's copy too)."""
+    `video_deleted(record)` with its sidecar's record (the tray asks the booth to delete the bucket's copy too).
+    Deleting a round deletes the videos it was the last round kept on: the PC's, and (`bucket_videos()`,
+    the bucket's kept streams, each passed to `video_deleted`) the bucket's."""
     from . import local_video, stats_site
 
     db_path = Path(db_path)
@@ -868,6 +919,8 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
                         raise ValueError("delete needs confirm: true")
                     value = True
                     found = delete_round(db_path, ident, float(body["ended"]))
+                    if found:
+                        self._drop_videos()
                 if not found:
                     return self._send(404, b"no such shot" if key == "left_out" else b"no such round", "text/plain")
                 refresh()
@@ -882,6 +935,29 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
                     log.exception("After a stats page edit")
             self._send(200, json.dumps({"id": ident, {"delete": "deleted"}.get(key, key): value}).encode(),
                        "application/json")
+
+        def _drop_videos(self) -> None:
+            """After a round is deleted: the videos no round kept is on any more. The round is gone
+            either way; a video that can't go yet (open in a player) stays, hidden on the page."""
+            from contextlib import closing
+
+            try:
+                with closing(connect(db_path)) as db:
+                    spans = round_spans(db)
+                folder = videos()[0] if videos is not None else None
+                for rec in videos_of_deleted(spans, local_video.recordings(folder) if folder else []):
+                    try:
+                        local_video.delete(folder, rec["session"])
+                    except (OSError, ValueError) as e:
+                        log.info("Kept the round video %s for now: %s", rec["session"], e)
+                        continue
+                    if video_deleted is not None and bucket_videos is None:
+                        video_deleted(rec)
+                if video_deleted is not None and bucket_videos is not None:
+                    for rec in videos_of_deleted(spans, bucket_videos()):
+                        video_deleted(rec)
+            except Exception:
+                log.exception("Deleting the videos of a deleted round")
 
         def _delete_video(self, session: str) -> None:
             folder = videos()[0] if videos is not None else None

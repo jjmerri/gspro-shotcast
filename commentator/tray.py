@@ -895,7 +895,17 @@ class Tray:
                 from .live_stream import request_delete
 
                 request_delete(self.cfg.log_dir, rec["session"], rec["since"], rec["ended"])
-        hooks = {"on_change": publisher.changed, "publish_status": publisher.status, "video_deleted": video_deleted}
+        def bucket_videos():   # the bucket's kept streams, as the booth's mirror last saved them
+            if not (self.cfg.publish.bucket and self.cfg.live.keep_days):
+                return []
+            try:
+                recs = json.loads((Path(self.cfg.log_dir) / "live-recordings.json").read_text(encoding="utf-8"))
+                recs = recs.get("recordings") if isinstance(recs, dict) else None
+            except (OSError, ValueError):
+                return []
+            return [r for r in recs if isinstance(r, dict)] if isinstance(recs, list) else []
+        hooks = {"on_change": publisher.changed, "publish_status": publisher.status, "video_deleted": video_deleted,
+                 "bucket_videos": bucket_videos}
         try:
             server = make_server(db, STATS_PORT, names, site, brand, videos, **hooks)
         except OSError:
