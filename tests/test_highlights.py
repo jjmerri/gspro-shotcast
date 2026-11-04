@@ -123,10 +123,10 @@ def test_a_scramble_doesnt_fill_a_hole_or_count_the_balls_not_played():
 
 def test_most_moments_and_the_cap():
     shots = [shot("Ann", h, 2, h * 10, putt=True, to_pin=15, outcome="holed") for h in range(1, 13)]
-    assert len(H.pick(shots)) == H.MAX_MOMENTS
+    assert len(H.pick(shots, seconds=1e9)) == H.MAX_MOMENTS
     old = [{k: v for k, v in x.items() if k not in ("picked", "hazard_x", "tags", "shared_ball", "gimme_yards")}
            for x in shots]   # an older database's shots
-    assert len(H.pick(old)) == H.MAX_MOMENTS
+    assert len(H.pick(old, seconds=1e9)) == H.MAX_MOMENTS
 
 
 def _reel(*ts):
@@ -220,3 +220,25 @@ def test_a_clip_runs_till_the_booth_is_done_talking_about_it_and_never_stops_mid
     nxt["ts"] = 113   # already in the clip, as is the line under way after it
     db.execute("UPDATE lines SET ts = 113.5 WHERE kind = 'segment'")
     assert H._post(20.0, chip, chip, H._talk(db, [chip, nxt])) == round(123.5 + H.TALK_TAIL + H.TALK_LAG - 100, 1)
+
+
+def test_the_booths_logged_air_times_place_its_lines_and_one_never_aired_is_skipped():
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE lines (id INTEGER PRIMARY KEY, session_id, shot_id, ts, kind, text, aired_at, aired_seconds)")
+    chip = {**shot("Ann", 1, 3, 100, to_pin=30, finish=1.5), "session_id": 1}
+    db.executemany("INSERT INTO lines (session_id, shot_id, ts, kind, text, aired_at, aired_seconds)"
+                   " VALUES (?,?,?,?,?,?,?)",
+                   [(1, chip["id"], 108.0, "shot", "a few words", 109.0, 12.0),   # longer than its words
+                    (1, chip["id"], 108.0, "shot", " ".join(["word"] * 50), None, None)])   # cut off
+    talk = H._talk(db, [chip])
+    assert H._post(H.POST_SHOT, chip, chip, talk) == round(121.0 + H.TALK_TAIL + H.STREAM_LAG - 100, 1)
+    shift = H.STREAM_LAG - H.TALK_LAG
+    assert talk[1][1] == [(109.0 + shift, 121.0 + shift)]
+    db.execute("ALTER TABLE lines DROP COLUMN aired_at")   # an older database: by its words
+    assert H._talk(db, [chip])[0][chip["id"]] > 121.0
+
+
+def test_a_reel_keeps_to_its_length():
+    shots = [shot("Ann", h, 2, h * 100, putt=True, to_pin=15, outcome="holed") for h in range(1, 13)]
+    clip = H.PRE + H.POST_PUTT + H.CLIP_SLACK
+    assert len(H.pick(shots, seconds=3 * clip + 1)) == 3

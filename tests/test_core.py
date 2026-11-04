@@ -467,6 +467,45 @@ async def test_speech_queue_pauses_between_lines_but_not_after_silence():
         task.cancel()
 
 
+async def test_a_logged_line_gets_the_time_it_played_whichever_comes_first(tmp_path):
+    import sqlite3
+
+    from commentator.models import Line
+    from commentator.store import Store
+    from commentator.tts.base import TTS, Audio
+
+    class QuickTTS(TTS):
+        async def synthesize(self, text, voice, instructions=None):
+            return Audio(samples=text, sample_rate=1)
+
+    async def fake_play(audio):
+        await asyncio.sleep(0.05)
+
+    path = tmp_path / "season.db"
+    with sqlite3.connect(path) as db:   # a database from before air times were logged
+        db.execute("CREATE TABLE lines (id INTEGER PRIMARY KEY, session_id INTEGER, shot_id INTEGER,"
+                   " ts REAL, kind TEXT, speaker TEXT, text TEXT, excluded INTEGER NOT NULL DEFAULT 0)")
+    store = Store(str(path))
+    speech = SpeechQueue(Config(), QuickTTS(), player=fake_play)
+    speech.on_aired = store.mark_aired
+    task = asyncio.create_task(speech.run())
+    try:
+        early, late = Line("pbp", "logged first"), Line("color", "played first")
+        store.record_lines("shot", [early])
+        began = time.time()
+        speech.say([early, late])
+        while not speech.is_idle():
+            await asyncio.sleep(0.01)
+        store.record_lines("reaction", [late])
+        rows = store.db.execute("SELECT text, aired_at, aired_seconds FROM lines ORDER BY id").fetchall()
+        assert [r[0] for r in rows] == ["logged first", "played first"]
+        assert all(began - 0.01 <= r[1] <= time.time() and 0.04 <= r[2] < 1 for r in rows)
+        assert rows[1][1] > rows[0][1]
+    finally:
+        task.cancel()
+        store.close()
+
+
 class _StallingTTS:
     """A remote voice whose listed calls hang (a stalled cloud request); the rest answer at once."""
 

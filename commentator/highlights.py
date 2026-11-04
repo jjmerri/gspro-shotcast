@@ -26,6 +26,8 @@ from . import interest as I
 from .live_stream import TYPES, segment_durations
 
 MAX_MOMENTS = 8
+REEL_SECONDS = 180.0      # ...and no more than fit in this long a reel (each clip: PRE, its post, and
+CLIP_SLACK = 8.0          # this, as its ends round out to the stream's 4 s segments)
 MIN_LEVEL = 6             # a moment the booth rates under this (out of 10) isn't a big one...
 OK_LEVEL = 5              # ...and a solid shot under it (OK_*) fills the reel's other places
 MIN_FINAL = 4.5           # ...nor one whose score, less what's already picked, is this or less (a bad 5 is 4.75)
@@ -38,6 +40,7 @@ POST_PUTT, POST_SHOT, POST_BIG = 12.0, 16.0, 20.0   # ...and after: a putt, a fu
 # next swing
 TALK_WORDS_PER_SECOND, TALK_GAP, TALK_TAIL, TALK_LAG, TALK_MAX = 2.7, 0.6, 1.5, 6.0, 45.0
 TALK_LOOKAHEAD = 4.0
+STREAM_LAG = 4.5          # where the booth logged when a line played (aired_at): heard this much later
 REACTION_SECONDS = 30.0   # a reaction (logged with no shot) is to the last shot this recently before it
 CLOSE_FROM_YARDS, CLOSE_FEET = 100.0, 15.0          # the booth's close_approach_* defaults
 BIG_DRIVE_YARDS = 300.0   # a round's longest drive from here is a moment
@@ -225,19 +228,31 @@ def _bests(shots: list[dict], before: dict[str, dict]) -> tuple[set[int], dict[i
 
 def _talk(db: sqlite3.Connection, shots: list[dict]) -> tuple:
     """(shot id -> when the booth was done talking about it: its call and any reaction to it;
-    session -> every line's (started, done); session -> its shots' times), in logged time."""
+    session -> every line's (started, done); session -> its shots' times), in logged time. A line
+    the booth noted the air time of is placed by that (and in a session with any, one without never
+    aired: an interrupted exchange's rest); others by their words, after the exchange before."""
     try:
-        rows = db.execute("SELECT session_id, shot_id, ts, kind, text FROM lines ORDER BY ts, id").fetchall()
+        rows = db.execute("SELECT session_id, shot_id, ts, kind, text, aired_at, aired_seconds FROM lines"
+                          " ORDER BY ts, id").fetchall()
     except sqlite3.OperationalError:
-        return ()   # (a database from before the booth logged its lines)
+        try:
+            rows = [(*r, None, None) for r in db.execute(
+                "SELECT session_id, shot_id, ts, kind, text FROM lines ORDER BY ts, id")]
+        except sqlite3.OperationalError:
+            return ()   # (a database from before the booth logged its lines)
+    noted = {r[0] for r in rows if r[5] is not None}
+    shift = STREAM_LAG - TALK_LAG   # (an aired time, as the logged time it's heard the same as)
     by_session: dict[int, list[dict]] = {}
     for s in shots:
         by_session.setdefault(s["session_id"], []).append(s)
     times = {k: [s["ts"] for s in v] for k, v in by_session.items()}
     batches: dict[tuple[int, float], list] = {}   # an exchange's lines share the time they're logged
-    for session, shot_id, ts, kind, text in rows:
+    for session, shot_id, ts, kind, text, aired_at, aired_seconds in rows:
+        if session in noted and aired_at is None:
+            continue
         b = batches.setdefault((session, ts), [[], set()])
-        b[0].append(len((text or "").split()) / TALK_WORDS_PER_SECOND)
+        b[0].append((aired_at + shift, aired_at + shift + (aired_seconds or 0.0)) if aired_at is not None
+                    else len((text or "").split()) / TALK_WORDS_PER_SECOND)
         if shot_id is None and kind == "reaction":
             i = bisect.bisect_right(times.get(session, []), ts) - 1
             if i >= 0 and ts - times[session][i] <= REACTION_SECONDS:
@@ -249,12 +264,21 @@ def _talk(db: sqlite3.Connection, shots: list[dict]) -> tuple:
     busy: dict[int, float] = {}
     for (session, ts), (lines, about) in sorted(batches.items(), key=lambda kv: kv[0][1]):
         at = max(ts, busy.get(session, 0.0))   # (an exchange waits for the one before it)
+        done = at
         for seconds in lines:
+            if isinstance(seconds, tuple):
+                spoken.setdefault(session, []).append(seconds)
+                done = at = max(done, seconds[1])
+                at += TALK_GAP
+                continue
             spoken.setdefault(session, []).append((at, at + seconds))
-            at += seconds + TALK_GAP
-        done = busy[session] = at - TALK_GAP
+            done = at + seconds
+            at = done + TALK_GAP
+        busy[session] = done
         for shot_id in about:
             per_shot[shot_id] = max(per_shot.get(shot_id, 0.0), done)
+    for v in spoken.values():
+        v.sort()
     return per_shot, spoken, times
 
 
@@ -281,6 +305,7 @@ def _post(post: float, at: dict, last: dict, talk: tuple | None) -> float:
 
 
 def pick(shots: list[dict], most: int = MAX_MOMENTS, sides: dict[str, int] | None = None,
+         seconds: float = REEL_SECONDS,
          before: dict[str, dict] | None = None, talk: tuple | None = None) -> list[dict]:
     """A round's highlight moments, in the order they happened. Picked best first (the booth's
     excitement, a notch more for a shot that set up a birdie or better; solid shots, OK_*, fill in), a
@@ -355,13 +380,15 @@ def pick(shots: list[dict], most: int = MAX_MOMENTS, sides: dict[str, int] | Non
     per_player = dict.fromkeys({m["shot"]["player"] for m in pool}, 0)   # (one with nothing to show: no say)
     per_hole: dict[int, list[dict]] = {}
     bad_by: set[str] = set()
+    used = 0.0
+    clip = lambda m: PRE + m["post"] + CLIP_SLACK
     while len(picked) < most:
         best, best_score = None, MIN_FINAL
         for m in pool:
             who, on = m["shot"]["player"], per_hole.get(m["hole"], [])
             # (a bad one only behind as many good ones: the reel's never mostly mistakes)
             if m in picked or len(on) >= 2 or (m["bad"] and (who in bad_by or len(bad_by) >= len(picked) - len(bad_by))) \
-                    or any(x["shot"] is m["shot"] for x in on):
+                    or any(x["shot"] is m["shot"] for x in on) or used + clip(m) > seconds:
                 continue
             # (against the player with fewest: a solo round isn't held back)
             score = m["score"] - 0.75 * (per_player[who] - min(per_player.values())) - 1.0 * len(on)
@@ -370,6 +397,7 @@ def pick(shots: list[dict], most: int = MAX_MOMENTS, sides: dict[str, int] | Non
         if best is None:
             break
         picked.append(best)
+        used += clip(best)
         who = best["shot"]["player"]
         per_player[who] += 1
         per_hole.setdefault(best["hole"], []).append(best)

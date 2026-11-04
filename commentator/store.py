@@ -122,7 +122,9 @@ CREATE TABLE IF NOT EXISTS lines (
     kind TEXT NOT NULL,                          -- preshot / flight / shot / segment
     speaker TEXT NOT NULL,
     text TEXT NOT NULL,
-    excluded INTEGER NOT NULL DEFAULT 0          -- its round's: 1 = excluded from the stats, 2 = deleted (stats_web)
+    excluded INTEGER NOT NULL DEFAULT 0,         -- its round's: 1 = excluded from the stats, 2 = deleted (stats_web)
+    aired_at REAL,                               -- when it started playing (NULL: not aired, or logged before this was)
+    aired_seconds REAL                           -- ...and how long it played
 );
 CREATE TABLE IF NOT EXISTS form_mentions (           -- round-sheet angles the booth used, per player
     id INTEGER PRIMARY KEY,
@@ -395,8 +397,10 @@ class Store:
         for col, decl in pr_added.items():
             if col not in have_pr:
                 self.db.execute(f"ALTER TABLE player_rounds ADD COLUMN {col} {decl}")
-        if "excluded" not in {r["name"] for r in self.db.execute("PRAGMA table_info(lines)")}:
-            self.db.execute("ALTER TABLE lines ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
+        have_lines = {r["name"] for r in self.db.execute("PRAGMA table_info(lines)")}
+        for col, decl in {"excluded": "INTEGER NOT NULL DEFAULT 0", "aired_at": "REAL", "aired_seconds": "REAL"}.items():
+            if col not in have_lines:
+                self.db.execute(f"ALTER TABLE lines ADD COLUMN {col} {decl}")
         if "tee_box" not in {r["name"] for r in self.db.execute("PRAGMA table_info(hole_layouts)")}:
             self.db.execute("ALTER TABLE hole_layouts ADD COLUMN tee_box TEXT")
         if self.db.execute("PRAGMA user_version").fetchone()[0] < 1:
@@ -967,13 +971,31 @@ class Store:
     def record_lines(self, kind: str, lines: list[Line], shot_id: int | None = None) -> None:
         # Said about a round already excluded or deleted on the stats page (a closer): so is the line
         # (worked out in the INSERT, so a delete can't land between).
+        # Each line keeps its rows (`_line_ids`), for when it airs (mark_aired); one that's already
+        # aired gets its air time now.
         now = time.time()
-        self.db.executemany(
-            "INSERT INTO lines (session_id, shot_id, ts, kind, speaker, text, excluded) VALUES (?1,?2,?3,?4,?5,?6,"
-            " COALESCE(CASE WHEN ?2 IS NOT NULL THEN (SELECT excluded FROM shots WHERE id = ?2)"
-            " ELSE (SELECT MAX(excluded) FROM rounds WHERE session_id = ?1 AND ended_at > ?3 - ?7 AND ended_at <= ?3) END, 0))",
-            [(self.session_id, shot_id, now, kind, l.speaker, l.text, CLOSER_SECONDS) for l in lines],
-        )
+        for l in lines:
+            aired = getattr(l, "_aired", None) or (None, None)
+            cur = self.db.execute(
+                "INSERT INTO lines (session_id, shot_id, ts, kind, speaker, text, excluded, aired_at, aired_seconds)"
+                " VALUES (?1,?2,?3,?4,?5,?6,"
+                " COALESCE(CASE WHEN ?2 IS NOT NULL THEN (SELECT excluded FROM shots WHERE id = ?2)"
+                " ELSE (SELECT MAX(excluded) FROM rounds WHERE session_id = ?1 AND ended_at > ?3 - ?7 AND ended_at <= ?3) END, 0),"
+                " ?8, ?9)",
+                (self.session_id, shot_id, now, kind, l.speaker, l.text, CLOSER_SECONDS, *aired))
+            try:
+                l._line_ids = [*getattr(l, "_line_ids", []), cur.lastrowid]
+            except AttributeError:
+                pass   # (a line that can't carry them: its air time goes unlogged)
+        self.db.commit()
+
+    def mark_aired(self, line: Line, began: float, seconds: float) -> None:
+        """Note when a logged line started playing and for how long (the highlight reels' cuts)."""
+        ids = getattr(line, "_line_ids", None)
+        if not ids:
+            return
+        self.db.executemany("UPDATE lines SET aired_at = ?, aired_seconds = ? WHERE id = ?",
+                            [(began, round(seconds, 2), i) for i in ids])
         self.db.commit()
 
     def spoken_lines(self) -> list[str]:

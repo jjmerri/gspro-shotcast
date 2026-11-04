@@ -209,6 +209,9 @@ class SpeechQueue:
         # Where per-request TTS rows and per-line air rows go (the engine's UsageLog), for the cost and
         # latency summary (`commentator cost`). None: not recorded.
         self.usage = None
+        # Told of each line once it's played: (line, when it started (time.time()), seconds it ran).
+        # The line also keeps them (`_aired`), for one logged after it's played.
+        self.on_aired = None
 
     def _record(self, row: dict) -> None:
         if self.usage is None:
@@ -252,6 +255,14 @@ class SpeechQueue:
         self.audio_stats["spoken_clips"] += 1
         self.audio_stats["spoken_chars"] += len(text)
         self.audio_stats["spoken_seconds"] += _aired_seconds(audio)
+
+    def _aired(self, line: Line, began: float, seconds: float) -> None:
+        line._aired = (began, seconds)
+        if self.on_aired is not None:
+            try:
+                self.on_aired(line, began, seconds)
+            except Exception as e:
+                log.debug("Line's air time not noted: %s", e)
 
     def say(self, lines: list[Line], interrupt: bool = False, deadline: float | None = None,
             banter: bool = False, hold: bool = False) -> None:
@@ -715,6 +726,7 @@ class SpeechQueue:
                 wait = time.monotonic() - queued if queued is not None else None
                 if wait is not None and wait > _SLOW_LINE_SECONDS:
                     log.info("Line started %.1fs after it was queued: %s", wait, line.text)
+                began = time.time()
                 if audio is not None:
                     if not streamed:   # a streamed clip is counted once it has finished playing
                         self._count_spoken(line.text, audio)
@@ -731,6 +743,7 @@ class SpeechQueue:
                         raise
                 except Exception:
                     log.exception("Audio playback failed")
+                self._aired(line, began, time.time() - began)
                 if gen == self._generation:
                     self._last_end, self._last_speaker = time.monotonic(), line.speaker
                 if streamed:

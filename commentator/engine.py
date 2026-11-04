@@ -734,6 +734,8 @@ class Engine:
         self.plan: FlightPlan | None = None
         # In-memory unless the caller passes the season database; replays use made-up shots.
         self.store = store or Store(None)
+        if hasattr(self.speech, "on_aired") and hasattr(self.store, "mark_aired"):
+            self.speech.on_aired = self.store.mark_aired   # each logged line's air time, for the reels' cuts
         self._publish_task: asyncio.Task | None = None
         self._publish_lock = asyncio.Lock()
         # The live stream on the stats page: OBS's output, mirrored to the bucket (live_stream.py).
