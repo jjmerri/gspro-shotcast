@@ -985,14 +985,17 @@ def test_the_recap_player_times_its_lines_over_the_clips():
     script = """
 const esc = s => String(s), toPar = n => String(n), state = {};
 const on = o => { o.ev = {}; o.addEventListener = (k, f) => (o.ev[k] ||= []).push(f); o.fire = k => (o.ev[k] || []).forEach(f => f({ target: o.t })); return o; };
-const document = { createElement: () => on({ classList: { toggle() {} }, style: { setProperty(k, v) { this[k] = v; } } }) };
+// A frame of the recording with black bars in it, 8 of 160 columns each side.
+const frame = new Uint8ClampedArray(160 * 90 * 4).map((_, i) => (i / 4 %% 160 < 8 || i / 4 %% 160 >= 152) ? 0 : 200);
+const document = { createElement: () => on({ classList: { toggle() {} }, style: { setProperty(k, v) { this[k] = v; } },
+  getContext: () => ({ drawImage() {}, getImageData: () => ({ data: frame }) }) }) };
 const saved = {}, store = { get: k => saved[k] ?? null, set: (k, v) => { saved[k] = v; } };
 const heard = [], log = [];
 let audio;
 class Audio { constructor() { audio = on(this); this.paused = true; }
   play() { this.paused = false; heard.push(this.src.split("/").pop()); return Promise.resolve(); }
   pause() { this.paused = true; } removeAttribute() {} }
-const video = on({ currentTime: 0, paused: true, muted: true,
+const video = on({ currentTime: 0, paused: true, muted: true, readyState: 4, clientWidth: 1000, clientHeight: 562.5, videoWidth: 1600, videoHeight: 900,
   play() { this.paused = false; log.push("play@" + this.currentTime); return Promise.resolve(); },
   pause() { this.paused = true; log.push("pause@" + this.currentTime); this.fire("pause"); } });
 const BODY = %s;
@@ -1018,6 +1021,7 @@ setTimeout(() => {
   audio.fire("ended");             // c2b done -> the next clip
   at(11.6);                        // c3, still going as the video ends (a pause, then the end)
   boards.push(r.board.hidden, r.board.innerHTML.includes("thru 4") && r.board.innerHTML.includes('class="on"'));
+  const fit = [r.board.style["--px"], r.board.style["--in"]];   // in from the recording's own bars
   at(16.5); boards.push(r.board.hidden); at(11.6);
   video.ended = true; video.pause(); video.fire("ended");
   const tail = [audio.paused, r.phase];
@@ -1026,7 +1030,7 @@ setTimeout(() => {
   const outro = r.card.innerHTML.includes("Standings");
   boards.push(r.board.hidden);
   audio.fire("ended");
-  console.log(JSON.stringify({ boards, stillHeld, start, playing, held, heard, log, tail, outro, done: r.phase, again: r.card.innerHTML.includes("Watch again") }));
+  console.log(JSON.stringify({ fit, boards, stillHeld, start, playing, held, heard, log, tail, outro, done: r.phase, again: r.card.innerHTML.includes("Watch again") }));
 }, 0);
 """ % (json.dumps(body), fns)
     got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
@@ -1099,4 +1103,4 @@ setTimeout(() => {
     assert got["log"] == ["play@0", "pause@4.2", "play@4.2", "pause@10.1", "play@10.1", "pause@11.6"] and got["done"] == "done"
     assert got["tail"] == [False, "clips"] and got["stillHeld"]
     # The net board's up through a clip with one (from the second hole on), gone in the outro.
-    assert got["boards"] == [True, False, True, False, True]
+    assert got["boards"] == [True, False, True, False, True] and got["fit"] == ["50px", "36px"]
