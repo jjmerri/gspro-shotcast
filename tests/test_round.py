@@ -322,7 +322,10 @@ async def test_a_round_played_to_the_end_takes_layouts_gspro_didnt_log_from_the_
     e.round, e.state.shots = r, shots
     await e.handle_round_end(RoundEndEvent(reason="final scorecard"))
     assert calls == []                  # not before GSPro's own can be read
-    await asyncio.sleep(0.05)
+    for _ in range(500):                # a background job: give a slow runner time
+        if calls:
+            break
+        await asyncio.sleep(0.01)
     assert len(calls) == 1 and calls[0] is not None
 
 
