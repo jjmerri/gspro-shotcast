@@ -4,9 +4,10 @@ Maintainer-only: the app never runs this, and nothing here changes what a user i
 uses the production code (stats_site, highlights, the Engine's recap) on a copy of a real season
 database, made safe to show:
 
-  * Josh Merritt (who built Shotcast, and agreed to be shown) keeps his name, his rounds and the booth's
-    commentary on them. Everyone else gets a made-up name everywhere it appears (stats, teams, the
-    shots' raw data, anything the booth said), and the booth's words about anyone else's shots are dropped.
+  * Josh (who built Shotcast, and agreed to be shown) keeps his first name, his rounds and the booth's
+    commentary on them, as "Josh Mercer". Everyone else gets a made-up name everywhere it appears (stats,
+    teams, the shots' raw data, anything the booth said), and the booth's words about anyone else's shots
+    are dropped. Where the recordings' booth says his real surname, it's muted (MUTES, --mute).
   * A made-up league: six teams of those players, whose week 1 is Josh's 71 at Premonition (the only
     league round with a recording) and five other real rounds at made-up handicaps, so the Home tab has
     results and standings and the week has a recap video.
@@ -15,13 +16,20 @@ database, made safe to show:
     broadcast by the stack's function: its hole 8 on a loop, with a scripted chat (CHAT below).
 
     python tools/demo/build.py --db season.db [--no-recap] [--upload]
+    python tools/demo/build.py --stored-db --no-recap --upload   # what .github/workflows/demo.yml runs
     python tools/demo/build.py --live      # just the live loop and its chat
+    python tools/demo/build.py --mute      # mute MUTES in the kept streams (once, after they're copied)
+
+A build from --db keeps its redacted copy of the season, and --upload stores it in the demo bucket
+(demo/season.db, which CloudFront won't serve), so the workflow can rebuild the site whenever the stats
+site's code changes without the real database. It skips the recap (which costs model and TTS calls);
+the last one uploaded stays.
 
 The stack, once (and again with DomainName/CertificateArn once demo.thegolfshed.app's certificate is
 issued; DNS is on Cloudflare: a CNAME from demo to the DistributionDomain output):
 
     aws cloudformation deploy --stack-name shotcast-demo --template-file tools/demo/demo-site.yaml \\
-        --capabilities CAPABILITY_IAM [--parameter-overrides DomainName=... CertificateArn=...]
+        --capabilities CAPABILITY_NAMED_IAM [--parameter-overrides DomainName=... CertificateArn=...]
 
 Needs AWS credentials for the stats bucket (read) and the demo stack (write), and with the recap, the
 keys in .env (the closer's model and TTS).
@@ -50,21 +58,22 @@ STACK = "shotcast-demo"
 REGION = "us-east-1"
 STATS_BUCKET = "shotcast-stats-bucket-9qzb6obvqvt3"
 DEMO_KEEP = "demo-keep/"          # in the stats bucket: the streams shown, and their recordings.json
-ME = "Josh Merritt"
+ME = "Josh Merritt"                 # in the season database
+SHOWN = "Josh Mercer"              # on the demo
 LIVE_SESSION = "20261104-133911-67149a"   # Premonition, Nov 4: the looped "live" round
-ROUND_LABELS = {LIVE_SESSION: "Premonition · Josh Merritt",
-                "20261030-225803-70cea1": "Paynes Valley · Josh Merritt · practice",
-                "20261029-101254-d9d0ae": "Abacoa Golf Club · Josh Merritt · practice"}
+ROUND_LABELS = {LIVE_SESSION: "Premonition · Josh Mercer",
+                "20261030-225803-70cea1": "Paynes Valley · Josh Mercer · practice",
+                "20261029-101254-d9d0ae": "Abacoa Golf Club · Josh Mercer · practice"}
 
 # Real name -> made-up name. Whole names first, then surnames, then first names, so "Kathy Merritt"
-# goes without touching Josh's. Corey keeps his first name: the booth says it on Josh's recordings.
+# gets her own and Josh keeps his first name. Corey keeps his: the booth says it on Josh's recordings.
 NAMES = {
     "Kathy Merritt": "Linda Hayes", "Corey Martin": "Corey Lane", "Dylan Martin": "Ethan Lane",
     "Paul Martin": "Greg Lane", "Kyle Martin": "Ben Lane", "Dan Binder": "Mike Russo",
     "Derek Binder": "Tony Russo", "Drew Binder": "Sam Russo", "Kyle Curley": "Ben Carter",
     "Jay Piwnicki": "Jake Morrow", "Brian Piehler": "Chris Lyons", "Bob Dunn": "Al Fisher",
     "Matt Ferri": "Nate Brooks", "Garrett Norris": "Luke Barrett",
-    "Binder": "Russo", "Martin": "Lane", "Curley": "Carter", "Piwnicki": "Morrow", "Piehler": "Lyons",
+    "Merritt": "Mercer", "Binder": "Russo", "Martin": "Lane", "Curley": "Carter", "Piwnicki": "Morrow", "Piehler": "Lyons",
     "Dunn": "Fisher", "Ferri": "Brooks", "Norris": "Barrett",
     "Kathy": "Linda", "Dylan": "Ethan", "Paul": "Greg", "Kyle": "Ben", "Dan": "Mike", "Derek": "Tony",
     "Drew": "Sam", "Jay": "Jake", "Brian": "Chris", "Bob": "Al", "Matt": "Nate", "Garrett": "Luke",
@@ -76,7 +85,7 @@ _NAME_RE = re.compile(r"\b(" + "|".join(sorted(map(re.escape, NAMES), key=len, r
 # rounds' own, so the stats page and the league agree.
 WEEK1 = {"Josh and Corey": ([79], 2), "Mike and Tony": ([52], 14), "Ben C and Al": ([56, 57], 15),
          "Jake and Chris": ([80, 81], 12), "Sam and Nate": ([51], 26), "Greg and Dean": ([34], 17)}
-TEAMS = {"Josh and Corey": ["Josh Merritt", "Corey Lane"], "Mike and Tony": ["Mike Russo", "Tony Russo"],
+TEAMS = {"Josh and Corey": [SHOWN, "Corey Lane"], "Mike and Tony": ["Mike Russo", "Tony Russo"],
          "Ben C and Al": ["Ben Carter", "Al Fisher"], "Jake and Chris": ["Jake Morrow", "Chris Lyons"],
          "Sam and Nate": ["Sam Russo", "Nate Brooks"], "Greg and Dean": ["Greg Lane", "Dean Price"]}
 WEEK1_END = "2026-11-04"
@@ -85,6 +94,11 @@ POINTS = [70, 60, 50, 45, 40, 35]
 # The "live" loop: hole 8 of that round, segments FIRST..LAST of its stream (tee to the birdie putt and
 # the booth's look ahead to 9), 2 minutes 8 seconds.
 LIVE_SEGMENTS = (350, 381)
+
+# Where the recordings' booth says Josh's real surname: stream -> (from, to) in seconds of the recording
+# (its segments' timestamps), from a word-timed transcript and the gaps either side of the word. --mute silences them.
+MUTES = {LIVE_SESSION: [(65.48, 65.88), (84.18, 84.57), (395.40, 395.80)],
+         "20261029-101254-d9d0ae": [(18.43, 18.80), (32.10, 32.47)]}
 
 # The live chat's script for the loop: seconds into it (a little after each moment shows), who, what.
 # Made up, about what's on screen.
@@ -97,8 +111,14 @@ CHAT = [
 ]
 
 
+# In GitHub Actions the role's credentials are in the environment; on the maintainer's machine, keys
+# there are a .env's (for other things), and the AWS CLI and boto3 should use the default profile.
+IN_CI = os.environ.get("GITHUB_ACTIONS") == "true"
+
+
 def aws_env() -> dict:
-    """The AWS CLI and boto3 use the default profile, not keys a .env put in the environment."""
+    if IN_CI:
+        return dict(os.environ)
     return {k: v for k, v in os.environ.items() if k not in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")}
 
 
@@ -130,10 +150,17 @@ def mine_at(db: sqlite3.Connection) -> "callable":
 
 
 def redact(src: Path, out: Path) -> None:
-    """The demo's copy of the season: everyone but Josh renamed, and the booth's words kept only about him."""
+    """The demo's copy of the season: everyone renamed, and the booth's words kept only about Josh. A copy
+    that's already the demo's (the stored one) is only checked."""
     out.unlink(missing_ok=True)
     shutil.copy(src, out)
     db = sqlite3.connect(out)
+    if not db.execute("SELECT 1 FROM shots WHERE player = ? LIMIT 1", (ME,)).fetchone():
+        demo = db.execute("SELECT 1 FROM shots WHERE player = ? LIMIT 1", (SHOWN,)).fetchone()
+        db.close()
+        if not demo:
+            raise SystemExit(f"{src} isn't a season database with {ME}'s rounds, or the demo's copy of one")
+        return _check(out)
     player_of = dict(db.execute("SELECT id, player FROM shots"))
     is_mine = mine_at(db)
     drop = [i for i, sess, shot, ts in db.execute("SELECT id, session_id, shot_id, ts FROM lines")
@@ -161,6 +188,10 @@ def redact(src: Path, out: Path) -> None:
     db.commit()
     db.execute("VACUUM")
     db.close()
+    _check(out)
+
+
+def _check(out: Path) -> None:
     leaks = sorted({w for w in NAMES if " " not in w and _leaks(out, w)})
     if leaks:
         raise SystemExit(f"Real names still in the demo database: {leaks}")
@@ -197,7 +228,7 @@ def league_data() -> dict:
         "teams": [{"name": t, "number": f"Team {i}", "aliases": [], "players": [
             {"name": p, "aliases": [p.split()[0]], "handicap": None, "pronouns": "he/him", "notes":
              "Built this booth. An occasional light ribbing about that is fine, but don't lean on it."
-             if p == ME else ""} for p in players]} for i, (t, players) in enumerate(TEAMS.items(), 1)],
+             if p == SHOWN else ""} for p in players]} for i, (t, players) in enumerate(TEAMS.items(), 1)],
         "schedule": schedule,
     }
 
@@ -271,6 +302,9 @@ class Overlay:
 
 
 CACHE = WORK / "segments"
+SOURCE = WORK / "demo-source.db"      # the redacted season, before the build adds the league's results
+SOURCE_KEY = "demo/season.db"         # where --upload keeps it, for --stored-db
+TOUR = Path(__file__).with_name("tour.js")
 
 
 # ---- the build ------------------------------------------------------------------------------------
@@ -296,6 +330,7 @@ def build(db_src: Path, recap: bool) -> None:
     from commentator.stats_web import round_groups
     from commentator.store import Store
     from commentator.tts import build_tts
+    from commentator.tts.console_tts import ConsoleTTS
     from tests.test_core import FakeLLM
 
     WORK.mkdir(parents=True, exist_ok=True)
@@ -303,6 +338,8 @@ def build(db_src: Path, recap: bool) -> None:
     (SITE / "live").mkdir(parents=True)
     db_path = WORK / "season.db"
     redact(db_src, db_path)
+    if db_src.resolve() != SOURCE.resolve():
+        shutil.copy(db_path, SOURCE)
 
     client = Overlay()
     recs = json.loads(client.s3.get_object(Bucket=STATS_BUCKET, Key=DEMO_KEEP + "recordings.json")["Body"].read())
@@ -321,6 +358,7 @@ def build(db_src: Path, recap: bool) -> None:
 
     reels: dict = {}
     stats_site.build(db_path, SITE, reels=reels, site_name="Shotcast demo")
+    add_tour()
     _, of_row = round_groups(store.db)
     t = time.time()
     shown = {of_row[i] for i in WEEK1["Josh and Corey"][0]}
@@ -332,7 +370,7 @@ def build(db_src: Path, recap: bool) -> None:
     cfg.publish.bucket, cfg.publish.prefix = "demo", ""
     llm = FakeLLM(cfg.llm.live)
     e = Engine(cfg=cfg, league=league, source=ReplaySource(str(REPO / "data/sample_shots.jsonl")), live_llm=llm,
-               segment_llm=llm, speech=SpeechQueue(cfg, build_tts(cfg.tts)),
+               segment_llm=llm, speech=SpeechQueue(cfg, build_tts(cfg.tts) if recap else ConsoleTTS()),
                closer_llm=build_llm(cfg.llm.closer) if recap else llm, store=store, rng=random.Random(0))
     e.board = Board({}, league, POINTS)
     e._s3 = lambda: client
@@ -348,6 +386,27 @@ def build(db_src: Path, recap: bool) -> None:
         print(f"recap: {time.time() - t:.0f}s")
 
     write_live(client)
+
+
+def add_tour() -> None:
+    """The demo's walkthrough (tour.js): its own file, and a script tag in the demo's copy of the page."""
+    import hashlib
+    js = TOUR.read_bytes()
+    (SITE / "tour.js").write_bytes(js)
+    page = SITE / "index.html"
+    tag = f'<script src="tour.js?v={hashlib.sha256(js).hexdigest()[:10]}"></script>\n</body>'
+    html = page.read_text(encoding="utf-8")
+    if html.count("</body>") != 1:
+        raise SystemExit("The page has no single </body> for the tour's script")
+    page.write_text(html.replace("</body>", tag), encoding="utf-8")
+
+
+def stored_db() -> Path:
+    """The redacted season the last --db build uploaded (demo/season.db), for a build without the real one."""
+    import boto3
+    WORK.mkdir(parents=True, exist_ok=True)
+    boto3.Session().client("s3", region_name=REGION).download_file(stack_outputs()["BucketName"], SOURCE_KEY, str(SOURCE))
+    return SOURCE
 
 
 def write_live(client) -> None:
@@ -368,6 +427,38 @@ def upload_live() -> None:
     print("live loop up")
 
 
+def mute() -> None:
+    """Silence MUTES in the kept streams' segments, in the stats bucket's DEMO_KEEP (what builds read) and
+    the demo's copy. The video is copied untouched and the timestamps kept, so the playlists still fit."""
+    import tempfile
+
+    import boto3
+    from commentator.burn import ffmpeg
+    from commentator.live_stream import TYPES
+
+    s3 = boto3.Session().client("s3", region_name=REGION)
+    demo = stack_outputs()["BucketName"]
+    for sess, spans in MUTES.items():
+        full = s3.get_object(Bucket=STATS_BUCKET, Key=f"{DEMO_KEEP}s/{sess}/full.m3u8")["Body"].read().decode()
+        t, segs = 0.0, []
+        for d, name in zip(re.findall(r"#EXTINF:([\d.]+)", full), re.findall(r"^(stream\d+\.ts)$", full, re.M)):
+            segs.append((t, t + float(d), name))
+            t += float(d)
+        for name in sorted({n for a, b, n in segs for x, y in spans if x < b and y > a}):
+            with tempfile.TemporaryDirectory() as tmp:
+                src, out = Path(tmp, "in.ts"), Path(tmp, "out.ts")
+                s3.download_file(STATS_BUCKET, f"{DEMO_KEEP}s/{sess}/{name}", str(src))
+                quiet = "+".join(f"between(t,{x:.2f},{y:.2f})" for x, y in spans)
+                subprocess.run([ffmpeg(), "-loglevel", "error", "-y", "-copyts", "-i", str(src), "-map", "0",
+                                "-c:v", "copy", "-af", f"volume=0:enable='{quiet}'", "-c:a", "aac", "-b:a", "128k",
+                                "-muxdelay", "0", "-muxpreload", "0", "-f", "mpegts", str(out)], check=True)
+                for bucket, key in ((STATS_BUCKET, f"{DEMO_KEEP}s/{sess}/{name}"), (demo, f"live/s/{sess}/{name}")):
+                    s3.upload_file(str(out), bucket, key, ExtraArgs={"ContentType": TYPES[".ts"],
+                                                                     "CacheControl": "public, max-age=86400"})
+            CACHE.joinpath(f"live/s/{sess}/{name}").unlink(missing_ok=True)
+            print("muted", sess, name)
+
+
 # ---- the upload -----------------------------------------------------------------------------------
 
 def upload() -> None:
@@ -384,10 +475,12 @@ def upload() -> None:
              and p.name not in ("index.html", "latest.json")]
     for p in extra:
         key = p.relative_to(SITE).as_posix()
-        s3.upload_file(str(p), bucket, key, ExtraArgs={"ContentType": TYPES.get(p.suffix, "application/octet-stream"),
+        s3.upload_file(str(p), bucket, key, ExtraArgs={"ContentType": TYPES.get(p.suffix) or stats_site.CONTENT_TYPES.get(p.suffix, "application/octet-stream"),
                                                         "CacheControl": "no-cache" if p.suffix in (".json", ".m3u8") else "public, max-age=86400"})
     print("files:", len(extra))
     s3.upload_file(str(WORK / "live.json"), bucket, "demo/live.json", ExtraArgs={"ContentType": "application/json"})
+    if SOURCE.exists():
+        s3.upload_file(str(SOURCE), bucket, SOURCE_KEY)
     there = {o["Key"] for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix="live/s/")
              for o in page.get("Contents", [])}
     copied = 0
@@ -411,18 +504,26 @@ def main() -> None:
     ap.add_argument("--db", type=Path, help="a copy of the season database (the PC's logs/backups/season-*.db.gz, unzipped)")
     ap.add_argument("--no-recap", action="store_true", help="skip the week recap (it calls the closer's model and TTS)")
     ap.add_argument("--upload", action="store_true", help="publish to the shotcast-demo stack")
+    ap.add_argument("--stored-db", action="store_true", help="build from the redacted season the last --db build uploaded")
     ap.add_argument("--live", action="store_true", help="only rewrite and upload the live loop and its chat")
+    ap.add_argument("--mute", action="store_true", help="mute MUTES in the kept streams, the stats bucket's and the demo's")
     a = ap.parse_args()
-    load_env()
-    for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
-        os.environ.pop(k, None)
+    if not IN_CI:
+        load_env()
+        for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+            os.environ.pop(k, None)
     os.chdir(REPO)
+    if a.mute:
+        mute()
+        return
     if a.live:
         write_live(Overlay())
         upload_live()
         return
-    if a.db:
-        build(a.db, not a.no_recap)
+    if a.stored_db and a.db:
+        ap.error("--db or --stored-db, not both")
+    if a.db or a.stored_db:
+        build(a.db or stored_db(), not a.no_recap)
     if a.upload:
         upload()
 

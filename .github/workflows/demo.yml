@@ -1,0 +1,39 @@
+name: demo
+
+# Rebuilds the public demo (demo.thegolfshed.app) from the redacted season stored in its bucket, so the
+# demo keeps up with the stats site. Skips the week recap (model and TTS calls); the last one stays.
+# The role is the shotcast-demo stack's DeployRole (tools/demo/demo-site.yaml), assumable from main only.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "commentator/**"
+      - "tools/demo/**"
+      - "pyproject.toml"
+      - ".github/workflows/demo.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: demo
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e ".[cloud,league,publish,dev]"
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::344268766757:role/shotcast-demo-deploy
+          aws-region: us-east-1
+      - run: python -m pytest -q tests/test_demo_lambda.py
+      - run: python tools/demo/build.py --stored-db --no-recap --upload

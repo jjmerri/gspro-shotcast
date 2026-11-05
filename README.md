@@ -21,13 +21,17 @@ Shot tracking, season stats and an AI broadcast booth for **GSPro 3.1.x** simula
 Use the tracking on its own, or turn the booth on for the full broadcast.
 
 **Try the demo: [demo.thegolfshed.app](https://demo.thegolfshed.app/)**. It's the published stats
-page, with no password, so you can click around everything a league sees. The rounds, shots,
-round replays and booth commentary are real, from the author's sim; the other players have
-made-up names. The league is made up from those rounds: a finished week, its standings, and
-the booth's recap video of it. The **Live** tab loops one recorded hole as if it were on now,
-and its chat is scripted: what you type there shows only to you, and no booth reads it out (the
-real one does). The demo is built and hosted separately ([`tools/demo/`](tools/demo/)), so
-nothing in it changes what you install.
+page, with no password, so you can click around everything a league sees; a short guided tour
+offers itself on the first visit (and the **Tour** button runs it again). The rounds, shots,
+round replays and booth commentary are real, from the author's sim, with the players' names
+changed. Every shot links to its moment in the round's recording: for example,
+[watch this birdie putt on 8 at Premonition](https://demo.thegolfshed.app/#vods?player=Josh+Mercer&vod=20261104-133911-67149a&at=1504),
+or find the ▶ on any shot under **Rounds → Shots**. The league is made up from those rounds: a
+finished week, its standings, and the booth's recap video of it. The **Live** tab loops one
+recorded hole as if it were on now, and its chat is scripted: what you type there shows only to
+you, and no booth reads it out (the real one does). The demo is built and hosted separately
+([`tools/demo/`](tools/demo/)), so nothing in it changes what you install, and it's rebuilt
+whenever the stats site changes on `main`.
 
 https://github.com/user-attachments/assets/a3582249-23be-48c9-bf14-c5d1197671f8
 

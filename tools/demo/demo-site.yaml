@@ -13,6 +13,14 @@ Parameters:
     Type: String
     Default: ""
     Description: An ACM certificate in us-east-1 for DomainName (needed with it)
+  GitHubRepo:
+    Type: String
+    Default: jjmerri/gspro-shotcast
+    Description: The repository whose main branch's workflow (.github/workflows/demo.yml) may rebuild the demo
+  StatsBucket:
+    Type: String
+    Default: shotcast-stats-bucket-9qzb6obvqvt3
+    Description: The stats bucket whose demo-keep/ holds the streams the demo shows (read only)
 
 Conditions:
   HasDomain: !Not [!Equals [!Ref DomainName, ""]]
@@ -316,6 +324,51 @@ Resources:
             Action: s3:GetObject
             Resource: !Sub "${Bucket.Arn}/demo/*"
 
+  # The demo workflow's role (GitHub's OIDC provider is already in the account): it reads the kept streams,
+  # writes the demo bucket and refreshes the distribution, from main only.
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: shotcast-demo-deploy
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepo}:ref:refs/heads/main"
+      Policies:
+        - PolicyName: deploy-demo
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource: !Sub "${Bucket.Arn}/*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt Bucket.Arn
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${StatsBucket}/demo-keep/*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub "arn:aws:s3:::${StatsBucket}"
+                Condition:
+                  StringLike:
+                    s3:prefix: demo-keep/*
+              - Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Ref AWS::StackId
+              - Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
 Outputs:
   BucketName:
     Value: !Ref Bucket
@@ -325,3 +378,5 @@ Outputs:
     Value: !GetAtt Distribution.DomainName
   SiteUrl:
     Value: !If [HasDomain, !Sub "https://${DomainName}/", !Sub "https://${Distribution.DomainName}/"]
+  DeployRoleArn:
+    Value: !GetAtt DeployRole.Arn

@@ -68,3 +68,31 @@ def test_a_viewers_cookie_drops_their_oldest_messages_to_fit(live):
     assert len(cookie) < 3100
     mine = [m for m in json.loads(live(30, cookies=[cookie])["body"])["messages"] if m["name"] == "Me"]
     assert 1 <= len(mine) < 5 and mine[-1]["at"] == 24
+
+
+def test_redact_renames_josh_and_keeps_his_lines_when_run_again(tmp_path):
+    # The demo workflow rebuilds from the already-redacted copy: that must not drop Josh's commentary.
+    import sqlite3
+
+    from commentator.store import Store
+    from tools.demo import build
+
+    src = tmp_path / "season.db"
+    Store(str(src)).db.close()
+    db = sqlite3.connect(src)
+    (sess,) = db.execute("SELECT id FROM sessions").fetchone()
+    db.executemany("INSERT INTO shots (id, session_id, ts, player, is_putt) VALUES (?, ?, ?, ?, 0)",
+                   [(1, sess, 10.0, "Josh Merritt"), (2, sess, 20.0, "Dan Binder")])
+    db.executemany("INSERT INTO lines (session_id, shot_id, ts, kind, speaker, text) VALUES (?, ?, ?, 'shot', 'A', ?)",
+                   [(sess, 1, 10.0, "Josh Merritt finds the fairway."), (sess, 2, 20.0, "Dan Binder pulls it.")])
+    db.commit()
+    db.close()
+
+    once, twice = tmp_path / "once.db", tmp_path / "twice.db"
+    build.redact(src, once)
+    build.redact(once, twice)
+    for out in (once, twice):
+        db = sqlite3.connect(out)
+        assert [p for (p,) in db.execute("SELECT player FROM shots ORDER BY id")] == ["Josh Mercer", "Mike Russo"]
+        assert [t for (t,) in db.execute("SELECT text FROM lines")] == ["Josh Mercer finds the fairway."]
+        db.close()
