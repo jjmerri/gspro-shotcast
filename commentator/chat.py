@@ -87,6 +87,36 @@ class ChatTable:
             ExpressionAttributeValues={":t": {"BOOL": True}},
         )
 
+    # ---- alerts (push.py): the page's subscriptions, which the chat function keeps here ----------
+
+    def set_push_key(self, public: str) -> None:
+        """The booth's public push key, which the page subscribes with (GET /chat/push)."""
+        self._db().put_item(TableName=self.table, Item={"pk": {"S": "push"}, "sk": {"S": "key"},
+                                                        "public": {"S": public}})
+
+    def push_subscriptions(self) -> list:
+        from .push import Subscription
+
+        out, start = [], None
+        while True:
+            args = {"TableName": self.table, "KeyConditionExpression": "pk = :p AND begins_with(sk, :s)",
+                    "ExpressionAttributeValues": {":p": {"S": "push"}, ":s": {"S": "sub#"}}}
+            if start:
+                args["ExclusiveStartKey"] = start
+            resp = self._db().query(**args)
+            for row in resp.get("Items", []):
+                try:
+                    out.append(Subscription(row["sk"]["S"], row["endpoint"]["S"], row["p256dh"]["S"],
+                                            row["auth"]["S"], frozenset(row.get("topics", {}).get("SS", []))))
+                except KeyError:
+                    log.debug("Alerts: skipped a malformed subscription %r", row.get("sk"))
+            start = resp.get("LastEvaluatedKey")
+            if not start:
+                return out
+
+    def drop_push_subscription(self, sub_id: str) -> None:
+        self._db().delete_item(TableName=self.table, Key={"pk": {"S": "push"}, "sk": {"S": sub_id}})
+
 
 def _server_time(resp) -> float | None:
     """AWS's clock when it answered (its Date header, to the second): the messages' stamps are on it,

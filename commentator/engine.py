@@ -53,6 +53,7 @@ from .prompts import (
 from .board import Board, place
 from .booking import Bookings
 from .history import History
+from .alerts import Alerts
 from .chat import ChatMessage, ChatTable, chat_hazard_denial_problems, chat_lead_in_problems, cursor_at, screened_out
 from .news import GolfNews
 from .scores import LiveScores
@@ -657,6 +658,8 @@ class Engine:
         c = cfg.chat
         self.chat = ChatTable(c.table, cfg.publish.region) if c.enabled and c.table and cfg.source.type != "replay" \
             else None
+        # The page's alerts on phones (alerts.py), through the chat table's subscriptions.
+        self.alerts = Alerts(cfg.log_dir, self.chat) if self.chat is not None and c.alerts else None
         self._chat_cursor = cursor_at(time.time())    # the last message read (none before the booth started)
         self._chat_log: list[tuple[ChatMessage, float]] = []   # the recent conversation: (message, read at)
         self._chat_talked = ""                        # the newest message id the booth has talked about
@@ -672,6 +675,7 @@ class Engine:
         self._chat_live: bool | None = None           # what the table was last told: on air or not
         self._chat_beat = float("-inf")
         self._chat_round: int | None = None           # the round the chat was last open for
+        self._alerted_live: int | None = None         # the round the "we're live" alert went out for
         self._chat_since = ""                         # when that round's chat opened (a cursor_at key)
         self._chat_sent_since: str | None = None      # the one the table was last told
         self._aside_nines: set[int] = set()          # nines of this round whose asides are written
@@ -974,6 +978,8 @@ class Engine:
             asyncio.create_task(self._weather_loop(), name="weather")
         if self.chat is not None:
             asyncio.create_task(self._chat_loop(), name="chat")
+        if self.alerts is not None:
+            asyncio.create_task(asyncio.to_thread(self.alerts.start), name="alerts-key")
         if self.bookings is not None:
             self._fetch_bookings("startup")
         if self.cfg.publish.enabled and self.cfg.publish.bucket and self.cfg.source.type != "replay":
@@ -2133,6 +2139,8 @@ class Engine:
         entry = await asyncio.to_thread(recap.publish, client, p.bucket, p.prefix, key, body, video, sources, audio,
                                         digest, season, made=made)
         log.info("League recap of week %s up: %s clips, %.0fs of video", week, entry["clips"], entry["duration"])
+        if self.alerts is not None:
+            await asyncio.to_thread(self.alerts.recap, key, week, entry.get("course"))
 
     def _turn_finder(self, team_reel: dict[str, str]):
         """recap.turn_moments' `find`: a team's shot on a hole of its week's round (highlights.turn_shot),
@@ -2733,6 +2741,8 @@ class Engine:
             # A round's chat is its own: the page shows nothing from before this round's opened.
             self._chat_round, self._chat_since = self.round.id, cursor_at(time.time())
             self._chat_read_at = now
+        if on:
+            self._alert_live()
         since = self._chat_since if on else None
         if on != self._chat_live or since != self._chat_sent_since or now - self._chat_beat >= self.CHAT_HEARTBEAT:
             await asyncio.to_thread(self.chat.set_on_air, on, since)
@@ -2746,6 +2756,17 @@ class Engine:
             self._chat_talked = self._chat_written = self._chat_cursor
             if self._chat_task and not self._chat_task.done():
                 self._chat_task.cancel()
+
+    def _alert_live(self) -> None:
+        """On air in a round with the published stream running: the page's "we're live" alert, once a round."""
+        m = self.live_mirror
+        if (self.alerts is None or self.round is None or self._alerted_live == self.round.id
+                or m is None or not m.on_page):
+            return
+        self._alerted_live = self.round.id
+        who = " · ".join(s.label for s in self.round.sides) or "A round"
+        t = asyncio.create_task(asyncio.to_thread(self.alerts.live, who, self.round.course), name="alert-live")
+        t.add_done_callback(lambda t: t.cancelled() or t.exception())
 
     def _chat_glance_on_shot(self) -> None:
         """A shot was struck: if the booth could talk about the chat once its call is done, read the
@@ -9396,7 +9417,7 @@ class Engine:
         self._recap_soon()   # a league round's reel is up now
 
     async def _publish(self) -> None:
-        from .stats_site import publish_command
+        from .stats_site import publish_command, site_dir
 
         cmd = publish_command(self.cfg)
         if cmd is None:
@@ -9415,6 +9436,8 @@ class Engine:
         if code == 0:
             log.info("Stats page: %s", text.splitlines()[-1] if text else "published")
             self.health.clear("publish.failed", why="published")
+            if self.alerts is not None:
+                await asyncio.to_thread(self.alerts.after_publish, site_dir(self.cfg))
         else:
             last = text.splitlines()[-1] if text else f"exit {code}"
             log.warning("Stats page publish failed: %s", text[-2000:])

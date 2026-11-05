@@ -419,6 +419,11 @@ class Mirror:
     def _recording(self) -> dict | None:
         return next((r for r in self.recordings if r["session"] == self.session), None) if self.session else None
 
+    @property
+    def on_page(self) -> bool:
+        """A stream on, its playlist and the live status uploaded: the page is playing it."""
+        return self.session is not None and self._announced
+
     def clear(self) -> None:
         """Off air. With nothing kept, nothing left in the bucket from a stream that never stopped
         cleanly. Kept: a stream that never stopped cleanly is closed and listed, and any past

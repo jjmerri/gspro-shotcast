@@ -371,6 +371,8 @@ CONFIG_FIELDS: list[tuple[str, str, tuple[str, ...], str, str]] = [
     ("Chat", "At least this far apart (seconds)", ("chat", "min_gap_seconds"), "float", ""),
     ("Chat", "Words per line", ("chat", "max_words"), "int", ""),
     ("Chat", "Ignore messages older than (seconds)", ("chat", "max_age_seconds"), "float", ""),
+    ("Chat", "Phone alerts", ("chat", "alerts"), "bool",
+     "Alerts on phones that turned them on from the stats page: live, rounds, records, recaps (docs/tracking.md#alerts)."),
     ("GSPro", "Shot data from", ("source", "type"), "choice:connector_log|gspro_log|gspro_sniffer",
      "connector_log: GSPconnect's log (Uneekor and the other built-in connectors). gspro_log: GSPro's own log, "
      "any launch monitor, ball data only. gspro_sniffer: Open Connect traffic (needs Npcap)."),

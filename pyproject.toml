@@ -13,6 +13,7 @@ dependencies = [
     "httpx>=0.27",
     "numpy>=1.26",
     "pillow>=10",
+    "cryptography>=42",   # the stats page's phone alerts (push.py)
     "sounddevice>=0.4",   # speaker playback, whichever voice provider
     # Part-of-speech tagging, so the booth hears which descriptive words it keeps reusing (wordwatch.py).
     # The English model isn't on PyPI: it's pinned to spaCy's release wheel.
@@ -49,7 +50,7 @@ shotcast = "commentator.__main__:main"
 include = ["commentator*"]
 
 [tool.setuptools.package-data]
-commentator = ["*.html", "*.ps1", "stats_vendor/*/*"]
+commentator = ["*.html", "*.ps1", "stats_vendor/*/*", "stats_app/*", "stats_app/icons/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

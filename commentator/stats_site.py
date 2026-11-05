@@ -11,6 +11,7 @@ query needs over HTTP range requests, so the page stays fast however long the se
     v/<version>/player/<ctx>/<key>.json   one player's courses, highlights and records
     v/<version>/stats.db            shots and transcripts
     latest.json                     {"version": ...}: which v/ the page reads
+    manifest.webmanifest, sw.js, icons/   the home-screen app and its alerts (docs/tracking.md#alerts)
 
 Each build is a new version, and latest.json is written last, so a page that's open while a new
 round is published keeps reading the old files until it's refreshed.
@@ -36,15 +37,18 @@ from . import stats_web
 PAGE = Path(__file__).with_name("stats_web.html")
 SITE_NAME, MORE_TAB = "Shotcast", "More"   # publish.site_name, publish.more_tab
 VENDOR = Path(__file__).with_name("stats_vendor")
+APP = Path(__file__).with_name("stats_app")   # the service worker and icons, at the site's root
 CONTEXTS = {"all": None, "league": "league", "tournament": "tournament", "practice": "practice"}
 SHOT_FILTERS = ("date", "player", "course", "club", "lie", "round")   # the page's exact-match filters
 SHOT_RANGE = {"from": ">=", "to": "<="}                               # and its date range (YYYY-MM-DD)
 PAGE_SIZE = 1024   # small pages: a lookup fetches little more than the rows it needs
+APP_FILES = ("manifest.webmanifest", "sw.js")
 KEEP_VERSIONS = 2  # the newest, plus the one before for pages opened just before a publish
 
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                  ".json": "application/json", ".wasm": "application/wasm",
-                 ".db": "application/vnd.sqlite3", ".txt": "text/plain; charset=utf-8"}
+                 ".db": "application/vnd.sqlite3", ".txt": "text/plain; charset=utf-8",
+                 ".png": "image/png", ".webmanifest": "application/manifest+json"}
 
 
 def player_key(name: str) -> str:
@@ -146,6 +150,16 @@ def page(site_name: str = SITE_NAME, more_tab: str = MORE_TAB) -> str:
     return html
 
 
+def manifest(site_name: str = SITE_NAME) -> str:
+    """The home-screen app's manifest: the page, standalone, with the logo."""
+    icons = [{"src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+             {"src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
+             {"src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}]
+    return json.dumps({"name": site_name, "short_name": site_name, "start_url": "./", "scope": "./",
+                       "display": "standalone", "background_color": "#0f1715", "theme_color": "#0f1715",
+                       "icons": icons}, indent=1)
+
+
 def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = None,
           records: dict[int, dict] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB,
           local: bool = False, season_start: str | None = None, reels: dict[int, dict] | None = None) -> str:
@@ -178,6 +192,8 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
         if reels is not None:
             reels.update(highlights.rounds(src))
     (site / "index.html").write_text(page(site_name, more_tab), encoding="utf-8")
+    (site / "manifest.webmanifest").write_text(manifest(site_name), encoding="utf-8")
+    shutil.copytree(APP, site, dirs_exist_ok=True)
     for lib in VENDOR.iterdir():
         if lib.is_dir():
             shutil.copytree(lib, site / "vendor" / lib.name, dirs_exist_ok=True)
@@ -214,6 +230,7 @@ def upload(site: str | Path, bucket: str, prefix: str = "", client: Any = None) 
     keep = {f"v/{version}/"}
     order = ([p for p in files if rel(p).startswith(f"v/{version}/")]
              + [p for p in files if rel(p).startswith("vendor/")]
+             + [p for p in files if rel(p) in APP_FILES or rel(p).startswith("icons/")]
              + [site / "index.html"])
     existing = _list(client, bucket, prefix)
     for path in order:
@@ -266,6 +283,11 @@ def publish(db_path: str | Path, site: str | Path, bucket: str, prefix: str = ""
     return version
 
 
+def site_dir(cfg: Any) -> Path:
+    """Where the booth builds the site before uploading it."""
+    return Path(cfg.log_dir) / "stats-site"
+
+
 def publish_command(cfg: Any) -> list[str] | None:
     """The command that publishes the site for this config (the booth after a round, the tray after
     an edit on the local page), or None without a bucket."""
@@ -276,7 +298,7 @@ def publish_command(cfg: Any) -> list[str] | None:
         return None
     names = {key: persona.name for key, persona in cfg.personas.items()}
     return [sys.executable, "-m", "commentator.stats_site", "--db", str(cfg.db_path),
-            "--site", str(Path(cfg.log_dir) / "stats-site"), "--bucket", p.bucket, "--prefix", p.prefix,
+            "--site", str(site_dir(cfg)), "--bucket", p.bucket, "--prefix", p.prefix,
             "--names", json.dumps(names), "--site-name", p.site_name, "--more-tab", p.more_tab] \
         + (["--region", p.region] if p.region else []) \
         + (["--season-start", p.season_start] if p.season_start else [])

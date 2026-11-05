@@ -544,3 +544,23 @@ async def test_a_take_waits_for_the_shot_the_viewer_watched_to_be_recorded(tmp_p
     del e._shots_unrecorded[1]
     await _settle(e)
     assert "sent watching Frankie's shot 2 on hole 4 (7I)" in e.live_llm.prompts[0]
+
+
+async def test_the_live_alert_waits_for_the_stream_and_goes_once_a_round(tmp_path):
+    e = _booth(tmp_path)
+    _in_a_round(e)
+    sent = []
+    e.alerts = SimpleNamespace(live=lambda who, course: sent.append((who, course)))
+    e.live_mirror = SimpleNamespace(on_page=False)
+    await e._chat_tick()
+    await asyncio.sleep(0.05)
+    assert sent == []                                   # on air, but OBS isn't streaming yet
+    e.live_mirror.on_page = True
+    for _ in range(2):
+        await e._chat_tick()
+        await asyncio.sleep(0.05)
+    assert sent == [("Paul", "Pebble Beach")]
+    _in_a_round(e, rid=2)
+    await e._chat_tick()
+    await asyncio.sleep(0.05)
+    assert len(sent) == 2

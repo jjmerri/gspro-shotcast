@@ -81,7 +81,10 @@ or shot on the stats page has a **▶ Watch** button that jumps to that moment i
 and a half an hour of uploads plus about 50 cents a month to keep a busy week, and watching is
 within CloudFront's free tier for a league. See [Live stream](docs/tracking.md#live-stream). Viewers
 can chat alongside it, and the booth talks about the chat on air between shots; each round starts
-with an empty chat. See [Live chat](docs/tracking.md#live-chat). With
+with an empty chat. See [Live chat](docs/tracking.md#live-chat). Players can add the page to their
+phone's home screen (**📲 Get the app**) and get alerts when the booth goes live, a round is posted, a
+league record falls, someone makes an eagle or ace, or the league recap is up. See
+[Alerts](docs/tracking.md#alerts). With
 SuperSaaS bookings on, a **Schedule** tab shows who has the sim booked for the next two weeks.
 
 **Local vs published.** The tray's stats page is local: it runs on the sim PC over the database and
@@ -98,6 +101,7 @@ needs no setup. Publishing it puts the same page online and adds the rest:
 | Share links other people can open | | ✅ |
 | **Live** tab and its chat (needs the [live stream](docs/tracking.md#live-stream)) | | ✅ |
 | **Round replays** tab and **▶ Watch** buttons (needs the live stream) | | ✅ |
+| Home-screen app and phone alerts (needs the [chat](docs/tracking.md#live-chat)) | | ✅ |
 | **Schedule** tab (needs SuperSaaS bookings) | | ✅ |
 
 ## The booth

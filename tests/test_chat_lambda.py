@@ -39,11 +39,16 @@ class FakeTable:
             raise ConditionFailed()
         item["n"] = {"N": str(n + 1)}
 
-    def query(self, TableName, ExpressionAttributeValues, ScanIndexForward, Limit, **_):
-        pk, after = ExpressionAttributeValues[":p"]["S"], ExpressionAttributeValues[":s"]["S"]
-        rows = sorted((v for (p, s), v in self.items.items() if p == pk and s > after), key=lambda i: i["sk"]["S"],
-                      reverse=not ScanIndexForward)
-        return {"Items": rows[:Limit]}
+    def delete_item(self, TableName, Key):
+        self.items.pop((Key["pk"]["S"], Key["sk"]["S"]), None)
+
+    def query(self, TableName, KeyConditionExpression, ExpressionAttributeValues, ScanIndexForward=True, Limit=None,
+              Select=None, **_):
+        pk, s0 = ExpressionAttributeValues[":p"]["S"], ExpressionAttributeValues[":s"]["S"]
+        match = (lambda s: s.startswith(s0)) if "begins_with" in KeyConditionExpression else (lambda s: s > s0)
+        rows = sorted((v for (p, s), v in self.items.items() if p == pk and match(s)), key=lambda i: i["sk"]["S"],
+                      reverse=not ScanIndexForward)[:Limit]
+        return {"Count": len(rows)} if Select == "COUNT" else {"Items": rows}
 
 
 @pytest.fixture
@@ -136,3 +141,32 @@ def test_what_the_viewer_was_watching_is_kept_for_the_booth_only_when_its_well_f
                     {"sess": "20261103-2010", "behind": "9.00"}, {}, {}, {}, {}, {}]
     _, body = call(chat)
     assert all(set(m) == {"id", "name", "text", "at", "aired"} for m in body["messages"])   # not shown to viewers
+
+
+def _subscription(endpoint="https://fcm.googleapis.com/fcm/send/abc"):
+    return {"endpoint": endpoint, "keys": {"p256dh": "B" + "x" * 86, "auth": "a" * 22}}
+
+
+def test_alerts_give_out_the_booths_key_and_keep_a_phones_choices(chat):
+    assert call(chat, path="/chat/push") == (200, {"key": None})        # the booth hasn't set alerts up
+    chat.table.put_item("chat", {"pk": {"S": "push"}, "sk": {"S": "key"}, "public": {"S": "BPUB"}})
+    assert call(chat, path="/chat/push") == (200, {"key": "BPUB"})
+    sub = {"subscription": _subscription(), "topics": ["live", "round", "bogus"]}
+    assert call(chat, "POST", sub, path="/chat/push") == (200, {"topics": ["live", "round"]})
+    [(_, sk)] = [k for k in chat.table.items if k[0] == "push" and k[1] != "key"]
+    item = chat.table.items[("push", sk)]
+    assert sk.startswith("sub#") and item["topics"] == {"SS": ["live", "round"]} and item["auth"]["S"] == "a" * 22
+    assert call(chat, "POST", {**sub, "topics": []}, path="/chat/push") == (200, {"topics": []})   # all off
+    assert ("push", sk) not in chat.table.items
+
+
+def test_alerts_take_only_real_push_services_and_well_formed_keys(chat):
+    for endpoint in ("https://evil.example/push", "http://fcm.googleapis.com/x", "https://fcm.googleapis.com:8443/x",
+                     "https://web.push.apple.com.evil.example/x", "https://evilnotify.windows.com/x"):
+        assert call(chat, "POST", {"subscription": _subscription(endpoint), "topics": ["live"]}, path="/chat/push")[0] == 400
+    ok = "https://wns2-par02p.notify.windows.com/w/?token=x"
+    assert call(chat, "POST", {"subscription": _subscription(ok), "topics": ["live"]}, path="/chat/push")[0] == 200
+    bad = {"subscription": {**_subscription(), "keys": {"p256dh": "<script>", "auth": "a" * 22}}, "topics": ["live"]}
+    assert call(chat, "POST", bad, path="/chat/push")[0] == 400
+    assert call(chat, "POST", ["nope"], path="/chat/push")[0] == 400
+    assert call(chat, "DELETE", path="/chat/push")[0] == 405

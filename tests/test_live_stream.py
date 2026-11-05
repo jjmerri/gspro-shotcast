@@ -898,3 +898,28 @@ def test_a_league_rounds_stream_is_kept_till_its_weeks_deadline(tmp_path):
         now[0] = start + days * day
         Mirror(tmp_path / "hls", "bkt", client=s3, status_file=status, clock=lambda: now[0], keep_days=7).clear()
         assert bool([k for k in s3.objects if k.startswith(f"live/s/{sid}/")]) is kept, days
+
+
+def test_a_stream_is_on_the_page_only_once_its_playlist_is_up(tmp_path):
+    class Flaky(FakeS3):
+        fail = True
+
+        def put_object(self, Bucket, Key, **kw):
+            if self.fail and Key.endswith("stream.m3u8"):
+                raise OSError("S3 unreachable")
+            super().put_object(Bucket, Key, **kw)
+
+    s3, now = Flaky(), [1000.0]
+    m = Mirror(tmp_path / "hls", "bkt", client=s3, clock=lambda: now[0])
+    m.folder.mkdir()
+    _playlist(m.folder, 0, ["stream0.ts"], mtime=now[0])
+    try:
+        m.step()
+    except OSError:
+        pass
+    assert m.session and not m.on_page
+    s3.fail = False
+    now[0] += 6
+    _playlist(m.folder, 1, ["stream0.ts", "stream1.ts"], mtime=now[0])
+    m.step()
+    assert m.on_page

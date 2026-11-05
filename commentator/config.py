@@ -783,6 +783,9 @@ class ChatConfig(BaseModel):
     max_words: int = Field(45, ge=10)
     # Messages older than this are past: the booth leaves them out of what it talks about.
     max_age_seconds: float = Field(420.0, gt=0)
+    # Alerts on the phones that turned them on from the page (docs/tracking.md#alerts): the booth
+    # live, a round posted, a new league record, an eagle or ace, the league recap. Needs the table.
+    alerts: bool = True
 
 
 class BackupConfig(BaseModel):

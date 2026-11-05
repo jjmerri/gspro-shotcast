@@ -387,6 +387,8 @@ to look at):
 - `v/<version>/stats.db`: the shots and broadcast transcripts. The Shots and Broadcasts tabs query it
   in the browser, which reads only the parts of the file a query needs, so a season of 90,000 shots
   (a 90 MB file) still opens the Shots tab with about half a megabyte.
+- `manifest.webmanifest`, `sw.js` and `icons/`: the home-screen app and its [alerts](#alerts). These
+  three are served without the password (they hold nothing from the league).
 - `latest.json`, uploaded last: which version the page reads. The two newest versions are kept, so
   a page that's open during a publish keeps working; one left open longer moves to the newest
   version the next time it looks up shots or a broadcast (refresh for the newest season tables).
@@ -664,6 +666,43 @@ Setting it up (the stack needs the template with the chat in it):
 The booth reaches the table with the publish keys, in `publish.region`. The booth's own copy of
 the page (from the tray) has no chat. A stack deployed before the chat was per round keeps showing
 the last 6 hours until it's redeployed (step 1) with the current template.
+
+### Alerts
+
+Anyone with the page can get alerts on their phone, with no app store and no account: the header's
+**📲 Get the app** (or **🔔 Alerts**) button. On an iPhone it walks them through Safari's **Share →
+Add to Home Screen** (alerts on an iPhone only work from the home-screen app, iOS 16.4 or later); on
+Android and desktop browsers it offers the browser's own install, and the alerts work either way. In
+the app, **🔔 Alerts** has one toggle for each kind:
+
+- **We're live**: the booth is on air in a round and the [live stream](#live-stream) has started
+  reaching the page (at most once every 3 hours).
+- **Rounds posted**: a league or tournament round reached the stats page, with each side's score.
+- **Records, eagles and aces**: a new all-time league record (the Records tab's longest drive,
+  longest putt holed and closest approaches, not a player's own bests), or an eagle, albatross or ace
+  in any round.
+- **League recap**: the week's league recap video is up (Watch → Round replays).
+
+Tapping an alert opens the page at the round, the records, the recap or the Live tab.
+
+How it works: the browser subscribes with its push service (Google's, Apple's, Mozilla's or
+Microsoft's) and the page posts that subscription, and the chosen kinds, to the chat function
+(`/chat/push`), which keeps it in the chat table; turning every toggle off removes it. The booth
+sends each alert itself (`commentator/push.py`: standard Web Push, encrypted to each phone and signed
+with the booth's own key). That key is made the first time the booth starts with alerts on, kept in
+`logs/web-push-key.pem` (never in a problem report), and its public half goes in the chat table for
+the page. A new PC makes a new key: phones with alerts on pick it up the next time they open the
+page. A phone whose subscription is gone (the app deleted, alerts blocked) is dropped the next time
+an alert can't reach it.
+
+Rounds, records, eagles and aces are found by comparing each published build with the last
+(`logs/alerts-state.json`); the first publish after alerts are set up only takes note of what's
+there, so nothing old goes out. It's on whenever the [chat](#live-chat) is (`chat.alerts: false` turns
+it off) and needs the stack's newer template (the `deploy` command again, as for the chat): until
+then the button stays hidden.
+
+Notes: an iPhone app added to the home screen may ask for the site's password once. Each phone can
+change its alerts 20 times in 10 minutes, and the table holds up to 1,000 phones.
 
 ## Backups
 

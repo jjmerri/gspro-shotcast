@@ -296,4 +296,5 @@ chat:
   # max_words: 45              # each line's word limit (news asides get commentary.aside_max_words)
   # min_gap_seconds: 120       # and at least this long apart
   # max_age_seconds: 420       # older messages drop out of what it talks about
+  # alerts: true               # phone alerts from the page's 🔔 (live, rounds, records, recaps; docs/tracking.md#alerts)
   # poll_seconds: 5

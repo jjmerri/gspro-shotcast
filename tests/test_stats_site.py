@@ -110,6 +110,10 @@ def test_upload_points_latest_at_the_new_version_last_and_prunes_old_ones(tmp_pa
     assert db[2] == {"ContentType": "application/vnd.sqlite3", "CacheControl": "public, max-age=31536000, immutable"}
     wasm = next(c for c in uploads if c[1].endswith(".wasm"))
     assert wasm[2]["ContentType"] == "application/wasm"
+    app = {c[1]: c[2] for c in uploads if c[1] in ("stats/manifest.webmanifest", "stats/sw.js", "stats/icons/icon-192.png")}
+    assert app["stats/manifest.webmanifest"]["ContentType"] == "application/manifest+json"
+    assert app["stats/icons/icon-192.png"] == {"ContentType": "image/png", "CacheControl": "no-cache"}
+    assert app["stats/sw.js"]["CacheControl"] == "no-cache"   # a new service worker reaches phones at once
 
 
 def _engine(tmp_path, **publish):
