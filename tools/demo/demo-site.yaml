@@ -1,0 +1,327 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  The public Shotcast demo site (tools/demo/build.py): the stats page with no password, over a made-up
+  league built from real rounds, and a recorded round looped as if it were live, with a scripted chat.
+  Maintainer-only: nothing the app installs or deploys uses this.
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: ""
+    Description: The demo's own name (demo.thegolfshed.app), or empty for the cloudfront.net address only
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: An ACM certificate in us-east-1 for DomainName (needed with it)
+
+Conditions:
+  HasDomain: !Not [!Equals [!Ref DomainName, ""]]
+
+Resources:
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  OriginAccess:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  LiveRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: read-script
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${Bucket.Arn}/demo/*"
+
+  # The fake live broadcast, from demo/live.json (tools/demo/build.py): {"session", "segments": [seconds
+  # of each of the recording's segments], "chat": [{"t": seconds in, "name", "text"}]}. The recording plays
+  # on a loop from the epoch, so every viewer is at the same point:
+  #   GET  /live/status.json                 on air since the current loop started
+  #   GET  /live/s/<session>/stream.m3u8     a live playlist: the last few segments up to now
+  #   GET  /chat/messages                    the script's messages up to now, and this viewer's own
+  #   POST /chat/messages                    a viewer's message, kept only in their own cookie
+  # Nothing is stored here: a viewer's messages live in their browser and go when it closes.
+  Live:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LiveRole.Arn
+      Timeout: 5
+      MemorySize: 256
+      Environment:
+        Variables:
+          BUCKET: !Ref Bucket
+      Code:
+        ZipFile: |
+          import base64, json, os, re, time
+          import boto3
+
+          WINDOW = 6           # segments in the live playlist
+          SHOWN = 40           # chat messages shown
+          MINE = 5             # a viewer's own messages kept in their cookie
+          COOKIE = "demo_chat"
+          BEAT = 30            # status.json's "at" moves on this often, like the booth's heartbeat
+          _script = {"at": 0, "body": None}
+
+          def script():
+              if _script["body"] is None or time.time() - _script["at"] > 300:
+                  obj = boto3.client("s3").get_object(Bucket=os.environ["BUCKET"], Key="demo/live.json")
+                  _script["body"], _script["at"] = json.loads(obj["Body"].read()), time.time()
+              return _script["body"]
+
+          def reply(status, body, kind="application/json", cookies=None):
+              out = {"statusCode": status, "body": body if isinstance(body, str) else json.dumps(body),
+                     "headers": {"content-type": kind, "cache-control": "no-store"}}
+              if cookies:
+                  out["cookies"] = cookies
+              return out
+
+          def clock(s, now):
+              """(loops played, seconds into this one, the loop's length)"""
+              length = sum(s["segments"])
+              return int(now // length), now % length, length
+
+          def playlist(s, now):
+              segs = s["segments"]
+              n = len(segs)
+              loops, pos, _ = clock(s, now)
+              done, t = 0, 0.0
+              while done < n and t + segs[done] <= pos:
+                  t += segs[done]
+                  done += 1
+              last = loops * n + done - 1   # the newest whole segment, counted from the epoch
+              first = max(0, last - WINDOW + 1)
+              lines = ["#EXTM3U", "#EXT-X-VERSION:3",
+                       "#EXT-X-TARGETDURATION:%d" % (int(max(segs)) + 1),
+                       "#EXT-X-MEDIA-SEQUENCE:%d" % first,
+                       "#EXT-X-DISCONTINUITY-SEQUENCE:%d" % (first // n)]
+              for k in range(first, last + 1):
+                  i = k % n
+                  if i == 0 and k != first:
+                      lines.append("#EXT-X-DISCONTINUITY")
+                  lines += ["#EXTINF:%.3f," % segs[i], "stream%d.ts" % i]
+              return "\n".join(lines) + "\n"
+
+          def mine(event):
+              for c in event.get("cookies") or []:
+                  k, _, v = c.partition("=")
+                  if k.strip() == COOKIE:
+                      try:
+                          got = json.loads(base64.urlsafe_b64decode(v.strip() + "==").decode())
+                          return [m for m in got if isinstance(m, dict)][-MINE:]
+                      except Exception:
+                          return []
+              return []
+
+          def messages(s, now, own):
+              loops, pos, length = clock(s, now)
+              start = now - pos
+              out = []
+              for back in (1, 0):   # the end of the last loop, then this one's so far
+                  base = start - back * length
+                  for i, m in enumerate(s["chat"]):
+                      at = base + m["t"]
+                      if at <= now and now - at < length:
+                          out.append({"id": "%d-%04d" % (loops - back, i), "at": round(at, 3),
+                                      "name": m["name"], "text": m["text"], "aired": False})
+              for m in own:
+                  try:
+                      at = float(m.get("at"))
+                  except (TypeError, ValueError):
+                      continue
+                  if now - at < length:
+                      out.append({"id": "you-%s" % m.get("id", ""), "at": at,
+                                  "name": str(m.get("name", ""))[:24], "text": str(m.get("text", ""))[:200],
+                                  "aired": False})
+              out.sort(key=lambda m: m["at"])
+              return out[-SHOWN:]
+
+          def handler(event, context):
+              now = time.time()
+              path = event.get("rawPath") or ""
+              method = event.get("requestContext", {}).get("http", {}).get("method", "GET")
+              s = script()
+              if path == "/live/status.json":
+                  _, pos, _ = clock(s, now)
+                  return reply(200, {"live": True, "session": s["session"], "since": int(now - pos),
+                                     "at": int(now // BEAT * BEAT)})
+              if path == "/live/s/%s/stream.m3u8" % s["session"]:
+                  return reply(200, playlist(s, now), "application/vnd.apple.mpegurl")
+              if path != "/chat/messages":
+                  return reply(404, {"error": "not found"})
+              own = mine(event)
+              if method == "POST":
+                  try:
+                      raw = event.get("body") or ""
+                      body = json.loads(base64.b64decode(raw) if event.get("isBase64Encoded") else raw)
+                  except Exception:
+                      return reply(400, {"error": "Not a message."})
+                  if not isinstance(body, dict):
+                      return reply(400, {"error": "Not a message."})
+                  name = re.sub(r"\s+", " ", str(body.get("name") or "")).strip()[:24]
+                  text = re.sub(r"\s+", " ", str(body.get("text") or "")).strip()[:200]
+                  if not name or not text:
+                      return reply(400, {"error": "Put your name and a message in."})
+                  own = (own + [{"id": "%d" % (now * 1000), "at": round(now, 3), "name": name, "text": text}])[-MINE:]
+                  while True:   # oldest first out until it fits a browser's cookie (about 4 KB)
+                      value = base64.urlsafe_b64encode(json.dumps(own, separators=(",", ":"), ensure_ascii=False)
+                                                       .encode()).decode().rstrip("=")
+                      if len(value) <= 3000 or len(own) == 1:
+                          break
+                      own = own[1:]
+                  return reply(200, {"ok": True},
+                               cookies=["%s=%s; Path=/chat; Secure; HttpOnly; SameSite=Lax" % (COOKIE, value)])
+              if method != "GET":
+                  return reply(405, {"error": "method not allowed"})
+              return reply(200, {"on": True, "messages": messages(s, now, own)})
+
+  LiveUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt Live.Arn
+      AuthType: NONE
+
+  LiveUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Live
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  LiveUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Live
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+  # To the function: the body's type and the viewer's chat cookie, never the Host (a function URL
+  # answers only to its own).
+  LiveRequests:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub "${AWS::StackName}-live"
+        HeadersConfig:
+          HeaderBehavior: whitelist
+          Headers: [Content-Type]
+        QueryStringsConfig:
+          QueryStringBehavior: none
+        CookiesConfig:
+          CookieBehavior: whitelist
+          Cookies: [demo_chat]
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${AWS::StackName} Shotcast demo"
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Aliases: !If [HasDomain, [!Ref DomainName], !Ref AWS::NoValue]
+        ViewerCertificate: !If
+          - HasDomain
+          - AcmCertificateArn: !Ref CertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - !Ref AWS::NoValue
+        Origins:
+          - Id: site
+            DomainName: !GetAtt Bucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OriginAccess.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+          - Id: live
+            DomainName: !Select [2, !Split ["/", !GetAtt LiveUrl.FunctionUrl]]
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+        CacheBehaviors:
+          - PathPattern: /chat/*
+            TargetOriginId: live
+            ViewerProtocolPolicy: https-only
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad   # Managed-CachingDisabled
+            OriginRequestPolicyId: !Ref LiveRequests
+          - PathPattern: /live/status.json
+            TargetOriginId: live
+            ViewerProtocolPolicy: redirect-to-https
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: !Ref LiveRequests
+          - PathPattern: /live/s/*/stream.m3u8
+            TargetOriginId: live
+            ViewerProtocolPolicy: redirect-to-https
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: !Ref LiveRequests
+        DefaultCacheBehavior:
+          TargetOriginId: site
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6   # Managed-CachingOptimized
+
+  # Only this distribution reads the bucket, and never the chat script (demo/), which is the function's.
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${Bucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+          - Effect: Deny
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${Bucket.Arn}/demo/*"
+
+Outputs:
+  BucketName:
+    Value: !Ref Bucket
+  DistributionId:
+    Value: !Ref Distribution
+  DistributionDomain:
+    Value: !GetAtt Distribution.DomainName
+  SiteUrl:
+    Value: !If [HasDomain, !Sub "https://${DomainName}/", !Sub "https://${Distribution.DomainName}/"]
