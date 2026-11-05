@@ -1,7 +1,8 @@
 """Updates for the Windows app (the tray, commentator/tray.py): the newest GitHub release's installer.
 
 A release carries `Shotcast-Setup-<version>.exe` and `<that name>.sha256`. The installer is
-downloaded in the background and checked against the hash; the tray offers it, and running it
+downloaded in the background and checked against the hash; the tray offers it (and, unless that's
+turned off, installs it by itself when Shotcast next starts or GSPro's been closed a while), and running it
 (with only its progress window) replaces the app and starts the tray again, which then says whether
 the update took (`pending.json` next to the installer, `after_update`). Settings and the season file live outside
 the app's folder, so an update never touches them. Releases aren't code-signed yet; when they are,
@@ -25,6 +26,7 @@ API = f"https://api.github.com/repos/{REPO}/releases/latest"
 INSTALLER = re.compile(r"^Shotcast-Setup-.+\.exe$")
 PENDING = "pending.json"
 INSTALL_LOG = "install.log"
+AUTO = "auto.json"
 
 
 @dataclass
@@ -123,6 +125,31 @@ def install(installer: Path, version: str, home: Path | None = None) -> None:
         args.append(f"/home={home}")
     subprocess.Popen(args,
                      creationflags=flags, close_fds=True)
+
+
+def downloaded(folder: Path, current: str) -> tuple[str, Path] | None:
+    """The newest installer `download` left in `folder` (only a checked one gets its name) that's
+    newer than `current`, and its version; None without one."""
+    found = []
+    for path in Path(folder).glob("Shotcast-Setup-*.exe"):
+        version = path.stem.removeprefix("Shotcast-Setup-")
+        if newer(version, current):
+            found.append((parse(version), version, path))
+    return max(found)[1:] if found else None
+
+
+def auto_tried(folder: Path, version: str) -> bool:
+    """Whether an update to `version` was already started on its own (`mark_auto`): one that didn't
+    take isn't tried by itself again, at every start, but waits for Restart to update."""
+    try:
+        return json.loads((Path(folder) / AUTO).read_text(encoding="utf-8")).get("to") == version
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def mark_auto(folder: Path, version: str) -> None:
+    Path(folder).mkdir(parents=True, exist_ok=True)
+    (Path(folder) / AUTO).write_text(json.dumps({"to": version}), encoding="utf-8")
 
 
 def after_update(folder: Path, version: str) -> tuple[bool, str] | None:

@@ -698,7 +698,7 @@ own AWS credentials (`aws s3 cp s3://<BucketName>/backups/<file> .`).
 `python -m commentator backup` takes a copy now. To restore, stop the booth and run
 `python -m commentator restore logs/backups/season-....db.gz`; it checks the copy, saves the
 current file (even a corrupted one) as `pre-restore-*.db.gz` in the backup folder, then swaps it in.
-The tray's Restart to update also saves the file, with the booth stopped, as
+The tray's updates (Restart to update, or one installing itself) also save the file, with the booth stopped, as
 `pre-update-<when>-from-<version>.db.gz` there (the last three kept), to restore the same way.
 
 ## Recording only

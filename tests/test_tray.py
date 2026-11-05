@@ -187,8 +187,9 @@ def test_an_update_backs_up_the_season_first_and_publishes_once_it_took(tmp_path
     monkeypatch.setattr(backup, "pre_update", lambda cfg, version: order.append(("backup", version)))
     monkeypatch.setattr(updater, "install", lambda *a: order.append("install"))
     app = SimpleNamespace(update=(SimpleNamespace(version="0.2.0"), tmp_path / "x.exe"), version="0.1.0",
-                          home=tray.default_home(), cfg=None, booth=SimpleNamespace(stop=lambda: order.append("stop")),
+                          home=tray.default_home(), cfg=None, booth=SimpleNamespace(stop=lambda: order.append("stop"), state="running"),
                           quit=lambda: order.append("quit"))
+    app._install = lambda version, installer: tray.Tray._install(app, version, installer)
     tray.Tray.apply_update(app)
     assert order == ["stop", ("backup", "0.1.0"), "install", "quit"]
 
@@ -197,6 +198,21 @@ def test_an_update_backs_up_the_season_first_and_publishes_once_it_took(tmp_path
     tray.Tray.apply_update(app)
     assert order == ["stop", "install", "quit"]
 
+    def broken(*a):
+        raise OSError("blocked")
+    monkeypatch.setattr(updater, "install", broken)   # the installer won't run: the booth starts again
+    app.booth.start = lambda: order.append("start")
+    app.booth.state = "running"
+    order.clear()
+    with pytest.raises(OSError):
+        tray.Tray.apply_update(app)
+    assert order == ["stop", "start"]
+    app.booth.state = "other"   # another's booth: not one of this tray's started beside it
+    order.clear()
+    with pytest.raises(OSError):
+        tray.Tray.apply_update(app)
+    assert order == ["stop"] and app.booth.state == "other"
+
     published, said = [], []
     app.publisher = SimpleNamespace(changed=lambda: published.append(1))
     app.info = app.error = said.append
@@ -204,6 +220,66 @@ def test_an_update_backs_up_the_season_first_and_publishes_once_it_took(tmp_path
         monkeypatch.setattr(updater, "after_update", lambda folder, version: (took, "text"))
         tray.Tray._after_update(app)
     assert published == [1] and said == ["text", "text"]
+
+
+def test_a_downloaded_update_installs_itself_as_shotcast_starts_once(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from commentator import tray
+
+    folder = tmp_path / "updates"
+    folder.mkdir()
+    for name in ("Shotcast-Setup-0.1.9.exe", "Shotcast-Setup-0.1.12.exe", "Shotcast-Setup-0.1.13.exe.part"):
+        (folder / name).write_text("")
+    installed = []
+    app = SimpleNamespace(home=tmp_path, version="0.1.10", _install=lambda v, p: installed.append((v, p.name)),
+                          round_in_progress=lambda: None, surely_off_air=lambda: True)
+    monkeypatch.setattr(tray, "installs_updates", lambda: True)
+    monkeypatch.setattr(tray, "other_booths", lambda: [])
+    monkeypatch.setattr(tray, "gspro_running", lambda: True)
+    assert not tray.Tray.install_at_start(app) and not installed   # GSPro's open: not now, nor marked tried
+    assert app.update[0].version == "0.1.12"                         # but offered, for when it's closed a while
+    monkeypatch.setattr(tray, "gspro_running", lambda: False)
+    assert tray.Tray.install_at_start(app)
+    assert installed == [("0.1.12", "Shotcast-Setup-0.1.12.exe")]
+    # It didn't take (still 0.1.10 at the next start): it waits for Restart to update, not a loop.
+    assert not tray.Tray.install_at_start(app) and len(installed) == 1
+    app.version = "0.1.12"
+    assert not tray.Tray.install_at_start(app)
+    monkeypatch.setattr(tray, "installs_updates", lambda: False)
+    (folder / "Shotcast-Setup-0.1.14.exe").write_text("")
+    assert not tray.Tray.install_at_start(app) and len(installed) == 1
+
+
+def test_a_downloaded_update_installs_itself_once_gspro_has_been_closed_a_while(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from commentator import tray
+
+    clock, running, applied = [0.0], [True], []
+    app = SimpleNamespace(home=tmp_path, _clock=lambda: clock[0], _gspro_at=0.0, round_in_progress=lambda: None,
+                          surely_off_air=lambda: True, apply_update=lambda: applied.append(1),
+                          booth=SimpleNamespace(state="running", proc=SimpleNamespace(pid=7)),
+                          update=(SimpleNamespace(version="0.2.0"), tmp_path / "x.exe"))
+    monkeypatch.setattr(tray, "installs_updates", lambda: True)
+    monkeypatch.setattr(tray, "gspro_running", lambda: running[0])
+    others = [7]                                             # its own booth, which doesn't count
+    monkeypatch.setattr(tray, "other_booths", lambda: others)
+    idle = lambda t: (clock.__setitem__(0, t), tray.Tray.install_when_idle(app))[1]   # noqa: E731
+    assert not idle(100.0)                                   # GSPro's open
+    running[0] = False
+    assert not idle(100.0 + tray.IDLE_INSTALL_S - 1)         # closed, not long enough
+    app.round_in_progress = lambda: True
+    assert not idle(100.0 + tray.IDLE_INSTALL_S)             # a round still on
+    app.round_in_progress, app.surely_off_air = (lambda: False), (lambda: False)
+    assert not idle(100.0 + tray.IDLE_INSTALL_S)             # on air, or can't tell
+    app.surely_off_air, app.booth.state = (lambda: True), "other"
+    assert not idle(100.0 + tray.IDLE_INSTALL_S)             # a booth this tray didn't start
+    app.booth.state, others[:] = "running", [7, 9]
+    assert not idle(100.0 + tray.IDLE_INSTALL_S)             # one started since, not from here
+    others[:] = [7]
+    assert idle(100.0 + tray.IDLE_INSTALL_S) and applied == [1]
+    assert not idle(200.0 + tray.IDLE_INSTALL_S) and applied == [1]   # tried once
 
 
 def test_start_the_live_stream_starts_obs_when_it_isnt_running(tmp_path, monkeypatch):

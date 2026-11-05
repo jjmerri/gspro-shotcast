@@ -34,6 +34,8 @@ ROUND_STATUS_STALE_S = 4 * ROUND_STATUS_EVERY_S   # older than this: the booth m
 RESTARTS, RESTART_WINDOW_S = 3, 600      # crashes in that window before it stops restarting
 STARTING_LIMIT_S = 120   # a booth that hasn't said it's ready by then is taken as running anyway
 UPDATE_EVERY_S = 6 * 3600
+IDLE_INSTALL_S = 30 * 60   # a downloaded update installs by itself once GSPro's been closed this long
+GSPRO_CHECK_S = 60         # how often the tray looks for GSPro running
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
 
@@ -155,6 +157,28 @@ def notifies_when_ready() -> bool:
 
 def set_notifies_when_ready(on: bool) -> None:
     _set_flag("NotifyWhenReady", on)
+
+
+def installs_updates() -> bool:
+    """Whether a downloaded update installs by itself: as Shotcast starts, or once GSPro's been closed
+    IDLE_INSTALL_S (the menu's tick box). Off, it waits for Restart to update."""
+    return _flag("InstallUpdates", True)
+
+
+def set_installs_updates(on: bool) -> None:
+    _set_flag("InstallUpdates", on)
+
+
+def gspro_running() -> bool:
+    """GSPro open (3.1's GSPro.exe, the beta's GSpro.exe). Not Windows: never."""
+    if os.name != "nt":
+        return False
+    try:
+        done = subprocess.run(["tasklist", "/FI", "IMAGENAME eq gspro.exe", "/NH"], capture_output=True, text=True,
+                              timeout=30, creationflags=NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return True   # can't tell: don't install under it
+    return done.returncode != 0 or "gspro.exe" in done.stdout.lower()
 
 
 def remember_gspro_dir(folder: str) -> None:
@@ -449,6 +473,8 @@ class Tray:
         self.stats_url: str | None = None
         self.update = None            # a downloaded, checked updater.Release and its file
         self.checked_at = None        # when GitHub last said this is the latest
+        self._clock = time.monotonic
+        self._gspro_at = self._clock()   # GSPro last seen running (as if just closed, at the start)
         self.icon = None
         self.ui = None
         self._stop = threading.Event()
@@ -551,6 +577,16 @@ class Tray:
         try:
             return bool(json.loads((Path(self.cfg.log_dir) / "live.json").read_text(encoding="utf-8")).get("live"))
         except (OSError, ValueError):
+            return False
+
+    def surely_off_air(self) -> bool:
+        """The stream's off air for sure: live.json says so, or there's none. One being rewritten (read
+        half-written) isn't sure."""
+        try:
+            return not json.loads((Path(self.cfg.log_dir) / "live.json").read_text(encoding="utf-8")).get("live")
+        except FileNotFoundError:
+            return True
+        except (OSError, ValueError, AttributeError):
             return False
 
     def toggle_live(self, *_) -> None:
@@ -755,6 +791,10 @@ class Tray:
         set_checks_for_updates(not checks_for_updates())
         self._refresh()
 
+    def toggle_update_installs(self, *_) -> None:
+        set_installs_updates(not installs_updates())
+        self._refresh()
+
     def check_updates(self, *_) -> None:
         threading.Thread(target=self._check_updates, args=(True,), daemon=True).start()
 
@@ -773,14 +813,16 @@ class Tray:
             path = updater.download(release, self.home / "updates")
             self.update = (release, path)
             self._refresh()
+            later = ("it installs itself when Shotcast next starts, or once GSPro's been closed a while"
+                     if installs_updates() else "choose Restart to update in the tray menu")
             text = (f"Shotcast {release.version} is downloaded and ready (you have {self.version}).\n\n"
                     "Update now? Shotcast restarts for it, so not in the middle of a round. "
-                    "Later: choose Restart to update in the tray menu.")
+                    f"Later: {later}.")
             if told:
                 if self.ui is not None and self.ui.ask(text):
                     self.apply_update()
             else:
-                self.notify(f"Shotcast {release.version} is ready: choose Restart to update in the menu.")
+                self.notify(f"Shotcast {release.version} is ready: {later}.")
         except Exception as e:
             log.warning("Update check failed: %r", e)
             if told:
@@ -789,11 +831,24 @@ class Tray:
             self._refresh()
 
     def apply_update(self, *_) -> None:
-        from . import updater
-
         if not self.update:
             return
+        was = self.booth.state
         self.booth.stop()
+        try:
+            self._install(self.update[0].version, self.update[1])
+        except Exception:
+            if was in ("running", "starting"):
+                self.booth.start()   # the installer never ran: back to recording
+            else:                    # not running from here (another's booth, a crashed or stopped one): as it was
+                self.booth.state = was
+            raise
+        self.quit()
+
+    def _install(self, version: str, installer: Path) -> None:
+        """Back the season up and run the installer, which closes this app (the booth already stopped)."""
+        from . import updater
+
         try:
             from . import backup
 
@@ -802,8 +857,55 @@ class Tray:
         except Exception:
             log.exception("Season backup before the update failed (updating anyway: it doesn't touch the season)")
         custom = self.home.resolve() != default_home().resolve()
-        updater.install(self.update[1], self.update[0].version, self.home.resolve() if custom else None)
-        self.quit()
+        updater.install(installer, version, self.home.resolve() if custom else None)
+
+    def install_at_start(self) -> bool:
+        """As Shotcast starts, before the booth: an update downloaded earlier installs now, unless
+        something's on anyway (GSPro open, a booth left from before, a round or the stream). True when
+        it's installing, and this app should end."""
+        from . import updater
+
+        folder = self.home / "updates"
+        found = updater.downloaded(folder, self.version) if installs_updates() else None
+        if not found or updater.auto_tried(folder, found[0]):
+            return False
+        if gspro_running() or other_booths() or self.round_in_progress() or not self.surely_off_air():
+            log.info("Not installing the downloaded update to %s as Shotcast starts: GSPro or a booth is running", found[0])
+            # Offered in the menu, and installed once idle, without waiting for the next check.
+            self.update = (updater.Release(version=found[0], url="", sha256_url="", name=found[1].name, page=""), found[1])
+            return False
+        log.info("Installing the downloaded update to %s as Shotcast starts", found[0])
+        updater.mark_auto(folder, found[0])
+        self._install(*found)
+        return True
+
+    def install_when_idle(self) -> bool:
+        """Every GSPRO_CHECK_S: a downloaded update installs once GSPro's been closed IDLE_INSTALL_S,
+        with no round on, the stream surely off air and no booth this tray didn't start. True when it's installing."""
+        from . import updater
+
+        now = self._clock()
+        if gspro_running():
+            self._gspro_at = now
+            return False
+        if not self.update or not installs_updates() or now - self._gspro_at < IDLE_INSTALL_S:
+            return False
+        version = self.update[0].version
+        if self.booth.state == "other" or self.round_in_progress() or not self.surely_off_air() \
+                or updater.auto_tried(self.home / "updates", version):
+            return False
+        own = getattr(self.booth.proc, "pid", None)
+        if [pid for pid in other_booths() if pid != own]:   # one started since, not from here
+            return False
+        log.info("Installing the update to %s: GSPro's been closed %d minutes", version, (now - self._gspro_at) // 60)
+        updater.mark_auto(self.home / "updates", version)
+        try:
+            self.apply_update()
+        except Exception:
+            log.exception("Installing the update to %s failed", version)
+            self.notify(f"Shotcast {version} didn't install: choose Restart to update in the menu.")
+            return False
+        return True
 
     def _after_update(self) -> None:
         from . import updater
@@ -933,6 +1035,8 @@ class Tray:
                  safe(lambda: self.apply_update() if self.update else self.check_updates())),
             item("Check for updates automatically", safe(self.toggle_update_checks),
                  checked=lambda _: checks_for_updates()),
+            item("Install updates automatically (as Shotcast starts, or with GSPro closed)",
+                 safe(self.toggle_update_installs), checked=lambda _: installs_updates()),
             item("Start with Windows", safe(self.toggle_start_with_windows), checked=lambda _: starts_with_windows()),
             item("Notify when the booth is ready", safe(self.toggle_ready_notice), checked=lambda _: notifies_when_ready()),
             item(f"About Shotcast {self.version}", safe(self.about)),
@@ -999,6 +1103,7 @@ class Tray:
 
     def _watch(self) -> None:
         next_update = time.monotonic() + 60
+        next_idle = time.monotonic() + GSPRO_CHECK_S
         last = None
         while not self._stop.wait(1 if self.booth.state == "starting" else 3):
             if self.booth.poll() and notifies_when_ready():
@@ -1007,6 +1112,13 @@ class Tray:
             if now != last:
                 last = now
                 self._refresh()
+            if time.monotonic() >= next_idle:
+                next_idle = time.monotonic() + GSPRO_CHECK_S
+                try:
+                    if self.install_when_idle():
+                        return
+                except Exception:
+                    log.exception("Installing the update while idle failed")
             if time.monotonic() >= next_update:
                 next_update = time.monotonic() + UPDATE_EVERY_S
                 if checks_for_updates():
@@ -1018,6 +1130,11 @@ class Tray:
         from .tray_ui import Ui
 
         self.ui = Ui(fallback=self.notify)
+        try:
+            if self.install_at_start():
+                return
+        except Exception:
+            log.exception("Installing the downloaded update as Shotcast starts failed")
         self.start_stats()
         if other_booths():
             self.booth.state = "other"
