@@ -5,7 +5,8 @@
   const KEY = "shotcast.demo.tour";
   const ME = "player=Josh+Mercer";
   const VOD = "20261104-133911-67149a";   // Premonition: the round with a recording
-  const PUTT = 4041;                      // its hole 8 birdie putt
+  const HOLE = 8;                         // its replay and birdie putt
+  const PUTT = 4041;                      // the hole 8 birdie putt
   let roundId = null;
 
   const STEPS = [
@@ -23,7 +24,11 @@
       text: "Every round played at the sim, with the score and how it went. Next opens Josh's latest.",
       leave: () => { const r = document.querySelector("tr[data-round]"); roundId = r && r.dataset.round; } },
     { hash: () => roundId ? `#round?${ME}&id=${roundId}` : `#rounds?${ME}`, el: ".scorecard", title: "The card",
-      text: "Hole by hole, with the out and in nines. Further down: every shot and the hole-by-hole replay." },
+      text: "Hole by hole, with the out and in nines. Every hole number opens a replay of that hole: press 8 (or Next).",
+      click: `.scorecard [data-replay="${HOLE}"]` },
+    { hash: () => roundId ? `#round?${ME}&id=${roundId}&hole=${HOLE}` : `#rounds?${ME}`, el: ".replay svg", title: "Hole replays",
+      text: "The hole redrawn from the sim's shot data, every player's shots traced from tee to cup as they played it. "
+          + "Above it, ↻ plays it again and ▶ jumps to the hole in the broadcast." },
     { hash: `#shots?${ME}&course=Premonition&shot=${PUTT}`, el: `tr[data-shot="${PUTT}"]`, title: "Every shot",
       text: "Each shot's launch numbers, where it finished, and what the booth said about it. Here's a birdie putt on 8." },
     { hash: `#shots?${ME}&course=Premonition&shot=${PUTT}`, el: `tr[data-shot="${PUTT}"] [data-vod]`, title: "Jump to the video",
@@ -131,6 +136,7 @@
     clearInterval(timer);
     if (!s.el) return;
     const want = at, since = Date.now();
+    let lastY = -1, aligns = 0;
     // The views draw after their data loads: wait for the step's element, then keep up with the layout.
     timer = setInterval(() => {
       if (at !== want) return;
@@ -141,6 +147,15 @@
           el.scrollIntoView({ block: "center", behavior: "smooth" });
         } else if (Date.now() - since > 12000) { clearInterval(timer); return; }
       }
+      // A tall target (the hole replay, once its map loads) goes to the top, under the sticky header, to leave room
+      // for the card. The page scrolls a hole link's replay to the middle itself, so this waits for scrolling to
+      // settle and checks again, for the step's first few seconds only (after that the scroll is the visitor's).
+      if (target && target.getBoundingClientRect().height > innerHeight / 2 && Date.now() - since < 5000 && aligns < 3) {
+        const head = document.querySelector("header");
+        const off = target.getBoundingClientRect().top - (head ? Math.max(0, head.getBoundingClientRect().bottom) : 0) - 12;
+        if (Math.abs(off) > 16 && scrollY === lastY) { aligns += 1; scrollTo({ top: scrollY + off, behavior: "smooth" }); }
+      }
+      lastY = scrollY;
       place();
     }, 200);
   }
@@ -158,9 +173,14 @@
     const pad = 6;
     Object.assign(spot.style, { left: `${r.left - pad}px`, top: `${r.top - pad}px`, width: `${r.width + 2 * pad}px`, height: `${r.height + 2 * pad}px` });
     const h = card.offsetHeight, w = card.offsetWidth;
-    const below = r.bottom + pad + 12, above = r.top - pad - 12 - h;
-    const top = below + h < innerHeight ? below : above > 0 ? above : innerHeight - h - 12;
-    const left = Math.min(Math.max(12, r.left), innerWidth - w - 12);
+    const below = r.bottom + pad + 12, above = r.top - pad - 12 - h, right = r.right + pad + 12;
+    const fitsRight = right + w < innerWidth - 12, tall = r.height > innerHeight / 2;
+    let top, left = Math.min(Math.max(12, r.left), innerWidth - w - 12);
+    if (below + h < innerHeight) top = below;
+    else if (fitsRight && tall) { left = right; top = Math.min(Math.max(12, r.top), innerHeight - h - 12); }
+    else if (above > 0) top = above;
+    else if (fitsRight) { left = right; top = Math.min(Math.max(12, r.top), innerHeight - h - 12); }
+    else top = innerHeight - h - 12;
     Object.assign(card.style, { left: `${left}px`, top: `${top}px` });
   }
 
