@@ -24,7 +24,7 @@ ACCENT = (95, 197, 138)   # the stats page's --accent
 ROW = 0.028               # a row's text, as a share of the frame's height
 BOTTOM = 0.12             # the board's bottom, up off the frame's (clear of a player's controls)
 INSET = 0.04              # in from the picture's right edge, as a share of its width
-CARD_LOOK = 1             # how a card's drawn and made: a change to it makes every recap's again
+CARD_LOOK = 2             # how a card's drawn and made: a change to it makes every recap's again
 CARD_SEGMENT = 4.0        # a card's video, in segments this long
 BG = (17, 19, 24)         # the stats page's background
 
@@ -148,10 +148,11 @@ def card_png(kind: str, body: dict, width: int, height: int) -> bytes:
                 for r in body.get("rows") or []]
     else:
         title, sub = "Standings", f"after week {body.get('week')}"
-        rows = []
+        rows, places = [], [r["place"] for r in body.get("standings") or []]
         for r in body.get("standings") or []:
             move = (r["was"] - r["place"]) if r.get("was") else 0
-            rows.append((str(r["place"]), str(r["name"]), f"{round(r['points'] * 10) / 10:g}", str(abs(move)) if move else "",
+            tie = "T" if places.count(r["place"]) > 1 else ""
+            rows.append((f"{tie}{r['place']}", str(r["name"]), f"{round(r['points'] * 10) / 10:g}", str(abs(move)) if move else "",
                          move > 0 if move else None))
     img = Image.new("RGB", (width, height), BG)
     d = ImageDraw.Draw(img)

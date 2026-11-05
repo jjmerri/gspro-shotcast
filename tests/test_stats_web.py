@@ -975,7 +975,7 @@ def test_the_recap_player_times_its_lines_over_the_clips():
     page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
     fns = re.search(r"\nfunction recapPlayer\(.*?\n}\n", page, re.S).group(0)
     body = {"week": 6, "course": "Test Links", "rows": [{"name": "Aces", "net": -5, "place": 1, "tied": False, "points": 70}],
-            "standings": [{"name": "Aces", "points": 70, "place": 1, "was": 3}],
+            "standings": [{"name": "Aces", "points": 70, "place": 1, "was": 3}, {"name": "Duffers", "points": 70, "place": 1, "was": 1}],
             "intro": [{"text": "i1", "audio": "a/0.wav"}, {"text": "i2", "audio": "a/1.wav"}],
             "clips": [{"at": 0, "lines": [{"text": "c1", "at": 1.5, "audio": "a/2.wav"}, {"text": "c2", "at": 4, "audio": "a/3.wav"},
                                           {"text": "c2b", "at": 10.5, "audio": "a/3b.wav"}]},
@@ -1028,7 +1028,7 @@ setTimeout(() => {
   const tail = [audio.paused, r.phase];
   audio.fire("ended");             // c3 done: c4, which the video ended before, still plays
   audio.fire("ended");             // then the outro
-  const outro = r.card.innerHTML.includes("Standings");
+  const outro = r.card.innerHTML.includes("Standings") && (r.card.innerHTML.match(/<td>T1<\\/td>/g) || []).length === 2;
   boards.push(r.board.hidden);
   audio.fire("ended");
   console.log(JSON.stringify({ drawnIn, fit, boards, stillHeld, start, playing, held, heard, log, tail, outro, done: r.phase, again: r.card.innerHTML.includes("Watch again") }));

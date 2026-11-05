@@ -2098,8 +2098,8 @@ function recapPlayer(me, key, built) {
     <table><tbody>${b.rows.map(x => `<tr><td>${x.tied ? "T" : ""}${x.place}</td><td class="l">${esc(x.name)}</td><td>${toPar(x.net)}</td>${
       x.points !== null && x.points !== undefined ? `<td class="sub">${Math.round(x.points * 10) / 10} pts</td>` : ""}</tr>`).join("")}</tbody></table>`;
   const table = b => `<h3>Standings</h3><table><tbody>${b.standings.map(x => {
-    const d = x.was ? x.was - x.place : 0;
-    return `<tr><td>${x.place}</td><td class="l">${esc(x.name)}</td><td>${Math.round(x.points * 10) / 10}</td><td class="sub">${d > 0 ? `▲${d}` : d < 0 ? `▼${-d}` : ""}</td></tr>`;
+    const d = x.was ? x.was - x.place : 0, tied = b.standings.filter(y => y.place === x.place).length > 1;
+    return `<tr><td>${tied ? "T" : ""}${x.place}</td><td class="l">${esc(x.name)}</td><td>${Math.round(x.points * 10) / 10}</td><td class="sub">${d > 0 ? `▲${d}` : d < 0 ? `▼${-d}` : ""}</td></tr>`;
   }).join("")}</tbody></table>`;
   const show = html => { r.card.innerHTML = html; r.card.hidden = !html; };
   // A line's over once: a load that fails both rejects its play and fires an error. A play cut short
