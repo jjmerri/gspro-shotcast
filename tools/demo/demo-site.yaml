@@ -15,8 +15,11 @@ Parameters:
     Description: An ACM certificate in us-east-1 for DomainName (needed with it)
   GitHubRepo:
     Type: String
-    Default: jjmerri/gspro-shotcast
-    Description: The repository whose main branch's workflow (.github/workflows/demo.yml) may rebuild the demo
+    Default: jjmerri@17522082/gspro-shotcast@1414476607
+    Description: >-
+      The repository whose main branch's workflow (.github/workflows/demo.yml) may rebuild the demo,
+      as it appears in its OIDC token's sub (this repo uses immutable subjects: owner@id/name@id;
+      see gh api repos/OWNER/REPO/actions/oidc/customization/sub)
   StatsBucket:
     Type: String
     Default: shotcast-stats-bucket-9qzb6obvqvt3
