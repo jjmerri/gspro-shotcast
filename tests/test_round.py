@@ -1830,6 +1830,27 @@ async def test_setup_watcher_ignores_frames_with_a_player_dropdown_open(tmp_path
     assert p.roster_key == frozenset({"Mike", "Guesty"})
 
 
+async def test_a_name_misread_for_one_frame_goes_once_its_slot_reads_empty(tmp_path):
+    # As seen live: one frame read a closing dropdown's leftovers in slot 6 as a pill holding "KY";
+    # the next showed slot 6 empty, then the players clicked on to MATCH SETTINGS before a third
+    # PLAYERS frame. An empty slot isn't an OCR dropout: KY goes at once, not after a repeat.
+    phantom = _players_tab("Pebble Beach", {1: "MikeD", 2: "Sarah", 6: "KY"})
+    clean = _players_tab("Pebble Beach", {1: "MikeD", 2: "Sarah"})
+    match = _players_tab("Pebble Beach", {}, tab=_TAB_OFF, setup_match_tab=_TAB_ON)
+    e = _engine(tmp_path)
+    p = await _run_setup_watch(e, [phantom, clean, match, {"load_course": "Pebble Beach"}],
+                               until=lambda p: p is not None and p.aired)
+    assert p is not None and p.aired and p.roster_key == frozenset({"Mike", "Sarah"})
+
+    # A pill still there that just didn't OCR, though, is a dropout: the roster keeps its player.
+    dropout = _players_tab("Pebble Beach", {1: "MikeD", 2: "Sarah", 6: ""})
+    full = _players_tab("Pebble Beach", {1: "MikeD", 2: "Sarah", 6: "Guesty"})
+    e = _engine(tmp_path / "b")
+    p = await _run_setup_watch(e, [full, dropout, match, {"load_course": "Pebble Beach"}],
+                               until=lambda p: p is not None and p.aired)
+    assert p is not None and p.aired and p.roster_key == frozenset({"Mike", "Sarah", "Guesty"})
+
+
 async def test_a_players_tab_shown_briefly_between_slow_polls_is_still_read(tmp_path):
     import time
 
@@ -5171,7 +5192,8 @@ def test_the_round_status_counts_the_sign_off_and_a_new_round_at_once(tmp_path, 
         await done.wait()          # composing the sign-off: nothing in the speech queue yet
 
     app = SimpleNamespace(round=None, speech=SimpleNamespace(is_idle=lambda: True), _round_handling=0, _live_stop_task=None,
-                          cfg=SimpleNamespace(log_dir=str(tmp_path)), _handle_round_end=handle, live_mirror=None)
+                          cfg=SimpleNamespace(log_dir=str(tmp_path)), _handle_round_end=handle, live_mirror=None,
+                          _struck_at=0.0)
     app._in_round = lambda: Engine._in_round(app)
     path = tmp_path / engine_mod.ROUND_STATUS
 
@@ -5196,3 +5218,43 @@ def test_the_round_status_counts_the_sign_off_and_a_new_round_at_once(tmp_path, 
         assert await status(False)
         loop.cancel()
     asyncio.run(go())
+
+
+async def test_a_setup_misread_who_never_plays_the_first_hole_leaves_the_round(tmp_path):
+    from commentator.models import HoleChangeEvent
+    from commentator.state import ShotRecord
+
+    # As seen live: the setup read a phantom "KY" into slot 2. Brian and Jay play hole 1; GSPro's log
+    # never has slot 2 up. After hole 1 KY's out, and the others keep their GSPro slots.
+    e = _guest_round(tmp_path, ["Brian", "Jay", "KY"])
+    e.cfg.source.gspro_log_truth = True
+    e.state.current_hole, e.current_course = "Hole 1 Par 4", "Pebble Beach"
+    e.gspro.players_seen.update({0, 1})
+    e._pending_finish[2], e._pending_finish[0] = "KY's", "Brian's"
+    e.state.shots = [ShotRecord(g, Shot(club="DR"), "hole 1 par 4", Hud(), [], round_id=e.round.id)
+                     for g in ("Brian", "Jay")]
+    await e.handle_hole_change(HoleChangeEvent(previous="Hole 1 Par 4", current="Hole 2 Par 4", course="Pebble Beach"))
+    assert list(e.round.roster) == ["Brian", "Jay"]
+    assert e.round.slot_names == ["Brian", "Jay", None] and e._gspro_idx("Jay") == 1
+    assert e._pending_finish == {0: "Brian's"}
+    assert e.round.complete() is False   # waits on Brian and Jay alone now
+
+    # Not someone whose slot GSPro had up, though: they're just quiet.
+    e = _guest_round(tmp_path / "b", ["Brian", "Jay", "KY"])
+    e.cfg.source.gspro_log_truth = True
+    e.state.current_hole, e.current_course = "Hole 1 Par 4", "Pebble Beach"
+    e.gspro.players_seen.update({0, 1, 2})
+    e.state.shots = [ShotRecord("Brian", Shot(club="DR"), "hole 1 par 4", Hud(), [], round_id=e.round.id)]
+    await e.handle_hole_change(HoleChangeEvent(previous="Hole 1 Par 4", current="Hole 2 Par 4", course="Pebble Beach"))
+    assert list(e.round.roster) == ["Brian", "Jay", "KY"]
+
+    # A league player's shots go by their league name (Mike), not their GSPro one (MikeD): still played.
+    e = _engine(tmp_path / "c")
+    e.round = Round(league=LEAGUE, gspro_players=["MikeD", "Guesty"], course="Pebble Beach", scheduled_format=None,
+                    holes=18, start_hole=1, is_league=False)
+    e.cfg.source.gspro_log_truth = False   # no log to vouch for anyone
+    e.state.current_hole, e.current_course = "Hole 1 Par 4", "Pebble Beach"
+    e.state.shots = [ShotRecord(g, Shot(club="DR"), "hole 1 par 4", Hud(), [], round_id=e.round.id)
+                     for g in ("Mike", "Guesty")]
+    await e.handle_hole_change(HoleChangeEvent(previous="Hole 1 Par 4", current="Hole 2 Par 4", course="Pebble Beach"))
+    assert list(e.round.roster) == ["MikeD", "Guesty"]

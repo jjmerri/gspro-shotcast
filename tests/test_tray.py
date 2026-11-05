@@ -260,13 +260,15 @@ def test_a_downloaded_update_installs_itself_once_gspro_has_been_closed_a_while(
     app = SimpleNamespace(home=tmp_path, _clock=lambda: clock[0], _gspro_at=0.0, round_in_progress=lambda: None,
                           surely_off_air=lambda: True, apply_update=lambda: applied.append(1),
                           booth=SimpleNamespace(state="running", proc=SimpleNamespace(pid=7)),
-                          update=(SimpleNamespace(version="0.2.0"), tmp_path / "x.exe"))
+                          update=(SimpleNamespace(version="0.2.0"), tmp_path / "x.exe"),
+                          struck_ago=lambda: 0.0, ui=None)
+    app._clear_to_install = lambda v: tray.Tray._clear_to_install(app, v)
     monkeypatch.setattr(tray, "installs_updates", lambda: True)
     monkeypatch.setattr(tray, "gspro_running", lambda: running[0])
     others = [7]                                             # its own booth, which doesn't count
     monkeypatch.setattr(tray, "other_booths", lambda: others)
     idle = lambda t: (clock.__setitem__(0, t), tray.Tray.install_when_idle(app))[1]   # noqa: E731
-    assert not idle(100.0)                                   # GSPro's open
+    assert not idle(100.0)                                   # GSPro's open, and someone's playing
     running[0] = False
     assert not idle(100.0 + tray.IDLE_INSTALL_S - 1)         # closed, not long enough
     app.round_in_progress = lambda: True
@@ -280,6 +282,46 @@ def test_a_downloaded_update_installs_itself_once_gspro_has_been_closed_a_while(
     others[:] = [7]
     assert idle(100.0 + tray.IDLE_INSTALL_S) and applied == [1]
     assert not idle(200.0 + tray.IDLE_INSTALL_S) and applied == [1]   # tried once
+
+
+def test_an_update_installs_with_gspro_open_after_a_countdown_once_nobodys_played_a_while(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from commentator import tray
+
+    clock, applied, struck, shown, answers = [0.0], [], [0.0], [], []
+
+    def countdown(text, seconds, go, wait):
+        shown.append(text)
+        return answers.pop(0)()
+    app = SimpleNamespace(home=tmp_path, _clock=lambda: clock[0], _gspro_at=0.0, round_in_progress=lambda: False,
+                          surely_off_air=lambda: True, apply_update=lambda: applied.append(1),
+                          booth=SimpleNamespace(state="running", proc=SimpleNamespace(pid=7)),
+                          update=(SimpleNamespace(version="0.2.0"), tmp_path / "x.exe"),
+                          struck_ago=lambda: struck[0], ui=SimpleNamespace(ok=True, countdown=countdown))
+    app._clear_to_install = lambda v: tray.Tray._clear_to_install(app, v)
+    monkeypatch.setattr(tray, "installs_updates", lambda: True)
+    monkeypatch.setattr(tray, "gspro_running", lambda: True)
+    monkeypatch.setattr(tray, "other_booths", lambda: [7])
+    idle = lambda t: (clock.__setitem__(0, t), tray.Tray.install_when_idle(app))[1]   # noqa: E731
+    struck[0] = tray.IDLE_INSTALL_S - 1
+    assert not idle(100.0) and not shown                     # a shot under half an hour ago
+    struck[0], app.ui.ok = tray.IDLE_INSTALL_S, False
+    assert not idle(100.0) and not shown                     # nowhere to warn them: not with GSPro open
+    app.ui.ok = True
+    answers.append(lambda: False)                            # Postpone
+    assert not idle(100.0) and len(shown) == 1 and "{s}" in shown[0]
+    assert not idle(100.0 + tray.IDLE_INSTALL_S - 1) and len(shown) == 1   # not asked again for a while
+    answers.append(lambda: struck.__setitem__(0, 5.0) or True)   # a shot while it counted down
+    assert not idle(100.0 + tray.IDLE_INSTALL_S) and len(shown) == 2 and not applied
+    struck[0], auto = tray.IDLE_INSTALL_S, [True]
+    monkeypatch.setattr(tray, "installs_updates", lambda: auto[0])
+    answers.append(lambda: auto.__setitem__(0, False) or True)   # unticked in the menu while it counted
+    assert not idle(100.0 + tray.IDLE_INSTALL_S) and len(shown) == 3 and not applied
+    auto[0] = True
+    answers.append(lambda: True)                             # ran out, or Install now
+    assert idle(200.0 + tray.IDLE_INSTALL_S) and applied == [1]
+    assert not idle(300.0 + tray.IDLE_INSTALL_S) and len(shown) == 4   # tried once
 
 
 def test_start_the_live_stream_starts_obs_when_it_isnt_running(tmp_path, monkeypatch):

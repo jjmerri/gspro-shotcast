@@ -34,8 +34,9 @@ ROUND_STATUS_STALE_S = 4 * ROUND_STATUS_EVERY_S   # older than this: the booth m
 RESTARTS, RESTART_WINDOW_S = 3, 600      # crashes in that window before it stops restarting
 STARTING_LIMIT_S = 120   # a booth that hasn't said it's ready by then is taken as running anyway
 UPDATE_EVERY_S = 6 * 3600
-IDLE_INSTALL_S = 30 * 60   # a downloaded update installs by itself once GSPro's been closed this long
+IDLE_INSTALL_S = 30 * 60   # a downloaded update installs by itself once GSPro's been closed (or unplayed) this long
 GSPRO_CHECK_S = 60         # how often the tray looks for GSPro running
+INSTALL_WARN_S = 60        # with GSPro open, the countdown (with Postpone) before an update installs
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
 
@@ -161,7 +162,7 @@ def set_notifies_when_ready(on: bool) -> None:
 
 def installs_updates() -> bool:
     """Whether a downloaded update installs by itself: as Shotcast starts, or once GSPro's been closed
-    IDLE_INSTALL_S (the menu's tick box). Off, it waits for Restart to update."""
+    (or nobody's struck a ball) IDLE_INSTALL_S (the menu's tick box). Off, it waits for Restart to update."""
     return _flag("InstallUpdates", True)
 
 
@@ -572,6 +573,17 @@ class Tray:
         except (OSError, ValueError, KeyError, TypeError):
             return None
 
+    def struck_ago(self) -> float | None:
+        """Seconds since the booth last saw a ball struck (anywhere: range, practice, a round; its start
+        if none since), from log_dir/round.json; None when that can't be told."""
+        try:
+            status = json.loads((Path(self.cfg.log_dir) / ROUND_STATUS).read_text(encoding="utf-8"))
+            if time.time() - float(status["updated"]) > ROUND_STATUS_STALE_S:
+                return None
+            return max(0.0, time.time() - float(status["struck"]))
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
     def live_now(self) -> bool:
         """On air, as the booth's stream mirror last wrote it."""
         try:
@@ -813,7 +825,7 @@ class Tray:
             path = updater.download(release, self.home / "updates")
             self.update = (release, path)
             self._refresh()
-            later = ("it installs itself when Shotcast next starts, or once GSPro's been closed a while"
+            later = ("it installs itself when Shotcast next starts, or once nobody's played for a while"
                      if installs_updates() else "choose Restart to update in the tray menu")
             text = (f"Shotcast {release.version} is downloaded and ready (you have {self.version}).\n\n"
                     "Update now? Shotcast restarts for it, so not in the middle of a round. "
@@ -880,24 +892,44 @@ class Tray:
         return True
 
     def install_when_idle(self) -> bool:
-        """Every GSPRO_CHECK_S: a downloaded update installs once GSPro's been closed IDLE_INSTALL_S,
-        with no round on, the stream surely off air and no booth this tray didn't start. True when it's installing."""
+        """Every GSPRO_CHECK_S: a downloaded update installs once GSPro's been closed IDLE_INSTALL_S, or
+        is open but nobody's struck a ball in that long (then only after a countdown on screen that can
+        postpone it), with no round on, the stream surely off air and no booth this tray didn't start.
+        True when it's installing."""
         from . import updater
 
         now = self._clock()
-        if gspro_running():
+        open_ = gspro_running()
+        if open_:
             self._gspro_at = now
+        if not self.update or not installs_updates() or now < getattr(self, "_postponed_until", 0.0):
             return False
-        if not self.update or not installs_updates() or now - self._gspro_at < IDLE_INSTALL_S:
+        if open_:
+            ago = self.struck_ago()
+            if ago is None or ago < IDLE_INSTALL_S or self.ui is None or not self.ui.ok:
+                return False
+        elif now - self._gspro_at < IDLE_INSTALL_S:
             return False
         version = self.update[0].version
-        if self.booth.state == "other" or self.round_in_progress() or not self.surely_off_air() \
-                or updater.auto_tried(self.home / "updates", version):
+        if not self._clear_to_install(version):
             return False
-        own = getattr(self.booth.proc, "pid", None)
-        if [pid for pid in other_booths() if pid != own]:   # one started since, not from here
-            return False
-        log.info("Installing the update to %s: GSPro's been closed %d minutes", version, (now - self._gspro_at) // 60)
+        if open_:
+            mins = int(ago // 60)
+            if not self.ui.countdown(
+                    f"Shotcast {version} is ready, and nobody's hit a shot in {mins} minutes, so it installs "
+                    "in {s} seconds. GSPro stays open; the booth is back in about a minute.",
+                    INSTALL_WARN_S, "Install now", "Postpone"):
+                self._postponed_until = self._clock() + IDLE_INSTALL_S
+                log.info("Update to %s postponed from its countdown", version)
+                return False
+            # A shot, round or stream since the countdown began calls it off, and so does unticking it.
+            ago = self.struck_ago()
+            if ago is None or ago < IDLE_INSTALL_S or not installs_updates() or not self._clear_to_install(version):
+                log.info("Update to %s not installed: play started during its countdown", version)
+                return False
+            log.info("Installing the update to %s: GSPro's open but nobody's hit a shot in %d minutes", version, mins)
+        else:
+            log.info("Installing the update to %s: GSPro's been closed %d minutes", version, (now - self._gspro_at) // 60)
         updater.mark_auto(self.home / "updates", version)
         try:
             self.apply_update()
@@ -906,6 +938,17 @@ class Tray:
             self.notify(f"Shotcast {version} didn't install: choose Restart to update in the menu.")
             return False
         return True
+
+    def _clear_to_install(self, version: str) -> bool:
+        """Nothing an install would interrupt: no round, the stream surely off air, no booth this tray
+        didn't start, and this version not already tried."""
+        from . import updater
+
+        if self.booth.state == "other" or self.round_in_progress() or not self.surely_off_air() \
+                or updater.auto_tried(self.home / "updates", version):
+            return False
+        own = getattr(self.booth.proc, "pid", None)
+        return not [pid for pid in other_booths() if pid != own]   # one started since, not from here
 
     def _after_update(self) -> None:
         from . import updater
@@ -1035,7 +1078,7 @@ class Tray:
                  safe(lambda: self.apply_update() if self.update else self.check_updates())),
             item("Check for updates automatically", safe(self.toggle_update_checks),
                  checked=lambda _: checks_for_updates()),
-            item("Install updates automatically (as Shotcast starts, or with GSPro closed)",
+            item("Install updates automatically (as Shotcast starts, or when nobody's playing)",
                  safe(self.toggle_update_installs), checked=lambda _: installs_updates()),
             item("Start with Windows", safe(self.toggle_start_with_windows), checked=lambda _: starts_with_windows()),
             item("Notify when the booth is ready", safe(self.toggle_ready_notice), checked=lambda _: notifies_when_ready()),

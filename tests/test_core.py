@@ -1453,9 +1453,11 @@ async def test_the_impact_snapshot_ends_the_setups_moment(tmp_path):
                     live_llm=None, segment_llm=None, speech=None, rng=random.Random(0))
     preshot = asyncio.create_task(asyncio.sleep(10))
     engine._preshot_task, seq = preshot, engine._shot_seq
+    engine._struck_at = 0.0
     engine._capture_impact(ev := ShotEvent(shot=Shot()))
     await asyncio.sleep(0)
     assert preshot.cancelled() and engine._shot_seq == ev.impact_seq == seq + 1
+    assert engine._struck_at > 0   # a ball struck, even if its data never comes: not idle for an install
     # A ball struck before this one is handled: this one is superseded and stays behind it.
     engine._capture_impact(newer := ShotEvent(shot=Shot()))
     engine._preshot_task = asyncio.create_task(asyncio.sleep(10))

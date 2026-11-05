@@ -245,8 +245,10 @@ beyond that is supported on paper but not yet run live:
    ready, with any warnings, unless you untick **Notify when the booth is ready** in the menu), then green when everything's fine, orange with warnings, red when
    the booth isn't running. Updates are checked every few hours (unless you untick it; see the
    [privacy policy](PRIVACY.md)), downloaded and offered in the menu. A downloaded update installs
-   itself when Shotcast next starts (before the booth does) or once GSPro's been closed for 30
-   minutes with no round on and the stream off air, never mid-round; untick **Install updates
+   itself when Shotcast next starts (before the booth does), or once GSPro's been closed for 30
+   minutes, or GSPro's open but nobody's hit a shot for 30 minutes (then a window counts down a
+   minute first, with **Postpone** to wait another 30); always with no round on and the stream off
+   air, never mid-round. Untick **Install updates
    automatically** to only update from the menu. One that didn't take isn't tried by itself again. Updating copies the season database to `pre-update-*.db.gz` in the backup folder
    (the last three are kept), shows the installer's progress, then Shotcast starts again, says it's
    updated and republishes the stats page a minute later. Your settings, season database and backups are in

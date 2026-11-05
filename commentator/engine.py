@@ -909,6 +909,9 @@ class Engine:
         self.hole_number_read = False
         # For spotting the end of a round when GSPro's final scorecard isn't read.
         self._last_activity = time.monotonic()
+        # When a ball was last struck (any: range, practice or round), wall clock, for the tray's
+        # round status: an update installs with GSPro open only once nobody's hit one in a while.
+        self._struck_at = time.time()
         # The activity timestamp before the current setup, i.e. how quiet it was just before this
         # tee: a long gap marks a round that was abandoned rather than finished.
         self._prev_activity = 0.0
@@ -2679,12 +2682,13 @@ class Engine:
             os.replace(tmp, path)
         # Checked often and written the moment it changes, so a round that just started reads as one;
         # rewritten every ROUND_STATUS_EVERY_S anyway, which tells the tray the booth is still there.
+        # A ball struck is written at once too: the tray mustn't install over play that just resumed.
         written, at = None, 0.0
         while True:
-            now = self._in_round()
+            now = (self._in_round(), self._struck_at)
             if now != written or time.monotonic() - at >= ROUND_STATUS_EVERY_S:
                 try:
-                    await asyncio.to_thread(write, {"round": now, "updated": time.time()})
+                    await asyncio.to_thread(write, {"round": now[0], "updated": time.time(), "struck": now[1]})
                     written, at = now, time.monotonic()
                 except Exception as e:
                     log.debug("Couldn't write the round status: %s", e)
@@ -5434,6 +5438,7 @@ class Engine:
         return self.state.current_hole, self.current_par, r, r.seq if r else None
 
     def _capture_impact(self, event: ShotEvent) -> None:
+        self._struck_at = time.time()   # even a swing whose ball data never comes is someone playing
         event.impact_at = time.monotonic()
         event.impact_state = (self._impact_state(), *self._impact_hole())
         event.setup_hud = self._setup_at_impact(event.impact_at)
@@ -5450,6 +5455,7 @@ class Engine:
             event.impact_read = asyncio.ensure_future(self._read_impact_hud("[held shot]"))
 
     async def handle_shot(self, event: ShotEvent) -> None:
+        self._struck_at = time.time()
         if self._on_range() and not await self._course_shot_off_own_range(event):
             log.info("Range shot ignored (club %s, carry %.1f)", event.shot.club, event.shot.carry or 0)
             return
@@ -7361,12 +7367,15 @@ class Engine:
             return
         r = self.round
         if r and not r.ended:
+            first_done = r.seq == 1
             r.seq += 1
             if self.hole_number and not r.start_hole_assumed:
                 r.seq = self.hole_number - r.start_hole + 1  # a read hole number beats counting changes
             if self.current_par:
                 r.par.setdefault(r.seq, self.current_par)
             log.info("Round %s: hole %s of %s", r.id, r.seq, r.holes)
+            if first_done and r.seq == 2:
+                self._drop_no_shows(r)
             self._score_hole_started(r)
             self._maybe_prep_asides(r)
             if r.seq > r.holes:
@@ -7934,6 +7943,32 @@ class Engine:
                 return True
         return False
 
+    def _drop_no_shows(self, r: Round) -> None:
+        """The first hole's done, and everyone in a round plays it. A player the round has who didn't
+        (no shot, no score, never set up on its tee, and GSPro's log never had their slot up) was never
+        there - a setup slot misread - and leaves the round, so nothing waits on them to finish or
+        talks about them. Nobody's shots at all means the names can't be trusted either way: kept."""
+        shot = {x.player for x in self.state.shots if x.round_id == r.id}
+        names = {g: {g, r.roster[g]} - {None} for g in r.roster}   # shots go by the league name
+        if not any(shot & n for n in names.values()):
+            return
+        seen = self.gspro.players_seen if self._log_rounds else None
+        for g in list(r.roster):
+            if shot & names[g] or names[g] & set(r.teed) or r.card_scores.get(g) or r.log_scores.get(g):
+                continue
+            if seen is not None:
+                # The log names players by slot: unless theirs is known and was never up, it can't say.
+                if r.slot_guess or not r.slot_names or g not in r.slot_names or r.slot_names.index(g) in seen:
+                    continue
+            old = list(r.slot_names or [])
+            if not r.remove_player(g):
+                continue
+            new = r.slot_names or []
+            for cache in (self._pending_finish, self._finish_seq, self._last_row):
+                for k in [k for k in cache if (old[k] if k < len(old) else None) != (new[k] if k < len(new) else None)]:
+                    del cache[k]
+            log.info("Round %s: %r didn't play the first hole: not a player (players now %s)", r.id, g, list(r.roster))
+
     def _add_to_round(self, r: Round, name: str, match: str | None, **where) -> None:
         old = list(r.slot_names or [])
         if not r.add_player(name, **where):
@@ -8393,6 +8428,7 @@ class Engine:
                     self._fetch_bookings("setup screen", fresh_within=BOOKINGS_FRESH_SECONDS)
                     self._live_preroll()
                 to_read = slots
+                states: dict[str, str] = {}
                 slot_frame = frame
                 if probed and not players_tab and (snap := self._players_snap) is not None \
                         and snap[0] > players_read_at and time.monotonic() - snap[0] <= 3.0:
@@ -8459,8 +8495,14 @@ class Engine:
                 # front-loads right away, no extra poll of delay), but a SHRUNK one - a player who
                 # vanished from just this frame - only after it repeats. A one-frame slot dropout is
                 # always a shrink, so this can't let it poison the roster the opener front-loads for,
-                # yet adding or swapping a player still fires the front-load with no wait.
-                accept = bool(names) and (not set(names) < set(roster) or names == last_read)
+                # yet adding or swapping a player still fires the front-load with no wait. A slot the
+                # pixels show empty isn't a dropout, though: whoever was read there is gone at once (a
+                # name misread off a closing dropdown's last frame, say, mustn't outlast its one frame).
+                gone = set(roster) - set(names)
+                emptied = bool(gone) and all(
+                    i < len(slots) and states.get(slots[i]) == "empty"
+                    for i, n in enumerate(slot_order) if n in gone) and gone <= set(slot_order)
+                accept = bool(names) and (not set(names) < set(roster) or names == last_read or emptied)
                 last_read = names
                 if accept:
                     roster = names

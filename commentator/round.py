@@ -279,6 +279,35 @@ class Round:
             self._allocate_hole_strokes()
         return True
 
+    def remove_player(self, g: str) -> bool:
+        """A player the round was started with who was never there (a misread setup slot): out of the
+        roster, its team and every record. Their slot is left empty rather than closed up, so everyone
+        else keeps their GSPro index. True if removed."""
+        if g not in self.roster or len(self.roster) < 2:
+            return False
+        del self.roster[g]
+        self.teams = {t: [x for x in gs if x != g] for t, gs in self.teams.items()}
+        self.teams = {t: gs for t, gs in self.teams.items() if gs}
+        if self.slot_names is not None:
+            self.slot_names = [None if n == g else n for n in self.slot_names]
+        if self.setup_slots is not None:
+            self.setup_slots = [None if n == g else n for n in self.setup_slots]
+        for d in (self.card_scores, self.log_scores, self.spellings, self.slot_reads, self.slot_held):
+            d.pop(g, None)
+        self.teed = [x for x in self.teed if x != g]
+        self.renamed = {k: v for k, v in self.renamed.items() if v != g}
+        self.log_agree = {k: n for k, n in self.log_agree.items() if k[1] != g}
+        self.picked_up = {(x, seq) for x, seq in self.picked_up if x != g}
+        for results in self.ctp_results.values():
+            results.pop(g, None)
+        self.card_rows = [(n, None if x == g else x) for n, x in self.card_rows]
+        self.sides = self._build_sides()
+        if self.course_card:
+            self.apply_course_card(self.course_card)
+        elif self.week_card:
+            self._allocate_hole_strokes()
+        return True
+
     def rename_player(self, old: str, new: str) -> bool:
         """A guest admitted under a misread of their name: every record of the round goes to the name
         GSPro shows. True if renamed."""

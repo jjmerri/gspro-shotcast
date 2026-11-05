@@ -167,6 +167,63 @@ class Ui:
         done.wait()
         return bool(answer and answer[0])
 
+    def countdown(self, text: str, seconds: int, go: str, wait: str, title: str = TITLE) -> bool:
+        """`text` (its "{s}" the seconds left) counting down on top of everything, waiting for it: True
+        when it ran out or `go` was pressed, False for `wait` or the window closed. Call it from any
+        thread but Tk's; without windows it's False."""
+        log.info("Countdown shown: %s", text.replace("{s}", str(seconds)))
+        if not self.ok:
+            return False
+        done, answer = threading.Event(), []
+
+        def finish(value: bool, w) -> None:
+            if not done.is_set():
+                answer.append(value)
+                done.set()
+                w.destroy()
+
+        def show():
+            import tkinter as tk
+            from tkinter import ttk
+
+            w = tk.Toplevel(self.root)
+            w.title(title)
+            w.resizable(False, False)
+            w.attributes("-topmost", True)
+            w.protocol("WM_DELETE_WINDOW", lambda: finish(False, w))
+            f = ttk.Frame(w, padding=self.px(14))
+            f.pack(fill="both", expand=True)
+            label = ttk.Label(f, wraplength=self.px(380), justify="left")
+            label.pack(anchor="w")
+            bar = ttk.Frame(f)
+            bar.pack(fill="x", pady=(self.px(12), 0))
+            ttk.Button(bar, text=wait, command=lambda: finish(False, w)).pack(side="right")
+            ttk.Button(bar, text=go, command=lambda: finish(True, w)).pack(side="right", padx=self.px(6))
+
+            def tick(left: int) -> None:
+                if done.is_set():
+                    return
+                if left <= 0:
+                    finish(True, w)
+                    return
+                label.configure(text=text.replace("{s}", str(left)))
+                w.after(1000, tick, left - 1)
+            tick(seconds)
+            w.update_idletasks()
+            w.geometry(f"+{max(0, (w.winfo_screenwidth() - w.winfo_reqwidth()) // 2)}"
+                       f"+{max(0, (w.winfo_screenheight() - w.winfo_reqheight()) // 3)}")
+            w.focus_force()
+
+        def go_safely():
+            try:
+                show()
+            except Exception:
+                done.set()
+                raise
+        self.call(go_safely)
+        done.wait(seconds + 30)   # a Tk that's stopped answering can't hold the tray up
+        return bool(answer and answer[0])
+
     def open_settings(self, tray, tab: str | None = None) -> None:
         def go():
             if self.settings_window is not None and self.settings_window.alive():
