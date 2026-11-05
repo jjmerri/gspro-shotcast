@@ -57,10 +57,11 @@ Resources:
                 Action: s3:GetObject
                 Resource: !Sub "${Bucket.Arn}/demo/*"
 
-  # The fake live broadcast, from demo/live.json (tools/demo/build.py): {"session", "segments": [seconds
-  # of each of the recording's segments], "chat": [{"t": seconds in, "name", "text"}]}. The recording plays
-  # on a loop from the epoch, so every viewer is at the same point:
-  #   GET  /live/status.json                 on air since the current loop started
+  # The fake live broadcast, from demo/live.json (tools/demo/build.py): {"session", "first": the loop's
+  # first segment number, "segments": [seconds of each of its segments], "chat": [{"t": seconds into the
+  # loop, "name", "text"}]}. That stretch of the recording plays on a loop from the epoch, so every viewer
+  # is at the same point:
+  #   GET  /live/status.json                 on air since the top of the hour
   #   GET  /live/s/<session>/stream.m3u8     a live playlist: the last few segments up to now
   #   GET  /chat/messages                    the script's messages up to now, and this viewer's own
   #   POST /chat/messages                    a viewer's message, kept only in their own cookie
@@ -124,7 +125,7 @@ Resources:
                   i = k % n
                   if i == 0 and k != first:
                       lines.append("#EXT-X-DISCONTINUITY")
-                  lines += ["#EXTINF:%.3f," % segs[i], "stream%d.ts" % i]
+                  lines += ["#EXTINF:%.3f," % segs[i], "stream%d.ts" % (s.get("first", 0) + i)]
               return "\n".join(lines) + "\n"
 
           def mine(event):
@@ -167,8 +168,7 @@ Resources:
               method = event.get("requestContext", {}).get("http", {}).get("method", "GET")
               s = script()
               if path == "/live/status.json":
-                  _, pos, _ = clock(s, now)
-                  return reply(200, {"live": True, "session": s["session"], "since": int(now - pos),
+                  return reply(200, {"live": True, "session": s["session"], "since": int(now // 3600 * 3600),
                                      "at": int(now // BEAT * BEAT)})
               if path == "/live/s/%s/stream.m3u8" % s["session"]:
                   return reply(200, playlist(s, now), "application/vnd.apple.mpegurl")

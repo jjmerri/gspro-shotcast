@@ -12,9 +12,10 @@ database, made safe to show:
     results and standings and the week has a recap video.
   * Videos come only from Josh's solo streams (DEMO_KEEP, copied from the stats bucket where they won't
     expire), since the GSPro screen shows each player's name. Premonition is also looped as the "live"
-    broadcast by the stack's function, with a scripted chat (CHAT below).
+    broadcast by the stack's function: its hole 8 on a loop, with a scripted chat (CHAT below).
 
     python tools/demo/build.py --db season.db [--no-recap] [--upload]
+    python tools/demo/build.py --live      # just the live loop and its chat
 
 The stack, once (and again with DomainName/CertificateArn once demo.thegolfshed.app's certificate is
 issued; DNS is on Cloudflare: a CNAME from demo to the DistributionDomain output):
@@ -81,28 +82,18 @@ TEAMS = {"Josh and Corey": ["Josh Merritt", "Corey Lane"], "Mike and Tony": ["Mi
 WEEK1_END = "2026-11-04"
 POINTS = [70, 60, 50, 45, 40, 35]
 
-# The live chat's script for the looped Premonition round: seconds into the recording (a little after
-# each moment shows on it), who, what. Made up, about what's on screen.
+# The "live" loop: hole 8 of that round, segments FIRST..LAST of its stream (tee to the birdie putt and
+# the booth's look ahead to 9), 2 minutes 8 seconds.
+LIVE_SEGMENTS = (350, 381)
+
+# The live chat's script for the loop: seconds into it (a little after each moment shows), who, what.
+# Made up, about what's on screen.
 CHAT = [
-    (25, "Dave K", "is this live? 👋"), (60, "Sarah", "hi from Ohio"),
-    (95, "mike_r", "Premonition is such a cool course"), (150, "Dave K", "drive's in the rough right"),
-    (190, "Sarah", "nice approach"), (245, "Tom H", "solid par to start"),
-    (300, "mike_r", "rough again lol"), (390, "Tom H", "BIRDIE 🐦"), (398, "Sarah", "let's gooo"),
-    (465, "Dave K", "fairway finder"), (700, "golfnut22", "par on the 5, take it"),
-    (735, "mike_r", "deep rough on a par 3 😬"), (795, "Sarah", "great up and down!"),
-    (840, "golfnut22", "that drive was pure"), (990, "Dave K", "ugh, bogey"),
-    (1185, "mike_r", "missed the green"), (1265, "Tom H", "two bogeys in a row, shake it off"),
-    (1300, "Sarah", "how does the booth know all these stats?"),
-    (1340, "golfnut22", "the commentary is wild, it's all AI?"), (1400, "Dave K", "back on track"),
-    (1515, "Tom H", "birdie on 8!!"), (1522, "mike_r", "🔥🔥"), (1610, "golfnut22", "big slice there"),
-    (1720, "Sarah", "even at the turn"), (1805, "Dave K", "what launch monitor is he on?"),
-    (1885, "Tom H", "pure 4 iron"), (1935, "mike_r", "another up and down"),
-    (2040, "Sarah", "birdie on 12 🐦 back under par"), (2185, "golfnut22", "oof, three putt"),
-    (2240, "Dave K", "keep it in the fairway"), (2400, "Tom H", "nice save"),
-    (2510, "mike_r", "BIRDIE on 16 💪"), (2560, "Sarah", "two to go, one under"),
-    (2665, "golfnut22", "par on 17"), (2700, "Dave K", "one more good drive"),
-    (2820, "Tom H", "71! under par round 👏"), (2835, "Sarah", "gg"),
-    (2860, "mike_r", "great round, watch the week recap on Round replays"),
+    (6, "Sarah", "hi from Ohio 👋"), (14, "Dave K", "is this live?"),
+    (24, "mike_r", "fairway finder"), (40, "Tom H", "the commentary is wild, it's all AI?"),
+    (58, "golfnut22", "how does the booth know all these stats?"), (80, "Sarah", "nice wedge"),
+    (92, "Dave K", "27 feet for birdie, c'mon"), (110, "Tom H", "BIRDIE 🐦"), (113, "mike_r", "🔥🔥"),
+    (122, "golfnut22", "back to even, let's go"),
 ]
 
 
@@ -356,10 +347,25 @@ def build(db_src: Path, recap: bool) -> None:
         asyncio.run(e._build_recap())
         print(f"recap: {time.time() - t:.0f}s")
 
+    write_live(client)
+
+
+def write_live(client) -> None:
+    """The live function's script (demo/live.json): the loop's segments and the chat."""
     full = client.get_object("", f"live/s/{LIVE_SESSION}/full.m3u8")["Body"].read().decode()
-    segs = [float(x) for x in re.findall(r"#EXTINF:([\d.]+)", full)]
-    (WORK / "live.json").write_text(json.dumps({"session": LIVE_SESSION, "segments": segs,
+    segs = [float(x) for x in re.findall(r"#EXTINF:([\d.]+)", full)][LIVE_SEGMENTS[0]:LIVE_SEGMENTS[1] + 1]
+    WORK.mkdir(parents=True, exist_ok=True)
+    (WORK / "live.json").write_text(json.dumps({"session": LIVE_SESSION, "first": LIVE_SEGMENTS[0], "segments": segs,
                                                 "chat": [{"t": t, "name": n, "text": x} for t, n, x in CHAT]}))
+
+
+def upload_live() -> None:
+    """Only the live loop and its chat: the function reads it within 5 minutes."""
+    import boto3
+    s3 = boto3.Session().client("s3", region_name=REGION)
+    s3.upload_file(str(WORK / "live.json"), stack_outputs()["BucketName"], "demo/live.json",
+                   ExtraArgs={"ContentType": "application/json"})
+    print("live loop up")
 
 
 # ---- the upload -----------------------------------------------------------------------------------
@@ -405,11 +411,16 @@ def main() -> None:
     ap.add_argument("--db", type=Path, help="a copy of the season database (the PC's logs/backups/season-*.db.gz, unzipped)")
     ap.add_argument("--no-recap", action="store_true", help="skip the week recap (it calls the closer's model and TTS)")
     ap.add_argument("--upload", action="store_true", help="publish to the shotcast-demo stack")
+    ap.add_argument("--live", action="store_true", help="only rewrite and upload the live loop and its chat")
     a = ap.parse_args()
     load_env()
     for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
         os.environ.pop(k, None)
     os.chdir(REPO)
+    if a.live:
+        write_live(Overlay())
+        upload_live()
+        return
     if a.db:
         build(a.db, not a.no_recap)
     if a.upload:

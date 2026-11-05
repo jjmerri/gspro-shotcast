@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 TEMPLATE = Path(__file__).resolve().parents[1] / "tools" / "demo" / "demo-site.yaml"
-SCRIPT = {"session": "s1", "segments": [4.0, 4.0, 4.0, 3.0],   # a 15 second loop
+SCRIPT = {"session": "s1", "first": 0, "segments": [4.0, 4.0, 4.0, 3.0],   # a 15 second loop
           "chat": [{"t": 1, "name": "A", "text": "first"}, {"t": 9, "name": "B", "text": "later"}]}
 
 
@@ -39,7 +39,13 @@ def test_the_live_playlist_wraps_to_the_start_with_a_discontinuity(live):
     assert re.findall(r"stream\d+\.ts|#EXT-X-DISCONTINUITY\n", body) == [
         "stream0.ts", "stream1.ts", "stream2.ts", "stream3.ts", "#EXT-X-DISCONTINUITY\n", "stream0.ts", "stream1.ts"]
     status = json.loads(live(2 * 15 + 9, "/live/status.json")["body"])
-    assert status["live"] and status["session"] == "s1" and status["since"] == 30
+    assert status["live"] and status["session"] == "s1"
+
+
+def test_the_loop_can_be_a_stretch_from_the_middle_of_the_recording(live, monkeypatch):
+    monkeypatch.setitem(SCRIPT, "first", 350)
+    body = live(2 * 15 + 9, "/live/s/s1/stream.m3u8")["body"]
+    assert re.findall(r"stream\d+\.ts", body) == [f"stream{i}.ts" for i in (350, 351, 352, 353, 350, 351)]
 
 
 def test_the_chat_shows_the_script_so_far_and_a_viewers_own_messages_from_their_cookie(live):
