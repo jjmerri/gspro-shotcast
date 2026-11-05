@@ -11,6 +11,7 @@ stats page and in the app; "Booth" items only in the app. Plain words, one line 
 - **Out of bounds** gets called on the shot itself in GSPro 4.0, not only before the next one.
 - The lie comes from the player box in GSPro 4.0 and the beta ("Deep" is deep rough), with the minimap as backup.
 - A round quit part-way through keeps its last finished hole.
+- A drive hit right after **Tee Off** from a course's range is called on the right hole.
 - Each round stores GSPro's green and fairway firmness (4.0) and the launch monitor.
 
 ## 0.1.87
