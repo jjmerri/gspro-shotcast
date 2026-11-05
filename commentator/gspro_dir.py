@@ -11,8 +11,8 @@ from .settings_files import set_yaml
 DEFAULT = r"C:\GSProV1"
 CONNECTOR_LOG = r"Core\GSPC\ConnectDebug.txt"
 COURSES = (r"Courses", r"Core\GSP\Courses")
-# The 3.1 release, and the 3.59 public beta installed next to it (or on its own).
-EXES = (r"Core\GSP\GSPro.exe", r"Core\GSProPublicBeta\GSpro.exe")
+# The 3.1 release, the 3.59 public beta and 4.0, installed side by side (or on their own).
+EXES = (r"Core\GSP\GSPro.exe", r"Core\GSProPublicBeta\GSpro.exe", r"Core\GSPv4\GSPro.exe")
 
 
 def looks_like_gspro(folder: str) -> bool:

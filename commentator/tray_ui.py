@@ -789,7 +789,7 @@ class SettingsWindow:
         elif gspro_dir.looks_like_gspro(folder):
             text = "\u2714 GSPro is in this folder."
         else:
-            text = "\u26a0 There's no GSPro in this folder (Core\\GSP or Core\\GSProPublicBeta)."
+            text = "\u26a0 There's no GSPro in this folder (Core\\GSP, Core\\GSProPublicBeta or Core\\GSPv4)."
         self.gspro_status.configure(text=text)
 
     def _advanced_tab(self) -> None:

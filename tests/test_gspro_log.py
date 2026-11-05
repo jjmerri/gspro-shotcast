@@ -605,6 +605,52 @@ def test_a_kick_off_the_cart_path_is_a_fact():
     assert asyncio.run(Engine._kick_facts(me, s.fires, "rough", True, wait=0)) == []
 
 
+def test_a_4_0_out_of_bounds_is_called_on_its_own_shot():
+    import asyncio
+    from types import SimpleNamespace
+    from commentator.engine import Engine
+    from commentator.models import Shot
+
+    # GSPro 4.0 (Josh, Paynes Valley 2): the penalty bump follows the shooter's own score line at once.
+    s = GsproState()
+    lines = ["ActivePlayer: 0  currentHole: 1  strokes: 0  Previous Score: 0",
+             " * ------- Shot Fired! ------- *",
+             "LaunchExt Vars: sp 142.37, el 13.66, az -0.42, ts 3968.65, sa 6.89, cy 222.29, id 15",
+             "Physics Settings: Green Firmness 0     Fairway Firmness 0    Course Type 1",
+             "LaunchExt - Regular Mode",
+             'LM Type {"connectType":"Uneekor","LMType":"UNEEKOR EYEXO2"}',
+             'LM Type {"connectType":"Uneekor","LMType":"UNEEKOREYEXO2"}',
+             "ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 0",
+             "ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 1"]
+    for line in lines:
+        for ev in parse_events(line):
+            s.apply(ev)
+    info = s.fire_info(s.fires)
+    assert info["penalty_strokes"] == 1 and s.penalties(0) == 1
+    assert info["physics"] == {"green_firmness": 0, "fairway_firmness": 0, "course_type": 1,
+                               "launch_monitor": "UNEEKOR EYEXO2"}
+    me = SimpleNamespace(gspro=s)
+    drive = Shot(ball_speed=142.4, vla=13.7, carry=222.3)
+    facts, tag = asyncio.run(Engine._penalty_shot_facts(me, s.fires, drive, [], wait=0))
+    assert tag == "out_of_bounds" and "out of bounds" in facts[0]
+    assert asyncio.run(Engine._penalty_shot_facts(me, s.fires, drive, ["in_water"], wait=0)) == ([], None)
+    s.fire_info(s.fires)["hazard"] = (1.0, 2.0, 3.0)
+    facts, tag = asyncio.run(Engine._penalty_shot_facts(me, s.fires, drive, [], wait=0))
+    assert tag == "in_hazard" and "penalty area" in facts[0]
+    # Told only once a line saying it is on air.
+    from commentator.models import Line
+    me._pen_called = {}
+    lines = [Line("a", "What a strike."), Line("b", "And that's out of bounds.")]
+    Engine._hook_penalty_call(me, lines, s.fire_info(s.fires))
+    assert me._pen_called == {} and not hasattr(lines[0], "_on_air")
+    lines[1]._on_air()
+    assert me._pen_called == {(0, 1): 1}
+    # A clean shot: nothing to say.
+    for ev in parse_events(" * ------- Shot Fired! ------- *\nActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 2"):
+        s.apply(ev)
+    assert asyncio.run(Engine._penalty_shot_facts(me, s.fires, drive, [], wait=0)) == ([], None)
+
+
 def test_a_tree_hit_is_logged_on_its_shot_and_called_by_its_height():
     from types import SimpleNamespace
     from commentator.engine import Engine

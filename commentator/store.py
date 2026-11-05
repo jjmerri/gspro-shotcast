@@ -173,7 +173,10 @@ CREATE TABLE IF NOT EXISTS rounds (
     nine_net_to_par INTEGER,                     -- part-played round; the season ranks per nine, and
                                                  -- prorating eleven holes onto nine invents a score
     players TEXT,                                -- JSON: the side's players (NULL on older rows)
-    excluded INTEGER NOT NULL DEFAULT 0          -- 1 = excluded from the stats on the local page (stats_web)
+    excluded INTEGER NOT NULL DEFAULT 0,         -- 1 = excluded from the stats on the local page (stats_web)
+    -- GSPro's physics settings as its log writes them (4.0+, NULL before): raw values, scale unconfirmed.
+    green_firmness INTEGER, fairway_firmness INTEGER, course_type INTEGER,
+    launch_monitor TEXT                          -- GSPro's "LM Type" for the round, e.g. UNEEKOR EYEXO2
 );
 CREATE TABLE IF NOT EXISTS week_results (       -- a league team's finished week, by the sim's count
     id INTEGER PRIMARY KEY,
@@ -385,7 +388,8 @@ class Store:
                         "is_tournament": "INTEGER NOT NULL DEFAULT 0",
                         "complete": "INTEGER NOT NULL DEFAULT 1", "holes_played": "INTEGER",
                         "nine_to_par": "INTEGER", "nine_net_to_par": "INTEGER", "players": "TEXT",
-                        "excluded": "INTEGER NOT NULL DEFAULT 0"}
+                        "excluded": "INTEGER NOT NULL DEFAULT 0", "green_firmness": "INTEGER",
+                        "fairway_firmness": "INTEGER", "course_type": "INTEGER", "launch_monitor": "TEXT"}
         for col, decl in rounds_added.items():
             if col not in have_rounds:
                 self.db.execute(f"ALTER TABLE rounds ADD COLUMN {col} {decl}")
@@ -1378,12 +1382,15 @@ class Store:
 
     def record_round(self, *, course, fmt, side, team, holes, stats, strokes, net_to_par, hole_number,
                      hole_pars=None, is_league: bool = True, complete: bool = True, players: list[str] | None = None,
-                     is_tournament: bool = False, first_nine: tuple[int, int | None] | None = None) -> int:
+                     is_tournament: bool = False, first_nine: tuple[int, int | None] | None = None,
+                     physics: dict | None = None) -> int:
         """One side's round. A round quit early is recorded too (complete=0, holes_played short): its
         per-hole and per-try stats count, but it only counts as a round in the season totals once a
         full nine was played (see _COUNTS_AS_ROUND), and those totals are scored per nine holes.
         `first_nine` is (gross to par, net to par) over the first nine holes played, stored only for a
-        part-played round so the season ranks the nine it finished rather than a prorated fraction."""
+        part-played round so the season ranks the nine it finished rather than a prorated fraction.
+        `physics`: GSPro's settings for the round from its log (green_firmness, fairway_firmness,
+        course_type, launch_monitor), whichever were logged."""
         # Key per-hole maps by real hole number for cross-round per-hole stats; drop holes whose number
         # is unknown rather than falling back to the round sequence (which would collide with hole 1).
         scores_json = json.dumps({str(h): v for k, v in stats.scores.items() if (h := hole_number(k)) is not None})
@@ -1398,14 +1405,16 @@ class Store:
             """INSERT INTO rounds (session_id, ended_at, date, course, format, side, team, holes, gross, par, strokes,
                    net_to_par, fir_hit, fir_tries, gir_hit, gir_tries, scramble_hit, scramble_tries, sand_hit,
                    sand_tries, putts, putt_holes, penalties, longest_drive, scores, hole_pars, source, is_league,
-                   complete, holes_played, nine_to_par, nine_net_to_par, players, is_tournament)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   complete, holes_played, nine_to_par, nine_net_to_par, players, is_tournament, green_firmness,
+                   fairway_firmness, course_type, launch_monitor)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (self.session_id, time.time(), time.strftime("%Y-%m-%d"), self.course_name(course), fmt, side, team, holes,
              stats.gross if stats.holes_scored else None, stats.par or None, strokes, net_to_par,
              *stats.fir, *stats.gir, *stats.scramble, *stats.sand,
              stats.putts if stats.putt_holes else None, stats.putt_holes, stats.penalties, stats.longest_drive,
              scores_json, pars_json, stats.source, int(is_league), int(complete), stats.holes_scored,
-             nine, nine_net, json.dumps(players) if players else None, int(is_tournament)),
+             nine, nine_net, json.dumps(players) if players else None, int(is_tournament),
+             *((physics or {}).get(k) for k in ("green_firmness", "fairway_firmness", "course_type", "launch_monitor"))),
         )
         self.db.commit()
         return cur.lastrowid

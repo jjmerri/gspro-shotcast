@@ -575,6 +575,41 @@ def test_parse_others_reads_rows_with_distances_only():
         assert parse_others(row) == [OtherPlayer(name, "400.3 yards", "E")]
 
 
+def test_parse_others_drops_a_lie_cell_with_a_stray_mark():
+    # GSPro 4.0: the distance line's lie OCR'd as "; Tee" became a phantom player.
+    items = [OcrItem("Corey", 60, 300, 20), OcrItem("E", 200, 300, 20), OcrItem("391.5yd", 60, 325, 16),
+             OcrItem("; Tee", 160, 325, 16)]
+    assert parse_others(items) == [OtherPlayer("Corey", "391.5 yards", "E")]
+    row = [OcrItem("; Wes", 113, 42, 47), OcrItem("400.3yds", 329, 42, 41), OcrItem("E", 622, 40, 37)]
+    assert parse_others(row) == [OtherPlayer("Wes", "400.3 yards", "E")]
+
+
+def test_the_player_box_lie_beats_the_minimap(monkeypatch):
+    # 4.0/3.59 write the lie in the player box ("Deep" for deep rough): it wins over the minimap's.
+    from commentator.config import ScreenConfig
+    from commentator.screen import Screen
+
+    s = Screen(ScreenConfig())
+    boxes = {"player_box": [OcrItem("Josh", 20, 10, 12, 5), OcrItem("E", 60, 10, 12, 55),
+                            OcrItem("165.7yd", 120, 10, 12, 100), OcrItem("7ft 0", 180, 10, 12, 160),
+                            OcrItem("Deep", 230, 10, 12, 215), OcrItem("1 234", 280, 10, 12, 260)],
+             "lie": [OcrItem("Rough", 50, 10, 12, 30)]}
+    monkeypatch.setattr(Screen, "ocr_items", lambda self, img: boxes[img.info["name"]])
+    from PIL import Image
+
+    def crop(name):
+        img = Image.new("RGB", (300, 20))
+        img.info["name"] = name
+        return img
+    hud = s.read_hud(["player_box", "lie"], crops={"player_box": crop("player_box"), "lie": crop("lie")},
+                     other_side=False)
+    assert hud.box_lie == "deep rough" and hud.lie == "deep rough"
+    boxes["player_box"] = boxes["player_box"][:4]   # 3.1: no lie in the box, the minimap's stands
+    hud = s.read_hud(["player_box", "lie"], crops={"player_box": crop("player_box"), "lie": crop("lie")},
+                     other_side=False)
+    assert hud.box_lie is None and hud.lie == "rough"
+
+
 def test_parse_others_reads_3_59_two_line_rows():
     # 3.59 puts the name and score on one line and the distance (and lie) on the next.
     items = [OcrItem("Corey", 60, 300, 20), OcrItem("E", 200, 300, 20), OcrItem("19.6 yds", 60, 325, 16),
@@ -2815,6 +2850,21 @@ def test_a_round_quit_part_way_is_ranked_by_the_nine_it_finished(tmp_path):
     assert season["best_net_to_par"] == 2 and season["best_gross_to_par"] == 2
 
 
+def test_a_round_stores_gspros_physics_settings(tmp_path):
+    from commentator.round import SideStats
+    from commentator.store import Store
+
+    s = Store(str(tmp_path / "s.db"))
+    s.session_id = 1
+    st = SideStats(holes_scored=1, gross=4, par=4, scores={1: 4})
+    rid = s.record_round(course="Pebble", fmt="stroke", side="Mike", team=None, holes=1, stats=st, strokes=0,
+                         net_to_par=0, hole_number=lambda k: k, hole_pars={1: 4},
+                         physics={"green_firmness": 2, "fairway_firmness": 0, "launch_monitor": "UNEEKOR EYEXO2"})
+    row = s.db.execute("SELECT green_firmness, fairway_firmness, course_type, launch_monitor FROM rounds WHERE id = ?",
+                       (rid,)).fetchone()
+    assert tuple(row) == (2, 0, None, "UNEEKOR EYEXO2")
+
+
 def test_a_finished_round_keeps_the_prorated_rate_over_its_own_nine(tmp_path):
     from commentator.round import SideStats
     from commentator.store import Store
@@ -3729,6 +3779,22 @@ async def test_a_quit_after_a_full_nine_signs_off_on_the_holes_played(tmp_path):
     e._sign_off = fake_sign_off
     await e.handle_round_end(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
     assert signed == [9]
+
+
+def test_a_quit_keeps_the_last_hole_when_a_phantom_side_never_scored(tmp_path):
+    # GSPro 4.0: an OCR'd "; Tee" became a second player with no scores, and the finished hole 2
+    # was dropped because that side had no score on it.
+    e = _engine(tmp_path)
+    r = e._build_round(["Josh", "; Tee"], "Paynes Valley", {"hole_count": 18}, is_league=False)
+    e._start_round(r)
+    r.par = {q: 4 for q in range(1, 19)}
+    r.set_log_scores("Josh", {1: 4, 2: 7})
+    r.seq = 2
+    e._record_round_stats(r, "quit early in GSPro", complete=False)
+    assert r.stats_through == 2
+    r.set_log_scores("Josh", {1: 4})   # the hole really was still being played
+    e._record_round_stats(r, "quit early in GSPro", complete=False)
+    assert r.stats_through == 1
 
 
 async def test_a_quit_before_a_full_nine_still_gets_no_closer(tmp_path):

@@ -180,7 +180,7 @@ League file + Squabbit ─────────► standings, handicaps, stor
 
 ## Requirements
 
-- A Windows PC running **GSPro 3.1.x** (or the 3.59 public beta, see below), windowed or
+- A Windows PC running **GSPro 3.1.x** (or 4.0 or the 3.59 public beta, see below), windowed or
   borderless (not exclusive fullscreen).
   Shotcast runs on the same PC. It reads GSPro's screen; checked on 16:10 (3450×2160) and 16:9
   (1920×1080) screens, and `screen-check --fix` fits it to others.
@@ -207,13 +207,17 @@ beyond that is supported on paper but not yet run live:
 - **English GSPro and yards.** The screen and log reads expect GSPro's interface in English, with
   yards and mph. Metres or another interface language will likely misread. (The commentary itself
   can be in another language.)
-- **GSPro updates.** Built against 3.1.x. The 3.59 public beta (new menus and HUD, its log in
-  `Player.log`) is detected from the version GSPro logs, and the booth switches its log, setup
-  screen and HUD reads to match; it has been checked on recordings of one 3.59.11 session, not yet
-  run live. `screen-check` and the tray's GSPro folder check work on both. On the beta, the `gspro_log` shot source
-  takes its numbers from the shot files GSPro saves once the ball stops (the beta logs no
-  `LaunchExt Vars`), so those shots air a few seconds late with no mid-flight call. A release that moves the HUD or changes the
-  log can break reads until the code catches up; `screen-check` shows which boxes stopped reading.
+- **GSPro updates.** Built against 3.1.x. The 3.59 public beta and 4.0 (new menus and HUD, the log
+  in `Player.log`, 4.0 installed in `Core\GSPv4`) are detected from the version GSPro logs, and the
+  booth switches its log, setup screen and HUD reads to match. The beta has been checked on
+  recordings of one 3.59.11 session; 4.0 on one live session of two holes. `screen-check` and the
+  tray's GSPro folder check work on all three. On the beta, the `gspro_log` shot source takes its
+  numbers from the shot files GSPro saves once the ball stops (the beta logs no `LaunchExt Vars`), so
+  those shots air a few seconds late with no mid-flight call; 4.0 logs `LaunchExt Vars` again, so its
+  shots come through at once, as on 3.1. 4.0 also logs its green and fairway firmness, which each
+  round stores as the raw numbers GSPro writes (which number is which menu setting isn't confirmed).
+  A release that moves the HUD or changes the log can break reads until the code catches up;
+  `screen-check` shows which boxes stopped reading.
 - **Windows only** for tracking and the booth. The stats page runs anywhere with Python.
 
 ## Quick start

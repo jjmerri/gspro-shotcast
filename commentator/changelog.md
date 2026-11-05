@@ -4,6 +4,15 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.88
+
+### Booth
+- Works with **GSPro 4.0**: the Settings folder check and Find GSPro know its new folder.
+- **Out of bounds** gets called on the shot itself in GSPro 4.0, not only before the next one.
+- The lie comes from the player box in GSPro 4.0 and the beta ("Deep" is deep rough), with the minimap as backup.
+- A round quit part-way through keeps its last finished hole.
+- Each round stores GSPro's green and fairway firmness (4.0) and the launch monitor.
+
 ## 0.1.87
 
 ### Stats page

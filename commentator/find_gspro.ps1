@@ -1,5 +1,5 @@
-# Prints the folder GSPro is installed in (the one holding Core\GSP\GSPro.exe, or the public beta's
-# Core\GSProPublicBeta\GSpro.exe), or nothing.
+# Prints the folder GSPro is installed in (the one holding Core\GSP\GSPro.exe, the public beta's
+# Core\GSProPublicBeta\GSpro.exe or 4.0's Core\GSPv4\GSPro.exe), or nothing.
 # Used by the installer's GSPro page and the Windows app's Settings. Looks at, in order: a running
 # GSPro, Start menu and desktop shortcuts to it or its launcher, and \GSProV1 on each drive.
 param([string]$Out)
@@ -14,6 +14,7 @@ Get-ChildItem $places -Recurse -Filter *.lnk | Where-Object Name -match "GSP" | 
 }
 Get-PSDrive -PSProvider FileSystem | ForEach-Object { $found += (Join-Path $_.Root "GSProV1") }
 $dir = $found | Where-Object { $_ -and ((Test-Path -LiteralPath (Join-Path $_ "Core\GSP\GSPro.exe")) -or
-    (Test-Path -LiteralPath (Join-Path $_ "Core\GSProPublicBeta\GSpro.exe"))) } | Select-Object -First 1
+    (Test-Path -LiteralPath (Join-Path $_ "Core\GSProPublicBeta\GSpro.exe")) -or
+    (Test-Path -LiteralPath (Join-Path $_ "Core\GSPv4\GSPro.exe"))) } | Select-Object -First 1
 # The installer reads the file as ANSI.
 if ($Out) { [IO.File]::WriteAllText($Out, [string]$dir, [Text.Encoding]::Default) } else { $dir }

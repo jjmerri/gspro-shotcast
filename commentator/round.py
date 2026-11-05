@@ -208,6 +208,9 @@ class Round:
         # round's summary in the log.
         self.name_sources: dict[str, int] = {}
         self.box_hidden = 0       # shots GSPro's player box was hidden for at impact
+        # GSPro's physics settings and launch monitor as its log gave them with the round's shots (see
+        # GsproState's physics), stored with the round.
+        self.physics: dict = {}
         self.log_disagreed = 0    # shots the screen and GSPro's log named different players for
         # The last scorecard's rows in order, each with the round's player it went to (None: nobody's).
         self.card_rows: list[tuple[str, str | None]] = []

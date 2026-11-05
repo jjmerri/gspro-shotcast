@@ -173,7 +173,7 @@ def set_installs_updates(on: bool) -> None:
 
 
 def gspro_running() -> bool:
-    """GSPro open (3.1's GSPro.exe, the beta's GSpro.exe). Not Windows: never."""
+    """GSPro open (3.1's and 4.0's GSPro.exe, the beta's GSpro.exe). Not Windows: never."""
     if os.name != "nt":
         return False
     try:

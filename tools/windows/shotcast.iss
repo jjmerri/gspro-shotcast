@@ -139,7 +139,8 @@ end;
 function LooksLikeGSPro(Dir: String): Boolean;
 begin
   Result := (Dir <> '') and (FileExists(AddBackslash(Dir) + 'Core\GSP\GSPro.exe')
-    or FileExists(AddBackslash(Dir) + 'Core\GSProPublicBeta\GSpro.exe'));
+    or FileExists(AddBackslash(Dir) + 'Core\GSProPublicBeta\GSpro.exe')
+    or FileExists(AddBackslash(Dir) + 'Core\GSPv4\GSPro.exe'));
 end;
 
 function GSProDir(Param: String): String;
@@ -221,7 +222,7 @@ begin
       Result := SuppressibleMsgBox('No GSPro folder: Shotcast reads shots from GSPro''s own log instead (no club data) '
         + 'until you set it in the tray''s Settings. Continue?', mbConfirmation, MB_YESNO, IDYES) = IDYES
     else if not LooksLikeGSPro(Dir) then
-      Result := SuppressibleMsgBox('There''s no GSPro (Core\GSP or Core\GSProPublicBeta) in ' + Dir + '. Use this folder anyway?',
+      Result := SuppressibleMsgBox('There''s no GSPro (Core\GSP, Core\GSProPublicBeta or Core\GSPv4) in ' + Dir + '. Use this folder anyway?',
         mbConfirmation, MB_YESNO, IDYES) = IDYES;
   end;
 end;

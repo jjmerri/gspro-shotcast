@@ -56,6 +56,9 @@ class Hud:
     hole_length: str | None = None
     hole_number: int | None = None
     lie: str | None = None
+    # The lie written in the player box after the distance (3.59/4.0: "Fairway", "Deep"); `lie` prefers
+    # it over the minimap's header when the player box was read too.
+    box_lie: str | None = None
     tiles: dict[str, str] = field(default_factory=dict)
     # Pin height relative to the ball, + uphill. None when the arrow's direction couldn't be read.
     elevation_yards: float | None = None
@@ -275,7 +278,8 @@ def parse_lie(items: list[str]) -> str | None:
     for lie in LIES:
         if re.search(rf"\b{lie}\b", text):
             return lie
-    return None
+    # 3.59/4.0's player box says just "Deep" for deep rough.
+    return "deep rough" if re.search(r"\bdeep\b", text) else None
 
 
 # GSPro's result-banner wording (abbreviated: "DBL BOGEY", not "Double Bogey"), longest/worst first
@@ -364,6 +368,11 @@ SCORE_BADGE = re.compile(r"^(E|[+-]\d+)$")
 LIE_CELL = re.compile(r"(?:{0})(?:\s+(?:{0}))*".format("|".join(re.escape(lie) for lie in (*LIES, "deep"))))
 
 
+def is_lie_cell(text: str) -> bool:
+    """A cell of lie words only, ignoring stray OCR marks around them ("; Tee")."""
+    return LIE_CELL.fullmatch(re.sub(r"^[^a-z]+|[^a-z]+$", "", text.strip().lower())) is not None
+
+
 def parse_others(items: list[OcrItem]) -> list[OtherPlayer]:
     """The other players listed under the active one: name, distance to the pin, score badge.
 
@@ -375,11 +384,13 @@ def parse_others(items: list[OcrItem]) -> list[OtherPlayer]:
     for row in _rows(items):
         texts = [i.text.strip() for i in row]
         distance = DISTANCE.search(" ".join(texts))
-        names = [t for t in texts if re.search(r"[A-Za-z]{2}", t) and not DISTANCE.search(_zero(t))
+        # OCR can stick a stray mark on a cell ("; Tee"): it isn't part of a name or a lie.
+        names = [re.sub(r"^[^\w(+-]+", "", t) for t in texts]
+        names = [t for t in names if re.search(r"[A-Za-z]{2}", t) and not DISTANCE.search(_zero(t))
                  and not re.search(r"\d(st|nd|rd|th)\b|\bin for\b", t, re.I)]
         # 3.59's distance line also names the lie ("Fairway", "Deep"): not a name under a name line.
         # A whole cell of lie words only, so "Alex Green" (or a classic row's lone "Green") still counts.
-        name = next((t for t in names if not LIE_CELL.fullmatch(t.strip().lower())), None)
+        name = next((t for t in names if not is_lie_cell(t)), None)
         if name is None and names and not (distance and pending):
             name = names[0]
         score = next((t for t in texts if SCORE_BADGE.match(t)), None)

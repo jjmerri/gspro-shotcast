@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw
 
 from .config import HUD_ASPECT, NEW_UI_REGIONS, Region, ScreenConfig
 from .hud import (
-    DISTANCE, LIE_CELL, NAME_DARK, Hud, OcrItem, arrow_direction, parse_club, parse_elevation, parse_hole_box, parse_lie,
+    DISTANCE, NAME_DARK, Hud, OcrItem, arrow_direction, is_lie_cell, parse_club, parse_elevation, parse_hole_box, parse_lie,
     parse_others, parse_player_box, parse_score_banner, parse_scorecard, parse_slope, parse_tiles, tile_value_items,
 )
 
@@ -138,6 +138,15 @@ def monitor_of(rect: tuple[int, int, int, int], monitors: list[dict]) -> int | N
     cx, cy = (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
     return next((i for i, m in enumerate(monitors) if i and m["left"] <= cx < m["left"] + m["width"]
                  and m["top"] <= cy < m["top"] + m["height"]), None)
+
+
+def _box_lie_cell(items: list[OcrItem]) -> OcrItem | None:
+    """The player box's lie (3.59/4.0): a cell of lie words only ("Deep" for deep rough) right of the
+    distance, so a player called "Alex Green" doesn't count. None on 3.1, whose box has no lie."""
+    dist = next((i for i in items if DISTANCE.search(i.text)), None)
+    if dist is None:
+        return None
+    return min((i for i in items if i.left > dist.left and is_lie_cell(i.text)), key=lambda i: i.left, default=None)
 
 
 def _strip_neighbour(items: list[OcrItem], row: OcrItem, start: int, end: int) -> int | None:
@@ -505,7 +514,7 @@ class Screen:
                 continue
             rest = self.read_hud([n for n in ("player_name", "club", "lie") if n in crops], crops=crops,
                                  other_side=False)
-            hud.name_sig, hud.club, hud.lie = rest.name_sig, rest.club, rest.lie
+            hud.name_sig, hud.club, hud.lie = rest.name_sig, rest.club, hud.box_lie or rest.lie
             hud.handed = hud.handed or rest.handed
             hud.crops = crops
             if want_club and not hud.club:
@@ -568,6 +577,8 @@ class Screen:
                 if hud.shot_number is None:
                     hud.shot_number = self._strip_shot(img, items)
                 hud.elevation_yards = self._elevation(img, items, metric=(hud.to_pin or "").endswith("metres"))
+                if (cell := _box_lie_cell(items)) is not None:
+                    hud.box_lie = parse_lie([cell.text])
             elif name == "hole_box":
                 for k, v in parse_hole_box(texts).items():
                     setattr(hud, k, v)
@@ -598,6 +609,8 @@ class Screen:
                 hud.scorecard = parse_scorecard(items)
         if other_side:
             self._other_side(parts, hud, base, crops)
+        # The player box's lie is the ball's own, in plain words; the minimap's header is the backup.
+        hud.lie = hud.box_lie or hud.lie
         return hud
 
     def _other_side(self, parts: list[str], hud: Hud, base: "Image.Image | None",
@@ -634,13 +647,8 @@ class Screen:
         On 3.59 the lie and the shot-number strip follow it, so only items left of the lie count; and
         OCR sometimes joins it to the distance ("5ft 5  0ft 0"), so then it's the text after that."""
         numeric = [i for i in items if re.search(r"\d", i.text) and not re.search(r"shot|\(", i.text, re.I)]
-        # The lie: a cell of lie words only (3.59 says just "Deep" for deep rough) right of the
-        # distance, so a player called "Alex Green" above it doesn't count.
-        dist = next((i for i in items if DISTANCE.search(i.text)), None)
-        lie_left = min((i.left for i in items if dist is not None and i.left > dist.left
-                        and LIE_CELL.fullmatch(i.text.strip().lower())), default=None)
-        if lie_left is not None:
-            numeric = [i for i in numeric if i.left < lie_left]
+        if (lie := _box_lie_cell(items)) is not None:
+            numeric = [i for i in numeric if i.left < lie.left]
         if not numeric:
             return None
         if len(numeric) >= 2:  # the first number is the distance to the pin

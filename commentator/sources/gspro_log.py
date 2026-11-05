@@ -89,6 +89,7 @@ class LogEvent:
     descent: float | None = None      # bounce: the ball's descent angle at its first landing (0 = not falling yet)
     cup_mm: float | None = None       # cup: how far from the cup's centre (mm) the ball crossed it
     lie_cost: tuple[int, int] | None = None   # penalty_surface: the (spin %, speed %) the lie left the shot
+    physics: dict | None = None       # physics: GSPro's settings for the shot just fired (see _PHYSICS)
 
 
 # GSPro's `Using Material TVG<surface>` names mapped to the booth's lie vocabulary (commentator/hud.py
@@ -134,6 +135,14 @@ _PENALTY_SURFACE = re.compile(r"^Penalty Surface TVG(\w+),(?: Spin(\d+)%, Speed 
 # The driving range loads as its own "course": these lines mark it (and there's no `Selected Course:`).
 _RANGE_MARKERS = ("GSPro Multi Range", "RangeLevelLoaded()")
 _VERSION = re.compile(r"^GSPro Version:\s*(\S+)")
+# GSPro 4.0 logs its physics settings with every shot, right after the launch line. Raw numbers: the
+# game's menu has named steps (super soft to super hard firmness), and which number is which isn't
+# confirmed, so they're stored as logged.
+_PHYSICS = re.compile(r"^Physics Settings:\s*Green Firmness\s*(-?\d+)\s+Fairway Firmness\s*(-?\d+)"
+                      r"(?:\s+Course Type\s*(-?\d+))?")
+# The launch monitor GSPro is connected to, logged with each shot (every version): `LM Type
+# {"connectType":"Uneekor","LMType":"UNEEKOR EYEXO2"}`.
+_LM_TYPE = re.compile(r'^LM Type\s*(\{.*\})\s*$')
 # Each bounce logs the altitude GSPro's physics is using, in feet. It can differ from the course
 # file's altitude (Cabot Cliffs: 1,700 in the file, 50 here), and some rounds log 0.
 _ALTITUDE = re.compile(rf"^magnitude:.*\|\s*elevation\s+(-?{_NUM})\s*$")
@@ -283,6 +292,15 @@ def parse_events(text: str) -> list[LogEvent]:
                 out.append(LogEvent("flag_hit"))
             elif m := _VERSION.match(line):
                 out.append(LogEvent("version", display=m.group(1)))
+            elif m := _PHYSICS.match(line):
+                physics = {"green_firmness": int(m.group(1)), "fairway_firmness": int(m.group(2))}
+                if m.group(3) is not None:
+                    physics["course_type"] = int(m.group(3))
+                out.append(LogEvent("physics", physics=physics))
+            elif m := _LM_TYPE.match(line):
+                lm = json.loads(m.group(1))
+                if isinstance(lm, dict) and (name := str(lm.get("LMType") or lm.get("connectType") or "").strip()):
+                    out.append(LogEvent("physics", physics={"launch_monitor": name}))
             elif m := _ALTITUDE.match(line):
                 out.append(LogEvent("altitude", altitude_ft=float(m.group(1))))
             elif any(k in line for k in _MARKERS):
@@ -480,6 +498,11 @@ class GsproState:
             self.unparsed = (self.unparsed + [ev.display])[-5:]
         elif ev.kind == "altitude":
             self.altitude_ft = ev.altitude_ft
+        elif ev.kind == "physics":
+            if self.fires in self._fire_info:   # logged just after the shot it was played with
+                held = self._fire_info[self.fires].setdefault("physics", {})
+                for k, v in (ev.physics or {}).items():
+                    held.setdefault(k, v)   # the first of a shot's repeated LM Type lines
         elif ev.kind == "sgt":
             self.sgt = True
         elif ev.kind == "course":
@@ -846,6 +869,12 @@ class GsproState:
             if not self._shot_since_state.get(ev.player) and not self._gimmie_since_state.get(ev.player) \
                     and not closed:
                 self._penalties[key] = self._penalties.get(key, 0) + (ev.score - prev)
+                # GSPro 4.0 logs the bump straight after the shooter's own score line (3.1 not until
+                # the next player is up): the stroke that drew it is this player's last on the hole.
+                last = self._fire_info.get((self._fires_by.get(ev.player) or [None])[-1])
+                if last is not None and last.get("hole") == ev.hole:
+                    last["penalty_strokes"] = last.get("penalty_strokes", 0) + (ev.score - prev)
+                    last.setdefault("penalty_strokes_at", time.monotonic())
                 # The next shot is from the drop, not where the ball ended (the water), and no fresh
                 # material is logged for the drop, so forget the stale lie and let OCR fill it in.
                 self.lie_by.pop(ev.player, None)

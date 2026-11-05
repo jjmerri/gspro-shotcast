@@ -312,7 +312,7 @@ class PreparedNews:
 NEWS_TRIGGER_TAGS = {
     "big_drive": {"monster_carry", "big_carry", "season_best_drive", "league_best_drive"},
     "trouble": {"in_bunker", "in_sand", "in_water", "in_hazard", "in_trees", "in_deep_rough", "in_fescue",
-                "in_native"},
+                "in_native", "out_of_bounds"},
     "wayward": {"big_miss_left", "big_miss_right", "mishit"},
     "great_approach": {"found_green"},
     "long_putt": {"long_putt"},
@@ -772,6 +772,7 @@ class Engine:
         # shots), used instead of the OCR penalty heuristic when source.gspro_log_truth is on.
         self.gspro = GsproState()
         self._narrated_pen: dict[tuple[int, int], int] = {}  # penalties already told, per (player, hole)
+        self._pen_called: dict[tuple[int, int], int] = {}    # of those, told on the shot's own call (4.0)
         # A player's personal note ("built this booth") is a callback, not a catchphrase: count the
         # aired lines that lean on it this round, and stop it after NOTE_USES_PER_ROUND.
         names = {w for n in league.players for w in re.findall(r"[a-z]+", n.lower())}
@@ -1320,7 +1321,7 @@ class Engine:
             while len(self._late_tiles) > 4:
                 del self._late_tiles[next(iter(self._late_tiles))]
             self._apply_late_tiles(tiles_for)
-        hud.lie = extra.lie
+        hud.lie = hud.box_lie or extra.lie   # the player box's lie (3.59/4.0), else the minimap's
         if not hud.lie and hud.shot_number != 1 and self.cfg.screen.ocr:
             seq = self._shot_seq
             hud.lie = await self._reread_setup_lie(extra.name_sig, seq)
@@ -4828,9 +4829,10 @@ class Engine:
     def _penalty_facts_from_truth(self, idx: int, hud: Hud | None = None) -> list[str]:
         """The penalty fact from GSPro's own stroke count, told once per new penalty on a hole.
 
-        GSPro scores a dry penalty (out of bounds, a ball that ran into a penalty area, a lost ball)
+        GSPro 3.1 scores a dry penalty (out of bounds, a ball that ran into a penalty area, a lost ball)
         only as it moves on to the next player, after the shot's own call, so the next setup is the
-        first place the booth can say it. With a setup `hud` and no splash already called, that
+        first place the booth can say it (4.0 scores it as the ball stops, and the shot's call says it:
+        _penalty_shot_facts). With a setup `hud` and no splash or penalty already called, that
         setup's line is marked to always air and the penalty only counts as told once a line carrying
         it airs: a dropped or cancelled setup line leaves it for the next one."""
         hole = self.gspro.hole_by.get(idx, self.gspro.current_hole)   # this player's hole, not the global one
@@ -4846,7 +4848,10 @@ class Engine:
                           (None, None))
         if last and last[3] == hole and self.gspro.fire_info(fire).get("hazard") and "in_water" not in last[1].tags:
             facts.append("The ball that cost the penalty landed dry and then ran on into the penalty area.")
-        splashed = bool(last and last[3] == hole and "in_water" in last[1].tags)
+        # The shot's own call told it: the splash, or (4.0, which scores a dry penalty at once) a line
+        # about the ball out of bounds or run into the penalty area that aired (_penalty_shot_facts).
+        splashed = bool(last and last[3] == hole and "in_water" in last[1].tags) \
+            or self._pen_called.get((idx, hole), 0) >= penalties
         if hud is None or splashed or not self.cfg.commentary.preshot:
             self._narrated_pen[(idx, hole)] = penalties   # the splash call told it (or no setup line will)
         else:
@@ -5861,6 +5866,9 @@ class Engine:
             before = replace(before, lie=played_from)
         if not shot.is_putt and "in_water" not in tags and self._shot_wet(player, since=impact):
             tags = [*tags, "in_water"]   # the GSPro log saw the splash: the wrap can say where it went
+        penalty_facts, penalty_tag = await self._penalty_shot_facts(fire, shot, tags)
+        if penalty_tag and penalty_tag not in tags:
+            tags = [*tags, penalty_tag]
         r = shot_round
         if r and player:
             player = r.current_name(player)   # a guest renamed while this shot was in flight
@@ -5933,6 +5941,7 @@ class Engine:
         if r is not None and rec.round_id == r.id:
             r.name_sources[name_source] = r.name_sources.get(name_source, 0) + 1
             r.box_hidden += use_screen and not shown
+            r.physics.update(self.gspro.fire_info(fire).get("physics") or {})
         if fire is not None:
             self._fire_rows[fire] = (shot_id, rec, idx, impact_snap[1].get(idx) if idx is not None else None)
             self._row_source[fire] = name_source
@@ -5957,6 +5966,9 @@ class Engine:
         if tree := self._tree_facts(fire, shot, impact, tag, wood_tree):
             score = max(score, c.interest_threshold)   # a ball knocked down by a tree gets its word
             replay_facts = replay_facts + tree
+        if penalty_facts:
+            score = max(score, c.interest_threshold)   # out of bounds gets its word
+            replay_facts = replay_facts + penalty_facts
         self._shot_id = shot_id   # for record_lines linkage; the local guards against a concurrent task
         log.info("%s by %s: interest %.2f %s", tag, player or "unknown", score, tags)
 
@@ -6343,7 +6355,21 @@ class Engine:
         if lines and self._banter_on():
             # Only a big moment (or an aside past its wait) gets here with the aside still on air.
             self.speech.interrupt()
+        if penalty_facts and lines:
+            self._hook_penalty_call(lines, self.gspro.fire_info(fire))
         self._air_lines("shot", lines, shot_id)
+
+    def _hook_penalty_call(self, lines: list[Line], info: dict) -> None:
+        """The shot's penalty (_penalty_shot_facts) counts as told once a reaction line saying it is on
+        air: one dropped or never voiced leaves it for the next setup's line."""
+        idx, hole = info.get("player"), info.get("hole")
+        said = next((l for l in lines if re.search(r"penalt|out of bounds|\bOB\b|lost ball|\bdrop", l.text, re.I)), None)
+        if idx is None or hole is None or said is None:
+            return
+
+        def told(key=(idx, hole), n=self.gspro.penalties_on(idx, hole)) -> None:
+            self._pen_called[key] = max(self._pen_called.get(key, 0), n)
+        said._on_air = told
 
     def _trail_carry(self, player: str | None, entry: tuple) -> None:
         """Add a stroke to the player's trail in shot order, and teach the carry model from every full
@@ -6511,6 +6537,31 @@ class Engine:
         what = "the cart path" if landed == "cart path" else "something man-made (a bridge, steps or a wall)"
         return [f"The ball landed on {what} and kicked off it, finishing in the {lie}. That bounce is "
                 f"worth a word."]
+
+    async def _penalty_shot_facts(self, fire: int | None, shot: Shot, tags: list[str],
+                                  wait: float = 0.6) -> tuple[list[str], str | None]:
+        """The shot's own penalty, when GSPro scored it as the ball stopped: 4.0 logs a dry penalty (out
+        of bounds, a ball that ran into a penalty area) right after the shooter's score line, where 3.1
+        waited for the next player, so the shot's call can say it. A splash is the water call's to make.
+        Returns (facts, tag): "out_of_bounds", or "in_hazard" for a ball GSPro saw run into a penalty
+        area. Told here, the next setup's penalty fact only counts the stroke (_penalty_facts_from_truth)."""
+        if shot.is_putt or fire is None or "in_water" in tags:
+            return [], None
+        info = self.gspro.fire_info(fire)
+        if "rest_at" in info:
+            deadline = info["rest_at"] + wait   # it comes with the rest: no wait once that's past
+            while "penalty_strokes" not in info and time.monotonic() < deadline:
+                await asyncio.sleep(0.1)
+                info = self.gspro.fire_info(fire)
+        n = info.get("penalty_strokes")
+        if not n:
+            return [], None
+        strokes = f"{'a' if n == 1 else n} penalty stroke{'s' if n > 1 else ''}"
+        if info.get("hazard"):
+            return [f"The ball landed dry and then ran on into the penalty area: GSPro has added {strokes}. "
+                    f"That's worth a word."], "in_hazard"
+        return [f"GSPro has called this ball out of bounds: {strokes}, and the next shot is played again "
+                f"from where this one was hit. That's worth a word: call it out of bounds."], "out_of_bounds"
 
     def _tree_facts(self, fire: int | None, shot: Shot, impact: float, tag: str = "",
                     wood_tree: bool = False) -> list[str]:
@@ -7807,6 +7858,7 @@ class Engine:
         # Per-round live state must not carry into a new round (a reused (idx, hole) would suppress a
         # real penalty call, a streak would continue, a stale call would be graded against a new putt).
         self._narrated_pen.clear()
+        self._pen_called.clear()
         self._note_uses.clear()
         self._fir_streak.clear()
         self._last_hud_shot.clear()
@@ -9064,7 +9116,10 @@ class Engine:
         self._note_tournament(r)
         self._apply_log_corrections()
         if not complete:
-            done = all(r.card_score(side, r.seq) is not None for side in r.sides)
+            # A side with no score on any hole (a misread name that became a phantom player) can't
+            # say whether the current hole was finished; only the sides actually playing count.
+            playing = [s for s in r.sides if any(r.card_score(s, q) is not None for q in range(1, r.seq + 1))]
+            done = bool(playing) and all(r.card_score(side, r.seq) is not None for side in playing)
             r.stats_through = max(0, r.seq if done else r.seq - 1)
             if not r.stats_through:
                 log.info("Round %s quit before a hole was finished: nothing to record", r.id)
@@ -9089,7 +9144,7 @@ class Engine:
                                         stats=st, strokes=side.strokes, net_to_par=net[side.key],
                                         hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
                                         is_tournament=r.is_tournament, complete=complete,
-                                        first_nine=r.first_nine(st, r.hole_strokes_for(side)))
+                                        first_nine=r.first_nine(st, r.hole_strokes_for(side)), physics=r.physics)
         if complete:
             self._record_week_results(r, row_of)
         # Per-player FIR/GIR/scrambling/sand-save for individual season stats. Alternate shot isn't
