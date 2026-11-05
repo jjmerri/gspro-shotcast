@@ -168,6 +168,15 @@ def test_a_moment_moved_or_rescored_in_its_reel_rebuilds_the_recap():
     assert len({one, two, recap.digest(facts, recap.footage(reels, {"Aces": "7"}, {}))}) == 3
 
 
+def test_a_change_to_how_a_card_is_drawn_rebuilds_the_recap(monkeypatch):
+    from commentator import burn
+
+    facts = recap.week_facts(_board(), 6, "2026-12-07")
+    one = recap.digest(facts, {})
+    monkeypatch.setattr(burn, "CARD_LOOK", burn.CARD_LOOK + 1)
+    assert recap.digest(facts, {}) != one
+
+
 def test_a_clip_runs_for_its_lines_but_not_into_the_next_moment_or_past_its_part():
     reel = [[(f"s1/a{i}.ts", 4.0) for i in range(10)], [(f"s2/b{i}.ts", 4.0) for i in range(10)]]
     # 1 s in the first part: from 0 (a second before, clamped to the part) for its 6 s of lines.

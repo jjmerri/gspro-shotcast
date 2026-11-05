@@ -392,8 +392,10 @@ def choose(facts: dict, footage: dict[str, dict], budget: float = RECAP_SECONDS)
 def digest(facts: dict, footage: dict[str, dict], turns: dict[str, list[dict]] | None = None) -> str:
     """What a recap is built from: the week's numbers and the moments it could show (where each is
     in its reel, and what it is; `turns`: turn_moments'). A change to any (Squabbit's net replacing
-    the sim's, a team's reel cut late or cut again) rebuilds it."""
-    body = {"v": BUILD, "rows": [[r["team"], r["net"]] for r in facts["rows"]],
+    the sim's, a team's reel cut late or cut again) rebuilds it, as does a change to how it's made or drawn."""
+    from . import burn
+
+    body = {"v": [BUILD, burn.LOOK, burn.CARD_LOOK], "rows": [[r["team"], r["net"]] for r in facts["rows"]],
             "holes": {t: {str(h): v for h, v in hs.items()} for t, hs in sorted((facts.get("holes") or {}).items())},
             "standings": [[s["team"], s["points"]] for s in facts["standings"]],
             "footage": {t: [f["key"], f.get("cuts"), [[m.get(k) for k in ("id", "at", "what", "level", "bad", "player", "hole")]
