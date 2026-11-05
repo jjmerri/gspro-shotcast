@@ -1636,7 +1636,17 @@ class Engine:
             return False
         log.info("Shot struck with GSPro's log on the range: its score line puts it on the course; taking it "
                  "as a course shot (club %s, carry %.1f)", event.shot.club, event.shot.carry or 0)
-        event.impact_at, event.impact_state = impact, (state, *self._impact_hole())
+        # Its hole is the course's opening tee, not the one the booth last had (the round before the
+        # range, often another course): GSPro's log numbers it (0-based), the banner on screen has its par.
+        banner = Hud()
+        if self.screen is not None and self.cfg.screen.ocr:
+            try:
+                banner = await self.screen.read_hud_async(["hole_box"])
+            except Exception:
+                log.exception("Hole banner read failed")
+        logged = g.fire_info(n).get("hole")
+        hole = hole_label(banner, logged + 1 if logged is not None else banner.hole_number) or None
+        event.impact_at, event.impact_state = impact, (state, hole, banner.par, *self._impact_hole()[2:])
         event.impact_read, event.setup_hud = read, setup
         return True
 

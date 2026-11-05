@@ -2522,6 +2522,7 @@ async def test_a_tee_shot_struck_while_the_log_says_its_courses_range_is_kept(tm
 
     await range_swing(score_line=False)
     assert e._shot_seq == 0
+    e.state.current_hole, e.current_par = "Hole 2, par 3, 196 yards", 3   # the last round's, before the range
     # The last round over and still held (its sign-off a minute ago): the drive begins a new one.
     e.round = Round(league=e.league, gspro_players=["Josh"], course="York Golf Club", scheduled_format=None)
     e.round.ended, e._round_ended_at, e._shots_at_round_end = True, time.monotonic(), e.gspro.fires
@@ -2536,6 +2537,7 @@ async def test_a_tee_shot_struck_while_the_log_says_its_courses_range_is_kept(tm
     await asyncio.wait_for(phantom, 10)
     assert e.gspro.mode == "course" and e._shot_seq == 1 and len(e.state.shots) == 1
     assert e.state.shots[0].shot.carry == 250.0
+    assert e.state.shots[0].hole == "Hole 1"   # the course's opening tee, not the last round's hole 2
     # Its shot 2 on screen can't open a round (not shot 1), so the booth joins the round at that setup.
     second = Hud(player_text="Josh E Shot 2 75 YDS", shot_number=2, score_to_par="E", to_pin="75 yards")
     assert not e._after_round(second) and e._should_join(second)
