@@ -21,12 +21,14 @@ import webbrowser
 from collections import deque
 from pathlib import Path
 
+from . import changelog
 from .config import ROUND_STATUS, ROUND_STATUS_EVERY_S
 from .settings_files import env_value, set_commentary, set_env, set_yaml
 
 log = logging.getLogger(__name__)
 
 APP = "Shotcast"
+CHANGELOG_URL = "https://github.com/jjmerri/gspro-shotcast/blob/main/commentator/changelog.md"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 STATS_PORT = 8765
 PUBLISH_AFTER_EDIT_S = 60.0   # a run of edits on the local page goes up once, this long after the last
@@ -959,11 +961,26 @@ class Tray:
             log.warning("Couldn't read the last update's note: %r", e)
             return
         if done is not None:
-            ok, text = done
+            ok, text, was = done
             log.info("Update: %s", text)
             if ok:
                 self.publisher.changed()   # the new version's page and figures, without waiting for a round
+                if self._whats_new(text, changelog.between(was or "0", self.version)):
+                    return
             (self.info if ok else self.error)(text)
+
+    def _whats_new(self, heading: str, releases: list) -> bool:
+        """The What's new window: `releases`' changes under `heading`. False with nothing to show it in."""
+        if not releases or self.ui is None or not self.ui.ok:
+            return False
+        self.ui.whats_new(heading, changelog.text(releases))
+        return True
+
+    def whats_new(self, *_) -> None:
+        """What's new, from the menu: the last few releases."""
+        if not self._whats_new(f"What's new in Shotcast {self.version}",
+                               [r for r in changelog.releases() if not changelog.newer(r.version, self.version)][:5]):
+            webbrowser.open(CHANGELOG_URL)
 
     def open_folder(self, *_) -> None:
         open_file(self.home)
@@ -1082,6 +1099,7 @@ class Tray:
                  safe(self.toggle_update_installs), checked=lambda _: installs_updates()),
             item("Start with Windows", safe(self.toggle_start_with_windows), checked=lambda _: starts_with_windows()),
             item("Notify when the booth is ready", safe(self.toggle_ready_notice), checked=lambda _: notifies_when_ready()),
+            item("What's new", safe(self.whats_new)),
             item(f"About Shotcast {self.version}", safe(self.about)),
             item("Quit...", self.quit_asked),
         )

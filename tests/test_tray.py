@@ -168,12 +168,12 @@ def test_update_says_whether_it_took(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "current_version", lambda: "0.1.0")
     updater.install(tmp_path / "Shotcast-Setup-0.2.0.exe", "0.2.0")
     assert "/SILENT" in runs[0] and f"/LOG={tmp_path / 'install.log'}" in runs[0]
-    ok, text = updater.after_update(tmp_path, "0.2.0")
-    assert ok and "0.2.0" in text and "0.1.0" in text
+    ok, text, was = updater.after_update(tmp_path, "0.2.0")
+    assert ok and "0.2.0" in text and was == "0.1.0"
     assert updater.after_update(tmp_path, "0.2.0") is None      # said once
 
     updater.install(tmp_path / "Shotcast-Setup-0.2.0.exe", "0.2.0")
-    ok, text = updater.after_update(tmp_path, "0.1.0")
+    ok, text, _ = updater.after_update(tmp_path, "0.1.0")
     assert not ok and "install.log" in text
     assert updater.after_update(tmp_path / "none", "0.1.0") is None
 
@@ -216,8 +216,9 @@ def test_an_update_backs_up_the_season_first_and_publishes_once_it_took(tmp_path
     published, said = [], []
     app.publisher = SimpleNamespace(changed=lambda: published.append(1))
     app.info = app.error = said.append
+    app._whats_new = lambda heading, rels: False
     for took in (True, False):
-        monkeypatch.setattr(updater, "after_update", lambda folder, version: (took, "text"))
+        monkeypatch.setattr(updater, "after_update", lambda folder, version: (took, "text", "0.1.0"))
         tray.Tray._after_update(app)
     assert published == [1] and said == ["text", "text"]
 

@@ -152,9 +152,9 @@ def mark_auto(folder: Path, version: str) -> None:
     (Path(folder) / AUTO).write_text(json.dumps({"to": version}), encoding="utf-8")
 
 
-def after_update(folder: Path, version: str) -> tuple[bool, str] | None:
-    """After `install`, on the next start: (True, message) if this is the version it installed,
-    (False, message) if it isn't; None when there was no update."""
+def after_update(folder: Path, version: str) -> tuple[bool, str, str] | None:
+    """After `install`, on the next start: (True, message, the version it was) if this is the version
+    it installed, (False, message, ...) if it isn't; None when there was no update."""
     note = folder / PENDING
     try:
         pending = json.loads(note.read_text(encoding="utf-8"))
@@ -162,11 +162,11 @@ def after_update(folder: Path, version: str) -> tuple[bool, str] | None:
         return None
     finally:
         note.unlink(missing_ok=True)
-    want = str(pending.get("to", ""))
+    want, was = str(pending.get("to", "")), str(pending.get("from", ""))
     if version == want:
-        return True, f"Shotcast is updated to {version} (from {pending.get('from', 'the last version')})."
+        return True, f"Shotcast is updated to {version} (from {was or 'the last version'}).", was
     return False, (f"The update to {want} didn't install: this is still Shotcast {version}. "
-                   f"The installer's log is {folder / INSTALL_LOG}.")
+                   f"The installer's log is {folder / INSTALL_LOG}."), was
 
 
 def _sha256(path: Path) -> str:

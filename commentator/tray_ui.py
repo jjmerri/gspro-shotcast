@@ -144,6 +144,42 @@ class Ui:
         w.focus_force()
         return copy
 
+    def whats_new(self, heading: str, text: str, title: str = "What's new") -> None:
+        """`heading`, then the releases' changes (changelog.text) in a box that scrolls."""
+        log.info("What's new shown: %s", heading)
+        if self.ok:
+            self.call(lambda: self._whats_new_box(heading, text, title))
+        else:
+            self._fallback(heading)
+
+    def _whats_new_box(self, heading: str, text: str, title: str) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        w = tk.Toplevel(self.root)
+        w.title(title)
+        w.attributes("-topmost", True)
+        f = ttk.Frame(w, padding=self.px(14))
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text=heading, wraplength=self.px(460), justify="left",
+                  font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        body = ttk.Frame(f)
+        body.pack(fill="both", expand=True, pady=(self.px(10), 0))
+        box = tk.Text(body, wrap="word", width=64, height=min(22, text.count("\n") + 2), relief="flat",
+                      font=("Segoe UI", 10), padx=self.px(6), pady=self.px(6))
+        bar = ttk.Scrollbar(body, command=box.yview)
+        box.configure(yscrollcommand=bar.set)
+        box.insert("1.0", text)
+        box.configure(state="disabled")
+        bar.pack(side="right", fill="y")
+        box.pack(side="left", fill="both", expand=True)
+        ttk.Button(f, text="OK", command=w.destroy).pack(anchor="e", pady=(self.px(12), 0))
+        w.update_idletasks()
+        w.geometry(f"+{max(0, (w.winfo_screenwidth() - w.winfo_reqwidth()) // 2)}"
+                   f"+{max(0, (w.winfo_screenheight() - w.winfo_reqheight()) // 3)}")
+        w.focus_force()
+        w.after(1500, lambda: w.winfo_exists() and w.attributes("-topmost", False))
+
     def error(self, text: str, title: str = TITLE) -> None:
         log.warning("Error shown: %s", text)
         if self.ok:

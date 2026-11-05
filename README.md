@@ -256,7 +256,7 @@ beyond that is supported on paper but not yet run live:
    - **Warnings** (when there are any), **Restart the booth**, **Back up now** (the menu shows the
      last backup),
      **Check for updates** / **Restart to update**, **Check for updates automatically**,
-     **Install updates automatically**, **Start with Windows**, **Notify when the booth is ready**, **Quit** (it asks first).
+     **Install updates automatically**, **Start with Windows**, **Notify when the booth is ready**, **What's new**, **Quit** (it asks first).
 
    The icon's light is grey while the booth starts (a few seconds; a notification says when it's
    ready, with any warnings, unless you untick **Notify when the booth is ready** in the menu), then green when everything's fine, orange with warnings, red when
@@ -267,8 +267,9 @@ beyond that is supported on paper but not yet run live:
    minute first, with **Postpone** to wait another 30); always with no round on and the stream off
    air, never mid-round. Untick **Install updates
    automatically** to only update from the menu. One that didn't take isn't tried by itself again. Updating copies the season database to `pre-update-*.db.gz` in the backup folder
-   (the last three are kept), shows the installer's progress, then Shotcast starts again, says it's
-   updated and republishes the stats page a minute later. Your settings, season database and backups are in
+   (the last three are kept), shows the installer's progress, then Shotcast starts again, shows
+   **What's new** since the version it replaced ([the changelog](commentator/changelog.md)) and
+   republishes the stats page a minute later; the stats page shows its part once on Home. Your settings, season database and backups are in
    `%LOCALAPPDATA%\Shotcast`, which updating and uninstalling leave alone.
 3. **Where things are.** The docs give paths from the Shotcast folder (`%LOCALAPPDATA%\Shotcast`;
    **More → Open the Shotcast folder**): `logs\season.db`, `config.yaml`, `.env`, and a league

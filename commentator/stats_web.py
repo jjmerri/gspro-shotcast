@@ -23,7 +23,7 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from . import handicap_index
+from . import changelog, handicap_index
 from . import season_analytics as A
 from .store import CLOSER_SECONDS, DRIVE_SQL
 
@@ -841,7 +841,8 @@ def summary(db: sqlite3.Connection, context: str | None = None,
             "season_from": season_start(season), "predictions": predictions(db, names),
             "courses": A.courses(db, context),
             "booth": A.booth(db, names), "broadcasts": A.broadcasts(db), "filters": filters,
-            "vod_rounds": [[s, e, int(st > 0)] for s, e, st in round_spans(db)]}
+            "vod_rounds": [[s, e, int(st > 0)] for s, e, st in round_spans(db)],
+            "news": changelog.site()}
 
 
 def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | None = None,

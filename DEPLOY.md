@@ -29,6 +29,10 @@ start its own and says so; **Restart the booth** in its menu stops the other and
 
 ## Releases
 
+Before tagging, add the release to [`commentator/changelog.md`](commentator/changelog.md) under
+its version (`## 0.2.0`), in plain words: **Stats page** items show on the stats page and in the
+app's What's new window, **Booth** items only in the app.
+
 Releases are built by `.github/workflows/windows-app.yml` when a `v*` tag is pushed (the tag is
 the version); running the workflow by hand makes a test build in the run's artifacts. The build
 runs the whole test suite on the Python it packages, with the packages pip resolved that day, so a
