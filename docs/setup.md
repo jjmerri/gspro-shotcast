@@ -178,6 +178,7 @@ cover real GSPro/Uneekor traffic or live screen layouts; use the bring-up steps 
 | `capture_screen.py` | Grabs a full screenshot with a pixel grid, for placing OCR regions on GSPro's setup and course-load screens |
 | `list_windows.py` | Lists window titles (Windows), to find GSPro's exact `screen.window_title` |
 | `ocr_bench.py` | Times the OCR engine at different thread counts, to pick `screen.ocr_threads` |
+| `demo/build.py` | Builds and publishes the public demo site (demo.thegolfshed.app) from a redacted copy of a season DB, on its own stack (`demo/demo-site.yaml`); maintainer-only |
 
 ## Regression fixtures
 
