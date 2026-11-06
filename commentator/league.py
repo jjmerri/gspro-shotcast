@@ -7,6 +7,13 @@ from typing import Any
 import yaml
 
 
+def _chat_keys(name: str | None) -> list[str]:
+    """A name as a live-chat viewer might type it: the whole of it, then its first word, lowercase
+    without punctuation ("Dan M!" -> "dan m", "dan")."""
+    words = re.sub(r"[^\w' -]+", " ", (name or "").lower()).split()
+    return list(dict.fromkeys([" ".join(words), *words[:1]])) if words else []
+
+
 class League:
     """League context from a JSON or YAML file.
 
@@ -22,6 +29,8 @@ class League:
         self.squabbit_invite = data.get("squabbit_invite")
         # alias (lowercase) -> canonical player name
         self._aliases: dict[str, str] = {}
+        # A name or its first word (lowercase) -> every player it could be, for live-chat names.
+        self._chat_names: dict[str, set[str]] = {}
         self.player_team: dict[str, str] = {}
         self.team_players: dict[str, list[str]] = {}
         self.player_info: dict[str, dict[str, Any]] = {}
@@ -47,6 +56,8 @@ class League:
                 for alias in [name, *p.get("aliases", []), p.get("gspro_name")]:
                     if alias:
                         self._aliases[alias.lower()] = name
+                        for key in _chat_keys(alias):
+                            self._chat_names.setdefault(key, set()).add(name)
 
     @classmethod
     def load(cls, path: str | Path | None) -> "League":
@@ -97,6 +108,18 @@ class League:
             return min(found)[2]
         close = difflib.get_close_matches(lowered, list(self._aliases), n=1, cutoff=0.75)
         return self._aliases[close[0]] if close else None
+
+    def chat_member(self, name: str | None) -> str | None:
+        """The league player a live-chat name is most likely: the whole name or its first word is one of
+        a player's names, or a name's first word, exactly ("dan", "Dan M", "Dan!") and nobody else's.
+        Never fuzzy: a viewer typed it, OCR didn't misread it, and "Danny" may be anyone."""
+        for candidate in _chat_keys(name):
+            players = self._chat_names.get(candidate, ()) if len(candidate) >= 3 else ()
+            if len(players) == 1:
+                return next(iter(players))
+            if players:
+                return None   # shared by two players: either one
+        return None
 
     def names_for(self, player: str) -> list[str]:
         """Every name a player goes by: roster name, aliases and GSPro name."""

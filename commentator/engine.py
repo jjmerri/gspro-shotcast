@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 from collections import Counter, deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -2958,11 +2958,24 @@ class Engine:
             return False
         return now - self._chat_aired_at >= c.min_gap_seconds - (20.0 if soon else 0.0)
 
-    def _chat_context(self) -> list[str]:
-        """What the booth knows to talk about the chat with: the round, the card, who's up and the
-        last few things it said."""
+    def _chat_member(self, name: str) -> str | None:
+        """A note on a chat name that's a league player's who isn't in this round: most likely them,
+        watching. None for any other name, for a player in the round (someone else by that name is likelier
+        than them typing between shots), and with nobody from the league playing (the booth leaves the
+        league out of it)."""
         r = self.round
-        out = [*self._roster_facts()]
+        player = self.league.chat_member(name)
+        if not player or not r or r.ended or self._no_members(r) or player in self._playing(r):
+            return None
+        team = self.league.player_team.get(player)
+        return (f"a league player's name: most likely {player}"
+                + (f" of {self.league.team_name(team)}" if team else "") + ", not playing this round, watching")
+
+    def _chat_context(self, watching: Iterable[str] = ()) -> list[str]:
+        """What the booth knows to talk about the chat with: the round, the card, who's up and the
+        last few things it said. `watching`: league players most likely in the chat."""
+        r = self.round
+        out = [*self._roster_facts(watching)]
         if course := (r.course if r is not None else None) or self.current_course:
             out.append(f"Course: {course}")
         if self.hole_number:
@@ -3000,9 +3013,12 @@ class Engine:
                 m.shot = self._chat_shot_watched(m.watched)
             if m.watched is not None and (pending is None or m.watched < pending):
                 m.upcoming = self._chat_upcoming(m.watched, m.shot)
+        members = {m.name: self._chat_member(m.name) for m, _ in log_}
         user, facts_text = chat_prompt(messages=[(m.name, m.text, m.id > talked, self._chat_shot_brief(m.shot),
-                                                  m.upcoming) for m, _ in log_],
-                                       context=self._chat_context(), moderation=self.cfg.chat.moderation,
+                                                  m.upcoming, members[m.name]) for m, _ in log_],
+                                       context=self._chat_context(self.league.chat_member(n)
+                                                                  for n, note in members.items() if note),
+                                       moderation=self.cfg.chat.moderation,
                                        commentators=self._persona_names, openers=self._chat_openers[-4:])
         try:
             good, _ = await self._write_aside("Chat", user, facts_text, chat_schema(self.speakers), kind="chat",
@@ -3131,10 +3147,14 @@ class Engine:
         r = self.round
         if not r or r.ended:
             return []
-        playing = {p for side in r.sides for p in side.players} if r.format in TEAM_BALL else \
-            {p for p in r.roster.values() if p}
+        playing = self._playing(r)
         teams = {self.league.player_team.get(p) for p in playing} - {None}
         return [p for t in teams for p in self.league.team_players.get(t, []) if p not in playing]
+
+    @staticmethod
+    def _playing(r: Round) -> set[str]:
+        return {p for side in r.sides for p in side.players} if r.format in TEAM_BALL else \
+            {p for p in r.roster.values() if p}
 
     def _delivery_turn(self, notable: bool) -> bool:
         """Whether this reaction gets club-delivery facts: never two in a row."""
@@ -3150,14 +3170,17 @@ class Engine:
             return []
         return self.round.format_facts() + self._pick_facts(stroke, setup, player) + self._roster_facts()
 
-    def _roster_facts(self) -> list[str]:
+    def _roster_facts(self, watching: Iterable[str] = ()) -> list[str]:
         """Who isn't here: a partner of someone playing is left out entirely (a solo practice round had
         "a handy look for <absent partner> now", and asides about the partner's absence call after call). And any player
-        note already used enough this round, so the model doesn't keep reaching for it."""
-        r = self.round
+        note already used enough this round, so the model doesn't keep reaching for it. `watching`: who's
+        most likely in the live chat, whom a take on the chat may talk to as a viewer."""
+        r, watching = self.round, set(watching)
         facts: list[str] = self._outsider_facts(r) if r and not r.ended else []
         if absent := self._absent_partners():
-            facts.append(f"Not playing this round: {', '.join(absent)}. Leave them out of the commentary.")
+            facts.append(f"Not playing this round: {', '.join(absent)}. Leave them out of the commentary"
+                         + (f", except {_join_names(here)} in the chat, as a viewer watching."
+                            if (here := [p for p in absent if p in watching]) else "."))
         if spent := self._spent_notes():
             facts.append(f"Already used enough today, leave alone: the league notes about {', '.join(spent)}.")
         return facts

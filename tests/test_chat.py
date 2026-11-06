@@ -564,3 +564,39 @@ async def test_the_live_alert_waits_for_the_stream_and_goes_once_a_round(tmp_pat
     await e._chat_tick()
     await asyncio.sleep(0.05)
     assert len(sent) == 2
+
+
+async def test_a_chat_name_thats_a_league_player_not_out_there_is_most_likely_them_watching(tmp_path):
+    from tests.test_round import LEAGUE
+    assert [LEAGUE.chat_member(n) for n in ("sarah", "Sarah K", " SARAH!! ", "Sarahh", "Sa", "MikeD", "")] == \
+        ["Sarah", "Sarah", "Sarah", None, None, "Mike", None]
+    from commentator.league import League
+    two = League({"teams": [{"name": "A", "players": [{"name": "John Smith", "aliases": ["Johnny!"]}, {"name": "Dan Webb"}]},
+                            {"name": "B", "players": [{"name": "John Jones", "aliases": ["Johnny"]}]}]})
+    # A name two players share is either one's.
+    assert [two.chat_member(n) for n in ("John", "Johnny", "john jones", "Dan", "dan w")] == \
+        [None, None, "John Jones", "Dan Webb", "Dan Webb"]
+    e = _booth(tmp_path)
+    _in_a_round(e)
+    e.round.roster, e.round.sides = {"Mike": "Mike"}, [SimpleNamespace(label="Mike", players=["Mike"], key="Mike")]
+    now = int(time.time() * 1000)
+    for i, (name, text) in enumerate([("Sarah", "miss you out there mike"), ("Mike", "is this thing on"),
+                                      ("Tony", "mike owes me a beer"), ("Sarahh", "go mike")]):
+        _post(e.chat, name, text, now + i + 1)
+    await _tick(e)
+    await _settle(e)
+    prompt = e.live_llm.prompts[0]
+    assert ("- Sarah (a league player's name: most likely Sarah of Aces, not playing this round, watching): "
+            '"miss you out there mike"') in prompt
+    assert '- Tony (a league player\'s name: most likely Tony of Duffers, not playing this round, watching)' in prompt
+    assert '- Mike: "is this thing on"' in prompt and '- Sarahh: "go mike"' in prompt   # playing; no fuzzy match
+    assert "Not playing this round: Sarah. Leave them out of the commentary, except Sarah in the chat" in prompt
+    assert "most likely that player watching from home" in prompt and "Any other name: don't guess" in prompt
+
+    # Nobody from the league playing: the booth leaves the league out, and every name is only a name.
+    e2 = _booth(tmp_path / "guest")
+    _in_a_round(e2)
+    _post(e2.chat, "Sarah", "hi", now + 9)
+    await _tick(e2)
+    await _settle(e2)
+    assert '- Sarah: "hi"' in e2.live_llm.prompts[0] and "league player's name" not in e2.live_llm.prompts[0]
