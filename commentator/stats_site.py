@@ -162,13 +162,15 @@ def manifest(site_name: str = SITE_NAME) -> str:
 
 def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = None,
           records: dict[int, dict] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB,
-          local: bool = False, season_start: str | None = None, reels: dict[int, dict] | None = None) -> str:
+          local: bool = False, season_start: str | None = None, reels: dict[int, dict] | None = None,
+          news: bool = True) -> str:
     """Build (or refresh) the site in `site` from the season database; returns the new version. With
     `records`, it's filled with every shot holding a record (id -> the record), for record_clips; with
     `reels`, with every round's highlight moments (round -> its reel), for highlights.sync.
     `site_name` and `more_tab` are publish.site_name and publish.more_tab. `local`: for the page served
     on the PC (stats_web.make_server), which also lists the rounds excluded from the stats.
-    `season_start`: publish.season_start (MM-DD), for the records' This season range."""
+    `season_start`: publish.season_start (MM-DD), for the records' This season range. `news`: False
+    leaves out the page's What's new card (the demo, whose visitors aren't following the releases)."""
     records = {} if records is None else records
     db_path, site = Path(db_path), Path(site)
     version = new_version()
@@ -177,6 +179,8 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
     with closing(stats_web.connect(db_path)) as src:
         for name, context in CONTEXTS.items():
             body: dict[str, Any] = stats_web.summary(src, context, names, local, season_start)
+            if not news:
+                body["news"] = []
             body["db"] = {"name": db_path.name, "modified": db_path.stat().st_mtime, "published": time.time()}
             pdir = vdir / "player" / name
             pdir.mkdir(parents=True, exist_ok=True)

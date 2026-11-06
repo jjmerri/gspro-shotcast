@@ -357,7 +357,7 @@ def build(db_src: Path, recap: bool) -> None:
         store.record_week_result(1, WEEK1_END, team, sum(holes.values()), ids[0], holes)
 
     reels: dict = {}
-    stats_site.build(db_path, SITE, reels=reels, site_name="Shotcast demo")
+    stats_site.build(db_path, SITE, reels=reels, site_name="Shotcast demo", news=False)
     add_tour()
     _, of_row = round_groups(store.db)
     t = time.time()

@@ -66,6 +66,13 @@ def test_rebuilding_keeps_only_the_newest_versions(tmp_path):
     assert list((site / "vendor").glob("*/sqlite.worker.js"))
 
 
+def test_a_build_can_leave_out_whats_new(tmp_path):
+    path = _season(tmp_path)
+    news = lambda v: json.loads((tmp_path / v / "v" / stats_site.build(path, tmp_path / v, news=v == "site")
+                                 / "summary-all.json").read_text())["news"]
+    assert news("site") and news("demo") == []
+
+
 class FakeS3:
     def __init__(self, keys=()):
         self.keys = set(keys)
