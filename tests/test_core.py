@@ -4612,6 +4612,38 @@ async def test_a_banner_that_flips_back_with_no_shot_undoes_the_hole_change(tmp_
     assert e.hole_number == 13
 
 
+async def test_a_tee_read_with_a_stray_mark_before_the_name_still_settles(tmp_path):
+    # GSPro 4.0's tee box read "9 Josh E …" and "Josh E …" on alternate polls: one player's setup.
+    e = _mini_engine(tmp_path)
+    e.cfg.screen.hud_poll_seconds = 0
+    e.cfg.commentary.preshot_settle_seconds = 0
+    reads = ["9 Josh E 496.8yd 10.2 yd Tee", "Josh E 496.8yd 10.2 yd Tee"] * 4
+    emitted = []
+
+    class Screen:
+        last_read_seconds = last_capture_seconds = 0.0
+
+        async def read_hud_async(self, parts):
+            text = reads.pop(0) if reads else ""
+            return Hud(player_text=text or None, shot_number=1 if text else None, score_to_par="E",
+                       to_pin="496.8 yards", par=5, hole_length="497 yards")
+
+    async def emit(hud, stamp):
+        emitted.append(hud.player_text)
+
+    e.screen = Screen()
+    e._emit_setup = emit
+    task = asyncio.create_task(e._watch_hud())
+    for _ in range(200):
+        if not reads:
+            break
+        await asyncio.sleep(0.005)
+    task.cancel()
+    assert len(emitted) == 1
+    from commentator.engine import _box_player
+    assert _box_player("123 E 496.8yd") == "123" and _box_player("李 E 496.8yd") == "李"
+
+
 async def test_an_opening_tee_on_screen_takes_gspro_off_its_courses_range(tmp_path):
     # Tee Off from a course's own range logs nothing: GSPro's log still says range at the first tee.
     from commentator.sources.gspro_log import LogEvent, parse_events

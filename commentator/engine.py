@@ -106,11 +106,19 @@ class HoleWatch:
         return pa == pb and da != db and bool(da) and bool(db) and (da in db or db in da)
 
 
+def _box_player(player_text: str | None) -> str | None:
+    """The player box's first word, past any stray marks with no letter in them: GSPro 4.0's tee box
+    can read "9 Josh E …" on one poll and "Josh E …" on the next, which must be the same player. Only
+    the name's own words count, so an all-digit name stays itself rather than becoming its score."""
+    words = _gspro_name(player_text or "").split() or (player_text or "").split()
+    return next((w for w in words if any(ch.isalpha() for ch in w)), words[0] if words else None)
+
+
 def _setup_key(hud: Hud) -> tuple | None:
     """One stroke's setup: who, which shot, and from how far, as the player box reads."""
     if not (hud.player_text and hud.shot_number and hud.to_pin):
         return None
-    return hud.player_text.split()[0], hud.gspro_shot or hud.shot_number, hud.to_pin
+    return _box_player(hud.player_text), hud.gspro_shot or hud.shot_number, hud.to_pin
 
 
 def _opening_tee(hud: Hud) -> bool:
@@ -1181,7 +1189,7 @@ class Engine:
 
             # The player box only changes once the previous ball has stopped, so a new
             # (shot number, distance) that holds steady is a player addressing the next shot.
-            setup = (hud.player_text and hud.player_text.split()[0], hud.shot_number, hud.to_pin)
+            setup = (_box_player(hud.player_text), hud.shot_number, hud.to_pin)
             # A mulligan puts the player box back exactly as it was, so the re-hit's setup would read as
             # the one already handled. It's a new setup when, after a swing, the box moved on to that
             # player's next stroke (seen even once: the take-back can follow within a second) and then
