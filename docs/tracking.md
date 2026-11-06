@@ -688,7 +688,7 @@ the app, **🔔 Alerts** has one toggle for each kind:
 - **League recap**: the week's league recap video is up (Watch → Round replays).
 
 Tapping an alert opens the page at the round, the records, the recap or the Live tab. The page only
-offers what the booth sends: with no league set up, no league recap or league-only live choice, and
+offers what the booth sends: **We're live** only with the [live stream](#live-stream) on; with no league set up, no league recap or league-only live choice, and
 the rounds and records toggles cover tournament rounds and eagles and aces; the recap only when the
 booth makes them (`publish.recaps`, with Squabbit on).
 

@@ -549,9 +549,13 @@ async def test_a_take_waits_for_the_shot_the_viewer_watched_to_be_recorded(tmp_p
 def test_the_page_offers_only_the_alerts_this_booth_sends(tmp_path):
     from commentator.league import League
     e = _booth(tmp_path)
-    assert e._alert_topics() == ["live", "round", "record", "liveleague"]   # no recaps from a replay
+    assert e._alert_topics() == ["round", "record", "league"]   # a replay: no stream, no recaps
+    e.cfg.source.type, e.cfg.live.enabled, e.cfg.publish.bucket = "gspro", True, "b"
+    assert e._alert_topics() == ["live", "liveleague", "round", "record", "league"]
     e.league = League({})
-    assert e._alert_topics() == ["live", "round", "record"]                # no league set up
+    assert e._alert_topics() == ["live", "round", "record"]     # no league set up
+    e.cfg.live.enabled = False
+    assert e._alert_topics() == ["round", "record"]             # no live stream
 
 
 async def test_the_live_alert_waits_for_the_stream_and_goes_once_a_round(tmp_path):

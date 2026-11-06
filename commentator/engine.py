@@ -2778,13 +2778,17 @@ class Engine:
                 self._chat_task.cancel()
 
     def _alert_topics(self) -> list[str]:
-        """The kinds of alert this booth sends, which the page offers: none about a league without one
-        set up, and the recap only when the booth makes them (_recap_soon)."""
+        """The kinds of alert this booth sends, which the page offers: "we're live" only with the stream
+        going to the page (_start_live's mirror), none about a league without one set up, and the recap
+        only when the booth makes them (_recap_soon). "league" isn't a kind: it tells the page there's
+        a league, for how it words the rest."""
         p, league = self.cfg.publish, bool(self.league.team_players)
+        live = self.cfg.live.enabled and bool(p.bucket) and self.cfg.source.type != "replay"
         recaps = (league and p.enabled and p.bucket and p.recaps and self.cfg.squabbit.enabled
                   and self.league.squabbit_invite and self.cfg.source.type != "replay" and self.speech is not None
                   and not self.commentary_unavailable and getattr(self.live_llm, "provider", None) != "off")
-        return ["live", "round", "record"] + (["liveleague"] if league else []) + (["recap"] if recaps else [])
+        return ((["live"] + (["liveleague"] if league else []) if live else []) + ["round", "record"]
+                + (["recap"] if recaps else []) + (["league"] if league else []))
 
     def _alert_live(self) -> None:
         """On air in a round with the published stream running: the page's "we're live" alert, once a

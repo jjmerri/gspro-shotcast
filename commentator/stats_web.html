@@ -2685,7 +2685,7 @@ const ALERT_TOPICS = [["live", "We're live", "The booth goes on air with the str
 // offered: the kinds the booth sends (none listed, from an older booth or stack: all of them).
 const app = { key: null, offered: null, install: null, topics: [], busy: false, error: "" };
 const offers = k => !app.offered || app.offered.includes(k);
-const hasLeague = () => offers("liveleague");
+const hasLeague = () => offers("league");   // not a kind of alert: the booth saying it has a league
 // Without a league, the kinds that are about one say what's left of them.
 const topicText = ([k, label, sub]) => hasLeague() ? [label, sub]
   : k === "round" ? ["Tournament rounds posted", "A tournament round's scores"]
