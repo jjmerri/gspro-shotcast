@@ -398,8 +398,8 @@ CONFIG_FIELDS: list[tuple[str, str, tuple[str, ...], str, str]] = [
     ("Asides", "Stories about the real course", ("trivia", "enabled"), "bool", "From the course's Wikipedia article."),
     ("Asides", "Trivia per round", ("trivia", "per_round"), "int", ""),
     ("Chat", "Live chat on the stats page", ("chat", "enabled"), "bool",
-     "Viewers chat on the Live tab and the booth talks about it. Open only while the booth is on air in a round."),
-    ("Chat", "Chat table", ("chat", "table"), "text", "The site stack's ChatTable output (docs/tracking.md#live-chat)."),
+     "Viewers chat on the Live tab and the booth talks about it. Open only while the booth is on air in a round. "
+     "Needs the site table (Sharing)."),
     ("Chat", "Moderation", ("chat", "moderation"), "choice:off|standard|strict",
      "off: trash talk and swearing are fair game. standard: no swearing or personal attacks. strict: only "
      "clean, kind messages. Links, spam and slurs never air."),
@@ -407,8 +407,6 @@ CONFIG_FIELDS: list[tuple[str, str, tuple[str, ...], str, str]] = [
     ("Chat", "At least this far apart (seconds)", ("chat", "min_gap_seconds"), "float", ""),
     ("Chat", "Words per line", ("chat", "max_words"), "int", ""),
     ("Chat", "Ignore messages older than (seconds)", ("chat", "max_age_seconds"), "float", ""),
-    ("Chat", "Phone alerts", ("chat", "alerts"), "bool",
-     "Alerts on phones that turned them on from the stats page: live, rounds, records, recaps (docs/tracking.md#alerts)."),
     ("GSPro", "Shot data from", ("source", "type"), "choice:connector_log|gspro_log|gspro_sniffer",
      "connector_log: GSPconnect's log (Uneekor and the other built-in connectors). gspro_log: GSPro's own log, "
      "any launch monitor, ball data only. gspro_sniffer: Open Connect traffic (needs Npcap)."),
@@ -438,6 +436,10 @@ CONFIG_FIELDS: list[tuple[str, str, tuple[str, ...], str, str]] = [
     ("Sharing", "Publish as soon as a round ends", ("publish", "after_round"), "bool", ""),
     ("Sharing", "Site name", ("publish", "site_name"), "text", "The stats page's title and header."),
     ("Sharing", "Last tab's name", ("publish", "more_tab"), "text", ""),
+    ("Sharing", "Site table (chat and alerts)", ("chat", "table"), "text",
+     "The site stack's ChatTable output: phone alerts and the live chat (docs/tracking.md#alerts)."),
+    ("Sharing", "Phone alerts", ("chat", "alerts"), "bool",
+     "Alerts on phones that turned them on from the stats page: live, rounds, records, recaps. Needs the site table."),
     ("Sharing", "Backups", (), "heading", ""),
     ("Sharing", "Back up the season file", ("backup", "enabled"), "bool", "When the booth starts and after each round."),
     ("Sharing", "Backup folder", ("backup", "dir"), "text",

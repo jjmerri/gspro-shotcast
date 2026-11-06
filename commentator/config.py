@@ -762,7 +762,8 @@ class LiveConfig(BaseModel):
 
 class ChatConfig(BaseModel):
     # The stats page's Live tab chat, which the booth glances at and talks about on air
-    # (docs/tracking.md#live-chat). `table` is the site stack's ChatTable output; the booth reaches it
+    # (docs/tracking.md#live-chat). `table` is the site stack's ChatTable output (the chat's and the
+    # phone alerts', Settings → Sharing → Site table); the booth reaches it
     # with the publish keys, in publish.region. The page shows the chat, and takes messages, only while
     # the booth is on air in a round.
     enabled: bool = False
@@ -784,7 +785,8 @@ class ChatConfig(BaseModel):
     # Messages older than this are past: the booth leaves them out of what it talks about.
     max_age_seconds: float = Field(420.0, gt=0)
     # Alerts on the phones that turned them on from the page (docs/tracking.md#alerts): the booth
-    # live, a round posted, a new league record, an eagle or ace, the league recap. Needs the table.
+    # live, a round posted, a new league record, an eagle or ace, the league recap. Needs the table,
+    # not the chat itself (`enabled`).
     alerts: bool = True
 
 

@@ -657,7 +657,8 @@ Setting it up (the stack needs the template with the chat in it):
    newer template and the same password. It adds the chat table and function, and lets the upload
    user use the table.
 2. The `ChatTable` output (`aws cloudformation describe-stacks --stack-name shotcast-stats --query
-   "Stacks[0].Outputs"`) goes in `config.yaml`:
+   "Stacks[0].Outputs"`) goes in Settings → Sharing → **Site table (chat and alerts)**, and Settings →
+   Chat → **Live chat on the stats page** turns the chat on. In `config.yaml`:
 
    ```yaml
    chat:
@@ -704,9 +705,10 @@ an alert can't reach it.
 
 Rounds, records, eagles and aces are found by comparing each published build with the last
 (`logs/alerts-state.json`); the first publish after alerts are set up only takes note of what's
-there, so nothing old goes out. It's on whenever the [chat](#live-chat) is (`chat.alerts: false` turns
-it off) and needs the stack's newer template (the `deploy` command again, as for the chat): until
-then the button stays hidden.
+there, so nothing old goes out. It's on whenever the site table is set (Settings → Sharing → **Site
+table (chat and alerts)**, the [chat's](#live-chat) step 2), with or without the chat itself; Settings →
+Sharing → **Phone alerts** (`chat.alerts: false`) turns it off. It needs the stack's newer template
+(the `deploy` command again, as for the chat): until then the button stays hidden.
 
 Notes: an iPhone app added to the home screen may ask for the site's password once. Each phone can
 change its alerts 20 times in 10 minutes, and the table holds up to 1,000 phones.

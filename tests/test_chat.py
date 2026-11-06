@@ -583,6 +583,31 @@ async def test_the_live_alert_waits_for_the_stream_and_goes_once_a_round(tmp_pat
     assert len(sent) == 3
 
 
+async def test_alerts_need_only_the_site_table_not_the_chat(tmp_path):
+    import random
+    from commentator.config import Config
+    from commentator.engine import Engine
+    from commentator.sources.replay import ReplaySource
+    from commentator.speech import SpeechQueue
+    from commentator.tts.console_tts import ConsoleTTS
+    from tests.test_core import FakeLLM
+    from tests.test_round import LEAGUE
+
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.chat.table, cfg.chat.enabled = "shotcast-stats-ChatTable-X", False
+    llm = FakeLLM(cfg.llm.live)
+    e = Engine(cfg=cfg, league=LEAGUE, source=ReplaySource("data/sample_shots.jsonl"), live_llm=llm,
+               segment_llm=llm, speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0))
+    assert e.chat is None and e.alerts is not None
+    _in_a_round(e)
+    sent = []
+    e.alerts = SimpleNamespace(live=lambda who, course, league: sent.append((who, course, league)))
+    e.live_mirror = SimpleNamespace(on_page=True)
+    await e._chat_tick()   # no chat table writes: it would fail on e.chat (None)
+    await asyncio.sleep(0.05)
+    assert sent == [("Paul", "Pebble Beach", False)]
+
+
 async def test_a_chat_name_thats_a_league_players_is_most_likely_them(tmp_path):
     from tests.test_round import LEAGUE
     assert [LEAGUE.chat_member(n) for n in ("sarah", "Sarah K", " SARAH!! ", "Sarahh", "Sa", "MikeD", "")] == \

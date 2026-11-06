@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.92
+
+### Booth
+- **Phone alerts** work without the live chat: the site's table is under Settings → Sharing → **Site table (chat and alerts)**, next to the **Phone alerts** switch.
+
 ## 0.1.91
 
 ### Stats page

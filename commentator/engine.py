@@ -654,12 +654,13 @@ class Engine:
         self._score_said: dict[str, list[str]] = {}  # event key -> what the booth said about it, this session
         self._score_written: set[str] = set()       # "key@version": scores already written up, this session
         self._aside_tasks: set[asyncio.Task] = set()
-        # The stats page's live chat (docs/tracking.md#live-chat); None when it's off.
+        # The site stack's table, for the live chat and the phone alerts, each on its own.
         c = cfg.chat
-        self.chat = ChatTable(c.table, cfg.publish.region) if c.enabled and c.table and cfg.source.type != "replay" \
-            else None
-        # The page's alerts on phones (alerts.py), through the chat table's subscriptions.
-        self.alerts = Alerts(cfg.log_dir, self.chat) if self.chat is not None and c.alerts else None
+        table = ChatTable(c.table, cfg.publish.region) if c.table and cfg.source.type != "replay" else None
+        # The stats page's live chat (docs/tracking.md#live-chat); None when it's off.
+        self.chat = table if c.enabled else None
+        # The page's alerts on phones (alerts.py), through the table's subscriptions.
+        self.alerts = Alerts(cfg.log_dir, table) if table is not None and c.alerts else None
         self._chat_cursor = cursor_at(time.time())    # the last message read (none before the booth started)
         self._chat_log: list[tuple[ChatMessage, float]] = []   # the recent conversation: (message, read at)
         self._chat_talked = ""                        # the newest message id the booth has talked about
@@ -984,7 +985,7 @@ class Engine:
             asyncio.create_task(self._news_loop(), name="news")
         if self.weather is not None:
             asyncio.create_task(self._weather_loop(), name="weather")
-        if self.chat is not None:
+        if self.chat is not None or self.alerts is not None:   # the loop also sends "we're live"
             asyncio.create_task(self._chat_loop(), name="chat")
         if self.alerts is not None:
             asyncio.create_task(asyncio.to_thread(self.alerts.start, self._alert_topics()), name="alerts-key")
@@ -2753,10 +2754,14 @@ class Engine:
     CHAT_REWRITE = 15.0     # seconds a ready take is kept before newer messages get it rewritten
 
     async def _chat_tick(self) -> None:
-        """Tell the table whether the booth is on air (on a change, and as a heartbeat). The messages
-        themselves are read only when a shot gives the booth a gap it could talk about them in
-        (_chat_glance)."""
+        """Tell the table whether the booth is on air (on a change, and as a heartbeat), and send the
+        "we're live" alert (with or without the chat). The messages themselves are read only when a
+        shot gives the booth a gap it could talk about them in (_chat_glance)."""
         on, now = self._chat_open(), time.monotonic()
+        if self.chat is None:   # alerts without the chat
+            if on:
+                self._alert_live()
+            return
         if on and self._chat_round != self.round.id:
             # A round's chat is its own: the page shows nothing from before this round's opened.
             self._chat_round, self._chat_since = self.round.id, cursor_at(time.time())
