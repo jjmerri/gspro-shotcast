@@ -893,7 +893,7 @@ function renderHome() {
     <div class="sub">${esc(sideName(last))} · ${esc(last.course)} · ${esc(last.date)}</div></div>`);
   if (!me) {   // the season's leaders, for everyone
     const ix = d.players.filter(p => p.index !== null && p.index !== undefined).sort((a, b) => a.index - b.index)[0];
-    if (ix) cards.push(`<div class="card go" data-player="${esc(ix.name)}"><div class="k">Lowest handicap</div><div class="v">${hcp(ix.index)}</div><div class="sub">${esc(ix.name)} · ${toPar(ix.avg_to_par_9)} a nine</div></div>`);
+    if (ix) cards.push(`<div class="card go" data-player="${esc(ix.name)}"><div class="k">Lowest handicap${state.hcpClean && "index_clean" in ix ? " · no mulligans" : ""}</div><div class="v">${hcp(ix.index)}</div><div class="sub">${esc(ix.name)} · ${toPar(ix.avg_to_par_9)} a nine</div></div>`);
     const span = d.records.season ? "season" : "1y", rec = d.records[span] || {};
     for (const [k, label, v] of [["longest_drive", "Longest drive", x => Math.round(x.v) + " yd"], ["longest_putt", "Longest putt holed", x => Math.round(x.v * 3) + " ft"]])
       if (rec[k]) cards.push(`<div class="card go" data-tab="highlights"><div class="k">${label} <span class="sub">${span === "season" ? "this season" : "past year"}</span></div><div class="v">${v(rec[k])}</div><div class="sub">${esc(rec[k].player)} · ${esc(rec[k].course || "")}</div></div>`);
