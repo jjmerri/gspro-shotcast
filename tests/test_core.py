@@ -6,6 +6,7 @@ import contextlib
 import json
 import random
 import re
+from dataclasses import replace
 
 from commentator.config import Config
 from commentator.engine import TREE_CALL_WATCH_SECONDS, TREE_CALLS, Engine
@@ -4155,6 +4156,53 @@ def _row(e, r, fire, n, lie, hole=11, seq=12):
     e.state.record_shot(rec)
     e._fire_rows[fire] = (sid, rec, 0, hole)
     return sid, rec
+
+
+def test_a_re_tee_after_water_gspro_scored_no_penalty_for_is_counted_one_on(tmp_path):
+    from commentator.sources.gspro_log import parse_events
+    e = _mini_engine(tmp_path)
+    r = _log_round(e)
+    g = e.gspro
+    for ev in parse_events(" * ------- Shot Fired! ------- *\n"
+                           "Water splash effect played at position: (1262.70, 41.96, 1345.45), impact speed 8.7\n"
+                           "ActivePlayer: 0  currentHole: 11  strokes: 1  Previous Score: 0\n"):
+        g.apply(ev)
+    _, drive = _row(e, r, g.fires, 1, "tee", hole=10)   # at impact the log still had the hole before
+    drive.to_pin_before = "416 yards"
+    # A drop near the water, not the tee again: GSPro scores that one.
+    drop = Hud(player_text="Paul", shot_number=2, to_pin="250 yards")
+    e._add_rehit_penalty(drop, "Paul")
+    assert g.penalties(0) == 0
+    snap = e._impact_state()[0]   # struck before the setup's read added it
+    hud = Hud(player_text="Paul", shot_number=2, to_pin="416 yards", lie="tee")
+    e._add_rehit_penalty(hud, "Paul")
+    e._count_added_penalty(hud, "Paul")
+    assert (g.penalties(0), g.shot_number(0), hud.shot_number) == (1, 3, 3)
+    e._snap_added_penalty(snap, Hud(player_text="Paul", shot_number=2), "Paul")
+    assert (snap[4][(0, 11)], snap[6][0]) == (1, 3)
+    snap = (*e._impact_state()[0][:8], 0.0)   # taken before it too
+    snap[4].clear(), snap[6].update({0: 2})
+    e._snap_added_penalty(snap, Hud(player_text="Paul"), "Paul")   # no number read at impact
+    assert (snap[4][(0, 11)], snap[6][0]) == (1, 3)
+    e._add_rehit_penalty(Hud(player_text="Paul", shot_number=2, to_pin="416 yards"), "Paul")   # read again
+    e._count_added_penalty(hud, "Paul")
+    assert (g.penalties(0), hud.shot_number) == (1, 3)
+    # The impact read that missed the box takes GSPro's number from the (copied) setup read, counted once.
+    before = Hud()
+    e._fill_from_setup(before, replace(hud, lie="tee"))
+    e._count_added_penalty(before, "Paul")
+    assert before.shot_number == 3
+    # The re-tee splashes too: GSPro's shot 3 is the booth's 5.
+    for ev in parse_events(" * ------- Shot Fired! ------- *\n"
+                           "Water splash effect played at position: (1262.70, 41.96, 1345.45), impact speed 8.7\n"
+                           "ActivePlayer: 0  currentHole: 11  strokes: 1  Previous Score: 1\n"):
+        g.apply(ev)
+    _, again = _row(e, r, g.fires, 3, "tee")
+    again.to_pin_before = "416 yards"
+    hud = Hud(player_text="Paul", shot_number=3, to_pin="416 yards", lie="tee")
+    e._add_rehit_penalty(hud, "Paul")
+    e._count_added_penalty(hud, "Paul")
+    assert (g.penalties(0), hud.shot_number) == (2, 5)
 
 
 def test_a_putt_recorded_before_its_score_line_gets_its_start_once_the_line_arrives(tmp_path):

@@ -87,6 +87,8 @@ class Hud:
     # The boxes this was read from (grab_regions), when they were grabbed before the OCR: what a
     # problem report shows of a read that came up wrong.
     crops: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
+    # GSPro's own stroke number when the booth counted a penalty GSPro left out (shot_number has it).
+    gspro_shot: int | None = None
 
 
 NAME_DARK: tuple = ()

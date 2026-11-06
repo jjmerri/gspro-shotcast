@@ -961,3 +961,65 @@ def test_aim_offset_scales_the_minimap_to_the_distance():
     assert aim_offset(0.0, -338.0, 150.0) == (0.0, 0.0)          # on the ball
     along, right = aim_offset(67.7, 339.0, 200.0)                # at the pin, a tenth of the span right
     assert abs(along - 200.0) < 1e-9 and abs(right - 20.0) < 1e-9
+
+
+def _york_water_drive() -> GsproState:
+    # GSPro 4.0 (York hole 2): a drive splashes ("Water splash effect played", 4.0's only splash line);
+    # re-teed, GSPro scores no penalty for it.
+    s = GsproState()
+    for e in parse_events("ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 3\n"
+                          " * ------- Shot Fired! ------- *\n"
+                          "Water splash effect played at position: (1262.70, 41.96, 1345.45), impact speed 8.7\n"
+                          "ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 0\n"):
+        s.apply(e)
+    return s
+
+
+def _play(s: GsproState, *lines: str) -> None:
+    for line in lines:
+        for e in parse_events(line):
+            s.apply(e)
+
+
+def test_a_penalty_gspro_left_out_counts_on_every_later_score_line():
+    s = _york_water_drive()
+    assert s.wet(0) and s.strokes_before(0) == 1 and s.penalties(0) == 0
+    s.add_penalty(0, 1)
+    assert (s.shot_number(0), s.penalties(0), s.stroke_shift(0, 2), s.stroke_shift(0, 1)) == (3, 1, 1, 0)
+    _play(s, " * ------- Shot Fired! ------- *", "ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 1",
+          " * ------- Shot Fired! ------- *", "ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 2")
+    assert (s.strokes_before(0), s.penalties(0)) == (4, 1)
+
+
+def test_an_added_penalty_goes_with_a_mulligan_of_the_wet_ball():
+    s = _york_water_drive()
+    s.add_penalty(0, 1)
+    _play(s, "ActivePlayer: 0  currentHole: 1  strokes: -1  Previous Score: 1",
+          " * ------- Shot Fired! ------- *", "ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 0")
+    assert (s.strokes_before(0), s.penalties(0), s.stroke_shift(0, 2)) == (1, 0, 0)
+
+
+def test_an_added_penalty_isnt_counted_twice_when_gspro_scores_it_late():
+    s = _york_water_drive()
+    s.add_penalty(0, 1)
+    _play(s, "ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 1",   # GSPro's own bump after all
+          " * ------- Shot Fired! ------- *", "ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 2")
+    assert (s.strokes_before(0), s.penalties(0), s.stroke_shift(0, 3)) == (3, 1, 0)
+    assert s.stroke_shift(0, 2) == 1   # a read of GSPro's number from before it scored it
+
+
+def test_an_added_penalty_goes_with_a_mulligan_logged_as_a_repeated_score():
+    s = _york_water_drive()
+    s.add_penalty(0, 1)
+    _play(s, " * ------- Shot Fired! ------- *", "ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 0")
+    assert (s.strokes_before(0), s.penalties(0), s.stroke_shift(0, 2)) == (1, 0, 0)
+    assert s.fire_info(s.fires)["score"] == 1
+
+
+def test_a_replayed_hole_starts_without_the_penalty_the_booth_added():
+    s = _york_water_drive()
+    s.add_penalty(0, 1)
+    _play(s, " * ------- Shot Fired! ------- *", "ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 1",
+          " * ------- Shot Fired! ------- *", "ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 2",
+          " * ------- Shot Fired! ------- *", "ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 0")
+    assert (s.strokes_before(0), s.penalties(0), s.fire_info(s.fires)["score"]) == (1, 0, 1)

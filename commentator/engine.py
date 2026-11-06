@@ -110,7 +110,7 @@ def _setup_key(hud: Hud) -> tuple | None:
     """One stroke's setup: who, which shot, and from how far, as the player box reads."""
     if not (hud.player_text and hud.shot_number and hud.to_pin):
         return None
-    return hud.player_text.split()[0], hud.shot_number, hud.to_pin
+    return hud.player_text.split()[0], hud.gspro_shot or hud.shot_number, hud.to_pin
 
 
 def _opening_tee(hud: Hud) -> bool:
@@ -821,6 +821,7 @@ class Engine:
         self._gimme_ids: dict[int, int] = {}   # shot id -> its conceded putt row's id
         self._form_said: dict[tuple, list[tuple[int, list[str]]]] = {}   # (round, side) -> [(hole of round, angles)]
         self._form_pending: tuple | None = None   # (round, side, players, hole of round) the sheet last went to
+        self._rehit_penalised: set[int] = set()   # shots whose missing re-hit penalty the booth added
         self._lie_corrected: set[int | None] = set()   # shots whose called finish the booth has corrected
         self._mulligans_called: set[int] = set()   # id() of swings already announced as taken back
         # Each index's last recorded shot (shot_id, ShotRecord, log hole, penalties then), so the next
@@ -1349,6 +1350,8 @@ class Engine:
             hud.others = extra.others
         self._note_player(hud)
         player = self._player(hud.player_text, None)
+        self._add_rehit_penalty(hud, player)
+        self._count_added_penalty(hud, player)
         if player and hud.shot_number:
             swings = [x for x in self.state.shots if x.player == player]
             stroke = (player, hud.shot_number)
@@ -4881,6 +4884,73 @@ class Engine:
         self._strategy_hole = hole
         return [line]
 
+    def _add_rehit_penalty(self, hud: Hud, player: str | None) -> tuple[int, int] | None:
+        """GSPro 4.0 scores no penalty stroke when a ball in the water is played again from where it was
+        hit (a re-tee): the next stroke is numbered one on, as if the wet ball were in play. Seen at that
+        stroke's setup, the player's last stroke on the hole went wet (or out of bounds), this is the
+        stroke after it, from the same spot, and GSPro's log scored nothing between: add the stroke.
+        Returns the (index, hole) it was added on."""
+        g = self.gspro
+        idx = self._gspro_idx(player)
+        r = self.round
+        if idx is None or r is None or not hud.shot_number or hud.shot_number < 2 or g.team_scores \
+                or (r.format == "scramble" and not r.no_scramble):
+            return None
+        fire, row = next(((f, v) for f, v in sorted(self._fire_rows.items(), reverse=True) if v[2] == idx),
+                         (None, None))
+        if row is None:
+            return None
+        shot_id, rec, _, _ = row
+        hole = g.fire_info(fire).get("hole")   # as its score line credited it (a tee shot's impact had the hole before)
+        own = hud.gspro_shot or hud.shot_number
+        if (shot_id is None or shot_id in self._rehit_penalised or rec.mulligan or rec.shot.is_putt
+                or rec.round_id != r.id or hole is None or g.hole_by.get(idx) != hole
+                or rec.shot_number is None or own + g.stroke_shift(idx, own) != rec.shot_number + 1):
+            return None   # (the record counts any penalty added before: compare in its numbering)
+        info = g.fire_info(fire)
+        wet = "in_water" in rec.tags or "out_of_bounds" in rec.tags or g.wet(idx)
+        if not wet or info.get("penalty_strokes") or info.get("score") is None \
+                or g.strokes_before(idx) != info["score"]:
+            return None
+        here, there = to_yards(hud.to_pin), to_yards(rec.to_pin_before or rec.hud.to_pin)
+        if here is None or there is None or abs(here - there) > max(3.0, there * 0.02):
+            return None   # played from somewhere else: a drop, not the same spot again
+        self._rehit_penalised.add(shot_id)
+        g.add_penalty(idx, hole)
+        log.info("Re-hit from where shot %s (%r's stroke %s, %s) was played, %s from the pin: GSPro scored no "
+                 "penalty, so the booth adds one (stroke %d, not %d)", shot_id, self._display(player),
+                 rec.shot_number, "in the water" if "in_water" in rec.tags or g.wet(idx) else "out of bounds",
+                 hud.to_pin, rec.shot_number + 2, rec.shot_number + 1)
+        return idx, hole
+
+    def _snap_added_penalty(self, snap: tuple, before: Hud, player: str | None) -> None:
+        """A penalty owed before this stroke that the booth added after its impact snapshot was taken
+        (its setup, or this impact, only got to it then): the snapshot that settles the wet shot's
+        finish and baselines this stroke counts it too."""
+        idx = self._gspro_idx(player)
+        if idx is None or len(snap) < 9:
+            return
+        g = self.gspro
+        # With no number on screen, the log's own count at impact (which _number_from_log goes on to use).
+        stroke = before.gspro_shot or before.shot_number or snap[6].get(idx)
+        if n := g.added_since(idx, stroke, snap[8]):
+            key = (idx, snap[1].get(idx, snap[5]))
+            snap[4][key] = snap[4].get(key, 0) + n
+            if idx in snap[6]:
+                snap[6][idx] += n
+
+    def _count_added_penalty(self, hud: Hud, player: str | None, tag: str = "") -> None:
+        """A penalty GSPro left out (_add_rehit_penalty) on the HUD's stroke number for the rest of the
+        hole, so the record, the replay check and the calls all count it. GSPro's own number is kept on
+        the read, which makes this safe to run on it again."""
+        if not hud.shot_number:
+            return
+        own = hud.gspro_shot or hud.shot_number
+        n = self.gspro.stroke_shift(self._gspro_idx(player), own)
+        hud.gspro_shot, hud.shot_number = own if n else None, own + n   # (a mulligan can take it back)
+        if n and tag:
+            log.info("%s stroke %d, not GSPro's %d: the booth counted a penalty GSPro didn't", tag, own + n, own)
+
     def _fix_stale_pick_hud(self, hud: Hud, idx: int | None) -> None:
         """Right after a scramble pick GSPro's HUD can still show "Shot 1" and the tee distance (Derek
         "has 437 yards" for a stroke 2 from 262). The log has the team ball by then: trust it."""
@@ -5387,7 +5457,8 @@ class Engine:
                        {i: gs.shot_number(i) for i in range(8)},  # stroke count AT IMPACT, before the
                        #                                            slow read, so a putt-miss shows the
                        #                                            instant the next state line advances it
-                       dict(gs.dropped_by))   # scramble balls not picked, to leave their finish alone
+                       dict(gs.dropped_by),   # scramble balls not picked, to leave their finish alone
+                       time.monotonic())
         fires0 = gs.fires   # GSPro's shot counter at impact, to find this shot's putting/regular mode
         setups0 = dict(gs.setups_by)   # each player's setups so far: the next one settles this shot
         lies0 = dict(gs.lie_by)   # each ball's logged surface going into this shot
@@ -5622,6 +5693,9 @@ class Engine:
         if not player and (player := self._solo_name()):
             name_source = "the round's only player"
         log.info("%s player %s (%s)", tag, player or "unknown", name_source)
+        self._add_rehit_penalty(before, player)   # (the wet shot may have been recorded only after the setup)
+        self._snap_added_penalty(impact_snap, before, player)
+        self._count_added_penalty(before, player, tag)
         if use_screen and before.shot_number is None:
             self._number_from_log(before, player, impact_snap, tag)
         # GSPro's own club box beats guessing the club from loft.
@@ -6664,7 +6738,8 @@ class Engine:
         log.info("%s the impact read missed the player box%s: %r shot %s from the setup read", tag,
                  f" (read {before.player_text!r})" if before.player_text else "",
                  setup.player_text, setup.shot_number)
-        before.player_text, before.shot_number = setup.player_text, setup.shot_number
+        # GSPro's own number: _count_added_penalty adds what it left out, once, to this read.
+        before.player_text, before.shot_number = setup.player_text, setup.gspro_shot or setup.shot_number
         before.to_pin, before.score_to_par = setup.to_pin, setup.score_to_par
         if before.elevation_yards is None:
             before.elevation_yards = setup.elevation_yards

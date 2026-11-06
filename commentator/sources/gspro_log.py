@@ -37,7 +37,7 @@ import os
 import re
 import time
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -230,8 +230,9 @@ def parse_events(text: str) -> list[LogEvent]:
                         out.append(LogEvent("flag_hit"))
                 if m := _ALTITUDE.match(line):
                     out.append(LogEvent("altitude", altitude_ft=float(m.group(1))))
-            elif "Hit_water" in line:
-                # The splash, logged the instant the ball goes in (before the penalty score bump).
+            elif "Hit_water" in line or line.startswith("Water splash effect played"):
+                # The splash, logged the instant the ball goes in (before the penalty score bump). 4.0
+                # writes it as "Water splash effect played at position: ...".
                 out.append(LogEvent("hit_water"))
             elif m := _SELECT.search(line):
                 out.append(LogEvent("select", player=int(m.group(1))))
@@ -399,6 +400,9 @@ class GsproState:
     gimmies_by: dict = field(default_factory=dict)    # index -> conceded tap-ins
     _score: dict = field(default_factory=dict)
     _penalties: dict = field(default_factory=dict)
+    # (index, hole) -> penalties GSPro never scored (add_penalty), each {"n", "at": GSPro's own score once
+    # the stroke that drew it was played, "pending": no stroke since}, added to each later score line.
+    _score_shift: dict = field(default_factory=dict)
     _pending_lie: str | None = None   # a material seen, awaiting the player index the block names
     # Whether a shot was fired or a gimmie conceded since that player's previous score line, keyed by
     # index: in a 2-ball the partner's interleaved state lines must not clear this player's flag (or a
@@ -710,7 +714,8 @@ class GsproState:
         for d in (self.players_seen, self.lie_by, self.to_pin_by, self.gimme_by, self.hole_by,
                   self.hole_outs_by, self.gimmies_by, self._score, self._penalties,
                   self._shot_since_state, self._gimmie_since_state, self._wet_since_shot, self._wet_at,
-                  self._undo, self._picked, self.dropped_by, self.hole_scores, self._end_for):
+                  self._undo, self._picked, self.dropped_by, self.hole_scores, self._end_for,
+                  self._score_shift):
             d.clear()
         self._end_next = False
         self.teammates.clear()
@@ -801,6 +806,14 @@ class GsproState:
                 self._finish(left, self._score[left])
         self.hole_by[ev.player] = ev.hole
         self._attach_lie(ev.player)
+        raw = ev.score
+        if (added := self._score_shift.get((ev.player, ev.hole))) and ev.score is not None:
+            # One below the stroke that drew it took that stroke back (a mulligan of it, a pick-up).
+            added[:] = [a for a in added if ev.score >= a["at"]]
+            if added:
+                ev = replace(ev, score=ev.score + sum(a["n"] for a in added))
+            else:
+                del self._score_shift[(ev.player, ev.hole)]
         if self._unowned_fire is not None:
             n, self._unowned_fire = self._unowned_fire, None
             rest = self._rest_by.pop(ev.player, None)
@@ -824,6 +837,9 @@ class GsproState:
         key = (ev.player, ev.hole)
         prev = self._score.get(key)
         shot = self._shot_since_state.get(ev.player)
+        if shot:
+            for a in self._score_shift.get(key, []):
+                a["pending"] = False   # a stroke played since: GSPro's own late penalty can't be this one
         undo = self._undo.pop(ev.player, None)
         undo = undo if undo and undo[0] == ev.hole else None
         if prev is not None and ev.strokes is not None and ev.strokes < 0:
@@ -857,6 +873,19 @@ class GsproState:
             fires = self._fires_by.get(ev.player) or []
             if len(fires) >= 2 and (not self.team_scores or self._shot_score.get(ev.player) == (ev.hole, ev.score)):
                 self.mulligan_fires.setdefault(fires[-2], "repeat")
+                # A penalty the booth added for the stroke replaced goes with it.
+                if gone := [a for a in self._score_shift.get(key, []) if a["at"] >= raw]:
+                    n = sum(a["n"] for a in gone)
+                    self._score_shift[key] = [a for a in self._score_shift[key] if a["at"] < raw]
+                    if not self._score_shift[key]:
+                        del self._score_shift[key]
+                    self._penalties[key] = self._penalties.get(key, 0) - n
+                    if self._penalties[key] <= 0:
+                        self._penalties.pop(key, None)
+                    ev = replace(ev, score=ev.score - n)
+                    self._score[key] = ev.score
+                    if (info := self._fire_info.get(fires[-1])) is not None and info.get("hole") == ev.hole:
+                        info["score"] = ev.score   # the replacement's, as credited above
             if not self.team_scores:
                 self.hole_scores.pop(key, None)   # a holed shot replayed: settled again if this one ends it
         elif prev is not None and ev.score > prev:
@@ -867,6 +896,22 @@ class GsproState:
             team = {ev.player} | {m for pair in self.teammates if ev.player in pair for m in pair}
             closed = self.team_scores and any(i in team and h == ev.hole for i, h in self.hole_scores)
             if not self._shot_since_state.get(ev.player) and not self._gimmie_since_state.get(ev.player) \
+                    and not closed and any(a["pending"] and a["n"] for a in self._score_shift.get(key, [])):
+                # GSPro scored the penalty after all, late, before the ball was played again: it's the
+                # one add_penalty already counted, not a second.
+                took = 0
+                for a in reversed(self._score_shift[key]):
+                    if a["pending"] and took < ev.score - prev:
+                        t = min(a["n"], ev.score - prev - took)
+                        a["n"], took = a["n"] - t, took + t
+                        a["absorbed"] = a.get("absorbed", 0) + t
+                self._score_shift[key] = [a for a in self._score_shift[key] if a["n"] or a.get("absorbed")]
+                if not self._score_shift[key]:
+                    del self._score_shift[key]
+                if ev.score - prev > took:
+                    self._penalties[key] = self._penalties.get(key, 0) + (ev.score - prev - took)
+                ev = replace(ev, score=ev.score - took)
+            elif not self._shot_since_state.get(ev.player) and not self._gimmie_since_state.get(ev.player) \
                     and not closed:
                 self._penalties[key] = self._penalties.get(key, 0) + (ev.score - prev)
                 # GSPro 4.0 logs the bump straight after the shooter's own score line (3.1 not until
@@ -881,6 +926,10 @@ class GsproState:
             self._score[key] = ev.score
         elif prev is not None and ev.score < prev:
             self._penalties.pop(key, None)   # the hole is being replayed (a round restart on this course)
+            if self._score_shift.pop(key, None):   # none of the booth's penalties carry over either
+                ev = replace(ev, score=raw)
+                if shot and (info := self._fire_info.get((self._fires_by.get(ev.player) or [None])[-1])) is not None:
+                    info["score"] = raw
             self._score[key] = ev.score
             self.hole_scores.pop(key, None)
             self._wet_since_shot.pop(ev.player, None)   # the replayed hole starts dry
@@ -968,6 +1017,39 @@ class GsproState:
     def shot_number(self, player: int | None = None) -> int:
         """The stroke the player is about to play: strokes already taken plus one."""
         return self.strokes_before(player) + 1
+
+    def add_penalty(self, player: int, hole, n: int = 1) -> None:
+        """Count a penalty GSPro's log never scored (4.0 adds none when a ball in the water is played
+        again from where it was hit): on the player's score and penalties now, and on each later score
+        line for the hole. Dropped if the stroke that drew it is taken back; absorbed if GSPro scores
+        it after all before the ball is played again."""
+        key = (player, hole)
+        if n <= 0 or key not in self._score:
+            return
+        added = self._score_shift.setdefault(key, [])
+        added.append({"n": n, "at": self._score[key] - sum(a["n"] for a in added), "pending": True,
+                      "added_at": time.monotonic()})
+        self._penalties[key] = self._penalties.get(key, 0) + n
+        self._score[key] += n
+        self.hole_scores.pop(key, None)
+
+    def added_since(self, player: int | None, stroke: int | None, since: float) -> int:
+        """Penalties owed before GSPro's stroke `stroke` that add_penalty counted after `since` (a
+        monotonic time), including any GSPro has since scored itself."""
+        if player is None or not stroke:
+            return 0
+        return sum(a["n"] + a.get("absorbed", 0) for a in self._score_shift.get((player, self.hole_by.get(player)), [])
+                   if stroke > a["at"] and a["added_at"] > since)
+
+    def stroke_shift(self, player: int | None, stroke: int | None) -> int:
+        """Penalty strokes add_penalty counted that GSPro's own stroke number `stroke` (its HUD's, for
+        the player's current hole) leaves out: those for strokes played after the one that drew them."""
+        if player is None or not stroke:
+            return 0
+        added = self._score_shift.get((player, self.hole_by.get(player)), [])
+        # Once GSPro scored one late, its own numbers count it, but a read from before it did doesn't.
+        return sum(a["n"] for a in added if stroke > a["at"]) \
+            + sum(a.get("absorbed", 0) for a in added if stroke == a["at"] + 1)
 
     def penalties_on(self, player: int, hole) -> int:
         """Penalty strokes `player` took on a given GSPro hole (not just the one they're on now)."""
