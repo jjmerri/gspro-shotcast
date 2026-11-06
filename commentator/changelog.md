@@ -4,6 +4,18 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.91
+
+### Stats page
+- **Alerts** works in Firefox too.
+- "We're live" alerts can be for any round or for league and tournament rounds only.
+- Alerts only offers what your booth sends: no league alerts without a league, no "We're live" without the live stream.
+- The site password is optional.
+
+### Booth
+- The booth knows when a chatter is a league player, or one of the players out there typing between shots.
+- The booth doesn't make up predictions it never made.
+
 ## 0.1.90
 
 ### Booth
