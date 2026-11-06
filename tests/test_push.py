@@ -91,6 +91,22 @@ def test_the_first_check_alerts_nothing_and_later_ones_only_whats_new():
     assert _check(rows, state, 5200, big)[0] == []   # nothing twice
 
 
+def test_a_phone_can_hear_only_when_a_league_or_tournament_round_goes_live(tmp_path, monkeypatch):
+    a = alerts.Alerts(tmp_path, table=None)
+    sent = []
+    monkeypatch.setattr(a, "send", lambda got: sent.append([x.topic for x in got]))
+    clock = [1e9]
+    monkeypatch.setattr(alerts.time, "time", lambda: clock[0])
+    a.live("Ann", "Sheep Ranch")                 # practice
+    a.live("Ann", "Sheep Ranch", league=True)   # league, an hour on: the any-round phones already heard
+    clock[0] += 3600
+    a.live("Ann", "Sheep Ranch", league=True)
+    a.live("Ann", "Sheep Ranch", league=True)
+    clock[0] += alerts.LIVE_GAP
+    a.live("Ann", "Sheep Ranch", league=True)
+    assert sent == [["live"], ["liveleague"], ["live", "liveleague"]]
+
+
 def test_only_league_shots_are_league_records():
     rows = [_row(1, 100, "Ann", 36, 0)]
     league = {"id": 5, "ts": 90, "player": "Ann", "v": 280.0}

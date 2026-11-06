@@ -550,7 +550,7 @@ async def test_the_live_alert_waits_for_the_stream_and_goes_once_a_round(tmp_pat
     e = _booth(tmp_path)
     _in_a_round(e)
     sent = []
-    e.alerts = SimpleNamespace(live=lambda who, course: sent.append((who, course)))
+    e.alerts = SimpleNamespace(live=lambda who, course, league: sent.append((who, course, league)))
     e.live_mirror = SimpleNamespace(on_page=False)
     await e._chat_tick()
     await asyncio.sleep(0.05)
@@ -559,11 +559,16 @@ async def test_the_live_alert_waits_for_the_stream_and_goes_once_a_round(tmp_pat
     for _ in range(2):
         await e._chat_tick()
         await asyncio.sleep(0.05)
-    assert sent == [("Paul", "Pebble Beach")]
+    assert sent == [("Paul", "Pebble Beach", False)]
+    e.round.is_tournament = True   # found out after the first shot: the league-only phones hear now
+    for _ in range(2):
+        await e._chat_tick()
+        await asyncio.sleep(0.05)
+    assert sent[1:] == [("Paul", "Pebble Beach", True)]
     _in_a_round(e, rid=2)
     await e._chat_tick()
     await asyncio.sleep(0.05)
-    assert len(sent) == 2
+    assert len(sent) == 3
 
 
 async def test_a_chat_name_thats_a_league_players_is_most_likely_them(tmp_path):

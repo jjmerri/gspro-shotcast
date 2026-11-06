@@ -675,7 +675,9 @@ class Engine:
         self._chat_live: bool | None = None           # what the table was last told: on air or not
         self._chat_beat = float("-inf")
         self._chat_round: int | None = None           # the round the chat was last open for
-        self._alerted_live: int | None = None         # the round the "we're live" alert went out for
+        # The round the "we're live" alert went out for, and whether as a league or tournament one
+        # (a tournament is only known after the first shot: the league-only phones hear then).
+        self._alerted_live: tuple[int, bool] | None = None
         self._chat_since = ""                         # when that round's chat opened (a cursor_at key)
         self._chat_sent_since: str | None = None      # the one the table was last told
         self._aside_nines: set[int] = set()          # nines of this round whose asides are written
@@ -2776,14 +2778,18 @@ class Engine:
                 self._chat_task.cancel()
 
     def _alert_live(self) -> None:
-        """On air in a round with the published stream running: the page's "we're live" alert, once a round."""
+        """On air in a round with the published stream running: the page's "we're live" alert, once a
+        round, and again if it turns out to be a tournament (Alerts.live's gap keeps the any-round
+        phones from hearing twice)."""
         m = self.live_mirror
-        if (self.alerts is None or self.round is None or self._alerted_live == self.round.id
-                or m is None or not m.on_page):
+        if self.alerts is None or self.round is None or m is None or not m.on_page:
             return
-        self._alerted_live = self.round.id
+        league = bool(self.round.is_league or self.round.is_tournament)
+        if self._alerted_live in ((self.round.id, league), (self.round.id, True)):
+            return
+        self._alerted_live = (self.round.id, league)
         who = " · ".join(s.label for s in self.round.sides) or "A round"
-        t = asyncio.create_task(asyncio.to_thread(self.alerts.live, who, self.round.course), name="alert-live")
+        t = asyncio.create_task(asyncio.to_thread(self.alerts.live, who, self.round.course, league), name="alert-live")
         t.add_done_callback(lambda t: t.cancelled() or t.exception())
 
     def _chat_glance_on_shot(self) -> None:

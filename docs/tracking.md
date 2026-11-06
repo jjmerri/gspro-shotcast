@@ -678,7 +678,9 @@ Android and desktop browsers it offers the browser's own install, and the alerts
 the app, **🔔 Alerts** has one toggle for each kind:
 
 - **We're live**: the booth is on air in a round and the [live stream](#live-stream) has started
-  reaching the page (at most once every 3 hours).
+  reaching the page (at most once every 3 hours). Under it, **Any round** or **League and tournament
+  rounds only**. The league-only choice needs the stack's current template; on an older one the page
+  says the site can't send it yet.
 - **Rounds posted**: a league or tournament round reached the stats page, with each side's score.
 - **Records, eagles and aces**: a new all-time league record (the Records tab's longest drive,
   longest putt holed and closest approaches, not a player's own bests), or an eagle, albatross or ace

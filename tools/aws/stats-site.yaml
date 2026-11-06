@@ -338,7 +338,7 @@ Resources:
           # ---- alerts: phones' push subscriptions, which the booth sends to (commentator/push.py)
           PUSH_HOSTS = ("fcm.googleapis.com", "updates.push.services.mozilla.com", "web.push.apple.com",
                         ".notify.windows.com", ".push.apple.com")
-          TOPICS = {"live", "round", "record", "recap"}
+          TOPICS = {"live", "liveleague", "round", "record", "recap"}
           MOST_PHONES = 1000
 
           def push_host(endpoint):

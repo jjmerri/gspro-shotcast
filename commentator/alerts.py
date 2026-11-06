@@ -1,6 +1,7 @@
 """What the stats page's alerts say, and when (docs/tracking.md#alerts).
 
     live    the booth is on air in a round with the stream on (once a few hours at most)
+    liveleague  the same, for a league or tournament round only (a phone picks one or the other)
     round   a league or tournament round posted to the stats page
     record  a new league record (the Records tab's all-time ones, not a player's own), an eagle or an ace
     recap   the week's league recap is up
@@ -212,19 +213,25 @@ class Alerts:
             return
         self.send(alerts)
 
-    def live(self, who: str, course: str | None) -> None:
-        """The booth went on air in a round with the stream on."""
+    def live(self, who: str, course: str | None, league: bool = False) -> None:
+        """The booth went on air in a round with the stream on. `league`: a league or tournament round,
+        which the phones that only want those hear about too. Each kind keeps its own gap, so a practice
+        round's alert doesn't use up the league one's night."""
+        now = time.time()
         with self._lock:
             state = self._state()
-            if time.time() - (state.get("live_at") or 0) < LIVE_GAP:
+            topics = [t for t in ("live", "liveleague") if (t == "live" or league)
+                      and now - (state.get(f"{t}_at") or 0) >= LIVE_GAP]
+            if not topics:
                 return
-            state["live_at"] = time.time()
+            for t in topics:
+                state[f"{t}_at"] = now
             try:
                 self._save(state)
             except OSError as e:
                 log.debug("Alerts: couldn't save the state: %s", e)
         body = f"{who}" + (f" on {course}" if course else "") + ". Watch and chat on the stats page."
-        self.send([push.Alert("live", "🔴 Live now", body.strip(), "#live?player=", tag="live", ttl=3600)])
+        self.send([push.Alert(t, "🔴 Live now", body.strip(), "#live?player=", tag="live", ttl=3600) for t in topics])
 
     def recap(self, key: str, week: Any, course: str | None) -> None:
         """A league recap was published (sent once per recap, however often it's rebuilt)."""

@@ -29,6 +29,8 @@
   #apppanel label { display:flex; gap:10px; align-items:flex-start; padding:8px 0; border-bottom:1px solid var(--line); cursor:pointer; }
   #apppanel label input { margin-top:3px; width:18px; height:18px; accent-color:var(--accent); flex:none; }
   #apppanel label .sub { display:block; }
+  #apppanel .livepick { padding:2px 0 6px 28px; border-bottom:1px solid var(--line); }
+  #apppanel .livepick label { padding:4px 0; border:0; font-size:.92em; }
   #apppanel .close { position:absolute; top:8px; right:10px; background:none; border:none; color:var(--dim); font-size:18px; cursor:pointer; }
   #apppanel .status { color:var(--bad); min-height:1em; margin-top:8px; font-size:13px; }
   #apppanel .install { margin:0 0 10px; }
@@ -2676,6 +2678,7 @@ window.addEventListener("hashchange", () => route());
 // the alerts: one toggle a kind, sent to the booth's table as this browser's subscription.
 const PUSH_URL = "/chat/push";
 const ALERT_TOPICS = [["live", "We're live", "The booth goes on air with the stream"],
+                      ["liveleague", "", ""],   // "We're live" for league and tournament rounds only: its choice below
                       ["round", "Rounds posted", "A league or tournament round's scores"],
                       ["record", "Records, eagles and aces", "A new league record, or an eagle or ace by anyone"],
                       ["recap", "League recap", "The week's recap video is up"]];
@@ -2727,8 +2730,14 @@ function drawAppPanel() {
     if (!pushable()) html += `<p class="sub">This browser can't show alerts.</p>`;
     else {
       if (Notification.permission === "denied") html += `<p class="sub">Notifications are blocked for this site: allow them in the browser's settings, then come back.</p>`;
-      html += ALERT_TOPICS.map(([k, label, sub]) => `<label><input type="checkbox" data-alert="${k}"${app.topics.includes(k) ? " checked" : ""}${app.busy ? " disabled" : ""}>
-        <span>${label}<span class="sub">${sub}</span></span></label>`).join("");
+      const dis = app.busy ? " disabled" : "", league = app.topics.includes("liveleague");
+      html += ALERT_TOPICS.filter(t => t[1]).map(([k, label, sub]) => {
+        const on = app.topics.includes(k) || (k === "live" && league);
+        return `<label><input type="checkbox" data-alert="${k}"${on ? " checked" : ""}${dis}>
+        <span>${label}<span class="sub">${sub}</span></span></label>` + (k === "live" && on ? `<div class="livepick">
+          <label><input type="radio" name="livepick" data-livepick="live"${league ? "" : " checked"}${dis}> Any round</label>
+          <label><input type="radio" name="livepick" data-livepick="liveleague"${league ? " checked" : ""}${dis}> League and tournament rounds only</label></div>` : "");
+      }).join("");
       html += `<div class="status" role="status">${esc(app.error)}</div>`;
     }
   }
@@ -2752,7 +2761,9 @@ async function installApp() {
 async function postPush(sub, topics) {
   const r = await fetch(PUSH_URL, { method: "POST", headers: { "content-type": "application/json" },
                                     body: JSON.stringify({ subscription: sub.toJSON(), topics }) });
-  if (!r.ok) throw new Error(((await r.json().catch(() => null)) || {}).error || `The site said ${r.status}.`);
+  const got = await r.json().catch(() => null);
+  if (!r.ok) throw new Error((got || {}).error || `The site said ${r.status}.`);
+  return got && Array.isArray(got.topics) ? got.topics : topics;
 }
 
 // The service worker's registration, active, and its push subscription (or null). Firefox can leave
@@ -2778,7 +2789,13 @@ function setAlerts(topics, asked = Promise.resolve(Notification.permission)) {
       const key = keyBytes(app.key);
       if (sub && !sameKey(sub.options.applicationServerKey, key)) { await sub.unsubscribe(); sub = null; }
       sub = sub || await within(reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }), 20000);
-      await postPush(sub, topics);
+      const kept = await postPush(sub, topics);
+      // A site set up before a kind existed drops it: say so, and show what it kept.
+      if (topics.some(t => !kept.includes(t))) {
+        app.error = "This site can't send that kind of alert yet: its owner needs to update it.";
+        if (!kept.length) await sub.unsubscribe();
+        topics = kept;
+      }
     }
     app.topics = topics;
     store.set("shotcast.alerts", topics.length ? JSON.stringify(topics) : null);
@@ -2792,9 +2809,14 @@ $("#apppanel").addEventListener("click", e => {
   else if (e.target.closest("[data-appinstall]")) installApp();
 });
 $("#apppanel").addEventListener("change", e => {
-  const k = e.target.dataset.alert;
-  if (!k || app.busy) return;
-  const topics = ALERT_TOPICS.map(t => t[0]).filter(t => t === k ? e.target.checked : app.topics.includes(t));
+  const pick = e.target.dataset.livepick, k = e.target.dataset.alert;
+  if ((!k && !pick) || app.busy) return;
+  const live = app.topics.includes("liveleague") ? "liveleague" : "live";
+  // "We're live" is one box: on, it's the kind picked below it (any round to start with).
+  const want = t => pick ? (t === "live" || t === "liveleague" ? t === pick : app.topics.includes(t))
+    : k === "live" ? (t === live ? e.target.checked : t !== "live" && t !== "liveleague" && app.topics.includes(t))
+    : t === k ? e.target.checked : app.topics.includes(t);
+  const topics = ALERT_TOPICS.map(t => t[0]).filter(want);
   const asked = topics.length && Notification.permission === "default" ? Notification.requestPermission()
     : Promise.resolve(Notification.permission);
   setAlerts(topics, asked);

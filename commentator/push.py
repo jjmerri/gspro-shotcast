@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 log = logging.getLogger(__name__)
 
 KEY_FILE = "web-push-key.pem"   # under log_dir: the booth's signing key (never in a problem report)
-TOPICS = ("live", "round", "record", "recap")
+TOPICS = ("live", "liveleague", "round", "record", "recap")
 RECORD_SIZE = 4096
 CONTACT = "https://github.com/jjmerri/gspro-shotcast"   # VAPID's "sub": who a push service can reach
 
