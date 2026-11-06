@@ -23,9 +23,10 @@ stats page and in the app; "Booth" items only in the app. Plain words, one line 
 ## 0.1.87
 
 ### Stats page
-- **Phone alerts:** add the stats page to your phone's home screen (tap **📲 Get the app**) and get a
-  notification when the booth goes live, a league round is posted, a league record falls, someone
-  makes an eagle or an ace, or the week's recap is up. Pick which in **🔔 Alerts**.
+- **Phone alerts:** tap **🔔 Alerts** at the top of the stats page and pick what you'd like a
+  notification for: the booth going live, a league round posted, a league record falling, an eagle or
+  an ace, or the week's recap. On an iPhone, tap **📲 Get the app** first to add the page to your
+  home screen.
 - **What's new:** a card like this one on the stats page when something new arrives.
 
 ### Booth

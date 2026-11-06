@@ -3545,6 +3545,42 @@ def test_a_note_is_capped_per_round(tmp_path):
     assert e._grounded([line], "Josh steps up.", mode="round")[0]
 
 
+def test_a_line_holds_a_commentator_only_to_a_call_made_out_loud(tmp_path):
+    # From a real round: "a chance to finish with a clean statement" became "You've called this a clean
+    # finish", and the closer built on it.
+    from commentator.models import Line
+    e = _engine_with(tmp_path, _noted_league())
+    e._start_round(Round(league=e.league, gspro_players=["Josh"], course="X", scheduled_format=None))
+    e._write_transcript([Line("pbp", "Now the eighteenth, and a chance to finish with a clean statement.")])
+    cited = Line("color", "You\u2019ve called this a clean finish. That prediction's getting nervous.")
+    good, problems = e._grounded([cited], "", mode="result")
+    assert not good and any("prediction nobody made" in p for p in problems)
+    assert not e._grounded([Line("pbp", "My prediction looks shaky now.")], "", mode="result")[0]
+    assert not e._grounded([Line("pbp", "That prediction's getting nervous.")], "", mode="result")[0]
+    e._write_transcript([Line("pbp", "I think that was a pull.")])   # a description, not a call
+    assert not e._grounded([cited], "", mode="result")[0]
+    reply = [Line("pbp", "I predict he'll miss this left."), Line("color", "Your prediction is brave.")]
+    assert e._grounded(reply, "", mode="result")[0] == reply   # a call earlier in the same response
+    assert e._grounded([Line("color", "My prediction: he holes this one.")], "", mode="result")[0]   # a new one
+    assert e._grounded([Line("color", "You called that a fresh chance. Scenic route.")], "", mode="result")[0]   # quoting
+    assert not any("calls the booth made" in f for f in e._format_facts())
+    assert any("Nobody in the booth made a call" in f for f in e._call_facts(whole_round=True))
+
+    e._write_transcript([Line("pbp", "Four feet, right to left. I think this slides by.")])
+    assert e._grounded([Line("color", "You called it slipping by, and it dropped.")], "", mode="result")[0]
+    assert e._grounded([Line("pbp", "As I predicted, it held its line.")], "", mode="result")[0]
+    assert not e._grounded([Line("color", "As I predicted, it held its line.")], "", mode="result")[0]   # not his call
+    assert any('the only ones to hold anyone to' in f and "I think this slides by" in f for f in e._format_facts())
+
+    # Two holes on, it's no longer this hole's or the last's, but the closer may still hold them to it.
+    e.round.seq += 2
+    assert not e._grounded([cited], "", mode="result")[0]
+    assert e._grounded([Line("color", "Your prediction on that putt aged badly.")], "", mode="round")[0]
+    # A new round starts with no calls.
+    e._start_round(Round(league=e.league, gspro_players=["Josh"], course="X", scheduled_format=None))
+    assert not e._grounded([Line("color", "Your prediction on that putt aged badly.")], "", mode="round")[0]
+
+
 def test_roster_facts_name_an_absent_partner(tmp_path):
     e = _engine_with(tmp_path, _noted_league())
     # A league round with one ball for the team is alternate shot: the partner IS playing.

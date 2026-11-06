@@ -27,7 +27,7 @@ from .facts import (
 )
 from .flight_pick import FlightPlan, Hazard, pick_line, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
-from .grounding import (SCENERY, bare_acknowledgement, check_line, meta_talk, ngrams, note_keywords, repeats, uses_note,
+from .grounding import (SCENERY, bare_acknowledgement, check_line, cites_call, makes_call, meta_talk, ngrams, note_keywords, repeats, uses_note,
                         wrong_round_score)
 from .hud import NAME_DARK, Hud, Scorecard, describe, hole_key, name_sig_changed
 from .interest import (LEAGUE_BEST_DRIVE_LEVEL, REPLY_PUTT_LEVEL, SEASON_BEST_DRIVE_LEVEL,
@@ -837,6 +837,10 @@ class Engine:
         # player's current putt, committed only when the pre-shot line airs and graded against the
         # result when the stamped hole matches. Keyed by player so a partner's shot can't bin it.
         self._pending_prediction: dict[str, tuple[str, bool, str | None]] = {}
+        # The calls the booth made out loud this round, (speaker key, hole seq, line): the only ones a
+        # line may hold a commentator to. A wrap once turned "a chance to finish with a clean statement"
+        # into "you've called this a clean finish", and the closer built on it.
+        self._calls: list[tuple[str, int, str]] = []
         self._pred_turn = 0
         self._pred_rested = True   # False right after a call: the next putt never gets one
         self._plan_made_at = 0.0
@@ -2959,14 +2963,15 @@ class Engine:
         return now - self._chat_aired_at >= c.min_gap_seconds - (20.0 if soon else 0.0)
 
     def _chat_member(self, name: str) -> str | None:
-        """A note on a chat name that's a league player's who isn't in this round: most likely them,
-        watching. None for any other name, for a player in the round (someone else by that name is likelier
-        than them typing between shots), and with nobody from the league playing (the booth leaves the
-        league out of it)."""
+        """A note on a chat name that's a league player's: most likely them, watching from home if they
+        aren't in this round, or typing between shots if they are. None for any other name, and with nobody
+        from the league playing (the booth leaves the league out of it)."""
         r = self.round
         player = self.league.chat_member(name)
-        if not player or not r or r.ended or self._no_members(r) or player in self._playing(r):
+        if not player or not r or r.ended or self._no_members(r):
             return None
+        if player in self._playing(r):
+            return f"a league player's name: most likely {player}, who's playing this round, typing between shots"
         team = self.league.player_team.get(player)
         return (f"a league player's name: most likely {player}"
                 + (f" of {self.league.team_name(team)}" if team else "") + ", not playing this round, watching")
@@ -3168,7 +3173,38 @@ class Engine:
     def _format_facts(self, stroke: int | None = None, setup: bool = False, player: str | None = None) -> list[str]:
         if not self.round or self.round.ended:
             return []
-        return self.round.format_facts() + self._pick_facts(stroke, setup, player) + self._roster_facts()
+        return (self.round.format_facts() + self._pick_facts(stroke, setup, player) + self._roster_facts()
+                + self._call_facts())
+
+    def _calls_made(self, whole_round: bool = False) -> list[tuple[str, int, str]]:
+        """The booth's calls this round: on this hole or the last one, or the whole round's."""
+        seq = self.round.seq if self.round else 0
+        return [c for c in self._calls if whole_round or c[1] >= seq - 1]
+
+    def _call_facts(self, whole_round: bool = False) -> list[str]:
+        calls = self._calls_made(whole_round)
+        where = "this round" if whole_round else "on this hole or the last"
+        if not calls:
+            return [f"Nobody in the booth made a call out loud {where}: never say anyone predicted or "
+                    "called anything."] if whole_round else []
+        said = "; ".join(f'{self.cfg.personas[k].name or k}: "{t}"' for k, _, t in calls[-4:])
+        return [f"The calls the booth made out loud {where}, the only ones to hold anyone to: {said}"]
+
+    def _uncalled(self, line: Line, whole_round: bool, earlier: Iterable[Line] = ()) -> str | None:
+        """Why a line holding a commentator to a call nobody made is wrong, or None. `earlier`: the
+        lines kept so far in the same response, whose calls count too."""
+        whose = cites_call(line.text)
+        if whose is None or not self.round:
+            return None
+        others = [k for k in self.speakers if k != line.speaker]
+        if whose == "you" and not others:
+            return None
+        who = {line.speaker} if whose == "me" else set(others) if whose == "you" else set(self.speakers)
+        if any(k in who for k, _, _ in self._calls_made(whole_round)) or any(
+                l.speaker in who and makes_call(l.text) for l in earlier):
+            return None
+        return ("holds a commentator to a prediction nobody made" + (" this round" if whole_round else " on this hole")
+                + ": only a line that said what would happen (\"I think this slides by\") is a prediction")
 
     def _roster_facts(self, watching: Iterable[str] = ()) -> list[str]:
         """Who isn't here: a partner of someone playing is left out entirely (a solo practice round had
@@ -7987,6 +8023,7 @@ class Engine:
         self._mulligans_called.clear()
         self._finish_seq.clear()
         self._pending_prediction.clear()
+        self._calls.clear()
 
     def _opener_io(self, r: Round, first: str | None = None, preround: bool = False) -> tuple[str, str]:
         season = {s.key: self.store.season_rounds(s.key, "league" if r.is_league else "practice") for s in r.sides}
@@ -9359,7 +9396,8 @@ class Engine:
         # One call, written now that the final score is known, while the last hole's wrap airs: it
         # used to be pre-built on the last hole in three or four score branches, one of which aired.
         cap = self.cfg.commentary.closer_max_words
-        user, facts_text = closer_prompt(facts=facts + self._weather_facts(), recent_lines=self.state.recent_lines,
+        user, facts_text = closer_prompt(facts=facts + self._weather_facts() + self._call_facts(whole_round=True),
+                                         recent_lines=self.state.recent_lines,
                                          max_words=cap)
         # r.ended is set above, so the `system` property would pick practice; pass the round's own
         # variant so a league round's sign-off keeps its stakes framing.
@@ -9848,6 +9886,9 @@ class Engine:
             if bare_acknowledgement(line.text):
                 check.ok = False
                 check.problems.append("a bare acknowledgement adds nothing")
+            if mode != "news" and (why := self._uncalled(line, mode == "round", good)):
+                check.ok = False
+                check.problems.append(why)
             for player in self._spent_notes():
                 if uses_note(line.text, self._note_keys[player]):
                     check.ok = False
@@ -9979,6 +10020,8 @@ class Engine:
         self.store.record_lines(kind, lines, shot_id)
         self._note_form_mentions(lines)
         for line in lines:
+            if self.round and not self.round.ended and makes_call(line.text):
+                self._calls.append((line.speaker, self.round.seq, line.text))
             self._season_phrases |= ngrams(line.text, 6)
             for player, keys in self._note_keys.items():
                 if uses_note(line.text, keys):

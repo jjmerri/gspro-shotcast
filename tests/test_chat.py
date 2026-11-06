@@ -566,7 +566,7 @@ async def test_the_live_alert_waits_for_the_stream_and_goes_once_a_round(tmp_pat
     assert len(sent) == 2
 
 
-async def test_a_chat_name_thats_a_league_player_not_out_there_is_most_likely_them_watching(tmp_path):
+async def test_a_chat_name_thats_a_league_players_is_most_likely_them(tmp_path):
     from tests.test_round import LEAGUE
     assert [LEAGUE.chat_member(n) for n in ("sarah", "Sarah K", " SARAH!! ", "Sarahh", "Sa", "MikeD", "")] == \
         ["Sarah", "Sarah", "Sarah", None, None, "Mike", None]
@@ -589,9 +589,11 @@ async def test_a_chat_name_thats_a_league_player_not_out_there_is_most_likely_th
     assert ("- Sarah (a league player's name: most likely Sarah of Aces, not playing this round, watching): "
             '"miss you out there mike"') in prompt
     assert '- Tony (a league player\'s name: most likely Tony of Duffers, not playing this round, watching)' in prompt
-    assert '- Mike: "is this thing on"' in prompt and '- Sarahh: "go mike"' in prompt   # playing; no fuzzy match
+    assert ("- Mike (a league player's name: most likely Mike, who's playing this round, typing between shots): "
+            '"is this thing on"') in prompt
+    assert '- Sarahh: "go mike"' in prompt   # no fuzzy match
     assert "Not playing this round: Sarah. Leave them out of the commentary, except Sarah in the chat" in prompt
-    assert "most likely that player watching from home" in prompt and "Any other name: don't guess" in prompt
+    assert "One playing this round is most likely typing between shots" in prompt and "Any other name: don't guess" in prompt
 
     # Nobody from the league playing: the booth leaves the league out, and every name is only a name.
     e2 = _booth(tmp_path / "guest")

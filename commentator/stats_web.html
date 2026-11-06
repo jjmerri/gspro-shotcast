@@ -2755,20 +2755,29 @@ async function postPush(sub, topics) {
   if (!r.ok) throw new Error(((await r.json().catch(() => null)) || {}).error || `The site said ${r.status}.`);
 }
 
+// The service worker's registration, active, and its push subscription (or null). Firefox can leave
+// getSubscription unanswered on a worker that's only just registered, and the button waited on it.
+const within = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(
+  () => no(new Error("The browser's alert service didn't answer: try again in a moment.")), ms))]);
+async function pushReg() {
+  await within(navigator.serviceWorker.register("sw.js"), 10000);
+  const reg = await within(navigator.serviceWorker.ready, 10000);
+  return [reg, await within(reg.pushManager.getSubscription(), 10000)];
+}
+
 // Asked for straight from the tap (before anything is awaited): Safari only asks the question then.
 function setAlerts(topics, asked = Promise.resolve(Notification.permission)) {
   app.busy = true; app.error = "";
   drawAppPanel();
   return (async () => {
-    const reg = await navigator.serviceWorker.register("sw.js");
-    let sub = await reg.pushManager.getSubscription();
+    let [reg, sub] = await pushReg();
     if (!topics.length) {
       if (sub) { await postPush(sub, []); await sub.unsubscribe(); }
     } else {
       if (await asked !== "granted") throw new Error("Notifications weren't allowed for this site.");
       const key = keyBytes(app.key);
       if (sub && !sameKey(sub.options.applicationServerKey, key)) { await sub.unsubscribe(); sub = null; }
-      sub = sub || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+      sub = sub || await within(reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }), 20000);
       await postPush(sub, topics);
     }
     app.topics = topics;
@@ -2800,17 +2809,18 @@ async function initApp() {
   if (!app.key) return;
   try { app.topics = JSON.parse(store.get("shotcast.alerts") || "[]").filter(t => ALERT_TOPICS.some(a => a[0] === t)); }
   catch (e) { app.topics = []; }
+  if (!pushable()) app.topics = [];
+  drawAppBtn();   // now, not after the check below: it may take a while, or never answer
   if (pushable()) {
     try {
-      const reg = await navigator.serviceWorker.register("sw.js");
-      const sub = await reg.pushManager.getSubscription();
+      const [, sub] = await pushReg();
       if (!sub) { app.topics = []; store.set("shotcast.alerts", null); }
       // The booth's key changed (a new PC): subscribe again with the new one, as allowed already.
       else if (app.topics.length && !sameKey(sub.options.applicationServerKey, keyBytes(app.key))
                && Notification.permission === "granted") setAlerts(app.topics);
     } catch (e) {}
-  } else app.topics = [];
-  drawAppBtn();
+    drawAppBtn();
+  }
 }
 
 showTabs();

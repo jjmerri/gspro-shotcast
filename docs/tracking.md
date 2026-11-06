@@ -406,7 +406,8 @@ rest of the code: save the template
 folder and open a Command Prompt (or terminal) in that folder. Each command below is one line.
 
 1. Create the stack (pick the password you'll give the league; 8+ characters, letters, digits and
-   `._~!@#%^*+=-`):
+   `._~!@#%^*+=-`; or leave `SitePassword=""` blank for a page anyone with the link can open, live
+   chat, stream and replays included):
 
    ```
    aws cloudformation deploy --stack-name shotcast-stats --template-file stats-site.yaml --capabilities CAPABILITY_IAM --parameter-overrides SiteUser=league SitePassword="<password>"
@@ -457,7 +458,8 @@ not proxied. Every other address, `www` and the `cloudfront.net` one included, r
 domain.
 
 To change the password, run the `deploy` command again with the new one; that signs every browser
-out. To pick up a newer template (such as the sign-in cookie) on a stack you already have, run
+out. `SitePassword=""` takes the password off (the whole page opens to anyone with the link), and a
+password put back asks for it again. To pick up a newer template (such as the sign-in cookie) on a stack you already have, run
 `deploy` again with the same password, or with `--parameter-overrides LoginDays=90` to keep browsers
 signed in for a different number of days. To take it all down, empty
 the bucket (`aws s3 rm s3://<BucketName> --recursive`), delete the upload user's access key, and

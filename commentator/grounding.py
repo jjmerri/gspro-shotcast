@@ -343,6 +343,42 @@ def bare_acknowledgement(line: str) -> bool:
     return bool(_BARE.match(line))
 
 
+# A call made out loud, which the booth can later hold a commentator to ("you called it"). Broad on
+# purpose: a call missed here only lets a made-up one ("you've called this a clean finish", from "a
+# chance to finish with a clean statement") be rejected.
+_AHEAD = (r"(?=[^.!?;]*\b(?:will|'ll|going to|gonna|goes|go|drops?|dropping|slides?|sliding|miss(?:es)?|missing|holes?"
+          r"|holing|makes?|finds?|stays?|breaks?|falls?|lips?|sinks?|gets?|comes?|has to|needs?)\b)")
+_CALL = re.compile(
+    r"\b(?:(?:i (?:think|reckon|bet|fancy|expect)|i've got (?:this|it|him|her))\b" + _AHEAD +
+    r"|(?:i predict|i'm (?:calling|backing|tipping|predicting|going with)|i'll (?:call|back|bet|predict|go with|tip)"
+    r"|i call|mark my words|calling it|watch this|my money(?:'s| is))\b"
+    r"|my (?:bet|call|tip|prediction|pick)(?::| is\b| for\b| -))")
+# A line holding someone to an earlier prediction: "you" is the other commentator, "I"/"my" the speaker.
+# Not "you called": "you called that a pull" is the booth quoting how a shot was described, said on air.
+_CITED = re.compile(r"\b(?:(you|i)(?:'ve| have)? predicted|(your|my|that|the) predictions?)\b")
+
+
+def _plain(line: str) -> str:
+    return line.lower().replace("\u2019", "'")
+
+
+def makes_call(line: str) -> bool:
+    return bool(_CALL.search(_plain(line)))
+
+
+def cites_call(line: str) -> str | None:
+    """Whose earlier prediction the line holds them to: "you" (the other commentator), "me" (the
+    speaker), "any" ("that prediction"), or None. One in a line that makes a call ("my prediction: he
+    holes it") is that new call."""
+    m = _CITED.search(_plain(line))
+    if not m:
+        return None
+    word = m.group(1) or m.group(2)
+    if word in ("you", "your"):
+        return "you"
+    return None if makes_call(line) else "me" if word in ("i", "my") else "any"
+
+
 _NOTE_STOP = {
     "this", "that", "with", "about", "most", "time", "just", "call", "golf", "fine", "lean", "occasional",
     "light", "ribbing", "dont", "don't", "plays", "play", "playing", "another", "other", "team", "teams",

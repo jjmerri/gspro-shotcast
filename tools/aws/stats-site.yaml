@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   GSPro Shotcast stats page: a private S3 bucket served through CloudFront behind one shared
-  username and password, plus an IAM user that can only upload to the bucket, and the live chat
-  that feeds the booth (a small function and table under /chat/, behind the same password).
+  username and password (or open to anyone, with no password), plus an IAM user that can only upload to the bucket, and the live chat
+  that feeds the booth (a small function and table under /chat/, behind the same password, if any).
   See docs/tracking.md#sharing-the-stats-page and docs/tracking.md#live-chat.
 
 Parameters:
@@ -14,10 +14,12 @@ Parameters:
   SitePassword:
     Type: String
     NoEcho: true
-    MinLength: 8
-    AllowedPattern: "[A-Za-z0-9._~!@#%^*+=-]+"
-    ConstraintDescription: 8+ characters; letters, digits and ._~!@#%^*+=- only.
-    Description: Password for the stats page (shared with the league).
+    Default: ""
+    AllowedPattern: "^$|^[A-Za-z0-9._~!@#%^*+=-]{8,}$"
+    ConstraintDescription: blank, or 8+ characters; letters, digits and ._~!@#%^*+=- only.
+    Description: >-
+      Password for the stats page (shared with the league). Blank: no password, the page, its live
+      chat, stream and replays are open to anyone with the link.
   DomainName:
     Type: String
     Default: ""
@@ -46,6 +48,7 @@ Parameters:
 
 Conditions:
   HasDomain: !Not [!Equals [!Ref DomainName, ""]]
+  Public: !Equals [!Ref SitePassword, ""]
 
 Resources:
   Bucket:
@@ -113,9 +116,10 @@ Resources:
                 headers: { location: { value: "https://" + domain + event.request.uri } }
               };
             }
-            // The home-screen app's files: a phone fetches them without the sign-in (they hold nothing).
+            // No password (SitePassword left blank): open to anyone. And the home-screen app's files: a
+            // phone fetches them without the sign-in (they hold nothing).
             var uri = event.request.uri;
-            if (uri === "/manifest.webmanifest" || uri === "/sw.js" || uri.indexOf("/icons/") === 0) {
+            if (${Public} || uri === "/manifest.webmanifest" || uri === "/sw.js" || uri.indexOf("/icons/") === 0) {
               return event.request;
             }
             var auth = event.request.headers.authorization;
@@ -131,6 +135,7 @@ Resources:
         - Token: !Base64
             Fn::Sub: "${SiteUser}:${SitePassword}"
           Domain: !Ref DomainName
+          Public: !If [Public, "true", "false"]
 
   # After a request let in by the password, keeps the browser signed in for LoginDays with a
   # cookie, so it isn't asked again every time it forgets the password (phones do, often).
