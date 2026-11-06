@@ -886,7 +886,7 @@ function renderHome() {
   }
   const p = me && d.players.find(p => p.name === me);
   if (p) cards.push(`<div class="card go" data-player="${esc(p.name)}"><div class="k">${esc(p.name)}</div><div class="v">${toPar(p.avg_to_par_9)} <span class="sub">a nine</span></div>
-    <div class="sub">index ${hcp(p.index)} · best ${toPar(p.best_to_par_9)} · ${p.rounds} round${p.rounds === 1 ? "" : "s"}</div></div>`);
+    <div class="sub">index ${hcp(p.index)}${state.hcpClean && "index_clean" in p ? " (no mulligans)" : ""} · best ${toPar(p.best_to_par_9)} · ${p.rounds} round${p.rounds === 1 ? "" : "s"}</div></div>`);
   const mineR = me ? d.rounds.filter(r => r.players.includes(me)) : d.rounds;
   const last = me && mineR[0] && sideIn(d.rounds.filter(r => r.round === mineR[0].round), me);
   if (last) cards.push(`<div class="card go" data-round="${last.id}"><div class="k">${me ? "Latest round" : "Last round"}${freshTag(last)}</div><div class="v">${dash(last.gross)} <span class="sub">${toPar(last.to_par)}</span></div>

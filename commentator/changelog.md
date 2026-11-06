@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.93
+
+### Stats page
+- The home page's handicap shows when it's from **no-mulligan rounds** only.
+
 ## 0.1.92
 
 ### Booth
