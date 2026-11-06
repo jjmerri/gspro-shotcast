@@ -151,6 +151,9 @@ def test_alerts_give_out_the_booths_key_and_keep_a_phones_choices(chat):
     assert call(chat, path="/chat/push") == (200, {"key": None})        # the booth hasn't set alerts up
     chat.table.put_item("chat", {"pk": {"S": "push"}, "sk": {"S": "key"}, "public": {"S": "BPUB"}})
     assert call(chat, path="/chat/push") == (200, {"key": "BPUB"})
+    chat.table.put_item("chat", {"pk": {"S": "push"}, "sk": {"S": "key"}, "public": {"S": "BPUB"},
+                                 "topics": {"SS": ["live", "record"]}})   # what this booth sends
+    assert call(chat, path="/chat/push") == (200, {"key": "BPUB", "topics": ["live", "record"]})
     sub = {"subscription": _subscription(), "topics": ["live", "round", "bogus"]}
     assert call(chat, "POST", sub, path="/chat/push") == (200, {"topics": ["live", "round"]})
     [(_, sk)] = [k for k in chat.table.items if k[0] == "push" and k[1] != "key"]

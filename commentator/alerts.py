@@ -169,11 +169,12 @@ class Alerts:
         tmp.write_text(json.dumps(state), encoding="utf-8")
         os.replace(tmp, path)
 
-    def start(self) -> None:
-        """Make the booth's key if it has none, and give the page its public half."""
+    def start(self, topics: list[str] | None = None) -> None:
+        """Make the booth's key if it has none, and give the page its public half and the kinds of
+        alert this booth sends (`topics`)."""
         try:
             self._key = push.load_key(self.log_dir)
-            self.table.set_push_key(push.public_key(self._key))
+            self.table.set_push_key(push.public_key(self._key), topics)
         except Exception as e:
             log.warning("Alerts: couldn't set up the push key: %s", e)
 

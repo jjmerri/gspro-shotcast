@@ -367,7 +367,8 @@ Resources:
               method = event.get("requestContext", {}).get("http", {}).get("method")
               if method == "GET":   # the booth's public key, to subscribe with (none: alerts aren't set up)
                   item = db.get_item(TableName=TABLE, Key={"pk": {"S": "push"}, "sk": {"S": "key"}}).get("Item")
-                  return reply(200, {"key": item["public"]["S"] if item else None})
+                  return reply(200, {"key": item["public"]["S"] if item else None,
+                                     **({"topics": item["topics"]["SS"]} if item and "topics" in item else {})})
               if method != "POST":
                   return reply(405, {"error": "GET or POST"})
               body = event.get("body") or ""

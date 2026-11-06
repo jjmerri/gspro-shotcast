@@ -2682,7 +2682,14 @@ const ALERT_TOPICS = [["live", "We're live", "The booth goes on air with the str
                       ["round", "Rounds posted", "A league or tournament round's scores"],
                       ["record", "Records, eagles and aces", "A new league record, or an eagle or ace by anyone"],
                       ["recap", "League recap", "The week's recap video is up"]];
-const app = { key: null, install: null, topics: [], busy: false, error: "" };
+// offered: the kinds the booth sends (none listed, from an older booth or stack: all of them).
+const app = { key: null, offered: null, install: null, topics: [], busy: false, error: "" };
+const offers = k => !app.offered || app.offered.includes(k);
+const hasLeague = () => offers("liveleague");
+// Without a league, the kinds that are about one say what's left of them.
+const topicText = ([k, label, sub]) => hasLeague() ? [label, sub]
+  : k === "round" ? ["Tournament rounds posted", "A tournament round's scores"]
+  : k === "record" ? ["Eagles and aces", "An eagle, albatross or ace by anyone"] : [label, sub];
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
 const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 const pushable = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
@@ -2731,10 +2738,11 @@ function drawAppPanel() {
     else {
       if (Notification.permission === "denied") html += `<p class="sub">Notifications are blocked for this site: allow them in the browser's settings, then come back.</p>`;
       const dis = app.busy ? " disabled" : "", league = app.topics.includes("liveleague");
-      html += ALERT_TOPICS.filter(t => t[1]).map(([k, label, sub]) => {
+      html += ALERT_TOPICS.filter(t => t[1] && offers(t[0])).map(t => {
+        const k = t[0], [label, sub] = topicText(t);
         const on = app.topics.includes(k) || (k === "live" && league);
         return `<label><input type="checkbox" data-alert="${k}"${on ? " checked" : ""}${dis}>
-        <span>${label}<span class="sub">${sub}</span></span></label>` + (k === "live" && on ? `<div class="livepick">
+        <span>${label}<span class="sub">${sub}</span></span></label>` + (k === "live" && on && hasLeague() ? `<div class="livepick">
           <label><input type="radio" name="livepick" data-livepick="live"${league ? "" : " checked"}${dis}> Any round</label>
           <label><input type="radio" name="livepick" data-livepick="liveleague"${league ? " checked" : ""}${dis}> League and tournament rounds only</label></div>` : "");
       }).join("");
@@ -2816,7 +2824,7 @@ $("#apppanel").addEventListener("change", e => {
   const want = t => pick ? (t === "live" || t === "liveleague" ? t === pick : app.topics.includes(t))
     : k === "live" ? (t === live ? e.target.checked : t !== "live" && t !== "liveleague" && app.topics.includes(t))
     : t === k ? e.target.checked : app.topics.includes(t);
-  const topics = ALERT_TOPICS.map(t => t[0]).filter(want);
+  const topics = ALERT_TOPICS.map(t => t[0]).filter(t => offers(t) && want(t));
   const asked = topics.length && Notification.permission === "default" ? Notification.requestPermission()
     : Promise.resolve(Notification.permission);
   setAlerts(topics, asked);
@@ -2826,17 +2834,25 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") $("#apppanel
 async function initApp() {
   try {
     const r = await fetch(PUSH_URL, { cache: "no-store" });
-    app.key = r.ok ? (await r.json()).key : null;
+    const got = r.ok ? await r.json() : {};
+    app.key = got.key || null;
+    app.offered = Array.isArray(got.topics) ? got.topics : null;
   } catch (e) { app.key = null; }
   if (!app.key) return;
-  try { app.topics = JSON.parse(store.get("shotcast.alerts") || "[]").filter(t => ALERT_TOPICS.some(a => a[0] === t)); }
-  catch (e) { app.topics = []; }
+  let stored = [];
+  try { stored = JSON.parse(store.get("shotcast.alerts") || "[]").filter(t => ALERT_TOPICS.some(a => a[0] === t)); }
+  catch (e) {}
+  app.topics = stored.filter(offers);
+  // Kinds this booth no longer sends (no league now): kept on the server they'd still go out with no
+  // toggle showing to turn them off, so the server gets what's left.
+  const dropped = app.topics.length !== stored.length;
   if (!pushable()) app.topics = [];
   drawAppBtn();   // now, not after the check below: it may take a while, or never answer
   if (pushable()) {
     try {
       const [, sub] = await pushReg();
       if (!sub) { app.topics = []; store.set("shotcast.alerts", null); }
+      else if (dropped && Notification.permission === "granted") setAlerts(app.topics);
       // The booth's key changed (a new PC): subscribe again with the new one, as allowed already.
       else if (app.topics.length && !sameKey(sub.options.applicationServerKey, keyBytes(app.key))
                && Notification.permission === "granted") setAlerts(app.topics);

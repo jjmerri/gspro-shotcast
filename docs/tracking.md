@@ -687,7 +687,10 @@ the app, **🔔 Alerts** has one toggle for each kind:
   in any round.
 - **League recap**: the week's league recap video is up (Watch → Round replays).
 
-Tapping an alert opens the page at the round, the records, the recap or the Live tab.
+Tapping an alert opens the page at the round, the records, the recap or the Live tab. The page only
+offers what the booth sends: with no league set up, no league recap or league-only live choice, and
+the rounds and records toggles cover tournament rounds and eagles and aces; the recap only when the
+booth makes them (`publish.recaps`, with Squabbit on).
 
 How it works: the browser subscribes with its push service (Google's, Apple's, Mozilla's or
 Microsoft's) and the page posts that subscription, and the chosen kinds, to the chat function

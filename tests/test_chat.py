@@ -546,6 +546,14 @@ async def test_a_take_waits_for_the_shot_the_viewer_watched_to_be_recorded(tmp_p
     assert "sent watching Frankie's shot 2 on hole 4 (7I)" in e.live_llm.prompts[0]
 
 
+def test_the_page_offers_only_the_alerts_this_booth_sends(tmp_path):
+    from commentator.league import League
+    e = _booth(tmp_path)
+    assert e._alert_topics() == ["live", "round", "record", "liveleague"]   # no recaps from a replay
+    e.league = League({})
+    assert e._alert_topics() == ["live", "round", "record"]                # no league set up
+
+
 async def test_the_live_alert_waits_for_the_stream_and_goes_once_a_round(tmp_path):
     e = _booth(tmp_path)
     _in_a_round(e)

@@ -987,7 +987,7 @@ class Engine:
         if self.chat is not None:
             asyncio.create_task(self._chat_loop(), name="chat")
         if self.alerts is not None:
-            asyncio.create_task(asyncio.to_thread(self.alerts.start), name="alerts-key")
+            asyncio.create_task(asyncio.to_thread(self.alerts.start, self._alert_topics()), name="alerts-key")
         if self.bookings is not None:
             self._fetch_bookings("startup")
         if self.cfg.publish.enabled and self.cfg.publish.bucket and self.cfg.source.type != "replay":
@@ -2776,6 +2776,15 @@ class Engine:
             self._chat_talked = self._chat_written = self._chat_cursor
             if self._chat_task and not self._chat_task.done():
                 self._chat_task.cancel()
+
+    def _alert_topics(self) -> list[str]:
+        """The kinds of alert this booth sends, which the page offers: none about a league without one
+        set up, and the recap only when the booth makes them (_recap_soon)."""
+        p, league = self.cfg.publish, bool(self.league.team_players)
+        recaps = (league and p.enabled and p.bucket and p.recaps and self.cfg.squabbit.enabled
+                  and self.league.squabbit_invite and self.cfg.source.type != "replay" and self.speech is not None
+                  and not self.commentary_unavailable and getattr(self.live_llm, "provider", None) != "off")
+        return ["live", "round", "record"] + (["liveleague"] if league else []) + (["recap"] if recaps else [])
 
     def _alert_live(self) -> None:
         """On air in a round with the published stream running: the page's "we're live" alert, once a

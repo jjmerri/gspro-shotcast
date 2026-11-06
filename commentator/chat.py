@@ -89,10 +89,13 @@ class ChatTable:
 
     # ---- alerts (push.py): the page's subscriptions, which the chat function keeps here ----------
 
-    def set_push_key(self, public: str) -> None:
-        """The booth's public push key, which the page subscribes with (GET /chat/push)."""
-        self._db().put_item(TableName=self.table, Item={"pk": {"S": "push"}, "sk": {"S": "key"},
-                                                        "public": {"S": public}})
+    def set_push_key(self, public: str, topics: list[str] | None = None) -> None:
+        """The booth's public push key, which the page subscribes with (GET /chat/push), and the kinds
+        of alert it sends (`topics`), the only ones the page offers."""
+        item = {"pk": {"S": "push"}, "sk": {"S": "key"}, "public": {"S": public}}
+        if topics:
+            item["topics"] = {"SS": list(topics)}
+        self._db().put_item(TableName=self.table, Item=item)
 
     def push_subscriptions(self) -> list:
         from .push import Subscription
