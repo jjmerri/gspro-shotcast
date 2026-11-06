@@ -5458,7 +5458,7 @@ class Engine:
                        #                                            slow read, so a putt-miss shows the
                        #                                            instant the next state line advances it
                        dict(gs.dropped_by),   # scramble balls not picked, to leave their finish alone
-                       time.monotonic())
+                       gs.added_count)        # penalties the booth had added by then
         fires0 = gs.fires   # GSPro's shot counter at impact, to find this shot's putting/regular mode
         setups0 = dict(gs.setups_by)   # each player's setups so far: the next one settles this shot
         lies0 = dict(gs.lie_by)   # each ball's logged surface going into this shot

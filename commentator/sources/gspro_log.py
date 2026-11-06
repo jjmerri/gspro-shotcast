@@ -403,6 +403,7 @@ class GsproState:
     # (index, hole) -> penalties GSPro never scored (add_penalty), each {"n", "at": GSPro's own score once
     # the stroke that drew it was played, "pending": no stroke since}, added to each later score line.
     _score_shift: dict = field(default_factory=dict)
+    added_count: int = 0   # penalties add_penalty has counted, ever: orders them against a snapshot
     _pending_lie: str | None = None   # a material seen, awaiting the player index the block names
     # Whether a shot was fired or a gimmie conceded since that player's previous score line, keyed by
     # index: in a 2-ball the partner's interleaved state lines must not clear this player's flag (or a
@@ -1027,19 +1028,20 @@ class GsproState:
         if n <= 0 or key not in self._score:
             return
         added = self._score_shift.setdefault(key, [])
+        self.added_count += 1
         added.append({"n": n, "at": self._score[key] - sum(a["n"] for a in added), "pending": True,
-                      "added_at": time.monotonic()})
+                      "seq": self.added_count})
         self._penalties[key] = self._penalties.get(key, 0) + n
         self._score[key] += n
         self.hole_scores.pop(key, None)
 
-    def added_since(self, player: int | None, stroke: int | None, since: float) -> int:
-        """Penalties owed before GSPro's stroke `stroke` that add_penalty counted after `since` (a
-        monotonic time), including any GSPro has since scored itself."""
+    def added_since(self, player: int | None, stroke: int | None, since: int) -> int:
+        """Penalties owed before GSPro's stroke `stroke` that add_penalty counted after `added_count`
+        was `since`, including any GSPro has since scored itself."""
         if player is None or not stroke:
             return 0
         return sum(a["n"] + a.get("absorbed", 0) for a in self._score_shift.get((player, self.hole_by.get(player)), [])
-                   if stroke > a["at"] and a["added_at"] > since)
+                   if stroke > a["at"] and a["seq"] > since)
 
     def stroke_shift(self, player: int | None, stroke: int | None) -> int:
         """Penalty strokes add_penalty counted that GSPro's own stroke number `stroke` (its HUD's, for

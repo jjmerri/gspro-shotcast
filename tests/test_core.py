@@ -4180,7 +4180,7 @@ def test_a_re_tee_after_water_gspro_scored_no_penalty_for_is_counted_one_on(tmp_
     assert (g.penalties(0), g.shot_number(0), hud.shot_number) == (1, 3, 3)
     e._snap_added_penalty(snap, Hud(player_text="Paul", shot_number=2), "Paul")
     assert (snap[4][(0, 11)], snap[6][0]) == (1, 3)
-    snap = (*e._impact_state()[0][:8], 0.0)   # taken before it too
+    snap = (*e._impact_state()[0][:8], 0)   # taken before it too
     snap[4].clear(), snap[6].update({0: 2})
     e._snap_added_penalty(snap, Hud(player_text="Paul"), "Paul")   # no number read at impact
     assert (snap[4][(0, 11)], snap[6][0]) == (1, 3)

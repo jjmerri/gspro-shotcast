@@ -4,7 +4,7 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
-## 0.1.89
+## 0.1.90
 
 ### Booth
 - A **re-tee after water** in GSPro 4.0 counts the penalty stroke (GSPro leaves it out), and the drive isn't counted as a fairway hit.
