@@ -5867,7 +5867,8 @@ class Engine:
         # Read before the lie fix-up below, which can recast a green set up in yards as the fringe.
         off_wrong_green = None if shot.is_putt else wrong_green_yards(before.lie, before.to_pin)
         played_from = self._played_from(before, shot, self.gspro.fire_info(fire),
-                                        MATERIAL_TO_LIE.get(lies0.get(idx)) if idx is not None else None)
+                                        MATERIAL_TO_LIE.get(lies0.get(idx)) if idx is not None else None,
+                                        shot_hole)
         if played_from == "green" and self._set_up_in_yards(before):
             played_from = self._off_green_lie(before)
             log.info("%s set up in yards: off the green, recorded as %s", tag, played_from)
@@ -6714,7 +6715,8 @@ class Engine:
         lie GSPro played it from (no rough or sand without GSPro's penalty for it), else the fringe."""
         return before.lie if before.lie not in (None, "", "green", *self._PENALIZING_LIES) else "fringe"
 
-    def _played_from(self, before: Hud, shot: Shot, info: dict, material: str | None) -> str | None:
+    def _played_from(self, before: Hud, shot: Shot, info: dict, material: str | None,
+                     hole_label: str | None = None) -> str | None:
         """The lie this shot was really struck from, for the record. The HUD's lie read and the log's
         material (where the previous shot LANDED, not where it stopped) both misread: a ball that
         landed on the green and rolled into a bunker, a bunker ball shown as rough. GSPro's own word
@@ -6723,6 +6725,11 @@ class Engine:
         shot, it wasn't played from rough or sand, whatever the other reads said."""
         if before.shot_number == 1:
             return "tee"
+        if (before.lie or "").lower() == "tee" and not shot.is_putt \
+                and (m := re.search(r"\d+(?:\.\d+)? (?:yards|metres|meters)", hole_label or "")) \
+                and (yd := to_yards(before.to_pin)) is not None and (length := to_yards(m.group(0))) \
+                and abs(yd - length) <= 10:
+            return "tee"   # a re-tee (stroke and distance): the HUD's Tee, at the hole's full length
         if pen := info.get("penalty"):
             return MATERIAL_TO_LIE.get(pen, before.lie)
         if not (info and self.gspro.logs_penalty_surface):

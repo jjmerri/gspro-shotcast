@@ -4118,6 +4118,12 @@ def test_the_recorded_lie_is_where_gspro_says_the_shot_was_played_from(tmp_path)
     # No penalty surface logged: not rough or sand, whatever the landing material or the HUD said.
     assert e._played_from(Hud(lie="rough", shot_number=2), full, played, "rough") == "fairway"
     assert e._played_from(Hud(lie="rough", shot_number=2), full, played, "fringe") == "fringe"
+    # A re-tee after a ball in the water (York 2): the HUD's Tee at the hole's full length stands.
+    york2 = "Hole 2, par 4, 417 yards"
+    assert e._played_from(Hud(lie="tee", shot_number=2, to_pin="416.4 yards"), full, played, "rough", york2) == "tee"
+    assert e._played_from(Hud(lie="tee", shot_number=2, to_pin="180.0 yards"), full, played, "rough", york2) == "fairway"
+    assert e._played_from(Hud(lie="tee", shot_number=2, to_pin="380.8 metres"), full, played, "rough",
+                          "Hole 2, par 4, 381 metres") == "tee"
     assert e._played_from(Hud(lie="sand", shot_number=4), putt, {"putting": True}, None) == "green"
     # A ball that landed short and ran onto the green: the landing material isn't where it was played.
     assert e._played_from(Hud(lie="green", shot_number=3), putt, {"putting": True}, "fairway") == "green"
