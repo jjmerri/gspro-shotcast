@@ -192,6 +192,12 @@ _MARKERS = ("ActivePlayer:", "Logging tdist", "Selecting shot", "Using Material"
             "Leaves", "Roll dist")
 
 
+def _reworded(line: str) -> bool:
+    """A line carrying a marker word that no parser took. GSPro 4.0's "LeavesCollider buried IGNORED,
+    leavesHit = ..." is debug chatter beside the "** Leaves hitTime" line that carries the hit."""
+    return any(k in line for k in _MARKERS) and not line.startswith("LeavesCollider ")
+
+
 def parse_events(text: str) -> list[LogEvent]:
     """Every meaningful game-state line in order; Unity noise is dropped. A malformed line is skipped,
     never fatal: the tailer applies these continuously and one bad line can't be allowed to stop it."""
@@ -304,11 +310,11 @@ def parse_events(text: str) -> list[LogEvent]:
                     out.append(LogEvent("physics", physics={"launch_monitor": name}))
             elif m := _ALTITUDE.match(line):
                 out.append(LogEvent("altitude", altitude_ft=float(m.group(1))))
-            elif any(k in line for k in _MARKERS):
+            elif _reworded(line):
                 out.append(LogEvent("unparsed", display=line[:160]))
         except (ValueError, IndexError):
             log.debug("Skipping unparseable GSPro log line: %r", line[:120])
-            if any(k in line for k in _MARKERS):
+            if _reworded(line):
                 out.append(LogEvent("unparsed", display=line[:160]))
     return out
 

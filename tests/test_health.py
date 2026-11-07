@@ -100,6 +100,18 @@ def test_log_version_and_reworded_lines():
     assert s.version == "3.1.6.20" and s.kinds["unparsed"] == 1 and s.unparsed
 
 
+def test_gspro_4_leaves_collider_debug_line_is_not_a_reworded_line():
+    # GSPro 4.0, a pine-straw shot into a tree: the debug line around the hit isn't a wording change,
+    # and the hit itself still parses.
+    text = ("LeavesCollider buried IGNORED, leavesHit = True, trunkHit = False\n"
+            " ** Leaves hitTime, 0.52 , HitCount 1, Penalty 24.6% , Accumulated penalty 24.6% \n"
+            "LeavesCollider buried IGNORED, leavesHit = True, trunkHit = False\n")
+    assert [(e.kind, e.leaves) for e in parse_events(text)] == [("leaves", (0.52, 1, 24.6, 24.6))]
+    # a line glued onto it still parses
+    glued = parse_events("LeavesCollider buried IGNORED, leavesHit = True, trunkHit = FalseRoll dist ft9.689")
+    assert [e.kind for e in glued] == ["roll"]
+
+
 def test_log_redaction():
     line = r"Loading C:\Users\jjmer\AppData\LocalLow\GSPro and Alex Sample hit"
     out = fixtures.redact_text(line, ["Alex Sample"])
