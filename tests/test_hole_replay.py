@@ -115,6 +115,24 @@ def test_a_round_quit_before_its_layout_doesnt_take_the_next_rounds_pin(tmp_path
     assert rp["pin_estimated"] and math.dist(rp["pin"], (0, 300)) < 2.0
 
 
+def test_a_hole_gspro_capped_at_its_maximum_shows_the_card_score(tmp_path):
+    # DPC Sodgrass, 11-06: Evan hit his 8th stroke after three balls in the water, but the par 3's
+    # maximum put 7 on the card. The replay gives the card's score, marked; an uncapped hole is unchanged.
+    _, st = _season(tmp_path)
+    st.db.execute("UPDATE shots SET start_x = 10, start_z = 200 WHERE shot_number = 2")
+    st.db.execute("UPDATE shots SET start_x = 2, start_z = 295, outcome = NULL WHERE shot_number = 3")
+    st.db.commit()
+    assert hole_replays(st.db)[(1, 1)]["players"][0]["strokes"] == 3
+    st.db.execute("UPDATE rounds SET scores = '{\"1\": 2}'")
+    st.db.commit()
+    dan = hole_replays(st.db)[(1, 1)]["players"][0]
+    assert (dan["strokes"], dan.get("capped")) == (2, True)
+    st.db.execute("UPDATE rounds SET scores = '{\"1\": 4}'")
+    st.db.commit()
+    dan = hole_replays(st.db)[(1, 1)]["players"][0]
+    assert (dan["strokes"], dan.get("capped")) == (3, None)
+
+
 def test_the_same_pins_from_new_tees_later_in_the_session_are_kept_and_repeats_are_not(tmp_path):
     _, st = _season(tmp_path)
     hole = {"par": 4, "played": True, "tee": (0.0, 2.0, 0.0), "pin": (0.0, 1.0, 300.0)}

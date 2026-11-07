@@ -224,6 +224,7 @@ def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]
     for (rnd, _), rows in groups.items():
         by_round.setdefault(rnd, []).extend(rows)
     teams = {rnd: _scramble_teams(rows) for rnd, rows in by_round.items()}
+    cards = _cards(db)
     out = {}
     for key, rows in groups.items():
         rows = _fill_gaps(rows)
@@ -238,7 +239,28 @@ def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]
             if rp["tee"] and rp["pin"] and (m := _map_for(images, rp["course"], key[1], ses)):
                 rp["map"] = m
             rp["ts"] = min(r["ts"] for r in rows)   # the hole's first shot, for the page's video link
+            for p in rp["players"]:
+                card = cards.get((key[0], p["name"].casefold()), {}).get(str(key[1]))
+                if "used" not in p and isinstance(card, int) and p["strokes"] and card < p["strokes"]:
+                    # GSPro capped the hole at its maximum score: the card has fewer strokes than were hit.
+                    p["strokes"], p["capped"] = card, True
             out[key] = rp
+    return out
+
+
+def _cards(db: sqlite3.Connection) -> dict[tuple[int, str], dict[str, Any]]:
+    """Each recorded side's card by (round, side name folded): hole number -> strokes."""
+    if "scores" not in {r[1] for r in db.execute("PRAGMA table_info(rounds)")}:
+        return {}
+    _, of_row = stats_web.round_groups(db)
+    out = {}
+    for rid, side, scores in db.execute("SELECT id, side, scores FROM rounds WHERE scores IS NOT NULL"):
+        try:
+            card = json.loads(scores)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(card, dict) and rid in of_row and side:
+            out[(of_row[rid], side.casefold())] = card
     return out
 
 
