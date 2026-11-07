@@ -247,6 +247,9 @@ def parse_events(text: str) -> list[LogEvent]:
                 # The splash, logged the instant the ball goes in (before the penalty score bump). 4.0
                 # writes it as "Water splash effect played at position: ...".
                 out.append(LogEvent("hit_water"))
+            elif line == "SelectShotToUse":
+                # A scramble's pick screen: everyone on the team has hit, the cards list each ball.
+                out.append(LogEvent("pick_screen"))
             elif m := _SELECT.search(line):
                 out.append(LogEvent("select", player=int(m.group(1))))
             elif m := _MATERIAL.search(line):
@@ -492,6 +495,11 @@ class GsproState:
     # player's next shot was played from (the team ball), so its finish and lie can't be read off it.
     selected: int | None = None
     pick: tuple | None = None
+    # The pick screen ("SelectShotToUse", until the pick): how many have shown, whether one is up now,
+    # and the balls on it, {player index: fire}. GSPro logs where only the picked ball lies.
+    pick_screens: int = 0
+    pick_screen_up: bool = False
+    pick_balls: dict = field(default_factory=dict)
     _pick_stroke: int | None = None
     teammates: set = field(default_factory=set)
     dropped_by: dict = field(default_factory=dict)
@@ -595,13 +603,29 @@ class GsproState:
                 if rest is None or "to_pin" in rest:   # a block with no position line of its own
                     rest = self._rest_by[p] = {"hole": self.hole_by.get(p, self.current_hole)}
                 rest["to_pin"] = ev.to_pin
+        elif ev.kind == "pick_screen":
+            self.pick_screens += 1
+            self.pick_screen_up = True
+            p = self.active_player
+            hole = self.hole_by.get(p, self.current_hole)
+            mates = {p} if any(p in pair for pair in self.teammates) else set()
+            while grown := {m for pair in self.teammates if pair & mates for m in pair} - mates:
+                mates |= grown   # a copy links the picked player to each partner: the whole team
+            self.pick_balls = {}
+            for q, fires in self._fires_by.items():
+                info = self._fire_info.get(fires[-1]) if fires else None
+                if info is not None and info.get("hole") == hole and "picked" not in info \
+                        and (not mates or q in mates):
+                    self.pick_balls[q] = fires[-1]
         elif ev.kind == "select":
+            self.pick_screen_up = False
             self.active_player = self.selected = ev.player
             self._since_select = True
             if ev.player is not None:
                 self.players_seen.add(ev.player)
                 self._attach_lie(ev.player)
         elif ev.kind == "shot_fired":
+            self.pick_screen_up = False
             self.shots_since_course += 1
             self.live_shots_since_course += 1
             self.fires += 1
@@ -761,6 +785,7 @@ class GsproState:
         self._end_next = False
         self.teammates.clear()
         self.selected = self.pick = None
+        self.pick_screen_up = False
         self._pending_lie = None
         self._aim = None
         self._rest_by.clear()

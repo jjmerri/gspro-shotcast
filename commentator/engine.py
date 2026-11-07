@@ -224,6 +224,11 @@ def _nines_picked(tones: dict) -> tuple[int, int] | None:
 # How far Total Length may still move between the last two grabs before a player box switch for the
 # ball to count as stopped: a ball that rolls on (255 then 262 yards, Premonition 10-21) isn't.
 REST_CREEP_YARDS = 1.0
+# A held Total Length is kept as the ball at rest once it has held this long more (a ball pausing on a
+# crest rolls on within it); GSPro shows a stopped ball about a second before moving on.
+REST_HOLD_SECONDS = 0.6
+# How long to keep reading a scramble's pick screen for its cards (it showed ~6.5 s, Bethpage 11-07).
+PICK_SCREEN_SECONDS = 15.0
 
 
 def _unsettled(hud: Hud, tag: str = "") -> Hud:
@@ -848,6 +853,10 @@ class Engine:
         self._before_result: dict[int, tuple] = {}   # a shot's finish as it was before its outcome landed
         self._conceded_ids: set[int] = set()   # shots whose conceded putt row is stored
         self._team_finished: set[int] = set()   # shared-ball shots given the team's next stroke as their finish
+        # Scramble pick screens read off the screen: ({player index: fire}, {index: GSPro name}, cards,
+        # read at), each card written to its ball's row once that row is recorded (the unpicked ball's
+        # only finish).
+        self._pick_cards_due: list[tuple[dict, dict, list, float]] = []
         self._gimme_ids: dict[int, int] = {}   # shot id -> its conceded putt row's id
         self._form_said: dict[tuple, list[tuple[int, list[str]]]] = {}   # (round, side) -> [(hole of round, angles)]
         self._form_pending: tuple | None = None   # (round, side, players, hole of round) the sheet last went to
@@ -1051,6 +1060,8 @@ class Engine:
             # Always: the setup screen's players, holes and game mode are the round's stats too. Only the
             # early opener it can compose needs commentary.preround.
             tasks.append(asyncio.create_task(self._watch_setup(), name="setup-watch"))
+            if self._log_truth:
+                tasks.append(asyncio.create_task(self._watch_picks(), name="pick-watch"))
         try:
             while (event := await self._events.get()) is not None:
                 try:
@@ -7241,6 +7252,8 @@ class Engine:
                 row[1].picked = picked
         if r is not None and r.format in TEAM_BALL:
             self._team_finishes(r)
+        if self._pick_cards_due:
+            self._apply_pick_cards()
         for fire in sorted(self._owners_due):
             owner = g.fire_info(fire).get("player")
             if fire not in self._fire_rows or owner is not None or fire < g.fires - 20:
@@ -7509,7 +7522,7 @@ class Engine:
                 landing, steady = hud, 0  # landing read; kept only as a fallback if the HUD moves on
                 log.info("%s touchdown ~%.1fs into the follow; following to rest", tag, touchdown)
                 if callable(getattr(self.screen, "grab_regions", None)):
-                    return await self._follow_to_rest(hud, who, tag, started, deadline, poll, ended, at_rest)
+                    return await self._follow_to_rest(hud, who, tag, started, deadline, ended, at_rest)
             prev_game = game
             if logged_rest:
                 # GSPro's log had the ball stopped before this read was taken, so it is at rest. Without it the
@@ -7553,86 +7566,198 @@ class Engine:
         log.info("%s ball not seen to come to rest within %.0fs (touchdown=%s)", tag, deadline, touchdown is not None)
         return _unsettled(last or landing or Hud(), tag), touchdown is not None
 
+    async def _watch_picks(self) -> None:
+        """A scramble's pick screen (GSPro logs "SelectShotToUse") lists every ball the team hit with its
+        yards to the pin and its lie, and GSPro's log has where only the picked one lies: read the
+        cards while it's up (it shows a few seconds after the last ball stops, until the pick)."""
+        seen = self.gspro.pick_screens
+        while True:
+            await asyncio.sleep(0.25)
+            g = self.gspro
+            if g.pick_screens == seen:
+                continue
+            seen, balls = g.pick_screens, dict(g.pick_balls)
+            region = getattr(self.screen, "region", None)
+            if len(balls) < 2 or not callable(region) or region("pick_panel") is None:
+                continue
+            try:
+                cards = await self._read_pick_panel(seen, len(balls))
+            except Exception:
+                log.exception("Reading the pick screen failed")
+                continue
+            log.info("Pick screen: %s", ", ".join(f"{c.name} {c.yards:.0f} yd {c.lie}" for c in cards) or "not read")
+            if cards:
+                names = {idx: (self._log_name(idx) or (None,))[0] for idx in balls}
+                self._pick_cards_due.append((balls, names, cards, time.monotonic()))
+
+    async def _read_pick_panel(self, seen: int, balls: int) -> list:
+        """The pick screen's cards, read until every ball's is (or the pick is made, or 15 s pass)."""
+        g, best = self.gspro, []
+        deadline = time.monotonic() + PICK_SCREEN_SECONDS
+        while g.pick_screen_up and g.pick_screens == seen and time.monotonic() < deadline:
+            cards = (await self.screen.read_hud_async(["pick_panel"])).pick_cards
+            if len(cards) > len(best):
+                best = cards
+            if len(best) >= balls:
+                break
+            await asyncio.sleep(0.4)
+        return best
+
+    def _apply_pick_cards(self) -> None:
+        """Each pick card's yards and lie onto its ball's row: the card's name against the GSPro name
+        of each ball's player, and a last card left to the last ball."""
+        for entry in list(self._pick_cards_due):
+            balls, gspro_names, cards, at = entry
+            if any(f not in self._fire_rows for f in balls.values()):
+                if time.monotonic() - at > 60:
+                    self._pick_cards_due.remove(entry)
+                continue
+            self._pick_cards_due.remove(entry)
+            names = {idx: gspro_names.get(idx) or self._fire_rows[f][1].player for idx, f in balls.items()}
+            left, todo, pairs = dict(names), list(cards), []
+            for card in sorted(cards, key=lambda c: -max((_name_ratio(c.name, n) for n in names.values()), default=0)):
+                idx, n = max(left.items(), key=lambda kv: _name_ratio(card.name, kv[1]), default=(None, None))
+                if idx is not None and _name_ratio(card.name, n) >= 0.6:
+                    pairs.append((idx, card))
+                    left.pop(idx)
+                    todo.remove(card)
+            if len(left) == 1 and len(todo) == 1:
+                pairs.append((next(iter(left)), todo[0]))
+            for idx, card in pairs:
+                shot_id, rec = self._fire_rows[balls[idx]][:2]
+                if rec.mulligan:
+                    continue
+                self.store.fill_finish(shot_id, round(card.yards, 1))
+                if card.lie:
+                    self.store.set_lie_after(shot_id, card.lie)
+                log.info("Pick card %s (%s): shot %s finished %.0f yd, %s", card.name, names[idx], shot_id,
+                         card.yards, card.lie)
+
+    def _rest_grab(self, parts: list[str]) -> dict:
+        """The follow's quick grab: the boxes through one capture handle (~80 ms for the lie, name and
+        tiles at 4K on the sim PC, against ~180 ms one handle per box), else grab_regions."""
+        boxes = getattr(self.screen, "grab_boxes", None)
+        if callable(boxes) and (crops := boxes(parts)):
+            return crops
+        return self.screen.grab_regions(parts)
+
     async def _follow_to_rest(self, landing: Hud, who, tag: str, started: float, deadline: float,
-                              poll: float, ended: Callable[[], bool] | None = None,
+                              ended: Callable[[], bool] | None = None,
                               at_rest: Callable[[], bool] | None = None) -> tuple[Hud, bool]:
-        """From touchdown on, watch the HUD's pixels rather than OCR it: a read OCRs the lie and the
-        tiles one after the other (1.2-1.5 s), and GSPro shows the ball at rest only a second or so
-        before moving the player box on, so the read-until-steady follow rarely saw a drive stop and
-        named the lie from mid-roll. Grabs (a few ms, no OCR) every `poll`: Total Length's number
-        stops changing when the ball stops, and the grab taken at rest is the one OCR'd. Only that
-        number is compared (its box from the landing read): the rest of the tiles region is the live
-        scene beside the panel. It must hold for two grab-to-grab comparisons in a row, since a ball
-        creeping on a slope ticks over less often than once a poll (and one did, then rolled off the
-        green). Measured: a stopped drive showed for about a second before GSPro faded the box, and a
-        grab takes 0.1-0.15 s at 4K, so the confirming third grab often came after the switch. GSPro
-        moves on only once the ball has stopped, so when it does, the last grab before the switch is
-        read if Total Length had already held still into it."""
+        """From touchdown on, watch the HUD's pixels rather than OCR it: GSPro shows the ball at rest
+        only about a second (1.0-1.25 s, Bethpage 11-07) before fading the box and moving on, and an
+        OCR read takes a third of that. Grabs (no OCR) every `rest_poll_seconds`: Total Length's number
+        stops changing when the ball stops. Only that number is compared (its box from the landing
+        read): the rest of the tiles region is the live scene beside the panel.
+
+        Held for two grab-to-grab comparisons, the grab is OCR'd for the resting lie in the background
+        while the grabs go on: that read is provisional. A ball can pause on a crest and roll on, or
+        creep on a slope slower than the polls, so it's kept only once the number has held REST_HOLD_
+        SECONDS more, or GSPro moves on (it does only with the ball stopped) with the number where it
+        was. If the number moves again, a later hold replaces it. With no hold seen before the switch,
+        the last two grabs' totals are compared (the fade changes the pixels with the ball stopped)."""
         parts = ["lie", "player_name", "tiles"]
         box = landing.tile_boxes.get("total length")
+        rest_poll = max(self.cfg.screen.rest_poll_seconds, 0.02)
         prev, steady, prev_crops, older_crops = None, 0, None, None
-        while time.monotonic() - started < deadline:
-            if ended and ended():
-                log.info("%s hole over in the GSPro log %.1fs into the follow; not waiting to see the ball stop",
-                         tag, time.monotonic() - started)
-                return _unsettled(landing, tag), True
-            logged_rest = at_rest is not None and at_rest()   # before the grab: it must come after the rest
-            try:
-                crops = await asyncio.to_thread(self.screen.grab_regions, parts)
-            except Exception:
-                log_capture_failure("%s HUD grab failed while following to rest", tag, logger=log, level=logging.WARNING)
-                prev, steady, prev_crops, older_crops = None, 0, None, None   # a failed grab can't count toward a steady run
-                await asyncio.sleep(poll)
-                continue
-            sig = name_signature(crops["player_name"]) if "player_name" in crops else None
-            if who is not None and name_sig_changed(who, sig):
-                if steady >= 1 and prev_crops is not None:
-                    hud = await asyncio.to_thread(self.screen.read_hud, parts, None, prev_crops)
-                    if _this_shots_tiles(hud):
-                        log.info("%s ball at rest: player box switched %.1fs into the follow with the total "
-                                 "already still; resting lie %s", tag, time.monotonic() - started, hud.lie)
-                        return hud, True
-                elif prev_crops is not None and older_crops is not None:
-                    # The box fading out changes the pixels with the ball already stopped, so the pixel
-                    # test never held (41 of 45 drives, 11-07): read the last two grabs' Total Length.
-                    last, before = await asyncio.gather(
-                        asyncio.to_thread(self.screen.read_hud, parts, None, prev_crops),
-                        asyncio.to_thread(self.screen.read_hud, parts, None, older_crops))
-                    a = _tile_yards(last.tiles, "total length", "yards")
-                    b = _tile_yards(before.tiles, "total length", "yards")
-                    if a is not None and b is not None and _this_shots_tiles(last) and last.lie:
-                        if abs(a - b) <= REST_CREEP_YARDS:
-                            log.info("%s ball at rest: player box switched %.1fs into the follow with the total "
-                                     "%.1f then %.1f; resting lie %s", tag, time.monotonic() - started, b, a, last.lie)
-                            return last, True
-                        log.info("%s player box switched with the ball still rolling (total %.1f then %.1f, lie %s)",
-                                 tag, b, a, last.lie)
-                log.info("%s player box switched %.1fs into the follow, before the ball was seen at rest (lie %s)",
-                         tag, time.monotonic() - started, landing.lie)
-                return _unsettled(landing, tag), True
-            tiles = crops.get("tiles")
-            # The box only fits a grab the same size as the landing read's crop (a capture fallback or
-            # resolution change moves everything); otherwise compare the whole region.
-            fits = box and tiles is not None and tiles.size == landing.tile_crop_size
-            total = tiles.crop(box) if fits else tiles
-            steady = steady + 1 if total is not None and prev is not None and not _pixels_changed(prev, total) else 0
-            logged_rest = logged_rest and steady < 2
-            if steady >= 2 or logged_rest:
-                hud = await asyncio.to_thread(self.screen.read_hud, parts, None, crops)
-                log.info("%s ball at rest: %s %.1fs into the follow, resting lie %s", tag,
-                         "in the GSPro log" if logged_rest else ("total length" if fits else "tiles") + " still",
-                         time.monotonic() - started, hud.lie)
-                if self.cfg.screen.save_review_images:
-                    await asyncio.to_thread(self._save_review_image, tag, "final")
-                # The next player's address shows both distance tiles blank ("--.--"): the box moved
-                # on unnoticed (no name signature), so this grab isn't this shot's.
-                if _this_shots_tiles(hud):
-                    return hud, True
-                return _unsettled(landing, tag), True
-            prev, prev_crops, older_crops = total, crops, prev_crops
-            await asyncio.sleep(poll)
-        log.info("%s ball not seen to come to rest within %.0fs (touchdown=True)", tag, deadline)
-        return _unsettled(landing, tag), True
+        held = None   # the provisional rest: (grab time, its OCR task, its crops), or None
+        moved = False  # the number changed since the provisional rest's grab
+        since: deque = deque(maxlen=12)   # the grabs since the number moved off the hold, newest last
+
+        def drop():
+            nonlocal held
+            if held is not None:
+                held[1].cancel()
+            held = None
+
+        async def kept(hud: Hud, how: str) -> tuple[Hud, bool]:
+            log.info("%s ball at rest: %s %.1fs into the follow, resting lie %s", tag, how,
+                     time.monotonic() - started, hud.lie)
+            if self.cfg.screen.save_review_images:
+                await asyncio.to_thread(self._save_review_image, tag, "final")
+            # The next player's address shows both distance tiles blank ("--.--"): the box moved on
+            # unnoticed (no name signature), so this grab isn't this shot's.
+            return (hud, True) if _this_shots_tiles(hud) else (_unsettled(landing, tag), True)
+
+        async def read(crops) -> Hud:
+            return await asyncio.to_thread(self.screen.read_hud, parts, None, crops)
+
+        try:
+            while time.monotonic() - started < deadline:
+                if ended and ended():
+                    log.info("%s hole over in the GSPro log %.1fs into the follow; not waiting to see the ball stop",
+                             tag, time.monotonic() - started)
+                    return _unsettled(landing, tag), True
+                logged_rest = at_rest is not None and at_rest()   # before the grab: it must come after the rest
+                try:
+                    crops = await asyncio.to_thread(self._rest_grab, parts)
+                except Exception:
+                    log_capture_failure("%s HUD grab failed while following to rest", tag, logger=log, level=logging.WARNING)
+                    prev, steady, prev_crops, older_crops = None, 0, None, None   # a failed grab can't count toward a steady run
+                    await asyncio.sleep(rest_poll)
+                    continue
+                at = time.monotonic()
+                sig = name_signature(crops["player_name"]) if "player_name" in crops else None
+                if who is not None and name_sig_changed(who, sig):
+                    if held is not None:
+                        hud = await held[1]
+                        if not moved:
+                            return await kept(hud, "player box switched with the total still")
+                        # The number changed after the hold: the fade, or the ball rolling on. The
+                        # newest grab since that reads says which; none reading is the fade's dimming.
+                        b, a = _tile_yards(hud.tiles, "total length", "yards"), None
+                        for c in reversed(since):
+                            if (a := _tile_yards((await read(c)).tiles, "total length", "yards")) is not None:
+                                break
+                        # A later readable total the hold can't vouch for (its own unread) is no rest.
+                        if a is None or (b is not None and abs(a - b) <= REST_CREEP_YARDS):
+                            return await kept(hud, "player box switched, total %s then %s;" % (b, a))
+                        log.info("%s rolled on after a hold (total %s then %.1f)", tag, b, a)
+                    if steady >= 1 and prev_crops is not None:
+                        hud = await read(prev_crops)
+                        if _this_shots_tiles(hud):
+                            return await kept(hud, "player box switched with the total already still;")
+                    elif prev_crops is not None and older_crops is not None:
+                        # The box fading out changes the pixels with the ball already stopped, so the pixel
+                        # test never held (41 of 45 drives, 11-07): read the last two grabs' Total Length.
+                        last, before = await asyncio.gather(read(prev_crops), read(older_crops))
+                        a = _tile_yards(last.tiles, "total length", "yards")
+                        b = _tile_yards(before.tiles, "total length", "yards")
+                        if a is not None and b is not None and _this_shots_tiles(last) and last.lie:
+                            if abs(a - b) <= REST_CREEP_YARDS:
+                                return await kept(last, "player box switched, total %.1f then %.1f;" % (b, a))
+                            log.info("%s player box switched with the ball still rolling (total %.1f then %.1f, lie %s)",
+                                     tag, b, a, last.lie)
+                    log.info("%s player box switched %.1fs into the follow, before the ball was seen at rest (lie %s)",
+                             tag, time.monotonic() - started, landing.lie)
+                    return _unsettled(landing, tag), True
+                if logged_rest:
+                    return await kept(await read(crops), "in the GSPro log")
+                tiles = crops.get("tiles")
+                # The box only fits a grab the same size as the landing read's crop (a capture fallback or
+                # resolution change moves everything); otherwise compare the whole region.
+                fits = box and tiles is not None and tiles.size == landing.tile_crop_size
+                total = tiles.crop(box) if fits else tiles
+                still = total is not None and prev is not None and not _pixels_changed(prev, total)
+                steady = steady + 1 if still else 0
+                if not still and held is not None:
+                    moved = True
+                if moved:
+                    since.append(crops)
+                if steady >= 2 and (held is None or moved):
+                    drop()   # a later hold replaces the last: the ball rolled on
+                    held, moved = (at, asyncio.create_task(read(crops)), crops), False
+                    since.clear()
+                if held is not None and not moved and at - held[0] >= REST_HOLD_SECONDS:
+                    return await kept(await held[1], ("total length" if fits else "tiles") + " still")
+                prev, prev_crops, older_crops = total, crops, prev_crops
+                await asyncio.sleep(rest_poll)
+            if held is not None and not moved:
+                return await kept(await held[1], "total length still at the cap")
+            log.info("%s ball not seen to come to rest within %.0fs (touchdown=True)", tag, deadline)
+            return _unsettled(landing, tag), True
+        finally:
+            drop()
 
     def _save_review_image(self, tag: str, moment: str) -> None:
         folder = Path(self.cfg.log_dir) / "shots" / time.strftime("%Y-%m-%d")

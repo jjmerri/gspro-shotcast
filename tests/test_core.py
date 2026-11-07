@@ -5193,6 +5193,38 @@ def test_a_scramble_ball_that_was_not_picked_keeps_its_own_finish_and_lie(tmp_pa
     assert tuple(row) == (None, "fairway") and rec.hud.lie == "fairway"
 
 
+def test_the_pick_screens_cards_give_each_balls_finish_and_lie(tmp_path):
+    from commentator.hud import OcrItem, parse_pick_cards
+    from commentator.round import Round
+
+    # Bethpage, 11-07: GSPro logs where only the picked ball lies; the pick screen lists both. Card 1 is
+    # Ozzy's, the name GSPro has for the roster's Mike; card 2 read "KYLE MARTIN".
+    def item(text, x, y, h=30):
+        return OcrItem(text=text, x=x, y=y, h=h, left=x - 10 * len(text))
+
+    cards = parse_pick_cards([item("1", 30, 40, 20), item("AZZO", 100, 45), item("294", 100, 110, 40),
+                              item("DEEP ROUGH", 80, 160), item("2ND", 150, 160), item("Select", 100, 220),
+                              item("2", 220, 40, 20), item("KYLE MARTIN", 300, 45), item("41 FT", 300, 110, 40),
+                              item("GREEN 2ND", 300, 160), item("Select", 300, 220)])
+    assert [(c.name, round(c.yards, 1), c.lie) for c in cards] == [("AZZO", 294.0, "deep rough"),
+                                                                   ("KYLE MARTIN", 13.7, "green")]
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Ozzy", "Kyle Martin"], course="X", scheduled_format=None, holes=9,
+              is_league=False, slot_names=["Ozzy", "Kyle Martin"])
+    e.round = r
+    ozzy, rec = _row(e, r, 7, 1, "tee", hole=0, seq=1)
+    kyle, rec2 = _row(e, r, 8, 1, "tee", hole=0, seq=1)
+    rec2.player = "Kyle Martin"
+    e._pick_cards_due.append(({0: 7, 1: 9}, {0: "Ozzy", 1: "Kyle Martin"}, cards, time.monotonic()))
+    e._apply_pick_cards()
+    assert e._pick_cards_due   # Kyle's ball isn't recorded yet: kept
+    e._fire_rows[9] = e._fire_rows.pop(8)
+    e._apply_pick_cards()
+    rows = {i: tuple(e.store.db.execute("SELECT finish_yards, lie_after FROM shots WHERE id = ?", (i,)).fetchone())
+            for i in (ozzy, kyle)}
+    assert rows == {ozzy: (294.0, "deep rough"), kyle: (13.7, "green")} and not e._pick_cards_due
+
+
 def test_gspro_revealing_a_scramble_makes_the_round_one(tmp_path):
     from commentator.round import Round
     e = _mini_engine(tmp_path)
@@ -5421,6 +5453,76 @@ async def test_a_switch_right_after_the_ball_stops_reads_the_last_grab_before_it
     hud, landed = await follow([(125.2, "fairway"), (122.0, "rough"), (121.5, "sand"), (121.5, "sand")], fading)
     assert landed and hud.lie == "sand"
     hud, landed = await follow([(125.2, "fairway"), (123.1, "rough"), (121.9, "sand")], fading)
+    assert landed and hud.lie is None
+
+
+async def test_a_ball_pausing_on_a_crest_is_read_again_where_it_stops(tmp_path):
+    from PIL import Image, ImageDraw
+
+    # A held Total Length is only provisional: a ball can pause on a crest and roll on. It's kept once it
+    # has held REST_HOLD_SECONDS, or GSPro moves on with it unchanged (the fade itself may change pixels).
+    def name(text):
+        img = Image.new("RGB", (60, 14), (30, 30, 30))
+        ImageDraw.Draw(img).text((2, 1), text, fill=(255, 255, 255))
+        return img
+
+    josh, next_up = name("JOSH"), name("EVAN M")
+
+    def tiles(total, shade=0):
+        img = Image.new("RGB", (120, 20))
+        draw = ImageDraw.Draw(img)
+        draw.text((62, 2), str(abs(total)), fill=(255, 255, 255))
+        if shade:
+            draw.rectangle((110, 15, 119, 19), fill=(shade,) * 3)   # the fade, inside Total Length's box
+        return img
+
+    async def follow(grabs):
+        ocr = iter([Hud(player_text="P", shot_number=1, lie="fairway", tile_boxes={"total length": (60, 0, 120, 20)},
+                        tile_crop_size=(120, 20),
+                        tiles={"carry (game)": str(c), "total length": str(c)}) for c in (100.0, 129.6, 129.6)])
+
+        class Screen:
+            i = 0
+
+            async def read_hud_async(self, parts):
+                return next(ocr)
+
+            def grab_regions(self, parts):
+                total, lie, shade = grabs[min(self.i, len(grabs) - 1)]
+                self.i += 1
+                return {"tiles": tiles(total, shade), "player_name": next_up if lie == "next" else josh,
+                        "lie": lie, "total": None if shade or total < 0 else total}   # < 0: drawn, won't read
+
+            def read_hud(self, parts, image=None, crops=None):
+                total = crops["total"]
+                return Hud(lie=crops["lie"], tiles={"carry (game)": "129.6",
+                                                    "total length": "" if total is None else str(total)})
+
+        from commentator.screen import name_signature
+        cfg = Config(log_dir=str(tmp_path))
+        cfg.screen.follow_poll_seconds = 0.05
+        engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                        live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=Screen())
+        return await engine._follow_shot(Hud(player_text="P", shot_number=1, lie="tee", name_sig=name_signature(josh)))
+
+    paused = [(140.0, "fairway", 0)] * 3 + [(145.5, "rough", 0), (148.2, "rough", 0)] + [(148.2, "rough", 0)] * 3
+    hud, landed = await follow(paused + [(0, "next", 0)] * 3)
+    assert landed and hud.lie == "rough" and hud.tiles["total length"] == "148.2"
+    # No switch at all: held long enough is the rest.
+    hud, landed = await follow([(140.0, "fairway", 0)] * 30)
+    assert landed and hud.lie == "fairway"
+    # Held, then the fade changes the pixels (and won't read) before the switch: still the rest.
+    hud, landed = await follow([(140.0, "sand", 0)] * 3 + [(140.0, "sand", 90), (140.0, "sand", 160)] + [(0, "next", 0)] * 3)
+    assert landed and hud.lie == "sand"
+    # Held, then rolled on through the switch: not at rest.
+    hud, landed = await follow([(140.0, "fairway", 0)] * 3 + [(146.0, "rough", 0), (151.0, "rough", 0)] + [(0, "next", 0)] * 3)
+    assert landed and hud.lie is None
+    # ...even when the fade's dim grab, unreadable, comes last: the readable one before it rolled on.
+    hud, landed = await follow([(140.0, "fairway", 0)] * 3 + [(146.0, "rough", 0), (151.0, "rough", 0),
+                                                            (151.0, "rough", 120)] + [(0, "next", 0)] * 3)
+    assert landed and hud.lie is None
+    # ...or when the held frame's own total won't read: the readable totals after it say it moved.
+    hud, landed = await follow([(-140.0, "fairway", 0)] * 3 + [(146.0, "rough", 0), (151.0, "rough", 0)] + [(0, "next", 0)] * 3)
     assert landed and hud.lie is None
 
 

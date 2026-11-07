@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw
 from .config import HUD_ASPECT, NEW_UI_REGIONS, Region, ScreenConfig
 from .hud import (
     DISTANCE, NAME_DARK, Hud, OcrItem, arrow_direction, is_lie_cell, parse_club, parse_elevation, parse_hole_box, parse_lie,
+    parse_pick_cards,
     parse_others, parse_player_box, parse_score_banner, parse_scorecard, parse_slope, parse_tiles, tile_value_items,
 )
 
@@ -232,7 +233,7 @@ def _strip_number(token: str, first: bool) -> int | None:
 FAST_DETECT: dict[str, tuple[str, int]] = {
     "player_box": ("min", 320), "hole_box": ("min", 320),
     **{n: ("ref", 1080) for n in ("lie", "club", "tiles", "tiles_left", "scorecard_title", "setup_course",
-                                  "load_course", "course_select", "setup_game_mode")},
+                                  "load_course", "course_select", "setup_game_mode", "pick_panel")},
 }
 
 
@@ -704,6 +705,8 @@ class Screen:
                     setattr(hud, k, v)
             elif name == "lie":
                 hud.lie = parse_lie(texts)
+            elif name == "pick_panel":
+                hud.pick_cards = parse_pick_cards(items)
             elif name in ("tiles", "tiles_left"):
                 hud.tiles = {**hud.tiles, **parse_tiles(items)}
                 if name == "tiles":

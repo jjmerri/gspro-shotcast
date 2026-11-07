@@ -36,10 +36,13 @@
    counts up and freezes at touchdown, Total Length counts until the ball stops, then GSPro
    moves the player box to the next shot. The last reading that still belonged to this shot
    gives the reaction its lie and numbers, so the next player's lie is never credited to this
-   shot. From touchdown on, the HUD is grabbed without OCR every poll, and the first grab whose
-   tiles haven't changed since the last (the ball has stopped) is the one read, so GSPro moving
-   on a second later doesn't matter. If the box moves on before the ball is seen at rest, the
-   lie isn't named (except the green); the next setup and GSPro's log record where it stopped.
+   shot. From touchdown on, the HUD is grabbed without OCR every `screen.rest_poll_seconds`
+   (GSPro shows a stopped ball for only about a second). Once Total Length holds for two grabs,
+   that grab is read for the resting lie while the grabs go on. It's kept once the number has
+   held 0.6 s more or GSPro moves on; a ball that pauses on a crest and rolls on is read again
+   where it stops. If the box moves on before the ball is seen to hold, the last two grabs'
+   totals are compared; still rolling, the lie isn't named (except the green), and the next
+   setup and GSPro's log record where it stopped.
    A shot that GSPro's log says ended the hole (holed, or stopped inside the gimme circle) stops
    the follow there, so a chip that ends the hole is called without waiting to see it at rest.
    GSPro also logs the end of every shot's roll (`Roll dist ft`): the first read after that line is

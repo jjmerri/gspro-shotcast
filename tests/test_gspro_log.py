@@ -825,6 +825,28 @@ def test_in_a_scramble_the_putt_that_holed_is_the_teams_and_the_partners_miss_is
     assert [s.fire_info(n).get("picked") for n in range(1, 5)] == [False, True, False, True]
 
 
+def test_the_pick_screen_lists_the_teams_balls_until_the_pick():
+    s = GsproState()
+    events = parse_events("* ------- Shot Fired! ------- *\n"
+                          "ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 0\n"
+                          "* ------- Shot Fired! ------- *\n"
+                          "ActivePlayer: 1  currentHole: 0  strokes: 1  Previous Score: 0\n"
+                          "SelectShotToUse\n")
+    assert events[-1].kind == "pick_screen"
+    for ev in events:
+        s.apply(ev)
+    assert s.pick_screens == 1 and s.pick_screen_up and s.pick_balls == {0: 1, 1: 2}
+    s.apply(LogEvent("select", player=0))
+    assert not s.pick_screen_up
+    # A four-player team: the copies linked the picked player to each partner, never partner to partner.
+    s.teammates = {frozenset((0, 1)), frozenset((0, 2)), frozenset((0, 3))}
+    for p in range(4):
+        s.apply(LogEvent("shot_fired"))
+        s.apply(LogEvent("state", player=p, hole=0, score=2, strokes=1))
+    s.apply(LogEvent("pick_screen"))
+    assert s.pick_balls == {0: 3, 1: 4, 2: 5, 3: 6}
+
+
 def test_a_solo_hole_out_is_not_a_pick():
     s = GsproState()
     for ev in [LogEvent("shot_fired"), LogEvent("hole_out"), LogEvent("state", player=0, hole=0, score=1, strokes=1)]:

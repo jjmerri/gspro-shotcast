@@ -133,6 +133,9 @@ NEW_UI_REGIONS = {
     # HOLES tab: the FRONT and BACK checkboxes (white with a tick when checked, an outline when not).
     "setup_front9_box": Region(left=0.077, top=0.348, width=0.012, height=0.018, aspect=HUD_ASPECT),
     "setup_back9_box": Region(left=0.077, top=0.632, width=0.012, height=0.018, aspect=HUD_ASPECT),
+    # A scramble's pick screen (GSPro 4.1): a card per ball, centred low in the frame. Wide enough for
+    # four players' cards.
+    "pick_panel": Region(left=0.22, top=0.60, width=0.56, height=0.21, anchor="middle", aspect=HUD_ASPECT),
     # The course list's title is "LOCAL MATCH", top centre.
     "course_select": Region(left=0.40, top=0.010, width=0.20, height=0.055, aspect=HUD_ASPECT),
 }
@@ -338,6 +341,9 @@ class ScreenConfig(BaseModel):
     # After impact the HUD is polled to follow the ball: CARRY (game) counts up until touchdown,
     # Total Length until it stops, and about 1-2 s later GSPro moves on to the next shot.
     follow_poll_seconds: float = 0.3
+    # From touchdown the follow only grabs (no OCR) to see Total Length stop: GSPro shows the ball at
+    # rest for about a second, so it's grabbed this often (plus ~80 ms per grab at 4K).
+    rest_poll_seconds: float = 0.05
     # How long to follow a shot from impact. The cap bites on odd outcomes (a water penalty, a lost
     # ball) where the stop is never cleanly seen, so keep it short.
     follow_max_seconds: float = 12.0

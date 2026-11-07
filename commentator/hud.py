@@ -89,6 +89,58 @@ class Hud:
     crops: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
     # GSPro's own stroke number when the booth counted a penalty GSPro left out (shot_number has it).
     gspro_shot: int | None = None
+    # A scramble's pick screen: one card per ball the team can play (pick_panel).
+    pick_cards: list["PickCard"] = field(default_factory=list)
+
+
+@dataclass
+class PickCard:
+    """A ball on GSPro's scramble pick screen: who hit it, how far it lies from the pin, and on what."""
+    name: str
+    yards: float
+    lie: str | None
+
+
+_PICK_DISTANCE = re.compile(r"^(\d{1,3}(?:\.\d)?)\s*(ft|feet|yds?|m)?$", re.I)
+
+
+def parse_pick_cards(items: list[OcrItem]) -> list[PickCard]:
+    """The scramble pick screen's cards (GSPro 4.1, Bethpage 11-07): each is a slot number and name
+    ("2  KYLE MARTIN"), the yards to the pin ("135"), the lie and stroke ("FAIRWAY  2ND"), and a
+    Select button. The buttons anchor the cards: every other item belongs to the nearest one."""
+    buttons = sorted((i for i in items if _bare(i.text) == "select"), key=lambda i: i.x)
+    if not buttons:
+        return []
+    cards: list[list[OcrItem]] = [[] for _ in buttons]
+    for i in items:
+        if _bare(i.text) == "select":
+            continue
+        k = min(range(len(buttons)), key=lambda n: abs(buttons[n].x - i.x))
+        if i.y < buttons[k].y:
+            cards[k].append(i)
+    out = []
+    for card in cards:
+        if not card:
+            continue
+        card.sort(key=lambda i: i.y)
+        top = card[0]
+        head = [i for i in card if abs(i.y - top.y) <= top.h * 0.6]
+        name = " ".join(re.sub(r"^\d+\s*", "", i.text).strip() for i in sorted(head, key=lambda i: i.x))
+        name = " ".join(w for w in name.split() if not w.isdigit())
+        yards = None
+        rest = []
+        for i in card:
+            if i in head:
+                continue
+            if yards is None and (m := _PICK_DISTANCE.match(i.text.strip())):
+                v = float(m.group(1))
+                unit = (m.group(2) or "").lower()
+                yards = v / 3 if unit.startswith("f") else v * 1.0936 if unit == "m" else v
+            else:
+                rest.append(i.text)
+        if name and yards is not None:
+            out.append(PickCard(name=name, yards=yards, lie=parse_lie(rest)))
+    return out
 
 
 NAME_DARK: tuple = ()
