@@ -500,7 +500,8 @@ async def test_a_logged_line_gets_the_time_it_played_whichever_comes_first(tmp_p
         store.record_lines("reaction", [late])
         rows = store.db.execute("SELECT text, aired_at, aired_seconds FROM lines ORDER BY id").fetchall()
         assert [r[0] for r in rows] == ["logged first", "played first"]
-        assert all(began - 0.01 <= r[1] <= time.time() and 0.04 <= r[2] < 1 for r in rows)
+        slack = 0.02   # Windows' clock ticks about every 16 ms: the 0.05 s play can end a tick early
+        assert all(began - slack <= r[1] <= time.time() and 0.05 - slack <= r[2] < 1 for r in rows)
         assert rows[1][1] > rows[0][1]
     finally:
         task.cancel()
