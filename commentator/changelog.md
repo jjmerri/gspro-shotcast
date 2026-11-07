@@ -4,6 +4,20 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.96
+
+### Stats page
+- The league card shows each week's **closest to the pin** on every par 3 played on the sim.
+- Scramble rounds record every ball's distance to the pin and lie, including the balls the team didn't pick.
+- A conceded putt's distance is the ball's real distance to the hole, not the gimme circle.
+
+### Booth
+- The ball's resting lie is named far more often: the booth watches the ball stop much more closely.
+- A ball pausing on a crest before rolling on is read again where it finally stops.
+- A scramble's ball pick is no longer counted as a mulligan.
+- Alternate shot rounds use GSPro's own scores.
+- A league round started with the wrong number of holes and quit after the right ones counts for the week.
+
 ## 0.1.95
 
 ### Booth
