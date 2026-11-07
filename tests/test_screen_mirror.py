@@ -187,3 +187,28 @@ def test_the_on_air_badge_only_shows_while_gspro_is_up(monkeypatch):
     assert not badge(lambda: False)._gspro_up()
     assert badge(None)._gspro_up()
     assert badge(lambda: 1 / 0)._gspro_up()
+
+
+class ScreenShotError(Exception):
+    """Named as mss's: Windows refusing the grab (the PC locked)."""
+
+
+def test_a_refused_screen_grab_logs_once_until_capture_works_again(caplog, monkeypatch):
+    from commentator import screen as screen_mod
+
+    s = Screen(ScreenConfig())
+    monkeypatch.setattr(s, "crop", lambda *a: (_ for _ in ()).throw(ScreenShotError("BitBlt")))
+    caplog.set_level("DEBUG", logger="commentator.screen")
+    for _ in range(3):
+        s.read_hud(["player_box", "hole_box", "lie"], image=_frame())
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1 and "BitBlt" in warnings[0].getMessage()
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+    screen_mod._capture_ok()
+    assert "works again" in caplog.records[-1].getMessage()
+
+    caplog.clear()
+    monkeypatch.setattr(s, "crop", lambda *a: (_ for _ in ()).throw(ValueError("bad crop")))
+    s.read_hud(["player_box"], image=_frame())
+    assert [r.levelname for r in caplog.records if r.levelname in ("WARNING", "ERROR")] == ["ERROR"]

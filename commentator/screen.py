@@ -18,6 +18,50 @@ from .hud import (
 
 log = logging.getLogger(__name__)
 
+_outage_lock = threading.Lock()
+_outage: dict[str, Any] = {"since": None, "failures": 0}
+
+
+def _capture_error(exc: BaseException | None) -> bool:
+    """Windows refusing a screen grab (mss's ScreenShotError: the PC locked, the display asleep, a
+    UAC prompt up), not a bad read."""
+    return exc is not None and type(exc).__name__ == "ScreenShotError"
+
+
+def log_failure(msg: str, *args: Any, logger: logging.Logger | None = None, level: int = logging.ERROR) -> None:
+    """In an except block: log msg at `level`, with the traceback, for a read that failed. A refused screen grab logs one
+    warning instead, and every read failing on it after that only at DEBUG, until a grab works again
+    (_capture_ok): the booth polls several times a second, so a locked PC used to log hundreds of
+    tracebacks a minute."""
+    import sys
+
+    logger = logger or log
+    exc = sys.exc_info()[1]
+    if not _capture_error(exc):
+        logger.log(level, msg, *args, exc_info=True)
+        return
+    with _outage_lock:
+        first = _outage["since"] is None
+        if first:
+            _outage["since"] = time.monotonic()
+        _outage["failures"] += 1
+    if first:
+        logger.warning("Screen capture is failing (%s): the PC locked or the display asleep? "
+                       "Not logged again until it works", exc)
+    else:
+        logger.debug(msg, *args, exc_info=True)
+
+
+def _capture_ok() -> None:
+    """A screen grab worked: ends an outage log_failure is holding quiet, saying how long it was."""
+    if _outage["since"] is None:
+        return
+    with _outage_lock:
+        since, failures = _outage["since"], _outage["failures"]
+        _outage["since"], _outage["failures"] = None, 0
+    if since is not None:
+        log.info("Screen capture works again after %.0f s (%d reads failed)", time.monotonic() - since, failures)
+
 
 @dataclass(frozen=True)
 class Tone:
@@ -280,7 +324,7 @@ class Screen:
             left_img, right_img = ((self.crop(base, _MIRROR_PROBE), self.crop(base, right)) if base is not None
                                    else (self.grab(_MIRROR_PROBE), self.grab(right)))
         except Exception:
-            log.exception("Mirrored-layout probe failed")
+            log_failure("Mirrored-layout probe failed")
             self._mirror_pending = None
             return self.mirrored
         left, right_look = _corner_look(left_img), _corner_look(right_img)
@@ -349,6 +393,8 @@ class Screen:
         img = winshot.capture_window(self.cfg.window_title)
         if img is None:
             log.warning("Couldn't capture the %r window; using the monitor grab", self.cfg.window_title)
+        else:
+            _capture_ok()
         return img
 
     def _grab_full(self) -> Image.Image:
@@ -360,6 +406,7 @@ class Screen:
         # mss handles aren't thread-safe, and these calls run in worker threads.
         with mss.mss() as sct:
             raw = sct.grab(self._mon(sct))
+            _capture_ok()
             return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
 
     def monitor_size(self) -> tuple[int, int]:
@@ -381,6 +428,7 @@ class Screen:
                 left, top, width, height = region.to_pixels(mon["width"], mon["height"])
                 box = {"left": mon["left"] + left, "top": mon["top"] + top, "width": width, "height": height}
                 raw = sct.grab(box)
+                _capture_ok()
                 return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
         img = self._grab_full()
         return self.crop(img, region) if region else img
@@ -399,6 +447,7 @@ class Screen:
                 if i:
                     time.sleep(interval)
                 raw = sct.grab(box)
+                _capture_ok()
                 out.append(Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX"))
         return out
 
@@ -535,7 +584,7 @@ class Screen:
             try:
                 out[OTHER_SIDE] = self._other_side_crops(names, base)
             except Exception:
-                log.exception("Grabbing the other side's HUD boxes failed")
+                log_failure("Grabbing the other side's HUD boxes failed")
         return out
 
     def grab_boxes(self, names: tuple[str, ...] | list[str]) -> dict[str, Image.Image]:
@@ -563,6 +612,7 @@ class Screen:
                     out[name] = img.crop((left - bl, top - bt, left - bl + width, top - bt + height))
                     continue
                 raw = sct.grab({"left": mon["left"] + left, "top": mon["top"] + top, "width": width, "height": height})
+                _capture_ok()
                 out[name] = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
                 grabbed.append(((left, top, width, height), out[name]))
         return out
@@ -638,7 +688,7 @@ class Screen:
                     img = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))))
                 items = self.ocr_region(img, name, scale)
             except Exception:
-                log.exception("OCR failed for region %s", name)
+                log_failure("OCR failed for region %s", name)
                 continue
             texts = [i.text for i in items]
             if name == "player_box":
@@ -699,7 +749,7 @@ class Screen:
             names = [n for n in parts if n in other_crops and n not in ("mirrored", "probe")]
             other = self.read_hud(names, crops={n: other_crops[n] for n in names}, other_side=False)
         except Exception:
-            log.exception("Reading the other side's HUD boxes failed")
+            log_failure("Reading the other side's HUD boxes failed")
             return
         if not (other.lie or other.club) or self.mirrored != mirrored:
             return
@@ -823,7 +873,7 @@ class Screen:
                     img = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))))
                 out[name] = " ".join(i.text for i in self.ocr_region(img, name, scale)).strip()
             except Exception:
-                log.exception("OCR failed for region %s", name)
+                log_failure("OCR failed for region %s", name)
                 out[name] = ""
         return out
 
@@ -846,7 +896,7 @@ class Screen:
                     img = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))))
                 out[name] = _group_lines(self.ocr_region(img, name, scale))
             except Exception:
-                log.exception("OCR failed for region %s", name)
+                log_failure("OCR failed for region %s", name)
                 out[name] = []
         return out
 
@@ -886,7 +936,7 @@ class Screen:
                 try:
                     lines = _group_lines(self.ocr_region(ocr_img, name, scale))
                 except Exception:
-                    log.exception("OCR failed for region %s", name)
+                    log_failure("OCR failed for region %s", name)
                     lines = []
                 # Visibility for debugging the hash: a region re-read means its pixels changed. INFO on a
                 # real change (the hash fired - compare against the roster the watcher then logs), DEBUG

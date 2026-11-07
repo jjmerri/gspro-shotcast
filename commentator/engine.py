@@ -64,7 +64,7 @@ from .round import FORMAT_NAMES, TEAM_BALL, Round, normalize_format, to_par
 from .round import name_key as _name_key
 from .round import name_ratio as _name_ratio
 from .round import _join as _join_names
-from .screen import Screen, name_signature, tone_of
+from .screen import Screen, log_failure as log_capture_failure, name_signature, tone_of
 from .sources.base import ShotSource
 from .sources.gspro_log import M_TO_YD, MATERIAL_TO_LIE, GsproLogFollower, GsproState, live_log
 from .speech import SpeechQueue
@@ -7521,7 +7521,7 @@ class Engine:
             try:
                 crops = await asyncio.to_thread(self.screen.grab_regions, parts)
             except Exception:
-                log.warning("%s HUD grab failed while following to rest", tag, exc_info=True)
+                log_capture_failure("%s HUD grab failed while following to rest", tag, logger=log, level=logging.WARNING)
                 prev, steady, prev_crops = None, 0, None   # a failed grab can't count toward a steady run
                 await asyncio.sleep(poll)
                 continue
@@ -8721,7 +8721,7 @@ class Engine:
                     frame, gate = await asyncio.to_thread(self.screen.grab_and_read,
                                                           ["setup_course", "load_course", "course_select"])
             except Exception:
-                log.exception("Setup-screen read failed")
+                log_capture_failure("Setup-screen read failed", logger=log)
                 continue
             play_course = _play_button_course(gate.get("setup_course", ""))
             # The course list's title: "Select Course" (3.1), "LOCAL MATCH" (3.59).
