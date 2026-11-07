@@ -467,6 +467,7 @@ class GsproState:
     # settled as a miss by the time GSPro picked it. Append-only, like `pickups`.
     pick_gimmes: list = field(default_factory=list)
     _since_select: bool = False
+    _tdist_last: tuple | None = None   # (player, metres) of the last tdist line since a score or fire line
     _shot_score: dict = field(default_factory=dict)   # index -> the score line of the player's last shot
     _undo: dict = field(default_factory=dict)         # index -> (hole, penalties then, fire taken back)
     _picked: set = field(default_factory=set)          # (index, hole) capped at the maximum
@@ -584,6 +585,7 @@ class GsproState:
                 self._fire_info[self._unowned_fire]["landed"] = ev.surface   # where that shot first came down
         elif ev.kind == "tdist":
             self.to_pin, self.gimmie = ev.to_pin, ev.gimmie
+            self._tdist_last = (self.active_player, ev.to_pin)
             if self.active_player is not None:   # the block's player, set by the preceding state/select
                 self.to_pin_by[self.active_player] = ev.to_pin
                 self.gimme_by[self.active_player] = ev.gimmie
@@ -604,6 +606,7 @@ class GsproState:
             self.live_shots_since_course += 1
             self.fires += 1
             self._material_since_fire = False
+            self._tdist_last = None
             self._fire_at[self.fires] = time.monotonic()
             self._fire_info[self.fires] = info = {"player": None}
             if self._aim is not None:
@@ -661,6 +664,12 @@ class GsproState:
                     self._fire_info[self.fires]["lie_cost"] = ev.lie_cost
         elif ev.kind == "gimmie":
             self.gimmies += 1
+            # The ball's distance is logged the line before: how far the conceded putt was.
+            p = self.active_player
+            if p is not None and self._tdist_last is not None and self._tdist_last[0] == p:
+                info = self._fire_info.get((self._fires_by.get(p) or [None])[-1])
+                if info is not None and info.get("hole") == self.hole_by.get(p, self.current_hole):
+                    info.setdefault("left", self._tdist_last[1])
             if self._since_select and self.active_player is not None and self.active_player == self.selected:
                 self.pick_gimmes.append((self.active_player, self.hole_by.get(self.active_player, self.current_hole)))
             if self.active_player is not None:
@@ -694,6 +703,7 @@ class GsproState:
                 if s in self._rest_by:
                     self._rest_by[mate] = dict(self._rest_by[s])
         elif ev.kind == "state":
+            self._tdist_last = None
             if self._unowned_fire in self._fire_info:
                 # The shooter's score line follows the ball coming to rest: the rest time on 3.59,
                 # which logs no `Roll dist` line (3.1's, logged just before, is kept).

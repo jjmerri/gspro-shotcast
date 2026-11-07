@@ -221,6 +221,11 @@ def _nines_picked(tones: dict) -> tuple[int, int] | None:
     return (1, 18) if f and b else (1, 9) if f else (10, 9) if b else None
 
 
+# How far Total Length may still move between the last two grabs before a player box switch for the
+# ball to count as stopped: a ball that rolls on (255 then 262 yards, Premonition 10-21) isn't.
+REST_CREEP_YARDS = 1.0
+
+
 def _unsettled(hud: Hud, tag: str = "") -> Hud:
     """A follow's last read from before the ball was seen at rest (GSPro shows the ball at rest only a
     second or so before moving the player box on, and a read can miss that). Taken mid-roll, its lie
@@ -842,6 +847,7 @@ class Engine:
         self._void_watch: set[int] = set()   # shots whose result watch followed the wrong player's line
         self._before_result: dict[int, tuple] = {}   # a shot's finish as it was before its outcome landed
         self._conceded_ids: set[int] = set()   # shots whose conceded putt row is stored
+        self._team_finished: set[int] = set()   # shared-ball shots given the team's next stroke as their finish
         self._gimme_ids: dict[int, int] = {}   # shot id -> its conceded putt row's id
         self._form_said: dict[tuple, list[tuple[int, list[str]]]] = {}   # (round, side) -> [(hole of round, angles)]
         self._form_pending: tuple | None = None   # (round, side, players, hole of round) the sheet last went to
@@ -1798,7 +1804,7 @@ class Engine:
             return
         scores = g.last_hole_scores if g.round_ends != self._log_round_ends else g.hole_scores
         for name in r.roster:
-            idx = self._gspro_idx(name)
+            idx = self._gspro_idx(name, scores=True)
             if idx is not None:   # the log's holes are 0-based
                 r.set_log_scores(name, {hole + 2 - r.start_hole: v for (i, hole), v in scores.items() if i == idx})
 
@@ -3664,6 +3670,14 @@ class Engine:
         was, now = (last.lie_before or "").lower(), (hud.lie or "").lower()
         if was and now and was != now:
             return None
+        # A scramble's last hitter: GSPro shows their box at the same spot while the team picks a ball
+        # (four false mulligans called on Bethpage, 11-07). With every teammate's stroke played, the
+        # HUD can't tell a replay from the pick; GSPro's log still flags a real one.
+        if r and r.player_format(player) == "scramble" and (side := r.side_for(player)) and len(side.players) > 1:
+            played = {x.player for x in self.state.shots if x.round_id == r.id and x.hole_seq == r.seq
+                      and x.shot_number == hud.shot_number and not x.mulligan}
+            if set(side.players) <= played:
+                return None
         return last
 
     def _mulligan_facts(self, player: str | None, hud: Hud) -> list[str]:
@@ -4501,14 +4515,15 @@ class Engine:
         return (f"{side.label}: {(round(hs['closing_to_par'] / n, 1) or 0.0):+.1f} to par on each of their closing holes "
                 f"this season.") if n >= 6 else None
 
-    def _gspro_idx(self, player: str | None) -> int | None:
+    def _gspro_idx(self, player: str | None, scores: bool = False) -> int | None:
         """The GSPro player index for the name being commentated, for reading the log's per-player
         data (lie, distance, strokes, penalties). GSPro indexes players by setup slot, so the index is
         the slot position (slot 1 = 0). None when the log can't be safely attributed: not enabled, no
-        round, alternate shot (shared ball), or a MULTIPLAYER round not built from the setup slots (a
-        tee-time roster is in honour order, so its position isn't GSPro's index)."""
+        round, alternate shot (shared ball) unless it's only for the `scores` (a hole's score is the
+        team's, whichever partner's line carries it), or a MULTIPLAYER round not built from the setup
+        slots (a tee-time roster is in honour order, so its position isn't GSPro's index)."""
         r = self.round
-        if not self._log_truth or r is None or r.ended or r.format == "alternate":
+        if not self._log_truth or r is None or r.ended or (r.format == "alternate" and not scores):
             return None
         if r.slot_names:                       # captured setup slots: the trustworthy name -> index map
             name = r.current_name(player) if player else player   # a shot in flight may hold a pre-rename name
@@ -4556,7 +4571,7 @@ class Engine:
         if r is not self.round or r.ended or not r.slot_guess:
             return False
         order = list(r.slot_names or [])
-        now = {n: self._gspro_idx(n) for n in order if n}
+        now = {n: self._gspro_idx(n, scores=True) for n in order if n}
         held = r.slot_held
         changed = {n for n, i in held.items() if now.get(n) != i}
         r.slot_held = {n: i for n, i in now.items() if i is not None}
@@ -6705,7 +6720,8 @@ class Engine:
             if after["outs"] > before["outs"]:
                 self.store.set_shot_result(prev_id, finish_yards=0.0)                  # holed
             elif after["gim"] > before["gim"]:
-                self.store.set_shot_result(prev_id, finish_yards=self.gspro.gimme_of(idx))  # conceded
+                self.store.set_shot_result(prev_id, finish_yards=self._gimme_left(prev_id)
+                                           or self.gspro.gimme_of(idx))   # conceded
             return
         if after["pen"] > before["pen"]:   # same hole, a penalty on this shot: the next setup is the drop
             return
@@ -7223,6 +7239,8 @@ class Engine:
                 self._picks_done.add(fire)
                 self.store.set_picked(row[0], picked)
                 row[1].picked = picked
+        if r is not None and r.format in TEAM_BALL:
+            self._team_finishes(r)
         for fire in sorted(self._owners_due):
             owner = g.fire_info(fire).get("player")
             if fire not in self._fire_rows or owner is not None or fire < g.fires - 20:
@@ -7311,13 +7329,19 @@ class Engine:
             self.store.set_shot_result(shot_id, outcome=outcome)
         if outcome == "conceded" and shot_id is not None:
             self._conceded_ids.add(shot_id)
-            if (gimme := self.store.record_gimme(shot_id)) is not None:
+            if (gimme := self.store.record_gimme(shot_id, self._gimme_left(shot_id))) is not None:
                 self._gimme_ids[shot_id] = gimme
             log.info("%s conceded putt recorded", tag)
             if not putt:
                 self.store.set_lie_after(shot_id, "green")
                 if rec is not None and rec.hud.lie != "green":
                     rec.hud = replace(rec.hud, lie="green")
+
+    def _gimme_left(self, shot_id: int | None) -> float | None:
+        """How far from the hole (yards) GSPro logged the ball this shot left inside the gimme circle."""
+        fire = next((f for f, v in self._fire_rows.items() if v[0] == shot_id), None) if shot_id else None
+        m = self.gspro.fire_info(fire).get("left") if fire is not None else None
+        return m * M_TO_YD if m is not None else None
 
     async def _late_result(self, shot_id: int | None, idx: int, base_outs: int, base_gim: int, base_shot: int,
                            tag: str, putt: bool, prediction: tuple | None = None, hole: str | None = None,
@@ -7546,7 +7570,7 @@ class Engine:
         read if Total Length had already held still into it."""
         parts = ["lie", "player_name", "tiles"]
         box = landing.tile_boxes.get("total length")
-        prev, steady, prev_crops = None, 0, None
+        prev, steady, prev_crops, older_crops = None, 0, None, None
         while time.monotonic() - started < deadline:
             if ended and ended():
                 log.info("%s hole over in the GSPro log %.1fs into the follow; not waiting to see the ball stop",
@@ -7557,7 +7581,7 @@ class Engine:
                 crops = await asyncio.to_thread(self.screen.grab_regions, parts)
             except Exception:
                 log_capture_failure("%s HUD grab failed while following to rest", tag, logger=log, level=logging.WARNING)
-                prev, steady, prev_crops = None, 0, None   # a failed grab can't count toward a steady run
+                prev, steady, prev_crops, older_crops = None, 0, None, None   # a failed grab can't count toward a steady run
                 await asyncio.sleep(poll)
                 continue
             sig = name_signature(crops["player_name"]) if "player_name" in crops else None
@@ -7568,6 +7592,21 @@ class Engine:
                         log.info("%s ball at rest: player box switched %.1fs into the follow with the total "
                                  "already still; resting lie %s", tag, time.monotonic() - started, hud.lie)
                         return hud, True
+                elif prev_crops is not None and older_crops is not None:
+                    # The box fading out changes the pixels with the ball already stopped, so the pixel
+                    # test never held (41 of 45 drives, 11-07): read the last two grabs' Total Length.
+                    last, before = await asyncio.gather(
+                        asyncio.to_thread(self.screen.read_hud, parts, None, prev_crops),
+                        asyncio.to_thread(self.screen.read_hud, parts, None, older_crops))
+                    a = _tile_yards(last.tiles, "total length", "yards")
+                    b = _tile_yards(before.tiles, "total length", "yards")
+                    if a is not None and b is not None and _this_shots_tiles(last) and last.lie:
+                        if abs(a - b) <= REST_CREEP_YARDS:
+                            log.info("%s ball at rest: player box switched %.1fs into the follow with the total "
+                                     "%.1f then %.1f; resting lie %s", tag, time.monotonic() - started, b, a, last.lie)
+                            return last, True
+                        log.info("%s player box switched with the ball still rolling (total %.1f then %.1f, lie %s)",
+                                 tag, b, a, last.lie)
                 log.info("%s player box switched %.1fs into the follow, before the ball was seen at rest (lie %s)",
                          tag, time.monotonic() - started, landing.lie)
                 return _unsettled(landing, tag), True
@@ -7590,7 +7629,7 @@ class Engine:
                 if _this_shots_tiles(hud):
                     return hud, True
                 return _unsettled(landing, tag), True
-            prev, prev_crops = total, crops
+            prev, prev_crops, older_crops = total, crops, prev_crops
             await asyncio.sleep(poll)
         log.info("%s ball not seen to come to rest within %.0fs (touchdown=True)", tag, deadline)
         return _unsettled(landing, tag), True
@@ -8068,6 +8107,25 @@ class Engine:
                         and r.side_for(s.player) is side), None)
             if nxt and nxt.lie_before == "green" and (y := to_yards(nxt.to_pin_before)) is not None:
                 self.store.fill_tee_finish(tee.shot_id, y)
+
+    def _team_finishes(self, r: Round) -> None:
+        """A shared ball's full shot finished where the team's next stroke starts. GSPro's log has no
+        position for it (at a tee it still shows the last hole), so the per-player finish never comes:
+        alternate shot's ball is the partner's next, a scramble's is the picked ball's (the lifted
+        ones' rest is never shown). A penalty makes the next stroke two on, so it's left alone."""
+        mine = [s for s in self.state.shots if s.round_id == r.id and not s.mulligan and s.hole_seq]
+        for s in mine:
+            if s.shot_id is None or s.shot_id in self._team_finished or s.shot.is_putt or s.shot_number is None:
+                continue
+            side = r.side_for(s.player)
+            fmt = r.player_format(s.player)
+            if side is None or fmt not in TEAM_BALL or (fmt == "scramble" and not s.picked):
+                continue
+            nxt = next((x for x in mine if x.hole_seq == s.hole_seq and x.shot_number == s.shot_number + 1
+                        and r.side_for(x.player) is side), None)
+            if nxt is not None and (y := to_yards(nxt.to_pin_before)) is not None:
+                self._team_finished.add(s.shot_id)
+                self.store.fill_finish(s.shot_id, y)
 
     def _canonical_course(self, course: str | None) -> str | None:
         """The league's name for a course when it's on the schedule, else the name as given. GSPro

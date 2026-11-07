@@ -935,12 +935,19 @@ def test_a_scramble_pick_inside_the_gimme_circle_concedes_the_picked_balls_strok
         + _line(1, 1, 4, player=1)
     )
     assert s.pick_gimmes == [(0, 1)]
+    assert s.fire_info(1).get("left") is None   # player 1's putt: lifted
+    s = _replay("* ------- Shot Fired! ------- *\n" + _line(1, 1, 3, player=0) + "Putt Out Mode\n"
+                "* ------- Shot Fired! ------- *\n" + _line(1, 1, 3, player=1) + "Selecting shot for player: 0\n"
+                "Logging tdist: 0.2899483 and ActiveGameGimmieDistance: 1.22\n"
+                "Select Shot - active user ball is within Gimmie distance\n")
+    assert s.fire_info(1).get("left") == 0.2899483 and "left" not in s.fire_info(2)   # the picked putt's 0.29 m
 
 
 def test_an_ordinary_gimmie_is_not_a_pick():
     s = _replay(FIRE + _line(1, 1, 3) + "Logging tdist: 0.5 and ActiveGameGimmieDistance: 1.22\n"
                 "Select Shot - active user ball is within Gimmie distance\n" + _line(1, 1, 4))
     assert s.gimmies_by == {0: 1} and s.pick_gimmes == []
+    assert s.fire_info(1).get("left") == 0.5   # how far the conceded putt was
 
 
 # ---- ball positions, aim clicks and the hole layout ------------------------------------------

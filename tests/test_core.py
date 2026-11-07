@@ -2668,6 +2668,11 @@ def test_a_scramble_shot_isnt_finished_from_the_next_stroke(tmp_path):
     approach = rec(2, "8I", 150)
     rec(3, "PT", 2)   # played from the partner's ball, not where Josh's approach finished
     assert s.db.execute("SELECT finish_yards FROM shots WHERE id = ?", (approach,)).fetchone()[0] is None
+    # But a picked ball conceded inside the gimme circle is its own: it finished where GSPro logged it.
+    chip = rec(1, "PW", 60)
+    s.db.execute("UPDATE shots SET hole = 'Hole 2, par 3, 160 yards' WHERE id = ?", (chip,))
+    s.record_gimme(chip, 0.44)
+    assert s.db.execute("SELECT finish_yards FROM shots WHERE id = ?", (chip,)).fetchone()[0] == 0.44
 
 
 def test_a_shot_finishes_where_the_next_stroke_starts(tmp_path):
@@ -2702,6 +2707,9 @@ def test_a_shot_finishes_where_the_next_stroke_starts(tmp_path):
     s.close()
     s = Store(path)   # older rows are filled in at startup
     assert (finish(drive), finish(approach), finish(dropped), finish(ace)) == (150, 6, 1.5, 0.0)
+    pitch = rec(1, "PW", "tee", 90, hole="Hole 4, par 3, 90 yards")
+    s.record_gimme(pitch, 0.6)   # GSPro logged how far it stopped: that, not the radius
+    assert finish(pitch) == 0.6
 
 
 def test_prediction_record_tracks_commentator_accuracy(tmp_path):
@@ -4548,6 +4556,73 @@ def test_the_mulligan_setup_compares_where_the_swing_was_played_from(tmp_path):
     assert e._mulligan_facts("Paul", Hud(shot_number=3, to_pin="15.4 yards"))
 
 
+def test_a_scramble_pick_showing_the_last_hitters_box_again_is_not_a_mulligan(tmp_path):
+    # Bethpage, 11-07: after Kyle, the team's second hitter, teed off, GSPro showed his box at the tee
+    # again while the team picked a ball, and the booth announced "Kyle gets a mulligan" four times.
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Pat", "Sam"], course="X", scheduled_format=None, holes=9,
+              is_league=False, slot_names=["Pat", "Sam"])
+    r.play_scramble([["Pat", "Sam"]])
+    e.round, r.seq = r, 5
+
+    def tee(who):
+        e.state.record_shot(ShotRecord(who, Shot(ball_speed=150, club="DR"), "Hole 5", Hud(lie="fairway"), [],
+                                       round_id=r.id, hole_seq=5, par=4, lie_before="tee", shot_number=1,
+                                       to_pin_before="405.1 yards"))
+    tee("Pat")
+    again = Hud(shot_number=1, to_pin="405.1 yards", lie="tee")
+    assert e._mulligan_facts("Pat", again)                                 # Sam hasn't hit: a replay
+    tee("Sam")
+    assert e._mulligan_facts("Sam", Hud(shot_number=1, to_pin="405.1 yards", lie="tee")) == []   # the pick
+
+
+def test_a_shared_balls_shot_finishes_where_the_teams_next_stroke_starts(tmp_path):
+    # Bethpage, 11-07: none of the scramble's 18 tee shots got a finish (GSPro logs no position at a
+    # tee), so Kyle's tee shot on the closest-to-the-pin hole, 24 yards away, had no distance.
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Pat", "Sam"], course="X", scheduled_format=None, holes=9,
+              is_league=False, slot_names=["Pat", "Sam"])
+    r.play_scramble([["Pat", "Sam"]])
+    e.round = r
+
+    def stroke(who, n, pin, picked=None, putt=False, seq=3):
+        sid = e.store.record_shot(player=who, hole=f"Hole {seq}", shot=Shot(club="PT" if putt else "8I"),
+                                  before=Hud(lie="green" if putt else "tee", shot_number=n), after=Hud(),
+                                  tags=[], carry_game_yards=None, total_yards=None, offline_yards=None,
+                                  fmt="scramble")
+        rec = ShotRecord(who, Shot(club="PT" if putt else "8I"), f"Hole {seq}", Hud(), [], round_id=r.id,
+                         hole_seq=seq, shot_number=n, to_pin_before=pin, shot_id=sid, picked=picked)
+        e.state.record_shot(rec)
+        return sid
+
+    def finish(sid):
+        return e.store.db.execute("SELECT finish_yards FROM shots WHERE id = ?", (sid,)).fetchone()[0]
+
+    kyle, mike = stroke("Pat", 1, "160 yards", picked=True), stroke("Sam", 1, "160 yards", picked=False)
+    e._team_finishes(r)
+    assert finish(kyle) is None                             # the team hasn't played on yet
+    stroke("Sam", 2, "71 feet 11 inches", putt=True)
+    e._team_finishes(r)
+    assert finish(kyle) == pytest.approx(71.9 / 3, abs=0.05) and finish(mike) is None   # a lifted ball: unknown
+
+
+def test_alternate_shot_takes_its_scores_from_gspros_log(tmp_path):
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    e.cfg.source.gspro_log_truth = True
+    r = Round(league=e.league, gspro_players=["Pat", "Sam"], course="X", scheduled_format="alternate", holes=9,
+              start_hole=1, is_league=False, slot_names=["Pat", "Sam"])
+    r.format, r.teams = "alternate", {"Pat & Sam": ["Pat", "Sam"]}
+    r.sides = r._build_sides()
+    e.round = r
+    e.gspro.first_hole, e.gspro.hole_scores = 0, {(1, 0): 5}   # the partner who holed out carries the score
+    e._sync_log_scores(r)
+    assert r.log_scores == {"Sam": {1: 5}} and r.card_score(r.sides[0], 1) == 5
+    assert e._gspro_idx("Sam") is None   # its shots still aren't the log's per-player ones
+
+
 def test_bunkers_become_a_theme_after_the_second(tmp_path):
     e = _mini_engine(tmp_path)
     r = _log_round(e)
@@ -5304,8 +5379,9 @@ async def test_a_switch_right_after_the_ball_stops_reads_the_last_grab_before_it
         ImageDraw.Draw(img).text((62, 2), str(total), fill=(255, 255, 255))
         return img
 
-    async def follow(totals):
-        grabs = [(tiles(t), lie) for t, lie in totals] + [(tiles(0), "next")] * 3
+    async def follow(totals, fade=None):
+        grabs = [(tiles(t) if fade is None else fade(t, i), lie, t) for i, (t, lie) in enumerate(totals)]
+        grabs += [(tiles(0), "next", 0)] * 3
         ocr = iter([Hud(player_text="P", shot_number=1, lie="fairway", tile_boxes={"total length": (60, 0, 120, 20)},
                         tile_crop_size=(120, 20),
                         tiles={"carry (game)": str(c), "total length": str(c)}) for c in (100.0, 129.6, 129.6)])
@@ -5317,12 +5393,12 @@ async def test_a_switch_right_after_the_ball_stops_reads_the_last_grab_before_it
                 return next(ocr)
 
             def grab_regions(self, parts):
-                img, lie = grabs[min(self.i, len(grabs) - 1)]
+                img, lie, total = grabs[min(self.i, len(grabs) - 1)]
                 self.i += 1
-                return {"tiles": img, "player_name": next_up if lie == "next" else josh, "lie": lie}
+                return {"tiles": img, "player_name": next_up if lie == "next" else josh, "lie": lie, "total": total}
 
             def read_hud(self, parts, image=None, crops=None):
-                return Hud(lie=crops["lie"], tiles={"carry (game)": "129.6", "total length": "121.5"})
+                return Hud(lie=crops["lie"], tiles={"carry (game)": "129.6", "total length": str(crops["total"])})
 
         from commentator.screen import name_signature
         cfg = Config(log_dir=str(tmp_path))
@@ -5334,6 +5410,17 @@ async def test_a_switch_right_after_the_ball_stops_reads_the_last_grab_before_it
     hud, landed = await follow([(125.2, "fairway"), (123.1, "rough"), (121.5, "sand"), (121.5, "sand")])
     assert landed and hud.lie == "sand" and hud.tiles["total length"] == "121.5"
     hud, landed = await follow([(125.2, "fairway"), (123.1, "rough"), (121.9, "sand")])
+    assert landed and hud.lie is None
+    # Bethpage, 11-07: the box fades out with the ball stopped, so no two grabs' pixels match. The last
+    # two grabs' totals do (or creep under a yard): that's the ball at rest.
+    def fading(total, i):
+        img = tiles(total)
+        ImageDraw.Draw(img).rectangle((110, 15, 119, 19), fill=(i * 50 + 20,) * 3)   # inside Total Length's box
+        return img
+
+    hud, landed = await follow([(125.2, "fairway"), (122.0, "rough"), (121.5, "sand"), (121.5, "sand")], fading)
+    assert landed and hud.lie == "sand"
+    hud, landed = await follow([(125.2, "fairway"), (123.1, "rough"), (121.9, "sand")], fading)
     assert landed and hud.lie is None
 
 

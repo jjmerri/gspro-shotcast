@@ -680,12 +680,13 @@ class Store:
         same hole (a penalty in between means the next was played from a drop, not where the ball lay)."""
         if prev["is_putt"] or prev["mulligan"] or prev["finish_yards"] is not None or prev["outcome"] == "gimme":
             return None
-        if prev["fmt"] == "scramble":   # the next stroke may be from a partner's ball
+        # A scramble's next stroke may be from a partner's ball; its conceded putt is the picked ball's own.
+        if prev["fmt"] == "scramble" and nxt["outcome"] != "gimme":
             return None
         if not self._same_hole_next(prev, nxt) or nxt["shot_number"] != prev["shot_number"] + 1:
             return None
-        if nxt["outcome"] == "gimme":
-            return prev["gimme_yards"] or nxt["gimme_yards"]   # (inside it; None with no radius logged)
+        if nxt["outcome"] == "gimme":   # its logged length, else inside the radius (None with neither)
+            return nxt["to_pin_yards"] or prev["gimme_yards"] or nxt["gimme_yards"]
         return nxt["to_pin_yards"]
 
     def _fill_previous_finish(self, shot_id: int) -> None:
@@ -974,20 +975,20 @@ class Store:
                 [(fmt, i, i) for i in shot_ids])
             self.db.commit()
 
-    def record_gimme(self, shot_id: int) -> int | None:
+    def record_gimme(self, shot_id: int, left_yards: float | None = None) -> int | None:
         """The conceded putt after `shot_id` ended inside the gimme circle: GSPro counts the stroke but
         nobody hits it, so it's stored as a putt with outcome 'gimme' and no launch data, from the green,
-        within the gimme radius (its exact length isn't logged). Same player, hole and flags as the
-        stroke that left it."""
+        `left_yards` from the hole (GSPro's tdist, when logged; else just within the gimme radius). Same
+        player, hole and flags as the stroke that left it."""
         cur = self.db.execute(
             """INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, units,
-                   lie_before, to_pin, score_to_par, tags, raw, gimme_yards, outcome, fmt, attributed, is_league,
-                   is_tournament, excluded)
-               SELECT session_id, ?, player, course, hole, shot_number + 1, NULL, 1, units, 'green', NULL,
+                   lie_before, to_pin, to_pin_yards, score_to_par, tags, raw, gimme_yards, outcome, fmt, attributed,
+                   is_league, is_tournament, excluded)
+               SELECT session_id, ?, player, course, hole, shot_number + 1, NULL, 1, units, 'green', NULL, ?,
                       score_to_par, '["gimme"]', '{}', gimme_yards, 'gimme', fmt, attributed, is_league,
                       is_tournament, excluded
                FROM shots WHERE id = ?""",
-            (time.time(), shot_id),
+            (time.time(), left_yards, shot_id),
         )
         if cur.rowcount:
             self._fill_previous_finish(cur.lastrowid)
@@ -1173,6 +1174,12 @@ class Store:
         self.db.execute("UPDATE shots SET fmt = ?, attributed = ?, shared_ball = ? WHERE id > ? AND player = ?",
                         (fmt, int(attributed), int(shared_ball), after_id, player))
         self.db.commit()
+
+    def fill_finish(self, shot_id: int | None, yards: float) -> None:
+        """A shared ball's finish from where the team's next stroke started, unless one's already known."""
+        if shot_id is not None:
+            self.db.execute("UPDATE shots SET finish_yards = COALESCE(finish_yards, ?) WHERE id = ?", (yards, shot_id))
+            self.db.commit()
 
     def fill_tee_finish(self, shot_id: int | None, yards: float) -> None:
         """A tee shot's finish on the green from the HUD at the next stroke, when GSPro's log couldn't
