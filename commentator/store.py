@@ -87,6 +87,12 @@ CREATE TABLE IF NOT EXISTS hole_layouts (            -- each hole's geometry, lo
     tee_box TEXT                                 -- the course file's box at the tee (Black, Blue, ...); NULL
                                                  -- until matched (course_layout.name_tee_boxes)
 );
+CREATE TABLE IF NOT EXISTS logged_pins (             -- pins GSPro 3.59+ logged setting a hole up, as seen: which
+    id INTEGER PRIMARY KEY,                      -- hole is worked out from the shots (course_layout.fill_missing)
+    session_id INTEGER REFERENCES sessions(id),
+    ts REAL NOT NULL,
+    x REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL   -- world metres, as hole_layouts.pin_*
+);
 CREATE TABLE IF NOT EXISTS hole_images (             -- GSPro's minimap off the tee, the hole replay's background
     id INTEGER PRIMARY KEY,                      -- one per course and hole: the map is the same every round
     session_id INTEGER REFERENCES sessions(id),  -- the session it was taken in
@@ -547,6 +553,12 @@ class Store:
             added += 1
         self.db.commit()
         return added
+
+    def record_logged_pin(self, pos: tuple[float, float, float], ts: float | None = None) -> None:
+        """Keep a pin GSPro logged as it set a hole up (gspro_log._SCM_PIN), for this session."""
+        self.db.execute("INSERT INTO logged_pins (session_id, ts, x, y, z) VALUES (?,?,?,?,?)",
+                        (self.session_id, time.time() if ts is None else ts, *pos))
+        self.db.commit()
 
     def fill_log_totals(self, session_id: int | None = -1) -> int:
         """Fill in a full shot's total from GSPro's logged positions when its TOTAL LENGTH tile was never

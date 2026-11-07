@@ -683,6 +683,13 @@ def test_a_tree_hit_is_logged_on_its_shot_and_called_by_its_height():
 
 
 
+def test_the_pins_gspro_logs_setting_holes_up_are_kept_once_each():
+    text = ("SCM_ShotWPPos0: (964.25, 118.86, 261.91) pinPos: (854.80, 113.04, 138.12)\n" * 2
+            + "SCM_ShotWPPos0: (1.0, 2.0, 3.0) ShotWPPos1: (4.0, 5.0, 6.0) pinPos: (-12.50, 40.91, -1211.35)\n"
+            + '[{"active":true,"played":true,"par":4,"pinPos":{"x":0.0,"y":1.0,"z":300.0}}]\n')
+    assert build_state(text).pins == [(854.8, 113.04, 138.12), (-12.5, 40.91, -1211.35)]
+
+
 def test_a_bush_gspro_names_is_called_a_bush_whatever_its_modelled_height():
     from types import SimpleNamespace
     from commentator.engine import TREE_LOW_CALLS, Engine

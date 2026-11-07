@@ -485,6 +485,36 @@ def test_a_round_quit_early_takes_its_tee_and_pin_from_the_course_file(tmp_path)
     assert fill_missing(st.db, [str(tmp_path / "Courses")]) == 0   # once
 
 
+def test_a_pin_gspro_logged_for_the_hole_is_used_over_the_course_files(tmp_path):
+    from commentator.course_layout import fill_missing
+    path, st = _season(tmp_path)
+    st.db.execute("UPDATE shots SET to_pin_yards = ?, start_x = 50, start_z = 100 WHERE shot_number = 1",
+                  (round(2 * math.hypot(60, 150) * M_TO_YD, 1),))
+    st.db.execute("UPDATE shots SET start_x = 10, start_z = 200 WHERE shot_number = 2")
+    st.db.execute("UPDATE shots SET start_x = 2, start_z = 295 WHERE shot_number = 3")
+    st.db.commit()
+    st.record_logged_pin((40.0, 1.0, 250.0), ts=990.0)    # another hole's: the shots don't fit it
+    st.record_logged_pin((0.3, 1.0, 300.2), ts=999.0)     # this hole's, a little off the file's Thursday
+    st.record_logged_pin((0.0, 1.0, 300.0), ts=1200.0)    # too long after the hole to be its
+    # No course file: the logged pin alone fills it (the tee stays unknown).
+    assert fill_missing(st.db, [str(tmp_path / "Courses")]) == 1
+    rp = hole_replays(st.db)[(1, 1)]
+    assert rp["pin"] == [0.3, 300.2] and rp["tee"] is None and not rp["pin_estimated"]
+    # With the course file, the logged pin still wins, and the tee comes from the file.
+    st.db.execute("DELETE FROM hole_layouts")
+    st.db.commit()
+    _course_file(tmp_path)
+    assert fill_missing(st.db, [str(tmp_path / "Courses")]) == 1
+    rp = hole_replays(st.db)[(1, 1)]
+    assert rp["pin"] == [0.3, 300.2] and rp["tee"] == [0, 0]
+    # A logged pin the shots don't fit is passed over for the file's.
+    st.db.execute("DELETE FROM hole_layouts")
+    st.db.execute("UPDATE logged_pins SET x = 20 WHERE ts = 999")
+    st.db.commit()
+    assert fill_missing(st.db, [str(tmp_path / "Courses")]) == 1
+    assert hole_replays(st.db)[(1, 1)]["pin"] == [0, 300]
+
+
 def _course_file(tmp_path):
     """Test Links' course file: hole 1's Black tee at (0, -40), White at (0, 0), a dogleg aim point and
     two days' pins."""

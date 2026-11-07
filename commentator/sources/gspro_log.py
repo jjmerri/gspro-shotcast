@@ -172,6 +172,9 @@ _LEAVES_PASS = re.compile(r"^\* Leaves pas thru at hit (\d+)")
 # it hadn't started coming down: it struck something standing up (a tree trunk) on the way up, or
 # barely left the ground.
 _BOUNCE = re.compile(rf"^Force {_NUM}\|\|.*\|\|\s*descent angle\s*({_NUM})\|\|")
+# GSPro 3.59+ logs the hole's pin as it sets the hole up (1-3 times, sometimes again after the hole-out;
+# not on every hole): `SCM_ShotWPPos0: (x, y, z) [ShotWPPos1: (...)] pinPos: (x, y, z)`, world metres.
+_SCM_PIN = re.compile(rf"^SCM_.*\bpinPos: \(\s*(-?{_NUM}),\s*(-?{_NUM}),\s*(-?{_NUM})\s*\)")
 # Logged once per shot (putts too, and water) as the ball comes to rest, before the shooter's score
 # block: the end of the ball's motion, whatever the screen shows. GSPro 3.1 only: on 3.59 the
 # shooter's score line is the first sign the ball stopped (see GsproState's "state").
@@ -293,6 +296,8 @@ def parse_events(text: str) -> list[LogEvent]:
                 out.append(LogEvent("leaves_pass"))
             elif line.startswith("Bush penalty applied"):
                 out.append(LogEvent("bush"))
+            elif m := _SCM_PIN.match(line):
+                out.append(LogEvent("pin_pos", pos=tuple(float(g) for g in m.groups())))
             elif m := _BOUNCE.match(line):
                 out.append(LogEvent("bounce", descent=float(m.group(1))))
             elif m := _ROLL.search(line):
@@ -509,6 +514,8 @@ class GsproState:
     # The hole list of the latest completed round (see _layout_holes), and how many have been seen.
     layout_holes: list = field(default_factory=list)
     layouts: int = 0
+    # Every pin GSPro 3.59+ logged setting a hole up (_SCM_PIN), in order, a repeat of the last left out.
+    pins: list = field(default_factory=list)
 
     def apply(self, ev: LogEvent) -> None:
         self.kinds[ev.kind] += 1
@@ -629,6 +636,9 @@ class GsproState:
         elif ev.kind == "bush":
             if self.fires in self._fire_info:
                 self._fire_info[self.fires]["bush"] = True
+        elif ev.kind == "pin_pos":
+            if not self.pins or self.pins[-1] != ev.pos:
+                self.pins.append(ev.pos)
         elif ev.kind == "leaves_pass":
             if self.fires in self._fire_info:
                 info = self._fire_info[self.fires]

@@ -281,7 +281,20 @@ def parse_lie(items: list[str]) -> str | None:
         if re.search(rf"\b{lie}\b", text):
             return lie
     # 3.59/4.0's player box says just "Deep" for deep rough.
-    return "deep rough" if re.search(r"\bdeep\b", text) else None
+    if re.search(r"\bdeep\b", text):
+        return "deep rough"
+    # GSPro 4's one-word headers, mapped to the names its log uses (MATERIAL_TO_LIE). Only a whole
+    # item counts: a menu behind the lie panel can show "PINE COUNTRY CLUB!".
+    return next((SHORT_LIES[w] for i in items if (w := _bare(i)) in SHORT_LIES), None)
+
+
+# GSPro 4's one-word lie headers (practice tee lie panel): Semi, Pine, Timber.
+SHORT_LIES = {"semi": "semi rough", "pine": "pine straw", "timber": "structure"}
+
+
+def _bare(text: str) -> str:
+    """The text lower-cased without stray OCR marks around it ("; Tee" -> "tee")."""
+    return re.sub(r"^[^a-z]+|[^a-z]+$", "", text.strip().lower())
 
 
 # GSPro's result-banner wording (abbreviated: "DBL BOGEY", not "Double Bogey"), longest/worst first
@@ -367,12 +380,12 @@ def _rows(items: list[OcrItem]) -> list[list[OcrItem]]:
 
 
 SCORE_BADGE = re.compile(r"^(E|[+-]\d+)$")
-LIE_CELL = re.compile(r"(?:{0})(?:\s+(?:{0}))*".format("|".join(re.escape(lie) for lie in (*LIES, "deep"))))
+LIE_CELL = re.compile(r"(?:{0})(?:\s+(?:{0}))*".format("|".join(re.escape(lie) for lie in (*LIES, "deep", *SHORT_LIES))))
 
 
 def is_lie_cell(text: str) -> bool:
     """A cell of lie words only, ignoring stray OCR marks around them ("; Tee")."""
-    return LIE_CELL.fullmatch(re.sub(r"^[^a-z]+|[^a-z]+$", "", text.strip().lower())) is not None
+    return LIE_CELL.fullmatch(_bare(text)) is not None
 
 
 def parse_others(items: list[OcrItem]) -> list[OtherPlayer]:

@@ -1187,7 +1187,8 @@ async def test_interrupt_mid_sequence_releases_the_synth_loop():
 
 # Exact OCR output captured from GSPro 3.1.x release frames (see data/screens/SOURCES.md).
 def test_hud_parsers_on_real_ocr_output():
-    from commentator.hud import OcrItem, hole_key, parse_club, parse_hole_box, parse_lie, parse_player_box, parse_tiles
+    from commentator.hud import (OcrItem, hole_key, is_lie_cell, parse_club, parse_hole_box, parse_lie,
+                                 parse_player_box, parse_tiles)
 
     p = parse_player_box(["Mixtape_Golf", "4th (-1)", "Shot 4", "19.5 YDS", "▲4FT 6"])
     assert p["shot_number"] == 4 and p["score_to_par"] == "-1" and p["to_pin"] == "19.5 yards"
@@ -1205,6 +1206,12 @@ def test_hud_parsers_on_real_ocr_output():
 
     assert parse_lie(["Green", "O0T"]) == "green"
     assert parse_lie(["Rough"]) == "rough"
+    # GSPro 4's one-word headers (read off the 1280x720 practice tee), only as a whole item.
+    assert parse_lie(["Total Spin", "Club Speed", "Semi"]) == "semi rough"
+    assert parse_lie(["Total Spin", "Club Speed", "Pine"]) == "pine straw"
+    assert parse_lie(["Total Spin", "Club Speed", "Timber"]) == "structure"
+    assert parse_lie(["PINE COUNTRY CLUB!"]) is None
+    assert is_lie_cell("Pine")
 
     # GSPro 3.59 (public beta): "Hole 2" over the course, "RIGHT HAND", feet and inches run together.
     assert parse_hole_box(["Hole 2", "Paynes Valley", "PAR 3", "153 YDS"])["hole_number"] == 2

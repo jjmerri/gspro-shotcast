@@ -329,6 +329,17 @@ async def test_a_round_played_to_the_end_takes_layouts_gspro_didnt_log_from_the_
     assert len(calls) == 1 and calls[0] is not None
 
 
+def test_pins_gspro_logs_are_kept_for_the_hole_replays(tmp_path):
+    e = _engine(tmp_path)
+    e.gspro.pins.extend([(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)])
+    e._check_log_round()
+    e.gspro.pins.append((7.0, 8.0, 9.0))
+    e._check_log_round()
+    rows = e.store.db.execute("SELECT session_id, x, y, z FROM logged_pins ORDER BY id").fetchall()
+    assert [tuple(r)[1:] for r in rows] == [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0), (7.0, 8.0, 9.0)]
+    assert {r["session_id"] for r in rows} == {e.store.session_id}
+
+
 def test_side_stats_final_override_sets_the_last_hole_score():
     # The closer is pre-built before the last putt; final_override supplies the hypothetical last-hole
     # score so each branch's whole-round totals are right.

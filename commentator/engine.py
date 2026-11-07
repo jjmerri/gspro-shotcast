@@ -961,6 +961,7 @@ class Engine:
         self._log_round_ends = 0
         self._log_round_completes = 0
         self._log_layouts = 0
+        self._log_pins = 0   # pins GSPro logged (GsproState.pins) already kept
         self._range_noted = False
         self._practice = False   # GSPro's practice mode on screen: no round, so no commentary and nothing saved
         self._round_box_seen = False   # a round's player box has been on screen: practice isn't the first word
@@ -1728,6 +1729,13 @@ class Engine:
         """Act on round-level lines in GSPro's log: a round holed out ("Round Is Complete", with the
         holes it actually covered) or left ("End Round", which before completion means quit early)."""
         g, r = self.gspro, self.round
+        while self._log_pins < len(g.pins):
+            # The pin GSPro set the hole up with: which hole is worked out later, from the shots.
+            try:
+                self.store.record_logged_pin(g.pins[self._log_pins])
+            except Exception as e:
+                log.warning("Couldn't keep GSPro's logged pin (%s)", e)
+            self._log_pins += 1
         if g.layouts != self._log_layouts:
             # The completed round's hole list: each played hole's tee and pin, for the hole replays.
             self._log_layouts = g.layouts
