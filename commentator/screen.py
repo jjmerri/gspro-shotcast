@@ -179,10 +179,28 @@ def _strip_number(token: str, first: bool) -> int | None:
     return int(token) if int(token) < 20 else None
 
 
+# How the text detector sizes each region's crop with screen.ocr_fast (benchmarked on 4K, 1080p,
+# 1280x800 and 1280x720 frames against the default). RapidOCR's default enlarges every crop until its
+# short side is 736 px, which is most of an OCR's time. ("min", n): enlarge to a short side of at least
+# n px. ("ref", h): scale the crop to the size it would be on a screen h px tall (shrinking it on a
+# bigger screen). Regions not listed keep the default: the scorecard (reads worse smaller), the score
+# banner (not benchmarked) and the setup player slots (names at 4K only come back with the big upscale).
+FAST_DETECT: dict[str, tuple[str, int]] = {
+    "player_box": ("min", 320), "hole_box": ("min", 320),
+    **{n: ("ref", 1080) for n in ("lie", "club", "tiles", "tiles_left", "scorecard_title", "setup_course",
+                                  "load_course", "course_select", "setup_game_mode")},
+}
+
+
 class Screen:
     def __init__(self, cfg: ScreenConfig) -> None:
         self.cfg = cfg
         self._ocr: Any = None
+        # One OCR at a time: the detector's input size is set on the shared engine before each call.
+        self._ocr_lock = threading.Lock()
+        self._det_default: tuple[str, int] | None = None
+        self._ocr_how = threading.local()   # the detector size / rec-only for this thread's next ocr_items
+        self._frame_h = 0   # the height of the screen the last region was cut from (FAST_DETECT's "ref")
         self.last_read_seconds = 0.0
         self.last_capture_seconds = 0.0
         self.mirrored = False   # the current player's HUD is in GSPro's lefty layout (see MIRRORED)
@@ -359,6 +377,7 @@ class Screen:
 
             with mss.mss() as sct:
                 mon = self._mon(sct)
+                self._frame_h = mon["height"]
                 left, top, width, height = region.to_pixels(mon["width"], mon["height"])
                 box = {"left": mon["left"] + left, "top": mon["top"] + top, "width": width, "height": height}
                 raw = sct.grab(box)
@@ -418,9 +437,21 @@ class Screen:
     def ocr_items(self, img: Image.Image) -> list[OcrItem]:
         import numpy as np
 
-        res = self._ocr_engine()(np.array(img))
+        size, rec_only = getattr(self._ocr_how, "size", None), getattr(self._ocr_how, "rec_only", False)
+        arr = np.array(img)
+        with self._ocr_lock:
+            engine = self._ocr_engine()
+            # RapidOCR keeps each call's use_* flags for the next, so every call sets them all.
+            if rec_only:
+                res = engine(arr, use_det=False, use_cls=False, use_rec=True)
+            else:
+                self._size_detector(engine, size)
+                res = engine(arr, use_det=True, use_cls=True, use_rec=True)
         if not res.txts:
             return []
+        if rec_only:   # no detection, so no boxes: the text fills the image
+            w, h = img.size
+            return [OcrItem(text=t, x=w / 2, y=h / 2, h=float(h), left=0.0) for t in res.txts if t]
         items = []
         for text, box in zip(res.txts, res.boxes):
             xs, ys = box[:, 0], box[:, 1]
@@ -428,10 +459,48 @@ class Screen:
                                  left=float(xs.min())))
         return items
 
+    def _size_detector(self, engine: Any, size: tuple[str, int] | None) -> None:
+        """Set the detector's input size for the next call: `size`, else its configured default."""
+        det = getattr(engine, "text_det", None) or (engine._load_det_model() if hasattr(engine, "_load_det_model") else None)
+        if det is None or not hasattr(det, "limit_side_len"):
+            return
+        if self._det_default is None:
+            self._det_default = (det.limit_type, det.limit_side_len)
+        det.limit_type, det.limit_side_len = size or self._det_default
+
+    def _det_size(self, name: str | None, img: Image.Image, scale: float = 1.0) -> tuple[str, int] | None:
+        """The detector's (limit_type, limit_side_len) for region `name`'s crop `img` (already resized
+        by `scale`) under FAST_DETECT, or None for the default."""
+        rule = FAST_DETECT.get(name or "") if self.cfg.ocr_fast else None
+        if rule is None:
+            return None
+        kind, n = rule
+        if kind == "min":
+            return "min", n
+        if not self._frame_h:
+            return None
+        r = n / self._frame_h / (scale or 1.0)
+        short = min(img.size)
+        if r >= 1:
+            return "min", max(short, round(short * r))
+        return "max", max(32, round(max(img.size) * r))
+
+    def ocr_region(self, img: Image.Image, name: str | None, scale: float = 1.0,
+                   rec_only: bool = False) -> list[OcrItem]:
+        """ocr_items on region `name`'s crop, sized for it (_det_size). `rec_only`: read `img` as one
+        piece of text, with no detection (a lone digit already cut out)."""
+        self._ocr_how.size = None if rec_only else self._det_size(name, img, scale)
+        self._ocr_how.rec_only = rec_only
+        try:
+            return self.ocr_items(img)
+        finally:
+            self._ocr_how.size, self._ocr_how.rec_only = None, False
+
     def ocr(self, img: Image.Image) -> str:
         return " ".join(i.text for i in self.ocr_items(img))
 
     def crop(self, img: Image.Image, region: Region) -> Image.Image:
+        self._frame_h = img.height
         left, top, width, height = region.to_pixels(img.width, img.height)
         return img.crop((left, top, left + width, top + height))
 
@@ -481,6 +550,7 @@ class Screen:
         grabbed: list[tuple[tuple[int, int, int, int], Image.Image]] = []
         with mss.mss() as sct:
             mon = self._mon(sct)
+            self._frame_h = mon["height"]
             for name in names:
                 if (region := self.region(name)) is None:
                     continue
@@ -566,7 +636,7 @@ class Screen:
                 crop_size = img.size
                 if scale and scale != 1.0:
                     img = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))))
-                items = self.ocr_items(img)
+                items = self.ocr_region(img, name, scale)
             except Exception:
                 log.exception("OCR failed for region %s", name)
                 continue
@@ -708,7 +778,8 @@ class Screen:
                                              (tight, 3, 30)):
                         crop = crop.resize((crop.width * scale, crop.height * scale))
                         crop = ImageOps.expand(crop, border=pad, fill=(255, 255, 255))
-                        text = re.sub(r"[^0-9]", "", "".join(i.text for i in self.ocr_items(crop)))
+                        text = re.sub(r"[^0-9]", "", "".join(
+                            i.text for i in self.ocr_region(crop, None, rec_only=self.cfg.ocr_fast)))
                         if text and 0 < int(text) < 20:
                             if int(text) == expect:
                                 return expect
@@ -750,7 +821,7 @@ class Screen:
                 scale = self.cfg.ocr_scale
                 if scale and scale != 1.0:
                     img = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))))
-                out[name] = " ".join(i.text for i in self.ocr_items(img)).strip()
+                out[name] = " ".join(i.text for i in self.ocr_region(img, name, scale)).strip()
             except Exception:
                 log.exception("OCR failed for region %s", name)
                 out[name] = ""
@@ -773,7 +844,7 @@ class Screen:
                 scale = self.cfg.ocr_scale
                 if scale and scale != 1.0:
                     img = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))))
-                out[name] = _group_lines(self.ocr_items(img))
+                out[name] = _group_lines(self.ocr_region(img, name, scale))
             except Exception:
                 log.exception("OCR failed for region %s", name)
                 out[name] = []
@@ -813,7 +884,7 @@ class Screen:
                 ocr_img = (ocr_img.resize((max(1, round(ocr_img.width * scale)), max(1, round(ocr_img.height * scale))))
                            if scale and scale != 1.0 else ocr_img)
                 try:
-                    lines = _group_lines(self.ocr_items(ocr_img))
+                    lines = _group_lines(self.ocr_region(ocr_img, name, scale))
                 except Exception:
                     log.exception("OCR failed for region %s", name)
                     lines = []

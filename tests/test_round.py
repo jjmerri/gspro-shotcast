@@ -1260,6 +1260,7 @@ def test_play_button_course_reads_the_setup_button():
     assert _play_button_course("Play Pebble Beach") == "Pebble Beach"
     assert _play_button_course("PLAY BALSAMS PANORAMA!") == "BALSAMS PANORAMA"  # real button text
     assert _play_button_course("PLAY  Wynn Golf Club") == "Wynn Golf Club"
+    assert _play_button_course("PLAY ABACOA GOLF CLUB! 0") == "ABACOA GOLF CLUB"   # a stray mark past the "!"
     assert _play_button_course("Settings") is None   # a different screen/button
     assert _play_button_course("Play") is None        # the button before a course is chosen
     assert _play_button_course("") is None

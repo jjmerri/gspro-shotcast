@@ -161,10 +161,10 @@ _HAZARD = re.compile(rf"^Haz entry Point \(({_FLOAT}), ({_FLOAT}), ({_FLOAT})\)"
 # centre. GSPro fits the map so the ball sits near (0, -338) and the pin near (0, +339): y runs up the
 # ball-to-pin line and x to its right, about 677 units for the whole distance (see aim_offset).
 _AIM = re.compile(rf"^\(({_FLOAT}), ({_FLOAT}), 0\.0+\)$")   # 3.59 writes 0.00
-# The ball went into foliage in flight and lost speed for it. GSPro names no object (tree or bush):
-# only the time into the flight, the hit's number on the shot and the speed it cost. Logged among the
-# launch lines, before the landing ones. A "Leaves pas thru at hit N" line instead means the ball went
-# through the foliage at no cost.
+# The ball went into foliage in flight and lost speed for it: the time into the flight, the hit's
+# number on the shot and the speed it cost. Logged among the launch lines, before the landing ones. A
+# "Leaves pas thru at hit N" line instead means the ball went through the foliage at no cost. GSPro
+# 3.59 and later add "Bush penalty applied" beside it when the foliage was a bush (3.1 names nothing).
 _LEAVES = re.compile(rf"^\*\* Leaves hitTime,\s*({_NUM})\s*,\s*HitCount\s*(\d+),\s*Penalty\s*({_NUM})%\s*,"
                      rf"\s*Accumulated penalty\s*({_NUM})%")
 _LEAVES_PASS = re.compile(r"^\* Leaves pas thru at hit (\d+)")
@@ -291,6 +291,8 @@ def parse_events(text: str) -> list[LogEvent]:
                                                       float(m.group(4)))))
             elif _LEAVES_PASS.match(line):
                 out.append(LogEvent("leaves_pass"))
+            elif line.startswith("Bush penalty applied"):
+                out.append(LogEvent("bush"))
             elif m := _BOUNCE.match(line):
                 out.append(LogEvent("bounce", descent=float(m.group(1))))
             elif m := _ROLL.search(line):
@@ -624,6 +626,9 @@ class GsproState:
                 info = self._fire_info[self.fires]
                 info.setdefault("leaves_at", time.monotonic())
                 info.setdefault("leaves", []).append(ev.leaves)
+        elif ev.kind == "bush":
+            if self.fires in self._fire_info:
+                self._fire_info[self.fires]["bush"] = True
         elif ev.kind == "leaves_pass":
             if self.fires in self._fire_info:
                 info = self._fire_info[self.fires]

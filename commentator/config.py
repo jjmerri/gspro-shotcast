@@ -331,6 +331,10 @@ class ScreenConfig(BaseModel):
     # Shrink each region before OCR: a high-res HUD reads fine smaller and far faster, which is
     # what lets the booth keep up while following a shot. 1.0 = full size.
     ocr_scale: float = 1.0
+    # Size the text detector's input per region (screen.FAST_DETECT): the HUD and setup boxes are
+    # read at about the size they'd have on a 1080p screen rather than all blown up to 736 px, ~5x
+    # faster with the same reads. Off = every region at the detector's default size, as before.
+    ocr_fast: bool = True
     # After impact the HUD is polled to follow the ball: CARRY (game) counts up until touchdown,
     # Total Length until it stops, and about 1-2 s later GSPro moves on to the next shot.
     follow_poll_seconds: float = 0.3

@@ -96,14 +96,14 @@
   ]
  },
  "expected": {
-  "player_text": "Alex E Shot 1 391.5 YDS  27.1YDS",
+  "player_text": "Alex E Shot 1 391.5 YDS T 27.1YDS",
   "shot_number": 1,
   "to_pin": "391.5 yards",
   "score_to_par": "E",
   "course": "Paynes Valley",
   "par": 4,
   "hole_length": "392 yards",
-  "hole_number": null,
+  "hole_number": 1,
   "lie": "tee",
   "club": "DR",
   "handed": "RH",

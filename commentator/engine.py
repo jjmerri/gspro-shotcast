@@ -271,9 +271,10 @@ FORMAT_SETTLE_SECONDS = 3.0
 def _play_button_course(text: str) -> str | None:
     """The course name out of GSPro's bottom-right "Play <course>!" setup button, or None when the
     text isn't that button (so this doubles as "are we on the setup screen?"). GSPro shows its own
-    course name here, which can differ from the league's (matched via the schedule's gspro_course)."""
+    course name here, which can differ from the league's (matched via the schedule's gspro_course).
+    Anything read past the "!" is a stray mark beside the button ("PLAY ABACOA GOLF CLUB! 0")."""
     m = re.match(r"\s*play\b[\s:·.\-]*(.+)", text or "", re.I)
-    course = (m.group(1) if m else "").strip().strip("!.").strip()
+    course = (m.group(1) if m else "").split("!")[0].strip().strip(".").strip()
     return course or None
 
 
@@ -6774,8 +6775,8 @@ class Engine:
     def _tree_facts(self, fire: int | None, shot: Shot, impact: float, tag: str = "",
                     wood_tree: bool = False) -> list[str]:
         """Facts when GSPro's log had the ball hit a tree: foliage in flight, or the wood of a trunk or
-        branch (`wood_tree`, see GsproState.tree_wood). GSPro doesn't say what the foliage was, so the height there
-        (modelled from the launch numbers) tells a tree from a bush."""
+        branch (`wood_tree`, see GsproState.tree_wood). GSPro 3.59+ logs a bush as one; otherwise the
+        height there (modelled from the launch numbers) tells a tree from a bush."""
         if shot.is_putt:
             return []
         info = self.gspro.fire_info(fire)
@@ -6799,6 +6800,13 @@ class Engine:
                  info["leaves_at"] - impact if "leaves_at" in info else float("nan"), t,
                  f"{p.height_ft:.0f}" if p else "?", f"{p.out_yd:.0f}" if p else "?", lost,
                  " (past the modelled landing)" if p and p.landed else "")
+        times = "once" if len(hits) == 1 else f"{len(hits)} times"
+        if info.get("bush"):
+            where = "a bush" + (f" about {p.out_yd:.0f} yards out" if p and not p.landed else "")
+            return [f"The ball hit foliage {times} in flight: {where} (GSPro itself says it was a bush, not a "
+                    f"tree). It cost the ball about {lost:.0f}% of its speed, so the bush, not the swing, cut "
+                    f"this shot short. Worth a word. Call it a bush, never a tree or a branch; any distance "
+                    f"is an estimate, keep it loose."]
         if p is None:
             where = "somewhere along the way"
         elif p.landed or p.height_ft < 10:
@@ -6813,7 +6821,6 @@ class Engine:
             where = f"in the branches of a tree, roughly {p.height_ft:.0f} feet up and {p.out_yd:.0f} yards out"
         else:
             where = f"high up in a tree, roughly {p.height_ft:.0f} feet up and {p.out_yd:.0f} yards out"
-        times = "once" if len(hits) == 1 else f"{len(hits)} times"
         return [f"The ball hit foliage {times} in flight: {where}, by our estimate. It cost the ball about "
                 f"{lost:.0f}% of its speed, so the trees, not the swing, cut this shot short. Worth a word "
                 f"(an unlucky branch, a tree that jumped out). The height and distance are estimates: keep "
@@ -7562,7 +7569,7 @@ class Engine:
         if hits and hits[-1][3] >= TREE_CALL_PENALTY:
             t = hits[0][0]
             p = point_at(shot.ball_speed, shot.vla, shot.total_spin, shot.spin_axis, self._raw_yards(shot), t)
-            low = p is not None and (p.landed or p.height_ft < 10)
+            low = info.get("bush") or (p is not None and (p.landed or p.height_ft < 10))
             high, low_calls = TREE_CALLS_BY_LANGUAGE[self.cfg.commentary.language]
             return impact + t, low_calls if low else high
         return None

@@ -2115,6 +2115,41 @@ async def test_follow_shot_gives_up_without_a_stop(tmp_path):
     assert not landed
 
 
+def test_ocr_fast_sizes_the_detector_per_region_and_screen():
+    from types import SimpleNamespace
+    from PIL import Image
+    from commentator.screen import Screen
+    from commentator.config import ScreenConfig
+
+    class Engine_:
+        def __init__(self):
+            self.text_det, self.calls = SimpleNamespace(limit_type="min", limit_side_len=736), []
+
+        def __call__(self, arr, **kw):
+            self.calls.append((self.text_det.limit_type, self.text_det.limit_side_len, kw["use_det"]))
+            return SimpleNamespace(txts=(), boxes=[])
+
+    def sizes(screen, size, parts=("player_box", "lie", "scorecard")):
+        screen._ocr = Engine_()
+        screen.read_hud(list(parts), image=Image.new("RGB", size), other_side=False)
+        return screen._ocr.calls
+
+    s = Screen(ScreenConfig())
+    lie = s.region("lie").to_pixels(3840, 2160)
+    # 4K: the lie box shrunk to its 1080p size, the player box's floor, the scorecard as it always was.
+    assert sizes(s, (3840, 2160)) == [("min", 320, True), ("max", round(max(lie[2:]) / 2), True),
+                                      ("min", 736, True)]
+    lie = s.region("lie").to_pixels(1280, 720)
+    assert sizes(s, (1280, 720))[1] == ("min", round(min(lie[2:]) * 1.5), True)
+    # Off: every region at the detector's default, as before.
+    assert {c[:2] for c in sizes(Screen(ScreenConfig(ocr_fast=False)), (3840, 2160))} == {("min", 736)}
+    # A lone digit read without detection leaves the next read detecting again.
+    s._ocr = Engine_()
+    s.ocr_region(Image.new("RGB", (40, 40)), None, rec_only=True)
+    s.ocr_region(Image.new("RGB", (40, 40)), "scorecard")
+    assert [c[2] for c in s._ocr.calls] == [False, True]
+
+
 def test_read_region_lines_cached_only_ocrs_changed_regions():
     # The setup-watcher speedup: a slot whose pixels didn't change since last poll is NOT re-OCR'd, so
     # a quick single-slot roster change reads on its own instead of re-reading all eight every poll.

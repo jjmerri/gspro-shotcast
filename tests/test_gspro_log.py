@@ -683,6 +683,30 @@ def test_a_tree_hit_is_logged_on_its_shot_and_called_by_its_height():
 
 
 
+def test_a_bush_gspro_names_is_called_a_bush_whatever_its_modelled_height():
+    from types import SimpleNamespace
+    from commentator.engine import TREE_LOW_CALLS, Engine
+    from commentator.models import Shot
+
+    # GSPro 4.0 (the sim, Nov 3): the bush line comes with the leaves line on the same shot.
+    s = GsproState()
+    for line in [" * ------- Shot Fired! ------- *", "LaunchExt - Regular Mode",
+                 "Penalty Surface TVGrough, Spin80%, Speed 94%, VLA 100%", "Bush penalty applied",
+                 " ** Leaves hitTime, 1.53 , HitCount 1, Penalty 34.0% , Accumulated penalty 34.0% "]:
+        for ev in parse_events(line):
+            s.apply(ev)
+    assert s.fire_info(s.fires)["bush"] is True
+    me = SimpleNamespace(gspro=s, _raw_yards=Engine._raw_yards, cfg=SimpleNamespace(
+        commentary=SimpleNamespace(language="en")))
+    me._foliage_fact = lambda *a: Engine._foliage_fact(me, *a)
+    # Modelled high up (the tree test's approach): GSPro's word wins.
+    approach = Shot(ball_speed=112.15, vla=18.43, total_spin=2992, spin_axis=-1.69, carry=171.77)
+    fact = Engine._tree_facts(me, s.fires, approach, 0.0)[0]
+    assert "a bush about" in fact and "high up in a tree" not in fact and "34%" in fact
+    me.gspro.fire_of = lambda fires0, impact: s.fires
+    assert Engine._tree_hit_logged(me, 0, 0.0, approach)[1] == TREE_LOW_CALLS
+
+
 def test_the_cup_lines_say_how_each_ball_met_the_cup():
     # From the sim (Josh, Owl's Nest): a lip-out on 8, a putt holed dead centre, one that caught the
     # edge on the way in, one that burned the edge with too much pace, and a chip off the flagstick.
