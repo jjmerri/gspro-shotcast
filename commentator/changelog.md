@@ -4,6 +4,20 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.94
+
+### Stats page
+- A **hole replay** shows the card's score, marked "(max)", when GSPro capped the hole at its maximum.
+- Hole replays use the exact pin GSPro 4.0 logs for the hole when it has one.
+
+### Booth
+- Reading the screen is several times faster, so calls come quicker after a shot.
+- A ball into a **bush** is called a bush when GSPro says it was one, not a tree.
+- GSPro 4.0's **Semi**, **Pine** and **Timber** lies are read from the screen.
+- The scorecard check is lighter between holes in GSPro 4.0.
+- The resting lie is right when the next player is up the moment the ball stops.
+- Minimaps sent to Jev are big enough for it again.
+
 ## 0.1.93
 
 ### Stats page
