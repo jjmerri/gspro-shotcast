@@ -5526,6 +5526,58 @@ async def test_a_ball_pausing_on_a_crest_is_read_again_where_it_stops(tmp_path):
     assert landed and hud.lie is None
 
 
+async def test_a_capture_just_before_the_switch_is_the_ball_at_rest(tmp_path, monkeypatch):
+    from PIL import Image, ImageDraw
+
+    import commentator.engine as engine_mod
+    from commentator.screen import name_signature
+
+    # Round 93, 11-07, replayed: the ball stopped in deep rough and the box switched before a second grab
+    # could confirm it (11 of 12 lies went unnamed). GSPro shows a stopped ball ~1 s before moving on, so
+    # a capture begun inside REST_SHOWN_SECONDS of the switch is the rest; one older than that is not.
+    def name(text):
+        img = Image.new("RGB", (60, 14), (30, 30, 30))
+        ImageDraw.Draw(img).text((2, 1), text, fill=(255, 255, 255))
+        return img
+
+    josh, next_up = name("JOSH"), name("EVAN M")
+
+    async def to_rest():   # touchdown read in deep rough, then the first grab is already the next player
+        ocr = iter([Hud(player_text="P", shot_number=1, lie="deep rough", tile_boxes={"total length": (60, 0, 120, 20)},
+                        tile_crop_size=(120, 20), tiles={"carry (game)": str(c), "total length": str(c)})
+                    for c in (100.0, 129.6, 129.6)])
+
+        class Screen:
+            async def read_hud_async(self, parts):
+                return next(ocr)
+
+            def grab_regions(self, parts):
+                return {"tiles": Image.new("RGB", (120, 20)), "player_name": next_up, "lie": "tee"}
+
+        cfg = Config(log_dir=str(tmp_path))
+        cfg.screen.follow_poll_seconds = 0.05
+        engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                        live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=Screen())
+        return await engine._follow_shot(Hud(player_text="P", shot_number=1, lie="tee", name_sig=name_signature(josh)))
+
+    def f(lie, total, sig=(True, False) * 8):
+        h = _ct(lie, 140.0, total)
+        h.name_sig = sig
+        return h
+
+    leo = (False, True) * 8
+    before = Hud(player_text="P", shot_number=1, lie="tee", name_sig=(True, False) * 8)
+    hud, landed = await to_rest()
+    assert landed and hud.lie == "deep rough"
+    hud, _ = await _follow([f("sand", 150.0), f("tee", 150.0, sig=leo)], before, tmp_path)   # OCR reads only
+    assert hud.lie == "sand"
+    monkeypatch.setattr(engine_mod, "REST_SHOWN_SECONDS", 0.0)   # the capture came too long before the switch
+    hud, landed = await to_rest()
+    assert landed and hud.lie is None
+    hud, _ = await _follow([f("sand", 150.0), f("tee", 150.0, sig=leo)], before, tmp_path)
+    assert hud.lie is None
+
+
 async def test_following_to_rest_never_takes_the_next_players_blank_tiles(tmp_path):
     from PIL import Image
 
