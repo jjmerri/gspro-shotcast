@@ -4703,6 +4703,78 @@ async def test_an_opening_tee_on_screen_takes_gspro_off_its_courses_range(tmp_pa
     assert (e.gspro.mode, e.gspro.course) == ("course", "yorkgc_gsp")
 
 
+async def test_the_scorecard_title_is_read_when_the_log_says_a_hole_ended_and_every_2s_otherwise(tmp_path, monkeypatch):
+    import time as real_time
+    from commentator import engine as eng
+    from commentator.sources.gspro_log import parse_events
+    e = _mini_engine(tmp_path)
+    e.cfg.screen.hud_poll_seconds = 0
+    tee = Hud(player_text="Josh E Shot 1 325.7 YDS", shot_number=1, score_to_par="E", to_pin="325.7 yards",
+              course="York Golf Club", par=4, hole_length="326 yards")
+    polls: list[bool] = []
+    script: list = []
+    clock = [1000.0]
+
+    class Clock:   # the engine's clock only: a second per HUD read
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+        def monotonic(self):
+            return clock[0]
+
+    monkeypatch.setattr(eng, "time", Clock())
+
+    class Screen:
+        last_read_seconds = last_capture_seconds = 0.0
+
+        async def read_hud_async(self, parts):
+            if parts == ["scorecard"]:
+                return Hud()
+            clock[0] += 1.0
+            polls.append("scorecard_title" in parts)
+            step = script.pop(0) if script else None
+            if callable(step):
+                step()
+            return Hud(scorecard_open=True) if step == "card" and "scorecard_title" in parts else tee
+
+        async def snapshot_jpeg(self):
+            return None
+
+    e.screen = Screen()
+    e._emit_setup = lambda hud, stamp: asyncio.sleep(0)
+
+    async def watch(steps):
+        polls.clear()
+        script[:] = steps
+        task = asyncio.create_task(e._watch_hud())
+        for _ in range(400):
+            if not script:
+                break
+            await asyncio.sleep(0.002)
+        task.cancel()
+        return polls[:len(steps)]
+
+    # No log followed (or GSPro 3.1, whose log misses hole ends): every poll, as before.
+    assert all(await watch([None] * 6))
+    e._fire_log_followed = lambda: True
+    e.gspro.version = "3.1.6.20"
+    assert all(await watch([None] * 6))
+    e.gspro.version = "4.0"
+    monkeypatch.setattr(eng, "SCORECARD_DUE_SECONDS", 0.0)
+    assert await watch([None] * 5) == [True, False, True, False, True]
+
+    def holed_out():
+        for ev in parse_events("Real putt made and all players done - AllPlayersHoledOut\n"):
+            e.gspro.apply(ev)
+    monkeypatch.setattr(eng, "SCORECARD_DUE_SECONDS", 60.0)
+    got = await watch([None, None, holed_out] + [None] * 4)
+    assert got == [True, False, True] + [True] * 4    # then the card is due: every poll
+    monkeypatch.setattr(eng, "SCORECARD_DUE_SECONDS", 0.0)
+    # A card opened from the menu, outside any hole end, is caught and then followed every poll.
+    assert await watch([None, None, "card", "card", "card", None, None]) == \
+        [True, False, True, True, True, True, False]
+
+
 async def test_gsprolog_hole_corrects_the_count_and_moves_the_holes_shots(tmp_path):
     from commentator.course_card import CourseCard
     from commentator.models import HoleChangeEvent

@@ -357,6 +357,12 @@ UNPLAYED_SHOT_WAIT_SECONDS = 2.5
 RANGE_TEE_SHOT_WAIT_SECONDS = 30.0
 RECAP_POLL_SECONDS = 30.0      # how often a league recap waiting on a round or its publish looks again
 LAYOUT_WAIT_SECONDS = 20.0     # after a round's end, for GSPro 3.1's logged layout before the course file's
+# The scorecard title is read every HUD poll for this long after GSPro's log says a hole (or the round)
+# ended, the card being due; otherwise on the first poll SCORECARD_IDLE_SECONDS after the last read, to
+# catch a card opened from the menu or one whose hole end the log missed. GSPro 4 shows the card for about
+# 5 s; reads at most this far apart plus one poll stay under 4 s apart (every poll, when polls are slower).
+SCORECARD_DUE_SECONDS = 30.0
+SCORECARD_IDLE_SECONDS = 2.0
 KEEP_GSPRO_LOGS = 5             # copies of GSPro's log kept from round ends (see _keep_gspro_log)
 GSPRO_LOG_KEEP_BYTES = 8_000_000   # from the end of it: a round's lines and plenty before
 TREE_CALLS = ("Oh, that's into the trees!", "That's caught a branch!", "Oh no, it's clipped the tree!",
@@ -1109,6 +1115,8 @@ class Engine:
         candidate_stamp: tuple | None = None
         setup_seq = moved_on = 0
         card_read_at = 0.0
+        card_signals = self._card_signals()   # the log's hole and round ends at the last poll
+        card_due_until, title_at, card_up = 0.0, None, False   # title_at: the last title read
         away_at, away_seen, tee_polls, away_fires = None, False, 0, 0   # the screen leaving the range or menus
         while True:
             await asyncio.sleep(self.cfg.screen.hud_poll_seconds)
@@ -1116,11 +1124,20 @@ class Engine:
             # struck, nor the log's player changed, from its first sighting to the end of its read.
             stamp = (self._shot_seq, self.gspro.active_player, time.monotonic())
             poll_fires = self.gspro.fires
+            if (signals := self._card_signals()) is None or signals != card_signals:
+                card_signals, card_due_until = signals, stamp[2] + SCORECARD_DUE_SECONDS
+            read_title = (signals is None or card_up or stamp[2] < card_due_until or title_at is None
+                          or stamp[2] - title_at >= SCORECARD_IDLE_SECONDS)
+            if read_title:
+                title_at = stamp[2]
             try:
-                hud = await self.screen.read_hud_async(["player_box", "hole_box", "scorecard_title"])
+                hud = await self.screen.read_hud_async(
+                    ["player_box", "hole_box"] + (["scorecard_title"] if read_title else []))
             except Exception:
                 log.exception("HUD poll failed")
                 continue
+            if read_title:
+                card_up = hud.scorecard_open
             self._check_log_round()
             self._check_round_idle()
             if self._log_rounds and self.gspro.mode in ("range", "menu"):
@@ -1572,6 +1589,15 @@ class Engine:
 
     def _fire_log_followed(self) -> bool:
         return bool(self._log_truth and self._follower is not None and self._follower.primed and self.gspro.version)
+
+    def _card_signals(self) -> tuple | None:
+        """The hole and round ends GSPro's log has shown, which put the scorecard on screen, when the log
+        can be trusted to show them: a followed log from 3.59 on, which logs "AllPlayersHoledOut" for
+        every hole. None (3.1, which misses some, or no log followed): the card's title is read every poll."""
+        if not self._fire_log_followed() or gspro_ui(self.gspro.version) != "new":
+            return None
+        g = self.gspro
+        return g.holes_finished, g.round_completes, g.round_ends, g.hole_outs, g.gimmies
 
     async def _gspro_fired(self, fires0: int, impact: float, event: ShotEvent | None = None) -> bool:
         """Whether GSPro's log has this shot's "Shot Fired", waiting until UNPLAYED_SHOT_WAIT_SECONDS

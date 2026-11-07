@@ -224,6 +224,10 @@ def parse_events(text: str) -> list[LogEvent]:
                 out.append(LogEvent("team_copy"))
             elif "Hole out" in line:
                 out.append(LogEvent("hole_out"))
+            elif line.endswith("AllPlayersHoledOut"):
+                # "Real putt made and all players done - AllPlayersHoledOut": the hole is over for the
+                # group (a gimme as well as a holed putt), just before GSPro shows the scorecard.
+                out.append(LogEvent("all_holed_out"))
             elif "within Gimmie distance" in line:
                 out.append(LogEvent("gimmie"))
             elif line.startswith("magnitude:"):
@@ -379,6 +383,9 @@ class GsproState:
     sgt: bool = False                 # this round is being played on the Simulator Golf Tour (an SGT Sync logged)
     last_sgt: bool = False            # the last ended round's, kept past its reset like last_hole_scores
     round_completes: int = 0          # "Round Is Complete"s seen (every hole in the round holed out)
+    # "AllPlayersHoledOut"s seen: the group finished a hole, and GSPro is about to show the scorecard.
+    # Logged for every hole from 3.59; 3.1 misses some (holes that log only "Hole out !!!").
+    holes_finished: int = 0
     active_holes: int | None = None   # holes in the round, from the end-of-round layout's active flags
     # Since the current course was selected: shots fired, and the hole (0-based, as logged) of the first
     # score line. No shots means the group is still on its opening tee; some means a round under way.
@@ -541,6 +548,8 @@ class GsproState:
         elif ev.kind == "round_complete":
             self.round_completes += 1
             self._finish_picked()
+        elif ev.kind == "all_holed_out":
+            self.holes_finished += 1
         elif ev.kind == "layout":
             self.pars = ev.pars or []
             if ev.active:
