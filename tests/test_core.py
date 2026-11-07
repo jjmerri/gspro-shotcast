@@ -5198,16 +5198,16 @@ def test_the_pick_screens_cards_give_each_balls_finish_and_lie(tmp_path):
     from commentator.round import Round
 
     # Bethpage, 11-07: GSPro logs where only the picked ball lies; the pick screen lists both. Card 1 is
-    # Ozzy's, the name GSPro has for the roster's Mike; card 2 read "KYLE MARTIN".
+    # Ozzy's, the name GSPro has for the roster's Mike; card 2's badge ran into its name ("²KYLE MARTIN").
     def item(text, x, y, h=30):
         return OcrItem(text=text, x=x, y=y, h=h, left=x - 10 * len(text))
 
     cards = parse_pick_cards([item("1", 30, 40, 20), item("AZZO", 100, 45), item("294", 100, 110, 40),
                               item("DEEP ROUGH", 80, 160), item("2ND", 150, 160), item("Select", 100, 220),
-                              item("2", 220, 40, 20), item("KYLE MARTIN", 300, 45), item("41 FT", 300, 110, 40),
+                              item("²KYLE MARTIN", 300, 45), item("71' 11\"", 300, 110, 40),
                               item("GREEN 2ND", 300, 160), item("Select", 300, 220)])
     assert [(c.name, round(c.yards, 1), c.lie) for c in cards] == [("AZZO", 294.0, "deep rough"),
-                                                                   ("KYLE MARTIN", 13.7, "green")]
+                                                                   ("KYLE MARTIN", 24.0, "green")]
     e = _mini_engine(tmp_path)
     r = Round(league=e.league, gspro_players=["Ozzy", "Kyle Martin"], course="X", scheduled_format=None, holes=9,
               is_league=False, slot_names=["Ozzy", "Kyle Martin"])
@@ -5222,7 +5222,7 @@ def test_the_pick_screens_cards_give_each_balls_finish_and_lie(tmp_path):
     e._apply_pick_cards()
     rows = {i: tuple(e.store.db.execute("SELECT finish_yards, lie_after FROM shots WHERE id = ?", (i,)).fetchone())
             for i in (ozzy, kyle)}
-    assert rows == {ozzy: (294.0, "deep rough"), kyle: (13.7, "green")} and not e._pick_cards_due
+    assert rows == {ozzy: (294.0, "deep rough"), kyle: (24.0, "green")} and not e._pick_cards_due
 
 
 def test_gspro_revealing_a_scramble_makes_the_round_one(tmp_path):

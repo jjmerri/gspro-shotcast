@@ -102,6 +102,7 @@ class PickCard:
 
 
 _PICK_DISTANCE = re.compile(r"^(\d{1,3}(?:\.\d)?)\s*(ft|feet|yds?|m)?$", re.I)
+_PICK_FEET = re.compile(r"""^(\d{1,3})\s*['’`]\s*(\d{1,2})?\s*(?:"|”|''|'’)?$""")   # on the green: 71' 11"
 
 
 def parse_pick_cards(items: list[OcrItem]) -> list[PickCard]:
@@ -125,14 +126,16 @@ def parse_pick_cards(items: list[OcrItem]) -> list[PickCard]:
         card.sort(key=lambda i: i.y)
         top = card[0]
         head = [i for i in card if abs(i.y - top.y) <= top.h * 0.6]
-        name = " ".join(re.sub(r"^\d+\s*", "", i.text).strip() for i in sorted(head, key=lambda i: i.x))
+        name = " ".join(re.sub(r"^[\d¹²³⁴]+\s*", "", i.text).strip() for i in sorted(head, key=lambda i: i.x))
         name = " ".join(w for w in name.split() if not w.isdigit())
         yards = None
         rest = []
         for i in card:
             if i in head:
                 continue
-            if yards is None and (m := _PICK_DISTANCE.match(i.text.strip())):
+            if yards is None and (m := _PICK_FEET.match(i.text.strip())):
+                yards = (int(m.group(1)) + int(m.group(2) or 0) / 12) / 3
+            elif yards is None and (m := _PICK_DISTANCE.match(i.text.strip())):
                 v = float(m.group(1))
                 unit = (m.group(2) or "").lower()
                 yards = v / 3 if unit.startswith("f") else v * 1.0936 if unit == "m" else v
