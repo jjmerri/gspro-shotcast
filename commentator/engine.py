@@ -235,6 +235,12 @@ def _unsettled(hud: Hud, tag: str = "") -> Hud:
     return replace(hud, lie=None)
 
 
+def _this_shots_tiles(hud: Hud) -> bool:
+    """A read still shows a shot's distances: the next player's address has both tiles blank ("--.--")."""
+    return (_tile_yards(hud.tiles, "carry (game)", "yards") is not None
+            or _tile_yards(hud.tiles, "total length", "yards") is not None)
+
+
 def _pixels_changed(a, b, level: int = 40, count: int = 12) -> bool:
     """Two grabs of a HUD region differ: more than `count` pixels moved by `level` grey levels (a tenth
     of a yard ticking over in Total Length changes a few hundred)."""
@@ -7458,10 +7464,13 @@ class Engine:
         number is compared (its box from the landing read): the rest of the tiles region is the live
         scene beside the panel. It must hold for two grab-to-grab comparisons in a row, since a ball
         creeping on a slope ticks over less often than once a poll (and one did, then rolled off the
-        green). Measured: a stopped drive showed for about a second before GSPro faded the box."""
+        green). Measured: a stopped drive showed for about a second before GSPro faded the box, and a
+        grab takes 0.1-0.15 s at 4K, so the confirming third grab often came after the switch. GSPro
+        moves on only once the ball has stopped, so when it does, the last grab before the switch is
+        read if Total Length had already held still into it."""
         parts = ["lie", "player_name", "tiles"]
         box = landing.tile_boxes.get("total length")
-        prev, steady = None, 0
+        prev, steady, prev_crops = None, 0, None
         while time.monotonic() - started < deadline:
             if ended and ended():
                 log.info("%s hole over in the GSPro log %.1fs into the follow; not waiting to see the ball stop",
@@ -7472,11 +7481,17 @@ class Engine:
                 crops = await asyncio.to_thread(self.screen.grab_regions, parts)
             except Exception:
                 log.warning("%s HUD grab failed while following to rest", tag, exc_info=True)
-                prev, steady = None, 0   # a failed grab can't count toward a steady run
+                prev, steady, prev_crops = None, 0, None   # a failed grab can't count toward a steady run
                 await asyncio.sleep(poll)
                 continue
             sig = name_signature(crops["player_name"]) if "player_name" in crops else None
             if who is not None and name_sig_changed(who, sig):
+                if steady >= 1 and prev_crops is not None:
+                    hud = await asyncio.to_thread(self.screen.read_hud, parts, None, prev_crops)
+                    if _this_shots_tiles(hud):
+                        log.info("%s ball at rest: player box switched %.1fs into the follow with the total "
+                                 "already still; resting lie %s", tag, time.monotonic() - started, hud.lie)
+                        return hud, True
                 log.info("%s player box switched %.1fs into the follow, before the ball was seen at rest (lie %s)",
                          tag, time.monotonic() - started, landing.lie)
                 return _unsettled(landing, tag), True
@@ -7496,11 +7511,10 @@ class Engine:
                     await asyncio.to_thread(self._save_review_image, tag, "final")
                 # The next player's address shows both distance tiles blank ("--.--"): the box moved
                 # on unnoticed (no name signature), so this grab isn't this shot's.
-                if (_tile_yards(hud.tiles, "carry (game)", "yards") is not None
-                        or _tile_yards(hud.tiles, "total length", "yards") is not None):
+                if _this_shots_tiles(hud):
                     return hud, True
                 return _unsettled(landing, tag), True
-            prev = total
+            prev, prev_crops = total, crops
             await asyncio.sleep(poll)
         log.info("%s ball not seen to come to rest within %.0fs (touchdown=True)", tag, deadline)
         return _unsettled(landing, tag), True

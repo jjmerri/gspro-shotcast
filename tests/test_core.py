@@ -5170,6 +5170,58 @@ async def test_after_touchdown_the_follow_reads_the_grab_where_the_ball_stopped(
     assert landed and hud.lie == "rough" and hud.tiles["total length"] == "258.1"
 
 
+async def test_a_switch_right_after_the_ball_stops_reads_the_last_grab_before_it(tmp_path):
+    from PIL import Image, ImageDraw
+
+    # DPC Sodgrass, 11-06 (GSPro 4.0): the ball rolled into a bunker and showed at rest for about a
+    # second; grabs 0.45 s apart saw the total hold once, then the box switched before the confirming
+    # third. GSPro only moves on once the ball has stopped, so that last grab is the resting one. A
+    # switch while the total is still moving keeps the old answer: no resting lie.
+    def name(text):
+        img = Image.new("RGB", (60, 14), (30, 30, 30))
+        ImageDraw.Draw(img).text((2, 1), text, fill=(255, 255, 255))
+        return img
+
+    josh, next_up = name("JOSH"), name("EVAN M")
+
+    def tiles(total):
+        img = Image.new("RGB", (120, 20))
+        ImageDraw.Draw(img).text((62, 2), str(total), fill=(255, 255, 255))
+        return img
+
+    async def follow(totals):
+        grabs = [(tiles(t), lie) for t, lie in totals] + [(tiles(0), "next")] * 3
+        ocr = iter([Hud(player_text="P", shot_number=1, lie="fairway", tile_boxes={"total length": (60, 0, 120, 20)},
+                        tile_crop_size=(120, 20),
+                        tiles={"carry (game)": str(c), "total length": str(c)}) for c in (100.0, 129.6, 129.6)])
+
+        class Screen:
+            i = 0
+
+            async def read_hud_async(self, parts):
+                return next(ocr)
+
+            def grab_regions(self, parts):
+                img, lie = grabs[min(self.i, len(grabs) - 1)]
+                self.i += 1
+                return {"tiles": img, "player_name": next_up if lie == "next" else josh, "lie": lie}
+
+            def read_hud(self, parts, image=None, crops=None):
+                return Hud(lie=crops["lie"], tiles={"carry (game)": "129.6", "total length": "121.5"})
+
+        from commentator.screen import name_signature
+        cfg = Config(log_dir=str(tmp_path))
+        cfg.screen.follow_poll_seconds = 0.05
+        engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                        live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=Screen())
+        return await engine._follow_shot(Hud(player_text="P", shot_number=1, lie="tee", name_sig=name_signature(josh)))
+
+    hud, landed = await follow([(125.2, "fairway"), (123.1, "rough"), (121.5, "sand"), (121.5, "sand")])
+    assert landed and hud.lie == "sand" and hud.tiles["total length"] == "121.5"
+    hud, landed = await follow([(125.2, "fairway"), (123.1, "rough"), (121.9, "sand")])
+    assert landed and hud.lie is None
+
+
 async def test_following_to_rest_never_takes_the_next_players_blank_tiles(tmp_path):
     from PIL import Image
 
