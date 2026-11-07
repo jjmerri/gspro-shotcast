@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.95
+
+### Booth
+- A locked PC or a sleeping display no longer fills the log with hundreds of errors a minute.
+
 ## 0.1.94
 
 ### Stats page
