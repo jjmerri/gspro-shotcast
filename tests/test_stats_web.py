@@ -1157,3 +1157,32 @@ setTimeout(() => {
 """ % (json.dumps(body), fns)
     got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
     assert got == {"straight": ["clips", False, True, 1], "heard": ["0.wav", "1.wav", "0.wav", "1.wav", "2.wav"], "done": "done", "again": True}
+
+
+def test_alerts_in_another_sites_iframe_point_to_the_page_in_its_own_tab():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = re.search(r"\nconst esc = .*?\n", page).group(0) \
+        + re.search(r"\nfunction framed\(.*?\n}\n", page, re.S).group(0) \
+        + re.search(r"\nfunction drawAppPanel\(.*?\n}\n", page, re.S).group(0)
+    script = """
+const location = {origin: "https://x.cloudfront.net", href: "https://x.cloudfront.net/#home?player="};
+const self = {}, box = {innerHTML: ""}, $ = () => box, siteTitle = () => "Shotcast", isIOS = () => true;
+let top = self;
+const window = {self, get top() { return top; }};
+""" + fns + """
+const seen = [];
+const panel = () => { drawAppPanel(); return box.innerHTML.includes('href="https://x.cloudfront.net/#home?player="'); };
+seen.push(framed());
+top = {location: {origin: "https://x.cloudfront.net"}}; seen.push(framed());
+top = {get location() { throw new Error("cross-origin"); }}; seen.push(framed(), panel());
+console.log(JSON.stringify(seen));"""
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    assert got == [False, False, True, True]

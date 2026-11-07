@@ -2721,10 +2721,22 @@ function drawAppBtn() {
   b.title = getsApp() ? `Put ${siteTitle()} on your home screen, with alerts` : "Choose what to be alerted about";
 }
 
+// Shown inside another site's page (a league site's iframe): browsers won't ask about notifications
+// there, and report them as blocked whatever the setting says.
+function framed() {
+  try { return window.top !== window.self && window.top.location.origin !== location.origin; }
+  catch (e) { return true; }
+}
+
 function drawAppPanel() {
   const box = $("#apppanel .box"), name = esc(siteTitle());
   let html = `<button class="close" data-appclose aria-label="Close">✕</button>`;
-  if (isIOS() && !standalone()) {
+  if (framed()) {
+    html += `<h3>Alerts</h3>
+      <p class="sub">${name} is showing inside another site here, and browsers only allow alerts on a page opened on its own.</p>
+      <p class="install"><a href="${esc(location.href)}" target="_blank" rel="noopener">Open ${name} in its own tab ↗</a></p>
+      <p class="sub">Turn alerts on there: they keep coming after you close it.</p>`;
+  } else if (isIOS() && !standalone()) {
     html += `<h3>${name} on your home screen</h3>
       <p class="sub">Alerts on an iPhone come through the home-screen app (iOS 16.4 or later).</p>
       <ol><li>Tap <b>Share</b> <span aria-hidden="true">⬆️</span> (at the bottom in Safari, or the top right on an iPad).</li>
