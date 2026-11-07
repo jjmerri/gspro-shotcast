@@ -31,7 +31,9 @@ def test_half_greys_the_other_side_of_the_ball_to_pin_line():
 
 
 def test_fit_scales_into_jevs_limits():
-    assert min(fit(Image.new("RGB", (170, 310))).size) >= 256
+    assert min(fit(Image.new("RGB", (170, 310))).size) >= 280   # a 720p crop; Jev rejects under 280
+    assert min(fit(Image.new("RGB", (255, 464))).size) >= 280   # a 1080p crop
+    assert min(fit(Image.new("RGB", (255, 1568))).size) >= 280  # already at the cap: still widened
     assert max(fit(Image.new("RGB", (400, 3000))).size) <= 1568
     assert fit(Image.new("RGB", (458, 836))).size == (458, 836)
 

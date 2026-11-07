@@ -45,8 +45,9 @@ from .flight_pick import Hazard
 log = logging.getLogger(__name__)
 
 IMAGES_HEADER = {"TypeSafe-Danger-Zone-Images": "true"}
-# Jev's image limits: each side 256..1568 px.
-MIN_SIDE, MAX_SIDE = 256, 1568
+# Jev's image limits: each side up to 1568 px, and (measured 11-06) at least 280: it now rejects 256-279
+# with "Invalid image dimensions", which lost every minimap read at 1080p and below. 300 leaves a margin.
+MIN_SIDE, MAX_SIDE = 300, 1568
 
 WATER = ("Water is an open surface with no grass or plants on it: black, dark blue, blue-grey or pale "
          "silvery grey (the sea shimmers), smooth or rippled")
@@ -595,13 +596,13 @@ def _jpeg(img: Image.Image) -> bytes:
 
 def fit(img: Image.Image) -> Image.Image:
     """Scale into Jev's size limits, keeping the shape."""
+    if MIN_SIDE <= min(img.size) and max(img.size) <= MAX_SIDE:
+        return img
     scale = 1.0
     if min(img.size) < MIN_SIDE:
         scale = MIN_SIDE / min(img.size)
     if max(img.size) * scale > MAX_SIDE:
         scale = MAX_SIDE / max(img.size)
-    if scale == 1.0:
-        return img
     return img.resize((max(MIN_SIDE, round(img.width * scale)), max(MIN_SIDE, round(img.height * scale))))
 
 
