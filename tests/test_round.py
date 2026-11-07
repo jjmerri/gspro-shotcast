@@ -109,7 +109,12 @@ def test_two_balls_per_team_use_the_schedule():
     assert r.format == "best_ball" and not r.anonymous_players()
     assert {s.label: s.strokes for s in r.sides} == {"Mike": 5, "Sarah": 9}  # 75% of 6 and 12, .5 rounds up
     r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course=None, scheduled_format="alternate shot")
-    assert r.format is None and r.format_warning
+    # GSPro's own alternate shot mode: both partners set up on one ball, the HUD naming who's hitting.
+    assert r.format == "alternate" and not r.format_warning and not r.anonymous_players()
+    assert [s.gspro for s in r.sides] == [["MikeD", "Sarah"]] and r.no_scramble   # GSPro copies the ball
+    assert "isn't known" not in " ".join(r.format_facts())
+    one = Round(league=LEAGUE, gspro_players=["MikeD"], course=None, scheduled_format="alternate shot")
+    assert "isn't known" in " ".join(one.format_facts())
 
 
 def _three_hole_round(fmt="best ball"):
@@ -1134,6 +1139,15 @@ def test_classify_round_separates_league_from_practice(tmp_path):
     assert practice is None and entry["week"] == 3
     entry, practice = e._classify_round(["MikeD", "Sarah"], "Pebble Beach")  # week 4: best ball, two partners
     assert practice is None and entry["week"] == 4
+    # Alternate shot in GSPro's own mode: both partners set up on the one ball.
+    e._setup_format = "alternate"
+    entry, practice = e._classify_round(["MikeD", "Sarah"], "Wynn")
+    assert practice is None and entry["week"] == 3
+    # Both partners in stroke play on an alternate shot week is two balls: practice.
+    e._setup_format, e._setup_mode_read = None, True
+    _, practice = e._classify_round(["MikeD", "Sarah"], "Wynn")
+    assert practice and "alternate" in practice
+    e._setup_mode_read = False
     # A course we aren't playing this year is practice, even on a scheduled date.
     _, practice = e._classify_round(["MikeD"], "Augusta National")
     assert practice and "schedule" in practice
@@ -1467,7 +1481,8 @@ async def test_preround_preloads_a_practice_opener_and_airs_it(tmp_path):
 
     e = _engine(tmp_path)
     e.current_par = 4
-    # Two balls on Wynn, which is alternate shot (one ball): a practice round, but still preloaded.
+    # Two balls on Wynn, which is alternate shot, set up in stroke play: a practice round, but still preloaded.
+    e._setup_mode_read = True
     await e._prepare_speculative_round("Wynn", ["MikeD", "Sarah"])
     assert e._pending_opening is not None and not e._pending_opening.is_league
     held = e._pending_opening.lines[0].text
@@ -1537,12 +1552,12 @@ async def test_setup_watcher_airs_a_practice_opener_over_the_load(tmp_path):
 
     e = _engine(tmp_path)
     e.cfg.commentary.preround_poll_seconds = 0.01
-    # Wynn + these two is a practice round (not a scheduled league pairing). Practice airs over the load
-    # screen exactly like league: both round types behave the same way.
+    # An unscheduled course is a practice round. Practice airs over the load screen exactly like league:
+    # both round types behave the same way.
     reads = [
-        {"setup_course": "Play Wynn", "setup_slot_1": "MikeD", "setup_slot_2": "Sarah"},
-        {"setup_course": "Play Wynn", "setup_slot_1": "MikeD", "setup_slot_2": "Sarah"},
-        {"load_course": "Wynn"},  # the course's load screen: Play was pressed
+        {"setup_course": "Play Augusta National", "setup_slot_1": "MikeD", "setup_slot_2": "Sarah"},
+        {"setup_course": "Play Augusta National", "setup_slot_1": "MikeD", "setup_slot_2": "Sarah"},
+        {"load_course": "Augusta National"},  # the course's load screen: Play was pressed
     ]
 
     class FakeScreen:
@@ -3829,6 +3844,90 @@ async def test_a_quit_after_a_full_nine_signs_off_on_the_holes_played(tmp_path):
     e._sign_off = fake_sign_off
     await e.handle_round_end(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
     assert signed == [9]
+
+
+async def test_a_wrong_holes_practice_quit_after_the_weeks_nine_is_the_league_round(tmp_path):
+    # League week 1, 2026-11-07: set up for 18 (the week is the front 9), so practice; quit after 9.
+    from commentator.models import RoundEndEvent
+    e = _engine(tmp_path)
+    entry = next(w for w in e.league.data["schedule"] if w.get("week") == 4)
+    entry.update(start_hole=1, hole_count=9, holes="Front 9")
+    e._setup_holes = (1, 18)
+    names = ["MikeD", "Sarah"]
+    _, practice = e._classify_round(names, "Pebble Beach")
+    r = e._build_round(names, "Pebble Beach", {}, is_league=False)
+    e._note_holes_only(r, names, "Pebble Beach", practice)
+    e._start_round(r)
+    sid = e.store.db.execute("INSERT INTO shots (ts, session_id, player, is_putt, is_league, fmt) "
+                             "VALUES (0, ?, 'MikeD', 0, 0, NULL)", (e.store.session_id,)).lastrowid
+    e.state.record_shot(ShotRecord(player="MikeD", shot=Shot(club="Dr"), hud=Hud(), hole="Hole 1", tags=[],
+                                   round_id=r.id, hole_seq=1, shot_number=1, shot_id=sid))
+    r.start_hole, r.start_hole_assumed = 1, False
+    r.par = {q: 4 for q in range(1, 19)}
+    for g in names:
+        r.set_log_scores(g, {q: 4 for q in range(1, 10)})
+    r.seq = 10
+    signed = []
+
+    async def fake_sign_off(rr, stats):
+        signed.append(rr.is_league)
+    e._sign_off = fake_sign_off
+    await e.handle_round_end(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
+    assert r.is_league and r.holes == 9 and r.schedule["week"] == 4 and signed == [True]
+    rows = e.store.db.execute("SELECT is_league, complete, holes, team IS NOT NULL FROM rounds").fetchall()
+    assert rows and all(tuple(x) == (1, 1, 9, 1) for x in rows)
+    assert e.store.db.execute("SELECT MIN(is_league) FROM shots WHERE id > ?", (r.shot_floor,)).fetchone()[0] == 1
+    assert tuple(e.store.db.execute("SELECT fmt, attributed FROM shots WHERE id = ?", (sid,)).fetchone()) == ("best_ball", 1)
+    # No course card: the strokes still land on holes, so the team has a net.
+    assert all(s.hole_strokes for s in r.sides if s.strokes)
+
+
+@pytest.mark.parametrize("mike", [list(range(1, 11)),                  # Mike holed out on 10 too
+                                  [1, 2, 3, 4, 6, 7, 8, 9]])           # no score on 5: not finished
+async def test_a_wrong_holes_practice_not_stopped_at_the_weeks_nine_stays_practice(tmp_path, mike):
+    from commentator.models import RoundEndEvent
+    e = _engine(tmp_path)
+    entry = next(w for w in e.league.data["schedule"] if w.get("week") == 4)
+    entry.update(start_hole=1, hole_count=9, holes="Front 9")
+    e._setup_holes = (1, 18)
+    names = ["MikeD", "Sarah"]
+    _, practice = e._classify_round(names, "Pebble Beach")
+    r = e._build_round(names, "Pebble Beach", {}, is_league=False)
+    e._note_holes_only(r, names, "Pebble Beach", practice)
+    e._start_round(r)
+    r.start_hole, r.start_hole_assumed = 1, False
+    r.par = {q: 4 for q in range(1, 19)}
+    r.set_log_scores("MikeD", {q: 4 for q in mike})
+    r.set_log_scores("Sarah", {q: 4 for q in mike if q < 10})
+    r.seq = 10
+
+    async def fake_sign_off(rr, stats):
+        pass
+    e._sign_off = fake_sign_off
+    await e.handle_round_end(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
+    assert not r.is_league
+
+
+async def test_a_wrong_holes_practice_quit_short_of_the_weeks_holes_stays_practice(tmp_path):
+    from commentator.models import RoundEndEvent
+    e = _engine(tmp_path)
+    entry = next(w for w in e.league.data["schedule"] if w.get("week") == 4)
+    entry.update(start_hole=1, hole_count=9, holes="Front 9")
+    e._setup_holes = (1, 18)
+    names = ["MikeD", "Sarah"]
+    _, practice = e._classify_round(names, "Pebble Beach")
+    r = e._build_round(names, "Pebble Beach", {}, is_league=False)
+    e._note_holes_only(r, names, "Pebble Beach", practice)
+    assert r.league_if_holes is not None
+    e._start_round(r)
+    r.start_hole, r.start_hole_assumed = 1, False
+    r.par = {q: 4 for q in range(1, 19)}
+    for g in names:
+        r.set_log_scores(g, {q: 4 for q in range(1, 12)})   # played on past the week's nine
+    r.seq = 12
+    e._sign_off = lambda rr, stats: __import__("asyncio").sleep(0)
+    await e.handle_round_end(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
+    assert not r.is_league
 
 
 def test_a_quit_keeps_the_last_hole_when_a_phantom_side_never_scored(tmp_path):

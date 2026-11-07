@@ -11,7 +11,7 @@ import math
 import re
 import sqlite3
 import time
-from typing import Any
+from typing import Any, Callable
 
 from .hud import Hud
 from .models import Line, Shot
@@ -804,6 +804,13 @@ class Store:
         self.db.commit()
         return cur.rowcount
 
+    def mark_league(self, after_id: int) -> int:
+        """A round found to be a league one only at its end (see Round.make_league): every shot since
+        `after_id` (its shot floor) is a league shot."""
+        cur = self.db.execute("UPDATE shots SET is_league = 1, is_tournament = 0 WHERE id > ?", (after_id,))
+        self.db.commit()
+        return cur.rowcount
+
     def finish_of(self, shot_id: int) -> tuple[str | None, float | None]:
         """A shot's stored (lie_after, finish_yards)."""
         row = self.db.execute("SELECT lie_after, finish_yards FROM shots WHERE id = ?", (shot_id,)).fetchone()
@@ -1116,21 +1123,22 @@ class Store:
     def last_shot_id(self) -> int:
         return self.db.execute("SELECT COALESCE(MAX(id), 0) FROM shots").fetchone()[0]
 
-    def week_ctp(self, courses: list[str], holes: list[int], since: str,
-                 before_id: int | None = None) -> dict[int, tuple[str, float]]:
+    def week_ctp(self, courses: list[str], holes: list[int], since: str, before_id: int | None = None,
+                 team_of: Callable[[str], str | None] | None = None) -> dict[int, tuple[str, float]]:
         """The closest league tee shot on each closest-to-the-pin hole of this course since `since`
         (YYYY-MM-DD): hole number -> (player, yards). Only a tee shot that finished on the green (or
-        in the hole) counts. Individual-ball rounds only (best ball, aggregate): a team-ball format's
-        next stroke is from the chosen ball, so a player's own tee shot finish isn't known there.
-        `before_id` leaves out shots recorded after it (the round being played)."""
+        in the hole) counts. Every format: a scramble records a finish only for the ball the team
+        picked (its best, so the one that counts), and a shot whose hitter isn't known (one GSPro
+        profile for an alternate shot or scramble team) goes to the team, `team_of(player)`, or is
+        left out without it. `before_id` leaves out shots recorded after it (the round being played)."""
         from .league import course_match_score
 
         rows = self.db.execute(
-            """SELECT sh.player, sh.course, sh.hole, sh.finish_yards FROM shots sh
+            """SELECT sh.player, sh.course, sh.hole, sh.finish_yards, sh.attributed, sh.outcome FROM shots sh
                JOIN sessions se ON se.id = sh.session_id
-               WHERE sh.is_league = 1 AND sh.excluded = 0 AND sh.attributed = 1 AND sh.mulligan = 0 AND sh.left_out = 0 AND sh.is_putt = 0
-                     AND sh.shot_number = 1 AND sh.fmt IN ('best_ball', 'aggregate')
-                     AND sh.finish_yards IS NOT NULL AND (sh.lie_after = 'green' OR sh.outcome = 'holed')
+               WHERE sh.is_league = 1 AND sh.excluded = 0 AND sh.mulligan = 0 AND sh.left_out = 0 AND sh.is_putt = 0
+                     AND sh.shot_number = 1
+                     AND ((sh.finish_yards IS NOT NULL AND sh.lie_after = 'green') OR sh.outcome = 'holed')
                      AND sh.player IS NOT NULL AND sh.player != 'unknown' AND se.date >= ?
                      AND (? IS NULL OR sh.id <= ?)""",
             (since, before_id, before_id),
@@ -1143,10 +1151,37 @@ class Store:
             if not any(c and (c.lower() == (r["course"] or "").lower() or course_match_score(c, r["course"] or "") >= 0.6)
                        for c in courses):
                 continue
+            who = r["player"] if r["attributed"] else (team_of(r["player"]) if team_of else None)
+            if not who:
+                continue
             hole = int(m.group(1))
-            if hole not in best or r["finish_yards"] < best[hole][1]:
-                best[hole] = (r["player"], r["finish_yards"])
+            # (an ace with no logged finish: one GSPro profile's shared ball has no log index)
+            yards = 0.0 if r["outcome"] == "holed" else r["finish_yards"]
+            if hole not in best or yards < best[hole][1]:
+                best[hole] = (who, yards)
         return best
+
+    def players_after(self, after_id: int) -> list[str]:
+        """The named players on the shots recorded after `after_id`."""
+        return [r[0] for r in self.db.execute(
+            "SELECT DISTINCT player FROM shots WHERE id > ? AND player IS NOT NULL AND player != 'unknown'",
+            (after_id,))]
+
+    def restamp_shots(self, after_id: int, player: str, *, fmt: str | None, attributed: bool,
+                      shared_ball: bool) -> None:
+        """A player's shots after `after_id` re-read under their round's format (see Engine._league_after_quit)."""
+        self.db.execute("UPDATE shots SET fmt = ?, attributed = ?, shared_ball = ? WHERE id > ? AND player = ?",
+                        (fmt, int(attributed), int(shared_ball), after_id, player))
+        self.db.commit()
+
+    def fill_tee_finish(self, shot_id: int | None, yards: float) -> None:
+        """A tee shot's finish on the green from the HUD at the next stroke, when GSPro's log couldn't
+        give one (alternate shot's shared ball has no per-player log index)."""
+        if shot_id is None:
+            return
+        self.db.execute("UPDATE shots SET finish_yards = COALESCE(finish_yards, ?), lie_after = 'green' WHERE id = ?",
+                        (yards, shot_id))
+        self.db.commit()
 
     def season_longest_drive(self, context: str | None = None) -> tuple[str, float] | None:
         r = self.db.execute(

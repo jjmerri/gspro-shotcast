@@ -914,7 +914,7 @@ function renderHome() {
     <div class="sub">${esc(m.date)} · ${esc(m.course)}${m.hole ? ` · hole ${m.hole}` : ""}${shotActions(m)}</div></div></div>`).join("")
     + `<p class="sub"><button class="link" data-tab="highlights">All records and moments →</button></p>` : "";
   const pickHint = me ? "" : `<p class="sub">Pick yourself in the “Everyone” menu at the top to see your own numbers here and on every tab.</p>`;
-  const lg = state.league, league = lg ? weekCard(lg.week) + standingsCard(lg.standings) : "";
+  const lg = state.league, league = lg ? weekCard(lg.week) + ctpCard(lg.week) + standingsCard(lg.standings) : "";
   const latest = recapList()[0], recap = latest ? `<p>${recapBtn(latest[0], latest[1])}</p>` : "";
   return `<div class="home"><h2>${meTitle("Home")}</h2>${newsCard()}${pickHint}${cards.length ? `<div class="cards">${cards.join("")}</div>` : ""}
     ${league ? `<h2>League <span class="sub">from Squabbit and the sim · updated ${esc(when(lg.updated * 1000, { weekday: "short", hour: "numeric", minute: "2-digit" }))}</span></h2>${recap}<div class="league">${league}</div>` : ""}
@@ -1815,6 +1815,16 @@ function weekCard(w) {
     w.rows.some(r => r.sim) ? `<p class="sub">* the sim's count: not on Squabbit yet</p>` : ""}</section>`;
 }
 const myTeam = r => !!(state.me && Array.isArray(r.players) && r.players.includes(state.me));
+// The week's closest-to-the-pin holes (league.json's week.ctp): the closest tee shot on the green in the
+// sim's league rounds so far, a team's name where one GSPro profile hid who hit it.
+function ctpCard(w) {
+  const c = w && w.ctp;
+  if (!c || !(c.holes || []).length) return "";
+  return `<section class="card week"><h3>Closest to the pin <span class="sub">week ${esc(w.week)}${c.prize ? ` · $${esc(c.prize)} a hole` : ""}</span></h3>
+  <table><thead><tr><th>Hole</th><th class="l">Closest</th><th>Distance</th></tr></thead><tbody>${c.holes.map(h =>
+    `<tr${h.player && h.player === state.me ? ` class="mine"` : ""}><td>${esc(h.hole)}</td><td class="l">${h.player ? esc(h.player) : '<span class="sub">nobody on the green yet</span>'}</td><td>${h.distance ? esc(h.distance) : ""}</td></tr>`).join("")}
+  </tbody></table><p class="sub">Tee shots on the green in league rounds on the sim.</p></section>`;
+}
 // The season's points standings over its final weeks (league.json).
 function standingsCard(s) {
   if (!s || !(s.rows || []).length) return "";

@@ -119,7 +119,6 @@ def test_week_ctp_counts_only_league_tee_shots_on_the_green(tmp_path):
     _tee_shot(e, "Tony", 12, 4.0)
     _tee_shot(e, "Priya", 12, 2.5, lie="fringe")           # off the green: doesn't count
     _tee_shot(e, "Lou", 12, 1.0, league=False)              # practice: doesn't count
-    _tee_shot(e, "Dee", 12, 0.5, fmt="scramble")            # team ball: finish unknown
     _tee_shot(e, "Mike", 12, 3.0, course="Elsewhere")       # another course
     _tee_shot(e, "Sarah", 14, 1.0)                          # not a CTP hole
     assert e.store.week_ctp(["Test Links"], [12, 15], "2026-01-01") == {12: ("Tony", 4.0)}
@@ -128,6 +127,50 @@ def test_week_ctp_counts_only_league_tee_shots_on_the_green(tmp_path):
     facts = e._week_ctp_facts(r)
     assert facts == ["Closest to the pin on hole 12 this week so far: Tony, 12 feet from the hole.",
                      "Nobody has a tee shot on the green on hole 15 this week yet."]
+
+
+def test_week_ctp_counts_scramble_picks_and_credits_an_unknown_hitter_to_the_team(tmp_path):
+    e = _engine(tmp_path, League(LEAGUE_DATA))
+    _tee_shot(e, "Tony", 12, 4.0)
+    _tee_shot(e, "Dee", 12, 3.0, fmt="scramble")              # the ball Hackers picked: counts
+    one = _tee_shot(e, "Mike", 15, 2.0, fmt="alternate")      # one GSPro profile: who hit it isn't known
+    e.store.set_shot_player(one, "Mike", attributed=False, fmt="alternate", shared_ball=True)
+    assert e.store.week_ctp(["Test Links"], [12, 15], "2026-01-01") == {12: ("Dee", 3.0)}
+    r, _ = _round()
+    e.round = r
+    assert e._week_ctp(r) == {12: ("Dee", 3.0), 15: ("Aces", 2.0)}
+    card = e._ctp_card(6)
+    assert card["holes"] == [{"hole": 12, "player": "Dee", "yards": 3.0, "distance": "9 feet"},
+                             {"hole": 15, "player": "Aces", "yards": 2.0, "distance": "6 feet"}]
+    assert e._ctp_card(7) is None                              # no CTP holes that week
+
+
+def test_week_ctp_counts_an_ace_with_no_logged_finish(tmp_path):
+    e = _engine(tmp_path, League(LEAGUE_DATA))
+    _tee_shot(e, "Tony", 12, 3.0)
+    ace = _tee_shot(e, "Mike", 12, None, lie=None, fmt="alternate")
+    e.store.set_shot_player(ace, "Mike", attributed=False, fmt="alternate", shared_ball=True)
+    e.store.set_shot_result(ace, outcome="holed")
+    assert e.store.week_ctp(["Test Links"], [12], "2026-01-01", team_of=e._team_label) == {12: ("Aces", 0.0)}
+
+
+def test_alternate_shot_ctp_credits_the_partner_who_teed_off(tmp_path):
+    from commentator.state import ShotRecord
+
+    league = League(LEAGUE_DATA)
+    e = _engine(tmp_path, league)
+    sched = {**LEAGUE_DATA["schedule"][0], "format": "Alternate"}
+    r = Round(league=league, gspro_players=["Mike", "Sarah"], course="Test Links", scheduled_format="alternate",
+              holes=9, start_hole=10, schedule=sched, is_league=True)
+    assert r.format == "alternate" and not r.anonymous_players()   # GSPro's mode names each hitter
+    e.round, r.seq = r, 3                                            # hole 12
+    sid = _tee_shot(e, "Sarah", 12, None, lie=None, fmt="alternate")
+    e.state.record_shot(ShotRecord(player="Sarah", shot=Shot(club="8I"), hud=Hud(), hole="Hole 12", tags=[],
+                                   round_id=r.id, hole_seq=3, shot_number=1, shot_id=sid))
+    # Mike plays the second stroke: the tee shot was Sarah's.
+    facts = e._ctp_facts(2, Hud(lie="green", to_pin="9 feet", shot_number=2), "Mike")
+    assert facts[0].startswith("Sarah's tee shot")
+    assert e.store.week_ctp(["Test Links"], [12], "2026-01-01") == {12: ("Sarah", 3.0)}
 
 
 def test_live_ctp_compares_with_the_week(tmp_path):
@@ -338,3 +381,20 @@ def test_week_gap_fact():
     assert _week_gap_fact("Aces", -6, "Duffers", -4, 2) == (
         "Aces are 2 shots ahead of Duffers: net 1 over par or better over the last 2 holes keeps them in front, "
         "net 2 over par ties.")
+
+
+def test_a_promoted_alternate_round_backfills_tee_finishes_from_the_partners_stroke(tmp_path):
+    from commentator.state import ShotRecord
+
+    league = League(LEAGUE_DATA)
+    e = _engine(tmp_path, league)
+    sched = {**LEAGUE_DATA["schedule"][0], "format": "Alternate"}
+    r = Round(league=league, gspro_players=["Mike", "Sarah"], course="Test Links", scheduled_format="alternate",
+              holes=9, start_hole=10, schedule=sched, is_league=True)
+    sid = _tee_shot(e, "Mike", 12, None, lie=None, fmt="alternate")
+    for who, n, lie, pin, shot_id in (("Mike", 1, "tee", "150 yards", sid), ("Sarah", 2, "green", "9 feet", None)):
+        e.state.record_shot(ShotRecord(player=who, shot=Shot(club="8I"), hud=Hud(), hole="Hole 12", tags=[],
+                                       round_id=r.id, hole_seq=3, shot_number=n, lie_before=lie,
+                                       to_pin_before=pin, shot_id=shot_id))
+    e._alternate_tee_finishes(r)
+    assert e.store.week_ctp(["Test Links"], [12], "2026-01-01") == {12: ("Mike", 3.0)}

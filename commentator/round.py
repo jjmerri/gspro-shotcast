@@ -26,9 +26,10 @@ FORMATS = {
     "aggregate": "Team sum: each player plays their own ball, and the team score is both players' net scores "
                  "added together, so every stroke counts.",
     "alternate": "Alternate shot: one ball per team. The partners take turns on the tee hole by hole, then "
-                 "alternate every shot until the ball is holed. GSPro shows the ball under one player's name, "
-                 "so who hit any given shot isn't known.",
+                 "alternate every shot until the ball is holed.",
 }
+# Alternate shot with one GSPro profile for the team: the HUD can't say which partner hit.
+ALTERNATE_UNNAMED = "GSPro shows the ball under one player's name, so who hit any given shot isn't known."
 FORMAT_NAMES = {"scramble": "scramble", "best_ball": "best ball", "aggregate": "team sum", "alternate": "alternate shot"}
 _ALIASES = {
     "scramble": {"scramble", "twopersonscramble", "twomanscramble"},
@@ -186,6 +187,9 @@ class Round:
         # The season store's last shot id when the round started: the week's earlier CTP tee shots
         # are the ones at or below it (this round's come from ctp_results instead).
         self.shot_floor: int | None = None
+        # A practice round only for its holes (set up for 18 on a front-nine week): the week it would be.
+        # Quit after exactly the week's holes, it's that league round after all (Round.make_league).
+        self.league_if_holes: dict | None = None
         # Played on the Simulator Golf Tour (GSPro syncs it there, from just after its first stroke): a
         # tournament round, which counts in neither the league's stats nor practice's.
         self.is_tournament = False
@@ -241,7 +245,12 @@ class Round:
                        "treating it as alternate shot") if scheduled and scheduled not in TEAM_BALL else None
             return fmt, warning
         if scheduled == "alternate":
-            return None, "schedule says alternate shot but both partners are in GSPro; format not used"
+            # GSPro's own alternate shot mode: both partners set up, one ball, the HUD naming who's hitting.
+            if self.teams and all(len(gs) == 2 and len(self.league.team_players.get(t, [])) == 2
+                                  for t, gs in self.teams.items()):
+                self.no_scramble = True   # GSPro copies the ball between partners here: not a scramble
+                return "alternate", None
+            return None, "schedule says alternate shot but the partners aren't one team in GSPro; format not used"
         return scheduled, None
 
     def add_player(self, g: str, teed: list[str] | None = None, after: str | None = None,
@@ -310,6 +319,30 @@ class Round:
         elif self.week_card:
             self._allocate_hole_strokes()
         return True
+
+    def make_league(self, entry: dict, holes: int, scheduled_format: str | None = None) -> None:
+        """A round started as practice found to be this league week after all (set up for 18, quit
+        after the week's nine): the league's teams, format (`scheduled_format` overriding the
+        schedule's, as config's round_format does), Squabbit card and strokes, over `holes`."""
+        self.is_league, self.schedule = True, entry
+        self.ctp_holes = [int(h) for h in entry.get("ctp_holes") or []]
+        self.week_card = self.league.week_card(entry.get("week"))
+        self.teams_known = False
+        teams: dict[str, list[str]] = {}
+        for g, player in self.roster.items():
+            team = self.league.player_team.get(player) if player else self.league.match_team(g)
+            teams.setdefault(team or g, []).append(g)
+        self.teams = teams
+        was = self.format
+        self.format, self.format_warning = self._resolve_format(
+            normalize_format(scheduled_format or entry.get("format")))
+        if was == "scramble":   # GSPro played a scramble (play_scramble): that's the format, whatever the schedule
+            self.format, self.format_warning = "scramble", None
+        self.holes = holes   # the strokes are for the holes the week plays
+        self.sides = self._build_sides()
+        self.set_holes(holes, confirmed=True)
+        if not self.course_card and not self.week_card:
+            self._allocate_hole_strokes()   # (set_holes only re-allocates from a card)
 
     def rename_player(self, old: str, new: str) -> bool:
         """A guest admitted under a misread of their name: every record of the round goes to the name
@@ -965,6 +998,8 @@ class Round:
             return []
         facts = [f"This round's format: {FORMAT_NAMES[self.format]}. {FORMATS[self.format]}"]
         if self.anonymous_players():
+            if self.format == "alternate":
+                facts[0] += " " + ALTERNATE_UNNAMED
             facts.append("Never credit a shot to one player by name; talk about the team, or say \"they\".")
         return facts
 

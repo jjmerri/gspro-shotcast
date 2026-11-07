@@ -893,6 +893,7 @@ class Engine:
         # scramble sets the round's format; leagues mostly leave GSPro on stroke play and score their
         # format in an app. A shamble or alternate shot only stops the log calling it a scramble.
         self._setup_format: str | None = None
+        self._setup_mode_read = False   # the MATCH SETTINGS game mode was read (None then means stroke play)
         self._setup_format_at = float("-inf")   # when the game mode last changed
         self._opener_prepared_format: str | None = None
         # The last roster (and slot order) read off a setup screen's PLAYERS tab, for a setup that never shows it.
@@ -2062,12 +2063,27 @@ class Engine:
         board = self._league_board() if self._league_page_on else None
         if board is None:
             return
-        self._league_body = json.dumps({**board.page(time.strftime("%Y-%m-%d")),
-                                        "updated": round(time.time())}).encode()
+        page = board.page(time.strftime("%Y-%m-%d"))
+        if page.get("week"):
+            page["week"]["ctp"] = self._ctp_card(page["week"]["week"])
+        self._league_body = json.dumps({**page, "updated": round(time.time())}).encode()
         if not self._league_uploading:
             self._league_uploading = True
             self._bg(self._upload_league_page())
         self._recap_soon()
+
+    def _ctp_card(self, week: int) -> dict | None:
+        """The stats page's closest-to-the-pin card for a league week: each CTP hole's closest tee shot
+        on the green in the sim's league rounds (None for a hole nobody's hit yet), and the prize."""
+        entry = self.league.week_entry(week) or {}
+        holes = [int(h) for h in entry.get("ctp_holes") or []]
+        if not holes:
+            return None
+        best = self._schedule_ctp(entry, [], holes)
+        return {"prize": self.league.data.get("ctp_prize"),
+                "holes": [{"hole": h, **({"player": best[h][0], "yards": round(best[h][1], 2),
+                                          "distance": _distance_text(best[h][1])} if h in best else {})}
+                          for h in holes]}
 
     async def _upload_league_page(self) -> None:
         try:
@@ -3523,20 +3539,39 @@ class Engine:
             return facts
         if shot_number == 2 and hud and hud.lie == "green" and hud.to_pin and player \
                 and not getattr(hud, "_wrong_green", False):
-            who = self._display(player)
+            who, tee = self._ctp_tee_shot(r, player)
             lead = self._ctp_leader(r, hole, exclude=who)
             group = self._ctp_group_facts(r, exclude=who)
             r.ctp_results.setdefault(r.seq, {})[who] = hud.to_pin
+            if tee is not None and r.format == "alternate" and (y := to_yards(hud.to_pin)) is not None:
+                self.store.fill_tee_finish(tee.shot_id, y)   # the shared ball has no log finish
             facts = [f"{who}'s tee shot on this closest-to-the-pin hole finished on the green, {hud.to_pin} from the hole."]
             mine = to_yards(hud.to_pin)
             if lead and mine is not None:
                 facts.append(f"That's the new closest this week, inside {lead[0]}'s {lead[1]}." if mine < lead[2]
                              else f"{lead[0]}'s {lead[1]} is still the closest this week.")
                 facts += self._ctp_mark_source(lead)
-            elif not lead and r.format in ("best_ball", "aggregate"):
+            elif not lead and r.is_league:
                 facts.append("That's the closest tee shot on this hole this week so far.")
             return facts + group
         return []
+
+    def _ctp_tee_shot(self, r: Round, player: str) -> tuple[str, ShotRecord | None]:
+        """Whose tee shot this hole's second stroke is played after, and its record. Each ball's own in
+        best ball; alternate shot's is the partner who teed off (the team, when one GSPro profile hides
+        who); a scramble's is the ball the team picked, or the team until the pick is known."""
+        side = r.side_for(player)
+        if r.format not in TEAM_BALL or side is None:
+            mine = [s for s in self.state.shots if s.round_id == r.id and s.hole_seq == r.seq
+                    and s.shot_number == 1 and not s.mulligan and s.player == player]
+            return self._display(player), (mine[-1] if mine else None)
+        tees = [s for s in self.state.shots if s.round_id == r.id and s.hole_seq == r.seq and s.shot_number == 1
+                and not s.mulligan and r.side_for(s.player) is side]
+        if r.format == "scramble":
+            tees = [s for s in tees if s.picked]
+        if len(tees) == 1 or (tees and r.format == "alternate"):
+            return self._display(tees[-1].player), tees[-1]
+        return side.label, None
 
     @staticmethod
     def _ctp_mark_source(lead: tuple) -> list[str]:
@@ -3553,8 +3588,8 @@ class Engine:
                     exclude: str | None = None) -> tuple[str, str, float, bool] | None:
         """The closest tee shot on the green on this hole this week (who, distance text, yards, whether it
         came from an earlier round): earlier rounds from the season store (everything recorded before
-        this round started), and this round's own greens as the HUD read them. Individual-ball weeks only."""
-        if hole is None or r.format not in ("best_ball", "aggregate"):
+        this round started), and this round's own greens as the HUD read them."""
+        if hole is None:
             return None
         options = []
         if (db := self._week_ctp(r, before_id=r.shot_floor).get(hole)):
@@ -7895,15 +7930,18 @@ class Engine:
         return max(course_match_score(entry.get("course") or "", course),
                    course_match_score(entry.get("gspro_course") or "", course)) >= 0.6
 
-    def _classify_round(self, names: list[str], course: str | None) -> tuple[dict, str | None]:
+    def _classify_round(self, names: list[str], course: str | None,
+                        holes: tuple[int, int] | tuple[()] | None = None) -> tuple[dict, str | None]:
         """Decide whether this opening tee is a league round. Returns (schedule entry, practice reason):
         a None reason means it's a league round on that entry; a string reason means practice (still
         commentated, just without league framing). A league round needs a scheduled course that's still
         in date, the right number of balls for the format (two, or one for alternate shot), those
         balls to be one registered team, and (when the setup screen was read) the week's nines. `round_week` in config forces a week when the course can't be
         read, bypassing only the course and date gates. Works the same for the tee's ball count and the
-        setup screen's slots, since a player sets up exactly the balls they'll play (one for alternate)."""
+        setup screen's slots, since a player sets up exactly the balls they'll play (one for alternate).
+        `holes` (start, count) stands in for the setup screen's; () leaves the holes unchecked."""
         c = self.cfg.commentary
+        setup_holes = self._setup_holes if holes is None else holes
         today = time.strftime("%Y-%m-%d")
         if not self.league.players:
             return {}, "no league roster configured"
@@ -7925,15 +7963,18 @@ class Engine:
             if end and str(end) < today:
                 return {}, f"week {entry.get('week')} ({entry.get('course')}) was due by {end}"
         fmt = normalize_format(c.round_format or entry.get("format"))
-        expected = 1 if fmt == "alternate" else 2
-        if len(names) != expected:
+        # Alternate shot: one GSPro profile for the team, or both partners in GSPro's alternate shot mode.
+        expected = (1, 2) if fmt == "alternate" else (2,)
+        if len(names) not in expected:
             return {}, (f"{len(names)} ball(s) on the tee, {FORMAT_NAMES.get(fmt or '', 'league play')} "
-                        f"shows {expected}")
+                        f"shows {' or '.join(map(str, expected))}")
+        if fmt == "alternate" and len(names) == 2 and self._setup_mode_read and self._setup_format != "alternate":
+            return {}, "two balls on an alternate shot week, but GSPro's game mode isn't alternate shot"
         team, bad = self._lone_team(names)
         if bad:
             return {}, bad
-        if (not forced and self._setup_holes
-                and (bad := self._wrong_holes(entry, *self._setup_holes))):
+        if (not forced and setup_holes
+                and (bad := self._wrong_holes(entry, *setup_holes))):
             return {}, bad
         if not forced and team:
             # A team posts one round per week: once it has a full league round on every week scheduled
@@ -7955,6 +7996,78 @@ class Engine:
         picked = names.get((start, count), f"{count} holes from hole {start}")
         week = entry.get("holes") or names.get((want_start or start, want_count or count), "other holes")
         return f"set up for {picked}, but week {entry.get('week')} is {week}"
+
+    def _note_holes_only(self, r: Round, names: list[str], course: str | None, practice: str | None) -> None:
+        """Keep the week a practice round would be but for the holes on the setup screen (see
+        _league_after_quit)."""
+        if practice and self._setup_holes:
+            entry, why = self._classify_round(names, course, holes=())
+            r.league_if_holes = entry if why is None and entry else None
+
+    def _league_after_quit(self, r: Round) -> bool:
+        """A practice round set up for the wrong holes (18 on a front-nine week) and quit after exactly
+        the week's holes was that league round: it becomes one before it's recorded. True if it did."""
+        entry = r.league_if_holes
+        if r.is_league or r.is_tournament or not entry or r.start_hole_assumed:
+            return False
+        def scored(g: str) -> set[int]:
+            return set(r.log_scores.get(g, {})) | set(r.card_scores.get(g, {}))
+        # Who must have finished each hole: every ball, or in alternate shot each team's one ball (the
+        # partner who holed out has the score; the practice round still has them on balls of their own).
+        if normalize_format(self.cfg.commentary.round_format or entry.get("format")) == "alternate":
+            groups: dict[str, list[str]] = {}
+            for g, player in r.roster.items():
+                team = self.league.player_team.get(player) if player else self.league.match_team(g)
+                groups.setdefault(team or g, []).append(g)
+            balls = list(groups.values())
+        else:
+            balls = [s.gspro for s in r.sides]
+        holes = [set().union(*(scored(g) for g in ball)) for ball in balls]
+        playing = [h for h in holes if h]
+        if not playing:
+            return False
+        done = 0   # the holes every ball has finished, from the first: a gap isn't a finished round
+        while done < r.seq and all(done + 1 in h for h in playing):
+            done += 1
+        if done != entry.get("hole_count") or r.start_hole != entry.get("start_hole"):
+            return False
+        # Anyone who played on past the week's holes wasn't stopping at them (only reaching the next tee is).
+        if any(q > done for h in playing for q in h) or any(
+                s.round_id == r.id and (s.hole_seq or 0) > done and not s.mulligan for s in self.state.shots):
+            return False
+        entry, why = self._classify_round(list(r.roster), r.course, holes=(r.start_hole, done))
+        if why is not None or not entry:
+            log.info("Round %s: quit after the week's holes but not a league round after all (%s)", r.id, why)
+            return False
+        r.make_league(entry, done, self.cfg.commentary.round_format)
+        if r.shot_floor is not None:
+            self.store.mark_league(r.shot_floor)
+            # The league's format can change who a shot is credited to (one profile for an alternate
+            # shot team is both partners): re-stamp the round's shots, gimmes included, the way they'd
+            # have been recorded.
+            anon = set(r.anonymous_players())
+            for player in self.store.players_after(r.shot_floor):
+                shared = not r.solo(r.side_for(player)) and (r.format == "scramble" or r.no_scramble
+                                                             or self.gspro.team_scores)
+                self.store.restamp_shots(r.shot_floor, player, fmt=r.player_format(player),
+                                         attributed=player not in anon, shared_ball=shared)
+        if r.format == "alternate":
+            self._alternate_tee_finishes(r)
+        log.info("Round %s: set up for %s holes but quit after week %s's %s: a league round after all (%s)",
+                 r.id, self._setup_holes[1] if self._setup_holes else "more", entry.get("week"), done,
+                 ", ".join(f"{s.label} strokes {s.strokes}" for s in r.sides))
+        return True
+
+    def _alternate_tee_finishes(self, r: Round) -> None:
+        """Alternate shot's tee shots finish where the partner's second stroke starts: the practice
+        round a promoted one began as treated them as two balls, so _ctp_facts never filled these in."""
+        mine = [s for s in self.state.shots if s.round_id == r.id and not s.mulligan and s.hole_seq]
+        for tee in (s for s in mine if s.shot_number == 1 and s.shot_id is not None):
+            side = r.side_for(tee.player)
+            nxt = next((s for s in mine if s.hole_seq == tee.hole_seq and s.shot_number == 2
+                        and r.side_for(s.player) is side), None)
+            if nxt and nxt.lie_before == "green" and (y := to_yards(nxt.to_pin_before)) is not None:
+                self.store.fill_tee_finish(tee.shot_id, y)
 
     def _canonical_course(self, course: str | None) -> str | None:
         """The league's name for a course when it's on the schedule, else the name as given. GSPro
@@ -8086,6 +8199,7 @@ class Engine:
         self._setup_holes = self._opener_prepared_holes = None   # the next round reads its own setup
         self._setup_holes_read, self._holes_snap = False, None
         self._setup_format = self._opener_prepared_format = None
+        self._setup_mode_read = False
         self._scramble_pairs = set()
         self._putted_on_last_hole = self._round_end_queued = False
         self._live_round_start()
@@ -8430,6 +8544,9 @@ class Engine:
         # An opener prepared off the setup screen airs now, with no tee-time model or grounding wait,
         # when the tee confirms the same course and the same league team(s). Else it's made here.
         if (pending := self._take_matching_pending(is_league, course, names)) is not None:
+            if practice:
+                log.info("Practice, not a league round (%s)", practice)
+            self._note_holes_only(pending.round, names, course, practice)
             self._reconcile_slots(pending.round, names)
             self._refresh_course_card(pending.round, pending.course)
             self._apply_setup_holes(pending.round)
@@ -8459,6 +8576,7 @@ class Engine:
             self._bg(self._apply_live_handicaps(self._round_players(names)))
             log.info("Practice, not a league round (%s): calling the golf without league framing", practice)
         r = self._build_round(names, course, entry, is_league, slot_names=slots)
+        self._note_holes_only(r, names, course, practice)
         self._reconcile_slots(r, names)
         self._apply_log_holes(r)
         self._start_round(r)
@@ -8500,6 +8618,7 @@ class Engine:
         else:
             self._bg(self._apply_live_handicaps(self._round_players(names)))
         r = self._build_round(names, course, entry, is_league, use_current_hole=False, slot_names=slots)
+        self._note_holes_only(r, names, course, practice)
         g = self.gspro
         r.start_hole, r.start_hole_assumed = g.first_hole + 1, False   # the log's holes are 0-based
         if r.course_card:
@@ -8932,7 +9051,7 @@ class Engine:
     async def _read_setup_format(self, tones: dict, frame, fresh: bool, cache: dict) -> dict:
         """GSPro's game mode, while the MATCH SETTINGS tab is up (see _setup_format)."""
         if fresh:
-            self._setup_format = None
+            self._setup_format, self._setup_mode_read = None, False
         tab = tones.get("setup_match_tab")
         if tab is None or not _tab_lit(tab, _MATCH_TAB_LIT):
             return cache
@@ -8942,6 +9061,7 @@ class Engine:
         if not text.strip():
             return cache
         self._keep_fixture_frame("setup_match", frame)
+        self._setup_mode_read = True   # (None below is then stroke play or another every-ball mode)
         fmt = next((f for word, f in (("SCRAMBLE", "scramble"), ("SHAMBLE", "shamble"), ("ALTERNATE", "alternate"))
                     if word in text), None)
         if fmt != self._setup_format:
@@ -9257,28 +9377,40 @@ class Engine:
 
     def _week_ctp(self, r: Round, before_id: int | None = None) -> dict[int, tuple[str, float]]:
         """The week's closest tee shot on the green per closest-to-the-pin hole, from every league round
-        of this week's course on the sim. Individual-ball weeks only (see Store.week_ctp)."""
-        if not r.is_league or not r.ctp_holes or r.format not in ("best_ball", "aggregate"):
+        of this week's course on the sim (see Store.week_ctp)."""
+        if not r.is_league or not r.ctp_holes:
             return {}
+        return self._schedule_ctp(r.schedule, [r.course], r.ctp_holes, before_id)
+
+    def _schedule_ctp(self, entry: dict, courses: list[str | None], holes: list[int],
+                      before_id: int | None = None) -> dict[int, tuple[str, float]]:
+        """A schedule week's closest tee shots on the green on its closest-to-the-pin holes, from the
+        sim's league rounds on its course (see Store.week_ctp)."""
         ends = [e["end_date"] for e in self.league.data.get("schedule") or [] if e.get("end_date")]
-        if not ends:
+        if not ends or not holes:
             return {}
         import datetime
 
         since = (datetime.date.fromisoformat(min(ends)) - datetime.timedelta(days=120)).isoformat()
-        courses = [c for c in (r.course, r.schedule.get("course"), r.schedule.get("gspro_course")) if c]
-        return self.store.week_ctp(courses, r.ctp_holes, since, before_id)
+        courses = [c for c in (*courses, entry.get("course"), entry.get("gspro_course")) if c]
+        return self.store.week_ctp(courses, holes, since, before_id, team_of=self._team_label)
+
+    def _team_label(self, name: str) -> str | None:
+        """The league team a GSPro name plays for, by its display name (a shot with no known hitter)."""
+        player = self.league.match_player(name)
+        team = self.league.player_team.get(player) if player else self.league.match_team(name)
+        return self.league.team_name(team) if team else None
 
     def _closer_week_ctp(self, r: Round) -> dict[int, tuple[str, str, float]] | None:
         """The week's best tee shot per CTP hole from rounds before this one, for the closer to measure
-        tonight's against. None outside individual-ball league weeks (the week can't be counted)."""
-        if not r.is_league or not r.ctp_holes or r.format not in ("best_ball", "aggregate") \
+        tonight's against. None outside league weeks with a schedule (the week can't be counted)."""
+        if not r.is_league or not r.ctp_holes \
                 or not any(e.get("end_date") for e in self.league.data.get("schedule") or []):
             return None
         return {h: (who, _distance_text(y), y) for h, (who, y) in self._week_ctp(r, before_id=r.shot_floor).items()}
 
     def _week_ctp_facts(self, r: Round) -> list[str]:
-        if not r.is_league or r.format not in ("best_ball", "aggregate"):
+        if not r.is_league:
             return []
         best = self._week_ctp(r)
         facts = []
@@ -9443,7 +9575,10 @@ class Engine:
             # nine or more counts as a round in the season totals, scored per nine. A quit that far in
             # earns a sign-off over the holes actually played; a shorter one is left alone.
             self._wrap_branches = None
-            stats = self._record_round_stats(r, event.reason, complete=False)
+            if self._league_after_quit(r):
+                stats = self._record_round_stats(r, event.reason)
+            else:
+                stats = self._record_round_stats(r, event.reason, complete=False)
             self._fill_course_layouts(since=time.time() - 12 * 3600)
             played = max((st.holes_scored for st in stats.values()), default=0)
             if played < COUNTS_AS_ROUND_HOLES:
