@@ -784,6 +784,13 @@ def aside_room(cap: int) -> str:
     return f"\n\nEach line here may run up to {cap} words, room to tell the story."
 
 
+def word_limit(max_words: int) -> int:
+    """The most words a line asked to stay within `max_words` may run and still air whole. A line a few
+    words over is still a whole, sayable thought; at a hard 18 the booth dropped or cut hundreds a
+    week, almost all 19-22 words."""
+    return max_words + max_words // 4
+
+
 def parse_lines(text: str, speakers: list[str], max_words: int, names: list[str] | None = None) -> list[Line]:
     try:
         data = json.loads(text)
@@ -798,6 +805,7 @@ def parse_lines(text: str, speakers: list[str], max_words: int, names: list[str]
     # ...or runs two speakers' lines into one ("I'm calling this one in. Nigel: Dan rolls it home").
     inner = re.compile(r"(?<=[.!?])\s+(?:" + "|".join(re.escape(l) for l in labels) + r")\s*:\s*", re.I) \
         if labels else None
+    limit = word_limit(max_words)
     lines: list[Line] = []
     for item in items:
         if not isinstance(item, dict):
@@ -810,15 +818,15 @@ def parse_lines(text: str, speakers: list[str], max_words: int, names: list[str]
         if not body or body.strip(" .,:;!?-\"'").lower() in labels:   # just a speaker label ("pbp")
             continue
         words = body.split()
-        if len(words) > max_words:
+        if len(words) > limit:
             # Cut at the last full sentence that fits; a line that stops mid-thought sounds broken.
-            head = " ".join(words[:max_words])
+            head = " ".join(words[:limit])
             end = max(head.rfind(". "), head.rfind("! "), head.rfind("? "), *(i for i in [len(head) - 1] if head[-1] in ".!?"))
             if end <= 0:
-                log.warning("Dropped a %d-word line over the %d-word cap (no sentence end within it): %r",
-                            len(words), max_words, body)
+                log.warning("Dropped a %d-word line over the %d-word limit (no sentence end within it): %r",
+                            len(words), limit, body)
                 continue
-            log.warning("Cut a %d-word line over the %d-word cap to %d words: %r", len(words), max_words,
+            log.warning("Cut a %d-word line over the %d-word limit to %d words: %r", len(words), limit,
                         len(body[: end + 1].split()), body)
             body = head[: end + 1]
         speaker = item.get("speaker") if item.get("speaker") in speakers else speakers[0]

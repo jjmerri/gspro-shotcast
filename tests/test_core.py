@@ -316,6 +316,15 @@ def test_parse_lines_logs_the_lines_it_cuts_or_drops(caplog):
     assert ["Cut a 23-word" in caplog.messages[0], "Dropped a 20-word" in caplog.messages[1]] == [True, True]
 
 
+def test_a_line_a_few_words_over_the_cap_airs_whole():
+    # Live, at the 18-word cap: dropped whole, with no sentence end to cut back to.
+    near = "Derek has eight feet to save par and stay at plus two; it turns hard left to right late."
+    over = "Derek has eight feet for par to stay at one over; it turns a little left to right late. I think it slides by."
+    raw = json.dumps({"lines": [{"speaker": "pbp", "text": near}, {"speaker": "pbp", "text": over}]})
+    assert [l.text for l in parse_lines(raw, ["pbp"], max_words=18)] == [
+        near, "Derek has eight feet for par to stay at one over; it turns a little left to right late."]
+
+
 def test_parse_lines_strips_a_leaked_speaker_label():
     # A model sometimes echoes its own role key or display name into the text; it must not be spoken.
     raw = json.dumps({"lines": [

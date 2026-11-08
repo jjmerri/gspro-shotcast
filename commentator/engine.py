@@ -45,7 +45,7 @@ from .models import (
 )
 from .prompts import (
     ANGLES, FLIGHT_OUTCOMES, PRACTICE_ANGLES, NEWS_TRIGGERS, aside_room, closer_prompt, flight_prompt, opener_prompt, output_schema,
-    parse_lines, preshot_line_prompt, preshot_line_schema, preshot_hazard_prompt, preshot_hazard_schema,
+    parse_lines, word_limit, preshot_line_prompt, preshot_line_schema, preshot_hazard_prompt, preshot_hazard_schema,
     chat_prompt, chat_schema, news_prompt, news_schema, preshot_branch_prompt, preshot_branch_schema,
     reaction_outcomes, retry_prompt, segment_prompt, shot_prompt, system_prompt,
     wrap_recap_prompt, hole_intro_prompt, scores_prompt, trivia_prompt, trivia_schema,
@@ -2509,7 +2509,7 @@ class Engine:
             # ("Interesting bit of news this morning, Duke.") with the story itself gone.
             items = data.get("lines") if isinstance(data, dict) else None
             if long := [i + 1 for i, item in enumerate(items if isinstance(items, list) else [])
-                        if isinstance(item, dict) and len(str(item.get("text", "")).split()) > cap]:
+                        if isinstance(item, dict) and len(str(item.get("text", "")).split()) > word_limit(cap)]:
                 problems = problems + [f"line {', '.join(map(str, long))} ran over {cap} words: say each line, "
                                        f"story included, in at most {cap} words"]
             if len(lines) != 2 or len(good) != 2 or good[0].speaker == good[1].speaker:

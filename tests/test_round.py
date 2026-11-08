@@ -2160,7 +2160,7 @@ async def test_a_news_line_too_long_to_air_whole_is_retried_not_cut_to_its_tease
     # 10-21: cut back to its last full sentence under the word cap, Nigel's line aired as just
     # "Interesting bit of news this morning, Duke." with the story gone.
     llm = _NewsLLM(opening="Interesting bit of news this morning, Duke. Scottie Scheffler won by five shots on "
-                           "Sunday and nobody else got close.")
+                           "Sunday at Augusta and nobody else in that field got anywhere close.")
     e = _news_engine(tmp_path, llm)
     e.cfg.commentary.aside_max_words = 18
     r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, is_tournament=False)
