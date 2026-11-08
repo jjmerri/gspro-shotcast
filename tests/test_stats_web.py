@@ -636,6 +636,21 @@ console.log(JSON.stringify(out));"""
     assert "league rounds' kept all season" in rows
 
 
+def test_the_page_click_handler_answers_every_button_it_has_a_branch_for():
+    """A branch on t.dataset.x is dead unless [data-x] is in the selector that finds t (the reel buttons were)."""
+    import re
+    from pathlib import Path
+
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    m = re.search(r'const t = e\.target\.closest\((.*?)\);\n  if \(!t\) return;\n(.*?)\n}\);\n', page, re.S)
+    selector, body = m.group(1), m.group(2)
+    heads = re.findall(r"^  if \((t\.dataset\.\w+.*?)\) \{$", body, re.M)
+    attrs = {re.sub(r"[A-Z]", lambda c: "-" + c.group(0).lower(), n)
+             for h in heads for n in re.findall(r"t\.dataset\.(\w+)", h)}
+    assert "reel" in attrs
+    assert sorted(a for a in attrs if f"[data-{a}]" not in selector) == []
+
+
 def test_a_round_card_takes_its_longest_drive_from_its_shots(tmp_path):
     """Stored as none at the round's end (the club wasn't read), the drive counts once a rule does."""
     path, db = _db(tmp_path)

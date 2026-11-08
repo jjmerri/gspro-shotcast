@@ -2531,7 +2531,7 @@ document.addEventListener("click", (e) => {
     return;
   }
   const t = e.target.closest("[data-tab],[data-section],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
-                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-exclround],[data-delround],[data-delvod],[data-leagueround],[data-sharecard],[data-period],[data-vod],[data-clip],[data-link],[data-more],[data-onlyme],[data-hcpclean],[data-recap]");
+                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-exclround],[data-delround],[data-delvod],[data-leagueround],[data-sharecard],[data-period],[data-vod],[data-clip],[data-reel],[data-link],[data-more],[data-onlyme],[data-hcpclean],[data-recap]");
   if (!t) return;
   if (t.dataset.hcpclean) {
     state.hcpClean = t.dataset.hcpclean === "1";

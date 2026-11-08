@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.106
+
+### Stats page
+- Tapping ▶ Highlights now plays the round's highlight reel; before, it did nothing.
+
 ## 0.1.105
 
 ### Booth
