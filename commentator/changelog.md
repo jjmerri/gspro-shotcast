@@ -4,7 +4,7 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
-## 0.1.104
+## 0.1.105
 
 ### Booth
 - The booth only reads GSPro: anything in front of it (a browser, Discord, a chat window) or beside a windowed GSPro is blacked out before it's read, so it never ends up in the booth's log or a problem report.
