@@ -1772,6 +1772,26 @@ async def test_the_course_select_screen_reads_the_bookings_before_setup(tmp_path
     assert fetched == ["course select"]
 
 
+async def test_the_play_button_is_not_ocrd_every_poll_on_the_range(tmp_path):
+    import asyncio
+
+    e = _engine(tmp_path)
+    e.cfg.source.gspro_log_truth = True
+    e.gspro.mode = "range"
+    e.cfg.commentary.preround_poll_seconds = 0.01
+    e.screen = _PixelSetupScreen([{"setup_course": "DRO Tee 2 51"}])
+    task = asyncio.create_task(e._watch_setup())
+    while e.screen.i < 4:
+        await asyncio.sleep(0.01)
+    assert e.screen.ocred.count("setup_course") == 1   # the live range scene, read once per SETUP_AWAY_POLL_SECONDS
+    e.gspro.mode = "menu"
+    n = e.screen.i
+    while e.screen.i < n + 3:
+        await asyncio.sleep(0.01)
+    task.cancel()
+    assert e.screen.ocred.count("setup_course") >= 3   # back in the menus: every poll
+
+
 def _engine_with(tmp_path, league):
     from commentator.sources.replay import ReplaySource
     from commentator.speech import SpeechQueue

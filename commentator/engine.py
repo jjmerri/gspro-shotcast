@@ -233,6 +233,10 @@ REST_HOLD_SECONDS = 0.6
 REST_SHOWN_SECONDS = 0.9
 # How long to keep reading a scramble's pick screen for its cards (it showed ~6.5 s, Bethpage 11-07).
 PICK_SCREEN_SECONDS = 15.0
+# How often the setup watcher OCRs the Play button while GSPro's log has it on the range or a course
+# (no setup tab lit): there the region is the live scene, so its pixels change every poll and it was
+# OCR'd every poll (50,782 times on 11-07). Still read now and then, in case the log's state is wrong.
+SETUP_AWAY_POLL_SECONDS = 5.0
 
 
 def _unsettled(hud: Hud, tag: str = "") -> Hud:
@@ -9016,6 +9020,7 @@ class Engine:
         players_read_at = -1e9   # when the latest PLAYERS frame this loop read itself was grabbed
         frame_at = holes_since = float("-inf")   # this poll's grab; when this setup was first seen to begin
         seen_play: str | None = None   # the Play button's course on this poll (None off the setup screen)
+        gate_read_at = float("-inf")   # when the Play button was last OCR'd away from the menus
         while True:
             await asyncio.sleep(max(c.preround_poll_seconds, 0.2))
             self._sync_screen_ui()
@@ -9054,6 +9059,16 @@ class Engine:
                     players_tab = tab is not None and _tab_lit(tab, _PLAYERS_TAB_LIT)
                     if players_tab:
                         players_read_at = grabbed_at
+                    lit = players_tab or any(
+                        (t := tones.get(n)) is not None and _tab_lit(t, level)
+                        for n, level in (("setup_holes_tab", _HOLES_TAB_LIT), ("setup_match_tab", _MATCH_TAB_LIT)))
+                    # Away from the menus by GSPro's log (the range is only left for setup by End Round; a
+                    # course is reached from the setup screen, whose load screen must still be read at once).
+                    away = self.gspro.mode == "range" or (self.gspro.mode == "course" and not seen_setup)
+                    if not lit and p is None and self._log_rounds and away:
+                        if frame_at - gate_read_at < SETUP_AWAY_POLL_SECONDS:
+                            continue
+                        gate_read_at = frame_at
                     # On the PLAYERS tab only the Play button matters; elsewhere also the load title.
                     gate_names = ["setup_course"] if players_tab else ["setup_course", "load_course", "course_select"]
                     gate_lines, gate_cache = await asyncio.to_thread(

@@ -1388,9 +1388,13 @@ const freshTag = r => state.seen && r.ended > state.seen ? '<span class="tag new
 
 function renderRounds() {
   const d = state.data;
+  const rows = state.me ? d.rounds.filter(r => r.players.includes(state.me)) : d.rounds;
+  // League rounds are played off handicaps: a Net column whenever one is listed.
+  const net = rows.some(r => r.league);
   const cols = [
     { key: "date", label: "Date" }, { key: "course", label: "Course", cls: "l" }, { key: "side", label: "Player / side", cls: "l", val: sideName },
     { key: "gross", label: "Gross" }, { key: "to_par", label: "To par" },
+    ...(net ? [{ key: "net_to_par", label: "Net", title: "To par after handicap strokes (league rounds)" }] : []),
     { key: "format", label: "Format", cls: "l" }, { key: "played", label: "Holes" },
     { key: "fir", label: "Fairways", val: r => r.fir[1] ? r.fir[0] / r.fir[1] : null },
     { key: "gir", label: "GIR", val: r => r.gir[1] ? r.gir[0] / r.gir[1] : null }, { key: "putts", label: "Putts" },
@@ -1401,10 +1405,9 @@ function renderRounds() {
       · <button class="link" data-delround="${r.round}" data-ended="${r.round_end}" title="Remove the round and its shots for good">Delete</button></td>` : "";
   const row = r => `<tr class="click" data-round="${r.id}"><td>${esc(r.date)}${freshTag(r)}</td><td class="l">${esc(r.course)}</td>
       <td class="l">${esc(sideName(r))}${r.league && r.team && r.team !== r.side ? ` <span class="sub">${esc(r.team)}</span>` : ""}</td>
-      <td>${dash(r.gross)}</td><td>${toPar(r.to_par)}</td>
+      <td>${dash(r.gross)}</td><td>${toPar(r.to_par)}</td>${net ? `<td>${r.net_to_par == null ? "–" : toPar(r.net_to_par)}</td>` : ""}
       <td class="l">${esc(r.format.replace("_", " "))}${roundTags(r)}</td><td>${r.played}${r.played !== r.holes ? `/${r.holes}` : ""}</td>
       <td>${frac(r.fir)}</td><td>${frac(r.gir)}</td><td>${dash(r.putts)}</td>${manage(r)}</tr>`;
-  const rows = state.me ? d.rounds.filter(r => r.players.includes(state.me)) : d.rounds;
   return `<h2>${meTitle("Rounds")}</h2><p class="sub">Tap a round for its page: the scorecard, hole replays, shots and video.${state.me ? " Includes team rounds they played in." : ""}</p>`
     + sortable("rounds", rows, cols, row, { empty: "No rounds in this view.", cls: "rounds" }) + excludedRounds();
 }
@@ -1474,7 +1477,7 @@ function renderRound() {
   return back + `<h2>${esc(r.date)} · <a class="link" href="${esc(hashFor("courses", { course: r.course }))}">${esc(r.course)}</a></h2>${pick}
     <p>${who}${team} · ${esc(r.format.replace("_", " "))}${teeText(r) ? ` · ${esc(teeText(r))}` : ""}${roundTags(r)}${freshTag(r)}</p>
     <div class="cards rcards">
-      <div class="card"><div class="k">Score</div><div class="v">${dash(r.gross)} <span class="sub">${toPar(r.to_par)}</span></div><div class="sub">${r.played}${r.played !== r.holes ? ` of ${r.holes}` : ""} holes</div></div>
+      <div class="card"><div class="k">Score</div><div class="v">${dash(r.gross)} <span class="sub">${toPar(r.to_par)}</span></div><div class="sub">${r.played}${r.played !== r.holes ? ` of ${r.holes}` : ""} holes${r.net_to_par != null ? ` · net ${toPar(r.net_to_par)}` : ""}</div></div>
       <div class="card"><div class="k">Fairways · greens</div><div class="v">${frac(r.fir)} · ${frac(r.gir)}</div><div class="sub">scrambling ${frac(r.scramble)} · sand ${frac(r.sand)}</div></div>
       <div class="card"><div class="k">Putts</div><div class="v">${dash(r.putts)}</div><div class="sub">${puttText(r)}</div></div>
       <div class="card"><div class="k">Penalties · mulligans</div><div class="v">${dash(r.penalties)} · ${mulliganTotal(r)}</div><div class="sub">${[mulliganText(r), r.longest_drive ? `longest drive ${Math.round(r.longest_drive)} yd` : ""].filter(Boolean).join(" · ")}</div></div>

@@ -503,6 +503,7 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             "tournament": bool(r["is_tournament"]) and not r["is_league"],
             "gross": card["gross"] if card["played"] else r["gross"],
             "to_par": card["to_par"] if card["played"] else None,
+            "net_to_par": _net_to_par(r, card) if r["is_league"] else None,
             "fir": [r["fir_hit"], r["fir_tries"]], "gir": [r["gir_hit"], r["gir_tries"]],
             "scramble": [r["scramble_hit"], r["scramble_tries"]], "sand": [r["sand_hit"], r["sand_tries"]],
             "putts": r["putts"], "putt_split": putt_split, "penalties": r["penalties"], "longest_drive": longest,
@@ -512,6 +513,16 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             "mulligans": {p: mulligans.get(rnd, Counter())[p] for p in played_by or [r["side"]] if p},
         })
     return out
+
+
+def _net_to_par(r, card: dict) -> int | None:
+    """A league round's net to par: its scorecard's to par less the handicap strokes it was given
+    (what was recorded: gross to par less net), so a corrected card moves the net with it."""
+    if r["net_to_par"] is None:
+        return None
+    if not card["played"] or r["gross"] is None or not r["par"]:
+        return r["net_to_par"]
+    return card["to_par"] - (r["gross"] - r["par"] - r["net_to_par"])
 
 
 def _shot_brief(st, h: dict, sg: dict) -> dict[str, Any]:

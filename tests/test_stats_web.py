@@ -108,6 +108,19 @@ def test_a_rounds_side_players_come_from_the_record_else_its_shots(tmp_path):
     assert got == {"Duffers": ["Priya", "Tony"], "Aces": ["Josh", "Sam"]}
 
 
+def test_a_league_rounds_net_follows_its_card(tmp_path):
+    path, db = _db(tmp_path)
+    # Recorded 37 on par 36 off 4 strokes (net -3); the card was later corrected to 36 (net -4).
+    card = json.dumps({str(h): PARS[str(h)] for h in range(1, 10)})
+    for end, league in ((0, 1), (3600, 0)):
+        db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, gross, par, net_to_par,"
+                   " scores, hole_pars, is_league) VALUES (1, ?, '2026-10-16', 'Pebble', 'Ann', 9, 37, 36, -3, ?, ?, ?)",
+                   (end, card, json.dumps(PARS), league))
+    db.commit()
+    with stats_web.connect(path) as ro:
+        assert {r["league"]: r["net_to_par"] for r in stats_web.rounds(ro)} == {True: -4, False: None}
+
+
 def test_a_players_history_links_each_round_it_was_part_of(tmp_path):
     path, db = _db(tmp_path)
     for end, side in ((0, "Ann"), (10, "Bob"), (3600, "Ann")):   # two sides of one round, then another round
