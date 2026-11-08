@@ -113,6 +113,8 @@ squabbit:
   enabled: false          # pull live handicaps at round start (needs SQUABBIT_EMAIL/PASSWORD in .env
                           # and "squabbit_invite" in the league file)
   timeout_seconds: 15     # if Squabbit is slow or offline, the league file's handicaps stand
+  live_updates: true      # on a league round, ask on screen whether to post each hole's score and
+                          # CTP marks to the team's Squabbit card as it's played
 
 booking:
   enabled: false          # read the sim's SuperSaaS bookings (needs SUPERSAAS_API_KEY in .env): a

@@ -1,8 +1,9 @@
 """Reads this league's own data (handicaps, scores) from Squabbit at round start.
 
 The booth signs in as the league organiser with SQUABBIT_EMAIL / SQUABBIT_PASSWORD from
-the booth's .env, then reads the league, its tournaments and scorecards. Read-only: it
-never writes to Squabbit. A handful of requests per round, cached for the night.
+the booth's .env, then reads the league, its tournaments and scorecards. A handful of
+requests per round, cached for the night. The only writes are a league round's own hole
+scores and closest-to-the-pin marks, when the players opt in (squabbit_live.py, `commit`).
 
 Squabbit is a Firebase app, so this talks to Firebase directly: Identity Toolkit to sign
 in, then the Firestore REST API to read documents. The web API key is the one the public
@@ -49,6 +50,50 @@ def _value(v: dict[str, Any]) -> Any:
     return None
 
 
+DELETE = object()   # a value for `commit` that removes the field instead
+
+
+def _encode(v: Any) -> dict[str, Any]:
+    """A plain Python value as a Firestore typed value (the inverse of _value)."""
+    from datetime import datetime
+
+    if v is None:
+        return {"nullValue": None}
+    if isinstance(v, bool):
+        return {"booleanValue": v}
+    if isinstance(v, int):
+        return {"integerValue": str(v)}
+    if isinstance(v, float):
+        return {"doubleValue": v}
+    if isinstance(v, datetime):
+        return {"timestampValue": v.isoformat().replace("+00:00", "Z")}
+    if isinstance(v, dict):
+        return {"mapValue": {"fields": {str(k): _encode(x) for k, x in v.items()}}}
+    if isinstance(v, (list, tuple)):
+        return {"arrayValue": {"values": [_encode(x) for x in v]}}
+    return {"stringValue": str(v)}
+
+
+def _nest(values: dict[tuple[str, ...], Any]) -> dict[str, Any]:
+    """{("holeScoresV2", "5"): 4} -> Firestore `fields` with the map nesting the paths name."""
+    root: dict[str, Any] = {}
+    for path, v in values.items():
+        if v is DELETE:   # in the update mask but not the fields: Firestore removes it
+            continue
+        node = root
+        for seg in path[:-1]:
+            node = node.setdefault(seg, {"mapValue": {"fields": {}}})["mapValue"]["fields"]
+        node[path[-1]] = _encode(v)
+    return root
+
+
+def _mask(path: tuple[str, ...]) -> str:
+    """A field path for updateMask: segments that aren't plain identifiers go in backticks."""
+    import re
+
+    return ".".join(seg if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", seg) else f"`{seg}`" for seg in path)
+
+
 def _fields(doc: dict[str, Any]) -> dict[str, Any]:
     out = {k: _value(v) for k, v in doc.get("fields", {}).items()}
     out["_id"] = doc.get("name", "").rsplit("/", 1)[-1]
@@ -63,6 +108,8 @@ class SquabbitClient:
             raise SquabbitError("set SQUABBIT_EMAIL and SQUABBIT_PASSWORD in the booth .env")
         self._http = httpx.Client(timeout=30)
         self._token: str | None = None
+        self.auth_id: str | None = None
+        self._user_id: str | None = None
 
     def __enter__(self) -> "SquabbitClient":
         self.sign_in()
@@ -86,6 +133,7 @@ class SquabbitClient:
             }.get(reason, reason or "check the .env credentials")
             raise SquabbitError(f"sign-in failed ({resp.status_code}): {hint}")
         self._token = resp.json()["idToken"]
+        self.auth_id = resp.json().get("localId")
         log.info("signed in to Squabbit as %s", self.email)
 
     def _headers(self) -> dict[str, str]:
@@ -100,6 +148,48 @@ class SquabbitClient:
             return None
         resp.raise_for_status()
         return _fields(resp.json())
+
+    def document_at(self, path: str) -> tuple[dict[str, Any], str] | None:
+        """One document's fields and its update time (the precondition for a safe `commit`)."""
+        resp = self._http.get(f"{_DOCS}/{path}", headers=self._headers())
+        if resp.status_code == 401:
+            self.sign_in()
+            resp = self._http.get(f"{_DOCS}/{path}", headers=self._headers())
+        if resp.status_code in (403, 404):
+            return None
+        resp.raise_for_status()
+        raw = resp.json()
+        return _fields(raw), raw["updateTime"]
+
+    def commit(self, updates: list[tuple[str, dict[tuple[str, ...], Any], str]],
+               verify: list[tuple[str, str]] = ()) -> bool:
+        """Sets just these fields (each a path of segments) on existing documents, all at once or not at
+        all: `updates` are (path, values, update time when read), `verify` (path, update time) for
+        documents read but left alone. If any of them has changed since it was read (someone else wrote
+        it), nothing is written and this returns False, so the caller re-reads before trying again.
+        (Squabbit's rules refuse a read-write transaction, so this is the optimistic one its app uses.)"""
+        def name(path: str) -> str:
+            return f"projects/{PROJECT}/databases/(default)/documents/{path}"
+
+        writes = [{"update": {"name": name(path), "fields": _nest(values)},
+                   "updateMask": {"fieldPaths": [_mask(p) for p in values]},
+                   "currentDocument": {"updateTime": at}} for path, values, at in updates]
+        writes += [{"verify": name(path), "currentDocument": {"updateTime": at}} for path, at in verify]
+        resp = self._http.post(f"{_DOCS}:commit", headers=self._headers(), json={"writes": writes})
+        if resp.status_code == 401:   # the hour-long token ran out mid-round
+            self.sign_in()
+            resp = self._http.post(f"{_DOCS}:commit", headers=self._headers(), json={"writes": writes})
+        if resp.status_code in (400, 409) and ("FAILED_PRECONDITION" in resp.text or "ABORTED" in resp.text):
+            return False
+        resp.raise_for_status()
+        return True
+
+    def user_id(self) -> str | None:
+        """The signed-in account's Squabbit user id (not its sign-in id): who a CTP mark is entered by."""
+        if self._user_id is None and self.auth_id:
+            rows = self._query("users", [("authId", "EQUAL", self.auth_id)])
+            self._user_id = rows[0]["_id"] if rows else None
+        return self._user_id
 
     def _query(self, collection: str, where: list[tuple[str, str, Any]]) -> list[dict[str, Any]]:
         """Runs a Firestore structured query and returns the matched documents' fields."""
@@ -137,6 +227,10 @@ class SquabbitClient:
 
     def leaderboard(self, tournament_id: str) -> dict[str, Any] | None:
         return self.document(f"tournamentsLeaderboards/{tournament_id}")
+
+    def player_rounds(self, tournament_id: str) -> list[dict[str, Any]]:
+        """Every player's round in one event (one per player, on their team's scorecard)."""
+        return self._query("rounds", [("tournamentId", "EQUAL", tournament_id)])
 
     def league_rounds(self, league_id: str) -> list[dict[str, Any]]:
         """Every player round posted in the league: hole scores, the tee, and the handicap index used."""

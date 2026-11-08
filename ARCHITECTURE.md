@@ -122,6 +122,12 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
 ### External data
 - **`squabbit.py`** reads live handicaps and leaderboards from Squabbit at round start (read-only, best-effort),
   and the season's week cards, rounds and leaderboards for `squabbit --cards`/`--validate`.
+- **`squabbit_live.py`** opt-in live posting (`squabbit.live_updates`): when a league round starts, a
+  `popup.py` question on the sim's screen asks whether to update Squabbit. On yes, each finished hole's
+  score (a shared ball's on every teammate's round) and CTP marks go on the team's week card as one
+  atomic Firestore commit with update-time preconditions. The booth stops posting a card when anyone
+  else enters or clears anything on it. What the booth wrote is kept in `squabbit_live.json`, next to
+  the season db.
 - **`handicap.py`** Squabbit's handicap rules (course handicap, allowances, caps, stroke
   allocation), the week card built from a Squabbit tournament, and the season validation that
   recomputes leaderboard nets. `round.py` uses it, with the week card when one is saved.

@@ -184,6 +184,8 @@ class Round:
         self.week_card = league.week_card(self.schedule.get("week")) if is_league else None
         # Hole of the round -> who -> how far their tee shot finished from the hole.
         self.ctp_results: dict[int, dict[str, str]] = {}
+        # Which tee shot (season store id) each result came from, so a mulligan takes its result back.
+        self.ctp_tees: dict[tuple[int, str], int] = {}
         # The season store's last shot id when the round started: the week's earlier CTP tee shots
         # are the ones at or below it (this round's come from ctp_results instead).
         self.shot_floor: int | None = None

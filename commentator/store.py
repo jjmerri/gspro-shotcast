@@ -1181,6 +1181,16 @@ class Store:
             self.db.execute("UPDATE shots SET finish_yards = COALESCE(finish_yards, ?) WHERE id = ?", (yards, shot_id))
             self.db.commit()
 
+    def tee_finishes(self, shot_ids: list[int]) -> dict[int, float]:
+        """Shot id -> how far from the hole it finished on the green (0 in the hole), for those known."""
+        if not shot_ids:
+            return {}
+        rows = self.db.execute(
+            f"""SELECT id, finish_yards, outcome FROM shots WHERE id IN ({",".join("?" * len(shot_ids))})
+                AND mulligan = 0 AND ((finish_yards IS NOT NULL AND lie_after = 'green') OR outcome = 'holed')""",
+            shot_ids).fetchall()
+        return {r["id"]: 0.0 if r["outcome"] == "holed" else r["finish_yards"] for r in rows}
+
     def fill_tee_finish(self, shot_id: int | None, yards: float) -> None:
         """A tee shot's finish on the green from the HUD at the next stroke, when GSPro's log couldn't
         give one (alternate shot's shared ball has no per-player log index)."""

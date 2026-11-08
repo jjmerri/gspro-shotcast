@@ -384,6 +384,10 @@ class SquabbitConfig(BaseModel):
     enabled: bool = False
     # Keep a slow or unreachable Squabbit from stalling the opener; the file handicaps stand in.
     timeout_seconds: float = 15.0
+    # On a league round, ask on the sim's screen whether to post it to Squabbit as it's played: each
+    # hole's score on the team's card as it finishes, and closest-to-the-pin marks. Never offered (or
+    # written) over anything someone else entered on the team's card. Needs `enabled`.
+    live_updates: bool = True
 
 
 class BookingConfig(BaseModel):

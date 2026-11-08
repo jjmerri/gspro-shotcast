@@ -972,6 +972,12 @@ class Engine:
         self._recap_tried: tuple | None = None   # the last recap built or tried, (key, digest)
         self._recap_holes: dict[tuple[int, str], tuple[int, dict]] = {}   # (week, team) -> (net, Squabbit's holes)
         self._board_task: asyncio.Task | None = None
+        # Posting a league round to Squabbit as it's played (squabbit_live.py), once the players say yes:
+        # the booth's record of what it wrote (made on the first league round), and this round's state
+        # {"round", "status": finding/asking/on/off, "targets", "question", "dirty", "task", "last"}.
+        self._sq_live = None
+        self._sq: dict | None = None
+        self._sq_lock = asyncio.Lock()   # one writer at a time, across rounds (a replayed round's included)
         self.hole_number: int | None = None
         # Whether the current hole's number was read off the screen rather than counted on.
         self.hole_number_read = False
@@ -1797,6 +1803,7 @@ class Engine:
             self._apply_log_holes(r)
             if not self._round_end_queued:   # once it's ending, End Round's reset mustn't wipe the scores
                 self._sync_log_scores(r)
+                self._squabbit_kick()
         if g.round_completes != self._log_round_completes:
             self._log_round_completes = g.round_completes
             if live and not r.log_complete:
@@ -3583,6 +3590,11 @@ class Engine:
             mine = to_yards(hud.to_pin)
             dist = ctp_feet(hud.to_pin)
             r.ctp_results.setdefault(r.seq, {})[who] = hud.to_pin   # unrounded, to rank against
+            if tee is not None and tee.shot_id is not None:
+                r.ctp_tees[(r.seq, who)] = tee.shot_id
+            else:
+                r.ctp_tees.pop((r.seq, who), None)
+            self._squabbit_kick()
             if tee is not None and r.format == "alternate" and mine is not None:
                 self.store.fill_tee_finish(tee.shot_id, mine)   # the shared ball has no log finish
             facts = [f"{who}'s tee shot on this closest-to-the-pin hole finished on the green, {dist} from the hole."]
@@ -7308,6 +7320,12 @@ class Engine:
                 nxt[1].shot_number, nxt[1].lie_before = rec.shot_number, rec.lie_before
                 self.store.set_shot_start(nxt[0], rec.shot_number, rec.lie_before, replaced=shot_id)
             log.info("Shot %s was a mulligan (GSPro took it back): left out of the stats", shot_id)
+            if r is not None and rec.round_id == r.id:
+                for key in [k for k, tee in r.ctp_tees.items() if tee == shot_id]:
+                    del r.ctp_tees[key]
+                    (r.ctp_results.get(key[0]) or {}).pop(key[1], None)
+                    log.info("CTP: %s's mark on hole %s came from that shot; taken back", key[1], key[0])
+                    self._squabbit_kick()
         if self._totals_due:   # once the positions and mulligans above are all in
             self._totals_due = False
             self._fill_log_totals()
@@ -8077,6 +8095,7 @@ class Engine:
         sq = self.cfg.squabbit
         if not sq.enabled or not self.league.squabbit_invite:
             return
+        self._squabbit_kick()
         # The week's leaderboards load alongside, in their own task: a slow read never costs the handicaps.
         if self._board_task is None or self._board_task.done():
             self._board_task = asyncio.create_task(self._refresh_board())
@@ -8122,6 +8141,229 @@ class Engine:
                 for w in sorted(self.board.weeks) if self.board.posted(w)) or "no week posted yet")
         except Exception as e:
             log.warning("Squabbit leaderboard fetch failed (%s)", e)
+
+    # ---- posting the round to Squabbit as it's played ---------------------------------------
+
+    def _squabbit_live_on(self) -> bool:
+        sq = self.cfg.squabbit
+        return bool(sq.enabled and sq.live_updates and self.league.squabbit_invite
+                    and self.cfg.source.type != "replay")
+
+    def _squabbit_uids(self) -> dict[str, str]:
+        """Roster player -> Squabbit user id."""
+        return {p: i for p, info in self.league.player_info.items() if (i := (info or {}).get("squabbit_id"))}
+
+    def _squabbit_kick(self) -> None:
+        """A league round's scores or CTP marks may have changed: the first time, find the team's card
+        and ask on screen; once they've said yes, post whatever's new (in the background)."""
+        r = self.round
+        s = self._sq
+        if r is not None and s is not None and s["round"] != r.id:
+            # Another round (league or not): the last one's question comes down and its writer stops
+            # before this round's can start.
+            if s["status"] == "asking" and s["question"] is not None:
+                s["question"].close()
+            s["status"] = "off"
+            self._sq = s = None
+        if not r or r.ended or not r.is_league or r.is_tournament or not self._squabbit_live_on():
+            return
+        if s is None:
+            if not r.schedule.get("week") or not any(side.team for side in r.sides):
+                return   # not placed yet; a later kick tries again
+            self._sq = {"round": r.id, "status": "finding", "targets": [], "question": None,
+                        "dirty": False, "task": None, "last": None, "seen": {}}
+            self._bg(self._squabbit_offer(r, self._sq))
+            return
+        if s["status"] == "on":
+            s["dirty"] = True
+            if s["task"] is None or s["task"].done():
+                s["task"] = asyncio.create_task(self._squabbit_push(r, s))
+
+    def _ctp_hole_enders(self, r: Round) -> dict[tuple[int, str], float]:
+        """CTP tee shots that ended the hole (an ace, or inside the gimme), which leave no second-stroke
+        setup for ctp_results: (hole of the round, player) -> yards, from the season store's finish."""
+        shared = set(r.anonymous_players())   # one profile's ball: whoever hit it, it's no one's mark
+        tees = {s.shot_id: s for s in self.state.shots
+                if s.round_id == r.id and s.player not in shared and s.shot_number == 1 and not s.mulligan and s.shot_id is not None
+                and s.hole_seq is not None and s.outcome in ("holed", "conceded") and r.hole_number(s.hole_seq) in r.ctp_holes
+                and (r.format != "scramble" or s.picked is not False)}
+        return {(tees[sid].hole_seq, tees[sid].player): y for sid, y in self.store.tee_finishes(list(tees)).items()}
+
+    async def _squabbit_offer(self, r: Round, s: dict) -> None:
+        from .popup import Question
+        from .squabbit import SquabbitClient
+        from .squabbit_live import LiveSync
+
+        week = int(r.schedule["week"])
+        teams = sorted({side.team for side in r.sides if side.team})
+        uid_of = self._squabbit_uids()
+        if self._sq_live is None:
+            self._sq_live = LiveSync(Path(self.cfg.db_path).with_name("squabbit_live.json"))
+        live = self._sq_live
+
+        def find() -> list:
+            found = []
+            with SquabbitClient() as client:
+                league = client.league_by_invite(self.league.squabbit_invite)
+                if not league:
+                    return found
+                for team in teams:
+                    players = self.league.team_players.get(team, [])
+                    uids = [uid_of[p] for p in players if p in uid_of]
+                    if not players or len(uids) != len(players):
+                        log.info("Squabbit live: %s has a player with no Squabbit id", team)
+                        continue
+                    if (t := LiveSync.find(client, league["_id"], week, team, uids)) is not None:
+                        found.append((t, live.others(client, t)))
+            return found
+
+        try:
+            # After any earlier round's writer: what it's committing is the booth's, not someone else's.
+            async with self._sq_lock:
+                if s is not self._sq:
+                    return
+                found = await asyncio.wait_for(asyncio.to_thread(find), timeout=self.cfg.squabbit.timeout_seconds)
+        except Exception as e:
+            log.warning("Squabbit live: couldn't read week %s's cards (%s); not posting this round", week, e)
+            s["status"] = "off"
+            return
+        targets = []
+        for t, others in found:
+            if others:
+                log.info("Squabbit live: %s's week %s card already has entries the booth didn't make (%s); "
+                         "leaving it to them", t.team, week, "; ".join(others))
+            elif live.answer(t) is not False:
+                targets.append(t)
+        if s is not self._sq or r.ended or not targets:
+            s["status"] = "off"
+            return
+        s["targets"] = targets
+        if all(live.answer(t) for t in targets):   # said yes before the booth restarted
+            log.info("Squabbit live: posting %s's week %s round (said yes earlier)", " and ".join(teams), week)
+            s["status"] = "on"
+            self._squabbit_kick()
+            return
+        s["status"] = "asking"
+        loop = asyncio.get_running_loop()
+        who = " and ".join(t.team for t in targets)
+        s["question"] = Question(
+            "Update Squabbit as you play?",
+            f"Week {week}, {who}: each hole's score goes on your Squabbit card as you finish it, and "
+            "closest-to-the-pin tee shots too. Nothing is entered over anything already on your card.",
+            "Yes, update Squabbit", "No thanks",
+            on_answer=lambda yes: loop.call_soon_threadsafe(self._squabbit_answer, s, yes),
+            where=self.screen.monitor_rect if self.screen is not None and self.cfg.screen.follow_window else None,
+        ).show()
+
+    def _squabbit_answer(self, s: dict, yes: bool) -> None:
+        if s is not self._sq or s["status"] != "asking":
+            return
+        s["question"] = None
+        for t in s["targets"]:
+            self._sq_live.set_answer(t, yes)
+        s["status"] = "on" if yes else "off"
+        log.info("Squabbit live: %s", "yes, posting the round as it's played" if yes else "no thanks")
+        if yes:
+            r = self.round
+            if r is not None and r.id == s["round"] and r.ended:
+                s["dirty"] = True
+                s["task"] = asyncio.create_task(self._squabbit_push(r, s))
+            else:
+                self._squabbit_kick()
+
+    async def _squabbit_push(self, r: Round, s: dict) -> None:
+        """Posts what's new until nothing is: a kick while a post is out just goes round again."""
+        async with self._sq_lock:
+            await self._squabbit_push_locked(r, s)
+
+    async def _squabbit_push_locked(self, r: Round, s: dict) -> None:
+        from .squabbit import SquabbitClient
+        from .squabbit_live import Blocked, team_ctp, team_scores
+
+        live = self._sq_live
+        while s["dirty"] and s["status"] == "on" and s["targets"] and s is self._sq:
+            s["dirty"] = False
+            uid_of = self._squabbit_uids()
+            finished = self._ctp_hole_enders(r)
+            jobs = []
+            for t in s["targets"]:
+                if r.hole_number(1) is None:
+                    continue   # which nine isn't confirmed yet: the next kick posts it
+                if r.hole_number(1) != t.start_hole:   # GSPro's log moved the round to the other nine
+                    if t.scorecard_id not in s.setdefault("wrong_nine", set()):
+                        s["wrong_nine"].add(t.scorecard_id)
+                        log.warning("Squabbit live: this round starts on hole %s, %s's week card on %s; "
+                                    "not posting it", r.hole_number(1), t.team, t.start_hole)
+                    continue
+                scores: dict[str, dict[int, int | None]] = team_scores(r, t.team, uid_of)
+                marks: dict[tuple[int, str], float | None] = team_ctp(r, t.team, uid_of, self.league.match_player,
+                                                                      finished)
+                # Only what this round had and then lost is taken back (a mulligan on the green, a tee shot
+                # taken back): a round rebuilt after a restart hasn't lost what it hasn't recovered yet.
+                seen = s["seen"].setdefault(t.scorecard_id, {"scores": set(), "ctp": set()})
+                seen["scores"] |= {(uid, q) for uid, by in scores.items() for q in by}
+                seen["ctp"] |= set(marks)
+                for uid, seqs in live.posted(t).items():
+                    for seq in seqs - set(scores.get(uid, {})):
+                        if (uid, seq) in seen["scores"]:
+                            scores.setdefault(uid, {})[seq] = None
+                for k in seen["ctp"] - set(marks):
+                    marks[k] = None
+                jobs.append((t, scores, marks))
+            snapshot = [(t.scorecard_id, scores, sorted(marks.items())) for t, scores, marks in jobs]
+            if snapshot == s["last"]:
+                continue
+            s["last"] = None   # Squabbit may change below even if some cards fail; set again only when all go in
+
+            def push() -> tuple[list[str], list[tuple], set[str]]:
+                """What went in, the cards someone else has entered on, and the cards that failed."""
+                lines, blocked, failed = [], [], set()
+                with SquabbitClient() as client:
+                    for t, scores, marks in jobs:
+                        try:
+                            lines += [f"{t.team}: {x}" for x in live.push(client, t, scores, marks)]
+                        except Blocked as e:
+                            blocked.append((t, str(e)))
+                        except Exception as e:
+                            log.warning("Squabbit live: %s's post failed (%s); trying again on the next hole",
+                                        t.team, e)
+                            failed.add(t.scorecard_id)
+                return lines, blocked, failed
+
+            # No timeout here: a thread can't be stopped, and a second writer mustn't start while this one
+            # might still post older scores. Each request has its own (httpx's), so it does end.
+            try:
+                lines, blocked, failed = await asyncio.to_thread(push)
+            except Exception as e:
+                log.warning("Squabbit live: post failed (%s); trying again on the next hole", e)
+                continue
+            if not failed:
+                s["last"] = snapshot
+            if lines:
+                log.info("Squabbit live: posted %s", "; ".join(lines))
+            for t, why in blocked:
+                log.warning("Squabbit live: someone else has entered on %s's card (%s); the booth stops "
+                            "posting it", t.team, why)
+                s["targets"] = [x for x in s["targets"] if x is not t]
+                s["last"] = None
+            if not s["targets"]:
+                s["status"] = "off"
+
+    def _squabbit_round_end(self, r: Round) -> None:
+        """The round's over: an unanswered question comes down, and a yes gets its last holes posted."""
+        s = self._sq
+        if not s or s["round"] != r.id:
+            return
+        if s["status"] == "asking":
+            if s["question"] is not None:
+                s["question"].close()
+            s["question"] = None
+            s["status"] = "off"
+            log.info("Squabbit live: the round ended before anyone answered; not posting it")
+        elif s["status"] == "on":
+            s["dirty"] = True
+            if s["task"] is None or s["task"].done():
+                s["task"] = asyncio.create_task(self._squabbit_push(r, s))
 
     def _lone_team(self, names: list[str]) -> tuple[str | None, str | None]:
         """The single league team these HUD names belong to, or (None, reason) when they don't form
@@ -8410,6 +8652,7 @@ class Engine:
             self.state.shots.clear()   # "today" starts over with the new session
         struck = self._struck_new_round()
         self.round = r
+        self._squabbit_kick()   # a league round's question goes up; any other round ends the last one's
         self._round_started_at = time.monotonic()
         self._new_round_struck, self._range_exits_seen = None, self.gspro.range_exits
         self._opening_fire = None
@@ -9689,6 +9932,7 @@ class Engine:
         if self._admit_from_card(r, event.card):
             r.apply_scorecard(event.card)
         log.info("Round %s scorecard: %s", r.id, {g: dict(sorted(v.items())) for g, v in r.card_scores.items()})
+        self._squabbit_kick()
         if self.cfg.commentary.segments_on_hole_change and self.state.current_hole \
                 and self._wrapped_hole != self.state.current_hole:
             # In a group, the moment the second-to-last side holes out (one side left to putt), pre-
@@ -9807,6 +10051,7 @@ class Engine:
         self._apply_log_corrections()   # whose the last unnamed shots were, while the round still maps them
         self._log_name_summary(r)
         r.ended = True
+        self._squabbit_round_end(r)
         if self._log_truth and self.cfg.source.type != "replay":
             self._bg(asyncio.to_thread(self._keep_gspro_log))
         self._round_ended_at = time.monotonic()
