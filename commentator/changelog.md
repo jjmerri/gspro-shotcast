@@ -8,6 +8,8 @@ stats page and in the app; "Booth" items only in the app. Plain words, one line 
 
 ### Booth
 - When the booth isn't sure of a closest-to-the-pin tee shot (say a gimme that might be on the fringe), a box on the sim asks before it goes on Squabbit. Fix the distance if it's off and post it, or leave it to enter yourself.
+- GSPro's alternate shot mode is called as one team ball with one score, not two players' scores.
+- Wentworth by the Sea gets its own card (pars and yardages) even when it's installed under another course's name.
 
 ## 0.1.100
 

@@ -8648,10 +8648,21 @@ class Engine:
         return entry.get("course") if entry and self._course_matches(entry, course) else course
 
     def _card_course(self, course: str | None) -> str | None:
-        """The name to find a setup-read course's card folder by: GSPro's own name when the schedule
-        gives one (Balsams Panorama for Wentworth), else the name as read."""
+        """The name to find a setup-read course's card folder by: see _card_name, else the name as read."""
         sched = self.league.schedule_entry(time.strftime("%Y-%m-%d"), course) if course else None
-        return (sched.get("gspro_course") if sched and self._course_matches(sched, course) else None) or course
+        return (self._card_name(sched) if sched and self._course_matches(sched, course) else None) or course
+
+    def _card_name(self, entry: dict) -> str | None:
+        """The name a schedule week's course card is found by. GSPro lists Wentworth by the Sea as
+        Balsams Panorama (the schedule's gspro_course): the league copies Wentworth's files into GSPro's
+        Balsams folder, and they still name the course Wentworth. So the league's name, when an
+        installed course is exactly that; else GSPro's."""
+        from . import course_card
+
+        course, listed = entry.get("course"), entry.get("gspro_course")
+        if listed and course and course_card.identify(self.cfg.source.gspro_courses_dirs, course):
+            return course
+        return listed or course
 
     def _course_test(self, r: Round):
         """Whether a course name (a past league week's) is this round's course, or None to compare
@@ -8667,7 +8678,7 @@ class Engine:
         plain = course_card.plain_name
         # The schedule's own name for a GSPro course (Wentworth by the Sea is Balsams Panorama), but only
         # by exact name: a near one would turn "Swiss Alpine Valley" into "Alpine Valley".
-        alias = {plain(e["course"]): e["gspro_course"] for e in self.league.data.get("schedule") or []
+        alias = {plain(e["course"]): self._card_name(e) for e in self.league.data.get("schedule") or []
                  if e.get("course") and e.get("gspro_course")}
         return lambda name: (course_card.identify(dirs, alias.get(plain(name), name)) or "").lower() == mine.lower()
 
@@ -8718,9 +8729,8 @@ class Engine:
                   is_league=is_league, slot_names=slot_names)
         r.holes_confirmed = confirmed
         self._apply_setup_format(r)
-        # GSPro's course folder is named by GSPro's own course name, which the schedule carries as
-        # gspro_course when it differs from the league's name (e.g. Balsams Panorama vs Wentworth).
-        card = self._load_course_card(card_course or entry.get("gspro_course") or course)
+        card = self._load_course_card(card_course or (self._card_name(entry) if entry.get("gspro_course") else None)
+                                      or course)
         self._keep_course_tees(course, card)
         if card:
             r.apply_course_card(card)
@@ -9628,14 +9638,16 @@ class Engine:
             r.set_holes(self._setup_holes[1], confirmed=self._setup_holes_read)   # re-applies the course card for the new start
 
     def _apply_setup_format(self, r: Round) -> None:
-        """A scramble picked on the setup screen: the round is one from the start (two players are one
-        team; with more, the log's picks say who's together)."""
+        """A scramble or alternate shot picked on the setup screen: the round is one from the start (two
+        players are one team; with more, a scramble's log picks say who's together)."""
         if self._setup_format in ("shamble", "alternate"):
             r.no_scramble = True   # GSPro copies balls between teammates here too: not a scramble
         if self._setup_format == "scramble" and r.format != "scramble":
             names = [n for n in (r.slot_names or list(r.roster)) if n]
             r.play_scramble([names] if len(names) == 2 else [])
             log.info("Round %s: a scramble, from the setup screen", r.id)
+        if self._setup_format == "alternate" and r.play_alternate([n for n in (r.slot_names or list(r.roster)) if n]):
+            log.info("Round %s: alternate shot, from the setup screen", r.id)
 
     async def _read_setup_format(self, tones: dict, frame, fresh: bool, cache: dict) -> dict:
         """GSPro's game mode, while the MATCH SETTINGS tab is up (see _setup_format)."""

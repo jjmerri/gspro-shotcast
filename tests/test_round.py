@@ -1450,6 +1450,27 @@ async def test_preround_opener_is_set_aside_when_the_tee_differs(tmp_path):
     assert len(e.live_llm.prompts) > prompts_before_tee  # a tee-time opener was generated
 
 
+def test_wentworth_listed_as_balsams_panorama_gets_wentworths_card(tmp_path):
+    # The league copies Wentworth's files into GSPro's Balsams folder (GSPro lists it as Balsams
+    # Panorama); the real Balsams is kept aside, and still names itself Balsams Panorama.
+    for folder, name, par in (("balsams_gsp", "Wentworth by the Sea", "4"), ("balsams_gsp - bak", "Balsams Panorama", "5")):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "coursedetails.txt").write_text(
+            DETAILS.replace("Test Links", name).replace("72|5|", f"72|{par}|", 1), encoding="utf-8")
+    e = _engine(tmp_path)
+    e.cfg.source.gspro_courses_dirs = [str(tmp_path)]
+    entry = {"week": 7, "course": "Wentworth by the Sea", "gspro_course": "Balsams Panorama", "hole_count": 18}
+    r = e._build_round(["MikeD", "Sarah"], "Wentworth by the Sea", entry, is_league=False)
+    assert r.course_card.name == "Wentworth by the Sea" and r.course_card.folder == "balsams_gsp"
+    assert r.par[1] == 4
+    # Nothing installed by the league's name: GSPro's name, as before.
+    (tmp_path / "balsams_gsp" / "coursedetails.txt").unlink()
+    (tmp_path / "balsams_gsp").rmdir()
+    from commentator import course_card
+    course_card._index_cache.clear()
+    assert e._card_name(entry) == "Balsams Panorama"
+
+
 async def test_preround_opener_survives_the_gspro_course_alias(tmp_path):
     from commentator.models import RoundStartEvent
 
@@ -3808,6 +3829,13 @@ async def test_setup_scramble_game_mode_makes_a_two_player_round_one_team(tmp_pa
     assert r.format == "scramble" and [s.gspro for s in r.sides] == [["Alex", "Jamie"]]
 
 
+async def test_setup_alternate_shot_game_mode_makes_a_two_player_round_one_ball(tmp_path):
+    e, r = await _setup_then_load(tmp_path, [_match_tab("Beaver Creek", "ALTERNATE SHOT (STROKE)")] * 2)
+    assert r.format == "alternate" and [s.gspro for s in r.sides] == [["Alex", "Jamie"]] and r.no_scramble
+    assert not r.anonymous_players()   # GSPro names whoever's hitting
+    assert "isn't known" not in " ".join(r.format_facts())
+
+
 async def test_setup_any_other_game_mode_leaves_the_format_alone(tmp_path):
     e, r = await _setup_then_load(tmp_path, [_match_tab("Beaver Creek", "STROKE PLAY")] * 2)
     assert r.format is None and len(r.sides) == 2
@@ -3901,6 +3929,15 @@ async def test_a_wrong_holes_practice_quit_after_the_weeks_nine_is_the_league_ro
     assert tuple(e.store.db.execute("SELECT fmt, attributed FROM shots WHERE id = ?", (sid,)).fetchone()) == ("best_ball", 1)
     # No course card: the strokes still land on holes, so the team has a net.
     assert all(s.hole_strokes for s in r.sides if s.strokes)
+
+
+def test_gspro_alternate_shot_survives_a_practice_becoming_the_league_round(tmp_path):
+    e = _engine(tmp_path)
+    entry = next(w for w in e.league.data["schedule"] if w.get("week") == 4)   # a best ball week
+    r = e._build_round(["MikeD", "Sarah"], "Pebble Beach", {}, is_league=False)
+    assert r.play_alternate(["MikeD", "Sarah"])
+    r.make_league(entry, 9)
+    assert r.format == "alternate" and [s.gspro for s in r.sides] == [["MikeD", "Sarah"]]
 
 
 @pytest.mark.parametrize("mike", [list(range(1, 11)),                  # Mike holed out on 10 too

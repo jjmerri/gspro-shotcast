@@ -340,6 +340,8 @@ class Round:
             normalize_format(scheduled_format or entry.get("format")))
         if was == "scramble":   # GSPro played a scramble (play_scramble): that's the format, whatever the schedule
             self.format, self.format_warning = "scramble", None
+        elif was == "alternate" and (alt := self._resolve_format("alternate"))[0] == "alternate":
+            self.format, self.format_warning = alt   # GSPro's alternate shot mode (play_alternate)
         self.holes = holes   # the strokes are for the holes the week plays
         self.sides = self._build_sides()
         self.set_holes(holes, confirmed=True)
@@ -400,6 +402,28 @@ class Round:
         if teams:
             self.teams = teams
         self.format, self.format_warning = "scramble", None
+        self.sides = self._build_sides()
+        if self.course_card:
+            self.apply_course_card(self.course_card)
+        elif self.week_card:
+            self._allocate_hole_strokes()
+        return True
+
+    def play_alternate(self, names: list[str]) -> bool:
+        """GSPro's own alternate shot mode, picked on the setup screen: its partners share one ball and
+        one score, whoever's hitting. A practice round's team is `names` (the setup screen's two
+        players); a league round keeps its league teams. True if anything changed."""
+        if self.format == "alternate":
+            return False
+        if not self.is_league:
+            if len(names) != 2 or any(n not in self.roster for n in names):
+                return False
+            self.teams = {" & ".join(names): list(names), **{g: [g] for g in self.roster if g not in names}}
+            self.teams_known = True
+        elif not all(len(gs) == 2 for gs in self.teams.values()):
+            return False
+        self.no_scramble = True
+        self.format, self.format_warning = "alternate", None
         self.sides = self._build_sides()
         if self.course_card:
             self.apply_course_card(self.course_card)
