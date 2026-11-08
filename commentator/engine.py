@@ -3590,10 +3590,6 @@ class Engine:
             mine = to_yards(hud.to_pin)
             dist = ctp_feet(hud.to_pin)
             r.ctp_results.setdefault(r.seq, {})[who] = hud.to_pin   # unrounded, to rank against
-            if tee is not None and tee.shot_id is not None:
-                r.ctp_tees[(r.seq, who)] = tee.shot_id
-            else:
-                r.ctp_tees.pop((r.seq, who), None)
             self._squabbit_kick()
             if tee is not None and r.format == "alternate" and mine is not None:
                 self.store.fill_tee_finish(tee.shot_id, mine)   # the shared ball has no log finish
@@ -7320,12 +7316,6 @@ class Engine:
                 nxt[1].shot_number, nxt[1].lie_before = rec.shot_number, rec.lie_before
                 self.store.set_shot_start(nxt[0], rec.shot_number, rec.lie_before, replaced=shot_id)
             log.info("Shot %s was a mulligan (GSPro took it back): left out of the stats", shot_id)
-            if r is not None and rec.round_id == r.id:
-                for key in [k for k, tee in r.ctp_tees.items() if tee == shot_id]:
-                    del r.ctp_tees[key]
-                    (r.ctp_results.get(key[0]) or {}).pop(key[1], None)
-                    log.info("CTP: %s's mark on hole %s came from that shot; taken back", key[1], key[0])
-                    self._squabbit_kick()
         if self._totals_due:   # once the positions and mulligans above are all in
             self._totals_due = False
             self._fill_log_totals()
@@ -8296,19 +8286,16 @@ class Engine:
                                     "not posting it", r.hole_number(1), t.team, t.start_hole)
                     continue
                 scores: dict[str, dict[int, int | None]] = team_scores(r, t.team, uid_of)
-                marks: dict[tuple[int, str], float | None] = team_ctp(r, t.team, uid_of, self.league.match_player,
+                marks = team_ctp(r, t.team, uid_of, self.league.match_player,
                                                                       finished)
-                # Only what this round had and then lost is taken back (a mulligan on the green, a tee shot
-                # taken back): a round rebuilt after a restart hasn't lost what it hasn't recovered yet.
-                seen = s["seen"].setdefault(t.scorecard_id, {"scores": set(), "ctp": set()})
-                seen["scores"] |= {(uid, q) for uid, by in scores.items() for q in by}
-                seen["ctp"] |= set(marks)
+                # Only a score this round had and then lost is taken back (a mulligan on the green): a round
+                # rebuilt after a restart hasn't lost what it hasn't recovered yet.
+                seen = s["seen"].setdefault(t.scorecard_id, set())
+                seen |= {(uid, q) for uid, by in scores.items() for q in by}
                 for uid, seqs in live.posted(t).items():
                     for seq in seqs - set(scores.get(uid, {})):
-                        if (uid, seq) in seen["scores"]:
+                        if (uid, seq) in seen:
                             scores.setdefault(uid, {})[seq] = None
-                for k in seen["ctp"] - set(marks):
-                    marks[k] = None
                 jobs.append((t, scores, marks))
             snapshot = [(t.scorecard_id, scores, sorted(marks.items())) for t, scores, marks in jobs]
             if snapshot == s["last"]:

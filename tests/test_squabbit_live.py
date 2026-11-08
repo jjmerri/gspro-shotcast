@@ -166,16 +166,13 @@ def test_ctp_marks_go_in_alongside_others_but_never_over_a_players_own(tmp_path)
     assert live.push(c, t, {}, {(3, "a"): 4.0, (2, "b"): 3.0}) == ["a CTP hole 12 144 in"]
     comp = c.docs[TR]["holeCompetitions"]["c12"]
     assert comp["results"] == {"z": 120.0, "a": 144.0} and comp["enteredByUserIds"]["a"] == "me"
-    live.push(c, t, {}, {(3, "a"): 3.5})                  # a mulligan's better ball: the booth's to update
+    live.push(c, t, {}, {(3, "a"): 3.5})                  # a corrected read: the booth's to update
     assert comp["results"]["a"] == 126.0
     del comp["results"]["a"]                               # cleared by someone on Squabbit: left cleared
     assert live.push(c, t, {}, {(3, "a"): 3.0}) == [] and "a" not in comp["results"]
     comp["results"]["a"] = 126.0
     comp["results"]["b"] = 200.0                           # Sarah entered her own
     assert live.push(c, t, {}, {(3, "b"): 1.0}) == [] and comp["results"]["b"] == 200.0
-    # A tee shot taken back takes the booth's mark with it, never a player's own.
-    assert live.push(c, t, {}, {(3, "a"): None, (3, "b"): None}) == ["a CTP hole 12 taken back"]
-    assert comp["results"] == {"z": 120.0, "b": 200.0} and "a" not in comp["enteredByUserIds"]
 
 
 def test_find_picks_the_teams_scorecard_and_the_weeks_holes():

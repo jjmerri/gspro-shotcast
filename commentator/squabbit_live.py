@@ -149,8 +149,7 @@ class LiveSync:
              marks: dict[tuple[int, str], float]) -> list[str]:
         """Posts what Squabbit doesn't have yet: each player's finished holes (Squabbit user id -> hole
         of the round -> strokes; None takes back a score the booth posted, for a hole GSPro reopened)
-        and closest-to-the-pin marks ((hole of the round, user id) -> yards; None takes back the
-        booth's mark for a tee shot taken back).
+        and closest-to-the-pin marks ((hole of the round, user id) -> yards).
         The whole card is read and written as one: anyone else's entry on any of the team's rounds
         raises Blocked, and a change between the read and the write (someone entering just then) makes
         the write fail and the booth look again. Returns what was written, for the log."""
@@ -176,7 +175,7 @@ class LiveSync:
                                                      for h, v in sorted(new.items(), key=lambda x: int(x[0]))))
                 else:
                     verify.append((f"rounds/{rid}", at))
-            new_ctp: dict[str, float | None] = {}
+            new_ctp: dict[str, float] = {}
             if marks and (got := client.document_at(tround)) is not None:
                 values, new_ctp, lines = self._ctp_values(target, got[0], marks, client.user_id())
                 if values:
@@ -192,11 +191,7 @@ class LiveSync:
                             mine.pop(h, None)
                         else:
                             mine[h] = v
-                for key, inches in new_ctp.items():
-                    if inches is None:
-                        self.state["ctp"].pop(key, None)
-                    else:
-                        self.state["ctp"][key] = inches
+                self.state["ctp"].update(new_ctp)
                 self._save()
                 return done
         raise Busy(f"week {target.week}'s card for {target.team} kept changing")
@@ -225,27 +220,18 @@ class LiveSync:
             values[("finishedDate",)] = None   # a reopened last hole: not finished after all
         return values, new
 
-    def _ctp_values(self, target: Target, tround: dict[str, Any], marks: dict[tuple[int, str], float | None],
-                    me: str | None) -> tuple[dict[tuple[str, ...], Any], dict[str, float | None], list[str]]:
+    def _ctp_values(self, target: Target, tround: dict[str, Any], marks: dict[tuple[int, str], float],
+                    me: str | None) -> tuple[dict[tuple[str, ...], Any], dict[str, float], list[str]]:
         """The event's CTP results to set: the booth's marks, alongside anyone else's. A player's mark
-        someone else entered stays, and only the booth's own mark is taken back."""
-        from .squabbit import DELETE
-
+        someone else entered stays."""
         comps = tround.get("holeCompetitions") or {}
         values: dict[tuple[str, ...], Any] = {}
-        new: dict[str, float | None] = {}
+        new: dict[str, float] = {}
         lines = []
         for (seq, uid), yards in sorted(marks.items()):
             cid = target.ctp[target.hole(seq)]
             have = ((comps.get(cid) or {}).get("results") or {}).get(uid)
             key = f"{target.tournament_round_id}/{cid}/{uid}"
-            if yards is None:
-                if have is not None and have == self.state["ctp"].get(key):
-                    values[("holeCompetitions", cid, "results", uid)] = DELETE
-                    values[("holeCompetitions", cid, "enteredByUserIds", uid)] = DELETE
-                    new[key] = None
-                    lines.append(f"{uid} CTP hole {target.hole(seq)} taken back")
-                continue
             inches = float(round(yards * INCHES_PER_YARD))
             if have is None and key in self.state["ctp"]:
                 continue   # the booth's mark, cleared by someone on Squabbit: theirs to put back
