@@ -6,8 +6,12 @@ stats page and in the app; "Booth" items only in the app. Plain words, one line 
 
 ## 0.1.103
 
+### Stats page
+- Alternate-shot hole replays draw each stroke's line to where the partner played the next one.
+
 ### Booth
 - The booth's own badge, health list and popups are kept out of its screen reads (its warning was being read as the course name). They also no longer show in a stream that captures the screen.
+- In a scramble, the ball the team played on keeps the lie from GSPro's log; the pick screen's read is used for the other balls.
 
 ## 0.1.102
 

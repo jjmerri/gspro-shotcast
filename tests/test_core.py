@@ -5235,9 +5235,25 @@ def test_the_pick_screens_cards_give_each_balls_finish_and_lie(tmp_path):
     assert e._pick_cards_due   # Kyle's ball isn't recorded yet: kept
     e._fire_rows[9] = e._fire_rows.pop(8)
     e._apply_pick_cards()
+    assert e._pick_cards_due   # nor which ball was picked
+    rec.picked = rec2.picked = False
+    e._apply_pick_cards()
     rows = {i: tuple(e.store.db.execute("SELECT finish_yards, lie_after FROM shots WHERE id = ?", (i,)).fetchone())
             for i in (ozzy, kyle)}
     assert rows == {ozzy: (294.0, "deep rough"), kyle: (24.0, "green")} and not e._pick_cards_due
+    # The ball the team played on keeps the lie it has (GSPro's log corrects it from the next stroke);
+    # the pick screen's misread doesn't replace it.
+    e.store.set_lie_after(ozzy, "rough")
+    rec.picked = True
+    e._pick_cards_due.append(({0: 7, 1: 9}, {0: "Ozzy", 1: "Kyle Martin"}, cards, time.monotonic()))
+    e._apply_pick_cards()
+    assert e.store.finish_of(ozzy)[0] == "rough" and e.store.finish_of(kyle)[0] == "green"
+    # The log never named the pick (an older GSPro): after a while the cards only fill missing lies.
+    rec.picked = rec2.picked = None
+    e.store.set_lie_after(kyle, "fringe")
+    e._pick_cards_due.append(({0: 7, 1: 9}, {0: "Ozzy", 1: "Kyle Martin"}, cards, time.monotonic() - 61))
+    e._apply_pick_cards()
+    assert e.store.finish_of(kyle)[0] == "fringe" and not e._pick_cards_due
 
 
 def test_pick_cards_read_older_gspros_use_buttons_and_garbled_lies():

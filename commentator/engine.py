@@ -7701,6 +7701,9 @@ class Engine:
                 if time.monotonic() - at > 60:
                     self._pick_cards_due.remove(entry)
                 continue
+            # The log names the pick soon after: wait for it (a while), so the picked ball keeps its lie.
+            if any(self._fire_rows[f][1].picked is None for f in balls.values()) and time.monotonic() - at <= 60:
+                continue
             self._pick_cards_due.remove(entry)
             names = {idx: gspro_names.get(idx) or self._fire_rows[f][1].player for idx, f in balls.items()}
             left, todo, pairs = dict(names), list(cards), []
@@ -7717,7 +7720,10 @@ class Engine:
                 if rec.mulligan:
                     continue
                 self.store.fill_finish(shot_id, round(card.yards, 1))
-                if card.lie:
+                # The picked ball's lie is GSPro's log's (the team plays on from it); the pick screen only
+                # stands in for it when there's none, and is the only word on the balls lifted. Until the
+                # log says which was picked, a ball keeps the lie it has.
+                if card.lie and (rec.picked is False or not self.store.finish_of(shot_id)[0]):
                     self.store.set_lie_after(shot_id, card.lie)
                 log.info("Pick card %s (%s): shot %s finished %.0f yd, %s", card.name, names[idx], shot_id,
                          card.yards, card.lie)

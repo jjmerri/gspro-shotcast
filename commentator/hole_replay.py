@@ -224,6 +224,7 @@ def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]
     for (rnd, _), rows in groups.items():
         by_round.setdefault(rnd, []).extend(rows)
     teams = {rnd: _scramble_teams(rows) for rnd, rows in by_round.items()}
+    sides = _sides(db)
     cards = _cards(db)
     out = {}
     for key, rows in groups.items():
@@ -235,7 +236,7 @@ def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]
             continue
         ses, _, last = span[key[0]]
         until = min((f for s, f, _ in span.values() if s & ses and f > last), default=None)
-        if (rp := _replay(rows, key[1], layouts, ses, until, teams[key[0]])) is not None:
+        if (rp := _replay(rows, key[1], layouts, ses, until, teams[key[0]], sides.get(key[0]))) is not None:
             if rp["tee"] and rp["pin"] and (m := _map_for(images, rp["course"], key[1], ses)):
                 rp["map"] = m
             rp["ts"] = min(r["ts"] for r in rows)   # the hole's first shot, for the page's video link
@@ -365,10 +366,65 @@ def _travel_m(r: sqlite3.Row) -> float | None:
     return r["carry"] / M_TO_YD if r["carry"] else None
 
 
+def _sides(db: sqlite3.Connection) -> dict[int, dict[str, int]]:
+    """Each round's players' sides, by round as hole_replays numbers it: the rounds row each side's
+    players are recorded on (its id stands for the side)."""
+    if "players" not in {r[1] for r in db.execute("PRAGMA table_info(rounds)")}:
+        return {}
+    _, of_row = stats_web.round_groups(db)
+    out: dict[int, dict[str, int]] = {}
+    for rid, players in db.execute("SELECT id, players FROM rounds"):
+        try:
+            names = json.loads(players or "[]")
+        except ValueError:
+            continue
+        for name in names if isinstance(names, list) else []:
+            if isinstance(name, str):
+                out.setdefault(of_row.get(rid, rid), {})[name.casefold()] = rid
+    return out
+
+
 def _shared(r: sqlite3.Row) -> bool:
     """A team format where GSPro copies balls between teammates (a scramble's opening tee shots
     can predate the log revealing it, and so lack the flag)."""
     return r["fmt"] == "scramble" or bool(r["shared_ball"])
+
+
+def _alternate_ends(played: list[sqlite3.Row], starts: dict[int, tuple | None], rows: list[sqlite3.Row],
+                    pin: tuple | None, sides: dict[str, int]) -> dict[int, tuple | None]:
+    """Where each alternate-shot stroke went, by shot id: partners take turns on one ball, so a stroke
+    ends where the team's next one starts (the one whose start its length fits, when the sides aren't
+    known). The stroke that holed or was conceded, or left a gimme, runs to the pin; one
+    into a penalty area with a penalty stroke after it, to where it went in."""
+    def team(a, b):
+        a, b = (a or "").casefold(), (b or "").casefold()
+        return a == b or a not in sides or b not in sides or sides[a] == sides[b]
+    alt = [r for r in rows if r["fmt"] == "alternate" and r["shot_number"] and not r["mulligan"]]
+    ends: dict[int, tuple | None] = {}
+    for r in played:
+        if r["fmt"] != "alternate" or not r["shot_number"]:
+            continue
+        n, st, end = r["shot_number"], starts.get(r["id"]), None
+        hazard, wet = _xz(r["hazard_x"], r["hazard_z"]), "in_water" in json.loads(r["tags"] or "[]")
+        ours = [o for o in alt if o["id"] != r["id"] and team(o["player"], r["player"])]
+        after = min((o["shot_number"] for o in ours if o["shot_number"] > n), default=None)
+        if r["outcome"] in ("holed", "conceded"):
+            end = pin
+        elif hazard and ((after is not None and after > n + 1) or wet):
+            end = hazard
+        elif wet:
+            end = None
+        elif any(o["outcome"] == "gimme" and o["shot_number"] == n and o["player"] != r["player"] for o in ours):
+            end = pin   # the partner's gimme, under this stroke's number
+        elif nxt := [o for o in ours if o["shot_number"] == n + 1 and o["outcome"] != "gimme"
+                     and starts.get(o["id"]) is not None]:
+            t = _travel_m(r)
+            best = min(nxt, key=lambda o: abs(math.dist(st, starts[o["id"]]) - t) if st and t is not None else 0)
+            end = starts[best["id"]]
+        elif any(o["outcome"] == "gimme" and o["shot_number"] == n + 1 for o in ours):
+            end = pin
+        ends[r["id"]] = end
+    return ends
 
 
 def _scramble_teams(rows: list[sqlite3.Row]) -> dict[str, str]:
@@ -466,7 +522,8 @@ def _team_ends(played: list[sqlite3.Row], starts: dict[int, tuple | None], rows:
 
 
 def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sessions: set,
-            until: float | None = None, teams: dict[str, str] | None = None) -> dict[str, Any] | None:
+            until: float | None = None, teams: dict[str, str] | None = None,
+            sides: dict[str, int] | None = None) -> dict[str, Any] | None:
     first = rows[0]
     this_round, any_round = _layout_for(layouts, first["course"], hole, sessions, first["ts"],
                                         rows[-1]["ts"], until)
@@ -486,6 +543,7 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
     starts = {r["id"]: ((tee if r["shot_number"] == 1 else None) or _xz(r["start_x"], r["start_z"])
                         or (tee if (r["shot_number"] or 0) <= 1 else None)) for r in played}
     team_ends, team_used = _team_ends(played, starts, rows, pin, teams or {})
+    alt_ends = _alternate_ends(played, starts, rows, pin, sides or {})
     players = []
     for name in dict.fromkeys(r["player"] or "unknown" for r in rows):
         mine = [r for r in played if (r["player"] or "unknown") == name]
@@ -498,7 +556,9 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
             tags = json.loads(r["tags"] or "[]")
             end, hazard = None, _xz(r["hazard_x"], r["hazard_z"])
             follows = nxt is not None and (nxt["shot_number"] or 0) == (r["shot_number"] or 0) + 1
-            if _shared(r):
+            if r["fmt"] == "alternate":
+                end = alt_ends.get(r["id"])
+            elif _shared(r):
                 end = team_ends.get(r["id"])   # drawn only for the ball the team played on
             elif hazard and ((nxt is not None and not follows) or "in_water" in tags):
                 # Into a penalty area: the next stroke, after the penalty, is the drop. Only with a

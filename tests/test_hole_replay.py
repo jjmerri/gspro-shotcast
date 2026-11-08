@@ -222,6 +222,37 @@ def test_a_scramble_draws_only_the_ball_the_team_played_on(tmp_path):
     assert [(s["from"], s["to"]) for s in players["Derek"]] == [([0.0, 0.0], None), ([10.0, 200.0], None)]
 
 
+def test_alternate_shot_runs_each_stroke_to_the_partners_next_one(tmp_path):
+    path, st = _season(tmp_path)
+    log = tmp_path / "output_log.txt"
+    log.write_text(_hole_log())
+    backfill(path, [str(log)])
+    # Wentworth, 11-08: Dan and Derek take turns on one ball (Dan 1 and 3, Derek 2), and Derek's missed
+    # putt is left a gimme Dan's stroke number shares.
+    st.db.execute("UPDATE shots SET fmt = 'alternate', shared_ball = 1, outcome = NULL")
+    st.db.execute("UPDATE shots SET player = 'Derek', outcome = 'missed' WHERE shot_number = 2")
+    st.db.execute("UPDATE shots SET outcome = 'missed' WHERE shot_number = 3")
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, outcome, fmt,"
+                  " shared_ball, raw) VALUES (?, 1004, 'Derek', 'Test Links', 'Hole 1, par 4, 328 yards', 3, 'PT', 1,"
+                  " 'gimme', 'alternate', 1, '{}')", (st.session_id,))
+    # Another team's stroke 4 isn't where Dan's last putt went.
+    st.db.execute("UPDATE rounds SET players = '[\"Dan\", \"Derek\"]'")
+    st.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, players) VALUES"
+                  " (?, 2000, '2025-10-20', 'Test Links', 'Kyle', 1, '[\"Kyle\"]')", (st.session_id,))
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, fmt,"
+                  " shared_ball, start_x, start_z, raw) VALUES (?, 1005, 'Kyle', 'Test Links', 'Hole 1, par 4,"
+                  " 328 yards', 4, 'PT', 1, 'alternate', 1, 50.0, 50.0, '{}')", (st.session_id,))
+    st.db.commit()
+    players = {p["name"]: p["shots"] for p in hole_replays(st.db)[(1, 1)]["players"]}
+    assert [(s["from"], s["to"]) for s in players["Dan"]] == [([0.0, 0.0], [10.0, 200.0]), ([2.0, 295.0], [0.0, 300.0])]
+    assert [(s["from"], s["to"]) for s in players["Derek"]] == [([10.0, 200.0], [2.0, 295.0])]
+    # A gimme recorded under the shooter's own name, at the next stroke, also ends the hole.
+    st.db.execute("UPDATE shots SET player = 'Dan', shot_number = 4 WHERE outcome = 'gimme'")
+    st.db.commit()
+    players = {p["name"]: p["shots"] for p in hole_replays(st.db)[(1, 1)]["players"]}
+    assert players["Dan"][-1]["to"] == [0.0, 300.0]
+
+
 def test_a_scramble_draws_the_ball_gspro_picked_and_counts_each_partners_used_shots(tmp_path):
     path, st = _season(tmp_path)
     log = tmp_path / "output_log.txt"
