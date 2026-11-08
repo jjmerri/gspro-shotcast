@@ -330,7 +330,18 @@ def _no_activate(root) -> None:
     hwnd = _hwnd(root)
     u.SetWindowLongW(hwnd, GWL_EXSTYLE, u.GetWindowLongW(hwnd, GWL_EXSTYLE) | WS_EX_TOOLWINDOW
                      | WS_EX_NOACTIVATE | WS_EX_TOPMOST)
+    _hide_from_capture(hwnd)
     _topmost(root)
+
+
+def _hide_from_capture(hwnd: int) -> None:
+    """Keep the booth's own windows out of screen grabs: its health list, drawn over GSPro's setup
+    screen, was read as the course name. Windows 10 2004+; older ones just keep showing it."""
+    import ctypes
+
+    WDA_EXCLUDEFROMCAPTURE = 0x11
+    if not ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE):
+        log.debug("Couldn't keep window %s out of screen capture", hwnd)
 
 
 def _topmost(root) -> None:

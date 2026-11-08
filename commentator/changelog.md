@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.103
+
+### Booth
+- The booth's own badge, health list and popups are kept out of its screen reads (its warning was being read as the course name). They also no longer show in a stream that captures the screen.
+
 ## 0.1.102
 
 ### Booth
