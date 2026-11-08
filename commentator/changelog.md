@@ -4,6 +4,14 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.100
+
+### Stats page
+- The league home shows the weeks due on the same date together, with arrows to look back at past dates.
+
+### Booth
+- On a league round, a box on the sim asks whether to update Squabbit as you play. Say yes and each hole's score goes on your team's week card as you finish it, along with closest-to-the-pin tee shots. Nothing goes over anything already on your card.
+
 ## 0.1.99
 
 ### Stats page
