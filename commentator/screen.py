@@ -68,13 +68,15 @@ def _capture_ok() -> None:
 class Tone:
     """A region's grey levels (0-255): mean, median, and the share of near-white (>= 200) pixels;
     and the share of strongly blue pixels (GSPro 3.59 marks the selected setup tab with a blue
-    underline) and of saturated ones (its name pills are a dark team colour, not grey)."""
+    underline) and of saturated ones (its name pills are a dark team colour, not grey), with their
+    median RGB (`tint`, None with too few of them): the same team colour reads the same tint."""
 
     mean: float
     median: float
     light: float
     blue: float = 0.0
     color: float = 0.0
+    tint: tuple[int, int, int] | None = None
 
 
 def tone_of(img: Image.Image) -> Tone:
@@ -91,13 +93,17 @@ def tone_of(img: Image.Image) -> Tone:
             median = v
             break
     a = np.asarray(img.convert("RGB"), dtype=int)
+    tint = None
     if a.size:
         r, g, b = a[..., 0], a[..., 1], a[..., 2]
         blue = float(((b > 150) & (b - r > 80) & (b - g > 30)).mean())
-        color = float((a.max(axis=2) - a.min(axis=2) > 60).mean())
+        saturated = a.max(axis=2) - a.min(axis=2) > 60
+        color = float(saturated.mean())
+        if color >= 0.1:
+            tint = tuple(int(v) for v in np.median(a[saturated], axis=0))
     else:
         blue = color = 0.0
-    return Tone(mean=mean, median=median, light=sum(hist[200:]) / n, blue=blue, color=color)
+    return Tone(mean=mean, median=median, light=sum(hist[200:]) / n, blue=blue, color=color, tint=tint)
 
 
 def name_signature(img: Image.Image) -> tuple:

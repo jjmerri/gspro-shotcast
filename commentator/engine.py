@@ -289,7 +289,25 @@ def _slot_state(tone) -> str:
     return "empty"
 
 
-# A bookings read this recent (at course select, say) covers the setup screen that follows it.
+# Two name pills whose tints are this close (largest channel difference) are one team colour: the
+# same colour reads within a few levels, GSPro's team colours sit far further apart.
+_TEAM_TINT_SAME = 30
+
+
+def _tint_groups(slots: list[str | None], tints: list) -> list[list[str]] | None:
+    """The named slots grouped by pill tint, in slot order; None when any named slot's tint is unread."""
+    groups: list[tuple[tuple[int, int, int], list[str]]] = []
+    for name, tint in zip(slots, tints):
+        if not name:
+            continue
+        if tint is None:
+            return None
+        same = next((g for t, g in groups if max(abs(a - b) for a, b in zip(t, tint)) <= _TEAM_TINT_SAME), None)
+        if same is not None:
+            same.append(name)
+        else:
+            groups.append((tint, [name]))
+    return [g for _, g in groups] or None
 BOOKINGS_FRESH_SECONDS = 300.0
 # A game-mode change alone (same players and nines) re-writes the front-loaded opener only once the
 # mode has sat unchanged this long: clicking through the modes rewrote it on every click.
@@ -325,6 +343,8 @@ class PendingOpening:
     # Composed for the last roster read on an earlier setup screen (this one's PLAYERS tab was never
     # opened), so the tee must show exactly that roster, guests included, before it airs.
     guessed: bool = False
+    # The setup's team colours (see Engine._setup_teams_key) its round was built with.
+    colour_teams: frozenset | None = None
 
 
 @dataclass
@@ -926,9 +946,13 @@ class Engine:
         # scramble sets the round's format; leagues mostly leave GSPro on stroke play and score their
         # format in an app. A shamble or alternate shot only stops the log calling it a scramble.
         self._setup_format: str | None = None
+        # The PLAYERS tab's slots (positional names) and each one's name-pill tint, the team colour
+        # (see _setup_colour_teams); None until read.
+        self._setup_tints: tuple[list[str | None], list[tuple[int, int, int] | None]] | None = None
         self._setup_mode_read = False   # the MATCH SETTINGS game mode was read (None then means stroke play)
         self._setup_format_at = float("-inf")   # when the game mode last changed
         self._opener_prepared_format: str | None = None
+        self._opener_prepared_teams: frozenset | None = None   # the colour teams it was written for
         # The last roster (and slot order) read off a setup screen's PLAYERS tab, for a setup that never shows it.
         self._last_setup_roster: tuple[list[str], list[str]] | None = None
         # The setup screen Play was pressed on: (course, roster, slot order, when), for the round's start.
@@ -3273,9 +3297,10 @@ class Engine:
         if team and any(p in self.league.team_players.get(team, []) for p in self._absent_partners()):
             team = None
         r = self.round
-        if r and not r.ended and not r.is_league and r.format == "scramble":
+        if r and not r.ended and not r.is_league and (r.format == "scramble" or r.format == "alternate" and r.colour_teams):
             # A practice scramble's teams are GSPro's, not the league's: with Josh's league team on
             # Corey's calls, a scramble Corey played with Frankie aired "Josh and Corey remain even par".
+            # Alternate shot paired by the team colours likewise.
             side = None if r.teams_guessed() else r.side_for(player)
             team = side.label if side and len(side.players) > 1 else None
         return player, team
@@ -4566,7 +4591,10 @@ class Engine:
         team's, whichever partner's line carries it), or a MULTIPLAYER round not built from the setup
         slots (a tee-time roster is in honour order, so its position isn't GSPro's index)."""
         r = self.round
-        if not self._log_truth or r is None or r.ended or (r.format == "alternate" and not scores):
+        if not self._log_truth or r is None or r.ended:
+            return None
+        # A player the team colours left alone beside alternate-shot pairs plays their own ball.
+        if r.format == "alternate" and not scores and not (r.colour_teams and r.solo(r.side_for(player))):
             return None
         if r.slot_names:                       # captured setup slots: the trustworthy name -> index map
             name = r.current_name(player) if player else player   # a shot in flight may hold a pre-rename name
@@ -7142,9 +7170,21 @@ class Engine:
             merged = set(pair).union(*hit)
             groups = [grp for grp in groups if grp not in hit] + [merged]
         order = r.slot_names or (list(r.roster) if len(r.roster) == len(g.players_seen) else [])
-        names = [[order[i] for i in sorted(grp) if i < len(order) and order[i]] for grp in groups]
+        names = [n for grp in groups if len(n := [order[i] for i in sorted(grp) if i < len(order) and order[i]]) > 1]
+        if r.colour_teams:
+            # The setup's team colours stand for whoever the log hasn't tied to anyone yet (each team's
+            # first copy comes as it picks): not having picked isn't being alone.
+            # A log pair inside one colour team only confirms part of it: the rest of that colour join it.
+            tied = {n for grp in names for n in grp}
+            colours = [[n for n in cg if n in r.roster] for cg in r.colour_teams]
+            for grp in names:
+                home = next((cg for cg in colours if set(grp) <= set(cg)), None)
+                if home is not None:
+                    grp += [n for n in home if n not in tied]
+                    tied.update(home)
+            names += [k for cg in colours if len(k := [n for n in cg if n not in tied]) > 1]
         was = r.format
-        if r.play_scramble([n for n in names if len(n) > 1]):
+        if r.play_scramble(names):
             # Every time the teams change: a pair found later had its earlier shots filed as solo, and a
             # player the setup grouped by league team may turn out to be alone (their shots are their own).
             mine = [x for x in self.state.shots if x.round_id == r.id and x.shot_id is not None]
@@ -7301,10 +7341,13 @@ class Engine:
             if fire in self._mulligans_done or fire not in self._fire_rows:
                 continue
             self._mulligans_done.add(fire)
-            if kind == "repeat" and team:
+            shot_id, rec, idx, hole = self._fire_rows[fire]
+            # A player the team colours left alone plays their own ball and score (one profile alone in
+            # alternate shot is more likely partners sharing it).
+            lone = r is not None and bool(r.colour_teams) and r.solo(r.side_for(rec.player))
+            if kind == "repeat" and team and not lone:
                 continue
             self._totals_due = True
-            shot_id, rec, idx, hole = self._fire_rows[fire]
             rec.mulligan = True
             self.store.set_mulligan(shot_id)
             # No conceded-putt row to flag with it: a shot that ends in the gimme circle ends the hole,
@@ -8779,6 +8822,7 @@ class Engine:
         self._setup_holes = self._opener_prepared_holes = None   # the next round reads its own setup
         self._setup_holes_read, self._holes_snap = False, None
         self._setup_format = self._opener_prepared_format = None
+        self._setup_tints = self._opener_prepared_teams = None
         self._setup_mode_read = False
         self._scramble_pairs = set()
         self._putted_on_last_hole = self._round_end_queued = False
@@ -8841,6 +8885,8 @@ class Engine:
         tee_players = frozenset(pl for n in names if (pl := self.league.match_player(n)))
         if p.players != tee_players:
             return f"players {sorted(p.players)} != tee {sorted(tee_players)}"
+        if not p.aired and p.colour_teams != self._setup_teams_key():
+            return "written before the team colours changed"
         if p.guessed and p.roster_key != self._roster_key(names):
             return f"made for the last roster {sorted(p.roster_key)}, tee reads {sorted(self._roster_key(names))}"
         return None
@@ -9070,11 +9116,12 @@ class Engine:
         r.setup_slots = None   # the tee's order is a guess at GSPro's
         r.slot_guess = True    # on a green it isn't even the tee's: screen reads place each player
 
-    def _as_round_names(self, r: Round, slots: list[str | None]) -> list[str | None]:
+    def _as_round_names(self, r: Round, slots: list[str | None],
+                        pool: list[str] | None = None) -> list[str | None]:
         """Setup-screen slot names as the round spells its players (another read of a pill can differ
         by case or OCR), matched the way _roster_key matches them when only one of the round's names
-        is that player; an exact or unmatched name is kept."""
-        mine = [g for g in (r.slot_names or []) if g]
+        is that player; an exact or unmatched name is kept. The round's names are its slots', or `pool`."""
+        mine = [g for g in (pool if pool is not None else r.slot_names or []) if g]
         by_key: dict = {}
         for g in mine:
             by_key.setdefault(self._roster_key([g]), []).append(g)
@@ -9499,6 +9546,7 @@ class Engine:
                 if probed:
                     fresh = not seen_setup or play_course != course
                     if fresh:
+                        self._setup_tints = None   # another setup's team colours aren't this one's
                         # A HOLES sample since the last poll that didn't show this setup is this setup's;
                         # straight from another course's setup, one in between could be either's.
                         holes_since = frame_at if last_play and last_play != play_course else prev_at
@@ -9559,6 +9607,7 @@ class Engine:
                     self._last_setup_roster = (list(names), list(positional))
                     if probed and players_tab:
                         self._keep_fixture_frame("setup_players", slot_frame)
+                        self._note_setup_tints(positional, [getattr(tones.get(s), "tint", None) for s in slots])
                 # Log on first detection and on every accepted roster change, so a live setup read can
                 # be watched tracking the picker rather than looking stuck on the first team seen.
                 if (not seen_setup) or (accept and names != logged_roster):
@@ -9657,16 +9706,43 @@ class Engine:
             r.set_holes(self._setup_holes[1], confirmed=self._setup_holes_read)   # re-applies the course card for the new start
 
     def _apply_setup_format(self, r: Round) -> None:
-        """A scramble or alternate shot picked on the setup screen: the round is one from the start (two
-        players are one team; with more, a scramble's log picks say who's together)."""
+        """A scramble or alternate shot picked on the setup screen: the round is one from the start. Two
+        players are one team; with more, the team colours on the PLAYERS tab say who's together (and a
+        scramble's log picks still have the last word)."""
         if self._setup_format in ("shamble", "alternate"):
             r.no_scramble = True   # GSPro copies balls between teammates here too: not a scramble
-        if self._setup_format == "scramble" and r.format != "scramble":
-            names = [n for n in (r.slot_names or list(r.roster)) if n]
-            r.play_scramble([names] if len(names) == 2 else [])
-            log.info("Round %s: a scramble, from the setup screen", r.id)
-        if self._setup_format == "alternate" and r.play_alternate([n for n in (r.slot_names or list(r.roster)) if n]):
-            log.info("Round %s: alternate shot, from the setup screen", r.id)
+        if self._setup_format not in ("scramble", "alternate"):
+            return
+        names = [n for n in (r.slot_names or list(r.roster)) if n]
+        groups = [names] if len(names) == 2 else self._setup_colour_teams(r)
+        if len(names) > 2 and groups and not r.is_league:
+            r.colour_teams = groups
+        if self._setup_format == "scramble" and (r.format != "scramble" or groups) \
+                and r.play_scramble(groups or []):
+            log.info("Round %s: a scramble, from the setup screen%s", r.id,
+                     f" (teams {groups})" if groups and len(names) > 2 else "")
+        if self._setup_format == "alternate" and (groups or r.is_league) and r.play_alternate(groups or []):
+            log.info("Round %s: alternate shot, from the setup screen%s", r.id,
+                     f" (teams {groups})" if len(names) > 2 else "")
+
+    def _note_setup_tints(self, slots: list[str | None], tints: list) -> None:
+        """Keep the PLAYERS tab's pill tints for its slots (logged when the teams they make change)."""
+        before = self._setup_tints
+        self._setup_tints = (list(slots), list(tints))
+        if before is None or _tint_groups(*before) != _tint_groups(slots, tints):
+            if (groups := _tint_groups(slots, tints)) is not None:
+                log.info("Setup PLAYERS tab: team colours %s", groups)
+
+    def _setup_colour_teams(self, r: Round) -> list[list[str]] | None:
+        """The round's players grouped by their name pills' team colour on the setup screen, as the
+        round spells them; None unless every slot's colour was read and its players are the round's."""
+        if self._setup_tints is None:
+            return None
+        slots, tints = self._setup_tints
+        groups = _tint_groups(self._as_round_names(r, slots, pool=list(r.roster)), tints)
+        if groups is None or sorted(n for g in groups for n in g) != sorted(r.roster):
+            return None
+        return groups
 
     async def _read_setup_format(self, tones: dict, frame, fresh: bool, cache: dict) -> dict:
         """GSPro's game mode, while the MATCH SETTINGS tab is up (see _setup_format)."""
@@ -9730,9 +9806,11 @@ class Engine:
             return
         key = self._roster_key(roster)
         if not key or (key == self._opener_prepared_for and self._setup_holes == self._opener_prepared_holes
-                       and self._setup_format == self._opener_prepared_format):
+                       and self._setup_format == self._opener_prepared_format
+                       and self._setup_teams_key() == self._opener_prepared_teams):
             return
         if (key == self._opener_prepared_for and self._setup_holes == self._opener_prepared_holes
+                and self._setup_format != self._opener_prepared_format
                 and time.monotonic() - self._setup_format_at < FORMAT_SETTLE_SECONDS):
             # Only the game mode changed, and it may still be changing; a later poll writes it. The
             # opener written for the old mode is out of date: drop it (and any compose still running)
@@ -9746,10 +9824,19 @@ class Engine:
             return
         self._opener_prepared_for, self._opener_prepared_holes = key, self._setup_holes
         self._opener_prepared_format = self._setup_format
+        self._opener_prepared_teams = self._setup_teams_key()
         self._opener_gen += 1
         log.info("Front-loading the opener for roster %s on %r", sorted(key), course)
         self._bg(self._prepare_speculative_round(course, list(roster), air=False, gen=self._opener_gen,
                                                  slot_names=list(slot_order) if slot_order else None))
+
+    def _setup_teams_key(self) -> frozenset | None:
+        """The team colours' teams in a scramble or alternate shot set up (what an opener written for
+        it says about partners), None in any other mode or before they're read."""
+        if self._setup_format not in ("scramble", "alternate") or self._setup_tints is None:
+            return None
+        groups = _tint_groups(*self._setup_tints)
+        return frozenset(frozenset(g) for g in groups) if groups else None
 
     def _front_loaded_fits(self, course: str, roster: list[str]) -> bool:
         """The front-loaded opener still matches the roster and course now on the load screen (league
@@ -9763,6 +9850,7 @@ class Engine:
                 and (self._setup_format != "scramble" or p.round.format == "scramble")
                 # Written before a game-mode change still waiting to settle: out of date.
                 and self._setup_format == self._opener_prepared_format
+                and self._setup_teams_key() == p.colour_teams
                 # Still the same kind of round: a practice booking can turn up after it was written.
                 and (self._classify_round(roster, course)[1] is None) == p.is_league)
 
@@ -9790,6 +9878,7 @@ class Engine:
             await self._apply_live_handicaps(self._round_players(names))
         elif air:
             log.info("Setup read %s on %r is a practice round (%s); preparing its opener", names, course, practice)
+        colour_teams = self._setup_teams_key()   # what _build_round's teams come from
         r = self._build_round(names, sched.get("course") or course, entry if is_league else {}, is_league,
                               card_course=self._card_course(course), use_current_hole=False,
                               slot_names=slot_names)   # None (not the filtered roster) is the safe signal
@@ -9824,7 +9913,8 @@ class Engine:
         self._pending_opening = PendingOpening(course=course, teams=frozenset(r.teams), players=players,
                                                is_league=is_league, round=r, lines=lines,
                                                aired=aired, awaiting_load=awaiting,
-                                               roster_key=self._roster_key(names), guessed=guessed)
+                                               roster_key=self._roster_key(names), guessed=guessed,
+                                               colour_teams=colour_teams)
         if aired:
             self._air_lines("opener", lines)  # play over the course load
             log.info("Early opener aired during the load (%s) for %s %s: %d line(s)",
@@ -10140,20 +10230,21 @@ class Engine:
         if complete:
             self._record_week_results(r, row_of)
         # Per-player FIR/GIR/scrambling/sand-save for individual season stats. Alternate shot isn't
-        # attributed to one player, so skip it; otherwise record each individual (distinct names from
-        # this round's own shots, so a two-ball team isn't double-counted), skipping any shared-ball
-        # (anonymous) player. Scrambling/sand are gated to individual-ball formats at query time.
-        if r.format != "alternate":
-            anon = set(r.anonymous_players())
-            names = {rec.player for rec in self.state.shots if rec.round_id == r.id
-                     and rec.player and rec.player != "unknown" and rec.player not in anon}
-            for name in names:
-                pst = r.player_stats(name, self.state.shots)
-                if pst.holes_scored:
-                    nine = r.first_nine(pst)
-                    self.store.record_player_round(player=name, course=r.course, fmt=r.player_format(name), stats=pst,
-                                                   hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
-                                                   is_tournament=r.is_tournament, complete=complete, nine_to_par=nine[0] if nine else None)
+        # attributed to one player, so skip it (but not a player alone on their own ball in it); otherwise
+        # record each individual (distinct names from this round's own shots, so a two-ball team isn't
+        # double-counted), skipping any shared-ball (anonymous) player. Scrambling/sand are gated to
+        # individual-ball formats at query time.
+        anon = set(r.anonymous_players())
+        names = {rec.player for rec in self.state.shots if rec.round_id == r.id
+                 and rec.player and rec.player != "unknown" and rec.player not in anon
+                 and r.player_format(rec.player) != "alternate"}
+        for name in names:
+            pst = r.player_stats(name, self.state.shots)
+            if pst.holes_scored:
+                nine = r.first_nine(pst)
+                self.store.record_player_round(player=name, course=r.course, fmt=r.player_format(name), stats=pst,
+                                               hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
+                                               is_tournament=r.is_tournament, complete=complete, nine_to_par=nine[0] if nine else None)
         self._refresh_own_handicaps()
         return stats
 

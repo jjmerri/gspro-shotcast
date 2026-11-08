@@ -178,6 +178,8 @@ class Round:
         # A practice scramble's teams as GSPro tied them (play_scramble); until then they're the league's,
         # a guess: Josh played with Paul, not his league partner Corey.
         self.teams_known = False
+        # The setup screen's team colours (GSPro names), when they set a practice round's teams.
+        self.colour_teams: list[list[str]] | None = None
         self.ctp_holes = [int(h) for h in self.schedule.get("ctp_holes") or []]
         # Squabbit's card for this league week (`squabbit --cards`): its stroke index, tee rating and
         # slope, and the format's handicap settings are what the league's net scores use.
@@ -302,6 +304,8 @@ class Round:
         del self.roster[g]
         self.teams = {t: [x for x in gs if x != g] for t, gs in self.teams.items()}
         self.teams = {t: gs for t, gs in self.teams.items() if gs}
+        if self.colour_teams:
+            self.colour_teams = [[x for x in gs if x != g] for gs in self.colour_teams]
         if self.slot_names is not None:
             self.slot_names = [None if n == g else n for n in self.slot_names]
         if self.setup_slots is not None:
@@ -357,6 +361,8 @@ class Round:
         self.renamed[old] = new
         self.roster = {(new if g == old else g): p for g, p in self.roster.items()}
         self.teams = {(new if t == old else t): [new if g == old else g for g in gs] for t, gs in self.teams.items()}
+        if self.colour_teams:
+            self.colour_teams = [[new if g == old else g for g in gs] for gs in self.colour_teams]
         if self.slot_names is not None:
             self.slot_names = [new if n == old else n for n in self.slot_names]
         for d in (self.card_scores, self.log_scores, self.spellings, self.slot_reads,
@@ -409,18 +415,23 @@ class Round:
             self._allocate_hole_strokes()
         return True
 
-    def play_alternate(self, names: list[str]) -> bool:
+    def play_alternate(self, groups: list[list[str]]) -> bool:
         """GSPro's own alternate shot mode, picked on the setup screen: its partners share one ball and
-        one score, whoever's hitting. A practice round's team is `names` (the setup screen's two
-        players); a league round keeps its league teams. True if anything changed."""
-        if self.format == "alternate":
-            return False
+        one score, whoever's hitting. A practice round's teams are `groups` (the setup screen's two
+        players, or its team colours: pairs, and anyone left alone plays their own ball); a league
+        round keeps its league teams. True if anything changed."""
         if not self.is_league:
-            if len(names) != 2 or any(n not in self.roster for n in names):
+            named = [n for g in groups for n in g]
+            if not any(len(g) == 2 for g in groups) or any(len(g) > 2 for g in groups) \
+                    or any(n not in self.roster for n in named) or len(set(named)) != len(named):
                 return False
-            self.teams = {" & ".join(names): list(names), **{g: [g] for g in self.roster if g not in names}}
+            teams = {" & ".join(g) if len(g) > 1 else g[0]: list(g) for g in groups}
+            teams.update({g: [g] for g in self.roster if g not in named})
+            if self.format == "alternate" and teams == self.teams:
+                return False
+            self.teams = teams
             self.teams_known = True
-        elif not all(len(gs) == 2 for gs in self.teams.values()):
+        elif self.format == "alternate" or not all(len(gs) == 2 for gs in self.teams.values()):
             return False
         self.no_scramble = True
         self.format, self.format_warning = "alternate", None
@@ -520,17 +531,17 @@ class Round:
                 self.index[seq] = int(self.week_card["index"][hole])
 
     def solo(self, side: Side | None) -> bool:
-        """A one-person team in a scramble (a lone player against a team, or alone in GSPro's scramble
-        mode): nobody to pick a ball with, so it's an ordinary individual round."""
-        return (self.format == "scramble" and side is not None
+        """A one-person team in a scramble or alternate shot (a lone player against a team, or alone in
+        GSPro's team mode): nobody to share a ball with, so it's an ordinary individual round."""
+        return (self.format in ("scramble", "alternate") and side is not None
                 and len(side.players) == 1 and len(side.gspro) == 1)
 
     def side_format(self, side: Side | None) -> str | None:
-        """The format this side actually played: none (individual) for a one-person scramble team."""
+        """The format this side actually played: none (individual) for a one-person team."""
         return None if self.solo(side) else self.format
 
     def player_format(self, player: str | None) -> str | None:
-        return self.side_format(self.side_for(player)) if self.format == "scramble" else self.format
+        return self.side_format(self.side_for(player)) if self.format in ("scramble", "alternate") else self.format
 
     def anonymous_players(self) -> list[str]:
         """Players who share a ball nobody can attribute: their names mustn't go on a shot."""

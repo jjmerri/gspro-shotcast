@@ -1883,7 +1883,7 @@ async def test_players_swapped_after_the_opener_was_written_take_gspros_slots(tm
     p = await _run_setup_watch(e, [first, first, swapped, swapped, {"load_course": "Pebble Beach"}],
                                until=lambda p: p is not None and p.aired and e._played_setup is not None)
     assert p is not None and p.round.slot_names[:2] == ["Dan", "Derek"]
-    assert p.round.play_alternate(["Dan", "Derek"])
+    assert p.round.play_alternate([["Dan", "Derek"]])
     e.current_par, e.current_course = 4, "Pebble Beach"
     await e.handle_round_start(RoundStartEvent(hud=Hud(player_text="Derek E Shot 1 150 YDS", shot_number=1,
                                                        score_to_par="E", to_pin="150 yards")))
@@ -1897,6 +1897,76 @@ def test_the_played_slots_are_matched_to_the_rounds_own_spellings(tmp_path):
     r = e._build_round(["MikeD", "Sarah"], "Pebble Beach", {}, is_league=False, slot_names=["MikeD", "Sarah"])
     assert r.reorder_slots(e._as_round_names(r, ["SARAH", "MIKED", None]))
     assert r.slot_names == ["Sarah", "MikeD", None]
+
+
+_RED, _GREEN = (131, 18, 21), (19, 122, 38)   # GSPro 3.59's red and green name pills, off the sim PC
+
+
+def _pill(tint):
+    return Tone(121, 122, 0.01, color=0.6, tint=tint)
+
+
+async def test_a_four_player_scramble_takes_its_teams_from_the_pill_colours(tmp_path):
+    from commentator.models import RoundStartEvent
+
+    # Teams first set Alex+Blake red, then Blake moved to green with Drew: the colours at Play stand,
+    # and the opener written for the first teams is rewritten (it may name the partners).
+    names = {1: "Alex", 2: "Blake", 3: "Casey", 4: "Drew"}
+    first = _players_tab("Pebble Beach", names, setup_slot_1=_pill(_RED), setup_slot_2=_pill(_RED),
+                         setup_slot_3=_pill(_RED), setup_slot_4=_pill(_GREEN), setup_match_tab=_TAB_ON)
+    final = _players_tab("Pebble Beach", names, setup_slot_1=_pill(_RED), setup_slot_2=_pill(_GREEN),
+                         setup_slot_3=_pill(_RED), setup_slot_4=_pill(_GREEN), setup_match_tab=_TAB_ON)
+    first["setup_game_mode"] = final["setup_game_mode"] = "SCRAMBLE"
+    e = _engine(tmp_path)
+    p = await _run_setup_watch(e, [first, first, final, final, {"load_course": "Pebble Beach"}],
+                               until=lambda p: p is not None and p.aired and e._played_setup is not None)
+    teams = {"Alex & Casey": ["Alex", "Casey"], "Blake & Drew": ["Blake", "Drew"]}
+    assert p is not None and p.round.teams == teams
+    e.current_par, e.current_course = 4, "Pebble Beach"
+    await e.handle_round_start(RoundStartEvent(hud=Hud(player_text="Alex E Shot 1 150 YDS", shot_number=1,
+                                                       score_to_par="E", to_pin="150 yards")))
+    assert e.round is p.round and e.round.format == "scramble" and e.round.teams == teams
+    # GSPro's first copy ties Alex and Casey; Blake and Drew haven't picked yet but are still a team.
+    e.gspro.teammates = {(0, 2)}
+    e._sync_scramble()
+    assert e.round.teams == teams and e.round.player_format("Drew") == "scramble"
+    # A copy confirming two of a three-player colour team keeps the third with them.
+    e.round.colour_teams, e._scramble_pairs = [["Alex", "Blake", "Casey"], ["Drew"]], set()
+    e._sync_scramble()
+    assert e.round.side_for("Blake").players == ["Alex", "Casey", "Blake"] and e.round.player_format("Drew") is None
+
+
+def test_alternate_shot_pairs_by_colour_and_an_unread_colour_guesses_nothing(tmp_path):
+    from PIL import Image
+
+    from commentator.engine import _tint_groups
+    from commentator.screen import tone_of
+
+    def crop(pill, bar):   # a slot's crop: the dark pill inside its brighter header bar, white name text
+        img = Image.new("RGB", (120, 30), bar)
+        img.paste(Image.new("RGB", (100, 20), pill), (10, 5))
+        img.paste(Image.new("RGB", (40, 8), (255, 255, 255)), (40, 11))
+        return img
+
+    red, green = crop(_RED, (193, 38, 44)), crop(_GREEN, (40, 170, 70))
+    slots = ["MikeD", "Sarah", "Tony", "Rando", None]
+    tints = [tone_of(i).tint for i in (red, green, green, red)] + [None]
+    assert _tint_groups(slots, tints) == [["MikeD", "Rando"], ["Sarah", "Tony"]]
+
+    e = _engine(tmp_path)
+    e._setup_format = "alternate"
+    e._setup_tints = (slots, tints)
+    r = e._build_round(slots[:4], "Pebble Beach", {}, is_league=False, slot_names=slots)
+    assert r.format == "alternate"
+    assert r.teams == {"MikeD & Rando": ["MikeD", "Rando"], "Sarah & Tony": ["Sarah", "Tony"]}
+    # One pill not read (a grey pill on the old menus, say): no teams are guessed from the rest.
+    e._setup_tints = (slots, tints[:3] + [None, None])
+    r = e._build_round(slots[:4], "Pebble Beach", {}, is_league=False, slot_names=slots)
+    assert r.format != "alternate"
+    # Three players, one left alone in their own colour: the pair shares a ball, the single plays their own.
+    e._setup_tints = (slots[:3], tints[:3])
+    r = e._build_round(slots[:3], "Pebble Beach", {}, is_league=False, slot_names=slots[:3])
+    assert r.format == "alternate" and r.player_format("Sarah") == "alternate" and r.player_format("MikeD") is None
 
 
 async def test_a_setup_that_never_shows_the_players_tab_uses_the_last_roster_held_for_the_tee(tmp_path):
@@ -3749,6 +3819,40 @@ def test_a_one_person_scramble_team_is_recorded_as_an_individual_round(tmp_path)
     assert rows["Duffers"]["format"] == "scramble" and json.loads(rows["Duffers"]["players"]) == ["Tony", "Priya"]
 
 
+def test_a_player_alone_in_alternate_shot_keeps_individual_stats_and_a_rename_keeps_colour_teams(tmp_path):
+    from types import SimpleNamespace
+    e = _engine_with(tmp_path, _noted_league())
+    r = Round(league=e.league, gspro_players=["Tony", "Priya", "Josh"], course="X", scheduled_format="stroke",
+              is_league=False,
+              slot_names=["Tony", "Priya", "Josh"], holes=2)
+    r.colour_teams = [["Tony", "Priya"], ["Josh"]]
+    r.play_alternate(r.colour_teams)
+    e._start_round(r)
+    for g in ("Tony", "Priya", "Josh"):
+        r.set_log_scores(g, {1: 4, 2: 3})
+    e.state.shots.extend(ShotRecord(p, Shot(carry=200.0), "Hole 1", Hud(), [], round_id=r.id, par=4)
+                         for p in ("Tony", "Priya", "Josh"))
+    recorded = []
+    e.store.record_player_round = lambda **kw: recorded.append(kw["player"])
+    r.player_stats = lambda name, shots: SimpleNamespace(holes_scored=2)
+    r.first_nine = lambda *a: None
+    e._record_round_stats(r, "test")
+    assert recorded == ["Josh"]
+    # Pairs across the league teams: the calls name the colour partners, not the league's.
+    r2 = Round(league=e.league, gspro_players=["Tony", "Priya", "Josh"], course="X", scheduled_format="stroke",
+               is_league=False, slot_names=["Tony", "Priya", "Josh"], holes=2)
+    r2.colour_teams = [["Tony", "Josh"], ["Priya"]]
+    r2.play_alternate(r2.colour_teams)
+    e.round = r2
+    assert e._who("Priya") == ("Priya", None) and e._who("Tony")[1] == r2.side_for("Tony").label != "Duffers"
+    e.round = r
+    e.cfg.source.gspro_log_truth = True   # the lone player's own log lines are theirs; the pair's shared ball isn't attributed
+    assert e._gspro_idx("Josh") == 2 and e._gspro_idx("Tony") is None
+    # A corrected spelling follows into the colour teams, so a later scramble pick can't revive the old name.
+    assert r.rename_player("Josh", "Joshua")
+    assert r.colour_teams == [["Tony", "Priya"], ["Joshua"]]
+    assert r.remove_player("Priya") and r.colour_teams == [["Tony"], ["Joshua"]]
+
 def test_club_delivery_never_on_back_to_back_reactions(tmp_path):
     e = _engine_with(tmp_path, _noted_league())
 
@@ -3963,7 +4067,7 @@ def test_gspro_alternate_shot_survives_a_practice_becoming_the_league_round(tmp_
     e = _engine(tmp_path)
     entry = next(w for w in e.league.data["schedule"] if w.get("week") == 4)   # a best ball week
     r = e._build_round(["MikeD", "Sarah"], "Pebble Beach", {}, is_league=False)
-    assert r.play_alternate(["MikeD", "Sarah"])
+    assert r.play_alternate([["MikeD", "Sarah"]])
     r.make_league(entry, 9)
     assert r.format == "alternate" and [s.gspro for s in r.sides] == [["MikeD", "Sarah"]]
 

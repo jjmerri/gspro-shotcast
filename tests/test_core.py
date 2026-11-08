@@ -4367,6 +4367,12 @@ def test_a_repeated_score_in_alternate_shot_flags_nothing(tmp_path):
     e.gspro.mulligan_fires[7] = "undo"      # an explicit take-back counts in any format, but only once
     e._apply_log_corrections()
     assert not rec1.mulligan
+    # One the team colours left alone beside a pair plays their own ball: a repeat is their mulligan.
+    r.colour_teams = [["Alex", "Blake"], ["Paul"]]
+    _, rec2 = _row(e, r, 9, 1, "tee")
+    e.gspro.mulligan_fires[9] = "repeat"
+    e._apply_log_corrections()
+    assert rec2.mulligan
 
 
 def test_a_pick_up_reaches_the_round(tmp_path):

@@ -8,6 +8,7 @@ stats page and in the app; "Booth" items only in the app. Plain words, one line 
 
 ### Booth
 - Swapping players' order on GSPro's setup screen no longer mixes up whose shot was whose (a holed putt was being given to the partner's stroke before it).
+- A scramble or alternate shot with more than two players takes its teams from the team colours on GSPro's PLAYERS tab.
 
 ## 0.1.101
 
