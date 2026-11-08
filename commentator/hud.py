@@ -13,6 +13,7 @@ with the bare score ("Josh  E"), then distance to the pin, elevation, lie and a 
 Par 4 392 yds"); the handedness box says "RIGHT HAND"; the hole-out banner says "SCORE: 5".
 """
 
+import difflib
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -108,13 +109,14 @@ _PICK_FEET = re.compile(r"""^(\d{1,3})\s*['’`]\s*(\d{1,2})?\s*(?:"|”|''|'’
 def parse_pick_cards(items: list[OcrItem]) -> list[PickCard]:
     """The scramble pick screen's cards (GSPro 4.1, Bethpage 11-07): each is a slot number and name
     ("2  KYLE MARTIN"), the yards to the pin ("135"), the lie and stroke ("FAIRWAY  2ND"), and a
-    Select button. The buttons anchor the cards: every other item belongs to the nearest one."""
-    buttons = sorted((i for i in items if _bare(i.text) == "select"), key=lambda i: i.x)
+    Select button (USE on older GSPro, 11-02, whose lie is just "DEEP"). The buttons anchor the
+    cards: every other item belongs to the nearest one."""
+    buttons = sorted((i for i in items if _bare(i.text) in _PICK_BUTTONS), key=lambda i: i.x)
     if not buttons:
         return []
     cards: list[list[OcrItem]] = [[] for _ in buttons]
     for i in items:
-        if _bare(i.text) == "select":
+        if _bare(i.text) in _PICK_BUTTONS:
             continue
         k = min(range(len(buttons)), key=lambda n: abs(buttons[n].x - i.x))
         if i.y < buttons[k].y:
@@ -135,15 +137,34 @@ def parse_pick_cards(items: list[OcrItem]) -> list[PickCard]:
                 continue
             if yards is None and (m := _PICK_FEET.match(i.text.strip())):
                 yards = (int(m.group(1)) + int(m.group(2) or 0) / 12) / 3
-            elif yards is None and (m := _PICK_DISTANCE.match(i.text.strip())):
+            elif yards is None and (m := _PICK_DISTANCE.match(i.text.strip())) and (
+                    "." not in m.group(1) or m.group(2)):   # a bare "8.6" is a misread 9' 8"
                 v = float(m.group(1))
                 unit = (m.group(2) or "").lower()
                 yards = v / 3 if unit.startswith("f") else v * 1.0936 if unit == "m" else v
             else:
                 rest.append(i.text)
         if name and yards is not None:
-            out.append(PickCard(name=name, yards=yards, lie=parse_lie(rest)))
+            out.append(PickCard(name=name, yards=yards, lie=_pick_lie(rest)))
     return out
+
+
+_PICK_BUTTONS = ("select", "use")
+_ORDINAL = re.compile(r"(?<=[a-z])(?=\d+(?:st|nd|rd|th)\b)", re.I)
+_ONE_WORD_LIES = [lie for lie in LIES if " " not in lie]
+
+
+def _pick_lie(texts: list[str]) -> str | None:
+    """A card's lie, past OCR running it into the stroke ("GREEN5TH") or dropping a letter ("SNDSAND",
+    "SND AND")."""
+    texts = [_ORDINAL.sub(" ", t) for t in texts]
+    if lie := parse_lie(texts):
+        return lie
+    words = [w for t in texts for w in re.findall(r"[a-z]{3,}", t.lower())]
+    if lie := next((m[0] for w in words if (m := difflib.get_close_matches(w, _ONE_WORD_LIES, 1, 0.8))), None):
+        return lie
+    squashed = re.sub(r"[^a-z]", "", " ".join(texts).lower())
+    return next((lie for lie in sorted(LIES, key=len, reverse=True) if lie.replace(" ", "") in squashed), None)
 
 
 NAME_DARK: tuple = ()

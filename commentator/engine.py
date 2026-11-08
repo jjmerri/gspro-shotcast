@@ -7619,14 +7619,17 @@ class Engine:
                 self._pick_cards_due.append((balls, names, cards, time.monotonic()))
 
     async def _read_pick_panel(self, seen: int, balls: int) -> list:
-        """The pick screen's cards, read until every ball's is (or the pick is made, or 15 s pass)."""
+        """The pick screen's cards, read until every ball's is with its lie (or the pick is made, or 15 s pass)."""
         g, best = self.gspro, []
+
+        def score(cards: list) -> tuple:
+            return len(cards), sum(1 for c in cards if c.lie)
         deadline = time.monotonic() + PICK_SCREEN_SECONDS
         while g.pick_screen_up and g.pick_screens == seen and time.monotonic() < deadline:
             cards = (await self.screen.read_hud_async(["pick_panel"])).pick_cards
-            if len(cards) > len(best):
+            if score(cards) > score(best):
                 best = cards
-            if len(best) >= balls:
+            if len(best) >= balls and all(c.lie for c in best):
                 break
             await asyncio.sleep(0.4)
         return best

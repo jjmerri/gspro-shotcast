@@ -5234,6 +5234,38 @@ def test_the_pick_screens_cards_give_each_balls_finish_and_lie(tmp_path):
     assert rows == {ozzy: (294.0, "deep rough"), kyle: (24.0, "green")} and not e._pick_cards_due
 
 
+def test_pick_cards_read_older_gspros_use_buttons_and_garbled_lies():
+    from commentator.hud import OcrItem, parse_pick_cards
+
+    def card(x, *texts):
+        return [OcrItem(text=t, x=x, y=y, h=12) for t, y in zip(texts, (37, 61, 78, 100))]
+
+    # 11-02 (older GSPro): USE buttons, "DEEP" for deep rough, the lie run into the stroke.
+    assert [(c.name, round(c.yards, 1), c.lie) for c in parse_pick_cards(
+        card(314, "DYLAN", "20'9\"", "GREEN5TH", "USE") + card(402, "MOM", "12", "DEEP", "USE"))] == [
+        ("DYLAN", 6.9, "green"), ("MOM", 12.0, "deep rough")]
+    # 11-07: a dropped letter in SAND; a 9' 8" misread as a bare "8.6" leaves that card unread.
+    assert [(c.name, c.lie) for c in parse_pick_cards(
+        card(314, "OZZY", "141", "SND AND", "Select") + card(402, "KYLE", "187", "SNDSAND", "Select")
+        + card(490, "PAT", "90", "WASTEE 2ND", "Select"))] == [("OZZY", "sand"), ("KYLE", "sand"), ("PAT", "waste")]
+    assert [c.name for c in parse_pick_cards(
+        card(314, "OZZY", "8.6", "GREEN", "Select") + card(402, "KYLE", "28' 2\"", "GREEN", "Select"))] == ["KYLE"]
+
+
+async def test_the_pick_reader_keeps_reading_until_every_card_has_its_lie(tmp_path):
+    import types
+    from commentator.hud import PickCard
+    e = _mini_engine(tmp_path)
+    e.gspro.pick_screens, e.gspro.pick_screen_up = 1, True
+    reads = iter([[PickCard("OZZY", 141.0, None), PickCard("KYLE", 187.0, "deep rough")],
+                  [PickCard("OZZY", 141.0, "sand"), PickCard("KYLE", 187.0, "deep rough")]])
+
+    async def read(_parts):
+        return types.SimpleNamespace(pick_cards=next(reads))
+    e.screen = types.SimpleNamespace(read_hud_async=read)
+    assert [c.lie for c in await e._read_pick_panel(1, 2)] == ["sand", "deep rough"]
+
+
 def test_gspro_revealing_a_scramble_makes_the_round_one(tmp_path):
     from commentator.round import Round
     e = _mini_engine(tmp_path)
