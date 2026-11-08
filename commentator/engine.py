@@ -8929,6 +8929,10 @@ class Engine:
             if sampler is not None:
                 sampler.cancel()
 
+    def _on_range_by_log(self) -> bool:
+        """GSPro's log has it on the range, where its setup screen isn't up (only End Round leaves it)."""
+        return self._log_rounds and self.gspro.mode == "range"
+
     async def _sample_setup_tabs(self) -> None:
         """Keep the latest frame showing the setup screen's PLAYERS tab with names on it, and the nines
         last checked on its HOLES tab, sampled every quarter second. The watch's own polls are ~2 s apart
@@ -8966,7 +8970,8 @@ class Engine:
         while True:
             await asyncio.sleep(0.25)
             self._sync_screen_ui()
-            if self.round is not None and not self.round.ended:
+            if (self.round is not None and not self.round.ended) or self._on_range_by_log():
+                # (The range's sky behind the tabs reads as a lit tab: full frames 4x a second for nothing.)
                 self._players_snap = self._holes_snap = None
                 last_nines = None
                 continue
@@ -9062,10 +9067,13 @@ class Engine:
                     lit = players_tab or any(
                         (t := tones.get(n)) is not None and _tab_lit(t, level)
                         for n, level in (("setup_holes_tab", _HOLES_TAB_LIT), ("setup_match_tab", _MATCH_TAB_LIT)))
-                    # Away from the menus by GSPro's log (the range is only left for setup by End Round; a
-                    # course is reached from the setup screen, whose load screen must still be read at once).
-                    away = self.gspro.mode == "range" or (self.gspro.mode == "course" and not seen_setup)
-                    if not lit and p is None and self._log_rounds and away:
+                    # Away from the menus by GSPro's log: on the range (only End Round leaves it for setup;
+                    # its sky behind the tabs reads as a lit tab, so they aren't asked), or on a course with
+                    # no setup tab showing (`Selected Course:` is logged as the setup screen opens, and its
+                    # load screen must still be read at once once the setup was seen).
+                    away = self._on_range_by_log() or (
+                        self._log_rounds and self.gspro.mode == "course" and not seen_setup and not lit)
+                    if p is None and away:
                         if frame_at - gate_read_at < SETUP_AWAY_POLL_SECONDS:
                             continue
                         gate_read_at = frame_at

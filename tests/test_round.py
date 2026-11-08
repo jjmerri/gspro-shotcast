@@ -1779,7 +1779,8 @@ async def test_the_play_button_is_not_ocrd_every_poll_on_the_range(tmp_path):
     e.cfg.source.gspro_log_truth = True
     e.gspro.mode = "range"
     e.cfg.commentary.preround_poll_seconds = 0.01
-    e.screen = _PixelSetupScreen([{"setup_course": "DRO Tee 2 51"}])
+    # The range's sky behind the PLAYERS tab reads as a lit tab.
+    e.screen = _PixelSetupScreen([{"setup_course": "DRO Tee 2 51", "tones": {"setup_players_tab": _TAB_ON}}])
     task = asyncio.create_task(e._watch_setup())
     while e.screen.i < 4:
         await asyncio.sleep(0.01)
