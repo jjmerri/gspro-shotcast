@@ -4,6 +4,15 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.99
+
+### Stats page
+- Closest-to-the-pin distances show in feet, however far.
+
+### Booth
+- The booth reads the scramble pick screen on older GSPro versions too (USE buttons), and reads each ball's lie more reliably.
+- Closest-to-the-pin distances are called in feet, however far.
+
 ## 0.1.98
 
 ### Booth
