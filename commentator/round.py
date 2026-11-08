@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 
 from . import handicap
-from .facts import to_yards
+from .facts import ctp_feet, to_yards
 from .hud import Scorecard
 from .league import League
 from .store import COUNTS_AS_ROUND_HOLES, is_drive
@@ -1079,7 +1079,7 @@ class Round:
         facts += self._team_facts(all_stats)
         for seq, results in sorted(self.ctp_results.items()):
             who, distance = min(results.items(), key=lambda kv: to_yards(kv[1]) or 999)
-            fact = f"Closest to the pin today on {self.hole_name(seq)}: {who}, {distance} from the hole"
+            fact = f"Closest to the pin today on {self.hole_name(seq)}: {who}, {ctp_feet(distance)} from the hole"
             mine = to_yards(distance)
             if week_ctp is None or mine is None:
                 facts.append(fact + " (it's up against the rest of the league's tee shots this week).")

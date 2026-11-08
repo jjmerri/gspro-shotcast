@@ -20,7 +20,7 @@ from typing import Any
 from .carry_model import CarryModel, correct_for_elevation
 from .config import ROUND_STATUS, ROUND_STATUS_CHECK_S, ROUND_STATUS_EVERY_S, Config
 from .flight import point_at
-from .facts import (
+from .facts import (ctp_feet, ctp_text as _ctp_text,
     PUTT_COUNT_FACT, PUTT_FOR, PUTT_FOR_FACT, SCORE_NAMES, _PUTT_WORDS, _fmt_to_par, _to_par_value, club_delivery_facts, club_delivery_notable, club_name, flight_facts,
     gimme_edge, history_facts, lie_cost_fact, moment_facts, ordinal, preshot_facts, putt_count_fact, putt_elevation_inches, shot_facts, to_yards, WRONG_GREEN_YARDS, wrong_green_fact,
     wrong_conceded_score, wrong_green_yards, wrong_holed_putt, wrong_putt_score,
@@ -2117,7 +2117,7 @@ class Engine:
         best = self._schedule_ctp(entry, [], holes)
         return {"prize": self.league.data.get("ctp_prize"),
                 "holes": [{"hole": h, **({"player": best[h][0], "yards": round(best[h][1], 2),
-                                          "distance": _distance_text(best[h][1])} if h in best else {})}
+                                          "distance": _ctp_text(best[h][1])} if h in best else {})}
                           for h in holes]}
 
     async def _upload_league_page(self) -> None:
@@ -3577,11 +3577,12 @@ class Engine:
             who, tee = self._ctp_tee_shot(r, player)
             lead = self._ctp_leader(r, hole, exclude=who)
             group = self._ctp_group_facts(r, exclude=who)
-            r.ctp_results.setdefault(r.seq, {})[who] = hud.to_pin
-            if tee is not None and r.format == "alternate" and (y := to_yards(hud.to_pin)) is not None:
-                self.store.fill_tee_finish(tee.shot_id, y)   # the shared ball has no log finish
-            facts = [f"{who}'s tee shot on this closest-to-the-pin hole finished on the green, {hud.to_pin} from the hole."]
             mine = to_yards(hud.to_pin)
+            dist = ctp_feet(hud.to_pin)
+            r.ctp_results.setdefault(r.seq, {})[who] = hud.to_pin   # unrounded, to rank against
+            if tee is not None and r.format == "alternate" and mine is not None:
+                self.store.fill_tee_finish(tee.shot_id, mine)   # the shared ball has no log finish
+            facts = [f"{who}'s tee shot on this closest-to-the-pin hole finished on the green, {dist} from the hole."]
             if lead and mine is not None:
                 facts.append(f"That's the new closest this week, inside {lead[0]}'s {lead[1]}." if mine < lead[2]
                              else f"{lead[0]}'s {lead[1]} is still the closest this week.")
@@ -3616,7 +3617,7 @@ class Engine:
     def _ctp_group_facts(self, r: Round, exclude: str | None = None) -> list[str]:
         """This round's tee shots already on the green on this hole, so a line about a playing partner's
         shot has something true to say (and isn't made up)."""
-        return [f"Earlier on this hole in this round, {who}'s tee shot finished on the green, {dist} from the hole."
+        return [f"Earlier on this hole in this round, {who}'s tee shot finished on the green, {ctp_feet(dist)} from the hole."
                 for who, dist in (r.ctp_results.get(r.seq) or {}).items() if who != exclude]
 
     def _ctp_leader(self, r: Round, hole: int | None,
@@ -3628,10 +3629,10 @@ class Engine:
             return None
         options = []
         if (db := self._week_ctp(r, before_id=r.shot_floor).get(hole)):
-            options.append((db[0], _distance_text(db[1]), db[1], True))
+            options.append((db[0], _ctp_text(db[1]), db[1], True))
         for who, dist in (r.ctp_results.get(r.seq) or {}).items():
             if who != exclude and (y := to_yards(dist)) is not None:
-                options.append((who, dist, y, False))
+                options.append((who, ctp_feet(dist), y, False))
         return min(options, key=lambda o: o[2]) if options else None
 
     # ---- pre-shot -------------------------------------------------------------------------
@@ -9656,7 +9657,7 @@ class Engine:
         if not r.is_league or not r.ctp_holes \
                 or not any(e.get("end_date") for e in self.league.data.get("schedule") or []):
             return None
-        return {h: (who, _distance_text(y), y) for h, (who, y) in self._week_ctp(r, before_id=r.shot_floor).items()}
+        return {h: (who, _ctp_text(y), y) for h, (who, y) in self._week_ctp(r, before_id=r.shot_floor).items()}
 
     def _week_ctp_facts(self, r: Round) -> list[str]:
         if not r.is_league:
@@ -9666,7 +9667,7 @@ class Engine:
         for hole in r.ctp_holes:
             if hole in best:
                 who, yards = best[hole]
-                facts.append(f"Closest to the pin on hole {hole} this week so far: {who}, {_distance_text(yards)} "
+                facts.append(f"Closest to the pin on hole {hole} this week so far: {who}, {_ctp_text(yards)} "
                              f"from the hole.")
             else:
                 facts.append(f"Nobody has a tee shot on the green on hole {hole} this week yet.")

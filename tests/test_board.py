@@ -117,31 +117,32 @@ def _tee_shot(e, who, hole, finish, lie="green", fmt="best_ball", league=True, c
 def test_week_ctp_counts_only_league_tee_shots_on_the_green(tmp_path):
     e = _engine(tmp_path, League(LEAGUE_DATA))
     _tee_shot(e, "Tony", 12, 4.0)
+    _tee_shot(e, "Ann", 15, 25.5)                           # past 20 yd: still feet
     _tee_shot(e, "Priya", 12, 2.5, lie="fringe")           # off the green: doesn't count
     _tee_shot(e, "Lou", 12, 1.0, league=False)              # practice: doesn't count
     _tee_shot(e, "Mike", 12, 3.0, course="Elsewhere")       # another course
     _tee_shot(e, "Sarah", 14, 1.0)                          # not a CTP hole
-    assert e.store.week_ctp(["Test Links"], [12, 15], "2026-01-01") == {12: ("Tony", 4.0)}
+    assert e.store.week_ctp(["Test Links"], [12, 15], "2026-01-01") == {12: ("Tony", 4.0), 15: ("Ann", 25.5)}
     r, _ = _round()
     e.round = r
     facts = e._week_ctp_facts(r)
     assert facts == ["Closest to the pin on hole 12 this week so far: Tony, 12 feet from the hole.",
-                     "Nobody has a tee shot on the green on hole 15 this week yet."]
+                     "Closest to the pin on hole 15 this week so far: Ann, 76 feet 6 inches from the hole."]
 
 
 def test_week_ctp_counts_scramble_picks_and_credits_an_unknown_hitter_to_the_team(tmp_path):
     e = _engine(tmp_path, League(LEAGUE_DATA))
     _tee_shot(e, "Tony", 12, 4.0)
     _tee_shot(e, "Dee", 12, 3.0, fmt="scramble")              # the ball Hackers picked: counts
-    one = _tee_shot(e, "Mike", 15, 2.0, fmt="alternate")      # one GSPro profile: who hit it isn't known
+    one = _tee_shot(e, "Mike", 15, 25.5, fmt="alternate")     # one GSPro profile: who hit it isn't known
     e.store.set_shot_player(one, "Mike", attributed=False, fmt="alternate", shared_ball=True)
     assert e.store.week_ctp(["Test Links"], [12, 15], "2026-01-01") == {12: ("Dee", 3.0)}
     r, _ = _round()
     e.round = r
-    assert e._week_ctp(r) == {12: ("Dee", 3.0), 15: ("Aces", 2.0)}
-    card = e._ctp_card(6)
+    assert e._week_ctp(r) == {12: ("Dee", 3.0), 15: ("Aces", 25.5)}
+    card = e._ctp_card(6)                                       # the card is in feet, even past 20 yd
     assert card["holes"] == [{"hole": 12, "player": "Dee", "yards": 3.0, "distance": "9 feet"},
-                             {"hole": 15, "player": "Aces", "yards": 2.0, "distance": "6 feet"}]
+                             {"hole": 15, "player": "Aces", "yards": 25.5, "distance": "76 feet 6 inches"}]
     assert e._ctp_card(7) is None                              # no CTP holes that week
 
 
@@ -352,6 +353,16 @@ def test_standings_facts_from_final_weeks(tmp_path):
     assert e._board_standings(r) is None
 
 
+def test_ctp_ranks_on_the_huds_distance_not_the_rounded_feet(tmp_path):
+    e = _engine(tmp_path, League(LEAGUE_DATA))
+    _tee_shot(e, "Tony", 12, 25.105)
+    r, _ = _round()
+    r.seq = 3
+    e._start_round(r)
+    e._ctp_facts(2, Hud(lie="green", to_pin="25.1 yards"), "Mike")   # said as 75 feet 4 inches (25.111 yd)
+    assert e._ctp_leader(r, 12)[:2] == ("Mike", "75 feet 4 inches")
+
+
 def test_ctp_facts_name_the_group_and_where_the_mark_came_from(tmp_path):
     e = _engine(tmp_path, League(LEAGUE_DATA))
     _tee_shot(e, "Tony", 12, 4.0)
@@ -366,6 +377,8 @@ def test_ctp_facts_name_the_group_and_where_the_mark_came_from(tmp_path):
     assert "That's the new closest this week, inside Tony's 12 feet." in green
     assert "Tony's mark came from an earlier round this week, not this one." in green
     assert any("Mike's tee shot finished on the green, 22 feet" in f for f in green)
+    long = e._ctp_facts(2, Hud(lie="green", to_pin="25.5 yards"), "Pat")   # the HUD's yards, said in feet
+    assert "Pat's tee shot on this closest-to-the-pin hole finished on the green, 76 feet 6 inches from the hole." in long
     # The closer measures tonight's best against the week's earlier rounds.
     closing = " ".join(r.closing_facts([], {}, week_ctp=e._closer_week_ctp(r)))
     assert ("Closest to the pin today on hole 12: Sarah, 9 feet 2 inches from the hole. That's the closest on "

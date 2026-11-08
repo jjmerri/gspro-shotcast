@@ -346,6 +346,18 @@ def to_yards(distance: str | None) -> float | None:
     return value
 
 
+def ctp_text(yards: float) -> str:
+    """A closest-to-the-pin distance: always feet and inches, however far."""
+    feet, inches = divmod(round(yards * 36), 12)
+    return f"{feet} feet {inches} inches" if inches else f"{feet} feet"
+
+
+def ctp_feet(distance: str) -> str:
+    """A HUD distance ("25.5 yards") said the CTP way, in feet; the text itself if it can't be read."""
+    yards = to_yards(distance)
+    return distance if yards is None else ctp_text(yards)
+
+
 def _to_par_value(score_to_par: str | None) -> int | None:
     """GSPro's round score-to-par ("E", "+2", "-1") as an int, or None."""
     if not score_to_par:
