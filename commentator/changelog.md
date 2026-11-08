@@ -4,6 +4,14 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.97
+
+### Stats page
+- League rounds show their **net score** (after handicap strokes) on the Rounds tab and the round's page.
+
+### Booth
+- Between rounds on the range, the booth no longer re-reads the setup screen several times a second.
+
 ## 0.1.96
 
 ### Stats page
