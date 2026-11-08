@@ -129,6 +129,8 @@
   .week { margin-top:14px; } .week h3 { margin:0 0 8px; } .week table { background:none; }
   .week tr.on td { color:var(--accent); font-weight:600; } .week tr.mine td { font-weight:600; } .week .sub { font-weight:400; }
   .league { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:12px; } .league .week { margin-top:0; }
+  .lgnav { display:flex; align-items:center; gap:12px; margin:4px 0 10px; } .lgnav .lgarrow { font-size:24px; line-height:1; padding:0 6px; }
+  .lgnav .lgarrow:disabled { opacity:.25; cursor:default; }
   .chat .log { max-height:260px; overflow-y:auto; margin:6px 0 8px; }
   .chat .msg { padding:4px 0; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
   .chat .msg b { color:var(--accent); margin-right:6px; }
@@ -914,10 +916,13 @@ function renderHome() {
     <div class="sub">${esc(m.date)} · ${esc(m.course)}${m.hole ? ` · hole ${m.hole}` : ""}${shotActions(m)}</div></div></div>`).join("")
     + `<p class="sub"><button class="link" data-tab="highlights">All records and moments →</button></p>` : "";
   const pickHint = me ? "" : `<p class="sub">Pick yourself in the “Everyone” menu at the top to see your own numbers here and on every tab.</p>`;
-  const lg = state.league, league = lg ? weekCard(lg.week) + ctpCard(lg.week) + standingsCard(lg.standings) : "";
-  const latest = recapList()[0], recap = latest ? `<p>${recapBtn(latest[0], latest[1])}</p>` : "";
+  const lg = state.league, at = lg ? leagueDate(lg) : null;
+  const league = lg ? at.weeks.map(weekCard).join("") + ctpCard(at.weeks) + standingsCard(lg.standings) : "";
+  const recaps = at ? recapList().filter(([, r]) => at.weeks.some(w => w.week === r.week && (!at.date || !r.end_date || r.end_date === at.date))) : [];
+  const latest = recapList()[0], recap = recaps.length ? `<p>${recaps.map(([k, r]) => recapBtn(k, r)).join(" · ")}</p>`
+    : latest ? `<p>${recapBtn(latest[0], latest[1])}</p>` : "";
   return `<div class="home"><h2>${meTitle("Home")}</h2>${newsCard()}${pickHint}${cards.length ? `<div class="cards">${cards.join("")}</div>` : ""}
-    ${league ? `<h2>League <span class="sub">from Squabbit and the sim · updated ${esc(when(lg.updated * 1000, { weekday: "short", hour: "numeric", minute: "2-digit" }))}</span></h2>${recap}<div class="league">${league}</div>` : ""}
+    ${league ? `<h2>League <span class="sub">from Squabbit and the sim · updated ${esc(when(lg.updated * 1000, { weekday: "short", hour: "numeric", minute: "2-digit" }))}</span></h2>${leagueNav(lg, at)}${recap}<div class="league">${league}</div>` : ""}
     <h2>${me ? "Their latest rounds" : "Latest rounds"}</h2>${recent}
     ${moments ? `<h2>Moments <span class="sub">last 3 months</span></h2>${moments}` : ""}</div>`;
 }
@@ -1798,7 +1803,7 @@ const weekPanel = () => weekCard(state.week);
 // shared), team, net (* the sim's count of a team not on Squabbit yet), and on the Live tab the team on
 // the sim now. A viewer's own team in bold.
 function weekCard(w) {
-  if (!w || !(w.rows || []).length) return "";
+  if (!w || !(w.rows || []).length && !(w.waiting || []).length) return "";
   const nets = w.rows.filter(r => r.net !== null && r.net !== undefined).map(r => r.net);
   const rows = [...w.rows].sort((a, b) => (a.net ?? Infinity) - (b.net ?? Infinity) || !!a.on - !!b.on);
   const place = n => {
@@ -1811,21 +1816,50 @@ function weekCard(w) {
     .filter(Boolean).map(esc).join(" · ");
   const cls = r => [r.on && "on", myTeam(r) && "mine"].filter(Boolean).join(" ");
   return `<section class="card week"><h3>Week ${esc(w.week)} <span class="sub">${sub}</span></h3>
-  <table><thead><tr><th></th><th class="l">Team</th><th>Net</th>${w.rows.some(r => r.on) ? "<th></th>" : ""}</tr></thead><tbody>${rows.map(r =>
+  ${rows.length ? `<table><thead><tr><th></th><th class="l">Team</th><th>Net</th>${w.rows.some(r => r.on) ? "<th></th>" : ""}</tr></thead><tbody>${rows.map(r =>
     `<tr${cls(r) ? ` class="${cls(r)}"` : ""}><td>${place(r.net)}</td><td class="l">${esc(r.team)}</td><td>${toPar(r.net)}${r.sim ? "*" : ""}</td>
     ${w.rows.some(r => r.on) ? `<td class="l sub">${r.on ? (r.thru ? `${r.thru === w.holes ? "finished" : `thru ${r.thru}`} · <span class="livedot"></span>on now` : `<span class="livedot"></span>on now`) : ""}</td>` : ""}</tr>`).join("")}
-  </tbody></table>${Array.isArray(w.waiting) && w.waiting.length ? `<p class="sub">${w.final ? "Didn't post" : "Yet to play"}: ${w.waiting.map(esc).join(", ")}</p>` : ""}${
+  </tbody></table>` : ""}${Array.isArray(w.waiting) && w.waiting.length ? `<p class="sub">${w.final ? "Didn't post" : "Yet to play"}: ${w.waiting.map(esc).join(", ")}</p>` : ""}${
     w.rows.some(r => r.sim) ? `<p class="sub">* the sim's count: not on Squabbit yet</p>` : ""}</section>`;
 }
 const myTeam = r => !!(state.me && Array.isArray(r.players) && r.players.includes(state.me));
-// The week's closest-to-the-pin holes (league.json's week.ctp): the closest tee shot on the green in the
-// sim's league rounds so far, a team's name where one GSPro profile hid who hit it.
-function ctpCard(w) {
-  const c = w && w.ctp;
-  if (!c || !(c.holes || []).length) return "";
-  return `<section class="card week"><h3>Closest to the pin <span class="sub">week ${esc(w.week)}${c.prize ? ` · $${esc(c.prize)} a hole` : ""}</span></h3>
-  <table><thead><tr><th>Hole</th><th class="l">Closest</th><th>Distance</th></tr></thead><tbody>${c.holes.map(h =>
-    `<tr${h.player && h.player === state.me ? ` class="mine"` : ""}><td>${esc(h.hole)}</td><td class="l">${h.player ? esc(h.player) : '<span class="sub">nobody on the green yet</span>'}</td><td>${h.distance ? esc(h.distance) : ""}</td></tr>`).join("")}
+// The Home tab's league weeks by due date (league.json's dates): the one picked with the arrows, else
+// the one league.json opens on (the earliest still open, else the latest). A league.json from before
+// dates has just its one week.
+function leagueDate(lg) {
+  const dates = lg.dates && lg.dates.length ? lg.dates : lg.week ? [{ date: lg.week.deadline, weeks: [lg.week] }] : [];
+  if (!dates.length) return { date: null, weeks: [], i: 0, n: 0 };
+  const cur = Number.isInteger(lg.current) ? lg.current : dates.length - 1;
+  const i = Math.max(0, Math.min(dates.length - 1, Number.isInteger(state.leagueAt) ? state.leagueAt : cur));
+  return { ...dates[i], i, n: dates.length };
+}
+const andList = xs => xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} & ${xs[xs.length - 1]}`;
+function leagueNav(lg, at) {
+  if (!at.weeks.length) return "";
+  const due = at.date ? new Date(`${at.date}T12:00:00`) : null;
+  const dueText = due && !isNaN(due) ? `due ${due.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}` : "";
+  const label = `${at.weeks.length > 1 ? "Weeks" : "Week"} ${andList(at.weeks.map(w => esc(w.week)))}${dueText ? ` <span class="sub">${esc(dueText)}</span>` : ""}`;
+  const arrow = (step, ch, title) => `<button class="link lgarrow" data-lgstep="${step}" title="${title}" aria-label="${title}"${
+    at.i + step < 0 || at.i + step >= at.n ? " disabled" : ""}>${ch}</button>`;
+  return `<div class="lgnav">${arrow(-1, "‹", "Earlier weeks")}<b>${label}</b>${arrow(1, "›", "Later weeks")}</div>`;
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-lgstep]");
+  if (!b || b.disabled || !state.league) return;
+  const at = leagueDate(state.league);
+  state.leagueAt = at.i + Number(b.dataset.lgstep);
+  render();
+});
+// The closest-to-the-pin holes of the weeks shown (league.json's week.ctp): the closest tee shot on the
+// green in the sim's league rounds so far, a team's name where one GSPro profile hid who hit it.
+function ctpCard(weeks) {
+  const ws = (weeks || []).filter(w => w && w.ctp && (w.ctp.holes || []).length);
+  if (!ws.length) return "";
+  const many = ws.length > 1, prizes = [...new Set(ws.map(w => w.ctp.prize).filter(Boolean))];
+  const holes = ws.flatMap(w => w.ctp.holes.map(h => ({ ...h, week: w.week })));
+  return `<section class="card week"><h3>Closest to the pin <span class="sub">${many ? "weeks" : "week"} ${andList(ws.map(w => esc(w.week)))}${prizes.length === 1 ? ` · $${esc(prizes[0])} a hole` : ""}</span></h3>
+  <table><thead><tr>${many ? "<th>Week</th>" : ""}<th>Hole</th><th class="l">Closest</th><th>Distance</th></tr></thead><tbody>${holes.map(h =>
+    `<tr${h.player && h.player === state.me ? ` class="mine"` : ""}>${many ? `<td>${esc(h.week)}</td>` : ""}<td>${esc(h.hole)}</td><td class="l">${h.player ? esc(h.player) : '<span class="sub">nobody on the green yet</span>'}</td><td>${h.distance ? esc(h.distance) : ""}</td></tr>`).join("")}
   </tbody></table><p class="sub">Tee shots on the green in league rounds on the sim.</p></section>`;
 }
 // The season's points standings over its final weeks (league.json).
@@ -2090,7 +2124,9 @@ async function pollExtras() {
   const schedule = sched && Array.isArray(sched.bookings) ? sched : null;
   const clips = cl && cl.clips && typeof cl.clips === "object" ? cl.clips : null;
   const rowsOk = c => c && Array.isArray(c.rows) && c.rows.every(r => r && typeof r === "object") ? c : null;
-  const league = lg && lg.updated ? { ...lg, week: rowsOk(lg.week), standings: rowsOk(lg.standings) } : null;
+  const dates = lg && Array.isArray(lg.dates) ? lg.dates.filter(d => d && typeof d === "object")
+    .map(d => ({ date: typeof d.date === "string" ? d.date : null, weeks: (Array.isArray(d.weeks) ? d.weeks : []).filter(rowsOk) })) : null;
+  const league = lg && lg.updated ? { ...lg, week: rowsOk(lg.week), dates, standings: rowsOk(lg.standings) } : null;
   const reels = rl && rl.reels && typeof rl.reels === "object" ? Object.fromEntries(Object.entries(rl.reels).filter(([, x]) =>
     x && typeof x === "object" && Array.isArray(x.moments) && x.moments.every(m => m && typeof m === "object"))) : null;
   const recaps = rc && rc.recaps && typeof rc.recaps === "object" ? Object.fromEntries(Object.entries(rc.recaps).filter(([, x]) =>

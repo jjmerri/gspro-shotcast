@@ -1199,3 +1199,43 @@ top = {get location() { throw new Error("cross-origin"); }}; seen.push(framed(),
 console.log(JSON.stringify(seen));"""
     got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
     assert got == [False, False, True, True]
+
+
+def test_the_home_tabs_league_arrows_step_through_due_dates():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = "".join(re.search(pat, page, re.S).group(0) for pat in (
+        r"\nfunction leagueDate\(.*?\n}\n", r"\nconst andList = .*?\n", r"\nfunction leagueNav\(.*?\n}\n",
+        r"\nfunction ctpCard\(.*?\n}\n"))
+    ctp = lambda h: {"prize": 5, "holes": [{"hole": h, "player": "Ann", "distance": "9 feet"}]}
+    lg = {"current": 1, "dates": [
+        {"date": "2026-12-06", "weeks": [{"week": 1, "rows": [], "ctp": ctp(3)}, {"week": 2, "rows": [], "ctp": ctp(14)}]},
+        {"date": "2026-12-13", "weeks": [{"week": 3, "rows": [], "ctp": ctp(8)}]}]}
+    script = "const esc = s => String(s), state = {};" + fns + f"const lg = {json.dumps(lg)};" + """
+const seen = [];
+for (const at of [null, 0, -3, 9]) {
+  state.leagueAt = at;
+  const d = leagueDate(lg), nav = leagueNav(lg, d);
+  seen.push([d.weeks.map(w => w.week), nav.includes('data-lgstep="-1" title="Earlier weeks" aria-label="Earlier weeks" disabled'),
+             nav.includes('data-lgstep="1" title="Later weeks" aria-label="Later weeks" disabled'), nav.replace(/<[^>]+>/g, "")]);
+}
+state.leagueAt = 0;
+const two = ctpCard(leagueDate(lg).weeks);
+seen.push([two.includes("<th>Week</th>"), (two.match(/<tr>|<tr /g) || []).length, two.includes("weeks 1 & 2 · $5 a hole")]);
+seen.push(leagueDate({week: {week: 4, deadline: "2026-12-20", rows: []}}).weeks.map(w => w.week));
+console.log(JSON.stringify(seen));
+"""
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    assert got[:4] == [[[3], False, True, "‹Week 3 due Sun, Dec 13›"],
+                       [[1, 2], True, False, "‹Weeks 1 & 2 due Sun, Dec 6›"],
+                       [[1, 2], True, False, "‹Weeks 1 & 2 due Sun, Dec 6›"],
+                       [[3], False, True, "‹Week 3 due Sun, Dec 13›"]]
+    assert got[4] == [True, 3, True]       # the header row and a hole from each week
+    assert got[5] == [4]                   # a league.json from before dates: its one week

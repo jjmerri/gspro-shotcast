@@ -2091,16 +2091,19 @@ class Engine:
         return self.board.with_sim(self.store.week_results(self.league.data.get("schedule") or []))
 
     def _publish_league_page(self) -> None:
-        """Put the stats page's Home tab league cards (league.json: this week's results, the season
-        standings) up. Written when they can change: after the round-start Squabbit read, when a league
-        round finishes, and at midnight (a passed deadline makes a week final). Before a Squabbit read
-        this run, the last one up stands. One upload at a time, the newest last."""
+        """Put the stats page's Home tab league cards (league.json: every due date's weeks with their
+        closest-to-the-pin cards, the season standings) up. Written when they can change: after the
+        round-start Squabbit read, when a league round finishes, and at midnight (a passed deadline
+        makes a week final). Before a Squabbit read this run, the last one up stands. One upload at a
+        time, the newest last."""
         board = self._league_board() if self._league_page_on else None
         if board is None:
             return
         page = board.page(time.strftime("%Y-%m-%d"))
-        if page.get("week"):
-            page["week"]["ctp"] = self._ctp_card(page["week"]["week"])
+        weeks = [w for d in page["dates"] for w in d["weeks"]] + ([page["week"]] if page.get("week") else [])
+        for w in weeks:
+            if "ctp" not in w:
+                w["ctp"] = self._ctp_card(w["week"])
         self._league_body = json.dumps({**page, "updated": round(time.time())}).encode()
         if not self._league_uploading:
             self._league_uploading = True

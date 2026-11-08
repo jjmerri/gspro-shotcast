@@ -257,7 +257,35 @@ def test_the_home_tabs_league_cards_show_this_week_and_the_standings():
     # Past week 7's deadline both weeks are final: the latest one shows, with who never posted.
     after = b.page("2026-12-07")["week"]
     assert (after["week"], after["final"], after["waiting"]) == (7, True, ["Duffers", "Hackers"])
-    assert Board({}, league, POINTS).page("2026-11-01") == {"week": None, "standings": None}
+    assert Board({}, league, POINTS).page("2026-11-01") == {"week": None, "dates": [], "current": None,
+                                                             "standings": None}
+
+
+def test_the_home_tab_groups_league_weeks_by_due_date_and_keeps_past_ones():
+    data = {**LEAGUE_DATA, "schedule": [*LEAGUE_DATA["schedule"],
+                                        {"week": 8, "course": "Later", "end_date": "2026-12-13"},
+                                        {"week": 9, "course": "Unplayed", "end_date": "2026-12-20"}]}
+    league = League(data)
+    teams = [("x1", ["a", "b"], "Team 1"), ("x2", ["c", "d"], "Team 2"), ("x3", ["e", "f"], "Hackers")]
+    b = Board.from_squabbit([week(6, [(*t, n) for t, n in zip(teams, (-4, -2, None))])], league, POINTS)
+    page = b.page("2026-11-01")
+    # Weeks 6 and 7 are due the same day: shown together, week 7 with nobody posted yet. Weeks
+    # nobody's posted in on their own date aren't.
+    assert [(d["date"], [w["week"] for w in d["weeks"]]) for d in page["dates"]] == [("2026-12-06", [6, 7])]
+    assert page["dates"][0]["weeks"][1] == {"week": 7, "course": "Other", "deadline": "2026-12-06", "final": False,
+                                            "rows": [], "waiting": ["Aces", "Duffers", "Hackers"]}
+    assert page["current"] == 0 and page["week"] == page["dates"][0]["weeks"][0]
+    b = Board.from_squabbit([week(6, [(*t, n) for t, n in zip(teams, (-4, -2, None))]),
+                             week(8, [(*t, n) for t, n in zip(teams, (1, None, None))])], league, POINTS)
+    # Week 8 alone on its date. While 6 and 7 are open they're what the page opens on...
+    page = b.page("2026-11-01")
+    assert [[w["week"] for w in d["weeks"]] for d in page["dates"]] == [[6, 7], [8]]
+    assert page["current"] == 0
+    # ...and once their deadline's passed, week 8; 6 and 7 stay one arrow back, final.
+    page = b.page("2026-12-07")
+    assert page["current"] == 1
+    assert [(w["final"], w["waiting"]) for w in page["dates"][0]["weeks"]] == [
+        (True, ["Hackers"]), (True, ["Aces", "Duffers", "Hackers"])]                # week 7: nobody posted
 
 
 def test_the_sims_finished_rounds_stand_in_until_a_team_posts_on_squabbit():

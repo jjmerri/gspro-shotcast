@@ -143,21 +143,50 @@ class Board:
         done = [w for w in sorted(self.weeks) if self.final(w, today)]
         return done[-1] if done else None
 
+    def by_date(self, today: str) -> tuple[list[tuple[str | None, list[int]]], int | None]:
+        """The league's weeks grouped by due date ([(end_date, weeks)] in schedule order, the weeks due the
+        same day together), only dates with a week teams have posted in; and which to show first: the
+        earliest with a week still open, else the latest. A week without a due date stands alone."""
+        groups: dict[str, tuple[str | None, list[int]]] = {}
+        schedule = {int(e["week"]) for e in self.league.data.get("schedule") or [] if e.get("week") is not None}
+        for w in sorted(set(self.weeks) | schedule):
+            end = (self.league.week_entry(w) or {}).get("end_date")
+            groups.setdefault(str(end) if end else f"week {w}", (str(end) if end else None, []))[1].append(w)
+        shown = [g for g in groups.values() if any(self.posted(w) for w in g[1])]
+        shown.sort(key=lambda g: min(g[1]))
+        if not shown:
+            return [], None
+        live = [i for i, (_, ws) in enumerate(shown) if any(self.posted(w) and not self.final(w, today) for w in ws)]
+        return shown, live[0] if live else len(shown) - 1
+
+    def _week_card(self, w: int, today: str) -> dict[str, Any]:
+        entry = self.league.week_entry(w) or {}
+        entries = self.weeks.get(w) or [Entry(t, None) for t in self.league.team_players]
+        end = entry.get("end_date")
+        # A week nobody posted in doesn't count toward the standings, but past its deadline it's over.
+        return {"week": w, "course": entry.get("course"), "deadline": end,
+                "final": self.final(w, today) or bool(end) and str(end) < today,
+                "rows": [{**self._row(e.team), "net": e.net, **({"sim": True} if e.sim else {})}
+                         for e in self.posted(w)],
+                "waiting": [self.league.team_name(e.team) for e in entries if e.net is None]}
+
+    def _row(self, t: str) -> dict[str, Any]:
+        return {"team": self.league.team_name(t), "players": self.league.team_players.get(t, [])}
+
     def page(self, today: str) -> dict[str, Any]:
-        """The stats page's Home tab league cards (league.json): this week's results and who's yet to
-        play, and the season standings (a sim-counted net is marked "sim", and standings that use one
-        "provisional"). Teams by their display names, each with its players, so the
-        page can pick out a viewer's own team."""
-        def team(t: str) -> dict[str, Any]:
-            return {"team": self.league.team_name(t), "players": self.league.team_players.get(t, [])}
-        out: dict[str, Any] = {"week": None, "standings": None}
+        """The stats page's Home tab league cards (league.json): every due date's weeks (`dates`, each
+        week's results and who's yet to play), which date to open on (`current`, see by_date), and the
+        season standings (a sim-counted net is marked "sim", and standings that use one "provisional").
+        `week` is the one week older pages show (current_week). Teams by their display names, each with
+        its players, so the page can pick out a viewer's own team."""
+        team = self._row
+        out: dict[str, Any] = {"week": None, "dates": [], "current": None, "standings": None}
+        groups, current = self.by_date(today)
+        cards = {w: self._week_card(w, today) for _, ws in groups for w in ws}
+        out["dates"] = [{"date": d, "weeks": [cards[w] for w in ws]} for d, ws in groups]
+        out["current"] = current
         if (w := self.current_week(today)) is not None:
-            entry = self.league.week_entry(w) or {}
-            out["week"] = {"week": w, "course": entry.get("course"), "deadline": entry.get("end_date"),
-                           "final": self.final(w, today),
-                           "rows": [{**team(e.team), "net": e.net, **({"sim": True} if e.sim else {})}
-                                    for e in self.posted(w)],
-                           "waiting": [self.league.team_name(e.team) for e in self.weeks[w] if e.net is None]}
+            out["week"] = cards.get(w) or self._week_card(w, today)
         table, weeks = self.standings(today)
         if weeks:
             counted = [w for w in self.weeks if self.final(w, today)]
