@@ -4,6 +4,12 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.98
+
+### Booth
+- Commentary lines that run a few words long now air whole instead of being cut short or skipped.
+- On the driving range, the booth really does stop re-reading the setup screen (the sky behind it looked like a lit tab).
+
 ## 0.1.97
 
 ### Stats page
