@@ -431,6 +431,26 @@ class Round:
             self._allocate_hole_strokes()
         return True
 
+    def reorder_slots(self, slots: list[str | None]) -> bool:
+        """GSPro's slots when Play was pressed, the same players in another order than this round was
+        built with (swapped on the setup screen after the opener was written): GSPro's log goes by the
+        slots, so take them, and name a practice team in their order. True if the order changed."""
+        if not self.slot_names or list(slots) == list(self.slot_names) \
+                or sorted(n for n in slots if n) != sorted(n for n in self.slot_names if n) \
+                or len({n for n in slots if n}) != len([n for n in slots if n]):
+            return False
+        self.slot_names, self.setup_slots = list(slots), list(slots)
+        if not self.is_league and self.teams_known:
+            rank = {n: i for i, n in enumerate(slots) if n}
+            ordered = [sorted(gs, key=lambda g: rank.get(g, len(rank))) for gs in self.teams.values()]
+            self.teams = {" & ".join(gs) if len(gs) > 1 else gs[0]: gs for gs in ordered}
+            self.sides = self._build_sides()
+            if self.course_card:
+                self.apply_course_card(self.course_card)
+            elif self.week_card:
+                self._allocate_hole_strokes()
+        return True
+
     def _build_sides(self) -> list[Side]:
         sides = []
         if self.format in TEAM_BALL:

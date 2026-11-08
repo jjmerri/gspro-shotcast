@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.102
+
+### Booth
+- Swapping players' order on GSPro's setup screen no longer mixes up whose shot was whose (a holed putt was being given to the partner's stroke before it).
+
 ## 0.1.101
 
 ### Booth

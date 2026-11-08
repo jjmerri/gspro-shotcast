@@ -9070,6 +9070,22 @@ class Engine:
         r.setup_slots = None   # the tee's order is a guess at GSPro's
         r.slot_guess = True    # on a green it isn't even the tee's: screen reads place each player
 
+    def _as_round_names(self, r: Round, slots: list[str | None]) -> list[str | None]:
+        """Setup-screen slot names as the round spells its players (another read of a pill can differ
+        by case or OCR), matched the way _roster_key matches them when only one of the round's names
+        is that player; an exact or unmatched name is kept."""
+        mine = [g for g in (r.slot_names or []) if g]
+        by_key: dict = {}
+        for g in mine:
+            by_key.setdefault(self._roster_key([g]), []).append(g)
+
+        def own(n: str | None) -> str | None:
+            if not n or n in mine:
+                return n
+            match = by_key.get(self._roster_key([n]), [])
+            return match[0] if len(match) == 1 else n
+        return [own(n) for n in slots]
+
     def _take_matching_pending(self, is_league: bool, course: str | None,
                                names: list[str]) -> PendingOpening | None:
         p, self._pending_opening = self._pending_opening, None  # consumed either way
@@ -9127,6 +9143,9 @@ class Engine:
             if practice:
                 log.info("Practice, not a league round (%s)", practice)
             self._note_holes_only(pending.round, names, course, practice)
+            if slots and pending.round.reorder_slots(self._as_round_names(pending.round, slots)):
+                log.info("Round %s: the setup screen's players were reordered after the opener was written; "
+                         "GSPro's slots are %s", pending.round.id, slots)
             self._reconcile_slots(pending.round, names)
             self._refresh_course_card(pending.round, pending.course)
             self._apply_setup_holes(pending.round)

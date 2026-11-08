@@ -1871,6 +1871,34 @@ async def test_setup_watcher_fires_the_opener_with_no_league(tmp_path):
     assert p.lines[0].text in next(tmp_path.glob("transcript-*.txt")).read_text()
 
 
+async def test_players_swapped_after_the_opener_was_written_take_gspros_slots(tmp_path):
+    from commentator.league import League
+    from commentator.models import RoundStartEvent
+
+    # The opener was written for Dan in slot 1; the players were then swapped (same players, so it
+    # wasn't rewritten). GSPro's log goes by the slots at Play: a round left on the old order pins
+    # every log line (a holed putt included) on the partner.
+    first, swapped = _players_tab("Pebble Beach", {1: "Dan", 2: "Derek"}), _players_tab("Pebble Beach", {1: "Derek", 2: "Dan"})
+    e = _engine_with(tmp_path, League({}))
+    p = await _run_setup_watch(e, [first, first, swapped, swapped, {"load_course": "Pebble Beach"}],
+                               until=lambda p: p is not None and p.aired and e._played_setup is not None)
+    assert p is not None and p.round.slot_names[:2] == ["Dan", "Derek"]
+    assert p.round.play_alternate(["Dan", "Derek"])
+    e.current_par, e.current_course = 4, "Pebble Beach"
+    await e.handle_round_start(RoundStartEvent(hud=Hud(player_text="Derek E Shot 1 150 YDS", shot_number=1,
+                                                       score_to_par="E", to_pin="150 yards")))
+    assert e.round is p.round and [n for n in e.round.slot_names if n] == ["Derek", "Dan"]
+    assert e.round.setup_slots == e.round.slot_names
+    assert [s.key for s in e.round.sides] == ["Derek & Dan"]
+
+
+def test_the_played_slots_are_matched_to_the_rounds_own_spellings(tmp_path):
+    e = _engine(tmp_path)
+    r = e._build_round(["MikeD", "Sarah"], "Pebble Beach", {}, is_league=False, slot_names=["MikeD", "Sarah"])
+    assert r.reorder_slots(e._as_round_names(r, ["SARAH", "MIKED", None]))
+    assert r.slot_names == ["Sarah", "MikeD", None]
+
+
 async def test_a_setup_that_never_shows_the_players_tab_uses_the_last_roster_held_for_the_tee(tmp_path):
     from commentator.models import RoundStartEvent
 
