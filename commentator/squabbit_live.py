@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,7 +60,8 @@ class Busy(Exception):
 class LiveSync:
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.state: dict[str, Any] = {"answers": {}, "scores": {}, "ctp": {}}
+        self._lock = threading.Lock()   # a post's thread and the players' answers both write it
+        self.state: dict[str, Any] = {"answers": {}, "scores": {}, "ctp": {}, "ctp_answers": {}}
         try:
             self.state.update(json.loads(path.read_text()))
         except FileNotFoundError:
@@ -78,8 +81,24 @@ class LiveSync:
         return self.state["answers"].get(target.scorecard_id)
 
     def set_answer(self, target: Target, yes: bool) -> None:
-        self.state["answers"][target.scorecard_id] = yes
-        self._save()
+        with self._lock:
+            self.state["answers"][target.scorecard_id] = yes
+            self._save()
+
+    @staticmethod
+    def ctp_key(target: Target, seq: int, uid: str) -> str:
+        return f"{target.tournament_round_id}/{target.hole(seq)}/{uid}"
+
+    def ctp_answer(self, key: str) -> tuple[bool, float | None]:
+        """Whether the players were asked about this mark, and the yards they confirmed (None: they'll
+        enter it themselves)."""
+        got = self.state["ctp_answers"]
+        return (key in got, got.get(key))
+
+    def set_ctp_answer(self, key: str, yards: float | None) -> None:
+        with self._lock:
+            self.state["ctp_answers"][key] = yards
+            self._save()
 
     def posted(self, target: Target) -> dict[str, set[int]]:
         """The holes the booth has on this card, per user id, by the round's hole order: a booth that
@@ -184,15 +203,16 @@ class LiveSync:
             if not updates:
                 return []
             if client.commit(updates, verify):
-                for rid, new in new_scores.items():
-                    mine = self.state["scores"].setdefault(rid, {})
-                    for h, v in new.items():
-                        if v is None:
-                            mine.pop(h, None)
-                        else:
-                            mine[h] = v
-                self.state["ctp"].update(new_ctp)
-                self._save()
+                with self._lock:
+                    for rid, new in new_scores.items():
+                        mine = self.state["scores"].setdefault(rid, {})
+                        for h, v in new.items():
+                            if v is None:
+                                mine.pop(h, None)
+                            else:
+                                mine[h] = v
+                    self.state["ctp"].update(new_ctp)
+                    self._save()
                 return done
         raise Busy(f"week {target.week}'s card for {target.team} kept changing")
 
@@ -266,25 +286,62 @@ def team_scores(r, team: str, uid_of: dict[str, str]) -> dict[str, dict[int, int
     return out
 
 
-def team_ctp(r, team: str, uid_of: dict[str, str], match_player,
-             finished: dict[tuple[int, str], float] | None = None) -> dict[tuple[int, str], float]:
-    """This round's tee shots on the green on CTP holes for one team: (hole of the round, user id) ->
-    yards. Only a player's own: a shared ball nobody can put a name to isn't anyone's mark. `finished`
-    adds tee shots that ended the hole ((hole of the round, player) -> yards), which ctp_results misses."""
-    from .facts import to_yards
+@dataclass
+class Mark:
+    """A closest-to-the-pin tee shot the booth found: on the green, `yards` from the hole. One it isn't
+    sure of (`why`) is asked about on screen before it goes on Squabbit."""
 
-    out = {}
+    seq: int                  # hole of the round
+    who: str                  # the player (or the team label a shared ball was read under)
+    yards: float | None       # None: unknown (only an unsure mark)
+    why: str | None = None    # None: sure
+
+    @property
+    def sure(self) -> bool:
+        return self.why is None
+
+
+def team_ctp(r, team: str, uid_of: dict[str, str], match_player, found: list[Mark]) -> dict[tuple[int, str], Mark]:
+    """The marks for one team's players: (hole of the round, user id) -> the mark, a sure one over an
+    unsure one, then the closest. Only a player's own: a shared ball nobody can put a name to isn't
+    anyone's mark."""
+    out: dict[tuple[int, str], Mark] = {}
     labels = {side.label for side in r.sides if len(side.players) > 1}   # a shared ball, not a player
     shared = set(r.anonymous_players())   # one profile's ball: whoever hit it, it's no one's mark
-    found = [(seq, who, to_yards(dist)) for seq, by_who in r.ctp_results.items() for who, dist in by_who.items()]
-    found += [(seq, who, yards) for (seq, who), yards in (finished or {}).items()]
-    for seq, who, yards in found:
-        player = None if who in labels else match_player(who)
+    for m in found:
+        player = None if m.who in labels else match_player(m.who)
         if player in shared:
             continue
         side = r.side_for(player) if player else None
-        if side is None or side.team != team or not (uid := uid_of.get(player)) or yards is None:
+        if side is None or side.team != team or not (uid := uid_of.get(player)):
             continue
-        if (seq, uid) not in out or yards < out[(seq, uid)]:
-            out[(seq, uid)] = yards
+        have = out.get((m.seq, uid))
+        far = lambda x: float("inf") if x.yards is None else x.yards
+        if have is None or (m.sure, -far(m)) > (have.sure, -far(have)):
+            out[(m.seq, uid)] = Mark(m.seq, player, m.yards, m.why)
     return out
+
+
+_FEET_INCHES = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(?:'|ft|feet|foot)?\s*(?:(\d+(?:\.\d+)?)\s*(?:\"|''|in|inch|inches)?)?\s*$",
+                          re.IGNORECASE)
+_INCHES = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(?:\"|''|in|inch|inches)\s*$", re.IGNORECASE)
+
+
+def parse_feet(text: str) -> float | None:
+    """A typed CTP distance in yards: 9' 8", 9 ft 8 in, 9 8, 9.5 (feet), or 116" (inches). None if it
+    isn't one (or is past 100 feet, too far to be a CTP mark on the green)."""
+    if (m := _INCHES.match(text)):
+        feet = float(m.group(1)) / 12
+    elif (m := _FEET_INCHES.match(text)):
+        feet = float(m.group(1)) + (float(m.group(2)) / 12 if m.group(2) else 0)
+        if m.group(2) and float(m.group(2)) >= 12:
+            return None
+    else:
+        return None
+    return feet / 3 if 0 <= feet <= 100 else None
+
+
+def feet_text(yards: float) -> str:
+    """A CTP distance to type over: 9' 8"."""
+    feet, inches = divmod(round(yards * 36), 12)
+    return f"{feet}' {inches}\""

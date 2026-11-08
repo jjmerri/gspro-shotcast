@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.101
+
+### Booth
+- When the booth isn't sure of a closest-to-the-pin tee shot (say a gimme that might be on the fringe), a box on the sim asks before it goes on Squabbit. Fix the distance if it's off and post it, or leave it to enter yourself.
+
 ## 0.1.100
 
 ### Stats page

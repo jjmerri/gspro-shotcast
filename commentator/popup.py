@@ -1,7 +1,9 @@
-"""A yes/no question on the sim's screen: a box over GSPro, on its monitor, that stays on top until
-someone answers. Like the ON AIR badge it never takes focus, so GSPro keeps the keyboard and mouse
-look; clicking a button still works. Tk runs on the box's own thread for its whole life (made,
-shown and torn down there); the answer is handed to the caller's callback on that thread.
+"""A question on the sim's screen: a box over GSPro, on its monitor, that stays on top until someone
+answers. Like the ON AIR badge it never takes focus, so GSPro keeps the keyboard and mouse look;
+clicking a button still works. A box with a text field (`Entry`) takes the keyboard only once its
+field is clicked, and hands it back to GSPro when answered. Tk runs on the box's own thread for its
+whole life (made, shown and torn down there); the answer is handed to the caller's callback on that
+thread.
 """
 
 import gc
@@ -66,6 +68,7 @@ class Question:
                  wraplength=round(sw * 0.4), justify="center").pack()
         tk.Label(frame, text=self.detail, bg=PANEL, fg=MUTED, font=("Segoe UI", -unit),
                  wraplength=round(sw * 0.4), justify="center").pack(pady=(unit // 2, unit))
+        field = self._field(tk, root, frame, unit)
         buttons = tk.Frame(frame, bg=PANEL)
         buttons.pack()
         done = {"answered": False}
@@ -73,12 +76,18 @@ class Question:
         def answer(yes: bool) -> None:
             if done["answered"]:
                 return
+            if (got := self._result(yes, field)) is _INVALID:
+                return
             done["answered"] = True
             root.quit()
+            self._give_back()
             try:
-                self.on_answer(yes)
+                self.on_answer(got)
             except Exception:
                 log.exception("Question answer handler failed")
+
+        if field is not None:
+            field.bind("<Return>", lambda _e: answer(True))
 
         for text, color, yes in ((self.yes, YES_GREEN, True), (self.no, NO_GREY, False)):
             tk.Button(buttons, text=text, bg=color, fg=ON_TEXT, activebackground=color, activeforeground=ON_TEXT,
@@ -110,3 +119,74 @@ class Question:
         log.info("Asking on screen: %s", self.title)
         root.mainloop()
         root.destroy()
+
+    # A plain question has no field: its answer is yes or no.
+    def _field(self, tk, root, frame, unit):
+        return None
+
+    def _result(self, yes: bool, field):
+        return yes
+
+    def _give_back(self) -> None:
+        pass
+
+
+_INVALID = object()
+
+
+class Entry(Question):
+    """A question with a text field, filled in with the booth's guess: yes answers the field's text
+    (once `valid` accepts it; until then the field turns red), no answers None."""
+
+    def __init__(self, title: str, detail: str, value: str, yes: str, no: str,
+                 on_answer: Callable[[str | None], None], valid: Callable[[str], bool],
+                 where: Callable[[], tuple[int, int, int, int]] | None = None) -> None:
+        super().__init__(title, detail, yes, no, on_answer, where)
+        self.value, self.valid = value, valid
+        self._gspro = None   # the window that had the keyboard before the field took it
+
+    def _field(self, tk, root, frame, unit):
+        field = tk.Entry(frame, justify="center", font=("Segoe UI", -round(unit * 1.4), "bold"), width=12,
+                         bg="#ffffff", fg="#111111", relief="flat", insertbackground="#111111")
+        field.insert(0, self.value)
+        field.pack(pady=(0, unit))
+
+        def take_keyboard(_e=None) -> None:
+            if sys.platform == "win32" and self._gspro is None:
+                self._gspro = _take_focus(root)
+            field.focus_force()
+
+        field.bind("<Button-1>", take_keyboard, add="+")
+        field.bind("<Key>", lambda _e: field.configure(bg="#ffffff"), add="+")
+        return field
+
+    def _result(self, yes: bool, field):
+        if not yes:
+            return None
+        text = field.get().strip()
+        if not self.valid(text):
+            field.configure(bg="#f4b4b4")
+            return _INVALID
+        return text
+
+    def _give_back(self) -> None:
+        if self._gspro:
+            import ctypes
+
+            ctypes.windll.user32.SetForegroundWindow(self._gspro)
+
+
+def _take_focus(root) -> int | None:
+    """Lets the box take the keyboard (it was made never to): the click on it was the last input, so
+    Windows allows it. Returns the window that had it, to hand back."""
+    import ctypes
+
+    from .overlay import _hwnd
+
+    GWL_EXSTYLE, WS_EX_NOACTIVATE = -20, 0x08000000
+    u = ctypes.windll.user32
+    before = u.GetForegroundWindow()
+    hwnd = _hwnd(root)
+    u.SetWindowLongW(hwnd, GWL_EXSTYLE, u.GetWindowLongW(hwnd, GWL_EXSTYLE) & ~WS_EX_NOACTIVATE)
+    u.SetForegroundWindow(hwnd)
+    return before if before and before != hwnd else None

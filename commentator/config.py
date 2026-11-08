@@ -388,6 +388,10 @@ class SquabbitConfig(BaseModel):
     # hole's score on the team's card as it finishes, and closest-to-the-pin marks. Never offered (or
     # written) over anything someone else entered on the team's card. Needs `enabled`.
     live_updates: bool = True
+    # A CTP tee shot conceded inside the gimme this close to the hole (feet) is taken as on the green;
+    # one farther out could be on the fringe, so the players are asked. Pin sheets keep the hole at least
+    # three paces (9-10 ft) from the green's edge; a pin anywhere ("greenskeeper's revenge"): set 0.
+    ctp_sure_gimme_feet: float = 8.0
 
 
 class BookingConfig(BaseModel):

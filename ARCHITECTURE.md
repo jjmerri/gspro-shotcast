@@ -126,8 +126,12 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
   `popup.py` question on the sim's screen asks whether to update Squabbit. On yes, each finished hole's
   score (a shared ball's on every teammate's round) and CTP marks go on the team's week card as one
   atomic Firestore commit with update-time preconditions. The booth stops posting a card when anyone
-  else enters or clears anything on it. What the booth wrote is kept in `squabbit_live.json`, next to
-  the season db.
+  else enters or clears anything on it. A CTP mark goes on once that player has finished the hole. One
+  the booth isn't sure of goes up as a `popup.Entry` box, prefilled with its guess for the players to
+  post, correct or leave to enter themselves. That covers a screen read GSPro's log disagrees with, a
+  tee shot conceded farther out than `squabbit.ctp_sure_gimme_feet` (on the green or the fringe?), and
+  a lifted scramble ball. What the booth wrote, and the players' answers, are kept in
+  `squabbit_live.json`, next to the season db.
 - **`handicap.py`** Squabbit's handicap rules (course handicap, allowances, caps, stroke
   allocation), the week card built from a Squabbit tournament, and the season validation that
   recomputes leaderboard nets. `round.py` uses it, with the week card when one is saved.

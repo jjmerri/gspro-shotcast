@@ -184,6 +184,8 @@ class Round:
         self.week_card = league.week_card(self.schedule.get("week")) if is_league else None
         # Hole of the round -> who -> how far their tee shot finished from the hole.
         self.ctp_results: dict[int, dict[str, str]] = {}
+        # The tee shot (season store id) each result was read for: GSPro's log has its own finish to check.
+        self.ctp_tees: dict[tuple[int, str], int | None] = {}
         # The season store's last shot id when the round started: the week's earlier CTP tee shots
         # are the ones at or below it (this round's come from ctp_results instead).
         self.shot_floor: int | None = None

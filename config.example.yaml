@@ -115,6 +115,9 @@ squabbit:
   timeout_seconds: 15     # if Squabbit is slow or offline, the league file's handicaps stand
   live_updates: true      # on a league round, ask on screen whether to post each hole's score and
                           # CTP marks to the team's Squabbit card as it's played
+  ctp_sure_gimme_feet: 8  # a CTP tee shot conceded inside the gimme this close to the hole is taken as on
+                          # the green; farther out it may be on the fringe, so the players are asked to
+                          # confirm. 0 always asks (pins placed anywhere, e.g. greenskeeper's revenge)
 
 booking:
   enabled: false          # read the sim's SuperSaaS bookings (needs SUPERSAAS_API_KEY in .env): a

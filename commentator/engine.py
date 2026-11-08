@@ -976,6 +976,7 @@ class Engine:
         # the booth's record of what it wrote (made on the first league round), and this round's state
         # {"round", "status": finding/asking/on/off, "targets", "question", "dirty", "task", "last"}.
         self._sq_live = None
+        self._log_finish: dict[int, float] = {}   # shot id -> where GSPro's log put it (yards from the hole)
         self._sq: dict | None = None
         self._sq_lock = asyncio.Lock()   # one writer at a time, across rounds (a replayed round's included)
         self.hole_number: int | None = None
@@ -3590,6 +3591,7 @@ class Engine:
             mine = to_yards(hud.to_pin)
             dist = ctp_feet(hud.to_pin)
             r.ctp_results.setdefault(r.seq, {})[who] = hud.to_pin   # unrounded, to rank against
+            r.ctp_tees[(r.seq, who)] = tee.shot_id if tee is not None else None
             self._squabbit_kick()
             if tee is not None and r.format == "alternate" and mine is not None:
                 self.store.fill_tee_finish(tee.shot_id, mine)   # the shared ball has no log finish
@@ -6767,6 +6769,7 @@ class Engine:
         if after["pen"] > before["pen"]:   # same hole, a penalty on this shot: the next setup is the drop
             return
         if after["to_pin_m"] is not None:
+            self._log_finish[prev_id] = after["to_pin_m"] * M_TO_YD
             self.store.set_shot_result(prev_id, finish_yards=after["to_pin_m"] * M_TO_YD)
 
     async def _hole_result(self, timeout: float, poll: float = 0.3) -> str | None:
@@ -8153,6 +8156,8 @@ class Engine:
             # before this round's can start.
             if s["status"] == "asking" and s["question"] is not None:
                 s["question"].close()
+            if s["ctp_q"] is not None:
+                s["ctp_q"][1].close()
             s["status"] = "off"
             self._sq = s = None
         if not r or r.ended or not r.is_league or r.is_tournament or not self._squabbit_live_on():
@@ -8161,7 +8166,8 @@ class Engine:
             if not r.schedule.get("week") or not any(side.team for side in r.sides):
                 return   # not placed yet; a later kick tries again
             self._sq = {"round": r.id, "status": "finding", "targets": [], "question": None,
-                        "dirty": False, "task": None, "last": None, "seen": {}}
+                        "dirty": False, "task": None, "last": None, "seen": {},
+                        "ctp_q": None, "ctp_queue": [], "ctp_asked": set()}
             self._bg(self._squabbit_offer(r, self._sq))
             return
         if s["status"] == "on":
@@ -8169,15 +8175,56 @@ class Engine:
             if s["task"] is None or s["task"].done():
                 s["task"] = asyncio.create_task(self._squabbit_push(r, s))
 
-    def _ctp_hole_enders(self, r: Round) -> dict[tuple[int, str], float]:
-        """CTP tee shots that ended the hole (an ace, or inside the gimme), which leave no second-stroke
-        setup for ctp_results: (hole of the round, player) -> yards, from the season store's finish."""
+    def _ctp_marks(self, r: Round) -> list:
+        """This round's closest-to-the-pin tee shots on the green (squabbit_live.Mark), each with why
+        the booth isn't sure of it, if it isn't: the screen's distance against GSPro's log, a tee shot
+        conceded inside the gimme (on the green, or the fringe?), and a scramble ball the team didn't
+        play that the pick screen read on the green."""
+        from .facts import ctp_text, to_yards
+        from .squabbit_live import Mark
+
+        marks = []
+        for seq, by_who in r.ctp_results.items():
+            for who, text in by_who.items():
+                seen = to_yards(text)
+                logged = self._log_finish.get(r.ctp_tees.get((seq, who)))
+                if logged is not None and (seen is None or abs(seen - logged) * 3 > max(1.0, logged * 0.3)):
+                    marks.append(Mark(seq, who, logged, f"The screen read {text}, but GSPro's log has it "
+                                                        f"{ctp_text(logged)} from the hole."))
+                elif seen is not None:
+                    marks.append(Mark(seq, who, seen))
         shared = set(r.anonymous_players())   # one profile's ball: whoever hit it, it's no one's mark
         tees = {s.shot_id: s for s in self.state.shots
-                if s.round_id == r.id and s.player not in shared and s.shot_number == 1 and not s.mulligan and s.shot_id is not None
-                and s.hole_seq is not None and s.outcome in ("holed", "conceded") and r.hole_number(s.hole_seq) in r.ctp_holes
-                and (r.format != "scramble" or s.picked is not False)}
-        return {(tees[sid].hole_seq, tees[sid].player): y for sid, y in self.store.tee_finishes(list(tees)).items()}
+                if s.round_id == r.id and s.player not in shared and s.shot_number == 1 and not s.mulligan
+                and s.shot_id is not None and s.hole_seq is not None and r.hole_number(s.hole_seq) in r.ctp_holes}
+        # Tee shots that ended the hole (an ace, or inside the gimme) leave no second-stroke setup to read.
+        enders = {i: s for i, s in tees.items() if s.outcome in ("holed", "conceded")
+                  and (r.format != "scramble" or s.picked is not False)}
+        sure_yards = self.cfg.squabbit.ctp_sure_gimme_feet / 3
+        finished = self.store.tee_finishes(list(enders))
+        for sid, shot in enders.items():
+            if sid not in finished and shot.outcome != "conceded":
+                continue
+            yards = finished.get(sid)   # a gimme GSPro gave no distance or radius for: they're asked
+            if shot.outcome == "holed":
+                marks.append(Mark(shot.hole_seq, shot.player, 0.0))
+            elif (left := self._gimme_left(sid)) is None:
+                marks.append(Mark(shot.hole_seq, shot.player, yards, "It was conceded inside the gimme, but "
+                                  "GSPro didn't say how close. Is it on the green, and how far from the hole?"))
+            elif left > sure_yards:
+                marks.append(Mark(shot.hole_seq, shot.player, left, f"It was conceded inside the gimme, "
+                                  f"{ctp_text(left)} from the hole. Is it on the green?"))
+            else:
+                marks.append(Mark(shot.hole_seq, shot.player, left))
+        if r.format == "scramble":
+            lifted = {i: s for i, s in tees.items() if s.picked is False and s.outcome not in ("holed", "conceded")}
+            for sid, yards in self.store.tee_finishes(list(lifted)).items():
+                marks.append(Mark(lifted[sid].hole_seq, lifted[sid].player, yards,
+                                  "The team played the other ball; the pick screen read this one on the green."))
+        return marks
+
+    def _popup_where(self):
+        return self.screen.monitor_rect if self.screen is not None and self.cfg.screen.follow_window else None
 
     async def _squabbit_offer(self, r: Round, s: dict) -> None:
         from .popup import Question
@@ -8242,7 +8289,7 @@ class Engine:
             "closest-to-the-pin tee shots too. Nothing is entered over anything already on your card.",
             "Yes, update Squabbit", "No thanks",
             on_answer=lambda yes: loop.call_soon_threadsafe(self._squabbit_answer, s, yes),
-            where=self.screen.monitor_rect if self.screen is not None and self.cfg.screen.follow_window else None,
+            where=self._popup_where(),
         ).show()
 
     def _squabbit_answer(self, s: dict, yes: bool) -> None:
@@ -8274,7 +8321,7 @@ class Engine:
         while s["dirty"] and s["status"] == "on" and s["targets"] and s is self._sq:
             s["dirty"] = False
             uid_of = self._squabbit_uids()
-            finished = self._ctp_hole_enders(r)
+            found = self._ctp_marks(r)
             jobs = []
             for t in s["targets"]:
                 if r.hole_number(1) is None:
@@ -8286,8 +8333,21 @@ class Engine:
                                     "not posting it", r.hole_number(1), t.team, t.start_hole)
                     continue
                 scores: dict[str, dict[int, int | None]] = team_scores(r, t.team, uid_of)
-                marks = team_ctp(r, t.team, uid_of, self.league.match_player,
-                                                                      finished)
+                marks: dict[tuple[int, str], float] = {}
+                for (seq, uid), m in team_ctp(r, t.team, uid_of, self.league.match_player, found).items():
+                    # Once the player's done the hole (GSPro's log has the tee shot's finish by then), and
+                    # only where the week's event has a contest.
+                    if t.hole(seq) not in t.ctp or not (r.ended or scores.get(uid, {}).get(seq) is not None):
+                        continue
+                    if m.sure:
+                        marks[(seq, uid)] = m.yards
+                        continue
+                    key = live.ctp_key(t, seq, uid)
+                    asked, yards = live.ctp_answer(key)
+                    if not asked:
+                        self._squabbit_ask_ctp(s, t, key, m)
+                    elif yards is not None:
+                        marks[(seq, uid)] = yards
                 # Only a score this round had and then lost is taken back (a mulligan on the green): a round
                 # rebuilt after a restart hasn't lost what it hasn't recovered yet.
                 seen = s["seen"].setdefault(t.scorecard_id, set())
@@ -8335,6 +8395,52 @@ class Engine:
                 s["last"] = None
             if not s["targets"]:
                 s["status"] = "off"
+                if s["ctp_q"] is not None:
+                    s["ctp_q"][1].close()
+                    s["ctp_q"] = None
+
+    def _squabbit_ask_ctp(self, s: dict, t, key: str, m) -> None:
+        """Queues an on-screen check of a mark the booth isn't sure of: one box at a time."""
+        if key in s["ctp_asked"]:
+            return
+        s["ctp_asked"].add(key)
+        s["ctp_queue"].append((t, key, m))
+        self._squabbit_next_ctp(s)
+
+    def _squabbit_next_ctp(self, s: dict) -> None:
+        from .popup import Entry
+        from .squabbit_live import feet_text, parse_feet
+
+        if s["ctp_q"] is not None or not s["ctp_queue"] or s is not self._sq:
+            return
+        t, key, m = s["ctp_queue"].pop(0)
+        loop = asyncio.get_running_loop()
+        s["ctp_q"] = (key, Entry(
+            f"{self._display(m.who)}'s closest to the pin, hole {t.hole(m.seq)}",
+            f"{m.why} Fix the distance if it's off, then post it to Squabbit.",
+            feet_text(m.yards) if m.yards is not None else "", "Post it", "I'll enter it myself",
+            on_answer=lambda text: loop.call_soon_threadsafe(self._squabbit_ctp_answer, s, key, text),
+            valid=lambda text: parse_feet(text) is not None,
+            where=self._popup_where(),
+        ).show())
+
+    def _squabbit_ctp_answer(self, s: dict, key: str, text: str | None) -> None:
+        from .squabbit_live import parse_feet
+
+        if s is not self._sq or s["ctp_q"] is None or s["ctp_q"][0] != key:
+            return
+        s["ctp_q"] = None
+        yards = parse_feet(text) if text is not None else None
+        log.info("Squabbit live: CTP %s %s", key, f"confirmed at {text}" if yards is not None else
+                 "left for the players to enter")
+        self._squabbit_next_ctp(s)
+        r = self.round if self.round is not None and self.round.id == s["round"] else None
+
+        self._sq_live.set_ctp_answer(key, yards)
+        if r is not None and s["status"] == "on":
+            s["dirty"] = True
+            # A new task, not the one out now: that one may already be past its last look at `dirty`.
+            s["task"] = asyncio.create_task(self._squabbit_push(r, s))
 
     def _squabbit_round_end(self, r: Round) -> None:
         """The round's over: an unanswered question comes down, and a yes gets its last holes posted."""

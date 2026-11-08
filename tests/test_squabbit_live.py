@@ -9,7 +9,7 @@ import pytest
 from commentator.league import League
 from commentator.round import Round
 from commentator.squabbit import SquabbitClient
-from commentator.squabbit_live import Blocked, LiveSync, Target, team_ctp, team_scores
+from commentator.squabbit_live import Blocked, LiveSync, Mark, Target, feet_text, parse_feet, team_ctp, team_scores
 from tests.test_board import LEAGUE_DATA, _engine
 
 UIDS = {"Mike": "a", "Sarah": "b", "Tony": "c", "Priya": "d", "Lou": "e", "Dee": "f"}
@@ -216,18 +216,56 @@ def test_a_shared_ball_goes_on_both_rounds_and_best_ball_on_each_players_own():
     r.log_scores = {"Mike": {1: 5}, "Sarah": {1: 4, 2: 3}}
     assert team_scores(r, "Aces", UIDS) == {"a": {1: 5}, "b": {1: 4, 2: 3}}
     assert team_scores(r, "Duffers", UIDS) == {}
-    r.ctp_results = {3: {"Sarah": "4 yards", "Aces": "2 yards"}, 5: {"Mike": "10 feet 6 inches"}}
-    assert team_ctp(r, "Aces", UIDS, league.match_player) == {(3, "b"): 4.0, (5, "a"): 3.5}
-    # An ace, which leaves no second-stroke setup to read a mark from.
-    assert team_ctp(r, "Aces", UIDS, league.match_player, {(7, "Mike"): 0.0}) == \
-        {(3, "b"): 4.0, (5, "a"): 3.5, (7, "a"): 0.0}
+    found = [Mark(3, "Sarah", 4.0), Mark(3, "Aces", 2.0), Mark(5, "Mike", 3.5), Mark(5, "Mike", 3.0, "unsure")]
+    assert {k: (m.yards, m.sure) for k, m in team_ctp(r, "Aces", UIDS, league.match_player, found).items()} == \
+        {(3, "b"): (4.0, True), (5, "a"): (3.5, True)}   # a team label is no one's; a sure mark beats a guess
     # One GSPro profile for the team: its ball is no one's mark, whatever name it's under.
     league = League(LEAGUE_DATA)
     r = Round(league=league, gspro_players=["Mike"], course="Test Links", scheduled_format="Alternate Shot",
               holes=9, start_hole=10, schedule={**LEAGUE_DATA["schedule"][0], "format": "Alternate Shot"})
     assert r.anonymous_players()
-    r.ctp_results = {3: {"Mike": "4 yards", "Aces": "2 yards"}}
-    assert team_ctp(r, "Aces", UIDS, league.match_player, {(5, "Sarah"): 0.0}) == {}
+    assert team_ctp(r, "Aces", UIDS, league.match_player, [Mark(3, "Mike", 4.0), Mark(5, "Sarah", 0.0)]) == {}
+
+
+def test_a_typed_ctp_distance_reads_in_feet_and_inches():
+    for text in ("9' 8\"", "9 8", "9ft 8in", "9 feet 8 inches", "116\"", "116 in"):
+        assert round(parse_feet(text) * 36) == 116, text
+    assert round(parse_feet("9.5") * 36) == 114 and parse_feet("0") == 0
+    for text in ("", "abc", "9 13", "150", "-3"):
+        assert parse_feet(text) is None, text
+    assert feet_text(116 / 36) == "9' 8\""
+
+
+def test_the_booth_asks_about_ctp_marks_it_isnt_sure_of(tmp_path):
+    e = _engine(tmp_path, League(LEAGUE_DATA))
+    r, _ = _league_round("Scramble")
+    r.ctp_holes = [12, 13, 14, 15, 17]
+    e.round = r
+    tee = lambda sid, seq, who, outcome=None, picked=None: SimpleNamespace(
+        shot_id=sid, round_id=r.id, hole_seq=seq, player=who, shot_number=1, mulligan=False,
+        outcome=outcome, picked=picked)
+    e.state.shots = [tee(1, 3, "Mike"), tee(2, 4, "Mike", "conceded", True), tee(3, 5, "Sarah", "conceded"),
+                     tee(4, 6, "Mike", "conceded"), tee(5, 3, "Sarah", picked=False), tee(6, 1, "Sarah", "holed"),
+                     tee(7, 8, "Sarah", "conceded")]
+    finishes = {1: 4.0, 2: 2.0, 3: 3.5, 4: 1.0, 5: 5.0, 6: 0.0}
+    e.store.tee_finishes = lambda ids: {i: finishes[i] for i in ids if i in finishes}
+    gimme = {2: 2.0, 3: 3.5}   # yards GSPro logged inside the gimme: 6 ft, 10.5 ft; shot 4's not known
+    e._gimme_left = lambda sid: gimme.get(sid)
+    r.ctp_results = {3: {"Mike": "4 yards"}, 7: {"Sarah": "20 feet"}}
+    r.ctp_tees = {(3, "Mike"): 1, (7, "Sarah"): 9}
+    e._log_finish = {1: 4.1, 9: 12.0}   # Mike's read agrees with the log; Sarah's doesn't
+    got = {(m.seq, m.who): (m.yards and round(m.yards, 2), m.sure) for m in e._ctp_marks(r)}
+    assert got == {
+        (3, "Mike"): (4.0, True),
+        (7, "Sarah"): (12.0, False),    # the screen and the log disagree: the log's offered
+        (4, "Mike"): (2.0, True),       # conceded inside the default 8 ft: on the green
+        (5, "Sarah"): (3.5, False),     # conceded at 10.5 ft: maybe the fringe
+        (6, "Mike"): (1.0, False),      # conceded, nobody knows how close
+        (3, "Sarah"): (5.0, False),     # a lifted scramble ball the pick screen read on the green
+        (8, "Sarah"): (None, False),    # conceded, no distance at all: asked, with nothing filled in
+    }   # hole 1 isn't a CTP hole
+    e.cfg.squabbit.ctp_sure_gimme_feet = 0     # pins anywhere: every gimme's asked about
+    assert not next(m for m in e._ctp_marks(r) if m.seq == 4).sure
 
 
 def test_the_round_is_posted_once_the_players_say_yes(tmp_path, monkeypatch):
@@ -350,3 +388,91 @@ def test_a_card_that_keeps_changing_is_a_failed_post_not_a_quiet_one(tmp_path):
     c.commit = lambda updates, verify=(): False
     with pytest.raises(Busy):
         live.push(c, t, {"a": {1: 5}}, {})
+
+
+def test_an_unsure_ctp_mark_goes_in_as_the_players_confirm_it(tmp_path, monkeypatch):
+    import commentator.popup as popup
+    import commentator.squabbit as sq
+
+    boxes = []
+
+    class Box:
+        def __init__(self, title, detail, *a, on_answer, valid=None, where=None):
+            boxes.append(self)
+            self.title, self.on_answer, self.valid, self.closed = title, on_answer, valid, False
+            self.value = a[0] if len(a) == 3 else None
+
+        def show(self):
+            return self
+
+        def close(self):
+            self.closed = True
+
+    fake = _client()
+    fake.docs[TR]["holeCompetitions"]["c13"] = {"results": {}}
+    fake.tournaments = lambda lid: [{"_id": "T", "name": "Week 6 - Best Ball"}]
+    fake.player_rounds = lambda tid: [{"_id": "Ra", "userId": "a", "scorecardId": "S"},
+                                      {"_id": "Rb", "userId": "b", "scorecardId": "S"}]
+    fake.tournament_rounds = lambda tid: [{"_id": "TR", "startingHole": 10, "numHoles": 9, "holeCompetitions": {
+        "c12": {"type": "ClosestToThePin", "holeNumber": 12}, "c13": {"type": "ClosestToThePin", "holeNumber": 13}}}]
+    fake.league_by_invite = lambda code: {"_id": "L"}
+
+    class Client:
+        def __init__(self, *a):
+            pass
+
+        def __enter__(self):
+            return fake
+
+        def __exit__(self, *exc):
+            pass
+
+    monkeypatch.setattr(popup, "Question", Box)
+    monkeypatch.setattr(popup, "Entry", Box)
+    monkeypatch.setattr(sq, "SquabbitClient", Client)
+
+    async def settle(e):
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+        if e._sq.get("task"):
+            await e._sq["task"]
+
+    async def go():
+        e = _engine(tmp_path, League(LEAGUE_DATA))
+        e.cfg.squabbit.enabled = True
+        e.cfg.source.type = "gspro"
+        e.cfg.db_path = str(tmp_path / "season.db")
+        r, _ = _league_round("Best Ball")
+        r.league = e.league
+        r.ctp_holes = [12, 13]
+        e.round = r
+        r.seq = 3
+        e._ctp_marks = lambda r: [Mark(3, "Mike", 3.0, "Is it on the green?"), Mark(4, "Sarah", 2.0, "Hm?")]
+        e._squabbit_kick()
+        await settle(e)
+        boxes[0].on_answer(True)
+        await settle(e)
+        assert len(boxes) == 1     # hole 12's still being played: nothing asked yet
+        r.log_scores = {"Mike": {3: 3, 4: 4}}   # Sarah's still on hole 13: hers waits for her
+        e._squabbit_kick()
+        await settle(e)
+        assert len(boxes) == 2 and boxes[1].title.startswith("Mike") and boxes[1].value == "9' 0\""
+        assert boxes[1].valid("9 4") and not boxes[1].valid("close")
+        assert fake.docs[TR]["holeCompetitions"]["c12"]["results"] == {"z": 120.0}   # not until they say
+        boxes[1].on_answer("9' 4\"")
+        await settle(e)
+        assert fake.docs[TR]["holeCompetitions"]["c12"]["results"] == {"z": 120.0, "a": 112.0}
+        r.log_scores["Sarah"] = {4: 3}
+        e._squabbit_kick()
+        await settle(e)
+        assert len(boxes) == 3 and boxes[2].title.startswith("Sarah")
+        boxes[2].on_answer(None)        # "I'll enter it myself"
+        await settle(e)
+        assert fake.docs[TR]["holeCompetitions"]["c13"]["results"] == {}
+        e._squabbit_kick()
+        await settle(e)
+        assert len(boxes) == 3           # answered: never asked again
+        assert json.loads((tmp_path / "squabbit_live.json").read_text())["ctp_answers"] == \
+            {"TR/12/a": 112 / 36, "TR/13/b": None}
+
+    asyncio.run(go())
