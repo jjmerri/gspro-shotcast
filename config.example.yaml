@@ -135,6 +135,8 @@ screen:
   monitor: 1
   capture: monitor           # framebuffer grab (never stalls GSPro). "window" is occlusion-proof
   window_title: GSPro        # but forces a synchronous render each grab and can freeze the game
+  mask_other_windows: true   # black out anything in front of GSPro (a browser, Discord) so it's never read or logged
+  # show_through: [obs64.exe] # programs whose windows over GSPro are read anyway (an overlay the log says is blanking it)
   ocr_threads: 6             # cap OCR cores so it can't starve GSPro (null = all cores)
   follow_poll_seconds: 0.3   # how often the HUD is read while following a shot
   # rest_poll_seconds: 0.05  # after touchdown, how often it's grabbed (no OCR) to see the ball stop

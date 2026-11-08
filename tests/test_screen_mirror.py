@@ -212,3 +212,44 @@ def test_a_refused_screen_grab_logs_once_until_capture_works_again(caplog, monke
     monkeypatch.setattr(s, "crop", lambda *a: (_ for _ in ()).throw(ValueError("bad crop")))
     s.read_hud(["player_box"], image=_frame())
     assert [r.levelname for r in caplog.records if r.levelname in ("WARNING", "ERROR")] == ["ERROR"]
+
+
+def test_a_grab_blacks_out_whatever_isnt_gspro(monkeypatch):
+    import types
+
+    from commentator import winshot
+
+    class Sct:   # the desktop: all white
+        def grab(self, box):
+            return types.SimpleNamespace(size=(box["width"], box["height"]),
+                                         bgra=b"\xff" * (box["width"] * box["height"] * 4))
+    names = {7: "chrome.exe", 8: "obs64.exe"}
+    monkeypatch.setattr(winshot, "exe_name", names.get)
+    # GSPro windowed at (0, 0)-(80, 100); Chrome over its top left, OBS over its bottom left.
+    monkeypatch.setattr(winshot, "coverage", lambda _t: ((0, 0, 80, 100), [((-50, -50, 20, 30), 7),
+                                                                            ((0, 90, 10, 100), 8)]))
+    s = Screen(ScreenConfig(show_through=["OBS64.exe"]))
+    img = s._sct_grab(Sct(), {"left": 10, "top": 10, "width": 90, "height": 80})
+    assert img.getpixel((9, 19)) == img.getpixel((75, 50)) == (0, 0, 0)   # Chrome; beside the window
+    assert img.getpixel((10, 20)) == img.getpixel((69, 50)) == img.getpixel((0, 79)) == (255, 255, 255)
+    monkeypatch.setattr(winshot, "coverage", lambda _t: (None, []))   # GSPro isn't up
+    assert s._sct_grab(Sct(), {"left": 0, "top": 0, "width": 4, "height": 4}).getextrema() == ((0, 0),) * 3
+    s.cfg.mask_other_windows = False
+    assert s._sct_grab(Sct(), {"left": 0, "top": 0, "width": 4, "height": 4}).getextrema() == ((255, 255),) * 3
+
+
+def test_a_window_that_moves_during_a_grab_blacks_it_all_out(monkeypatch):
+    import types
+
+    from commentator import winshot
+
+    covers = iter([((0, 0, 10, 10), [((0, 0, 5, 10), 7)]), ((0, 0, 10, 10), [])])   # before, after the grab
+    monkeypatch.setattr(winshot, "coverage", lambda _t: next(covers))
+    monkeypatch.setattr(winshot, "exe_name", lambda _p: "chrome.exe")
+    sct = types.SimpleNamespace(grab=lambda box: types.SimpleNamespace(size=(10, 10), bgra=b"\xff" * 400))
+    img = Screen(ScreenConfig())._sct_grab(sct, {"left": 0, "top": 0, "width": 10, "height": 10})
+    assert img.getextrema() == ((0, 0),) * 3   # where it was as the grab was taken isn't known
+    # Not knowing what's in front at all reads nothing.
+    monkeypatch.setattr(winshot, "coverage", lambda _t: 1 / 0)
+    img = Screen(ScreenConfig())._sct_grab(sct, {"left": 0, "top": 0, "width": 10, "height": 10})
+    assert img.getextrema() == ((0, 0),) * 3

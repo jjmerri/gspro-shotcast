@@ -328,6 +328,12 @@ class ScreenConfig(BaseModel):
     # GSPro's own window via PrintWindow so a popup in front can't corrupt the read, but it forces
     # the game to render synchronously each grab and can stutter/freeze it, so it's off by default.
     capture: Literal["monitor", "window"] = "monitor"
+    # Black out whatever part of a grab isn't GSPro: another program's window in front of it (a
+    # browser, Discord) or the desktop beside a windowed GSPro, so the reads, the log and problem
+    # reports never take in anything personal. `show_through` names programs (e.g. "obs64.exe") whose
+    # windows over GSPro are read anyway, for an overlay the log says is blanking GSPro by mistake.
+    mask_other_windows: bool = True
+    show_through: list[str] = []
     window_title: str = "GSPro"
     # Cap OCR (onnxruntime) threads so it can't grab every core and starve GSPro. None = all cores.
     ocr_threads: int | None = 6

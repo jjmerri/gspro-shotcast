@@ -262,6 +262,64 @@ class Screen:
         self.monitor = cfg.monitor   # the monitor read last (follow_window moves it to GSPro's)
         self._monitor_at = -1e9
         self._monitor_lock = threading.Lock()
+        self._masked_logged: dict[str, float] = {}   # who blanked a grab, and when that was last logged
+
+    def _covered(self, box: tuple[int, int, int, int]) -> list[tuple[int, int, int, int]]:
+        """The parts of a grab of `box` (left, top, right, bottom on the desktop) GSPro isn't showing,
+        in the grab's own pixels (see ScreenConfig.mask_other_windows)."""
+        if not self.cfg.mask_other_windows:
+            return []
+        left, top, right, bottom = box
+        try:
+            from . import winshot
+
+            cover = winshot.coverage(self.cfg.window_title)
+        except Exception:
+            # Unsure what's in front: read nothing rather than risk someone's browser.
+            log.debug("Couldn't tell which windows cover GSPro", exc_info=True)
+            self._log_masked("couldn't tell which windows are in front of GSPro")
+            return [(0, 0, right - left, bottom - top)]
+        if cover is None:
+            return []
+        gspro, front = cover
+        if gspro is None:
+            self._log_masked("GSPro's window isn't up", 600)
+            return [(0, 0, right - left, bottom - top)]
+        gl, gt, gr, gb = gspro
+        out = [(left, top, right, gt), (left, gb, right, bottom), (left, max(top, gt), gl, min(bottom, gb)),
+               (gr, max(top, gt), right, min(bottom, gb))]
+        skip = {n.casefold() for n in self.cfg.show_through}
+        for r, pid in front:
+            name = winshot.exe_name(pid)
+            if name.casefold() not in skip:
+                hit = (max(left, r[0]), max(top, r[1]), min(right, r[2]), min(bottom, r[3]))
+                if hit[0] < hit[2] and hit[1] < hit[3]:
+                    self._log_masked(f"{name} is in front of GSPro")
+                    out.append(hit)
+        out = [(max(l, left), max(t, top), min(r, right), min(b, bottom)) for l, t, r, b in out]
+        return [(l - left, t - top, r - left, b - top) for l, t, r, b in out if l < r and t < b]
+
+    def _log_masked(self, why: str, every: float = 60) -> None:
+        now = time.monotonic()
+        if now - self._masked_logged.get(why, -1e9) > every:
+            self._masked_logged[why] = now
+            log.info("Screen read blanked where GSPro isn't showing: %s", why)
+
+    def _sct_grab(self, sct, box: dict) -> Image.Image:
+        """One mss grab of `box`, with every part GSPro isn't showing blacked out. The windows are
+        looked at just before the grab and just after: when they moved meanwhile (a window dragged or
+        closed), where one was at the moment of the grab isn't known, so it's all blacked out."""
+        desk = (box["left"], box["top"], box["left"] + box["width"], box["top"] + box["height"])
+        before = self._covered(desk)
+        raw = sct.grab(box)
+        _capture_ok()
+        img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+        after = self._covered(desk)
+        if holes := before if before == after else [(0, 0, img.width, img.height)]:
+            draw = ImageDraw.Draw(img)
+            for l, t, r, b in holes:
+                draw.rectangle((l, t, r - 1, b - 1), fill=(0, 0, 0))
+        return img
 
     def monitor_index(self, monitors: list[dict]) -> int:
         """The mss monitor to read: the one GSPro's window is on (looked up every few seconds), else
@@ -412,9 +470,7 @@ class Screen:
 
         # mss handles aren't thread-safe, and these calls run in worker threads.
         with mss.mss() as sct:
-            raw = sct.grab(self._mon(sct))
-            _capture_ok()
-            return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+            return self._sct_grab(sct, self._mon(sct))
 
     def monitor_size(self) -> tuple[int, int]:
         import mss
@@ -434,9 +490,7 @@ class Screen:
                 self._frame_h = mon["height"]
                 left, top, width, height = region.to_pixels(mon["width"], mon["height"])
                 box = {"left": mon["left"] + left, "top": mon["top"] + top, "width": width, "height": height}
-                raw = sct.grab(box)
-                _capture_ok()
-                return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+                return self._sct_grab(sct, box)
         img = self._grab_full()
         return self.crop(img, region) if region else img
 
@@ -453,9 +507,7 @@ class Screen:
             for i in range(frames):
                 if i:
                     time.sleep(interval)
-                raw = sct.grab(box)
-                _capture_ok()
-                out.append(Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX"))
+                out.append(self._sct_grab(sct, box))
         return out
 
     def to_jpeg(self, img: Image.Image) -> bytes:
@@ -618,9 +670,8 @@ class Screen:
                     (bl, bt, _, _), img = inside
                     out[name] = img.crop((left - bl, top - bt, left - bl + width, top - bt + height))
                     continue
-                raw = sct.grab({"left": mon["left"] + left, "top": mon["top"] + top, "width": width, "height": height})
-                _capture_ok()
-                out[name] = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+                out[name] = self._sct_grab(sct, {"left": mon["left"] + left, "top": mon["top"] + top,
+                                                 "width": width, "height": height})
                 grabbed.append(((left, top, width, height), out[name]))
         return out
 
