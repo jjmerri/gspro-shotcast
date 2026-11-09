@@ -1254,3 +1254,31 @@ console.log(JSON.stringify(seen));
                        [[3], False, True, "‹Week 3 due Sun, Dec 13›"]]
     assert got[4] == [True, 3, True]       # the header row and a hole from each week
     assert got[5] == [4]                   # a league.json from before dates: its one week
+
+
+def test_the_pages_tab_switch_leaves_a_back_entry():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = re.search(r"\nfunction remember\(.*?\n}\n", page, re.S).group(0) \
+        + re.search(r"\nfunction switchTab\(.*?\n}\n", page, re.S).group(0)
+    script = """
+const state = {tab: "home"}, stack = [{hash: "#home?", st: null}];
+const location = {get hash() { return stack[stack.length - 1].hash; }};
+const history = {replaceState: (st, _, h) => { stack[stack.length - 1] = {hash: h, st}; },
+                 pushState: (st, _, h) => stack.push({hash: h, st})};
+const scrollY = 300, window = {scrollTo() {}}, box = {getBoundingClientRect: () => ({top: 0, bottom: 0})};
+const $ = () => box, showTabs = () => {}, render = () => history.replaceState(null, "", "#" + state.tab + "?");
+""" + fns + """
+const seen = [];
+switchTab("schedule"); seen.push(stack.map(e => e.hash), stack[0].st);
+switchTab("schedule"); seen.push(stack.length);   // the tab already shown: no entry
+console.log(JSON.stringify(seen));"""
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    assert got == [["#home?", "#schedule?"], {"y": 300}, 2]

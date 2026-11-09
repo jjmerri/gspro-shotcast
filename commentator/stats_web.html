@@ -553,6 +553,16 @@ function openView(view) {
   render();
   if (!state.scrollTo) window.scrollTo(0, 0);
 }
+// Another tab (the tab row, or a card that goes to one): a history entry too, so Back returns to it.
+function switchTab(view) {
+  if (view !== state.tab) remember();
+  state.tab = view;
+  showTabs();
+  render();
+  // Switching from far down a page: start the new one at its top, not mid-way.
+  const top = $("#main").getBoundingClientRect().top + scrollY - $("header").getBoundingClientRect().bottom;
+  if (scrollY > top) window.scrollTo(0, Math.max(0, top));
+}
 // A link followed on the page (an <a href="#…">), Back or Forward: the view in the address.
 function route(y = 0) {
   if (location.hash === shownHash) return;
@@ -2665,12 +2675,7 @@ document.addEventListener("click", (e) => {
     delete state.sort.shots;
     loadShots();
   } else if (t.dataset.tab || t.dataset.section) {
-    state.tab = t.dataset.tab || sectionView(t.dataset.section);
-    showTabs();
-    render();
-    // Switching from far down a page: start the new one at its top, not mid-way.
-    const top = $("#main").getBoundingClientRect().top + scrollY - $("header").getBoundingClientRect().bottom;
-    if (scrollY > top) window.scrollTo(0, Math.max(0, top));
+    switchTab(t.dataset.tab || sectionView(t.dataset.section));
   } else if (t.dataset.ctx !== undefined) {
     state.ctx = t.dataset.ctx;
     document.querySelectorAll("#ctx button").forEach(b => b.classList.toggle("on", b === t));
@@ -2690,6 +2695,7 @@ document.addEventListener("click", (e) => {
     state.replayHole = state.replayPlayed = null;
     if (side) render(); else openView("round");
   } else if (t.dataset.course) {
+    if (state.course !== t.dataset.course) remember();
     state.course = t.dataset.course;
     state.scrollTo = { sel: "#coursedetail", block: "start", until: Date.now() + 2000 };
     render();

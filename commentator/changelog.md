@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.109
+
+### Stats page
+- Back works after switching tabs: going from Home to the schedule (or any tab, or a course's details) and pressing Back returns to where you were.
+
 ## 0.1.108
 
 ### Booth
