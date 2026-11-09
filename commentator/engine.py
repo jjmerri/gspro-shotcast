@@ -5551,7 +5551,7 @@ class Engine:
         # Then voice the mid-flight lines while the player sets up. Voicing takes over a second on
         # some CPUs, which would land a wedge call after the ball does. Likeliest outcomes first;
         # whatever isn't ready at impact is voiced then instead.
-        order = ("on_target", "left", "right", "short", "long", "left_trouble", "right_trouble")
+        order = ("on_target", "left", "right", "short", "long", "coming_back", "layup", "left_trouble", "right_trouble")
         voicing = time.monotonic()
         outcomes = sorted(plan.lines, key=lambda o: order.index(o) if o in order else len(order))
         concurrent = getattr(self.speech.tts, "concurrent", False)

@@ -504,7 +504,8 @@ def flight_prompt(*, player, team, hole, facts: list[str], recent_lines, speaker
 # "water" is never projected from the launch numbers (project() can't know the hole has water); it's
 # selected at impact only when the GSPro log's Hit_water confirms the ball went in, so its flight line
 # may name the water where the others must not. The rest are the projected ball flights.
-FLIGHT_OUTCOMES = ("on_target", "short", "long", "left", "right", "left_trouble", "right_trouble", "water")
+FLIGHT_OUTCOMES = ("on_target", "short", "long", "left", "right", "left_trouble", "right_trouble", "water",
+                   "coming_back", "layup")
 # Reaction branches, written at setup and played the instant the result is known, with no model call
 # after the ball stops. The set depends on whether this shot is a putt (picked by lie / roll). Each is
 # one place a full shot can come to rest, matched to the GSPro log's surface materials, so the finish
@@ -715,7 +716,12 @@ def preshot_branch_prompt(
         '"left" or "right" here, they read as a direction), short (short of the FLAG, usually still on the green: '
         '"might be a touch short", "leaves itself a putt from below"; never that it needs more carry to reach or '
         'won\'t reach the green, unless the green front is clearly beyond this club), long, left, right, and '
-        "left_trouble / right_trouble (below). " + _FLIGHT_WATER + "."
+        "left_trouble / right_trouble (below). " + _FLIGHT_WATER + ". "
+        "coming_back: it started off the flag's line and the shape (a draw or a fade) is bending it back toward "
+        'the flag: no "left" or "right", nothing about how long it is; null on a tee shot that isn\'t going at a green. '
+        "layup: the player picked a spot short of the green (laying up, or getting out of trouble) and the ball is "
+        "heading for that spot: about the spot or the safe play, never the flag, pin or green; null if this shot can "
+        "only be going at the green."
         + '\n2. "reaction_lines": what ' + speaker + ' says the instant the ball stops, at most 12 words each, '
         "written now for each place it can finish, judged against what this shot was trying to do (a tee shot wants "
         "the fairway; an approach wants the green). Write one per outcome: " + _RESULT_GUIDANCE

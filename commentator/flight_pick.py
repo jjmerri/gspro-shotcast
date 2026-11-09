@@ -317,17 +317,29 @@ def project(
     return Projection(carry, lateral, length or side or "on_target", total=total, **shape)
 
 
+def _bend(p: Projection) -> float:
+    return max(4.0, p.carry * 0.03)   # less curve than this isn't a shape worth calling
+
+
+def _near(p: Projection) -> float:
+    return max(8.0, p.carry * 0.06)   # project()'s side tolerance: "on the flag's line"
+
+
+def curving_back(p: Projection | None) -> bool:
+    """Started off the flag's line and curving back onto it: the draw or fade working back to the pin."""
+    if not p or not p.at_pin or abs(p.curve) < _bend(p) or abs(p.start) < _near(p) * 0.6:
+        return False
+    return (p.start > 0) != (p.curve > 0) and abs(p.lateral) <= _near(p)
+
+
 def shape_facts(p: Projection | None, aim: tuple[float, float] | None = None, pin_yards: float | None = None) -> list[str]:
     """The ball's shape against the flag, with the green in reach: where it started from the flag and
     whether the curve brings it back or takes it away, so the booth can call a draw coming back to the
     pin (the launch monitor's start line is from the aim, which may be well off the flag)."""
-    if not p or not p.at_pin:
-        return []
-    bend = max(4.0, p.carry * 0.03)
-    if abs(p.curve) < bend:
+    if not p or not p.at_pin or abs(p.curve) < _bend(p):
         return []
     cside = "right" if p.curve > 0 else "left"
-    near = max(8.0, p.carry * 0.06)   # project()'s side tolerance: "on the flag's line"
+    near = _near(p)
     facts = []
     if abs(p.start) < near * 0.6:
         facts.append(f"It started at the flag and is curving away to the {cside}.")
@@ -361,6 +373,14 @@ def pick_line(
     # The lines were written before the player clicked a spot short of the green: one that has the ball
     # going at the flag is wrong for a layup or a way out (the live call, told the aim, says it instead).
     layup = not plan.lengthless and aimed_short(aim, to_yards(to_pin or plan.to_pin))
+    special = None
+    if layup and proj.outcome == "on_target":
+        special = "layup"   # heading at the spot the player picked
+    elif curving_back(proj) and (proj.outcome == "on_target" or (
+            proj.outcome in ("short", "long") and abs(proj.gap) <= max(10.0, (proj.total - proj.gap) * 0.1))):
+        special = "coming_back"   # the shape is the story; a little short or long is no contradiction
+    if special and (line := plan.lines.get(special)) and line.strip().lower() != "null":
+        return special, line
     for outcome in (proj.outcome, proj.outcome.removesuffix("_trouble")):
         named = plan.named.get(outcome.removesuffix("_trouble")) if outcome.endswith("_trouble") else None
         if named and not any(h.kind == named for h in proj.in_play):

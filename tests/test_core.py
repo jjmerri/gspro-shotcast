@@ -1579,6 +1579,22 @@ def test_projection_picks_outcomes_for_flight_test_scenarios():
     assert pick_line(plan, layup, "130 yards", aim=(0, 100)) is None
     plan.lines["on_target"] = "Back in play."
     assert pick_line(plan, layup, "130 yards", aim=(0, 100)) == ("on_target", "Back in play.")
+    # G: a layup heading at its spot takes the layup line, a miss off it still the side call
+    plan.lines.update(layup="Laying it up to his number.", right="Leaking right.")
+    assert pick_line(plan, layup, "130 yards", aim=(0, 100)) == ("layup", "Laying it up to his number.")
+    assert pick_line(plan, replace(layup, hla=12), "130 yards", aim=(0, 100))[0] == "right"
+    assert pick_line(plan, layup, "130 yards")[0] == "short"   # no click short of the green: not a layup
+    # H: aimed right, drawing back onto the flag's line takes the coming-back line, even a touch long;
+    # the same draw aimed at the flag (curving away) or a big miss long doesn't
+    plan = FlightPlan(player=None, to_pin="160 yards", lines={"coming_back": "Working back to the flag.",
+                                                              "on_target": "Dead on it.", "left": "Pulled.",
+                                                              "long": "Too much club."})
+    assert pick_line(plan, draw, "160 yards", aim=(47, 339)) == ("coming_back", "Working back to the flag.")
+    assert pick_line(plan, draw, "155 yards", aim=(47, 339))[0] == "coming_back"
+    assert pick_line(plan, draw, "160 yards")[0] == "left"
+    assert pick_line(plan, draw, "125 yards", aim=(47, 339))[0] == "long"
+    del plan.lines["coming_back"]
+    assert pick_line(plan, draw, "160 yards", aim=(47, 339)) == ("on_target", "Dead on it.")
 
 
 async def test_impact_uses_preshot_plan_without_a_model_call(tmp_path):
