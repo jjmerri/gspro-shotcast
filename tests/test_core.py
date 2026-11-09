@@ -1395,6 +1395,10 @@ def test_flight_projection_facts():
     assert round(to_yards("98.2 metres"), 1) == 107.4 and round(to_yards("10 feet 8 inches"), 2) == 3.56
     assert "short of the pin" in " ".join(flight_facts(Shot(club="9I", carry=95, hla=0), "107.4 yards"))
     assert "past the pin" in " ".join(flight_facts(Shot(club="9I", carry=120, hla=0), "107.4 yards"))
+    # Bands, not a yardage the booth would read out mid-flight
+    sand = " ".join(flight_facts(Shot(club="PW", carry=136, hla=0), "120 yards", 0.8, "sand")[-1:])
+    assert "a little short of the pin" in sand and not re.search(r"\d", sand)
+    assert "well short of the pin" in " ".join(flight_facts(Shot(club="9I", carry=92, hla=0), "107 yards"))
     assert "around the pin" in " ".join(flight_facts(Shot(club="GW", carry=86.4, hla=0.8), "84.8 yards"))
     assert "out of reach" in " ".join(flight_facts(Shot(club="DR", carry=240, hla=0), "504.2 yards"))
 

@@ -496,7 +496,7 @@ def flight_prompt(*, player, team, hole, facts: list[str], recent_lines, speaker
         + f'\n\nThe ball is in the air. Give exactly one line from "{speaker}", at most 10 words, present tense, '
         "the way a TV commentator calls a shot mid-flight: will it get there (\"needs legs\", \"too much club\"), "
         "is it on line, is it drifting toward trouble. Nobody knows where it lands yet, so never say where it "
-        "finished." + look + (f" {off_flag} {OFF_FLAG}." if off_flag else "")
+        "finished, and never put a number of yards on it." + look + (f" {off_flag} {OFF_FLAG}." if off_flag else "")
     )
     return prompt, facts_text
 

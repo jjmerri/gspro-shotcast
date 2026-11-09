@@ -452,15 +452,17 @@ def flight_facts(
     carry = (carry or 0) * carry_factor  # GSPro takes distance off for rough, sand and so on
     if not (pin and carry):
         return facts
+    # Bands, not yards: the projected carry is an estimate (the lie's penalty most of all), and a ball
+    # that carries short can still run out onto the green, so a number in the air was false precision.
     gap = carry - pin
     if pin > carry * 1.25:
         facts.append("The green is out of reach with this shot; it's about position.")
     elif abs(gap) <= max(3, pin * 0.05):
         facts.append("The launch monitor projects it to carry right around the pin distance.")
-    elif gap < 0:
-        facts.append(f"The launch monitor projects it to carry about {round(-gap)} yards short of the pin.")
     else:
-        facts.append(f"The launch monitor projects it to carry about {round(gap)} yards past the pin.")
+        much = "well" if abs(gap) > max(10, pin * 0.1) else "a little"
+        facts.append(f"The launch monitor projects it to carry {much} {'short of' if gap < 0 else 'past'} the pin "
+                     "(an estimate: the ball can still run on or release after landing).")
     return facts
 
 
