@@ -3600,6 +3600,31 @@ async def test_only_a_putt_past_the_lag_distance_asks_for_a_gimme_line(tmp_path)
         {"gimme": "Great lag, tap-in par."}
 
 
+async def test_the_branch_prompt_sees_the_last_flight_calls_and_a_drive_aims_at_the_fairway(tmp_path):
+    from commentator.models import Line
+
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.tts.console_simulate_duration = False
+    llm = FakeLLM(cfg.llm.live)
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=llm, segment_llm=None,
+                    speech=SpeechQueue(cfg, ConsoleTTS()), screen=_SetupScreen(), rng=random.Random(0))
+    engine.flight_llm = llm
+    for i in range(10):
+        engine._write_transcript([Line(engine.speakers[0], f"Peeling away to the right, call {i}.")], "flight")
+    engine._write_transcript([Line(engine.speakers[0], "What a strike.")], "shot")
+    engine.current_par = 4
+    for lie, to_pin, tee in (("tee", "426 yards", True), ("tee", "310 yards", False), ("fairway", "426 yards", False)):
+        llm.prompts.clear()
+        await engine.handle_preshot(PreShotEvent(hud=Hud(player_text=f"Toby 1st Shot 1 {to_pin}", shot_number=1,
+                                                         lie=lie, to_pin=to_pin)))
+        branch = next(p for p in llm.prompts if "PRE-SHOT BRANCHES" in p)
+        calls = branch.split("last mid-flight calls", 1)[1]
+        assert "call 1." not in calls and "- Peeling away to the right, call 2." in calls and "call 9." in calls
+        assert "What a strike" not in calls
+        assert ("No flight line mentions the flag" in branch) is tee, (lie, to_pin)
+
+
 async def test_run_loop_cancel_keeps_the_current_setups_plan(tmp_path):
     # The run loop calls _cancel_preshot() right before handle_preshot for a new setup. That must
     # not cancel the model call _emit_setup started for this same setup, or no plan gets built.

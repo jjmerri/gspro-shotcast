@@ -147,6 +147,21 @@ def _recent_block(recent_lines) -> str:
             + "\n".join(_recent(recent_lines) or ["(none yet)"]) + (words.note() if words else ""))
 
 
+def _flight_block(recent_lines) -> str:
+    """The booth's last mid-flight calls: they're written from a handful of shapes, so without them in
+    view the same verb ("peeling", "bending") and opening come back shot after shot."""
+    calls = list(getattr(recent_lines, "flight", None) or [])
+    if not calls:
+        return ""
+    return ("\n\nThe booth's last mid-flight calls, oldest first. Every new flight line needs a different "
+            "verb and a different opening from all of these; vary the shape too (not always "
+            '"<verb>ing left, <hazard> in play"):\n' + "\n".join(f"- {c}" for c in calls))
+
+
+TEE_SHOT = ("This is a tee shot on a par 4 or 5: the green is out of range, so its target is the fairway. "
+            'No flight line mentions the flag or the pin; on_target is down the middle, at the target or the fairway')
+
+
 # Appended to the live reaction and between-hole prompts. It trims run-ons without flattening the
 # booth: a long, comma-stapled sentence reads worse aloud than two short ones and takes longer to
 # voice. Kept in the user prompt (not the cached system prompt) so a wording tweak costs no re-cache.
@@ -469,17 +484,18 @@ def _header(player: str | None, team: str | None, hole: str | None) -> list[str]
     return out
 
 
-def flight_prompt(*, player, team, hole, facts: list[str], recent_lines, speaker: str, has_image: bool) -> tuple[str, str]:
+def flight_prompt(*, player, team, hole, facts: list[str], recent_lines, speaker: str, has_image: bool,
+                  tee_shot: bool = False) -> tuple[str, str]:
     facts_text = "\n".join(_header(player, team, hole) + facts + [clock_fact()])
     look = (" The screenshot was taken at impact: use it to see trouble near the ball's line (water, bunkers, "
             "trees) and call it if the ball is heading that way." if has_image else "")
     prompt = (
         "IN FLIGHT. FACTS:\n" + facts_text
-        + _recent_block(recent_lines)
+        + _recent_block(recent_lines) + _flight_block(recent_lines)
         + f'\n\nThe ball is in the air. Give exactly one line from "{speaker}", at most 10 words, present tense, '
         "the way a TV commentator calls a shot mid-flight: will it get there (\"needs legs\", \"too much club\"), "
         "is it on line, is it drifting toward trouble. Nobody knows where it lands yet, so never say where it "
-        "finished." + look
+        "finished." + look + (f" {TEE_SHOT}." if tee_shot else "")
     )
     return prompt, facts_text
 
@@ -645,7 +661,7 @@ def preshot_hazard_prompt(*, player, hole, facts: list[str], speaker: str) -> tu
 def preshot_branch_prompt(
     *, player, team, hole, facts: list[str], recent_lines, speaker: str,
     second: str | None = None, is_putt: bool = False, named: dict[str, str] | None = None, lag: bool = False,
-    putt_feet: float | None = None, reply: bool = False, putt_to_par: int | None = None,
+    putt_feet: float | None = None, reply: bool = False, putt_to_par: int | None = None, tee_shot: bool = False,
 ) -> tuple[str, str]:
     """The pre-rendered branches (mid-flight line per flight, reaction per finish), written now so the
     call is instant once the ball moves. Text-only: it runs beside the setup call, so there's no image
@@ -704,7 +720,8 @@ def preshot_branch_prompt(
         "the fairway; an approach wants the green). Write one per outcome: " + _RESULT_GUIDANCE
         + ". Keep the reaction honest to each result; don't claim a number or a distance."
         + "\n\n" + trouble + "."
-        + "\n\nFACTS:\n" + facts_text + recent
+        + (f"\n\n{TEE_SHOT}." if tee_shot else "")
+        + "\n\nFACTS:\n" + facts_text + recent + _flight_block(recent_lines)
     )
     return prompt, facts_text
 

@@ -35,11 +35,13 @@ class ShotRecord:
 
 
 class RecentLines(deque):
-    """The booth's last lines, plus the round's tally of the descriptive words it has leaned on."""
+    """The booth's last lines, plus the round's tally of the descriptive words it has leaned on, and
+    the last mid-flight calls (they're one in many lines, so the recent lines soon lose them)."""
 
     def __init__(self, *args) -> None:
         super().__init__(*args)
         self.words = WordWatch()
+        self.flight: deque[str] = deque(maxlen=8)
 
 
 @dataclass

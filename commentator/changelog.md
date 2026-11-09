@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.107
+
+### Booth
+- More varied calls while the ball's in the air: the booth sees its last few and stops reaching for the same words ("peeling", "bending… in play"), and drives on par 4s and 5s are called at the fairway, not the flag.
+
 ## 0.1.106
 
 ### Stats page

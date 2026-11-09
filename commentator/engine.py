@@ -446,6 +446,8 @@ UNCACHED_KINDS = {"closer"}
 
 # How long a putt's or short shot's setup line waits for the booth to stop talking before it's dropped.
 PRESHOT_IDLE_WAIT_SECONDS = 5.0
+# Beyond this from the tee the green's out of a drive's reach: its flight calls aim at the fairway.
+LONG_TEE_YARDS = 330
 # How long after a round ends a non-tee setup is taken as the finished round's stale HUD.
 AFTER_ROUND_QUIET_SECONDS = 120.0
 # How often a hole's where-to-miss read (when there is one) is offered to the pre-shot line.
@@ -5330,7 +5332,7 @@ class Engine:
             recent_lines=self.state.recent_lines, speaker=name(self.speakers[0]),
             second=name(second) if second else None, is_putt=is_putt,
             named=minimap.named(to_yards(hud.to_pin)) if minimap else None, lag=lag,
-            putt_feet=putt_feet, reply=reply, putt_to_par=to_par,
+            putt_feet=putt_feet, reply=reply, putt_to_par=to_par, tee_shot=self._long_tee_shot(hud.lie, hud.to_pin),
         )
         # Three concurrent calls: the spoken line (live_llm, text) and the branches (flight_llm, text)
         # always run; the hazard read (preshot_llm, vision) runs only for a full shot with an image to
@@ -7941,7 +7943,7 @@ class Engine:
             player=who, team=team, hole=self.state.current_hole,
             facts=flight_facts(shot, before.to_pin, factor, before.lie, before.elevation_yards),
             recent_lines=self.state.recent_lines,
-            speaker=self.speakers[0], has_image=bool(images),
+            speaker=self.speakers[0], has_image=bool(images), tee_shot=self._long_tee_shot(before.lie, before.to_pin),
         )
         budget = max(deadline - (time.monotonic() - impact), 0.1)
         try:
@@ -10954,11 +10956,18 @@ class Engine:
         self.store.record_form_mentions(players, topics)
         self._form_pending = None
 
+    def _long_tee_shot(self, lie: str | None, to_pin: str | None) -> bool:
+        """A drive whose target is the fairway, not the flag: off the tee of a par 4 or 5 out of reach."""
+        yards = to_yards(to_pin)
+        return (lie or "").lower() == "tee" and (self.current_par or 0) >= 4 and (yards is None or yards > LONG_TEE_YARDS)
+
     def _write_transcript(self, lines: list[Line], kind: str = "shot", shot_id: int | None = None) -> None:
         # The handler's own shot id beats the shared one, which the next shot may have moved on.
         if shot_id is None and kind in ("shot", "flight"):
             shot_id = self._shot_id
         self.store.record_lines(kind, lines, shot_id)
+        if kind == "flight" and (flight := getattr(self.state.recent_lines, "flight", None)) is not None:
+            flight.extend(line.text for line in lines)
         self._note_form_mentions(lines)
         for line in lines:
             if self.round and not self.round.ended and makes_call(line.text):
