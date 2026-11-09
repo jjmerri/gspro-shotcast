@@ -821,6 +821,36 @@ def test_a_driver_recorded_off_the_deck_becomes_a_three_wood_once(tmp_path):
     assert [r[0] for r in st.db.execute("SELECT club FROM shots ORDER BY ts")] == ["DR", "DR", "3W", "3W", "DR"]
 
 
+def test_alternate_shot_finishes_kept_as_the_holes_end_are_repaired_once(tmp_path):
+    import json
+    from commentator.store import Store
+
+    path = str(tmp_path / "season.db")
+    st = Store(path)
+    rows = [  # (ts, player, hole, shot_number, is_putt, to_pin, finish, outcome)
+        (1, "Pat", "Hole 3", 2, 0, 166.0, 1.33, None),    # approach kept as the gimme radius
+        (2, "Kim", "Hole 3", 2, 0, 150.0, 0.0, None),     # the other team's approach
+        (3, "Lee", "Hole 3", 3, 1, 10.0, None, None),     # ... their putt: not Pat's team's ball
+        (4, "Sam", "Hole 3", 3, 1, 7.7, 0.0, "gimme"),    # Sam's conceded putt's own row
+        (5, "Sam", "Hole 3", 3, 1, 7.7, None, None),      # Sam's putt
+        (6, "Pat", "Hole 4", 1, 0, 400.0, 0.0, "holed"),  # an ace keeps its 0
+        (7, "Sam", "Hole 5", 2, 0, 120.0, 0.0, None),     # nothing played after it this round: left alone
+        (200, "Pat", "Hole 5", 3, 1, 9.0, None, None),    # the next round's Hole 5
+    ]
+    for ts, who, hole, num, putt, pin, fin, out in rows:
+        st.db.execute("INSERT INTO shots (session_id, ts, player, hole, shot_number, is_putt, to_pin_yards, "
+                      "finish_yards, outcome, fmt, mulligan) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'alternate', 0)",
+                      (st.session_id, ts, who, hole, num, putt, pin, fin, out))
+    for ended, team in ((10, ["Pat", "Sam"]), (10.4, ["Kim", "Lee"]), (300, ["Pat", "Sam"])):
+        st.db.execute("INSERT INTO rounds (session_id, ended_at, date, format, side, holes, players) "
+                      "VALUES (?, ?, '2026-11-08', 'alternate', 'x', 9, ?)", (st.session_id, ended, json.dumps(team)))
+    st.db.execute("PRAGMA user_version = 2")   # as kept before
+    st.db.commit()
+    st.db.close()
+    st = Store(path, new_session=False)
+    got = [r[0] for r in st.db.execute("SELECT finish_yards FROM shots ORDER BY ts")]
+    assert got == [7.7, 10.0, None, 0.0, None, 0.0, 0.0, None]
+
 DETAILS = ("Test Links|Someone|1010|A scenic place, links style.|Erin, WI|1|1|72|"
            "5|4|4|4|4|3|5|4|3|4|4|4|3|5|4|3|4|5|"
            "13|7|11|9|15|1|5|17|4|14|10|18|2|12|16|8|6|3|"

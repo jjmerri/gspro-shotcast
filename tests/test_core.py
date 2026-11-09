@@ -4742,6 +4742,33 @@ def test_a_shared_balls_shot_finishes_where_the_teams_next_stroke_starts(tmp_pat
     assert finish(kyle) == pytest.approx(71.9 / 3, abs=0.05) and finish(mike) is None   # a lifted ball: unknown
 
 
+def test_an_alternate_shot_finish_is_where_the_partner_played_from_not_the_holes_end(tmp_path):
+    # Wentworth, 11-08: Derek's 7-iron to 23 ft was kept as 4 ft (the gimme radius), the hole's end
+    # at his own next stroke on the next tee, so the highlight said he stuffed it.
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Pat", "Sam"], course="X", scheduled_format=None, holes=9,
+              is_league=False, slot_names=["Pat", "Sam"])
+    r.play_alternate([["Pat", "Sam"]])
+    e.round = r
+
+    def stroke(who, n, pin, putt=False):
+        sid = e.store.record_shot(player=who, hole="Hole 3", shot=Shot(club="PT" if putt else "7I"),
+                                  before=Hud(lie="green" if putt else "fairway", shot_number=n), after=Hud(),
+                                  tags=[], carry_game_yards=None, total_yards=None, offline_yards=None,
+                                  fmt="alternate")
+        e.state.record_shot(ShotRecord(who, Shot(club="PT" if putt else "7I"), "Hole 3", Hud(), [],
+                                       round_id=r.id, hole_seq=3, shot_number=n, to_pin_before=pin, shot_id=sid))
+        return sid
+
+    approach = stroke("Pat", 2, "166 yards")
+    e.store.set_shot_result(approach, finish_yards=1.33)    # as the per-player chain left it
+    stroke("Sam", 3, "23 feet 1 inches", putt=True)
+    e._team_finishes(r)
+    got = e.store.db.execute("SELECT finish_yards FROM shots WHERE id = ?", (approach,)).fetchone()[0]
+    assert got == pytest.approx(23.1 / 3, abs=0.05)
+
+
 def test_alternate_shot_takes_its_scores_from_gspros_log(tmp_path):
     from commentator.round import Round
     e = _mini_engine(tmp_path)

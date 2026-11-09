@@ -432,6 +432,9 @@ class Store:
                                AND NOT (lower(COALESCE(lie_before, '')) LIKE 'tee%' OR COALESCE(shot_number, 0) = 1
                                         OR (COALESCE(lie_before, '') = '' AND shot_number IS NULL))""")
             self.db.execute("PRAGMA user_version = 2")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 3:
+            self._repair_alternate_finishes()
+            self.db.execute("PRAGMA user_version = 3")
         # A round's course read off the scorecard was stored in capitals: file it under the shots' name.
         for table in ("rounds", "player_rounds"):
             for (course,) in self.db.execute(f"SELECT DISTINCT course FROM {table} WHERE course IS NOT NULL").fetchall():
@@ -1181,10 +1184,45 @@ class Store:
                         (fmt, int(attributed), int(shared_ball), after_id, player))
         self.db.commit()
 
-    def fill_finish(self, shot_id: int | None, yards: float) -> None:
-        """A shared ball's finish from where the team's next stroke started, unless one's already known."""
+    def _repair_alternate_finishes(self) -> None:
+        """Alternate shot's full shots were given the hole's end (the gimme radius, or 0 for the partner's
+        holed putt) as their finish: the player's own next stroke, on the next hole. The team's next
+        stroke is where it finished. Shots don't name their team or round, so each saved alternate
+        round's own shots are taken: its session, after the round before it ended, its players."""
+        rounds = self.db.execute("SELECT session_id, ended_at, players FROM rounds WHERE format = 'alternate' "
+                                 "AND players IS NOT NULL").fetchall()
+        for session_id, ended_at, players in rounds:
+            try:
+                team = [p for p in json.loads(players) if isinstance(p, str)]
+            except ValueError:
+                continue
+            if not team:
+                continue
+            # Each side of a round is saved a moment apart: the round before ended minutes earlier.
+            start = self.db.execute("SELECT MAX(ended_at) FROM rounds WHERE session_id = ? AND ended_at < ?",
+                                    (session_id, ended_at - 120)).fetchone()[0]
+            marks = ",".join("?" * len(team))
+            shots = self.db.execute(
+                f"SELECT id, hole, shot_number, is_putt, to_pin_yards, finish_yards, outcome FROM shots "
+                f"WHERE session_id = ? AND ts > ? AND ts <= ? AND player IN ({marks}) AND fmt = 'alternate' "
+                f"AND mulligan = 0 ORDER BY id",
+                (session_id, start if start is not None else float("-inf"), ended_at, *team)).fetchall()
+            for n, (sid, hole, num, putt, _, finish, outcome) in enumerate(shots):
+                if putt or finish is None or num is None or outcome == "holed":
+                    continue
+                for _, nhole, nnum, _, npin, _, nout in shots[n + 1:]:
+                    if nhole != hole:
+                        break
+                    if nnum == num + 1 and nout != "gimme" and npin is not None:
+                        self.db.execute("UPDATE shots SET finish_yards = ? WHERE id = ?", (npin, sid))
+                        break
+
+    def fill_finish(self, shot_id: int | None, yards: float, replace: bool = False) -> None:
+        """A shared ball's finish from where the team's next stroke started, unless one's already known
+        (or over it, with `replace`)."""
         if shot_id is not None:
-            self.db.execute("UPDATE shots SET finish_yards = COALESCE(finish_yards, ?) WHERE id = ?", (yards, shot_id))
+            sql = "?" if replace else "COALESCE(finish_yards, ?)"
+            self.db.execute(f"UPDATE shots SET finish_yards = {sql} WHERE id = ?", (yards, shot_id))
             self.db.commit()
 
     def tee_finishes(self, shot_ids: list[int]) -> dict[int, float]:

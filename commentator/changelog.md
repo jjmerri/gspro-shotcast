@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.110
+
+### Stats page
+- Alternate shot approach distances are right: a shot was being kept as finishing at gimme range (or in the hole) instead of where the partner played the next one from, so highlights said "stuffs it to 4 ft" for a 23-footer. Past rounds are fixed too.
+
 ## 0.1.109
 
 ### Stats page

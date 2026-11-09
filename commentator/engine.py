@@ -6265,10 +6265,17 @@ class Engine:
         # by shot order: a slow earlier handler (stuck _follow_shot) must not resolve/stash after a
         # later shot already did, which would scramble the "next setup = this rest" pairing.
         in_order = idx is not None and my_seq > self._finish_seq.get(idx, 0)
+        # Alternate shot: a player's next stroke is the partner's ball after theirs (often on the next
+        # hole), so their own last shot's rest isn't where it was played from. _team_finishes has it.
+        alternate = fmt == "alternate"
         if in_order:
             self._finish_seq[idx] = my_seq
-            self._resolve_pending_finish(idx, impact_snap)
-            self._correct_last_finish(idx, impact_snap, before.lie, shot_hole, before.shot_number, fmt)
+            if alternate:
+                self._pending_finish.pop(idx, None)
+                self._last_row.pop(idx, None)
+            else:
+                self._resolve_pending_finish(idx, impact_snap)
+                self._correct_last_finish(idx, impact_snap, before.lie, shot_hole, before.shot_number, fmt)
         if r is not None and not r.ended:   # a shot of no round (or an ended one) says nothing of the next
             self._note_tournament(r)
         shot_id = self.store.record_shot(
@@ -6295,10 +6302,10 @@ class Engine:
             m.shot()   # a stream with no shots on it isn't kept
         # Not gated on the screen seeing touchdown: the finish comes from GSPro's log at the next shot,
         # and a water or OB ball is caught there by its penalty. (Gating on it lost half the finishes.)
-        if in_order and not shot.is_putt:
+        if in_order and not shot.is_putt and not alternate:
             self._pending_finish[idx] = (shot_id, {**self._idx_snap(impact_snap, idx),
                                                    "hud_yards": to_yards(before.to_pin)})
-        if in_order:
+        if in_order and not alternate:
             snap = self._idx_snap(impact_snap, idx)
             self._last_row[idx] = (shot_id, rec, snap["hole"], snap["pen"], snap["dropped"])
         if r is not None and rec.round_id == r.id:
@@ -8723,7 +8730,9 @@ class Engine:
                         and r.side_for(x.player) is side), None)
             if nxt is not None and (y := to_yards(nxt.to_pin_before)) is not None:
                 self._team_finished.add(s.shot_id)
-                self.store.fill_finish(s.shot_id, y)
+                # Alternate shot's is the only finish there is (one from before the round was
+                # alternate chained the player's own strokes); a scramble's pick screen may have one.
+                self.store.fill_finish(s.shot_id, y, replace=fmt == "alternate")
 
     def _canonical_course(self, course: str | None) -> str | None:
         """The league's name for a course when it's on the schedule, else the name as given. GSPro
