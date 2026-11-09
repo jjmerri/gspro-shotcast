@@ -235,11 +235,13 @@ def _strip_number(token: str, first: bool) -> int | None:
 # short side is 736 px, which is most of an OCR's time. ("min", n): enlarge to a short side of at least
 # n px. ("ref", h): scale the crop to the size it would be on a screen h px tall (shrinking it on a
 # bigger screen). Regions not listed keep the default: the scorecard (reads worse smaller), the score
-# banner (not benchmarked) and the setup player slots (names at 4K only come back with the big upscale).
+# banner (not benchmarked), the other players' board (drops names and scores smaller) and the setup
+# player slots (names at 4K only come back with the big upscale).
 FAST_DETECT: dict[str, tuple[str, int]] = {
     "player_box": ("min", 320), "hole_box": ("min", 320),
-    **{n: ("ref", 1080) for n in ("lie", "club", "tiles", "tiles_left", "scorecard_title", "setup_course",
-                                  "load_course", "course_select", "setup_game_mode", "pick_panel")},
+    **{n: ("ref", 1080) for n in ("lie", "club", "slope", "tiles", "tiles_left", "scorecard_title",
+                                  "setup_course", "load_course", "course_select", "setup_game_mode",
+                                  "pick_panel")},
 }
 
 

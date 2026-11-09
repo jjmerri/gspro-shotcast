@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.108
+
+### Booth
+- Faster read of each shot's setup: the slope readout no longer takes most of the time, so the booth has the lie and the player sooner.
+
 ## 0.1.107
 
 ### Booth
