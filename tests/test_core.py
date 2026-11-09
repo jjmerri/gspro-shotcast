@@ -1552,6 +1552,18 @@ def test_projection_picks_outcomes_for_flight_test_scenarios():
     assert project(draw, "160 yards", []).outcome == "left"
     assert project(draw, "160 yards", [], aim=(47, 339)).outcome == "on_target"
     assert project(draw, "260 yards", [], aim=(47, 339)).outcome == "left"
+    # F: a click about 85 yards out with the pin at 130 is a layup or a way out: no length call off the
+    # pin, and a pre-written line that has it going at the flag is dropped for the live call.
+    from commentator.flight_pick import FlightPlan, pick_line
+    layup = Shot(club="9I", carry=105, hla=0, spin_axis=0)
+    assert project(layup, "130 yards", []).outcome == "short"
+    assert project(layup, "130 yards", [], aim=(0, 100)).outcome == "on_target"
+    plan = FlightPlan(player=None, to_pin="130 yards", lines={"on_target": "Right at the flag!", "short": "Short."})
+    assert pick_line(plan, layup, "130 yards", aim=(0, 100)) is None
+    plan.lines["on_target"] = "Straight at the flagstick."
+    assert pick_line(plan, layup, "130 yards", aim=(0, 100)) is None
+    plan.lines["on_target"] = "Back in play."
+    assert pick_line(plan, layup, "130 yards", aim=(0, 100)) == ("on_target", "Back in play.")
 
 
 async def test_impact_uses_preshot_plan_without_a_model_call(tmp_path):
@@ -3624,7 +3636,7 @@ async def test_the_branch_prompt_sees_the_last_flight_calls_and_a_shot_out_of_re
     engine.store.length_norm = lambda player, club=None: drives
     for lie, to_pin, drive, far in (("tee", "426 yards", None, True), ("tee", "280 yards", None, False),
                                     ("fairway", "250 yards", None, False), ("fairway", "250 yards", 210, True),
-                                    ("fairway", "225 yards", 210, False)):
+                                    ("fairway", "225 yards", 210, False), ("deep rough", "200 yards", 210, True)):
         drives.update(n=10, avg_total=drive)   # the player's usual drive (None: too few on record)
         llm.prompts.clear()
         await engine.handle_preshot(PreShotEvent(hud=Hud(player_text=f"MikeD 1st Shot 1 {to_pin}", shot_number=1,
@@ -3634,6 +3646,30 @@ async def test_the_branch_prompt_sees_the_last_flight_calls_and_a_shot_out_of_re
         assert "call 1." not in calls and "- Peeling away to the right, call 2." in calls and "call 9." in calls
         assert "What a strike" not in calls
         assert ("No flight line mentions the flag" in branch) is far, (lie, to_pin, drive)
+
+
+def test_the_booth_knows_when_the_green_was_never_the_target(tmp_path):
+    cfg = Config(log_dir=str(tmp_path))
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None,
+                    speech=SpeechQueue(cfg, ConsoleTTS()), screen=_SetupScreen(), rng=random.Random(0))
+    engine.store.length_norm = lambda player, club=None: {"n": 10, "avg_total": 250}
+    engine.current_par = 4
+    # Clicked 60 yards out with the pin at 150: a punch out, whatever the reach.
+    assert "aimed at a spot about 60 yards out" in engine._off_flag("Mike", "fairway", "150 yards", aim=(0, -67))
+    assert engine._off_flag("Mike", "fairway", "150 yards", aim=(30, 339)) is None   # a draw at the flag
+    assert "tree" in engine._off_flag("Mike", "fairway", "150 yards", stymie=True)
+    [fact] = engine._reach_facts("Mike", "fairway", "150 yards", (0, -67), "fairway")
+    assert "never the plan" in fact
+    # From deep rough (0.72 of the carry) 230 out is beyond a 275-yard reach; 150 is well inside it.
+    assert "out of Mike's reach" in engine._reach_facts("Mike", "deep rough", "230 yards", None, "fairway")[0]
+    assert "within Mike's reach even so" in engine._reach_facts("Mike", "deep rough", "150 yards", None, "rough")[0]
+    assert engine._reach_facts("Mike", "deep rough", "150 yards", None, "green") == []
+    assert engine._reach_facts("Mike", "fairway", "230 yards", None, "rough") == []   # a clean lie: nothing to excuse
+    assert engine._reach_facts("Mike", "deep rough", "230 yards", None, "green") == []   # it got there anyway
+    assert "out of Mike's reach" in engine._reach_facts("Mike", "deep rough", "165 yards", None, "rough", 40)[0]
+    # A click level with the ball, off to the side: a chip out sideways
+    assert "out to the right" in engine._off_flag("Mike", "deep rough", "130 yards", aim=(200, -338))
 
 
 async def test_run_loop_cancel_keeps_the_current_setups_plan(tmp_path):

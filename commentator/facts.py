@@ -432,14 +432,20 @@ def elevation_facts(hud) -> list[str]:
 
 def flight_facts(
     shot: Shot, to_pin: str | None, carry_factor: float = 1.0, lie: str | None = None,
-    elevation_yards: float | None = None,
+    elevation_yards: float | None = None, aim: tuple[float, float] | None = None,
 ) -> list[str]:
-    """What a commentator knows the instant the ball leaves the club."""
+    """What a commentator knows the instant the ball leaves the club. `aim`: the player's minimap click."""
+    from .flight_pick import aim_facts
+
     facts = ["The ball is in the air right now. It has not landed."]
     if lie:
         facts.append(f"It was hit from the {lie}.")
     facts += [f for f in shot_facts(shot) if not f.startswith(("Carry:", "Ball speed:"))]
     pin = to_yards(to_pin)
+    aimed, layup = aim_facts(aim, pin)
+    facts += aimed
+    if layup:
+        return facts
     if pin and elevation_yards and abs(elevation_yards) >= 2:
         pin += elevation_yards  # plays longer uphill, shorter downhill
     carry = shot.carry if (shot.units or "yards").lower().startswith("y") else (shot.carry or 0) * 1.0936

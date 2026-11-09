@@ -6,6 +6,7 @@ physics, no wind), so it only calls a miss or trouble when the numbers are clear
 """
 
 import math
+import re
 from dataclasses import dataclass, field
 
 from .facts import to_yards
@@ -173,8 +174,13 @@ START_LINE_SHARE = 0.58
 CURVE_PER_RPM = 5.1e-5
 CURVE_RPM_GUESS = 2450   # a shot with no spin reading: a driver's
 # GSPro's minimap aim click: the ball sits near (0, AIM_MAP_BALL_Y), with y running up the line to the
-# pin and x to its right (sources/gspro_log.aim_offset).
+# pin and x to its right, AIM_MAP_SPAN units from ball to pin (sources/gspro_log.aim_offset).
 AIM_MAP_BALL_Y = -338.0
+AIM_MAP_SPAN = 677.0
+# A click this far short of the pin is a layup or a way out, not a shot at the flag: in the season's
+# aimed shots the ball went about 0.7-0.8 of the way to the click when it was short, 0.85 at the pin.
+LAYUP_AIM_SHARE = 0.7
+FLAG_WORDS = re.compile(r"\b(flag|flagstick|pin|stick|green|hole|cup)\b", re.I)
 
 
 def _curve_yards(carry: float, spin: float, axis: float) -> float:
@@ -186,6 +192,45 @@ def aim_turn(aim: tuple[float, float] | None) -> float | None:
     if not aim or aim[1] - AIM_MAP_BALL_Y <= 0:
         return None
     return math.atan2(aim[0], aim[1] - AIM_MAP_BALL_Y)
+
+
+def aim_spot(aim: tuple[float, float] | None, pin_yards: float | None) -> tuple[float, float] | None:
+    """Where a minimap aim click points: (yards out along the line to the pin, yards right of it)."""
+    if not aim or not pin_yards:
+        return None
+    scale = pin_yards / AIM_MAP_SPAN
+    return (aim[1] - AIM_MAP_BALL_Y) * scale, aim[0] * scale
+
+
+def spot_words(spot: tuple[float, float]) -> str:
+    """'a spot about 60 yards out', or for a click level with or behind the ball, which way it went."""
+    along, right = spot
+    if along >= 5:
+        return f"a spot about {along:.0f} yards out"
+    side = "right" if right > 0 else "left"
+    return f"a spot {'back and ' if along <= -5 else ''}out to the {side}, about {abs(right):.0f} yards sideways"
+
+
+def aimed_short(aim: tuple[float, float] | None, pin_yards: float | None) -> bool:
+    """The player clicked a spot well short of the pin: laying up or getting out, not going at the flag."""
+    spot = aim_spot(aim, pin_yards)
+    return bool(spot) and spot[0] < LAYUP_AIM_SHARE * pin_yards
+
+
+def aim_facts(aim: tuple[float, float] | None, pin_yards: float | None) -> tuple[list[str], bool]:
+    """Where the player aimed, as booth facts, and whether it was short of the green (a layup or a way out)."""
+    spot = aim_spot(aim, pin_yards)
+    if not spot:
+        return [], False
+    along, right = spot
+    way = f"{abs(right):.0f} yards {'right' if right > 0 else 'left'} of the line to the pin"
+    if along < LAYUP_AIM_SHARE * pin_yards:
+        off = f", {way}" if abs(right) >= 5 and along >= 5 else ""
+        return [f"The player aimed at {spot_words(spot)}{off}, short of the green (the pin is "
+                f"{pin_yards:.0f} yards): the target is that spot, not the flag."], True
+    if abs(right) >= 3:
+        return [f"The player aimed about {way}."], False
+    return [], False
 
 
 def _in_play(h: Hazard, carry: float, lateral: float = float("inf")) -> bool:
@@ -223,6 +268,8 @@ def project(
     lateral = (START_LINE_SHARE * carry * math.sin(math.radians(shot.hla or 0))
                + _curve_yards(carry, shot.total_spin or 0, shot.spin_axis or 0))
     pin = to_yards(to_pin)
+    if aimed_short(aim, pin):
+        pin = None   # a layup or a way out: the spot clicked is the target, and short of the pin is the plan
     # The launch monitor measures the start line from where the player aimed. With the green in reach the
     # pin is the target, so a click right of it to play a draw is turned into a miss off the pin line; out
     # of reach (a layup, a drive round a dogleg) the spot they aimed at is the target itself.
@@ -268,11 +315,14 @@ def pick_line(
                    elevation_yards, aim)
     if not proj:
         return None
+    # The lines were written before the player clicked a spot short of the green: one that has the ball
+    # going at the flag is wrong for a layup or a way out (the live call, told the aim, says it instead).
+    layup = not plan.lengthless and aimed_short(aim, to_yards(to_pin or plan.to_pin))
     for outcome in (proj.outcome, proj.outcome.removesuffix("_trouble")):
         named = plan.named.get(outcome.removesuffix("_trouble")) if outcome.endswith("_trouble") else None
         if named and not any(h.kind == named for h in proj.in_play):
             continue   # the line names a hazard that isn't the one in play: say the side instead
         line = plan.lines.get(outcome)
         if line and line.strip().lower() != "null":  # never speak a model's null outcome as "null"
-            return outcome, line
+            return None if layup and FLAG_WORDS.search(line) else (outcome, line)
     return None

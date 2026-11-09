@@ -26,7 +26,7 @@ from .facts import (ctp_feet, ctp_text as _ctp_text,
     gimme_edge, history_facts, lie_cost_fact, moment_facts, ordinal, preshot_facts, putt_count_fact, putt_elevation_inches, shot_facts, to_yards, WRONG_GREEN_YARDS, wrong_green_fact,
     wrong_conceded_score, wrong_green_yards, wrong_holed_putt, wrong_putt_score,
 )
-from .flight_pick import FlightPlan, Hazard, aim_turn, pick_line, pick_reaction, project
+from .flight_pick import FlightPlan, Hazard, aim_spot, aim_turn, aimed_short, pick_line, spot_words, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
 from .grounding import (SCENERY, bare_acknowledgement, check_line, cites_call, makes_call, meta_talk, ngrams, note_keywords, repeats, uses_note,
                         wrong_round_score)
@@ -452,6 +452,10 @@ PRESHOT_IDLE_WAIT_SECONDS = 5.0
 # found the green, and 6% from 1.1. A player with too few drives on record: a fixed distance.
 REACH_SHARE = 1.1
 UNKNOWN_REACH_YARDS = 300
+# A lie leaving less than this share of the carry (rough, sand) is worth naming when it decides the reach.
+LIE_REACH_NOTE = 0.97
+# Within this share of the reach the green was plainly gettable, so a miss from a bad lie isn't excused.
+REACH_COMFORT = 0.85
 # How long after a round ends a non-tee setup is taken as the finished round's stale HUD.
 AFTER_ROUND_QUIET_SECONDS = 120.0
 # How often a hole's where-to-miss read (when there is one) is offered to the pre-shot line.
@@ -969,6 +973,7 @@ class Engine:
         # The last setup the booth read: (its HUD, the shot count then, GSPro's logged active player,
         # when). The impact read's fallback when the player box is gone by the time it's grabbed.
         self._last_setup: tuple | None = None
+        self._stymie_seq: int | None = None   # the shot count when the last setup had a tree on the line
         # Each player set up over the ball, for the chat: (when, on the PC's clock; who and the shot).
         # [wall time, brief] of each setup, for the chat; the minimap's trouble is added once it's read.
         self._setups_seen: deque[list] = deque(maxlen=60)
@@ -5289,6 +5294,7 @@ class Engine:
             entry[1] += "; trouble: " + "; ".join(trouble)   # what a viewer's warning may be about
         if minimap and minimap.stymied(to_yards(hud.to_pin)):
             hud._stymie = True   # a tree on the line always gets its setup line
+            self._stymie_seq = self._shot_seq   # (and the live flight call, at impact, still knows it)
         if is_putt and putt_task is None and self.putt_reader:
             putt_task = self._start_putt_read()   # a putt the distance didn't give away (metres)
         putt = await self._await_putt(putt_task, is_putt)
@@ -5336,7 +5342,8 @@ class Engine:
             recent_lines=self.state.recent_lines, speaker=name(self.speakers[0]),
             second=name(second) if second else None, is_putt=is_putt,
             named=minimap.named(to_yards(hud.to_pin)) if minimap else None, lag=lag,
-            putt_feet=putt_feet, reply=reply, putt_to_par=to_par, out_of_reach=self._out_of_reach(player, hud.lie, hud.to_pin, hud.elevation_yards),
+            putt_feet=putt_feet, reply=reply, putt_to_par=to_par, off_flag=self._off_flag(player, hud.lie, hud.to_pin, hud.elevation_yards, self.gspro.pending_aim,
+                                   getattr(hud, "_stymie", False)),
         )
         # Three concurrent calls: the spoken line (live_llm, text) and the branches (flight_llm, text)
         # always run; the hazard read (preshot_llm, vision) runs only for a full shot with an image to
@@ -6017,7 +6024,8 @@ class Engine:
                 self.flight_latencies.append(time.monotonic() - impact)
             elif self._shot_seq == my_seq:
                 flight_task = asyncio.create_task(
-                    self._in_flight(projected, before, player, impact_image, impact, factor, my_seq, fires0))
+                    self._in_flight(projected, before, player, impact_image, impact, factor, my_seq, fires0,
+                                    stymie=self._stymie_seq == my_seq - 1))
 
         # A ball in the water is a penalty with no resting lie to wait for, so SAY its splash NOW, off
         # the GSPro log's Hit_water (ingested by this point, after the impact read), instead of behind
@@ -6670,6 +6678,9 @@ class Engine:
                 player, shot.club, self._is_drive(before), to_yards(before.to_pin),
                 tile_yards("total length") if landed and "total length" in hud.tiles else None,
                 lie=before.lie)
+            club += self._reach_facts(player, before.lie, before.to_pin, self.gspro.aim_of(fires0, impact),
+                                      "green" if full_result in ("holed", "conceded") else hud.lie,
+                                      before.elevation_yards)
         sand_theme = (self._bunker_facts(player) if (hud.lie or "").lower() in ("sand", "bunker")
                       and not shot.is_putt else [])
         facts = (lead + replay_facts + flight + club + result + sand_theme
@@ -7941,16 +7952,18 @@ class Engine:
 
     async def _in_flight(
         self, shot, before: Hud, player: str | None, image: bytes | None, impact: float, factor: float,
-        seq: int | None = None, fires0: int | None = None,
+        seq: int | None = None, fires0: int | None = None, stymie: bool = False,
     ) -> None:
         deadline = self.cfg.commentary.flight_deadline_seconds
         images = [image] if image and self.flight_llm.cfg.vision else []
         who, team = self._who(player)
+        long_tee = (before.lie or "").lower() == "tee" and (self.current_par or 0) >= 4
+        aim = None if fires0 is None or long_tee else self.gspro.aim_of(fires0, impact)   # (a long hole's map stops short)
         user, facts_text = flight_prompt(
             player=who, team=team, hole=self.state.current_hole,
-            facts=flight_facts(shot, before.to_pin, factor, before.lie, before.elevation_yards),
+            facts=flight_facts(shot, before.to_pin, factor, before.lie, before.elevation_yards, aim),
             recent_lines=self.state.recent_lines,
-            speaker=self.speakers[0], has_image=bool(images), out_of_reach=self._out_of_reach(player, before.lie, before.to_pin, before.elevation_yards),
+            speaker=self.speakers[0], has_image=bool(images), off_flag=self._off_flag(player, before.lie, before.to_pin, before.elevation_yards, aim, stymie),
         )
         budget = max(deadline - (time.monotonic() - impact), 0.1)
         try:
@@ -10963,17 +10976,59 @@ class Engine:
         self.store.record_form_mentions(players, topics)
         self._form_pending = None
 
-    def _out_of_reach(self, player: str | None, lie: str | None, to_pin: str | None,
-                      elevation_yards: float | None = None) -> bool:
-        """A shot whose target is the fairway or a layup, not the flag: the pin is beyond the player's reach
-        (their usual drive, REACH_SHARE over), or a par 4 or 5's tee shot with the distance unread."""
-        yards = to_yards(to_pin)
-        if yards is None:
-            return (lie or "").lower() == "tee" and (self.current_par or 0) >= 4
+    def _reach(self, player: str | None, lie: str | None) -> tuple[float, float]:
+        """How far out this player can get to the green from this lie (their usual drive, REACH_SHARE over,
+        less what the lie takes off a full swing), and the share of the carry the lie leaves."""
         norm = self.store.length_norm(player) if player and player != "unknown" else {}
         drive = norm.get("avg_total") if (norm.get("n") or 0) >= self.LENGTH_NORM_MIN_SHOTS else None
         reach = drive * REACH_SHARE if drive else UNKNOWN_REACH_YARDS
-        return yards + max(elevation_yards or 0, 0) > reach
+        share = self.carry.penalty((lie or "").lower() or None, reach)
+        return reach * share, share
+
+    def _off_flag(self, player: str | None, lie: str | None, to_pin: str | None, elevation_yards: float | None = None,
+                  aim: tuple | None = None, stymie: bool = False) -> str | None:
+        """Why the flag isn't this shot's target, for the flight lines (None when it is): the green's out of
+        the player's reach (counting the lie), they clicked a spot short of it, or a tree blocks the way."""
+        yards = to_yards(to_pin)
+        long_tee = (lie or "").lower() == "tee" and (self.current_par or 0) >= 4
+        if yards is None:
+            return "This is a tee shot on a par 4 or 5, so the target is the fairway." if long_tee else None
+        spot = None if long_tee else aim_spot(aim, yards)   # a long hole's map stops short of the green
+        if spot and aimed_short(aim, yards):
+            return f"The player has aimed at {spot_words(spot)}, short of the green."
+        reach, share = self._reach(player, lie)
+        if yards + max(elevation_yards or 0, 0) > reach:
+            lie_note = f" from the {lie}" if share < LIE_REACH_NOTE else ""
+            return f"The green is out of this player's reach{lie_note}, so the target is the fairway or a spot to lay up to."
+        if stymie:
+            return "A tree blocks the line to the pin, so the player may be playing around it or out to the fairway."
+        return None
+
+    def _reach_facts(self, player: str | None, lie: str | None, to_pin: str | None, aim: tuple | None,
+                     finish_lie: str | None, elevation_yards: float | None = None) -> list[str]:
+        """After the shot: whether the green was ever the target, so a layup, a way out of trouble or a
+        shot the lie wouldn't let reach is judged by where it left them, and one that should have got
+        there isn't excused."""
+        yards = to_yards(to_pin)
+        if not yards or (lie or "").lower() in ("tee", "green", "fringe", ""):
+            return []
+        if (finish_lie or "").lower() in ("green", "fringe"):
+            return []   # it got there: nothing to excuse
+        if aimed_short(aim, yards):
+            return [f"The player aimed at {spot_words(aim_spot(aim, yards))}, short of the green: going at the "
+                    f"flag was never the plan, so judge it by where it left them."]
+        reach, share = self._reach(player, lie)
+        if share >= LIE_REACH_NOTE:
+            return []
+        who = self._display(player) if player else "the player"
+        takes = f"the {lie} takes about {round((1 - share) * 100)}% off the carry"
+        yards += max(elevation_yards or 0, 0)   # as _off_flag: uphill plays longer
+        if yards > reach:
+            return [f"From the {lie} the green was out of {who}'s reach ({takes}): judge it by where it left them, "
+                    f"not by missing the green."]
+        if yards < reach * REACH_COMFORT:
+            return [f"From the {lie} the green was within {who}'s reach even so ({takes})."]
+        return []
 
     def _write_transcript(self, lines: list[Line], kind: str = "shot", shot_id: int | None = None) -> None:
         # The handler's own shot id beats the shared one, which the next shot may have moved on.

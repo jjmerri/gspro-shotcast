@@ -158,9 +158,9 @@ def _flight_block(recent_lines) -> str:
             '"<verb>ing left, <hazard> in play"):\n' + "\n".join(f"- {c}" for c in calls))
 
 
-OUT_OF_REACH = ("The green is out of this player's reach from here, so this shot's target is the fairway or a "
-                "spot to lay up to. No flight line mentions the flag, the pin or the green, or calls it at, toward or "
-                "near the flag; on_target is down the middle, at the target or on the fairway")
+# Follows the reason the flag isn't this shot's target (`off_flag`: out of reach, aimed short, a tree in the way).
+OFF_FLAG = ("No flight line mentions the flag, the pin or the green, or calls it at, toward or near the flag; "
+            "on_target means it's going where the player aimed")
 
 
 # Appended to the live reaction and between-hole prompts. It trims run-ons without flattening the
@@ -486,7 +486,7 @@ def _header(player: str | None, team: str | None, hole: str | None) -> list[str]
 
 
 def flight_prompt(*, player, team, hole, facts: list[str], recent_lines, speaker: str, has_image: bool,
-                  out_of_reach: bool = False) -> tuple[str, str]:
+                  off_flag: str | None = None) -> tuple[str, str]:
     facts_text = "\n".join(_header(player, team, hole) + facts + [clock_fact()])
     look = (" The screenshot was taken at impact: use it to see trouble near the ball's line (water, bunkers, "
             "trees) and call it if the ball is heading that way." if has_image else "")
@@ -496,7 +496,7 @@ def flight_prompt(*, player, team, hole, facts: list[str], recent_lines, speaker
         + f'\n\nThe ball is in the air. Give exactly one line from "{speaker}", at most 10 words, present tense, '
         "the way a TV commentator calls a shot mid-flight: will it get there (\"needs legs\", \"too much club\"), "
         "is it on line, is it drifting toward trouble. Nobody knows where it lands yet, so never say where it "
-        "finished." + look + (f" {OUT_OF_REACH}." if out_of_reach else "")
+        "finished." + look + (f" {off_flag} {OFF_FLAG}." if off_flag else "")
     )
     return prompt, facts_text
 
@@ -662,7 +662,7 @@ def preshot_hazard_prompt(*, player, hole, facts: list[str], speaker: str) -> tu
 def preshot_branch_prompt(
     *, player, team, hole, facts: list[str], recent_lines, speaker: str,
     second: str | None = None, is_putt: bool = False, named: dict[str, str] | None = None, lag: bool = False,
-    putt_feet: float | None = None, reply: bool = False, putt_to_par: int | None = None, out_of_reach: bool = False,
+    putt_feet: float | None = None, reply: bool = False, putt_to_par: int | None = None, off_flag: str | None = None,
 ) -> tuple[str, str]:
     """The pre-rendered branches (mid-flight line per flight, reaction per finish), written now so the
     call is instant once the ball moves. Text-only: it runs beside the setup call, so there's no image
@@ -721,7 +721,7 @@ def preshot_branch_prompt(
         "the fairway; an approach wants the green). Write one per outcome: " + _RESULT_GUIDANCE
         + ". Keep the reaction honest to each result; don't claim a number or a distance."
         + "\n\n" + trouble + "."
-        + (f"\n\n{OUT_OF_REACH}." if out_of_reach else "")
+        + (f"\n\n{off_flag} {OFF_FLAG}." if off_flag else "")
         + "\n\nFACTS:\n" + facts_text + recent + _flight_block(recent_lines)
     )
     return prompt, facts_text

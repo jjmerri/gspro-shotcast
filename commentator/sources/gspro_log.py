@@ -1042,6 +1042,11 @@ class GsproState:
     def fire_info(self, n: int | None) -> dict:
         return self._fire_info.get(n, {}) if n is not None else {}
 
+    @property
+    def pending_aim(self) -> tuple | None:
+        """The minimap aim click made since the last shot fired: the coming shot's, if it was moved."""
+        return self._aim
+
     def aim_of(self, base_fires: int, impact: float) -> tuple | None:
         """The minimap aim click for the shot that hit at `impact` (None if the aim wasn't moved): on its
         "Shot Fired" once that's logged, else the click still waiting for it."""
