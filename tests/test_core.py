@@ -2214,6 +2214,10 @@ def test_ocr_fast_sizes_the_detector_per_region_and_screen():
                                       ("min", 736, True)]
     lie = s.region("lie").to_pixels(1280, 720)
     assert sizes(s, (1280, 720))[1] == ("min", round(min(lie[2:]) * 1.5), True)
+    # The other players' board: shrunk to its 1620 px size on 4K, but never enlarged to it.
+    board = s.region("others").to_pixels(3840, 2160)
+    assert sizes(s, (3840, 2160), ("others",)) == [("max", round(max(board[2:]) * 0.75), True)]
+    assert sizes(s, (1920, 1080), ("others",)) == [("min", 736, True)]
     # Off: every region at the detector's default, as before.
     assert {c[:2] for c in sizes(Screen(ScreenConfig(ocr_fast=False)), (3840, 2160))} == {("min", 736)}
     # A lone digit read without detection leaves the next read detecting again.

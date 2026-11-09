@@ -234,14 +234,17 @@ def _strip_number(token: str, first: bool) -> int | None:
 # 1280x800 and 1280x720 frames against the default). RapidOCR's default enlarges every crop until its
 # short side is 736 px, which is most of an OCR's time. ("min", n): enlarge to a short side of at least
 # n px. ("ref", h): scale the crop to the size it would be on a screen h px tall (shrinking it on a
-# bigger screen). Regions not listed keep the default: the scorecard (reads worse smaller), the score
-# banner (not benchmarked), the other players' board (drops names and scores smaller) and the setup
-# player slots (names at 4K only come back with the big upscale).
+# bigger screen). ("shrink", h): the same, but only where that shrinks it (the default otherwise). Regions not listed keep the default: the scorecard (reads worse smaller), the score banner (not
+# benchmarked) and the setup player slots (names at 4K only come back with the big upscale). The other
+# players' board drops scores (and reads a result banner's word as a player) at ref 1080; shrunk to
+# 1620 it reads as well as the default on 4K in half the time, but enlarged to it (1080p, 720p) misreads
+# names the default gets.
 FAST_DETECT: dict[str, tuple[str, int]] = {
     "player_box": ("min", 320), "hole_box": ("min", 320),
     **{n: ("ref", 1080) for n in ("lie", "club", "slope", "tiles", "tiles_left", "scorecard_title",
                                   "setup_course", "load_course", "course_select", "setup_game_mode",
                                   "pick_panel")},
+    "others": ("shrink", 1620),
 }
 
 
@@ -591,6 +594,8 @@ class Screen:
             return None
         r = n / self._frame_h / (scale or 1.0)
         short = min(img.size)
+        if kind == "shrink" and r >= 1:
+            return None
         if r >= 1:
             return "min", max(short, round(short * r))
         return "max", max(32, round(max(img.size) * r))

@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.112
+
+### Booth
+- Faster read of the other players' scores on 4K screens: about twice as quick, and it catches a few scores it used to miss.
+
 ## 0.1.111
 
 ### Stats page
