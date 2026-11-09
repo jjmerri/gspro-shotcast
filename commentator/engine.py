@@ -10270,17 +10270,20 @@ class Engine:
                      side.strokes, net[side.key], *st.fir, *st.gir, st.putts, st.putt_holes, st.penalties,
                      st.scores, st.source, "" if complete else f"; incomplete, {st.holes_scored} of {r.holes} holes")
         row_of: dict[str, int] = {}   # each team's rounds row, for its week result
+        stored: list[int] = []   # every side's row (teammates on their own balls share a row_of key)
         for side in r.sides:
             st = stats[side.key]
             if st.holes_scored:
                 # A one-person scramble team is an individual round, filed under the player.
-                row_of[side.team or side.key] = self.store.record_round(course=r.course, fmt=r.side_format(side),
+                row_of[side.team or side.key] = row = self.store.record_round(course=r.course, fmt=r.side_format(side),
                                         side=side.players[0] if r.solo(side) else side.key, team=side.team,
                                         holes=r.holes, players=side.players,
                                         stats=st, strokes=side.strokes, net_to_par=net[side.key],
                                         hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
                                         is_tournament=r.is_tournament, complete=complete,
                                         first_nine=r.first_nine(st, r.hole_strokes_for(side)), physics=r.physics)
+                stored.append(row)
+        r.stored_rows = stored
         if complete:
             self._record_week_results(r, row_of)
         # Per-player FIR/GIR/scrambling/sand-save for individual season stats. Alternate shot isn't
@@ -10377,7 +10380,10 @@ class Engine:
             self._schedule_live_stop()
 
     async def _sign_off(self, r: Round, stats: dict) -> None:
-        season = {s.key: self.store.season_rounds(s.key, "league" if r.is_league else "practice") for s in r.sides}
+        # Measured against every earlier round, earlier today's included (a second round of the day
+        # isn't a season best when the first beat it), leaving out only this round's own rows.
+        season = {s.key: self.store.season_rounds(s.key, "league" if r.is_league else "practice",
+                                                  skip_rows=r.stored_rows) for s in r.sides}
         facts = (r.closing_facts(self.state.shots, season, week_ctp=self._closer_week_ctp(r))
                  + self._league_facts(r, closing=True))
         if not self.cfg.commentary.closer:

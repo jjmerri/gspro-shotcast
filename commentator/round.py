@@ -163,6 +163,7 @@ class Round:
         self.log_scores: dict[str, dict[int, int]] = {}
         self.scorecard_seen = False
         self.ended = False
+        self.stored_rows: list[int] = []   # this round's rounds rows, once recorded at its end
         # GSPro's log said every hole in the round is holed out ("Round Is Complete"). With the log
         # followed, this (not the guessed hole count) is what says the round is over.
         self.log_complete = False

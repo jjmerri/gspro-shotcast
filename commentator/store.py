@@ -11,7 +11,7 @@ import math
 import re
 import sqlite3
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from .hud import Hud
 from .models import Line, Shot
@@ -1673,13 +1673,21 @@ class Store:
             "closing_to_par": closing_to_par, "closing_holes": closing_holes,
         }
 
-    def season_rounds(self, side: str, context: str | None = None) -> dict[str, Any]:
+    def season_rounds(self, side: str, context: str | None = None,
+                      skip_rows: Sequence[int] | None = None) -> dict[str, Any]:
         """Earlier rounds for a player or team, before tonight: complete ones, plus a full nine or more
         from one quit early, sliced by `context` (see _ctx_sql). `rounds` counts every scored round;
         `net_rounds` only those with a net score (a handicap known), which the net average and best
         come from - counted off the same expression they average, or a part-played round whose stored
         nine has a net score the round as a whole doesn't would be averaged in but never counted.
-        Scores to par are per nine holes, so a 9 and an 18 compare."""
+        Scores to par are per nine holes, so a 9 and an 18 compare. `skip_rows` (a just-recorded
+        round's own rows) counts earlier today's rounds too, leaving out only those rows."""
+        if skip_rows is not None:
+            earlier = f"id NOT IN ({','.join('?' * len(skip_rows))})" if skip_rows else "1"
+            args: tuple = (side, *skip_rows)
+        else:
+            earlier = "session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))"
+            args = (side, self.session_id)
         r = self.db.execute(
             f"""SELECT COUNT(*) AS rounds, COUNT({_NET_PER_NINE}) AS net_rounds,
                       AVG({_NET_PER_NINE}) AS avg_net_to_par, MIN({_NET_PER_NINE}) AS best_net_to_par,
@@ -1687,9 +1695,9 @@ class Store:
                       AVG(1.0 * putts / NULLIF(putt_holes, 0)) AS putts_per_hole,
                       AVG(1.0 * fir_hit / NULLIF(fir_tries, 0)) AS fir_rate,
                       AVG(1.0 * gir_hit / NULLIF(gir_tries, 0)) AS gir_rate
-               FROM rounds WHERE side = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND gross IS NOT NULL
+               FROM rounds WHERE side = ? AND {earlier} AND gross IS NOT NULL
                      AND {_COUNTS_AS_ROUND}""" + _ctx_sql(context),
-            (side, self.session_id),
+            args,
         ).fetchone()
         return {k: r[k] for k in r.keys()}
 

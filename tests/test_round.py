@@ -4395,6 +4395,48 @@ async def test_the_closer_keeps_lines_longer_than_a_live_call_gets(tmp_path):
     assert f"up to {e.cfg.commentary.closer_max_words} words" in prompts[0]
 
 
+async def test_a_second_round_of_the_day_is_no_season_best_when_the_first_beat_it(tmp_path):
+    # Matt shot +19 at one course, then +28 at another the same afternoon: the closer called the +28
+    # his season best against par, measuring it only against rounds from before today.
+    import json
+
+    from commentator.round import SideStats
+
+    e = _engine(tmp_path)
+
+    def put(to_par):
+        st = SideStats(holes_scored=9, gross=36 + to_par, par=36, scores={h: 4 for h in range(1, 10)})
+        e.store.record_round(course="Pebble", fmt="stroke", side="Mike", team=None, holes=9, stats=st,
+                             strokes=0, net_to_par=to_par, hole_number=lambda k: k,
+                             hole_pars={h: 4 for h in range(1, 10)}, is_league=False)
+
+    today = e.store.session_id
+    e.store.session_id = e.store.db.execute(
+        "INSERT INTO sessions (started_at, date) VALUES (0, '2026-01-01')").lastrowid
+    put(6)                                  # last month
+    e.store.session_id = today
+    put(1)                                  # earlier today
+    # A teammate on their own ball, recorded after Mike: Mike's row must still be left out.
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="York", scheduled_format=None, holes=9,
+              is_league=False)
+    r.apply_scorecard(Scorecard(holes=list(range(1, 10)), par={k: 4 for k in range(1, 10)},
+                                index={k: k for k in range(1, 10)},
+                                scores={"MIKED": {k: 4 for k in range(1, 9)} | {9: 8},
+                                        "SARAH": {k: 5 for k in range(1, 10)}, "SCORECARD": {}}))
+    e.round = r
+    stats = e._record_round_stats(r, "test")
+    prompts = []
+
+    async def complete(kind, llm, user, images, system=None, schema=None):
+        prompts.append(user)
+        return json.dumps({"lines": []})
+
+    e._complete = complete
+    await e._sign_off(r, stats)
+    assert "best practice round" not in prompts[0]
+    assert "average in 2 earlier practice rounds: 4 over par" in prompts[0]   # (+6 and +1), not this +4 too
+
+
 def test_a_scramble_pick_inside_the_gimme_circle_records_the_teams_conceded_putt(tmp_path):
     from commentator.hud import Hud
     from commentator.models import Shot

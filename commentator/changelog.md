@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.115
+
+### Booth
+- A second round of the day is only called a season best if it beats the first one too.
+
 ## 0.1.114
 
 ### Stats page
