@@ -61,11 +61,12 @@ def test_a_record_shot_is_copied_out_of_its_stream_and_dropped_once_beaten():
     s3 = FakeS3(_stream(30))
     shot = {"ts": 1050, "player": "Ann", "course": "Pebble", "hole": "Hole 7, par 3, 106 yards"}
     assert record_clips.sync(s3, "b", "", {7: shot, 8: {"ts": 5000, "player": "Bob"}}) == {"kept": 1, "added": 1, "removed": 0}
-    # 50 s in: the segments from 44 s (3 before, 47 s) to 72 s (20 after, 70 s), and the shot a second before 50 s.
+    # 50 s in: the segments from 44 s (3 before, 47 s) to 72 s (20 after, 70 s), and a second before the
+    # shot shows on the stream (5 s on, 55 s).
     assert sorted(k.rsplit("/", 1)[1] for k in s3.objects if k.startswith(ROOT + "clips/7/")) == \
         ["clip.m3u8"] + sorted(f"stream{i}.ts" for i in range(11, 18))
     assert s3.objects[ROOT + "clips/7/stream11.ts"] == b"stream11.ts"
-    assert _index(s3) == {"7": {"at": 5.0, "duration": 28.0, "player": "Ann", "course": "Pebble",
+    assert _index(s3) == {"7": {"at": 10.0, "duration": 28.0, "shows": 5.0, "player": "Ann", "course": "Pebble",
                                 "hole": "Hole 7, par 3, 106 yards"}}
     # Its stream goes after a week: the clip stays, as long as the shot holds a record.
     for k in [k for k in s3.objects if k.startswith(ROOT + "s/")]:
@@ -73,6 +74,15 @@ def test_a_record_shot_is_copied_out_of_its_stream_and_dropped_once_beaten():
     assert record_clips.sync(s3, "b", "", {7: shot})["kept"] == 1
     assert record_clips.sync(s3, "b", "", {9: {"ts": 1100}}) == {"kept": 0, "added": 0, "removed": 1}
     assert _index(s3) == {} and not [k for k in s3.objects if k.startswith(ROOT + "clips/")]
+
+
+def test_a_clip_cut_before_the_streams_delay_was_allowed_for_moves_its_start_once():
+    s3 = FakeS3({ROOT + "clips.json": json.dumps({"clips": {"7": {"at": 5.0, "duration": 28.0},
+                                                            "8": {"at": 26.0, "duration": 28.0}}}).encode()})
+    record_clips.sync(s3, "b", "", {7: {"ts": 1}, 8: {"ts": 2}})
+    assert _index(s3) == {"7": {"at": 10.0, "duration": 28.0, "shows": 5.0}, "8": {"at": 27.0, "duration": 28.0, "shows": 5.0}}
+    record_clips.sync(s3, "b", "", {7: {"ts": 1}, 8: {"ts": 2}})
+    assert _index(s3)["7"]["at"] == 10.0
 
 
 def test_a_shot_near_the_end_of_a_stream_still_uploading_waits_for_the_rest():

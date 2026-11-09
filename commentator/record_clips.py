@@ -16,10 +16,10 @@ import json
 import time
 from typing import Any
 
-from .live_stream import TYPES, segment_durations, vod_playlist
+from .live_stream import SHOT_SHOWS, TYPES, segment_durations, vod_playlist
 
-PRE, POST = 3.0, 20.0   # seconds of the stream kept around the shot (it shows ~4 s after its ts)
-WATCH_LEAD = 1.0        # the page's stream links start a second before a shot: the same here
+PRE, POST = 3.0, 20.0   # seconds of the stream kept around the shot's ts (it shows SHOT_SHOWS after it)
+WATCH_LEAD = 1.0        # the page's stream links start a second before a shot shows: the same here
 
 
 def _get(client: Any, bucket: str, key: str) -> bytes | None:
@@ -42,6 +42,12 @@ def sync(client: Any, bucket: str, prefix: str, shots: dict[int, dict], clock=ti
     recordings = [r for r in (json.loads(raw).get("recordings") or [] if raw else []) if isinstance(r, dict)]
     saved = _get(client, bucket, root + "clips.json")
     index = {k: v for k, v in ((json.loads(saved).get("clips") or {}) if saved else {}).items() if isinstance(v, dict)}
+    shifted = 0
+    for v in index.values():   # cut before `at` allowed for the stream's delay: once, to where the shot shows
+        if v.get("shows") != SHOT_SHOWS and isinstance(v.get("at"), (int, float)):
+            end = v["duration"] - 1 if isinstance(v.get("duration"), (int, float)) else float("inf")
+            v.update(at=round(max(0.0, min(end, v["at"] + SHOT_SHOWS)), 1), shows=SHOT_SHOWS)
+            shifted += 1
     wanted = {str(k): v for k, v in shots.items()}
     now, playlists, added = clock(), {}, 0
     for key, shot in wanted.items():
@@ -72,7 +78,9 @@ def sync(client: Any, bucket: str, prefix: str, shots: dict[int, dict], clock=ti
                                ContentType=TYPES.get("." + name.rsplit(".", 1)[-1], "application/octet-stream"))
         client.put_object(Bucket=bucket, Key=f"{root}clips/{key}/clip.m3u8", Body=vod_playlist(pick, ended=True),
                           CacheControl="public, max-age=31536000, immutable", ContentType=TYPES[".m3u8"])
-        index[key] = {"at": round(max(0.0, t - first - WATCH_LEAD), 1), "duration": round(sum(d for _, d in pick), 1),
+        duration = sum(d for _, d in pick)
+        index[key] = {"at": round(max(0.0, min(duration - 1, t + SHOT_SHOWS - first - WATCH_LEAD)), 1),
+                      "duration": round(duration, 1), "shows": SHOT_SHOWS,
                       **{k: shot.get(k) for k in ("player", "course", "hole")}}
         added += 1
     gone = [k for k in index if k not in wanted]
@@ -81,7 +89,7 @@ def sync(client: Any, bucket: str, prefix: str, shots: dict[int, dict], clock=ti
     stale = []
     for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=root + "clips/"):
         stale += [o["Key"] for o in page.get("Contents", []) if o["Key"][len(root) + 6:].split("/", 1)[0] not in index]
-    if added or gone or saved is None:
+    if added or gone or shifted or saved is None:
         client.put_object(Bucket=bucket, Key=root + "clips.json", Body=json.dumps({"clips": index}).encode(),
                           CacheControl="no-cache", ContentType=TYPES[".json"])
     for i in range(0, len(stale), 1000):

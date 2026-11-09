@@ -57,6 +57,18 @@ def test_published_shots_and_transcripts_match_the_live_queries(tmp_path):
         assert pub.execute("PRAGMA page_size").fetchone()[0] == stats_site.PAGE_SIZE
 
 
+def test_every_published_swing_but_a_never_struck_gimme_has_its_time_published(tmp_path):
+    path = _season(tmp_path)   # shots at ts 1-48
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("UPDATE shots SET mulligan = 1 WHERE ts = 1")
+        db.execute("UPDATE shots SET excluded = 1 WHERE ts = 2")   # (a round left out of the stats)
+        db.execute("UPDATE shots SET outcome = 'gimme' WHERE ts = 4")
+    vdir = tmp_path / "site" / "v" / stats_site.build(path, tmp_path / "site")
+    with closing(sqlite3.connect(vdir / "stats.db")) as pub:
+        assert [r[0] for r in pub.execute("SELECT ts FROM pub_shot_ts WHERE ts BETWEEN ? AND ? ORDER BY ts", (0, 6))] \
+            == [1, 3, 5, 6]
+
+
 def test_rebuilding_keeps_only_the_newest_versions(tmp_path):
     path = _season(tmp_path)
     site = tmp_path / "site"

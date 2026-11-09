@@ -4,6 +4,13 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.111
+
+### Stats page
+- Videos start right before the swing: Watch buttons, highlight reels and record clips no longer show several seconds of the ball sitting there first.
+- Double-tap the right side of a video to skip ahead 5 seconds, the left to go back (tap again for more).
+- A "Next shot" button on round videos and highlight reels jumps straight to the next swing.
+
 ## 0.1.110
 
 ### Stats page

@@ -71,7 +71,7 @@ def new_version() -> str:
 
 
 def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | None = None) -> None:
-    """Shots (newest first, as the page lists them) and each session's transcript."""
+    """Shots (newest first, as the page lists them), their times, and each session's transcript."""
     tmp = out.with_name(out.name + ".tmp")
     tmp.unlink(missing_ok=True)
     shots = A.shot_log(src, None, limit=-1)
@@ -89,7 +89,12 @@ def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | No
             CREATE TABLE pub_transcript (session_id INTEGER PRIMARY KEY, json TEXT NOT NULL);
             CREATE TABLE pub_replay (round INTEGER, hole INTEGER, json TEXT NOT NULL, PRIMARY KEY (round, hole));
             CREATE TABLE pub_hole_image (id INTEGER PRIMARY KEY, src TEXT NOT NULL);
+            CREATE TABLE pub_shot_ts (ts REAL PRIMARY KEY);
         """)
+        # Every swing's time (a mulligan's too: it's on the stream) in the published rounds, for a replay's
+        # Next shot button.
+        db.executemany("INSERT OR IGNORE INTO pub_shot_ts VALUES (?)", src.execute(
+            "SELECT ts FROM shots WHERE ts IS NOT NULL AND COALESCE(outcome, '') != 'gimme'"))
         db.executemany("INSERT INTO pub_shot VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                        [(i, s["id"], kind.get(s["id"]), s["date"], s["player"], s["course"], s["club"],
                          s["lie_before"], round_of.get(s["id"])) for i, s in enumerate(shots)])

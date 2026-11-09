@@ -101,6 +101,9 @@
   #liveslot .unmute { position:absolute; top:12px; left:12px; background:rgba(0,0,0,.7); color:#fff; border:1px solid var(--line);
                       border-radius:6px; padding:8px 12px; font:inherit; cursor:pointer; }
   #liveslot video { width:100%; max-height:78vh; background:#000; border-radius:8px; }
+  #liveslot .nextshot { display:block; margin:6px 0 0 auto; } #liveslot .nextshot[hidden] { display:none; }
+  #liveslot .skipflash { position:absolute; top:40%; background:rgba(0,0,0,.6); color:#fff; border-radius:16px; padding:4px 12px;
+    font-weight:600; pointer-events:none; transition:opacity .4s; }
   #liveslot .recapcard { position:absolute; inset:0; background:rgba(0,0,0,.85); border-radius:8px; overflow:auto;
                          display:flex; flex-direction:column; align-items:center; padding:12px; text-align:center; }
   /* Centered by auto margins, not justify-content: a card taller than a phone's video scrolls from its top. */
@@ -590,14 +593,15 @@ async function shareLink(hash, title, btn) {
 }
 
 // Where a moment (a shot's or a hole's first time, epoch seconds) is in the kept streams: that
-// stream and a second before. `since` is when the stream was first seen, a little after it began, so
-// the time lands early already. Nothing once the stream is gone (a week).
-const WATCH_LEAD = 1;
+// stream, a second before it shows. A shot is on the stream SHOT_SHOWS after the booth logged it (the
+// stream's delay; highlights.SHOT_SHOWS, measured). Nothing once the stream is gone (a week).
+const WATCH_LEAD = 1, SHOT_SHOWS = 5;
+const streamAt = (ts, v) => ts + SHOT_SHOWS - v.since - WATCH_LEAD;
 function videoAt(ts) {
   if (!ts || !state.vods) return null;
   const now = Date.now() / 1000;
   const v = state.vods.find(v => ts >= v.since && ts <= (v.ended ?? now) + 1);
-  return v ? { session: v.session, at: Math.max(0, Math.round(ts - v.since - WATCH_LEAD)) } : null;
+  return v ? { session: v.session, at: Math.max(0, Math.round(streamAt(ts, v))) } : null;
 }
 // A shot holding a record has a clip of its own (record_clips.py), kept for as long as it holds it:
 // that, before the round's video, which goes in a week.
@@ -2003,6 +2007,7 @@ function stopLive() {
   if (!player) return;
   clearInterval(player.catchUp);
   if (player.golive) player.golive.remove();
+  if (player.next) player.next.remove();
   if (player.recap) player.recap.stop();
   if (player.hls) player.hls.destroy();
   player.video.removeAttribute("src");
@@ -2031,11 +2036,12 @@ function wantedVideo() {
   if (rc) return { key: "recap:" + state.vod.recap, src: `live/recaps/${encodeURIComponent(state.vod.recap)}/recap-${encodeURIComponent(rc.built)}.m3u8`,
                    at: 0, recap: state.vod.recap, built: rc.built };
   const hl = state.tab === "vods" && state.vod && state.vod.reel && state.reels && state.reels[state.vod.reel];
-  if (hl) return { key: "reel:" + state.vod.reel, src: `live/reels/${encodeURIComponent(state.vod.reel)}/reel.m3u8`, at: state.vod.at || 0 };
+  if (hl) return { key: "reel:" + state.vod.reel, src: `live/reels/${encodeURIComponent(state.vod.reel)}/reel.m3u8`, at: state.vod.at || 0,
+                   marks: (hl.moments || []).map(m => +m.at || 0) };
   const c = state.tab === "vods" && state.vod && state.vod.clip && state.clips && state.clips[state.vod.clip];
   if (c) return { key: "clip:" + state.vod.clip, src: `live/clips/${encodeURIComponent(state.vod.clip)}/clip.m3u8`, at: state.vod.at || 0 };
-  if (state.tab === "vods" && state.vod && (state.vods || []).some(v => v.session === state.vod.session))
-    return { key: "vod:" + state.vod.session, src: `live/s/${encodeURIComponent(state.vod.session)}/full.m3u8`, at: state.vod.at || 0 };
+  const v = state.tab === "vods" && state.vod && (state.vods || []).find(v => v.session === state.vod.session);
+  if (v) return { key: "vod:" + state.vod.session, src: `live/s/${encodeURIComponent(state.vod.session)}/full.m3u8`, at: state.vod.at || 0, vod: v };
   return null;
 }
 
@@ -2057,6 +2063,14 @@ function attachLive() {
       video.addEventListener("canplay", () => {
         if (video.paused && player === me) video.play().catch(() => {});
       }, { once: true });
+    }
+    if (!want.live && !want.recap) skipTaps(me);
+    if (want.marks || want.vod) {
+      const n = me.next = Object.assign(document.createElement("button"), { className: "nextshot", textContent: "⏭ Next shot", hidden: true });
+      n.onclick = () => nextShot(me);
+      video.addEventListener("timeupdate", () => showNext(me));
+      // A reel's, as the playlist loaded was cut (one cut again plays on next time it's opened).
+      if (want.marks) me.marks = want.marks.slice().sort((a, b) => a - b);
     }
     if (want.live) {
       const g = me.golive = Object.assign(document.createElement("button"), { className: "golive", hidden: true });
@@ -2080,7 +2094,63 @@ function attachLive() {
   slot.appendChild(player.video);
   if (player.unmute) slot.appendChild(player.unmute);
   if (player.golive) slot.appendChild(player.golive);
+  if (player.next) {
+    // (a replay's again on each publish: one still being played gets more shots)
+    if (!want.marks && player.marksFrom !== (site && site.version)) loadMarks(player, want.vod);
+    slot.appendChild(player.next);
+    showNext(player);
+  }
   if (player.recap) slot.append(player.recap.board, player.recap.card, player.recap.cap, player.recap.cc);
+}
+
+// Next shot: where each shot is in a reel (its moments) or a round replay (the stats data's shot
+// times, a second before each shows), to skip a player's setup.
+function loadMarks(me, v) {
+  const from = me.marksFrom = site && site.version;
+  const end = v.ended ?? Date.now() / 1000 + 60;
+  query("SELECT ts FROM pub_shot_ts WHERE ts BETWEEN ? AND ? ORDER BY ts", [v.since - 60, end + 1]).then(rows => {
+    if (player !== me || me.marksFrom !== from) return;   // gone, or a newer version's asked for
+    me.marks = rows.map(r => Math.max(0, streamAt(r.ts, v)));
+    showNext(me);
+  }).catch(() => {});   // a page published before shot times were: no button
+}
+const nextMark = me => (me.marks || []).find(t => t > me.video.currentTime + 0.5);
+function showNext(me) {
+  if (me.next) me.next.hidden = nextMark(me) === undefined;
+}
+function nextShot(me) {
+  const t = nextMark(me);
+  if (t === undefined) return;
+  me.video.currentTime = t;
+  me.video.play().catch(() => {});
+}
+// Double-tap the right of a video for SKIP seconds on, the left for back; each tap more, as many again.
+const SKIP = 5;
+function skipTaps(me) {
+  const v = me.video;
+  let last = null;
+  v.addEventListener("touchend", e => {
+    if (e.changedTouches.length !== 1) return;
+    const t = e.changedTouches[0], r = v.getBoundingClientRect();
+    if (t.clientY - r.top > r.height * 0.8) { last = null; return; }   // the player's own controls
+    const side = t.clientX - r.left < r.width / 2 ? -1 : 1;
+    if (last && e.timeStamp - last.at < 350 && last.side === side) {
+      e.preventDefault();
+      const end = isFinite(v.duration) ? v.duration - 0.5 : Infinity;
+      v.currentTime = Math.max(0, Math.min(end, v.currentTime + side * SKIP));
+      const f = me.flash || (me.flash = Object.assign(document.createElement("div"), { className: "skipflash" }));
+      f.total = last.total ? last.total + SKIP : SKIP;
+      f.textContent = side > 0 ? `+${f.total}s` : `−${f.total}s`;
+      f.style.left = side > 0 ? "" : "8%"; f.style.right = side > 0 ? "8%" : "";
+      f.style.opacity = 1;
+      if (v.parentNode && f.parentNode !== v.parentNode) v.parentNode.appendChild(f);
+      clearTimeout(f.timer);
+      f.timer = setTimeout(() => { f.style.opacity = 0; }, 600);
+      last = { at: e.timeStamp, side, total: f.total };
+      return;
+    }
+    last = { at: e.timeStamp, side, total: 0 };
+  }, { passive: false });
 }
 
 // Everyone watching the live stream should be on the same shot, so the chat is about the same thing:

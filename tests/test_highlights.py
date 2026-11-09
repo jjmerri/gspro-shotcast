@@ -139,20 +139,21 @@ def test_a_reel_is_cut_from_the_stream_with_a_break_between_moments():
     s3 = FakeS3(_stream(60))   # 240 s from 1000
     assert H.sync(s3, "b", "", {7: _reel(1020, 1026, 1150)}, clock=lambda: 1300) == {"kept": 1, "added": 1, "removed": 0}
     pl = s3.objects[ROOT + "reels/7/reel.m3u8"].decode()
-    # 20 s and 26 s in share one run (17-38 s: segments 4-9); 150 s in, the next (147-162 s: 36-40).
+    # Each shows 5 s on and starts 2 s before that: 20 s and 26 s in share one run (23-38 s: segments
+    # 5-9); 150 s in, the next (153-162 s: 38-40).
     assert pl.count("#EXT-X-DISCONTINUITY") == 1 and pl.endswith("#EXT-X-ENDLIST\n")
     assert [ln.split("/")[1] for ln in pl.splitlines() if ln.startswith("s1/")] == \
-        [f"stream{i}.ts" for i in [*range(4, 10), *range(36, 41)]]
-    assert s3.objects[ROOT + "reels/7/s1/stream36.ts"] == b"stream36.ts"
+        [f"stream{i}.ts" for i in [*range(5, 10), *range(38, 41)]]
+    assert s3.objects[ROOT + "reels/7/s1/stream38.ts"] == b"stream38.ts"
     reel = json.loads(s3.objects[ROOT + "reels.json"])["reels"]["7"]
-    assert [m["at"] for m in reel["moments"]] == [3.0, 9.0, 29.0] and reel["duration"] == 44.0
+    assert [m["at"] for m in reel["moments"]] == [4.0, 10.0, 22.0] and reel["duration"] == 32.0   # a second before each shows
     # Unchanged: nothing to do. Said differently, or made a league round: the same cut, its words redone.
     assert H.sync(s3, "b", "", {7: _reel(1020, 1026, 1150)}, clock=lambda: 1300)["added"] == 0
     renamed = _reel(1020, 1026, 1150)
     renamed["league"], renamed["moments"][0]["what"] = True, "new words"
     assert H.sync(s3, "b", "", {7: renamed}, clock=lambda: 1300)["added"] == 0
     reel = json.loads(s3.objects[ROOT + "reels.json"])["reels"]["7"]
-    assert reel["league"] and reel["moments"][0] == {"at": 3.0, "id": 1, "player": "Ann", "hole": 1, "what": "new words", "bad": False}
+    assert reel["league"] and reel["moments"][0] == {"at": 4.0, "id": 1, "player": "Ann", "hole": 1, "what": "new words", "bad": False}
     longer = _reel(1020, 1026, 1150)
     longer["moments"][2]["post"] = 20.0   # a longer cut: a new playlist
     assert H.sync(s3, "b", "", {7: longer}, clock=lambda: 1300)["added"] == 1
@@ -167,6 +168,21 @@ def test_a_reel_is_cut_from_the_stream_with_a_break_between_moments():
     # Gone off the page (or past its keep): deleted.
     assert H.sync(s3, "b", "", {}, clock=lambda: 1300) == {"kept": 0, "added": 0, "removed": 1}
     assert not [k for k in s3.objects if k.startswith(ROOT + "reels/")]
+
+
+def test_a_reel_cut_before_the_streams_delay_was_allowed_for_moves_its_moments_once():
+    s3 = FakeS3(_stream(60))
+    H.sync(s3, "b", "", {7: _reel(1020, 1026)}, clock=lambda: 1300)
+    entry = json.loads(s3.objects[ROOT + "reels.json"])["reels"]["7"]
+    del entry["shows"]
+    entry["moments"][0]["at"], entry["moments"][1]["at"], entry["finish"] = 3.0, 9.0, {"at": 2.0, "cut": [9, 12.0, None, None]}
+    s3.objects[ROOT + "reels.json"] = json.dumps({"reels": {"7": entry}}).encode()
+    reel = {**_reel(1020, 1026), "finish": {"id": 9, "ts": 1150, "player": "Ann", "hole": 9, "what": "fin", "post": 12.0}}
+    assert H.sync(s3, "b", "", {7: reel}, clock=lambda: 1300)["added"] == 0   # not cut again
+    entry = json.loads(s3.objects[ROOT + "reels.json"])["reels"]["7"]
+    assert [m["at"] for m in entry["moments"]] == [8.0, 14.0] and entry["finish"]["at"] == 7.0
+    H.sync(s3, "b", "", {7: reel}, clock=lambda: 1300)
+    assert [m["at"] for m in json.loads(s3.objects[ROOT + "reels.json"])["reels"]["7"]["moments"]] == [8.0, 14.0]
 
 
 def test_a_reel_waits_for_its_stream_and_keeps():
@@ -275,18 +291,18 @@ def test_a_league_rounds_finish_is_cut_on_its_own_for_the_recap():
             "finish": {"id": 99, "ts": 1150, "player": "Ann", "hole": 9, "what": "fin", "bad": False, "level": 5, "post": 12.0}}
     odd = FakeS3({"golf-reels/" + k: v for k, v in _stream(60).items()})   # (a prefix with "reels" in it)
     H.sync(odd, "b", "golf-reels", {7: reel}, clock=lambda: 1300)
-    assert "golf-reels/" + ROOT + "reels/7/finish/s1/stream36.ts" in odd.objects
+    assert "golf-reels/" + ROOT + "reels/7/finish/s1/stream38.ts" in odd.objects
     H.sync(s3, "b", "", {7: reel}, clock=lambda: 1300)
     # Not in the reel: its own playlist, under finish/.
-    assert "stream36.ts" not in s3.objects[ROOT + "reels/7/reel.m3u8"].decode()
-    assert "s1/stream36.ts" in s3.objects[ROOT + "reels/7/finish/finish.m3u8"].decode()
-    assert s3.objects[ROOT + "reels/7/finish/s1/stream36.ts"] == b"stream36.ts"
+    assert "stream38.ts" not in s3.objects[ROOT + "reels/7/reel.m3u8"].decode()
+    assert "s1/stream38.ts" in s3.objects[ROOT + "reels/7/finish/finish.m3u8"].decode()
+    assert s3.objects[ROOT + "reels/7/finish/s1/stream38.ts"] == b"stream38.ts"
     entry = json.loads(s3.objects[ROOT + "reels.json"])["reels"]["7"]
-    assert entry["finish"]["at"] == 5.0 and entry["finish"]["cut"] == [99, 12.0, None, None] and len(entry["moments"]) == 2
+    assert entry["finish"]["at"] == 2.0 and entry["finish"]["cut"] == [99, 12.0, None, None] and len(entry["moments"]) == 2
     # The reel cut again: the finish stays. Gone from the round: deleted.
     longer = {**reel, "moments": [{**m, "post": 20.0} for m in reel["moments"]]}
     H.sync(s3, "b", "", {7: longer}, clock=lambda: 1300)
-    assert ROOT + "reels/7/finish/s1/stream36.ts" in s3.objects
+    assert ROOT + "reels/7/finish/s1/stream38.ts" in s3.objects
     assert json.loads(s3.objects[ROOT + "reels.json"])["reels"]["7"]["finish"]["what"] == "fin"
     H.sync(s3, "b", "", {7: {k: v for k, v in longer.items() if k != "finish"}}, clock=lambda: 1300)
     assert not [k for k in s3.objects if "/finish/" in k]

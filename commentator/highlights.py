@@ -23,7 +23,7 @@ import time
 from typing import Any
 
 from . import interest as I
-from .live_stream import TYPES, segment_durations
+from .live_stream import SHOT_SHOWS, TYPES, segment_durations
 
 MAX_MOMENTS = 8
 REEL_SECONDS = 180.0      # ...and no more than fit in this long a reel (each clip: PRE, its post, and
@@ -31,7 +31,9 @@ CLIP_SLACK = 8.0          # this, as its ends round out to the stream's 4 s segm
 MIN_LEVEL = 6             # a moment the booth rates under this (out of 10) isn't a big one...
 OK_LEVEL = 5              # ...and a solid shot under it (OK_*) fills the reel's other places
 MIN_FINAL = 4.5           # ...nor one whose score, less what's already picked, is this or less (a bad 5 is 4.75)
-PRE = 3.0                 # seconds of the stream before a shot's time (it shows ~4 s after it)
+PRE = 3.0                 # seconds of the stream before a shot's time (it shows ~4 s after it), as reels were sized
+LEAD_IN = 2.0             # ...but a clip starts this long before the swing shows (SHOT_SHOWS after its time)
+WATCH_LEAD = 1.0          # ...and the moment's `at` a second before it
 POST_PUTT, POST_SHOT, POST_BIG = 12.0, 16.0, 20.0   # ...and after: a putt, a full shot, a 9 or 10's call
 # ...or, where the booth's lines were logged, till it's done talking about it (its call, reaction
 # and flight lines), stopping before anything else it says (the next shot's setup, a segment,
@@ -627,6 +629,7 @@ def sync(client: Any, bucket: str, prefix: str, reels: dict[int, dict], season_f
     keep_days = recs_body.get("keep_days") if isinstance(recs_body.get("keep_days"), (int, float)) else 7
     saved = _get(client, bucket, root + "reels.json")
     index = {k: v for k, v in ((json.loads(saved).get("reels") or {}) if saved else {}).items() if isinstance(v, dict)}
+    shifted = sum(_shift(v) for v in index.values())
     now = clock()
     wanted = {str(k): v for k, v in reels.items() if keep(v, now, keep_days, season_from)}
     playlists: dict[str, tuple[list[tuple[str, float]], bool]] = {}
@@ -645,7 +648,7 @@ def sync(client: Any, bucket: str, prefix: str, reels: dict[int, dict], season_f
             parts, moments = cut
             base = f"{root}reels/{key}/"
             _put(client, bucket, root, base, "reel.m3u8", parts, skip=base + "finish/")
-            entry = {**meta, "ids": ids, "cuts": cuts, "duration": round(sum(d for p in parts for *_, d in p), 1),
+            entry = {**meta, "shows": SHOT_SHOWS, "ids": ids, "cuts": cuts, "duration": round(sum(d for p in parts for *_, d in p), 1),
                      "moments": moments, **({"finish": old_entry["finish"]} if old_entry and "finish" in old_entry else {})}
             added += 1
         elif old_entry:   # not streamed (any more): the old reel stands, as the round is now (a league round's keep goes by it)
@@ -661,12 +664,24 @@ def sync(client: Any, bucket: str, prefix: str, reels: dict[int, dict], season_f
     stale = []
     for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=root + "reels/"):
         stale += [o["Key"] for o in page.get("Contents", []) if o["Key"][len(root) + 6:].split("/", 1)[0] not in index]
-    if added or changed or gone or saved is None:
+    if added or changed or gone or shifted or saved is None:
         client.put_object(Bucket=bucket, Key=root + "reels.json", Body=json.dumps({"reels": index}).encode(),
                           CacheControl="no-cache", ContentType=TYPES[".json"])
     for i in range(0, len(stale), 1000):
         client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in stale[i:i + 1000]]})
     return {"kept": len(index), "added": added, "removed": len(gone)}
+
+
+def _shift(entry: dict) -> bool:
+    """A reel cut when its moments' `at` didn't allow for the stream's delay (a second before the shot's
+    time, SHOT_SHOWS ahead of the swing) moved, once, to a second before the swing."""
+    if entry.get("shows") == SHOT_SHOWS:
+        return False
+    for m in (entry.get("moments") or []) + ([entry["finish"]] if isinstance(entry.get("finish"), dict) else []):
+        if isinstance(m, dict) and isinstance(m.get("at"), (int, float)):
+            m["at"] = round(m["at"] + SHOT_SHOWS, 1)
+    entry["shows"] = SHOT_SHOWS
+    return True
 
 
 def _put(client: Any, bucket: str, root: str, base: str, name: str, parts: list[list[tuple[str, str, float]]],
@@ -734,7 +749,7 @@ def _cut(client: Any, bucket: str, root: str, recordings: list[dict], playlists:
         t, start, idx = m["ts"] - rec["since"], 0.0, []
         for i, (_, dur) in enumerate(track):
             # (rounded out to whole segments, but not past the stop unless it's needed for `must`)
-            if start + dur > t - PRE and start < t + m["post"] and (
+            if start + dur > t + SHOT_SHOWS - LEAD_IN and start < t + m["post"] and (
                     m.get("stop") is None or start + dur <= t + m["stop"]
                     or start < t + m.get("must", 0.0) - MUST_GRACE or not idx):
                 idx.append(i)
@@ -751,7 +766,7 @@ def _cut(client: Any, bucket: str, root: str, recordings: list[dict], playlists:
         track = playlists[session][0]
         first = sum(d for _, d in track[:a])
         for m in ms:
-            moments.append({"at": round(offset + max(0.0, m["_t"] - first - 1.0), 1),
+            moments.append({"at": round(offset + max(0.0, m["_t"] + SHOT_SHOWS - first - WATCH_LEAD), 1),
                             **{k: m[k] for k in ("id", "player", "hole", "what", "bad", "level") if k in m}})
         part = [(session, name, d) for name, d in track[a:b + 1]]
         parts.append(part)

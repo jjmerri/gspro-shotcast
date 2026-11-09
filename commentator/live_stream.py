@@ -42,6 +42,7 @@ log = logging.getLogger(__name__)
 PASSWORD_ENV = "OBS_WEBSOCKET_PASSWORD"
 HEARTBEAT_SECONDS = 30
 MIN_RECORDING_SECONDS = 60   # a stream shorter than this (OBS started and stopped) isn't kept
+SHOT_SHOWS = 5.0             # a shot's swing is on the stream this long after the booth logged it (measured 5.2-5.8 s)
 SHOT_LEAD_SECONDS = 60       # a shot this long before a stream is first seen counts as on it
 SEGMENTS_KEPT = 300          # the newest segments' times kept for watched_at (20 minutes of 4 s ones)
 SAME_STREAM_SECONDS = 10     # a copy on the PC and one in the bucket that overlap by more are the same stream

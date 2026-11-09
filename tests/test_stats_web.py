@@ -1282,3 +1282,27 @@ switchTab("schedule"); seen.push(stack.length);   // the tab already shown: no e
 console.log(JSON.stringify(seen));"""
     got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
     assert got == [["#home?", "#schedule?"], {"y": 300}, 2]
+
+
+def test_the_pages_watch_links_and_next_shot_go_to_a_second_before_each_swing_shows():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = (re.search(r"\nconst WATCH_LEAD = .*?\nfunction videoAt\(.*?\n}\n", page, re.S).group(0)
+           + re.search(r"\nfunction loadMarks\(.*?\nfunction showNext\(.*?\n}\n", page, re.S).group(0))
+    # A stream from 1000; shots logged at 1010, 1030 and 1031 (a mulligan), each on it 5 s later.
+    script = ("const state = { vods: [{ session: 's', since: 1000, ended: 2000 }] }; let site = { version: 'v1' };"
+              "const query = async (sql, args) => [1010, 1030, 1031].filter(t => t >= args[0] && t <= args[1]).map(ts => ({ ts }));"
+              + fns +
+              "const me = { video: { currentTime: 0 } }; let player = me;"
+              "loadMarks(me, state.vods[0]); setTimeout(() => { const seen = [];"
+              " for (const t of [0, 14, 14.6, 36]) { me.video.currentTime = t; seen.push(nextMark(me) ?? null); }"
+              " console.log(JSON.stringify([videoAt(1010), me.marks, seen])); }, 10);")
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    assert got == [{"session": "s", "at": 14}, [14, 34, 35], [14, 34, 34, None]]
