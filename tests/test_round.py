@@ -591,6 +591,20 @@ def test_parse_others_reads_rows_with_distances_only():
         assert parse_others(row) == [OtherPlayer(name, "400.3 yards", "E")]
 
 
+def test_parse_others_doesnt_take_the_hole_result_banner_for_a_player():
+    # 4K at the hole's end: the result banner's word read on the board's distance line.
+    for word in ("Par", "Birdie"):
+        items = [OcrItem("Derek", 114, 43, 52), OcrItem("+2", 594, 70, 87), OcrItem("0ft2", 130, 94, 49),
+                 OcrItem("▲ Oft 4", 260, 92, 42), OcrItem(word, 393, 95, 44)]
+        assert parse_others(items) == [OtherPlayer("Derek", "0 feet 2 inches", "+2")]
+    # A player called that is still one, on one line or over a distance line.
+    row = [OcrItem("Ace", 113, 42, 47), OcrItem("400.3yds", 329, 42, 41), OcrItem("E", 622, 40, 37)]
+    assert parse_others(row) == [OtherPlayer("Ace", "400.3 yards", "E")]
+    two = [OcrItem("Par", 60, 300, 20), OcrItem("E", 200, 300, 20), OcrItem("391.5yd", 60, 325, 16),
+           OcrItem("Fairway", 160, 325, 16)]
+    assert parse_others(two) == [OtherPlayer("Par", "391.5 yards", "E")]
+
+
 def test_parse_others_drops_a_lie_cell_with_a_stray_mark():
     # GSPro 4.0: the distance line's lie OCR'd as "; Tee" became a phantom player.
     items = [OcrItem("Corey", 60, 300, 20), OcrItem("E", 200, 300, 20), OcrItem("391.5yd", 60, 325, 16),

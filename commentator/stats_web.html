@@ -101,7 +101,8 @@
   #liveslot .unmute { position:absolute; top:12px; left:12px; background:rgba(0,0,0,.7); color:#fff; border:1px solid var(--line);
                       border-radius:6px; padding:8px 12px; font:inherit; cursor:pointer; }
   #liveslot video { width:100%; max-height:78vh; background:#000; border-radius:8px; }
-  #liveslot .nextshot { display:block; margin:6px 0 0 auto; } #liveslot .nextshot[hidden] { display:none; }
+  #liveslot .shotnav { display:flex; margin-top:6px; } #liveslot .shotnav .nextshot { margin-left:auto; }
+  #liveslot .shotnav button[hidden] { display:none; }
   #liveslot .skipflash { position:absolute; top:40%; background:rgba(0,0,0,.6); color:#fff; border-radius:16px; padding:4px 12px;
     font-weight:600; pointer-events:none; transition:opacity .4s; }
   #liveslot .recapcard { position:absolute; inset:0; background:rgba(0,0,0,.85); border-radius:8px; overflow:auto;
@@ -2007,7 +2008,7 @@ function stopLive() {
   if (!player) return;
   clearInterval(player.catchUp);
   if (player.golive) player.golive.remove();
-  if (player.next) player.next.remove();
+  if (player.nav) player.nav.remove();
   if (player.recap) player.recap.stop();
   if (player.hls) player.hls.destroy();
   player.video.removeAttribute("src");
@@ -2067,7 +2068,11 @@ function attachLive() {
     if (!want.live && !want.recap) skipTaps(me);
     if (want.marks || want.vod) {
       const n = me.next = Object.assign(document.createElement("button"), { className: "nextshot", textContent: "⏭ Next shot", hidden: true });
-      n.onclick = () => nextShot(me);
+      n.onclick = () => goShot(me, nextMark(me));
+      const p = me.prev = Object.assign(document.createElement("button"), { className: "prevshot", textContent: "⏮ Previous shot", hidden: true });
+      p.onclick = () => goShot(me, prevMark(me));
+      me.nav = Object.assign(document.createElement("div"), { className: "shotnav" });
+      me.nav.append(p, n);
       video.addEventListener("timeupdate", () => showNext(me));
       // A reel's, as the playlist loaded was cut (one cut again plays on next time it's opened).
       if (want.marks) me.marks = want.marks.slice().sort((a, b) => a - b);
@@ -2097,7 +2102,7 @@ function attachLive() {
   if (player.next) {
     // (a replay's again on each publish: one still being played gets more shots)
     if (!want.marks && player.marksFrom !== (site && site.version)) loadMarks(player, want.vod);
-    slot.appendChild(player.next);
+    slot.appendChild(player.nav);
     showNext(player);
   }
   if (player.recap) slot.append(player.recap.board, player.recap.card, player.recap.cap, player.recap.cc);
@@ -2115,11 +2120,17 @@ function loadMarks(me, v) {
   }).catch(() => {});   // a page published before shot times were: no button
 }
 const nextMark = me => (me.marks || []).find(t => t > me.video.currentTime + 0.5);
+// Back to the start of this shot, or, in its first 2 s, the one before.
+function prevMark(me) {
+  const now = me.video.currentTime, marks = me.marks || [];
+  const i = marks.filter(t => t <= now + 0.5).length - 1;
+  return i < 0 ? undefined : now - marks[i] > 2 ? marks[i] : marks[i - 1];
+}
 function showNext(me) {
   if (me.next) me.next.hidden = nextMark(me) === undefined;
+  if (me.prev) me.prev.hidden = prevMark(me) === undefined;
 }
-function nextShot(me) {
-  const t = nextMark(me);
+function goShot(me, t) {
   if (t === undefined) return;
   me.video.currentTime = t;
   me.video.play().catch(() => {});

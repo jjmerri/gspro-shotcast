@@ -4,6 +4,14 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.113
+
+### Stats page
+- A "Previous shot" button under round videos and highlight reels goes back to the start of the swing, or the one before.
+
+### Booth
+- The hole-result banner ("Par", "Birdie") is no longer mistaken for another player on 4K screens.
+
 ## 0.1.112
 
 ### Booth

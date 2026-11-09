@@ -1302,7 +1302,8 @@ def test_the_pages_watch_links_and_next_shot_go_to_a_second_before_each_swing_sh
               + fns +
               "const me = { video: { currentTime: 0 } }; let player = me;"
               "loadMarks(me, state.vods[0]); setTimeout(() => { const seen = [];"
-              " for (const t of [0, 14, 14.6, 36]) { me.video.currentTime = t; seen.push(nextMark(me) ?? null); }"
+              " for (const t of [0, 14, 14.6, 20, 36]) { me.video.currentTime = t; seen.push([nextMark(me) ?? null, prevMark(me) ?? null]); }"
               " console.log(JSON.stringify([videoAt(1010), me.marks, seen])); }, 10);")
     got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
-    assert got == [{"session": "s", "at": 14}, [14, 34, 35], [14, 34, 34, None]]
+    # Previous shot: none before the first; 2 s into a shot it's back to its start, before then the one before.
+    assert got == [{"session": "s", "at": 14}, [14, 34, 35], [[14, None], [34, None], [34, None], [34, 14], [None, 34]]]

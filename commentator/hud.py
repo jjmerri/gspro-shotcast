@@ -400,6 +400,9 @@ SCORE_BANNERS: list[tuple[tuple[str, ...], str, int | None]] = [
 ]
 
 
+BANNER_WORDS = {w for needles, _, _ in SCORE_BANNERS for w in needles}
+
+
 SCORE_STROKES = re.compile(r"\bSCORE\s*:?\s*(\d{1,2})\b")
 
 
@@ -488,8 +491,10 @@ def parse_others(items: list[OcrItem]) -> list[OtherPlayer]:
         distance = DISTANCE.search(" ".join(texts))
         # OCR can stick a stray mark on a cell ("; Tee"): it isn't part of a name or a lie.
         names = [re.sub(r"^[^\w(+-]+", "", t) for t in texts]
-        names = [t for t in names if re.search(r"[A-Za-z]{2}", t) and not DISTANCE.search(_zero(t))
-                 and not re.search(r"\d(st|nd|rd|th)\b|\bin for\b", t, re.I)]
+        # (nor the hole-end result banner's word read through the board, right of a distance: "Par",
+        # "Birdie"; a name is a row's first cell, so a player called Par still is one)
+        names = [t for i, t in enumerate(names) if re.search(r"[A-Za-z]{2}", t) and not DISTANCE.search(_zero(t))
+                 and not re.search(r"\d(st|nd|rd|th)\b|\bin for\b", t, re.I) and (i == 0 or t.upper() not in BANNER_WORDS)]
         # 3.59's distance line also names the lie ("Fairway", "Deep"): not a name under a name line.
         # A whole cell of lie words only, so "Alex Green" (or a classic row's lone "Green") still counts.
         name = next((t for t in names if not is_lie_cell(t)), None)
