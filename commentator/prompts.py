@@ -717,11 +717,12 @@ def preshot_branch_prompt(
         '"might be a touch short", "leaves itself a putt from below"; never that it needs more carry to reach or '
         'won\'t reach the green, unless the green front is clearly beyond this club), long, left, right, and '
         "left_trouble / right_trouble (below). " + _FLIGHT_WATER + ". "
+        "coming_back and layup: always write both, since nobody knows yet how the player will play it, and each "
+        "is used only when the launch data shows it. "
         "coming_back: it started off the flag's line and the shape (a draw or a fade) is bending it back toward "
-        'the flag: no "left" or "right", nothing about how long it is; null on a tee shot that isn\'t going at a green. '
+        'the flag: no "left" or "right", nothing about how long it is. '
         "layup: the player picked a spot short of the green (laying up, or getting out of trouble) and the ball is "
-        "heading for that spot: about the spot or the safe play, never the flag, pin or green; null if this shot can "
-        "only be going at the green."
+        "heading for that spot: about the spot or the safe play, never the flag, pin or green."
         + '\n2. "reaction_lines": what ' + speaker + ' says the instant the ball stops, at most 12 words each, '
         "written now for each place it can finish, judged against what this shot was trying to do (a tee shot wants "
         "the fairway; an approach wants the green). Write one per outcome: " + _RESULT_GUIDANCE
