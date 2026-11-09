@@ -1273,6 +1273,13 @@ def test_facts_describe_flight_and_count_streaks():
     assert "180 yards" in hist
     prior[1].carry_game = 191.4   # GSPro's carry for the conditions replaces the launch monitor's
     assert "191 yards" in " ".join(history_facts("Tony", prior)) and "180" not in " ".join(history_facts("Tony", prior))
+    # A chip: no start line or curve, and it neither breaks nor joins the streak, nor hears it
+    chip = Shot(club="LW", hla=-6, spin_axis=-20, carry=18.0)
+    assert "started" not in " ".join(shot_facts(chip, chip=True)) and "curved" not in " ".join(shot_facts(chip, chip=True))
+    prior.append(ShotRecord("Tony", chip, None, Hud(), [], to_pin_before="21.5 yards"))
+    hist = " ".join(history_facts("Tony", prior))
+    assert "last 2 full shots before this one all started right" in hist and "lob wedge" not in hist
+    assert "started right" not in " ".join(history_facts("Tony", prior, chip=True))
 
 
 def test_moment_facts_tally_the_round_only_once_a_moment_repeats():

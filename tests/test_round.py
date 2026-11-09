@@ -806,6 +806,21 @@ def test_a_season_kept_with_metre_tee_yardages_has_them_made_yards_once(tmp_path
     assert st.db.execute("SELECT count(*) FROM tee_lengths").fetchone()[0] == 1
 
 
+def test_a_driver_recorded_off_the_deck_becomes_a_three_wood_once(tmp_path):
+    from commentator.store import Store
+
+    path = str(tmp_path / "season.db")
+    st = Store(path)
+    for n, (num, lie) in enumerate([(1, "tee"), (3, "tee"), (2, "fairway"), (None, "rough"), (None, None)]):
+        st.db.execute("INSERT INTO shots (session_id, ts, shot_number, club, is_putt, lie_before) VALUES (?, ?, ?, 'DR', 0, ?)",
+                      (st.session_id, n, num, lie))
+    st.db.execute("PRAGMA user_version = 1")   # as kept before
+    st.db.commit()
+    st.db.close()
+    st = Store(path, new_session=False)
+    assert [r[0] for r in st.db.execute("SELECT club FROM shots ORDER BY ts")] == ["DR", "DR", "3W", "3W", "DR"]
+
+
 DETAILS = ("Test Links|Someone|1010|A scenic place, links style.|Erin, WI|1|1|72|"
            "5|4|4|4|4|3|5|4|3|4|4|4|3|5|4|3|4|5|"
            "13|7|11|9|15|1|5|17|4|14|10|18|2|12|16|8|6|3|"

@@ -426,6 +426,12 @@ class Store:
                                 (json.dumps({h: round(m * M_TO_YD) for h, m in metres.items()}), course, tee))
             self.db.execute("DELETE FROM tee_lengths")
             self.db.execute("PRAGMA user_version = 1")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 2:
+            # Newer GSPro showed the driver for any long shot, so off the tee it was a 3-wood (hud.deck_club).
+            self.db.execute("""UPDATE shots SET club = '3W' WHERE club = 'DR' AND is_putt = 0
+                               AND NOT (lower(COALESCE(lie_before, '')) LIKE 'tee%' OR COALESCE(shot_number, 0) = 1
+                                        OR (COALESCE(lie_before, '') = '' AND shot_number IS NULL))""")
+            self.db.execute("PRAGMA user_version = 2")
         # A round's course read off the scorecard was stored in capitals: file it under the shots' name.
         for table in ("rounds", "player_rounds"):
             for (course,) in self.db.execute(f"SELECT DISTINCT course FROM {table} WHERE course IS NOT NULL").fetchall():

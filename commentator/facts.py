@@ -50,7 +50,17 @@ def _curve(axis: float | None) -> str | None:
     return f"curved hard {side}"
 
 
-def shot_facts(shot: Shot) -> list[str]:
+# A shot from this close is a chip or a pitch: its start line and curve (a yard or two over a short
+# carry) are noise the booth latched on to ("starts right and snaps left onto the green") on chips that
+# finished fine, so they aren't told; nor do chips count toward a start-line streak.
+CHIP_YARDS = 40
+
+
+def is_chip(shot: Shot, to_pin: str | None) -> bool:
+    return not shot.is_putt and (yd := to_yards(to_pin)) is not None and yd <= CHIP_YARDS
+
+
+def shot_facts(shot: Shot, chip: bool = False) -> list[str]:
     club = club_name(shot.club)
     if shot.is_putt:
         pace = "a firm putt" if (shot.ball_speed or 0) > 9 else "a gentle putt"
@@ -59,7 +69,7 @@ def shot_facts(shot: Shot) -> list[str]:
         return [f"It was {pace}.", "Putts are aimed to allow for break: don't comment on the putter face, "
                 "the path or the start line."]
     parts = [f"Club: {club}." if club else "Club: not known."]
-    flight = [p for p in (_direction(shot.hla), _curve(shot.spin_axis)) if p]
+    flight = [] if chip else [p for p in (_direction(shot.hla), _curve(shot.spin_axis)) if p]
     if flight:
         parts.append(f"The ball {' and '.join(flight)}.")
     if shot.carry:
@@ -158,12 +168,13 @@ def _total_yards(rec: ShotRecord) -> float | None:
     return float(m.group(0)) * (1.0936 if (hud.to_pin or "").endswith("metres") else 1)
 
 
-def history_facts(player: str | None, prior: list[ShotRecord]) -> list[str]:
+def history_facts(player: str | None, prior: list[ShotRecord], chip: bool = False) -> list[str]:
+    """`chip`: the shot this is for is a chip, which no start-line streak bears on."""
     who = player or "This player"
     whose = who + ("'" if who.endswith("s") else "'s")
     # The running count is background: aired, it became trivia ("the 23rd shot of the morning").
     facts = [f"This is {whose} {ordinal(len(prior) + 1)} shot today (background: don't quote the running count)."]
-    full = [r for r in prior if not r.shot.is_putt]
+    full = [r for r in prior if not r.shot.is_putt and not is_chip(r.shot, r.to_pin_before)]
     if full:
         last = full[-1].shot
         if full[-1].carry_game:   # GSPro's carry, not the launch monitor's flat one ("the 269-yard drive")
@@ -177,7 +188,7 @@ def history_facts(player: str | None, prior: list[ShotRecord]) -> list[str]:
     # Only state a streak when the code has counted it, so the model can't invent one.
     sides = [("right" if r.shot.hla > 2 else "left" if r.shot.hla < -2 else "straight")
              for r in full if r.shot.hla is not None]
-    if sides:
+    if sides and not chip:
         streak, side = 1, sides[-1]
         for s in reversed(sides[:-1]):
             if s != side:

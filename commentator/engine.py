@@ -23,7 +23,7 @@ from .config import ROUND_STATUS, ROUND_STATUS_CHECK_S, ROUND_STATUS_EVERY_S, Co
 from .flight import point_at
 from .facts import (ctp_feet, ctp_text as _ctp_text,
     PUTT_COUNT_FACT, PUTT_FOR, PUTT_FOR_FACT, SCORE_NAMES, _PUTT_WORDS, _fmt_to_par, _to_par_value, club_delivery_facts, club_delivery_notable, club_name, flight_facts,
-    gimme_edge, history_facts, lie_cost_fact, moment_facts, ordinal, preshot_facts, putt_count_fact, putt_elevation_inches, shot_facts, to_yards, WRONG_GREEN_YARDS, wrong_green_fact,
+    CHIP_YARDS, gimme_edge, history_facts, is_chip, lie_cost_fact, moment_facts, ordinal, preshot_facts, putt_count_fact, putt_elevation_inches, shot_facts, to_yards, WRONG_GREEN_YARDS, wrong_green_fact,
     wrong_conceded_score, wrong_green_yards, wrong_holed_putt, wrong_putt_score,
 )
 from .flight_pick import FlightPlan, Hazard, aim_spot, aim_turn, aimed_short, pick_line, spot_words, pick_reaction, project
@@ -5302,7 +5302,8 @@ class Engine:
         facts = (preshot_facts(hud, self.current_par, self.handed.get(player or ""))
                  + self._mulligan_facts(player, hud) + self._putt_count_facts(player, is_putt, hud)
                  + self._penalty_facts(player, hud.shot_number, hud) + self._truth_context_facts(is_putt, idx)
-                 + history_facts(self._display(player), self.state.player_shots(player or "unknown"))
+                 + history_facts(self._display(player), self.state.player_shots(player or "unknown"),
+                                 chip=not is_putt and (to_yards(hud.to_pin) or 99) <= CHIP_YARDS)
                  + moment_facts(self._display(player), self._round_shots(player), putt=is_putt,
                                 at_edge=idx is not None and gimme_edge(self.gspro.to_pin_of(idx), self.gspro.gimme_of(idx)))
                  + self._format_facts(hud.shot_number, setup=True, player=player) + self._ctp_facts(hud.shot_number, hud, player)
@@ -6156,7 +6157,7 @@ class Engine:
         # gets a live reaction carrying the club facts below. Only for players with the markers.
         # Club delivery is spice: a notable one now and then, an ordinary one rarely, never on two
         # reactions in a row (every shot's face-to-path got old fast).
-        notable_delivery = club_delivery_notable(shot)
+        notable_delivery = club_delivery_notable(shot) and not is_chip(shot, before.to_pin)
         use_delivery = self._delivery_turn(notable_delivery)
         if notable_delivery and use_delivery:
             score += 0.5
@@ -6669,7 +6670,8 @@ class Engine:
         # how far the ball travelled, from a tile that can read stale) was unreliable enough to call a
         # ball in a greenside bunker "three yards, beautifully done". The lie (describe) is read
         # accurately; crediting a stuffed shot belongs on the next setup's exact distance instead.
-        flight = shot_facts(shot)
+        chip = is_chip(shot, before.to_pin)
+        flight = shot_facts(shot, chip=chip)
         if "mishit" in tags:
             flight.append("The strike was a mishit: well short of what this club normally goes.")
         if "carry (game)" in hud.tiles and not shot.is_putt:
@@ -6678,7 +6680,7 @@ class Engine:
         # Club delivery (angle of attack, face, path) is colour, not every-shot material - on every
         # shot it gets repetitive. Feed it only when the delivery is actually standout, or now and then
         # on an ordinary one, so it stays a spice.
-        club = club_delivery_facts(shot) if use_delivery else []
+        club = club_delivery_facts(shot) if use_delivery and not chip else []
         self._delivery_last = bool(club)
         if not shot.is_putt:
             club += self._length_norm_facts(
@@ -6691,7 +6693,7 @@ class Engine:
         sand_theme = (self._bunker_facts(player) if (hud.lie or "").lower() in ("sand", "bunker")
                       and not shot.is_putt else [])
         facts = (lead + replay_facts + flight + club + result + sand_theme
-                 + history_facts(self._display(player), prior)
+                 + history_facts(self._display(player), prior, chip=chip)
                  + moment_facts(self._display(player), [x for x in prior if r and x.round_id == r.id], rec)
                  + season_facts
                  + self._format_facts(before.shot_number, player=player) + (self._ctp_facts(1) if hud.shot_number == 1 else []))
