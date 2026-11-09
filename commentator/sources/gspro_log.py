@@ -1042,6 +1042,12 @@ class GsproState:
     def fire_info(self, n: int | None) -> dict:
         return self._fire_info.get(n, {}) if n is not None else {}
 
+    def aim_of(self, base_fires: int, impact: float) -> tuple | None:
+        """The minimap aim click for the shot that hit at `impact` (None if the aim wasn't moved): on its
+        "Shot Fired" once that's logged, else the click still waiting for it."""
+        n = self.fire_of(base_fires, impact)
+        return self.fire_info(n).get("aim") if n is not None else self._aim
+
     def cup_of(self, n: int | None) -> str | None:
         """How shot `n` met the cup, from the log: "flagstick" (a full shot struck it), "lip_in" (it
         dropped, but caught the edge on the way: crossed at least LIP_IN_MM from the centre), "lip_out"

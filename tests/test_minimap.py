@@ -510,10 +510,11 @@ def test_side_hazards_need_a_big_miss_and_par4_tee_shots_have_no_length_call():
     lines = {o: o for o in ("right_trouble", "right", "short", "on_target", "left")}
     plan = FlightPlan(player=None, to_pin="526 yards", hazards=[Hazard("water", "right")], lines=lines,
                       named={"right": "water"})
-    # A driver bending gently right into the fairway (Cabot Cliffs) isn't near the water.
+    # A driver started left and bending gently back into the fairway (Cabot Cliffs) isn't near the water.
     fade = Shot(club="DR", carry=216, hla=-2.6, spin_axis=14.7, total_spin=4211)
-    assert pick_line(plan, fade, "526 yards")[0] == "right"
-    slice_ = Shot(club="DR", carry=240, hla=4.5, spin_axis=18)
+    assert pick_line(plan, fade, "526 yards")[0] == "on_target"
+    assert pick_line(plan, Shot(club="DR", carry=240, hla=4.5, spin_axis=18), "526 yards")[0] == "right"
+    slice_ = Shot(club="DR", carry=240, hla=10, spin_axis=30)
     assert pick_line(plan, slice_, "526 yards")[0] == "right_trouble"
     # A 3-wood laid back off the tee of a 273-yard par 4 isn't "short".
     plan = FlightPlan(player=None, to_pin="273 yards", lines=lines)
@@ -766,11 +767,11 @@ async def test_a_bunker_off_the_line_is_in_play_only_for_a_miss_that_reaches_it(
     plan = FlightPlan(player=None, to_pin="400 yards", hazards=plan.hazards,
                       lines={"left_trouble": "That bunker comes into play.", "left": "Pulled left."},
                       named={"left": "bunker"})
-    # A 250-yard drive ~17 yards left doesn't get out to it; ~30 yards left does.
-    assert pick_line(plan, Shot(club="DR", carry=250, hla=-4), "400 yards")[0] == "left"
-    assert pick_line(plan, Shot(club="DR", carry=250, hla=-7), "400 yards")[0] == "left_trouble"
-    # ...and a shank 86 yards left is well past it.
-    assert pick_line(plan, Shot(club="DR", carry=250, hla=-20), "400 yards")[0] == "left"
+    # A 250-yard drive ~18 yards left doesn't get out to it; ~30 yards left does.
+    assert pick_line(plan, Shot(club="DR", carry=250, hla=-7), "400 yards")[0] == "left"
+    assert pick_line(plan, Shot(club="DR", carry=250, hla=-12), "400 yards")[0] == "left_trouble"
+    # ...and a shank 85 yards left is well past it.
+    assert pick_line(plan, Shot(club="DR", carry=250, hla=-36), "400 yards")[0] == "left"
 
 
 def test_merged_bunker_pieces_keep_the_nearest_distance_off_the_line():

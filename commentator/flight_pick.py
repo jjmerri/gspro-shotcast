@@ -164,6 +164,29 @@ EDGE_SHORT_YARDS = 20
 EDGE_LONG_YARDS = 30
 EDGE_SLACK_YARDS = 5
 
+# Where the ball ends up sideways: a share of the start line plus a curve from the sidespin (total spin
+# x the sine of the spin axis, so a high-spin wedge bends more than a driver at the same axis). Fitted
+# to 953 full shots' finishes in GSPro (the next shot's logged start, off the line to the pin or, from
+# a tee, to the hole's aim point): the ball finishes much straighter than its raw numbers say. The old
+# 1.0 start line and 1.75e-4 curve missed by a median 9.3 yards on held-out rounds; these by 4.3.
+START_LINE_SHARE = 0.58
+CURVE_PER_RPM = 5.1e-5
+CURVE_RPM_GUESS = 2450   # a shot with no spin reading: a driver's
+# GSPro's minimap aim click: the ball sits near (0, AIM_MAP_BALL_Y), with y running up the line to the
+# pin and x to its right (sources/gspro_log.aim_offset).
+AIM_MAP_BALL_Y = -338.0
+
+
+def _curve_yards(carry: float, spin: float, axis: float) -> float:
+    return carry * (spin or CURVE_RPM_GUESS) * math.sin(math.radians(axis)) * CURVE_PER_RPM
+
+
+def aim_turn(aim: tuple[float, float] | None) -> float | None:
+    """Radians right of the line to the pin that a minimap aim click points, or None (none, or behind)."""
+    if not aim or aim[1] - AIM_MAP_BALL_Y <= 0:
+        return None
+    return math.atan2(aim[0], aim[1] - AIM_MAP_BALL_Y)
+
 
 def _in_play(h: Hazard, carry: float, lateral: float = float("inf")) -> bool:
     # A point hazard (a bunker) is only in play when it was placed at a distance the carry reaches: a
@@ -187,20 +210,25 @@ def _in_play(h: Hazard, carry: float, lateral: float = float("inf")) -> bool:
 
 
 def project(
-    shot: Shot, to_pin: str | None, hazards: list[Hazard], carry_factor: float = 1.0, elevation_yards: float | None = None
+    shot: Shot, to_pin: str | None, hazards: list[Hazard], carry_factor: float = 1.0, elevation_yards: float | None = None,
+    aim: tuple[float, float] | None = None,
 ) -> Projection | None:
     """`carry_factor` scales the launch monitor's carry to what GSPro will allow from this lie;
-    `elevation_yards` (pin above the ball, +) makes the pin play longer or shorter."""
+    `elevation_yards` (pin above the ball, +) makes the pin play longer or shorter; `aim` is the
+    player's minimap aim click for this shot (GSPro's log, in minimap units), if they moved it."""
     if not shot.carry or shot.is_putt:
         return None
     carry = shot.carry if (shot.units or "yards").lower().startswith("y") else shot.carry * 1.0936
     carry *= carry_factor
-    # Start line plus curve. The curve is driven by sidespin (total spin x the sine of the spin
-    # axis), not the axis angle alone, so a high-spin wedge bends far more than a driver at the same
-    # axis. Calibrated to a driver: 250 yd, 2500 rpm, 10 deg axis -> ~19 yd (matching the old fit).
-    spin, axis = shot.total_spin or 0, shot.spin_axis or 0
-    curve = carry * spin * math.sin(math.radians(axis)) * 1.75e-4 if spin else carry * axis * 0.0075
-    lateral = carry * math.sin(math.radians(shot.hla or 0)) + curve
+    lateral = (START_LINE_SHARE * carry * math.sin(math.radians(shot.hla or 0))
+               + _curve_yards(carry, shot.total_spin or 0, shot.spin_axis or 0))
+    pin = to_yards(to_pin)
+    # The launch monitor measures the start line from where the player aimed. With the green in reach the
+    # pin is the target, so a click right of it to play a draw is turned into a miss off the pin line; out
+    # of reach (a layup, a drive round a dogleg) the spot they aimed at is the target itself.
+    turn = aim_turn(aim)
+    if turn and pin and pin <= carry * 1.25:
+        lateral = lateral * math.cos(turn) + carry * math.sin(turn)
     side_tolerance = max(8.0, carry * 0.06)
     total = carry * (1 + _roll_share(shot))
     side = "right" if lateral > side_tolerance else "left" if lateral < -side_tolerance else None
@@ -210,7 +238,6 @@ def project(
         if in_play:
             return Projection(carry, lateral, f"{side}_trouble", in_play, total)
 
-    pin = to_yards(to_pin)
     elevated = bool(pin and elevation_yards and abs(elevation_yards) >= 2)
     if elevated:
         pin += elevation_yards * (UPHILL_YARDS_PER_YARD if elevation_yards > 0 else 1.0)
@@ -233,11 +260,12 @@ def project(
 
 
 def pick_line(
-    plan: FlightPlan, shot: Shot, to_pin: str | None, carry_factor: float = 1.0, elevation_yards: float | None = None
+    plan: FlightPlan, shot: Shot, to_pin: str | None, carry_factor: float = 1.0, elevation_yards: float | None = None,
+    aim: tuple[float, float] | None = None,
 ) -> tuple[str, str] | None:
     """Returns (outcome, line), falling back from a trouble call to the plain side call."""
     proj = project(shot, None if plan.lengthless else (to_pin or plan.to_pin), plan.hazards, carry_factor,
-                   elevation_yards)
+                   elevation_yards, aim)
     if not proj:
         return None
     for outcome in (proj.outcome, proj.outcome.removesuffix("_trouble")):

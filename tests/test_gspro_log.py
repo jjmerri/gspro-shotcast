@@ -996,6 +996,16 @@ def test_each_shot_takes_the_position_and_aim_logged_since_the_last():
     assert s.layout_holes[1]["pin"] is None and not s.layout_holes[1]["played"]
 
 
+def test_a_shots_aim_is_known_at_impact_before_and_after_its_shot_fired_is_logged():
+    import time
+
+    s = _replay("(12.5, 100.0, 0.0)\n")
+    assert s.aim_of(0, time.monotonic()) == (12.5, 100.0)     # the click still waiting for its shot
+    s = _replay("(12.5, 100.0, 0.0)\n" + SHOT)
+    assert s.aim_of(0, time.monotonic()) == (12.5, 100.0)     # on its Shot Fired
+    assert s.aim_of(1, time.monotonic() + 10) is None          # the next shot wasn't aimed
+
+
 def _rest(player, x, z, tdist):
     return (f"Selecting shot for player: {player}\nData for selected player: X {x} Y 1.0 Z {z}\n"
             f"Logging tdist: {tdist} and ActiveGameGimmieDistance: 1.22\n")

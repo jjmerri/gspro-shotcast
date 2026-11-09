@@ -1529,9 +1529,9 @@ def test_projection_picks_outcomes_for_flight_test_scenarios():
     # runs down the side, so it's in play even without a distance; a bunker the model couldn't place
     # at a distance is not (it's as likely beside the green), so that drifts to a plain side call.
     left_pen = [Hazard("penalty area", "left", None, None)]
-    assert project(Shot(club="DR", carry=240, hla=-4.5, spin_axis=-18), "504.2 yards", left_pen).outcome == "left_trouble"
+    assert project(Shot(club="DR", carry=240, hla=-10, spin_axis=-30), "504.2 yards", left_pen).outcome == "left_trouble"
     vague_bunker = [Hazard("bunker", "left", None, None)]
-    assert project(Shot(club="DR", carry=240, hla=-4.5, spin_axis=-18), "504.2 yards", vague_bunker).outcome == "left"
+    assert project(Shot(club="DR", carry=240, hla=-10, spin_axis=-30), "504.2 yards", vague_bunker).outcome == "left"
     # C: drive starting right and slicing, nothing mapped on the right -> plain right
     lake_left = [Hazard("water", "left", 200, 280)]
     assert project(Shot(club="DR", carry=235, hla=3.5, spin_axis=16), "338.4 metres", lake_left).outcome == "right"
@@ -1546,6 +1546,12 @@ def test_projection_picks_outcomes_for_flight_test_scenarios():
     # Trouble out of carry range isn't called
     far = [Hazard("water", "left", 280, 320)]
     assert project(Shot(club="DR", carry=200, hla=-4, spin_axis=-15), "400 yards", far).outcome == "left"
+    # E: aimed right of the flag to play a draw: started on the aim and drew back to the pin. With the
+    # green out of reach the spot aimed at is the target, so the same draw is a miss left of it.
+    draw = Shot(club="7I", carry=160, hla=0, spin_axis=-12, total_spin=6500)
+    assert project(draw, "160 yards", []).outcome == "left"
+    assert project(draw, "160 yards", [], aim=(47, 339)).outcome == "on_target"
+    assert project(draw, "260 yards", [], aim=(47, 339)).outcome == "left"
 
 
 async def test_impact_uses_preshot_plan_without_a_model_call(tmp_path):
@@ -3600,7 +3606,7 @@ async def test_only_a_putt_past_the_lag_distance_asks_for_a_gimme_line(tmp_path)
         {"gimme": "Great lag, tap-in par."}
 
 
-async def test_the_branch_prompt_sees_the_last_flight_calls_and_a_drive_aims_at_the_fairway(tmp_path):
+async def test_the_branch_prompt_sees_the_last_flight_calls_and_a_shot_out_of_reach_aims_off_the_flag(tmp_path):
     from commentator.models import Line
 
     cfg = Config(log_dir=str(tmp_path))
@@ -3613,16 +3619,21 @@ async def test_the_branch_prompt_sees_the_last_flight_calls_and_a_drive_aims_at_
     for i in range(10):
         engine._write_transcript([Line(engine.speakers[0], f"Peeling away to the right, call {i}.")], "flight")
     engine._write_transcript([Line(engine.speakers[0], "What a strike.")], "shot")
-    engine.current_par = 4
-    for lie, to_pin, tee in (("tee", "426 yards", True), ("tee", "310 yards", False), ("fairway", "426 yards", False)):
+    engine.current_par = 5
+    drives = {}
+    engine.store.length_norm = lambda player, club=None: drives
+    for lie, to_pin, drive, far in (("tee", "426 yards", None, True), ("tee", "280 yards", None, False),
+                                    ("fairway", "250 yards", None, False), ("fairway", "250 yards", 210, True),
+                                    ("fairway", "225 yards", 210, False)):
+        drives.update(n=10, avg_total=drive)   # the player's usual drive (None: too few on record)
         llm.prompts.clear()
-        await engine.handle_preshot(PreShotEvent(hud=Hud(player_text=f"Toby 1st Shot 1 {to_pin}", shot_number=1,
+        await engine.handle_preshot(PreShotEvent(hud=Hud(player_text=f"MikeD 1st Shot 1 {to_pin}", shot_number=1,
                                                          lie=lie, to_pin=to_pin)))
         branch = next(p for p in llm.prompts if "PRE-SHOT BRANCHES" in p)
         calls = branch.split("last mid-flight calls", 1)[1]
         assert "call 1." not in calls and "- Peeling away to the right, call 2." in calls and "call 9." in calls
         assert "What a strike" not in calls
-        assert ("No flight line mentions the flag" in branch) is tee, (lie, to_pin)
+        assert ("No flight line mentions the flag" in branch) is far, (lie, to_pin, drive)
 
 
 async def test_run_loop_cancel_keeps_the_current_setups_plan(tmp_path):

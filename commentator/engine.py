@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -25,7 +26,7 @@ from .facts import (ctp_feet, ctp_text as _ctp_text,
     gimme_edge, history_facts, lie_cost_fact, moment_facts, ordinal, preshot_facts, putt_count_fact, putt_elevation_inches, shot_facts, to_yards, WRONG_GREEN_YARDS, wrong_green_fact,
     wrong_conceded_score, wrong_green_yards, wrong_holed_putt, wrong_putt_score,
 )
-from .flight_pick import FlightPlan, Hazard, pick_line, pick_reaction, project
+from .flight_pick import FlightPlan, Hazard, aim_turn, pick_line, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
 from .grounding import (SCENERY, bare_acknowledgement, check_line, cites_call, makes_call, meta_talk, ngrams, note_keywords, repeats, uses_note,
                         wrong_round_score)
@@ -446,8 +447,11 @@ UNCACHED_KINDS = {"closer"}
 
 # How long a putt's or short shot's setup line waits for the booth to stop talking before it's dropped.
 PRESHOT_IDLE_WAIT_SECONDS = 5.0
-# Beyond this from the tee the green's out of a drive's reach: its flight calls aim at the fairway.
-LONG_TEE_YARDS = 330
+# Beyond this share of a player's usual drive the green's out of reach, so a flight call aims at the
+# fairway or the layup, not the flag. In the season's shots none from 1.15 times that (1.2 off a tee)
+# found the green, and 6% from 1.1. A player with too few drives on record: a fixed distance.
+REACH_SHARE = 1.1
+UNKNOWN_REACH_YARDS = 300
 # How long after a round ends a non-tee setup is taken as the finished round's stale HUD.
 AFTER_ROUND_QUIET_SECONDS = 120.0
 # How often a hole's where-to-miss read (when there is one) is offered to the pre-shot line.
@@ -5332,7 +5336,7 @@ class Engine:
             recent_lines=self.state.recent_lines, speaker=name(self.speakers[0]),
             second=name(second) if second else None, is_putt=is_putt,
             named=minimap.named(to_yards(hud.to_pin)) if minimap else None, lag=lag,
-            putt_feet=putt_feet, reply=reply, putt_to_par=to_par, tee_shot=self._long_tee_shot(hud.lie, hud.to_pin),
+            putt_feet=putt_feet, reply=reply, putt_to_par=to_par, out_of_reach=self._out_of_reach(player, hud.lie, hud.to_pin, hud.elevation_yards),
         )
         # Three concurrent calls: the spoken line (live_llm, text) and the branches (flight_llm, text)
         # always run; the hazard read (preshot_llm, vision) runs only for a full shot with an image to
@@ -5899,7 +5903,8 @@ class Engine:
                 and (shot.carry or 0) >= c.min_flight_carry and plan and time.monotonic() - self._plan_made_at < 180 and not self._tree_hit_logged(fires0, impact, shot):
             carry0 = self._raw_yards(shot)
             factor0 = self.carry.factor(plan.lie, carry0, self.current_course, shot.vla, "lm")
-            picked = pick_line(plan, replace(shot, carry=carry0, units="Yards"), plan.to_pin, factor0, plan.elevation_yards)
+            picked = pick_line(plan, replace(shot, carry=carry0, units="Yards"), plan.to_pin, factor0, plan.elevation_yards,
+                               self.gspro.aim_of(fires0, impact))
             # The sim logs the splash only when the ball ARRIVES at the water, so a mid-flight check is
             # almost always still dry; this stays a cheap best-effort (no wait, so it never delays the
             # flight line). The reliable water call is the splash reaction, fired once the ball lands.
@@ -5983,16 +5988,18 @@ class Engine:
         # Only the fallback here now: the fresh-plan line already played above, before this read.
         if not flight_played and not banter and not landed_already and c.in_flight and not shot.is_putt and (shot.carry or 0) >= c.min_flight_carry:
             fresh = plan and time.monotonic() - self._plan_made_at < 180 and plan.player in (None, player)
-            picked = pick_line(plan, projected, before.to_pin, factor, before.elevation_yards) if fresh else None
+            aim = self.gspro.aim_of(fires0, impact)
+            picked = pick_line(plan, projected, before.to_pin, factor, before.elevation_yards, aim) if fresh else None
             if fresh and self._shot_wet(plan.player, since=impact) and plan.lines.get("water"):
                 picked = ("water", plan.lines["water"])  # the log already says it's wet: tease the water
             proj = project(projected, before.to_pin or (plan.to_pin if plan else None), plan.hazards if plan else [],
-                           factor, before.elevation_yards)
+                           factor, before.elevation_yards, aim)
             if proj:
                 pin = to_yards(before.to_pin)
-                log.info("%s projection: carry %.0f yd vs pin %s (elevation %s), drift %+.0f yd -> %s; plan %s",
+                log.info("%s projection: carry %.0f yd vs pin %s (elevation %s), drift %+.0f yd%s -> %s; plan %s",
                          tag, proj.carry, f"{pin:.0f} yd" if pin else "unknown", before.elevation_yards,
-                         proj.lateral, proj.outcome, "ready" if fresh else ("stale" if plan else "none"))
+                         proj.lateral, f" (aimed {math.degrees(t):+.0f} deg)" if (t := aim_turn(aim)) else "",
+                         proj.outcome, "ready" if fresh else ("stale" if plan else "none"))
             if self._tree_called == my_seq or self._tree_hit_logged(fires0, impact, shot):
                 pass   # a tree hit is called (or about to be): the plan's line and a fresh one no longer fit
             elif picked and self._shot_seq == my_seq:   # not if another ball was struck during the impact read
@@ -7943,7 +7950,7 @@ class Engine:
             player=who, team=team, hole=self.state.current_hole,
             facts=flight_facts(shot, before.to_pin, factor, before.lie, before.elevation_yards),
             recent_lines=self.state.recent_lines,
-            speaker=self.speakers[0], has_image=bool(images), tee_shot=self._long_tee_shot(before.lie, before.to_pin),
+            speaker=self.speakers[0], has_image=bool(images), out_of_reach=self._out_of_reach(player, before.lie, before.to_pin, before.elevation_yards),
         )
         budget = max(deadline - (time.monotonic() - impact), 0.1)
         try:
@@ -10956,10 +10963,17 @@ class Engine:
         self.store.record_form_mentions(players, topics)
         self._form_pending = None
 
-    def _long_tee_shot(self, lie: str | None, to_pin: str | None) -> bool:
-        """A drive whose target is the fairway, not the flag: off the tee of a par 4 or 5 out of reach."""
+    def _out_of_reach(self, player: str | None, lie: str | None, to_pin: str | None,
+                      elevation_yards: float | None = None) -> bool:
+        """A shot whose target is the fairway or a layup, not the flag: the pin is beyond the player's reach
+        (their usual drive, REACH_SHARE over), or a par 4 or 5's tee shot with the distance unread."""
         yards = to_yards(to_pin)
-        return (lie or "").lower() == "tee" and (self.current_par or 0) >= 4 and (yards is None or yards > LONG_TEE_YARDS)
+        if yards is None:
+            return (lie or "").lower() == "tee" and (self.current_par or 0) >= 4
+        norm = self.store.length_norm(player) if player and player != "unknown" else {}
+        drive = norm.get("avg_total") if (norm.get("n") or 0) >= self.LENGTH_NORM_MIN_SHOTS else None
+        reach = drive * REACH_SHARE if drive else UNKNOWN_REACH_YARDS
+        return yards + max(elevation_yards or 0, 0) > reach
 
     def _write_transcript(self, lines: list[Line], kind: str = "shot", shot_id: int | None = None) -> None:
         # The handler's own shot id beats the shared one, which the next shot may have moved on.

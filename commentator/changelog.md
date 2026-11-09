@@ -7,7 +7,9 @@ stats page and in the app; "Booth" items only in the app. Plain words, one line 
 ## 0.1.107
 
 ### Booth
-- More varied calls while the ball's in the air: the booth sees its last few and stops reaching for the same words ("peeling", "bending… in play"), and drives on par 4s and 5s are called at the fairway, not the flag.
+- More varied calls while the ball's in the air: the booth sees its last few and stops reaching for the same words ("peeling", "bending… in play").
+- A shot that can't reach the green (a drive, a long second, a layup) is called at the fairway or the layup, not the flag; reach is judged from the player's own usual drive.
+- Truer left and right calls in flight: the projection is now tuned to where a thousand of the season's shots actually finished, and it follows your aim, so aiming right of the flag to draw it back is called at the flag, not as a pull left.
 
 ## 0.1.106
 
