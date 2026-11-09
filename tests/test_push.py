@@ -88,6 +88,10 @@ def test_the_first_check_alerts_nothing_and_later_ones_only_whats_new():
     assert ("record", "🦅 Eagle! Cal", "Hole 5 (par 5) at Sheep Ranch") in got      # practice round: no "posted"
     assert ("record", "🏆 New league record: Longest drive", "Bob: 321 yd, Sheep Ranch, hole 4 (was 300 yd)") in got
     assert len(got) == 4
+    # Tapped, they play the eagle's hole and the record shot.
+    urls = {a.title: a.url for a in sent}
+    assert urls["🦅 Eagle! Cal"] == "#round?player=&id=3&hole=5&watch=1"
+    assert urls["🏆 New league record: Longest drive"] == "#highlights?player=&ctx=league&period=all&watch=1&shot=9&ts=4900"
     assert _check(rows, state, 5200, big)[0] == []   # nothing twice
 
 
@@ -116,7 +120,8 @@ def test_only_league_shots_are_league_records():
     better = {"id": 7, "ts": 5100, "player": "Cal", "v": 300.0}
     sent, _ = _check(rows, state, 5200, better, anywhere=practice)
     assert [(a.title, a.body, a.url) for a in sent] == [
-        ("🏆 New league record: Longest drive", "Cal: 300 yd (was 280 yd)", "#highlights?player=&ctx=league&period=all")]
+        ("🏆 New league record: Longest drive", "Cal: 300 yd (was 280 yd)",
+         "#highlights?player=&ctx=league&period=all&watch=1&shot=7&ts=5100")]
     _, state = _check(rows, state, 5200, better)
     assert _check(rows, state, 5300, {**league, "ts": 5250})[0] == []   # the 300 taken out: 280 isn't new
 

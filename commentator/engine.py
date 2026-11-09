@@ -6185,7 +6185,8 @@ class Engine:
                           else f"{player}'s longest drive from earlier weeks ({season['longest_drive']:.0f} yards)")
                 season_facts.append(f"That's a new personal best: longer than {beaten}. Excitement "
                                     f"{SEASON_BEST_DRIVE_LEVEL} out of 10.")
-            elif (best := self.store.season_longest_drive(context="league")) and drive > best[1]:
+            elif shot_round is not None and shot_round.is_league \
+                    and (best := self.store.season_longest_drive(context="league")) and drive > best[1]:
                 tags.append("league_best_drive")
                 score = max(score + 0.6, c.big_moment_threshold)
                 season_facts.append(f"That's the longest drive in the league this season, past {best[0]}'s "

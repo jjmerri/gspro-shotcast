@@ -1900,6 +1900,32 @@ async def test_season_best_drive_is_called_out(tmp_path):
     assert "new personal best: longer than Mike's longest drive from earlier weeks (290 yards)" in mike
 
 
+async def test_a_practice_drive_past_the_league_best_is_no_league_record(tmp_path):
+    # A practice round's drive was called "the league's longest", though only league rounds count.
+    from commentator.store import Store
+
+    db = str(tmp_path / "season.db")
+    old = Store(db)
+    old.record_shot(player="Mike", hole="Hole 1", shot=Shot(club="DR", carry=50.0), before=Hud(lie="tee"),
+                    after=Hud(lie="fairway"), tags=[], carry_game_yards=50.0, total_yards=None, offline_yards=None)
+    old.record_shot(player="Tony", hole="Hole 1", shot=Shot(club="DR", carry=900.0), before=Hud(lie="tee"),
+                    after=Hud(lie="fairway"), tags=[], carry_game_yards=900.0, total_yards=None, offline_yards=None,
+                    is_league=False)
+    _backdate(old)
+    old.close()
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.tts.console_simulate_duration = False
+    cfg.commentary.routine_comment_rate = 1.0
+    cfg.commentary.min_seconds_between_comments = 0
+    llm = FakeLLM(cfg.llm.live)
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"),
+                    source=ReplaySource("data/sample_shots.jsonl", speed=1e6), live_llm=llm, segment_llm=llm,
+                    speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0), store=Store(db))
+    await engine.run()
+    reactions = [p for p in llm.prompts if p.startswith(_REACTION) and "Player: Tony" in p and "driver" in p]
+    assert reactions and not any("longest drive in the league" in p for p in reactions)
+
+
 async def test_a_drive_shorter_than_one_earlier_today_is_no_personal_best(tmp_path):
     # Kathy's earlier-weeks best was 117 yards, so every drive past it was "a personal best" all
     # night, the 142-yarder after a 227 included.

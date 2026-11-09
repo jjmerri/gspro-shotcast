@@ -318,6 +318,8 @@ function applyHash() {
     : q.get("clip") ? { clip: q.get("clip"), at: +q.get("at") || 0 }
     : q.get("vod") ? { session: q.get("vod"), at: +q.get("at") || 0 } : null;
   if (state.tab === "broadcasts" && num("session")) state.session = num("session");
+  // An alert's link: play its shot (or, on a round, the hole) once the videos are known.
+  state.watch = q.get("watch") ? { id: num("shot"), ts: +q.get("ts") || null, hole: state.tab === "round" ? state.replayHole : null } : null;
   return !state.data || was[0] !== state.me || was[1] !== state.ctx;
 }
 applyHash();
@@ -546,6 +548,29 @@ function writeHash() {
 
 // Into a round, a player, a round's shots, a video: a history entry first, so Back comes out of it to
 // where the page was (and how far down). The caller sets the view and draws it, which writes its link.
+function openVideo({ reel, clip, session, at }) {
+  // From another view: a history entry to come back to.
+  if (state.tab !== "vods") remember();
+  if (player && player.session === (reel ? "reel:" + reel : clip ? "clip:" + clip : "vod:" + session)) {
+    player.video.currentTime = at;   // the same stream: just jump
+    player.video.play().catch(() => {});
+  } else {
+    stopLive();
+  }
+  state.vod = reel ? { reel, at } : clip ? { clip, at } : { session, at };
+  state.tab = "vods";
+  showTabs();
+  render();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+// An alert's watch request, once the videos are known: its video, or (gone, never kept) the page it
+// opened on. Once: Back to that page doesn't play it again.
+function watchNow(ts, id = null) {
+  if (!state.extrasIn) return;
+  state.watch = null;
+  const w = shotVideo(id, ts);
+  if (w) setTimeout(() => openVideo({ clip: w.clip, session: w.session, at: w.at }));
+}
 function remember() {
   history.replaceState({ y: scrollY }, "", location.hash);
   history.pushState(null, "", location.hash);
@@ -1240,6 +1265,7 @@ function replayPart(reps, round) {
   // Animate once per opening, not again on every re-render (a sort, another round's toggle).
   const key = `${state.round}:${state.replayHole}`, animate = state.replayPlayed !== key;
   state.replayPlayed = key;
+  if (state.watch && state.watch.hole === state.replayHole) watchNow(rp.ts);
   const actions = ` · <span class="acts">${watchBtn(rp.ts, "▶ Watch the hole")}${shareBtn(hashFor("rounds", { round: state.round, hole: state.replayHole }), `hole ${rp.hole}`)}</span>`;
   return replaySvg(rp, animate, { colors, focus, only: state.replayOnly && focus ? focus : null, actions });
 }
@@ -2225,6 +2251,9 @@ async function pollExtras() {
   const was = JSON.stringify([state.vods, state.schedule, state.clips, state.league, state.reels, state.recaps]);
   state.vods = vods; state.schedule = schedule; state.clips = clips; state.league = league; state.reels = reels; state.recaps = recaps;
   state.keepDays = rec && rec.keep_days > 0 ? rec.keep_days : 7;
+  const first = !state.extrasIn;
+  state.extrasIn = true;
+  if (first && state.watch) render();
   if (JSON.stringify([vods, schedule, clips, league, reels, recaps]) === was) return;
   const shown = state.tab;
   if ((state.tab === "vods" && !tabs().includes("vods")) || (state.tab === "schedule" && !schedule)) state.tab = "home";
@@ -2530,6 +2559,7 @@ function render() {
   attachChat();
   if (state.tab === "live") pollChat();
   writeHash();
+  if (state.watch && state.watch.ts) watchNow(state.watch.ts, state.watch.id);
   // A link to a round, hole or shot: bring it into view once it's drawn (replays and shots load later).
   const go = state.scrollTo;
   if (go) {
@@ -2646,20 +2676,7 @@ document.addEventListener("click", (e) => {
     return;
   }
   if (t.dataset.vod || t.dataset.clip || t.dataset.reel) {
-    // From another view: a history entry to come back to.
-    if (state.tab !== "vods") remember();
-    const at = +t.dataset.vodat || 0, clip = t.dataset.clip, reel = t.dataset.reel;
-    if (player && player.session === (reel ? "reel:" + reel : clip ? "clip:" + clip : "vod:" + t.dataset.vod)) {
-      player.video.currentTime = at;   // the same stream: just jump
-      player.video.play().catch(() => {});
-    } else {
-      stopLive();
-    }
-    state.vod = reel ? { reel, at } : clip ? { clip, at } : { session: t.dataset.vod, at };
-    state.tab = "vods";
-    showTabs();
-    render();
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    openVideo({ reel: t.dataset.reel, clip: t.dataset.clip, session: t.dataset.vod, at: +t.dataset.vodat || 0 });
     return;
   }
   if (t.dataset.more) {

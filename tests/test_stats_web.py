@@ -1307,3 +1307,27 @@ def test_the_pages_watch_links_and_next_shot_go_to_a_second_before_each_swing_sh
     got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
     # Previous shot: none before the first; 2 s into a shot it's back to its start, before then the one before.
     assert got == [{"session": "s", "at": 14}, [14, 34, 35], [[14, None], [34, None], [34, None], [34, 14], [None, 34]]]
+
+
+def test_an_alerts_watch_link_plays_its_shot_once_the_videos_are_known():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = (re.search(r"\nconst WATCH_LEAD = .*?\nfunction shotVideo\(.*?\n}\n", page, re.S).group(0)
+           + re.search(r"\nfunction watchNow\(.*?\n}\n", page, re.S).group(0))
+    # A stream from 1000 to 2000, and a record clip for shot 7.
+    script = ("const state = { vods: [{ session: 's', since: 1000, ended: 2000 }], clips: { 7: { at: 3 } } };"
+              "const opened = []; const openVideo = w => opened.push(w); const setTimeout = f => f();"
+              + fns +
+              "state.watch = {}; watchNow(1010, 7); const early = [opened.length, !!state.watch];"
+              "state.extrasIn = true; watchNow(1010, 7); watchNow(1010); watchNow(5000);"
+              "console.log(JSON.stringify([early, opened, state.watch]));")
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    # Nothing until the videos are known; then the record clip, else the round's video, else nothing.
+    assert got == [[0, True], [{"clip": "7", "at": 3}, {"session": "s", "at": 14}], None]

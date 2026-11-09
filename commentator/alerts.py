@@ -80,7 +80,9 @@ def _record_alert(cat: str, shot: dict, old: dict | None) -> push.Alert:
         value = "holed" if shot.get("outcome") == "holed" else _feet(shot["v"])
         was = old and ("holed" if old.get("outcome") == "holed" else _feet(old["v"]))
     body = f"{who}: {value}" + (f", {_where(shot)}" if _where(shot) else "") + (f" (was {was})" if was else "")
-    return push.Alert("record", f"🏆 New league record: {what}", body, "#highlights?player=&ctx=league&period=all",
+    # The page plays the shot (its record clip, or the round's video) if there's one, else shows the records.
+    watch = f"&watch=1&shot={shot['id']}&ts={shot['ts']}" if shot.get("id") and shot.get("ts") else ""
+    return push.Alert("record", f"🏆 New league record: {what}", body, "#highlights?player=&ctx=league&period=all" + watch,
                       tag=f"record-{cat}")
 
 
@@ -104,7 +106,7 @@ def _round_alerts(rows: list[dict]) -> list[push.Alert]:
             name = "Hole in one" if score == 1 else "Albatross" if score == par - 3 else "Eagle" if score == par - 2 else "Condor"
             icon = "🎯" if score == 1 else "🦅"
             out.append(push.Alert("record", f"{icon} {name}! {who}", f"Hole {h['hole']} (par {par}) at {course}",
-                                  f"#round?player=&id={r['id']}&hole={h['hole']}", tag=f"eagle-{rnd}-{h['hole']}-{who}"))
+                                  f"#round?player=&id={r['id']}&hole={h['hole']}&watch=1", tag=f"eagle-{rnd}-{h['hole']}-{who}"))
     return out
 
 

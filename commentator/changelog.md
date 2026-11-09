@@ -4,6 +4,14 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.114
+
+### Stats page
+- Tapping an eagle or ace alert plays the hole on video, and a new league record alert plays the shot.
+
+### Booth
+- A long practice drive is no longer called "the league's longest": only league rounds set league records.
+
 ## 0.1.113
 
 ### Stats page
