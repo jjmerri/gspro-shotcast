@@ -30,7 +30,7 @@ from .flight_pick import FlightPlan, Hazard, aim_spot, aim_turn, aimed_short, pi
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
 from .grounding import (SCENERY, bare_acknowledgement, check_line, cites_call, makes_call, meta_talk, ngrams, note_keywords, repeats, uses_note,
                         wrong_round_score)
-from .hud import NAME_DARK, Hud, Scorecard, describe, hole_key, name_sig_changed
+from .hud import NAME_DARK, Hud, Scorecard, deck_club, describe, hole_key, name_sig_changed
 from .interest import (LEAGUE_BEST_DRIVE_LEVEL, REPLY_PUTT_LEVEL, SEASON_BEST_DRIVE_LEVEL,
                        approach_gimme_level, holed_out_level, holed_putt_level, holed_putt_score,
                        putt_to_par, score_shot,
@@ -5966,8 +5966,11 @@ class Engine:
         if use_screen and before.shot_number is None:
             self._number_from_log(before, player, impact_snap, tag)
         # GSPro's own club box beats guessing the club from loft.
+        before.club = deck_club(before.club, before.shot_number, before.lie)
         if before.club:
             shot = replace(shot, club=before.club)
+        elif (club := deck_club(shot.club, before.shot_number, before.lie)) != shot.club:
+            shot = replace(shot, club=club)
         handed = before.handed or shot.handed
         if player and handed:
             self.handed[player] = handed
@@ -6216,9 +6219,13 @@ class Engine:
         if played_from == "green" and self._set_up_in_yards(before):
             played_from = self._off_green_lie(before)
             log.info("%s set up in yards: off the green, recorded as %s", tag, played_from)
+        # The HUD's Tee recast only for want of a distance to check it by may still be a re-tee: keep its driver.
+        retee = (before.lie or "").lower() == "tee" and self._at_tee_length(before, shot_hole) is None
         if played_from != before.lie:
             log.info("%s played from %s (the HUD read %s)", tag, played_from, before.lie)
             before = replace(before, lie=played_from)
+        if not retee and (club := deck_club(shot.club, before.shot_number, before.lie)) != shot.club:
+            shot = replace(shot, club=club)   # off the deck (from the feed's club, or a stale "tee" read)
         if not shot.is_putt and "in_water" not in tags and self._shot_wet(player, since=impact):
             tags = [*tags, "in_water"]   # the GSPro log saw the splash: the wrap can say where it went
         penalty_facts, penalty_tag = await self._penalty_shot_facts(fire, shot, tags)
@@ -7071,6 +7078,16 @@ class Engine:
         lie GSPro played it from (no rough or sand without GSPro's penalty for it), else the fringe."""
         return before.lie if before.lie not in (None, "", "green", *self._PENALIZING_LIES) else "fringe"
 
+    @staticmethod
+    def _at_tee_length(before: Hud, hole_label: str | None) -> bool | None:
+        """Whether the distance to the pin is the hole's full length (a ball on the tee), or None when
+        either distance is unread."""
+        m = re.search(r"\d+(?:\.\d+)? (?:yards|metres|meters)", hole_label or "")
+        yd, length = to_yards(before.to_pin), to_yards(m.group(0)) if m else None
+        if yd is None or not length:
+            return None
+        return abs(yd - length) <= 10
+
     def _played_from(self, before: Hud, shot: Shot, info: dict, material: str | None,
                      hole_label: str | None = None) -> str | None:
         """The lie this shot was really struck from, for the record. The HUD's lie read and the log's
@@ -7081,10 +7098,7 @@ class Engine:
         shot, it wasn't played from rough or sand, whatever the other reads said."""
         if before.shot_number == 1:
             return "tee"
-        if (before.lie or "").lower() == "tee" and not shot.is_putt \
-                and (m := re.search(r"\d+(?:\.\d+)? (?:yards|metres|meters)", hole_label or "")) \
-                and (yd := to_yards(before.to_pin)) is not None and (length := to_yards(m.group(0))) \
-                and abs(yd - length) <= 10:
+        if (before.lie or "").lower() == "tee" and not shot.is_putt and self._at_tee_length(before, hole_label):
             return "tee"   # a re-tee (stroke and distance): the HUD's Tee, at the hole's full length
         if pen := info.get("penalty"):
             return MATERIAL_TO_LIE.get(pen, before.lie)

@@ -336,6 +336,17 @@ CLUB_WORDS = [
 ]
 
 
+def deck_club(club: str | None, shot_number: int | None, lie: str | None) -> str | None:
+    """Newer GSPro puts the driver in the club box for any long shot, off the deck too, where the player
+    is really hitting a fairway wood: a driver is taken only off a tee, so one shown elsewhere is a 3-wood."""
+    if club != "DR":
+        return club
+    lie = (lie or "").lower()
+    if lie.startswith("tee") or shot_number == 1 or (not lie and shot_number is None):
+        return club
+    return "3W"
+
+
 def parse_club(items: list[str]) -> dict:
     """GSPro's club box ("Driver", "7 Iron", ...) and handedness box ("RH"/"LH", 3.59 "RIGHT HAND")."""
     text = " ".join(items).lower()

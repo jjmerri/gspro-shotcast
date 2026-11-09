@@ -3868,6 +3868,15 @@ def test_club_box_parsing():
     assert parse_club(["4 1ron"])["club"] == "4I"
 
 
+def test_driver_shown_off_the_deck_is_a_three_wood():
+    from commentator.hud import deck_club
+
+    assert deck_club("DR", 1, "tee") == "DR" and deck_club("DR", 3, "Tee") == "DR"   # a re-tee after OB
+    assert deck_club("DR", 2, "fairway") == "3W" and deck_club("DR", None, "deep rough") == "3W"
+    assert deck_club("DR", 2, None) == "3W" and deck_club("DR", None, None) == "DR"   # unknown: leave it
+    assert deck_club("5I", 2, "fairway") == "5I"
+
+
 def test_regions_adjust_to_the_screen_shape():
     from commentator.config import DEFAULT_REGIONS, Region
 
