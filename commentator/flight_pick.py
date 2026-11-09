@@ -128,6 +128,13 @@ class Projection:
     outcome: str
     in_play: list[Hazard] = field(default_factory=list)   # the hazards behind a *_trouble outcome
     total: float | None = None   # carry plus the expected roll-out, what the length call is judged on
+    # Off the line to the target (the pin, with it in reach; else the aim), yards + right: where the start
+    # line alone would land it, and how far the curve moves it from there (lateral = start + curve).
+    start: float = 0.0
+    curve: float = 0.0
+    at_pin: bool = False   # the pin is the target: in reach, and not a layup
+    length: str | None = None   # "short" / "long" of the (elevation-adjusted) pin, None when pin high or not judged
+    gap: float | None = None    # total less the adjusted pin, yards, when length is judged
 
 
 # Roll-out as a share of carry, from total spin: ~360/spin puts an 8-iron at 6300 rpm near 6% (an
@@ -265,8 +272,8 @@ def project(
         return None
     carry = shot.carry if (shot.units or "yards").lower().startswith("y") else shot.carry * 1.0936
     carry *= carry_factor
-    lateral = (START_LINE_SHARE * carry * math.sin(math.radians(shot.hla or 0))
-               + _curve_yards(carry, shot.total_spin or 0, shot.spin_axis or 0))
+    start = START_LINE_SHARE * carry * math.sin(math.radians(shot.hla or 0))
+    curve = _curve_yards(carry, shot.total_spin or 0, shot.spin_axis or 0)
     pin = to_yards(to_pin)
     if aimed_short(aim, pin):
         pin = None   # a layup or a way out: the spot clicked is the target, and short of the pin is the plan
@@ -274,21 +281,18 @@ def project(
     # pin is the target, so a click right of it to play a draw is turned into a miss off the pin line; out
     # of reach (a layup, a drive round a dogleg) the spot they aimed at is the target itself.
     turn = aim_turn(aim)
-    if turn and pin and pin <= carry * 1.25:
-        lateral = lateral * math.cos(turn) + carry * math.sin(turn)
+    at_pin = bool(pin and pin <= carry * 1.25)
+    if turn and at_pin:
+        start, curve = start * math.cos(turn) + carry * math.sin(turn), curve * math.cos(turn)
+    lateral = start + curve
     side_tolerance = max(8.0, carry * 0.06)
     total = carry * (1 + _roll_share(shot))
     side = "right" if lateral > side_tolerance else "left" if lateral < -side_tolerance else None
 
-    if side:
-        in_play = [h for h in hazards if h.side == side and _in_play(h, carry, lateral)]
-        if in_play:
-            return Projection(carry, lateral, f"{side}_trouble", in_play, total)
-
     elevated = bool(pin and elevation_yards and abs(elevation_yards) >= 2)
     if elevated:
         pin += elevation_yards * (UPHILL_YARDS_PER_YARD if elevation_yards > 0 else 1.0)
-    length = None
+    length = gap = None
     if pin and pin <= carry * 1.25:  # green in range; on a tee shot "short of the pin" means nothing
         # The projection has no real physics, and elevation skews the carry in one direction only:
         # downhill a ball runs well past its flat launch-monitor carry (so don't over-call "short"),
@@ -298,12 +302,51 @@ def project(
         extra = abs(elevation_yards) * 0.5 if elevated else 0.0
         short_tol = tol + (extra if elevation_yards and elevation_yards < 0 else 0.0)
         long_tol = tol + (extra if elevation_yards and elevation_yards > 0 else 0.0)
-        length = "short" if total < pin - short_tol else "long" if total > pin + long_tol else None
+        gap = total - pin
+        length = "short" if gap < -short_tol else "long" if gap > long_tol else None
+    shape = {"start": start, "curve": curve, "at_pin": at_pin, "length": length, "gap": gap}
+
+    if side:
+        in_play = [h for h in hazards if h.side == side and _in_play(h, carry, lateral)]
+        if in_play:
+            return Projection(carry, lateral, f"{side}_trouble", in_play, total, **shape)
 
     # A big sideways miss matters more than being a few yards long or short.
     if side and (not length or abs(lateral) > side_tolerance * 1.5):
-        return Projection(carry, lateral, side, total=total)
-    return Projection(carry, lateral, length or side or "on_target", total=total)
+        return Projection(carry, lateral, side, total=total, **shape)
+    return Projection(carry, lateral, length or side or "on_target", total=total, **shape)
+
+
+def shape_facts(p: Projection | None, aim: tuple[float, float] | None = None, pin_yards: float | None = None) -> list[str]:
+    """The ball's shape against the flag, with the green in reach: where it started from the flag and
+    whether the curve brings it back or takes it away, so the booth can call a draw coming back to the
+    pin (the launch monitor's start line is from the aim, which may be well off the flag)."""
+    if not p or not p.at_pin:
+        return []
+    bend = max(4.0, p.carry * 0.03)
+    if abs(p.curve) < bend:
+        return []
+    cside = "right" if p.curve > 0 else "left"
+    near = max(8.0, p.carry * 0.06)   # project()'s side tolerance: "on the flag's line"
+    facts = []
+    if abs(p.start) < near * 0.6:
+        facts.append(f"It started at the flag and is curving away to the {cside}.")
+    else:
+        sside = "right" if p.start > 0 else "left"
+        if sside == cside:
+            facts.append(f"It started {sside} of the flag and is curving further {cside}, away from it.")
+        elif abs(p.lateral) <= near:
+            facts.append(f"It started {sside} of the flag and is curving back toward it, on course to come back "
+                         "onto the flag's line.")
+        elif (p.lateral > 0) == (p.start > 0):
+            facts.append(f"It started {sside} of the flag and is curving back toward it, but may not get all the way back.")
+        else:
+            facts.append(f"It started {sside} of the flag and is curving back across the flag's line to the {cside}.")
+    spot = aim_spot(aim, pin_yards)
+    if spot and abs(spot[1]) >= 3 and (spot[1] > 0) != (p.curve > 0):
+        facts.append(f"That's the shape the player set up for: aimed {'right' if spot[1] > 0 else 'left'} of the flag "
+                     f"to bring it back.")
+    return facts
 
 
 def pick_line(

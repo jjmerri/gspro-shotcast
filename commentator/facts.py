@@ -435,34 +435,52 @@ def flight_facts(
     elevation_yards: float | None = None, aim: tuple[float, float] | None = None,
 ) -> list[str]:
     """What a commentator knows the instant the ball leaves the club. `aim`: the player's minimap click."""
-    from .flight_pick import aim_facts
+    from .flight_pick import aim_facts, project, shape_facts
 
     facts = ["The ball is in the air right now. It has not landed."]
     if lie:
         facts.append(f"It was hit from the {lie}.")
-    facts += [f for f in shot_facts(shot) if not f.startswith(("Carry:", "Ball speed:"))]
     pin = to_yards(to_pin)
     aimed, layup = aim_facts(aim, pin)
-    facts += aimed
+    shape = [f for f in shot_facts(shot) if not f.startswith(("Carry:", "Ball speed:"))]
+    if aimed and not layup:
+        # The launch monitor's start line is from the aim, not the flag: say so, or "started left" reads
+        # as a pull when it started left of a spot aimed right of the flag.
+        shape = [f.replace("The ball started on line", "The ball started on the line the player aimed")
+                  .replace("The ball started a little left", "The ball started a little left of where the player aimed")
+                  .replace("The ball started a little right", "The ball started a little right of where the player aimed")
+                  .replace("The ball started well left", "The ball started well left of where the player aimed")
+                  .replace("The ball started well right", "The ball started well right of where the player aimed")
+                 for f in shape]
+    facts += shape + aimed
     if layup:
         return facts
-    if pin and elevation_yards and abs(elevation_yards) >= 2:
-        pin += elevation_yards  # plays longer uphill, shorter downhill
-    carry = shot.carry if (shot.units or "yards").lower().startswith("y") else (shot.carry or 0) * 1.0936
-    carry = (carry or 0) * carry_factor  # GSPro takes distance off for rough, sand and so on
-    if not (pin and carry):
+    proj = project(shot, to_pin, [], carry_factor, elevation_yards, aim=aim)
+    facts += shape_facts(proj, aim, pin)
+    if not (pin and proj and proj.carry):
         return facts
-    # Bands, not yards: the projected carry is an estimate (the lie's penalty most of all), and a ball
-    # that carries short can still run out onto the green, so a number in the air was false precision.
-    gap = carry - pin
-    if pin > carry * 1.25:
+    # Bands, not yards, and project()'s own length call (carry plus roll, elevation-adjusted), so the
+    # fact and the pre-written pick agree: the projection is an estimate, a number in the air false precision.
+    if proj.gap is None:   # project() didn't judge the length: the (elevation-adjusted) pin is out of reach
         facts.append("The green is out of reach with this shot; it's about position.")
-    elif abs(gap) <= max(3, pin * 0.05):
-        facts.append("The launch monitor projects it to carry right around the pin distance.")
+    elif proj.length is None:
+        facts.append("It projects to finish right around the pin distance.")
+    else:
+        much = "well" if abs(proj.gap) > max(10, pin * 0.1) else "a little"
+        facts.append(f"It projects to finish {much} {'short of' if proj.length == 'short' else 'past'} the pin, "
+                     "counting its roll (an estimate).")
+    return facts
+    # Bands, not yards, judged on where it should finish (carry plus roll-out), not the carry: the
+    # projection is an estimate (the lie's penalty most of all), so a number in the air is false precision.
+    gap = (proj.total or proj.carry) - pin
+    if proj.gap is None:   # project() didn't judge the length: the (elevation-adjusted) pin is out of reach
+        facts.append("The green is out of reach with this shot; it's about position.")
+    elif abs(gap) <= max(5, pin * 0.06):   # project()'s own dead-band, so the fact and the pick agree
+        facts.append("It projects to finish right around the pin distance.")
     else:
         much = "well" if abs(gap) > max(10, pin * 0.1) else "a little"
-        facts.append(f"The launch monitor projects it to carry {much} {'short of' if gap < 0 else 'past'} the pin "
-                     "(an estimate: the ball can still run on or release after landing).")
+        facts.append(f"It projects to finish {much} {'short of' if gap < 0 else 'past'} the pin, counting its roll "
+                     "(an estimate).")
     return facts
 
 

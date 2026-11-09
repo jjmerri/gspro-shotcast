@@ -11,6 +11,7 @@ stats page and in the app; "Booth" items only in the app. Plain words, one line 
 - A shot that can't reach the green (a drive, a long second, a layup) is called at the fairway or the layup, not the flag; reach is judged from the player's own usual drive.
 - Truer left and right calls in flight: the projection is now tuned to where a thousand of the season's shots actually finished, and it follows your aim, so aiming right of the flag to draw it back is called at the flag, not as a pull left.
 - Laying up or chipping out sideways from trouble: when you click a spot well short of the flag, or a tree blocks the line, the booth calls the shot at that spot, not "at the flag".
+- Draws and fades are called against the flag: a ball aimed right that's drawing back is called coming back to the pin, not as a hook, and "short" or "long" counts the roll, with no yardages guessed mid-flight.
 - Reach counts the lie: from deep rough or sand the booth knows the green may be out of reach, and afterwards it can tell a good recovery from a shot that should have found the green.
 
 ## 0.1.106

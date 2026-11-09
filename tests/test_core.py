@@ -1398,7 +1398,18 @@ def test_flight_projection_facts():
     # Bands, not a yardage the booth would read out mid-flight
     sand = " ".join(flight_facts(Shot(club="PW", carry=136, hla=0), "120 yards", 0.8, "sand")[-1:])
     assert "a little short of the pin" in sand and not re.search(r"\d", sand)
-    assert "well short of the pin" in " ".join(flight_facts(Shot(club="9I", carry=92, hla=0), "107 yards"))
+    assert "well short of the pin" in " ".join(flight_facts(Shot(club="9I", carry=88, hla=0), "107 yards"))
+    # Aimed right of the flag to draw it back: the start line is from the aim, and the shape is told
+    # against the flag
+    draw = Shot(club="7I", carry=160, hla=0, spin_axis=-12, total_spin=6500)
+    aimed = " ".join(flight_facts(draw, "160 yards", aim=(47, 339)))
+    assert "started on the line the player aimed" in aimed
+    assert "started right of the flag and is curving back toward it, on course" in aimed
+    assert "the shape the player set up for" in aimed
+    assert "curving away to the left" in " ".join(flight_facts(draw, "160 yards"))
+    fade = " ".join(flight_facts(replace(draw, hla=4, spin_axis=10), "160 yards"))
+    assert "started right of the flag and is curving further right" in fade and "set up for" not in fade
+    assert "flag" not in " ".join(flight_facts(draw, "400 yards"))   # out of reach: no shape against the flag
     assert "around the pin" in " ".join(flight_facts(Shot(club="GW", carry=86.4, hla=0.8), "84.8 yards"))
     assert "out of reach" in " ".join(flight_facts(Shot(club="DR", carry=240, hla=0), "504.2 yards"))
 
