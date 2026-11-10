@@ -46,9 +46,9 @@ class ChatTable:
 
     def _db(self):
         if self._client is None:
-            import boto3
+            from . import backend
 
-            self._client = boto3.client("dynamodb", region_name=self.region) if self.region else boto3.client("dynamodb")
+            self._client = backend.dynamodb(self.region)
         return self._client
 
     def set_on_air(self, on: bool, since: str | None = None) -> None:

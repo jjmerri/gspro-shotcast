@@ -215,9 +215,9 @@ def off_air(cfg) -> None:
     p = cfg.publish
     client = None
     if p.bucket:
-        import boto3
+        from . import backend
 
-        client = boto3.client("s3", region_name=p.region) if p.region else boto3.client("s3")
+        client = backend.s3(p.region)
     Mirror(cfg.live.dir, p.bucket, p.prefix, cfg.live.playlist, client, keep_days=cfg.live.keep_days,
            status_file=Path(cfg.log_dir) / "live.json").clear()
 
@@ -225,9 +225,9 @@ def off_air(cfg) -> None:
 def remove(bucket: str, prefix: str = "", client: Any = None) -> None:
     """No Live tab: the stream is turned off, so the page shouldn't offer it."""
     if client is None:
-        import boto3
+        from . import backend
 
-        client = boto3.client("s3")
+        client = backend.s3()
     client.delete_objects(Bucket=bucket, Delete={"Objects": [
         {"Key": (prefix.strip("/") + "/" if prefix.strip("/") else "") + "live/status.json"}]})
 
@@ -722,9 +722,9 @@ class Mirror:
     # -- the thread
     def start(self, interval: float = 1.0) -> None:
         if self.client is None and self.bucket:
-            import boto3
+            from . import backend
 
-            self.client = boto3.client("s3")
+            self.client = backend.s3()
         self.folder.mkdir(parents=True, exist_ok=True)
         self._thread = threading.Thread(target=self.run, args=(interval,), name="live-mirror", daemon=True)
         self._thread.start()

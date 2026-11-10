@@ -229,9 +229,9 @@ def upload(site: str | Path, bucket: str, prefix: str = "", client: Any = None) 
     newest KEEP_VERSIONS versions. Returns the published version."""
     site = Path(site)
     if client is None:
-        import boto3
+        from . import backend
 
-        client = boto3.client("s3")
+        client = backend.s3()
     prefix = prefix.strip("/") + "/" if prefix.strip("/") else ""
     version = json.loads((site / "latest.json").read_text(encoding="utf-8"))["version"]
     files = [p for p in site.rglob("*") if p.is_file() and not p.name.endswith(".tmp")]
@@ -272,12 +272,12 @@ def publish(db_path: str | Path, site: str | Path, bucket: str, prefix: str = ""
             season_start: str | None = None) -> str:
     """Build the site from the database and upload it, then keep the record shots' clips and the
     rounds' highlight reels up to date (record_clips.py, highlights.py). Returns the published version."""
-    import boto3
+    from . import backend
 
     records: dict[int, dict] = {}
     reels: dict[int, dict] = {}
     build(db_path, site, names, records, site_name, more_tab, season_start=season_start, reels=reels)
-    client = boto3.client("s3", region_name=region) if region else boto3.client("s3")
+    client = backend.s3(region)
     version = upload(site, bucket, prefix, client)
     try:
         n = record_clips.sync(client, bucket, prefix, records)
