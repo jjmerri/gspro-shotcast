@@ -46,9 +46,9 @@ def run(cfg: Config, force: bool = False) -> Path | None:
     if b.s3 and state.get("file") and state.get("uploaded") != state["file"]:
         if not cfg.publish.bucket:
             raise RuntimeError("backup.s3 is on but publish.bucket isn't set")
-        import boto3
+        from . import backend
 
-        client = boto3.client("s3", region_name=cfg.publish.region) if cfg.publish.region else boto3.client("s3")
+        client = backend.s3(cfg.publish.region)
         upload(dest / state["file"], cfg.publish.bucket, b.s3_prefix, b.daily, b.weekly, client)
         (dest / STATE).write_text(json.dumps({**state, "uploaded": state["file"]}), encoding="utf-8")
     return path
@@ -168,9 +168,9 @@ def upload(path: Path, bucket: str, prefix: str = "backups/", daily: int = 14, w
            client: Any = None) -> None:
     """Upload a backup to s3://bucket/prefix and prune the copies there the same way."""
     if client is None:
-        import boto3
+        from . import backend
 
-        client = boto3.client("s3")
+        client = backend.s3()
     prefix = prefix.strip("/") + "/"
     client.upload_file(str(path), bucket, prefix + path.name,
                        ExtraArgs={"ContentType": "application/gzip"})

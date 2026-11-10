@@ -2077,10 +2077,9 @@ class Engine:
         self._bookings_task = asyncio.create_task(self.bookings.refresh(why=why), name="bookings")
 
     def _s3(self):
-        import boto3
+        from . import backend
 
-        p = self.cfg.publish
-        return boto3.client("s3", region_name=p.region) if p.region else boto3.client("s3")
+        return backend.s3(self.cfg.publish.region)
 
     def _schedule_key(self) -> str:
         p = self.cfg.publish.prefix.strip("/")
@@ -10438,10 +10437,9 @@ class Engine:
                 # Turned off since it last ran: take the Live tab off the page.
                 def remove() -> None:
                     try:
-                        import boto3
+                        from . import backend
 
-                        live_stream.remove(p.bucket, p.prefix,
-                                           boto3.client("s3", region_name=p.region) if p.region else boto3.client("s3"))
+                        live_stream.remove(p.bucket, p.prefix, backend.s3(p.region))
                     except Exception as e:
                         log.info("Live stream: couldn't remove the Live tab: %s", e)
                 threading.Thread(target=remove, name="live-remove", daemon=True).start()
@@ -10457,9 +10455,9 @@ class Engine:
         status = Path(self.cfg.log_dir) / "live.json"
         if p.bucket:
             try:
-                import boto3
+                from . import backend
 
-                client = boto3.client("s3", region_name=p.region) if p.region else boto3.client("s3")
+                client = backend.s3(p.region)
                 self.live_mirror = live_stream.Mirror(lv.dir, p.bucket, p.prefix, lv.playlist, client,
                                                       status_file=status, keep_days=lv.keep_days)
             except Exception:

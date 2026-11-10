@@ -163,6 +163,10 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
 - **`winshot.py`** occlusion-proof window capture (PrintWindow) for `screen.capture: window`, when a
   window sits over GSPro. Off by default; the default is a plain monitor grab.
 - **`dotenv.py`** a tiny `.env` loader (no dependency).
+- **`backend.py`** where every AWS client (S3, DynamoDB) is made: boto3's own credentials by
+  default, swappable in one place with `backend.use()`.
+- **`settings_owner.py`** who owns each setting (`web`, `pc` or `service`) for a future hosted
+  service; unused self-hosted. `tools/settings_schema.py` writes it with the config's JSON Schema.
 
 ### `llm/` and `tts/` (one file per provider, swapped by config)
 - `llm/`: `base.py`, `ollama_client.py`, `anthropic_client.py`, `openai_client.py`.
