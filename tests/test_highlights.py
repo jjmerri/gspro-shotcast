@@ -265,10 +265,13 @@ def test_a_clip_with_nothing_said_runs_till_the_ball_is_at_rest_and_a_gimme_is_n
     gimme = {**shot("Ann", 1, 4, 108.6, putt=True, outcome="gimme"), "session_id": 1}   # as the ball stops
     nxt = {**shot("Bob", 1, 3, 140), "session_id": 1}
     got = H._post(H.POST_SHOT, chip, chip, H._talk(db, [chip, gimme, nxt]))
-    assert got == {"post": H.POST_SHOT, "stop": round(40 + H.STREAM_LAG - H.STOP_MARGIN, 1),
-                   "must": H.SHOT_SHOWS + H.MIN_AFTER}
-    nxt["ts"] = 103   # a next swing that soon still can't cut it before the ball's at rest
-    assert H._post(H.POST_SHOT, chip, chip, H._talk(db, [chip, nxt]))["post"] == H.SHOT_SHOWS + H.MIN_AFTER
+    settled = round(8.6 + H.SHOT_SHOWS + H.REST_TAIL, 1)   # over once the ball's stopped
+    assert got == {"post": settled, "stop": round(40 + H.STREAM_LAG - H.STOP_MARGIN, 1), "must": settled}
+    gimme["ts"] = 103   # (a quick chip's over as quick)
+    assert H._post(H.POST_SHOT, chip, chip, H._talk(db, [chip, gimme, nxt]))["post"] == 3 + H.SHOT_SHOWS + H.REST_TAIL
+    nxt["ts"], gimme["ts"] = 103, 120   # a gimme after the next swing is that one's; and a next swing
+    # that soon still can't cut it before the ball's at rest
+    assert H._post(H.POST_SHOT, chip, chip, H._talk(db, [chip, nxt, gimme]))["post"] == H.SHOT_SHOWS + H.MIN_AFTER
 
 
 def test_the_booths_logged_air_times_place_its_lines_and_one_never_aired_is_skipped():

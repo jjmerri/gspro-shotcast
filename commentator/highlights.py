@@ -45,6 +45,8 @@ STREAM_LAG = 4.5          # where the booth logged when a line played (aired_at)
 STOP_MARGIN = 2.0         # a clip ends this far ahead of the next thing said (a line's start can be early)
 MUST_GRACE = 2.5         # ...and drops a segment holding both it and only this much of the clip's own talk
 MIN_AFTER = 8.0           # ...but not before this long after its last shot's swing shows (the ball comes to rest)
+REST_TAIL = 2.0           # ...or, where a gimme was logged (as the ball stopped), this long after that shows
+REST_SECONDS = 15.0       # ...a gimme this soon after the shot, before the next swing
 REACTION_SECONDS = 30.0   # a reaction (logged with no shot) is to the last shot this recently before it
 FLIGHT_SECONDS = 15.0     # ...and a flight line to the one this recently
 CLOSE_FROM_YARDS, CLOSE_FEET = 100.0, 15.0          # the booth's close_approach_* defaults
@@ -233,7 +235,8 @@ def _bests(shots: list[dict], before: dict[str, dict]) -> tuple[set[int], dict[i
 
 def _talk(db: sqlite3.Connection, shots: list[dict]) -> tuple:
     """(session -> every line's (started, done, the time of the shot it's about: its call, a reaction
-    or flight line, or None); session -> its shots' times), in logged time. A line the booth noted
+    or flight line, or None); session -> its swings' times; session -> its gimmes' times (each
+    logged as the ball before it stopped)), in logged time. A line the booth noted
     the air time of is placed by that (and in a session with any, one without never aired: an
     interrupted exchange's rest); others by their words, after the exchange before."""
     try:
@@ -248,9 +251,9 @@ def _talk(db: sqlite3.Connection, shots: list[dict]) -> tuple:
     noted = {r[0] for r in rows if r[5] is not None}
     shift = STREAM_LAG - TALK_LAG   # (an aired time, as the logged time it's heard the same as)
     times: dict[int, list[float]] = {}
-    for s in shots:
-        if s.get("outcome") != "gimme":   # (never struck: logged as the ball before it comes to rest)
-            times.setdefault(s["session_id"], []).append(s["ts"])
+    rests: dict[int, list[float]] = {}
+    for s in shots:   # (a gimme's never struck)
+        (rests if s.get("outcome") == "gimme" else times).setdefault(s["session_id"], []).append(s["ts"])
     ts_of = {s["id"]: s["ts"] for s in shots}
     batches: dict[tuple[int, float], list] = {}   # an exchange's lines share the time they're logged
     for session, shot_id, ts, kind, text, aired_at, aired_seconds in rows:
@@ -281,25 +284,31 @@ def _talk(db: sqlite3.Connection, shots: list[dict]) -> tuple:
         busy[session] = done
     for v in spoken.values():
         v.sort(key=lambda x: x[:2])
-    return spoken, times
+    return spoken, times, rests
 
 
 def _post(post: float, at: dict, last: dict, talk: tuple | None) -> dict:
     """The stretch of stream after `at` (seconds): `post`, or on till the booth's done talking about
     the shots from `at` to `last`; and where the booth logged its lines, `stop` before whatever it says
-    next or the next swing, though never before `must` (its own lines' end; None: no stop)."""
+    next or the next swing, though never before `must` (its own lines' end, or the ball at rest; None:
+    no stop). Where the ball's known to have stopped (a gimme), it's over at `must`."""
     if not talk:
         return {"post": post, "stop": None, "must": 0.0}
-    spoken, swings = talk
+    spoken, swings, *more = talk
     session = at.get("session_id")
     lo, hi = at["ts"], last["ts"]
     end = at["ts"] + post - TALK_LAG   # (when what's heard at the cut was logged)
     own = [done for _, done, about in spoken.get(session, []) if about is not None and lo <= about <= hi]
-    rest = hi + SHOT_SHOWS + MIN_AFTER - TALK_LAG   # (the ball at rest, as logged)
-    must = max(rest, *(d + TALK_TAIL for d in own)) if own else rest
-    end = max(end, must)
     times = swings.get(session, [])
     i = bisect.bisect_right(times, hi)
+    gimmes = more[0].get(session, []) if more else []
+    j = bisect.bisect_right(gimmes, hi)
+    settled = gimmes[j] if j < len(gimmes) and gimmes[j] - hi <= REST_SECONDS and (
+        i == len(times) or gimmes[j] < times[i]) else None
+    # (the ball at rest, as logged)
+    rest = hi + SHOT_SHOWS + MIN_AFTER - TALK_LAG if settled is None else settled + SHOT_SHOWS + REST_TAIL - TALK_LAG
+    must = max(rest, *(d + TALK_TAIL for d in own)) if own else rest
+    end = max(end, must) if settled is None else must
     stop = times[i] + STREAM_LAG - TALK_LAG if i < len(times) else None   # (the next swing, as heard)
     for start, _, about in spoken.get(session, []):
         if start > hi and not (about is not None and lo <= about <= hi):
