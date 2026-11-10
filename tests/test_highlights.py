@@ -165,6 +165,10 @@ def test_a_reel_is_cut_from_the_stream_with_a_break_between_moments():
     stopped["moments"][2]["must"] = 10.0 + H.MUST_GRACE + 1   # ...unless its own talk runs well into it
     H.sync(s3, "b", "", {7: stopped}, clock=lambda: 1300)
     assert "s1/stream40.ts" in s3.objects[ROOT + "reels/7/reel.m3u8"].decode()
+    rest = 10.2   # ...or the ball stops in it (just after it starts), the clip over a tail after that
+    stopped["moments"][2].update(post=rest + H.REST_TAIL, stop=rest + H.REST_TAIL, must=rest + H.REST_TAIL)
+    H.sync(s3, "b", "", {7: stopped}, clock=lambda: 1300)
+    assert "s1/stream40.ts" in s3.objects[ROOT + "reels/7/reel.m3u8"].decode()
     # Gone off the page (or past its keep): deleted.
     assert H.sync(s3, "b", "", {}, clock=lambda: 1300) == {"kept": 0, "added": 0, "removed": 1}
     assert not [k for k in s3.objects if k.startswith(ROOT + "reels/")]
@@ -272,6 +276,16 @@ def test_a_clip_with_nothing_said_runs_till_the_ball_is_at_rest_and_a_gimme_is_n
     nxt["ts"], gimme["ts"] = 103, 120   # a gimme after the next swing is that one's; and a next swing
     # that soon still can't cut it before the ball's at rest
     assert H._post(H.POST_SHOT, chip, chip, H._talk(db, [chip, nxt, gimme]))["post"] == H.SHOT_SHOWS + H.MIN_AFTER
+    # Where GSPro's log had the ball stop, that's when, gimme or not.
+    nxt["ts"], gimme["ts"] = 140, 108.6
+    chip["rest_ts"] = 106.0
+    assert H._post(H.POST_SHOT, chip, chip, H._talk(db, [chip, gimme, nxt]))["post"] == 6 + H.SHOT_SHOWS + H.REST_TAIL
+    chip["rest_ts"] = 150.0   # (a long roll, past the booth's cap)
+    nxt["ts"] = 200
+    assert H._post(H.POST_SHOT, chip, chip, H._talk(db, [chip, nxt]))["post"] == 50 + H.SHOT_SHOWS + H.REST_TAIL
+    nxt["ts"] = 140
+    chip["rest_ts"] = 100 + H.REST_MAX + 1   # (not this shot's)
+    assert H._post(H.POST_SHOT, chip, chip, H._talk(db, [chip, gimme, nxt]))["post"] == settled
 
 
 def test_the_booths_logged_air_times_place_its_lines_and_one_never_aired_is_skipped():

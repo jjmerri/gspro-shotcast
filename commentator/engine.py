@@ -232,6 +232,9 @@ REST_HOLD_SECONDS = 0.6
 # begun less than this before the grab that sees the switch was taken with the ball at rest. Round 93
 # replayed: 11 of 12 unnamed lies were read right but went unconfirmed, the switch ~0.1-0.6 s after.
 REST_SHOWN_SECONDS = 0.9
+# How long after a shot is recorded to wait for GSPro's log to have its ball stop, to note when (a putt's
+# recorded before it stops; a long drive's roll can outlast the follow's cap).
+REST_WAIT_SECONDS = 45.0
 # How long to keep reading a scramble's pick screen for its cards (it showed ~6.5 s, Bethpage 11-07).
 PICK_SCREEN_SECONDS = 15.0
 # How often the setup watcher OCRs the Play button while GSPro's log has it on the range or a course
@@ -6294,6 +6297,8 @@ class Engine:
         )
         rec.shot_id = shot_id
         self._shots_unrecorded.pop(id(event), None)
+        if self._log_truth and fire is not None and shot_id is not None:
+            self._bg(self._note_rest(shot_id, fire, impact))
         if ocr and not shot.is_putt and shot_id is not None and not follow_tiles:
             self._tiles_due[my_seq] = (shot_id, rec, shown_before, unit, self._hc)
             while len(self._tiles_due) > 4:
@@ -8839,6 +8844,16 @@ class Engine:
         if self.current_par:
             r.par.setdefault(1, self.current_par)
         return r
+
+    async def _note_rest(self, shot_id: int, fire: int, impact: float, wait: float = REST_WAIT_SECONDS) -> None:
+        """Store when GSPro's log had this shot's ball stop (wall clock), for its highlight clip to end on:
+        the log says so whether GSPro's tiles stay up through the shot or hide until the next one."""
+        deadline = time.monotonic() + wait
+        while "rest_at" not in self.gspro.fire_info(fire) and time.monotonic() < deadline:
+            await asyncio.sleep(0.25)
+        at = self.gspro.fire_info(fire).get("rest_at")
+        if at is not None and at >= impact:
+            self.store.set_shot_rest(shot_id, time.time() - (time.monotonic() - at))
 
     def _bg(self, coro) -> None:
         """Run a coroutine detached, keeping a reference so it isn't GC'd and swallowing its result."""

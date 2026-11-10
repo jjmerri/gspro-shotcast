@@ -3147,6 +3147,28 @@ def test_a_penalty_after_a_dry_landing_says_the_ball_ran_into_the_hazard(tmp_pat
     assert "ran on" not in " ".join(engine._penalty_facts_from_truth(0))
 
 
+async def test_a_shot_notes_when_gspro_logged_its_ball_stopping(tmp_path):
+    from commentator.store import Store
+
+    cfg = Config(log_dir=str(tmp_path))
+    store = Store(str(tmp_path / "s.db"))
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, store=store)
+    row = lambda: store.db.execute("INSERT INTO shots (session_id, ts, is_putt) VALUES (?, ?, 1)",
+                                   (store.session_id, time.time())).lastrowid
+    putt, other = row(), row()
+    impact = time.monotonic() - 5
+    engine.gspro._fire_info[7] = {}
+    noting = asyncio.create_task(engine._note_rest(putt, 7, impact, wait=5.0))
+    await asyncio.sleep(0.3)   # (a putt's recorded before it stops)
+    engine.gspro._fire_info[7]["rest_at"] = time.monotonic() - 1.0
+    await noting
+    rest = store.db.execute("SELECT rest_ts FROM shots WHERE id = ?", (putt,)).fetchone()[0]
+    assert abs(rest - (time.time() - 1.0)) < 0.5
+    await engine._note_rest(other, 8, impact, wait=0.3)   # never logged: none
+    assert store.db.execute("SELECT rest_ts FROM shots WHERE id = ?", (other,)).fetchone()[0] is None
+
+
 def test_an_unaired_dry_penalty_is_forced_into_the_setup_line_and_retried(tmp_path, monkeypatch):
     engine, _ = _setup_engine(tmp_path)
     g = engine.gspro

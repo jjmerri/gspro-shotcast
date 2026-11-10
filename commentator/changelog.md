@@ -7,7 +7,7 @@ stats page and in the app; "Booth" items only in the app. Plain words, one line 
 ## 0.1.116
 
 ### Stats page
-- Highlight reels play each shot until the ball stops, instead of cutting off a chip or approach that finishes inside gimme range.
+- Highlight reels play each shot until the ball stops and end soon after, instead of cutting off a chip or approach that finishes inside gimme range.
 
 ## 0.1.115
 

@@ -381,6 +381,7 @@ class Store:
                  "shared_ball": "INTEGER NOT NULL DEFAULT 0", "left_out": "INTEGER NOT NULL DEFAULT 0", "handed": "TEXT",
                  "excluded": "INTEGER NOT NULL DEFAULT 0",
                  "picked": "INTEGER", "tree_hits": "INTEGER", "total_from_log": "INTEGER NOT NULL DEFAULT 0",
+                 "rest_ts": "REAL",   # when GSPro's log had the ball stop (wall clock), for highlight clips
                  **{col: "REAL" for col in CLUB_COLS}, **{col: "REAL" for col in POSITION_COLS},
                  **{col: "REAL" for col in HAZARD_COLS}}
         for col, decl in added.items():
@@ -907,6 +908,12 @@ class Store:
         if shot_id is not None:
             self.db.execute("UPDATE shots SET start_x = ?, start_y = ?, start_z = ? WHERE id = ? AND start_x IS NULL",
                             (*start, shot_id))
+            self.db.commit()
+
+    def set_shot_rest(self, shot_id: int | None, at: float) -> None:
+        """When GSPro's log had this shot's ball stop (wall clock), for its highlight clip to end on."""
+        if shot_id is not None:
+            self.db.execute("UPDATE shots SET rest_ts = ? WHERE id = ? AND rest_ts IS NULL", (at, shot_id))
             self.db.commit()
 
     def set_picked(self, shot_id: int | None, picked: bool) -> None:

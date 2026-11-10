@@ -45,8 +45,10 @@ STREAM_LAG = 4.5          # where the booth logged when a line played (aired_at)
 STOP_MARGIN = 2.0         # a clip ends this far ahead of the next thing said (a line's start can be early)
 MUST_GRACE = 2.5         # ...and drops a segment holding both it and only this much of the clip's own talk
 MIN_AFTER = 8.0           # ...but not before this long after its last shot's swing shows (the ball comes to rest)
-REST_TAIL = 2.0           # ...or, where a gimme was logged (as the ball stopped), this long after that shows
-REST_SECONDS = 15.0       # ...a gimme this soon after the shot, before the next swing
+REST_TAIL = 3.0           # ...or, where GSPro's log had the ball stop (rest_ts), or a gimme was logged as it
+REST_SECONDS = 15.0       # did (one this soon after the shot, before the next swing), this long after that shows
+#                          (more than MUST_GRACE: the segment the ball stops in is never dropped)
+REST_MAX = 60.0           # (a rest_ts further after its shot than this is none)
 REACTION_SECONDS = 30.0   # a reaction (logged with no shot) is to the last shot this recently before it
 FLIGHT_SECONDS = 15.0     # ...and a flight line to the one this recently
 CLOSE_FROM_YARDS, CLOSE_FEET = 100.0, 15.0          # the booth's close_approach_* defaults
@@ -65,7 +67,8 @@ NOT_PUTT_COUNTED = ("scramble", "alternate")       # one ball between partners: 
 # A shot's columns an older database may not have (stats_web.connect's views fill in only some).
 DEFAULTS = {"picked": None, "hazard_x": None, "shared_ball": 0, "gimme_yards": None, "mulligan": 0, "left_out": 0,
             "fmt": None, "offline_yards": None, "outcome": None, "finish_yards": None, "total_yards": None,
-            "to_pin_yards": None, "lie_before": None, "lie_after": None, "tags": None, "is_putt": 0, "shot_number": None}
+            "to_pin_yards": None, "lie_before": None, "lie_after": None, "tags": None, "is_putt": 0, "shot_number": None,
+            "rest_ts": None}
 
 
 def _par(label: str | None) -> int | None:
@@ -291,7 +294,7 @@ def _post(post: float, at: dict, last: dict, talk: tuple | None) -> dict:
     """The stretch of stream after `at` (seconds): `post`, or on till the booth's done talking about
     the shots from `at` to `last`; and where the booth logged its lines, `stop` before whatever it says
     next or the next swing, though never before `must` (its own lines' end, or the ball at rest; None:
-    no stop). Where the ball's known to have stopped (a gimme), it's over at `must`."""
+    no stop). Where the ball's known to have stopped (its rest_ts, or a gimme), it's over at `must`."""
     if not talk:
         return {"post": post, "stop": None, "must": 0.0}
     spoken, swings, *more = talk
@@ -303,8 +306,10 @@ def _post(post: float, at: dict, last: dict, talk: tuple | None) -> dict:
     i = bisect.bisect_right(times, hi)
     gimmes = more[0].get(session, []) if more else []
     j = bisect.bisect_right(gimmes, hi)
-    settled = gimmes[j] if j < len(gimmes) and gimmes[j] - hi <= REST_SECONDS and (
-        i == len(times) or gimmes[j] < times[i]) else None
+    settled = last.get("rest_ts")
+    if settled is None or not hi < settled <= hi + REST_MAX:
+        settled = gimmes[j] if j < len(gimmes) and gimmes[j] - hi <= REST_SECONDS and (
+            i == len(times) or gimmes[j] < times[i]) else None
     # (the ball at rest, as logged)
     rest = hi + SHOT_SHOWS + MIN_AFTER - TALK_LAG if settled is None else settled + SHOT_SHOWS + REST_TAIL - TALK_LAG
     must = max(rest, *(d + TALK_TAIL for d in own)) if own else rest
@@ -319,6 +324,8 @@ def _post(post: float, at: dict, last: dict, talk: tuple | None) -> dict:
         end = min(end, max(stop, must))
     # (at most TALK_MAX after the last shot of it: a three-putt's run of putts comes first)
     cap = TALK_MAX + hi - TALK_LAG   # (as logged)
+    if settled is not None:
+        cap = max(cap, rest)   # (never before a long roll's known stop)
     rel = lambda t: round(min(cap, t) + TALK_LAG - at["ts"], 1)
     return {"post": rel(end), "stop": None if stop is None else rel(max(stop, must)), "must": rel(must)}
 
