@@ -253,9 +253,22 @@ def test_a_clip_runs_till_the_booth_is_done_talking_about_it_and_stops_before_wh
     # Not called, only its flight: on past that, but not into the banter after it.
     db.execute("DELETE FROM lines")
     db.executemany("INSERT INTO lines (session_id, shot_id, ts, kind, text) VALUES (?,?,?,?,?)",
-                   [(1, None, 100.0, "flight", words(6)), (1, None, 108.0, "banter", words(40))])
-    assert post(chip) == {"post": heard(108 - H.STOP_MARGIN), "stop": heard(108 - H.STOP_MARGIN),
-                          "must": heard(100 + 6 / H.TALK_WORDS_PER_SECOND + H.TALK_TAIL)}
+                   [(1, None, 100.0, "flight", words(20)), (1, None, 112.0, "banter", words(40))])
+    assert post(chip) == {"post": heard(112 - H.STOP_MARGIN), "stop": heard(112 - H.STOP_MARGIN),
+                          "must": heard(100 + 20 / H.TALK_WORDS_PER_SECOND + H.TALK_TAIL)}
+
+
+def test_a_clip_with_nothing_said_runs_till_the_ball_is_at_rest_and_a_gimme_is_no_next_swing():
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE lines (id INTEGER PRIMARY KEY, session_id, shot_id, ts, kind, text)")   # no booth
+    chip = {**shot("Ann", 1, 3, 100, to_pin=30, finish=1.0), "session_id": 1}
+    gimme = {**shot("Ann", 1, 4, 108.6, putt=True, outcome="gimme"), "session_id": 1}   # as the ball stops
+    nxt = {**shot("Bob", 1, 3, 140), "session_id": 1}
+    got = H._post(H.POST_SHOT, chip, chip, H._talk(db, [chip, gimme, nxt]))
+    assert got == {"post": H.POST_SHOT, "stop": round(40 + H.STREAM_LAG - H.STOP_MARGIN, 1),
+                   "must": H.SHOT_SHOWS + H.MIN_AFTER}
+    nxt["ts"] = 103   # a next swing that soon still can't cut it before the ball's at rest
+    assert H._post(H.POST_SHOT, chip, chip, H._talk(db, [chip, nxt]))["post"] == H.SHOT_SHOWS + H.MIN_AFTER
 
 
 def test_the_booths_logged_air_times_place_its_lines_and_one_never_aired_is_skipped():

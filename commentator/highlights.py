@@ -44,7 +44,7 @@ TALK_WORDS_PER_SECOND, TALK_GAP, TALK_TAIL, TALK_LAG, TALK_MAX = 2.7, 0.6, 1.5, 
 STREAM_LAG = 4.5          # where the booth logged when a line played (aired_at): heard this much later
 STOP_MARGIN = 2.0         # a clip ends this far ahead of the next thing said (a line's start can be early)
 MUST_GRACE = 2.5         # ...and drops a segment holding both it and only this much of the clip's own talk
-MIN_AFTER = 8.0           # ...but not before this long after its last shot (the ball comes to rest)
+MIN_AFTER = 8.0           # ...but not before this long after its last shot's swing shows (the ball comes to rest)
 REACTION_SECONDS = 30.0   # a reaction (logged with no shot) is to the last shot this recently before it
 FLIGHT_SECONDS = 15.0     # ...and a flight line to the one this recently
 CLOSE_FROM_YARDS, CLOSE_FEET = 100.0, 15.0          # the booth's close_approach_* defaults
@@ -249,7 +249,8 @@ def _talk(db: sqlite3.Connection, shots: list[dict]) -> tuple:
     shift = STREAM_LAG - TALK_LAG   # (an aired time, as the logged time it's heard the same as)
     times: dict[int, list[float]] = {}
     for s in shots:
-        times.setdefault(s["session_id"], []).append(s["ts"])
+        if s.get("outcome") != "gimme":   # (never struck: logged as the ball before it comes to rest)
+            times.setdefault(s["session_id"], []).append(s["ts"])
     ts_of = {s["id"]: s["ts"] for s in shots}
     batches: dict[tuple[int, float], list] = {}   # an exchange's lines share the time they're logged
     for session, shot_id, ts, kind, text, aired_at, aired_seconds in rows:
@@ -294,7 +295,8 @@ def _post(post: float, at: dict, last: dict, talk: tuple | None) -> dict:
     lo, hi = at["ts"], last["ts"]
     end = at["ts"] + post - TALK_LAG   # (when what's heard at the cut was logged)
     own = [done for _, done, about in spoken.get(session, []) if about is not None and lo <= about <= hi]
-    must = max(hi + MIN_AFTER - TALK_LAG, *(d + TALK_TAIL for d in own)) if own else hi + MIN_AFTER - TALK_LAG
+    rest = hi + SHOT_SHOWS + MIN_AFTER - TALK_LAG   # (the ball at rest, as logged)
+    must = max(rest, *(d + TALK_TAIL for d in own)) if own else rest
     end = max(end, must)
     times = swings.get(session, [])
     i = bisect.bisect_right(times, hi)
