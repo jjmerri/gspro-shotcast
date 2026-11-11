@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.118
+
+### Booth
+- Saving a change to the stats page's settings (its name, colours, season start or where it goes) republishes the stats page about a minute later, with a notice, instead of waiting for the next round.
+
 ## 0.1.117
 
 ### Booth

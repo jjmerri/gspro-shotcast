@@ -474,7 +474,7 @@ keep Shotcast's own. **Background** is the page, **Panels** the header, cards an
 tab, links, buttons and chart lines, and **Highlight** a selected or hovered row, the selected tab
 and an opened shot (empty: mixed from the others). They're applied at every publish, and on the
 page on this PC, so they last through publishes and updates; the shareable round image uses them
-too.
+too. Saving them (or any of the page's other settings) republishes the page about a minute later.
 
 ```yaml
 publish:
