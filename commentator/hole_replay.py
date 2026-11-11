@@ -496,6 +496,23 @@ def _team_ends(played: list[sqlite3.Row], starts: dict[int, tuple | None], rows:
             continue
         nxt = [o for o in shared if o["shot_number"] == r["shot_number"] + 1 and o["player"] in names
                and o["start_x"] is not None]
+        mates = [o for o in shared if root(o["player"]) == root(r["player"])]   # the team, not just this group
+        later = sorted((o for o in mates if o["shot_number"] > r["shot_number"] + 1), key=lambda o: o["shot_number"])
+        wet = [o for o in group if o["hazard_x"] is not None and o["hazard_z"] is not None]
+        skipped = not any(o["shot_number"] == r["shot_number"] + 1 for o in mates)
+        if skipped and later and wet:
+            # Into a penalty area: the team's next stroke, after the penalty, is from the drop, so the
+            # picked ball runs to where it went in: the log's pick, else the wet ball nearest the drop.
+            if logged is not None:
+                pick = next((o for o in wet if o["id"] == logged["id"]), None)
+            else:
+                drop = next((_xz(o["start_x"], o["start_z"]) for o in later if o["start_x"] is not None), None)
+                pick = (wet[0] if len(wet) == 1 else min(wet, key=lambda o: math.dist(
+                    (o["hazard_x"], o["hazard_z"]), drop)) if drop else None)
+            if pick is not None and (logged is not None or pick["picked"] is None):
+                ends[pick["id"]] = (pick["hazard_x"], pick["hazard_z"])
+                used.add(pick["id"])
+            continue
         if nxt:
             to, lie = (nxt[0]["start_x"], nxt[0]["start_z"]), nxt[0]["lie_before"]
         elif pin and names & finished and r["shot_number"] == last:

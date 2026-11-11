@@ -338,6 +338,41 @@ def test_scramble_teams_sharing_a_tee_are_drawn_apart_and_a_penalty_gap_is_not_r
     assert players["Ivy"][0]["to"] == [-20.0, 240.0] and players["Hal"][0]["to"] is None
 
 
+def test_a_scramble_ball_picked_into_a_penalty_area_runs_to_where_it_went_in(tmp_path):
+    # Kiawah 12th, 11-11: both approaches went into the penalty area, Dan's was picked, and the team
+    # played stroke 4 from its drop. His approach runs to where it went in, and the counts still add up.
+    _, st = _season(tmp_path)
+    st.db.execute("DELETE FROM shots")
+    for who, n, ts, x, z, hx, hz, picked, outcome in (
+            ("Dan", 1, 1001.0, None, None, None, None, 0, None), ("Derek", 1, 1001.5, None, None, None, None, 1, None),
+            ("Dan", 2, 1002.0, 0.0, 180.0, 4.0, 290.0, 1, None), ("Derek", 2, 1002.5, 0.0, 180.0, 30.0, 280.0, 0, None),
+            ("Dan", 4, 1004.0, 5.0, 289.0, None, None, 0, None), ("Derek", 4, 1004.5, 5.0, 289.0, None, None, 1, "holed")):
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, to_pin_yards,"
+                      " shared_ball, fmt, start_x, start_z, hazard_x, hazard_z, picked, outcome, raw) VALUES (?, ?, ?,"
+                      " 'Test Links', 'Hole 1, par 4, 328 yards', ?, '7I', 0, 100, 1, 'scramble', ?, ?, ?, ?, ?, ?, '{}')",
+                      (st.session_id, ts, who, n, x, z, hx, hz, picked, outcome))
+    st.db.commit()
+    st.record_hole_layout("Test Links", [{"par": 4, "played": True, "tee": (0.0, 2.0, 0.0), "pin": (0.0, 1.0, 300.0)}],
+                          session_id=st.session_id, ts=1500.0)
+    players = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}
+    assert [(s["to"], s.get("penalty")) for s in players["Dan"]["shots"]] == [
+        (None, None), ([4.0, 290.0], True), (None, None)]
+    assert players["Derek"]["shots"][1]["to"] is None
+    got = [(players[n]["used"], players[n]["used_gimmes"], players[n]["used_pens"]) for n in ("Dan", "Derek")]
+    assert got == [(1, 0, 1), (2, 0, 0)] and sum(map(sum, got)) == 4
+    # With no pick logged, the wet ball whose entry point is nearest the drop is the one played on.
+    st.db.execute("UPDATE shots SET picked = NULL WHERE shot_number = 2")
+    st.db.commit()
+    players = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}
+    assert players["Dan"]["shots"][1]["to"] == [4.0, 290.0] and players["Derek"]["shots"][1]["to"] is None
+    # A partner's stroke 3 on record (his stroke 2 uncaptured): no stroke was skipped, so no penalty.
+    st.db.execute("UPDATE shots SET shot_number = 3, start_x = 5.0, start_z = 289.0, hazard_x = NULL, hazard_z = NULL"
+                  " WHERE player = 'Derek' AND shot_number = 2")
+    st.db.commit()
+    dan = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}["Dan"]
+    assert not dan["shots"][1].get("penalty")
+
+
 def test_a_full_shot_bows_against_its_curve_and_a_putt_is_straight(tmp_path):
     path, st = _season(tmp_path)
     log = tmp_path / "output_log.txt"

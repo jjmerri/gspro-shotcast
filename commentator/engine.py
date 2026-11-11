@@ -5727,7 +5727,8 @@ class Engine:
                        #                                            slow read, so a putt-miss shows the
                        #                                            instant the next state line advances it
                        dict(gs.dropped_by),   # scramble balls not picked, to leave their finish alone
-                       gs.added_count)        # penalties the booth had added by then
+                       gs.added_count,        # penalties the booth had added by then
+                       (gs.pick, gs.pick_stroke()))   # the scramble's pick: the team ball being played
         fires0 = gs.fires   # GSPro's shot counter at impact, to find this shot's putting/regular mode
         setups0 = dict(gs.setups_by)   # each player's setups so far: the next one settles this shot
         lies0 = dict(gs.lie_by)   # each ball's logged surface going into this shot
@@ -5968,6 +5969,8 @@ class Engine:
         self._count_added_penalty(before, player, tag)
         if use_screen and before.shot_number is None:
             self._number_from_log(before, player, impact_snap, tag)
+        if use_screen:
+            self._misread_shot_one(before, player, impact_snap, lies0, shot_hole, tag)
         # GSPro's own club box beats guessing the club from loft.
         before.club = deck_club(before.club, before.shot_number, before.lie)
         if before.club:
@@ -7066,6 +7069,32 @@ class Engine:
             return
         log.info("%s shot %s from GSPro's log (unread on screen)", tag, n)
         before.shot_number = n
+
+    def _misread_shot_one(self, before: Hud, player: str | None, impact_snap: tuple, lies0: dict,
+                          hole_label: str | None, tag: str = "") -> None:
+        """An impact read of "shot 1" away from the tee, where GSPro's log (as it stood at impact) has
+        the player further on this hole: the strip's boxed digit misread (Dan's third at Sand Valley's
+        2nd, a lob wedge from 19.6 yards, read "1", then recorded off the tee and called "for eagle").
+        The log's count wins; in a scramble, the stroke after the team's picked ball."""
+        if before.shot_number != 1 or self._at_tee_length(before, hole_label) is not False:
+            return
+        idx = self._gspro_idx(player)
+        if (not self._log_truth or idx is None or self.hole_number is None
+                or (hole := impact_snap[1].get(idx)) is None or hole + 1 != self.hole_number):
+            return
+        r = self.round
+        if r and r.format == "scramble" and not r.no_scramble:
+            pick, stroke = impact_snap[9] if len(impact_snap) > 9 else (None, None)
+            ours = pick and (pick[0] == idx or frozenset((pick[0], idx)) in self.gspro.teammates)   # not a rival team's
+            n = (stroke or 0) + 1 if ours and pick[1] == hole else 0
+        else:
+            n = impact_snap[6].get(idx) or 0
+        if n <= 1:
+            return
+        log.info("%s shot %s, not the HUD's 1: %s from the pin isn't the tee", tag, n, before.to_pin)
+        before.shot_number = n
+        if (before.lie or "").lower() == "tee":
+            before.lie = MATERIAL_TO_LIE.get(lies0.get(idx)) or before.lie
 
     def _use_setup_lie(self, before: Hud, tag: str = "") -> None:
         """The lie this stroke's setup read, while the player stood over the ball, over the impact

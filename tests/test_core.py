@@ -5236,6 +5236,49 @@ def test_a_shot_with_no_number_on_screen_takes_the_stroke_gspro_logged_at_impact
     assert team.shot_number is None
 
 
+def test_an_impact_read_of_shot_1_away_from_the_tee_takes_the_stroke_gspro_logged(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    # Sand Valley 2nd, 11-11: Dan's third, a lob wedge from 19.6 yards, read "1" off the HUD's strip and
+    # was recorded off the tee (a phantom penalty on the card) and called "for eagle".
+    e = _mini_engine(tmp_path)
+    e.cfg.source.gspro_log_truth = True
+    monkeypatch.setattr(e, "_gspro_idx", lambda player: 0)
+    e.gspro.lie_by[0] = "green"   # live: the log has moved on to where this shot finished
+    lies0 = {0: "fairway"}
+    snap = (None, {0: 1}) + (None,) * 4 + ({0: 3},) + (None, 0, (None, None))
+    e.hole_number = 2
+    label = "Hole 2, par 4, 361 yards"
+    hud = Hud(shot_number=1, to_pin="19.6 yards", lie="tee")
+    e._misread_shot_one(hud, "Dan", snap, lies0, label)
+    assert (hud.shot_number, hud.lie) == (3, "fairway")
+    # A real tee shot (the hole's length) stands, and so does one whose distance wasn't read.
+    for to_pin in ("358.0 yards", None):
+        tee = Hud(shot_number=1, to_pin=to_pin, lie="tee")
+        e._misread_shot_one(tee, "Dan", snap, lies0, label)
+        assert tee.shot_number == 1
+    # At the next tee the log still counts the hole before: no count to take.
+    e.hole_number = 3
+    gone = Hud(shot_number=1, to_pin="19.6 yards")
+    e._misread_shot_one(gone, "Dan", snap, lies0, "Hole 3, par 3, 150 yards")
+    assert gone.shot_number == 1
+    # A scramble counts from the team's pick as it stood at impact, not the live one (which can have
+    # moved on to the next pick by the time the impact is read).
+    e.hole_number = 2
+    e.round = SimpleNamespace(format="scramble", no_scramble=False)
+    e.gspro.pick, e.gspro._pick_stroke = (1, 1), 3
+    e.gspro.teammates.add(frozenset((0, 1)))
+    team = Hud(shot_number=1, to_pin="26.4 yards", lie="tee")
+    e._misread_shot_one(team, "Dan", snap[:9] + (((1, 1), 2),), lies0, label)
+    assert (team.shot_number, team.lie) == (3, "fairway")
+    rival = Hud(shot_number=1, to_pin="26.4 yards")   # the last pick was another team's
+    e._misread_shot_one(rival, "Dan", snap[:9] + (((2, 1), 4),), lies0, label)
+    assert rival.shot_number == 1
+    unpicked = Hud(shot_number=1, to_pin="26.4 yards")   # no pick on this hole at impact
+    e._misread_shot_one(unpicked, "Dan", snap, lies0, label)
+    assert unpicked.shot_number == 1
+
+
 def test_the_hud_buffer_reads_the_newest_address_frame_that_shows_the_player_box(monkeypatch):
     from PIL import Image
 
