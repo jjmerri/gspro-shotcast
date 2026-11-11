@@ -465,6 +465,28 @@ signed in for a different number of days. To take it all down, empty
 the bucket (`aws s3 rm s3://<BucketName> --recursive`), delete the upload user's access key, and
 `aws cloudformation delete-stack --stack-name shotcast-stats`.
 
+### Theme
+
+The page's colours can match your league's own site (say, one it's embedded in): Settings → Sharing →
+Stats page colours, or `publish.theme` in config.yaml. Each is hex, like `#3B7C5E`; any left empty
+keep Shotcast's own. **Background** is the page, **Panels** the header, cards and tables,
+**Borders** the lines between them, **Text** and **Muted text** (labels), **Accent** the selected
+tab, links, buttons and chart lines, and **Highlight** a selected or hovered row, the selected tab
+and an opened shot (empty: mixed from the others). They're applied at every publish, and on the
+page on this PC, so they last through publishes and updates; the shareable round image uses them
+too.
+
+```yaml
+publish:
+  theme:
+    background: "#3B7C5E"
+    panel: "#326D53"
+    border: "#75A68C"
+    muted: "#DCECE3"
+    accent: "#FFD21F"
+    highlight: "#285941"
+```
+
 ### Live stream
 
 The published page's **Live** tab can show the GSPro screen and sound (the booth's voices too)

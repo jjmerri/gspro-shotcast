@@ -267,6 +267,14 @@ publish:
   # site_name: Shotcast                  # the page's title and header
   # more_tab: More                       # the tab for Schedule, Broadcasts and Booth
   # season_start: "10-01"                # the league's season starts each Oct 1: Records gets This season
+  # theme:                               # the page's colours, as hex; any left out keep Shotcast's own
+  #   background: "#3B7C5E"
+  #   panel: "#326D53"                   # the header, cards and tables
+  #   border: "#75A68C"
+  #   text: "#E6EFE9"
+  #   muted: "#DCECE3"                   # labels and secondary text
+  #   accent: "#FFD21F"                  # the selected tab, links, buttons and chart lines
+  #   highlight: "#285941"               # a selected or hovered row; empty: mixed from the others
 
 # "Create a problem report" in the tray can send its zip to whoever supports Shotcast and give you
 # a code to pass on. Set upload_url to "" to only save it (DEPLOY.md#problem-report-drop).

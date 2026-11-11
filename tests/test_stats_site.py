@@ -202,7 +202,7 @@ async def test_the_publish_after_a_round_uses_the_season_start(tmp_path, monkeyp
     await eng._publish()
     assert ran[0][1:3] == ("-m", "commentator.stats_site")
     got = {}
-    monkeypatch.setattr(stats_site, "publish", lambda *a: got.setdefault("args", a) and "v1")
+    monkeypatch.setattr(stats_site, "publish", lambda *a, **k: got.setdefault("args", a) and "v1")
     stats_site.main(list(ran[0][3:]))
     assert got["args"][-1] == "10-01"
 
@@ -290,6 +290,54 @@ def test_a_season_start_is_a_month_and_day():
     for bad in ("13-01", "04-31", "October", "2026-10-01"):
         with pytest.raises(ValueError):
             PublishConfig(season_start=bad)
+
+
+def test_a_theme_colours_the_page_and_without_one_it_is_as_shipped(tmp_path, monkeypatch):
+    import re
+    from types import SimpleNamespace
+
+    from commentator.config import PublishConfig
+
+    shipped = stats_site.PAGE.read_text(encoding="utf-8")
+    assert stats_site.page() == stats_site.page(theme={}) and 'id="theme"' not in stats_site.page()
+    assert stats_site.page().replace("<title>Shotcast</title>", "") == shipped.replace("<title>Shotcast</title>", "")
+    # The page's own shades are all variables, so a theme reaches every one of them.
+    root = shipped[shipped.index(":root {"):shipped.index("}", shipped.index(":root {"))]
+    for shade in re.findall(r"--[a-z]+:(#[0-9a-f]{6})", root):
+        uses = shipped.count(shade) - root.count(shade)
+        assert uses == {"#0f1715": 2, "#e6efe9": 2, "#8fa59b": 1, "#5fc58a": 2}.get(shade, 0), shade
+
+    p = PublishConfig(theme={"background": "3B7C5E", "accent": "#FFD21F", "highlight": "#285941", "text": " "})
+    theme = p.theme.colors()
+    assert theme == {"background": "#3b7c5e", "accent": "#ffd21f", "highlight": "#285941"}
+    assert p.brand["theme"] == theme and PublishConfig().brand["theme"] == {}
+    html = stats_site.page(theme=theme)
+    css = html[html.index('<style id="theme">'):html.index("</head>")]
+    assert html.index('<style id="theme">') > html.index("</style>")   # after the page's own, so it wins
+    assert "--bg:#3b7c5e;" in css and "--accent:#ffd21f;" in css and "--hover:#285941;" in css
+    assert "--text" not in css.split("--raised")[0]   # unset: Shotcast's own
+    assert '<meta name="theme-color" content="#3b7c5e">' in html
+    assert json.loads(stats_site.manifest(theme=theme))["theme_color"] == "#3b7c5e"
+    # Without a highlight its shades are mixed here, as plain colours any browser takes.
+    mixed = stats_site.theme_css({"background": "#ffffff", "text": "#111111", "accent": "#123456"})
+    assert "--raised:#e3e7eb;" in mixed and "color-mix" not in mixed
+    assert "--scrim:rgba(255, 255, 255, .92);" in mixed and "--on-accent:#fff;" in mixed and "--glow:#5fc58a;" in mixed   # a dark accent
+    assert "--on-accent:#000;" in css
+    for bad in ("green", "#12345", "#123456; } body { x"):
+        with pytest.raises(ValueError):
+            PublishConfig(theme={"accent": bad})
+    with pytest.raises(ValueError):
+        stats_site.page(theme={"accent": "red;}"})
+
+    # The booth's publish carries it to the page it uploads.
+    cfg = SimpleNamespace(publish=p.model_copy(update={"bucket": "b"}), personas={}, db_path="s.db", log_dir=str(tmp_path))
+    cmd = stats_site.publish_command(cfg)
+    assert json.loads(cmd[cmd.index("--theme") + 1]) == theme
+    assert "--theme" not in stats_site.publish_command(SimpleNamespace(**{**vars(cfg), "publish": PublishConfig(bucket="b")}))
+    seen = {}
+    monkeypatch.setattr(stats_site, "publish", lambda *a, theme=None: seen.setdefault("theme", theme) and "v1")
+    stats_site.main(cmd[3:])
+    assert seen["theme"] == theme
 
 
 def test_one_publish_at_a_time_holds_the_sites_lock(tmp_path):

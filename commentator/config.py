@@ -709,6 +709,33 @@ class PuttReadConfig(BaseModel):
     slope_px: float = 0.7
 
 
+class ThemeConfig(BaseModel):
+    # The stats page's colours (docs/tracking.md#theme), as hex like "#3B7C5E"; empty: Shotcast's own.
+    # Set by publish, so they last through publishes and updates. The shades it doesn't set (selected
+    # rows, charts' backgrounds) are mixed from these, or are `highlight` if set.
+    background: str | None = None   # the page
+    panel: str | None = None         # the header, cards and tables
+    border: str | None = None        # lines between them
+    text: str | None = None
+    muted: str | None = None         # labels and secondary text
+    accent: str | None = None        # the selected tab, links, buttons and chart lines
+    highlight: str | None = None     # a selected or hovered row, the selected tab, an opened shot
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _hex(cls, v: Any) -> str | None:
+        if v is None or not str(v).strip():
+            return None
+        m = re.fullmatch(r"#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})", str(v).strip())
+        if not m:
+            raise ValueError(f"a theme colour should be hex like #3B7C5E, not {v!r}")
+        return "#" + m.group(1).lower()
+
+    def colors(self) -> dict[str, str]:
+        """The colours that are set, by name."""
+        return {k: v for k, v in self.model_dump().items() if v}
+
+
 class PublishConfig(BaseModel):
     # Put the stats page online (docs/tracking.md#sharing-the-stats-page): `publish` builds the static
     # site and uploads it to this S3 bucket, served through CloudFront with the league password. The
@@ -731,6 +758,8 @@ class PublishConfig(BaseModel):
     # The day the league's season starts each year (MM-DD, like "10-01"): the page's records get a
     # This season range, from the latest such day. Empty: the ranges only go back months.
     season_start: str | None = None
+    # The page's colours, to match a league's own site (the page embedded in it, say).
+    theme: ThemeConfig = Field(default_factory=ThemeConfig)
 
     @field_validator("season_start", mode="before")
     @classmethod
@@ -744,9 +773,10 @@ class PublishConfig(BaseModel):
         return f"{month:02d}-{day:02d}"
 
     @property
-    def brand(self) -> dict[str, str | None]:
-        """build()'s options for the page: its name, last tab's name and season start."""
-        return {"site_name": self.site_name, "more_tab": self.more_tab, "season_start": self.season_start}
+    def brand(self) -> dict[str, Any]:
+        """build()'s options for the page: its name, last tab's name, season start and colours."""
+        return {"site_name": self.site_name, "more_tab": self.more_tab, "season_start": self.season_start,
+                "theme": self.theme.colors()}
 
 
 class LiveConfig(BaseModel):

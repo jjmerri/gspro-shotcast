@@ -58,6 +58,7 @@ FIELDS: dict[str, Owner] = {
     "publish.site_name": "web",
     "publish.more_tab": "web",
     "publish.season_start": "web",
+    "publish.theme": "web",
     "publish.recaps": "web",
     "live.enabled": "web",
     "live.with_rounds": "web",
