@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.117
+
+### Booth
+- The stats page's colours can be set in Settings, under Sharing, to match your league's own site; they stay through every publish and update.
+
 ## 0.1.116
 
 ### Stats page

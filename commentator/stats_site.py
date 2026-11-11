@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import shutil
 import sqlite3
@@ -144,38 +145,89 @@ def _note_records(out: dict[int, dict], by_period: dict[str, dict]) -> None:
             out[shot["id"]] = shot
 
 
-def page(site_name: str = SITE_NAME, more_tab: str = MORE_TAB) -> str:
-    """The page, with the site's name (title and header) and its last section's tab name."""
+# publish.theme's names for the page's CSS colours, and the page's own values for them.
+THEME_VARS = {"background": "--bg", "panel": "--panel", "border": "--line", "text": "--text", "muted": "--dim",
+              "accent": "--accent"}
+SHIPPED = {"--bg": "#0f1715", "--panel": "#16211e", "--line": "#24332f", "--text": "#e6efe9", "--dim": "#8fa59b",
+           "--accent": "#5fc58a"}
+# The page's other shades, mixed from those: (colour, share of it, over this one).
+MIXED = {"--raised": ("--accent", 0.12, "--bg"), "--hover": ("--text", 0.07, "--bg"), "--deep": ("#000000", 0.25, "--bg"),
+         "--plot": ("--panel", 0.5, "--bg"), "--track": ("--accent", 0.25, "--panel"), "--soft": ("--text", 0.75, "--dim")}
+HEX = re.compile(r"#(?:[0-9a-f]{3}|[0-9a-f]{6})")
+
+
+def _rgb(colour: str) -> tuple[int, int, int]:
+    h = colour.lstrip("#")
+    h = "".join(c * 2 for c in h) if len(h) == 3 else h
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _mix(a: str, share: float, b: str) -> str:
+    return "#" + "".join(f"{round(x * share + y * (1 - share)):02x}" for x, y in zip(_rgb(a), _rgb(b)))
+
+
+def theme_css(theme: dict[str, str]) -> str:
+    """publish.theme (ThemeConfig.colors()) as CSS variables over the page's own; empty without one.
+    Every value is a plain colour worked out here, so any browser (and the share image's canvas) takes it."""
+    theme = {k: v for k, v in (theme or {}).items() if k in THEME_VARS or k == "highlight"}
+    if not theme:
+        return ""
+    for v in theme.values():   # only ever a colour in the page's <style>
+        if not HEX.fullmatch(v):
+            raise ValueError(f"not a theme colour: {v!r}")
+    base = {**SHIPPED, **{THEME_VARS[k]: v for k, v in theme.items() if k in THEME_VARS}}
+    css = {THEME_VARS[k]: v for k, v in theme.items() if k in THEME_VARS}
+    css.update({name: _mix(base.get(a, a), share, base[b]) for name, (a, share, b) in MIXED.items()})
+    if "highlight" in theme:
+        css.update({"--raised": theme["highlight"], "--hover": theme["highlight"], "--deep": theme["highlight"]})
+    css["--scrim"] = "rgba({}, {}, {}, .92)".format(*_rgb(base["--bg"]))   # a recap over the video
+    r, g, b = (c / 255 for c in _rgb(base["--accent"]))
+    light = 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.4
+    css["--on-accent"] = "#000" if light else "#fff"   # text on accent
+    css["--glow"] = base["--accent"] if light else SHIPPED["--accent"]   # accent on the dark video overlays
+    return ":root { " + " ".join(f"{k}:{v};" for k, v in css.items()) + " }"
+
+
+def page(site_name: str = SITE_NAME, more_tab: str = MORE_TAB, theme: dict[str, str] | None = None) -> str:
+    """The page, with the site's name (title and header), its last section's tab name and its colours
+    (publish.theme). Without a theme, the page exactly as it ships."""
     html = PAGE.read_text(encoding="utf-8")
-    for old, new in (("<title>Shotcast</title>", f"<title>{escape(site_name)}</title>"),
-                     ('<span id="sitename">Shotcast</span>', f'<span id="sitename">{escape(site_name)}</span>'),
-                     ('<meta name="more-tab" content="More">', f'<meta name="more-tab" content="{escape(more_tab)}">')):
+    swaps = [("<title>Shotcast</title>", f"<title>{escape(site_name)}</title>"),
+             ('<span id="sitename">Shotcast</span>', f'<span id="sitename">{escape(site_name)}</span>'),
+             ('<meta name="more-tab" content="More">', f'<meta name="more-tab" content="{escape(more_tab)}">')]
+    if css := theme_css(theme or {}):
+        swaps += [('<meta name="theme-color" content="#0f1715">',
+                   f'<meta name="theme-color" content="{(theme or {}).get("background", "#0f1715")}">'),
+                  ("</style>\n</head>", f"</style>\n<style id=\"theme\">\n  {css}\n</style>\n</head>")]
+    for old, new in swaps:
         assert html.count(old) == 1, old
         html = html.replace(old, new)
     return html
 
 
-def manifest(site_name: str = SITE_NAME) -> str:
+def manifest(site_name: str = SITE_NAME, theme: dict[str, str] | None = None) -> str:
     """The home-screen app's manifest: the page, standalone, with the logo."""
     icons = [{"src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
              {"src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
              {"src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}]
+    bg = (theme or {}).get("background") or "#0f1715"
     return json.dumps({"name": site_name, "short_name": site_name, "start_url": "./", "scope": "./",
-                       "display": "standalone", "background_color": "#0f1715", "theme_color": "#0f1715",
+                       "display": "standalone", "background_color": bg, "theme_color": bg,
                        "icons": icons}, indent=1)
 
 
 def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = None,
           records: dict[int, dict] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB,
           local: bool = False, season_start: str | None = None, reels: dict[int, dict] | None = None,
-          news: bool = True) -> str:
+          news: bool = True, theme: dict[str, str] | None = None) -> str:
     """Build (or refresh) the site in `site` from the season database; returns the new version. With
     `records`, it's filled with every shot holding a record (id -> the record), for record_clips; with
     `reels`, with every round's highlight moments (round -> its reel), for highlights.sync.
     `site_name` and `more_tab` are publish.site_name and publish.more_tab. `local`: for the page served
     on the PC (stats_web.make_server), which also lists the rounds excluded from the stats.
     `season_start`: publish.season_start (MM-DD), for the records' This season range. `news`: False
-    leaves out the page's What's new card (the demo, whose visitors aren't following the releases)."""
+    leaves out the page's What's new card (the demo, whose visitors aren't following the releases).
+    `theme`: publish.theme's colours (ThemeConfig.colors())."""
     records = {} if records is None else records
     db_path, site = Path(db_path), Path(site)
     version = new_version()
@@ -200,8 +252,8 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
         build_data_db(src, vdir / "stats.db", names)
         if reels is not None:
             reels.update(highlights.rounds(src))
-    (site / "index.html").write_text(page(site_name, more_tab), encoding="utf-8")
-    (site / "manifest.webmanifest").write_text(manifest(site_name), encoding="utf-8")
+    (site / "index.html").write_text(page(site_name, more_tab, theme), encoding="utf-8")
+    (site / "manifest.webmanifest").write_text(manifest(site_name, theme), encoding="utf-8")
     shutil.copytree(APP, site, dirs_exist_ok=True)
     for lib in VENDOR.iterdir():
         if lib.is_dir():
@@ -269,14 +321,14 @@ def _list(client: Any, bucket: str, prefix: str) -> set[str]:
 
 def publish(db_path: str | Path, site: str | Path, bucket: str, prefix: str = "", region: str | None = None,
             names: dict[str, str] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB,
-            season_start: str | None = None) -> str:
+            season_start: str | None = None, theme: dict[str, str] | None = None) -> str:
     """Build the site from the database and upload it, then keep the record shots' clips and the
     rounds' highlight reels up to date (record_clips.py, highlights.py). Returns the published version."""
     from . import backend
 
     records: dict[int, dict] = {}
     reels: dict[int, dict] = {}
-    build(db_path, site, names, records, site_name, more_tab, season_start=season_start, reels=reels)
+    build(db_path, site, names, records, site_name, more_tab, season_start=season_start, reels=reels, theme=theme)
     client = backend.s3(region)
     version = upload(site, bucket, prefix, client)
     try:
@@ -310,7 +362,8 @@ def publish_command(cfg: Any) -> list[str] | None:
             "--site", str(site_dir(cfg)), "--bucket", p.bucket, "--prefix", p.prefix,
             "--names", json.dumps(names), "--site-name", p.site_name, "--more-tab", p.more_tab] \
         + (["--region", p.region] if p.region else []) \
-        + (["--season-start", p.season_start] if p.season_start else [])
+        + (["--season-start", p.season_start] if p.season_start else []) \
+        + (["--theme", json.dumps(theme)] if (theme := p.theme.colors()) else [])
 
 
 @contextmanager
@@ -357,10 +410,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--site-name", default=SITE_NAME)
     p.add_argument("--more-tab", default=MORE_TAB)
     p.add_argument("--season-start", help="the league's season start, MM-DD")
+    p.add_argument("--theme", default="{}", help="publish.theme's colours, as JSON")
     a = p.parse_args(argv)
     with site_lock(a.site):
         version = publish(a.db, a.site, a.bucket, a.prefix, a.region, json.loads(a.names), a.site_name,
-                          a.more_tab, a.season_start)
+                          a.more_tab, a.season_start, theme=json.loads(a.theme))
     print(f"Published {version} to s3://{a.bucket}/{a.prefix}")
 
 
