@@ -418,9 +418,10 @@ class AutoPublisher:
         self.publishing = False
         self.last: dict | None = None        # {"ok", "at", "message"}
 
-    def changed(self) -> None:
+    def changed(self) -> bool:
+        """Publish in `delay` (an earlier wait starts over). False when publishing is off."""
         if self._command() is None:
-            return
+            return False
         with self._lock:
             if self._timer is not None:
                 self._timer.cancel()
@@ -428,6 +429,7 @@ class AutoPublisher:
             self._timer = threading.Timer(self.delay, self._fire)
             self._timer.daemon = True
             self._timer.start()
+        return True
 
     def status(self) -> dict:
         with self._lock:
@@ -540,6 +542,15 @@ class Tray:
         except Exception:
             log.exception("Reloading config.yaml failed")
         self._refresh()
+
+    def republish_for(self, keys) -> bool:
+        """After Settings saved `keys` (config paths): a change under publish (the page's name, colours,
+        season, where it goes) republishes the stats page shortly, as an edit on the local page does,
+        and says so. True when it will."""
+        if not any(k and k[0] == "publish" for k in keys) or not self.publisher.changed():
+            return False
+        self.notify("Your stats page republishes with the new settings in about a minute.")
+        return True
 
     # -- actions
     def open_stats(self, *_) -> None:

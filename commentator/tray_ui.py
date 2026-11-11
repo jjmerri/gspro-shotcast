@@ -889,6 +889,7 @@ class SettingsWindow:
         log.info("Settings saved: %s", ", ".join([".".join(k) for k in config_changes] + list(env_changes)
                                                   + (["GSPro folder"] if gspro else [])))
         self.tray.settings_saved()
+        self.tray.republish_for(config_changes)
         self.close()
         if self.tray.booth.state in ("stopped", "crashed"):
             return   # it reads them when it next starts

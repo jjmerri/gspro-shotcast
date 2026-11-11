@@ -393,8 +393,26 @@ def test_a_run_of_edits_on_the_local_page_publishes_once_after_the_last(tmp_path
     assert status["last"]["ok"] and status["last"]["message"] == "Published v1 to s3://b/"
 
     off = tray.AutoPublisher(lambda: None, tmp_path, delay=0.01, run=run)
-    off.changed()   # publishing isn't set up: nothing waits
+    assert not off.changed()   # publishing isn't set up: nothing waits
     assert not off.status()["enabled"] and off.status()["due"] is None
+
+
+def test_saving_the_stats_pages_settings_republishes_it_and_says_so():
+    from types import SimpleNamespace
+
+    def app(on):
+        a = SimpleNamespace(scheduled=[], notices=[])
+        a.publisher = SimpleNamespace(changed=lambda: a.scheduled.append(1) or on)
+        a.notify = a.notices.append
+        return a
+
+    a = app(True)
+    assert tray.Tray.republish_for(a, {("publish", "theme", "accent"): "#ffd21f", ("tts", "enabled"): True})
+    assert a.scheduled == [1] and "republishes" in a.notices[0]
+    a = app(True)
+    assert not tray.Tray.republish_for(a, {("live", "enabled"): True}) and not a.scheduled and not a.notices
+    a = app(False)   # publishing is off: nothing to say
+    assert not tray.Tray.republish_for(a, {("publish", "site_name"): "X"}) and a.scheduled == [1] and not a.notices
 
 
 def test_the_booth_restarts_unasked_only_when_its_status_says_between_rounds(tmp_path):
