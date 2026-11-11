@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.120
+
+### Booth
+- Shots are followed to where they stop again, instead of being called from mid-flight ("found the fairway", "missed the green") when the camera passed over sky or sand.
+
 ## 0.1.119
 
 ### Stats page
