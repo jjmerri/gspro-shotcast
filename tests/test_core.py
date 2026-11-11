@@ -2008,6 +2008,15 @@ def test_the_359_shot_box_is_read_as_the_strip_beside_it_says():
     # Past par the strip runs to two digits: "10" left of the box means 11, not 2.
     reads = iter(["1", "11", "11", "11"])
     assert s._strip_shot(img, items[:-2] + [OcrItem("10", 560, 140, 30, 550)]) == 11
+    # Plain strip digits left of the box (past the lie): not the first stroke, whatever the box reads.
+    # Derek's third at Kiawah's 18th, "1 2 [3] 4", OCR'd "１２ 3" with the box alone read "1".
+    mid = items[:-2] + [OcrItem("１２", 520, 140, 30, 500), OcrItem("4", 640, 140, 30, 630)]
+    reads = iter(["1", "1", "", "1"])
+    assert s._strip_shot(img, mid) == 3
+    reads = iter(["1", "1", "", "1"])
+    assert s._strip_shot(img, mid[:-1]) is None   # nothing else to go on: left to GSPro's log
+    reads = iter(["３", "３", "３", "３"])   # a full-width read of the box counts
+    assert s._strip_shot(img, mid[:-1]) == 3
 
 
 def test_putt_elevation_is_spoken_in_inches_and_feet():
@@ -2697,6 +2706,26 @@ def test_a_tee_shot_never_reads_the_last_holes_penalty_from_the_log(tmp_path):
     engine._gspro_idx = lambda player: 0
     assert engine._penalty_facts("Dan", 1) == []
     assert "penalty" in engine._penalty_facts("Dan", 3)[0].lower()   # mid-hole, the log's count stands
+
+
+def test_a_scramble_partners_own_wet_ball_isnt_the_teams_penalty(tmp_path):
+    # Kiawah's 13th: Derek's approach was wet, the team picked Dan's on the green, and "Derek's fourth is
+    # for birdie" aired over stroke 3: the log's count was Derek's own ball, not the one in play.
+    from commentator.hud import Hud
+    from commentator.round import Round
+    from commentator.store import Store
+
+    cfg = Config(log_dir=str(tmp_path))
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, store=Store(str(tmp_path / "s.db")))
+    engine.round = Round(league=engine.league, gspro_players=["Dan", "Derek"], course="X",
+                         scheduled_format="scramble", holes=9)
+    engine.gspro.current_hole, engine.gspro.hole_by[1] = 12, 12
+    engine.gspro._penalties[(1, 12)] = 1
+    engine.gspro._score[(1, 12)] = 3   # strokes taken: his 4th is next
+    engine._gspro_idx = lambda player: 1
+    assert engine._penalty_facts("Derek", 3, Hud(shot_number=3)) == []
+    assert "stroke 4" in engine._penalty_facts("Derek", 4, Hud(shot_number=4))[0]   # the team's own drop
 
 
 def test_a_stale_shot_1_hud_after_a_scramble_pick_takes_the_logs_stroke(tmp_path):
@@ -3832,6 +3861,25 @@ async def test_a_stroke_played_before_its_setup_settled_is_not_a_mulligan(tmp_pa
     await engine._emit_setup(Hud(player_text="Toby 4th (+1) Shot 4 40 YDS", shot_number=4, score_to_par="+1",
                                  to_pin="40.1 yards"))
     assert isinstance(await engine._events.get(), PreShotEvent)
+
+
+async def test_a_take_back_after_the_box_showed_a_partner_is_a_mulligan_and_drops_the_partners_plan(tmp_path):
+    # Kiawah's 10th: Dan re-teed twice with no setup of his read between swings; the box showed Derek, so
+    # Dan's setups were dropped as late reads and Derek's flight call aired over Dan's mulligans.
+    from commentator.flight_pick import FlightPlan
+    from commentator.round import Round
+    engine, _ = _setup_engine(tmp_path)
+    r = engine.round = Round(league=engine.league, gspro_players=["Toby", "Sam"], course="X",
+                             scheduled_format=None, holes=18)
+    engine.state.record_shot(ShotRecord("Toby", Shot(ball_speed=150, club="DR"), "Hole 1",
+                                        Hud(lie="water", to_pin="200 yards"), [], round_id=r.id, hole_seq=r.seq,
+                                        lie_before="rough", shot_number=1, to_pin_before="400 yards"))
+    await engine._emit_setup(Hud(player_text="Sam Shot 1 400 YDS", shot_number=1, to_pin="400 yards"))
+    await (await engine._events.get()).model_task
+    engine.plan = FlightPlan(player="Sam", to_pin="400 yards")
+    await engine._emit_setup(Hud(player_text="Toby Shot 1 400 YDS", shot_number=1, to_pin="400 yards"))
+    assert not engine._events.empty() and isinstance(engine._events.get_nowait(), PreShotEvent)
+    assert engine.plan is None
 
 
 async def test_a_setup_still_showing_a_stroke_that_finished_the_hole_is_dropped(tmp_path):

@@ -819,6 +819,7 @@ class Engine:
         # (who, shot) -> id of that player's swing before it, at its setup: a mulligan replays a stroke
         # that was set up, while one played before its setup settled leaves the HUD showing it a moment.
         self._set_up: dict[tuple, int | None] = {}
+        self._box_since_swing: tuple | None = None   # (swing count, player) of the last setup read
         self._shot_seq = 0
         self._tree_called = 0   # the _shot_seq whose tree hit was called in flight
         # Hazard map and pre-written mid-flight lines from the latest pre-shot look.
@@ -1473,10 +1474,21 @@ class Engine:
         player = self._player(hud.player_text, None)
         self._add_rehit_penalty(hud, player)
         self._count_added_penalty(hud, player)
+        if player and self.plan is not None and self.plan.player and self.plan.player != player:
+            # The box shows someone else now: the plan's flight lines name its player (Derek's call aired
+            # over Dan's mulligan at Kiawah's 10th, 11-11).
+            log.info("Flight plan for %r dropped: the box shows %r", self._display(self.plan.player),
+                     self._display(player))
+            self.plan = None
+        box_before, self._box_since_swing = self._box_since_swing, (self._shot_seq, player)
         if player and hud.shot_number:
             swings = [x for x in self.state.shots if x.player == player]
             stroke = (player, hud.shot_number)
             last = self._replayed_swing(player, hud)
+            # The box moved on to someone else after this player's swing and came back to the same stroke:
+            # GSPro took the swing back (Dan's re-tees at Kiawah's 10th with no setup of his seen between).
+            taken_back = last is not None and box_before is not None and box_before[0] == self._shot_seq \
+                and box_before[1] not in (None, player) and bool(self.state.shots) and self.state.shots[-1] is last
             if last is not None and last.outcome in ("holed", "conceded"):
                 # That stroke finished the hole, so it can't be replayed: the HUD just hadn't moved on
                 # from it yet (a conceded putt was called a mulligan, and its replay announced).
@@ -1490,8 +1502,8 @@ class Engine:
                 self._set_up[stroke] = id(swings[-1]) if swings else None
                 while len(self._set_up) > 32:
                     del self._set_up[next(iter(self._set_up))]
-            elif stroke not in self._set_up or self._set_up[stroke] not in (
-                    id(last), id(swings[-2]) if len(swings) > 1 else None):
+            elif not taken_back and (stroke not in self._set_up or self._set_up[stroke] not in (
+                    id(last), id(swings[-2]) if len(swings) > 1 else None)):
                 # The player hit this stroke before its setup settled (a quick putt), and the HUD still
                 # showed it as the ball rolled: it's been played, so it isn't a setup (nor a mulligan).
                 log.info("Setup dropped: %r already played stroke %s (a late read, not a mulligan)",
@@ -3784,7 +3796,8 @@ class Engine:
                     f"not a real stroke. Call it a misread and have a laugh at the machine, not a mulligan on a "
                     f"bad putt."]
         return [f"{who} is taking a mulligan: the last swing{went} was taken back, and {who} is replaying "
-                f"stroke {hud.shot_number} from the same spot. Mention the mulligan."]
+                f"stroke {hud.shot_number} from the same spot{f', {hud.to_pin} away' if hud.to_pin else ''} "
+                f"(not from where the taken-back swing finished). Mention the mulligan."]
 
     def _putt_count_facts(self, player: str | None, is_putt: bool, hud: Hud) -> list[str]:
         """Which putt on the hole this is, counted from this player's own ball (strokes from the green,
@@ -4286,11 +4299,20 @@ class Engine:
                 f"straight in a few words (it trickled off into the {now}, say) before the setup."]
 
     def _team_score_facts(self, player: str | None) -> list[str]:
-        """Best ball: the team's running gross score beside each partner's own. GSPro's HUD score is the
-        individual's, and with no team number the booth credited a partner's or team's figure to one
+        """A scramble's one shared score; in best ball, the team's running gross score beside each partner's
+        own. GSPro's HUD score is the individual's, and with no team number the booth credited a partner's or team's figure to one
         player ("keeps Derek at +1" when +1 was the team's)."""
         r = self.round
         side = r.side_for(player) if r and not r.ended and player else None
+        if side and len(side.players) > 1 and r.format == "scramble" and not r.no_scramble:
+            # One ball, one score: "he stays at plus two" and "Derek has 23 feet for par to keep the round
+            # even" credited Dan and Derek's shared scramble score to Derek (Kiawah, 11-11).
+            who = self._display(player)
+            return [f"This is a scramble: {side.label} play one ball and share one score. The round score and "
+                    f"what this stroke is for (par, birdie) are the team's, not {who}'s own: say the team or "
+                    f"they stay at that number, never \"{who} stays at\" or \"his round\". Each partner plays "
+                    f"the stroke from the picked spot, so one partner's miss isn't the hole's result while the "
+                    f"other still has that stroke to play."]
         tg = r.team_gross(side.team) if side and side.team else None
         if tg is None:
             return []
@@ -5119,6 +5141,12 @@ class Engine:
         if penalties <= self._narrated_pen.get((idx, hole), 0):
             return []
         n = self.gspro.shot_number(idx)
+        r = self.round
+        if hud is not None and hud.shot_number and n != hud.shot_number and r and not r.ended \
+                and r.format == "scramble" and not r.no_scramble:
+            # The log counts the player's own ball; the team plays the picked one. Derek's ball was in the
+            # water, Dan's on the green, and "Derek's fourth is for birdie" aired over stroke 3 (Kiawah, 11-11).
+            return []
         facts = [f"A penalty stroke was taken (a ball in the water or out of bounds, then a drop); "
                  f"{penalties} penalty stroke{'s' if penalties > 1 else ''} on this hole so far. Counting "
                  f"the penalty, this is stroke {n} on the hole: call it the {ordinal(n)}, not an earlier number."]
@@ -5285,10 +5313,16 @@ class Engine:
                 ocr_pin = to_yards(hud.to_pin)
                 if ocr_pin is None or abs(tp - ocr_pin) <= 20:
                     hud.to_pin = f"{tp:.1f} yards"
-                else:   # on a tee the log can still hold the last hole's ball: expected, not a warning
-                    (log.debug if on_tee else log.warning)(
-                        "Log to_pin %.1f yd diverges from HUD %.1f yd for idx %s (%r); keeping HUD "
-                        "(likely a mis-attributed slot)", tp, ocr_pin, idx, self._display(player))
+                else:
+                    # On a tee the log can still hold the last hole's ball, and mid-hole the last spot
+                    # (Evan's 302.1 yards after his 3-wood from there): expected, not a warning.
+                    prev = self.state.player_shots(player or "unknown")
+                    stale = on_tee or bool(prev) and (was := to_yards(prev[-1].to_pin_before)) is not None \
+                        and abs(was - tp) <= 0.5
+                    (log.debug if on_tee else log.info if stale else log.warning)(
+                        "Log to_pin %.1f yd diverges from HUD %.1f yd for idx %s (%r); keeping HUD (%s)", tp,
+                        ocr_pin, idx, self._display(player),
+                        "the log still has the last spot" if stale else "likely a mis-attributed slot")
         minimap = await self._await_minimap(minimap_task, is_putt)
         if minimap and (entry := getattr(hud, "_chat_setup", None)) and (trouble := [
                 f.removeprefix("Hole layout: ").rstrip(".") for f in minimap.facts(to_yards(hud.to_pin), hud.lie)

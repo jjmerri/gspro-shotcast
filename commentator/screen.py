@@ -4,6 +4,7 @@ import logging
 import re
 import threading
 import time
+import unicodedata
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
@@ -219,6 +220,17 @@ def _strip_neighbour(items: list[OcrItem], row: OcrItem, start: int, end: int) -
     else:
         guess = None
     return guess if guess and 0 < guess < 20 else None
+
+
+def _strip_left_of_box(items: list[OcrItem], row: OcrItem, start: int) -> bool:
+    """Whether plain strip digits sit left of the shot box (past the lie word, so not the elevation):
+    then it isn't the first stroke. On 3.59 the PC's OCR read Derek's third, "1 2 [3] 4", as
+    "１２ 3", and the box alone as "1"."""
+    on_row = [i for i in items if abs(i.y - row.y) <= row.h and i is not row]
+    words = [r for i in on_row if re.search(r"[A-Za-z]", i.text) and (r := 2 * i.x - i.left) <= start + 2]
+    floor = max(words, default=2 * row.x - row.left)
+    return any(re.fullmatch(r"[\d ]+", i.text.strip() or "x") and i.left > floor and 2 * i.x - i.left <= start + 2
+               for i in on_row)
 
 
 def _strip_number(token: str, first: bool) -> int | None:
@@ -890,18 +902,21 @@ class Screen:
                     # "14"). The strip counts up, so the plain digits beside the box say what it
                     # should hold: a read that agrees wins, else the most common read.
                     expect = _strip_neighbour(items, row, start, x)
+                    not_first = _strip_left_of_box(items, row, start)
+                    if not_first and expect == 1:
+                        expect = None
                     reads = []
                     for crop, scale, pad in ((tight, 1, 10), (tight, 2, 20), (loose, 2, x - start),
                                              (tight, 3, 30)):
                         crop = crop.resize((crop.width * scale, crop.height * scale))
                         crop = ImageOps.expand(crop, border=pad, fill=(255, 255, 255))
-                        text = re.sub(r"[^0-9]", "", "".join(
-                            i.text for i in self.ocr_region(crop, None, rec_only=self.cfg.ocr_fast)))
-                        if text and 0 < int(text) < 20:
+                        text = re.sub(r"[^0-9]", "", unicodedata.normalize("NFKC", "".join(
+                            i.text for i in self.ocr_region(crop, None, rec_only=self.cfg.ocr_fast))))
+                        if text and 0 < int(text) < 20 and not (not_first and int(text) == 1):
                             if int(text) == expect:
                                 return expect
                             reads.append(int(text))
-                    return max(reads, key=reads.count) if reads else None
+                    return max(reads, key=reads.count) if reads else expect if not_first else None
                 start = None
         return None
 

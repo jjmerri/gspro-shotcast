@@ -865,6 +865,117 @@ def test_alternate_shot_finishes_kept_as_the_holes_end_are_repaired_once(tmp_pat
     got = [r[0] for r in st.db.execute("SELECT finish_yards FROM shots ORDER BY ts")]
     assert got == [7.7, 10.0, None, 0.0, None, 0.0, 0.0, None]
 
+
+def test_mid_hole_strokes_misread_as_shot_one_are_renumbered_and_their_phantom_penalty_dropped(tmp_path):
+    import json
+    from commentator.store import Store
+
+    path = str(tmp_path / "season.db")
+    st = Store(path)
+    h2, h3 = "Hole 2, par 4, 361 yards", "Hole 3, par 3, 150 yards"
+    h4, h5, h6 = "Hole 4, par 4, 400 yards", "Hole 5, par 4, 400 yards", "Hole 6, par 4, 400 yards"
+    rows = [  # (ts, player, hole, shot_number, lie_before, lie_after, to_pin, mulligan)
+        (1, "Dan", h2, 1, "tee", "fairway", 361.0, 0),
+        (2, "Dan", h2, 2, "fairway", "fairway", 120.0, 0),
+        (3, "Dan", h2, 1, "tee", "green", 19.6, 0),       # the misread third
+        (4, "Dan", h2, 4, "green", "holed", 5.0, 0),
+        (5, "Dan", h3, 1, "tee", "green", 150.0, 0),
+        (6, "Dan", h3, 2, "green", "green", 30.0, 0),
+        (7, "Dan", h3, 1, "tee", "green", 148.0, 0),      # a restart from the tee: left alone
+        (8, "Dan", h4, 1, "tee", "fairway", 400.0, 0),
+        (9, "Dan", h4, 2, "fairway", "water", 150.0, 0),
+        (10, "Dan", h4, 1, "tee", "green", 30.0, 0),      # the misread fourth, after a drop
+        (11, "Dan", h4, 5, "green", "holed", 3.0, 0),
+        (12, "Dan", h5, 1, "tee", "fairway", 400.0, 0),
+        (13, "Dan", h5, 2, "fairway", "water", 150.0, 0),
+        (14, "Dan", h5, 1, "tee", "green", 30.0, 0),      # third or fourth: nothing after says, so left alone
+        (15, "Dan", h6, 1, "tee", "fairway", 400.0, 0),
+        (16, "Dan", h6, 2, "fairway", "water", 150.0, 0),
+        (17, "Dan", h6, 1, "tee", "water", 30.0, 0),      # wet after a drop: the next stroke can't say, so alone
+        (18, "Dan", h6, 6, "green", "holed", 3.0, 0),
+    ]
+    for ts, who, hole, num, lb, la, pin, mull in rows:
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, lie_before, "
+                      "lie_after, to_pin_yards, mulligan) VALUES (?, ?, ?, 'Sand Valley', ?, ?, 0, ?, ?, ?, ?)",
+                      (st.session_id, ts, who, hole, num, lb, la, pin, mull))
+    st.db.execute("INSERT INTO rounds (session_id, ended_at, date, format, side, holes, players, course, penalties) "
+                  "VALUES (?, 20, '2026-11-10', 'stroke', 'Dan', 18, ?, 'SAND VALLEY', 3)",
+                  (st.session_id, json.dumps(["Dan"])))
+    st.db.execute("PRAGMA user_version = 3")   # as kept before
+    st.db.commit()
+    st.db.close()
+    st = Store(path, new_session=False)
+    got = [tuple(r) for r in st.db.execute("SELECT shot_number, lie_before FROM shots ORDER BY ts")]
+    assert got == [(1, "tee"), (2, "fairway"), (3, "fairway"), (4, "green"), (1, "tee"), (2, "green"), (1, "tee"),
+                   (1, "tee"), (2, "fairway"), (4, None), (5, "green"), (1, "tee"), (2, "fairway"), (1, "tee"),
+                   (1, "tee"), (2, "fairway"), (1, "tee"), (6, "green")]
+    # The drop's penalty stays; the misreads' phantoms go.
+    assert st.db.execute("SELECT penalties FROM rounds").fetchone()[0] == 1
+
+
+def test_the_misread_shot_one_repair_keeps_restarts_alternate_shot_and_shares_a_scramble_gap(tmp_path):
+    import json
+    from commentator.store import Store
+
+    path = str(tmp_path / "season.db")
+    st = Store(path)
+    h = "Hole 4, par 4, 400 yards"
+
+    def shot(ts, who, num, lb, pin, fmt=None, la="fairway"):
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, lie_before, "
+                      "lie_after, to_pin_yards, mulligan, fmt) VALUES (?, ?, ?, 'C', ?, ?, 0, ?, ?, ?, 0, ?)",
+                      (st.session_id, ts, who, h, num, lb, la, pin, fmt))
+
+    def rnd(ended, team, penalties, fmt):
+        st.db.execute("INSERT INTO rounds (session_id, ended_at, date, format, side, holes, players, course, "
+                      "penalties) VALUES (?, ?, '2026-11-10', ?, 'x', 18, ?, 'C', ?)",
+                      (st.session_id, ended, fmt, json.dumps(team), penalties))
+
+    # A full hole, then a restart from the tee: the misread third is a 3, not a 7.
+    for ts, n, lb, pin in ((1, 1, "tee", 400.0), (2, 2, "fairway", 150), (3, 3, "green", 9), (4, 4, "green", 2),
+                           (5, 1, "tee", 400.0), (6, 2, "fairway", 160), (7, 1, "tee", 40)):
+        shot(ts, "Pat", n, lb, pin)
+    rnd(10, ["Pat"], 0, "stroke")
+    # A scramble where both partners' thirds were misread: one gap, one phantom penalty.
+    for ts, who, n, lb, pin in ((101, "Dan", 1, "tee", 400.0), (102, "Derek", 1, "tee", 400.0),
+                                (103, "Dan", 2, "fairway", 150), (104, "Derek", 2, "fairway", 150),
+                                (105, "Dan", 1, "tee", 20), (106, "Derek", 1, "tee", 20),
+                                (107, "Dan", 4, "green", 2)):
+        shot(ts, who, n, lb, pin, "scramble", la="sand" if ts == 103 else "fairway")
+    rnd(110, ["Dan", "Derek"], 1, "scramble")
+    # Alternate shot: a partner's stroke comes between a player's own, so it's left as saved.
+    for ts, who, n, lb, pin in ((201, "Kim", 1, "tee", 400.0), (202, "Lee", 2, "fairway", 150),
+                                (203, "Kim", 3, "green", 20), (204, "Lee", 1, "tee", 5)):
+        shot(ts, who, n, lb, pin, "alternate")
+    rnd(210, ["Kim", "Lee"], 0, "alternate")
+    # A scramble hole restarted: the partner's third on this visit gives the lie, not the one before it.
+    for ts, who, n, lb, pin in ((301, "Dan", 1, "tee", 400.0), (302, "Derek", 1, "tee", 400.0),
+                                (303, "Dan", 2, "fairway", 150), (304, "Derek", 2, "fairway", 150),
+                                (305, "Derek", 3, "sand", 20),
+                                (306, "Dan", 1, "tee", 400.0), (307, "Derek", 1, "tee", 400.0),
+                                (308, "Dan", 2, "fairway", 150), (309, "Derek", 2, "fairway", 150),
+                                (310, "Derek", 3, "fairway", 20), (311, "Dan", 1, "tee", 20)):
+        shot(ts, who, n, lb, pin, "scramble")
+    rnd(320, ["Dan", "Derek"], 0, "scramble")
+    # Both partners' seconds wet: the team's drop is a real penalty, so the misread is the fourth.
+    for ts, who, n, lb, la, pin in ((401, "Dan", 1, "tee", "fairway", 400.0), (402, "Derek", 1, "tee", "fairway", 400.0),
+                                    (403, "Dan", 2, "fairway", "water", 150), (404, "Derek", 2, "fairway", "water", 150),
+                                    (405, "Dan", 1, "tee", "green", 30), (406, "Derek", 4, "rough", "green", 30),
+                                    (407, "Dan", 5, "green", "holed", 3)):
+        shot(ts, who, n, lb, pin, "scramble", la=la)
+    rnd(420, ["Dan", "Derek"], 1, "scramble")
+    st.db.execute("PRAGMA user_version = 3")
+    st.db.commit()
+    st.db.close()
+    st = Store(path, new_session=False)
+    nums = [r[0] for r in st.db.execute("SELECT shot_number FROM shots ORDER BY ts")]
+    assert nums == [1, 2, 3, 4, 1, 2, 3] + [1, 1, 2, 2, 3, 3, 4] + [1, 2, 3, 1] + [1, 1, 2, 2, 3, 1, 1, 2, 2, 3, 3] \
+        + [1, 1, 2, 2, 4, 4, 5]
+    assert [r[0] for r in st.db.execute("SELECT penalties FROM rounds ORDER BY ended_at")] == [0, 0, 0, 0, 1]
+    # Which partner's second was picked isn't known: neither one's own finish is the thirds' lie.
+    assert [r[0] for r in st.db.execute("SELECT lie_before FROM shots WHERE ts IN (105, 106)")] == [None, None]
+    assert st.db.execute("SELECT lie_before FROM shots WHERE ts = 311").fetchone()[0] == "fairway"
+
 DETAILS = ("Test Links|Someone|1010|A scenic place, links style.|Erin, WI|1|1|72|"
            "5|4|4|4|4|3|5|4|3|4|4|4|3|5|4|3|4|5|"
            "13|7|11|9|15|1|5|17|4|14|10|18|2|12|16|8|6|3|"
@@ -4521,6 +4632,15 @@ def test_team_gross_only_for_best_ball():
     assert r.team_gross("Aces") is None
     solo = Round(league=LEAGUE, gspro_players=["MikeD"], course="X", scheduled_format="best_ball", holes=3)
     assert solo.team_gross("Aces") is None
+
+
+def test_a_scrambles_score_is_the_teams_not_the_putters(tmp_path):
+    # "Derek has this par putt; hole it and he stays at plus two": Dan and Derek's shared scramble score.
+    eng = _engine(tmp_path)
+    eng.round = Round(league=LEAGUE, gspro_players=["MikeD", "SarahK"], course="X", scheduled_format="scramble",
+                      holes=3, is_league=False)
+    facts = "\n".join(eng._team_score_facts("Mike"))
+    assert "share one score" in facts and "never \"Mike stays at\"" in facts
 
 
 def test_short_missed_putt_is_called_a_miss_not_good_touch():

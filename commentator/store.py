@@ -5,6 +5,7 @@ export. Replays and evals use an in-memory database so made-up shots never reach
 """
 
 import io
+import itertools
 import json
 import logging
 import math
@@ -436,6 +437,9 @@ class Store:
         if self.db.execute("PRAGMA user_version").fetchone()[0] < 3:
             self._repair_alternate_finishes()
             self.db.execute("PRAGMA user_version = 3")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 4:
+            self._repair_misread_first_strokes()
+            self.db.execute("PRAGMA user_version = 4")
         # A round's course read off the scorecard was stored in capitals: file it under the shots' name.
         for table in ("rounds", "player_rounds"):
             for (course,) in self.db.execute(f"SELECT DISTINCT course FROM {table} WHERE course IS NOT NULL").fetchall():
@@ -1190,6 +1194,115 @@ class Store:
         self.db.execute("UPDATE shots SET fmt = ?, attributed = ?, shared_ball = ? WHERE id > ? AND player = ?",
                         (fmt, int(attributed), int(shared_ball), after_id, player))
         self.db.commit()
+
+    def _repair_misread_first_strokes(self) -> None:
+        """A mid-hole stroke whose HUD strip was read "shot 1" was saved off the tee (Dan's lob wedge from
+        19.6 yards at Sand Valley's 2nd, the third): the stroke after the player's last on that visit to
+        the hole, from where that left them, and the round's phantom penalty (a gap in the strokes) gone.
+        Only well short of the hole's length, and only where the next stroke comes after it; after a stroke
+        that may have cost a penalty, only numbered from the next stroke. Not in alternate shot, where the
+        partner's strokes come between a player's own."""
+        rows = self.db.execute("SELECT id, session_id, player, course, hole, shot_number, lie_after, mulligan, "
+                               "is_putt, to_pin_yards, ts, fmt FROM shots ORDER BY session_id, player, ts, id").fetchall()
+
+        def visit(seq):
+            """The strokes on the same visit to the hole, back to (or on to) a stroke 1: a restart."""
+            for o in seq:
+                if o["hole"] != r["hole"] or o["course"] != r["course"]:
+                    return
+                if o["mulligan"] or not o["shot_number"]:
+                    continue
+                yield o
+                if o["shot_number"] == 1:
+                    return
+
+        fixes = {}
+        for _, group in itertools.groupby(rows, key=lambda x: (x["session_id"], x["player"])):
+            group = list(group)
+            for i, r in enumerate(group):
+                if r["shot_number"] != 1 or r["mulligan"] or r["is_putt"] or r["to_pin_yards"] is None \
+                        or r["fmt"] == "alternate":
+                    continue
+                m = re.search(r"(\d+) yards", r["hole"] or "")
+                if not m or r["to_pin_yards"] > 0.75 * int(m.group(1)):
+                    continue
+                before = list(visit(reversed(group[:i])))
+                if not before or (n := max(o["shot_number"] for o in before)) < 2:
+                    continue
+                after = next(visit(group[i + 1:]), None)
+                if after is not None and after["shot_number"] != 1 and after["shot_number"] <= n + 1:
+                    continue
+                last, num = max(before, key=lambda o: o["ts"]), n + 1
+                if last["lie_after"] in (None, "water"):
+                    # A penalty may come between (wet, or no finish saved: out of bounds): only the next stroke
+                    # tells, while the stroke itself took none. In a scramble too: the drop may be the team's.
+                    if after is None or after["shot_number"] == 1 or r["lie_after"] in (None, "water"):
+                        continue
+                    num = after["shot_number"] - 1
+                restart = next((o["ts"] for o in group[i + 1:] if o["hole"] == r["hole"] and o["course"] == r["course"]
+                                and not o["mulligan"] and o["shot_number"] == 1), None)
+                fixes[r["id"]] = (r, num, last, min(o["ts"] for o in before), restart)
+        if not fixes:
+            return
+        # Every number as saved, before any is changed: two partners' misreads on one hole share a gap.
+        holes, updates = {}, []
+        for r, n, last, began, restart in fixes.values():
+            rnd = self._round_of(r)
+            if r["fmt"] == "scramble":
+                # The ball played is the team's pick: a teammate's saved lie for the same stroke on this visit
+                # to the hole (after the player's stroke 1, before their restart), else unknown (the player's
+                # own last finish may not be the ball picked).
+                team = rnd[1] if rnd else []
+                marks = ",".join("?" * len(team))
+                until = min(x for x in (restart, rnd[4] if rnd else None, r["ts"] + 300) if x is not None)
+                mates = self.db.execute(
+                    f"SELECT DISTINCT lie_before FROM shots WHERE session_id = ? AND course = ? AND hole = ? "
+                    f"AND player != ? AND player IN ({marks}) AND shot_number = ? AND mulligan = 0 "
+                    f"AND ts > ? AND ts > ? - 300 AND ts < ? "
+                    f"AND lie_before IS NOT NULL AND lie_before != 'tee' AND id NOT IN ({','.join('?' * len(fixes))})",
+                    (r["session_id"], r["course"], r["hole"], r["player"], *team, n, began, r["ts"], until,
+                     *fixes)).fetchall() if team else []
+                lie = mates[0][0] if len(mates) == 1 else None
+            else:
+                lie = last["lie_after"] if last["lie_after"] not in (None, "water") else None
+            updates.append((n, lie, r["id"]))
+            if rnd:
+                holes.setdefault((rnd[0], r["hole"]), (r, rnd))
+        self.db.executemany("UPDATE shots SET shot_number = ?, lie_before = CASE WHEN lie_before = 'tee' "
+                            "THEN ? ELSE lie_before END WHERE id = ?", updates)
+        left: dict[int, int] = {}
+        for (rid, _), (r, (_, team, penalties, start, ended)) in holes.items():
+            marks = ",".join("?" * len(team))
+            got = self.db.execute(
+                f"SELECT id, shot_number FROM shots WHERE session_id = ? AND course = ? AND hole = ? AND mulligan = 0 "
+                f"AND shot_number IS NOT NULL AND ts > ? AND ts <= ? AND player IN ({marks})",
+                (r["session_id"], r["course"], r["hole"], start, ended, *team)).fetchall()
+            nums = sorted({x["shot_number"] for x in got})
+            was = sorted({1 if x["id"] in fixes else x["shot_number"] for x in got})
+
+            def gaps(seq):
+                return sum(b - a - 1 for a, b in zip(seq, seq[1:]) if b - a > 1)
+            if (delta := gaps(was) - gaps(nums)) > 0 and (have := left.get(rid, penalties)):
+                left[rid] = max(0, have - delta)
+        for rid, penalties in left.items():
+            self.db.execute("UPDATE rounds SET penalties = ? WHERE id = ?", (penalties, rid))
+
+    def _round_of(self, shot: sqlite3.Row) -> tuple | None:
+        """The saved round a shot was played in (id, its side's players, penalties, the window of its
+        shots): the session's first round on that course to end after it whose side has the player."""
+        for rid, players, side, penalties, ended in self.db.execute(
+                "SELECT id, players, side, penalties, ended_at FROM rounds WHERE session_id = ? AND ended_at >= ? "
+                "AND lower(course) = lower(?) ORDER BY ended_at", (shot["session_id"], shot["ts"], shot["course"])):
+            try:
+                team = [p for p in json.loads(players or "[]") if isinstance(p, str)] or [side]
+            except ValueError:
+                team = [side]
+            if shot["player"] not in team:
+                continue
+            start = self.db.execute("SELECT MAX(ended_at) FROM rounds WHERE session_id = ? AND ended_at < ? - 120",
+                                    (shot["session_id"], ended)).fetchone()[0]
+            return rid, team, penalties, start if start is not None else float("-inf"), ended
+        return None
 
     def _repair_alternate_finishes(self) -> None:
         """Alternate shot's full shots were given the hole's end (the gimme radius, or 0 for the partner's
