@@ -4,6 +4,17 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.119
+
+### Stats page
+- Mid-hole shots that were saved as a tee shot (and the penalty strokes that came with them) are corrected in past rounds, and are no longer misread.
+- A scramble's hole replay shows the team's stroke into a penalty area.
+
+### Booth
+- When a player re-tees right after a partner's swing, the call is about the right player.
+- Scramble scores are spoken as the team's, and one partner's wet ball isn't called the team's penalty.
+- A replayed putt or shot is called from the right distance.
+
 ## 0.1.118
 
 ### Booth
