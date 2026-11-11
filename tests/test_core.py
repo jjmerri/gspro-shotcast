@@ -2576,6 +2576,30 @@ def test_name_signature_tells_players_apart_and_ignores_brightness():
     assert name_signature(Image.new("RGB", (450, 56), (8, 8, 8))) == NAME_DARK
     assert name_sig_changed(toby, NAME_DARK) and not name_sig_changed(None, toby)
 
+
+def test_name_signature_ignores_the_course_above_the_name_bar():
+    # Real 3450x2160 captures of Josh's cell: its top rows are the course above the bar. Sky before
+    # the drive, dark grass mid-flight; that read as a new player and cut the follow short.
+    from PIL import Image, ImageDraw
+
+    from commentator.hud import name_sig_changed
+    from commentator.screen import name_signature
+
+    sky = Image.open("tests/fixtures/name_cell_sky.png").convert("RGB")
+    flight = Image.open("tests/fixtures/name_cell_mid_flight.png").convert("RGB")
+    assert not name_sig_changed(name_signature(sky), name_signature(flight))
+    wes = sky.copy()
+    ImageDraw.Draw(wes).rectangle((0, 7, 447, 55), fill=(209, 50, 38))
+    ImageDraw.Draw(wes).text((10, 12), "Wes", fill=(255, 255, 255), font_size=36)
+    assert name_sig_changed(name_signature(sky), name_signature(wes))
+
+    def range_cell(scenery):   # the range's dark bar, under black or near-fill dark green scenery
+        im = Image.new("RGB", (448, 56), (13, 22, 34))
+        ImageDraw.Draw(im).rectangle((0, 0, 447, 6), fill=scenery)
+        ImageDraw.Draw(im).text((10, 12), "Josh", fill=(255, 255, 255), font_size=36)
+        return im
+    assert not name_sig_changed(name_signature(range_cell((0, 0, 0))), name_signature(range_cell((20, 30, 20))))
+
 async def test_follow_shot_rejects_frozen_stale_tiles_as_touchdown(tmp_path):
     # The previous shot's carry (game) / total are already frozen and may still be on screen for the
     # first reads. Without a "seen it climb" guard, that reads as an instant touchdown and hands back

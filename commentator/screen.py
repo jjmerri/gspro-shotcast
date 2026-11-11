@@ -107,11 +107,62 @@ def tone_of(img: Image.Image) -> Tone:
     return Tone(mean=mean, median=median, light=sum(hist[200:]) / n, blue=blue, color=color, tint=tint)
 
 
+def _longest_run(ok) -> "tuple[int, int] | None":
+    best, start = None, None
+    for i, v in enumerate([*ok, False]):
+        if v and start is None:
+            start = i
+        elif not v and start is not None:
+            if best is None or i - start > best[1] - best[0]:
+                best = (start, i)
+            start = None
+    return best
+
+
+def _name_bar(img: Image.Image) -> Image.Image:
+    """The name cell with everything but its name bar (the rows and columns of the bar's fill colour
+    and the white text over it) painted over in the fill. GSPro 4's cell also takes in the course
+    above the bar (7 of 56 rows at 3450x2160), and sky, sand or a dark tree line passing there
+    mid-flight read as a new player. The cell keeps its size so a bar edge found a row off (dark
+    scenery next to a dark bar) doesn't shift the text. The cell as is when no bar is found (a fade,
+    a menu)."""
+    import numpy as np
+
+    a = np.asarray(img.convert("RGB"), dtype=int)
+    if a.ndim != 3 or a.shape[0] < 3 or a.shape[1] < 3:
+        return img
+    keys = (a[..., 0] // 8) * 1024 + (a[..., 1] // 8) * 32 + a[..., 2] // 8
+    values, counts = np.unique(keys, return_counts=True)
+    fill = np.median(a[keys == values[counts.argmax()]], axis=0)
+    span = 255 - fill
+    lit = span > 24
+    if not lit.any():
+        return img
+    # Text is white anti-aliased into the fill: every pixel of the bar lies between the two.
+    t = ((a[..., lit] - fill[lit]) / span[lit]).mean(axis=2)
+    resid = np.abs(a - (fill + t[..., None] * span)).max(axis=2)
+    on_bar = (resid < 40) & (t > -0.15) & (t < 1.15)
+    is_fill = np.abs(a - fill).max(axis=2) < 24
+    rows = _longest_run((on_bar.mean(axis=1) >= 0.9) & (is_fill.mean(axis=1) >= 0.1))
+    if rows is None or rows[1] - rows[0] < 3:
+        return img
+    cols = _longest_run(on_bar[rows[0]:rows[1]].mean(axis=0) >= 0.9)
+    if cols is None or cols[1] - cols[0] < 3:
+        return img
+    keep = np.zeros(on_bar.shape, dtype=bool)
+    keep[rows[0]:rows[1], cols[0]:cols[1]] = True
+    keep &= on_bar
+    if keep.all():
+        return img
+    out = np.where(keep[..., None], a, np.round(fill).astype(int))
+    return Image.fromarray(out.astype(np.uint8), "RGB")
+
+
 def name_signature(img: Image.Image) -> tuple:
-    """The name cell as a 96x12 text mask (thresholded midway between its darkest and brightest
-    pixel, so a brightness shift doesn't change it), or NAME_DARK when there's no text contrast (the
-    screen is fading or black between players)."""
-    px = list(img.convert("L").resize((96, 12), Image.BILINEAR).tobytes())
+    """The name cell's bar (see _name_bar) as a 96x12 text mask (thresholded midway between its darkest and
+    brightest pixel, so a brightness shift doesn't change it), or NAME_DARK when there's no text
+    contrast (the screen is fading or black between players)."""
+    px = list(_name_bar(img).convert("L").resize((96, 12), Image.BILINEAR).tobytes())
     lo, hi = min(px), max(px)
     if hi - lo < 60:
         return NAME_DARK
