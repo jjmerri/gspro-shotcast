@@ -126,6 +126,20 @@ def test_gapping_uses_full_swings_and_reads_the_flight(db):
     assert pw["miss"] == "starts straight, draw" and dr["miss"] == "starts 3° right, slice"
 
 
+def test_gapping_leaves_out_the_rough_where_gspros_club_is_often_one_short(db):
+    # GSPro picks the club by distance, not lie: Josh's "9-irons" from the rough carried 131 to 113.
+    for carry in (112, 113, 114, 115, 111):
+        shot(db, club="9I", carry_raw=carry, ball_speed=89, lie_before="fairway")
+    for carry in (130, 131, 132):
+        shot(db, club="9I", carry_raw=carry, ball_speed=98, lie_before="rough")
+    for carry in (100, 110, 120):                      # too few clean PWs: every lie counts
+        shot(db, club="PW", carry_raw=carry, ball_speed=85, lie_before="rough" if carry > 100 else "tee")
+    db.commit()
+    nine, pw = A.gapping(db, "Ann")
+    assert (nine["carry"], nine["n"], nine["swings"], nine["any_lie"]) == (113, 5, 8, False)
+    assert (pw["carry"], pw["n"], pw["any_lie"]) == (110, 3, True)
+
+
 def test_gapping_takes_the_game_carry_when_no_raw_carry_was_sent_or_read(db):
     # A launch monitor that sends a carry of 0 and no CARRY (raw) tile on screen.
     for carry in (100, 104, 98):

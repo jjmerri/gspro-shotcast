@@ -907,7 +907,7 @@ function gapChart(clubs) {
   if (!cs.length) return '<p class="empty">No launch-monitor carries yet.</p>';
   const max = Math.max(...cs.map(c => c.carry_max || c.carry)) * 1.05;
   const pct = v => (100 * v / max).toFixed(1) + "%";
-  return `<div class="gap">${cs.map(c => `<div>${esc(c.club)}</div><div class="gaptrack" title="${c.n} swings; middle half ${c.carry_lo}–${c.carry_hi} yd">
+  return `<div class="gap">${cs.map(c => `<div>${esc(c.club)}${c.any_lie ? "*" : ""}</div><div class="gaptrack" title="${c.n} swings${c.any_lie ? " (any lie)" : ""}; middle half ${c.carry_lo}–${c.carry_hi} yd">
       <span class="rng" style="left:${pct(c.carry_lo)};width:${pct(Math.max(1, c.carry_hi - c.carry_lo))}"></span>
       <span class="med" style="left:${pct(c.carry)}"></span>
       <span class="lbl" style="left:calc(${pct(c.carry)} + 8px)">${c.game ? "≈" : ""}${Math.round(c.carry)} yd</span></div>`).join("")}</div>`;
@@ -1070,13 +1070,13 @@ function renderPlayer(p) {
   </div>
   <h2>Gapping and typical miss</h2>
   <div class="grid2">
-    <div>${gapChart(p.gapping)}<p class="sub">Launch-monitor carry: the bar is the middle half of swings, the mark the median.${p.gapping.some(c => c.game) ? " ≈: some swings had no raw carry, so GSPro's game carry stands in (slope and weather included). Add GSPro's Carry (raw) data tile for exact numbers." : ""}</p></div>
+    <div>${gapChart(p.gapping)}<p class="sub">Launch-monitor carry from the tee and fairway: the bar is the middle half of swings, the mark the median.${p.gapping.some(c => c.any_lie) ? " *: too few tee and fairway swings, so every lie counts (from the rough GSPro's club is often one less than the one swung)." : ""}${p.gapping.some(c => c.game) ? " ≈: some swings had no raw carry, so GSPro's game carry stands in (slope and weather included). Add GSPro's Carry (raw) data tile for exact numbers." : ""}</p></div>
     <div>${sortable("gap", p.gapping, [
-      { key: "club", label: "Club" }, { key: "n", label: "Swings", title: "Full swings used (of all swings with the club)" }, { key: "carry", label: "Carry" },
+      { key: "club", label: "Club" }, { key: "n", label: "Swings", title: "Full swings from the tee or fairway used (of all swings with the club)" }, { key: "carry", label: "Carry" },
       { key: "gap_to_next", label: "Gap", title: "Median carry gap to the next club down" },
       { key: "smash", label: "Smash", title: "Ball speed / club speed" }, { key: "launch", label: "Launch" },
       { key: "spin", label: "Spin" }, { key: "miss", label: "Typical flight", cls: "l" }],
-      c => `<tr><td>${esc(c.club)}</td><td>${c.n}${c.swings > c.n ? ` <span class="sub">/ ${c.swings}</span>` : ""}</td><td${c.game ? ` title="${c.game} of ${c.n} from GSPro's game carry"` : ""}>${c.game ? "≈" : ""}${dash(c.carry === null ? null : Math.round(c.carry), " yd")}</td>
+      c => `<tr><td>${esc(c.club)}${c.any_lie ? `<span title="Too few tee and fairway swings: every lie counts">*</span>` : ""}</td><td>${c.n}${c.swings > c.n ? ` <span class="sub">/ ${c.swings}</span>` : ""}</td><td${c.game ? ` title="${c.game} of ${c.n} from GSPro's game carry"` : ""}>${c.game ? "≈" : ""}${dash(c.carry === null ? null : Math.round(c.carry), " yd")}</td>
         <td>${dash(c.gap_to_next, " yd")}</td><td>${dash(c.smash)}</td><td>${dash(c.launch, "°")}</td>
         <td>${dash(c.spin === null ? null : Math.round(c.spin))}</td><td class="l">${esc(c.miss || "–")}</td></tr>`,
       { key: "carry", dir: -1 })}
