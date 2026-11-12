@@ -385,6 +385,7 @@ class GsproState:
     own_range: bool = False
     range_exits: int = 0   # score lines that took the log off the range (_left_range_unlogged)
     range_exit_fire: int | None = None   # the fire the last of them credited: the new round's first shot
+    course_entries: int = 0   # courses gone onto (selected, loaded, or teed off from their own range)
     pars: list[int] = field(default_factory=list)
     # Where GSPro is: "range" (the driving range), "course" (a round selected or being played), "menu"
     # (a round or the range was just left), or None (not seen yet).
@@ -756,6 +757,7 @@ class GsproState:
 
     def _on_course(self, course: str | None, display: str | None) -> None:
         self.course, self.course_display = course, display
+        self.course_entries += 1
         self.last_sgt = False   # the ended round's: a new course is a new round
         self.altitude_ft = None
         self.mode, self.active_holes = "course", None
@@ -1251,6 +1253,7 @@ class GsproLogFollower:
         s._picked = set(past._picked)   # picked-up holes: finished, though not yet in hole_scores
         s.current_hole = past.current_hole if past.shots_since_course else None
         s.version, s.kinds, s.unparsed = past.version, Counter(past.kinds), list(past.unparsed)
+        s.course_entries = past.course_entries
         self.primed = True
 
     async def run(self) -> None:

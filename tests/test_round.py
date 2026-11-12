@@ -3388,6 +3388,52 @@ def test_booth_started_mid_round_joins_it_without_an_opener(tmp_path):
     assert e._should_join(tee) and not e._should_join(tee)   # tried once
 
 
+async def test_a_round_whose_start_was_missed_is_joined_once_a_scorecard_shows_it(tmp_path):
+    import time
+
+    from commentator.hud import Scorecard
+    from commentator.models import RoundStartEvent, ScorecardEvent
+    from commentator.sources.gspro_log import LogEvent, parse_events
+
+    # Bethpage 11-12: the last round (Old Head) over and still held, then a new course and no opening tee
+    # ever read. The holes on the scorecard are the only sign a round is on.
+    e = _log_engine(tmp_path)
+    for ev in parse_events("Selected Course: oldhead_gsp\n"):
+        e.gspro.apply(ev)
+    e.round = Round(league=e.league, gspro_players=["Josh"], course="Old Head Golf Links", scheduled_format=None)
+    e.round.ended, e._round_ended_at = True, time.monotonic() - 3600
+    e._shots_at_round_end, e._courses_at_round_end = e.gspro.fires, e.gspro.course_entries
+    card = ScorecardEvent(card=Scorecard(holes=list(range(1, 19)), scores={"PAUL": {1: 8}, "TRAVIS": {1: 8}}))
+    second = Hud(player_text="Travis E Shot 2 202 YDS", shot_number=2, score_to_par="E", to_pin="202 yards")
+
+    def play(hole: int):
+        e.gspro.apply(LogEvent("shot_fired"))
+        for ev in parse_events(f"ActivePlayer: 0  currentHole: {hole}  strokes: 1  Previous Score: 0\n"):
+            e.gspro.apply(ev)
+
+    play(9)   # the last round played on, on its own course, past where the booth ended it: not a new one
+    await e.handle_scorecard(card)
+    assert not e._should_join(second)
+    for ev in parse_events("Selected Course: bethpage_gsp\n"):
+        e.gspro.apply(ev)
+    play(0)
+    assert not e._should_join(second)   # no card yet: nothing says a round is on
+    await e.handle_scorecard(card)
+    # The next tee before its first shot: GSPro's log still says hole 1, as on an opening tee.
+    tee = Hud(player_text="Paul +4 Shot 1 344 YDS", shot_number=1, score_to_par="+4", to_pin="344 yards")
+    assert e._teed_off_before_setup() and e._should_join(tee)
+    assert e._should_join(second)   # still, should that setup be dropped before it joined
+    await e.handle_round_start(RoundStartEvent(hud=second, joined=True))
+    joined = e.round
+    assert joined.course != "Old Head Golf Links" and not joined.ended and joined.start_hole == 1
+    assert not e._should_join(second)
+    # A card seen before a round that started normally doesn't join another once that one ends.
+    e._card_join, joined.ended = True, True
+    e._start_round(joined)
+    joined.ended = True
+    assert not e._should_join(second)
+
+
 def test_a_tee_shot_struck_before_the_first_setup_read_still_starts_the_round(tmp_path):
     # Dan, Sheep Ranch: he swung 2 s after the hole showed, before the booth's first setup read; then
     # Derek's tee read shot 1, and the log's one shot on the course had the booth join "mid-round".

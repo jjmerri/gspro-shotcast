@@ -1049,6 +1049,10 @@ class Engine:
         self._practice = False   # GSPro's practice mode on screen: no round, so no commentary and nothing saved
         self._round_box_seen = False   # a round's player box has been on screen: practice isn't the first word
         self._join_tried = False   # joining a round already under way is tried once, at the first setup
+        # A scorecard with holes played and no round in progress, on a course gone onto since the last
+        # round ended: a round whose start the booth missed, joined at the next setup (_note_idle_card).
+        self._card_join = False
+        self._courses_at_round_end = self._round_course_entries = 0
         # GSPro's End Round count when an opening drive struck off a course's own range was taken: with
         # no round open (or the last one over), that drive began one the booth must join.
         self._new_round_struck: int | None = None
@@ -1584,17 +1588,34 @@ class Engine:
 
     def _should_join(self, hud: Hud) -> bool:
         """The booth started with a round already under way (GSPro's log shows shots on this course
-        and the booth isn't tracking a round): pick it up at the first setup, once."""
+        and the booth isn't tracking a round): pick it up at the first setup, once. Or one whose start it
+        missed, which a scorecard showed (_note_idle_card)."""
         struck = self._struck_new_round()
-        if not struck and (self._join_tried or not self._log_rounds or self.round is not None):
+        card = self._card_join and self._log_rounds and (self.round is None or self.round.ended)
+        if not struck and not card and (self._join_tried or not self._log_rounds or self.round is not None):
             return False
         g = self.gspro
         if g.mode != "course" or not g.shots_since_course or g.first_hole is None or g.current_hole is None:
             return False
-        if hud.shot_number == 1 and self._teed_off_before_setup():
+        if hud.shot_number == 1 and not card and self._teed_off_before_setup():
             return False   # a round start, whose first tee shot beat the first setup read (_is_round_start)
-        self._join_tried = True
+        self._join_tried = True   # _card_join stays armed until a round starts: this setup may yet be dropped
         return True
+
+    def _note_idle_card(self, card: Scorecard) -> None:
+        """A scorecard read with no round in progress. Holes on it, with GSPro on a course gone onto since
+        the last round ended and shots played there, mean a round is under way whose start the booth
+        missed (Bethpage 11-12: GSPro windowed, its title bar pushed the HUD down, and no tee's shot number
+        read, so no opening tee was ever seen): join it at the next setup. The last round's own card, or
+        that round played on past where the booth ended it, isn't a new one."""
+        g = self.gspro
+        if self._card_join or not self._log_rounds or not any(card.scores.values()):
+            return
+        if g.mode != "course" or not g.shots_since_course or g.course_entries == self._courses_at_round_end:
+            return
+        self._card_join = True
+        log.info("Scorecard shows holes played with no round in progress: a round under way the booth "
+                 "missed the start of; joining it at the next setup")
 
     def _teed_off_before_setup(self) -> bool:
         """Every shot GSPro logged on this course came while the booth was watching, all on the hole
@@ -9007,6 +9028,8 @@ class Engine:
         self._squabbit_kick()   # a league round's question goes up; any other round ends the last one's
         self._round_started_at = time.monotonic()
         self._new_round_struck, self._range_exits_seen = None, self.gspro.range_exits
+        self._card_join = False   # a round's on: a scorecard seen before it doesn't join another after it
+        self._round_course_entries = self.gspro.course_entries   # its course, for _courses_at_round_end
         self._opening_fire = None
         if struck:
             self._adopt_opening_shots(r)
@@ -10345,6 +10368,7 @@ class Engine:
             if event.card.scores != self._idle_card_logged:   # the card stays up after a round: once per change
                 self._idle_card_logged = event.card.scores
                 log.info("Scorecard read with no round in progress: %s", event.card.scores)
+            self._note_idle_card(event.card)
             return
         if not r.apply_scorecard(event.card):
             log.info("Scorecard didn't match the round's players (%s): rows %s", list(r.roster), list(event.card.scores))
@@ -10485,6 +10509,7 @@ class Engine:
         for task in list(self._aside_tasks):
             task.cancel()
         self._shots_at_round_end = self.gspro.fires
+        self._courses_at_round_end = self._round_course_entries
         self.hole_number = None  # the next round starts its own count
         if self.cfg.health.enabled and self.cfg.source.type != "replay":
             try:
