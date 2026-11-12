@@ -232,7 +232,8 @@ def _corner_look(img: Image.Image) -> str | None:
 
 OTHER_SIDE = "@other_side"   # grab_regions' key for the other side's boxes (Screen._other_side)
 
-FOLLOW_SECONDS = 3.0   # how often to look again for the monitor GSPro's window is on
+FOLLOW_SECONDS = 3.0   # how often to look again for the monitor GSPro's window is on (and its view)
+MIN_VIEW = 200         # px: a smaller client area isn't GSPro's game view (mid-restore, say)
 
 
 def monitor_of(rect: tuple[int, int, int, int], monitors: list[dict]) -> int | None:
@@ -330,6 +331,8 @@ class Screen:
         self.monitor = cfg.monitor   # the monitor read last (follow_window moves it to GSPro's)
         self._monitor_at = -1e9
         self._monitor_lock = threading.Lock()
+        self._view: tuple[int, int, int, int] | None = None   # GSPro's game view on the desktop (gspro_view)
+        self._view_at = -1e9
         self._masked_logged: dict[str, float] = {}   # who blanked a grab, and when that was last logged
 
     def _covered(self, box: tuple[int, int, int, int]) -> list[tuple[int, int, int, int]]:
@@ -438,6 +441,48 @@ class Screen:
     def _mon(self, sct) -> dict:
         return sct.monitors[self.monitor_index(sct.monitors)]
 
+    def gspro_view(self) -> tuple[int, int, int, int] | None:
+        """GSPro's game view (left, top, right, bottom on the desktop): its window's client area, so a
+        windowed GSPro of any size reads like a full screen, without its title bar pushing the HUD
+        down. Looked up every few seconds; kept while GSPro is minimized or the lookup fails; None
+        (read the whole monitor) when GSPro isn't up, off Windows, or without follow_window."""
+        if not self.cfg.follow_window:
+            return None
+        now = time.monotonic()
+        with self._monitor_lock:
+            if now - self._view_at < FOLLOW_SECONDS:
+                return self._view
+            self._view_at = now
+            view = self._view
+        try:
+            from . import winshot
+
+            info = winshot.window_info(self.cfg.window_title)
+            if not info or not info.get("game"):
+                view = None
+            elif not info["minimized"]:
+                c = info.get("client")
+                view = tuple(c) if c and c[2] - c[0] >= MIN_VIEW and c[3] - c[1] >= MIN_VIEW else None
+        except Exception:
+            log.debug("Couldn't look up GSPro's window", exc_info=True)
+        with self._monitor_lock:
+            if view != self._view:
+                if view is None:
+                    log.info("Reading the whole monitor (GSPro's game view isn't up)")
+                else:
+                    log.info("Reading GSPro's game view: %dx%d at (%d, %d)", view[2] - view[0],
+                             view[3] - view[1], view[0], view[1])
+            self._view = view
+        return view
+
+    def _area(self, sct) -> dict:
+        """What regions are fractions of, as an mss box: GSPro's game view, else the monitor."""
+        view = self.gspro_view()
+        if view is None:
+            return self._mon(sct)
+        left, top, right, bottom = view
+        return {"left": left, "top": top, "width": right - left, "height": bottom - top}
+
     def monitor_rect(self) -> tuple[int, int, int, int]:
         """(left, top, width, height) of the monitor being read, in desktop pixels."""
         import mss
@@ -538,13 +583,14 @@ class Screen:
 
         # mss handles aren't thread-safe, and these calls run in worker threads.
         with mss.mss() as sct:
-            return self._sct_grab(sct, self._mon(sct))
+            return self._sct_grab(sct, self._area(sct))
 
     def monitor_size(self) -> tuple[int, int]:
+        """The size of what's read: GSPro's game view, else the monitor."""
         import mss
 
         with mss.mss() as sct:
-            mon = self._mon(sct)
+            mon = self._area(sct)
             return mon["width"], mon["height"]
 
     def grab(self, region: Region | None = None) -> Image.Image:
@@ -554,7 +600,7 @@ class Screen:
             import mss
 
             with mss.mss() as sct:
-                mon = self._mon(sct)
+                mon = self._area(sct)
                 self._frame_h = mon["height"]
                 left, top, width, height = region.to_pixels(mon["width"], mon["height"])
                 box = {"left": mon["left"] + left, "top": mon["top"] + top, "width": width, "height": height}
@@ -569,7 +615,7 @@ class Screen:
 
         out = []
         with mss.mss() as sct:
-            mon = self._mon(sct)
+            mon = self._area(sct)
             left, top, width, height = region.to_pixels(mon["width"], mon["height"])
             box = {"left": mon["left"] + left, "top": mon["top"] + top, "width": width, "height": height}
             for i in range(frames):
@@ -727,7 +773,7 @@ class Screen:
         out: dict[str, Image.Image] = {}
         grabbed: list[tuple[tuple[int, int, int, int], Image.Image]] = []
         with mss.mss() as sct:
-            mon = self._mon(sct)
+            mon = self._area(sct)
             self._frame_h = mon["height"]
             for name in names:
                 if (region := self.region(name)) is None:

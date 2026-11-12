@@ -56,10 +56,19 @@ def find_window(substr: str) -> int | None:
     return max(matches, key=lambda m: m[1])[0] if matches else None
 
 
+def _client(hwnd) -> tuple[int, int, int, int] | None:
+    """The window's client area (inside its title bar and border) on the desktop, or None."""
+    r, origin = wintypes.RECT(), wintypes.POINT(0, 0)
+    if not (_user32.GetClientRect(hwnd, ctypes.byref(r)) and _user32.ClientToScreen(hwnd, ctypes.byref(origin))):
+        return None
+    return origin.x, origin.y, origin.x + r.right, origin.y + r.bottom
+
+
 def window_info(substr: str) -> dict | None:
-    """The title, screen rectangle (left, top, right, bottom), minimized state and whether it's a Unity
-    game window ("game") of the window find_window picks, or None when there isn't one (or not on
-    Windows)."""
+    """The title, screen rectangle (left, top, right, bottom), client area ("client", the same on the
+    desktop: the game's view, without a windowed GSPro's title bar and border), minimized state and
+    whether it's a Unity game window ("game") of the window find_window picks, or None when there isn't
+    one (or not on Windows)."""
     hwnd = find_window(substr)
     if not hwnd:
         return None
@@ -70,7 +79,7 @@ def window_info(substr: str) -> dict | None:
     _user32.GetWindowTextW(hwnd, buf, n + 1)
     cls = ctypes.create_unicode_buffer(64)
     _user32.GetClassNameW(hwnd, cls, 64)
-    return {"title": buf.value, "rect": (r.left, r.top, r.right, r.bottom),
+    return {"title": buf.value, "rect": (r.left, r.top, r.right, r.bottom), "client": _client(hwnd),
             "minimized": bool(_user32.IsIconic(hwnd)), "game": cls.value == UNITY_CLASS}
 
 
@@ -208,7 +217,11 @@ def _capture(hwnd: int) -> Image.Image | None:
         bmi.size, bmi.w, bmi.h, bmi.planes, bmi.bpp = ctypes.sizeof(_BMI), w, -h, 1, 32  # top-down
         buf = ctypes.create_string_buffer(w * h * 4)
         _gdi32.GetDIBits(memdc, bmp, 0, h, buf, ctypes.byref(bmi), 0)
-        return Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1)
+        img = Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1)
+        # Just the game's view: a windowed GSPro's title bar and border would shift every region.
+        if (c := _client(hwnd)) and c[2] > c[0] and c[3] > c[1]:
+            img = img.crop((c[0] - r.left, c[1] - r.top, c[2] - r.left, c[3] - r.top))
+        return img
     finally:
         _gdi32.DeleteObject(bmp)
         _gdi32.DeleteDC(memdc)

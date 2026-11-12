@@ -219,6 +219,11 @@ def screen_layout(cfg: Config) -> list[str]:
         left, top, right, bottom = window["rect"]
         lines.append(f"GSPro window: {window['title']!r} {right - left}x{bottom - top} at ({left}, {top})"
                      f"{' MINIMIZED' if window['minimized'] else ''}, on monitor {on}")
+        if (c := window.get("client")) and on is not None and on < len(monitors):
+            m = monitors[on]
+            full = c == (m["left"], m["top"], m["left"] + m["width"], m["top"] + m["height"])
+            lines.append(f"GSPro view: {c[2] - c[0]}x{c[3] - c[1]} at ({c[0]}, {c[1]})"
+                         f"{'' if full else ' (windowed)'}")
         if on is not None and on != reads:
             lines.append(f"!! GSPro is on monitor {on} but the booth reads monitor {reads}")
     return lines

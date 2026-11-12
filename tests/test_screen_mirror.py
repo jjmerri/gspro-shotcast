@@ -157,6 +157,52 @@ def test_the_screen_follows_gspro_to_its_monitor(monkeypatch):
     assert Screen(ScreenConfig(monitor=2)).monitor_index(MONITORS[:2]) == 1   # screen.monitor unplugged
 
 
+def test_a_windowed_gspro_is_read_from_its_game_view_not_the_monitor(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from commentator import screen as screen_mod, winshot
+
+    desktop = Image.new("RGB", (3840, 2160), (0, 0, 0))
+    view = (300, 200, 300 + 1600, 200 + 1000)    # a 1600x1000 client area under a title bar
+    l, t, w, h = Screen(ScreenConfig()).region("player_box").to_pixels(1600, 1000)
+    desktop.paste((200, 10, 10), (view[0] + l, view[1] + t, view[0] + l + w, view[1] + t + h))
+
+    class Sct:
+        monitors = [None, {"left": 0, "top": 0, "width": 3840, "height": 2160}]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def grab(self, box):
+            img = desktop.crop((box["left"], box["top"], box["left"] + box["width"], box["top"] + box["height"]))
+            return SimpleNamespace(size=img.size, bgra=img.convert("RGBX").tobytes("raw", "BGRX"))
+
+    monkeypatch.setitem(sys.modules, "mss", SimpleNamespace(mss=Sct))
+    window = {"title": "GSPro", "rect": (292, 169, 1908, 1208), "client": view, "minimized": False, "game": True}
+    monkeypatch.setattr(winshot, "window_info", lambda title: window)
+    clock = [100.0]
+    monkeypatch.setattr(screen_mod.time, "monotonic", lambda: clock[0])
+    s = Screen(ScreenConfig())
+    box = s.grab(s.region("player_box"))
+    assert box.size == (w, h) and box.getcolors() == [(w * h, (200, 10, 10))]
+    assert s.monitor_size() == (1600, 1000) and s.monitor_rect() == (0, 0, 3840, 2160)
+    window["minimized"] = True       # kept while minimized
+    clock[0] += 10
+    assert s.monitor_size() == (1600, 1000)
+    window = None                    # GSPro closed: the whole monitor
+    clock[0] += 10
+    assert s.monitor_size() == (3840, 2160)
+    window = {"title": "GSPro", "rect": (0, 0, 800, 600), "client": (0, 0, 800, 600), "minimized": False,
+              "game": False}         # a browser tab titled GSPro isn't its view
+    clock[0] += 10
+    assert s.monitor_size() == (3840, 2160)
+    assert Screen(ScreenConfig(follow_window=False)).gspro_view() is None
+
+
 def test_the_on_air_badge_only_shows_while_gspro_is_up(monkeypatch):
     from commentator import winshot
     from commentator.config import OverlayConfig

@@ -321,7 +321,9 @@ class TTSConfig(BaseModel):
 
 class ScreenConfig(BaseModel):
     # Read the monitor GSPro's window is on, rechecked every few seconds; `monitor` (1 = the primary)
-    # is used when GSPro's window can't be found (not running, minimized) or with this off.
+    # is used when GSPro's window can't be found (not running, minimized) or with this off. With it on,
+    # regions are fractions of GSPro's game view (its window's client area), so a windowed GSPro of any
+    # size reads as a full-screen one does; with it off they're fractions of the monitor.
     follow_window: bool = True
     monitor: int = 1
     # "monitor" grabs the framebuffer and never touches GSPro's render path; "window" captures
