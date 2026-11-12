@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.123
+
+### Stats page
+- Club gapping uses only shots from the tee and fairway: from the rough GSPro often records a shorter club than the one swung. A club with too few of those is starred.
+
 ## 0.1.122
 
 ### Booth
