@@ -4,6 +4,14 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.122
+
+### Booth
+- Chipping off the green with a wedge gets its own (fun) call instead of being called a putt, and a mention in the sign-off.
+- Calls written before the swing no longer guess the club ("the iron holds its line" over a driver).
+- Quitting on a new hole's tee no longer introduces that hole before the sign-off.
+- The sign-off no longer opens with "Good afternoon".
+
 ## 0.1.121
 
 ### Stats page
