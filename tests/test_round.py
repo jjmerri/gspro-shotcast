@@ -5932,3 +5932,70 @@ async def test_a_setup_misread_who_never_plays_the_first_hole_leaves_the_round(t
                      for g in ("Mike", "Guesty")]
     await e.handle_hole_change(HoleChangeEvent(previous="Hole 1 Par 4", current="Hole 2 Par 4", course="Pebble Beach"))
     assert list(e.round.roster) == ["MikeD", "Guesty"]
+
+
+async def test_a_chip_off_the_green_gets_a_fun_call_not_a_putt(tmp_path):
+    # Old Head 7, 2026-11-12: a lob wedge chipped from 45 feet on the green was called "that long first
+    # putt", and as a routine shot it might not have been called at all.
+    from commentator.models import Shot, ShotEvent
+
+    e = _engine(tmp_path)
+    e.cfg.commentary.closer = e.cfg.commentary.opener = False
+    e.cfg.commentary.routine_comment_rate = 0.0
+    e.cfg.commentary.min_seconds_between_comments = 0
+    e.state.current_hole = "Hole 7, par 3, 160 yards"
+    green = Hud(player_text="MikeD 2nd Shot 2 45 FT", shot_number=2, to_pin="45 feet 11 inches", lie="green")
+    await e.handle_shot(ShotEvent(shot=Shot(club="LW", carry=8.9), hud_hint=green, impact_hud_hint=green))
+    shot_prompt = next(p for p in e.live_llm.prompts if "chipped off the putting surface" in p)
+    assert "lob wedge" in shot_prompt and "never a putt" in shot_prompt
+
+    putt = Hud(player_text="MikeD 3rd Shot 3 7 FT", shot_number=3, to_pin="7 feet", lie="green")
+    e.live_llm.prompts.clear()
+    await e.handle_shot(ShotEvent(shot=Shot(club="PT"), hud_hint=putt, impact_hud_hint=putt))
+    assert not any("chipped off the putting surface" in p for p in e.live_llm.prompts)
+
+
+def test_closing_facts_call_back_a_chip_off_the_green():
+    from commentator.models import Shot
+    from commentator.state import ShotRecord
+
+    r = Round(league=LEAGUE, gspro_players=["MikeD"], course="Pebble Beach", scheduled_format=None)
+    r.holes, r.start_hole, r.start_hole_assumed = 9, 1, False
+
+    def rec(club, lie, to_pin, mulligan=False):
+        return ShotRecord("MikeD", Shot(club=club), None, None, [], round_id=r.id, hole_seq=7, lie_before=lie,
+                          to_pin_before=to_pin, mulligan=mulligan)
+    records = [rec("LW", "green", "45 feet 11 inches"), rec("PT", "green", "7 feet"),
+               rec("SW", "green", "300 feet", mulligan=True),
+               rec("PW", "green", "967 feet 9 inches")]   # off another hole's green: not this
+    facts = [f for f in r.closing_facts(records, {}) if "chipped off the green" in f]
+    assert facts == ["A moment worth a callback: MikeD chipped off the green with the lob wedge instead of "
+                     f"putting on {r.hole_name(7)}."]
+
+
+async def test_a_quit_on_an_unplayed_tee_drops_its_hole_intro(tmp_path):
+    # Old Head, 2026-11-12: quit on the tenth tee, and its intro and a weather line aired before the closer.
+    from commentator.models import Line, RoundEndEvent
+    from commentator.state import ShotRecord
+    e = _engine(tmp_path)
+    r = e._build_round(["MikeD"], "Somewhere", {"hole_count": 18}, is_league=False)
+    e._start_round(r)
+    r.par = {q: 4 for q in range(1, 19)}
+    r.set_log_scores("MikeD", {q: 4 for q in range(1, 10)})
+    drops = []
+    e.speech.drop_since = drops.append
+
+    async def fake_sign_off(rr, stats):
+        pass
+    e._sign_off = fake_sign_off
+    r.seq = 10                                     # walked to the tenth tee
+    e.speech.say([Line("pbp", "Par at the ninth.")])   # the ninth's wrap, queued before the intro
+    wrapped = e.speech.exchange_mark()
+    await e._tee_up("Hole 10, par 4, 400 yards")
+    e.state.shots.append(ShotRecord("MikeD", Shot(club="DR"), None, None, [], round_id=r.id, hole_seq=10))
+    await e.handle_round_end(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
+    assert drops == []              # someone teed off on the tenth: it was played, its lines stay
+    e.state.shots.clear()
+    r.ended = False
+    await e.handle_round_end(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
+    assert drops == [wrapped]       # only what was queued since the tenth's intro began

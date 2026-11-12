@@ -167,13 +167,17 @@ class SpeechQueue:
         self._stop = stopper
         # A line past its deadline is dropped, never played late.
         self._text_q: asyncio.Queue[_Queued] = asyncio.Queue()
-        # (generation, line, audio, deadline, when a live line was queued or None for a prepared one)
-        self._audio_q: asyncio.Queue[tuple[int, Line, Audio | None, float | None, float | None]] = asyncio.Queue(maxsize=1)
+        # (generation, line, audio, deadline, when a live line was queued or None for a prepared one,
+        # its say() exchange or None for a prepared one)
+        self._audio_q: asyncio.Queue[tuple[int, Line, Audio | None, float | None, float | None, int | None]] = \
+            asyncio.Queue(maxsize=1)
         # The synth the loop is waiting on; interrupt() cancels it (queued ones are cancelled as they're
         # drained) so a stalled request can't hold up the line that superseded it.
         self._synth_task: asyncio.Task | None = None
         self._exchange = 0
         self._lost_exchange: int | None = None
+        self._dropped_exchanges = range(0)   # see drop_since
+        self._synth_exchange: int | None = None
         # Commentary off: nothing is voiced or played.
         self.muted = False
         # Lines accepted but not yet finished playing, including the ones mid-synthesis or mid-playback.
@@ -530,7 +534,7 @@ class SpeechQueue:
         if self.muted:
             return
         self.interrupt()
-        self._audio_q.put_nowait((self._generation, line, audio, None, None))
+        self._audio_q.put_nowait((self._generation, line, audio, None, None, None))
         self._pending += 1
 
     def say_prepared_sequence(self, items: list[tuple[Line, Audio | None]], banter: bool = False,
@@ -556,7 +560,7 @@ class SpeechQueue:
                     if gen != self._generation:   # a newer interrupt superseded this sequence
                         self._pending -= (len(items) - i)   # the rest never reach the play loop
                         return
-                    await self._audio_q.put((gen, line, audio, None, None))
+                    await self._audio_q.put((gen, line, audio, None, None, None))
             finally:
                 # Release the synth loop, but only if we still own it (a newer sequence that took over
                 # owns the token now and will clear it itself). A plain interrupt bumps the generation
@@ -620,6 +624,21 @@ class SpeechQueue:
         if dropped:
             log.info("New shot: dropped %s lines still waiting to air", dropped)
 
+    def exchange_mark(self) -> int:
+        """The last say() call so far: drop_since(mark) later drops what was queued after it."""
+        return self._exchange
+
+    def drop_since(self, mark: int) -> None:
+        """Drop the lines queued by say() after `mark` (from exchange_mark) that aren't on air yet,
+        keeping anything queued before it and anything queued later. The round was quit on a new
+        hole's tee: its intro would talk up a hole nobody plays, but the last hole's wrap still airs."""
+        if mark >= self._exchange:
+            return
+        self._dropped_exchanges = range(mark + 1, self._exchange + 1)
+        if self._synth_task and not self._synth_task.done() and self._synth_exchange in self._dropped_exchanges:
+            self._synth_task.cancel()
+        log.info("Dropping lines queued since exchange %s (%s calls)", mark, len(self._dropped_exchanges))
+
     def _drain(self, q: asyncio.Queue) -> None:
         while not q.empty():
             item = q.get_nowait()
@@ -639,14 +658,15 @@ class SpeechQueue:
         """Hands voiced lines to the play loop in queue order, waiting on each line's synth in turn."""
         while True:
             item = await self._text_q.get()
-            if item.gen != self._generation or item.exchange == self._lost_exchange:
+            if item.gen != self._generation or item.exchange == self._lost_exchange \
+                    or item.exchange in self._dropped_exchanges:
                 _discard(item)
                 self._banter_lines.discard(id(item.line))
                 self._pending -= 1
                 continue
             if item.task is None:
                 self._start_synth(item)
-            self._synth_task = item.task
+            self._synth_task, self._synth_exchange = item.task, item.exchange
             try:
                 ok, audio = await item.task
             except asyncio.CancelledError:
@@ -654,7 +674,13 @@ class SpeechQueue:
                     raise
                 ok, audio = False, None  # interrupt() superseded it mid-synthesis
             finally:
-                self._synth_task = None
+                self._synth_task = self._synth_exchange = None
+            if item.exchange in self._dropped_exchanges:   # drop_since() while it was being voiced
+                if isinstance(audio, StreamedAudio):
+                    audio.cancel()
+                self._banter_lines.discard(id(item.line))
+                self._pending -= 1
+                continue
             late = ok and item.deadline is not None and time.monotonic() > item.deadline
             if not ok or late:
                 if isinstance(audio, StreamedAudio):
@@ -679,7 +705,7 @@ class SpeechQueue:
                 self._banter_lines.discard(id(item.line))
                 self._pending -= 1
                 continue
-            await self._audio_q.put((item.gen, item.line, audio, item.deadline, item.queued))
+            await self._audio_q.put((item.gen, item.line, audio, item.deadline, item.queued, item.exchange))
 
     async def _pause_before(self, line: Line) -> None:
         """Leaves a beat between consecutive lines, longer when the other commentator takes over, so
@@ -704,13 +730,13 @@ class SpeechQueue:
 
     async def _play_loop(self) -> None:
         while True:
-            gen, line, audio, deadline, queued = await self._audio_q.get()
+            gen, line, audio, deadline, queued, exchange = await self._audio_q.get()
             streamed = isinstance(audio, StreamedAudio)
             try:
-                if gen != self._generation:
+                if gen != self._generation or exchange in self._dropped_exchanges:
                     continue
                 await self._pause_before(line)
-                if gen != self._generation:
+                if gen != self._generation or exchange in self._dropped_exchanges:
                     continue
                 if deadline is not None and time.monotonic() > deadline:
                     log.info("Dropped a line that missed its moment by %.1fs: %s",

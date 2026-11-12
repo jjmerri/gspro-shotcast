@@ -24,7 +24,7 @@ from .flight import point_at
 from .facts import (ctp_feet, ctp_text as _ctp_text,
     PUTT_COUNT_FACT, PUTT_FOR, PUTT_FOR_FACT, SCORE_NAMES, _PUTT_WORDS, _fmt_to_par, _to_par_value, club_delivery_facts, club_delivery_notable, club_name, flight_facts,
     CHIP_YARDS, gimme_edge, history_facts, is_chip, lie_cost_fact, moment_facts, ordinal, preshot_facts, putt_count_fact, putt_elevation_inches, shot_facts, to_yards, WRONG_GREEN_YARDS, wrong_green_fact,
-    wrong_conceded_score, wrong_green_yards, wrong_holed_putt, wrong_putt_score,
+    wrong_conceded_score, wrong_green_yards, wrong_holed_putt, wrong_putt_score, green_chip_fact, names_club,
 )
 from .flight_pick import FlightPlan, Hazard, aim_spot, aim_turn, aimed_short, pick_line, spot_words, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
@@ -613,6 +613,8 @@ def _great_shot_fact(start_yards: float | None, where: str, strokes: int | None 
 
 
 WELCOME = re.compile(r"\b(welcome|good (morning|afternoon|evening|day)|hello|evening,? everyone)\b", re.I)
+# A sign-off that opens like a broadcast ("Good afternoon, and what a finish") after the whole show.
+CLOSER_GREETING = re.compile(r"^\W*good (morning|afternoon|evening|day)\b[\s,.!-]*(and\b\s*)?", re.I)
 _OWNED = r"(?:round|card|scorecard|day|night|driver|putter|tee shot|short game|iron play|season)"
 _FORM_MARK = re.compile(
     r"\b(\d+|zero|none|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(of|for|from)\s+"
@@ -799,6 +801,7 @@ class Engine:
         # finish on, so the hole wrap plays instantly on the hole change with no model call.
         self._wrap_branches: dict | None = None
         self._wrap_task: asyncio.Task | None = None
+        self._hole_speech_mark: tuple[int, int, int] | None = None  # (round, hole seq, speech exchange) at its intro
         self._wrapped_hole: str | None = None  # hole already wrapped (on the scorecard), so the hole change doesn't repeat it
         # The round closer, pre-generated and pre-voiced on the last hole before the final putt,
         # branched by the deciding side's possible final score (solo rounds only). Played at round end
@@ -5685,6 +5688,9 @@ class Engine:
                 continue
             line = parse_lines(json.dumps({"lines": [{"speaker": self.speakers[0], "text": text}]}),
                                self.speakers, self.cfg.commentary.max_words_per_line, self._persona_names)
+            if line and not is_putt and (club := names_club(line[0].text)):
+                log.info("Dropped the %s flight line (names a club, %r, before it's known): %r", outcome, club, line[0].text)
+                continue
             if outcome == "water":
                 # The water tease names the water, which the unseen-scenery grounding would reject.
                 # It's only ever played when the GSPro log confirms the ball is wet, so the water is a
@@ -5765,6 +5771,9 @@ class Engine:
                 continue
             if phrase := repeats(body, [self.system_examples]) or repeats(body, recent):
                 log.info("Dropped the pre-written %s reaction (reuses %r): %r", outcome, phrase, body)
+                continue
+            if not is_putt and (club := names_club(body)):
+                log.info("Dropped the pre-written %s reaction (names a club, %r, before it's known): %r", outcome, club, body)
                 continue
             if putt_for and (named := wrong_putt_score(body, *putt_for, holed=outcome in ("holed", "lip_in", "holed_reply"))):
                 log.info("Dropped the pre-written %s reaction (calls a putt for %s): %r", outcome, named, body)
@@ -6409,6 +6418,10 @@ class Engine:
         must = ("misread" if "misread" in replay_facts[0] else "mulligan") if replay_facts else None
         if off_wrong_green is not None:
             score = max(score, c.interest_threshold)   # a shot off another hole's green gets its word
+        chip_off_green = not shot.is_putt and (played_from or "").lower() == "green" and off_wrong_green is None
+        if chip_off_green:
+            score = max(score, c.interest_threshold)   # a chip off the putting surface gets its word
+            tags = [*tags, "green_chip"]
         if replay_facts:
             score = max(score, c.interest_threshold)   # the mulligan gets its word
         if kick := await self._kick_facts(fire, hud.lie, shot.is_putt, wood_tree=wood_tree):
@@ -6754,6 +6767,8 @@ class Engine:
             result = result + [next_putt]
         if off_wrong_green is not None:
             result = [wrong_green_fact(off_wrong_green, played_off=True)] + result
+        if chip_off_green:
+            result = [green_chip_fact(club_name(shot.club))] + result
         # No in-the-moment "distance from the pin": the only estimate available (start distance minus
         # how far the ball travelled, from a tile that can read stale) was unreliable enough to call a
         # ball in a greenside bunker "three yards, beautifully done". The lie (describe) is read
@@ -8212,6 +8227,10 @@ class Engine:
     async def _tee_up(self, current_hole: str) -> None:
         """Introduce the hole that's starting. Used after a pre-made recap, which is recap-only; the
         on-demand wrap already tees up the next hole itself."""
+        if (r := self.round) and not r.ended:
+            # The last hole's wrap is queued already: what's queued from here is this hole's, and a
+            # quit on its tee drops it.
+            self._hole_speech_mark = (r.id, r.seq, self.speech.exchange_mark())
         user, facts_text = hole_intro_prompt(
             hole=current_hole, recent_lines=self.state.recent_lines,
             extra=self._roster_facts() + self._weather_facts(self.cfg.weather.between_holes_rate))
@@ -10483,6 +10502,13 @@ class Engine:
             else:
                 stats = self._record_round_stats(r, event.reason, complete=False)
             self._fill_course_layouts(since=time.time() - 12 * 3600)
+            mark = self._hole_speech_mark
+            if mark and mark[:2] == (r.id, r.seq) \
+                    and not any(x.round_id == r.id and x.hole_seq == r.seq for x in self.state.shots):
+                # Quit on the tee of a hole nobody played: its intro and segment lines, still waiting
+                # to air, would talk up a hole that never happens. The last hole's wrap still airs.
+                log.info("Round %s quit on unplayed hole %s: dropping its lines still waiting to air", r.id, r.seq)
+                self.speech.drop_since(mark[2])
             played = max((st.holes_scored for st in stats.values()), default=0)
             if played < COUNTS_AS_ROUND_HOLES:
                 self._schedule_publish(after_speech=True)
@@ -11064,6 +11090,8 @@ class Engine:
                 out.append(f'none of the lines says "{must}": say it in so many words')
             if english and kind == "opener" and lines and not WELCOME.search(lines[0].text):
                 out.append("the opener has to start with a line welcoming everyone to the broadcast")
+            if english and kind == "closer" and lines and CLOSER_GREETING.match(lines[0].text):
+                out.append("the sign-off can't open with a greeting like \"good afternoon\": the show is ending")
             return out
 
         lines, problems = self._grounded(await self._generate(kind, llm, user, images, system=system,
@@ -11087,6 +11115,12 @@ class Engine:
                 self.stats["dropped_after_retry"] += len(still_bad)
         if kind == "opener":
             lines = lines[:self.cfg.commentary.opener_max_lines]   # it plays over a load that can be quick
+        if english and kind == "closer" and lines and (m := CLOSER_GREETING.match(lines[0].text)):
+            rest = lines[0].text[m.end():].strip()
+            if rest:
+                lines = [replace(lines[0], text=rest[0].upper() + rest[1:]), *lines[1:]]
+            else:
+                lines = lines[1:]
         return lines
 
     def _air_lines(self, kind: str, lines: list[Line], shot_id: int | None = None) -> None:

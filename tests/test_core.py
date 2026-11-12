@@ -677,6 +677,40 @@ async def test_a_new_shot_drops_waiting_lines_but_lets_the_one_on_air_finish():
     assert played == ["start", "end", "start", "end"]
 
 
+async def test_a_quit_on_a_new_tee_drops_only_the_lines_queued_since_the_hole_began(capsys):
+    import asyncio
+
+    from commentator.models import Line
+
+    played: list[int] = []
+    gate = asyncio.Event()
+
+    async def rec_play(audio):
+        played.append(1)
+        await gate.wait()
+
+    speech = SpeechQueue(_fast_tts_cfg(hedge=30, live=30), _StallingTTS(stall_calls=set()), player=rec_play,
+                         stopper=lambda: None)
+    task = asyncio.create_task(speech.run())
+    speech.say([Line("pbp", "on air"), Line("color", "the ninth's wrap")])
+    while played != [1]:
+        await asyncio.sleep(0.01)
+    mark = speech.exchange_mark()                 # the hole change
+    speech.say([Line("pbp", "the tenth's intro"), Line("color", "the weather")])
+    speech.drop_since(mark)                       # quit on the tenth tee
+    gate.set()
+    while not speech.is_idle():
+        await asyncio.sleep(0.01)
+    speech.say([Line("pbp", "the closer")])
+    while not speech.is_idle():
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert capsys.readouterr().out.split("\n")[:3] == ["  [Nigel] on air", "  [Duke] the ninth's wrap",
+                                                       "  [Nigel] the closer"]
+
+
 async def test_a_new_shot_lets_an_aside_on_air_play_out_and_a_routine_call_waits_for_it():
     import asyncio
 
@@ -2398,6 +2432,38 @@ def test_prewritten_putt_reactions_may_quote_the_putt_length_only(tmp_path):
     out = e._build_reactions({"reaction_lines": {"holed": "Il rentre ce putt de 7,5 pieds !",
                                                  "short": "Il reste court, à 2,5 pieds."}}, True, "Putt length: 7.5 feet.")
     assert out == {"holed": "Il rentre ce putt de 7,5 pieds !"}
+
+
+def test_lines_written_before_the_swing_dont_guess_the_club(tmp_path):
+    # Old Head, 2026-11-12: "Josh's iron holds its line" over a driver, "the wedge climbs" over a 9-iron.
+    e = _mini_engine(tmp_path)
+    out = e._build_reactions({"reaction_lines": {"fairway": "The iron finds the short grass.",
+                                                 "rough": "Into the rough, a tough drive."}}, False)
+    assert out == {"rough": "Into the rough, a tough drive."}   # "drive" is the shot, not a club
+    plan = e._build_plan({"flight_lines": {"on_target": "That wedge is climbing beautifully.",
+                                           "water": "That iron is heading for the water.",
+                                           "long": "This one's carrying a long way, out of the woods."}},
+                         None, "150 yards", "", seen_image=False)
+    assert set(plan.lines) == {"long"}
+    putts = e._build_reactions({"reaction_lines": {"holed": "The putter does it again!"}}, True)
+    assert putts == {"holed": "The putter does it again!"}       # on the green the club is known
+
+
+async def test_a_sign_off_doesnt_open_with_a_greeting(tmp_path):
+    # Old Head, 2026-11-12: the closer began "Good afternoon, and that's where Josh calls time".
+    replies = [[{"speaker": "pbp", "text": "Good afternoon, and that's where Josh calls time."},
+                {"speaker": "color", "text": "One under and smiling, Nigel."}]] * 2
+
+    class SeqLLM(FakeLLM):
+        async def complete_json(self, system, user, schema, images=None, cache=True):
+            self.prompts.append(user)
+            return LLMResult(text=json.dumps({"lines": replies[len(self.prompts) - 1]}))
+
+    e = _mini_engine(tmp_path)
+    llm = SeqLLM(e.cfg.llm.live)
+    lines = await e._compose("closer", llm, "THE ROUND IS OVER.", "Josh calls time at one under.", [], mode="round")
+    assert len(llm.prompts) == 2 and "greeting" in llm.prompts[1]
+    assert lines[0].text == "That's where Josh calls time."      # the retry greeted too: the greeting is cut
 
 
 def test_prewritten_putt_reactions_name_the_comeback_for_the_next_score(tmp_path):

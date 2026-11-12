@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 
 from . import handicap
-from .facts import ctp_feet, to_yards
+from .facts import club_name, ctp_feet, to_yards, wrong_green_yards
 from .hud import Scorecard
 from .league import League
 from .store import COUNTS_AS_ROUND_HOLES, is_drive
@@ -1150,6 +1150,13 @@ class Round:
                              f"{prior[1]} from an earlier round.")
             else:
                 facts.append(fact + f". {prior[0]}'s {prior[1]} from an earlier round this week is still closer.")
+        chips = [r for r in records if r.round_id == self.id and not r.mulligan and r.lie_before == "green"
+                 and not r.shot.is_putt and wrong_green_yards(r.lie_before, r.to_pin_before) is None
+                 and (not self.stats_through or r.hole_seq <= self.stats_through)]
+        for r in sorted(chips, key=lambda r: (r.hole_seq, r.shot.timestamp or 0)):
+            club = f"the {name}" if (name := club_name(r.shot.club)) else "a club other than the putter"
+            facts.append(f"A moment worth a callback: {r.player or 'a player'} chipped off the green with "
+                         f"{club} instead of putting on {self.hole_name(r.hole_seq)}.")
         return facts
 
     def net_to_par(self, side: Side, stats: SideStats) -> int | None:

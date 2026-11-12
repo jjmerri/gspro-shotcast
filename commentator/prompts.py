@@ -712,7 +712,8 @@ def preshot_branch_prompt(
         "PRE-SHOT BRANCHES. The player is about to hit. Write the lines now, for each way the shot could go. "
         "Reply with two things, each value the spoken words themselves, never a speaker name or label:\n"
         f'1. "flight_lines": what {speaker} says while the ball is in the air: at most 10 words, present '
-        "tense, no numbers, never where it lands. on_target (dead straight at the target: never the words "
+        "tense, no numbers, never where it lands, and never the club (driver, iron, wedge): it isn't known "
+        "until the ball is struck, so say the ball or the shot. on_target (dead straight at the target: never the words "
         '"left" or "right" here, they read as a direction), short (short of the FLAG, usually still on the green: '
         '"might be a touch short", "leaves itself a putt from below"; never that it needs more carry to reach or '
         'won\'t reach the green, unless the green front is clearly beyond this club), long, left, right, and '
@@ -790,7 +791,8 @@ def closer_prompt(*, facts: list[str], recent_lines, now: datetime | None = None
         "not the count. Give it personality: each commentator "
         "commits to a clear opinion of the round (said naturally, never announced as a \"verdict\"), a callback "
         "to a running joke or a prediction from the broadcast's recent lines if one landed, and a last line "
-        "people would remember, not a generic thanks-for-watching."
+        "people would remember, not a generic thanks-for-watching. The broadcast is already under way: don't "
+        "open with a greeting (no \"good afternoon\" or \"good evening\")."
         + (aside_room(max_words) if max_words else "")
     )
     return prompt, facts_text

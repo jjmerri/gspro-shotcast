@@ -515,6 +515,26 @@ def wrong_green_fact(yards: float, *, played_off: bool = False) -> str:
             "not a real putt: don't call it a putt for any score, and don't call the hole's green found.")
 
 
+def green_chip_fact(club: str | None) -> str:
+    """A stroke played from the green with a club other than the putter (a lob wedge chipped from 46
+    feet was called "that long first putt")."""
+    what = f"a {club}" if club else "a club other than the putter"
+    return (f"This stroke was played from ON the green with {what}, not the putter: the player chipped off "
+            "the putting surface instead of putting. That's rare and memorable - have some fun with it (the "
+            "greenkeeper, the divot, the nerve of it). Call it a chip, never a putt, and don't call any "
+            "earlier stroke on this hole a putt unless the facts say so.")
+
+
+# A club named in a line written before the shot, when the club isn't known yet: "Josh's iron holds its
+# line" was a driver, "the wedge climbs" a nine-iron. ("drive" is the shot, not the club.)
+_CLUB_WORD = re.compile(r"\b(driver|(?:three|five|seven|fairway|[3579])[- ]?wood|irons?|wedges?|hybrids?|putter)\b",
+                        re.I)
+
+
+def names_club(text: str) -> str | None:
+    return m.group(1) if (m := _CLUB_WORD.search(text)) else None
+
+
 def preshot_facts(hud, hole_par: int | None, handed: str | None = None) -> list[str]:
     facts = []
     if hud.shot_number:
