@@ -4,6 +4,12 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.124
+
+### Booth
+- GSPro in a window (any size) is read as well as full screen: its title bar no longer stops the booth seeing who's up or starting the round.
+- A round whose start the booth missed is picked up once a scorecard shows it.
+
 ## 0.1.123
 
 ### Stats page
