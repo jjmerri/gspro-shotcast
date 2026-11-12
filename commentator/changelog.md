@@ -4,6 +4,16 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.121
+
+### Stats page
+- Scramble tee shots saved as finishing on the tee get their real lie (fairway, rough, sand) in past rounds.
+
+### Booth
+- A shot is never saved as coming to rest on the tee.
+- After a hole, the booth gives the right overall score, not just the hole's ("two under overall" after an eagle at three under).
+- In a scramble, the booth no longer says which ball the team picked before everyone has hit, or sets up a player's next shot before their partner has played.
+
 ## 0.1.120
 
 ### Booth
