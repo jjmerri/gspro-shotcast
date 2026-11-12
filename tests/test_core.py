@@ -5561,6 +5561,12 @@ def test_the_pick_screens_cards_give_each_balls_finish_and_lie(tmp_path):
     e._pick_cards_due.append(({0: 7, 1: 9}, {0: "Ozzy", 1: "Kyle Martin"}, cards, time.monotonic()))
     e._apply_pick_cards()
     assert e.store.finish_of(ozzy)[0] == "rough" and e.store.finish_of(kyle)[0] == "green"
+    # Unless the lie it has is "tee", the stale read of where it was hit from (Corey's opening drive at
+    # Bethpage, 11-11: the card said fairway).
+    e.store.set_lie_after(ozzy, "tee")
+    e._pick_cards_due.append(({0: 7, 1: 9}, {0: "Ozzy", 1: "Kyle Martin"}, cards, time.monotonic()))
+    e._apply_pick_cards()
+    assert e.store.finish_of(ozzy)[0] == "deep rough"
     # The log never named the pick (an older GSPro): after a while the cards only fill missing lies.
     rec.picked = rec2.picked = None
     e.store.set_lie_after(kyle, "fringe")
@@ -5661,9 +5667,37 @@ def test_the_scramble_pick_fact_names_the_stroke_it_came_from(tmp_path):
     assert e._pick_facts(1) == ["The team picked Sam's ball from the stroke-1 shots; stroke 2 is played from there."]
     late = e._pick_facts(2)
     assert "Stroke 2 was played from Sam's ball" in late[0] and "don't say or guess" in late[1]
+    # Off the next tee the log still holds the last hole's pick (stroke 3): Duke said "They've picked
+    # Josh's ball" with Corey still to hit.
+    g._pick_stroke = 3
+    assert len(e._pick_facts(1)) == 1 and "don't say or guess" in e._pick_facts(1)[0]
     g.pick = None
     assert len(e._pick_facts(1)) == 1 and "don't say or guess" in e._pick_facts(1)[0]
     assert e._pick_facts(1, setup=True) == []
+
+
+def test_a_scramble_stroke_isnt_set_up_while_a_partner_has_the_last_still_to_play(tmp_path):
+    # Bethpage, 11-11: GSPro flashed Josh's next ball (26 yards, deep rough) before Corey teed off, and
+    # the booth set it up: "Josh has a demanding recovery from the deep rough".
+    from commentator.round import Round
+    from commentator.state import ShotRecord
+    e = _mini_engine(tmp_path)
+    r = e.round = Round(league=e.league, gspro_players=["Pat", "Sam"], course="X", scheduled_format="scramble",
+                        holes=9, is_league=False, slot_names=["Pat", "Sam"])
+    r.play_scramble([["Pat", "Sam"]])
+
+    def hit(who, n):
+        e.state.shots.append(ShotRecord(player=who, shot=None, hole="h", hud=None, tags=[], round_id=r.id,
+                                        hole_seq=r.seq, shot_number=n))
+    hit("Pat", 1)
+    assert e._partner_to_play("Pat", 2) == "Sam"
+    assert e._partner_to_play("Sam", 2) is None    # Sam's own stroke 1 isn't in: no grounds
+    assert e._partner_to_play("Pat", 1) is None
+    hit("Sam", 1)
+    assert e._partner_to_play("Pat", 2) is None
+    # Partners on one GSPro profile: their turns can't be told apart, so nobody's held up.
+    r.sides[0].gspro = ["Pat"]
+    assert e._partner_to_play("Pat", 3) is None
 
 
 def test_the_hole_recap_counts_strokes_not_swings(tmp_path):
@@ -5818,6 +5852,10 @@ async def test_a_switch_right_after_the_ball_stops_reads_the_last_grab_before_it
     hud, landed = await follow([(125.2, "fairway"), (123.1, "rough"), (121.5, "sand"), (121.5, "sand")])
     assert landed and hud.lie == "sand" and hud.tiles["total length"] == "121.5"
     hud, landed = await follow([(125.2, "fairway"), (123.1, "rough"), (121.9, "sand")])
+    assert landed and hud.lie is None
+    # Bethpage, 11-11: a ball doesn't come to rest on the tee; that's the lie it was hit from, not yet
+    # redrawn (Corey's 275-yard drive was saved finishing there).
+    hud, landed = await follow([(125.2, "fairway"), (123.1, "rough"), (121.5, "tee"), (121.5, "tee")])
     assert landed and hud.lie is None
     # Bethpage, 11-07: the box fades out with the ball stopped, so no two grabs' pixels match. The last
     # two grabs' totals do (or creep under a yard): that's the ball at rest.

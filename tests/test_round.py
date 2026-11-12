@@ -913,6 +913,49 @@ def test_mid_hole_strokes_misread_as_shot_one_are_renumbered_and_their_phantom_p
     assert st.db.execute("SELECT penalties FROM rounds").fetchone()[0] == 1
 
 
+def test_full_shots_saved_finishing_on_the_tee_take_the_next_strokes_lie(tmp_path):
+    from commentator.store import Store
+
+    # Bethpage, 11-11: Corey's 275-yard opening drive, the team's pick, kept the lie it was hit from.
+    path = str(tmp_path / "season.db")
+    st = Store(path)
+    h1, h2, h3 = "Hole 1, par 4, 426 yards", "Hole 2, par 4, 389 yards", "Hole 3, par 4, 400 yards"
+    rows = [  # (ts, player, hole, shot_number, lie_before, lie_after, total, fmt, picked, mulligan)
+        (1, "Josh", h1, 1, "tee", "rough", 250.0, "scramble", 0, 0),
+        (2, "Corey", h1, 1, "tee", "tee", 275.5, "scramble", 1, 0),     # the pick: the team's next lie
+        (3, "Josh", h1, 2, "fairway", "green", 140.0, "scramble", 1, 0),
+        (3.5, "Corey", h1, 2, "fairway", "green", 150.0, "scramble", 0, 0),
+        (4, "Josh", h2, 1, "tee", "tee", 230.0, "scramble", 0, 0),      # not picked: its rest never played,
+        (5, "Corey", h2, 1, "tee", "fairway", 260.0, "scramble", 1, 0),
+        (6, "Josh", h2, 2, "fairway", "green", 120.0, "scramble", 1, 0),  # though he plays on next
+        (7, "Dan", h1, 1, "tee", "tee", 240.0, None, None, 1),          # a mulligan: hit again
+        (8, "Dan", h1, 1, "tee", "tee", 3.0, None, None, 0),            # a whiff
+        (9, "Dan", h1, 2, "tee", "tee", 230.0, None, None, 0),          # hit again from there: so alone
+        (10, "Dan", h1, 3, "tee", "fairway", 230.0, None, None, 0),
+        (11, "Josh", h3, 1, "tee", "tee", 250.0, "scramble", 1, 0),     # another team's next comes first
+        (12, "Kyle", h3, 2, "sand", "green", 90.0, "scramble", 1, 0),
+        (13, "Corey", h3, 2, "fairway", "green", 120.0, "scramble", 1, 0),
+        (14, "Josh", h2, 1, "tee", "tee", 250.0, "scramble", 1, 0),     # a penalty: only Kyle plays a 2nd
+        (15, "Kyle", h2, 2, "sand", "green", 90.0, "scramble", 1, 0),
+        (16, "Josh", h2, 3, "rough", "green", 90.0, "scramble", 1, 0),
+        (17, "Josh", h3, 1, "tee", "tee", 250.0, "scramble", 1, 0),     # the hole started over: alone
+        (18, "Josh", h3, 1, "tee", "rough", 250.0, "scramble", 1, 0),
+        (19, "Josh", h3, 2, "rough", "green", 90.0, "scramble", 1, 0),
+    ]
+    for ts, who, hole, num, lb, la, total, fmt, picked, mull in rows:
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, lie_before, "
+                      "lie_after, total_yards, fmt, picked, mulligan) VALUES (?, ?, ?, 'Bethpage', ?, ?, 0, ?, ?, ?, "
+                      "?, ?, ?)", (st.session_id, ts, who, hole, num, lb, la, total, fmt, picked, mull))
+    st.db.execute("PRAGMA user_version = 4")   # as kept before
+    st.db.commit()
+    st.db.close()
+    st = Store(path, new_session=False)
+    got = [r[0] for r in st.db.execute("SELECT lie_after FROM shots ORDER BY ts")]
+    assert got == ["rough", "fairway", "green", "green", "tee", "fairway", "green", "tee", "tee", "tee", "fairway",
+                   "tee", "green", "green", "tee", "green", "green",
+                   "tee", "rough", "green"]
+
+
 def test_the_misread_shot_one_repair_keeps_restarts_alternate_shot_and_shares_a_scramble_gap(tmp_path):
     import json
     from commentator.store import Store
@@ -1195,6 +1238,11 @@ async def test_wrap_states_the_finished_hole_score_from_the_scorecard(tmp_path):
     # From the scorecard (no banner needed): a 5 on a par 4 is a bogey, stated with the numbers so
     # the grounding check lets the wrap say "bogey" / "one over".
     assert facts and "made 5" in facts[0] and "par-4" in facts[0] and "1 over" in facts[0] and "bogey" in facts[0]
+    # And the round's running score beside it: told only the hole's "2 under par" for an eagle, the
+    # wrap said "moving two under overall" with the team at three under.
+    assert "Round score after the finished hole: Aces is 1 over par through 1 hole " in facts[1]
+    r.par[2] = 5   # a pre-made branch counts the hole it's for: an eagle three on the par 5
+    assert "Aces is 1 under par through 2 holes" in e._round_total_facts(2, (r.sides[0].key, 2, 3, 5))[0]
 
 
 async def test_pre_made_wrap_branch_plays_for_the_scored_result(tmp_path):

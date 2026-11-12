@@ -3420,6 +3420,23 @@ class Engine:
                 f"{margin} par" + (f" (a {term})" if term else "")
                 + (": they picked up, and the game scored the hole at its maximum" if picked else "") + ".")
 
+    def _round_total_facts(self, through: int, extra: tuple[str, int, int, int] | None = None) -> list[str]:
+        """Each side's round score to par after hole `through`, beside the hole's own: given only the
+        hole ("2 under par" for an eagle), the wrap called it the round ("moving two under overall" at
+        three under). `extra` = (side key, seq, strokes, par), a pre-built branch's score for the hole."""
+        r = self.round
+        if not r or r.ended or through < 1:
+            return []
+        facts = []
+        for side in r.sides:
+            hyp = extra[1:] if extra and extra[0] == side.key else None
+            tally = r.par_type_to_par(side, through, self.state.shots, hyp)
+            if tally:
+                total = sum(v for v, _ in tally.values())
+                facts.append(f"Round score after the finished hole: {side.label} is {to_par(total)} through "
+                             f"{through} hole{'s' if through > 1 else ''} (the hole score is for that hole alone).")
+        return facts
+
     def _hole_score_facts(self, finished_hole: str | None) -> list[str]:
         """How each side scored on the hole that just finished, from the scorecard. This is the
         reliable par/bogey signal even when GSPro's result banner never shows. The par comes from the
@@ -3433,7 +3450,8 @@ class Engine:
         par = int(m.group(1))
         self._apply_log_corrections()
         return [self._score_fact(side, s, par, picked=r.was_picked_up([*side.gspro, *side.players], r.seq - 1))
-                for side in r.sides if (s := r.card_score(side, r.seq - 1)) is not None]
+                for side in r.sides if (s := r.card_score(side, r.seq - 1)) is not None] \
+            + self._round_total_facts(r.seq - 1)
 
     def _hole_penalty_facts(self, seq: int) -> list[str]:
         """Penalty strokes each player took on hole `seq` of the round, from GSPro's log, so the wrap
@@ -3549,7 +3567,8 @@ class Engine:
         async def gen(strokes):
             # "round" mode: a recap spans several lies, so skip the single-finishing-lie check that
             # would otherwise reject "found the green, then the rough".
-            result = (other_facts + [self._score_fact(side, strokes, par)] + self._hole_penalty_facts(r.seq)
+            result = (other_facts + [self._score_fact(side, strokes, par)]
+                      + self._round_total_facts(r.seq, (side.key, r.seq, strokes, par)) + self._hole_penalty_facts(r.seq)
                       + self._par_type_facts(r.seq, (side.key, r.seq, strokes, par))
                       + r.lead_change_facts(r.seq, (side.key, r.seq, strokes)) + theme + roster)
             user, facts = wrap_recap_prompt(finished_hole=finished, result=result,
@@ -5414,6 +5433,21 @@ class Engine:
         results = await asyncio.gather(*calls.values(), return_exceptions=True)
         return dict(zip(calls.keys(), results)), facts_text
 
+    def _partner_to_play(self, player: str | None, stroke: int | None) -> str | None:
+        """In a scramble, a partner who hasn't yet hit the stroke before `stroke` on this hole, when
+        `player` has: the team's stroke `stroke` can't be set up before everyone's played the last."""
+        r = self.round
+        if not r or r.ended or r.format != "scramble" or not player or not stroke or stroke < 2:
+            return None
+        side = r.side_for(player)
+        if side is None or len(side.players) < 2 or len(set(side.gspro)) < 2:
+            return None   # (partners sharing one GSPro profile: their turns can't be told apart)
+        played = {x.player for x in self.state.shots if x.round_id == r.id and x.hole_seq == r.seq
+                  and not x.mulligan and x.shot_number == stroke - 1}
+        if player not in played:
+            return None   # this player's own count is off: no grounds to say anyone's still to play
+        return next((p for p in side.players if p != player and p not in played), None)
+
     def _setup_line_rate(self, hud: Hud, is_putt: bool) -> float:
         """The chance this setup gets a spoken line. Weighted toward the moments worth setting up:
         every putt (a long lag and a close scoring look both deserve a word) and a short scoring
@@ -5572,7 +5606,12 @@ class Engine:
         turn = getattr(event.hud, "_line_turn", None)
         if turn is None:   # results supplied without _preshot_model (replay, tests): roll here
             turn = self.rng.random() <= rate
-        if spoken and not turn:
+        waiting = self._partner_to_play(player, event.hud.shot_number)
+        if spoken and waiting:
+            # GSPro flashes the hitter's next ball before the partner's turn (Josh's deep-rough 26 yards
+            # shown before Corey teed off): the team's next stroke isn't set up until the pick.
+            log.info("Setup line skipped: %s still to play stroke %s", waiting, event.hud.shot_number - 1)
+        elif spoken and not turn:
             log.info("Setup line skipped: not this shot's turn (rate %.0f%%)", rate * 100)
         elif spoken and (good := setup_lines()):
             if self.speech.is_idle():
@@ -7336,7 +7375,11 @@ class Engine:
         if setup:
             return [f"Stroke {stroke} is played from {name}'s ball, the team's pick from stroke {n}."] \
                 if n == stroke - 1 else []
-        if n >= stroke:
+        if n > stroke:
+            # A pick from a later stroke than this one is the last hole's: the log moves to a new hole only
+            # once its tee shot is in ("They've picked Josh's ball" off the tee, Corey still to hit).
+            return [undecided]
+        if n == stroke:
             return [f"The team picked {name}'s ball from the stroke-{stroke} shots; stroke {stroke + 1} is "
                     f"played from there."]
         return [f"Stroke {stroke} was played from {name}'s ball (the team's pick from stroke {n}).", undecided]
@@ -7636,6 +7679,17 @@ class Engine:
     async def _follow_shot(self, before: Hud, tag: str = "", is_putt: bool = False,
                            ended: Callable[[], bool] | None = None,
                            at_rest: Callable[[], bool] | None = None) -> tuple[Hud, bool]:
+        """_follow_reads, less a resting lie of "tee": no shot comes to rest there; it's the lie the
+        ball was hit from, not yet redrawn (Corey's 275-yard opening drive at Bethpage was saved there)."""
+        hud, landed = await self._follow_reads(before, tag, is_putt, ended, at_rest)
+        if not is_putt and (hud.lie or "").lower() == "tee":
+            log.info("%s lie tee read for where the ball stopped: the lie it was hit from; not naming it", tag)
+            hud = replace(hud, lie=None)
+        return hud, landed
+
+    async def _follow_reads(self, before: Hud, tag: str = "", is_putt: bool = False,
+                            ended: Callable[[], bool] | None = None,
+                            at_rest: Callable[[], bool] | None = None) -> tuple[Hud, bool]:
         """Follows the ball through the HUD from impact until it stops.
 
         Checked on gameplay video: CARRY (game) counts up and freezes at touchdown (the lie flips
@@ -7833,8 +7887,10 @@ class Engine:
                 self.store.fill_finish(shot_id, round(card.yards, 1))
                 # The picked ball's lie is GSPro's log's (the team plays on from it); the pick screen only
                 # stands in for it when there's none, and is the only word on the balls lifted. Until the
-                # log says which was picked, a ball keeps the lie it has.
-                if card.lie and (rec.picked is False or not self.store.finish_of(shot_id)[0]):
+                # log says which was picked, a ball keeps the lie it has. A saved "tee" is no lie at all: the
+                # stale hit-from read (Corey's opening drive at Bethpage, card "fairway").
+                saved = self.store.finish_of(shot_id)[0]
+                if card.lie and (rec.picked is False or not saved or saved.lower() == "tee"):
                     self.store.set_lie_after(shot_id, card.lie)
                 log.info("Pick card %s (%s): shot %s finished %.0f yd, %s", card.name, names[idx], shot_id,
                          card.yards, card.lie)

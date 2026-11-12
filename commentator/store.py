@@ -440,6 +440,9 @@ class Store:
         if self.db.execute("PRAGMA user_version").fetchone()[0] < 4:
             self._repair_misread_first_strokes()
             self.db.execute("PRAGMA user_version = 4")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 5:
+            self._repair_tee_finishes()
+            self.db.execute("PRAGMA user_version = 5")
         # A round's course read off the scorecard was stored in capitals: file it under the shots' name.
         for table in ("rounds", "player_rounds"):
             for (course,) in self.db.execute(f"SELECT DISTINCT course FROM {table} WHERE course IS NOT NULL").fetchall():
@@ -1194,6 +1197,40 @@ class Store:
         self.db.execute("UPDATE shots SET fmt = ?, attributed = ?, shared_ball = ? WHERE id > ? AND player = ?",
                         (fmt, int(attributed), int(shared_ball), after_id, player))
         self.db.commit()
+
+    HOLE_VISIT_SECONDS = 1800   # a hole's strokes are played well inside this; a later round's aren't
+
+    def _repair_tee_finishes(self) -> None:
+        """A full shot saved as finishing on the tee kept the lie it was hit from (Corey's opening drive at
+        Bethpage, 275 yards). Its real lie is where the next stroke on the hole was played from: the same
+        player's, or in a scramble, when this was the ball picked, everyone's next (left alone unless they
+        all agree, the player's own among them: another team's may come first). Not mulligans (hit again) or whiffs."""
+        rows = self.db.execute(
+            "SELECT id, session_id, player, course, hole, shot_number, fmt, picked, ts FROM shots "
+            "WHERE lower(lie_after) = 'tee' AND is_putt = 0 AND COALESCE(mulligan, 0) = 0 "
+            "AND total_yards >= 10 AND shot_number IS NOT NULL").fetchall()
+        for r in rows:
+            # The hole visit: until the player starts the hole over (a restart: their count goes back).
+            reset = self.db.execute(
+                "SELECT MIN(ts) FROM shots WHERE session_id = ? AND course = ? AND hole = ? AND player = ? "
+                "AND ts > ? AND shot_number <= ? AND COALESCE(mulligan, 0) = 0",
+                (r["session_id"], r["course"], r["hole"], r["player"], r["ts"], r["shot_number"])).fetchone()[0]
+            until = min(r["ts"] + self.HOLE_VISIT_SECONDS, reset if reset is not None else float("inf"))
+            nxt = self.db.execute(
+                "SELECT player, fmt, lie_before FROM shots WHERE session_id = ? AND course = ? AND hole = ? "
+                "AND shot_number = ? AND ts > ? AND ts < ? AND COALESCE(mulligan, 0) = 0 ORDER BY ts, id",
+                (r["session_id"], r["course"], r["hole"], r["shot_number"] + 1, r["ts"], until)).fetchall()
+            if r["fmt"] == "scramble":
+                nxt = [n for n in nxt if n["fmt"] == "scramble"]
+                lies = {(n["lie_before"] or "").lower() for n in nxt}
+                # The picker plays on from their own ball too: without their next stroke (a penalty, a
+                # missed shot), another team's could be all there is.
+                mine = any(n["player"] == r["player"] for n in nxt)
+                nxt = nxt[:1] if r["picked"] and mine and len(lies) == 1 else []
+            else:
+                nxt = [n for n in nxt if n["player"] == r["player"]][:1]
+            if nxt and nxt[0]["lie_before"] and not nxt[0]["lie_before"].lower().startswith("tee"):
+                self.db.execute("UPDATE shots SET lie_after = ? WHERE id = ?", (nxt[0]["lie_before"], r["id"]))
 
     def _repair_misread_first_strokes(self) -> None:
         """A mid-hole stroke whose HUD strip was read "shot 1" was saved off the tee (Dan's lob wedge from
