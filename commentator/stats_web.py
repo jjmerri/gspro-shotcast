@@ -24,7 +24,7 @@ from urllib.parse import unquote, urlparse
 
 from . import changelog, handicap_index
 from . import season_analytics as A
-from .round_record import _late_gimmes, membership, player_round_of, round_groups, shot_rounds
+from .round_record import _late_gimmes, player_round_of, round_groups, round_rows, shot_rounds
 from .store import DRIVE_SQL
 
 log = logging.getLogger(__name__)
@@ -92,11 +92,11 @@ _ROUND_TABLES = ("rounds", "player_rounds", "shots", "lines")
 def _round_rows(db: sqlite3.Connection, round_id: int, ended: float) -> list[list[int]] | None:
     """A round's rows (as round_groups and the page number it: its lowest `rounds` id), per table of
     _ROUND_TABLES: its sides, its players' cards, its shots and what the booth said in it
-    (round_record.membership's). None when there's no such round, it didn't end at `ended` (its
+    (round_record.round_rows'). None when there's no such round, it didn't end at `ended` (its
     `round_end` on the page), or it was deleted. Worked out over every row, excluded or not, so it's
     the same round either way."""
     db.row_factory = sqlite3.Row
-    g = next((g for g in membership(db) if g["round"] == round_id), None)
+    g = round_rows(db, round_id)
     if g is None or abs(g["end"] - ended) > 0.001:
         return None
     if db.execute(f"SELECT 1 FROM rounds WHERE excluded = {DELETED} AND id IN ({_in(g['sides'])})").fetchone():

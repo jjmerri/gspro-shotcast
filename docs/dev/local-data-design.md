@@ -128,8 +128,9 @@ happens to opening drives adopted by `_adopt_opening_shots`, and to late gimmes.
   began. Its slot is found by GSPro's name or by the roster name the booth gives a league player. A line on a
   shot takes its shot's record. A line on no shot goes to the round being played, else the round
   that ended within `CLOSER_SECONDS` (its closer), else practice. With no round live, they go to the
-  open practice stretch, which starts one if needed. (A line said before a round starts is
-  practice's; the time rules gave it to the round. Step 3 settles which the readers follow.) `record_gimme` copies `record_uuid` and
+  open practice stretch, which starts one if needed. When a round starts, the lines on no shot
+  that practice got after its last shot (the opener, aired over the course load) move to the
+  round, as the time rules had it. `record_gimme` copies `record_uuid` and
   `slot_id` from the shot it follows, like it copies the rest.
 - **Late gimmes.** A gimme conceded within `CLOSER_SECONDS` of the round ending gets that round's
   record directly, since the engine still knows the round. The `_late_gimmes` time rule is needed
@@ -534,7 +535,11 @@ The `EXPLAIN QUERY PLAN` test from step 1 covers the triggers' lookups as well.
    with its equality test. Readers stay on today's rules, and the stored grouping is checked against
    them.
 3. Readers switch to the stored grouping (`round_groups`, `shot_rounds`, `player_round_of`,
-   `_round_rows`).
+   `_late_gimmes`, `round_rows` for `_round_rows`), keeping their shapes. They read it once every
+   row has a record (`round_record.recorded`), else the time rules (`_timed_*`, which `membership`
+   and `reconcile` keep using): a file not yet migrated, or rows an older version wrote since the
+   last start. On a migrated copy the two give the same pages; they differ only for rounds played
+   since, where practice on the round's course before it is no longer the round's.
 4. Overrides, with the page's edits moved onto them.
 5. Contributions and rollups keyed by record and slot (stats-longevity step 4), then reels (step 5).
 

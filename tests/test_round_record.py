@@ -568,3 +568,47 @@ def test_a_rename_onto_a_misread_shots_name_keeps_the_players_slot(tmp_path):
     assert set(_slots(s, u)) == {"Ann", "Bo"} and _rec(s, c)[1] == _slots_id(s, u, "Bo")
     assert _slots(s, u)["Bo"] == (None, 1, "booth")
     assert s.db.execute("SELECT player FROM shots WHERE id = ?", (c,)).fetchone()[0] == "Bo"
+
+
+def test_the_opener_aired_over_the_load_is_the_rounds(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    import time
+    p = _hit(s, "Ann", time.time())                    # practice, then the opener over the course load
+    warmup = _said(s, p)
+    opener = _said(s, text="Welcome to Pebble")
+    practice = _rec(s, p)[0]
+    assert opener == practice
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None})
+    got = dict(s.db.execute("SELECT text, record_uuid FROM lines").fetchall())
+    assert got == {"x": practice, "Welcome to Pebble": u} and warmup == practice
+    s2 = Store(str(tmp_path / "t.db"))                 # an opener with no practice before it: dropped stretch
+    _said(s2, text="Welcome")
+    v = s2.begin_round("r1", course="Pebble", players={"Ann": None})
+    assert s2.db.execute("SELECT record_uuid FROM lines").fetchone()[0] == v
+    assert s2.db.execute("SELECT COUNT(*) FROM round_records WHERE kind = 'practice'").fetchone()[0] == 0
+    s3 = Store(str(tmp_path / "u.db"))                 # yesterday's practice talk, the booth left running
+    _hit(s3, "Ann", time.time())
+    old = _said(s3, text="Nice one")
+    assert s3.roll_session_if_idle(now=time.time() + 86400)
+    w = s3.begin_round("r1", course="Pebble", players={"Ann": None})
+    assert s3.db.execute("SELECT record_uuid FROM lines").fetchone()[0] == old != w
+
+
+def test_the_readers_read_the_stored_record_once_every_row_has_one(tmp_path):
+    from commentator import stats_web
+
+    s = Store(str(tmp_path / "s.db"))
+    p = _hit(s, "Ann", T0)                             # practice on the round's course, just before it
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None}, since_id=p)
+    a = _hit(s, "Ann", T0 + 100)
+    s.end_round(u)
+    sess = s.db.execute("SELECT session_id FROM shots WHERE id = ?", (a,)).fetchone()[0]
+    rid = s.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, round_uuid)"
+                       " VALUES (?, ?, '2023-11-14', 'Pebble', 'Ann', 18, ?)", (sess, T0 + 200, u)).lastrowid
+    assert R.recorded(s.db)
+    assert R.shot_rounds(s.db) == {a: rid} and R._timed_shot_rounds(s.db) == {p: rid, a: rid}
+    assert stats_web._round_rows(s.db, rid, T0 + 200)[2] == [a]
+    assert R.round_groups(s.db) == R._timed_round_groups(s.db)
+    s.db.execute("UPDATE shots SET record_uuid = NULL WHERE id = ?", (p,))   # as an older version writes
+    assert not R.recorded(s.db)
+    assert R.shot_rounds(s.db) == {p: rid, a: rid} and stats_web._round_rows(s.db, rid, T0 + 200)[2] == [p, a]

@@ -5,7 +5,8 @@ shot, line and round row belongs to, kept in season.db instead of worked out by 
 over every row, excluded or deleted ones included. `reconcile` stores what it says for the rows that
 don't have a record yet: all of them the first time (the schema 6 migration), and afterwards only
 what an older version of the app wrote. A record the booth wrote as it played (`assigned = live`,
-`Live`) is never regrouped."""
+`Live`) is never regrouped. The readers (round_groups, shot_rounds, ...) read the stored record
+once every row has one, and the time rules till then."""
 from __future__ import annotations
 
 import bisect
@@ -129,9 +130,9 @@ def set_quiet(db: sqlite3.Connection, quiet: str) -> None:
     db.execute("UPDATE meta SET quiet = ?", (quiet,))
 
 
-# ---- the time rules ---------------------------------------------------------------------------------
+# ---- the time rules (what a round was before it was stored) ---------------------------------------------------------------------------------
 
-def round_groups(db: sqlite3.Connection, table: str = "rounds") -> tuple[list[dict[str, Any]], dict[int, int]]:
+def _timed_round_groups(db: sqlite3.Connection, table: str = "rounds") -> tuple[list[dict[str, Any]], dict[int, int]]:
     """The rounds as played: one per end of a round, whatever its number of sides (one row each in
     `rounds`, or `table`). Returns them oldest first ({round, end, course}; `round` is the lowest row
     id) and each row's round."""
@@ -148,10 +149,10 @@ def round_groups(db: sqlite3.Connection, table: str = "rounds") -> tuple[list[di
     return groups, of_row
 
 
-def player_round_of(db: sqlite3.Connection):
+def _timed_player_round_of(db: sqlite3.Connection):
     """A lookup from a player_rounds row (session, course, end) to its round in `rounds` (round_groups'
     id): both are stored as the round ends, a moment apart. None when no side of it was recorded."""
-    _, of_row = round_groups(db)
+    _, of_row = _timed_round_groups(db)
     ends: dict[tuple, list[tuple[float, int]]] = {}
     for rid, sess, end, course in db.execute("SELECT id, session_id, ended_at, course FROM rounds"):
         ends.setdefault((sess, (course or "").casefold()), []).append((end, of_row[rid]))
@@ -163,13 +164,13 @@ def player_round_of(db: sqlite3.Connection):
     return find
 
 
-def shot_rounds(db: sqlite3.Connection, every: bool = False) -> dict[int, int]:
+def _timed_shot_rounds(db: sqlite3.Connection, every: bool = False) -> dict[int, int]:
     """Each shot's round: shots aren't stored with one, so it's the round that ended next after the
     shot (and after the round before it), when that round was on the shot's course and ended within a
     round's length of it (a booth restart mid-round keeps its shots). Shots of a round that was never
     finished and recorded have none. `every` takes in the rounds left out of the stats too (connect's
     views hide them)."""
-    groups, _ = round_groups(db, "main.rounds" if every else "rounds")
+    groups, _ = _timed_round_groups(db, "main.rounds" if every else "rounds")
     ends = [g["end"] for g in groups]
     out = {}
     for sid, ts, course in db.execute(f"SELECT id, ts, course FROM {'main.shots' if every else 'shots'}"):
@@ -181,7 +182,7 @@ def shot_rounds(db: sqlite3.Connection, every: bool = False) -> dict[int, int]:
     return out
 
 
-def _late_gimmes(db: sqlite3.Connection, groups: list[dict[str, Any]], owner: dict[int, int],
+def _timed_late_gimmes(db: sqlite3.Connection, groups: list[dict[str, Any]], owner: dict[int, int],
                  table: str = "shots") -> dict[int, int]:
     """shot_rounds' `owner`, with each putt conceded late (its result came in after the round was
     recorded) given to that round, not the next one."""
@@ -200,9 +201,9 @@ def membership(db: sqlite3.Connection) -> list[dict[str, Any]]:
     and the lines on no shot (the calls before a swing, the reactions, the closer) of every session it
     was played in (a round can span a booth restart), each from the closer of that session's round
     before to its own."""
-    groups, of_row = round_groups(db)
-    find = player_round_of(db)
-    owner = _late_gimmes(db, groups, shot_rounds(db))
+    groups, of_row = _timed_round_groups(db)
+    find = _timed_player_round_of(db)
+    owner = _timed_late_gimmes(db, groups, _timed_shot_rounds(db))
     by_id = {g["round"]: g for g in groups}
     for g in groups:
         g.update(sides=[], cards=[], shots=[], lines=[])
@@ -237,6 +238,114 @@ def membership(db: sqlite3.Connection) -> list[dict[str, Any]]:
         for k in ("sides", "cards", "shots"):
             g[k].sort()
     return groups
+
+
+# ---- the readers --------------------------------------------------------------------------------------
+# What the stats read rounds by: the stored record, once every row has one; until then (a file not yet
+# migrated, or rows an older version of the app wrote since the last start) the time rules. Each keeps
+# the time rules' shapes: a round is numbered by its first `rounds` row.
+
+def recorded(db: sqlite3.Connection) -> bool:
+    """Whether every row of the file has its record (main's tables: stats_web.connect's views hide some)."""
+    try:
+        if db.execute("PRAGMA main.user_version").fetchone()[0] < 6:
+            return False
+        return db.execute("""SELECT NOT (EXISTS (SELECT 1 FROM main.shots WHERE record_uuid IS NULL)
+                             OR EXISTS (SELECT 1 FROM main.lines WHERE record_uuid IS NULL)
+                             OR EXISTS (SELECT 1 FROM main.rounds WHERE round_uuid IS NULL)
+                             OR EXISTS (SELECT 1 FROM main.player_rounds WHERE round_uuid IS NULL))""").fetchone()[0] == 1
+    except sqlite3.OperationalError:
+        return False
+
+
+def round_groups(db: sqlite3.Connection, table: str = "rounds") -> tuple[list[dict[str, Any]], dict[int, int]]:
+    """The rounds as played: one per end of a round, whatever its number of sides (one row each in
+    `rounds`, or `table`). Returns them oldest first ({round, end, course, session}; `round` is its
+    first row's id) and each row's round."""
+    if not recorded(db):
+        return _timed_round_groups(db, table)
+    groups: list[dict[str, Any]] = []
+    of_row: dict[int, int] = {}
+    by_uuid: dict[str, dict[str, Any]] = {}
+    for r in db.execute(f"SELECT id, session_id, ended_at, course, round_uuid FROM {table} ORDER BY ended_at, id"):
+        if (g := by_uuid.get(r["round_uuid"])) is None:
+            g = by_uuid[r["round_uuid"]] = {"round": r["id"], "end": r["ended_at"], "course": r["course"],
+                                            "session": r["session_id"]}
+            groups.append(g)
+        g["end"] = r["ended_at"]
+        of_row[r["id"]] = g["round"]
+    return groups, of_row
+
+
+def _round_of_record(db: sqlite3.Connection, table: str, of_row: dict[int, int]) -> dict[str, int]:
+    return {u: of_row[rid] for rid, u in db.execute(f"SELECT id, round_uuid FROM {table}") if rid in of_row}
+
+
+def player_round_of(db: sqlite3.Connection):
+    """A lookup from a player_rounds row (its session, course and end) to its round in `rounds`
+    (round_groups' id). None when no side of it was recorded."""
+    if not recorded(db):
+        return _timed_player_round_of(db)
+    _, of_row = round_groups(db)
+    of_record = _round_of_record(db, "rounds", of_row)
+    card = {(sess, (course or "").casefold(), end): of_record.get(u) for sess, course, end, u in db.execute(
+        "SELECT session_id, course, ended_at, round_uuid FROM player_rounds")}
+
+    def find(session_id: int, course: str | None, ended_at: float) -> int | None:
+        return card.get((session_id, (course or "").casefold(), ended_at))
+    return find
+
+
+def shot_rounds(db: sqlite3.Connection, every: bool = False) -> dict[int, int]:
+    """Each shot's round (round_groups' id): none for practice, or a round never finished and recorded,
+    or a putt conceded after its round was recorded (_late_gimmes'). `every` takes in the rounds left
+    out of the stats too (connect's views hide them)."""
+    if not recorded(db):
+        return _timed_shot_rounds(db, every)
+    rounds_table, shots_table = ("main.rounds", "main.shots") if every else ("rounds", "shots")
+    groups, of_row = round_groups(db, rounds_table)
+    of_record = _round_of_record(db, rounds_table, of_row)
+    end = {g["round"]: g["end"] for g in groups}
+    out = {}
+    for sid, ts, outcome, u in db.execute(f"SELECT id, ts, outcome, record_uuid FROM {shots_table}"):
+        if (rnd := of_record.get(u)) is not None and not (outcome == "gimme" and ts > end[rnd]):
+            out[sid] = rnd
+    return out
+
+
+def _late_gimmes(db: sqlite3.Connection, groups: list[dict[str, Any]], owner: dict[int, int],
+                 table: str = "shots") -> dict[int, int]:
+    """shot_rounds' `owner`, with each putt conceded late (its result came in after the round was
+    recorded) given to that round, not the next one."""
+    if not recorded(db):
+        return _timed_late_gimmes(db, groups, owner, table)
+    of_record = {u: g for g in groups for (u,) in db.execute("SELECT round_uuid FROM main.rounds WHERE id = ?",
+                                                             (g["round"],))}
+    for sid, ts, u in db.execute(f"SELECT id, ts, record_uuid FROM {table} WHERE outcome = 'gimme'"):
+        if (g := of_record.get(u)) is not None and ts > g["end"]:
+            owner[sid] = g["round"]
+    return owner
+
+
+def round_rows(db: sqlite3.Connection, round_id: int) -> dict[str, Any] | None:
+    """A round by round_groups' id, over every row (excluded or deleted ones too: call it on the file's
+    own tables): {round, end, sides, cards, shots, lines} as `membership` gives it. None when there's
+    no such round."""
+    if not recorded(db):
+        return next((g for g in membership(db) if g["round"] == round_id), None)
+    row = db.execute("SELECT round_uuid FROM rounds WHERE id = ?", (round_id,)).fetchone()
+    if row is None:
+        return None
+    u = row[0]
+    sides = db.execute("SELECT id, ended_at FROM rounds WHERE round_uuid = ? ORDER BY ended_at, id", (u,)).fetchall()
+    if sides[0][0] != round_id:
+        return None
+
+    def ids(table: str, col: str) -> list[int]:
+        return [i for (i,) in db.execute(f"SELECT id FROM {table} WHERE {col} = ? ORDER BY id", (u,))]
+    return {"round": round_id, "end": sides[-1][1], "sides": sorted(i for i, _ in sides),
+            "cards": ids("player_rounds", "round_uuid"), "shots": ids("shots", "record_uuid"),
+            "lines": ids("lines", "record_uuid")}
 
 
 # ---- storing it -------------------------------------------------------------------------------------
@@ -664,7 +773,13 @@ class Live:
                 self.db.execute("UPDATE shots SET record_uuid = ?, slot_id = ? WHERE id = ?", (u, self.slot(u, player), sid))
                 self.db.execute("UPDATE lines SET record_uuid = ? WHERE shot_id = ?", (u, sid))
         if self.practice:
-            self._close(self.practice[0], "finished")
+            # What the booth said this session since practice's last shot (the opener, aired over the
+            # course load) is the round's: as the time rules had it.
+            p = self.practice[0]
+            if self.practice[1] == session_id:
+                self.db.execute("UPDATE lines SET record_uuid = ?1 WHERE record_uuid = ?2 AND shot_id IS NULL AND ts >"
+                                " COALESCE((SELECT MAX(ts) FROM shots WHERE record_uuid = ?2), -1e18)", (u, p))
+            self._close(p, "finished")
             self.practice = None
         self.round, self.closing = u, None
         self.mine.add(u)
