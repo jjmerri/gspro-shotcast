@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.125
+
+### Booth
+- The booth can use a second voice service (Microsoft Azure) once Google's free monthly allowance runs low, picking the voices at the start of each round so they never change mid-round.
+
 ## 0.1.124
 
 ### Booth
