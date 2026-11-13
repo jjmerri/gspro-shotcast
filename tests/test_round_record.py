@@ -308,3 +308,263 @@ def test_round_rows_reads_the_same_membership(tmp_path, excluded):
     g = groups[excluded]
     assert stats_web._round_rows(db, g["round"], g["end"]) == [g["sides"], g["cards"], g["shots"], g["lines"]]
     assert stats_web._round_rows(db, groups[2]["round"], groups[2]["end"]) is None   # deleted
+
+
+# ---- written as the booth plays (Live) -----------------------------------------------------------------
+
+def _hit(store, player, at, course="Pebble"):
+    from commentator.hud import Hud
+    from commentator.models import Shot
+    return store.record_shot(player=player, hole="Hole 1", shot=Shot(club="Dr", timestamp=at), before=Hud(),
+                             after=Hud(), tags=[], carry_game_yards=None, total_yards=None, offline_yards=None,
+                             course=course)
+
+
+def _said(store, shot_id=None, text="x"):
+    from commentator.models import Line
+    store.record_lines("shot", [Line("pbp", text)], shot_id=shot_id)
+    return store.db.execute("SELECT record_uuid FROM lines ORDER BY id DESC LIMIT 1").fetchone()[0]
+
+
+def _rec(store, shot_id):
+    return tuple(store.db.execute("SELECT record_uuid, slot_id FROM shots WHERE id = ?", (shot_id,)).fetchone())
+
+
+def _record(store, u):
+    return store.db.execute("SELECT kind, state, ended_at FROM round_records WHERE uuid = ?", (u,)).fetchone()
+
+
+def _slots(store, u):
+    return {r[0]: (r[1], r[2], r[3]) for r in store.db.execute(
+        "SELECT name, player, seat, matched_by FROM round_slots WHERE round_uuid = ?", (u,))}
+
+
+def test_a_round_played_gets_its_record_as_it_goes(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    before = _hit(s, "Ann", T0)                        # practice
+    opener = _hit(s, "Ann", T0 + 60)                   # an opening drive, struck before the round started
+    on_opener = _said(s, opener)
+    u = s.begin_round("r1", course="Pebble", players={"Ann": "Ann Smith", "Bo": None}, seats=["Bo", "Ann"],
+                      since_id=before)
+    assert u == "r1"
+    assert _slots(s, u) == {"Ann": ("Ann Smith", 1, "booth"), "Bo": (None, 0, "booth")}
+    practice = _rec(s, before)[0]
+    assert _record(s, practice)[:2] == ("practice", "finished")
+    assert _rec(s, opener)[0] == u and s.db.execute("SELECT record_uuid FROM lines WHERE shot_id = ?",
+                                                     (opener,)).fetchone()[0] == u != on_opener
+    a = _hit(s, "Ann", T0 + 100)
+    b = _hit(s, "Bo", T0 + 110)
+    assert _rec(s, a) == (u, _rec(s, opener)[1]) and _rec(s, b)[0] == u and _rec(s, b)[1] != _rec(s, a)[1]
+    assert _said(s, a) == u and _said(s) == u          # a line on a shot, and one on none, mid-round
+    g = s.record_gimme(b)
+    assert _rec(s, g) == _rec(s, b)
+    assert s.db.execute("SELECT derived_from FROM shots WHERE id = ?", (g,)).fetchone()[0] == \
+        s.db.execute("SELECT uid FROM shots WHERE id = ?", (b,)).fetchone()[0]
+    s.end_round(u, complete=True)
+    assert _record(s, u)[:2] == ("round", "finished")
+    assert _said(s) == u                               # the closer
+    late = _rec(s, s.record_gimme(b))                   # a putt conceded after it's recorded
+    assert late == _rec(s, b)
+    s.db.execute("UPDATE round_records SET state = state")
+    R.reconcile(s.db)                                  # the live rows stay put
+    assert _rec(s, a)[0] == u and _rec(s, before)[0] == practice and not R.unassigned(s.db)
+
+
+def test_a_line_long_after_a_round_is_practices(tmp_path, monkeypatch):
+    import time as _time
+    s = Store(str(tmp_path / "s.db"))
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None})
+    s.end_round(u)
+    clock = _time.time() + CLOSER_SECONDS + 5
+    monkeypatch.setattr(_time, "time", lambda: clock)
+    assert _record(s, _said(s))[0] == "practice"
+
+
+def test_practice_splits_when_the_bay_sits_idle_or_the_booth_restarts(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    a, b = _hit(s, "Ann", T0), _hit(s, "Ann", T0 + R.PRACTICE_IDLE_SECONDS - 1)
+    c = _hit(s, "Ann", T0 + 2 * R.PRACTICE_IDLE_SECONDS + 5)
+    assert _rec(s, a)[0] == _rec(s, b)[0] != _rec(s, c)[0]
+    assert _record(s, _rec(s, a)[0])[1:] == ("finished", T0 + R.PRACTICE_IDLE_SECONDS - 1)
+    s.close()
+    s = Store(str(tmp_path / "s.db"))                  # a restart ends the open stretch
+    assert _record(s, _rec(s, c)[0])[1] == "finished"
+    assert _rec(s, _hit(s, "Ann", T0 + 2 * R.PRACTICE_IDLE_SECONDS + 10))[0] != _rec(s, c)[0]
+
+
+def test_a_restart_mid_round_continues_it_on_the_same_course_with_the_same_players(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None, "Bo": None})
+    a = _hit(s, "Ann", T0)
+    s.close()
+    s = Store(str(tmp_path / "s.db"))                  # restarted before ROUND_SPAN_SECONDS: left waiting
+    assert _record(s, u)[1] == "in_progress"
+    assert s.begin_round("r2", course="Pebble", players={"bo": None, "ann": None}) == u
+    assert _hit(s, "Ann", T0 + 50) and _rec(s, a)[0] == u
+    s.end_round(u, complete=False)
+    assert _record(s, u)[1] == "abandoned"
+
+
+def test_a_restart_into_another_round_abandons_the_old_one(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    import time as _time
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None, "Bo": None})
+    last = _time.time() + 5
+    _hit(s, "Ann", last)
+    s.close()
+    s = Store(str(tmp_path / "s.db"))
+    assert s.begin_round("r2", course="Pebble", players={"Ann": None}) == "r2"
+    assert _record(s, u)[1:] == ("abandoned", last)   # ended at its last shot
+
+
+def test_a_round_begun_by_this_booth_is_never_continued(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None})
+    assert s.begin_round("r2", course="Pebble", players={"Ann": None}) == "r2"   # (never ended)
+    assert _record(s, u)[1] == "abandoned"
+
+
+def test_a_booth_starting_ends_a_round_too_old_to_continue(tmp_path, monkeypatch):
+    import time as _time
+    s = Store(str(tmp_path / "s.db"))
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None})
+    s.close()
+    later = _time.time() + R.ROUND_SPAN_SECONDS + 60
+    monkeypatch.setattr(_time, "time", lambda: later)
+    s = Store(str(tmp_path / "s.db"))
+    assert _record(s, u)[1] == "abandoned"
+
+
+def test_marking_and_renaming_a_round_touch_only_its_record(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    floor = s.last_shot_id()
+    u = s.begin_round("r1", course="Pebble", players={"Anne": None})
+    a = _hit(s, "Anne", T0)
+    slot = _rec(s, a)[1]
+    s.end_round(u)
+    p = _hit(s, "Anne", T0 + 600)                       # practice after it
+    assert s.mark_tournament(floor, record=u) == 1 and s.mark_league(floor, record=u) == 1
+    assert s.players_after(floor, record=u) == ["Anne"]
+    assert s.rename_shots("Anne", "Ann", after_id=floor, record=u) == 1
+    s.db.execute("UPDATE shots SET is_league = 0 WHERE id = ?", (p,))
+    assert s.mark_league(floor, record=u) == 1
+    assert tuple(s.db.execute("SELECT player, is_league, is_tournament FROM shots WHERE id = ?", (p,)).fetchone()) \
+        == ("Anne", 0, 0)
+    assert _rec(s, a)[1] == slot and _slots(s, u) == {"Ann": (None, None, "booth")}   # the slot keeps its ID
+
+
+def test_a_shot_given_to_someone_else_moves_slot(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None, "Bo": None})
+    a, b = _hit(s, "Ann", T0), _hit(s, "Bo", T0 + 1)
+    g = s.record_gimme(a)
+    s.move_shot_player(a, "Bo", fmt=None, shared_ball=False, gimme_id=g)
+    assert _rec(s, a) == _rec(s, g) == _rec(s, b) == (u, _rec(s, b)[1])
+    n = _hit(s, None, T0 + 2)
+    assert _rec(s, n) == (u, None)
+    s.set_shot_player(n, "Ann", attributed=True, fmt=None, shared_ball=False)
+    assert _rec(s, n)[1] == _slots_id(s, u, "Ann")
+
+
+def _slots_id(store, u, name):
+    return store.db.execute("SELECT slot_id FROM round_slots WHERE round_uuid = ? AND name = ?", (u, name)).fetchone()[0]
+
+
+def test_an_empty_practice_stretch_is_dropped(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    s.records._practice(s.session_id, T0, None)
+    s.db.commit()
+    s.begin_round("r1", course="Pebble", players={"Ann": None})
+    assert s.db.execute("SELECT COUNT(*) FROM round_records WHERE kind = 'practice'").fetchone()[0] == 0
+
+
+def test_a_league_players_shots_go_to_the_slot_made_with_their_gspro_name(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    u = s.begin_round("r1", course="Pebble", players={"MikeD": "Mike"})
+    a = _hit(s, "Mike", T0)                           # the booth names him by his roster name
+    assert _rec(s, a)[1] == _slots_id(s, u, "MikeD") and len(_slots(s, u)) == 1
+    s.close()
+    s = Store(str(tmp_path / "s.db"))                  # so a restart still sees the same players
+    assert s.begin_round("r2", course="Pebble", players={"MikeD": "Mike"}) == u
+
+
+def test_a_shot_stored_late_stays_in_the_round_it_was_struck_in(tmp_path):
+    from commentator.hud import Hud
+    from commentator.models import Shot
+    s = Store(str(tmp_path / "s.db"))
+    a = s.begin_round("r1", course="Pebble", players={"Ann": None})
+    s.end_round(a)
+    s.begin_round("r2", course="Pebble", players={"Ann": None})
+    late = s.record_shot(player="Ann", hole="Hole 18", shot=Shot(club="P"), before=Hud(), after=Hud(), tags=[],
+                         carry_game_yards=None, total_yards=None, offline_yards=None, course="Pebble", record=a)
+    assert _rec(s, late) == (a, _slots_id(s, a, "Ann"))
+
+
+def test_a_restart_that_reads_a_name_in_another_case_keeps_the_players_slot(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None})
+    a = _hit(s, "Ann", T0)
+    s.close()
+    s = Store(str(tmp_path / "s.db"))
+    assert s.begin_round("r2", course="Pebble", players={"ann": None}) == u
+    assert _rec(s, _hit(s, "ann", T0 + 50)) == _rec(s, a) and list(_slots(s, u)) == ["ann"]
+    s.end_round(u)
+    v = s.begin_round("r3", course="Pebble", players={"José": None})
+    j = _hit(s, "José", T0 + 100)
+    s.close()
+    s = Store(str(tmp_path / "s.db"))
+    assert s.begin_round("r4", course="Pebble", players={"JOSÉ": None}) == v
+    assert _rec(s, _hit(s, "JOSÉ", T0 + 150)) == _rec(s, j)
+
+
+def test_a_players_slots_follow_them_joining_and_leaving_mid_round(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None, "Ghost": None}, seats=["Ann", "Ghost"])
+    m = _hit(s, "Mike", T0)                           # before the booth added him to the round
+    s.round_players(u, {"Ann": None, "MikeD": "Mike"}, ["Ann", "MikeD"])   # Ghost dropped, MikeD added
+    assert _slots(s, u) == {"Ann": (None, 0, "booth"), "MikeD": ("Mike", 1, "booth")}
+    assert _rec(s, m)[1] == _slots_id(s, u, "MikeD")
+    s.close()
+    s = Store(str(tmp_path / "s.db"))
+    assert s.begin_round("r2", course="Pebble", players={"Ann": None, "MikeD": "Mike"}) == u
+
+
+def test_a_round_left_too_long_is_not_continued_even_by_a_booth_running_since(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None})
+    s.close()
+    s = Store(str(tmp_path / "s.db"))
+    import time as _time
+    s.records.mine.clear()
+    assert s.records.begin("r2", session_id=s.session_id, course="Pebble", players={"Ann": None}, seats=None,
+                           since_id=None, now=_time.time() + R.ROUND_SPAN_SECONDS + 60) == "r2"
+    assert _record(s, u)[1] == "abandoned"
+
+
+def test_a_misread_name_corrected_leaves_no_slot_behind(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None, "Bo": None})
+    a = _hit(s, "Anne", T0)
+    assert _slots(s, u)["Anne"] == (None, None, "shot")
+    s.set_shot_player(a, "Ann", attributed=True, fmt=None, shared_ball=False)
+    assert set(_slots(s, u)) == {"Ann", "Bo"}
+    b = _hit(s, "Cy", T0 + 1)                          # a name on a shot, kept till the restart
+    s.close()
+    s = Store(str(tmp_path / "s.db"))
+    assert s.begin_round("r2", course="Pebble", players={"Ann": None, "Bo": None}) == u
+    assert _rec(s, b)[0] == u
+
+
+def test_a_rename_onto_a_misread_shots_name_keeps_the_players_slot(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    floor = s.last_shot_id()
+    u = s.begin_round("r1", course="Pebble", players={"Anne": None}, seats=["Anne"])
+    a, b = _hit(s, "Ann", T0), _hit(s, "Anne", T0 + 1)
+    s.rename_shots("Anne", "Ann", after_id=floor, record=u)
+    assert _slots(s, u) == {"Ann": (None, 0, "booth")} and _rec(s, a) == _rec(s, b)
+    c = _hit(s, "BO", T0 + 2)                           # and in another case
+    s.round_players(u, {"Ann": None, "Bob": None}, ["Ann", "Bob"])
+    s.rename_shots("Bob", "Bo", after_id=floor, record=u)
+    assert set(_slots(s, u)) == {"Ann", "Bo"} and _rec(s, c)[1] == _slots_id(s, u, "Bo")
+    assert _slots(s, u)["Bo"] == (None, 1, "booth")
+    assert s.db.execute("SELECT player FROM shots WHERE id = ?", (c,)).fetchone()[0] == "Bo"

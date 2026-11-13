@@ -4,8 +4,8 @@ shot, line and round row belongs to, kept in season.db instead of worked out by 
 `membership` is the rule rounds were always read by (the time rules below, formerly in stats_web),
 over every row, excluded or deleted ones included. `reconcile` stores what it says for the rows that
 don't have a record yet: all of them the first time (the schema 6 migration), and afterwards only
-what an older version of the app wrote. A record the booth wrote as it played (`assigned = live`) is
-never regrouped."""
+what an older version of the app wrote. A record the booth wrote as it played (`assigned = live`,
+`Live`) is never regrouped."""
 from __future__ import annotations
 
 import bisect
@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS round_slots (           -- a player in a round
     name TEXT,                                   -- as GSPro shows it (a rename changes it)
     side TEXT,                                   -- the rounds.side it plays on
     player TEXT,                                 -- the league roster name it was matched to
-    matched_by TEXT NOT NULL                     -- exact / alias / fuzzy / manual / legacy
+    matched_by TEXT NOT NULL                     -- booth (a player as it played) / shot (a name on a shot, no player of it) / legacy (the migration)
 );
 """
 
@@ -508,3 +508,207 @@ def migrate(db: sqlite3.Connection) -> None:
     except BaseException:
         db.rollback()
         raise
+
+
+# ---- the booth, as it plays ---------------------------------------------------------------------------
+
+def _same(a: str | None, b: str | None) -> bool:
+    return (a or "").casefold() == (b or "").casefold()
+
+
+class Live:
+    """The records the booth writes as it plays (`assigned = live`): the round being played, from its
+    start (`begin`) to its end (`end`), else a practice stretch. Each write method asks `place` (a
+    shot) or `place_line` where its row goes. Writes join the caller's transaction; the caller commits."""
+
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self.db = db
+        self.round: str | None = None            # the round being played
+        self.closing: tuple[str, float] | None = None   # the round just ended, and when: its closer's lines
+        self.practice: tuple[str, int | None, float] | None = None   # (uuid, session, last row at)
+        self.mine: set[str] = set()              # rounds begun by this booth (never a restart's to continue)
+
+    def _last_at(self, u: str) -> float | None:
+        return self.db.execute("SELECT MAX(at) FROM (SELECT MAX(ts) AS at FROM shots WHERE record_uuid = ?1"
+                               " UNION ALL SELECT MAX(ts) FROM lines WHERE record_uuid = ?1"
+                               " UNION ALL SELECT started_at FROM round_records WHERE uuid = ?1)", (u,)).fetchone()[0]
+
+    def _close(self, u: str, state: str) -> None:
+        """End an in-progress record at its last row; a practice stretch left with none is dropped."""
+        practice = self.db.execute("SELECT 1 FROM round_records WHERE uuid = ? AND kind = 'practice'", (u,)).fetchone()
+        if practice and not self.db.execute("SELECT 1 FROM shots WHERE record_uuid = ?1 UNION ALL"
+                                            " SELECT 1 FROM lines WHERE record_uuid = ?1 LIMIT 1", (u,)).fetchone():
+            self.db.execute("DELETE FROM round_slots WHERE round_uuid = ?", (u,))
+            self.db.execute("DELETE FROM round_records WHERE uuid = ?", (u,))
+            return
+        self.db.execute("UPDATE round_records SET state = ?, ended_at = ? WHERE uuid = ? AND state = 'in_progress'",
+                        (state, self._last_at(u), u))
+
+    def start(self, now: float) -> None:
+        """A booth starting: the practice stretch the last one left open is over, and so is a round
+        nothing can continue any more (`ROUND_SPAN_SECONDS` since its last row). A more recent one waits
+        for `begin` to continue it."""
+        for u, kind in self.db.execute("SELECT uuid, kind FROM round_records WHERE state = 'in_progress'"
+                                       " AND assigned = 'live'").fetchall():
+            if kind == "practice":
+                self._close(u, "finished")
+            elif now - (self._last_at(u) or 0) > ROUND_SPAN_SECONDS:
+                self._close(u, "abandoned")
+
+    def _find(self, u: str, name: str, player: str | None = None) -> str | None:
+        """The slot in `u` that's `name` (case aside), or holds it or `player` as its roster name."""
+        best = None
+        for s, n, p in self.db.execute("SELECT slot_id, name, player FROM round_slots WHERE round_uuid = ?", (u,)):
+            rank = 0 if n == name else 1 if _same(n, name) else 2 if p and _same(p, name) else \
+                3 if player and (_same(n, player) or _same(p, player)) else None
+            if rank is not None and (best is None or rank < best[0]):
+                best = (rank, s)
+        return best[1] if best else None
+
+    def slot(self, u: str | None, name: str | None, *, player: str | None = None, seat: int | None = None,
+             how: str = "shot") -> str | None:
+        """`name`'s slot in record `u`, made if it has none (no slot for a shot nobody's named). A shot
+        names a league player by their roster name, which their slot (made with GSPro's) holds as `player`.
+        One made for a round's player is `booth`'s; one made for a name on a shot, no player of it, `shot`'s."""
+        if not u or not name or name == "unknown":
+            return None
+        if s := self._find(u, name, player):
+            return s
+        s = _new_id()
+        self.db.execute("INSERT INTO round_slots (slot_id, round_uuid, seat, name, player, matched_by)"
+                        " VALUES (?, ?, ?, ?, ?, ?)", (s, u, seat, name, player, how))
+        return s
+
+    def sync(self, u: str, players: dict[str, str | None], seats: list[str] | None) -> None:
+        """Round `u`'s slots as its players are now (one added or dropped mid-round): each player's
+        slot takes their GSPro name, roster name and seat; a slot nobody has any more, with no shot or
+        card on it, goes."""
+        if not self.known(u):
+            return
+        keep = set()
+        for name, player in players.items():
+            if not name or name == "unknown":
+                continue
+            seat = seats.index(name) if seats and name in seats else None
+            if s := self._find(u, name, player):
+                self.db.execute("UPDATE round_slots SET name = ?, player = ?, seat = ?, matched_by = 'booth'"
+                                " WHERE slot_id = ?", (name, player, seat, s))
+            else:
+                s = self.slot(u, name, player=player, seat=seat, how="booth")
+            keep.add(s)
+        for (s,) in self.db.execute("SELECT slot_id FROM round_slots WHERE round_uuid = ?", (u,)).fetchall():
+            if s not in keep and not self.db.execute(
+                    "SELECT 1 FROM shots WHERE slot_id = ?1 UNION ALL SELECT 1 FROM player_rounds WHERE slot_id = ?1"
+                    " LIMIT 1", (s,)).fetchone():
+                self.db.execute("DELETE FROM round_slots WHERE slot_id = ?", (s,))
+
+    def _practice(self, session_id: int | None, at: float, course: str | None) -> str:
+        if p := self.practice:
+            if p[1] == session_id and at - p[2] <= PRACTICE_IDLE_SECONDS and self.db.execute(
+                    "SELECT 1 FROM round_records WHERE uuid = ? AND state = 'in_progress'", (p[0],)).fetchone():
+                self.practice = (p[0], session_id, max(at, p[2]))
+                return p[0]
+            self._close(p[0], "finished")
+        u = _new_id()
+        self.db.execute("INSERT INTO round_records (uuid, kind, session_id, course, started_at, state, assigned)"
+                        " VALUES (?, 'practice', ?, ?, ?, 'in_progress', 'live')", (u, session_id, course, at))
+        self.practice = (u, session_id, at)
+        return u
+
+    def place(self, session_id: int | None, player: str | None, at: float, course: str | None,
+              record: str | None = None) -> tuple[str, str | None]:
+        """A new shot's (record, slot): the round it was struck in (`record`, when it has one: a shot
+        stored late is still its), else the round being played, else the practice stretch."""
+        u = (record if self.known(record) else None) or self.round or self._practice(session_id, at, course)
+        return u, self.slot(u, player)
+
+    def place_line(self, session_id: int | None, at: float) -> str:
+        """A new line on no shot: the round being played, the one just ended (its closer), else practice."""
+        if self.round:
+            return self.round
+        if self.closing and at - self.closing[1] <= CLOSER_SECONDS:
+            return self.closing[0]
+        return self._practice(session_id, at, None)
+
+    def known(self, u: str | None) -> bool:
+        return bool(u) and self.db.execute("SELECT 1 FROM round_records WHERE uuid = ?", (u,)).fetchone() is not None
+
+    def begin(self, u: str, *, session_id: int | None, course: str | None, players: dict[str, str | None],
+              seats: list[str] | None, since_id: int | None, now: float) -> str:
+        """A round starting: its record and a slot per player, the shots since `since_id` (its opening
+        drives, struck before it started) moved in from practice, and the practice stretch ended.
+        A round left in progress by a booth that stopped is continued (its UUID returned) when this one
+        is on the same course with the same players; any other is abandoned."""
+        names = {n.casefold() for n in players if n and n != "unknown"}
+        go_on = None
+        for v, c in self.db.execute("SELECT uuid, course FROM round_records WHERE kind = 'round' AND state = 'in_progress'"
+                                    " AND assigned = 'live' ORDER BY started_at DESC").fetchall():
+            had = {r[0].casefold() for r in self.db.execute(
+                "SELECT name FROM round_slots WHERE round_uuid = ? AND name IS NOT NULL AND matched_by = 'booth'", (v,))}
+            if go_on is None and v not in self.mine and names and _same(c, course) and had == names \
+                    and now - (self._last_at(v) or 0) <= ROUND_SPAN_SECONDS:
+                go_on = v
+            else:
+                self._close(v, "abandoned")
+        if go_on:
+            u = go_on
+        else:
+            self.db.execute("INSERT INTO round_records (uuid, kind, session_id, course, started_at, state, assigned)"
+                            " VALUES (?, 'round', ?, ?, ?, 'in_progress', 'live')", (u, session_id, course, now))
+        self.sync(u, players, seats)
+        if since_id is not None:
+            moved = self.db.execute(
+                "SELECT id, player FROM shots WHERE id > ? AND (record_uuid IS NULL OR record_uuid IN"
+                " (SELECT uuid FROM round_records WHERE kind = 'practice'))", (since_id,)).fetchall()
+            for sid, player in moved:
+                self.db.execute("UPDATE shots SET record_uuid = ?, slot_id = ? WHERE id = ?", (u, self.slot(u, player), sid))
+                self.db.execute("UPDATE lines SET record_uuid = ? WHERE shot_id = ?", (u, sid))
+        if self.practice:
+            self._close(self.practice[0], "finished")
+            self.practice = None
+        self.round, self.closing = u, None
+        self.mine.add(u)
+        return u
+
+    def end(self, u: str, complete: bool, now: float) -> None:
+        """A round over: `finished`, or `abandoned` when quit early."""
+        self.db.execute("UPDATE round_records SET state = ?, ended_at = ? WHERE uuid = ? AND state = 'in_progress'",
+                        ("finished" if complete else "abandoned", now, u))
+        if self.round == u:
+            self.round, self.closing = None, (u, now)
+
+    def take(self, shot_id: int, u: str | None) -> None:
+        """A shot recorded before its round started, taken into it since (the round's record must exist)."""
+        if self.known(u):
+            player = self.db.execute("SELECT player FROM shots WHERE id = ?", (shot_id,)).fetchone()
+            if player is not None:
+                self.db.execute("UPDATE shots SET record_uuid = ?, slot_id = ? WHERE id = ?",
+                                (u, self.slot(u, player[0]), shot_id))
+                self.db.execute("UPDATE lines SET record_uuid = ? WHERE shot_id = ?", (u, shot_id))
+
+    def reslot(self, shot_ids: list[int]) -> None:
+        """Shots whose player changed: each to its player's slot in its own record."""
+        for sid in shot_ids:
+            if row := self.db.execute("SELECT record_uuid, player, slot_id FROM shots WHERE id = ?", (sid,)).fetchone():
+                self.db.execute("UPDATE shots SET slot_id = ? WHERE id = ?", (self.slot(row[0], row[1]), sid))
+                # A name only a shot had (a misread), left with none: gone.
+                self.db.execute("DELETE FROM round_slots WHERE slot_id = ?1 AND matched_by = 'shot' AND NOT EXISTS"
+                                " (SELECT 1 FROM shots WHERE slot_id = ?1) AND NOT EXISTS"
+                                " (SELECT 1 FROM player_rounds WHERE slot_id = ?1)", (row[2],))
+
+    def rename(self, u: str, old: str, new: str) -> None:
+        """A player's name in round `u` read right at last: the slot keeps its ID and takes the name.
+        Where the round has a slot by that name already, the two are one: the round's player's
+        (`booth`) is kept, and the other's shots join it."""
+        slots = self.db.execute("SELECT slot_id, matched_by, name FROM round_slots WHERE round_uuid = ?"
+                                " ORDER BY name = ? DESC", (u, old)).fetchall()
+        mine = next((s for s in slots if _same(s[2], old)), None)
+        if not mine:
+            return
+        have = next((s for s in slots if _same(s[2], new) and s[0] != mine[0]), None)
+        keep, drop = (mine, have) if have and mine[1] == "booth" and have[1] != "booth" else (have or mine, have and mine)
+        if drop:
+            for table in ("shots", "player_rounds"):
+                self.db.execute(f"UPDATE {table} SET slot_id = ? WHERE slot_id = ?", (keep[0], drop[0]))
+            self.db.execute("DELETE FROM round_slots WHERE slot_id = ?", (drop[0],))
+        self.db.execute("UPDATE round_slots SET name = ? WHERE slot_id = ?", (new, keep[0]))

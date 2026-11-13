@@ -4070,7 +4070,7 @@ class Engine:
         if r is None or r.is_league or r.is_tournament or not (g.sgt or (g.mode != "course" and g.last_sgt)):
             return
         r.is_tournament = True
-        n = self.store.mark_tournament(r.shot_floor) if r.shot_floor is not None else 0
+        n = self.store.mark_tournament(r.shot_floor, record=r.uuid) if r.shot_floor is not None else 0
         log.info("Round %s is a tournament round: GSPro is syncing it to the Simulator Golf Tour (%d shots so far marked)",
                  r.id, n)
 
@@ -4867,6 +4867,8 @@ class Engine:
         was = list(r.slot_names)
         r.note_slot_read(g, owner)
         r.learn_slots()
+        if r.slot_names != was:
+            self.store.round_players(r.uuid, dict(r.roster), r.slot_names)
         if self._recheck_slots(r, was):
             self._sync_log_scores(r)   # renames the shots it can, too
 
@@ -6557,6 +6559,7 @@ class Engine:
             # where GSPro's log had the ball for this shot, and the player's minimap aim, for the replay
             start=self.gspro.fire_info(fire).get("start"), aim=self.gspro.fire_info(fire).get("aim"),
             handed=before.handed or shot.handed or self.handed.get(player or ""), tree_hits=tree_hits or None,
+            record=r.uuid if r is not None else None,   # (its round's, even one ended or replaced since impact)
         )
         rec.shot_id = shot_id
         self._shots_unrecorded.pop(id(event), None)
@@ -9056,16 +9059,16 @@ class Engine:
             return False
         r.make_league(entry, done, self.cfg.commentary.round_format)
         if r.shot_floor is not None:
-            self.store.mark_league(r.shot_floor)
+            self.store.mark_league(r.shot_floor, record=r.uuid)
             # The league's format can change who a shot is credited to (one profile for an alternate
             # shot team is both partners): re-stamp the round's shots, gimmes included, the way they'd
             # have been recorded.
             anon = set(r.anonymous_players())
-            for player in self.store.players_after(r.shot_floor):
+            for player in self.store.players_after(r.shot_floor, record=r.uuid):
                 shared = not r.solo(r.side_for(player)) and (r.format == "scramble" or r.no_scramble
                                                              or self.gspro.team_scores)
                 self.store.restamp_shots(r.shot_floor, player, fmt=r.player_format(player),
-                                         attributed=player not in anon, shared_ball=shared)
+                                         attributed=player not in anon, shared_ball=shared, record=r.uuid)
         if r.format == "alternate":
             self._alternate_tee_finishes(r)
         log.info("Round %s: set up for %s holes but quit after week %s's %s: a league round after all (%s)",
@@ -9251,6 +9254,9 @@ class Engine:
         r.shot_floor = self.store.last_shot_id()
         if adopted := [v[0] for v in self._fire_rows.values() if v[0] is not None and v[1].round_id == r.id]:
             r.shot_floor = min(adopted) - 1   # the drives struck before it started are its own
+        # Its record, from here on every shot's (a round a stopped booth left open, continued, keeps its own).
+        r.uuid = self.store.begin_round(r.uuid, course=r.course, players=dict(r.roster), seats=r.slot_names,
+                                        since_id=r.shot_floor)
         self._note_tournament(r)   # a round joined mid-way already has its syncs in the log
         self._hc = RoundCounters(fires_at_start=self.gspro.fires, kinds_at_start=dict(self.gspro.kinds))
         if self.cfg.health.enabled and self.cfg.source.type != "replay":
@@ -9460,6 +9466,7 @@ class Engine:
             if not r.remove_player(g):
                 continue
             new = r.slot_names or []
+            self.store.round_players(r.uuid, dict(r.roster), r.slot_names)
             for cache in (self._pending_finish, self._finish_seq, self._last_row):
                 for k in [k for k in cache if (old[k] if k < len(old) else None) != (new[k] if k < len(new) else None)]:
                     del cache[k]
@@ -9470,6 +9477,7 @@ class Engine:
         if not r.add_player(name, **where):
             return
         new = r.slot_names or []
+        self.store.round_players(r.uuid, dict(r.roster), r.slot_names)
         # An index that's someone else's now: its last shot isn't this one's to finish or correct.
         for cache in (self._pending_finish, self._finish_seq, self._last_row):
             for k in [k for k in cache if (old[k] if k < len(old) else None) != (new[k] if k < len(new) else None)]:
@@ -9493,7 +9501,7 @@ class Engine:
         for x in self.state.shots:
             if x.round_id == r.id and x.player == g:
                 x.player = best
-        moved = self.store.rename_shots(g, best, after_id=r.shot_floor) if r.shot_floor is not None else 0
+        moved = self.store.rename_shots(g, best, after_id=r.shot_floor, record=r.uuid) if r.shot_floor is not None else 0
         log.info("Round %s: %r is read as %r: renamed (%s stored shots)", r.id, g, best, moved)
 
     def _admit_from_card(self, r: Round, card: Scorecard) -> bool:
@@ -9559,6 +9567,7 @@ class Engine:
         r.slot_names = list(names)
         r.setup_slots = None   # the tee's order is a guess at GSPro's
         r.slot_guess = True    # on a green it isn't even the tee's: screen reads place each player
+        self.store.round_players(r.uuid, dict(r.roster), r.slot_names)
 
     def _as_round_names(self, r: Round, slots: list[str | None],
                         pool: list[str] | None = None) -> list[str | None]:
@@ -9777,7 +9786,7 @@ class Engine:
             r.format == "scramble" or r.no_scramble or g.team_scores)
         self.store.set_shot_round_class(shot_id, is_league=r.is_league, fmt=r.player_format(name) if name else None,
                                         attributed=bool(name) and not self._anonymous(name), shared_ball=shared,
-                                        hole=label, course=r.course, is_tournament=r.is_tournament)
+                                        hole=label, course=r.course, is_tournament=r.is_tournament, record=r.uuid)
         if self._log_truth:
             self._owners_due.add(fire)
         return not attached
@@ -10654,6 +10663,7 @@ class Engine:
             r.stats_through = max(0, r.seq if done else r.seq - 1)
             if not r.stats_through:
                 log.info("Round %s quit before a hole was finished: nothing to record", r.id)
+                self.store.end_round(r.uuid, complete=False)
                 return {}
         stats = {s.key: r.side_stats(s, self.state.shots) for s in r.sides}
         net = {s.key: (r.net_to_par(s, stats[s.key]) if complete else r.net_to_par_played(s, stats[s.key]))
@@ -10676,7 +10686,8 @@ class Engine:
                                         stats=st, strokes=side.strokes, net_to_par=net[side.key],
                                         hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
                                         is_tournament=r.is_tournament, complete=complete,
-                                        first_nine=r.first_nine(st, r.hole_strokes_for(side)), physics=r.physics)
+                                        first_nine=r.first_nine(st, r.hole_strokes_for(side)), physics=r.physics,
+                                        record=r.uuid)
                 stored.append(row)
         r.stored_rows = stored
         if complete:
@@ -10696,7 +10707,10 @@ class Engine:
                 nine = r.first_nine(pst)
                 self.store.record_player_round(player=name, course=r.course, fmt=r.player_format(name), stats=pst,
                                                hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
-                                               is_tournament=r.is_tournament, complete=complete, nine_to_par=nine[0] if nine else None)
+                                               is_tournament=r.is_tournament, complete=complete, nine_to_par=nine[0] if nine else None,
+                                               record=r.uuid)
+        self.store.round_players(r.uuid, dict(r.roster), r.slot_names)   # its players and seats as they ended
+        self.store.end_round(r.uuid, complete=complete)
         self._refresh_own_handicaps()
         return stats
 

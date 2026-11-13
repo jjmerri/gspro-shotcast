@@ -4388,6 +4388,11 @@ async def test_a_wrong_holes_practice_quit_after_the_weeks_nine_is_the_league_ro
     rows = e.store.db.execute("SELECT is_league, complete, holes, team IS NOT NULL FROM rounds").fetchall()
     assert rows and all(tuple(x) == (1, 1, 9, 1) for x in rows)
     assert e.store.db.execute("SELECT MIN(is_league) FROM shots WHERE id > ?", (r.shot_floor,)).fetchone()[0] == 1
+    # Its record, begun as it started, ends with it; its rows carry it.
+    assert tuple(e.store.db.execute("SELECT kind, state FROM round_records WHERE uuid = ?", (r.uuid,)).fetchone()) \
+        == ("round", "finished")
+    assert {x[0] for x in e.store.db.execute("SELECT player_rounds.round_uuid FROM player_rounds UNION"
+                                             " SELECT round_uuid FROM rounds")} == {r.uuid}
     assert tuple(e.store.db.execute("SELECT fmt, attributed FROM shots WHERE id = ?", (sid,)).fetchone()) == ("best_ball", 1)
     # No course card: the strokes still land on holes, so the team has a net.
     assert all(s.hole_strokes for s in r.sides if s.strokes)
@@ -6111,3 +6116,13 @@ async def test_a_quit_on_an_unplayed_tee_drops_its_hole_intro(tmp_path):
     r.ended = False
     await e.handle_round_end(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
     assert drops == [wrapped]       # only what was queued since the tenth's intro began
+
+
+def test_a_rounds_stored_seats_follow_the_order_the_booth_learns(tmp_path):
+    e = _engine(tmp_path)
+    names = ["MikeD", "Sarah"]
+    r = e._build_round(names, "Pebble Beach", {}, is_league=False)
+    e._start_round(r)
+    e._reconcile_slots(r, ["Sarah", "MikeD"])
+    seats = dict(e.store.db.execute("SELECT name, seat FROM round_slots WHERE round_uuid = ?", (r.uuid,)).fetchall())
+    assert seats == {n: r.slot_names.index(n) for n in names} and r.slot_names == ["Sarah", "MikeD"]

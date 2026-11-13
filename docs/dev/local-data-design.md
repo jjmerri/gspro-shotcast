@@ -62,7 +62,10 @@ them.
   - `name`: as GSPro shows it, updated by a rename.
   - `side`: the side key `rounds.side` uses.
   - `player`: the league roster name it was matched to, or null.
-  - `matched_by`: `exact`, `alias`, `fuzzy`, `manual` or `legacy`. (Rev 4's "how each link was
+  - `matched_by`: `booth` (one of the round's players as it was played, `player` from the booth's
+    roster match), `shot` (a name on a shot that's none of the round's players: a misread, dropped
+    when its shots are corrected), `legacy` (made by the migration), and later `manual` (a
+    correction). (Rev 4's "how each link was
     made" correction would read this.)
 - **New columns.** Older versions don't write them; an `AFTER INSERT` trigger fills `uid` even for
   them.
@@ -109,22 +112,33 @@ happens to opening drives adopted by `_adopt_opening_shots`, and to late gimmes.
   - It moves the adopted opening shots into the record, and ends any open practice stretch.
   - It resolves a restart (below).
 
-  `Round` gets its UUID at construction (replacing the `Round._ids` counter) but writes nothing until
-  activation.
+  `Round` gets its UUID at construction (alongside the `Round._ids` counter the engine still keys
+  on) but writes nothing until activation. Activation takes in every shot after the round's shot
+  floor that's in practice or in no record, so its opening drives come with it.
 - **Players.**
-  - `Round.add_player` adds a slot.
+  - A player added or dropped mid-round (`Round.add_player`, `Round.remove_player`) updates the
+    slots: each player's slot takes their GSPro name, roster name and seat, and a slot nobody has any
+    more (no shot or card on it) goes. So does a seat order the booth learns later, and the round's
+    end syncs them once more. A slot is matched by name, case aside, or roster name.
   - A rename (`rename_shots`) updates the slot's `name` and its shots' `player`. The slot ID stays.
   - A reassignment (`move_shot_player`: a shot was someone else's) is a separate operation. It moves
     the shot, and its gimme row, to the other player's slot and name in one statement pair.
-- **Shots and lines** are inserted with the live record's UUID and the shooter's slot. With no round
-  live, they go to the open practice stretch, which starts one if needed. `record_gimme` copies `record_uuid` and
+- **Shots and lines** are inserted with the live record's UUID and the shooter's slot. A shot takes
+  the record of the round it was struck in, even when it's stored after that round ended or another
+  began. Its slot is found by GSPro's name or by the roster name the booth gives a league player. A line on a
+  shot takes its shot's record. A line on no shot goes to the round being played, else the round
+  that ended within `CLOSER_SECONDS` (its closer), else practice. With no round live, they go to the
+  open practice stretch, which starts one if needed. (A line said before a round starts is
+  practice's; the time rules gave it to the round. Step 3 settles which the readers follow.) `record_gimme` copies `record_uuid` and
   `slot_id` from the shot it follows, like it copies the rest.
 - **Late gimmes.** A gimme conceded within `CLOSER_SECONDS` of the round ending gets that round's
   record directly, since the engine still knows the round. The `_late_gimmes` time rule is needed
   only by the migration.
-- **No more ID ranges.** `mark_league`, `mark_tournament` and `rename_shots` select by
-  `record_uuid` (and slot), not `id > shot_floor`. Today they can catch any later shot, a practice
-  shot included (and, in the cloud layer, rows that arrived from the feed).
+- **No more ID ranges.** `mark_league`, `mark_tournament`, `rename_shots`, `players_after` and
+  `restamp_shots` select by `record_uuid`, not `id > shot_floor`. Today they can catch any later
+  shot, a practice shot included (and, in the cloud layer, rows that arrived from the feed). Rows
+  after the floor written with no record (a path that stamps none) still count, and a round with no
+  record (an older caller) falls back to the floor.
 - **Round end.**
   - `_record_round_stats` writes the `rounds` and `player_rounds` rows with the UUID and slots, and
     sets the record `finished` (`abandoned` for `complete=False`) and `ended_at`, in the same
@@ -138,10 +152,14 @@ happens to opening drives adopted by `_adopt_opening_shots`, and to late gimmes.
     stored shots; it doesn't create missing ones.) The booth already handles starting mid-round,
     and the scorecard read at the end gets the scores right.
   - The new `Round` continues the open `in_progress` record (its UUID and slots) when the course is
-    the same and its players match the record's slots. Otherwise it starts a new record, and the
-    open one becomes `abandoned`.
-  - An `in_progress` record that nothing continues within `ROUND_SPAN_SECONDS` becomes `abandoned`.
-    It's kept, never dropped.
+    the same, its players match the record's players' slots (case aside), and it's had a row within
+    `ROUND_SPAN_SECONDS`. Otherwise it starts a new record,
+    and the open one becomes `abandoned`, ended at its last row. A round this same booth began is
+    never continued: a new round started without the last one ending abandons it.
+  - At start, the booth ends the practice stretch the last one left open, and abandons an
+    `in_progress` round with no row for `ROUND_SPAN_SECONDS`. Both are kept, never dropped. (Opening
+    the file for maintenance, such as the stats page or a backfill, doesn't.)
+  - A practice stretch that ends with no rows is dropped.
   - Tested by stopping Shotcast mid-round on a sim and starting it again.
 - **Duplicate names** stay refused for now. With slots, two "Mike"s could be allowed later without a
   data change; that's an engine change for another day.
