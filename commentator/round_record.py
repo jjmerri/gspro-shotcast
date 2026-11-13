@@ -14,6 +14,8 @@ import json
 import sqlite3
 import uuid
 from collections import Counter
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from .store import CLOSER_SECONDS
@@ -245,6 +247,34 @@ def membership(db: sqlite3.Connection) -> list[dict[str, Any]]:
 # migrated, or rows an older version of the app wrote since the last start) the time rules. Each keeps
 # the time rules' shapes: a round is numbered by its first `rounds` row.
 
+_frozen: dict[int, dict] = {}   # id(connection) -> results reused while frozen()
+
+
+@contextmanager
+def frozen(db: sqlite3.Connection) -> Iterator[None]:
+    """While inside, `db` is read as if nothing changes (a site build): readers that go over all history
+    and are asked again with the same arguments reuse their first answer."""
+    if id(db) in _frozen:   # nested: the outer scope's answers still hold
+        yield
+        return
+    _frozen[id(db)] = {}
+    try:
+        yield
+    finally:
+        _frozen.pop(id(db), None)
+
+
+def reuse(db: sqlite3.Connection, key: tuple, compute: Callable[[], Any]) -> Any:
+    """`compute()`, or its earlier answer for `key` inside frozen(db). The same object comes back each
+    time: callers that change it get a copy."""
+    cache = _frozen.get(id(db))
+    if cache is None:
+        return compute()
+    if key not in cache:
+        cache[key] = compute()
+    return cache[key]
+
+
 def recorded(db: sqlite3.Connection) -> bool:
     """Whether every row of the file has its record (main's tables: stats_web.connect's views hide some)."""
     try:
@@ -299,7 +329,11 @@ def player_round_of(db: sqlite3.Connection):
 def shot_rounds(db: sqlite3.Connection, every: bool = False) -> dict[int, int]:
     """Each shot's round (round_groups' id): none for practice, or a round never finished and recorded,
     or a putt conceded after its round was recorded (_late_gimmes'). `every` takes in the rounds left
-    out of the stats too (connect's views hide them)."""
+    out of the stats too (connect's views hide them). A new dict each call (_late_gimmes adds to it)."""
+    return dict(reuse(db, ("shot_rounds", every), lambda: _shot_rounds(db, every)))
+
+
+def _shot_rounds(db: sqlite3.Connection, every: bool) -> dict[int, int]:
     if not recorded(db):
         return _timed_shot_rounds(db, every)
     rounds_table, shots_table = ("main.rounds", "main.shots") if every else ("rounds", "shots")

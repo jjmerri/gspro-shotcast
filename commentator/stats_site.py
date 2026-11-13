@@ -34,6 +34,7 @@ from . import hole_replay
 from . import highlights, record_clips
 from . import season_analytics as A
 from . import stats_web
+from .round_record import frozen, reuse
 
 PAGE = Path(__file__).with_name("stats_web.html")
 SITE_NAME, MORE_TAB = "Shotcast", "More"   # publish.site_name, publish.more_tab
@@ -233,7 +234,7 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
     version = new_version()
     vdir = site / "v" / version
     vdir.mkdir(parents=True, exist_ok=True)
-    with closing(stats_web.connect(db_path)) as src:
+    with closing(stats_web.connect(db_path)) as src, frozen(src):
         for name, context in CONTEXTS.items():
             body: dict[str, Any] = stats_web.summary(src, context, names, local, season_start)
             if not news:
@@ -241,7 +242,7 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
             body["db"] = {"name": db_path.name, "modified": db_path.stat().st_mtime, "published": time.time()}
             pdir = vdir / "player" / name
             pdir.mkdir(parents=True, exist_ok=True)
-            holes = A.holes_played(src, context)
+            holes = reuse(src, ("holes_played", context), lambda: A.holes_played(src, context))
             _note_records(records, body["records"])
             for p in body["players"]:
                 p["file"] = player_key(p["name"])

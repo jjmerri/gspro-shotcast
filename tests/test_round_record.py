@@ -649,3 +649,16 @@ def test_a_round_is_edited_only_once_the_booth_is_done_with_it(tmp_path, monkeyp
     assert R.unsettled(s.db, later) == ({open_: None}, {shot_of("Augusta"): None})
     assert stats_web.set_round_excluded(path, done, now, True)
     assert stats_web.set_left_out(path, shot_of("Pebble"), True)
+
+
+def test_frozen_reuses_answers_until_its_outermost_scope_ends():
+    db = sqlite3.connect(":memory:")
+    calls = []
+    ask = lambda: R.reuse(db, ("k",), lambda: calls.append(1) or len(calls))
+    assert ask() == 1 and ask() == 2                     # not frozen: computed every time
+    with R.frozen(db):
+        assert ask() == 3
+        with R.frozen(db):
+            assert ask() == 3
+        assert ask() == 3                                # the inner scope kept the outer's answers
+    assert ask() == 4

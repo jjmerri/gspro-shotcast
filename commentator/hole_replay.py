@@ -25,6 +25,7 @@ and yardages are that round's.
 from __future__ import annotations
 
 import base64
+import bisect
 import io
 import json
 import math
@@ -234,6 +235,23 @@ def _r(p: tuple[float, float] | None) -> list[float] | None:
     return [round(p[0], 2), round(p[1], 2)] if p else None
 
 
+def _next_after(times: dict[int, list], after: dict[int, tuple[set, float]]) -> dict[int, float | None]:
+    """For each round in `after` (its sessions, a time): the earliest of `times` (round -> [sessions, a
+    time]) later than that time among rounds sharing one of its sessions, else None. One sorted list per
+    session, so it's not every round against every round."""
+    by_session: dict[Any, list[float]] = {}
+    for ses, at in times.values():
+        for s in ses:
+            by_session.setdefault(s, []).append(at)
+    for v in by_session.values():
+        v.sort()
+    out: dict[int, float | None] = {}
+    for rnd, (ses, at) in after.items():
+        found = [v[i] for s in ses if (v := by_session.get(s)) and (i := bisect.bisect_right(v, at)) < len(v)]
+        out[rnd] = min(found, default=None)
+    return out
+
+
 def round_tees(db: sqlite3.Connection, round_of: dict[int, int] | None = None) -> dict[int, str]:
     """Each round's tee box (Black, Blue, ...), keyed as stats_web.shot_rounds numbers rounds: the box
     most of its holes' own layouts were named (hole_layouts.tee_box). Rounds with none named are left out."""
@@ -271,9 +289,10 @@ def round_tees(db: sqlite3.Connection, round_of: dict[int, int] | None = None) -
             e[0].add(ses)
             e[1] = max(e[1], ts)
     votes: dict[int, Counter] = {}
+    next_end = _next_after(ends, {rnd: (ses, end) for rnd, (ses, _, end) in span.items()})
     for (rnd, hole), (course, first, last) in holes.items():
         ses, start, end = span[rnd]
-        until = min((e for s, e in ends.values() if s & ses and e > end), default=None)
+        until = next_end[rnd]
         top = min(first + ROUND_HOURS, until) if until is not None else first + ROUND_HOURS
         own = [lo for lo in by_hole.get(((course or "").casefold(), hole), [])
                if lo["session_id"] in ses and lo["ts"] is not None and max(last - 60, start) <= lo["ts"] < top
@@ -316,6 +335,8 @@ def hole_replays(db: sqlite3.Connection,
     sides = _sides(db)
     cards = _cards(db)
     tracks = _tracks(db)
+    next_start = _next_after({rnd: (ses, first) for rnd, (ses, first, _) in span.items()},
+                             {rnd: (ses, last) for rnd, (ses, _, last) in span.items()})
     out = {}
     for key, rows in groups.items():
         rows = _fill_gaps(rows)
@@ -324,8 +345,8 @@ def hole_replays(db: sqlite3.Connection,
                       and any(r["outcome"] in ("holed", "gimme", "conceded") for r in rows))
         if not any(r["start_x"] is not None for r in rows) and not one_stroke:
             continue
-        ses, _, last = span[key[0]]
-        until = min((f for s, f, _ in span.values() if s & ses and f > last), default=None)
+        ses = span[key[0]][0]
+        until = next_start[key[0]]
         if (rp := _replay(rows, key[1], layouts, ses, until, teams[key[0]], sides.get(key[0]), tracks,
                           finish)) is not None:
             if rp["tee"] and rp["pin"] and (m := _map_for(images, rp["course"], key[1], ses)):

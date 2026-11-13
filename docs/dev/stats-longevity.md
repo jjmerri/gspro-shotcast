@@ -122,6 +122,16 @@ This helps local-only users as much as publishers, since the local page runs the
 - Expected: build time and upload size for shots and lists depend on the current season, not on
   history.
 
+### 3b. Repeated and quadratic work in the build (done)
+
+A profile of the full build on the 3-year, 211k-shot copy found work that didn't need stored totals:
+`hole_replay.round_tees` and `hole_replays` found each round's next round with a scan over every
+round (now a sorted list per session and a binary search); `booth`, `round_gimmes`, the handicap
+indexes and `shot_rounds` were recomputed for every context, and `holes_played` twice per context
+(now computed once per build, inside `round_record.frozen`). Output is identical on the 1-week,
+8-week and 3-year copies; the 3-year build went from 297 s to 194 s. The rest is real passes over all
+history, which step 4 addresses.
+
 ### 4. Stored totals instead of recomputing from every shot
 
 - A per-player-round contribution table (score, putts, fairways, greens, distances, bests, strokes

@@ -25,7 +25,7 @@ from urllib.parse import unquote, urlparse
 
 from . import changelog, handicap_index
 from . import season_analytics as A
-from .round_record import (_late_gimmes, in_play, player_round_of, round_groups, round_rows, shot_in_play,
+from .round_record import (_late_gimmes, in_play, player_round_of, reuse, round_groups, round_rows, shot_in_play,
                            shot_rounds, unsettled)
 from .store import DRIVE_SQL
 
@@ -745,14 +745,14 @@ def summary(db: sqlite3.Connection, context: str | None = None,
     published site leaves them out altogether). `season`: publish.season_start (MM-DD), for the
     records' This season range."""
     last = db.execute("SELECT MAX(date) FROM sessions").fetchone()[0]
-    holes = A.holes_played(db, context)
-    gimmes = round_gimmes(db)
+    holes = reuse(db, ("holes_played", context), lambda: A.holes_played(db, context))
+    gimmes = reuse(db, ("round_gimmes",), lambda: round_gimmes(db))
     usual = usual_gimme(db, gimmes)
     sg, rec, trend = A.sg_summary(holes, usual), A.recovery(holes), A.trends(db, holes, context, usual)
     people = players(db, context, usual)
     # Our own handicap index (handicap_index) goes by every counting round, whatever the context:
     # every such round, and without the rounds with a mulligan.
-    own = handicap_index.indexes(db)
+    own = reuse(db, ("indexes",), lambda: handicap_index.indexes(db))
     from .hole_replay import finish_laterals   # hole_replay imports this module
     finish = finish_laterals(db)
     for p in people:
@@ -788,7 +788,7 @@ def summary(db: sqlite3.Connection, context: str | None = None,
             "rounds": rounds_, **(_editing(db) if local else {}), **highlights_by_period(db, holes, context, season=season),
             "season_from": season_start(season), "predictions": predictions(db, names),
             "courses": A.courses(db, context),
-            "booth": A.booth(db, names), "broadcasts": A.broadcasts(db), "filters": filters,
+            "booth": reuse(db, ("booth", tuple(sorted((names or {}).items()))), lambda: A.booth(db, names)), "broadcasts": A.broadcasts(db), "filters": filters,
             "vod_rounds": [[s, e, int(st > 0)] for s, e, st in round_spans(db)],
             "news": changelog.site()}
 
