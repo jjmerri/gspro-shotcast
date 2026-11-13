@@ -134,6 +134,7 @@ Advanced**).
   - `ANTHROPIC_API_KEY` for Claude calls.
   - `OPENAI_API_KEY` for GPT models and the OpenAI voices.
   - `GOOGLE_TTS_API_KEY` for the Google voices (`tts.provider: google`).
+  - `AZURE_SPEECH_KEY` for the Azure voices (`tts.provider: azure`, or `azure` in `tts.fallback`).
   - `SQUABBIT_EMAIL` and `SQUABBIT_PASSWORD` for the live-handicap pull (only if
     `squabbit.enabled: true`).
   - `OBS_WEBSOCKET_PASSWORD` for starting and stopping OBS's stream (`live`; the tray's live stream

@@ -61,7 +61,8 @@ llm:
   # flight: { provider: ollama, model: qwen3:8b, effort: null, service_tier: null, max_tokens: 900 }
 
 tts:
-  # openai (cloud, needs OPENAI_API_KEY) | google (cloud, GOOGLE_TTS_API_KEY) | kokoro (on the PC's CPU) | console (print only)
+  # openai (cloud, needs OPENAI_API_KEY) | google (cloud, GOOGLE_TTS_API_KEY) | azure (cloud, AZURE_SPEECH_KEY)
+  # | kokoro (on the PC's CPU) | console (print only)
   provider: openai
   openai_voices:
     pbp: fable
@@ -73,6 +74,20 @@ tts:
   #   pbp: en-GB-Chirp3-HD-Iapetus
   #   color: en-US-Chirp3-HD-Orus
   # google_speaking_rate: 1.0
+  # Microsoft's Azure neural voices instead: provider: azure. 0.5M characters free a month (F0),
+  # then $15 per 1M on S0. The play-by-play voice goes "cheerful" on big moments.
+  # azure_voices:
+  #   pbp: en-GB-RyanNeural
+  #   color: en-US-AndrewNeural
+  # azure_region: eastus
+  # azure_styles: { pbp: cheerful }
+  # Voice fallbacks: as each round starts, the first of provider, then fallback, with enough free
+  # characters left this month for the round, kept for the whole round; `paid` once all are spent
+  # (docs/booth.md, "Voice fallbacks"). Leave out for one provider.
+  # fallback: [azure]
+  # paid: google                      # unset: provider
+  # free_chars: { google: 1000000, azure: 500000 }
+  # free_margin: 0.1                  # leave 10% of each free allowance unused
   # Voices on the PC instead (no key, no per-line cost, plainer delivery): provider: kokoro, after
   # `pip install -e ".[local]"` and downloading the two model files into models/ (docs/setup.md).
   # voices:             # Kokoro voice ids

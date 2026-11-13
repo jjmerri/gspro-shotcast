@@ -36,7 +36,8 @@ def test_splitting_the_config_by_owner_loses_nothing():
     data["from_a_newer_app"] = {"x": 1}
     parts = settings_owner.split(data)
     assert parts["service"]["tts"] == {k: data["tts"][k] for k in
-                                       ("provider", "openai_model")}
+                                       ("provider", "openai_model", "fallback", "paid", "free_chars",
+                                        "free_margin", "azure_region")}
     assert parts["web"]["tts"]["openai_voices"] == data["tts"]["openai_voices"]
     assert parts["pc"]["from_a_newer_app"] == {"x": 1}
     assert "screen" in parts["pc"] and "commentary" in parts["web"] and "llm" in parts["service"]

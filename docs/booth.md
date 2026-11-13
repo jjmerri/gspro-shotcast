@@ -161,6 +161,53 @@ the free tier lasts about 15 rounds.
 There's no delivery direction, so `openai_instructions` don't apply. Create a Google Cloud project
 with billing on, enable the Cloud Text-to-Speech API, and make an API key restricted to it.
 
+**Azure voices** (`tts.provider: azure`, `AZURE_SPEECH_KEY`, `tts.azure_region`) are Microsoft's
+neural voices (`tts.azure_voices`; British Ryan and American Andrew by default), streamed with
+about 0.2 s to first audio. The free F0 tier gives 0.5M characters a month and then stops serving
+until the next month (it can't be billed); the paid S0 tier bills $15 per million. On a big moment
+the play-by-play voice speaks in a `cheerful` style (`tts.azure_styles`, `tts.azure_style_degree`);
+Andrew has no styles, so the colour voice stays plain. Use the standard voices, not the "HD" ones,
+which bill on a separate, pricier meter. Create a Speech resource in the Azure portal and copy its key
+and region. Azure voices don't switch language with `commentary.language`.
+
+### Voice fallbacks
+
+One voice provider (`tts.provider` alone) is used for everything, as before; so is a local or
+print-only one (`kokoro`, `console`, or `--console`) whatever `tts.fallback` says. To stretch the free
+allowances, list more under `tts.fallback`:
+
+```yaml
+tts:
+  provider: google     # first choice
+  fallback: [azure]    # when Google's free allowance can't cover the next round
+  # paid: google       # once every free allowance is spent (unset: tts.provider)
+```
+
+How it picks:
+
+- **Once per round, at the round's start.** The round's characters are estimated as holes x players
+  x characters per player-hole (the p90 of this booth's own rounds once it has five, logged as
+  `tts_round` rows in `logs/usage.jsonl`; `tts.chars_per_player_hole`, 1,500, until then). The first
+  provider in `provider`, then `fallback` order whose free characters left this month cover the
+  estimate is used for the whole round, so the voices never change mid-round. When none can, the
+  `paid` provider is used.
+- **Free characters left** are `tts.free_chars` (Google 1M, Azure 0.5M) less `tts.free_margin`
+  (10%, so Google is left at 900k) less what the usage log shows was sent this month (every request,
+  retries included, so it errs high). A provider not in `free_chars` (OpenAI) has no allowance and is
+  never passed over. Google's month turns over at midnight US Pacific time, Azure's at midnight UTC.
+- **A slow or throttled request** is retried on the same provider and the line is dropped if it
+  misses its moment, exactly as with one provider: the voice never changes because of a hiccup.
+- **A provider that says its allowance is spent** (Azure's F0 tier answering 403) hands the rest of
+  the round to the `paid` provider (the one mid-round voice change) and isn't picked again that month.
+  If it's the paid provider itself, its lines fail.
+- **Counting is local**: Google never says its free tier is spent, it just starts billing, so the
+  booth counts from its own log. Deleting `logs/usage.jsonl` resets the count; a booth on another PC
+  with the same key isn't seen. The Google Cloud console's billing report is the real tally.
+
+The log says which voice each round got, e.g. `Voice switched google -> azure for this round (needs
+~54,000 chars: 18 holes x 2 players x 1500; free left: google 30,000 chars, azure 450,000 chars)`.
+Every provider listed needs its key in `.env`; the booth won't start without them.
+
 ### Languages
 
 `commentary.language` (the tray's Settings > Booth > Language) sets what the booth speaks: `en`

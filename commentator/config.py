@@ -215,10 +215,30 @@ def localized_voice(voice: str, language: str) -> str:
     return voice
 
 
+CloudVoice = Literal["openai", "google", "azure"]
+
+
 class TTSConfig(BaseModel):
     # Cloud voices by default (OPENAI_API_KEY); `google` for Google's Chirp 3 HD voices
-    # (GOOGLE_TTS_API_KEY); `kokoro` voices on the PC's CPU instead.
-    provider: Literal["kokoro", "openai", "google", "console"] = "openai"
+    # (GOOGLE_TTS_API_KEY); `azure` for Microsoft's neural voices (AZURE_SPEECH_KEY); `kokoro` voices
+    # on the PC's CPU instead.
+    provider: Literal["kokoro", "openai", "google", "azure", "console"] = "openai"
+    # Cloud voices to use instead of `provider` while its free monthly allowance (free_chars) can't
+    # cover the next round, in order; each keeps its own voices. Empty: `provider` is always used, as
+    # if nothing here were set. The choice is made as each round starts and holds for the whole
+    # round, so the voices never change mid-round (docs/booth.md, "Voice fallbacks").
+    fallback: list[CloudVoice] = Field(default_factory=list)
+    # The voice used once every free allowance is spent (it bills per character). Unset: `provider`.
+    paid: CloudVoice | None = None
+    # Free characters each month by provider. A provider not listed has no allowance to run out of
+    # (it's never passed over). Google resets on US Pacific time, Azure on UTC.
+    free_chars: dict[str, int] = Field(default_factory=lambda: {"google": 1_000_000, "azure": 500_000})
+    # The share of each free allowance left unused, so the count's slack never tips a round into the
+    # bill: 0.1 moves off Google at 900k characters.
+    free_margin: float = 0.10
+    # A round's estimate is holes x players x characters per player-hole: the p90 of this booth's
+    # own rounds once it has five, this until then.
+    chars_per_player_hole: int = 1500
     # Persona key -> provider voice id. Each provider has its own voice ids, so they're kept apart:
     # flipping `provider` is then the whole toggle, with no voice edits (and an easy switch back).
     voices: dict[str, str] = Field(default_factory=lambda: {"pbp": "bm_george", "color": "am_michael"})
@@ -228,6 +248,15 @@ class TTSConfig(BaseModel):
         "pbp": "en-GB-Chirp3-HD-Iapetus", "color": "en-US-Chirp3-HD-Orus"})
     # Google's pace (0.25-2.0). Kept apart from `speed`, which was tuned for the OpenAI voices.
     google_speaking_rate: float = 1.0
+    # Microsoft neural voice names (the standard ones: the HD ones bill as a separate, pricier meter),
+    # and the Speech resource's region.
+    azure_voices: dict[str, str] = Field(default_factory=lambda: {
+        "pbp": "en-GB-RyanNeural", "color": "en-US-AndrewNeural"})
+    azure_region: str = "eastus"
+    # Persona key -> the speaking style for a big moment (the voice must support it; Andrew has
+    # none). styledegree runs 0.01-2.
+    azure_styles: dict[str, str] = Field(default_factory=lambda: {"pbp": "cheerful"})
+    azure_style_degree: float = 2.0
     speed: float = 1.0
     kokoro_model: str = "models/kokoro-v1.0.onnx"
     kokoro_voices: str = "models/voices-v1.0.bin"
@@ -304,19 +333,48 @@ class TTSConfig(BaseModel):
     # air; one voiced on demand that can't be ready by then is dropped.
     flight_audio_deadline_seconds: float = 4.0
 
+    @field_validator("fallback")
+    @classmethod
+    def _distinct_fallbacks(cls, v: list[str]) -> list[str]:
+        return list(dict.fromkeys(v))
+
+    @property
+    def tiers(self) -> list[str]:
+        """The providers in the order they're tried for a round: `provider`, then the fallbacks."""
+        return list(dict.fromkeys([self.provider, *self.fallback]))
+
+    @property
+    def paid_provider(self) -> str:
+        return self.paid or self.provider
+
+    def voices_for(self, provider: str) -> dict[str, str]:
+        """The persona->voice map for a provider (voice ids differ by provider)."""
+        return {"openai": self.openai_voices, "google": self.google_voices,
+                "azure": self.azure_voices}.get(provider, self.voices)
+
     @property
     def active_voices(self) -> dict[str, str]:
-        """The persona->voice map for the provider in use (voice ids differ by provider)."""
-        if self.provider == "openai":
-            return self.openai_voices
-        if self.provider == "google":
-            return self.google_voices
-        return self.voices
+        """The persona->voice map for the provider in use."""
+        return self.voices_for(self.provider)
 
     @property
     def active_instructions(self) -> dict[str, str]:
         """Per-persona delivery instructions, only for the OpenAI provider; empty otherwise."""
         return self.openai_instructions if self.provider == "openai" else {}
+
+    def voice_for(self, provider: str, speaker: str, language: str = "en") -> tuple[str, str | None]:
+        """A persona's (voice, delivery instructions) on a provider, in the commentary language."""
+        voices = self.voices_for(provider)
+        voice = voices.get(speaker) or next(iter(voices.values()))
+        instructions = self.openai_instructions.get(speaker) if provider == "openai" else None
+        if language != "en":
+            if provider == "google":
+                voice = localized_voice(voice, language)
+            if instructions:
+                name = LANGUAGES[language][0]
+                instructions += (f"\nLanguage: The text is {name}. Speak it as a native {name} speaker, with a "
+                                 f"native {name} accent, whatever accent is described above.")
+        return voice, instructions
 
 
 class ScreenConfig(BaseModel):

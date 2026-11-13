@@ -323,6 +323,9 @@ def check_key(name: str, values: dict[str, str], cfg) -> str:
     if name == "GOOGLE_TTS_API_KEY":
         return _http_check("GET", "https://texttospeech.googleapis.com/v1/voices",
                            params={"languageCode": "en-US", "key": v})
+    if name == "AZURE_SPEECH_KEY":
+        return _http_check("GET", f"https://{cfg.tts.azure_region}.tts.speech.microsoft.com/cognitiveservices/voices/list",
+                           headers={"Ocp-Apim-Subscription-Key": v})
     if name == "OBS_WEBSOCKET_PASSWORD":
         from .live_stream import Obs
 
@@ -353,8 +356,11 @@ CONFIG_FIELDS: list[tuple[str, str, tuple[str, ...], str, str]] = [
      "What the booth speaks: en English, fr French, es Spanish, de German, it Italian, pt Portuguese, nl Dutch."),
     ("Booth", "Play-by-play commentator", ("personas", "pbp", "name"), "text", ""),
     ("Booth", "Colour commentator", ("personas", "color", "name"), "text", ""),
-    ("Booth", "Voices", ("tts", "provider"), "choice:openai|google",
-     "openai uses OPENAI_API_KEY; google uses GOOGLE_TTS_API_KEY."),
+    ("Booth", "Voices", ("tts", "provider"), "choice:openai|google|azure",
+     "openai uses OPENAI_API_KEY; google uses GOOGLE_TTS_API_KEY; azure uses AZURE_SPEECH_KEY."),
+    ("Booth", "Fallback voices", ("tts", "fallback"), "list",
+     "Used for a round when the voice above has too little of its free monthly allowance left, like azure. "
+     "Empty: always the voice above."),
     ("Booth", "Speaking pace (OpenAI voices)", ("tts", "speed"), "float", "1.0 is normal; 1.1 a little quicker."),
     ("Booth", "Speaking pace (Google voices)", ("tts", "google_speaking_rate"), "float", "0.25 to 2.0; 1.0 is normal."),
     ("Booth", "What the booth calls", (), "heading", ""),
@@ -491,6 +497,7 @@ ENV_FIELDS: list[tuple[str, str, str, bool, bool]] = [
     ("API keys", "OpenAI (voices, live lines)", "OPENAI_API_KEY", True, True),
     ("API keys", "Anthropic (Claude)", "ANTHROPIC_API_KEY", True, True),
     ("API keys", "Google Text-to-Speech", "GOOGLE_TTS_API_KEY", True, True),
+    ("API keys", "Azure Speech", "AZURE_SPEECH_KEY", True, True),
     ("API keys", "TypeSafe (Jev minimap read)", "TYPESAFE_API_KEY", True, False),
     ("League", "Squabbit email", "SQUABBIT_EMAIL", False, False),
     ("League", "Squabbit password", "SQUABBIT_PASSWORD", True, False),

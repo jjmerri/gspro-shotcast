@@ -792,6 +792,8 @@ class Engine:
         self.flight_latencies: list[float] = []
         if hasattr(self.speech, "usage"):
             self.speech.usage = self.usage   # per-request voice cost/latency rows
+        if hasattr(getattr(self.speech, "tts", None), "load_usage"):
+            self.speech.tts.load_usage(self.usage)   # this month's characters by voice provider
         Path(cfg.log_dir).mkdir(parents=True, exist_ok=True)
         self.transcript = Path(cfg.log_dir) / f"transcript-{time.strftime('%Y-%m-%d')}.txt"
         self._events: asyncio.Queue[ShotEvent | HoleChangeEvent | PreShotEvent | None] = asyncio.Queue()
@@ -6848,6 +6850,9 @@ class Engine:
             self.speech.interrupt()
         if penalty_facts and lines:
             self._hook_penalty_call(lines, self.gspro.fire_info(fire))
+        if score >= c.big_moment_threshold:
+            for line in lines:
+                line._excited = True   # a voice with a big-moment style uses it (tts.azure_styles)
         self._air_lines("shot", lines, shot_id)
 
     def _hook_penalty_call(self, lines: list[Line], info: dict) -> None:
@@ -9019,6 +9024,13 @@ class Engine:
         self._bg_tasks.add(task)
         task.add_done_callback(lambda t: (self._bg_tasks.discard(t), t.cancelled() or t.exception()))
 
+    def _pick_round_voice(self, r: Round) -> None:
+        """With voice fallbacks, pick the round's voice once: before an opener aired over the load,
+        else as the round starts, so the whole round, opener included, has one voice."""
+        if r.voice_from_seq is None:
+            r.voice_from_seq = r.seq
+            self.speech.start_round(max(r.holes - r.seq + 1, 1), len(r.roster))
+
     def _start_round(self, r: Round) -> None:
         if self.store.roll_session_if_idle():
             log.info("Booth idle for hours: round %s starts a new session (%s)", r.id, self.store.session_id)
@@ -9056,6 +9068,7 @@ class Engine:
         self._scramble_pairs = set()
         self._putted_on_last_hole = self._round_end_queued = False
         self._live_round_start()
+        self._pick_round_voice(r)
         # Close the "fresh empty scorecard" window so this same tee can't re-trigger a start.
         self._holes_played_at = 0.0
         self._news_bits, self._news_aired, self._news_moment = [], [], None
@@ -9897,6 +9910,7 @@ class Engine:
                     self._opener_gen += 1
                     p.awaiting_load = False
                     p.aired = True
+                    self._pick_round_voice(p.round)
                     self._air_lines("opener", p.lines)
                     log.info("Front-loaded opener aired during the load (%s) for %s %s",
                              "league" if p.is_league else "practice", p.course, sorted(p.players))
@@ -10145,6 +10159,7 @@ class Engine:
                                                roster_key=self._roster_key(names), guessed=guessed,
                                                colour_teams=colour_teams)
         if aired:
+            self._pick_round_voice(r)
             self._air_lines("opener", lines)  # play over the course load
             log.info("Early opener aired during the load (%s) for %s %s: %d line(s)",
                      "league" if is_league else "practice", r.course, sorted(players), len(lines))
@@ -10510,6 +10525,8 @@ class Engine:
             task.cancel()
         self._shots_at_round_end = self.gspro.fires
         self._courses_at_round_end = self._round_course_entries
+        if r.voice_from_seq is not None:   # the holes voiced since the voice was picked
+            self.speech.end_round(r.seq - r.voice_from_seq + 1, len(r.roster))
         self.hole_number = None  # the next round starts its own count
         if self.cfg.health.enabled and self.cfg.source.type != "replay":
             try:

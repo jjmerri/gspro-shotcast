@@ -53,6 +53,11 @@ SECTIONS: dict[str, Owner] = {
 FIELDS: dict[str, Owner] = {
     "tts.provider": "service",
     "tts.openai_model": "service",
+    "tts.fallback": "service",
+    "tts.paid": "service",
+    "tts.free_chars": "service",
+    "tts.free_margin": "service",
+    "tts.azure_region": "service",
     "tts.kokoro_model": "pc",
     "tts.kokoro_voices": "pc",
     "publish.site_name": "web",

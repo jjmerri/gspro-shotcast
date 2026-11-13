@@ -144,6 +144,9 @@ class Round:
         # practice round the booth still calls, minus the league framing (points, standings, handicap).
         self.is_league = is_league
         self.holes = holes
+        # The hole of the round the booth's voice provider was chosen at (Engine._pick_round_voice):
+        # a round joined partway is voiced, and estimated, from there on. None: not chosen yet.
+        self.voice_from_seq: int | None = None
         # Rounds start on 1 or 10, and a lone "1" in the hole box rarely OCRs, so an unread start is
         # a placeholder until the first scorecard shows which hole got the first score.
         self.start_hole = start_hole or 1

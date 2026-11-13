@@ -5,7 +5,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from .config import LANGUAGES, Config, localized_voice
+from .config import Config
 from .models import Line
 from .tts import TTS, Audio, StreamedAudio
 from .usage import tts_cost
@@ -210,6 +210,8 @@ class SpeechQueue:
             "synth_clips": 0, "synth_chars": 0, "synth_seconds": 0.0,
             "spoken_clips": 0, "spoken_chars": 0, "spoken_seconds": 0.0,
         }
+        # Characters sent to the voice since the round started; None between rounds.
+        self._round_chars: int | None = None
         # Where per-request TTS rows and per-line air rows go (the engine's UsageLog), for the cost and
         # latency summary (`commentator cost`). None: not recorded.
         self.usage = None
@@ -225,11 +227,35 @@ class SpeechQueue:
         except Exception as e:
             log.debug("Usage row not written: %s", e)
 
+    @property
+    def provider(self) -> str:
+        """The voice provider lines are going to now (with fallbacks, the one picked for this round)."""
+        return getattr(self.tts, "provider", None) or self.cfg.tts.provider
+
+    def start_round(self, holes: int, players: int) -> None:
+        """A round is starting: with voice fallbacks, pick the provider for it (docs/booth.md)."""
+        self._round_chars = 0
+        if hasattr(self.tts, "start_round"):
+            self.tts.start_round(holes, players)
+
+    def end_round(self, holes: int, players: int) -> None:
+        """Log the round's voiced characters, for the next rounds' estimates (tts.chars_per_player_hole)."""
+        chars, self._round_chars = self._round_chars, None
+        if chars and holes > 0 and players > 0:
+            self._record({"kind": "tts_round", "holes": holes, "players": players, "chars": chars})
+            if budget := getattr(self.tts, "budget", None):
+                budget.per_hole.append(chars / (holes * players))
+
     def _record_tts(self, purpose: str, attempt: int, chars: int, outcome: str, started: float,
-                    first: float | None, audio_s: float) -> None:
-        model = self.cfg.tts.openai_model if self.cfg.tts.provider == "openai" else self.cfg.tts.provider
+                    first: float | None, audio_s: float, provider: str | None = None) -> None:
+        provider = provider or self.provider
+        if budget := getattr(self.tts, "budget", None):
+            budget.add(provider, chars)
+        if self._round_chars is not None:
+            self._round_chars += chars
+        model = self.cfg.tts.openai_model if provider == "openai" else provider
         self._record({
-            "kind": "tts", "provider": self.cfg.tts.provider, "model": model, "purpose": purpose,
+            "kind": "tts", "provider": provider, "model": model, "purpose": purpose,
             "attempt": attempt, "chars": chars, "outcome": outcome,
             "first_audio_s": round(first, 3) if first is not None else None,
             "total_s": round(time.monotonic() - started, 3), "audio_s": round(audio_s, 2),
@@ -301,19 +327,23 @@ class SpeechQueue:
             until = min(until, item.deadline)
         item.task = asyncio.create_task(self._synthesize(item.line, until, live=True))
 
-    def _voice_for(self, line: Line) -> tuple[str, str | None]:
-        voices = self.cfg.tts.active_voices
-        voice = voices.get(line.speaker) or next(iter(voices.values()))
-        instructions = self.cfg.tts.active_instructions.get(line.speaker)
+    def _voice_for(self, line: Line):
+        """(voice, instructions) for a line. With voice fallbacks the voice is a resolver the TTS calls
+        with the provider each request goes to, so a line always gets that provider's voice."""
         language = self.cfg.commentary.language
-        if language != "en":
-            if self.cfg.tts.provider == "google":
-                voice = localized_voice(voice, language)
-            if instructions:
-                name = LANGUAGES[language][0]
-                instructions += (f"\nLanguage: The text is {name}. Speak it as a native {name} speaker, with a "
-                                 f"native {name} accent, whatever accent is described above.")
-        return voice, instructions
+        if getattr(self.tts, "resolves_voices", False):
+            return (lambda provider: self.cfg.tts.voice_for(provider, line.speaker, language)), None
+        return self.cfg.tts.voice_for(self.cfg.tts.provider, line.speaker, language)
+
+    def _served(self) -> dict:
+        """With voice fallbacks, the kwarg the TTS reports the provider that took a request in."""
+        return {"served": {}} if getattr(self.tts, "resolves_voices", False) else {}
+
+    def _tts_kw(self, line: Line) -> dict:
+        """A big moment's line (marked by the engine) in an excited speaking style, where the voice has one."""
+        if getattr(line, "_excited", False) and getattr(self.tts, "expressive", False):
+            return {"excited": True}
+        return {}
 
     async def _synthesize(self, line: Line, until: float | None = None, live: bool = False) -> tuple[bool, Audio | None]:
         """Voice a line, returning (ok, audio). A cloud voice's requests either answer in a second or
@@ -322,6 +352,7 @@ class SpeechQueue:
         whichever answers first wins. It keeps hedging, at most two requests in flight, until `until`
         (a time.monotonic()), which defaults to prepare_deadline_seconds for a line voiced ahead."""
         voice, instructions = self._voice_for(line)
+        kw = self._tts_kw(line)
         text = self.spoken(line.text)
         if not getattr(self.tts, "remote", False):
             try:
@@ -343,9 +374,11 @@ class SpeechQueue:
         purpose = "live" if live else "ahead"
 
         async def request(n: int) -> Audio | None:
-            at, outcome, audio = time.monotonic(), "unanswered", None
+            at, outcome, audio, served = time.monotonic(), "unanswered", None, self._served()
             try:
-                audio = await self.tts.synthesize(text, voice, instructions)
+                audio = await self.tts.synthesize(text, voice, instructions, **kw, **served)
+                if served:
+                    audio.provider = served["served"].get("provider")
                 outcome = "ok"
                 return audio
             except asyncio.CancelledError:
@@ -355,7 +388,8 @@ class SpeechQueue:
                 raise
             finally:
                 self._record_tts(purpose, n, len(text), outcome, at,
-                                 time.monotonic() - at if outcome == "ok" else None, _audio_seconds(audio))
+                                 time.monotonic() - at if outcome == "ok" else None, _audio_seconds(audio),
+                                 served.get("served", {}).get("provider"))
 
         def send() -> None:
             nonlocal sent
@@ -398,7 +432,7 @@ class SpeechQueue:
         log.warning("TTS gave up after %.1fs (%s requests): %s", time.monotonic() - started, sent, line.text)
         return False, None
 
-    async def _synthesize_streamed(self, line: Line, text: str, voice: str, instructions: str | None,
+    async def _synthesize_streamed(self, line: Line, text: str, voice, instructions: str | None,
                                    until: float, live: bool) -> tuple[bool, Audio | None]:
         """Stream a line. A request with no audio within first_audio_timeout_seconds (or one that
         errors) gets `retries` more sent alongside it; the first to start is kept and the rest are
@@ -409,13 +443,14 @@ class SpeechQueue:
         attempts: list[StreamedAudio] = []
         last_sent = started
         purpose = "live" if live else "ahead"
+        kw = self._tts_kw(line)
 
         def send() -> None:
             nonlocal last_sent
             clip = StreamedAudio(self.tts.stream_sample_rate)
             clip.prebuffer = cfg.stream_prebuffer_seconds
             clip.task = asyncio.create_task(
-                self._stream_into(clip, text, voice, instructions, len(attempts) + 1, purpose))
+                self._stream_into(clip, text, voice, instructions, len(attempts) + 1, purpose, kw))
             attempts.append(clip)
             last_sent = time.monotonic()
 
@@ -460,19 +495,23 @@ class SpeechQueue:
             if not winner.ok:
                 log.warning("TTS stream broke off while voicing ahead: %s", line.text)
                 return False, None
-            return True, Audio(samples=winner.samples, sample_rate=winner.sample_rate)
+            audio = Audio(samples=winner.samples, sample_rate=winner.sample_rate)
+            if (provider := getattr(winner, "provider", None)) is not None:
+                audio.provider = provider   # the play loop won't air it in a voice since replaced
+            return True, audio
         finally:
             for a in attempts:
                 if not (kept and a is winner):
                     a.cancel()
 
-    async def _stream_into(self, clip: StreamedAudio, text: str, voice: str, instructions: str | None,
-                           attempt: int, purpose: str) -> None:
+    async def _stream_into(self, clip: StreamedAudio, text: str, voice, instructions: str | None,
+                           attempt: int, purpose: str, kw: dict | None = None) -> None:
         """Download one streamed request into `clip`, recording it as a usage row when it ends."""
         started = time.monotonic()
         first: float | None = None
         outcome = "error"
-        stream = self.tts.stream(text, voice, instructions)
+        served = self._served()
+        stream = self.tts.stream(text, voice, instructions, **(kw or {}), **served)
         try:
             while True:
                 try:
@@ -487,6 +526,8 @@ class SpeechQueue:
                     break
                 if first is None:
                     first = time.monotonic() - started
+                    if served:
+                        clip.provider = served["served"].get("provider")
                 clip.push(block)
         except asyncio.CancelledError:
             outcome = "cut" if first is not None else "unanswered"
@@ -500,7 +541,8 @@ class SpeechQueue:
                 self.audio_stats["synth_clips"] += 1
                 self.audio_stats["synth_chars"] += len(text)
                 self.audio_stats["synth_seconds"] += clip.seconds
-            self._record_tts(purpose, attempt, len(text), outcome, started, first, clip.seconds)
+            self._record_tts(purpose, attempt, len(text), outcome, started, first, clip.seconds,
+                             served.get("served", {}).get("provider"))
 
     async def prepare_exchange(self, lines: list[Line]) -> tuple[list[Line], list[Audio | None]]:
         """Voice a multi-line exchange ahead of time (a wrap, the closer): in parallel on a network
@@ -742,6 +784,13 @@ class SpeechQueue:
                     log.info("Dropped a line that missed its moment by %.1fs: %s",
                              time.monotonic() - deadline, line.text)
                     self._record({"kind": "line", "outcome": "dropped", "reason": "missed",
+                                  "chars": len(line.text)})
+                    continue
+                if (voiced_by := getattr(audio, "provider", None)) and voiced_by != self.provider:
+                    # Voiced ahead before the voice provider changed: the other voice would cut in.
+                    log.info("Dropped a line voiced by %s now that the voice is %s: %s",
+                             voiced_by, self.provider, line.text)
+                    self._record({"kind": "line", "outcome": "dropped", "reason": "voice",
                                   "chars": len(line.text)})
                     continue
                 name = self.cfg.personas[line.speaker].name if line.speaker in self.cfg.personas else line.speaker

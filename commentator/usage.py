@@ -30,9 +30,10 @@ OPENAI_TIER_MULTIPLIER = {"fast": 2.0, "priority": 2.0, "flex": 0.5}
 # Cloud TTS (gpt-4o-mini-tts) is billed by generated audio time; OpenAI's own estimate is about this.
 # The tts-1 models bill by input characters instead. Check current pricing before relying on these.
 TTS_USD_PER_MINUTE = 0.015
-# Google Chirp 3 HD bills input characters ($30/M), with the first 1M characters each month free
-# (not reflected here).
-TTS_USD_PER_MILLION_CHARS = {"tts-1-hd": 30.0, "tts-1": 15.0, "google": 30.0}
+# Google Chirp 3 HD bills input characters ($30/M), with the first 1M characters each month free;
+# Azure's standard neural voices $15/M, with 0.5M free on the F0 tier (free allowances not reflected
+# here).
+TTS_USD_PER_MILLION_CHARS = {"tts-1-hd": 30.0, "tts-1": 15.0, "google": 30.0, "azure": 15.0}
 
 
 def audio_cost(seconds: float) -> float:
@@ -90,7 +91,8 @@ def estimate_cost(model: str, r: dict) -> float:
 
 class UsageLog:
     """logs/usage.jsonl: one row per model call ("kind" is the call's role), per TTS request
-    (kind "tts") and per line aired or dropped (kind "line")."""
+    (kind "tts"), per line aired or dropped (kind "line") per round's voicing (kind "tts_round") and per voice provider
+    that said its free allowance is spent (kind "tts_quota")."""
 
     def __init__(self, log_dir: str) -> None:
         Path(log_dir).mkdir(parents=True, exist_ok=True)
@@ -159,6 +161,8 @@ def summarize(log_dir: str, weeks: int = 12, as_model: str | None = None) -> str
             d["tts_audio"] += r.get("audio_s") or 0
             if r.get("first_audio_s") is not None:
                 d["first"].append(r["first_audio_s"])
+        elif kind in ("tts_round", "tts_quota"):
+            continue
         elif kind == "line":
             if r.get("outcome") == "dropped":
                 d["dropped"] += 1
