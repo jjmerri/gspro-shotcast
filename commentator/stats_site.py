@@ -33,7 +33,7 @@ from typing import Any
 from . import hole_replay
 from . import highlights, record_clips
 from . import season_analytics as A
-from . import stats_web
+from . import stats_cache, stats_web
 from .round_record import frozen, reuse
 
 PAGE = Path(__file__).with_name("stats_web.html")
@@ -234,7 +234,7 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
     version = new_version()
     vdir = site / "v" / version
     vdir.mkdir(parents=True, exist_ok=True)
-    with closing(stats_web.connect(db_path)) as src, frozen(src):
+    with closing(stats_web.connect(db_path)) as src, frozen(src), stats_cache.opened(src, db_path):
         for name, context in CONTEXTS.items():
             body: dict[str, Any] = stats_web.summary(src, context, names, local, season_start)
             if not news:

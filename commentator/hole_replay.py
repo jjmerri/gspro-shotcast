@@ -307,7 +307,8 @@ def hole_replays(db: sqlite3.Connection,
                  finish: dict[int, float] | None = None) -> dict[tuple[int, int], dict[str, Any]]:
     """Every replayable hole, keyed by (round, hole number): the round as stats_web.shot_rounds numbers
     it. A hole is replayable when at least one of its shots has a position, or it took one drawn stroke
-    (an ace, or a tee shot into the gimme circle), which runs from the tee to the pin.
+    (an ace, or a tee shot into the gimme circle), which runs from the tee to the pin. Kept per round
+    between builds (stats_cache).
     `finish`, when given, is filled with each swing's sideways finish (see finish_laterals)."""
     have = {r[1] for r in db.execute("PRAGMA table_info(shots)")}
     if "start_x" not in have:
@@ -316,49 +317,103 @@ def hole_replays(db: sqlite3.Connection,
     if "picked" not in have:
         cols = cols.replace(" picked,", " NULL AS picked,")
     round_of = stats_web.shot_rounds(db)
-    groups: dict[tuple[int, int], list[sqlite3.Row]] = {}
-    for row in db.execute(f"SELECT {cols} FROM shots ORDER BY id"):
-        m = _HOLE.match(row["hole"] or "")
-        if row["id"] in round_of and m:
-            groups.setdefault((round_of[row["id"]], int(m.group(1))), []).append(row)
-    layouts, images = _layouts(db), _images(db)
-    # Each round's sessions and first and last shot, to end its layout window at the next round's start.
+    # Each hole's first shot, and its first and last shot's times (by id, as its rows come), and each
+    # round's sessions and courses: enough to order the holes and end each round's layout window at
+    # the next round's start without reading every shot's every column.
+    holes: dict[tuple[int, int], list] = {}
     span: dict[int, list] = {}
-    for (rnd, _), rows in groups.items():
-        sp = span.setdefault(rnd, [set(), rows[0]["ts"], rows[-1]["ts"]])
-        sp[0].update(r["session_id"] for r in rows)
-        sp[1], sp[2] = min(sp[1], rows[0]["ts"]), max(sp[2], rows[-1]["ts"])
-    by_round: dict[int, list[sqlite3.Row]] = {}
-    for (rnd, _), rows in groups.items():
-        by_round.setdefault(rnd, []).extend(rows)
-    teams = {rnd: _scramble_teams(rows) for rnd, rows in by_round.items()}
-    sides = _sides(db)
-    cards = _cards(db)
-    tracks = _tracks(db)
-    next_start = _next_after({rnd: (ses, first) for rnd, (ses, first, _) in span.items()},
-                             {rnd: (ses, last) for rnd, (ses, _, last) in span.items()})
-    out = {}
-    for key, rows in groups.items():
-        rows = _fill_gaps(rows)
-        drawn = [r for r in rows if not r["mulligan"] and r["outcome"] != "gimme"]
-        one_stroke = (drawn and all(r["shot_number"] == 1 for r in drawn)
-                      and any(r["outcome"] in ("holed", "gimme", "conceded") for r in rows))
-        if not any(r["start_x"] is not None for r in rows) and not one_stroke:
-            continue
-        ses = span[key[0]][0]
-        until = next_start[key[0]]
-        if (rp := _replay(rows, key[1], layouts, ses, until, teams[key[0]], sides.get(key[0]), tracks,
-                          finish)) is not None:
-            if rp["tee"] and rp["pin"] and (m := _map_for(images, rp["course"], key[1], ses)):
-                rp["map"] = m
-            rp["ts"] = min(r["ts"] for r in rows)   # the hole's first shot, for the page's video link
-            for p in rp["players"]:
-                card = cards.get((key[0], p["name"].casefold()), {}).get(str(key[1]))
-                if "used" not in p and isinstance(card, int) and p["strokes"] and card < p["strokes"]:
-                    # GSPro capped the hole at its maximum score: the card has fewer strokes than were hit.
-                    p["strokes"], p["capped"] = card, True
-            out[key] = rp
-    return out
+    for sid, ses, ts, course, hole in db.execute("SELECT id, session_id, ts, course, hole FROM shots ORDER BY id"):
+        m = _HOLE.match(hole or "")
+        if sid in round_of and m:
+            rnd = round_of[sid]
+            h = holes.setdefault((rnd, int(m.group(1))), [ts, ts])
+            h[1] = ts
+            sp = span.setdefault(rnd, [set(), set()])
+            sp[0].add(ses)
+            sp[1].add((course or "").casefold())
+    first: dict[int, float] = {}
+    last: dict[int, float] = {}
+    for (rnd, _), (a, b) in holes.items():
+        first[rnd] = min(first.get(rnd, a), a)
+        last[rnd] = max(last.get(rnd, b), b)
+    times = {rnd: [sp[0], first[rnd], last[rnd]] for rnd, sp in span.items()}
+    next_start = _next_after({rnd: (ses, a) for rnd, (ses, a, _) in times.items()},
+                             {rnd: (ses, b) for rnd, (ses, _, b) in times.items()})
+    layouts, images = _layouts(db), _images(db)
+
+    from . import stats_cache
+
+    records: dict[int, str] = {}
+    sigs = {rnd: "" for rnd in span}
+    if stats_cache.of(db):
+        # Each course's layouts and minimaps, which any round there may draw on.
+        def per_course(rows: list[sqlite3.Row]) -> dict[str, str]:
+            out: dict[str, list] = {}
+            for r in rows:
+                out.setdefault((r["course"] or "").casefold(), []).append(tuple(r))
+            return {c: stats_cache.sig(v) for c, v in out.items()}
+        lay_of, img_of = per_course(layouts), per_course(images)
+        records, gens = stats_cache.row_records(db), stats_cache.record_sigs(db)
+        sigs = {rnd: stats_cache.sig(rnd, records.get(rnd), gens.get(records.get(rnd)), sorted(ses, key=str),
+                                     next_start[rnd], [(c, lay_of.get(c), img_of.get(c)) for c in sorted(courses)])
+                for rnd, (ses, courses) in span.items()}
+
+    def compute(rnds: list) -> dict[int, dict[int, dict]]:
+        want = set(rnds)
+        if len(want) == len(span):
+            rows_ = db.execute(f"SELECT {cols} FROM shots ORDER BY id").fetchall()
+        else:
+            uuids = sorted({records[r] for r in want})
+            rows_ = []
+            for i in range(0, len(uuids), 500):
+                chunk = uuids[i:i + 500]
+                rows_ += db.execute(f"SELECT {cols} FROM shots WHERE record_uuid IN ({','.join('?' * len(chunk))})",
+                                    chunk).fetchall()
+            rows_.sort(key=lambda r: r["id"])
+        groups: dict[tuple[int, int], list[sqlite3.Row]] = {}
+        for row in rows_:
+            m = _HOLE.match(row["hole"] or "")
+            if (rnd := round_of.get(row["id"])) in want and m:
+                groups.setdefault((rnd, int(m.group(1))), []).append(row)
+        by_round: dict[int, list[sqlite3.Row]] = {}
+        for (rnd, _), rows in groups.items():
+            by_round.setdefault(rnd, []).extend(rows)
+        teams = {rnd: _scramble_teams(rows) for rnd, rows in by_round.items()}
+        sides = _sides(db)
+        cards = _cards(db)
+        tracks = _tracks(db)
+        out: dict[int, dict[int | str, dict]] = {}
+        for key, rows in groups.items():
+            rows = _fill_gaps(rows)
+            drawn = [r for r in rows if not r["mulligan"] and r["outcome"] != "gimme"]
+            one_stroke = (drawn and all(r["shot_number"] == 1 for r in drawn)
+                          and any(r["outcome"] in ("holed", "gimme", "conceded") for r in rows))
+            if not any(r["start_x"] is not None for r in rows) and not one_stroke:
+                continue
+            ses = times[key[0]][0]
+            until = next_start[key[0]]
+            lat: dict[int, float] = {}
+            if (rp := _replay(rows, key[1], layouts, ses, until, teams[key[0]], sides.get(key[0]), tracks,
+                              lat)) is not None:
+                if rp["tee"] and rp["pin"] and (m := _map_for(images, rp["course"], key[1], ses)):
+                    rp["map"] = m
+                rp["ts"] = min(r["ts"] for r in rows)   # the hole's first shot, for the page's video link
+                for p in rp["players"]:
+                    card = cards.get((key[0], p["name"].casefold()), {}).get(str(key[1]))
+                    if "used" not in p and isinstance(card, int) and p["strokes"] and card < p["strokes"]:
+                        # GSPro capped the hole at its maximum score: the card has fewer strokes than were hit.
+                        p["strokes"], p["capped"] = card, True
+                rnd = out.setdefault(key[0], {})
+                rnd[key[1]] = rp
+                rnd.setdefault("finish", {}).update(lat)   # (finish_laterals', kept with the round's)
+        return out
+
+    per_round = stats_cache.per_key(db, "hole_replays", sigs, compute)
+    if finish is not None:
+        for rnd in per_round.values():
+            finish.update(rnd.get("finish", {}))
+    return {(rnd, hole): per_round[rnd][hole] for rnd, hole in holes
+            if rnd in per_round and hole in per_round[rnd]}
 
 
 def _cards(db: sqlite3.Connection) -> dict[tuple[int, str], dict[str, Any]]:

@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import stats_cache
 from .config import Config
 
 log = logging.getLogger(__name__)
@@ -222,4 +223,5 @@ def restore(backup: str | Path, db_path: str | Path, dest: str | Path) -> Path |
             for aside, extra in reversed(moved):   # the old file still needs its journal to recover
                 os.replace(aside, extra)
             raise
+    stats_cache.forget(db_path)   # (stats kept for the file replaced)
     return saved

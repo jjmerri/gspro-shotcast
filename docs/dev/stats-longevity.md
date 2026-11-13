@@ -132,6 +132,42 @@ indexes and `shot_rounds` were recomputed for every context, and `holes_played` 
 8-week and 3-year copies; the 3-year build went from 297 s to 194 s. The rest is real passes over all
 history, which step 4 addresses.
 
+### 4a. The stats cache (built: hole replays and reels)
+
+Results worked out per round are kept between builds in a cache file beside the database
+(`<db>.stats-cache`, `commentator/stats_cache.py`), not in the database itself, so no write path has
+to keep it up to date and it can't drift from the shots:
+
+- Each result is stored with a signature: the round's record change counter (`gen`) plus whatever
+  outside the record it reads. A build reuses results whose signature matches and works out the rest
+  in one pass (a key with no result, such as a round with too few moments for a reel, is kept too).
+- The whole file is thrown away when the app's code (a hash of the package's `.py` files), the schema
+  version or the database's `dataset_id` changes. `backup.restore` deletes it; a file copied back by
+  hand is put right by its next build, which re-keeps each changed round under the `gen` it went back
+  to. (One copied back by hand and edited before any build can't be told apart: the counters reach the
+  values kept with other rows. Rebuild stats is the way back; a random per-change token would close
+  it, at the cost of a schema change.) A
+  cache file that can't be read or written is worked around, not an error. `stats_cache.clear`
+  empties it (for a Rebuild stats option).
+- It's only used on a file where every row has its record (`round_record.recorded`); otherwise the
+  build works everything out as before.
+- **Hole replays** (`hole_replay.hole_replays`): signed by the round's `gen`, its sessions, the start of
+  the next round in them (which bounds the layout it takes), and the layouts and images of its courses.
+- **Reels** (`highlights.rounds`, step 5): signed by the round's `gen`, its end and course, its players'
+  bests before it, and the content of every session it touches (the `gen` of every record with shots or
+  lines there, or a line on a shot there), since the booth's words and the next swings set where clips
+  end. Changed rounds' reels are worked out from their sessions' shots and lines only.
+
+Tests (`tests/test_stats_cache.py`) build with and without the cache after an edit to an earlier round,
+the booth's words and practice in a later round's session, a side added with no shots and a layout
+learned, and require the same result; and check that an unchanged build reuses every round.
+
+Measured on the 3-year copy: output identical to the build before the cache, cold and warm. A cold
+build takes as long as before (145 s, against 149 s for the previous commit timed the same day); a
+warm one takes 115 s, with replays down from about 25 s to 3 s and reels from about 23 s to 3 s. The rest of a warm build is
+the summaries (`highlights_by_period`, `rounds`, `strokes_gained`, `booth`, `holes_played`), which the
+rest of step 4 addresses.
+
 ### 4. Stored totals instead of recomputing from every shot
 
 - A per-player-round contribution table (score, putts, fairways, greens, distances, bests, strokes
@@ -158,7 +194,7 @@ history, which step 4 addresses.
   stored rollups to equal a from-scratch computation.
 - Expected: the summary part of a build stays roughly flat as history grows.
 
-### 5. Reels cached per round (needs step 4)
+### 5. Reels cached per round (built, see 4a)
 
 - `highlights.rounds` results are stored per round. A reel depends on more than the round's shots:
   - its players' bests before it;
