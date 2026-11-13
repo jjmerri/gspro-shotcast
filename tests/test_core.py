@@ -1830,6 +1830,38 @@ def _backdate(store, date="2000-01-01"):
     store.db.commit()
 
 
+def test_booth_lookups_during_play_do_not_scan_history(tmp_path):
+    """Every query a shot runs (recording it, its lines and result, and the booth's lookups) finds its
+    rows by an index: a full scan of shots or lines grows with every season played."""
+    from commentator.models import Line
+    from commentator.store import Store
+
+    st = Store(str(tmp_path / "season.db"))
+
+    def rec(n, club="DR"):
+        return st.record_shot(player="Mike", hole="Hole 1, par 4, 400 yards", shot=Shot(club=club, carry=200.0),
+                              before=Hud(lie="tee", shot_number=n), after=Hud(lie="fairway"), tags=[],
+                              carry_game_yards=200.0, total_yards=210.0, offline_yards=1.0, course="Pebble")
+
+    first = rec(1)
+    seen: list[str] = []
+    st.db.set_trace_callback(seen.append)
+    putt = rec(2, "PT")
+    st.record_lines("shot", [Line("pbp", "Lovely.")], putt)
+    st.set_shot_result(putt, outcome="holed")
+    st.shot_struck_before(time.time() + 60, 600)
+    st.shot_struck_after(0, 600)
+    st.shot_brief(first)
+    st.db.set_trace_callback(None)
+    scans = []
+    for sql in seen:
+        if re.match(r"\s*(SELECT|UPDATE|DELETE|WITH)\b", sql, re.I):
+            plan = [r[3] for r in st.db.execute("EXPLAIN QUERY PLAN " + sql)]
+            scans += [(p, " ".join(sql.split())) for p in plan if re.match(r"SCAN (shots|lines)\b", p)]
+    assert len(seen) > 10 and scans == []
+    st.close()
+
+
 def test_store_keeps_the_season(tmp_path):
     from commentator.models import Line
     from commentator.store import Store

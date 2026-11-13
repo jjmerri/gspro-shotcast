@@ -633,15 +633,21 @@ def shot_log(db: sqlite3.Connection, context: str | None = None, *, player: str 
 
 def broadcasts(db: sqlite3.Connection) -> list[dict]:
     """Booth sessions that said anything, newest first, with the courses and players in them."""
+    courses: dict[int, list[str]] = {}
+    players: dict[int, list[str]] = {}
+    # (in the order each first appears in the session, as the per-session lookups gave them)
+    for sid, course in db.execute("SELECT session_id, course FROM shots WHERE course IS NOT NULL"
+                                  " GROUP BY session_id, course ORDER BY session_id, MIN(id)"):
+        courses.setdefault(sid, []).append(course)
+    for sid, player in db.execute("SELECT session_id, player FROM shots WHERE player IS NOT NULL AND player != 'unknown'"
+                                  " GROUP BY session_id, player ORDER BY session_id, MIN(id)"):
+        players.setdefault(sid, []).append(player)
     out = []
     for r in db.execute("SELECT s.id, s.date, COUNT(l.id) AS lines FROM sessions s JOIN lines l ON l.session_id = s.id"
                         " WHERE EXISTS (SELECT 1 FROM shots WHERE shots.session_id = s.id)"
                         " GROUP BY s.id ORDER BY s.started_at DESC"):
-        courses = [c[0] for c in db.execute("SELECT DISTINCT course FROM shots WHERE session_id = ? AND course IS NOT NULL",
-                                            (r["id"],))]
-        players = [p[0] for p in db.execute("SELECT DISTINCT player FROM shots WHERE session_id = ? AND player IS NOT NULL"
-                                            " AND player != 'unknown'", (r["id"],))]
-        out.append({"id": r["id"], "date": r["date"], "lines": r["lines"], "courses": courses, "players": players})
+        out.append({"id": r["id"], "date": r["date"], "lines": r["lines"],
+                    "courses": courses.get(r["id"], []), "players": players.get(r["id"], [])})
     return out
 
 

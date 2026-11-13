@@ -566,20 +566,26 @@ def rounds(db: sqlite3.Connection) -> dict[int, dict]:
         if (g := of_shot.get(r["id"])) is not None:
             by_round.setdefault(g, []).append(r)
     # (a putt conceded after its round was recorded is that round's finish, though not in its reel)
-    late = {sid: g for sid, g in _late_gimmes(db, groups, {}).items() if sid not in of_shot or of_shot[sid] != g}
+    late: dict[int, list[dict]] = {}
+    late_of = {sid: g for sid, g in _late_gimmes(db, groups, {}).items() if sid not in of_shot or of_shot[sid] != g}
+    for r in every:
+        if (g := late_of.get(r["id"])) is not None:
+            late.setdefault(g, []).append(r)
     talk = _talk(db, every)
     league, rows = set(), {}
     for r in db.execute("SELECT * FROM rounds"):
         league |= {of_row[r["id"]]} if "is_league" in r.keys() and r["is_league"] else set()
         rows.setdefault(of_row[r["id"]], []).append(r)
     # Each round's players' bests before it: every shot of theirs before its first, any round or none.
+    # (Only the round's own players are kept: _bests looks no one else up.)
+    in_round = {g: {s["player"] for s in shots} for g, shots in by_round.items()}
     before_round: dict[int, dict] = {}
     running: dict[str, dict] = {}
-    for r in db.execute("SELECT * FROM shots ORDER BY ts, id"):
-        s = {**DEFAULTS, **dict(r)}
+    for r in every:
+        s = {**DEFAULTS, **r}
         g = of_shot.get(s["id"])
         if g is not None and g not in before_round:
-            before_round[g] = {p: {k: tuple(v) for k, v in b.items()} for p, b in running.items()}
+            before_round[g] = {p: {k: tuple(v) for k, v in running[p].items()} for p in in_round[g] if p in running}
         if s["mulligan"] or s["left_out"] or not s["player"]:
             continue
         for kind, test, val in (("drive", _is_drive, "total_yards"), ("putt", _is_holed_putt, "to_pin_yards")):
@@ -602,7 +608,7 @@ def rounds(db: sqlite3.Connection) -> dict[int, dict]:
             "date": time.strftime("%Y-%m-%d", time.localtime(g["end"])), "ended": g["end"],
             "league": g["round"] in league,
             "moments": [_entry(m) for m in moments]}
-        ends = sorted(shots + [r for r in every if late.get(r["id"]) == g["round"]], key=lambda r: (r["ts"], r["id"]))
+        ends = sorted(shots + late.get(g["round"], []), key=lambda r: (r["ts"], r["id"]))
         if g["round"] in league and (f := finish(ends, talk)):
             out[g["round"]]["finish"] = _entry(f)
     return out

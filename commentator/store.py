@@ -244,6 +244,16 @@ CREATE INDEX IF NOT EXISTS shots_player ON shots(player);
 CREATE INDEX IF NOT EXISTS shots_lie ON shots(lie_before);
 """
 
+# Made by _migrate once their columns are sure to exist: name -> table(columns).
+INDEXES = {
+    "shots_session_ts": "shots(session_id, ts)",
+    "shots_ts": "shots(ts)",
+    "lines_session": "lines(session_id)",
+    "lines_shot": "lines(shot_id)",
+    "rounds_session": "rounds(session_id)",
+    "player_rounds_session": "player_rounds(session_id)",
+}
+
 
 # A round row counts toward the season's round totals (rounds played, average/best net) when it was
 # finished, or quit early after at least a full nine. Older rows have no holes_played: use holes.
@@ -433,6 +443,14 @@ class Store:
             self.db.execute("ALTER TABLE week_results ADD COLUMN holes TEXT")
         if "tee_box" not in {r["name"] for r in self.db.execute("PRAGMA table_info(hole_layouts)")}:
             self.db.execute("ALTER TABLE hole_layouts ADD COLUMN tee_box TEXT")
+        # Per-session and per-shot lookups (the booth's, during play, and the stats build's) would
+        # otherwise scan every shot ever recorded. Made here, after the columns exist; the first time,
+        # ANALYZE so the planner knows how the indexes compare (seconds, once, on a large season).
+        have_ix = {r[0] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+        for name, on in INDEXES.items():
+            self.db.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {on}")
+        if not set(INDEXES) <= have_ix:
+            self.db.execute("ANALYZE")
         if self.db.execute("PRAGMA user_version").fetchone()[0] < 1:
             # Tee yardages were kept as the course CSV gives them, in metres, and from its old-format
             # file where a course has both: make them yards, and have the courses read again (see

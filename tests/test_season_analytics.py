@@ -275,6 +275,20 @@ def test_booth_phrases_shot_log_and_transcript(db):
     assert [x["id"] for x in A.broadcasts(db)] == [1]
 
 
+def test_broadcasts_list_each_sessions_courses_and_players_in_order(db):
+    db.execute("INSERT INTO sessions (id, date, started_at) VALUES (2, '2025-01-08', 2)")
+    db.execute("UPDATE sessions SET started_at = 1 WHERE id = 1")
+    for sid, player, course in ((1, "Bo", "Pebble"), (2, "Cy", "Augusta"), (1, "Ann", "Pebble"), (2, "unknown", "Pebble"),
+                                (1, "Bo", "Augusta"), (2, "Ann", None), (1, None, "Pebble")):
+        shot(db, player, session_id=sid, course=course)
+    db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text) VALUES (1, 0, 'opener', 'pbp', 'Hi.'),"
+               " (2, 0, 'opener', 'pbp', 'Hi.'), (2, 1, 'opener', 'pbp', 'Again.')")
+    db.commit()
+    assert [(b["id"], b["lines"], b["courses"], b["players"]) for b in A.broadcasts(db)] == [
+        (2, 2, ["Augusta", "Pebble"], ["Cy", "Ann"]),
+        (1, 1, ["Pebble", "Augusta"], ["Bo", "Ann"])]
+
+
 def test_published_site_has_the_summary_shots_and_transcripts(db, tmp_path):
     from commentator import stats_site
 
