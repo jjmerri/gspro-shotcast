@@ -2011,7 +2011,7 @@ async def test_the_course_select_screen_reads_the_bookings_before_setup(tmp_path
     assert fetched == ["course select"]
 
 
-async def test_the_play_button_is_not_ocrd_every_poll_on_the_range(tmp_path):
+async def test_the_setup_screen_is_not_read_on_the_range(tmp_path):
     import asyncio
 
     e = _engine(tmp_path)
@@ -2021,12 +2021,10 @@ async def test_the_play_button_is_not_ocrd_every_poll_on_the_range(tmp_path):
     # The range's sky behind the PLAYERS tab reads as a lit tab.
     e.screen = _PixelSetupScreen([{"setup_course": "DRO Tee 2 51", "tones": {"setup_players_tab": _TAB_ON}}])
     task = asyncio.create_task(e._watch_setup())
-    while e.screen.i < 4:
-        await asyncio.sleep(0.01)
-    assert e.screen.ocred.count("setup_course") == 1   # the live range scene, read once per SETUP_AWAY_POLL_SECONDS
+    await asyncio.sleep(0.2)
+    assert e.screen.i == 0 and e.screen.ocred == []   # no frame grabbed, nothing OCR'd
     e.gspro.mode = "menu"
-    n = e.screen.i
-    while e.screen.i < n + 3:
+    while e.screen.i < 3:
         await asyncio.sleep(0.01)
     task.cancel()
     assert e.screen.ocred.count("setup_course") >= 3   # back in the menus: every poll

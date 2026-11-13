@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.127
+
+### Booth
+- Much lighter on the PC between rounds: on the driving range the booth no longer looks for the setup screen and checks the screen a third as often, and its text reading no longer keeps CPU cores busy while idle, so GSPro stays smooth.
+
 ## 0.1.126
 
 ### Booth

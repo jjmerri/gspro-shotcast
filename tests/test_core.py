@@ -5139,7 +5139,7 @@ async def test_an_opening_tee_on_screen_takes_gspro_off_its_courses_range(tmp_pa
     from commentator.sources.gspro_log import LogEvent, parse_events
     e = _mini_engine(tmp_path)
     e.cfg.source.gspro_log_truth, e.cfg.source.type = True, "gsprolog"
-    e.cfg.screen.hud_poll_seconds = 0
+    e.cfg.screen.hud_poll_seconds = e.cfg.screen.range_hud_poll_seconds = 0
     for ev in parse_events("Selected Course: yorkgc_gsp\nLoading course Practice\n"):
         e.gspro.apply(ev)
     tee = Hud(player_text="Josh E Shot 1 325.7 YDS", shot_number=1, score_to_par="E", to_pin="325.7 yards",
@@ -5191,6 +5191,61 @@ async def test_an_opening_tee_on_screen_takes_gspro_off_its_courses_range(tmp_pa
         e.gspro.apply(ev)
     await watch([Hud(player_text="QUICK CTP")] * 3 + [tee] * 3)
     assert (e.gspro.mode, e.gspro.course) == ("course", "yorkgc_gsp")
+
+
+async def test_the_hud_is_read_less_often_on_the_range(tmp_path):
+    e = _mini_engine(tmp_path)
+    e.cfg.source.gspro_log_truth, e.cfg.source.type = True, "gsprolog"
+    e.cfg.screen.hud_poll_seconds, e.cfg.screen.range_hud_poll_seconds = 0.01, 3600
+    e.gspro.mode = "range"
+    reads = []
+
+    class Screen:
+        last_read_seconds = last_capture_seconds = 0.0
+
+        async def read_hud_async(self, parts):
+            reads.append(e.gspro.mode)
+            return Hud(player_text="QUICK CTP")
+
+    e.screen = Screen()
+    task = asyncio.create_task(e._watch_hud())
+    await asyncio.sleep(0.2)
+    assert reads == ["range"]   # once, then not again within range_hud_poll_seconds
+    e.gspro.mode = "menu"
+    for _ in range(100):
+        if len(reads) >= 4:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    assert reads[1:4] == ["menu"] * 3   # off the range: every poll
+
+
+def test_ocr_threads_are_capped_at_the_cpu_count_and_onnxruntime_does_not_spin(monkeypatch):
+    import sys
+    import types
+
+    pytest.importorskip("rapidocr")
+    from rapidocr.inference_engine.onnxruntime.main import OrtInferSession
+
+    from commentator import screen as scr
+    from commentator.config import ScreenConfig
+
+    monkeypatch.setattr(OrtInferSession, "_init_sess_opts", OrtInferSession.__dict__["_init_sess_opts"])
+    made = []
+    monkeypatch.setitem(sys.modules, "rapidocr", types.SimpleNamespace(RapidOCR=lambda params=None: made.append(params)))
+    monkeypatch.setattr(scr.os, "cpu_count", lambda: 4)
+    s = scr.Screen(ScreenConfig(ocr_threads=6))
+    s._ocr_engine()
+    # RapidOCR silently drops a cap above the CPU count (taking every core), so it's clamped.
+    assert made == [{"EngineConfig.onnxruntime.intra_op_num_threads": 4}]
+    scr._ort_no_spin()   # twice: wrapped once
+
+    class Cfg(dict):
+        enable_cpu_mem_arena = False
+
+    opts = OrtInferSession._init_sess_opts(Cfg())
+    assert opts.get_session_config_entry("session.intra_op.allow_spinning") == "0"
+    assert opts.get_session_config_entry("session.inter_op.allow_spinning") == "0"
 
 
 async def test_the_scorecard_title_is_read_when_the_log_says_a_hole_ended_and_every_2s_otherwise(tmp_path, monkeypatch):

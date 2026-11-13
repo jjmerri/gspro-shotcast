@@ -237,9 +237,10 @@ REST_SHOWN_SECONDS = 0.9
 REST_WAIT_SECONDS = 45.0
 # How long to keep reading a scramble's pick screen for its cards (it showed ~6.5 s, Bethpage 11-07).
 PICK_SCREEN_SECONDS = 15.0
-# How often the setup watcher OCRs the Play button while GSPro's log has it on the range or a course
-# (no setup tab lit): there the region is the live scene, so its pixels change every poll and it was
-# OCR'd every poll (50,782 times on 11-07). Still read now and then, in case the log's state is wrong.
+# How often the setup watcher OCRs the Play button while GSPro's log has it on a course (no setup tab
+# lit): there the region is the live scene, so its pixels change every poll and it was OCR'd every poll
+# (50,782 times on 11-07). Still read now and then, in case the log's state is wrong. (The range isn't
+# read at all: its sky lights the tabs, and only End Round, which the log shows, leaves it for setup.)
 SETUP_AWAY_POLL_SECONDS = 5.0
 
 
@@ -1211,8 +1212,18 @@ class Engine:
         card_signals = self._card_signals()   # the log's hole and round ends at the last poll
         card_due_until, title_at, card_up = 0.0, None, False   # title_at: the last title read
         away_at, away_seen, tee_polls, away_fires = None, False, 0, 0   # the screen leaving the range or menus
+        range_read_at = float("-inf")
         while True:
             await asyncio.sleep(self.cfg.screen.hud_poll_seconds)
+            if self._on_range_by_log():
+                # The range's HUD only matters for spotting a course's first tee after Tee Off from its
+                # own range (unlogged), and OCR'ing it every second there cost GSPro several cores.
+                now = time.monotonic()
+                if now - range_read_at < self.cfg.screen.range_hud_poll_seconds:
+                    self._check_log_round()
+                    self._check_round_idle()
+                    continue
+                range_read_at = now
             # Who was up when this poll began: a setup is kept for the impact read only if no ball was
             # struck, nor the log's player changed, from its first sighting to the end of its read.
             stamp = (self._shot_seq, self.gspro.active_player, time.monotonic())
@@ -9696,6 +9707,10 @@ class Engine:
                 seen_setup, course, roster, self._opener_prepared_for = False, None, [], frozenset()
                 slot_order, slot_cache, gate_cache = [], {}, {}
                 continue
+            if self._on_range_by_log():
+                # No setup screen on the range (only End Round, which the log shows, leaves it for one), and
+                # its live scene changes every poll, so each read was OCR the game paid for.
+                continue
             p = self._pending_opening
             held = False
             if p is not None:
@@ -9728,12 +9743,10 @@ class Engine:
                     lit = players_tab or any(
                         (t := tones.get(n)) is not None and _tab_lit(t, level)
                         for n, level in (("setup_holes_tab", _HOLES_TAB_LIT), ("setup_match_tab", _MATCH_TAB_LIT)))
-                    # Away from the menus by GSPro's log: on the range (only End Round leaves it for setup;
-                    # its sky behind the tabs reads as a lit tab, so they aren't asked), or on a course with
-                    # no setup tab showing (`Selected Course:` is logged as the setup screen opens, and its
-                    # load screen must still be read at once once the setup was seen).
-                    away = self._on_range_by_log() or (
-                        self._log_rounds and self.gspro.mode == "course" and not seen_setup and not lit)
+                    # Away from the menus by GSPro's log: on a course with no setup tab showing (`Selected
+                    # Course:` is logged as the setup screen opens, and its load screen must still be read
+                    # at once once the setup was seen). The range was skipped above.
+                    away = self._log_rounds and self.gspro.mode == "course" and not seen_setup and not lit
                     if p is None and away:
                         if frame_at - gate_read_at < SETUP_AWAY_POLL_SECONDS:
                             continue

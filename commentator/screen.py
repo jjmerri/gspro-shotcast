@@ -1,6 +1,7 @@
 import asyncio
 import io
 import logging
+import os
 import re
 import threading
 import time
@@ -311,6 +312,34 @@ FAST_DETECT: dict[str, tuple[str, int]] = {
                                   "pick_panel")},
     "others": ("shrink", 1620),
 }
+
+
+def _ort_no_spin() -> None:
+    """Have RapidOCR's onnxruntime sessions park idle worker threads instead of spin-waiting for the
+    next op. Spinning saves microseconds a read but kept every pool thread busy: measured on the sim PC,
+    a HUD read a second cost ~12 cores spinning, ~5 not, at the same read time. RapidOCR has no option
+    for it, so its session-options builder is wrapped (once; a RapidOCR without it just spins)."""
+    try:
+        from rapidocr.inference_engine.onnxruntime.main import OrtInferSession
+    except Exception:
+        log.warning("OCR: couldn't turn off onnxruntime spin-waiting; it may use more CPU", exc_info=True)
+        return
+    build = OrtInferSession.__dict__.get("_init_sess_opts")
+    if isinstance(build, staticmethod) and getattr(build.__func__, "no_spin", False):
+        return
+    if not isinstance(build, staticmethod):
+        log.warning("OCR: this RapidOCR builds its sessions differently; onnxruntime may spin-wait")
+        return
+    inner = build.__func__
+
+    def no_spin(cfg: Any) -> Any:
+        opts = inner(cfg)
+        opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+        opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
+        return opts
+
+    no_spin.no_spin = True   # type: ignore[attr-defined]
+    OrtInferSession._init_sess_opts = staticmethod(no_spin)
 
 
 class Screen:
@@ -642,8 +671,10 @@ class Screen:
         if self._ocr is None:
             from rapidocr import RapidOCR
 
-            params = ({"EngineConfig.onnxruntime.intra_op_num_threads": self.cfg.ocr_threads}
-                      if self.cfg.ocr_threads else None)
+            _ort_no_spin()
+            # RapidOCR ignores a cap above the CPU count (it then takes every core), so clamp it.
+            threads = min(self.cfg.ocr_threads, os.cpu_count() or 1) if self.cfg.ocr_threads else None
+            params = {"EngineConfig.onnxruntime.intra_op_num_threads": threads} if threads else None
             try:
                 self._ocr = RapidOCR(params=params) if params else RapidOCR()
             except Exception:

@@ -485,6 +485,9 @@ class ScreenConfig(BaseModel):
         return {**DEFAULT_REGIONS, **regions}
     # How often the HUD is polled for new shots and holes.
     hud_poll_seconds: float = 1.0
+    # ...and how often while GSPro's log has it on the range, where the HUD is only watched for a
+    # course's first tee (Tee Off from its own range isn't logged) and each read is OCR GSPro pays for.
+    range_hud_poll_seconds: float = 3.0
     # Keep the last few seconds of the player and club boxes (small crops, a few grabs a second) while
     # a round is on: a GSPro that hides them the moment the ball is struck still names the shot from
     # the address frames. Monitor capture only.
