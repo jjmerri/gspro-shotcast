@@ -1655,8 +1655,8 @@ function renderRounds() {
     ...(state.local ? [{ key: "manage", label: "", val: () => null }] : []),
   ];
   // The local page only: exclude or delete a round from the list, as on its own page.
-  const manage = r => state.local ? `<td class="acts"><button class="link" data-exclround="${r.round}" data-ended="${r.round_end}" data-on="1" title="Keep it listed on this PC, but out of every stat (and off the published site)">Exclude</button>
-      · <button class="link" data-delround="${r.round}" data-ended="${r.round_end}" title="Remove the round and its shots for good">Delete</button></td>` : "";
+  const manage = r => state.local && settled(r.round) ? `<td class="acts"><button class="link" data-exclround="${r.round}" data-ended="${r.round_end}" data-on="1" title="Keep it listed on this PC, but out of every stat (and off the published site)">Exclude</button>
+      · <button class="link" data-delround="${r.round}" data-ended="${r.round_end}" title="Remove the round and its shots for good">Delete</button></td>` : state.local ? "<td></td>" : "";
   const row = r => `<tr class="click" data-round="${r.id}"><td>${esc(r.date)}${freshTag(r)}</td><td class="l">${esc(r.course)}</td>
       <td class="l">${esc(sideName(r))}${r.league && r.team && r.team !== r.side ? ` <span class="sub">${esc(r.team)}</span>` : ""}</td>
       <td>${dash(r.gross)}</td><td>${toPar(r.to_par)}</td>${net ? `<td>${r.net_to_par == null ? "–" : toPar(r.net_to_par)}</td>` : ""}
@@ -1665,6 +1665,19 @@ function renderRounds() {
   return `<h2>${meTitle("Rounds")}</h2><p class="sub">Tap a round for its page: the scorecard, hole replays, shots and video.${state.me ? " Includes team rounds they played in." : ""}</p>`
     + sortable("rounds", rows, cols, row, { empty: "No rounds in this view.", cls: "rounds" }) + excludedRounds();
 }
+
+// A round can be edited once the booth is done with it: its record closed and a few minutes past its end
+// (a putt conceded late, the closer). A shot can be left out once its round can (a practice shot any
+// time). `unsettled` and `unsettled_shots` map each that can't yet to when it can (null while its round
+// is still open). The server checks too.
+const settledBy = (key, id) => {
+  const at = ((state.data && state.data[key]) || {})[id];
+  return at === undefined || (at !== null && Date.now() / 1000 >= at);
+};
+const settled = round => settledBy("unsettled", round);
+const shotSettled = s => settledBy("unsettled_shots", s.id);
+
+const roundError = r => r.status === 409 ? "the round just ended: try again in a few minutes" : `HTTP ${r.status}`;
 
 // The local page only: the rounds excluded from the stats, to count again or delete for good.
 function excludedRounds() {
@@ -1719,7 +1732,7 @@ function renderRound() {
     ? `<a class="link" href="${esc(hashFor("broadcasts", { session: r.session }))}">What the booth said</a>` : "";
   const group = (label, items) => (items = items.filter(Boolean)).length
     ? `<div class="agroup"><span class="k">${label}</span>${items.join("")}</div>` : "";
-  const manage = state.local ? `<details class="manage"><summary>Manage ▾</summary><div class="agroup">${[
+  const manage = state.local && settled(r.round) ? `<details class="manage"><summary>Manage ▾</summary><div class="agroup">${[
       ...Object.keys(KIND_NAMES).filter(k => k !== roundKind(r)).map(k =>
         `<button class="link" data-leagueround="${r.round}" data-ended="${r.round_end}" data-kind="${k}" title="Which stats it counts in: League, Tournament or Practice">Make it a ${k} round</button>`),
       `<button class="link" data-exclround="${r.round}" data-ended="${r.round_end}" data-on="1" title="Keep it listed on this PC, but out of every stat (and off the published site)">Exclude from stats</button>`,
@@ -1843,7 +1856,7 @@ function renderShots() {
       axis ${dash(s.spin_axis && s.spin_axis.toFixed(1), "°")} · start ${dash(s.start_direction && s.start_direction.toFixed(1), "°")} · total ${yd(s.total)}</p>`;
     const said = s.lines.length ? s.lines.map(l => `<div class="line"><div class="who ${COLOR_KEYS.has(l.speaker) ? "color" : ""}">${esc(nameOf(l.speaker))}</div><div>${esc(l.text)} <span class="tag">${esc(l.kind)}</span></div></div>`).join("")
       : '<p class="empty">The booth said nothing tied to this shot.</p>';
-    const leave = state.local && !s.mulligan ? `<p><button class="link" data-leaveout="${s.id}" data-ts="${s.ts}" data-on="${s.left_out ? 0 : 1}">${s.left_out ? "Count this shot in the stats again" : "Leave this shot out of the stats"}</button>
+    const leave = state.local && !s.mulligan && shotSettled(s) ? `<p><button class="link" data-leaveout="${s.id}" data-ts="${s.ts}" data-on="${s.left_out ? 0 : 1}">${s.left_out ? "Count this shot in the stats again" : "Leave this shot out of the stats"}</button>
       <span class="sub">A bad read or a practice swing: it stays on the card and in the replay, but out of every average, record and strokes gained.</span></p>` : "";
     return head + `<tr class="detail"><td colspan="13">${brief}${launch}${said}${leave}</td></tr>`;
   };
@@ -2919,7 +2932,7 @@ document.addEventListener("click", (e) => {
     t.textContent = "Saving…";
     fetch(`api/shots/${t.dataset.leaveout}/left-out`, { method: "POST", headers: { "Content-Type": "application/json" },
                                                        body: JSON.stringify({ left_out: t.dataset.on === "1", ts: +t.dataset.ts }) })
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); load(); pubWatch(); })
+      .then(r => { if (!r.ok) throw new Error(roundError(r)); load(); pubWatch(); })
       .catch(e => { t.textContent = `Couldn't save (${e.message})`; });
     return;
   }
@@ -2930,7 +2943,7 @@ document.addEventListener("click", (e) => {
                                                          body: JSON.stringify({ ended: +t.dataset.ended, league: t.dataset.kind === "league",
                                                                                 tournament: t.dataset.kind === "tournament" }) })
       .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        if (!r.ok) throw new Error(roundError(r));
         if (state.ctx) state.ctx = t.dataset.kind;   // stay on the round
         load();
         pubWatch();
@@ -2958,7 +2971,7 @@ document.addEventListener("click", (e) => {
     t.textContent = "Saving…";
     fetch(`api/rounds/${id}/${del ? "delete" : "excluded"}`, { method: "POST", headers: { "Content-Type": "application/json" },
                                                          body: JSON.stringify({ ended: +t.dataset.ended, ...(del ? { confirm: true } : { excluded: t.dataset.on === "1" }) }) })
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); state.tab = "rounds"; showTabs(); load(); pubWatch(); })
+      .then(r => { if (!r.ok) throw new Error(roundError(r)); state.tab = "rounds"; showTabs(); load(); pubWatch(); })
       .catch(e => { t.disabled = false; t.textContent = `Couldn't save (${e.message})`; });
     return;
   }

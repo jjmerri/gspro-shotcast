@@ -348,6 +348,61 @@ def round_rows(db: sqlite3.Connection, round_id: int) -> dict[str, Any] | None:
             "lines": ids("lines", "record_uuid")}
 
 
+def _has_records(db: sqlite3.Connection, table: str, column: str, schema: str = "main") -> bool:
+    """Whether `table` rows point at their round records yet (the migration adds the column after the
+    table of records, so a half-done upgrade can have one without the other)."""
+    return (db.execute(f"SELECT 1 FROM {schema}.sqlite_master WHERE name = 'round_records'").fetchone() is not None
+            and column in {r[1] for r in db.execute(f"PRAGMA {schema}.table_info({table})")})
+
+
+def in_play(db: sqlite3.Connection, sides: list[int], end: float, now: float) -> bool:
+    """Whether a round (its `rounds` rows, ending at `end`) may still change: its record is still being
+    played (a booth that stopped before closing it closes it at its next start), or it ended less than
+    CLOSER_SECONDS ago (a putt conceded late, the closer). The page doesn't edit it till it's settled."""
+    if now < end + CLOSER_SECONDS:
+        return True
+    if not sides or not _has_records(db, "rounds", "round_uuid"):
+        return False
+    return db.execute(f"SELECT 1 FROM main.round_records WHERE state = 'in_progress' AND uuid IN (SELECT round_uuid"
+                      f" FROM main.rounds WHERE id IN ({','.join('?' * len(sides))}))", sides).fetchone() is not None
+
+
+def shot_in_play(db: sqlite3.Connection, shot_id: int, now: float) -> bool:
+    """Whether a shot's round may still change (in_play's rule, by the shot's record). A practice shot is
+    never in play. A shot with no record yet (an older version wrote it) goes by its own time."""
+    return shot_id in shots_in_play(db, now, shot_id)
+
+
+def shots_in_play(db: sqlite3.Connection, now: float, shot_id: int | None = None) -> dict[int, float | None]:
+    """The shots (or just `shot_id`) shot_in_play holds back, each with when it will be settled (None while
+    its record is open)."""
+    one, args = ("AND s.id = ?", [shot_id]) if shot_id is not None else ("", [])
+    since = now - CLOSER_SECONDS
+    if not _has_records(db, "shots", "record_uuid"):
+        return {i: ts + CLOSER_SECONDS for i, ts in db.execute(
+            f"SELECT s.id, s.ts FROM main.shots s WHERE s.ts > ? {one}", [since, *args])}
+    # CROSS JOIN: start from the few records, not the many shots.
+    out = {i: None if state == "in_progress" else ended + CLOSER_SECONDS for i, state, ended in db.execute(
+        f"""SELECT s.id, rr.state, rr.ended_at FROM main.round_records rr CROSS JOIN main.shots s ON s.record_uuid = rr.uuid
+            WHERE rr.kind = 'round' AND (rr.state = 'in_progress' OR rr.ended_at > ?) {one}""", [since, *args])}
+    out.update({i: ts + CLOSER_SECONDS for i, ts in db.execute(
+        f"SELECT s.id, s.ts FROM main.shots s WHERE s.record_uuid IS NULL AND s.ts > ? {one}", [since, *args])})
+    return out
+
+
+def unsettled(db: sqlite3.Connection, now: float) -> tuple[dict[int, float | None], dict[int, float | None]]:
+    """For the page: the rounds (as round_groups numbers them) and the shots (shots_in_play) not settled
+    yet, each with when it will be (None while its record is still open)."""
+    groups, of_row = round_groups(db, "main.rounds")
+    out: dict[int, float | None] = {g["round"]: g["end"] + CLOSER_SECONDS for g in groups
+                                    if now < g["end"] + CLOSER_SECONDS}
+    if _has_records(db, "rounds", "round_uuid"):
+        for (rid,) in db.execute("SELECT r.id FROM main.rounds r JOIN main.round_records rr ON rr.uuid = r.round_uuid"
+                                 " WHERE rr.state = 'in_progress'"):
+            out[of_row.get(rid, rid)] = None
+    return out, shots_in_play(db, now)
+
+
 # ---- storing it -------------------------------------------------------------------------------------
 
 def _new_id() -> str:

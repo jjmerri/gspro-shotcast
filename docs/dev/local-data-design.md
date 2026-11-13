@@ -2,7 +2,7 @@
 
 How the booth stores rounds in `season.db`, for self-hosted and cloud mode alike. Today a round is
 inferred from timestamps and names each time it's read; this makes it a stored record with an ID,
-players with slot IDs, a change counter, and edits kept apart from what was captured. Self-hosted
+players with slot IDs and a change counter, and edits wait till the booth is done with a round. Self-hosted
 uses it for speed (stored totals, cached reels: `stats-longevity.md` steps 4 and 5); cloud mode
 uses the same record to upload rounds (shotcast-cloud `docs/architecture.html`, "Data design (rev 4)").
 One model, one set of write paths, one importer.
@@ -12,8 +12,8 @@ place, and older app versions still open them.
 
 **Local first.** Shotcast Cloud may never ship, so the design comes in two layers:
 
-- **The local layer** is worth having on its own: stored rounds, slots, the change counter, edits as
-  overrides, the migration, stored totals and cached reels. It ships in the app with no cloud code,
+- **The local layer** is worth having on its own: stored rounds, slots, the change counter, the
+  migration, edits only on settled rounds, stored totals and cached reels. It ships in the app with no cloud code,
   no cloud configuration and no cloud tables.
 - **The cloud layer** is added only if the cloud goes ahead, by its own later migration. It adds
   writer ownership, residency, the upload counter, the outbox and journal, and their triggers.
@@ -72,8 +72,8 @@ them.
   - `shots`: `uid`, `record_uuid` (its round, or its practice stretch), `slot_id` and `derived_from`
     (a gimme's source shot, below).
   - `lines`: `uid` and `record_uuid`.
-  - `uid` is a random ID. Everything that refers to a shot or line from outside its table
-    (overrides, `captured`) uses `uid`, never the integer `id`. Without `AUTOINCREMENT`, SQLite
+  - `uid` is a random ID. Everything that refers to a shot or line from outside its table (a
+    gimme's `derived_from`, the cloud layer) uses `uid`, never the integer `id`. Without `AUTOINCREMENT`, SQLite
     reuses the highest `id` after it's deleted, so an integer reference could land on an unrelated
     new shot. (The cloud layer's eviction deletes rows, which is what makes this matter.)
   - `rounds`: `round_uuid`.
@@ -82,9 +82,6 @@ them.
   `week_results` keeps pointing at a `rounds` row, which now carries the UUID. Existing columns,
   `shots.player` included, stay as they are. Every reader keeps working, and readers move to the new
   columns one at a time.
-- **`overrides`** and **`captured`**: edits (below). They come in step 4, with their own schema
-  version (7), so schema 6 is the record alone.
-
 The cloud layer's tables and columns (below) come with their own migration, and their triggers with
 them, so a trigger never names a table that isn't there. (SQLite resolves every table a trigger
 names even when its `WHEN` is false.)
@@ -167,8 +164,8 @@ happens to opening drives adopted by `_adopt_opening_shots`, and to late gimmes.
 
 ### The change counter (`gen`)
 
-`gen` moves whenever what a record shows changes: capture, a backfill, a repair, a state change, an
-edit. Readers that cache anything per record store the `gen` they computed from and recompute when it
+`gen` moves whenever what a record shows changes: capture, a backfill, a repair, a state change, a
+page edit. Readers that cache anything per record store the `gen` they computed from and recompute when it
 differs:
 
 - contribution rows (`stats-longevity.md` step 4);
@@ -177,97 +174,45 @@ differs:
 SQLite triggers move it, not the write methods, so no write path can forget, an older app version's
 included:
 
-- `AFTER INSERT/UPDATE/DELETE` on `shots`, `lines`, `rounds`, `player_rounds`, `round_slots` and
-  `captured` bumps the row's record. When `record_uuid` itself changes, both records are bumped.
+- `AFTER INSERT/UPDATE/DELETE` on `shots`, `lines`, `rounds`, `player_rounds` and `round_slots`
+  bumps the row's record. When `record_uuid` itself changes, both records are bumped.
 - `AFTER UPDATE OF state, ended_at, course` on `round_records` bumps that record. Recursive triggers
   are off, so this doesn't re-fire.
-- Triggers on `week_results` (through its `rounds` row) and on `overrides` (through its target) do
-  the same.
+- Triggers on `week_results` (through its `rounds` row) do the same.
 - **`meta.quiet`** says who is writing:
   - `0`: normal.
-  - `applying`: an override being written into its columns. `gen` moves, but the override triggers
-    (below) don't treat the write as a capture.
   - `bookkeeping`: the migration. `gen` doesn't move, since what the record shows hasn't changed.
 
   Each of these is set for one transaction by the code doing it. Older versions never set it.
 - A statement touching 200 shots bumps `gen` 200 times. That's harmless: it's only compared, never
   counted.
 
-### Edits are overrides
+### Edits wait till a round is settled
 
-Today the page's edits overwrite columns the capture paths also write (`mark_league` and
-`set_round_league` both set `is_league`). A later backfill can undo an edit, and the captured value is
-lost. Instead, edits and captured values are kept apart:
+The page's edits (leave a shot out; make a round league, tournament or practice; exclude or delete a
+round) write the columns directly, as they always have. No edit log, no second copy of what was
+captured: the edit *is* the source of truth. That's safe because of one rule: **a round is edited
+only once it's settled**, meaning its record isn't `in_progress` and it ended at least
+`CLOSER_SECONDS` (3 minutes) ago (`round_record.in_play`).
 
-- **`overrides`** is the edit log. Rows are never changed except to stamp `undone_at`.
-  - `id`, `uid`, `target` (a shot's `uid` or a round UUID), `field`, `value`.
-  - `by`, `at`, `undone_at`.
-  - The before-value shown in the log is what was effective when the edit was made, written into
-    the row at insert.
-- **`captured`** holds, per physical row and field (`tbl`, `row_uid`, `field`, `value`), what the
-  capture paths last wrote to a field that's overridden. It's kept per row, because a round edit
-  covers rows with different captured values: one side's rows league, say, and another's not.
-- **Effective value.** For a field on a row, the effective value is the latest active override on
-  that row, or on its round. Otherwise it's the captured value. The column always holds the effective
-  value, so every reader works unchanged, including `stats_web.connect`'s excluded and deleted views.
-- **Two kinds of field.**
-  - *Edit-only*: `left_out` (shots) and `excluded`, which is also the deleted mark (shots, `lines`,
-    `rounds`, `player_rounds`). No capture path sets them. Only the page does, and new rows copy
-    them (`record_gimme` from the shot before; a line from its shot or round, `store.py` ~1029). Their
-    captured value is always 0, so they need no `captured` rows.
-  - *Captured*: `is_league` and `is_tournament` (shots, `rounds`, `player_rounds`). Capture writes
-    them, and rows in one round can differ (one side league, another not).
-- **Enforced in the database, not in Store methods**, so it holds for older app versions after a
-  downgrade:
-  - **Updates to an edit-only field.** Any write while `meta.quiet = 0` is an edit, since nothing
-    else writes these. So the trigger records it as an `overrides` row (`by = legacy`) and leaves
-    it in effect. An older version's exclude, delete or left-out after a downgrade therefore comes
-    back as a proper, undoable edit.
-  - **Updates to a captured field.** When `meta.quiet = 0` and an active override covers the row,
-    the trigger stores the new value in `captured` and puts the column back to the override's value.
-    So an older version's capture writes are kept, and the edit still wins. An older version's
-    *page edit* of league, tournament or practice on a round the new version has overridden also
-    lands as a capture. That case needs a downgrade plus a re-edit of the same round. It's
-    documented in the release notes, and the edit can be redone after upgrading.
-  - **New rows.** An `AFTER INSERT` trigger handles a row attached to a record with an active round
-    override (a late gimme, a closing line).
-    - Edit-only fields are set from the overrides covering the row. Whatever was copied in is ignored.
-    - For captured fields, an ordinary insert's value is its captured value.
-    - A derived row is different. A gimme is inserted with `derived_from` set to the `uid` of the
-      shot it follows, and its captured value is that shot's: its `captured` row, else its column.
-      It's never borrowed from another row.
-    - The trigger then writes the effective values.
-  - **Legacy inserts.** An older version's insert has no `record_uuid`, so no override applies
-    yet, and its columns hold what it copied, which matches what the round showed at that moment.
-    Reconciliation attaches it later. Before attaching, it sets `derived_from` on legacy gimme rows
-    (`outcome = 'gimme'`: the shot before it by the same player on the same hole, which is exactly
-    what `record_gimme` copied from).
-  - **Moving between records.** An `AFTER UPDATE OF record_uuid` trigger recomputes a row that
-    changes record (an opening drive adopted, a late gimme, a reconciliation, a reassignment). It
-    restores the captured value where the old record's override no longer covers the row, and
-    applies the new record's.
-- **Making an edit** inserts the override. (In the cloud layer that's with `quiet = 0`, so an edit
-  made during an import is journaled.)
-  - Then, in `quiet = applying`, it copies each covered row's current value into `captured` (where not
-    there already) and writes the new effective values.
-  - **Undo** stamps `undone_at` and recomputes the effective value from what's left: a later active
-    override, or else `captured`. Undoing an older edit never disturbs a later one.
-  - Tests:
-    - Exclude a round, then a late gimme and a closer arrive, then undo. The gimme and the line
-      must come back included.
-    - A round whose sides were captured differently (one league, one not) is overridden to
-      tournament. A late gimme arrives on each side. After undo, each side's rows, the gimmes
-      included, return to their own captured values.
-    - Both run once with the current writers, and once with an old version's inserts followed by a
-      re-upgrade.
-  - A `captured` row is removed once no active override covers it.
-- **The page's buttons** make local overrides. Nothing else changes for the user.
-- *(cloud layer)* In cloud mode there's no local stats page: the tray's "Stats" opens the web stats,
-  and edits are made there. They reach the booth through the feed as overrides.
-  - An uploaded revision carries captured values only: for `is_league` and `is_tournament`, the
-    column, or `captured` where one exists. Edit-only fields are left out of the body.
-  - The server holds overrides apart, as rev 4 requires, so an upload never erases an edit, and an
-    undo on the server can't reveal an edit baked into a revision.
+- **Nothing writes those columns after that.** The only other writers of `is_league` and
+  `is_tournament` (`mark_league`, `mark_tournament`, `set_shot_round_class`) run while the round is
+  being played or as it ends. Only the page writes `excluded` and `left_out`. The later writers (log
+  totals, hole layouts, the log backfill, repairs) change other columns of the round's shots.
+- **What arrives late** (a putt conceded after the last shot, the closer's lines) lands inside the
+  window, so it's there before any edit can be made.
+- **A booth that stopped mid-round** leaves its record `in_progress` till it next starts (which
+  continues or abandons it). Till then the round isn't editable.
+- **Shots too.** Leaving a shot out goes by its round record the same way (`shot_in_play`). A
+  practice shot can always be left out. A shot with no record yet (an older version wrote it) goes
+  by its own time.
+- **On the page**, the summary sends `unsettled` (each unsettled round, with when it settles, or
+  null while its record is open) and `unsettled_shots` (the same for each shot held back, by its
+  record: a round being played isn't on the page yet). The Manage actions and the shot's "Leave out" don't show till then, and the server
+  refuses an edit anyway (`RoundInPlay`, HTTP 409: "the round just ended: try again in a few
+  minutes"), for a page left open. Undo is the existing toggle back.
+- **Not covered:** a downgrade. An older version can edit any round and doesn't know the rule. Its
+  rows are reconciled at the next start like any other it writes.
 
 ### Migrating an existing database
 
@@ -290,19 +235,9 @@ transaction.
 4. **Give every shot and line a `uid`**, in the same pass that writes its record (and any left
    over after). Then check every row has one, and build the unique index on it, which fails (and
    rolls everything back) if a uid repeated.
-5. *(Schema 7, step 4)* **Turn the page edits it can recognise into overrides.**
-   - Only the page ever sets `left_out` and `excluded` (`stats_web.set_left_out`,
-     `set_round_excluded`, `delete_round`; `Store.set_left_out` is the same hand edit). So a
-     non-zero value is an edit for certain, and what was captured was 0.
-   - Those become `overrides` rows (`by = legacy`), with `captured` = 0.
-   - League, tournament and practice can't be told apart: capture and the page both wrote them, and
-     nothing recorded which. They stay as they are, as the *captured* values, not as overrides.
-   - That's safe, because after the migration no capture path writes the classification of a past
-     round. `mark_league` and `mark_tournament` now act only on the live record. A later page edit of
-     an old round's class becomes an ordinary override on top of today's value.
-6. **Set `user_version = 6`**, last, in the same transaction, after the `uid` check.
+5. **Set `user_version = 6`**, last, in the same transaction, after the `uid` check.
 
-On the 3-year scaled copy of a busy league (211k shots), steps 1–6 take about 11 s, once.
+On the 3-year scaled copy of a busy league (211k shots), steps 1–5 take about 11 s, once.
 
 **Reconciling after a downgrade.** An older version writes rows with no `record_uuid` and may finish
 a round whose earlier shots were already put in a practice stretch.
@@ -317,7 +252,6 @@ a round whose earlier shots were already put in a practice stretch.
   - Every record that gains or loses a row has its counters bumped (`quiet = 0`).
   - `live` records are never regrouped. Their membership came from the engine, not a guess.
 - Fixtures cover:
-  - upgrade → edit → downgrade → capture and page edit → re-upgrade;
   - a round begun before the upgrade (its shots already in a practice stretch), finished by an old
     version in a new session after a booth restart, then re-upgraded;
   - legacy inserts.
@@ -341,21 +275,20 @@ local layer has shipped, and only if the cloud goes ahead. It adds:
 - to `meta`: `mode` (`self_hosted`, `importing` or `cloud`), `bay_id`, `writer_generation`,
   `feed_watermark`;
 - to `round_records`: `writer_bay`, `resident`, and `seq`;
-- to `overrides`: `origin` (`local` or `cloud`);
 - `upload_outbox`, `row_journal` and a staging table, with their triggers;
-- a `remote` value for `meta.quiet`, for applying the server's data. It moves `gen` but not `seq`,
-  like `applying`. Eviction and rehydration use `bookkeeping`.
+- a `remote` value for `meta.quiet`, for applying the server's data. It moves `gen` but not `seq`.
+  Eviction and rehydration use `bookkeeping`.
 
 **Two counters.** "What this bay must upload" and "what a cache must recompute" differ, so the cloud
 layer adds `seq` next to `gen`. `seq` moves on the same triggers as `gen`, but only with
-`quiet = 0`: capture, a backfill, a repair, a state change. It drives the upload. An edit or the
-server's data moves only `gen`.
+`quiet = 0`: capture, a backfill, a repair, a state change. It drives the upload. The server's data
+(including web edits) moves only `gen`.
 
 | | Self-hosted | Cloud |
 |---|---|---|
-| Round record, slots, `gen`, overrides | yes | yes, same code |
+| Round record, slots, `gen` | yes | yes, same code |
 | Stored contributions and rollups | computed locally from all history | server's rollups from bootstrap; local contributions for this bay's rounds not yet in the feed |
-| Edits | local overrides | on the web stats page, arriving as overrides |
+| Edits | on the local page, once settled | on the web stats page only; the server owns the edit fields |
 | Upload outbox | absent | used |
 | History kept | all, forever | a bounded window of detail, plus stubs |
 | Local stats page | as today | none: the tray's "Stats" opens the web stats |
@@ -379,8 +312,9 @@ Cloud mode separates three things that are easy to conflate:
 **What the server may change here.** Applying the server's data (`quiet = remote`) follows one rule:
 it never replaces this bay's captured data while that data hasn't been acknowledged.
 
-- Overrides and person links on any record are applied: they're the server's to own, and stored
-  apart from captured data.
+- Edit fields (`excluded`, `left_out`, a finished round's league/tournament/practice mark, a
+  deletion) and person links on any record are applied: they're the server's to own. The PC sends
+  them only in a round's first revision (below), so applying them can't fight an upload.
 - Another bay's revision replaces that record's detail. Nothing here writes it.
 - For one of this bay's own records, a captured revision from the server is compared with the
   outbox row:
@@ -397,8 +331,7 @@ it never replaces this bay's captured data while that data hasn't been acknowled
 **Eviction and rehydration.**
 
 - **What's evicted.** Eviction (`quiet = bookkeeping`) drops a clean, acknowledged record's shots
-  and lines and sets `resident = 0`. The record, slots, sides, `captured` rows and each row's `uid`
-  stay.
+  and lines and sets `resident = 0`. The record, slots, sides and each row's `uid` stay.
 - **Hydrate first.** Code that reads or changes detail asks the Store to make the records it needs
   resident first: by record for a round's page, by session and time for a log backfill. An
   `UPDATE` aimed at an evicted shot would otherwise match nothing and fire no trigger.
@@ -414,13 +347,27 @@ it never replaces this bay's captured data while that data hasn't been acknowled
 
 Two kinds of thing are uploaded: round records, and rows outside any record.
 
+**Upload once, when settled.** A round is uploaded once, after it's settled (not `in_progress`,
+and `CLOSER_SECONDS` past its end: the same rule as page edits), so the late putt and the closer
+are in the first upload. Live scores during play are a separate, throwaway feed (the cloud design's
+"Live scores"), never this outbox.
+
 **Enqueueing.** `upload_outbox` has one row per record that has changed since it was last
 acknowledged. A trigger on `round_records` marks the row dirty whenever `seq` changes on a record
-whose `writer_bay` is this bay and that isn't `in_progress`. It runs in the same transaction as the
-change. In self-hosted mode `writer_bay` and `bay_id` are null, so it never fires.
+whose `writer_bay` is this bay. It runs in the same transaction as the change. In self-hosted mode
+`writer_bay` and `bay_id` are null, so it never fires. The uploader skips a dirty row till its
+record is settled.
+
+**Later revisions are rare.** After the first upload, `seq` moves only when something the booth
+owns changes a finished round's shots: log totals and hole layouts filled in after the round
+(`fill_log_totals`, `fill_finish`, `set_shot_rest`), the log backfill CLI, a repair migration. Each
+of those makes the next revision.
 
 **Building a revision.** The uploader builds the record's body from one read transaction. The body
-holds captured values, slots, sides, player rounds, week results, shots and lines.
+holds captured values, slots, sides, player rounds, week results, shots and lines. The first
+revision also carries the edit fields, as the server's starting values (the booth's own league and
+tournament marks); **later revisions never do**: they're the server's from then on, so a re-upload
+after a backfill can't undo a web edit.
 
 - If its hash equals the last acknowledged hash, and `seq` hasn't moved since the read, the dirty
   mark is cleared and nothing is sent.
@@ -446,7 +393,7 @@ is built.
 
 **Rows outside records.** Course geometry (`hole_layouts`, `logged_pins`, `hole_images`,
 `course_tees`, `tee_lengths`), predictions, the booth-memory tables (`form_mentions`, `asides`,
-`news_heard`), `sessions` and local `overrides` (made, or undone, before the cutover) change on
+`news_heard`) and `sessions` change on
 their own, sometimes in the background after a round (hole layouts,
 `engine.py` ~8256). So they get their own journal: `row_journal` (`tbl`, `row_key`, `change_no`).
 
@@ -454,7 +401,6 @@ their own, sometimes in the background after a round (hole layouts,
   `self_hosted` and `meta.quiet = 0`, in the same transaction as the write.
   - It's local changes only. What the server sent (feed, bootstrap, rehydration) is never sent back.
   - It covers older versions too, since the triggers live in the database.
-  - An override is sent by its `uid` with its `undone_at`, so resending is idempotent.
   - A test bootstraps, applies feed rows and rehydrates a record, and requires no new journal
     entries.
   - **Sessions.** A session is identified to the server as `dataset_id` plus its local `id`.
@@ -488,7 +434,8 @@ the local stats code and the cloud's.
 **What the importer sends.** It reads this model.
 
 - Each record goes as one round body, built as the outbox builds it.
-- Overrides go as overrides, with their history.
+- Edit fields go once, separately, as the server's starting values for them. After the cutover
+  they're the server's.
 - Course data, scorecards and anything else outside a record go as they are (rev 4, "Switching from
   self-hosted").
 - `meta.dataset_id` is the source namespace, which is how a copied database is caught.
@@ -523,7 +470,7 @@ Step 1's indexes, plus these, so that the triggers' lookups are indexed too:
 - `shots(record_uuid)`, `lines(record_uuid)`;
 - `rounds(round_uuid)`, `player_rounds(round_uuid)`;
 - `round_slots(round_uuid)`;
-- `overrides(target, field)`, `captured(tbl, row_uid, field)`, `shots(uid)`, `lines(uid)`;
+- `shots(uid)`, `lines(uid)`;
 - `round_records(state, ended_at)`.
 
 The `EXPLAIN QUERY PLAN` test from step 1 covers the triggers' lookups as well.
@@ -540,8 +487,12 @@ The `EXPLAIN QUERY PLAN` test from step 1 covers the triggers' lookups as well.
    and `reconcile` keep using): a file not yet migrated, or rows an older version wrote since the
    last start. On a migrated copy the two give the same pages; they differ only for rounds played
    since, where practice on the round's course before it is no longer the round's.
-4. Overrides, with the page's edits moved onto them.
+4. Page edits only on settled rounds (`round_record.in_play`; the page hides Manage and the server
+   answers 409 till then).
 5. Contributions and rollups keyed by record and slot (stats-longevity step 4), then reels (step 5).
+   They're a cache: recomputed when a record's `gen` moves, rebuilt in full in the background after
+   each app update, and on demand from a "Rebuild stats" option. A test checks them against a full
+   recompute.
 
 Steps 1 to 5 are the local layer. They need nothing from the cloud and ship on their own.
 

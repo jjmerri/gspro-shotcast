@@ -612,3 +612,40 @@ def test_the_readers_read_the_stored_record_once_every_row_has_one(tmp_path):
     s.db.execute("UPDATE shots SET record_uuid = NULL WHERE id = ?", (p,))   # as an older version writes
     assert not R.recorded(s.db)
     assert R.shot_rounds(s.db) == {p: rid, a: rid} and stats_web._round_rows(s.db, rid, T0 + 200)[2] == [p, a]
+
+
+def test_a_round_is_edited_only_once_the_booth_is_done_with_it(tmp_path, monkeypatch):
+    import time
+    from commentator import stats_web
+
+    path = str(tmp_path / "s.db")
+    s = Store(path)
+    now = time.time()
+
+    def play(rid, course, end):
+        u = s.begin_round(rid, course=course, players={"Ann": None})
+        _hit(s, "Ann", end, course=course)
+        return u, s.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, round_uuid)"
+                               " VALUES (?, ?, '2026-11-13', ?, 'Ann', 18, ?)", (s.session_id, end, course, u)).lastrowid
+    u, done = play("r1", "Pebble", now)
+    s.end_round(u)
+    s.db.commit()
+    shot_of = lambda course: s.db.execute("SELECT id FROM shots WHERE course = ?", (course,)).fetchone()[0]
+    with pytest.raises(stats_web.RoundInPlay):         # just ended: a late putt or the closer may follow
+        stats_web.set_round_excluded(path, done, now, True)
+    with pytest.raises(stats_web.RoundInPlay):
+        stats_web.set_left_out(path, shot_of("Pebble"), True)
+    rounds, shots = R.unsettled(s.db, now)
+    assert rounds == {done: now + R.CLOSER_SECONDS}
+    assert shots == {shot_of("Pebble"): pytest.approx(now + R.CLOSER_SECONDS, abs=1)}   # by its record's end
+    _, open_ = play("r2", "Augusta", now + 60)         # its record still open (the booth stopped before closing it)
+    s.db.commit()
+    later = now + 60 + R.CLOSER_SECONDS + 1
+    monkeypatch.setattr(time, "time", lambda: later)
+    with pytest.raises(stats_web.RoundInPlay):
+        stats_web.set_round_league(path, open_, now + 60, False)
+    with pytest.raises(stats_web.RoundInPlay):
+        stats_web.set_left_out(path, shot_of("Augusta"), True)
+    assert R.unsettled(s.db, later) == ({open_: None}, {shot_of("Augusta"): None})
+    assert stats_web.set_round_excluded(path, done, now, True)
+    assert stats_web.set_left_out(path, shot_of("Pebble"), True)

@@ -13,6 +13,7 @@ import re
 import sqlite3
 import tempfile
 import threading
+import time
 import webbrowser
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,7 +25,8 @@ from urllib.parse import unquote, urlparse
 
 from . import changelog, handicap_index
 from . import season_analytics as A
-from .round_record import _late_gimmes, player_round_of, round_groups, round_rows, shot_rounds
+from .round_record import (_late_gimmes, in_play, player_round_of, round_groups, round_rows, shot_in_play,
+                           shot_rounds, unsettled)
 from .store import DRIVE_SQL
 
 log = logging.getLogger(__name__)
@@ -74,12 +76,17 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 def set_left_out(db_path: str | Path, shot_id: int, left_out: bool, ts: float | None = None) -> bool:
     """Leave a shot out of the stats, or put it back (the local page's toggle). False when there's no such
-    shot, or (with `ts`, its time on the page) it isn't the one the page showed."""
+    shot, or (with `ts`, its time on the page) it isn't the one the page showed. Raises RoundInPlay for a
+    shot of a round not settled yet."""
     from contextlib import closing
 
     with closing(sqlite3.connect(db_path, timeout=10)) as db:
         if "left_out" not in {r[1] for r in db.execute("PRAGMA table_info(shots)")}:
             db.execute("ALTER TABLE shots ADD COLUMN left_out INTEGER NOT NULL DEFAULT 0")
+        db.execute("BEGIN IMMEDIATE")   # the shot checked is the shot changed
+        if shot_in_play(db, shot_id, time.time()):
+            db.rollback()
+            raise RoundInPlay(shot_id)
         cur = db.execute("UPDATE shots SET left_out = ? WHERE id = ? AND (? IS NULL OR ABS(ts - ?) <= 0.001)",
                          (int(left_out), shot_id, ts, ts))
         db.commit()
@@ -89,18 +96,24 @@ def set_left_out(db_path: str | Path, shot_id: int, left_out: bool, ts: float | 
 _ROUND_TABLES = ("rounds", "player_rounds", "shots", "lines")
 
 
+class RoundInPlay(Exception):
+    """A round the booth may still be adding to (round_record.in_play): not edited till it's settled."""
+
+
 def _round_rows(db: sqlite3.Connection, round_id: int, ended: float) -> list[list[int]] | None:
     """A round's rows (as round_groups and the page number it: its lowest `rounds` id), per table of
     _ROUND_TABLES: its sides, its players' cards, its shots and what the booth said in it
     (round_record.round_rows'). None when there's no such round, it didn't end at `ended` (its
     `round_end` on the page), or it was deleted. Worked out over every row, excluded or not, so it's
-    the same round either way."""
+    the same round either way. Raises RoundInPlay for a round not settled yet."""
     db.row_factory = sqlite3.Row
     g = round_rows(db, round_id)
     if g is None or abs(g["end"] - ended) > 0.001:
         return None
     if db.execute(f"SELECT 1 FROM rounds WHERE excluded = {DELETED} AND id IN ({_in(g['sides'])})").fetchone():
         return None
+    if in_play(db, g["sides"], g["end"], time.time()):
+        raise RoundInPlay(round_id)
     return [g["sides"], g["cards"], g["shots"], g["lines"]]
 
 
@@ -230,6 +243,14 @@ def excluded_rounds(db: sqlite3.Connection) -> list[dict[str, Any]]:
                                  "sides": []})
         g["sides"].append({"side": r["side"], "gross": r["gross"]})
     return list(out.values())
+
+
+def _editing(db: sqlite3.Connection) -> dict[str, Any]:
+    """What the local page needs to offer edits: the excluded rounds, and the rounds (by page number)
+    and shots not settled yet, each with when it will be, null while its record is open
+    (round_record.unsettled)."""
+    rounds, shots = unsettled(db, time.time())
+    return {"excluded_rounds": excluded_rounds(db), "unsettled": rounds, "unsettled_shots": shots}
 
 
 def _ctx(context: str | None) -> str:
@@ -764,7 +785,7 @@ def summary(db: sqlite3.Connection, context: str | None = None,
     return {"context": context or "all", "last_session": last, "has_league": has_league,
             "has_tournament": has_tournament, "gimme_ft": usual,
             "players": people,
-            "rounds": rounds_, **({"excluded_rounds": excluded_rounds(db)} if local else {}), **highlights_by_period(db, holes, context, season=season),
+            "rounds": rounds_, **(_editing(db) if local else {}), **highlights_by_period(db, holes, context, season=season),
             "season_from": season_start(season), "predictions": predictions(db, names),
             "courses": A.courses(db, context),
             "booth": A.booth(db, names), "broadcasts": A.broadcasts(db), "filters": filters,
@@ -859,6 +880,9 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
                 if not found:
                     return self._send(404, b"no such shot" if key == "left_out" else b"no such round", "text/plain")
                 refresh()
+            except RoundInPlay:
+                return self._send(409, json.dumps({"error": "the round just ended: try again in a few minutes"}).encode(),
+                                  "application/json")
             except (ValueError, KeyError, TypeError) as e:
                 return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
             except (OSError, sqlite3.Error) as e:
