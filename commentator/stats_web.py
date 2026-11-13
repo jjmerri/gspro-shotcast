@@ -671,22 +671,37 @@ APPROACH_BANDS = ((A.AROUND_GREEN_YARDS, 100), (100, 150), (150, 200), (200, A.A
 
 def records(db: sqlite3.Connection, context: str | None = None, player: str | None = None,
             since: str | None = None) -> dict[str, Any]:
-    base = (" AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)
-            + (" AND player = ?" if player else "")
-            + (" AND session_id IN (SELECT id FROM sessions WHERE date >= ?)" if since else ""))
-    args = ((player,) if player else ()) + ((since,) if since else ())
-    drive = db.execute(f"SELECT id, ts, player, {_DRIVE} AS v, course, hole FROM shots WHERE {_TEE_DRIVER} AND {_DRIVE} IS NOT NULL"
-                       + base + " ORDER BY v DESC LIMIT 1", args).fetchone()
+    return records_table(db, context, {"": since})(player, "")
+
+
+def records_table(db: sqlite3.Connection, context: str | None,
+                  starts: dict[str, str | None]) -> Callable[[str | None, str], dict[str, Any]]:
+    """records() for every player (and everyone, None) and each of the date ranges `starts` (key: first
+    night, None for all time), from one pass over the shots: returns pick(player, key). A tie goes to
+    the earlier shot."""
+    base = " AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)
+    date = ", (SELECT date FROM sessions WHERE sessions.id = shots.session_id) AS _date"
+    drive = A.firsts(db.execute(f"SELECT id, ts, player, {_DRIVE} AS v, course, hole{date} FROM shots WHERE {_TEE_DRIVER}"
+                                f" AND {_DRIVE} IS NOT NULL" + base + " ORDER BY v DESC, ts, id"), starts, 1, "_date")
     approaches = []
     for lo, hi in APPROACH_BANDS:   # 1 ft from 80 yd isn't the shot 2 ft from 200 is: a record for each
-        best = db.execute(f"SELECT id, ts, player, finish_yards AS v, club, outcome, ROUND(to_pin_yards) AS from_yd, course, hole"
-                          f" FROM shots WHERE {A.APPROACH_SQL} AND to_pin_yards > ? AND to_pin_yards <= ?"
-                          " AND finish_yards IS NOT NULL" + base + " ORDER BY v LIMIT 1", (lo, hi) + args).fetchone()
-        approaches.append({"from": lo, "to": hi, "best": dict(best) if best else None})
-    putt = db.execute("SELECT id, ts, player, to_pin_yards AS v, course, hole FROM shots WHERE is_putt = 1 AND outcome = 'holed'"
-                      " AND to_pin_yards IS NOT NULL" + base + " ORDER BY v DESC LIMIT 1", args).fetchone()
-    return {"longest_drive": dict(drive) if drive else None, "approaches": approaches,
-            "longest_putt": dict(putt) if putt else None}
+        approaches.append((lo, hi, A.firsts(db.execute(
+            f"SELECT id, ts, player, finish_yards AS v, club, outcome, ROUND(to_pin_yards) AS from_yd, course, hole{date}"
+            f" FROM shots WHERE {A.APPROACH_SQL} AND to_pin_yards > ? AND to_pin_yards <= ?"
+            " AND finish_yards IS NOT NULL" + base + " ORDER BY v, ts, id", (lo, hi)), starts, 1, "_date")))
+    putt = A.firsts(db.execute(f"SELECT id, ts, player, to_pin_yards AS v, course, hole{date} FROM shots WHERE is_putt = 1"
+                               " AND outcome = 'holed' AND to_pin_yards IS NOT NULL" + base + " ORDER BY v DESC, ts, id"),
+                    starts, 1, "_date")
+
+    def best(got: dict[tuple, list[dict]], player: str | None, key: str) -> dict | None:
+        rows = got.get((player, key))
+        return dict(rows[0]) if rows else None
+
+    def pick(player: str | None, key: str) -> dict[str, Any]:
+        return {"longest_drive": best(drive, player, key),
+                "approaches": [{"from": lo, "to": hi, "best": best(got, player, key)} for lo, hi, got in approaches],
+                "longest_putt": best(putt, player, key)}
+    return pick
 
 
 def record_shots(records_: dict[str, Any]) -> list[dict]:
@@ -735,8 +750,12 @@ def highlights_by_period(db: sqlite3.Connection, holes: list[dict], context: str
     """Records and highlights for each of the tab's date ranges: a top five can't be cut down to a
     shorter range on the page, so each range is worked out on its own. `season`: publish.season_start."""
     starts = period_starts(today, season)
-    return {"records": {k: records(db, context, player, s) for k, s in starts.items()},
-            "highlights": {k: A.highlights(db, holes, context, player, s) for k, s in starts.items()}}
+    key = tuple(starts.items())
+    recs = reuse(db, ("records_table", context, key), lambda: records_table(db, context, starts))
+    highs = reuse(db, ("highlights_table", context, key, id(holes)),
+                  lambda: A.highlights_table(db, holes, context, starts))
+    return {"records": {k: recs(player, k) for k in starts},
+            "highlights": {k: highs(player, k) for k in starts}}
 
 
 def summary(db: sqlite3.Connection, context: str | None = None,

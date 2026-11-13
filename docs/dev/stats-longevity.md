@@ -168,6 +168,13 @@ warm one takes 115 s, with replays down from about 25 s to 3 s and reels from ab
 the summaries (`highlights_by_period`, `rounds`, `strokes_gained`, `booth`, `holes_played`), which the
 rest of step 4 addresses.
 
+**Records and highlights in one pass.** The Records tab's ranges were each worked out with their own
+queries, for every context summary and again for every player's file (190 sets of sorted queries on the
+3-year copy). Now each context's records and highlights are worked out once, for every player and range
+together (`records_table`, `highlights_table`), and a tie goes to the earlier shot (before, whichever
+SQLite's plan put first). Same output as the previous build with that tie rule; on the 3-year copy a
+cold build went from 128 s to 103 s and a warm one to 79 s.
+
 **First build in the background.** The tray's stats page used to build before the booth started, so
 the first start after an update (a cold build) held the booth up. It now builds on its own thread
 (`make_server(build_in_background=True)`) and the booth starts at once. Pages wait for that build; if

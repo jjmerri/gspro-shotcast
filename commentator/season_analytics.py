@@ -13,7 +13,7 @@ import re
 import sqlite3
 import statistics
 from collections import Counter, defaultdict
-from typing import Any
+from typing import Any, Callable
 
 from . import shot_shape
 from .store import DRIVE_SQL
@@ -463,20 +463,39 @@ def _to_par_name(d: int) -> str:
     return {-3: "albatross", -2: "eagle", -1: "birdie", 1: "bogey", 2: "double"}.get(d, f"+{d}" if d > 0 else f"{d}")
 
 
+def firsts(rows, starts: dict[str, str | None], k: int, date: str = "date") -> dict[tuple, list[dict]]:
+    """The first `k` of `rows` (in their order) in each of the date ranges `starts` (key: first night
+    YYYY-MM-DD, None for all time), for everyone (None, key) and for each player (player, key)."""
+    out: dict[tuple, list[dict]] = {}
+    for r in rows:
+        r = dict(r)
+        d = r.pop("_date") if date == "_date" else r[date]
+        for key, since in starts.items():
+            if since is not None and (d or "") < since:
+                continue
+            for who in (None, r["player"]):
+                got = out.setdefault((who, key), [])
+                if len(got) < k:
+                    got.append(r)
+    return out
+
+
 def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = None,
                player: str | None = None, since: str | None = None) -> dict[str, Any]:
     """The season's moments: aces, eagles, chip-ins, birdie streaks, bounce-backs and blow-ups from the
     cards; and top-five lists of drives, approaches, chips and putts holed from the shots. With
     `player`, that player's own; with `since` (YYYY-MM-DD), only nights from that date on."""
+    return highlights_table(db, holes, context, {"": since})(player, "")
+
+
+def highlights_table(db: sqlite3.Connection, holes: list[dict], context: str | None,
+                     starts: dict[str, str | None]) -> Callable[[str | None, str], dict[str, Any]]:
+    """highlights() for every player (and everyone, None) and each of the date ranges `starts` (key:
+    first night, None for all time), from one pass over the shots: returns pick(player, key)."""
     moments: list[dict] = []
     streaks: list[dict] = []
     bounce: list[dict] = []
     blowups: list[dict] = []
-    args = ((player,) if player else ()) + ((since,) if since else ())
-    if player:
-        holes = [h for h in holes if h["player"] == player]
-    if since:
-        holes = [h for h in holes if (h["date"] or "") >= since]
     # A card moment's stroke (its id and time, for the page's links and video): the player's hole in
     # that session, the last one played before the round ended.
     by_hole: dict[tuple, list[dict]] = {}
@@ -493,9 +512,7 @@ def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = 
 
     for r in db.execute("SELECT pr.*, s.date FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
                         " WHERE (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))"
-                        + _ctx(context, "pr")
-                        + (" AND pr.player = ?" if player else "") + (" AND s.date >= ?" if since else "")
-                        + " ORDER BY pr.ended_at", args):
+                        + _ctx(context, "pr") + " ORDER BY pr.ended_at, pr.id"):
         try:
             scores = {int(k): v for k, v in json.loads(r["scores"] or "{}").items() if isinstance(v, int)}
             pars = {int(k): v for k, v in json.loads(r["hole_pars"] or "{}").items() if isinstance(v, int)}
@@ -533,29 +550,34 @@ def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = 
             moments.append({"player": h["player"], "date": h["date"], "course": h["course"], "hole": h["hole"],
                             "id": last["id"], "ts": last["ts"], "kind": "holed out", "text": f"Holed out from {round(yd) if yd else '?'} yd"
                             f" ({last['lie_before'] or 'off the green'}, {last['club'] or '?'})"})
-    moments.sort(key=lambda m: m["date"] or "", reverse=True)
-    base = (" AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)
-            + (" AND player = ?" if player else "") + (" AND date >= ?" if since else ""))
+    base = " AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)
     drive = "COALESCE(total_yards, carry_game_yards, carry_raw)"
-
-    def top(sql: str) -> list[dict]:
-        return [dict(r) for r in db.execute(sql, args)]
-
     j = " FROM shots JOIN sessions ON sessions.id = shots.session_id"
-    return {
-        "moments": moments,
-        "streaks": sorted(streaks, key=lambda s: (-s["length"], s["date"] or ""))[:10],
-        "bounce_backs": sorted(bounce, key=lambda b: b["date"] or "", reverse=True)[:10],
-        "blowups": sorted(blowups, key=lambda b: (-b["over"], b["date"] or ""))[:5],
-        "drives": top(f"SELECT shots.id, ts, player, ROUND({drive}) AS v, course, hole, date{j} WHERE {DRIVE_SQL}"
-                      f" AND {drive} IS NOT NULL{base} ORDER BY v DESC LIMIT 5"),
-        "approaches": top(f"SELECT shots.id, ts, player, ROUND(finish_yards * 3) AS v, outcome, club, ROUND(to_pin_yards) AS from_yd, course,"
-                          f" hole, date{j} WHERE {APPROACH_SQL} AND finish_yards IS NOT NULL{base} ORDER BY finish_yards LIMIT 5"),
-        "chips": top(f"SELECT shots.id, ts, player, ROUND(finish_yards * 3) AS v, outcome, club, ROUND(to_pin_yards) AS from_yd, lie_before AS lie,"
-                     f" course, hole, date{j} WHERE {CHIP_SQL} AND finish_yards IS NOT NULL{base} ORDER BY finish_yards LIMIT 5"),
-        "putts": top(f"SELECT shots.id, ts, player, ROUND(to_pin_yards * 3) AS v, course, hole, date{j} WHERE is_putt = 1"
-                     f" AND outcome = 'holed' AND to_pin_yards IS NOT NULL{base} ORDER BY to_pin_yards DESC LIMIT 5"),
-    }
+    tops = {name: firsts(db.execute(sql), starts, 5) for name, sql in {
+        "drives": f"SELECT shots.id, ts, player, ROUND({drive}) AS v, course, hole, date{j} WHERE {DRIVE_SQL}"
+                  f" AND {drive} IS NOT NULL{base} ORDER BY v DESC, ts, shots.id",
+        "approaches": f"SELECT shots.id, ts, player, ROUND(finish_yards * 3) AS v, outcome, club, ROUND(to_pin_yards) AS from_yd, course,"
+                      f" hole, date{j} WHERE {APPROACH_SQL} AND finish_yards IS NOT NULL{base} ORDER BY finish_yards, ts, shots.id",
+        "chips": f"SELECT shots.id, ts, player, ROUND(finish_yards * 3) AS v, outcome, club, ROUND(to_pin_yards) AS from_yd, lie_before AS lie,"
+                 f" course, hole, date{j} WHERE {CHIP_SQL} AND finish_yards IS NOT NULL{base} ORDER BY finish_yards, ts, shots.id",
+        "putts": f"SELECT shots.id, ts, player, ROUND(to_pin_yards * 3) AS v, course, hole, date{j} WHERE is_putt = 1"
+                 f" AND outcome = 'holed' AND to_pin_yards IS NOT NULL{base} ORDER BY to_pin_yards DESC, ts, shots.id",
+    }.items()}
+
+    def pick(player: str | None, key: str) -> dict[str, Any]:
+        since = starts[key]
+
+        def mine(xs: list[dict]) -> list[dict]:
+            return [dict(x) for x in xs if (player is None or x["player"] == player)
+                    and (since is None or (x["date"] or "") >= since)]
+        return {
+            "moments": sorted(mine(moments), key=lambda m: m["date"] or "", reverse=True),
+            "streaks": sorted(mine(streaks), key=lambda s: (-s["length"], s["date"] or ""))[:10],
+            "bounce_backs": sorted(mine(bounce), key=lambda b: b["date"] or "", reverse=True)[:10],
+            "blowups": sorted(mine(blowups), key=lambda b: (-b["over"], b["date"] or ""))[:5],
+            **{name: [dict(r) for r in got.get((player, key), [])] for name, got in tops.items()},
+        }
+    return pick
 
 
 _STOP = set("a an and the of to in on at for is it's its it that this with he his him you your be was are as"
