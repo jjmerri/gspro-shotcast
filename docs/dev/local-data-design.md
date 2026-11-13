@@ -8,8 +8,19 @@ uses the same record to upload rounds (shotcast-cloud `docs/architecture.html`, 
 One model, one set of write paths, one importer.
 
 Nothing here changes what the stats page or the booth shows. Existing databases are migrated in
-place, older app versions still open them, and nothing about the cloud is visible until it's turned
-on.
+place, and older app versions still open them.
+
+**Local first.** Shotcast Cloud may never ship, so the design comes in two layers:
+
+- **The local layer** is worth having on its own: stored rounds, slots, the change counter, edits as
+  overrides, the migration, stored totals and cached reels. It ships in the app with no cloud code,
+  no cloud configuration and no cloud tables.
+- **The cloud layer** is added only if the cloud goes ahead, by its own later migration. It adds
+  writer ownership, residency, the upload counter, the outbox and journal, and their triggers.
+  Removing it, or never building it, leaves the local layer untouched.
+
+Sections marked *(cloud layer)* describe the second layer. Nothing in the local layer refers to
+them.
 
 ## What's there today
 
@@ -33,46 +44,35 @@ on.
 
 ## The record
 
-### Tables (schema version 6)
-
-All of these are created in every database, in either mode, so triggers that name them always
-resolve. (SQLite resolves every table a trigger names even when its `WHEN` is false.)
+### Tables (schema version 6, local layer)
 
 - **`meta`**: one row.
-  - `dataset_id`: a UUID made once per `season.db`. It's the importer's source namespace, so a
-    copied database is recognisable.
-  - `mode`: `self_hosted`, `importing` or `cloud`.
-  - `bay_id`: null in self-hosted mode.
-  - `writer_generation`, `feed_watermark`: cloud mode only.
-  - `quiet`: a guard flag, `0`, `remote` or `bookkeeping` (below).
-- **`round_records`**: one row per round, and one per *loose batch* (below).
-  - Identity: `uuid` (primary key), `kind` (`round` or `loose`).
+  - `dataset_id`: a UUID made once per `season.db`, so a copied database is recognisable. (The
+    cloud layer would use it as the importer's source namespace.)
+  - `quiet`: a guard flag, `0` or `bookkeeping` (below).
+- **`round_records`**: one row per round, and one per *practice stretch* (below).
+  - Identity: `uuid` (primary key), `kind` (`round` or `practice`).
   - What it is: `session_id`, `course`, `started_at`, `ended_at`, `state` (`in_progress`,
     `finished`, `abandoned`).
-  - `writer_bay`: the bay whose PC captures and revises it. Null in self-hosted mode, meaning this
-    PC.
-  - `resident`: whether its shots and lines are on this PC (cloud mode can evict them).
-  - `seq` and `gen`: the change counters (below).
+  - `gen`: the change counter (below).
   - `assigned`: how its rows were grouped, `live` or `inferred` (the migration).
-  - `continues`: the UUID of a record it may continue (restart, below), or null.
 - **`round_slots`**: one row per player in a round.
   - `slot_id` (UUID), `round_uuid`.
   - `seat`: the GSPro setup-screen index, when known.
   - `name`: as GSPro shows it, updated by a rename.
   - `side`: the side key `rounds.side` uses.
   - `player`: the league roster name it was matched to, or null.
-  - `matched_by`: `exact`, `alias`, `fuzzy`, `manual` or `legacy`. This is the record that rev 4's
-    "how each link was made" correction reads.
-  - `person_id`: cloud mode, from the feed.
+  - `matched_by`: `exact`, `alias`, `fuzzy`, `manual` or `legacy`. (Rev 4's "how each link was
+    made" correction would read this.)
 - **New columns.** Older versions don't write them; an `AFTER INSERT` trigger fills `uid` even for
   them.
-  - `shots`: `uid`, `record_uuid` (its round, or its loose batch), `slot_id` and `derived_from`
+  - `shots`: `uid`, `record_uuid` (its round, or its practice stretch), `slot_id` and `derived_from`
     (a gimme's source shot, below).
   - `lines`: `uid` and `record_uuid`.
   - `uid` is a random ID. Everything that refers to a shot or line from outside its table
-    (overrides, `captured`, upload bodies) uses `uid`, never the integer `id`. Without
-    `AUTOINCREMENT`, SQLite reuses the highest `id` after it's deleted, which eviction can do, so an
-    integer reference could land on an unrelated new shot. Rehydration restores each row's `uid`.
+    (overrides, `captured`) uses `uid`, never the integer `id`. Without `AUTOINCREMENT`, SQLite
+    reuses the highest `id` after it's deleted, so an integer reference could land on an unrelated
+    new shot. (The cloud layer's eviction deletes rows, which is what makes this matter.)
   - `rounds`: `round_uuid`.
   - `player_rounds`: `round_uuid` and `slot_id`.
 
@@ -80,23 +80,32 @@ resolve. (SQLite resolves every table a trigger names even when its `WHEN` is fa
   `shots.player` included, stay as they are. Every reader keeps working, and readers move to the new
   columns one at a time.
 - **`overrides`** and **`captured`**: edits (below).
-- **`upload_outbox`** and **`row_journal`**: cloud mode's queue (below). They're empty and
-  unused in self-hosted mode.
 
-### Loose batches
+The cloud layer's tables and columns (below) come with their own migration, and their triggers with
+them, so a trigger never names a table that isn't there. (SQLite resolves every table a trigger
+names even when its `WHEN` is false.)
 
-Shots captured outside any round (range sessions, a round never recorded) belong to a loose batch:
-one per session per calendar day, with its own UUID. A loose batch has the same `seq` and, in cloud
-mode, the same upload path as a round (rev 4's "unattached shots"). A shot later assigned to a round
-moves from the batch to the round, which changes both. That happens to opening drives adopted by
-`_adopt_opening_shots`, and to late gimmes.
+### Practice stretches
+
+Shots captured outside any round (warm-ups, range time, a round never recorded) belong to a
+*practice stretch*, the nearest thing to a round they have.
+
+- A stretch begins with the first shot outside a round.
+- It ends when a round starts, when the session rolls over, or after the bay has been idle for
+  `PRACTICE_IDLE_SECONDS` (30 minutes, to be tuned).
+- It's a record like a round, with `kind = practice` and its own UUID, and it's `finished` when it
+  ends. So it changes only while it's open, like a round. (In the cloud layer it uploads like a
+  round: rev 4's "unattached shots".)
+
+A shot later assigned to a round moves from the stretch to the round, which changes both. That
+happens to opening drives adopted by `_adopt_opening_shots`, and to late gimmes.
 
 ### Writing it
 
 - **Round activation.** One transaction in `Engine._start_round`, after `roll_session_if_idle`, so
   the record's session is the one its shots go into.
   - It inserts the `round_records` row (`in_progress`) and a slot for every player.
-  - It moves the adopted opening shots into the record.
+  - It moves the adopted opening shots into the record, and ends any open practice stretch.
   - It resolves a restart (below).
 
   `Round` gets its UUID at construction (replacing the `Round._ids` counter) but writes nothing until
@@ -107,76 +116,62 @@ moves from the batch to the round, which changes both. That happens to opening d
   - A reassignment (`move_shot_player`: a shot was someone else's) is a separate operation. It moves
     the shot, and its gimme row, to the other player's slot and name in one statement pair.
 - **Shots and lines** are inserted with the live record's UUID and the shooter's slot. With no round
-  live, they go to the session's loose batch for the day. `record_gimme` copies `record_uuid` and
+  live, they go to the open practice stretch, which starts one if needed. `record_gimme` copies `record_uuid` and
   `slot_id` from the shot it follows, like it copies the rest.
 - **Late gimmes.** A gimme conceded within `CLOSER_SECONDS` of the round ending gets that round's
   record directly, since the engine still knows the round. The `_late_gimmes` time rule is needed
   only by the migration.
 - **No more ID ranges.** `mark_league`, `mark_tournament` and `rename_shots` select by
-  `record_uuid` (and slot), not `id > shot_floor`. Today they can catch any later shot, which in
-  cloud mode includes rows that arrived from the feed.
+  `record_uuid` (and slot), not `id > shot_floor`. Today they can catch any later shot, a practice
+  shot included (and, in the cloud layer, rows that arrived from the feed).
 - **Round end.**
   - `_record_round_stats` writes the `rounds` and `player_rounds` rows with the UUID and slots, and
     sets the record `finished` (`abandoned` for `complete=False`) and `ended_at`, in the same
     transaction.
   - The early return for a round quit before any hole was finished sets the record `abandoned` too.
     The shots it has are kept, as today.
-- **A booth restart mid-round.** Today the time rules join the two halves whenever the later one ends
-  on the same course within 8 hours, so a fresh game with the same players can be joined to a
-  crashed one. The record makes that a choice.
-  - The new `Round` adopts the open `in_progress` record (its UUID and slots) only on positive
-    evidence of continuing:
-    - the same course;
-    - the same GSPro roster, by seat when seats were read;
-    - the opening hole is past the record's last hole played;
-    - no "new round" signal from GSPro in between (the setup screen, a scorecard reset; the events
-      `handle_round_start` already reads).
-  - Without that evidence it starts a new record, and the open one becomes `abandoned`.
-  - When the evidence is mixed (same course and players, but a roster correction, say), it starts a
-    new record with `continues` set. The stats page then offers "join these rounds" as an edit.
-    Nothing is merged on a guess.
-  - An `in_progress` record that nothing adopts within `ROUND_SPAN_SECONDS` becomes `abandoned`. It's
-    kept, never dropped.
+- **Shotcast restarted mid-round.** A crash, a Windows update reboot or the tray being closed
+  stops the booth. There's no auto-restart, so it's whoever notices (a player, venue staff)
+  relaunching it. It's rare.
+  - Shots played while it's down are missed, as today. (The log backfill fills in details of
+    stored shots; it doesn't create missing ones.) The booth already handles starting mid-round,
+    and the scorecard read at the end gets the scores right.
+  - The new `Round` continues the open `in_progress` record (its UUID and slots) when the course is
+    the same and its players match the record's slots. Otherwise it starts a new record, and the
+    open one becomes `abandoned`.
+  - An `in_progress` record that nothing continues within `ROUND_SPAN_SECONDS` becomes `abandoned`.
+    It's kept, never dropped.
+  - Tested by stopping Shotcast mid-round on a sim and starting it again.
 - **Duplicate names** stay refused for now. With slots, two "Mike"s could be allowed later without a
   data change; that's an engine change for another day.
 
-### The change counters (`seq` and `gen`)
+### The change counter (`gen`)
 
-Two counters, because "what this bay must upload" and "what a cache must recompute" differ:
-
-- **`seq`** moves when what this bay *captured* changes: capture, a backfill, a repair, a state
-  change. It drives the upload.
-- **`gen`** moves when what the record *shows* changes: everything that moves `seq`, plus an edit
-  (override) and anything that arrives from the server (feed revisions, overrides, person links). It
-  drives the caches.
-
-SQLite triggers move them, not the write methods, so no write path can forget, an older app
-version's included:
-
-- `AFTER INSERT/UPDATE/DELETE` on `shots`, `lines`, `rounds`, `player_rounds`, `round_slots` and
-  `captured` bumps the row's record. When `record_uuid` itself changes, both records are bumped.
-- `AFTER UPDATE OF state, ended_at, course` on `round_records` bumps that record. Recursive triggers
-  are off, so this doesn't re-fire.
-- Triggers on `week_results` (through its `rounds` row) and on `overrides` (through its target, `gen`
-  only) do the same.
-- **`meta.quiet`** says who is writing:
-  - `0`: normal. Both `seq` and `gen` move.
-  - `remote`: applying the server's data (feed, bootstrap, a cloud override) or a local override to
-    its columns. Only `gen` moves.
-  - `bookkeeping`: eviction, rehydration, the migration. Neither moves, since what the record holds
-    hasn't changed, only where it's kept.
-
-  Each of these is set for one transaction by the code doing it. Older versions never set it.
-- A statement touching 200 shots bumps the counters 200 times. That's harmless: they're only
-  compared, never counted.
-
-Readers that cache anything per record store the `gen` they computed from and recompute when it
+`gen` moves whenever what a record shows changes: capture, a backfill, a repair, a state change, an
+edit. Readers that cache anything per record store the `gen` they computed from and recompute when it
 differs:
 
 - contribution rows (`stats-longevity.md` step 4);
 - the reel cache (step 5), whose key also covers the commentary sessions the round touches.
 
-The cloud uploader reads `seq`.
+SQLite triggers move it, not the write methods, so no write path can forget, an older app version's
+included:
+
+- `AFTER INSERT/UPDATE/DELETE` on `shots`, `lines`, `rounds`, `player_rounds`, `round_slots` and
+  `captured` bumps the row's record. When `record_uuid` itself changes, both records are bumped.
+- `AFTER UPDATE OF state, ended_at, course` on `round_records` bumps that record. Recursive triggers
+  are off, so this doesn't re-fire.
+- Triggers on `week_results` (through its `rounds` row) and on `overrides` (through its target) do
+  the same.
+- **`meta.quiet`** says who is writing:
+  - `0`: normal.
+  - `applying`: an override being written into its columns. `gen` moves, but the override triggers
+    (below) don't treat the write as a capture.
+  - `bookkeeping`: the migration. `gen` doesn't move, since what the record shows hasn't changed.
+
+  Each of these is set for one transaction by the code doing it. Older versions never set it.
+- A statement touching 200 shots bumps `gen` 200 times. That's harmless: it's only compared, never
+  counted.
 
 ### Edits are overrides
 
@@ -185,8 +180,8 @@ Today the page's edits overwrite columns the capture paths also write (`mark_lea
 lost. Instead, edits and captured values are kept apart:
 
 - **`overrides`** is the edit log. Rows are never changed except to stamp `undone_at`.
-  - `id`, `uid` (stable across PCs), `target` (a shot's `uid` or a round UUID), `field`, `value`.
-  - `origin` (`local` or `cloud`), `by`, `at`, `undone_at`.
+  - `id`, `uid`, `target` (a shot's `uid` or a round UUID), `field`, `value`.
+  - `by`, `at`, `undone_at`.
   - The before-value shown in the log is what was effective when the edit was made, written into
     the row at insert.
 - **`captured`** holds, per physical row and field (`tbl`, `row_uid`, `field`, `value`), what the
@@ -231,8 +226,9 @@ lost. Instead, edits and captured values are kept apart:
     changes record (an opening drive adopted, a late gimme, a reconciliation, a reassignment). It
     restores the captured value where the old record's override no longer covers the row, and
     applies the new record's.
-- **Making an edit** inserts the override with `quiet = 0`, so it's journaled during an import.
-  - Then, in `quiet = remote`, it copies each covered row's current value into `captured` (where not
+- **Making an edit** inserts the override. (In the cloud layer that's with `quiet = 0`, so an edit
+  made during an import is journaled.)
+  - Then, in `quiet = applying`, it copies each covered row's current value into `captured` (where not
     there already) and writes the new effective values.
   - **Undo** stamps `undone_at` and recomputes the effective value from what's left: a later active
     override, or else `captured`. Undoing an older edit never disturbs a later one.
@@ -245,20 +241,13 @@ lost. Instead, edits and captured values are kept apart:
     - Both run once with the current writers, and once with an old version's inserts followed by a
       re-upgrade.
   - A `captured` row is removed once no active override covers it.
-- **Self-hosted:** the page's buttons make local overrides. Nothing else changes for the user.
-- **Cloud mode:**
-  - The buttons call the API. The override comes back (in the response, and to other bays through
-    the feed) and is stored with `origin = cloud`.
-  - Offline, the buttons are disabled with a note. Queued edits would be a second sync path for
-    little gain.
-  - **What a revision carries.** The uploaded revision carries captured values only:
-    - for `is_league` and `is_tournament`, the column, or `captured` where one exists;
-    - edit-only fields are left out of the body altogether, since their captured value is always 0.
-
-    The server holds overrides apart, as rev 4 requires, so an upload never erases an edit and an
+- **The page's buttons** make local overrides. Nothing else changes for the user.
+- *(cloud layer)* In cloud mode there's no local stats page: the tray's "Stats" opens the web stats,
+  and edits are made there. They reach the booth through the feed as overrides.
+  - An uploaded revision carries captured values only: for `is_league` and `is_tournament`, the
+    column, or `captured` where one exists. Edit-only fields are left out of the body.
+  - The server holds overrides apart, as rev 4 requires, so an upload never erases an edit, and an
     undo on the server can't reveal an edit baked into a revision.
-  - A test: exclude a round, a backfill changes it and it uploads, the exclusion is undone on the
-    server. The round must come back included.
 
 ### Migrating an existing database
 
@@ -278,7 +267,8 @@ A one-off step at the first start on the new version. It runs after the start-of
    `complete = 0`. Deleted and excluded rounds become records too, with their marks as they are.
 2. **Make slots:** one per distinct player name in each round, with `matched_by = legacy` and
    `player` from the roster's current matching.
-3. **Make loose batches** for every shot and line left over.
+3. **Make practice stretches** for every shot and line left over, split as the live rule splits
+   them (a round's start, a session change, an idle gap).
 4. **Turn the page edits it can recognise into overrides.**
    - Only the page ever sets `left_out` and `excluded` (`stats_web.set_left_out`,
      `set_round_excluded`, `delete_round`; `Store.set_left_out` is the same hand edit). So a
@@ -292,7 +282,7 @@ A one-off step at the first start on the new version. It runs after the start-of
 5. **Set `user_version = 6`**, last, in the same transaction, after the `uid` check.
 
 **Reconciling after a downgrade.** An older version writes rows with no `record_uuid` and may finish
-a round whose earlier shots were already put in a loose batch.
+a round whose earlier shots were already put in a practice stretch.
 
 - At the next start, the new version finds the rows with no `record_uuid`.
   - It takes the time span they cover, widened by `ROUND_SPAN_SECONDS` on each side, since a round
@@ -300,14 +290,14 @@ a round whose earlier shots were already put in a loose batch.
   - It reruns the membership function over every raw row in that span, assigned or not.
   - If the result touches a record reaching outside the span, the span grows to cover it, and this
     repeats until nothing new is touched.
-  - It compares the result with the records in the span that are `assigned = inferred` or loose.
+  - It compares the result with the records in the span that are `assigned = inferred` or practice.
   - A group that matches an existing record keeps its UUID.
-  - Rows move between inferred records and loose batches where the rerun says so.
+  - Rows move between inferred records and practice stretches where the rerun says so.
   - Every record that gains or loses a row has its counters bumped (`quiet = 0`).
   - `live` records are never regrouped. Their membership came from the engine, not a guess.
 - Fixtures cover:
   - upgrade → edit → downgrade → capture and page edit → re-upgrade;
-  - a round begun before the upgrade (its shots already in a loose batch), finished by an old
+  - a round begun before the upgrade (its shots already in a practice stretch), finished by an old
     version in a new session after a booth restart, then re-upgraded;
   - legacy inserts.
 
@@ -322,16 +312,32 @@ excluded and a deleted round. Readers then switch to the stored grouping.
 3-year copy. If it takes more than about 10 s, it runs per session in the background instead, with
 readers using the function until `meta` says it's done.
 
-## Self-hosted and cloud mode
+## The cloud layer *(only if Shotcast Cloud ships)*
+
+Everything from here to "Indexes" is the cloud layer. It's added by its own migration, after the
+local layer has shipped, and only if the cloud goes ahead. It adds:
+
+- to `meta`: `mode` (`self_hosted`, `importing` or `cloud`), `bay_id`, `writer_generation`,
+  `feed_watermark`;
+- to `round_records`: `writer_bay`, `resident`, and `seq`;
+- to `overrides`: `origin` (`local` or `cloud`);
+- `upload_outbox`, `row_journal` and a staging table, with their triggers;
+- a `remote` value for `meta.quiet`, for applying the server's data. It moves `gen` but not `seq`,
+  like `applying`. Eviction and rehydration use `bookkeeping`.
+
+**Two counters.** "What this bay must upload" and "what a cache must recompute" differ, so the cloud
+layer adds `seq` next to `gen`. `seq` moves on the same triggers as `gen`, but only with
+`quiet = 0`: capture, a backfill, a repair, a state change. It drives the upload. An edit or the
+server's data moves only `gen`.
 
 | | Self-hosted | Cloud |
 |---|---|---|
-| Round record, slots, `seq`, overrides | yes | yes, same code |
+| Round record, slots, `gen`, overrides | yes | yes, same code |
 | Stored contributions and rollups | computed locally from all history | server's rollups from bootstrap; local contributions for this bay's rounds not yet in the feed |
-| Edits | local overrides | API, mirrored as overrides |
-| Upload outbox | empty | used |
+| Edits | local overrides | on the web stats page, arriving as overrides |
+| Upload outbox | absent | used |
 | History kept | all, forever | a bounded window of detail, plus stubs |
-| Local stats page | as today | opens the web stats (see open questions) |
+| Local stats page | as today | none: the tray's "Stats" opens the web stats |
 
 ### Who may change a record
 
@@ -503,25 +509,20 @@ The `EXPLAIN QUERY PLAN` test from step 1 covers the triggers' lookups as well.
 
 ## Order
 
-1. Step 1 indexes (stats-longevity).
-2. Record, slots, live writing, triggers, and migration with its equality test. Readers stay on
-   today's rules, and the stored grouping is checked against them.
+1. Step 1 indexes and hot spots (stats-longevity).
+2. The record: tables, slots, live writing, practice stretches, `gen` triggers, and the migration
+   with its equality test. Readers stay on today's rules, and the stored grouping is checked against
+   them.
 3. Readers switch to the stored grouping (`round_groups`, `shot_rounds`, `player_round_of`,
    `_round_rows`).
 4. Overrides, with the page's edits moved onto them.
 5. Contributions and rollups keyed by record and slot (stats-longevity step 4), then reels (step 5).
-6. Cloud mode, hidden: outbox, uploader, ownership guard, feed records, eviction (with the shotcast-cloud pilot).
 
-Steps 1 to 5 help self-hosted on their own and ship without the cloud.
+Steps 1 to 5 are the local layer. They need nothing from the cloud and ship on their own.
+
+6. *(cloud layer, only if it ships)* Its migration, the outbox, uploader, ownership guard, feed
+   records and eviction, with the shotcast-cloud pilot.
 
 ## Open questions
 
-- **The local stats page in cloud mode.** The booth keeps only a window of detail, so a local page
-  can't show lifetime stats. Proposed: it opens the web stats. The cloud doc currently says the local
-  page's edit buttons call the API; that would become "edits happen on the web page".
-- **Loose batch size.** A batch is per session per day. A venue running a bay all day as a range
-  makes one large batch that changes all day; per session per hour may be better. Measure on real
-  data.
-- **Restart evidence.** Which GSPro signals count as "new round" vs "resume" needs checking against
-  real logs from a crashed booth. Until then, mixed evidence starts a new record with `continues`
-  set, and the user joins the two on the page.
+- **`PRACTICE_IDLE_SECONDS`.** 30 minutes is a guess; tune it on real data.
