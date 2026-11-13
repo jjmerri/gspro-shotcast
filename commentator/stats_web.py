@@ -800,7 +800,8 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
                 on_change: Callable[[], None] | None = None,
                 publish_status: Callable[[], dict[str, Any]] | None = None,
                 video_deleted: Callable[[dict], None] | None = None,
-                bucket_videos: Callable[[], list[dict]] | None = None) -> ThreadingHTTPServer:
+                bucket_videos: Callable[[], list[dict]] | None = None,
+                build_in_background: bool = False) -> ThreadingHTTPServer:
     """Serve the stats page on localhost only (port 0 picks a free one), the same static site that
     `publish` uploads (stats_site.py), built into `site` (a temp folder by default) and rebuilt when
     the database changes. `names` maps persona keys to on-air names; `brand` is build()'s site_name,
@@ -813,7 +814,9 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
     POST api/recordings/<session>/delete deletes a round video kept on the PC, then calls
     `video_deleted(record)` with its sidecar's record (the tray asks the booth to delete the bucket's copy too).
     Deleting a round deletes the videos it was the last round kept on: the PC's, and (`bucket_videos()`,
-    the bucket's kept streams, each passed to `video_deleted`) the bucket's."""
+    the bucket's kept streams, each passed to `video_deleted`) the bucket's. `build_in_background`: the
+    first build runs on its own thread (after an update it works every round out again, minutes on
+    years of rounds), and the page waits for it."""
     from . import local_video, stats_site
 
     db_path = Path(db_path)
@@ -829,7 +832,19 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
                 stats_site.build(db_path, site, names, local=True, **options)
                 built["key"] = key
 
-    refresh()
+    ready = threading.Event()
+
+    def first_build() -> None:
+        try:
+            refresh()
+        except Exception:   # (latest.json tries again, and says why)
+            log.exception("Building the stats page failed")
+        finally:
+            ready.set()
+
+    if not build_in_background:
+        refresh()
+        ready.set()
 
     class Handler(BaseHTTPRequestHandler):
         def do_HEAD(self):  # noqa: N802
@@ -966,7 +981,8 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
                 if got is None:
                     return self._send(404, b"not found", "text/plain", head)
                 return self._range(*got, head)
-            if rel == "latest.json":
+            ready.wait()   # (not a half-built page, nor the last version's)
+            if rel == "latest.json" or built["key"] is None:   # (a first build that failed: again)
                 try:
                     refresh()
                 except (OSError, sqlite3.Error) as e:
@@ -1004,7 +1020,10 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
         def log_message(self, *args):  # quiet: the worker makes many small range requests
             pass
 
-    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    if build_in_background:   # (once the port's taken: a server that couldn't be made builds nothing)
+        threading.Thread(target=first_build, name="stats-build", daemon=True).start()
+    return server
 
 
 def serve(db_path: str | Path, port: int = 8765, open_browser: bool = True,

@@ -182,6 +182,65 @@ def test_a_page_being_built_doesnt_lock_the_booth_out_of_the_database(tmp_path):
             booth.execute("INSERT INTO sessions (started_at, date) VALUES (0, 'x')")
         assert len(reading.fetchall()) == 2     # it reads what it started with
 
+def test_a_server_building_in_the_background_answers_once_its_first_build_is_done(tmp_path, monkeypatch):
+    from commentator import stats_site
+
+    path, _ = _db(tmp_path)
+    (tmp_path / "site").mkdir()
+    (tmp_path / "site" / "index.html").write_text("the last version's page")
+    started, go = threading.Event(), threading.Event()
+    build = stats_site.build
+
+    def slow(*a, **k):
+        started.set()
+        go.wait(10)
+        return build(*a, **k)
+
+    monkeypatch.setattr(stats_site, "build", slow)
+    server = stats_web.make_server(path, port=0, site=tmp_path / "site", build_in_background=True)
+    assert started.wait(10)   # (make_server came back with the build under way)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    got = []
+    asking = threading.Thread(target=lambda: got.append(
+        urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/").read()))
+    try:
+        asking.start()
+        asking.join(0.5)
+        assert not got
+        go.set()
+        asking.join(10)
+        assert got and b"the last version's page" not in got[0]
+    finally:
+        go.set()
+        server.shutdown()
+
+
+def test_a_failed_background_build_is_tried_again_rather_than_serving_the_last_versions_page(tmp_path, monkeypatch):
+    from commentator import stats_site
+
+    path, _ = _db(tmp_path)
+    (tmp_path / "site").mkdir()
+    (tmp_path / "site" / "index.html").write_text("the last version's page")
+    build, fails = stats_site.build, [OSError("disk full"), OSError("disk full")]
+
+    def flaky(*a, **k):
+        if fails:
+            raise fails.pop()
+        return build(*a, **k)
+
+    monkeypatch.setattr(stats_site, "build", flaky)
+    server = stats_web.make_server(path, port=0, site=tmp_path / "site", build_in_background=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        with pytest.raises(urllib.error.HTTPError) as e:   # the first build, then the retry, fail
+            urllib.request.urlopen(base + "/")
+        assert e.value.code == 500
+        assert b"the last version's page" not in urllib.request.urlopen(base + "/").read()
+    finally:
+        server.shutdown()
+
+
 def test_server_serves_the_page_and_summary(tmp_path):
     path, db = _db(tmp_path)
     db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, gross, scores, hole_pars, is_league)"

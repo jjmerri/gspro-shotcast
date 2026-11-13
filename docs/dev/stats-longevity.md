@@ -168,6 +168,21 @@ warm one takes 115 s, with replays down from about 25 s to 3 s and reels from ab
 the summaries (`highlights_by_period`, `rounds`, `strokes_gained`, `booth`, `holes_played`), which the
 rest of step 4 addresses.
 
+**First build in the background.** The tray's stats page used to build before the booth started, so
+the first start after an update (a cold build) held the booth up. It now builds on its own thread
+(`make_server(build_in_background=True)`) and the booth starts at once. Pages wait for that build; if
+it fails, each request tries again and answers with an error rather than the last version's page.
+
+**Booth history reads (do they need stored tables?).** Timed on the 3-year copy (211k shots; the
+busiest player has 40,650): most per-shot history reads (`season_stats`, `fairways_hit`,
+`approach_proximity`, `putting_make_rate`, `recovery_proximity`) take 45–50 ms each, `player_profile`
+about 100 ms, `season_longest_drive` about 140 ms; hole, team and broadcast reads 1–21 ms. `carry_pairs`
+takes 2.1 s but runs once, when the booth starts. A tee shot makes roughly 5–8 heavy reads, so about
+0.3–0.6 s per shot after 3 years of heavy play (estimated from the parts, not timed end to end), well
+under the model's own latency, and growing in line with history. Stored tables aren't needed for this
+yet; if it grows, an index or a per-session in-memory cache is the cheaper fix. Step 4 below stays the
+plan only if those fall short or the cloud needs the rows.
+
 ### 4. Stored totals instead of recomputing from every shot
 
 - A per-player-round contribution table (score, putts, fairways, greens, distances, bests, strokes

@@ -1163,7 +1163,7 @@ class Tray:
                 return []
             return [r for r in recs if isinstance(r, dict)] if isinstance(recs, list) else []
         hooks = {"on_change": publisher.changed, "publish_status": publisher.status, "video_deleted": video_deleted,
-                 "bucket_videos": bucket_videos}
+                 "bucket_videos": bucket_videos, "build_in_background": True}   # (the booth starts meanwhile)
         try:
             server = make_server(db, STATS_PORT, names, site, brand, videos, **hooks)
         except OSError:
