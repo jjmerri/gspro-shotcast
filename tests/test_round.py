@@ -2024,7 +2024,9 @@ async def test_the_setup_screen_is_not_read_on_the_range(tmp_path):
     await asyncio.sleep(0.2)
     assert e.screen.i == 0 and e.screen.ocred == []   # no frame grabbed, nothing OCR'd
     e.gspro.mode = "menu"
-    while e.screen.i < 3:
+    for _ in range(300):
+        if e.screen.ocred.count("setup_course") >= 3:
+            break
         await asyncio.sleep(0.01)
     task.cancel()
     assert e.screen.ocred.count("setup_course") >= 3   # back in the menus: every poll
