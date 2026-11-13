@@ -392,6 +392,8 @@ class Store:
 
     def _migrate(self) -> None:
         """Add columns a pre-existing season.db is missing, so an older file keeps working."""
+        from . import round_record   # (it reads this module's constants)
+
         # hole_images was once kept per session: keep each hole's first map with its ball and pin found
         # (else its first), as record_hole_image does now.
         self.db.execute("""DELETE FROM hole_images WHERE id NOT IN (
@@ -449,6 +451,7 @@ class Store:
         have_ix = {r[0] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
         for name, on in INDEXES.items():
             self.db.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {on}")
+        round_record.install(self.db)
         if not set(INDEXES) <= have_ix:
             self.db.execute("ANALYZE")
         if self.db.execute("PRAGMA user_version").fetchone()[0] < 1:
@@ -481,6 +484,7 @@ class Store:
             for (course,) in self.db.execute(f"SELECT DISTINCT course FROM {table} WHERE course IS NOT NULL").fetchall():
                 if (name := self.course_name(course)) != course:
                     self.db.execute(f"UPDATE {table} SET course = ? WHERE course = ?", (name, course))
+        round_record.migrate(self.db)
         self.db.commit()
 
     def course_name(self, course: str | None) -> str | None:

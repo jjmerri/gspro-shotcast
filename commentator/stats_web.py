@@ -6,7 +6,6 @@ shots are left out, and scoring, GIR, scrambling, sand and putting come from ind
 only, since a scramble or alternate-shot score isn't one player's.
 """
 
-import bisect
 import calendar
 import json
 import logging
@@ -25,7 +24,8 @@ from urllib.parse import unquote, urlparse
 
 from . import changelog, handicap_index
 from . import season_analytics as A
-from .store import CLOSER_SECONDS, DRIVE_SQL
+from .round_record import _late_gimmes, membership, player_round_of, round_groups, shot_rounds
+from .store import DRIVE_SQL
 
 log = logging.getLogger(__name__)
 
@@ -91,49 +91,17 @@ _ROUND_TABLES = ("rounds", "player_rounds", "shots", "lines")
 
 def _round_rows(db: sqlite3.Connection, round_id: int, ended: float) -> list[list[int]] | None:
     """A round's rows (as round_groups and the page number it: its lowest `rounds` id), per table of
-    _ROUND_TABLES: its sides, its players' cards, its shots, and what the booth said in it: the lines on
-    its shots, and the session's lines on no shot (the calls before a swing, the reactions, the closer)
-    from the round before's closer to its own. None when there's no such round, it didn't end at `ended`
-    (its `round_end` on the page), or it was deleted. Worked out over every row, excluded or not, so
-    it's the same round either way."""
+    _ROUND_TABLES: its sides, its players' cards, its shots and what the booth said in it
+    (round_record.membership's). None when there's no such round, it didn't end at `ended` (its
+    `round_end` on the page), or it was deleted. Worked out over every row, excluded or not, so it's
+    the same round either way."""
     db.row_factory = sqlite3.Row
-    groups, of_row = round_groups(db)
-    i = next((i for i, g in enumerate(groups) if g["round"] == round_id), None)
-    if i is None or abs(groups[i]["end"] - ended) > 0.001:
+    g = next((g for g in membership(db) if g["round"] == round_id), None)
+    if g is None or abs(g["end"] - ended) > 0.001:
         return None
-    g = groups[i]
-    sides = [rid for rid, rnd in of_row.items() if rnd == round_id]
-    if db.execute(f"SELECT 1 FROM rounds WHERE excluded = {DELETED} AND id IN ({_in(sides)})").fetchone():
+    if db.execute(f"SELECT 1 FROM rounds WHERE excluded = {DELETED} AND id IN ({_in(g['sides'])})").fetchone():
         return None
-    find = player_round_of(db)
-    cards = [r["id"] for r in db.execute("SELECT id, session_id, course, ended_at FROM player_rounds")
-             if find(r["session_id"], r["course"], r["ended_at"]) == round_id]
-    owner = _late_gimmes(db, groups, shot_rounds(db))
-    shots = [sid for sid, rnd in owner.items() if rnd == round_id]
-    # The unlinked lines of every session it was played in (a round can span a booth restart), each
-    # from the closer of that session's round before.
-    sessions = {g["session"]} | {r[0] for r in db.execute(
-        f"SELECT DISTINCT session_id FROM shots WHERE id IN ({_in(shots)})")}
-    lines = {r[0] for r in db.execute(f"SELECT id FROM lines WHERE shot_id IN ({_in(shots)})")}
-    for sess in sessions:
-        since = max((x["end"] for x in groups[:i] if x["session"] == sess), default=float("-inf"))
-        lines |= {r[0] for r in db.execute(
-            "SELECT id FROM lines WHERE shot_id IS NULL AND session_id = ? AND ts > ? AND ts <= ?",
-            (sess, since + CLOSER_SECONDS, g["end"] + CLOSER_SECONDS))}
-    lines = sorted(lines)
-    return [sides, cards, shots, lines]
-
-
-def _late_gimmes(db: sqlite3.Connection, groups: list[dict[str, Any]], owner: dict[int, int],
-                 table: str = "shots") -> dict[int, int]:
-    """shot_rounds' `owner`, with each putt conceded late (its result came in after the round was
-    recorded) given to that round, not the next one."""
-    for x in groups:
-        for sid, course in db.execute(f"SELECT id, course FROM {table} WHERE session_id = ? AND outcome = 'gimme'"
-                                      " AND ts > ? AND ts <= ?", (x["session"], x["end"], x["end"] + CLOSER_SECONDS)):
-            if (course or "").casefold() == (x["course"] or "").casefold():
-                owner[sid] = x["round"]
-    return owner
+    return [g["sides"], g["cards"], g["shots"], g["lines"]]
 
 
 def _ensure_excluded(db: sqlite3.Connection) -> None:
@@ -303,60 +271,6 @@ def _counts(played) -> bool:
     """As in the booth: nine holes or more, finished or quit after a full nine (a player's card has no
     round length, and a one-hole 19th scored per nine would read as a -9 round)."""
     return (played or 0) >= 9
-
-
-ROUND_GAP_SECONDS = 30   # a round's sides are stored a moment apart; separate rounds are minutes apart
-ROUND_SPAN_SECONDS = 8 * 3600   # no round takes longer: an older shot was in a round never recorded
-
-
-def round_groups(db: sqlite3.Connection, table: str = "rounds") -> tuple[list[dict[str, Any]], dict[int, int]]:
-    """The rounds as played: one per end of a round, whatever its number of sides (one row each in
-    `rounds`, or `table`). Returns them oldest first ({round, end, course}; `round` is the lowest row
-    id) and each row's round."""
-    groups: list[dict[str, Any]] = []
-    of_row: dict[int, int] = {}
-    for r in db.execute(f"SELECT id, session_id, ended_at, course FROM {table} ORDER BY ended_at, id"):
-        g = groups[-1] if groups else None
-        if not (g and g["session"] == r["session_id"] and g["course"] == r["course"]
-                and r["ended_at"] - g["end"] <= ROUND_GAP_SECONDS):
-            g = {"round": r["id"], "end": r["ended_at"], "course": r["course"], "session": r["session_id"]}
-            groups.append(g)
-        g["end"] = r["ended_at"]
-        of_row[r["id"]] = g["round"]
-    return groups, of_row
-
-
-def player_round_of(db: sqlite3.Connection):
-    """A lookup from a player_rounds row (session, course, end) to its round in `rounds` (round_groups'
-    id): both are stored as the round ends, a moment apart. None when no side of it was recorded."""
-    _, of_row = round_groups(db)
-    ends: dict[tuple, list[tuple[float, int]]] = {}
-    for rid, sess, end, course in db.execute("SELECT id, session_id, ended_at, course FROM rounds"):
-        ends.setdefault((sess, (course or "").casefold()), []).append((end, of_row[rid]))
-
-    def find(session_id: int, course: str | None, ended_at: float) -> int | None:
-        near = [(abs(end - ended_at), rnd) for end, rnd in ends.get((session_id, (course or "").casefold()), [])]
-        best = min(near, default=None)
-        return best[1] if best and best[0] <= ROUND_GAP_SECONDS else None
-    return find
-
-
-def shot_rounds(db: sqlite3.Connection, every: bool = False) -> dict[int, int]:
-    """Each shot's round: shots aren't stored with one, so it's the round that ended next after the
-    shot (and after the round before it), when that round was on the shot's course and ended within a
-    round's length of it (a booth restart mid-round keeps its shots). Shots of a round that was never
-    finished and recorded have none. `every` takes in the rounds left out of the stats too (connect's
-    views hide them)."""
-    groups, _ = round_groups(db, "main.rounds" if every else "rounds")
-    ends = [g["end"] for g in groups]
-    out = {}
-    for sid, ts, course in db.execute(f"SELECT id, ts, course FROM {'main.shots' if every else 'shots'}"):
-        i = bisect.bisect_left(ends, ts)
-        # (a course name read off the scorecard is in capitals)
-        if i < len(groups) and (groups[i]["course"] or "").casefold() == (course or "").casefold() \
-                and groups[i]["end"] - ts <= ROUND_SPAN_SECONDS:
-            out[sid] = groups[i]["round"]
-    return out
 
 
 def round_gimmes(db: sqlite3.Connection) -> dict[int, float]:

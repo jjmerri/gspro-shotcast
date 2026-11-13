@@ -79,7 +79,8 @@ them.
   `week_results` keeps pointing at a `rounds` row, which now carries the UUID. Existing columns,
   `shots.player` included, stay as they are. Every reader keeps working, and readers move to the new
   columns one at a time.
-- **`overrides`** and **`captured`**: edits (below).
+- **`overrides`** and **`captured`**: edits (below). They come in step 4, with their own schema
+  version (7), so schema 6 is the record alone.
 
 The cloud layer's tables and columns (below) come with their own migration, and their triggers with
 them, so a trigger never names a table that isn't there. (SQLite resolves every table a trigger
@@ -251,12 +252,10 @@ lost. Instead, edits and captured values are kept apart:
 
 ### Migrating an existing database
 
-A one-off step at the first start on the new version. It runs after the start-of-booth backup
-(`backup.py`) and the step 1 indexes, in `quiet = bookkeeping`.
+A one-off step at the first start on the new version (`round_record.migrate`). It runs after the
+start-of-booth backup (`backup.py`) and the step 1 indexes, in `quiet = bookkeeping`, in one
+transaction.
 
-0. **Give every existing shot and line a `uid`**, where it hasn't one already, so a retried
-   migration keeps the ones it made. Then check every row has one and they're unique, before
-   anything refers to them.
 1. **Assign rounds from the raw tables.** It doesn't go through `stats_web.connect`, which hides
    excluded and deleted rows. It uses one new unfiltered membership function, extracted from
    `round_groups`, `player_round_of`, `shot_rounds`, `_late_gimmes` and the line-matching half of
@@ -265,11 +264,14 @@ A one-off step at the first start on the new version. It runs after the start-of
 
    Each group becomes a record with `assigned = inferred`: `finished`, or `abandoned` where
    `complete = 0`. Deleted and excluded rounds become records too, with their marks as they are.
-2. **Make slots:** one per distinct player name in each round, with `matched_by = legacy` and
-   `player` from the roster's current matching.
+2. **Make slots:** one per distinct player name in each round, with `matched_by = legacy`. `player`
+   stays null: the roster isn't in the database, so the roster matching fills it later.
 3. **Make practice stretches** for every shot and line left over, split as the live rule splits
    them (a round's start, a session change, an idle gap).
-4. **Turn the page edits it can recognise into overrides.**
+4. **Give every shot and line a `uid`**, in the same pass that writes its record (and any left
+   over after). Then check every row has one, and build the unique index on it, which fails (and
+   rolls everything back) if a uid repeated.
+5. *(Schema 7, step 4)* **Turn the page edits it can recognise into overrides.**
    - Only the page ever sets `left_out` and `excluded` (`stats_web.set_left_out`,
      `set_round_excluded`, `delete_round`; `Store.set_left_out` is the same hand edit). So a
      non-zero value is an edit for certain, and what was captured was 0.
@@ -279,19 +281,19 @@ A one-off step at the first start on the new version. It runs after the start-of
    - That's safe, because after the migration no capture path writes the classification of a past
      round. `mark_league` and `mark_tournament` now act only on the live record. A later page edit of
      an old round's class becomes an ordinary override on top of today's value.
-5. **Set `user_version = 6`**, last, in the same transaction, after the `uid` check.
+6. **Set `user_version = 6`**, last, in the same transaction, after the `uid` check.
+
+On the 3-year scaled copy of a busy league (211k shots), steps 1–6 take about 11 s, once.
 
 **Reconciling after a downgrade.** An older version writes rows with no `record_uuid` and may finish
 a round whose earlier shots were already put in a practice stretch.
 
 - At the next start, the new version finds the rows with no `record_uuid`.
-  - It takes the time span they cover, widened by `ROUND_SPAN_SECONDS` on each side, since a round
-    joins shots across sessions.
-  - It reruns the membership function over every raw row in that span, assigned or not.
-  - If the result touches a record reaching outside the span, the span grows to cover it, and this
-    repeats until nothing new is touched.
-  - It compares the result with the records in the span that are `assigned = inferred` or practice.
-  - A group that matches an existing record keeps its UUID.
+  - It reruns the membership function over the whole history, assigned or not. (Growing a time span
+    until nothing new is touched gives the same answer; it's rare enough not to be worth it.)
+  - It compares the result with the records that are `assigned = inferred` or practice.
+  - A group keeps the UUID of the existing record holding most of its rows. A late side or card of a
+    round the booth recorded joins that live record.
   - Rows move between inferred records and practice stretches where the rerun says so.
   - Every record that gains or loses a row has its counters bumped (`quiet = 0`).
   - `live` records are never regrouped. Their membership came from the engine, not a guess.
