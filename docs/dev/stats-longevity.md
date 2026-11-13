@@ -175,6 +175,10 @@ together (`records_table`, `highlights_table`), and a tie goes to the earlier sh
 SQLite's plan put first). Same output as the previous build with that tie rule; on the 3-year copy a
 cold build went from 128 s to 103 s and a warm one to 79 s.
 
+`rounds()` runs once per context, but what it reads from the shots (tees, lengths, drives, putts,
+mulligans) doesn't depend on the context: that part is now worked out once a build. 3-year copy: cold
+93 s, warm 70 s.
+
 **First build in the background.** The tray's stats page used to build before the booth started, so
 the first start after an update (a cold build) held the booth up. It now builds on its own thread
 (`make_server(build_in_background=True)`) and the booth starts at once. Pages wait for that build; if

@@ -344,10 +344,8 @@ def _course_lengths(db: sqlite3.Connection) -> dict[tuple[str, str], tuple[int, 
     return {((course or "").casefold(), tee): (yards, holes) for course, tee, yards, holes in rows}
 
 
-def rounds(db: sqlite3.Connection, context: str | None = None,
-           gimmes: dict[int, float] | None = None) -> list[dict[str, Any]]:
-    out = []
-    gimmes = round_gimmes(db) if gimmes is None else gimmes
+def _round_facts(db: sqlite3.Connection) -> dict[str, Any]:
+    """What rounds() reads from the shots, the same whatever the context (worked out once a build)."""
     groups, of_row = round_groups(db)
     end_of = {g["round"]: g["end"] for g in groups}
     who: dict[int, set] = {}
@@ -395,7 +393,19 @@ def rounds(db: sqlite3.Connection, context: str | None = None,
             " AND (lie_before = 'green' OR (is_putt = 1 AND lie_before IS NULL))"):
         if (rnd := of_shot.get(sid)) is not None and (m := _HOLE.match(hole or "")):
             hole_putts[(rnd, player, int(m.group(1)))] += 1
-    sides = Counter(of_row.values())
+    return {"of_row": of_row, "end_of": end_of, "who": who, "tees": tees, "course_lengths": course_lengths,
+            "lengths": lengths, "started": started, "kept": kept, "left": left, "mulligans": mulligans,
+            "hole_putts": hole_putts, "sides": Counter(of_row.values())}
+
+
+def rounds(db: sqlite3.Connection, context: str | None = None,
+           gimmes: dict[int, float] | None = None) -> list[dict[str, Any]]:
+    out = []
+    gimmes = round_gimmes(db) if gimmes is None else gimmes
+    f = reuse(db, ("round_facts",), lambda: _round_facts(db))
+    of_row, end_of, who, tees, course_lengths = f["of_row"], f["end_of"], f["who"], f["tees"], f["course_lengths"]
+    lengths, started, kept, left, mulligans = f["lengths"], f["started"], f["kept"], f["left"], f["mulligans"]
+    hole_putts, sides = f["hole_putts"], f["sides"]
     for r in db.execute("SELECT * FROM rounds WHERE 1=1" + _ctx(context) + " ORDER BY ended_at DESC, id DESC"):
         card = _card(_json(r["scores"]), _json(r["hole_pars"]))
         rnd = of_row.get(r["id"], r["id"])
