@@ -98,10 +98,11 @@ def test_each_gspro_reads_its_own_config_list():
     assert screen.region("lie") == mine and screen.region("hole_box") == new
 
 
-@pytest.mark.parametrize("w,h", [(1920, 1080), (2560, 1600), (3440, 1440)])
+@pytest.mark.parametrize("w,h", [(1920, 1080), (2560, 1600)])
 def test_boxes_follow_gspro_scaling_with_the_width(w, h):
     """GSPro scales with the width and pins each panel to its edge, as the defaults assume: the boxes
-    placed from the labels land on the defaults, on 16:9, 16:10 and ultrawide alike."""
+    placed from the labels land on the defaults, on 16:9 and 16:10 alike. (Wider than 16:9 it scales
+    with the height instead; see Region.)"""
     s = w / sc.REF_W
 
     def place(x, y, pin):

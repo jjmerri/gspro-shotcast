@@ -4091,6 +4091,27 @@ def test_regions_adjust_to_the_screen_shape():
     # A region without an aspect, or in pixels, is used as written.
     assert Region(left=0.5, top=0.1, width=0.2, height=0.2).to_pixels(1920, 1080) == (960, 108, 384, 216)
     assert Region(left=5, top=10, width=20, height=20, aspect=1.6).to_pixels(1920, 1080) == (5, 10, 20, 20)
+    # Wider than 16:9 GSPro draws to the height: a box is as tall and as far down as on a 16:9 screen
+    # of the same height. Across, a box keeps its fractions, unless it says which side its panel is
+    # pinned to; then it's the 16:9 box, that far from that side (or the middle).
+    for reg in (top, bottom, middle):
+        wide, std = reg.to_pixels(2560, 1080), reg.to_pixels(1920, 1080)
+        assert wide[1::2] == std[1::2]
+        assert wide[0::2] == (round(0.5 * 2560), round(0.2 * 2560))
+    right = top.model_copy(update={"side": "right"})
+    l, _, w, _ = right.to_pixels(2560, 1080)
+    sl, _, sw, _ = right.to_pixels(1920, 1080)
+    assert w == sw and 2560 - l - w == 1920 - sl - sw
+    centre = top.model_copy(update={"side": "center"})
+    l, _, w, _ = centre.to_pixels(2560, 1080)
+    sl, _, sw, _ = centre.to_pixels(1920, 1080)
+    assert w == sw and l + w / 2 - 1280 == sl + sw / 2 - 960
+    # The player grid reflows on 21:9: five cards across, so slot 5 ends row 1 and slot 6 starts row 2.
+    from commentator.config import NEW_UI_REGIONS
+    slot = {i: NEW_UI_REGIONS[f"setup_slot_{i}"].to_pixels(3440, 1440) for i in range(1, 9)}
+    pitch = slot[2][0] - slot[1][0]
+    assert slot[5][1] == slot[1][1] and abs(slot[5][0] - slot[4][0] - pitch) <= 1
+    assert abs(slot[6][0] - slot[1][0]) <= 1 and slot[6][1] > slot[1][1] + slot[1][3]
     # Every default stays on screen on a tall 4:3 and a 21:9 ultrawide.
     for w, h in ((1600, 1200), (3440, 1440), (3840, 2160)):
         for reg in DEFAULT_REGIONS.values():

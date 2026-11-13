@@ -211,7 +211,8 @@ def mirrored_region(region: Region) -> Region:
     """The same box on the other side of the screen (fractional regions only)."""
     if max(region.left, region.top, region.width, region.height) > 1:
         return region
-    return region.model_copy(update={"left": round(1 - region.left - region.width, 4)})
+    side = {"left": "right", "right": "left"}.get(region.side, region.side)
+    return region.model_copy(update={"left": round(1 - region.left - region.width, 4), "side": side})
 
 
 def _corner_look(img: Image.Image) -> str | None:

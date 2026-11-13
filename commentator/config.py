@@ -15,6 +15,15 @@ class Region(BaseModel):
     edge it's pinned to) changes by (screen aspect / calibration aspect). Set `aspect` to the
     width/height ratio the fractions were measured at and `anchor` to the pinned edge, and the box is
     adjusted to the screen it's read on. Without `aspect` the fractions are used as they are.
+
+    Wider than 16:9 (WIDEST_HUD) GSPro scales to the height instead: the HUD is laid out as on a 16:9
+    screen as tall as this one, each panel pinned to its side. So there the box keeps its 16:9 height.
+    Across, a panel only narrows toward its side, so a generous box reaching to that edge still holds
+    it as it is; a tight box set `side` (the edge its panel is pinned to, or "center") narrows with it.
+    A box in the setup screen's player grid sets `cell` (its 0-based place in the 4-wide grid, and the
+    grid's column and row pitch as fractions): wider than 16:9 the cards keep their size and the grid,
+    still centered, takes a column more for each pitch of extra width (5 across on 21:9), so the box
+    follows its card to its new place.
     """
 
     left: float
@@ -23,27 +32,52 @@ class Region(BaseModel):
     height: float
     anchor: Literal["top", "bottom", "middle"] = "top"
     aspect: float | None = None
+    side: Literal["left", "right", "center"] | None = None
+    cell: tuple[int, float, float] | None = None
 
     def to_pixels(self, screen_w: int, screen_h: int) -> tuple[int, int, int, int]:
         if max(self.left, self.top, self.width, self.height) <= 1:
-            top, height = self.top, self.height
+            left, width, top, height = self.left, self.width, self.top, self.height
             if self.aspect and screen_h:
-                r = (screen_w / screen_h) / self.aspect
+                shape = screen_w / screen_h
+                r = min(shape, WIDEST_HUD) / self.aspect
+                if shape > WIDEST_HUD and self.side:
+                    k = WIDEST_HUD / shape
+                    width = self.width * k
+                    mid = self.left + self.width / 2 - 0.5
+                    if self.cell:
+                        i, across, down = self.cell
+                        n = 4 + int((1 / k - 1) / across)
+                        mid += ((i % n - (n - 1) / 2) - (i % 4 - 1.5)) * across
+                        top += (i // n - i // 4) * down
+                    if self.side == "left":
+                        left = self.left * k
+                    elif self.side == "right":
+                        left = 1 - (1 - self.left - self.width) * k - width
+                    else:
+                        left = 0.5 + mid * k - width / 2
                 height = min(1.0, self.height * r)
                 if self.anchor == "top":
-                    top = self.top * r
+                    top = top * r
                 elif self.anchor == "bottom":
-                    top = 1 - (1 - self.top - self.height) * r - height
+                    top = 1 - (1 - top - self.height) * r - height
                 else:
-                    top = 0.5 + (self.top + self.height / 2 - 0.5) * r - height / 2
+                    top = 0.5 + (top + self.height / 2 - 0.5) * r - height / 2
                 top = min(max(top, 0.0), 1 - height)
-            return (round(self.left * screen_w), round(top * screen_h),
-                    round(self.width * screen_w), round(height * screen_h))
+            return (round(left * screen_w), round(top * screen_h),
+                    round(width * screen_w), round(height * screen_h))
         return int(self.left), int(self.top), int(self.width), int(self.height)
 
 
 # The aspect (width / height) the HUD defaults were measured at: GSPro on a 16:10 screen.
 HUD_ASPECT = 1.6
+# The widest shape GSPro scales its HUD to the width at; wider, it scales to the height (measured
+# 2026-11-12 on 2560x1080 and 3440x1440: every panel the size and place it has at 16:9 from its edge).
+WIDEST_HUD = 16 / 9
+
+
+# The player grid's column and row pitch on 3.1's setup screen (see Region.cell).
+_SLOT_PITCH = (0.235, 0.264)
 
 
 # Generous boxes that fit the GSPro 3.1.x release HUD, measured on a 16:10 screen and adjusted to other
@@ -81,31 +115,43 @@ DEFAULT_REGIONS = {
     # your name. Boxes are kept tight to each name pill: OCR returns nothing from a box that also
     # swallows the pill border or the dropdown chevron. GSPro scales this screen with the screen's
     # width, pinned to the top (the Play button to the bottom), so the boxes adjust to other screen
-    # shapes the way the HUD boxes do.
+    # shapes the way the HUD boxes do. These boxes are tight, so each says which side its panel is pinned
+    # to: wider than 16:9 they narrow toward it (the tabs, the slot grid and the tabs' panels toward the
+    # middle, the Play button toward the right), and the slot grid reflows (Region.cell). Checked on
+    # 3.59 at 2560x1080 and 3440x1440 (2026-11-12); 3.1 is assumed to lay out the same.
     # An empty slot shows a centered "+" add-player button (not the name pill), so the boxes are kept
     # tight to the top-of-card pill and the watcher drops any read without a letter (see _watch_setup).
-    "setup_course": Region(left=0.797, top=0.922, width=0.165, height=0.064, anchor="bottom", aspect=HUD_ASPECT),
-    "setup_slot_1": Region(left=0.070, top=0.254, width=0.139, height=0.050, aspect=HUD_ASPECT),
-    "setup_slot_2": Region(left=0.305, top=0.254, width=0.139, height=0.050, aspect=HUD_ASPECT),
-    "setup_slot_3": Region(left=0.540, top=0.254, width=0.139, height=0.050, aspect=HUD_ASPECT),
-    "setup_slot_4": Region(left=0.778, top=0.252, width=0.135, height=0.054, aspect=HUD_ASPECT),
-    "setup_slot_5": Region(left=0.070, top=0.518, width=0.139, height=0.050, aspect=HUD_ASPECT),
-    "setup_slot_6": Region(left=0.305, top=0.518, width=0.139, height=0.050, aspect=HUD_ASPECT),
-    "setup_slot_7": Region(left=0.540, top=0.518, width=0.139, height=0.050, aspect=HUD_ASPECT),
-    "setup_slot_8": Region(left=0.772, top=0.518, width=0.139, height=0.050, aspect=HUD_ASPECT),
+    "setup_course": Region(left=0.797, top=0.922, width=0.165, height=0.064, anchor="bottom", aspect=HUD_ASPECT,
+                           side="right"),
+    "setup_slot_1": Region(left=0.070, top=0.254, width=0.139, height=0.050, aspect=HUD_ASPECT,
+                           side="center", cell=(0, *_SLOT_PITCH)),
+    "setup_slot_2": Region(left=0.305, top=0.254, width=0.139, height=0.050, aspect=HUD_ASPECT,
+                           side="center", cell=(1, *_SLOT_PITCH)),
+    "setup_slot_3": Region(left=0.540, top=0.254, width=0.139, height=0.050, aspect=HUD_ASPECT,
+                           side="center", cell=(2, *_SLOT_PITCH)),
+    "setup_slot_4": Region(left=0.778, top=0.252, width=0.135, height=0.054, aspect=HUD_ASPECT,
+                           side="center", cell=(3, *_SLOT_PITCH)),
+    "setup_slot_5": Region(left=0.070, top=0.518, width=0.139, height=0.050, aspect=HUD_ASPECT,
+                           side="center", cell=(4, *_SLOT_PITCH)),
+    "setup_slot_6": Region(left=0.305, top=0.518, width=0.139, height=0.050, aspect=HUD_ASPECT,
+                           side="center", cell=(5, *_SLOT_PITCH)),
+    "setup_slot_7": Region(left=0.540, top=0.518, width=0.139, height=0.050, aspect=HUD_ASPECT,
+                           side="center", cell=(6, *_SLOT_PITCH)),
+    "setup_slot_8": Region(left=0.772, top=0.518, width=0.139, height=0.050, aspect=HUD_ASPECT,
+                           side="center", cell=(7, *_SLOT_PITCH)),
     # The PLAYERS tab header. It's a solid white pill only while that tab is selected, so its brightness
     # says the slot boxes hold player names (not Match Settings / Holes labels). Pixel check, no OCR.
-    "setup_players_tab": Region(left=0.305, top=0.105, width=0.130, height=0.045, aspect=HUD_ASPECT),
+    "setup_players_tab": Region(left=0.305, top=0.105, width=0.130, height=0.045, aspect=HUD_ASPECT, side="center"),
     # The HOLES tab header (a white pill while selected) and the FRONT 9 / BACK 9 checkboxes on that
     # tab (white when checked, an outline when not). Pixel checks, no OCR: they say which nines are in
     # the round.
-    "setup_holes_tab": Region(left=0.570, top=0.108, width=0.120, height=0.040, aspect=HUD_ASPECT),
+    "setup_holes_tab": Region(left=0.570, top=0.108, width=0.120, height=0.040, aspect=HUD_ASPECT, side="center"),
     # The MATCH SETTINGS tab header (a white pill while selected) and its GAME MODE value. Only a
     # SCRAMBLE is read from it: leagues leave GSPro on stroke play for their other formats.
-    "setup_match_tab": Region(left=0.440, top=0.108, width=0.120, height=0.040, aspect=HUD_ASPECT),
-    "setup_game_mode": Region(left=0.360, top=0.285, width=0.170, height=0.042, aspect=HUD_ASPECT),
-    "setup_front9_box": Region(left=0.074, top=0.221, width=0.018, height=0.028, aspect=HUD_ASPECT),
-    "setup_back9_box": Region(left=0.074, top=0.491, width=0.018, height=0.028, aspect=HUD_ASPECT),
+    "setup_match_tab": Region(left=0.440, top=0.108, width=0.120, height=0.040, aspect=HUD_ASPECT, side="center"),
+    "setup_game_mode": Region(left=0.360, top=0.285, width=0.170, height=0.042, aspect=HUD_ASPECT, side="center"),
+    "setup_front9_box": Region(left=0.074, top=0.221, width=0.018, height=0.028, aspect=HUD_ASPECT, side="center"),
+    "setup_back9_box": Region(left=0.074, top=0.491, width=0.018, height=0.028, aspect=HUD_ASPECT, side="center"),
     # GSPro's course-load screen shows the course name big and centered up top. The watcher fires the
     # opener when this matches the course that was set up (a positive "Play was pressed and it's
     # loading" signal), so a window popping up over the setup screen can't trigger a spurious opener.
@@ -119,20 +165,22 @@ DEFAULT_REGIONS = {
 # fit DEFAULT_REGIONS, but the setup screens moved: these replace the defaults while the booth sees that GSPro (Screen.ui "new"),
 # unless the config sets the region itself. Measured on 1600x1002 captures of 3.59.11.
 _SLOT_X, _SLOT_Y = (0.050, 0.2845, 0.519, 0.7535), (0.212, 0.4815)
+_NEW_SLOT_PITCH = (_SLOT_X[1] - _SLOT_X[0], _SLOT_Y[1] - _SLOT_Y[0])
 NEW_UI_REGIONS = {
     # A card's name pill sits in its coloured header bar; the box stops short of the chevron.
-    **{f"setup_slot_{row * 4 + col + 1}": Region(left=x, top=y, width=0.145, height=0.040, aspect=HUD_ASPECT)
+    **{f"setup_slot_{row * 4 + col + 1}": Region(left=x, top=y, width=0.145, height=0.040, aspect=HUD_ASPECT,
+                                                 side="center", cell=(row * 4 + col, *_NEW_SLOT_PITCH))
        for row, y in enumerate(_SLOT_Y) for col, x in enumerate(_SLOT_X)},
     # The tabs (PLAYERS / MATCH / HOLES) mark the selected one with a blue underline, not a white
     # pill: these boxes are just the underline's strip, read for blue (Tone.blue).
-    "setup_players_tab": Region(left=0.315, top=0.1345, width=0.110, height=0.005, aspect=HUD_ASPECT),
-    "setup_match_tab": Region(left=0.445, top=0.1345, width=0.110, height=0.005, aspect=HUD_ASPECT),
-    "setup_holes_tab": Region(left=0.575, top=0.1345, width=0.110, height=0.005, aspect=HUD_ASPECT),
+    "setup_players_tab": Region(left=0.315, top=0.1345, width=0.110, height=0.005, aspect=HUD_ASPECT, side="center"),
+    "setup_match_tab": Region(left=0.445, top=0.1345, width=0.110, height=0.005, aspect=HUD_ASPECT, side="center"),
+    "setup_holes_tab": Region(left=0.575, top=0.1345, width=0.110, height=0.005, aspect=HUD_ASPECT, side="center"),
     # MATCH tab, ROUND panel: the Game Mode dropdown's value, short of its chevron.
-    "setup_game_mode": Region(left=0.155, top=0.280, width=0.115, height=0.030, aspect=HUD_ASPECT),
+    "setup_game_mode": Region(left=0.155, top=0.280, width=0.115, height=0.030, aspect=HUD_ASPECT, side="center"),
     # HOLES tab: the FRONT and BACK checkboxes (white with a tick when checked, an outline when not).
-    "setup_front9_box": Region(left=0.077, top=0.348, width=0.012, height=0.018, aspect=HUD_ASPECT),
-    "setup_back9_box": Region(left=0.077, top=0.632, width=0.012, height=0.018, aspect=HUD_ASPECT),
+    "setup_front9_box": Region(left=0.077, top=0.348, width=0.012, height=0.018, aspect=HUD_ASPECT, side="center"),
+    "setup_back9_box": Region(left=0.077, top=0.632, width=0.012, height=0.018, aspect=HUD_ASPECT, side="center"),
     # A scramble's pick screen (GSPro 4.1): a card per ball, centred low in the frame. Wide enough for
     # four players' cards.
     "pick_panel": Region(left=0.22, top=0.60, width=0.56, height=0.21, anchor="middle", aspect=HUD_ASPECT),
