@@ -98,10 +98,20 @@ def _distances(db: sqlite3.Connection) -> dict[tuple, dict[int, list[float]]]:
     return out
 
 
-def _round_layout(layouts: dict[tuple, dict[int, list[float]]], course: str, sid: int, ended: float | None):
+def _batches(layouts: dict[tuple, dict[int, list[float]]]) -> dict[tuple, list[tuple]]:
+    """The batch keys of `layouts` per (course, session), in their order there."""
+    out: dict[tuple, list[tuple]] = {}
+    for k in layouts:
+        if len(k) == 3 and k[2] is not None:
+            out.setdefault(k[:2], []).append(k)
+    return out
+
+
+def _round_layout(layouts: dict[tuple, dict[int, list[float]]], batches: dict[tuple, list[tuple]],
+                  course: str, sid: int, ended: float | None):
     """The tee-to-pin distances logged for this round: the session's batch logged nearest its end, else
     the session's, else the course's."""
-    batches = [k for k in layouts if len(k) == 3 and k[0] == course and k[1] == sid and k[2] is not None]
+    batches = batches.get((course, sid), [])
     if ended is not None and batches:
         near = min(batches, key=lambda k: abs(k[2] - ended))
         if abs(near[2] - ended) <= LAYOUT_MATCH_S:
@@ -182,6 +192,7 @@ def indexes(db: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     history, one point per counted round: {date, course, holes, tee, differential, index, mulligans},
     and the same without the rounds with a counted mulligan, under `without_mulligans`."""
     tees, layouts = _tees(db), _distances(db)
+    batches = _batches(layouts)
     rows = db.execute("SELECT pr.id, pr.player, pr.session_id, pr.ended_at, pr.course, pr.fmt, pr.scores, pr.hole_pars, s.date"
                       " FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
                       " WHERE pr.excluded = 0 ORDER BY pr.ended_at, pr.id").fetchall()
@@ -196,7 +207,7 @@ def indexes(db: sqlite3.Connection) -> dict[str, dict[str, Any]]:
         if len(holes) < 9:
             continue
         key = (course or "").casefold()
-        tee = pick_tee(tees.get(key, []), _round_layout(layouts, key, sid, ended), holes[:18])
+        tee = pick_tee(tees.get(key, []), _round_layout(layouts, batches, key, sid, ended), holes[:18])
         cards.append((player, course, date, sc, pa, tee, mulligans.get(rid, 0)))
     every = _index_of(cards)
     clean = _index_of([c for c in cards if not c[6]])
@@ -208,14 +219,18 @@ def _index_of(cards: list[tuple]) -> dict[str, dict[str, Any]]:
     diffs: dict[str, list[float]] = {}
     played_holes: dict[str, int] = {}
     out: dict[str, dict[str, Any]] = {}
+    known: dict[str, float | None] = {}   # each player's index until their next card
 
     def current(player: str) -> float | None:
-        return index_from(diffs.get(player, [])) if played_holes.get(player, 0) >= FIRST_HOLES else None
+        if player not in known:
+            known[player] = index_from(diffs.get(player, [])) if played_holes.get(player, 0) >= FIRST_HOLES else None
+        return known[player]
 
     for player, course, date, sc, pa, tee, mulls in cards:
         diff, counted = _differential(sc, pa, tee, current(player))
         diffs.setdefault(player, []).append(diff)
         played_holes[player] = played_holes.get(player, 0) + counted
+        known.pop(player, None)
         p = out.setdefault(player, {"index": None, "rounds": 0, "history": []})
         p["index"], p["rounds"] = current(player), len(diffs[player])
         p["history"].append({"date": date, "course": course, "holes": counted, "tee": tee and tee["tee"],
