@@ -4,6 +4,7 @@ Everything is computed here so the booth never has to count: the model is told "
 fairways", never handed a list of shots to tally.
 """
 
+import copy
 import difflib
 import itertools
 import logging
@@ -334,8 +335,24 @@ class Round:
         """A round started as practice found to be this league week after all (set up for 18, quit
         after the week's nine): the league's teams, format (`scheduled_format` overriding the
         schedule's, as config's round_format does), Squabbit card and strokes, over `holes`."""
-        self.is_league, self.schedule = True, entry
+        self._league_sides(entry, scheduled_format)
         self.ctp_holes = [int(h) for h in entry.get("ctp_holes") or []]
+        self.holes = holes   # the strokes are for the holes the week plays
+        self.sides = self._build_sides()
+        self.set_holes(holes, confirmed=True)
+        if not self.course_card and not self.week_card:
+            self._allocate_hole_strokes()   # (set_holes only re-allocates from a card)
+
+    def league_view(self, entry: dict, scheduled_format: str | None = None) -> "Round":
+        """This practice round as league week `entry` would have it (its league teams and format), for
+        posting its scores as they're played: it shares this round's scores and changes nothing of it."""
+        v = copy.copy(self)
+        v.par, v.index = dict(self.par), dict(self.index)
+        v._league_sides(entry, scheduled_format)
+        return v
+
+    def _league_sides(self, entry: dict, scheduled_format: str | None) -> None:
+        self.is_league, self.schedule = True, entry
         self.week_card = self.league.week_card(entry.get("week"))
         self.teams_known = False
         teams: dict[str, list[str]] = {}
@@ -350,11 +367,7 @@ class Round:
             self.format, self.format_warning = "scramble", None
         elif was == "alternate" and (alt := self._resolve_format("alternate"))[0] == "alternate":
             self.format, self.format_warning = alt   # GSPro's alternate shot mode (play_alternate)
-        self.holes = holes   # the strokes are for the holes the week plays
         self.sides = self._build_sides()
-        self.set_holes(holes, confirmed=True)
-        if not self.course_card and not self.week_card:
-            self._allocate_hole_strokes()   # (set_holes only re-allocates from a card)
 
     def rename_player(self, old: str, new: str) -> bool:
         """A guest admitted under a misread of their name: every record of the round goes to the name

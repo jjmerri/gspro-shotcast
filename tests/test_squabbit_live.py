@@ -366,6 +366,110 @@ def test_the_round_is_posted_once_the_players_say_yes(tmp_path, monkeypatch):
     asyncio.run(go())
 
 
+def test_a_round_set_up_for_18_in_a_league_booking_is_asked_on_the_weeks_first_hole(tmp_path, monkeypatch):
+    import commentator.popup as popup
+    import commentator.squabbit as sq
+    from datetime import datetime
+
+    from commentator.booking import Booking
+
+    asked = []
+
+    class Q:
+        def __init__(self, title, detail, yes, no, on_answer, where=None):
+            asked.append(self)
+            self.on_answer = on_answer
+
+        def show(self):
+            return self
+
+        def close(self):
+            pass
+
+    fake = _client()
+    fake.tournaments = lambda lid: [{"_id": "T", "name": "Week 6 - Best Ball"}]
+    fake.player_rounds = lambda tid: [{"_id": "Ra", "userId": "a", "scorecardId": "S"},
+                                      {"_id": "Rb", "userId": "b", "scorecardId": "S"}]
+    fake.tournament_rounds = lambda tid: [{"_id": "TR", "startingHole": 10, "numHoles": 9}]
+    fake.league_by_invite = lambda code: {"_id": "L"}
+
+    class Client:
+        def __init__(self, *a):
+            pass
+
+        def __enter__(self):
+            return fake
+
+        def __exit__(self, *exc):
+            pass
+
+    monkeypatch.setattr(popup, "Question", Q)
+    monkeypatch.setattr(sq, "SquabbitClient", Client)
+
+    async def go():
+        e = _engine(tmp_path, League(LEAGUE_DATA))
+        e.cfg.squabbit.enabled = True
+        e.cfg.source.type = "gspro"
+        e.cfg.db_path = str(tmp_path / "season.db")
+        kind = ["League Week 6"]
+        e.bookings = SimpleNamespace(at=lambda: Booking(datetime.now(), datetime.now(), kind[0]))
+        # Week 6 is the back nine; they set up all 18 and warm up on the front.
+        r = Round(league=e.league, gspro_players=["Mike", "Sarah"], course="Test Links", scheduled_format=None,
+                  holes=18, start_hole=1, is_league=False)
+        r.league_if_holes = LEAGUE_DATA["schedule"][0]
+        e.round = r
+        r.log_scores = {"Mike": {9: 4}, "Sarah": {9: 5}}
+        r.seq = 9
+        e._squabbit_kick()
+        assert e._sq is None                 # the front nine isn't the week's
+        r.seq = 10
+        kind[0] = "Practice"
+        e._squabbit_kick()
+        assert e._sq is None                 # a practice booking: not a league round
+        kind[0] = "League Week 6"
+        e._squabbit_kick()
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if asked:
+                break
+        assert e._sq["status"] == "asking" and r.ctp_holes == [12, 15]
+        r.log_scores = {"Mike": {9: 4, 10: 5}, "Sarah": {9: 5, 10: 4}}
+        asked[0].on_answer(True)
+        await asyncio.sleep(0.05)
+        await e._sq["task"]
+        assert fake.docs["rounds/Ra"]["holeScoresV2"] == {"10": 5}
+        assert fake.docs["rounds/Rb"]["holeScoresV2"] == {"10": 4}
+
+        # A booth restarted mid-round joins it as league on all 18 (the setup screen's gone): still the back nine.
+        joined = Round(league=e.league, gspro_players=["Mike", "Sarah"], course="Test Links",
+                       scheduled_format="Best Ball", holes=18, start_hole=1, schedule=LEAGUE_DATA["schedule"][0])
+        joined.seq = 12
+        assert e._squabbit_week(joined) == (LEAGUE_DATA["schedule"][0], 9)
+
+    asyncio.run(go())
+
+
+def test_a_practice_round_scores_on_squabbit_as_its_league_week_would():
+    league = League(LEAGUE_DATA)
+    alternate = {**LEAGUE_DATA["schedule"][0], "format": "Alternate Shot"}
+    # One GSPro profile for an alternate shot team: practice has it as Mike's own ball.
+    r = Round(league=league, gspro_players=["Mike"], course="Test Links", scheduled_format=None,
+              holes=18, start_hole=1, is_league=False)
+    r.log_scores = {"Mike": {10: 4}}
+    assert team_scores(r, "Aces", UIDS) == {"a": {10: 4}}
+    v = r.league_view(alternate)
+    assert team_scores(v, "Aces", UIDS) == {"a": {10: 4}, "b": {10: 4}}
+    assert team_ctp(v, "Aces", UIDS, league.match_player, [Mark(12, "Mike", 3.0)]) == {}   # no one's mark
+    assert not r.is_league and r.format is None and team_scores(r, "Aces", UIDS) == {"a": {10: 4}}
+    # A practice scramble's teams are GSPro's ("Mike & Sarah"); the week's are the league's.
+    r = Round(league=league, gspro_players=["Mike", "Sarah"], course="Test Links", scheduled_format=None,
+              holes=18, start_hole=1, is_league=False)
+    r.play_scramble([["Mike", "Sarah"]])
+    r.log_scores = {"Sarah": {10: 3}}
+    assert {s.team for s in r.sides} == {"Mike & Sarah"}
+    assert team_scores(r.league_view(LEAGUE_DATA["schedule"][0]), "Aces", UIDS) == {"a": {10: 3}, "b": {10: 3}}
+
+
 def test_a_reopened_hole_is_taken_back_and_the_round_unfinished(tmp_path):
     live, c, t = LiveSync(tmp_path / "s.json"), _client(), _target()
     live.push(c, t, {"a": {1: 5, 2: 4, 3: 3}}, {})

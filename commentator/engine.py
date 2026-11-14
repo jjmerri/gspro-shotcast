@@ -3689,7 +3689,10 @@ class Engine:
             return facts
         if shot_number == 2 and hud and hud.lie == "green" and hud.to_pin and player \
                 and not getattr(hud, "_wrong_green", False):
-            who, tee = self._ctp_tee_shot(r, player)
+            sq = self._sq
+            # Whose tee shot the way the league week has it: a practice round only for its holes has
+            # GSPro's teams, not the league's (see _squabbit_view).
+            who, tee = self._ctp_tee_shot(self._squabbit_view(r, sq) if sq and sq["round"] == r.id else r, player)
             lead = self._ctp_leader(r, hole, exclude=who)
             group = self._ctp_group_facts(r, exclude=who)
             mine = to_yards(hud.to_pin)
@@ -8213,6 +8216,7 @@ class Engine:
             if self.current_par:
                 r.par.setdefault(r.seq, self.current_par)
             log.info("Round %s: hole %s of %s", r.id, r.seq, r.holes)
+            self._squabbit_kick()   # a round set up for more than the week's holes is asked on its first
             if first_done and r.seq == 2:
                 self._drop_no_shows(r)
             self._score_hole_started(r)
@@ -8418,9 +8422,36 @@ class Engine:
         """Roster player -> Squabbit user id."""
         return {p: i for p, info in self.league.player_info.items() if (i := (info or {}).get("squabbit_id"))}
 
+    def _squabbit_week(self, r: Round) -> tuple[dict, int] | None:
+        """The league week this round goes on Squabbit as, and how many of its holes come before the
+        week's first (0 for a league round). A practice round only for its holes (set up for 18 on a
+        nine-hole week) counts too while the sim's booked for league: from the tee of the week's first
+        hole, so a back nine week's warm-up front nine is left out."""
+        if r.is_league:
+            entry = r.schedule
+        else:
+            entry = r.league_if_holes
+            b = self.bookings.at() if self.bookings else None
+            if not entry or b is None or not b.league:
+                return None
+        if not entry.get("week") or r.start_hole_assumed and not r.is_league:
+            return None
+        # A league round a restarted booth joined on 18 holes (the setup screen's gone) has one too.
+        offset = 0 if r.start_hole_assumed else (entry.get("start_hole") or r.start_hole) - r.start_hole
+        if offset < 0 or r.seq <= offset or (
+                not r.is_league and offset + (entry.get("hole_count") or r.holes) > r.holes):
+            return None
+        return entry, offset
+
+    def _squabbit_view(self, r: Round, s: dict) -> Round:
+        """The round as its league week scores it: a practice round only for its holes takes the week's
+        teams and format (one profile for an alternate shot team is both partners)."""
+        return r if r.is_league else r.league_view(s["entry"], self.cfg.commentary.round_format)
+
     def _squabbit_kick(self) -> None:
-        """A league round's scores or CTP marks may have changed: the first time, find the team's card
-        and ask on screen; once they've said yes, post whatever's new (in the background)."""
+        """A league round's scores or CTP marks may have changed (or a round set up for more than the
+        week's holes reached its first, see _squabbit_week): the first time, find the team's card and
+        ask on screen; once they've said yes, post whatever's new (in the background)."""
         r = self.round
         s = self._sq
         if r is not None and s is not None and s["round"] != r.id:
@@ -8432,14 +8463,18 @@ class Engine:
                 s["ctp_q"][1].close()
             s["status"] = "off"
             self._sq = s = None
-        if not r or r.ended or not r.is_league or r.is_tournament or not self._squabbit_live_on():
+        if not r or r.ended or r.is_tournament or not self._squabbit_live_on():
             return
         if s is None:
-            if not r.schedule.get("week") or not any(side.team for side in r.sides):
-                return   # not placed yet; a later kick tries again
+            if (week := self._squabbit_week(r)) is None:
+                return   # not placed yet (or not up to the week's holes); a later kick tries again
+            entry, offset = week
+            if not any(side.team for side in self._squabbit_view(r, {"entry": entry}).sides):
+                return
             self._sq = {"round": r.id, "status": "finding", "targets": [], "question": None,
                         "dirty": False, "task": None, "last": None, "seen": {},
-                        "ctp_q": None, "ctp_queue": [], "ctp_asked": set()}
+                        "ctp_q": None, "ctp_queue": [], "ctp_asked": set(),
+                        "entry": entry, "offset": offset}
             self._bg(self._squabbit_offer(r, self._sq))
             return
         if s["status"] == "on":
@@ -8503,8 +8538,8 @@ class Engine:
         from .squabbit import SquabbitClient
         from .squabbit_live import LiveSync
 
-        week = int(r.schedule["week"])
-        teams = sorted({side.team for side in r.sides if side.team})
+        week = int(s["entry"]["week"])
+        teams = sorted({side.team for side in self._squabbit_view(r, s).sides if side.team})
         uid_of = self._squabbit_uids()
         if self._sq_live is None:
             self._sq_live = LiveSync(Path(self.cfg.db_path).with_name("squabbit_live.json"))
@@ -8547,6 +8582,9 @@ class Engine:
             s["status"] = "off"
             return
         s["targets"] = targets
+        if not r.is_league and not r.ctp_holes:
+            # Played as practice for its holes: the week's closest-to-the-pin tee shots are still read.
+            r.ctp_holes = [int(h) for h in s["entry"].get("ctp_holes") or []]
         if all(live.answer(t) for t in targets):   # said yes before the booth restarted
             log.info("Squabbit live: posting %s's week %s round (said yes earlier)", " and ".join(teams), week)
             s["status"] = "on"
@@ -8593,20 +8631,32 @@ class Engine:
         while s["dirty"] and s["status"] == "on" and s["targets"] and s is self._sq:
             s["dirty"] = False
             uid_of = self._squabbit_uids()
-            found = self._ctp_marks(r)
+            shared = {side.label for side in r.sides if len(side.players) > 1}   # a team's ball: no one's mark
+            found = [m for m in self._ctp_marks(r) if m.who not in shared]
+            view = self._squabbit_view(r, s)
+            off = s["offset"]
             jobs = []
             for t in s["targets"]:
-                if r.hole_number(1) is None:
+                if r.hole_number(1 + off) is None:
                     continue   # which nine isn't confirmed yet: the next kick posts it
-                if r.hole_number(1) != t.start_hole:   # GSPro's log moved the round to the other nine
+                if r.hole_number(1 + off) != t.start_hole:   # GSPro's log moved the round to the other nine
                     if t.scorecard_id not in s.setdefault("wrong_nine", set()):
                         s["wrong_nine"].add(t.scorecard_id)
-                        log.warning("Squabbit live: this round starts on hole %s, %s's week card on %s; "
-                                    "not posting it", r.hole_number(1), t.team, t.start_hole)
+                        log.warning("Squabbit live: this round's week holes start on hole %s, %s's week card on "
+                                    "%s; not posting it", r.hole_number(1 + off), t.team, t.start_hole)
                     continue
-                scores: dict[str, dict[int, int | None]] = team_scores(r, t.team, uid_of)
+                # The round's holes as the week card's: only the week's (a front nine week set up for 18
+                # stops at 9; a back nine week's warm-up front nine isn't on it).
+                week_seq = lambda seq: seq - off if 1 <= seq - off <= t.num_holes else None
+                scores: dict[str, dict[int, int | None]] = {
+                    uid: {q: v for seq, v in by.items() if (q := week_seq(seq)) is not None}
+                    for uid, by in team_scores(view, t.team, uid_of).items()}
+                scores = {uid: by for uid, by in scores.items() if by}
                 marks: dict[tuple[int, str], float] = {}
-                for (seq, uid), m in team_ctp(r, t.team, uid_of, self.league.match_player, found).items():
+                for (seq, uid), m in team_ctp(view, t.team, uid_of, self.league.match_player, found).items():
+                    if (seq := week_seq(seq)) is None:
+                        continue
+                    m = replace(m, seq=seq)
                     # Once the player's done the hole (GSPro's log has the tee shot's finish by then), and
                     # only where the week's event has a contest.
                     if t.hole(seq) not in t.ctp or not (r.ended or scores.get(uid, {}).get(seq) is not None):
