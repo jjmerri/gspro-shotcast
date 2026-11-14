@@ -350,54 +350,98 @@ def _round_facts(db: sqlite3.Connection) -> dict[str, Any]:
     """What rounds() reads from the shots, the same whatever the context (worked out once a build)."""
     groups, of_row = round_groups(db)
     end_of = {g["round"]: g["end"] for g in groups}
-    who: dict[int, set] = {}
-    named = dict(db.execute("SELECT id, player FROM shots WHERE player IS NOT NULL AND player != 'unknown'").fetchall())
-    of_shot = shot_rounds(db)
     from . import hole_replay
-    tees = hole_replay.round_tees(db, of_shot)
-    course_lengths = _course_lengths(db)
-    for sid, rnd in of_shot.items():
-        if sid in named:
-            who.setdefault(rnd, set()).add(named[sid])
-    # Each player's hole lengths from their tees, as GSPro's hole label read with their shots gave them
-    # (the most read, past a misread): a side's distance when every hole on its card has one.
+    tees = hole_replay.round_tees(db, shot_rounds(db))
+    who: dict[int, set] = {}
     lengths: dict[tuple[int, str], dict[int, Counter]] = {}
-    for sid, player, hole in db.execute("SELECT id, player, hole FROM shots WHERE hole LIKE 'Hole %yards'"
-                                        " AND player IS NOT NULL"):
-        if (rnd := of_shot.get(sid)) is not None and (m := _HOLE_YARDS.match(hole)):
-            lengths.setdefault((rnd, player), {}).setdefault(int(m.group(1)), Counter())[int(m.group(2))] += 1
-    started: dict[int, float] = {}   # each round's first shot, for the page's video links
-    for sid, ts in db.execute("SELECT id, ts FROM shots"):
-        if (rnd := of_shot.get(sid)) is not None and (rnd not in started or ts < started[rnd]):
-            started[rnd] = ts
-    # Each round's longest drive, from its drives in the stats: the one stored at the round's end misses
-    # a drive left out since, a total read after the swing, and drives a later rule counts (no club read).
+    started: dict[int, float] = {}
     kept: dict[tuple, float | None] = {}
     left: set[tuple] = set()
-    for sid, player, d, out_ in db.execute(f"SELECT id, player, {_DRIVE}, left_out FROM shots WHERE {_TEE_DRIVER}"
-                                           f" AND mulligan = 0 AND {_DRIVE} IS NOT NULL"):
-        key = (of_shot.get(sid), player)
-        if out_:
-            left.add(key)
-        else:
-            kept[key] = max(kept.get(key) or 0, d)
-    # Each player's mulligans in each round, but a misread putt (handicap_index.COUNTED_MULLIGAN).
     mulligans: dict[int, Counter] = {}
-    for sid, player in db.execute(f"SELECT id, player FROM shots WHERE {handicap_index.COUNTED_MULLIGAN}"
-                                  " AND player IS NOT NULL AND player != 'unknown'"):
-        if (rnd := of_shot.get(sid)) is not None:
-            mulligans.setdefault(rnd, Counter())[player] += 1
-    # Each player's putts on each hole of each round, counted as three_putts does (their own ball only).
     hole_putts: Counter = Counter()
-    for sid, player, hole in db.execute(
-            "SELECT id, player, hole FROM shots WHERE attributed = 1 AND mulligan = 0 AND left_out = 0"
-            " AND shared_ball = 0 AND COALESCE(fmt, '') NOT IN ('scramble', 'alternate') AND player IS NOT NULL"
-            " AND (lie_before = 'green' OR (is_putt = 1 AND lie_before IS NULL))"):
-        if (rnd := of_shot.get(sid)) is not None and (m := _HOLE.match(hole or "")):
-            hole_putts[(rnd, player, int(m.group(1)))] += 1
-    return {"of_row": of_row, "end_of": end_of, "who": who, "tees": tees, "course_lengths": course_lengths,
+    for night in N.per_night(db, "round_facts", lambda ns: _collect_round_facts(db, ns)).values():
+        for rnd, names in night["who"]:
+            who.setdefault(rnd, set()).update(names)
+        for rnd, player, hole, yards, n in night["lengths"]:
+            lengths.setdefault((rnd, player), {}).setdefault(hole, Counter())[yards] += n
+        for rnd, ts in night["started"]:
+            if rnd not in started or ts < started[rnd]:
+                started[rnd] = ts
+        for rnd, player, d in night["kept"]:
+            kept[(rnd, player)] = max(kept.get((rnd, player)) or 0, d)
+        left.update((rnd, player) for rnd, player in night["left"])
+        for rnd, player, n in night["mulligans"]:
+            mulligans.setdefault(rnd, Counter())[player] += n
+        for rnd, player, hole, n in night["hole_putts"]:
+            hole_putts[(rnd, player, hole)] += n
+    return {"of_row": of_row, "end_of": end_of, "who": who, "tees": tees, "course_lengths": _course_lengths(db),
             "lengths": lengths, "started": started, "kept": kept, "left": left, "mulligans": mulligans,
             "hole_putts": hole_putts, "sides": Counter(of_row.values())}
+
+
+def _collect_round_facts(db: sqlite3.Connection, ns: "N.Nights") -> dict[str, dict[str, list]]:
+    """Per night, what _round_facts reads from its shots, per round (a round resumed after midnight
+    has some on each night): who played, hole lengths read, the first shot, longest drives, mulligans,
+    putts per hole."""
+    of_shot = shot_rounds(db)
+    parts: dict[str, dict[str, dict]] = {d: {k: {} for k in ("who", "lengths", "started", "kept", "mulligans",
+                                                             "hole_putts")} | {"left": set()} for d in ns.dates}
+
+    def night(ses: int) -> dict[str, Any]:
+        return parts[ns.date[ses]]
+    for sid, ses, player in db.execute("SELECT id, session_id, player FROM shots WHERE player IS NOT NULL"
+                                       " AND player != 'unknown'" + ns.where):
+        if (rnd := of_shot.get(sid)) is not None:
+            night(ses)["who"].setdefault(rnd, set()).add(player)
+    # Each player's hole lengths from their tees, as GSPro's hole label read with their shots gave them
+    # (the most read, past a misread): a side's distance when every hole on its card has one.
+    for sid, ses, player, hole in db.execute("SELECT id, session_id, player, hole FROM shots WHERE hole LIKE"
+                                             " 'Hole %yards' AND player IS NOT NULL" + ns.where):
+        if (rnd := of_shot.get(sid)) is not None and (m := _HOLE_YARDS.match(hole)):
+            key = (rnd, player, int(m.group(1)), int(m.group(2)))
+            got = night(ses)["lengths"]
+            got[key] = got.get(key, 0) + 1
+    for sid, ses, ts in db.execute("SELECT id, session_id, ts FROM shots WHERE 1 = 1" + ns.where):
+        # each round's first shot, for the page's video links
+        if (rnd := of_shot.get(sid)) is not None:
+            got = night(ses)["started"]
+            if rnd not in got or ts < got[rnd]:
+                got[rnd] = ts
+    # Each round's longest drive, from its drives in the stats: the one stored at the round's end misses
+    # a drive left out since, a total read after the swing, and drives a later rule counts (no club read).
+    for sid, ses, player, d, out_ in db.execute(
+            f"SELECT id, session_id, player, {_DRIVE}, left_out FROM shots WHERE {_TEE_DRIVER}"
+            f" AND mulligan = 0 AND {_DRIVE} IS NOT NULL" + ns.where):
+        if (rnd := of_shot.get(sid)) is None:
+            continue
+        if out_:
+            night(ses)["left"].add((rnd, player))
+        else:
+            got = night(ses)["kept"]
+            got[(rnd, player)] = max(got.get((rnd, player)) or 0, d)
+    # Each player's mulligans in each round, but a misread putt (handicap_index.COUNTED_MULLIGAN).
+    for sid, ses, player in db.execute(f"SELECT id, session_id, player FROM shots WHERE {handicap_index.COUNTED_MULLIGAN}"
+                                       " AND player IS NOT NULL AND player != 'unknown'" + ns.where):
+        if (rnd := of_shot.get(sid)) is not None:
+            got = night(ses)["mulligans"]
+            got[(rnd, player)] = got.get((rnd, player), 0) + 1
+    # Each player's putts on each hole of each round, counted as three_putts does (their own ball only).
+    for sid, ses, player, hole in db.execute(
+            "SELECT id, session_id, player, hole FROM shots WHERE attributed = 1 AND mulligan = 0 AND left_out = 0"
+            " AND shared_ball = 0 AND COALESCE(fmt, '') NOT IN ('scramble', 'alternate') AND player IS NOT NULL"
+            " AND (lie_before = 'green' OR (is_putt = 1 AND lie_before IS NULL))" + ns.where):
+        if (rnd := of_shot.get(sid)) is not None and (m := _HOLE.match(hole or "")):
+            key = (rnd, player, int(m.group(1)))
+            got = night(ses)["hole_putts"]
+            got[key] = got.get(key, 0) + 1
+    return {d: {"who": [(rnd, sorted(names)) for rnd, names in p["who"].items()],
+                "lengths": [(*k, n) for k, n in p["lengths"].items()],
+                "started": list(p["started"].items()),
+                "kept": [(*k, d_) for k, d_ in p["kept"].items()],
+                "left": list(p["left"]),
+                "mulligans": [(*k, n) for k, n in p["mulligans"].items()],
+                "hole_putts": [(*k, n) for k, n in p["hole_putts"].items()]}
+            for d, p in parts.items()}
 
 
 def rounds(db: sqlite3.Connection, context: str | None = None,

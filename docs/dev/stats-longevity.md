@@ -120,8 +120,12 @@ merged like any other, and its record is in both nights' signatures.
   - the holes family (strokes gained, recovery, trends, round summaries' strokes gained and best and
     worst shots, and the highlights' candidates: each player's best of the night, all a range can
     take from it). `holes_played` no longer runs on a warm build: 74 s to 39 s for the 3-year copy.
+  - the rounds list's facts from the shots (`_round_facts`: who played, hole lengths, first shot,
+    longest drive, mulligans, putts per hole): 6.1 s to 3.5 s (the rest is the tee boxes, below).
   - Output identical to before on the 1- and 50-season copies.
-- **To port:** rounds (`_round_facts`), records, courses, the booth tab, predictions, broadcasts,
+- **To port:** a per-night round index (each round's sessions, first and last shot, holes, gimme
+  votes) for what still reads every shot to place rounds: the tee boxes, `round_spans`,
+  `round_gimmes`, the hole replays' and reels' scans, `shot_rounds`. Then records, courses, the booth tab, predictions, broadcasts,
   filters, the handicap index, the usual gimme.
 - **Decisions:**
   - The usual gimme stays as it is (the most common radius); the families it feeds put it in their
