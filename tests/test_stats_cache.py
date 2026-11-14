@@ -175,3 +175,28 @@ def test_a_damaged_cache_file_or_entry_is_worked_around(tmp_path):
     with closing(sqlite3.connect(stats_cache.path_for(path))) as c, c:
         c.execute("UPDATE entries SET value = x'00'")
     assert _build(path, True) == (*cold[:2], (0, 4))
+
+
+def test_player_stats_are_kept_per_night_and_an_edit_works_out_only_its_night_again(tmp_path):
+    path = tmp_path / "season.db"
+    shots = _season(path)
+    with closing(sqlite3.connect(path)) as db, db:
+        for n, (sid,) in enumerate(db.execute("SELECT id FROM sessions ORDER BY id").fetchall()):
+            db.execute("UPDATE sessions SET date = ? WHERE id = ?", (f"2023-11-1{4 + n}", sid))
+
+    def build(cached):
+        with closing(stats_web.connect(path)) as db:
+            if not cached:
+                return stats_web.players(db, gimme_ft=3.0), None
+            with stats_cache.opened(db, path) as c:
+                return stats_web.players(db, gimme_ft=3.0), (c.hits, c.misses)
+
+    cold = build(True)
+    assert cold == (build(False)[0], (0, 2))
+    assert [p["shots"] for p in cold[0]] == [5, 4]
+    assert build(True) == (cold[0], (2, 0))
+    with closing(sqlite3.connect(path)) as db, db:   # the first night's drive left out
+        db.execute("UPDATE shots SET left_out = 1 WHERE id = ?", (shots[0],))
+    after = build(True)
+    assert after == (build(False)[0], (1, 1))
+    assert [p["shots"] for p in after[0]] == [4, 4]

@@ -97,30 +97,39 @@ the cloud.
   after one round is edited, the page's first load after an edit, the booth's lookups and a backup.
 - Run by hand before a release that touches stats; not in CI (too slow). Compare against the targets.
 
-### 3. Build and publish only what changed
+### 3. Stats frozen per night, merged for any range (in progress)
 
-This helps local-only users as much as publishers, since the local page runs the same build.
+Stats aren't kept per season: the page's rolling ranges (3, 6, 9 months, a year) cross seasons. The
+unit is the night (a session date; no round record spans two).
 
-- **Split `stats.db` by season.** A past season's file is built once, named by a hash of its content,
-  and rebuilt and re-uploaded only if that season's data changes (an edit, a stats-code change). Each
-  build rebuilds only the current season's file. The page (`stats_web.html`, through sql.js-httpvfs)
-  queries the current season first and older ones as the user pages back or filters by date.
-  `latest.json` lists the season files.
-- **Content-addressed files.** Summary and player files are named by a hash of their content, so an
-  unchanged file is skipped on upload instead of being sent again under a new version folder. Pruning
-  never deletes a file that `latest.json` still points at.
-- **Split the summaries by season too.** Today each context's summary file holds every round,
-  scorecard, broadcast and player history, so any new round changes it and the whole history is
-  serialized and uploaded again. Those lists move into per-season files (built once for a past season,
-  like `stats.db`), leaving a small current summary: the current season's lists, the lifetime totals and
-  a list of the season files. The page loads an older season's lists when the user opens it.
-- **Nothing that changes with new rounds goes into a frozen season file.** Each round's summary today
-  embeds the player's current all-history averages (`add_round_summaries`, the `vs` figures), which
-  every new round moves. Those comparisons come out of the round lists and are joined in by the page
-  from the current lifetime totals. A test checks an old round's summary after a new-season round is
-  added.
-- Expected: build time and upload size for shots and lists depend on the current season, not on
-  history.
+- **Night partials** (`night_totals.py`). Each stat family keeps, per night and per round context
+  (league / tournament / practice), the counts behind its figures, in the stats cache (4a) under the
+  night's signature: its sessions and the change counters of its records. An edit to an old round
+  works out that one night again. Lifetime, a season and the rolling ranges merge the nights in range
+  (about 150 a year: milliseconds).
+- **The count behind every average is kept**, so a merged average is total over total, never an average
+  of averages. Bests and top lists keep the night's top rows with their tie keys (value, time, id);
+  event lists keep their rows; distributions keep fixed buckets.
+- **Done:** players (`players()`, `player()`, `three_putts`): 5.5 s to 0.3 s on a warm build of the
+  3-year copy, output identical (sums to the last bit of a float).
+- **To port:** the holes-based family (strokes gained, recovery, trends, round summaries), records and
+  highlights, courses, the booth tab, predictions, broadcasts, filters, the handicap index.
+- **Decisions:**
+  - The usual gimme stays as it is (the most common radius); the families it feeds put it in their
+    signature, so a change in it (rare) works them all out once. No number changes.
+  - Putting buckets are kept per `PUTT_EDGES` interval and merged at the usual gimme when shown.
+  - The round summaries' `vs` figures (against the player's lifetime numbers, which every new round
+    moves) are worked out by the page when it shows a round, not stored in the round.
+  - Gapping goes by the player's bag: a whole-bag reset and per-club resets, set on the local stats
+    page, instead of a time window.
+  - The booth: rates are total over total (today `season_rounds` averages per-round rates), band
+    lookups snap to 1 ft / 5 yd buckets, it merges the frozen nights once at startup and adds tonight
+    live; `spoken_lines` looks back 12 months, `side_rounds` gets a limit.
+- **Page files.** The shot log `stats.db` is split by calendar year; a past year's file is built once
+  and named by a hash of its content. Summary and player files are content-addressed too, so an
+  unchanged file is skipped on upload, and pruning never deletes a file `latest.json` still points at.
+  Past years' lists (rounds, broadcasts, trends) move to per-year files the page loads when paged back.
+- **Bench** at 1, 3, 5 and 10 years: the after-a-round times must be flat.
 
 ### 3b. Repeated and quadratic work in the build (done)
 

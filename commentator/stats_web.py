@@ -24,6 +24,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from . import changelog, handicap_index
+from . import night_totals as N
 from . import season_analytics as A
 from .round_record import (_late_gimmes, in_play, player_round_of, reuse, round_groups, round_rows, shot_in_play,
                            shot_rounds, unsettled)
@@ -537,126 +538,247 @@ def players(db: sqlite3.Connection, context: str | None = None,
     recorded round: with a card of their own, or shots in one (an alternate-shot or shared-ball round
     files no card per player). Shots outside any round (a session whose round was never recorded)
     don't make a player on their own, so deleting someone's rounds takes them off the list."""
-    in_round = shot_rounds(db)
-    names = {r[0] for r in db.execute("SELECT player FROM player_rounds WHERE 1=1" + _ctx(context))}
-    names |= {r[1] for r in db.execute(
-        "SELECT id, player FROM shots WHERE player IS NOT NULL AND player != 'unknown'"
-        " AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)) if r[0] in in_round}
-    return [player(db, name, context, gimme_ft) for name in sorted(names)]
+    merged = _players_merged(db, context)
+    return [_player(name, merged.get(name) or _new_player(), gimme_ft)
+            for name in sorted(n for n, m in merged.items() if m["listed"])]
 
 
 def player(db: sqlite3.Connection, name: str, context: str | None = None,
            gimme_ft: float | None = None) -> dict[str, Any]:
     """`gimme_ft` is the usual gimme radius (usual_gimme), where the putting buckets start."""
-    p: dict[str, Any] = {"name": name}
-    fir = [0, 0]
-    tot = {k: [0, 0] for k in ("gir", "scramble", "sand", "putts")}
-    nines: list[float] = []
-    holes = birdies = pars_made = bogeys = doubles = 0
-    by_par: dict[int, list[int]] = {3: [0, 0], 4: [0, 0], 5: [0, 0]}
-    history = []
+    return _player(name, _players_merged(db, context).get(name) or _new_player(), gimme_ft)
+
+
+# First-putt length bucket edges in feet for the three-putt chart.
+THREE_PUTT_EDGES = (10, 20, 30, 40, 60)
+_RATES = ("fir", "gir", "scramble", "sand", "putts")
+
+
+def _new_player() -> dict[str, Any]:
+    """A player's counts over some nights (_collect_players), everything players() shows worked out
+    from them."""
+    return {"listed": False, **{k: [0, 0] for k in _RATES}, "outcomes": [0, 0, 0, 0, 0],
+            "by_par": {3: [0, 0], 4: [0, 0], 5: [0, 0]}, "rounds": [], "drive": [0, 0.0, None], "shots": 0,
+            "clubs": {}, "putts_by": [[0, 0] for _ in range(len(PUTT_EDGES) + 1)],
+            # three-putts by holes in its context, and (the window taking in every context) in any
+            "three": [0, 0], "three_by": [[0, 0] for _ in range(len(THREE_PUTT_EDGES) + 1)],
+            "three_any": [0, 0], "three_any_by": [[0, 0] for _ in range(len(THREE_PUTT_EDGES) + 1)]}
+
+
+def _players_merged(db: sqlite3.Connection, context: str | None) -> dict[str, dict[str, Any]]:
+    """Each player's counts over every night in `context`."""
+    def run() -> dict[str, dict[str, Any]]:
+        keep = N.wanted(context)
+        out: dict[str, dict[str, Any]] = {}
+        for night in N.per_night(db, "players", lambda ns: _collect_players(db, ns)).values():
+            for ctx, people in night.items():
+                if not keep(ctx):
+                    continue
+                for name, part in people.items():
+                    m = out.setdefault(name, _new_player())
+                    m["listed"] = m["listed"] or part["listed"]
+                    for k in (*_RATES, "outcomes", "three", "three_any"):
+                        N.add(m[k], part[k])
+                    for k, v in part["by_par"].items():
+                        N.add(m["by_par"][k], v)
+                    m["rounds"] += part["rounds"]
+                    n, total, best = part["drive"]
+                    m["drive"][0] += n
+                    m["drive"][1] += total
+                    if best is not None and (m["drive"][2] is None or best > m["drive"][2]):
+                        m["drive"][2] = best
+                    m["shots"] += part["shots"]
+                    for club, (cn, fin, low, pin) in part["clubs"].items():
+                        c = m["clubs"].setdefault(club, [0, 0.0, None, 0.0])
+                        c[0] += cn
+                        c[1] += fin
+                        c[2] = low if c[2] is None or low < c[2] else c[2]
+                        c[3] += pin
+                    for into, got in ((m["putts_by"], part["putts_by"]), (m["three_by"], part["three_by"]),
+                                      (m["three_any_by"], part["three_any_by"])):
+                        for a, b in zip(into, got):
+                            N.add(a, b)
+        for m in out.values():
+            m["rounds"].sort(key=lambda r: (r[0], r[1]))
+            if context not in N.CONTEXTS:
+                m["three"], m["three_by"] = m["three_any"], m["three_any_by"]
+        return out
+    return reuse(db, ("players_merged", context), run)
+
+
+def _collect_players(db: sqlite3.Connection, ns: "N.Nights") -> dict[str, dict[str, dict[str, Any]]]:
+    """Per night, per context, per player: the counts behind players()."""
+    out: dict[str, dict[str, dict[str, Any]]] = {d: {} for d in ns.dates}
+
+    def of(session_id: int, r: Any, name: str) -> dict[str, Any]:
+        ctx = N.context_of(r["is_league"], r["is_tournament"])
+        return out[ns.date[session_id]].setdefault(ctx, {}).setdefault(name, _new_player())
+
     round_of = player_round_of(db)
-    for r in db.execute("SELECT * FROM player_rounds WHERE player = ?" + _ctx(context) + " ORDER BY ended_at",
-                        (name,)):
-        fir[0] += r["fir_hit"] or 0
-        fir[1] += r["fir_tries"] or 0
+    for r in db.execute("SELECT * FROM player_rounds WHERE player IS NOT NULL" + ns.where + " ORDER BY ended_at, id"):
+        p = of(r["session_id"], r, r["player"])
+        p["listed"] = True
+        p["fir"][0] += r["fir_hit"] or 0
+        p["fir"][1] += r["fir_tries"] or 0
         if (r["fmt"] or "") in SHARED_BALL:
             continue
         for key, hit, tries in (("gir", "gir_hit", "gir_tries"), ("scramble", "scramble_hit", "scramble_tries"),
                                 ("sand", "sand_hit", "sand_tries"), ("putts", "putts", "putt_holes")):
-            tot[key][0] += r[hit] or 0
-            tot[key][1] += r[tries] or 0
+            p[key][0] += r[hit] or 0
+            p[key][1] += r[tries] or 0
         card = _card(_json(r["scores"]), _json(r["hole_pars"]))
         for h in card["holes"]:
             d = h["score"] - h["par"]
-            holes += 1
-            birdies += d <= -1
-            pars_made += d == 0
-            bogeys += d == 1
-            doubles += d >= 2
-            if h["par"] in by_par:
-                by_par[h["par"]][0] += d
-                by_par[h["par"]][1] += 1
+            p["outcomes"][0] += 1
+            p["outcomes"][1] += d <= -1
+            p["outcomes"][2] += d == 0
+            p["outcomes"][3] += d == 1
+            p["outcomes"][4] += d >= 2
+            if h["par"] in p["by_par"]:
+                p["by_par"][h["par"]][0] += d
+                p["by_par"][h["par"]][1] += 1
         if card["played"] and _counts(r["holes_played"] or card["played"]):
             # A round quit part-way through contributes the nine it finished; prorating the odd holes
             # onto a nine would rank it by a score nobody shot. Older rows have no stored nine.
             per_nine = r["nine_to_par"] if "nine_to_par" in r.keys() and r["nine_to_par"] is not None \
                 else card["to_par"] * 9.0 / card["played"]
-            nines.append(per_nine)
-            history.append({"date": _date(db, r["session_id"]), "course": r["course"], "played": card["played"],
-                            "gross": card["gross"], "to_par": card["to_par"],
-                            "round": round_of(r["session_id"], r["course"], r["ended_at"])})
+            p["rounds"].append((r["ended_at"], r["id"], per_nine, ns.date[r["session_id"]], r["course"],
+                                card["played"], card["gross"], card["to_par"],
+                                round_of(r["session_id"], r["course"], r["ended_at"])))
+    in_round = None
+    putt_lo = [0.0, *(e / 3.0 for e in PUTT_EDGES)]
+    for r in db.execute(
+            f"SELECT id, session_id, player, is_league, is_tournament, ({_TEE_DRIVER}) AS tee_driver,"
+            f" {_DRIVE} AS drive, is_putt, outcome, to_pin_yards, finish_yards, club FROM shots"
+            " WHERE player IS NOT NULL AND attributed = 1 AND mulligan = 0 AND left_out = 0" + ns.where):
+        p = of(r["session_id"], r, r["player"])
+        if not p["listed"] and r["player"] != "unknown":
+            if in_round is None:
+                in_round = shot_rounds(db)
+            p["listed"] = r["id"] in in_round
+        p["shots"] += 1
+        if r["tee_driver"] and r["drive"] is not None:
+            p["drive"][0] += 1
+            p["drive"][1] += r["drive"]
+            if p["drive"][2] is None or r["drive"] > p["drive"][2]:
+                p["drive"][2] = r["drive"]
+        pin = r["to_pin_yards"]
+        if (r["is_putt"] == 0 and r["finish_yards"] is not None and r["club"] is not None
+                and r["club"] not in ("DR", "PT") and pin is not None and pin <= APPROACH_MAX_YARDS):
+            c = p["clubs"].setdefault(r["club"], [0, 0.0, None, 0.0])
+            c[0] += 1
+            c[1] += r["finish_yards"]
+            c[2] = r["finish_yards"] if c[2] is None or r["finish_yards"] < c[2] else c[2]
+            c[3] += pin
+        if (r["is_putt"] == 1 and r["outcome"] is not None and r["outcome"] != "gimme" and pin is not None
+                and 0 <= pin < 10_000 / 3.0):
+            i = max(i for i, lo in enumerate(putt_lo) if pin >= lo)
+            p["putts_by"][i][0] += 1
+            p["putts_by"][i][1] += r["outcome"] == "holed"
+    # As Store.three_putt_rate: a hole's putts are its strokes from the green (a conceded tap-in's
+    # 'gimme' row counts, as on the card), grouped by session + course + hole, the first by time giving
+    # the length. Shared-ball holes are left out (the team's putts aren't one player's).
+    # A hole in one context is apart from the same hole in another; with every context, it's one hole
+    # (filed under its first putt's context, and only counted when they're all taken in).
+    edges = [0, *THREE_PUTT_EDGES]
+    ctx_sql = "CASE WHEN is_league = 1 THEN 1 WHEN is_league = 0 AND is_tournament = 1 THEN 2 WHEN is_league = 0 THEN 3 END"
+    for key, apart in (("three", f", {ctx_sql}"), ("three_any", "")):
+        for r in db.execute(
+                f"""WITH hole_putts AS (
+                       SELECT session_id, player, is_league, is_tournament, to_pin_yards,
+                              ROW_NUMBER() OVER (PARTITION BY player, session_id, course, hole{apart} ORDER BY ts) AS putt_no,
+                              COUNT(*) OVER (PARTITION BY player, session_id, course, hole{apart}) AS putts
+                       FROM shots WHERE player IS NOT NULL AND attributed = 1 AND mulligan = 0 AND left_out = 0
+                             AND shared_ball = 0 AND COALESCE(fmt, '') NOT IN ('scramble', 'alternate') AND hole IS NOT NULL
+                             AND (lie_before = 'green' OR (is_putt = 1 AND lie_before IS NULL)){ns.where}
+                   )
+                   SELECT session_id, player, is_league, is_tournament, to_pin_yards * 3 AS feet, putts
+                   FROM hole_putts WHERE putt_no = 1"""):
+            p = of(r["session_id"], r, r["player"])
+            three = r["putts"] >= 3
+            p[key][0] += three
+            p[key][1] += 1
+            if (feet := r["feet"]) is not None:
+                for i, (lo, hi) in enumerate(zip(edges, [*THREE_PUTT_EDGES, None])):
+                    if feet >= lo and (hi is None or feet < hi):
+                        p[key + "_by"][i][0] += 1
+                        p[key + "_by"][i][1] += three
+    return out
+
+
+def _player(name: str, m: dict[str, Any], gimme_ft: float | None) -> dict[str, Any]:
+    """players()' row for a player, from their counts (_players_merged)."""
+    nines = [r[2] for r in m["rounds"]]
+    tot = {k: m[k] for k in _RATES}
+    fir = m["fir"]
+    holes, birdies, pars_made, bogeys, doubles = m["outcomes"]
+    by_par = m["by_par"]
+    p: dict[str, Any] = {"name": name}
     p.update({
         "rounds": len(nines),
         "avg_to_par_9": round(sum(nines) / len(nines), 1) if nines else None,
         "best_to_par_9": round(min(nines), 1) if nines else None,
-        "fir_pct": _pct(*fir), "fir": fir,
-        "gir_pct": _pct(*tot["gir"]), "gir": tot["gir"],
-        "scramble_pct": _pct(*tot["scramble"]), "scramble": tot["scramble"],
-        "sand_pct": _pct(*tot["sand"]), "sand": tot["sand"],
+        "fir_pct": _pct(*fir), "fir": list(fir),
+        "gir_pct": _pct(*tot["gir"]), "gir": list(tot["gir"]),
+        "scramble_pct": _pct(*tot["scramble"]), "scramble": list(tot["scramble"]),
+        "sand_pct": _pct(*tot["sand"]), "sand": list(tot["sand"]),
         "putts_per_hole": round(tot["putts"][0] / tot["putts"][1], 2) if tot["putts"][1] else None,
         "holes": holes,
         "birdie_pct": _pct(birdies, holes), "par_pct": _pct(pars_made, holes),
         "bogey_pct": _pct(bogeys, holes), "double_pct": _pct(doubles, holes),
         "par_avg": {str(k): round(v[0] / v[1], 2) if v[1] else None for k, v in by_par.items()},
-        "history": history,
+        "history": [{"date": d, "course": course, "played": played, "gross": gross, "to_par": to_par, "round": rnd}
+                    for _, _, _, d, course, played, gross, to_par, rnd in m["rounds"]],
         # The counts behind the rates, so the page can pool any group of players (the league average).
-        "totals": {"nines": sum(nines), "putts": tot["putts"],
-                   "outcomes": [birdies, pars_made, bogeys, doubles], "by_par": {str(k): v for k, v in by_par.items()}},
+        "totals": {"nines": sum(nines), "putts": list(tot["putts"]),
+                   "outcomes": [birdies, pars_made, bogeys, doubles],
+                   "by_par": {str(k): list(v) for k, v in by_par.items()}},
     })
-    shots = " AND player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)
-    d = db.execute(f"SELECT COUNT(*) n, AVG({_DRIVE}) avg, MAX({_DRIVE}) best FROM shots "
-                   f"WHERE {_TEE_DRIVER} AND {_DRIVE} IS NOT NULL" + shots, (name,)).fetchone()
-    p["drives"] = d["n"]
-    p["avg_drive"] = round(d["avg"]) if d["avg"] is not None else None
-    p["longest_drive"] = round(d["best"]) if d["best"] is not None else None
-    p["totals"]["drive_yards"] = d["avg"] * d["n"] if d["avg"] is not None else 0
-    p["shots"] = db.execute("SELECT COUNT(*) FROM shots WHERE 1=1" + shots, (name,)).fetchone()[0]
-    p["clubs"] = [dict(r) for r in db.execute(
-        "SELECT club, COUNT(*) AS n, ROUND(AVG(finish_yards), 1) AS avg_finish, ROUND(MIN(finish_yards), 1) AS best_finish,"
-        " ROUND(AVG(to_pin_yards)) AS avg_from FROM shots WHERE is_putt = 0 AND finish_yards IS NOT NULL"
-        " AND club IS NOT NULL AND club NOT IN ('DR', 'PT') AND to_pin_yards <= ?" + shots + " GROUP BY club ORDER BY avg_from DESC",
-        (APPROACH_MAX_YARDS, name))]
+    n, total, best = m["drive"]
+    p["drives"] = n
+    p["avg_drive"] = round(total / n) if n else None
+    p["longest_drive"] = round(best) if best is not None else None
+    p["totals"]["drive_yards"] = total if n else 0
+    p["shots"] = m["shots"]
+    p["clubs"] = sorted(({"club": club, "n": cn, "avg_finish": _sql_round(fin / cn, 1),
+                          "best_finish": _sql_round(low, 1), "avg_from": _sql_round(pin / cn, 0)}
+                         for club, (cn, fin, low, pin) in m["clubs"].items()),
+                        key=lambda c: (-c["avg_from"], c["club"]))
+    # The first bucket starts at the usual gimme circle, and takes in the rare putt struck from closer.
     p["putting"] = []
     buckets = putt_buckets(gimme_ft)
-    for lo, hi in buckets:
-        r = db.execute("SELECT COUNT(*) n, SUM(outcome = 'holed') made FROM shots WHERE is_putt = 1"
-                       " AND outcome IS NOT NULL AND outcome != 'gimme' AND to_pin_yards >= ? AND to_pin_yards < ?"
-                       + shots, (0 if lo == buckets[0][0] else lo / 3.0, (hi or 10_000) / 3.0, name)).fetchone()
-        p["putting"].append({"range": f"{lo:g}-{hi} ft" if hi else f"{lo:g}+ ft", "attempts": r["n"],
-                             "made": r["made"] or 0, "pct": _pct(r["made"] or 0, r["n"])})
-    p.update(three_putts(db, name, context))
+    merged = [0, 0]
+    first = len(PUTT_EDGES) + 1 - len(buckets)   # the intervals the first bucket takes in, less one
+    for i, got in enumerate(m["putts_by"]):
+        N.add(merged, got)
+        if i < first:
+            continue
+        lo, hi = buckets[i - first]
+        att, made = merged
+        p["putting"].append({"range": f"{lo:g}-{hi} ft" if hi else f"{lo:g}+ ft", "attempts": att,
+                             "made": made, "pct": _pct(made, att)})
+        merged = [0, 0]
+    total3 = [m["three"][0], m["three"][1]]
+    p.update({"three_putt_pct": _pct(*total3), "three_putts": total3, "three_putting": [
+        {"range": f"{lo}-{hi} ft" if hi else f"{lo}+ ft", "holes": h, "three_putts": n3, "pct": _pct(n3, h)}
+        for (lo, hi), (h, n3) in zip(zip([0, *THREE_PUTT_EDGES], [*THREE_PUTT_EDGES, None]), m["three_by"])]})
     return p
 
 
-# First-putt length bucket edges in feet for the three-putt chart.
-THREE_PUTT_EDGES = (10, 20, 30, 40, 60)
+_ROUNDER = sqlite3.connect(":memory:", check_same_thread=False)
+_ROUNDER_LOCK = threading.Lock()
+
+
+def _sql_round(x: float, digits: int) -> float:
+    """SQLite's ROUND, which the page has always shown (half away from zero, a float)."""
+    with _ROUNDER_LOCK:
+        return _ROUNDER.execute("SELECT ROUND(?, ?)", (x, digits)).fetchone()[0]
 
 
 def three_putts(db: sqlite3.Connection, name: str, context: str | None = None) -> dict[str, Any]:
-    """Holes three-putted (or worse), overall and by the first putt's length. As Store.three_putt_rate:
-    a hole's putts are its strokes from the green (a conceded tap-in's 'gimme' row counts, as on the
-    card), grouped by session + course + hole, the first by time giving the length. Shared-ball holes are
-    left out (the team's putts aren't one player's)."""
-    rows = db.execute(
-        """WITH hole_putts AS (
-               SELECT to_pin_yards,
-                      ROW_NUMBER() OVER (PARTITION BY session_id, course, hole ORDER BY ts) AS putt_no,
-                      COUNT(*) OVER (PARTITION BY session_id, course, hole) AS putts
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0
-                     AND shared_ball = 0 AND COALESCE(fmt, '') NOT IN ('scramble', 'alternate') AND hole IS NOT NULL
-                     AND (lie_before = 'green' OR (is_putt = 1 AND lie_before IS NULL))""" + _ctx(context) + """
-           )
-           SELECT to_pin_yards * 3 AS feet, putts FROM hole_putts WHERE putt_no = 1""", (name,)).fetchall()
-    total = [sum(r["putts"] >= 3 for r in rows), len(rows)]
-    edges = [0, *THREE_PUTT_EDGES]
-    by_length = []
-    for lo, hi in zip(edges, [*THREE_PUTT_EDGES, None]):
-        got = [r for r in rows if r["feet"] is not None and r["feet"] >= lo and (hi is None or r["feet"] < hi)]
-        n3 = sum(r["putts"] >= 3 for r in got)
-        by_length.append({"range": f"{lo}-{hi} ft" if hi else f"{lo}+ ft", "holes": len(got), "three_putts": n3,
-                          "pct": _pct(n3, len(got))})
-    return {"three_putt_pct": _pct(*total), "three_putts": total, "three_putting": by_length}
+    """Holes three-putted (or worse), overall and by the first putt's length (player()'s)."""
+    p = player(db, name, context)
+    return {k: p[k] for k in ("three_putt_pct", "three_putts", "three_putting")}
 
 
 def _date(db: sqlite3.Connection, session_id: int) -> str | None:

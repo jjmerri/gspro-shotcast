@@ -974,6 +974,17 @@ def test_three_putts_by_first_putt_length_leave_out_scramble_holes(tmp_path):
     assert bands["30-40 ft"] == (1, 2) and bands["0-10 ft"] == (0, 1)
 
 
+def test_a_holes_three_putts_count_within_each_context_and_across_them_with_all(tmp_path):
+    path, db = _db(tmp_path)
+    for ts, league in ((1, 1), (2, 1), (3, 0)):   # two league putts, then a practice one, on the same hole
+        _shot(db, "Ann", ts=ts, course="Pebble", hole="Hole 1, par 4", is_putt=1, lie_before="green",
+              to_pin_yards=5.0, is_league=league)
+    db.commit()
+    with stats_web.connect(path) as ro:
+        got = {c: stats_web.three_putts(ro, "Ann", c)["three_putts"] for c in ("league", "practice", None)}
+    assert got == {"league": [0, 1], "practice": [0, 1], None: [1, 1]}
+
+
 def test_the_pages_league_average_rounds_like_pythons_own_numbers():
     """A pooled figure (the page's pyRound) and a player's own (Python's round) must agree, or a tie
     shows as a win: 49/20 is 2.45 as a float just under, 2.5 in Python; 26/32 -> 81.25% -> 81.2."""
