@@ -1,4 +1,5 @@
 import json
+import random
 import sqlite3
 import threading
 import time
@@ -1401,3 +1402,26 @@ def test_an_alerts_watch_link_plays_its_shot_once_the_videos_are_known():
     got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
     # Nothing until the videos are known; then the record clip, else the round's video, else nothing.
     assert got == [[0, True], [{"clip": "7", "at": 3}, {"session": "s", "at": 14}], None]
+
+
+def test_a_rounds_strokes_gained_split_over_two_nights_adds_up_to_the_same_summary():
+    rnd = random.Random(7)
+    for _ in range(200):
+        shots = [{"id": i, "sg": rnd.choice([-0.31, -0.1, 0.0, 0.07, 0.31, 0.1 + 0.2]), "cat": rnd.choice(["putting", "approach"])}
+                 for i in range(rnd.randint(1, 12))]
+
+        def totals(part):
+            out = {}
+            stats_web.add_round_sg(out, {(1, "Ann"): {"cats": {}, "shots": 0, "best": None, "worst": None}})
+            for s in part:
+                stats_web.add_round_sg(out, {(1, "Ann"): {"cats": {s["cat"]: [s["sg"]]}, "shots": 1, "best": s, "worst": s}})
+            return out
+
+        whole = stats_web.round_sg_from(totals(shots)[(1, "Ann")])
+        ranked = sorted(shots, key=lambda s: -s["sg"])
+        assert whole["best_shot"] is ranked[0]
+        assert whole["worst_shot"] is (ranked[-1] if len(ranked) > 1 and ranked[-1]["sg"] < 0 else None)
+        k = rnd.randint(0, len(shots))
+        merged = totals(shots[:k])
+        stats_web.add_round_sg(merged, totals(shots[k:]))
+        assert stats_web.round_sg_from(merged[(1, "Ann")]) == whole

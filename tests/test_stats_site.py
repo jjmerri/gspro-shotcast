@@ -262,7 +262,7 @@ def test_each_player_gets_a_file_of_just_their_courses_highlights_and_records(tm
     assert set(files) == {"Ann", "Bob"} and files["Ann"] == stats_site.player_key("Ann") != files["Bob"]
     ann = json.loads((vdir / "player" / "all" / f"{files['Ann']}.json").read_text())
     with closing(stats_web.connect(path)) as src:
-        assert ann == stats_site.player_file(src, "Ann", None, A.holes_played(src, None))
+        assert ann == stats_site.player_file(src, "Ann", None)
         everyone = stats_web.records(src, None)
     assert ann["name"] == "Ann" and [c["players"] for c in ann["courses"]] == [["Ann"]]
     assert {h["avg"] for h in ann["courses"][0]["holes"]} == {4}

@@ -172,10 +172,10 @@ def sig(*parts: Any) -> str:
 
 
 def per_key(db: sqlite3.Connection, kind: str, sigs: dict[Hashable, str],
-            compute: Callable[[list[Hashable]], dict[Hashable, Any]]) -> dict[Hashable, Any]:
+            compute: Callable[[list[Hashable]], dict[Hashable, Any]], tally: bool = True) -> dict[Hashable, Any]:
     """Each key's result: the kept one while its signature holds, else `compute(keys)` for the rest
     (which may leave a key out: it has no result, and that's kept too). Without a cache open on `db`,
-    `compute` gets every key. The result is in `sigs`' order."""
+    `compute` gets every key. The result is in `sigs`' order. `tally`: count the hits and misses."""
     cache = of(db)
     if cache is None:
         got = compute(list(sigs))
@@ -183,8 +183,9 @@ def per_key(db: sqlite3.Connection, kind: str, sigs: dict[Hashable, str],
     kept = cache.get(kind, sigs)
     missing = [k for k in sigs if k not in kept]
     new = compute(missing) if missing else {}
-    cache.hits += len(kept)
-    cache.misses += len(missing)
+    if tally:
+        cache.hits += len(kept)
+        cache.misses += len(missing)
     cache.put(kind, {k: (sigs[k], (k in new, new.get(k))) for k in missing}, set(sigs))
     out = {}
     for k in sigs:

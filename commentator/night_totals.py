@@ -49,19 +49,68 @@ def nights(db: sqlite3.Connection) -> dict[str, list[int]]:
 
 
 def night_sigs(db: sqlite3.Connection) -> dict[str, str]:
-    """Each night's signature: its sessions, and its records' change counters. A record with no session
-    (or one no longer on file) can't be placed, so it's in every night's."""
+    """Each night's signature: its sessions, and the change counters of the records with rows in them
+    or starting in them (a round resumed after midnight is on two nights). A record that can't be
+    placed (no session, or none on file) is in every night's."""
     def run() -> dict[str, str]:
         date_of = {sid: d for d, sids in nights(db).items() for sid in sids}
         per: dict[str, list[tuple[str, int]]] = {d: [] for d in nights(db)}
         loose = []
+        rows_in = record_sessions(db)
         for uuid, sess, gen in db.execute("SELECT uuid, session_id, gen FROM main.round_records ORDER BY uuid"):
-            if (d := date_of.get(sess)) is None:
+            dates = {date_of[s] for s in (sess, *rows_in.get(uuid, ())) if s in date_of}
+            if not dates:
                 loose.append((uuid, gen))
-            else:
+            for d in dates:
                 per[d].append((uuid, gen))
         return {d: stats_cache.sig(sids, per[d], loose) for d, sids in nights(db).items()}
     return reuse(db, ("night_sigs",), run)
+
+
+_RECORD_ROWS = (("shots", "record_uuid"), ("lines", "record_uuid"), ("rounds", "round_uuid"),
+                ("player_rounds", "round_uuid"))
+
+
+def record_sessions(db: sqlite3.Connection) -> dict[str, list[int]]:
+    """Each record's sessions: those its rows are in. Kept with the record's change counter, so only a
+    changed record is looked up again."""
+    def compute(keys: list) -> dict[str, list[int]]:
+        out: dict[str, set[int]] = {k: set() for k in keys}
+        for i in range(0, len(keys), 500):
+            chunk = keys[i:i + 500]
+            marks = ",".join("?" * len(chunk))
+            for table, col in _RECORD_ROWS:
+                for uuid, sid in db.execute(
+                        f"SELECT DISTINCT {col}, session_id FROM main.{table} WHERE {col} IN ({marks})", chunk):
+                    out[uuid].add(sid)
+        return {k: sorted(v) for k, v in out.items()}
+
+    def run() -> dict[str, list[int]]:
+        gens = {uuid: str(gen) for uuid, gen in db.execute("SELECT uuid, gen FROM main.round_records")}
+        return stats_cache.per_key(db, "record_sessions", gens, compute, tally=False)
+    return reuse(db, ("record_sessions",), run)
+
+
+def exact_add(partials: list[float], x: float) -> None:
+    """Add `x` to a sum kept exactly, as floats that don't overlap (as math.fsum keeps it): however
+    the sum is split up and put back together (exact_merge), math.fsum(partials) is the same, the
+    true sum correctly rounded."""
+    i = 0
+    for y in partials:
+        if abs(x) < abs(y):
+            x, y = y, x
+        hi = x + y
+        lo = y - (hi - x)
+        if lo:
+            partials[i] = lo
+            i += 1
+        x = hi
+    partials[i:] = [x]
+
+
+def exact_merge(into: list[float], part: Iterable[float]) -> None:
+    for x in part:
+        exact_add(into, x)
 
 
 class Nights:

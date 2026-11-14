@@ -9,6 +9,7 @@ only, since a scramble or alternate-shot score isn't one player's.
 import calendar
 import json
 import logging
+import math
 import re
 import sqlite3
 import tempfile
@@ -477,33 +478,63 @@ def _shot_brief(st, h: dict, sg: dict) -> dict[str, Any]:
             "outcome": st["outcome"], "finish": st["finish_yards"], "category": sg["category"], "sg": round(sg["sg"], 2)}
 
 
-def add_round_summaries(db: sqlite3.Connection, rounds_: list[dict[str, Any]], holes: list[dict],
-                        people: list[dict[str, Any]], usual_gimme_ft: float | None = None,
-                        sg: list[dict] | None = None) -> None:
-    """A one-player side's round of nine holes or more gets a `summary`: the round against the player's season (score per
-    nine, fairways, greens, putts per hole), its strokes gained by category, its best and worst shots
-    by strokes gained, and its best and worst holes against par. `sg`: A.strokes_gained(holes,
-    usual_gimme_ft), when already worked out."""
-    of_shot = shot_rounds(db)
-    season = {p["name"]: p for p in people}
-    sg_of = {s["shot_id"]: s for s in (A.strokes_gained(holes, usual_gimme_ft) if sg is None else sg)}
-    by_round: dict[tuple, list[dict]] = {}
+def round_sg_totals(holes: list[dict], sg: list[dict], of_shot: dict[int, int]) -> dict[tuple, dict[str, Any]]:
+    """Per (round, player), from `holes` and their strokes gained (A.strokes_gained): what the round
+    summary's strokes gained and best and worst shots come of (round_sg_from). Totals of some holes
+    add up (add_round_sg) to theirs together, in the order they were played."""
+    sg_of = {s["shot_id"]: s for s in sg}
+    out: dict[tuple, dict[str, Any]] = {}
     for h in holes:
         rnd = of_shot.get(h["strokes"][0]["id"])
-        if rnd is not None:
-            by_round.setdefault((rnd, h["player"]), []).append(h)
-    for r in rounds_:
-        mine = by_round.get((r["round"], r["side"]))
-        p = season.get(r["side"])
-        if not mine or not p or r["format"] in SHARED_BALL or not _counts(r["played"]):
+        if rnd is None:
             continue
-        sg = {c: 0.0 for c in A.SG_CATEGORIES}
-        shots = []
-        for h in mine:
-            for st in h["strokes"]:
-                if st["id"] in sg_of:
-                    sg[sg_of[st["id"]]["category"]] += sg_of[st["id"]]["sg"]
-                    shots.append(_shot_brief(st, h, sg_of[st["id"]]))
+        add_round_sg(out, {(rnd, h["player"]): {"cats": {}, "shots": 0, "best": None, "worst": None}})
+        for st in h["strokes"]:
+            if st["id"] in sg_of:
+                got = sg_of[st["id"]]
+                brief = _shot_brief(st, h, got)
+                add_round_sg(out, {(rnd, h["player"]): {"cats": {got["category"]: [got["sg"]]}, "shots": 1,
+                                                        "best": brief, "worst": brief}})
+    return out
+
+
+def add_round_sg(into: dict[tuple, dict[str, Any]], part: dict[tuple, dict[str, Any]]) -> None:
+    for key, got in part.items():
+        m = into.get(key)
+        if m is None:
+            into[key] = m = {"cats": {}, "shots": 0, "best": None, "worst": None}
+        for cat, partials in got["cats"].items():
+            N.exact_merge(m["cats"].setdefault(cat, []), partials)
+        m["shots"] += got["shots"]
+        # the first of the best, and the last of the worst (as a stable sort ranks them)
+        if got["best"] is not None and (m["best"] is None or got["best"]["sg"] > m["best"]["sg"]):
+            m["best"] = got["best"]
+        if got["worst"] is not None and (m["worst"] is None or got["worst"]["sg"] <= m["worst"]["sg"]):
+            m["worst"] = got["worst"]
+
+
+def round_sg_from(m: dict[str, Any]) -> dict[str, Any]:
+    """A round summary's strokes gained by category and its best and worst shots by strokes gained."""
+    return {
+        "sg": {**{c: round(math.fsum(m["cats"].get(c, ())), 2) for c in A.SG_CATEGORIES},
+               "total": round(math.fsum(x for p in m["cats"].values() for x in p), 2)} if m["shots"] else None,
+        "best_shot": m["best"],
+        "worst_shot": m["worst"] if m["shots"] > 1 and m["worst"]["sg"] < 0 else None,
+    }
+
+
+def add_round_summaries(db: sqlite3.Connection, rounds_: list[dict[str, Any]], round_sg: dict[tuple, dict[str, Any]],
+                        people: list[dict[str, Any]]) -> None:
+    """A one-player side's round of nine holes or more gets a `summary`: the round against the player's season (score per
+    nine, fairways, greens, putts per hole), its strokes gained by category, its best and worst shots
+    by strokes gained (`round_sg`: round_sg_totals', merged), and its best and worst holes against par."""
+    season = {p["name"]: p for p in people}
+    for r in rounds_:
+        got = round_sg.get((r["round"], r["side"]))
+        got = got and round_sg_from(got)
+        p = season.get(r["side"])
+        if not got or not p or r["format"] in SHARED_BALL or not _counts(r["played"]):
+            continue
         played = r["played"] or len(r["card"]) or 0
         row = db.execute("SELECT * FROM rounds WHERE id = ?", (r["id"],)).fetchone()
         putt_holes = row["putt_holes"]
@@ -521,12 +552,9 @@ def add_round_summaries(db: sqlite3.Connection, rounds_: list[dict[str, Any]], h
         ]
         card = sorted(r["card"], key=lambda c: c["score"] - c["par"])
         spread = len(card) > 1 and card[0]["score"] - card[0]["par"] != card[-1]["score"] - card[-1]["par"]
-        ranked = sorted(shots, key=lambda s: -s["sg"])
         r["summary"] = {
             "vs": [v for v in vs if v["round"] is not None],
-            "sg": {**{c: round(v, 2) for c, v in sg.items()}, "total": round(sum(sg.values()), 2)} if shots else None,
-            "best_shot": ranked[0] if ranked else None,
-            "worst_shot": ranked[-1] if len(ranked) > 1 and ranked[-1]["sg"] < 0 else None,
+            "sg": got["sg"], "best_shot": got["best_shot"], "worst_shot": got["worst_shot"],
             "best_hole": card[0] if spread else None,
             "worst_hole": card[-1] if spread else None,
         }
@@ -558,7 +586,7 @@ def _new_player() -> dict[str, Any]:
     """A player's counts over some nights (_collect_players), everything players() shows worked out
     from them."""
     return {"listed": False, **{k: [0, 0] for k in _RATES}, "outcomes": [0, 0, 0, 0, 0],
-            "by_par": {3: [0, 0], 4: [0, 0], 5: [0, 0]}, "rounds": [], "drive": [0, 0.0, None], "shots": 0,
+            "by_par": {3: [0, 0], 4: [0, 0], 5: [0, 0]}, "rounds": [], "drive": [0, [], None], "shots": 0,
             "clubs": {}, "putts_by": [[0, 0] for _ in range(len(PUTT_EDGES) + 1)],
             # three-putts by holes in its context, and (the window taking in every context) in any
             "three": [0, 0], "three_by": [[0, 0] for _ in range(len(THREE_PUTT_EDGES) + 1)],
@@ -584,16 +612,16 @@ def _players_merged(db: sqlite3.Connection, context: str | None) -> dict[str, di
                     m["rounds"] += part["rounds"]
                     n, total, best = part["drive"]
                     m["drive"][0] += n
-                    m["drive"][1] += total
+                    N.exact_merge(m["drive"][1], total)
                     if best is not None and (m["drive"][2] is None or best > m["drive"][2]):
                         m["drive"][2] = best
                     m["shots"] += part["shots"]
                     for club, (cn, fin, low, pin) in part["clubs"].items():
-                        c = m["clubs"].setdefault(club, [0, 0.0, None, 0.0])
+                        c = m["clubs"].setdefault(club, [0, [], None, []])
                         c[0] += cn
-                        c[1] += fin
+                        N.exact_merge(c[1], fin)
                         c[2] = low if c[2] is None or low < c[2] else c[2]
-                        c[3] += pin
+                        N.exact_merge(c[3], pin)
                     for into, got in ((m["putts_by"], part["putts_by"]), (m["three_by"], part["three_by"]),
                                       (m["three_any_by"], part["three_any_by"])):
                         for a, b in zip(into, got):
@@ -659,17 +687,17 @@ def _collect_players(db: sqlite3.Connection, ns: "N.Nights") -> dict[str, dict[s
         p["shots"] += 1
         if r["tee_driver"] and r["drive"] is not None:
             p["drive"][0] += 1
-            p["drive"][1] += r["drive"]
+            N.exact_add(p["drive"][1], r["drive"])
             if p["drive"][2] is None or r["drive"] > p["drive"][2]:
                 p["drive"][2] = r["drive"]
         pin = r["to_pin_yards"]
         if (r["is_putt"] == 0 and r["finish_yards"] is not None and r["club"] is not None
                 and r["club"] not in ("DR", "PT") and pin is not None and pin <= APPROACH_MAX_YARDS):
-            c = p["clubs"].setdefault(r["club"], [0, 0.0, None, 0.0])
+            c = p["clubs"].setdefault(r["club"], [0, [], None, []])
             c[0] += 1
-            c[1] += r["finish_yards"]
+            N.exact_add(c[1], r["finish_yards"])
             c[2] = r["finish_yards"] if c[2] is None or r["finish_yards"] < c[2] else c[2]
-            c[3] += pin
+            N.exact_add(c[3], pin)
         if (r["is_putt"] == 1 and r["outcome"] is not None and r["outcome"] != "gimme" and pin is not None
                 and 0 <= pin < 10_000 / 3.0):
             i = max(i for i, lo in enumerate(putt_lo) if pin >= lo)
@@ -734,14 +762,14 @@ def _player(name: str, m: dict[str, Any], gimme_ft: float | None) -> dict[str, A
                    "outcomes": [birdies, pars_made, bogeys, doubles],
                    "by_par": {str(k): list(v) for k, v in by_par.items()}},
     })
-    n, total, best = m["drive"]
+    n, total, best = m["drive"][0], math.fsum(m["drive"][1]), m["drive"][2]
     p["drives"] = n
     p["avg_drive"] = round(total / n) if n else None
     p["longest_drive"] = round(best) if best is not None else None
     p["totals"]["drive_yards"] = total if n else 0
     p["shots"] = m["shots"]
-    p["clubs"] = sorted(({"club": club, "n": cn, "avg_finish": _sql_round(fin / cn, 1),
-                          "best_finish": _sql_round(low, 1), "avg_from": _sql_round(pin / cn, 0)}
+    p["clubs"] = sorted(({"club": club, "n": cn, "avg_finish": _sql_round(math.fsum(fin) / cn, 1),
+                          "best_finish": _sql_round(low, 1), "avg_from": _sql_round(math.fsum(pin) / cn, 0)}
                          for club, (cn, fin, low, pin) in m["clubs"].items()),
                         key=lambda c: (-c["avg_from"], c["club"]))
     # The first bucket starts at the usual gimme circle, and takes in the rare putt struck from closer.
@@ -878,7 +906,89 @@ def period_starts(today: date | None = None, season: str | None = None) -> dict[
     return out
 
 
-def highlights_by_period(db: sqlite3.Connection, holes: list[dict], context: str | None = None,
+def _usual(db: sqlite3.Connection) -> float | None:
+    return usual_gimme(db, reuse(db, ("round_gimmes",), lambda: round_gimmes(db)))
+
+
+def _collect_holes(db: sqlite3.Connection, ns: "N.Nights", usual: float | None) -> dict[str, dict[str, Any]]:
+    """Per night, per context ("" for all of them: a hole is grouped from its strokes in the context),
+    what comes of the holes played (A.holes_played): strokes gained, recovery, the trend point, each
+    round's strokes gained, and the highlights (those that rank kept to each player's best of the night,
+    which is all a range's best can take from it)."""
+    rows = db.execute(A.HOLE_ROWS_SQL.format(A.HOLE_ROWS_WHERE + ns.where)).fetchall()
+    of_shot = shot_rounds(db) if rows else {}
+    out: dict[str, dict[str, Any]] = {d: {} for d in ns.dates}
+    for key in ("", *N.CONTEXTS):
+        ctx = key or None
+        holes = A.holes_of(rows if not key else [r for r in rows if A._IN_CONTEXT[key](r)])
+        sg = A.strokes_gained(holes, usual)
+        per = {d: {"sg": {}, "rec": {}, "trend": {}, "rounds": {}, "hl": {
+            "moments": [], "streaks": [], "bounce": [], "blowups": [], "tops": {n: [] for n in A.TOPS}}}
+            for d in ns.dates}
+        sg_by: dict[str, list[dict]] = {}
+        for s in sg:
+            sg_by.setdefault(s["date"], []).append(s)
+        holes_by: dict[str, list[dict]] = {}
+        for h in holes:
+            holes_by.setdefault(h["date"], []).append(h)
+        for d, hs in holes_by.items():
+            per[d]["sg"] = A.sg_totals(hs, sg_by.get(d, []))
+            per[d]["rec"] = A.recovery_totals(hs)
+            per[d]["rounds"] = round_sg_totals(hs, sg_by.get(d, []), of_shot)
+        for name, points in A.trends(db, holes, ctx, usual, sg, where=ns.where).items():
+            for pt in points:
+                per[pt["date"]]["trend"][name] = pt
+        moments, streaks, bounce, blowups, tops = A.highlight_rows(db, holes, ctx, ns.where)
+        for m in moments:
+            per[m["date"]]["hl"]["moments"].append(m)
+        for name, xs, rank, k in (("streaks", streaks, lambda s: -s["length"], 10), ("bounce", bounce, None, 10),
+                                  ("blowups", blowups, lambda b: -b["over"], 5)):
+            mine: dict[tuple, list[dict]] = {}
+            for x in xs:
+                mine.setdefault((x["date"], x["player"]), []).append(x)
+            keep = {id(x) for got in mine.values() for x in (sorted(got, key=rank) if rank else got)[:k]}
+            for x in xs:
+                if id(x) in keep:
+                    per[x["date"]]["hl"][name].append(x)
+        for name, rs in tops.items():
+            seen: Counter = Counter()
+            for r in rs:
+                if seen[(r["date"], r["player"])] < 5:
+                    seen[(r["date"], r["player"])] += 1
+                    per[r["date"]]["hl"]["tops"][name].append(r)
+        for d in ns.dates:
+            out[d][key] = per[d]
+    return out
+
+
+def _holes_merged(db: sqlite3.Connection, context: str | None) -> dict[str, Any]:
+    """_collect_holes' nights merged, in `context`: sg_summary, recovery and trends as A's give them,
+    round_sg_totals' rounds, and highlight_rows' lists."""
+    key = context if context in N.CONTEXTS else ""
+    usual = _usual(db)
+
+    def run() -> dict[str, Any]:
+        sg: dict[str, dict[str, Any]] = {}
+        rec: dict[tuple, list] = {}
+        trend: dict[str, list[dict]] = {}
+        rounds_: dict[tuple, dict] = {}
+        hl: dict[str, Any] = {"moments": [], "streaks": [], "bounce": [], "blowups": [], "tops": {n: [] for n in A.TOPS}}
+        for night in N.per_night(db, "holes", lambda ns: _collect_holes(db, ns, usual), extra=(usual,)).values():
+            part = night[key]
+            A.add_sg(sg, part["sg"])
+            A.add_recovery(rec, part["rec"])
+            for name, pt in part["trend"].items():
+                trend.setdefault(name, []).append(pt)
+            add_round_sg(rounds_, part["rounds"])
+            for k in ("moments", "streaks", "bounce", "blowups"):
+                hl[k] += part["hl"][k]
+            for n in A.TOPS:
+                hl["tops"][n] += part["hl"]["tops"][n]
+        return {"sg": A.sg_from(sg), "recovery": A.recovery_from(rec), "trend": trend, "rounds": rounds_, "hl": hl}
+    return reuse(db, ("holes_merged", key, usual), run)
+
+
+def highlights_by_period(db: sqlite3.Connection, context: str | None = None,
                          player: str | None = None, today: date | None = None,
                          season: str | None = None) -> dict[str, Any]:
     """Records and highlights for each of the tab's date ranges: a top five can't be cut down to a
@@ -886,8 +996,9 @@ def highlights_by_period(db: sqlite3.Connection, holes: list[dict], context: str
     starts = period_starts(today, season)
     key = tuple(starts.items())
     recs = reuse(db, ("records_table", context, key), lambda: records_table(db, context, starts))
-    highs = reuse(db, ("highlights_table", context, key, id(holes)),
-                  lambda: A.highlights_table(db, holes, context, starts))
+    hl = _holes_merged(db, context)["hl"]
+    highs = reuse(db, ("highlights_table", context, key),
+                  lambda: A.highlights_pick(hl["moments"], hl["streaks"], hl["bounce"], hl["blowups"], hl["tops"], starts))
     return {"records": {k: recs(player, k) for k in starts},
             "highlights": {k: highs(player, k) for k in starts}}
 
@@ -898,11 +1009,10 @@ def summary(db: sqlite3.Connection, context: str | None = None,
     published site leaves them out altogether). `season`: publish.season_start (MM-DD), for the
     records' This season range."""
     last = db.execute("SELECT MAX(date) FROM sessions").fetchone()[0]
-    holes = reuse(db, ("holes_played", context), lambda: A.holes_played(db, context))
     gimmes = reuse(db, ("round_gimmes",), lambda: round_gimmes(db))
     usual = usual_gimme(db, gimmes)
-    strokes = A.strokes_gained(holes, usual)
-    sg, rec, trend = A.sg_summary(holes, usual, strokes), A.recovery(holes), A.trends(db, holes, context, usual, strokes)
+    fam = _holes_merged(db, context)
+    sg, rec, trend = fam["sg"], fam["recovery"], fam["trend"]
     people = players(db, context, usual)
     # Our own handicap index (handicap_index) goes by every counting round, whatever the context:
     # every such round, and without the rounds with a mulligan.
@@ -935,11 +1045,11 @@ def summary(db: sqlite3.Connection, context: str | None = None,
                                 " OR EXISTS (SELECT 1 FROM shots WHERE is_league = 0 AND is_tournament = 1)"
                                 ).fetchone()[0] == 1
     rounds_ = rounds(db, context, gimmes)
-    add_round_summaries(db, rounds_, holes, people, usual, strokes)
+    add_round_summaries(db, rounds_, fam["rounds"], people)
     return {"context": context or "all", "last_session": last, "has_league": has_league,
             "has_tournament": has_tournament, "gimme_ft": usual,
             "players": people,
-            "rounds": rounds_, **(_editing(db) if local else {}), **highlights_by_period(db, holes, context, season=season),
+            "rounds": rounds_, **(_editing(db) if local else {}), **highlights_by_period(db, context, season=season),
             "season_from": season_start(season), "predictions": predictions(db, names),
             "courses": A.courses(db, context),
             "booth": reuse(db, ("booth", tuple(sorted((names or {}).items()))), lambda: A.booth(db, names)), "broadcasts": A.broadcasts(db), "filters": filters,

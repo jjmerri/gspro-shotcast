@@ -183,12 +183,12 @@ def test_highlights_and_records_by_date_range(db):
     shot(db, session_id=2, total_yards=320, **tee)      # last year's bomb
     shot(db, total_yards=250, **tee)
     db.commit()
-    got = stats_web.highlights_by_period(db, A.holes_played(db), today=date(2026, 5, 31))
+    got = stats_web.highlights_by_period(db, today=date(2026, 5, 31))
     assert [(d["player"], d["v"]) for d in got["highlights"]["1y"]["drives"]] == [("Bo", 320), ("Ann", 250)]
     # A tie goes to whoever hit it first.
     assert [(d["player"], d["v"]) for d in got["highlights"]["all"]["drives"]] == [("Ann", 320), ("Bo", 320), ("Ann", 250)]
     assert got["records"]["3m"]["longest_drive"]["player"] == "Bo" and got["records"]["all"]["longest_drive"]["player"] == "Ann"
-    ann = stats_web.highlights_by_period(db, A.holes_played(db), player="Ann", today=date(2026, 5, 31))
+    ann = stats_web.highlights_by_period(db, player="Ann", today=date(2026, 5, 31))
     assert [d["v"] for d in ann["highlights"]["1y"]["drives"]] == [250]
     assert ann["records"]["3m"]["longest_drive"]["v"] == 250 and ann["records"]["all"]["longest_drive"]["v"] == 320
     assert ann["records"]["1y"] == stats_web.records(db, None, "Ann", "2025-05-31")
@@ -201,7 +201,7 @@ def test_highlights_and_records_by_date_range(db):
     assert stats_web.season_start("10-01", date(2026, 9, 30)) == "2025-10-01"
     assert stats_web.season_start("02-29", date(2027, 3, 1)) == "2027-02-28"
     assert stats_web.season_start(None) is None
-    got = stats_web.highlights_by_period(db, A.holes_played(db), today=date(2026, 5, 31), season="05-01")
+    got = stats_web.highlights_by_period(db, today=date(2026, 5, 31), season="05-01")
     assert got["records"]["season"]["longest_drive"]["player"] == "Bo"
 
 

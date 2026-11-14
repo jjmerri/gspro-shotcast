@@ -100,20 +100,29 @@ the cloud.
 ### 3. Stats frozen per night, merged for any range (in progress)
 
 Stats aren't kept per season: the page's rolling ranges (3, 6, 9 months, a year) cross seasons. The
-unit is the night (a session date; no round record spans two).
+unit is the night (a session date). A round resumed after midnight spans two nights; its pieces are
+merged like any other, and its record is in both nights' signatures.
 
 - **Night partials** (`night_totals.py`). Each stat family keeps, per night and per round context
   (league / tournament / practice), the counts behind its figures, in the stats cache (4a) under the
-  night's signature: its sessions and the change counters of its records. An edit to an old round
+  night's signature: its sessions and the change counters of the records with rows in them (each
+  record's sessions are kept with its change counter, so only a changed record is looked up). An edit to an old round
   works out that one night again. Lifetime, a season and the rolling ranges merge the nights in range
   (about 150 a year: milliseconds).
 - **The count behind every average is kept**, so a merged average is total over total, never an average
   of averages. Bests and top lists keep the night's top rows with their tie keys (value, time, id);
-  event lists keep their rows; distributions keep fixed buckets.
-- **Done:** players (`players()`, `player()`, `three_putts`): 5.5 s to 0.3 s on a warm build of the
-  3-year copy, output identical (sums to the last bit of a float).
-- **To port:** the holes-based family (strokes gained, recovery, trends, round summaries), records and
-  highlights, courses, the booth tab, predictions, broadcasts, filters, the handicap index.
+  event lists keep their rows; distributions keep fixed buckets. Sums of floats are kept exactly (as
+  `math.fsum` keeps them, `night_totals.exact_add`), so however the nights are split the figure is
+  the same: the true sum, correctly rounded.
+- **Done:**
+  - players (`players()`, `player()`, `three_putts`): 5.5 s to 0.3 s on a warm build of the 3-year
+    copy.
+  - the holes family (strokes gained, recovery, trends, round summaries' strokes gained and best and
+    worst shots, and the highlights' candidates: each player's best of the night, all a range can
+    take from it). `holes_played` no longer runs on a warm build: 74 s to 39 s for the 3-year copy.
+  - Output identical to before on the 1- and 50-season copies.
+- **To port:** rounds (`_round_facts`), records, courses, the booth tab, predictions, broadcasts,
+  filters, the handicap index, the usual gimme.
 - **Decisions:**
   - The usual gimme stays as it is (the most common radius); the families it feeds put it in their
     signature, so a change in it (rare) works them all out once. No number changes.

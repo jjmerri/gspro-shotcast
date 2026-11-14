@@ -2,6 +2,8 @@ import sqlite3
 from contextlib import closing
 
 from commentator import highlights, stats_cache, stats_web
+from commentator import night_totals as N
+from commentator import season_analytics as A
 from commentator.hole_replay import hole_replays
 from commentator.store import Store
 
@@ -200,3 +202,51 @@ def test_player_stats_are_kept_per_night_and_an_edit_works_out_only_its_night_ag
     after = build(True)
     assert after == (build(False)[0], (1, 1))
     assert [p["shots"] for p in after[0]] == [4, 4]
+
+
+def test_hole_stats_are_kept_per_night_and_an_edit_works_out_only_its_night_again(tmp_path):
+    path = tmp_path / "season.db"
+    shots = _season(path)
+    with closing(sqlite3.connect(path)) as db, db:
+        for n, (sid,) in enumerate(db.execute("SELECT id FROM sessions ORDER BY id").fetchall()):
+            db.execute("UPDATE sessions SET date = ? WHERE id = ?", (f"2023-11-1{4 + n}", sid))
+
+    def fresh(db):
+        holes = A.holes_played(db)
+        usual = stats_web._usual(db)
+        return {"sg": A.sg_summary(holes, usual), "recovery": A.recovery(holes),
+                "trend": A.trends(db, holes, None, usual)}
+
+    def build():
+        with closing(stats_web.connect(path)) as db, stats_cache.opened(db, path) as c:
+            got = stats_web._holes_merged(db, None)
+            return {k: got[k] for k in ("sg", "recovery", "trend")}, fresh(db), (c.hits, c.misses)
+
+    got, want, counts = build()
+    assert got == want and counts == (0, 2) and got["sg"]
+    assert build()[2] == (2, 0)
+    with closing(sqlite3.connect(path)) as db, db:   # the first night's drive left out
+        db.execute("UPDATE shots SET left_out = 1 WHERE id = ?", (shots[0],))
+    got, want, counts = build()
+    assert got == want and counts == (1, 1)
+
+
+def test_a_round_resumed_after_midnight_is_in_both_its_nights_signatures(tmp_path):
+    path = tmp_path / "season.db"
+    shots = _season(path)
+    with closing(sqlite3.connect(path)) as db, db:
+        for n, (sid,) in enumerate(db.execute("SELECT id FROM sessions ORDER BY id").fetchall()):
+            db.execute("UPDATE sessions SET date = ? WHERE id = ?", (f"2023-11-1{4 + n}", sid))
+        first = db.execute("SELECT record_uuid FROM shots WHERE id = ?", (shots[0],)).fetchone()[0]
+        db.execute("UPDATE shots SET record_uuid = ? WHERE id = ?", (first, shots[4]))   # the next night's drive
+
+    def sigs():
+        with closing(stats_web.connect(path)) as db, stats_cache.opened(db, path):
+            return N.night_sigs(db)
+
+    before = sigs()
+    assert sigs() == before
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("UPDATE shots SET left_out = 1 WHERE id = ?", (shots[4],))
+    after = sigs()
+    assert all(after[d] != before[d] for d in ("2023-11-14", "2023-11-15"))

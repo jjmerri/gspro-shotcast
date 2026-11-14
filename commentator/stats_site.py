@@ -34,7 +34,7 @@ from . import hole_replay
 from . import highlights, record_clips
 from . import season_analytics as A
 from . import stats_cache, stats_web
-from .round_record import frozen, reuse
+from .round_record import frozen
 
 PAGE = Path(__file__).with_name("stats_web.html")
 SITE_NAME, MORE_TAB = "Shotcast", "More"   # publish.site_name, publish.more_tab
@@ -58,12 +58,12 @@ def player_key(name: str) -> str:
     return hashlib.sha1(name.encode("utf-8")).hexdigest()[:12]
 
 
-def player_file(src: sqlite3.Connection, name: str, context: str | None, holes: list[dict],
+def player_file(src: sqlite3.Connection, name: str, context: str | None,
                 season: str | None = None) -> dict[str, Any]:
     """What the page shows for one picked player beyond the summary: their courses (hole by hole),
     highlights and records."""
     return {"name": name, "courses": A.courses(src, context, name),
-            **stats_web.highlights_by_period(src, holes, context, name, season=season)}
+            **stats_web.highlights_by_period(src, context, name, season=season)}
 
 
 def new_version() -> str:
@@ -246,11 +246,10 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
             body["db"] = {"name": db_path.name, "modified": db_path.stat().st_mtime, "published": time.time()}
             pdir = vdir / "player" / name
             pdir.mkdir(parents=True, exist_ok=True)
-            holes = reuse(src, ("holes_played", context), lambda: A.holes_played(src, context))
             _note_records(records, body["records"])
             for p in body["players"]:
                 p["file"] = player_key(p["name"])
-                pf = player_file(src, p["name"], context, holes, season_start)
+                pf = player_file(src, p["name"], context, season_start)
                 _note_records(records, pf["records"])
                 (pdir / f"{p['file']}.json").write_text(json.dumps(pf, separators=(",", ":")), encoding="utf-8")
             (vdir / f"summary-{name}.json").write_text(json.dumps(body, separators=(",", ":")), encoding="utf-8")
