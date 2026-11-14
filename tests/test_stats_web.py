@@ -182,6 +182,36 @@ def test_a_page_being_built_doesnt_lock_the_booth_out_of_the_database(tmp_path):
         with sqlite3.connect(path, timeout=0.2) as booth:
             booth.execute("INSERT INTO sessions (started_at, date) VALUES (0, 'x')")
         assert len(reading.fetchall()) == 2     # it reads what it started with
+        with sqlite3.connect(path, timeout=0.2) as booth:
+            booth.execute("UPDATE shots SET player = 'Bo'")
+        assert ro.execute("SELECT count(*) FROM sessions").fetchone()[0] == 1   # and every read after it
+        assert [r[0] for r in ro.execute("SELECT player FROM shots")] == ["Ann"] * 3
+
+
+def test_a_page_reads_a_wal_file_no_booth_has_open(tmp_path):
+    path, db = _db(tmp_path)
+    _shot(db, "Ann", ts=0)
+    db.commit()
+    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    db.close()
+    for name in ("season.db-wal", "season.db-shm"):   # as the last connection leaves it (on Windows)
+        (tmp_path / name).unlink(missing_ok=True)
+    with stats_web.connect(path) as ro:
+        assert ro.execute("SELECT count(*) FROM shots").fetchone()[0] == 1
+        with pytest.raises(sqlite3.OperationalError):
+            ro.execute("INSERT INTO sessions (started_at, date) VALUES (0, 'x')")
+
+
+def test_a_page_built_from_a_file_not_in_wal_mode_reads_a_copy(tmp_path):
+    path, db = _db(tmp_path)
+    db.execute("PRAGMA journal_mode = DELETE")
+    _shot(db, "Ann", ts=0)
+    db.commit()
+    with stats_web.connect(path) as ro:
+        assert ro.execute("PRAGMA main.journal_mode").fetchone()[0] == "memory"
+        assert ro.execute("SELECT count(*) FROM shots").fetchone()[0] == 1
+        with sqlite3.connect(path, timeout=0.2) as booth:
+            booth.execute("INSERT INTO sessions (started_at, date) VALUES (0, 'x')")
 
 def test_a_server_building_in_the_background_answers_once_its_first_build_is_done(tmp_path, monkeypatch):
     from commentator import stats_site

@@ -359,6 +359,15 @@ class Store:
         # Long enough to outwait anything else holding the file (a backup's copy, a page edit), so the booth
         # doesn't stop over a busy moment.
         self.db = sqlite3.connect(path or ":memory:", timeout=30)
+        if path:
+            # Write-ahead logging: the stats page reads a snapshot of the file while the booth writes
+            # (stats_web.connect). Kept by the file once set. A file where it can't be (a network
+            # share) stays as it was, and the page reads a copy instead.
+            try:
+                if self.db.execute("PRAGMA journal_mode = WAL").fetchone()[0] != "wal":
+                    log.warning("season file not in WAL mode: the stats page reads a copy of it")
+            except sqlite3.OperationalError as e:
+                log.warning("season file not switched to WAL mode: %s", e)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         self._migrate()

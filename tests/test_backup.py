@@ -74,6 +74,29 @@ def test_restore_keeps_the_chosen_copy_and_saves_even_a_corrupted_current_file(t
     assert backup.keep([p.name for p in dest.iterdir()]) == {old.name}   # pruning never sees it
 
 
+def test_restore_saves_the_current_file_with_whats_still_in_its_log(tmp_path):
+    import shutil
+
+    db, dest, crashed = tmp_path / "season.db", tmp_path / "backups", tmp_path / "crashed"
+    _db(db, "old")
+    old = backup.back_up(db, dest, daily=1, weekly=0)
+    with closing(sqlite3.connect(db)) as booth:
+        booth.execute("PRAGMA journal_mode = WAL")
+        booth.execute("PRAGMA wal_autocheckpoint = 0")
+        booth.execute("UPDATE t SET v = 'last shot'")
+        booth.commit()
+        crashed.mkdir()   # the files as a crash leaves them: the last shot only in the log
+        for name in ("season.db", "season.db-wal", "season.db-shm"):
+            shutil.copy(tmp_path / name, crashed / name)
+    saved = backup.restore(old, crashed / "season.db", dest)
+    assert _value(crashed / "season.db") == "old"
+    with gzip.open(saved) as fh:
+        (tmp_path / "saved.db").write_bytes(fh.read())
+    assert _value(tmp_path / "saved.db") == "last shot"
+    with gzip.open(backup.back_up(db, dest, force=True)) as fh:
+        assert fh.read(20)[18:20] == b"\x01\x01"   # a copy is one file, not in WAL mode
+
+
 def test_restore_refuses_an_empty_or_foreign_file_and_puts_the_journal_back_on_failure(tmp_path, monkeypatch):
     import pytest
 

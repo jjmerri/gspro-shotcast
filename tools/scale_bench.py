@@ -152,11 +152,11 @@ def run(db_in: str) -> None:
         try:
             base = f"http://127.0.0.1:{server.server_address[1]}"
             urllib.request.urlopen(base + "/latest.json").read()   # built for the file as it is
-            before = db_path.stat().st_mtime
+            before = stats_web.file_stamp(db_path)
             time.sleep(0.01)
             _edit_a_round(db_path)
-            if db_path.stat().st_mtime == before:
-                raise SystemExit("the edit didn't change the file's time: the page wouldn't rebuild")
+            if stats_web.file_stamp(db_path) == before:
+                raise SystemExit("the edit didn't change the file's stamp: the page wouldn't rebuild")
             _timed("page first load after a round", lambda: urllib.request.urlopen(base + "/latest.json").read())
         finally:
             server.shutdown()

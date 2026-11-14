@@ -90,6 +90,7 @@ def keep(names: list[str], daily: int = 14, weekly: int = 4) -> set[str]:
 def _snapshot(db_path: Path, out: Path) -> None:
     with closing(sqlite3.connect(db_path)) as src, closing(sqlite3.connect(out)) as dst:
         src.backup(dst)
+        dst.execute("PRAGMA journal_mode = DELETE")   # one file, as it was before the season file used WAL
         ok = dst.execute("PRAGMA integrity_check").fetchone()[0]
     if ok != "ok":
         raise RuntimeError(f"the copy failed its integrity check: {ok}")
@@ -183,10 +184,28 @@ def upload(path: Path, bucket: str, prefix: str = "backups/", daily: int = 14, w
         client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in stale[chunk:chunk + 1000]]})
 
 
+def _with_its_log(db_path: Path, out: Path) -> Path | None:
+    """The file with what's still in its WAL log beside it (after a crash, the last shots may be only
+    there), read through SQLite without changing it; None if there's no log or it can't be read that
+    way (a corrupted file is then kept byte for byte)."""
+    wal = db_path.with_name(db_path.name + "-wal")
+    if not wal.exists() or wal.stat().st_size == 0:
+        return None
+    try:
+        with closing(sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)) as src, \
+                closing(sqlite3.connect(out)) as copy:
+            src.backup(copy)
+            copy.execute("PRAGMA journal_mode = DELETE")
+        return out
+    except sqlite3.Error as e:
+        log.warning("kept %s as it is, without its log: %s", db_path.name, e)
+        return None
+
+
 def restore(backup: str | Path, db_path: str | Path, dest: str | Path) -> Path | None:
     """Put a backup back as the database. The restored copy is checked before it replaces anything, and
-    the current file is kept as dest/pre-restore-*.db.gz (returned), copied byte for byte so a corrupted
-    one is kept too, and never pruned. Stop the booth first."""
+    the current file is kept as dest/pre-restore-*.db.gz (returned), with what's still in its WAL log,
+    or copied byte for byte so a corrupted one is kept too, and never pruned. Stop the booth first."""
     backup, db_path, dest = Path(backup), Path(db_path), Path(dest)
     stamp = datetime.now().strftime(STAMP)
     with tempfile.TemporaryDirectory(dir=db_path.parent) as tmp:
@@ -207,7 +226,8 @@ def restore(backup: str | Path, db_path: str | Path, dest: str | Path) -> Path |
         if db_path.exists():
             dest.mkdir(parents=True, exist_ok=True)
             saved = dest / f"pre-restore-{stamp}.db.gz"
-            with open(db_path, "rb") as fin, gzip.open(saved, "wb", compresslevel=6) as fout:
+            current = _with_its_log(db_path, Path(tmp) / "current.db") or db_path
+            with open(current, "rb") as fin, gzip.open(saved, "wb", compresslevel=6) as fout:
                 shutil.copyfileobj(fin, fout, 1 << 20)
         # A leftover journal belongs to the old file: SQLite would replay it into the restored one.
         moved: list[tuple[Path, Path]] = []

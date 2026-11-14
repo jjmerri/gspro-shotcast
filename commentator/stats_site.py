@@ -243,7 +243,7 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
             body: dict[str, Any] = stats_web.summary(src, context, names, local, season_start)
             if not news:
                 body["news"] = []
-            body["db"] = {"name": db_path.name, "modified": db_path.stat().st_mtime, "published": time.time()}
+            body["db"] = {"name": db_path.name, "modified": stats_web.modified(db_path), "published": time.time()}
             pdir = vdir / "player" / name
             pdir.mkdir(parents=True, exist_ok=True)
             _note_records(records, body["records"])

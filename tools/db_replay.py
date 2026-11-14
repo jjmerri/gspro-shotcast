@@ -38,7 +38,8 @@ HOLE = re.compile(r"Hole (\d+), par (\d+), (\d+) yards")
 
 
 def load_round(db: str, session: int, player: str) -> list[dict]:
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con = sqlite3.connect(f"file:{db}?mode=rw", uri=True)   # not ro: a WAL file may need its -shm made
+    con.execute("PRAGMA query_only = ON")
     con.row_factory = sqlite3.Row
     rows = [dict(r) for r in con.execute(
         "SELECT * FROM shots WHERE session_id = ? AND player = ? AND mulligan = 0 ORDER BY id", (session, player))]

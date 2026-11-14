@@ -144,6 +144,32 @@ merged like any other, and its record is in both nights' signatures.
   Past years' lists (rounds, broadcasts, trends) move to per-year files the page loads when paged back.
 - **Bench** at 1, 3, 5 and 10 years: the after-a-round times must be flat.
 
+### 3a. The build reads the file, not a copy in memory (done)
+
+The build used to copy the whole database into memory first (`stats_web.connect`), because a minute
+of reading the file in SQLite's default journal mode would lock out the booth's writes. A copy that
+grows with the years, held for every build, is the wrong cost. Now:
+
+- The season file is in WAL (write-ahead log) mode: `Store` sets it, and the file keeps it. Writes
+  go to `season.db-wal` beside the file and are checkpointed into it later; readers don't block
+  writers or each other.
+- The build opens the file and holds one read transaction for the whole build: every query sees the
+  file as it was when the build started, and the stats cache's signatures and figures come from that
+  same snapshot. The booth's shots, and the page's own edits, carry on meanwhile.
+- It's opened read-write and made `query_only`: a read-only connection can't open a WAL file no one
+  else has open (it makes the `-shm` beside it). The diagnostic report and `tools/db_replay.py` too.
+- It's read mapped (`mmap_size`, the first GB): as quick as the copy was (3-year copy, warm: 37 s
+  either way; 43 s reading a page at a time) with no copy of its own.
+- The local page rebuilds when the file or its `-wal` changes (`stats_web.file_stamp`); the file alone
+  can go unchanged for a while.
+- Where WAL can't be set (a network share) the file stays as it was and the build reads a copy, as
+  before. Old versions of the app read and write a WAL file as usual.
+- Copies of the file go through SQLite (the backups already did; `log_backfill`'s dry run and the demo
+  build now too): a plain file copy can miss what's still in the `-wal`. Copying `season.db` by hand
+  while the app runs has the same risk. Backups stay single files (not in WAL mode).
+- A restore saves the current file with what's still in its `-wal` (after a crash the last shots may be
+  only there), read through SQLite; a file SQLite can't read is saved byte for byte, as before.
+
 ### 3b. Repeated and quadratic work in the build (done)
 
 A profile of the full build on the 3-year, 211k-shot copy found work that didn't need stored totals:

@@ -47,6 +47,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -153,8 +154,9 @@ def redact(src: Path, out: Path) -> None:
     """The demo's copy of the season: everyone renamed, and the booth's words kept only about Josh. A copy
     that's already the demo's (the stored one) is only checked."""
     out.unlink(missing_ok=True)
-    shutil.copy(src, out)
     db = sqlite3.connect(out)
+    with closing(sqlite3.connect(src)) as season:   # through SQLite: the newest writes may be in its WAL log
+        season.backup(db)
     if not db.execute("SELECT 1 FROM shots WHERE player = ? LIMIT 1", (ME,)).fetchone():
         demo = db.execute("SELECT 1 FROM shots WHERE player = ? LIMIT 1", (SHOWN,)).fetchone()
         db.close()
