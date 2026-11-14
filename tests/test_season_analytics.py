@@ -295,6 +295,20 @@ def test_booth_phrases_shot_log_and_transcript(db):
     assert [x["id"] for x in A.broadcasts(db)] == [1]
 
 
+def test_booth_phrases_come_from_the_nights_since_while_its_counts_stay_lifetime(db):
+    db.execute("UPDATE sessions SET date = '2025-01-01' WHERE id = 1")
+    db.execute("INSERT INTO sessions (id, date, started_at) VALUES (2, '2025-01-08', 2)")
+    for sid, text in ((2, "Soft landing now. Soft landing now."), (1, "Big drive there. Big drive there.")):
+        db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text) VALUES (?, 0, 'shot', 'pbp', ?)", (sid, text))
+    db.commit()
+    (lifetime,) = A.booth(db)["commentators"]
+    assert lifetime["phrases"][:2] == ["soft landing now", "big drive there"]   # a tie: the line said first
+    b = A.booth(db, None, "2025-01-08")
+    (pbp,) = b["commentators"]
+    assert pbp["lines"] == 2 and "soft landing now" in pbp["phrases"] and not any("big" in p for p in pbp["phrases"])
+    assert [n["lines"] for n in b["nights"]] == [1, 1]
+
+
 def test_broadcasts_list_each_sessions_courses_and_players_in_order(db):
     db.execute("INSERT INTO sessions (id, date, started_at) VALUES (2, '2025-01-08', 2)")
     db.execute("UPDATE sessions SET started_at = 1 WHERE id = 1")

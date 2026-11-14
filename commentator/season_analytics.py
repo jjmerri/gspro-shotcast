@@ -742,29 +742,31 @@ _STOP = set("a an and the of to in on at for is it's its it that this with he hi
             " but so just from off up out there what all i we our by or not no have has into than".split())
 
 
-def booth(db: sqlite3.Connection, names: dict[str, str] | None = None) -> dict[str, Any]:
-    """The commentators: lines and words by kind, a few signature phrases, and putt-call accuracy by night."""
+def booth(db: sqlite3.Connection, names: dict[str, str] | None = None, phrases_since: str | None = None) -> dict[str, Any]:
+    """The commentators: lines and words by kind, a few signature phrases (from the nights since
+    `phrases_since`, a date; None: all of them), and putt-call accuracy by night."""
     names = names or {}
-    on_air = {n.lower() for n in names.values()} | {"nigel", "duke"}
+    on_air = tuple(sorted({n.lower() for n in names.values()} | {"nigel", "duke"}))
     per: dict[str, dict] = {}
-    grams: dict[str, Counter] = defaultdict(Counter)
-    for r in db.execute("SELECT speaker, kind, text FROM lines"):
-        p = per.setdefault(r["speaker"], {"key": r["speaker"], "name": names.get(r["speaker"], r["speaker"]),
-                                          "lines": 0, "words": 0, "kinds": Counter()})
-        words = re.findall(r"[a-z0-9']+", r["text"].lower().replace("\u2019", "'"))
-        p["lines"] += 1
-        p["words"] += len(words)
-        p["kinds"][r["kind"]] += 1
-        # a phrase: three words, two of them not stop words, none a number or a commentator's name
-        usable = [(w.isalpha() or "'" in w) and w not in on_air for w in words]
-        stop = [w in _STOP for w in words]
-        mine = grams[r["speaker"]]
-        for i in range(len(words) - 2):
-            if usable[i] and usable[i + 1] and usable[i + 2] and stop[i] + stop[i + 1] + stop[i + 2] <= 1:
-                mine[f"{words[i]} {words[i + 1]} {words[i + 2]}"] += 1
-    sessions = {r[0]: r[1] for r in db.execute("SELECT id, date FROM sessions")}
-    rounds_by_date = Counter(r[0] for r in db.execute("SELECT DISTINCT date, session_id, course FROM rounds"))
-    lines_by_date = Counter(sessions.get(r[0]) for r in db.execute("SELECT session_id FROM lines"))
+    rounds_by_date: Counter = Counter()
+    lines_by_date: dict[str, int] = {}
+    for d, night in N.per_night(db, "booth", lambda ns: _collect_booth(db, ns)).items():
+        for speaker, (lines, words, kinds) in night["speakers"].items():
+            p = per.setdefault(speaker, {"key": speaker, "name": names.get(speaker, speaker),
+                                         "lines": 0, "words": 0, "kinds": Counter()})
+            p["lines"] += lines
+            p["words"] += words
+            p["kinds"].update(kinds)
+            lines_by_date[d] = lines_by_date.get(d, 0) + lines
+        rounds_by_date.update(night["rounds"])
+    grams: dict[str, dict[str, list]] = defaultdict(dict)
+    for night in N.per_night(db, "phrases", lambda ns: _collect_phrases(db, ns, set(on_air)), extra=(on_air,),
+                             since=phrases_since).values():
+        for speaker, got in night.items():
+            mine = grams[speaker]
+            for g, (n, first) in got.items():
+                have = mine.get(g)
+                mine[g] = [n, tuple(first)] if have is None else [have[0] + n, min(have[1], tuple(first))]
     calls = [{"date": r["date"], "who": names.get(r["commentator"], r["commentator"]), "calls": r["n"], "right": r["hits"] or 0}
              for r in db.execute("SELECT s.date, p.commentator, COUNT(*) n, SUM(correct) hits FROM predictions p"
                                  " JOIN sessions s ON s.id = p.session_id WHERE correct IS NOT NULL"
@@ -772,12 +774,59 @@ def booth(db: sqlite3.Connection, names: dict[str, str] | None = None) -> dict[s
     return {
         "commentators": [{**{k: v for k, v in p.items() if k != "kinds"}, "kinds": dict(p["kinds"]),
                           "words_per_line": round(p["words"] / p["lines"], 1) if p["lines"] else None,
-                          "phrases": [g for g, n in grams[k].most_common(8) if n >= 2]}
+                          "phrases": [g for g, n in _most_common(grams[k], 8) if n >= 2]}
                          for k, p in sorted(per.items())],
         "nights": [{"date": d, "lines": n, "rounds": rounds_by_date.get(d, 0)}
                    for d, n in sorted((d, n) for d, n in lines_by_date.items() if d)],
         "calls": calls,
     }
+
+
+def _most_common(counts: dict[str, list], k: int) -> list[tuple[str, int]]:
+    """The k commonest, a tie going to the phrase said first (as Counter.most_common over the lines
+    in order): counts are kept as [n, (line id, word) first said]."""
+    return [(g, n) for g, (n, _) in sorted(counts.items(), key=lambda kv: (-kv[1][0], kv[1][1]))[:k]]
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", text.lower().replace("\u2019", "'"))
+
+
+def _collect_booth(db: sqlite3.Connection, ns: "N.Nights") -> dict[str, dict[str, Any]]:
+    """Per night: each speaker's lines, words and lines by kind; and the rounds by their date (as many
+    as courses played in each session)."""
+    out: dict[str, dict[str, Any]] = {d: {"speakers": {}, "rounds": {}} for d in ns.dates}
+    for r in db.execute("SELECT session_id, speaker, kind, text FROM lines WHERE 1=1" + ns.where):
+        p = out[ns.date[r["session_id"]]]["speakers"].setdefault(r["speaker"], [0, 0, {}])
+        p[0] += 1
+        p[1] += len(_words(r["text"]))
+        p[2][r["kind"]] = p[2].get(r["kind"], 0) + 1
+    for sid, d, _ in db.execute("SELECT DISTINCT session_id, date, course FROM rounds WHERE 1=1" + ns.where):
+        got = out[ns.date[sid]]["rounds"]
+        got[d] = got.get(d, 0) + 1
+    return out
+
+
+def _collect_phrases(db: sqlite3.Connection, ns: "N.Nights", on_air: set[str]) -> dict[str, dict[str, dict]]:
+    """Per night, each speaker's phrases: three words, two of them not stop words, none a number or a
+    commentator's name; each with [times said, (line id, word) first said]."""
+    out: dict[str, dict[str, dict]] = {d: {} for d in ns.dates}
+    for r in db.execute("SELECT id, session_id, speaker, text FROM lines WHERE 1=1" + ns.where):
+        d = ns.date[r["session_id"]]
+        words = _words(r["text"])
+        usable = [(w.isalpha() or "'" in w) and w not in on_air for w in words]
+        stop = [w in _STOP for w in words]
+        mine = out[d].setdefault(r["speaker"], {})
+        for i in range(len(words) - 2):
+            if usable[i] and usable[i + 1] and usable[i + 2] and stop[i] + stop[i + 1] + stop[i + 2] <= 1:
+                g = f"{words[i]} {words[i + 1]} {words[i + 2]}"
+                got = mine.get(g)
+                if got is None:
+                    mine[g] = [1, (r["id"], i)]
+                else:
+                    got[0] += 1
+                    got[1] = min(got[1], (r["id"], i))
+    return out
 
 
 def shot_log(db: sqlite3.Connection, context: str | None = None, *, player: str | None = None,

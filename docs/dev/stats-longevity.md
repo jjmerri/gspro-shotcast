@@ -152,6 +152,10 @@ merged like any other, and its record is in both nights' signatures.
     rounds, last date, best nine and each hole's scores (a count per score: the average is total over
     total, birdies and bogeys go by the first card's par). The best nine is now the truly lowest, the
     earlier round taking a tie (it compared a round's nine with the best's rounded one).
+  - the booth tab (`booth`): per night, each speaker's lines, words and kinds, and the rounds by date;
+    the signature phrases from a second partial per night (each phrase's count and first line), merged
+    over the last year's nights only (below). Putt calls stay a direct query (cheap, and predictions
+    aren't in a night's signature).
   - Output identical to before on the 1- and 50-season copies.
 - **Where it stands** (warm build, nothing changed): 18 s on 1.5 years, 37 s on 3, 74 s on 6: still
   linear. On 6 years: writing the page's shot list and replays 37 s (`build_data_db`, every shot
@@ -160,7 +164,7 @@ merged like any other, and its record is in both nights' signatures.
   66.6 s (36.3 s and 26.9 s). Still linear: those two are the page files and the families left.
   With the per-year page files: 3 years 17.8 s warm, 23.5 s after an edit to the newest night; 6
   years 33.4 s and 44.8 s. What's left growing is the summary (the families still to port).
-- **To port:** the booth tab, predictions, broadcasts, filters, the handicap index,
+- **To port:** predictions, broadcasts, filters, the handicap index,
   the usual gimme; then the page files (below).
 - **Decisions:**
   - The usual gimme stays as it is (the most common radius); the families it feeds put it in their
@@ -173,6 +177,8 @@ merged like any other, and its record is in both nights' signatures.
   - The booth: rates are total over total (today `season_rounds` averages per-round rates), band
     lookups snap to 1 ft / 5 yd buckets, it merges the frozen nights once at startup and adds tonight
     live; `spoken_lines` looks back 12 months, `side_rounds` gets a limit.
+  - The booth tab's signature phrases go by the last 12 months (the 1y range's nights); its other
+    numbers stay lifetime. Older nights' phrase partials are dropped from the cache.
 - **Page files (done for the shot log).** The page's `stats.db` is one file per calendar year of play
   (`stats_site.page_files`):
   - A session's shots, swing times and transcript go in its date's year; a round's hole replays in its

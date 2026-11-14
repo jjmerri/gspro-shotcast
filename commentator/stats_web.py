@@ -1046,6 +1046,13 @@ def _usual(db: sqlite3.Connection) -> float | None:
     return usual_gimme(db, reuse(db, ("round_gimmes",), lambda: round_gimmes(db)))
 
 
+def _booth(db: sqlite3.Connection, names: dict[str, str] | None) -> dict[str, Any]:
+    """The booth tab; its signature phrases go by the last year (the 1y range's nights), so working
+    them out never grows with the years kept."""
+    since = period_starts()["1y"]
+    return reuse(db, ("booth", tuple(sorted((names or {}).items())), since), lambda: A.booth(db, names, since))
+
+
 def _collect_holes(db: sqlite3.Connection, ns: "N.Nights", usual: float | None) -> dict[str, dict[str, Any]]:
     """Per night, per context ("" for all of them: a hole is grouped from its strokes in the context),
     what comes of the holes played (A.holes_played): strokes gained, recovery, the trend point, each
@@ -1188,7 +1195,7 @@ def summary(db: sqlite3.Connection, context: str | None = None,
             "rounds": rounds_, **(_editing(db) if local else {}), **highlights_by_period(db, context, season=season),
             "season_from": season_start(season), "predictions": predictions(db, names),
             "courses": A.courses(db, context),
-            "booth": reuse(db, ("booth", tuple(sorted((names or {}).items()))), lambda: A.booth(db, names)), "broadcasts": A.broadcasts(db), "filters": filters,
+            "booth": _booth(db, names), "broadcasts": A.broadcasts(db), "filters": filters,
             "vod_rounds": [[s, e, int(st > 0)] for s, e, st in round_spans(db)],
             "news": changelog.site()}
 
