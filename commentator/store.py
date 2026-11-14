@@ -252,6 +252,7 @@ INDEXES = {
     "lines_shot": "lines(shot_id)",
     "rounds_session": "rounds(session_id)",
     "player_rounds_session": "player_rounds(session_id)",
+    "shots_course": "shots(course COLLATE NOCASE)",   # course_name: as each round is saved, and in play
 }
 
 
@@ -350,6 +351,26 @@ def _median(xs: list[float]) -> float | None:
         return None
     m = len(xs) // 2
     return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
+
+
+def planner_counts_stale(db: sqlite3.Connection, grown: float = 2.0, least: int = 1000) -> bool:
+    """Whether a table with indexes has `grown` times the rows ANALYZE last counted (or has `least`
+    rows and was never counted). SQLite plans by those counts: kept from a small season, a lookup of
+    a few hundred shots' lines reads every line instead of using the index (a 6-year season's build
+    went from seconds to minutes). ANALYZE again then: a few times in a file's life (a 6-year
+    season's takes 0.3 s)."""
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'sqlite_stat1'").fetchone():
+        counted: dict[str, int] = {}
+    else:
+        counted = {t: n for t, n in db.execute(
+            "SELECT tbl, MAX(CAST(stat AS INTEGER)) FROM sqlite_stat1 GROUP BY tbl")}
+    tables = [r[0] for r in db.execute("SELECT DISTINCT tbl_name FROM sqlite_master WHERE type = 'index'"
+                                       " AND sql IS NOT NULL AND tbl_name NOT LIKE 'sqlite_%'")]
+    for t in tables:
+        rows = db.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+        if rows >= least and rows > grown * counted.get(t, 0):
+            return True
+    return False
 
 
 class Store:
@@ -484,7 +505,7 @@ class Store:
             self.db.execute("ALTER TABLE hole_layouts ADD COLUMN tee_box TEXT")
         # Per-session and per-shot lookups (the booth's, during play, and the stats build's) would
         # otherwise scan every shot ever recorded. Made here, after the columns exist; the first time,
-        # ANALYZE so the planner knows how the indexes compare (seconds, once, on a large season).
+        # ANALYZE so the planner knows how the indexes compare (and again below as the season grows).
         have_ix = {r[0] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
         for name, on in INDEXES.items():
             self.db.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {on}")
@@ -522,6 +543,8 @@ class Store:
                 if (name := self.course_name(course)) != course:
                     self.db.execute(f"UPDATE {table} SET course = ? WHERE course = ?", (name, course))
         round_record.migrate(self.db)
+        if planner_counts_stale(self.db):   # (last: after the rows the migrations add)
+            self.db.execute("ANALYZE")
         self.db.commit()
 
     def course_name(self, course: str | None) -> str | None:

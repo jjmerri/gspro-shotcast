@@ -1852,6 +1852,7 @@ def test_booth_lookups_during_play_do_not_scan_history(tmp_path):
     st.shot_struck_before(time.time() + 60, 600)
     st.shot_struck_after(0, 600)
     st.shot_brief(first)
+    st.course_name("PEBBLE")   # a round's course, as each round is saved and as the booth recalls a hole
     st.db.set_trace_callback(None)
     scans = []
     for sql in seen:
@@ -1860,6 +1861,41 @@ def test_booth_lookups_during_play_do_not_scan_history(tmp_path):
             scans += [(p, " ".join(sql.split())) for p in plan if re.match(r"SCAN (shots|lines)\b", p)]
     assert len(seen) > 10 and scans == []
     st.close()
+
+
+def test_store_counts_the_season_again_for_the_planner_once_it_has_outgrown_the_last_count(tmp_path):
+    import sqlite3
+
+    from commentator.store import Store
+
+    path = str(tmp_path / "season.db")
+
+    def add_lines(db, n):
+        db.executemany("INSERT INTO lines (session_id, shot_id, ts, kind, speaker, text) VALUES (1, ?, 0, 'shot', 'a', 'x')",
+                       [(i // 3,) for i in range(n)])
+        db.commit()
+
+    def plan(db):
+        sql = f"SELECT text FROM lines WHERE shot_id IN ({','.join('?' * 500)}) ORDER BY ts, id"
+        return [r[3] for r in db.execute("EXPLAIN QUERY PLAN " + sql, list(range(500)))]
+
+    st = Store(path)
+    add_lines(st.db, 1500)
+    st.close()
+    Store(path).close()                # counted at 1,500
+    with sqlite3.connect(path) as db:
+        add_lines(db, 12000)           # a few seasons later
+        assert any(p.startswith("SCAN lines") for p in plan(db))   # planned as if it were still small
+    Store(path).close()
+    with sqlite3.connect(path) as db:
+        assert any(p.startswith("SEARCH lines USING INDEX lines_shot") for p in plan(db))
+        counted = db.execute("SELECT MAX(CAST(stat AS INTEGER)) FROM sqlite_stat1 WHERE tbl = 'lines'").fetchone()[0]
+    assert counted == 13500
+    with sqlite3.connect(path) as db:
+        add_lines(db, 100)
+    Store(path).close()                # not again till it's grown that much more
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT MAX(CAST(stat AS INTEGER)) FROM sqlite_stat1 WHERE tbl = 'lines'").fetchone()[0] == 13500
 
 
 def test_store_keeps_the_season(tmp_path):

@@ -89,6 +89,19 @@ the cloud.
   `shots` or `lines`.
 - Expected from the measurements: the 6-month build (publish, and the local page after a round) goes
   from 246 s to about 28 s, and booth lookups stop growing.
+- Later, from a 6-year copy (100 copies of the base, 422k shots):
+  - **ANALYZE again as the season grows** (`store.planner_counts_stale`). It ran once, when the indexes
+    were made, and SQLite kept planning by those counts: on the 6-year copy (counted when it was the
+    size of the base) the shot list's lookup of 500 shots' lines read every line each time,
+    quadratic: `shot_log` 28 s instead of 8. Now `Store` runs it again at start when a table with
+    indexes has twice the rows last counted (or 1,000 never counted): a few times in a file's life,
+    0.3 s each on 6 years; the check is a few ms.
+  - **`shots(course COLLATE NOCASE)`**: `course_name` (as each round is saved, as the booth recalls a
+    hole, and for every round course at each start) read the shots back to front for a course: 80 ms
+    a call on 3 years, 3.7 s of each start. Now a lookup in the index (ms; the file 1.4% bigger).
+    A start on 3 years: 5.4 s to 1.2 s; on 6 years 2.2 s.
+  - Still read in full at each start: `_backfill_finishes` (1.2 s on 3 years), a safety net for
+    finishing distances play didn't fill. Bound it to recent sessions with the round index (step 3).
 
 ### 2. Benchmark harness (built)
 
@@ -123,6 +136,9 @@ merged like any other, and its record is in both nights' signatures.
   - the rounds list's facts from the shots (`_round_facts`: who played, hole lengths, first shot,
     longest drive, mulligans, putts per hole): 6.1 s to 3.5 s (the rest is the tee boxes, below).
   - Output identical to before on the 1- and 50-season copies.
+- **Where it stands** (warm build, nothing changed): 18 s on 1.5 years, 37 s on 3, 74 s on 6: still
+  linear. On 6 years: writing the page's shot list and replays 37 s (`build_data_db`, every shot
+  every build), the summary 32 s. Both are what's left below; the target is flat.
 - **To port:** a per-night round index (each round's sessions, first and last shot, holes, gimme
   votes) for what still reads every shot to place rounds: the tee boxes, `round_spans`,
   `round_gimmes`, the hole replays' and reels' scans, `shot_rounds`. Then records, courses, the booth tab, predictions, broadcasts,
