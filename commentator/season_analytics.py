@@ -490,24 +490,88 @@ def courses(db: sqlite3.Connection, context: str | None = None, player: str | No
     """Per course: rounds, players, the best nine, and every hole's scoring average from the individual
     cards, so the hardest and easiest holes stand out. With `player`, from that player's cards only."""
     by_course: dict[str, dict] = {}
-    who = " AND pr.player = ?" if player else ""
+    for (course, who), m in _courses_merged(db, context).items():
+        if player and who != player:
+            continue
+        c = by_course.setdefault(course, _new_course())
+        c["players"].append(who)
+        _add_course(c, m)
+    out = []
+    for course, c in by_course.items():
+        holes = []
+        for h, (_, par, scores) in sorted(c["holes"].items()):
+            n = sum(scores.values())
+            f = Fraction(sum(s * k for s, k in scores.items()), n)
+            mean = int(f) if f.denominator == 1 else float(f)   # as statistics.mean gives it
+            holes.append({"hole": h, "par": par, "n": n, "avg": round(mean, 2), "to_par": round(mean - par, 2),
+                          "birdie_pct": round(100.0 * sum(k for s, k in scores.items() if s < par) / n),
+                          "bogey_plus_pct": round(100.0 * sum(k for s, k in scores.items() if s > par) / n),
+                          "best": min(scores), "worst": max(scores)})
+        ranked = sorted((h for h in holes if h["n"] >= 1), key=lambda h: h["to_par"])
+        out.append({"course": course, "rounds": c["rounds"], "players": sorted(c["players"]),
+                    "last_played": c["last_played"], "best": c["best"][1] if c["best"] else None, "holes": holes,
+                    "easiest": ranked[0]["hole"] if ranked else None, "hardest": ranked[-1]["hole"] if ranked else None})
+    out.sort(key=lambda c: (-c["rounds"], c["course"]))
+    return out
+
+
+def _new_course() -> dict[str, Any]:
+    """A course's counts over some cards (_collect_courses): rounds of a nine or more, the last date
+    played, the best nine as [rank key, best], and per hole [first card's key, its par, {score: holes}]."""
+    return {"rounds": 0, "players": [], "last_played": None, "best": None, "holes": {}}
+
+
+def _add_course(into: dict[str, Any], part: dict[str, Any]) -> None:
+    into["rounds"] += part["rounds"]
+    if part["last_played"] is not None:
+        into["last_played"] = max(into["last_played"] or "", part["last_played"])
+    if part["best"] is not None and (into["best"] is None or list(part["best"][0]) < list(into["best"][0])):
+        into["best"] = part["best"]
+    for h, (key, par, scores) in part["holes"].items():
+        e = into["holes"].get(h)
+        if e is None:
+            into["holes"][h] = [key, par, dict(scores)]
+            continue
+        if list(key) < list(e[0]):   # the par is the first card's
+            e[0], e[1] = key, par
+        for s, k in scores.items():
+            e[2][s] = e[2].get(s, 0) + k
+
+
+def _courses_merged(db: sqlite3.Connection, context: str | None) -> dict[tuple[str, str], dict[str, Any]]:
+    """Each (course, player)'s counts over every night in `context`."""
+    def run() -> dict[tuple[str, str], dict[str, Any]]:
+        keep = N.wanted(context)
+        out: dict[tuple[str, str], dict[str, Any]] = {}
+        for night in N.per_night(db, "courses", lambda ns: _collect_courses(db, ns)).values():
+            for ctx, cards in night.items():
+                if keep(ctx):
+                    for course, players in cards.items():
+                        for who, part in players.items():
+                            _add_course(out.setdefault((course, who), _new_course()), part)
+        return out
+    return reuse(db, ("courses_merged", context), run)
+
+
+def _collect_courses(db: sqlite3.Connection, ns: "N.Nights") -> dict[str, dict[str, dict[str, dict[str, Any]]]]:
+    """Per night, per context, per course and player: the counts behind courses()."""
+    out: dict[str, dict[str, dict[str, dict[str, Any]]]] = {d: {} for d in ns.dates}
     for r in db.execute("SELECT pr.*, s.date FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
                         " WHERE course IS NOT NULL AND (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))"
-                        + _ctx(context, "pr") + who + " ORDER BY pr.ended_at",
-                        (player,) if player else ()):
+                        + ns.where):
         try:
             scores = {int(k): v for k, v in json.loads(r["scores"] or "{}").items() if isinstance(v, int)}
             pars = {int(k): v for k, v in json.loads(r["hole_pars"] or "{}").items() if isinstance(v, int)}
         except (TypeError, ValueError):
             continue
-        c = by_course.setdefault(r["course"], {"course": r["course"], "rounds": 0, "players": set(), "holes": {},
-                                               "best": None, "last_played": None})
-        c["players"].add(r["player"])
+        ctx = N.context_of(r["is_league"], r["is_tournament"])
+        c = out[ns.date[r["session_id"]]].setdefault(ctx, {}).setdefault(r["course"], {}).setdefault(
+            r["player"], _new_course())
+        key = [r["ended_at"], r["id"]]   # (cards in the order played)
         c["last_played"] = max(c["last_played"] or "", r["date"])
         played = [h for h in sorted(scores) if h in pars]
-        for h in played:
-            e = c["holes"].setdefault(h, {"hole": h, "par": pars[h], "scores": []})
-            e["scores"].append(scores[h])
+        _add_course(c, {"rounds": 0, "last_played": None, "best": None,
+                        "holes": {h: [key, pars[h], {scores[h]: 1}] for h in played}})
         if len(played) >= 9:   # a round of a nine or more (a one-hole 19th's birdie isn't a -9 nine)
             c["rounds"] += 1
             to_par = sum(scores[h] - pars[h] for h in played)
@@ -515,24 +579,10 @@ def courses(db: sqlite3.Connection, context: str | None = None, player: str | No
             # holes onto a nine would make the best a score nobody shot. Older rows have no stored nine.
             stored = r["nine_to_par"] if "nine_to_par" in r.keys() else None
             per9 = stored if stored is not None else (to_par * 9 / len(played) if played else None)
-            if per9 is not None and (c["best"] is None or per9 < c["best"]["to_par_9"]):
-                c["best"] = {"player": r["player"], "date": r["date"], "to_par": to_par, "holes": len(played),
-                             "to_par_9": round(per9, 1)}
-    out = []
-    for c in by_course.values():
-        holes = []
-        for e in sorted(c["holes"].values(), key=lambda e: e["hole"]):
-            s = e["scores"]
-            holes.append({"hole": e["hole"], "par": e["par"], "n": len(s), "avg": round(statistics.mean(s), 2),
-                          "to_par": round(statistics.mean(s) - e["par"], 2),
-                          "birdie_pct": round(100.0 * sum(x < e["par"] for x in s) / len(s)),
-                          "bogey_plus_pct": round(100.0 * sum(x > e["par"] for x in s) / len(s)),
-                          "best": min(s), "worst": max(s)})
-        ranked = sorted((h for h in holes if h["n"] >= 1), key=lambda h: h["to_par"])
-        out.append({"course": c["course"], "rounds": c["rounds"], "players": sorted(c["players"]),
-                    "last_played": c["last_played"], "best": c["best"], "holes": holes,
-                    "easiest": ranked[0]["hole"] if ranked else None, "hardest": ranked[-1]["hole"] if ranked else None})
-    out.sort(key=lambda c: (-c["rounds"], c["course"]))
+            if per9 is not None:
+                _add_course(c, {"rounds": 0, "last_played": None, "holes": {}, "best": [
+                    [per9, *key], {"player": r["player"], "date": r["date"], "to_par": to_par, "holes": len(played),
+                                   "to_par_9": round(per9, 1)}]})
     return out
 
 

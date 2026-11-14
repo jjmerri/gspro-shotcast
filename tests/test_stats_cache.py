@@ -283,6 +283,48 @@ def test_records_are_each_nights_bests_merged_per_range_and_an_edit_works_out_on
     assert got[(None, "all")] == shots[0] and got[(None, "late")] == shots[4] and got[("Bo", "late")] is None
 
 
+def test_courses_are_kept_per_night_and_merged_with_the_first_cards_par_and_the_lowest_nine(tmp_path):
+    path = tmp_path / "season.db"
+    _season(path)
+    nine = {str(h): 4 for h in range(1, 10)}
+    with closing(sqlite3.connect(path)) as db, db:
+        nights = db.execute("SELECT s.id, r.round_uuid FROM sessions s JOIN rounds r ON r.session_id = s.id"
+                            " ORDER BY s.id").fetchall()
+        for n, (sid, _) in enumerate(nights):
+            db.execute("UPDATE sessions SET date = ? WHERE id = ?", (f"2023-11-1{4 + n}", sid))
+
+        def card(night, player, scores, pars, at):
+            sid, u = nights[night]
+            db.execute("INSERT INTO player_rounds (session_id, ended_at, player, course, scores, hole_pars, is_league,"
+                       " complete, holes_played, round_uuid) VALUES (?, ?, ?, 'Pebble', ?, ?, 0, 1, 9, ?)",
+                       (sid, at, player, json.dumps(scores), json.dumps(pars), u))
+        card(0, "Ann", {**nine, "1": 3}, nine, T0 + 50)                      # -1
+        card(1, "Bo", {**nine, "1": 3}, {**nine, "1": 5}, T0 + 86400 + 50)  # -2 by its own pars; hole 1 a par 5 now
+        card(1, "Ann", {**nine, "2": 5}, nine, T0 + 86400 + 40)             # +1
+
+    def build(player=None):
+        with closing(stats_web.connect(path)) as db:
+            fresh = A.courses(db, None, player)
+            with stats_cache.opened(db, path) as c:
+                got = A.courses(db, None, player)
+                return got, fresh, (c.hits, c.misses)
+
+    got, fresh, counts = build()
+    assert got == fresh and counts == (0, 2)
+    (c,) = got
+    assert c["rounds"] == 3 and c["players"] == ["Ann", "Bo"] and c["last_played"] == "2023-11-15"
+    assert c["best"]["player"] == "Bo" and c["best"]["to_par"] == -2
+    one = c["holes"][0]
+    assert (one["par"], one["n"], one["avg"], one["birdie_pct"], one["best"]) == (4, 3, 3.33, 67, 3)   # the first card's par
+    (ann,) = build("Ann")[0]
+    assert ann["rounds"] == 2 and ann["players"] == ["Ann"] and ann["best"]["to_par"] == -1
+    assert build()[2] == (2, 0)
+    with closing(sqlite3.connect(path)) as db, db:   # Ann's first card loses its birdie
+        db.execute("UPDATE player_rounds SET scores = ? WHERE player = 'Ann' AND ended_at = ?", (json.dumps(nine), T0 + 50))
+    got, fresh, counts = build()
+    assert got == fresh and counts == (1, 1) and got[0]["holes"][0]["birdie_pct"] == 33
+
+
 def test_the_pages_data_files_are_kept_per_year_and_an_edit_builds_only_its_year_again(tmp_path, monkeypatch):
     from commentator import stats_site
 

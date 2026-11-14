@@ -146,6 +146,12 @@ merged like any other, and its record is in both nights' signatures.
   - the reels' before-round bests: per night, the night's bests and each round's in-night bests
     before its start (`reel_bests`), merged in time order. Where nights overlap in time (a clock
     change), the old full read is used.
+  - the records (`records_table`): each player's best of the night per record (with its tie key), a
+    range's record the best of its nights'.
+  - the courses (`courses`, the summary's and each player's): per night, course and player, the cards'
+    rounds, last date, best nine and each hole's scores (a count per score: the average is total over
+    total, birdies and bogeys go by the first card's par). The best nine is now the truly lowest, the
+    earlier round taking a tie (it compared a round's nine with the best's rounded one).
   - Output identical to before on the 1- and 50-season copies.
 - **Where it stands** (warm build, nothing changed): 18 s on 1.5 years, 37 s on 3, 74 s on 6: still
   linear. On 6 years: writing the page's shot list and replays 37 s (`build_data_db`, every shot
@@ -154,7 +160,7 @@ merged like any other, and its record is in both nights' signatures.
   66.6 s (36.3 s and 26.9 s). Still linear: those two are the page files and the families left.
   With the per-year page files: 3 years 17.8 s warm, 23.5 s after an edit to the newest night; 6
   years 33.4 s and 44.8 s. What's left growing is the summary (the families still to port).
-- **To port:** records, courses, the booth tab, predictions, broadcasts, filters, the handicap index,
+- **To port:** the booth tab, predictions, broadcasts, filters, the handicap index,
   the usual gimme; then the page files (below).
 - **Decisions:**
   - The usual gimme stays as it is (the most common radius); the families it feeds put it in their
