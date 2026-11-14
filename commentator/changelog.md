@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.129
+
+### Booth
+- Turning the booth off only quiets the commentary: the live stream keeps going (with the game's sound), so the round still gets its replay and highlight reel.
+
 ## 0.1.128
 
 ### Booth
