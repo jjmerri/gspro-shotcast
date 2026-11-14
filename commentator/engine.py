@@ -330,6 +330,24 @@ def _play_button_course(text: str) -> str | None:
 
 
 @dataclass
+class BoothCall:
+    """A call the booth made out loud, and the stroke it's about: the stroke `shot_id` or `impact_seq`
+    (a call made while that ball was in the air), or with `after` the same player's next one (a
+    reaction's call); else `player`'s first stroke at or after `start` in the session's shots (anyone's,
+    with no player). Bound to that stroke once it's hit."""
+    speaker: str
+    seq: int
+    text: str
+    player: str | None
+    start: int
+    shot_id: int | None = None
+    impact_seq: int | None = None
+    after: bool = False
+    struck_after: int | None = None   # with no stroke named: the impact count when the call was made
+    stroke: ShotRecord | None = field(default=None, repr=False)
+
+
+@dataclass
 class PendingOpening:
     """An opener composed and grounded from the setup screen while the course loads, held until the
     tee HUD confirms the same course and the same league team(s) before it airs."""
@@ -933,10 +951,10 @@ class Engine:
         # player's current putt, committed only when the pre-shot line airs and graded against the
         # result when the stamped hole matches. Keyed by player so a partner's shot can't bin it.
         self._pending_prediction: dict[str, tuple[str, bool, str | None]] = {}
-        # The calls the booth made out loud this round, (speaker key, hole seq, line): the only ones a
-        # line may hold a commentator to. A wrap once turned "a chance to finish with a clean statement"
-        # into "you've called this a clean finish", and the closer built on it.
-        self._calls: list[tuple[str, int, str]] = []
+        # The calls the booth made out loud this round: the only ones a line may hold a commentator to.
+        # A wrap once turned "a chance to finish with a clean statement" into "you've called this a
+        # clean finish", and the closer built on it.
+        self._calls: list[BoothCall] = []
         self._pred_turn = 0
         self._pred_rested = True   # False right after a call: the next putt never gets one
         self._plan_made_at = 0.0
@@ -3393,13 +3411,86 @@ class Engine:
     def _format_facts(self, stroke: int | None = None, setup: bool = False, player: str | None = None) -> list[str]:
         if not self.round or self.round.ended:
             return []
-        return (self.round.format_facts() + self._pick_facts(stroke, setup, player) + self._roster_facts()
-                + self._call_facts())
+        # Who leads, every time: given only each player's own score, the booth worked out the margin
+        # itself and got it wrong ("one behind" for the leader).
+        standing = self.round.standing_fact(self.round.seq - 1)
+        return (self.round.format_facts() + ([standing] if standing else []) + self._pick_facts(stroke, setup, player)
+                + self._roster_facts() + self._call_facts())
 
-    def _calls_made(self, whole_round: bool = False) -> list[tuple[str, int, str]]:
+    def _calls_made(self, whole_round: bool = False) -> list[BoothCall]:
         """The booth's calls this round: on this hole or the last one, or the whole round's."""
         seq = self.round.seq if self.round else 0
-        return [c for c in self._calls if whole_round or c[1] >= seq - 1]
+        return [c for c in self._calls if whole_round or c.seq >= seq - 1]
+
+    def _same_ball(self, player: str, other: str | None) -> bool:
+        """Whether `other`'s stroke plays `player`'s ball: theirs, or a partner's in alternate shot."""
+        if other == player:
+            return True
+        r = self.round
+        return bool(r and other and r.player_format(player) == "alternate"
+                    and (side := r.side_for(player)) is not None and side is r.side_for(other))
+
+    def _strokes_after(self, player: str | None, seq: int | None, index: int) -> list[ShotRecord]:
+        """`player`'s ball's strokes (a partner's in alternate shot) (anyone's, with None) struck after impact `seq`, earliest first. Handlers can
+        record out of order, so it goes by impact order; a stroke with no impact number, by its place
+        after `index` in the session's shots."""
+        later = [x for i, x in enumerate(self.state.shots) if (player is None or self._same_ball(player, x.player)) and (
+            x.impact_seq > seq if x.impact_seq is not None and seq is not None else i > index)]
+        return sorted(later, key=lambda x: (x.impact_seq is None, x.impact_seq or 0))
+
+    def _call_shot(self, call: BoothCall) -> ShotRecord | None:
+        """The stroke a call is about, once it's been hit (a mulligan included: it's still the stroke the
+        call was about). A next stroke is looked up afresh each time, so one recorded late takes its place."""
+        if call.stroke is not None:
+            return call.stroke
+        shots = self.state.shots
+        if call.shot_id is None and call.impact_seq is None:
+            return next(iter(self._strokes_after(call.player, call.struck_after, call.start - 1)), None)
+        at = next((i for i, x in enumerate(shots) if (call.shot_id is not None and x.shot_id == call.shot_id)
+                   or (call.impact_seq is not None and x.impact_seq == call.impact_seq)), None)
+        if at is None:
+            return None   # that stroke isn't recorded yet
+        if call.after:
+            return next(iter(self._strokes_after(shots[at].player, shots[at].impact_seq, at)), None)
+        call.stroke = shots[at]
+        return call.stroke
+
+    def _hitter(self, player: str) -> str:
+        """Who a call's stroke is credited to: the team for a shared ball nobody can attribute, even
+        once the round has ended (the sign-off's calls are still that round's strokes)."""
+        r = self.round
+        side = r.side_for(player) if r else None
+        return side.label if side and set(side.players) & set(r.anonymous_players()) else player
+
+    def _call_outcome(self, call: BoothCall) -> str:
+        """What a call was about and how it came out, or that it's still to be decided."""
+        rec = self._call_shot(call)
+        if rec is None:
+            if not call.player:
+                return "about a stroke not hit or not recorded yet: still undecided"
+            return f"about {self._hitter(call.player)}'s next stroke: not hit yet, still undecided"
+        who = self._hitter(rec.player)
+        if rec.mulligan:
+            return (f"about {who}'s stroke{f' {rec.shot_number}' if rec.shot_number else ''}: GSPro took it back "
+                    "as a mulligan, so the call was never decided: don't judge it")
+        if rec.shot.is_putt:
+            stake = PUTT_FOR.get(rec.shot_number - rec.par) if rec.shot_number and rec.par else None
+            what = f"{who}'s putt" + (f" for {stake}" if stake else "")
+            outcome = rec.outcome
+            if outcome is None and any(x.hole == rec.hole and not x.mulligan for x in self._strokes_after(
+                    rec.player, rec.impact_seq, self.state.shots.index(rec))):
+                outcome = "missed"
+            if outcome is None:
+                return f"about {what}: struck, result not known yet, still undecided"
+            how = {"holed": "holed", "missed": "missed",
+                   "conceded": "missed, stopped inside the gimme circle"}.get(outcome, outcome)
+        else:
+            what = f"{who}'s {club_name(rec.shot.club) or 'shot'}" + (
+                f" (stroke {rec.shot_number})" if rec.shot_number else "")
+            how = "holed" if rec.outcome == "holed" else f"finished in the {rec.hud.lie}" if rec.hud.lie else None
+            if how is None:
+                return f"about {what}: struck, result not known yet, still undecided"
+        return f"about {what}: {how}. Settled: judge the call only by that, never hold it to a later shot"
 
     def _call_facts(self, whole_round: bool = False) -> list[str]:
         calls = self._calls_made(whole_round)
@@ -3407,8 +3498,11 @@ class Engine:
         if not calls:
             return [f"Nobody in the booth made a call out loud {where}: never say anyone predicted or "
                     "called anything."] if whole_round else []
-        said = "; ".join(f'{self.cfg.personas[k].name or k}: "{t}"' for k, _, t in calls[-4:])
-        return [f"The calls the booth made out loud {where}, the only ones to hold anyone to: {said}"]
+        said = "; ".join(f'{self.cfg.personas[c.speaker].name or c.speaker}: "{c.text}" ({self._call_outcome(c)})'
+                         for c in (calls if whole_round else calls[-4:]))
+        return [f"The calls the booth made out loud {where}, the only ones to hold anyone to, each with the "
+                f"stroke it was about and how that came out (a call came true only if that outcome bears it "
+                f"out): {said}"]
 
     def _uncalled(self, line: Line, whole_round: bool, earlier: Iterable[Line] = ()) -> str | None:
         """Why a line holding a commentator to a call nobody made is wrong, or None. `earlier`: the
@@ -3420,7 +3514,7 @@ class Engine:
         if whose == "you" and not others:
             return None
         who = {line.speaker} if whose == "me" else set(others) if whose == "you" else set(self.speakers)
-        if any(k in who for k, _, _ in self._calls_made(whole_round)) or any(
+        if any(c.speaker in who for c in self._calls_made(whole_round)) or any(
                 l.speaker in who and makes_call(l.text) for l in earlier):
             return None
         return ("holds a commentator to a prediction nobody made" + (" this round" if whole_round else " on this hole")
@@ -3533,8 +3627,9 @@ class Engine:
         r = self.round
         if not r or r.ended or r.seq <= 1:
             return []
+        standing = r.standing_fact(r.seq - 1)
         return (self._hole_penalty_facts(r.seq - 1) + self._par_type_facts(r.seq - 1)
-                + r.lead_change_facts(r.seq - 1))
+                + r.lead_change_facts(r.seq - 1) + ([standing] if standing else []))
 
     def _prevoicing(self) -> bool:
         return getattr(self.speech, "prevoicing", True)
@@ -3605,7 +3700,8 @@ class Engine:
             result = (other_facts + [self._score_fact(side, strokes, par)]
                       + self._round_total_facts(r.seq, (side.key, r.seq, strokes, par)) + self._hole_penalty_facts(r.seq)
                       + self._par_type_facts(r.seq, (side.key, r.seq, strokes, par))
-                      + r.lead_change_facts(r.seq, (side.key, r.seq, strokes)) + theme + roster)
+                      + r.lead_change_facts(r.seq, (side.key, r.seq, strokes))
+                      + [f for f in [r.standing_fact(r.seq, (side.key, r.seq, strokes))] if f] + theme + roster)
             user, facts = wrap_recap_prompt(finished_hole=finished, result=result,
                                             recap=recap, recent_lines=self.state.recent_lines)
             return self._grounded(await self._generate("segment", self.segment_llm, user, []), facts, "round", False)[0]
@@ -5558,6 +5654,7 @@ class Engine:
         """
         c = self.cfg.commentary
         player = self._player(event.hud.player_text, event.player_hint)
+        call_at = (len(self.state.shots), self._shot_seq)   # a setup line's call: this player's next stroke
         images = [event.image] if event.image else []
         # The call was usually started at setup (overlapping the HUD read); await that. Replay and
         # tests post no task, so fall back to making it here.
@@ -5633,7 +5730,7 @@ class Engine:
 
         def aired(good: list) -> None:
             self.state.record_lines(good)
-            self._write_transcript(good, "preshot")
+            self._write_transcript(good, "preshot", about=(player, *call_at))
             # The pre-shot (incl. any commentator call) aired; make its prediction gradeable, keyed
             # by player and stamped with the hole so a stale call (its putt produced no shot event)
             # is discarded at grading rather than graded against a later hole's putt.
@@ -5745,7 +5842,7 @@ class Engine:
                  sorted(plan.lines), sorted(plan.reactions))
         return plan
 
-    def _play_reaction(self, plan: FlightPlan, outcome: str, text: str) -> object:
+    def _play_reaction(self, plan: FlightPlan, outcome: str, text: str, impact_seq: int | None = None) -> object:
         """Air a pre-written result line, with the colour reply after it on a long holed putt. Returns
         the main line's audio (None when it's voiced now)."""
         line = Line(speaker=self.speakers[0], text=text)
@@ -5765,7 +5862,7 @@ class Engine:
         else:
             self.speech.say([line], interrupt=True)
         self.state.record_lines(lines)
-        self._write_transcript(lines, "reaction")
+        self._write_transcript(lines, "reaction", impact_seq=impact_seq, after=True)
         return audio
 
     def _reaction_speaker(self, outcome: str) -> str:
@@ -6047,7 +6144,7 @@ class Engine:
                     self.speech.say_prepared(line, plan.audio[outcome])
                 else:
                     self.speech.say([line], interrupt=True, deadline=impact + self.cfg.tts.flight_audio_deadline_seconds)
-                self._write_transcript([line], "flight")
+                self._write_transcript([line], "flight", impact_seq=my_seq)
                 self.flight_latencies.append(time.monotonic() - impact)
                 log.info("%s mid-flight call (%s) from the plan, audio %s, %.2fs after detection "
                          "[carry %.0f x %.2f, pin %s, elevation %s]: %r", tag, outcome,
@@ -6146,7 +6243,7 @@ class Engine:
                     self.speech.say_prepared(line, plan.audio[outcome])
                 else:
                     self.speech.say([line], interrupt=True, deadline=impact + self.cfg.tts.flight_audio_deadline_seconds)
-                self._write_transcript([line], "flight")
+                self._write_transcript([line], "flight", impact_seq=my_seq)
                 self.flight_latencies.append(time.monotonic() - impact)
             elif self._shot_seq == my_seq:
                 flight_task = asyncio.create_task(
@@ -6172,7 +6269,7 @@ class Engine:
                 self.speech.say_prepared(line, audio)
             else:
                 self.speech.say([line], interrupt=True)
-            self._write_transcript([line], "reaction")
+            self._write_transcript([line], "reaction", impact_seq=my_seq, after=True)
             self.stats["reaction_planned"] = self.stats.get("reaction_planned", 0) + 1
             splash_said = True
             log.info("%s water splash reaction (early, off Hit_water) %.1fs after impact: %r", tag,
@@ -6362,7 +6459,7 @@ class Engine:
             player or "unknown", shot, shot_hole, hud, tags,
             round_id=r.id if r else None, hole_seq=round_hole, par=shot_par,
             lie_before=before.lie, shot_number=before.shot_number, to_pin_before=before.to_pin,
-            carry_game=carry_game,
+            carry_game=carry_game, impact_seq=my_seq,
         )
         if idx is not None and (start_m := impact_snap[0].get(idx)) is not None:
             # Where this stroke was struck from (GSPro's distance at impact, in metres, to the inch).
@@ -6665,7 +6762,7 @@ class Engine:
                 self.speech.say_prepared(line, audio)
             else:
                 self.speech.say([line], interrupt=True)
-            self._write_transcript([line], "reaction")
+            self._write_transcript([line], "reaction", impact_seq=my_seq, after=True)
             self.stats["reaction_planned"] = self.stats.get("reaction_planned", 0) + 1
             log.info("%s water splash reaction from the plan, audio %s, %.1fs after impact: %r", tag,
                      "ready" if audio is not None else "voiced now", time.monotonic() - impact, text)
@@ -6710,7 +6807,7 @@ class Engine:
                                    roll_yards=roll_yards, holed=holed, conceded=outcome == "conceded", cup=cup)
             if picked:
                 outcome, text = picked
-                audio = self._play_reaction(shot_plan, outcome, text)
+                audio = self._play_reaction(shot_plan, outcome, text, impact_seq=my_seq)
                 self.stats["reaction_planned"] = self.stats.get("reaction_planned", 0) + 1
                 log.info("%s result call (%s) from the plan, audio %s, %.1fs after impact: %r", tag, outcome,
                          "ready" if audio is not None else "voiced now", time.monotonic() - impact, text)
@@ -6765,11 +6862,10 @@ class Engine:
         if not shot.is_putt and (fact := lie_cost_fact(MATERIAL_TO_LIE.get(info.get("penalty") or "", "rough"),
                                                        info.get("lie_cost"))):
             result = result + [fact]
-        # On the green in regulation or better: say what the next putt is for, so "ten feet for
-        # birdie" is a fact, not a guess (a par 5 in two is an eagle putt).
+        # On the green: say what the next putt is for, so "ten feet for birdie" is a fact, not a guess
+        # (a par 5 in two is an eagle putt), and on in three on a par 4 it's a par putt, not a birdie one.
         next_putt = None
-        if before.shot_number and shot_par and (name := SCORE_NAMES.get(before.shot_number + 1 - shot_par)) \
-                and before.shot_number + 1 - shot_par <= -1:
+        if before.shot_number and shot_par and (name := SCORE_NAMES.get(before.shot_number + 1 - shot_par)):
             next_putt = (f"The ball is on the green in {before.shot_number}: the next putt "
                          f"is for {name.split(' ', 1)[1]}.")
         if close_feet is not None:
@@ -8135,7 +8231,7 @@ class Engine:
                 return
             self.state.record_lines([line])
             self.speech.say([line], interrupt=True, deadline=hit_at + 2.0)
-            self._write_transcript([line], "flight")
+            self._write_transcript([line], "flight", impact_seq=seq)
             log.info("%s tree call in flight, %.2fs after impact (the hit at %.2fs): %r", tag,
                      time.monotonic() - impact, hit_at - impact, line.text)
             return
@@ -8146,7 +8242,7 @@ class Engine:
             return
         self.state.record_lines(kept)
         self._air_exchange(list(zip(kept, audio)))
-        self._write_transcript(kept, "flight")
+        self._write_transcript(kept, "flight", impact_seq=seq)
         log.info("%s tree call in flight, %.2fs after impact (the hit at %.2fs): %r", tag,
                  time.monotonic() - impact, hit_at - impact, kept[0].text if kept else "")
 
@@ -8186,7 +8282,7 @@ class Engine:
         line = Line(speaker=self.speakers[0], text=good[0].text)
         self.state.record_lines([line])
         self.speech.say([line], interrupt=True, deadline=impact + self.cfg.tts.flight_audio_deadline_seconds)
-        self._write_transcript([line], "flight")
+        self._write_transcript([line], "flight", impact_seq=seq)
 
     async def handle_hole_change(self, event: HoleChangeEvent) -> None:
         if event.correction:
@@ -10653,6 +10749,8 @@ class Engine:
         # One call, written now that the final score is known, while the last hole's wrap airs: it
         # used to be pre-built on the last hole in three or four score branches, one of which aired.
         cap = self.cfg.commentary.closer_max_words
+        if standing := next((f for q in range(r.holes, 0, -1) if (f := r.standing_fact(q))), None):
+            facts = facts + [standing]
         user, facts_text = closer_prompt(facts=facts + self._weather_facts() + self._call_facts(whole_round=True),
                                          recent_lines=self.state.recent_lines,
                                          max_words=cap)
@@ -11315,7 +11413,30 @@ class Engine:
             return [f"From the {lie} the green was within {who}'s reach even so ({takes})."]
         return []
 
-    def _write_transcript(self, lines: list[Line], kind: str = "shot", shot_id: int | None = None) -> None:
+    def _booth_call(self, line: Line, kind: str, shot_id: int | None, about: tuple[str | None, int, int] | None,
+                    impact_seq: int | None = None, after: bool = False) -> BoothCall:
+        """A call, tied to the stroke it's about: a setup line's, the player's at address; a mid-flight
+        line's, the ball in the air; one reacting to a shot, that player's next; any other, the next
+        stroke anyone hits."""
+        seq, shots = self.round.seq, self.state.shots
+        if about is not None:
+            return BoothCall(line.speaker, seq, line.text, about[0], about[1], struck_after=about[2])
+        if impact_seq is not None:
+            return BoothCall(line.speaker, seq, line.text, None, len(shots), impact_seq=impact_seq, after=after)
+        if shot_id is not None:
+            return BoothCall(line.speaker, seq, line.text, None, len(shots), shot_id=shot_id,
+                             after=kind != "flight")
+        if kind == "reaction" and shots:   # reacting to the stroke just played
+            return BoothCall(line.speaker, seq, line.text, shots[-1].player, len(shots),
+                             struck_after=shots[-1].impact_seq)
+        return BoothCall(line.speaker, seq, line.text, None, len(shots), struck_after=self._shot_seq)
+
+    def _write_transcript(self, lines: list[Line], kind: str = "shot", shot_id: int | None = None,
+                          about: tuple[str | None, int, int] | None = None, impact_seq: int | None = None,
+                          after: bool = False) -> None:
+        """What the lines' calls are about: `about`, (player, index into state.shots, impact count) when a
+        setup line was written, for that player's next stroke; `impact_seq`, the stroke of that handler
+        (or with `after`, the same player's next)."""
         # The handler's own shot id beats the shared one, which the next shot may have moved on.
         if shot_id is None and kind in ("shot", "flight"):
             shot_id = self._shot_id
@@ -11325,7 +11446,7 @@ class Engine:
         self._note_form_mentions(lines)
         for line in lines:
             if self.round and not self.round.ended and makes_call(line.text):
-                self._calls.append((line.speaker, self.round.seq, line.text))
+                self._calls.append(self._booth_call(line, kind, shot_id, about, impact_seq, after))
             self._season_phrases |= ngrams(line.text, 6)
             for player, keys in self._note_keys.items():
                 if uses_note(line.text, keys):

@@ -3190,6 +3190,44 @@ def test_a_chip_is_framed_as_up_and_down_not_a_holed_birdie():
     assert "which keeps the round at +1" in par_putt
 
 
+def test_a_lead_or_deficit_the_standing_doesnt_give_is_rejected():
+    # Riviera, 2026-11-14: "one behind" for the leader, and a one-shot lead called a "two-shot buffer".
+    from commentator.grounding import wrong_margin
+
+    facts = "On the card after 15 holes: Corey Martin leads by 1 shot; Josh Merritt is 1 back."
+    assert wrong_margin("Corey's double leaves him one behind.", facts) == "one behind"
+    assert wrong_margin("Corey has a two-shot buffer now.", facts) == "two-shot buffer"
+    assert wrong_margin("Josh is one ahead.", facts) == "one ahead"            # head to head, he trails
+    assert wrong_margin("Corey leads by a shot, Josh one back.", facts) is None
+    assert wrong_margin("Corey holds a one-shot lead over Josh.", facts) is None
+    assert wrong_margin("Josh needs to get one back.", facts) is None          # a stroke recovered
+    assert wrong_margin("Two back-to-back pars.", facts) is None
+    assert wrong_margin("It lands two behind the flag.", facts) is None
+    assert wrong_margin("He brought that one back into play.", facts) is None
+    assert wrong_margin("A lovely one-shot hole.", facts) is None
+    assert wrong_margin("Josh has the two-shot lead.", facts) == "two-shot lead"
+    comeback = facts + " Comeback: Corey Martin was 3 shots off the lead earlier in this round."
+    assert wrong_margin("Corey was three back, and now leads by one.", comeback) is None
+    assert wrong_margin("Corey now leads by three.", comeback) == "leads by three"   # that was then
+    assert wrong_margin("Josh is three back.", comeback) == "three back"
+    assert wrong_margin("Corey was three back, but he leads by three.", comeback) == "leads by three"
+    assert wrong_margin("Corey leads by two.", "Josh is +4 through 15 holes.") == "leads by two"   # no standing
+    week = "Aces are 2 shots behind Duffers: net -3 over the last hole ties."   # the league's week-gap fact
+    assert wrong_margin("Aces are two shots behind Duffers.", week) is None
+    card = "On the card after 8 holes: Aces leads by 1 shot; Birdies is 1 back. " + week
+    assert wrong_margin("Aces are two shots behind Duffers.", card) is None   # the week's board, not the card
+    assert wrong_margin("Aces are one behind Birdies.", card) == "one behind"
+    assert wrong_margin("Aces have a two-shot deficit to Duffers.", card) is None
+    assert wrong_margin("Aces sit two back against Duffers.", card) is None
+    # The week's gap isn't the card's: Aces lead Birdies by one, whatever they trail Duffers by.
+    assert wrong_margin("Aces have a two-shot buffer over Birdies.", card) == "two-shot buffer"
+    assert wrong_margin("Aces lead Birdies by one.", card) is None
+    assert wrong_margin("Birdies are one ahead of Aces.", card) == "one ahead"
+    assert wrong_margin("Birdies are one behind Aces.", card) is None
+    tied = "On the card after 4 holes: Mike and Sarah are tied for the lead; Tony is 2 back."
+    assert wrong_margin("Tony sits two back.", tied) is None and wrong_margin("Mike is two behind.", tied)
+
+
 def test_a_round_score_the_facts_dont_give_is_rejected():
     from commentator.grounding import check_line, wrong_round_score
 

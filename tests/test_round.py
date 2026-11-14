@@ -4012,6 +4012,72 @@ def test_a_line_holds_a_commentator_only_to_a_call_made_out_loud(tmp_path):
     assert not e._grounded([Line("color", "Your prediction on that putt aged badly.")], "", mode="round")[0]
 
 
+def test_a_call_is_tied_to_the_stroke_it_was_about_and_settled_by_it(tmp_path):
+    # Riviera, 2026-11-14: 16's "I'm calling it in" was held to 17's putt, and "a birdie look next"
+    # was called delivered after a par. Each call now carries its stroke and how that came out.
+    from commentator.models import Line
+    e = _engine_with(tmp_path, _noted_league())
+    e._start_round(Round(league=e.league, gspro_players=["Josh", "Sam"], course="X", scheduled_format=None))
+    e._write_transcript([Line("pbp", "Five feet. I'm calling it in.")], "preshot", about=("Josh", len(e.state.shots), e._shot_seq))
+    assert any("I'm calling it in" in f and "not hit yet, still undecided" in f for f in e._format_facts())
+    e.state.shots += [rec("Sam", 1, 4, 3, "green", "green", "PT"), rec("Josh", 1, 4, 3, "green", "green", "PT")]
+    assert any("Josh's putt for birdie: struck, result not known yet" in f for f in e._format_facts())
+    e.state.shots[-1].outcome = "missed"
+    e.state.shots.append(rec("Josh", 1, 4, 4, "green", "green", "PT"))   # his next putt isn't the call's
+    facts = " ".join(e._format_facts())
+    assert "Josh's putt for birdie: missed. Settled" in facts and "never hold it to a later shot" in facts
+    # A reaction's call is about that player's next stroke, after the one the handler (impact 7) played,
+    # even when another stroke is recorded in between.
+    e._write_transcript([Line("color", "I'm calling a birdie look next.")], "reaction", impact_seq=7, after=True)
+    josh_tee, sam_tee, josh_2nd = (rec("Josh", 2, 4, 1, "tee", "fairway", "DR"), rec("Sam", 2, 4, 1, "tee", "rough", "DR"),
+                                   rec("Josh", 2, 4, 2, "fairway", "rough"))
+    josh_tee.impact_seq, josh_2nd.impact_seq, josh_3rd = 7, 8, rec("Josh", 2, 4, 3, "rough", "green")
+    josh_3rd.impact_seq = 9
+    e.state.shots += [sam_tee, josh_3rd, josh_tee]   # handlers can record out of impact order
+    assert "Josh's 7-iron (stroke 3)" in " ".join(e._call_facts(whole_round=True))   # all that's in so far
+    e.state.shots.append(josh_2nd)
+    assert "Josh's 7-iron (stroke 2): finished in the rough" in " ".join(e._call_facts(whole_round=True))
+
+
+def test_an_alternate_shot_call_is_settled_by_the_partners_next_stroke(tmp_path):
+    from commentator.models import Line
+    e = _engine_with(tmp_path, LEAGUE)
+    e._start_round(Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course=None, scheduled_format="alternate shot"))
+    assert e.round.format == "alternate"
+    e._write_transcript([Line("color", "I'm calling this next putt in.")], "reaction", impact_seq=3, after=True)
+    mike, sarah, mike_again = (rec("MikeD", 1, 4, 3, "green", "green", "PT"), rec("Sarah", 1, 4, 4, "green", "green", "PT"),
+                               rec("MikeD", 1, 4, 5, "green", "green", "PT"))
+    mike.impact_seq, sarah.impact_seq, mike_again.impact_seq = 3, 4, 5
+    mike.outcome = sarah.outcome = "missed"
+    e.state.shots += [mike, sarah, mike_again]
+    facts = " ".join(e._call_facts(whole_round=True))
+    assert "Sarah's putt for par: missed" in facts and "bogey" not in facts
+    # One GSPro ball for the team: the call's stroke is the team's, at the sign-off too.
+    e._start_round(Round(league=LEAGUE, gspro_players=["MikeD"], course=None, scheduled_format=None))
+    e._write_transcript([Line("color", "I'm calling it in.")], "flight", impact_seq=9)
+    holed = rec("MikeD", 1, 4, 3, "green", "green", "PT")
+    holed.impact_seq, holed.outcome = 9, "holed"
+    e.state.shots.append(holed)
+    e.round.ended = True
+    assert "about Aces's putt for birdie: holed" in " ".join(e._call_facts(whole_round=True))
+
+
+def test_shot_facts_give_who_leads_in_a_practice_round(tmp_path):
+    # Riviera, 2026-11-14: given only each player's own score, the booth had the leader "one behind".
+    from commentator.grounding import check_line
+    e = _engine_with(tmp_path, LEAGUE)
+    e._start_round(Round(league=e.league, gspro_players=["MikeD", "Sarah"], course="X", scheduled_format=None,
+                         holes=5, is_league=False))
+    e.round.set_log_scores("MikeD", {1: 4, 2: 5})
+    e.round.set_log_scores("Sarah", {1: 4, 2: 4})
+    e.round.seq = 3
+    facts = "\n".join(e._format_facts())
+    assert "On the card after 2 holes: Sarah leads by 1 shot; Mike is 1 back." in facts
+    assert "On the card after 2 holes" in " ".join(e._wrap_tally_facts())
+    assert check_line("Mike's five leaves him one back of Sarah.", facts, "").ok
+    assert not check_line("Sarah's four leaves her one behind.", facts, "").ok
+
+
 def test_roster_facts_name_an_absent_partner(tmp_path):
     e = _engine_with(tmp_path, _noted_league())
     # A league round with one ball for the team is alternate shot: the partner IS playing.
@@ -4140,7 +4206,7 @@ def test_the_wrap_says_which_holes_found_the_water():
     assert "found the water on hole 3" in facts
 
 
-def test_a_hole_recap_names_a_putt_for_birdie():
+def test_a_hole_recap_names_what_every_putt_is_for():
     from commentator.state import SessionState
 
     st = SessionState()
@@ -4149,7 +4215,7 @@ def test_a_hole_recap_names_a_putt_for_birdie():
     for s in st.shots:
         s.hole = "hole 1"
     recap = st.hole_recap("hole 1")
-    assert recap[2].startswith("Mike: stroke 3, putt for birdie") and recap[3] == "Mike: stroke 4, putt"
+    assert recap[2].startswith("Mike: stroke 3, putt for birdie") and recap[3] == "Mike: stroke 4, putt for par"
 
 
 def test_a_hole_recap_counts_the_conceded_tap_in_as_a_putt():
@@ -4164,7 +4230,7 @@ def test_a_hole_recap_counts_the_conceded_tap_in_as_a_putt():
     st.shots[2].outcome, st.shots[3].outcome = "missed", "conceded"
     recap = st.hole_recap("hole 1")
     assert recap[2].endswith(", missed")
-    assert recap[3] == "Mike: stroke 4, putt, stopped inside the gimme circle"
+    assert recap[3] == "Mike: stroke 4, putt for par, stopped inside the gimme circle"
     assert recap[4] == "Mike: conceded tap-in (counts as a putt)" and len(recap) == 5
     st.shots[3].outcome = "holed"
     assert st.hole_recap("hole 1")[3].endswith(", holed") and len(st.hole_recap("hole 1")) == 4
@@ -5861,7 +5927,7 @@ def test_lead_change_facts_call_a_new_leader_a_tie_and_a_comeback():
     r.set_log_scores("MikeD", {1: 7, 2: 4, 3: 3, 4: 3})
     r.set_log_scores("Sarah", {1: 4, 2: 4, 3: 4, 4: 5})
     assert r.lead_change_facts(3) == []          # Sarah still leads
-    assert r.standing_fact(3) == "On the card after 3 holes: Sarah leads by 2 shots."
+    assert r.standing_fact(3) == "On the card after 3 holes: Sarah leads by 2 shots; Mike is 2 back."
     assert r.standing_fact(4) == "On the card after 4 holes: Mike and Sarah are tied for the lead."
     assert r.standing_fact(5) is None            # Mike's 5 isn't on the card yet
     assert r.lead_change_facts(4) == ["Tied for the lead on the card after 4 holes: Mike and Sarah. "

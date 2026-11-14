@@ -1312,9 +1312,10 @@ class Round:
         return [f"Tied for the lead {card} after {through} holes: {_join([names[c] for c in now])}. "
                 f"Before this hole {was}."]
 
-    def standing_fact(self, through: int) -> str | None:
-        """Who leads on the card after hole `through`, and by how much (the same count as lead changes)."""
-        if through < 1 or (run := self._running_totals(through)) is None:
+    def standing_fact(self, through: int, extra: tuple[str, int, int] | None = None) -> str | None:
+        """Who leads on the card after hole `through`, and by how much (the same count as lead changes).
+        `extra`: a pre-built wrap branch's score, as for lead_change_facts."""
+        if through < 1 or (run := self._running_totals(through, extra)) is None:
             return None
         names, totals, net = run
         now = [t[through - 1] for t in totals]
@@ -1322,10 +1323,13 @@ class Round:
         leads = [names[c] for c, v in enumerate(now) if v == low]
         card = f" ({'net' if net else 'gross'})" if self.is_league else ""
         n = f"{through} hole{'s' if through != 1 else ''}"
+        # Who's behind, and by how many, named: given only the leader, a line had the leader "one behind".
+        back = "".join(f"; {names[c]} is {v - low} back" for c, v in sorted(enumerate(now), key=lambda x: x[1])
+                       if v != low)
         if len(leads) > 1:
-            return f"On the card{card} after {n}: {_join(leads)} are tied for the lead."
+            return f"On the card{card} after {n}: {_join(leads)} are tied for the lead{back}."
         margin = min(v for v in now if v != low) - low
-        return f"On the card{card} after {n}: {leads[0]} leads by {margin} shot{'s' if margin != 1 else ''}."
+        return f"On the card{card} after {n}: {leads[0]} leads by {margin} shot{'s' if margin != 1 else ''}{back}."
 
     def _running_totals(self, through: int, extra: tuple[str, int, int] | None = None):
         """(competitor names, each one's running total after holes 1..through, net or not), or None

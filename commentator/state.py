@@ -32,6 +32,7 @@ class ShotRecord:
     carry_game: float | None = None   # GSPro's own carry (elevation and conditions), when it was on screen
     cup: str | None = None   # how the ball met the cup, from GSPro's log: lip_out / lip_in / flagstick
     gimme_edge: bool = False   # struck from just outside the gimme circle (its last stroke nearly conceded it)
+    impact_seq: int | None = None   # the booth's count of strokes at impact: ties a mid-flight call to this one
 
 
 class RecentLines(deque):
@@ -78,8 +79,9 @@ class SessionState:
             if r.hole != hole or r.mulligan:   # a swing GSPro took back never happened on the card
                 continue
             what = "putt" if r.shot.is_putt else (club_name(r.shot.club) or "shot")
-            # A putt for birdie or better is named as one, so the recap's "look at birdie" is grounded.
-            if r.shot.is_putt and r.shot_number and r.par and r.shot_number - r.par <= -1 \
+            # Every putt is named for what it's for, so the recap's "look at birdie" is grounded and a
+            # par putt isn't recalled as a birdie one.
+            if r.shot.is_putt and r.shot_number and r.par \
                     and (score := SCORE_NAMES.get(r.shot_number - r.par)):
                 what = f"putt for {score.split(' ', 1)[1]}"
             desc = f"{name(r.player)}: {f'stroke {r.shot_number}, ' if r.shot_number else ''}{what}"

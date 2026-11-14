@@ -112,6 +112,102 @@ def wrong_round_score(line: str, facts: str) -> str | None:
                 return m.group(0)
     return None
 
+# A lead or deficit on the card ("leads by two", "one behind", "a two-shot buffer"): only the standing
+# facts give one. Adding the scores up itself, the booth had the leader "one behind" and a one-shot lead
+# as "two".
+_MARGIN_NUM = r"(a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d+)"
+_SHOTS = r"(?:[\s-](?:shots?|strokes?))"
+MARGIN_CLAIMS = (
+    (re.compile(rf"\b(?:leads?|leading|led|ahead|up|clear)\s+by\s+{_MARGIN_NUM}{_SHOTS}?\b"), "ahead"),
+    (re.compile(rf"\b{_MARGIN_NUM}{_SHOTS}?\s+(behind|back|adrift|ahead|in front)\b"
+                rf"(?!-|\s+(?:the|this|that|it|its|his|her|a|an|into|in|on|onto|to|out|up|down|from|towards?|over|"
+                rf"across|through|home|inside|where|there)\b)"),
+     None),
+    (re.compile(rf"\b{_MARGIN_NUM}[\s-](?:shot|stroke|under)[\s-](?:lead|buffer|advantage|cushion|edge|margin|gap)\b"),
+     "ahead"),
+    (re.compile(rf"\b{_MARGIN_NUM}[\s-](?:shot|stroke)[\s-]deficit\b"), "behind"),
+)
+# "gets one back" / "picks a shot back" is a stroke recovered, and "brought that one back" a ball, not a margin.
+_MARGIN_RECOVER = re.compile(r"\b(?:gets?|got|getting|grabs?|grabbed|claws?|clawed|picks?|picked|wins?|won|takes?|took|"
+                             r"earns?|earned|gives?|gave|giving|brings?|brought|bringing|pulls?|pulled|drags?|dragged|"
+                             r"draws?|drew|spins?|spun|sucks?|sucked|hits?|knocks?|knocked|sends?|sent|steps?|stepped)"
+                             r"\s+(?:\w+\s+)?$")
+_ONE_PRONOUN = re.compile(r"\b(?:that|this|the|which|each|every)\s+$")   # "that one back": a ball
+# A margin some time ago ("was three back"): the comeback fact gives that, not the standing now.
+_MARGIN_PAST = re.compile(r"\b(?:was|were|had been|earlier|before|started|began|once)\b")
+_STANDING = re.compile(r"on the card[^:]*: (.+?) (?:leads by (\d+) shots?|(?:are|is) tied for the lead)((?:; .+? is \d+ back)*)\.")
+_TRAILER = re.compile(r"; (.+?) is (\d+) back")
+# Any margin a fact states: the standing, a lead change, the league's stakes and week-gap facts, a recap's.
+_MARGIN_FACT = re.compile(r"\b(?:leads?|leading|outright,) by (\d+)\b|\b(\d+) (?:shots? )?(?:behind|ahead|back|clear)\b")
+_PAST_MARGIN_FACT = re.compile(r"\b(\d+) shots off the lead\b")
+
+
+def wrong_margin(line: str, facts: str) -> str | None:
+    """A lead or deficit the line claims that the facts don't give, or that has the leader trailing (or,
+    head to head, the trailer ahead)."""
+    lowered, facts_lower = line.lower(), facts.lower()
+    behind: dict[str, int] = {}   # each competitor on the card: shots off the lead
+    for m in _STANDING.finditer(facts_lower):
+        for name in re.split(r", | and ", m.group(1)):
+            behind[name.strip()] = 0
+        for t in _TRAILER.finditer(m.group(3)):
+            behind[t.group(1)] = int(t.group(2))
+    margins = {int(a or b) for a, b in _MARGIN_FACT.findall(facts_lower)}
+    past = {int(n) for n in _PAST_MARGIN_FACT.findall(facts_lower)}
+    margins |= {abs(x - y) for x in behind.values() for y in behind.values() if x != y}
+    for pattern, direction in MARGIN_CLAIMS:
+        for m in pattern.finditer(lowered):
+            word = m.group(1)
+            if word in ("a", "an") and not re.match(_SHOTS, lowered[m.end(1):]) \
+                    and not re.match(r"[\s-](?:shot|stroke)", lowered[m.end(1):]):
+                continue   # "a back" isn't a count
+            if _MARGIN_RECOVER.search(lowered[:m.start()]) or (
+                    word == "one" and direction is None and _ONE_PRONOUN.search(lowered[:m.start()])):
+                continue
+            value = 1 if word in ("a", "an") else _score_word_value(word)
+            if not value:
+                continue
+            start = max(lowered.rfind(c, 0, m.start()) for c in ".;!?") + 1
+            sentence = lowered[start:m.start()]
+            # A margin some time ago only from the comeback fact, its direction not the standing now's. The
+            # tense is the claim's own clause: "Corey was three back, but he leads by three" claims three now.
+            clause = re.split(r",|;|\b(?:but|and|while|yet|now)\b", sentence)[-1]
+            if _MARGIN_PAST.search(clause):
+                if value not in past | margins:
+                    return m.group(0)
+                continue
+            if value not in margins:
+                return m.group(0)
+            way = direction or ("behind" if m.group(2) in ("behind", "back", "adrift") else "ahead")
+
+            def card_names(text: str) -> list[str]:
+                hits = [(min(x.start() for w in re.split(r"[\s&]+", n) if len(w) > 2
+                             for x in re.finditer(rf"\b{re.escape(w)}\b", text)), n) for n in behind
+                        if any(len(w) > 2 and re.search(rf"\b{re.escape(w)}\b", text) for w in re.split(r"[\s&]+", n))]
+                return [n for _, n in sorted(hits)]
+            named = card_names(sentence)
+            # Two on the card against each other ("Aces' two-shot buffer over Birdies"): their own gap only,
+            # not a margin some other pairing or the week's board gives.
+            ends = [i for c in ".;!?" if (i := lowered.find(c, m.end())) >= 0]
+            after = re.split(r",|;|\b(?:but|and|while|yet|now)\b", lowered[m.end():min(ends, default=len(lowered))])[0]
+            pair = card_names(clause)
+            pair += [n for n in card_names(after) if n not in pair]
+            if len(pair) == 2:
+                gap = behind[pair[1]] - behind[pair[0]]   # > 0: the first named is ahead
+                if (gap if way == "ahead" else -gap) != value:
+                    return m.group(0)
+                continue
+            # "two behind Duffers": up against someone not on this card (the week's board), not the standing.
+            if len(named) != 1 or ((nxt := re.match(r"\s+(?:(?:of|than|to|against|on|over)\s+)?([A-Z][\w'-]*)", line[m.end():]))
+                                   and not any(nxt.group(1).lower() in re.split(r"[\s&]+", n) for n in behind)):
+                continue
+            if way == "behind" and behind[named[0]] == 0:   # a leader, tied or not, trails nobody
+                return m.group(0)
+            if way == "ahead" and len(behind) == 2 and behind[named[0]] > 0:
+                return m.group(0)
+    return None
+
+
 # Words that always need explicit support: they claim something happened, whatever the phrasing.
 OUTCOMES = {
     "water": ("water", "hazard", "penalty"),
@@ -254,6 +350,8 @@ def check_line(
         problems.append(f'"{said}": that round score isn\'t in the facts')
     if said := wrong_par_type_tally(line, facts):
         problems.append(f'"{said}": that score on the par-type holes isn\'t in the facts')
+    if mode != "news" and (said := wrong_margin(line, facts + "\n" + context)):
+        problems.append(f'"{said}": that lead or deficit isn\'t what the standing facts give')
 
     facts_lower = facts.lower()
     # Normalised the same way as the line's words: GSPro's "sand" lie is a bunker for this purpose.
