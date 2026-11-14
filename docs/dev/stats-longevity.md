@@ -90,11 +90,11 @@ the cloud.
 - Expected from the measurements: the 6-month build (publish, and the local page after a round) goes
   from 246 s to about 28 s, and booth lookups stop growing.
 
-### 2. Benchmark harness
+### 2. Benchmark harness (built)
 
-- `tools/scale_bench.py`: builds the scaled copies from a redacted season (as above) and times the
-  build, the local page's first load after a change (through `make_server`), the booth's lookups and
-  a backup.
+- `tools/scale_bench.py scale SRC OUT --copies N` makes a bigger file from a real one;
+  `tools/scale_bench.py run DB` times, on a copy, a cold build, a build with nothing changed, a build
+  after one round is edited, the page's first load after an edit, the booth's lookups and a backup.
 - Run by hand before a release that touches stats; not in CI (too slow). Compare against the targets.
 
 ### 3. Build and publish only what changed
