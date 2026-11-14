@@ -8,6 +8,7 @@ stats page and in the app; "Booth" items only in the app. Plain words, one line 
 
 ### Booth
 - Turning the booth off only quiets the commentary: the live stream keeps going (with the game's sound), so the round still gets its replay and highlight reel.
+- A league-night round set up for all 18 holes now gets the Squabbit question on the tee of the week's first hole, and posts only the week's holes.
 
 ## 0.1.128
 
