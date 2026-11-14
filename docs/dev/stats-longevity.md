@@ -179,6 +179,13 @@ cold build went from 128 s to 103 s and a warm one to 79 s.
 mulligans) doesn't depend on the context: that part is now worked out once a build. 3-year copy: cold
 93 s, warm 70 s.
 
+Then, all with the same output: strokes gained worked out once per context rather than three times;
+the shots behind each context's holes read once a build and split by context in Python; the booth's
+phrase count done with per-word flags; and the shots file packed with `VACUUM INTO` a new file rather
+than `VACUUM` (which packs into a temporary file and copies it back: 9 s down to 3 s on the 330 MB
+file). 3-year copy: cold 80 s, warm 56 s. What's left is spread thin: the players' rows (many small
+queries per player), the records' one-pass tables, the shot log and its JSON, a few seconds each.
+
 **First build in the background.** The tray's stats page used to build before the booth started, so
 the first start after an update (a cold build) held the booth up. It now builds on its own thread
 (`make_server(build_in_background=True)`) and the booth starts at once. Pages wait for that build; if

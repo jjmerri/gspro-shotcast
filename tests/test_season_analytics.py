@@ -205,6 +205,20 @@ def test_highlights_and_records_by_date_range(db):
     assert got["records"]["season"]["longest_drive"]["player"] == "Bo"
 
 
+def test_holes_for_each_context_in_a_build_match_reading_that_context_alone(db):
+    from commentator.round_record import frozen
+
+    for i, (league, tournament) in enumerate([(1, 0), (0, 1), (0, 0), (1, 0)]):
+        for n, lie in ((1, "tee"), (2, "green")):
+            shot(db, hole=f"Hole {i + 1}, par 4, 400 yards", shot_number=n, lie_before=lie, to_pin_yards=400 / n,
+                 is_league=league, is_tournament=tournament, outcome="holed" if n == 2 else None)
+    db.commit()
+    alone = {c: A.holes_played(db, c) for c in (None, "league", "tournament", "practice")}
+    assert [len(h) for h in alone.values()] == [4, 2, 1, 1]
+    with frozen(db):
+        assert {c: A.holes_played(db, c) for c in alone} == alone
+
+
 def test_recovery_counts_greens_found_from_trouble(db):
     hole = "Hole 1, par 4, 400 yards"
     shot(db, hole=hole, shot_number=1, club="DR", lie_before="tee", to_pin_yards=400)

@@ -477,13 +477,15 @@ def _shot_brief(st, h: dict, sg: dict) -> dict[str, Any]:
 
 
 def add_round_summaries(db: sqlite3.Connection, rounds_: list[dict[str, Any]], holes: list[dict],
-                        people: list[dict[str, Any]], usual_gimme_ft: float | None = None) -> None:
+                        people: list[dict[str, Any]], usual_gimme_ft: float | None = None,
+                        sg: list[dict] | None = None) -> None:
     """A one-player side's round of nine holes or more gets a `summary`: the round against the player's season (score per
     nine, fairways, greens, putts per hole), its strokes gained by category, its best and worst shots
-    by strokes gained, and its best and worst holes against par."""
+    by strokes gained, and its best and worst holes against par. `sg`: A.strokes_gained(holes,
+    usual_gimme_ft), when already worked out."""
     of_shot = shot_rounds(db)
     season = {p["name"]: p for p in people}
-    sg_of = {s["shot_id"]: s for s in A.strokes_gained(holes, usual_gimme_ft)}
+    sg_of = {s["shot_id"]: s for s in (A.strokes_gained(holes, usual_gimme_ft) if sg is None else sg)}
     by_round: dict[tuple, list[dict]] = {}
     for h in holes:
         rnd = of_shot.get(h["strokes"][0]["id"])
@@ -777,7 +779,8 @@ def summary(db: sqlite3.Connection, context: str | None = None,
     holes = reuse(db, ("holes_played", context), lambda: A.holes_played(db, context))
     gimmes = reuse(db, ("round_gimmes",), lambda: round_gimmes(db))
     usual = usual_gimme(db, gimmes)
-    sg, rec, trend = A.sg_summary(holes, usual), A.recovery(holes), A.trends(db, holes, context, usual)
+    strokes = A.strokes_gained(holes, usual)
+    sg, rec, trend = A.sg_summary(holes, usual, strokes), A.recovery(holes), A.trends(db, holes, context, usual, strokes)
     people = players(db, context, usual)
     # Our own handicap index (handicap_index) goes by every counting round, whatever the context:
     # every such round, and without the rounds with a mulligan.
@@ -810,7 +813,7 @@ def summary(db: sqlite3.Connection, context: str | None = None,
                                 " OR EXISTS (SELECT 1 FROM shots WHERE is_league = 0 AND is_tournament = 1)"
                                 ).fetchone()[0] == 1
     rounds_ = rounds(db, context, gimmes)
-    add_round_summaries(db, rounds_, holes, people, usual)
+    add_round_summaries(db, rounds_, holes, people, usual, strokes)
     return {"context": context or "all", "last_session": last, "has_league": has_league,
             "has_tournament": has_tournament, "gimme_ft": usual,
             "players": people,

@@ -74,8 +74,9 @@ def new_version() -> str:
 
 def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | None = None) -> None:
     """Shots (newest first, as the page lists them), their times, and each session's transcript."""
-    tmp = out.with_name(out.name + ".tmp")
+    tmp, packed = out.with_name(out.name + ".tmp"), out.with_name(out.name + ".packed")
     tmp.unlink(missing_ok=True)
+    packed.unlink(missing_ok=True)
     shots = A.shot_log(src, None, limit=-1)
     kind = {r[0]: "league" if r[1] else "tournament" if r[2] else "practice"
             for r in src.execute("SELECT id, is_league, is_tournament FROM shots")}
@@ -117,8 +118,11 @@ def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | No
         db.execute("CREATE INDEX pub_shot_id ON pub_shot (id)")   # a link to one shot finds its round
         db.execute("ANALYZE")   # lets SQLite pick the most selective filter's index
         db.commit()
-        db.execute("VACUUM")
-    tmp.replace(out)
+        # Packed into a new file (each table's pages together, for the page's range reads): as VACUUM
+        # does, without its copy back into this one.
+        db.execute("VACUUM INTO ?", (str(packed),))
+    tmp.unlink()
+    packed.replace(out)
 
 
 def shot_query(context: str | None, filters: dict[str, str], limit: int = 500) -> tuple[str, list]:

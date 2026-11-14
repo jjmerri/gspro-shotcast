@@ -16,6 +16,7 @@ from collections import Counter, defaultdict
 from typing import Any, Callable
 
 from . import shot_shape
+from .round_record import reuse
 from .store import DRIVE_SQL
 
 SHARED_BALL = ("scramble", "alternate")
@@ -80,6 +81,14 @@ def _ctx(context: str | None, table: str = "") -> str:
             "practice": f" AND {t}is_league = 0 AND {t}is_tournament = 0"}.get(context or "", "")
 
 
+# _ctx's filters, on a row
+_IN_CONTEXT: dict[str, Callable[[Any], bool]] = {
+    "league": lambda r: r["is_league"] == 1,
+    "tournament": lambda r: r["is_league"] == 0 and r["is_tournament"] == 1,
+    "practice": lambda r: r["is_league"] == 0 and r["is_tournament"] == 0,
+}
+
+
 def _par_of(label: str | None) -> int | None:
     m = re.search(r"par (\d)", label or "")
     return int(m.group(1)) if m else None
@@ -101,13 +110,15 @@ def holes_played(db: sqlite3.Connection, context: str | None = None, player: str
     are left out. A stroke a player left out of their stats stays in its hole (it was still played, and
     it ends the stroke before it) but gains no strokes and counts toward no recovery or chip-in. A hole is `complete` when it ends holed, or in a conceded tap-in."""
     where = "attributed = 1 AND mulligan = 0 AND player IS NOT NULL AND player != 'unknown'" \
-            " AND (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))" + _ctx(context)
-    args: tuple = ()
+            " AND (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))"
+    sql = "SELECT s.*, sess.date FROM shots s JOIN sessions sess ON sess.id = s.session_id WHERE {} ORDER BY s.player, s.session_id, s.ts, s.id"
     if player:
-        where += " AND player = ?"
-        args = (player,)
-    rows = db.execute(f"SELECT s.*, sess.date FROM shots s JOIN sessions sess ON sess.id = s.session_id"
-                      f" WHERE {where} ORDER BY s.player, s.session_id, s.ts, s.id", args).fetchall()
+        rows = db.execute(sql.format(where + _ctx(context) + " AND player = ?"), (player,)).fetchall()
+    else:
+        # every context's rows read once a build (inside round_record.frozen), and each one's picked out
+        rows = reuse(db, ("holes_played_rows",), lambda: db.execute(sql.format(where)).fetchall())
+        if context in _IN_CONTEXT:
+            rows = [r for r in rows if _IN_CONTEXT[context](r)]
     holes: list[dict] = []
     cur: dict | None = None
     for r in rows:
@@ -190,9 +201,11 @@ def strokes_gained(holes: list[dict], usual_gimme_ft: float | None = None) -> li
     return out
 
 
-def sg_summary(holes: list[dict], usual_gimme_ft: float | None = None) -> dict[str, dict]:
-    """Per player: strokes gained per category and in total, per nine holes played, against the tour."""
-    sg = strokes_gained(holes, usual_gimme_ft)
+def sg_summary(holes: list[dict], usual_gimme_ft: float | None = None,
+               sg: list[dict] | None = None) -> dict[str, dict]:
+    """Per player: strokes gained per category and in total, per nine holes played, against the tour.
+    `sg`: strokes_gained(holes, usual_gimme_ft), when already worked out."""
+    sg = strokes_gained(holes, usual_gimme_ft) if sg is None else sg
     nines: dict[str, float] = defaultdict(float)
     for h in holes:
         if h["complete"]:
@@ -367,9 +380,10 @@ def recovery(holes: list[dict]) -> dict[str, list[dict]]:
 
 
 def trends(db: sqlite3.Connection, holes: list[dict], context: str | None = None,
-           usual_gimme_ft: float | None = None) -> dict[str, list[dict]]:
+           usual_gimme_ft: float | None = None, sg: list[dict] | None = None) -> dict[str, list[dict]]:
     """Per player, one point per night: score to par per nine, putts per hole, fairways and greens hit,
-    and strokes gained per nine. From individual-ball rounds."""
+    and strokes gained per nine. From individual-ball rounds. `sg`: strokes_gained(holes,
+    usual_gimme_ft), when already worked out."""
     nights: dict[tuple, dict] = {}
     for r in db.execute("SELECT pr.*, s.date FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
                         " WHERE (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))" + _ctx(context, "pr") + " ORDER BY pr.ended_at"):
@@ -390,7 +404,7 @@ def trends(db: sqlite3.Connection, holes: list[dict], context: str | None = None
         n["gir"][0] += r["gir_hit"] or 0
         n["gir"][1] += r["gir_tries"] or 0
     sg_night: dict[tuple, float] = defaultdict(float)
-    for s in strokes_gained(holes, usual_gimme_ft):
+    for s in strokes_gained(holes, usual_gimme_ft) if sg is None else sg:
         sg_night[(s["player"], s["date"])] += s["sg"]
     holes_night: Counter = Counter((h["player"], h["date"]) for h in holes if h["complete"])
     out: dict[str, list[dict]] = defaultdict(list)
@@ -597,10 +611,13 @@ def booth(db: sqlite3.Connection, names: dict[str, str] | None = None) -> dict[s
         p["lines"] += 1
         p["words"] += len(words)
         p["kinds"][r["kind"]] += 1
-        for g in zip(words, words[1:], words[2:]):
-            if (sum(w not in _STOP for w in g) >= 2 and all(w.isalpha() or "'" in w for w in g)
-                    and not any(w in on_air for w in g)):
-                grams[r["speaker"]][" ".join(g)] += 1
+        # a phrase: three words, two of them not stop words, none a number or a commentator's name
+        usable = [(w.isalpha() or "'" in w) and w not in on_air for w in words]
+        stop = [w in _STOP for w in words]
+        mine = grams[r["speaker"]]
+        for i in range(len(words) - 2):
+            if usable[i] and usable[i + 1] and usable[i + 2] and stop[i] + stop[i + 1] + stop[i + 2] <= 1:
+                mine[f"{words[i]} {words[i + 1]} {words[i + 2]}"] += 1
     sessions = {r[0]: r[1] for r in db.execute("SELECT id, date FROM sessions")}
     rounds_by_date = Counter(r[0] for r in db.execute("SELECT DISTINCT date, session_id, course FROM rounds"))
     lines_by_date = Counter(sessions.get(r[0]) for r in db.execute("SELECT session_id FROM lines"))
