@@ -94,6 +94,25 @@ def test_the_usual_gimme_is_the_one_most_league_rounds_used(tmp_path):
     assert sorted(r["gimme_ft"] for r in s["rounds"]) == [4.0, 4.0, 6.0, 6.0]
 
 
+def test_a_tie_for_the_usual_gimme_goes_to_the_radius_played_first_whatever_the_records_ids(tmp_path):
+    from commentator import round_record
+
+    path, db = _db(tmp_path)
+    for end, ft in ((1000, 3), (2000, 6)):
+        _shot(db, "Ann", ts=end - 100, course="Pebble", gimme_yards=ft / 3, is_league=1)
+        db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, gross, scores, hole_pars,"
+                   " is_league) VALUES (1, ?, '2026-10-01', 'Pebble', 'Ann', 9, 36, '{}', '{}', 1)", (end,))
+    round_record.reconcile(db)
+    for end, u in ((1000, "z"), (2000, "a")):   # the first round's record sorts last
+        (old,), = db.execute("SELECT round_uuid FROM rounds WHERE ended_at = ?", (end,))
+        for table, col in (("round_records", "uuid"), ("rounds", "round_uuid"), ("shots", "record_uuid"),
+                           ("round_slots", "round_uuid"), ("player_rounds", "round_uuid"), ("lines", "record_uuid")):
+            db.execute(f"UPDATE {table} SET {col} = ? WHERE {col} = ?", (u, old))
+    db.commit()
+    with stats_web.connect(path) as ro:
+        assert round_record.recorded(ro) and stats_web.summary(ro)["gimme_ft"] == 3.0
+
+
 def test_a_rounds_side_players_come_from_the_record_else_its_shots(tmp_path):
     path, db = _db(tmp_path)
     for player in ("Tony", "Priya"):
@@ -470,7 +489,7 @@ def test_a_round_has_its_tee_boxs_whole_course_length_from_the_course_file(tmp_p
                " VALUES (1, 100, '2026-10-01', 'Pebble', 'Ann', 9, 1, '{\"1\": 4}', '{\"1\": 4}')")
     db.execute("INSERT INTO tee_lengths VALUES ('PEBBLE', 'Blue', 6115, 18), ('Pebble', 'Red', 5000, 18)")
     db.commit()
-    monkeypatch.setattr(hole_replay, "round_tees", lambda db, of_shot: dict.fromkeys(of_shot.values(), "Blue"))
+    monkeypatch.setattr(hole_replay, "round_tees", lambda db: dict.fromkeys(stats_web.shot_rounds(db).values(), "Blue"))
     with stats_web.connect(path) as ro:
         r = stats_web.rounds(ro)[0]
     assert (r["tee"], r["course_yards"], r["course_holes"]) == ("Blue", 6115, 18)

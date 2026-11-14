@@ -126,16 +126,16 @@ class Nights:
 
 
 def per_night(db: sqlite3.Connection, kind: str, collect: Callable[[Nights], dict[str, Any]],
-              extra: Any = ()) -> dict[str, Any]:
+              extra: Any = (), tally: bool = True) -> dict[str, Any]:
     """Each night's partial for a family: kept ones while the night's signature (and `extra`, anything
     else the partial reads) holds, `collect(nights)` for the rest, which returns one for each of its
-    dates. Oldest night first."""
+    dates. Oldest night first. `tally`: count them in the cache's hits and misses."""
     def run() -> dict[str, Any]:
         if stats_cache.of(db) is None:   # (no cache: nothing kept to check, and maybe no records to sign by)
             got = collect(Nights(db, list(nights(db))))
             return {d: got[d] for d in nights(db)}
         sigs = {d: stats_cache.sig(s, extra) for d, s in night_sigs(db).items()}
-        return stats_cache.per_key(db, kind, sigs, lambda dates: collect(Nights(db, dates)))
+        return stats_cache.per_key(db, kind, sigs, lambda dates: collect(Nights(db, dates)), tally=tally)
     return reuse(db, ("per_night", kind, extra), run)
 
 

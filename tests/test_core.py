@@ -1951,6 +1951,50 @@ def test_store_keeps_club_delivery_and_backfills_older_files(tmp_path):
     assert [tuple(r) for r in reopened.db.execute(f"SELECT {cols} FROM shots ORDER BY id")] == expected
 
 
+def test_the_startup_finish_backfill_rereads_only_the_round_records_changed_since_it_last_ran(tmp_path):
+    from commentator.store import Store
+
+    db = str(tmp_path / "season.db")
+    for night in range(2):
+        st = Store(db)
+        st.record_shot(player="Mike", hole="Hole 1", shot=Shot(club="7I", carry=150.0), before=Hud(lie="fairway"),
+                       after=Hud(lie="green"), tags=[], carry_game_yards=150.0, total_yards=155.0, offline_yards=1.0)
+        st.close()
+    st = Store(db, new_session=False)
+    (old, new), = [st.db.execute("SELECT min(session_id), max(session_id) FROM shots").fetchone()]
+    assert old != new and st.db.execute("SELECT count(*) FROM round_records WHERE finishes_gen IS NOT gen").fetchone()[0] == 0
+    # A holed-out full shot with no finish in each night; the newer night's record is noted as checked.
+    st.db.execute("UPDATE shots SET outcome = 'holed', finish_yards = NULL")
+    st.db.execute("UPDATE round_records SET finishes_gen = gen WHERE uuid IN"
+                  " (SELECT record_uuid FROM shots WHERE session_id = ?)", (new,))
+    st.db.commit()
+    st.close()
+    st = Store(db, new_session=False)
+    got = dict(st.db.execute("SELECT session_id, finish_yards FROM shots").fetchall())
+    assert got == {old: 0.0, new: None}   # the older night's edit is filled; the noted record isn't reread
+    assert st.db.execute("SELECT count(*) FROM round_records WHERE finishes_gen IS NOT gen").fetchone()[0] == 0
+    # A shot deleted from a night is noted against the night, not only its record (which may go with it).
+    st.close()
+    st = Store(db)
+    for hole in ("Hole 1", "Hole 2"):
+        st.record_shot(player="Mike", hole=hole, shot=Shot(club="7I", carry=150.0), before=Hud(lie="fairway"),
+                       after=Hud(lie="green"), tags=[], carry_game_yards=150.0, total_yards=155.0, offline_yards=1.0)
+    third = st.db.execute("SELECT max(session_id) FROM shots").fetchone()[0]
+    st.db.execute("UPDATE shots SET outcome = 'holed', finish_yards = NULL")
+    st.db.execute("INSERT INTO round_records (uuid, kind, session_id, state, assigned) VALUES"
+                  " ('alone', 'round', ?, 'finished', 'inferred')", (third,))
+    st.db.execute("UPDATE shots SET record_uuid = 'alone' WHERE id = (SELECT max(id) FROM shots)")
+    st.db.execute("UPDATE round_records SET finishes_gen = gen")
+    st.db.execute("DELETE FROM shots WHERE id = (SELECT max(id) FROM shots)")   # its record's only shot
+    st.db.commit()
+    st.close()
+    st = Store(db, new_session=False)
+    got = dict(st.db.execute("SELECT session_id, finish_yards FROM shots").fetchall())
+    assert got == {old: None, new: None, third: 0.0}
+    assert st.db.execute("SELECT count(*) FROM finish_recheck").fetchone()[0] == 0
+    st.close()
+
+
 def test_driving_records_count_only_tee_shots(tmp_path):
     from commentator.store import Store
 

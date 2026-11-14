@@ -27,8 +27,8 @@ from urllib.parse import unquote, urlparse
 from . import changelog, handicap_index
 from . import night_totals as N
 from . import season_analytics as A
-from .round_record import (_late_gimmes, in_play, player_round_of, reuse, round_groups, round_rows, shot_in_play,
-                           shot_rounds, unsettled)
+from .round_record import (_late_gimmes, in_play, player_round_of, recorded, reuse, round_groups, round_rows,
+                           round_shots, shot_in_play, shot_rounds, unsettled)
 from .store import DRIVE_SQL
 
 log = logging.getLogger(__name__)
@@ -232,10 +232,16 @@ def round_spans(db: sqlite3.Connection) -> list[list[float]]:
         g = of_row[rid]
         state[g] = min(state.get(g, ex), ex)   # one side still counting keeps the round
     start = {g["round"]: g["end"] for g in groups}
-    owner = _late_gimmes(db, groups, shot_rounds(db, every=True), "main.shots")
-    for sid, ts in db.execute("SELECT id, ts FROM main.shots"):
-        if (rnd := owner.get(sid)) in start:
-            start[rnd] = min(start[rnd], ts)
+    if recorded(db):
+        # (a putt conceded late is the round's too, and after its end: it never moves the start)
+        for rnd, d in round_shots(db, "main.shots").items():
+            if rnd in start and d["first"] is not None:
+                start[rnd] = min(start[rnd], d["first"])
+    else:
+        owner = _late_gimmes(db, groups, shot_rounds(db, every=True), "main.shots")
+        for sid, ts in db.execute("SELECT id, ts FROM main.shots"):
+            if (rnd := owner.get(sid)) in start:
+                start[rnd] = min(start[rnd], ts)
     return [[start[g["round"]], g["end"], state[g["round"]]] for g in groups]
 
 
@@ -332,10 +338,15 @@ def round_gimmes(db: sqlite3.Connection) -> dict[int, float]:
     """Each round's gimme radius in feet: the one most of its shots logged (GSPro writes it at every
     shot's setup; the odd shot without one, like an opening tee shot, is outvoted)."""
     per: dict[int, Counter] = {}
-    of_shot = shot_rounds(db)
-    for sid, g in db.execute("SELECT id, gimme_yards FROM shots WHERE gimme_yards IS NOT NULL"):
-        if (rnd := of_shot.get(sid)) is not None:
-            per.setdefault(rnd, Counter())[round(g * 3, 1)] += 1
+    if recorded(db):
+        # (in order of each round's first shot to log one, as usual_gimme's ties go)
+        logged = sorted((d["gimme_at"], rnd, d["gimme_ft"]) for rnd, d in round_shots(db).items() if d["gimme_ft"])
+        per = {rnd: Counter(ft) for _, rnd, ft in logged}
+    else:
+        of_shot = shot_rounds(db)
+        for sid, g in db.execute("SELECT id, gimme_yards FROM shots WHERE gimme_yards IS NOT NULL"):
+            if (rnd := of_shot.get(sid)) is not None:
+                per.setdefault(rnd, Counter())[round(g * 3, 1)] += 1
     return {rnd: c.most_common(1)[0][0] for rnd, c in per.items()}
 
 
@@ -383,7 +394,7 @@ def _round_facts(db: sqlite3.Connection) -> dict[str, Any]:
     groups, of_row = round_groups(db)
     end_of = {g["round"]: g["end"] for g in groups}
     from . import hole_replay
-    tees = hole_replay.round_tees(db, shot_rounds(db))
+    tees = hole_replay.round_tees(db)
     who: dict[int, set] = {}
     lengths: dict[tuple[int, str], dict[int, Counter]] = {}
     started: dict[int, float] = {}

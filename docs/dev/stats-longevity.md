@@ -100,8 +100,11 @@ the cloud.
     hole, and for every round course at each start) read the shots back to front for a course: 80 ms
     a call on 3 years, 3.7 s of each start. Now a lookup in the index (ms; the file 1.4% bigger).
     A start on 3 years: 5.4 s to 1.2 s; on 6 years 2.2 s.
-  - Still read in full at each start: `_backfill_finishes` (1.2 s on 3 years), a safety net for
-    finishing distances play didn't fill. Bound it to recent sessions with the round index (step 3).
+  - `_backfill_finishes`, a safety net for finishing distances play didn't fill, read every shot at
+    each start (1.2 s on 3 years). Now it notes the change counter of each round record it checked
+    (`round_records.finishes_gen`) and reads only the sessions of records changed since, and those a
+    shot was deleted from (a trigger notes them in `finish_recheck`): a start on
+    3 years is 0.2 s. It reads every shot the first time (and while any shot has no record).
 
 ### 2. Benchmark harness (built)
 
@@ -135,14 +138,22 @@ merged like any other, and its record is in both nights' signatures.
     take from it). `holes_played` no longer runs on a warm build: 74 s to 39 s for the 3-year copy.
   - the rounds list's facts from the shots (`_round_facts`: who played, hole lengths, first shot,
     longest drive, mulligans, putts per hole): 6.1 s to 3.5 s (the rest is the tee boxes, below).
+  - a digest per round record (`round_record.record_shots`, cached by the record's change counter):
+    its shot ids, sessions, first and last shot, holes with their times, players, courses and gimme
+    votes, with and without excluded rows. `shot_rounds`, the late gimmes, `round_spans`,
+    `round_gimmes`, the tee boxes and the hole replays' and reels' round scans take it from there;
+    an edit reads only its record's rows again.
+  - the reels' before-round bests: per night, the night's bests and each round's in-night bests
+    before its start (`reel_bests`), merged in time order. Where nights overlap in time (a clock
+    change), the old full read is used.
   - Output identical to before on the 1- and 50-season copies.
 - **Where it stands** (warm build, nothing changed): 18 s on 1.5 years, 37 s on 3, 74 s on 6: still
   linear. On 6 years: writing the page's shot list and replays 37 s (`build_data_db`, every shot
-  every build), the summary 32 s. Both are what's left below; the target is flat.
-- **To port:** a per-night round index (each round's sessions, first and last shot, holes, gimme
-  votes) for what still reads every shot to place rounds: the tee boxes, `round_spans`,
-  `round_gimmes`, the hole replays' and reels' scans, `shot_rounds`. Then records, courses, the booth tab, predictions, broadcasts,
-  filters, the handicap index, the usual gimme.
+  every build), the summary 32 s. Both are what's left below; the target is flat. With the round
+  digests and reel bests: 3 years 31.6 s (`build_data_db` 17.3 s, the summary 12.8 s), 6 years
+  66.6 s (36.3 s and 26.9 s). Still linear: those two are the page files and the families left.
+- **To port:** records, courses, the booth tab, predictions, broadcasts, filters, the handicap index,
+  the usual gimme; then the page files (below).
 - **Decisions:**
   - The usual gimme stays as it is (the most common radius); the families it feeds put it in their
     signature, so a change in it (rare) works them all out once. No number changes.

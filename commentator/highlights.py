@@ -23,7 +23,9 @@ import time
 from typing import Any
 
 from . import interest as I
+from . import night_totals
 from .live_stream import SHOT_SHOWS, TYPES, segment_durations
+from .round_record import round_shots
 
 MAX_MOMENTS = 8
 REEL_SECONDS = 180.0      # ...and no more than fit in this long a reel (each clip: PRE, its post, and
@@ -558,6 +560,86 @@ def _entry(m: dict) -> dict:
             "what": m["what"], "bad": m["bad"], "level": m["level"], "post": m["post"], "stop": m["stop"], "must": m["must"]}
 
 
+_LIGHT = ["id", "ts", "session_id", "player", "hole", "mulligan", "left_out", "lie_before", "is_putt",
+          "total_yards", "to_pin_yards", "outcome", "picked"]
+
+
+def _light(db: sqlite3.Connection, where: str) -> list[dict]:
+    """The shots (`where`: night_totals.Nights' limit, or ""), what a best reads of them, by time."""
+    have = {r[1] for r in db.execute("PRAGMA table_info(shots)")}
+    return [{**DEFAULTS, **dict(zip(_LIGHT, r))} for r in db.execute(
+        f"SELECT {', '.join(c if c in have else 'NULL' for c in _LIGHT)} FROM shots WHERE 1 = 1{where} ORDER BY ts, id")]
+
+
+def _add_best(running: dict[str, dict], s: dict) -> None:
+    """Count a shot in its player's bests (player -> {"drive"/"putt": [most, count]}), if it's one."""
+    if s["mulligan"] or s["left_out"] or not s["player"]:
+        return
+    for kind, test, val in (("drive", _is_drive, "total_yards"), ("putt", _is_holed_putt, "to_pin_yards")):
+        if test(s):
+            b = running.setdefault(s["player"], {}).setdefault(kind, [0.0, 0])
+            b[0], b[1] = max(b[0], s[val]), b[1] + 1
+
+
+def _merge_bests(into: dict[str, list], part: dict[str, list]) -> None:
+    """Add bests counted later (`part`) to `into` (kind -> [most, count])."""
+    for kind, (most, n) in part.items():
+        b = into.setdefault(kind, [0.0, 0])
+        b[0], b[1] = max(b[0], most), b[1] + n
+
+
+def _as_bests(b: dict[str, list]) -> dict[str, tuple]:
+    return {k: tuple(b[k]) for k in sorted(b)}
+
+
+def _collect_bests(db: sqlite3.Connection, ns: "night_totals.Nights") -> dict[str, dict]:
+    """Per night: the first and last of its shots ([ts, id]), each player's bests over its shots, and,
+    for each round whose first shot is that night's, its players' bests that night before it."""
+    starts: dict[int, list[int]] = {}
+    digests = round_shots(db)
+    for rnd, d in digests.items():
+        if d["start"] is not None:
+            starts.setdefault(d["start"][1], []).append(rnd)
+    parts = {d: {"lo": None, "hi": None, "totals": {}, "rounds": {}} for d in ns.dates}
+    for s in _light(db, ns.where):
+        night = parts[ns.date[s["session_id"]]]
+        key = [s["ts"], s["id"]]
+        night["lo"] = night["lo"] or key
+        night["hi"] = key
+        for rnd in starts.get(s["id"], ()):
+            night["rounds"][rnd] = {p: _as_bests(night["totals"][p]) for p in digests[rnd]["players"]
+                                    if p in night["totals"]}
+        _add_best(night["totals"], s)
+    return parts
+
+
+def _bests_before(db: sqlite3.Connection, in_round: dict[int, set]) -> dict[int, dict] | None:
+    """Each round's players' bests before its first shot, from each night's (_collect_bests, kept per
+    night): the nights before it, then its own night's before it. None if nights' shots interleave
+    in time (one night's shots don't all come before the next's), when that doesn't add up."""
+    nights = night_totals.per_night(db, "reel_bests", lambda ns: _collect_bests(db, ns), tally=False)
+    hi = None
+    for night in nights.values():
+        if night["lo"] is not None:
+            if hi is not None and not list(hi) < list(night["lo"]):
+                return None
+            hi = night["hi"]
+    out: dict[int, dict] = {}
+    running: dict[str, dict] = {}
+    for night in nights.values():
+        for rnd, own in night["rounds"].items():
+            got = {}
+            for p in in_round.get(rnd, ()):
+                if p in running or p in own:
+                    b = {k: list(v) for k, v in running.get(p, {}).items()}
+                    _merge_bests(b, own.get(p, {}))
+                    got[p] = _as_bests(b)
+            out[rnd] = got
+        for p, part in night["totals"].items():
+            _merge_bests(running.setdefault(p, {}), part)
+    return out
+
+
 def rounds(db: sqlite3.Connection) -> dict[int, dict]:
     """Every round's reel: round -> {label, date, league, ended, moments: [{id, ts, player, hole, what,
     bad, level, post, stop, must}]}, for rounds with two moments or more (`db`: stats_web.connect's);
@@ -566,37 +648,42 @@ def rounds(db: sqlite3.Connection) -> dict[int, dict]:
     players' bests before it do, or anything in a session it was played in (what the booth said there
     sets where its clips end)."""
     from . import stats_cache
-    from .stats_web import _late_gimmes, round_groups, shot_rounds
+    from .stats_web import _late_gimmes, recorded, round_groups, shot_rounds
 
     groups, of_row = round_groups(db)
     of_shot = shot_rounds(db)
     late_of = {sid: g for sid, g in _late_gimmes(db, groups, {}).items() if sid not in of_shot or of_shot[sid] != g}
-    have = {r[1] for r in db.execute("PRAGMA table_info(shots)")}
-    cols = ["id", "ts", "session_id", "player", "hole", "mulligan", "left_out", "lie_before", "is_putt",
-            "total_yards", "to_pin_yards", "outcome", "picked"]
-    light = [{**DEFAULTS, **dict(zip(cols, r))} for r in db.execute(
-        f"SELECT {', '.join(c if c in have else 'NULL' for c in cols)} FROM shots ORDER BY ts, id")]
     # Each round's players' bests before it: every shot of theirs before its first, any round or none.
     # (Only the round's own players are kept: _bests looks no one else up.)
     in_round: dict[int, set] = {}
     sessions: dict[int, set] = {}
-    for s in light:
-        if (g := of_shot.get(s["id"])) is not None:
-            in_round.setdefault(g, set()).add(s["player"])
-        if (g := of_shot.get(s["id"], late_of.get(s["id"]))) is not None:
-            sessions.setdefault(g, set()).add(s["session_id"])
-    before_round: dict[int, dict] = {}
-    running: dict[str, dict] = {}
-    for s in light:
-        g = of_shot.get(s["id"])
-        if g is not None and g not in before_round:
-            before_round[g] = {p: {k: tuple(v) for k, v in running[p].items()} for p in in_round[g] if p in running}
-        if s["mulligan"] or s["left_out"] or not s["player"]:
-            continue
-        for kind, test, val in (("drive", _is_drive, "total_yards"), ("putt", _is_holed_putt, "to_pin_yards")):
-            if test(s):
-                b = running.setdefault(s["player"], {}).setdefault(kind, [0.0, 0])
-                b[0], b[1] = max(b[0], s[val]), b[1] + 1
+    before_round: dict[int, dict] | None = None
+    if recorded(db):
+        # From each round's digest (round_record.record_shots) and each night's bests (_night_bests).
+        digests = round_shots(db)
+        for rnd, d in digests.items():
+            if d["ids"]:
+                in_round[rnd] = set(d["players"])
+                sessions[rnd] = set(d["sessions"])
+        for g in groups:
+            for _, ts, ses in (d := digests.get(g["round"])) and d["gimmes_out"] or ():
+                if ts > g["end"]:
+                    sessions.setdefault(g["round"], set()).add(ses)
+        before_round = _bests_before(db, in_round)
+    if before_round is None:
+        in_round, sessions, before_round = {}, {}, {}
+        light = _light(db, "")
+        for s in light:
+            if (g := of_shot.get(s["id"])) is not None:
+                in_round.setdefault(g, set()).add(s["player"])
+            if (g := of_shot.get(s["id"], late_of.get(s["id"]))) is not None:
+                sessions.setdefault(g, set()).add(s["session_id"])
+        running: dict[str, dict] = {}
+        for s in light:
+            g = of_shot.get(s["id"])
+            if g is not None and g not in before_round:
+                before_round[g] = {p: _as_bests(running[p]) for p in in_round[g] if p in running}
+            _add_best(running, s)
     league, rows = set(), {}
     for r in db.execute("SELECT * FROM rounds"):
         league |= {of_row[r["id"]]} if "is_league" in r.keys() and r["is_league"] else set()
@@ -608,10 +695,11 @@ def rounds(db: sqlite3.Connection) -> dict[int, dict]:
         gens, records = stats_cache.record_sigs(db), stats_cache.row_records(db)
         # A session's content: the records with rows in it, as they stand (a line on a shot in another
         # session takes that one's too: the shot's time places the line).
+        # (the sessions of every row of each record: its shots and lines, and its cards too)
         in_session: dict[Any, set] = {}
-        for ses, u in db.execute("SELECT session_id, record_uuid FROM main.shots UNION"
-                                 " SELECT session_id, record_uuid FROM main.lines"):
-            in_session.setdefault(ses, set()).add(u)
+        for u, sids in night_totals.record_sessions(db).items():
+            for ses in sids:
+                in_session.setdefault(ses, set()).add(u)
         for ses, other in db.execute("SELECT DISTINCT l.session_id, s.record_uuid FROM main.lines l"
                                      " JOIN main.shots s ON s.id = l.shot_id WHERE s.session_id IS NOT l.session_id"):
             in_session.setdefault(ses, set()).add(other)
@@ -635,7 +723,12 @@ def rounds(db: sqlite3.Connection) -> dict[int, dict]:
                 every += [dict(r) for r in db.execute(
                     f"SELECT * FROM shots WHERE session_id IN ({','.join('?' * len(chunk))})", chunk)]
             every.sort(key=lambda r: (r["ts"], r["id"]))
-            talk = _talk(db, every, ses, {s["id"]: s["ts"] for s in light}) if ses else _talk(db, [], [])
+            ts_of: dict[int, float] = {}
+            for i in range(0, len(ses), 500):
+                chunk = ses[i:i + 500]
+                ts_of.update(db.execute(f"SELECT s.id, s.ts FROM lines l JOIN shots s ON s.id = l.shot_id"
+                                        f" WHERE l.session_id IN ({','.join('?' * len(chunk))})", chunk))
+            talk = _talk(db, every, ses, ts_of) if ses else _talk(db, [], [])
         by_round: dict[int, list[dict]] = {}
         late: dict[int, list[dict]] = {}
         for r in every:

@@ -821,9 +821,36 @@ class Store:
 
     def _backfill_finishes(self) -> None:
         """Fill finishing distances the booth missed on older rows: from the next stroke, or 0 for a
-        full shot that holed out. Idempotent; only touches rows that have none."""
+        full shot that holed out. Idempotent; only touches rows that have none. Reads only the sessions
+        of the round records changed since it last did (a record's gen moves with any of its rows; it
+        notes the one it saw in finishes_gen) and those a shot was deleted from (finish_recheck), not every
+        shot each start: all of them the first time, or while any shot has no record."""
+        if self.db.in_transaction:
+            self.db.commit()
+        self.db.execute("BEGIN IMMEDIATE")   # (nothing changes a record between its look and its note)
+        try:
+            self._backfill_finishes_in()
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+
+    def _backfill_finishes_in(self) -> None:
+        where, args, stale = "", [], None
+        if self.db.execute("SELECT 1 FROM shots WHERE record_uuid IS NULL LIMIT 1").fetchone() is None:
+            stale = [u for (u,) in self.db.execute("SELECT uuid FROM round_records WHERE finishes_gen IS NOT gen")]
+            deleted = {s for (s,) in self.db.execute("SELECT session_id FROM finish_recheck")}
+            if not stale and not deleted:
+                return
+            if self.db.execute("SELECT 1 FROM round_records WHERE finishes_gen IS NOT NULL LIMIT 1").fetchone():
+                sessions = set(deleted)
+                for i in range(0, len(stale), 500):
+                    chunk = stale[i:i + 500]
+                    sessions.update(s for (s,) in self.db.execute(
+                        f"SELECT DISTINCT session_id FROM shots WHERE record_uuid IN ({','.join('?' * len(chunk))})", chunk))
+                where, args = f" AND session_id IN ({','.join('?' * len(sessions))})", sorted(sessions)
         rows = self.db.execute(f"SELECT {self._FINISH_COLS} FROM shots WHERE attributed = 1 AND player IS NOT NULL"
-                               " AND player != 'unknown' ORDER BY session_id, player, id").fetchall()
+                               f" AND player != 'unknown'{where} ORDER BY session_id, player, id", args).fetchall()
         updates = []
         for prev, nxt in zip(rows, rows[1:]):
             if prev["mulligan"] or (prev["session_id"], prev["player"]) != (nxt["session_id"], nxt["player"]):
@@ -836,8 +863,13 @@ class Store:
                     and r["finish_yards"] is None and not r["mulligan"]]
         if updates:
             self.db.executemany("UPDATE shots SET finish_yards = ? WHERE id = ?", updates)
-            self.db.commit()
             log.info("Filled %d missing shot finishing distances from the following strokes", len(updates))
+        self.db.execute("DELETE FROM finish_recheck")
+        if stale is not None:
+            for i in range(0, len(stale), 500):
+                chunk = stale[i:i + 500]
+                self.db.execute(f"UPDATE round_records SET finishes_gen = gen WHERE uuid IN ({','.join('?' * len(chunk))})",
+                                chunk)
 
     def _same_hole_next(self, earlier: sqlite3.Row, later: sqlite3.Row) -> bool:
         """`later` is the same player's next stroke on the same hole: same hole (the number may be read

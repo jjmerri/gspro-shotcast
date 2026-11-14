@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import bisect
 import json
+import re
 import sqlite3
 import uuid
 from collections import Counter
@@ -52,6 +53,9 @@ CREATE TABLE IF NOT EXISTS round_slots (           -- a player in a round
     player TEXT,                                 -- the league roster name it was matched to
     matched_by TEXT NOT NULL                     -- booth (a player as it played) / shot (a name on a shot, no player of it) / legacy (the migration)
 );
+CREATE TABLE IF NOT EXISTS finish_recheck (        -- sessions a shot was deleted from since Store._backfill_finishes last ran
+    session_id INTEGER PRIMARY KEY
+);
 """
 
 COLUMNS = {
@@ -59,6 +63,7 @@ COLUMNS = {
     "lines": {"uid": "TEXT", "record_uuid": "TEXT"},
     "rounds": {"round_uuid": "TEXT"},
     "player_rounds": {"round_uuid": "TEXT", "slot_id": "TEXT"},
+    "round_records": {"finishes_gen": "INTEGER"},   # the gen Store._backfill_finishes last looked at its shots
 }
 
 INDEXES = {
@@ -94,6 +99,9 @@ WHEN NEW.{col} IS NOT NULL AND {_COUNTS} BEGIN {_bump(f"NEW.{col}")} END;""")
 WHEN {_COUNTS} BEGIN UPDATE round_records SET gen = gen + 1 WHERE uuid IN (NEW.{col}, OLD.{col}); END;""")
         out.append(f"""CREATE TRIGGER IF NOT EXISTS {table}_gen_delete AFTER DELETE ON {table}
 WHEN OLD.{col} IS NOT NULL AND {_COUNTS} BEGIN {_bump(f"OLD.{col}")} END;""")
+    # (a deleted shot can leave another record's strokes next to each other, and its own record may go)
+    out.append("""CREATE TRIGGER IF NOT EXISTS shots_finish_recheck AFTER DELETE ON shots WHEN OLD.session_id IS NOT NULL
+BEGIN INSERT OR IGNORE INTO finish_recheck (session_id) VALUES (OLD.session_id); END;""")
     rec = "(SELECT round_uuid FROM rounds WHERE id = {}.round_id)"
     out.append(f"""CREATE TRIGGER IF NOT EXISTS week_results_gen_insert AFTER INSERT ON week_results
 WHEN {_COUNTS} BEGIN {_bump(rec.format("NEW"))} END;""")
@@ -336,15 +344,10 @@ def shot_rounds(db: sqlite3.Connection, every: bool = False) -> dict[int, int]:
 def _shot_rounds(db: sqlite3.Connection, every: bool) -> dict[int, int]:
     if not recorded(db):
         return _timed_shot_rounds(db, every)
-    rounds_table, shots_table = ("main.rounds", "main.shots") if every else ("rounds", "shots")
-    groups, of_row = round_groups(db, rounds_table)
-    of_record = _round_of_record(db, rounds_table, of_row)
-    end = {g["round"]: g["end"] for g in groups}
-    out = {}
-    for sid, ts, outcome, u in db.execute(f"SELECT id, ts, outcome, record_uuid FROM {shots_table}"):
-        if (rnd := of_record.get(u)) is not None and not (outcome == "gimme" and ts > end[rnd]):
-            out[sid] = rnd
-    return out
+    out: dict[int, int] = {}
+    for d in round_shots(db, "main.shots" if every else "shots").values():
+        out.update(dict.fromkeys(d["ids"], d["round"]))
+    return dict(sorted(out.items()))   # (in shot order, as callers' ties go)
 
 
 def _late_gimmes(db: sqlite3.Connection, groups: list[dict[str, Any]], owner: dict[int, int],
@@ -353,12 +356,132 @@ def _late_gimmes(db: sqlite3.Connection, groups: list[dict[str, Any]], owner: di
     recorded) given to that round, not the next one."""
     if not recorded(db):
         return _timed_late_gimmes(db, groups, owner, table)
-    of_record = {u: g for g in groups for (u,) in db.execute("SELECT round_uuid FROM main.rounds WHERE id = ?",
-                                                             (g["round"],))}
-    for sid, ts, u in db.execute(f"SELECT id, ts, record_uuid FROM {table} WHERE outcome = 'gimme'"):
-        if (g := of_record.get(u)) is not None and ts > g["end"]:
-            owner[sid] = g["round"]
+    record_of = dict(db.execute("SELECT id, round_uuid FROM main.rounds"))
+    digests = record_shots(db)
+    mode = _mode(db, table)
+    late = []
+    for g in groups:
+        d = digests.get(record_of.get(g["round"]))
+        late += [(sid, g["round"]) for sid, ts, _ in (d[mode]["gimmes_out"] if d and d[mode] else ()) if ts > g["end"]]
+    owner.update(sorted(late))
     return owner
+
+
+_HOLE = re.compile(r"Hole (\d+)")
+
+
+def _mode(db: sqlite3.Connection, table: str) -> str:
+    """Which of a record digest's two halves `table` (a shots or rounds table) reads: "every" row, or
+    the "kept" ones (excluded = 0) that stats_web.connect's views leave."""
+    if table.startswith("main."):
+        return "every"
+    view = db.execute("SELECT 1 FROM temp.sqlite_master WHERE type = 'view' AND name = 'shots'").fetchone()
+    return "kept" if view else "every"
+
+
+def record_shots(db: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """What the build reads off each recorded round's shots, digested once per record and kept with
+    its change counter (stats_cache), so a build reads only the changed rounds' shots, not all of
+    them. Keyed by the record; per half ("every" row, or the "kept" ones: _mode), None when the half
+    has no rounds row, else:
+      round, end: the round as round_groups numbers it, and its end;
+      ids: its shots (shot_rounds': all but putts conceded after the end);
+      gimmes_out: [shot, ts, session] of every putt conceded (_late_gimmes);
+      first: the earliest of all its shots' times; last, sessions: the latest and the sessions of ids';
+      start: [ts, id] of ids' first shot (by time, then id), None with none; players: ids' players;
+      holes: hole number -> [course, earliest, latest, first, last] of ids' shots on it (first and last
+        by id; the course is the first's), with hole_sessions and courses (casefolded) of those shots;
+      gimme_ft: gimme radius in feet -> how many of ids' shots logged it (in order of the first to log
+        each), gimme_at: the first of ids to log one (None with none)."""
+    from . import stats_cache
+
+    have_ex = {t: "excluded" in {r[1] for r in db.execute(f"PRAGMA main.table_info({t})")} for t in ("shots", "rounds")}
+    s_ex = "excluded" if have_ex["shots"] else "0"
+    r_ex = "excluded" if have_ex["rounds"] else "0"
+
+    def digest(rows: list, shots: list) -> dict[str, Any] | None:
+        if not rows:
+            return None
+        rows = sorted(rows)
+        end = rows[-1][0]
+        out: dict[str, Any] = {"round": rows[0][1], "end": end, "ids": [], "gimmes_out": [], "first": None,
+                               "last": None, "sessions": [], "holes": {}, "hole_sessions": [], "courses": [],
+                               "gimme_ft": {}, "gimme_at": None, "start": None, "players": []}
+        sessions, hole_sessions, courses, players = set(), set(), set(), set()
+        holes, gimme_ft = out["holes"], out["gimme_ft"]
+        for sid, ts, ses, course, hole, outcome, gimme, player in shots:
+            out["first"] = ts if out["first"] is None else min(out["first"], ts)
+            if outcome == "gimme":
+                out["gimmes_out"].append([sid, ts, ses])
+                if ts > end:
+                    continue
+            out["ids"].append(sid)
+            out["last"] = ts if out["last"] is None else max(out["last"], ts)
+            if out["start"] is None or [ts, sid] < out["start"]:
+                out["start"] = [ts, sid]
+            sessions.add(ses)
+            if player:
+                players.add(player)
+            if gimme is not None:
+                ft = round(gimme * 3, 1)
+                gimme_ft[ft] = gimme_ft.get(ft, 0) + 1
+                if out["gimme_at"] is None:
+                    out["gimme_at"] = sid
+            if m := _HOLE.match(hole or ""):
+                h = holes.setdefault(int(m.group(1)), [course, ts, ts, ts, ts])
+                h[1], h[2], h[4] = min(h[1], ts), max(h[2], ts), ts
+                hole_sessions.add(ses)
+                courses.add((course or "").casefold())
+        out["sessions"] = sorted(sessions, key=str)
+        out["hole_sessions"] = sorted(hole_sessions, key=str)
+        out["courses"] = sorted(courses)
+        out["players"] = sorted(players)
+        return out
+
+    def compute(keys: list) -> dict[str, dict[str, Any]]:
+        want = set(keys)
+        rows: dict[str, list] = {u: [] for u in keys}
+        shots: dict[str, list] = {u: [] for u in keys}
+        cols = f"id, ts, session_id, course, hole, outcome, gimme_yards, player, {s_ex}, record_uuid"
+        if len(keys) == len(all_keys):
+            for u, *r in db.execute(f"SELECT round_uuid, ended_at, id, {r_ex} FROM main.rounds"):
+                if u in want:
+                    rows[u].append(r)
+            for *s, u in db.execute(f"SELECT {cols} FROM main.shots ORDER BY id"):
+                if u in want:
+                    shots[u].append(s)
+        else:
+            for i in range(0, len(keys), 500):
+                chunk = keys[i:i + 500]
+                marks = ",".join("?" * len(chunk))
+                for u, *r in db.execute(f"SELECT round_uuid, ended_at, id, {r_ex} FROM main.rounds"
+                                        f" WHERE round_uuid IN ({marks})", chunk):
+                    rows[u].append(r)
+                for *s, u in db.execute(f"SELECT {cols} FROM main.shots WHERE record_uuid IN ({marks})", chunk):
+                    shots[u].append(s)
+            for v in shots.values():
+                v.sort()
+        out = {}
+        for u in keys:
+            every = digest([r[:2] for r in rows[u]], [s[:8] for s in shots[u]])
+            kept = digest([r[:2] for r in rows[u] if not r[2]], [s[:8] for s in shots[u] if not s[8]])
+            out[u] = {"every": every, "kept": kept}
+        return out
+
+    def run() -> dict[str, dict[str, Any]]:
+        gens = {u: str(g) for u, g in db.execute("SELECT uuid, gen FROM main.round_records WHERE uuid IN"
+                                                 " (SELECT round_uuid FROM main.rounds)")}
+        all_keys.extend(gens)
+        return stats_cache.per_key(db, "record_shots", gens, compute, tally=False)
+    all_keys: list[str] = []
+    return reuse(db, ("record_shots",), run)
+
+
+def round_shots(db: sqlite3.Connection, table: str = "shots") -> dict[int, dict[str, Any]]:
+    """record_shots' digests of the half `table` reads (_mode), by round (round_groups' numbers)."""
+    mode = _mode(db, table)
+    return reuse(db, ("round_shots", mode), lambda: dict(sorted(
+        ((d[mode]["round"], d[mode]) for d in record_shots(db).values() if d[mode] is not None), key=lambda x: x[0])))
 
 
 def round_rows(db: sqlite3.Connection, round_id: int) -> dict[str, Any] | None:

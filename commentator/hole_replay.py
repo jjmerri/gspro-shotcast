@@ -34,7 +34,7 @@ import sqlite3
 from collections import Counter
 from typing import Any
 
-from . import shot_shape, stats_web
+from . import round_record, shot_shape, stats_web
 from .sources.gspro_log import M_TO_YD, aim_offset
 
 ROUND_HOURS = 8 * 3600          # a round's layout is logged at its end, within this of its shots
@@ -255,47 +255,66 @@ def _next_after(times: dict[int, list], after: dict[int, tuple[set, float]]) -> 
 def round_tees(db: sqlite3.Connection, round_of: dict[int, int] | None = None) -> dict[int, str]:
     """Each round's tee box (Black, Blue, ...), keyed as stats_web.shot_rounds numbers rounds: the box
     most of its holes' own layouts were named (hole_layouts.tee_box). Rounds with none named are left out."""
-    by_hole: dict[tuple[str, int], list[sqlite3.Row]] = {}
+    by_hole: dict[tuple[str, int, Any], list[sqlite3.Row]] = {}
+    named = False
     for lo in _layouts(db):
         if "tee_box" in lo.keys():
-            by_hole.setdefault(((lo["course"] or "").casefold(), lo["hole"]), []).append(lo)
-    if not any(lo["tee_box"] for los in by_hole.values() for lo in los):
+            by_hole.setdefault(((lo["course"] or "").casefold(), lo["hole"], lo["session_id"]), []).append(lo)
+            named = named or bool(lo["tee_box"])
+    if not named:
         return {}
-    round_of = stats_web.shot_rounds(db) if round_of is None else round_of
-    every_round = stats_web.shot_rounds(db, every=True)
     holes: dict[tuple[int, int], list] = {}   # (round, hole) -> [course, first ts, last ts]
     span: dict[int, list] = {}                # round -> [sessions, first ts, last ts]
-    for sid, ses, ts, course, hole in db.execute("SELECT id, session_id, ts, course, hole FROM shots ORDER BY id"):
-        m = _HOLE.match(hole or "")
-        if (rnd := round_of.get(sid)) is None or not m:
-            continue
-        h = holes.setdefault((rnd, int(m.group(1))), [course, ts, ts])
-        h[1], h[2] = min(h[1], ts), max(h[2], ts)
-        sp = span.setdefault(rnd, [set(), ts, ts])
-        sp[0].add(ses)
-        sp[1], sp[2] = min(sp[1], ts), max(sp[2], ts)
+    ends: dict[int, list] = {}                # every recorded round -> [sessions, last ts]
+    shot_ts: dict[float, set] = {}            # a shot's ts -> the rounds of shots then
+    if round_of is None and round_record.recorded(db):
+        # From each round's digest of its shots (round_record.record_shots), and the shots at a layout's time.
+        for rnd, d in round_record.round_shots(db).items():
+            for n, (course, lo, hi, _, _) in d["holes"].items():
+                holes[(rnd, n)] = [course, lo, hi]
+            if d["holes"]:
+                span[rnd] = [set(d["hole_sessions"]), min(h[1] for h in d["holes"].values()),
+                             max(h[2] for h in d["holes"].values())]
+        for rnd, d in round_record.round_shots(db, "main.shots").items():
+            if d["ids"]:
+                ends[rnd] = [set(d["sessions"]), d["last"]]
+        round_of, every_round = stats_web.shot_rounds(db), stats_web.shot_rounds(db, every=True)
+        for sid, ts in db.execute("SELECT id, ts FROM main.shots WHERE ts IN"
+                                  " (SELECT ts FROM hole_layouts WHERE ts IS NOT NULL)"):
+            shot_ts.setdefault(ts, set()).add(round_of.get(sid, every_round.get(sid)))
+    else:
+        round_of = stats_web.shot_rounds(db) if round_of is None else round_of
+        every_round = stats_web.shot_rounds(db, every=True)
+        for sid, ses, ts, course, hole in db.execute("SELECT id, session_id, ts, course, hole FROM shots ORDER BY id"):
+            m = _HOLE.match(hole or "")
+            if (rnd := round_of.get(sid)) is None or not m:
+                continue
+            h = holes.setdefault((rnd, int(m.group(1))), [course, ts, ts])
+            h[1], h[2] = min(h[1], ts), max(h[2], ts)
+            sp = span.setdefault(rnd, [set(), ts, ts])
+            sp[0].add(ses)
+            sp[1], sp[2] = min(sp[1], ts), max(sp[2], ts)
+        for sid, ses, ts in db.execute("SELECT id, session_id, ts FROM main.shots"):
+            rnd = every_round.get(sid)
+            shot_ts.setdefault(ts, set()).add(round_of.get(sid, rnd))
+            if rnd is not None:
+                e = ends.setdefault(rnd, [set(), ts])
+                e[0].add(ses)
+                e[1] = max(e[1], ts)
     # GSPro logs a round's layouts as it completes, so a round's own are its holes' earliest after it was
     # played (and the round started: not the round before's, logged a moment before) and before the next recorded round in its sessions ended (one left out of the stats too:
     # a stray shot after the round can't move an end, as it can a start). Layouts worked out from a
     # round's shots (course_layout.fill_missing) are stamped with one of its shots: another round's
     # aren't this one's.
-    ends: dict[int, list] = {}                # every recorded round -> [sessions, last ts]
-    shot_ts: dict[float, set] = {}            # a shot's ts -> the rounds of shots then
-    for sid, ses, ts in db.execute("SELECT id, session_id, ts FROM main.shots"):
-        rnd = every_round.get(sid)
-        shot_ts.setdefault(ts, set()).add(round_of.get(sid, rnd))
-        if rnd is not None:
-            e = ends.setdefault(rnd, [set(), ts])
-            e[0].add(ses)
-            e[1] = max(e[1], ts)
     votes: dict[int, Counter] = {}
     next_end = _next_after(ends, {rnd: (ses, end) for rnd, (ses, _, end) in span.items()})
     for (rnd, hole), (course, first, last) in holes.items():
         ses, start, end = span[rnd]
         until = next_end[rnd]
         top = min(first + ROUND_HOURS, until) if until is not None else first + ROUND_HOURS
-        own = [lo for lo in by_hole.get(((course or "").casefold(), hole), [])
-               if lo["session_id"] in ses and lo["ts"] is not None and max(last - 60, start) <= lo["ts"] < top
+        key = (course or "").casefold()
+        own = [lo for s in ses for lo in by_hole.get((key, hole, s), [])
+               if lo["ts"] is not None and max(last - 60, start) <= lo["ts"] < top
                and shot_ts.get(lo["ts"], {rnd}) <= {rnd}]
         lo = min(own, key=lambda lo: (lo["ts"], lo["id"]), default=None)
         if lo is not None and lo["tee_box"]:
@@ -322,15 +341,22 @@ def hole_replays(db: sqlite3.Connection,
     # the next round's start without reading every shot's every column.
     holes: dict[tuple[int, int], list] = {}
     span: dict[int, list] = {}
-    for sid, ses, ts, course, hole in db.execute("SELECT id, session_id, ts, course, hole FROM shots ORDER BY id"):
-        m = _HOLE.match(hole or "")
-        if sid in round_of and m:
-            rnd = round_of[sid]
-            h = holes.setdefault((rnd, int(m.group(1))), [ts, ts])
-            h[1] = ts
-            sp = span.setdefault(rnd, [set(), set()])
-            sp[0].add(ses)
-            sp[1].add((course or "").casefold())
+    if round_record.recorded(db):
+        for rnd, d in round_record.round_shots(db).items():
+            for n, (_, _, _, a, b) in d["holes"].items():
+                holes[(rnd, n)] = [a, b]
+            if d["holes"]:
+                span[rnd] = [set(d["hole_sessions"]), set(d["courses"])]
+    else:
+        for sid, ses, ts, course, hole in db.execute("SELECT id, session_id, ts, course, hole FROM shots ORDER BY id"):
+            m = _HOLE.match(hole or "")
+            if sid in round_of and m:
+                rnd = round_of[sid]
+                h = holes.setdefault((rnd, int(m.group(1))), [ts, ts])
+                h[1] = ts
+                sp = span.setdefault(rnd, [set(), set()])
+                sp[0].add(ses)
+                sp[1].add((course or "").casefold())
     first: dict[int, float] = {}
     last: dict[int, float] = {}
     for (rnd, _), (a, b) in holes.items():
