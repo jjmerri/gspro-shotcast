@@ -473,7 +473,7 @@ def upload() -> None:
     s3 = boto3.Session().client("s3", region_name=REGION)
     version = stats_site.upload(SITE, bucket, client=s3)
     print("site:", version)
-    extra = [p for p in SITE.rglob("*") if p.is_file() and p.relative_to(SITE).parts[0] not in ("v", "vendor")
+    extra = [p for p in SITE.rglob("*") if p.is_file() and p.relative_to(SITE).parts[0] not in ("v", "vendor", "data")
              and p.name not in ("index.html", "latest.json")]
     for p in extra:
         key = p.relative_to(SITE).as_posix()

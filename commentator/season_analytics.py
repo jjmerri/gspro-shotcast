@@ -732,9 +732,12 @@ def booth(db: sqlite3.Connection, names: dict[str, str] | None = None) -> dict[s
 
 def shot_log(db: sqlite3.Connection, context: str | None = None, *, player: str | None = None,
              date: str | None = None, course: str | None = None, club: str | None = None,
-             lie: str | None = None, limit: int = 500) -> list[dict]:
-    """Shots, newest first, each with what the booth said about it."""
+             lie: str | None = None, limit: int = 500, sessions: list[int] | None = None) -> list[dict]:
+    """Shots, newest first, each with what the booth said about it. `sessions`: only theirs."""
     where, args = ["1=1"], []
+    if sessions is not None:
+        where.append("shots.session_id IN (SELECT value FROM json_each(?))")
+        args.append(json.dumps(list(sessions)))
     for col, val in (("player", player), ("date", date), ("course", course), ("club", club), ("lie_before", lie)):
         if val:
             where.append(f"{'sessions.' if col == 'date' else 'shots.'}{col} = ?")

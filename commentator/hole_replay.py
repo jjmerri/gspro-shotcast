@@ -329,9 +329,27 @@ def hole_replays(db: sqlite3.Connection,
     (an ace, or a tee shot into the gimme circle), which runs from the tee to the pin. Kept per round
     between builds (stats_cache).
     `finish`, when given, is filled with each swing's sideways finish (see finish_laterals)."""
+    replays, _, laterals = _reused(db)
+    if finish is not None:
+        finish.update(laterals)
+    return replays
+
+
+def replay_rounds(db: sqlite3.Connection) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[int, tuple[str, list]]]:
+    """hole_replays, and each round that may have one: (the signature its replays are kept under, "" with
+    no cache open; its holes' sessions). Once per build (round_record.reuse)."""
+    return _reused(db)[:2]
+
+
+def _reused(db: sqlite3.Connection) -> tuple:
+    return round_record.reuse(db, ("hole_replays",), lambda: _hole_replays(db))
+
+
+def _hole_replays(db: sqlite3.Connection) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[int, tuple[str, list]],
+                                                   dict[int, float]]:
     have = {r[1] for r in db.execute("PRAGMA table_info(shots)")}
     if "start_x" not in have:
-        return {}
+        return {}, {}, {}
     cols = _COLS if "hazard_x" in have else _COLS.replace("hazard_x, hazard_z", "NULL AS hazard_x, NULL AS hazard_z")
     if "picked" not in have:
         cols = cols.replace(" picked,", " NULL AS picked,")
@@ -435,11 +453,11 @@ def hole_replays(db: sqlite3.Connection,
         return out
 
     per_round = stats_cache.per_key(db, "hole_replays", sigs, compute)
-    if finish is not None:
-        for rnd in per_round.values():
-            finish.update(rnd.get("finish", {}))
-    return {(rnd, hole): per_round[rnd][hole] for rnd, hole in holes
-            if rnd in per_round and hole in per_round[rnd]}
+    laterals: dict[int, float] = {}
+    for rnd in per_round.values():
+        laterals.update(rnd.get("finish", {}))
+    return ({(rnd, hole): per_round[rnd][hole] for rnd, hole in holes if rnd in per_round and hole in per_round[rnd]},
+            {rnd: (sigs[rnd], sorted(span[rnd][0], key=str)) for rnd in span}, laterals)
 
 
 def _cards(db: sqlite3.Connection) -> dict[tuple[int, str], dict[str, Any]]:

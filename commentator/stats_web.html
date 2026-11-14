@@ -358,37 +358,73 @@ async function getJSON(url, opts) {
 }
 
 // The site (stats_site.py): latest.json names the version; its summary-<context>.json holds the
-// season stats, and its stats.db the shots and transcripts, read a few pages at a time.
+// season stats, and its data files (latest.json's "data", one per year of play, newest first) the
+// shots, transcripts and hole replays, read a few pages at a time. A site from before data files has
+// one, v/<version>/stats.db.
 const LIB = "vendor/sql.js-httpvfs-0.8.12/";
-let site = null;   // { version, db }
-async function query(sql, args) {
+let site = null;   // { version, data }
+const siteOf = latest => ({ version: latest.version, data: latest.data || [{ file: `v/${latest.version}/stats.db` }] });
+const workers = new Map();   // a data file's URL -> its database: a file a new version keeps is read on
+
+// The data files a query can find rows in (`w`: a date, a from/to date range, a round, a shot id, a
+// session, a span of times [lo, hi], or any shots), newest first. A file's year and its ranges of each say; one
+// without them (a site from before data files) may hold anything, and a null range holds none.
+function pickFiles(data, w) {
+  const meets = (r, lo, hi) => r === undefined || (r !== null && r[0] <= hi && lo <= r[1]);
+  return data.filter(e => {
+    if (e.year !== undefined) {
+      if (w.date && w.date.slice(0, 4) !== e.year) return false;
+      if (w.from && e.year < w.from.slice(0, 4)) return false;
+      if (w.to && e.year > w.to.slice(0, 4)) return false;
+    }
+    if (w.shots && e.ids === null) return false;
+    if (w.round != null && !meets(e.rounds, w.round, w.round)) return false;
+    if (w.id != null && !meets(e.ids, w.id, w.id)) return false;
+    if (w.session != null && !meets(e.sessions, w.session, w.session)) return false;
+    if (w.ts && !meets(e.ts, w.ts[0], w.ts[1])) return false;
+    return true;
+  });
+}
+
+// `run(data)` over the site's data files. Open across a couple of publishes, a file it read may be
+// gone: then it's run once more over the newest version's (once, even when several fail together).
+async function onSite(run) {
   const tried = site;
   try {
-    return await runQuery(sql, args);
+    return await run(tried.data);
   } catch (e) {
-    // Open across a couple of publishes: this version's stats.db is gone, so move to the newest
-    // (once, even when several queries fail together).
     if (site === tried) {
       const latest = await getJSON("latest.json", { cache: "no-store" });
       if (latest.version === tried.version) throw e;
-      if (site === tried) site = { version: latest.version, db: null };
+      if (site === tried) site = siteOf(latest);
     }
-    return await runQuery(sql, args);
+    return await run(site.data);
   }
 }
 
-async function runQuery(sql, args) {
-  if (!site.db) {
-    const abs = (u) => new URL(u, location.href).toString();
-    site.db = createDbWorker([{ from: "inline", config: { serverMode: "full", url: abs(`v/${site.version}/stats.db`),
-                                                          requestChunkSize: 1024 } }],
+async function runQuery(file, sql, args) {
+  const abs = (u) => new URL(u, location.href).toString(), url = abs(file);
+  if (!workers.has(url)) {
+    const w = createDbWorker([{ from: "inline", config: { serverMode: "full", url, requestChunkSize: 1024 } }],
                              abs(LIB + "sqlite.worker.js"), abs(LIB + "sql-wasm.wasm"));
+    workers.set(url, w);
+    w.catch(() => { if (workers.get(url) === w) workers.delete(url); });   // tried again next time
   }
-  const w = await site.db;
+  const w = await workers.get(url);
   return w.db.query(sql, args);
 }
 
-// The same SQL as stats_site.shot_query: newest first, up to 500.
+// The first row any of the files `w` picks has for this query.
+const firstRow = (w, sql, args) => onSite(async data => {
+  for (const e of pickFiles(data, w)) {
+    const [row] = await runQuery(e.file, sql, args);
+    if (row) return row;
+  }
+  return undefined;
+});
+
+// The same SQL as stats_site.shot_query: newest first, up to 500. Each file's newest 500, merged in
+// order, from every file that could hold a shot newer than the 500th so far (a file's times say).
 const SHOT_FILTERS = ["date", "player", "course", "club", "lie", "round"];
 const SHOT_RANGE = { from: ">=", to: "<=" };
 async function queryShots(ctx, f) {
@@ -397,31 +433,57 @@ async function queryShots(ctx, f) {
   for (const key of SHOT_FILTERS) if (f[key]) { where.push(`s.${key} = ?`); args.push(key === "round" ? Number(f[key]) : f[key]); }
   for (const [key, op] of Object.entries(SHOT_RANGE)) if (f[key]) { where.push(`s.date ${op} ?`); args.push(f[key]); }
   const sql = "SELECT j.json FROM pub_shot s JOIN pub_shot_json j ON j.ord = s.ord"
-    + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY s.ord LIMIT 500";
-  return (await query(sql, args)).map(r => JSON.parse(r.json));
+    + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY s.ord LIMIT ";
+  const w = { shots: true, date: f.date, from: f.from, to: f.to, round: f.round ? Number(f.round) : null };
+  return onSite(async data => {
+    let out = [];
+    for (const e of pickFiles(data, w)) {
+      if (out.length >= 500 && e.ts && e.ts[1] < out[499].ts) continue;
+      for (const r of await runQuery(e.file, sql + 500, args)) out.push(JSON.parse(r.json));
+      out = out.sort((a, b) => b.ts - a.ts || b.id - a.id).slice(0, 500);
+    }
+    return out;
+  });
 }
 
-// A round's hole replays (hole_replay.py), by hole number. A site built before replays has no table.
+// A round's hole replays (hole_replay.py), by hole number, and their minimaps, from the file that has
+// them. A site built before replays has no table.
 async function loadReplays(round) {
   state.replays[round] = "loading";
   let got = {};
   try {
-    for (const r of await query("SELECT hole, json FROM pub_replay WHERE round = ?", [Number(round)])) got[r.hole] = JSON.parse(r.json);
-    const ids = [...new Set(Object.values(got).filter(rp => rp.map).map(rp => rp.map.id))];
-    if (ids.length) {
-      const src = {};
-      for (const r of await query(`SELECT id, src FROM pub_hole_image WHERE id IN (${ids.map(() => "?").join(",")})`, ids)) src[r.id] = r.src;
-      for (const rp of Object.values(got)) if (rp.map) { if (src[rp.map.id]) rp.map.src = src[rp.map.id]; else delete rp.map; }
-    }
+    got = await onSite(async data => {
+      for (const e of pickFiles(data, { round: Number(round) })) {
+        const got = {};
+        for (const r of await runQuery(e.file, "SELECT hole, json FROM pub_replay WHERE round = ?", [Number(round)])) got[r.hole] = JSON.parse(r.json);
+        if (!Object.keys(got).length) continue;
+        const ids = [...new Set(Object.values(got).filter(rp => rp.map).map(rp => rp.map.id))];
+        if (ids.length) {
+          const src = {};
+          for (const r of await runQuery(e.file, `SELECT id, src FROM pub_hole_image WHERE id IN (${ids.map(() => "?").join(",")})`, ids)) src[r.id] = r.src;
+          for (const rp of Object.values(got)) if (rp.map) { if (src[rp.map.id]) rp.map.src = src[rp.map.id]; else delete rp.map; }
+        }
+        return got;
+      }
+      return {};
+    });
   } catch (e) { got = {}; }
   state.replays[round] = got;
   render();
 }
 
 async function queryTranscript(id) {
-  const rows = await query("SELECT json FROM pub_transcript WHERE session_id = ?", [Number(id)]);
-  return rows.length ? JSON.parse(rows[0].json) : [];
+  const row = await firstRow({ session: Number(id) }, "SELECT json FROM pub_transcript WHERE session_id = ?", [Number(id)]);
+  return row ? JSON.parse(row.json) : [];
 }
+
+// Every swing's time between lo and hi, in order, from the files with times then.
+const queryShotTimes = (lo, hi) => onSite(async data => {
+  const out = [];
+  for (const e of pickFiles(data, { ts: [lo, hi] }))
+    for (const r of await runQuery(e.file, "SELECT ts FROM pub_shot_ts WHERE ts BETWEEN ? AND ? ORDER BY ts", [lo, hi])) out.push(r.ts);
+  return out.sort((a, b) => a - b);
+});
 
 let loading = 0;   // only the latest load() may show its data (a slow older one can finish last)
 // The booth's own page: an edit goes up to the published site a minute after the last one (the tray's
@@ -456,7 +518,7 @@ async function load() {
     if (mine !== loading) return;
     state.local = !!latest.local;   // served by the booth's own stats server, which can leave shots out
     if (state.local && !pubPoll) pubWatch();
-    if (!site || site.version !== latest.version) { site = { version: latest.version, db: null }; state.transcriptFor = null; state.replays = {}; }
+    if (!site || site.version !== latest.version) { site = siteOf(latest); state.transcriptFor = null; state.replays = {}; }
     const body = await getJSON(`v/${site.version}/summary-${state.ctx || "all"}.json`);
     if (mine !== loading) return;
     state.data = body;
@@ -1809,7 +1871,7 @@ async function loadShots() {
     const id = state.shotLink;
     state.shotLink = null;
     try {
-      const [s] = await query("SELECT round, date FROM pub_shot WHERE id = ?", [id]);
+      const s = await firstRow({ id: Number(id) }, "SELECT round, date FROM pub_shot WHERE id = ?", [Number(id)]);
       if (s) state.shotFilter = s.round ? { round: String(s.round) } : { from: s.date, to: s.date };
     } catch (e) {}
   }
@@ -2360,9 +2422,9 @@ function attachLive() {
 function loadMarks(me, v) {
   const from = me.marksFrom = site && site.version;
   const end = v.ended ?? Date.now() / 1000 + 60;
-  query("SELECT ts FROM pub_shot_ts WHERE ts BETWEEN ? AND ? ORDER BY ts", [v.since - 60, end + 1]).then(rows => {
+  queryShotTimes(v.since - 60, end + 1).then(times => {
     if (player !== me || me.marksFrom !== from) return;   // gone, or a newer version's asked for
-    me.marks = rows.map(r => Math.max(0, streamAt(r.ts, v)));
+    me.marks = times.map(ts => Math.max(0, streamAt(ts, v)));
     showNext(me);
   }).catch(() => {});   // a page published before shot times were: no button
 }

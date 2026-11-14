@@ -395,14 +395,18 @@ to look at):
   highlights and booth stats, computed on the PC.
 - `v/<version>/player/<all|league|tournament|practice>/<key>.json`: one player's courses, highlights and
   records, fetched when they're picked (a few KB each).
-- `v/<version>/stats.db`: the shots and broadcast transcripts. The Shots and Broadcasts tabs query it
-  in the browser, which reads only the parts of the file a query needs, so a season of 90,000 shots
-  (a 90 MB file) still opens the Shots tab with about half a megabyte.
+- `data/<hash>.db`: the shots, broadcast transcripts and hole replays, one file per year of play,
+  named by its content and listed in `v/<version>/data.json`. The Shots and Broadcasts tabs query
+  them in the browser, which reads only the files a query can find rows in, newest year first, and
+  only the parts of a file it needs, so a season of 90,000 shots (a 90 MB file) still opens the Shots
+  tab with about half a megabyte. A past year's file stays the same from publish to publish, so it's
+  uploaded once; files no kept version reads are deleted.
 - `manifest.webmanifest`, `sw.js` and `icons/`: the home-screen app and its [alerts](#alerts). These
   three are served without the password (they hold nothing from the league).
 - `latest.json`, uploaded last: which version the page reads. The two newest versions are kept, so
   a page that's open during a publish keeps working; one left open longer moves to the newest
-  version the next time it looks up shots or a broadcast (refresh for the newest season tables).
+  version the next time it looks up shots or a broadcast (refresh for the newest season tables). A
+  page left open from before data files (a site published by an older version) needs a refresh.
 
 It holds every player's shots, scores and the booth's lines, and nothing else from the PC (no
 config, keys or logs).

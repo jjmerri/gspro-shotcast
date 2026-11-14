@@ -1,25 +1,33 @@
 """The stats page as a static site: build it from the season database, and publish it to S3.
 
 The heavy stats (season tables, strokes gained, scorecards, highlights) are computed here, once per
-publish, into one JSON file per context. Shots and broadcast transcripts go into a small SQLite file
-(stats.db) that the page queries in the browser with sql.js-httpvfs, which reads only the pages a
+publish, into one JSON file per context. Shots and broadcast transcripts go into SQLite files (one
+per year, below) that the page queries in the browser with sql.js-httpvfs, which reads only the pages a
 query needs over HTTP range requests, so the page stays fast however long the season gets.
 
     index.html                      the page
     vendor/sql.js-httpvfs-<v>/      the browser SQLite library
     v/<version>/summary-<ctx>.json  ctx: all, league, tournament, practice
     v/<version>/player/<ctx>/<key>.json   one player's courses, highlights and records
-    v/<version>/stats.db            shots and transcripts
-    latest.json                     {"version": ...}: which v/ the page reads
+    v/<version>/data.json           the version's data files (below)
+    data/<hash>.db                  a year's shots, transcripts and hole replays
+    latest.json                     {"version": ..., "data": ...}: which v/ the page reads
     manifest.webmanifest, sw.js, icons/   the home-screen app and its alerts (docs/tracking.md#alerts)
 
 Each build is a new version, and latest.json is written last, so a page that's open while a new
 round is published keeps reading the old files until it's refreshed.
+
+The shots and transcripts are one file per year of play (data/<hash of the file>.db), listed newest
+first in the version's data.json (and in latest.json, as "data"), each with the ranges of the rows in
+it so the page only reads the files a query can find rows in. A year's file is built again only when
+something in it changes (stats_cache, per year), and named by its content, so a publish uploads only
+the files that changed, and an open page keeps the files it has read (immutable).
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import secrets
 import shutil
@@ -33,8 +41,10 @@ from typing import Any
 from . import hole_replay
 from . import highlights, record_clips
 from . import season_analytics as A
-from . import stats_cache, stats_web
+from . import night_totals, stats_cache, stats_web
 from .round_record import frozen
+
+log = logging.getLogger(__name__)
 
 PAGE = Path(__file__).with_name("stats_web.html")
 SITE_NAME, MORE_TAB = "Shotcast", "More"   # publish.site_name, publish.more_tab
@@ -46,6 +56,7 @@ SHOT_RANGE = {"from": ">=", "to": "<="}                               # and its 
 PAGE_SIZE = 1024   # small pages: a lookup fetches little more than the rows it needs
 APP_FILES = ("manifest.webmanifest", "sw.js")
 KEEP_VERSIONS = 2  # the newest, plus the one before for pages opened just before a publish
+DATA_FILE = re.compile(r"[0-9a-f]{20}\.db")   # a data file's name: its content's hash
 
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                  ".json": "application/json", ".wasm": "application/wasm",
@@ -72,16 +83,22 @@ def new_version() -> str:
     return time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + f".{int(now % 1 * 1e6):06d}-" + secrets.token_hex(3)
 
 
-def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | None = None) -> None:
-    """Shots (newest first, as the page lists them), their times, and each session's transcript."""
+def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | None = None,
+                  part: tuple[list[int], list[int]] | None = None) -> None:
+    """Shots (newest first, as the page lists them), their times, each session's transcript and each
+    round's hole replays. `part`: only those of these sessions and rounds (page_parts' year)."""
     tmp, packed = out.with_name(out.name + ".tmp"), out.with_name(out.name + ".packed")
     tmp.unlink(missing_ok=True)
     packed.unlink(missing_ok=True)
-    shots = A.shot_log(src, None, limit=-1)
+    mine, args = "", ()
+    if part is not None:
+        mine, args = " AND session_id IN (SELECT value FROM json_each(?))", (json.dumps(list(part[0])),)
+    shots = A.shot_log(src, None, limit=-1, sessions=None if part is None else part[0])
     kind = {r[0]: "league" if r[1] else "tournament" if r[2] else "practice"
-            for r in src.execute("SELECT id, is_league, is_tournament FROM shots")}
+            for r in src.execute("SELECT id, is_league, is_tournament FROM shots WHERE 1=1" + mine, args)}
     round_of = stats_web.shot_rounds(src)
-    sessions = [r[0] for r in src.execute("SELECT DISTINCT session_id FROM lines WHERE session_id IS NOT NULL")]
+    sessions = [r[0] for r in src.execute("SELECT DISTINCT session_id FROM lines WHERE session_id IS NOT NULL"
+                                          + mine + " ORDER BY session_id", args)]
     with closing(sqlite3.connect(tmp)) as db:
         db.execute(f"PRAGMA page_size = {PAGE_SIZE}")
         db.execute("PRAGMA journal_mode = DELETE")
@@ -97,7 +114,7 @@ def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | No
         # Every swing's time (a mulligan's too: it's on the stream) in the published rounds, for a replay's
         # Next shot button.
         db.executemany("INSERT OR IGNORE INTO pub_shot_ts VALUES (?)", src.execute(
-            "SELECT ts FROM shots WHERE ts IS NOT NULL AND COALESCE(outcome, '') != 'gimme'"))
+            "SELECT ts FROM shots WHERE ts IS NOT NULL AND COALESCE(outcome, '') != 'gimme'" + mine, args))
         db.executemany("INSERT INTO pub_shot VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                        [(i, s["id"], kind.get(s["id"]), s["date"], s["player"], s["course"], s["club"],
                          s["lie_before"], round_of.get(s["id"])) for i, s in enumerate(shots)])
@@ -107,6 +124,9 @@ def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | No
                        [(sid, json.dumps(A.transcript(src, sid, names), separators=(",", ":")))
                         for sid in sessions])
         replays = hole_replay.hole_replays(src)
+        if part is not None:
+            rounds = set(part[1])
+            replays = {k: rp for k, rp in replays.items() if k[0] in rounds}
         db.executemany("INSERT INTO pub_replay VALUES (?, ?, ?)",
                        [(rnd, hole, json.dumps(rp, separators=(",", ":"))) for (rnd, hole), rp in replays.items()])
         # Each hole's minimap once, however many rounds' replays draw on it.
@@ -123,6 +143,132 @@ def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | No
         db.execute("VACUUM INTO ?", (str(packed),))
     tmp.unlink()
     packed.replace(out)
+
+
+def page_parts(src: sqlite3.Connection) -> dict[str, tuple[list[int], list[int]]]:
+    """The page's data split by year of play, newest first: each year's sessions (by their date) and the
+    rounds whose hole replays go with them (by their first hole's date). Rows of a session that isn't on
+    file (none of their own date) go with the newest year."""
+    year_of = {sid: d[:4] for d, sids in night_totals.nights(src).items() for sid in sids}
+    seen = {r[0] for r in src.execute("SELECT DISTINCT session_id FROM shots WHERE session_id IS NOT NULL"
+                                      " UNION SELECT DISTINCT session_id FROM lines WHERE session_id IS NOT NULL")}
+    loose = sorted(seen - year_of.keys())
+    years = sorted(set(year_of.values()), reverse=True)
+    if loose and not years:
+        years = [""]
+    parts: dict[str, tuple[list[int], list[int]]] = {y: ([], []) for y in years}
+    for sid, y in year_of.items():
+        parts[y][0].append(sid)
+    if loose:
+        parts[years[0]][0].extend(loose)
+    for rnd, (_, sessions) in hole_replay.replay_rounds(src)[1].items():
+        placed = [year_of[s] for s in sessions if s in year_of]
+        parts[min(placed) if placed else years[0]][1].append(rnd)
+    for sessions, rounds in parts.values():
+        sessions.sort()
+        rounds.sort()
+    return parts
+
+
+def _year_sigs(src: sqlite3.Connection, parts: dict[str, tuple[list[int], list[int]]],
+               names: dict[str, str] | None) -> dict[str, str]:
+    """Each year's signature: its nights' (their sessions and the records played in them), the records of
+    a line in it about a shot in another year (or the other way about), its rounds' hole replays', the
+    records with rows in a session that isn't on file (the newest year's), and the speakers' names."""
+    gens = stats_cache.record_sigs(src)
+    year_of = {sid: y for y, (sessions, _) in parts.items() for sid in sessions}
+    nights = night_totals.night_sigs(src)
+    per: dict[str, set] = {y: set() for y in parts}
+    for ses_a, rec_a, ses_b, rec_b in src.execute(
+            "SELECT DISTINCT l.session_id, l.record_uuid, s.session_id, s.record_uuid FROM main.lines l"
+            " JOIN main.shots s ON s.id = l.shot_id WHERE s.session_id IS NOT l.session_id"):
+        for ses in (ses_a, ses_b):
+            if ses in year_of:
+                per[year_of[ses]] |= {rec_a or "", rec_b or ""}
+    dated = {sid for sids in night_totals.nights(src).values() for sid in sids}
+    if parts:
+        newest = next(iter(parts))
+        for uuid, sessions in night_totals.record_sessions(src).items():
+            if any(s not in dated for s in sessions):
+                per[newest].add(uuid or "")
+    replays = hole_replay.replay_rounds(src)[1]
+    by_year: dict[str, list] = {y: [] for y in parts}
+    for d, s in nights.items():
+        if d[:4] in by_year:
+            by_year[d[:4]].append((d, s))
+    return {y: stats_cache.sig(y, by_year[y], sorted((u, gens.get(u)) for u in per[y]),
+                               [(r, replays[r][0]) for r in rounds], sorted((names or {}).items()))
+            for y, (_, rounds) in parts.items()}
+
+
+def _year_file(src: sqlite3.Connection, site: Path, year: str, part: tuple[list[int], list[int]],
+               names: dict[str, str] | None) -> dict[str, Any]:
+    """Build one year's data file into site/data, named by its content; returns its data.json entry."""
+    ddir = site / "data"
+    ddir.mkdir(parents=True, exist_ok=True)
+    tmp = ddir / f"building-{year or 'none'}-{secrets.token_hex(4)}.db.tmp"
+    build_data_db(src, tmp, names, part)
+    h = hashlib.sha256()
+    with tmp.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    file = f"data/{h.hexdigest()[:20]}.db"
+    with closing(sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)) as db:
+        def span(sql: str) -> list | None:
+            lo, hi = db.execute(sql).fetchone()
+            return None if lo is None else [lo, hi]
+        # (its swings' times, and its shots': newest first, so the first and last)
+        ts = [t for t in (span("SELECT MIN(ts), MAX(ts) FROM pub_shot_ts"), span(
+            "SELECT MIN(t), MAX(t) FROM (SELECT json_extract(json, '$.ts') AS t FROM pub_shot_json"
+            " WHERE ord IN (0, (SELECT MAX(ord) FROM pub_shot_json)))")) if t]
+        ts = [min(t[0] for t in ts), max(t[1] for t in ts)] if ts else None
+        ids = span("SELECT MIN(id), MAX(id) FROM pub_shot")
+        a, b = span("SELECT MIN(round), MAX(round) FROM pub_shot"), span("SELECT MIN(round), MAX(round) FROM pub_replay")
+        rounds = [min(x[0] for x in (a, b) if x), max(x[1] for x in (a, b) if x)] if a or b else None
+    sessions = [part[0][0], part[0][-1]] if part[0] else None
+    if (site / file).exists():
+        tmp.unlink()
+    else:
+        tmp.replace(site / file)
+    return {"year": year, "file": file, "ts": ts, "sessions": sessions, "rounds": rounds, "ids": ids}
+
+
+def page_files(src: sqlite3.Connection, site: Path, names: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """The page's data files, newest year first (data.json): each year's kept from the last build while
+    nothing in it has changed (and its file is still in this site), else built again."""
+    parts = page_parts(src)
+    cache = stats_cache.of(src)
+    kept: dict = {}
+    sigs: dict[str, str] = {}
+    kind = "page_year:" + stats_cache.sig(str(site.resolve()))   # each site (the PC's, the published) its own files
+    if cache is not None:
+        sigs = _year_sigs(src, parts, names)
+        kept = cache.get(kind, sigs)
+    out, new = [], {}
+    for year, part in parts.items():
+        entry = kept.get(year)
+        if entry is None or not (site / entry["file"]).is_file():
+            entry = _year_file(src, site, year, part, names)
+            new[year] = (sigs.get(year, ""), entry)
+        out.append(entry)
+    if cache is not None:
+        cache.hits += len(parts) - len(new)
+        cache.misses += len(new)
+        cache.put(kind, new, set(parts))
+    return out
+
+
+def _referenced(site: Path, versions: list[str]) -> set[str] | None:
+    """The data files these versions read (a version from before data files reads none); None while one
+    is still being built (no data.json yet, nor a stats.db of its own)."""
+    out: set[str] = set()
+    for v in versions:
+        try:
+            out |= {e["file"] for e in json.loads((site / "v" / v / "data.json").read_text(encoding="utf-8"))}
+        except FileNotFoundError:
+            if not (site / "v" / v / "stats.db").exists():
+                return None
+    return out
 
 
 def shot_query(context: str | None, filters: dict[str, str], limit: int = 500) -> tuple[str, list]:
@@ -253,7 +399,8 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
                 _note_records(records, pf["records"])
                 (pdir / f"{p['file']}.json").write_text(json.dumps(pf, separators=(",", ":")), encoding="utf-8")
             (vdir / f"summary-{name}.json").write_text(json.dumps(body, separators=(",", ":")), encoding="utf-8")
-        build_data_db(src, vdir / "stats.db", names)
+        data = page_files(src, site, names)
+        (vdir / "data.json").write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
         if reels is not None:
             reels.update(highlights.rounds(src))
     (site / "index.html").write_text(page(site_name, more_tab, theme), encoding="utf-8")
@@ -263,57 +410,90 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
         if lib.is_dir():
             shutil.copytree(lib, site / "vendor" / lib.name, dirs_exist_ok=True)
     tmp = site / "latest.json.tmp"
-    tmp.write_text(json.dumps({"version": version}), encoding="utf-8")
+    tmp.write_text(json.dumps({"version": version, "data": data}), encoding="utf-8")
     tmp.replace(site / "latest.json")
     for old in sorted((site / "v").iterdir(), key=lambda p: p.name)[:-KEEP_VERSIONS]:
         if old.name != version:
             shutil.rmtree(old, ignore_errors=True)
+    used = _referenced(site, [p.name for p in (site / "v").iterdir()])
+    for f in (site / "data").glob("*") if used is not None else ():
+        if (DATA_FILE.fullmatch(f.name) and f"data/{f.name}" not in used
+                or f.name.startswith("building-") and f.stat().st_mtime < time.time() - 86400):   # (a crashed build's)
+            f.unlink(missing_ok=True)
     return version
 
 
 # ---- S3 ---------------------------------------------------------------------------------------
 
 def _cache_control(key: str) -> str:
-    if key.startswith(("v/", "vendor/")):
-        return "public, max-age=31536000, immutable"   # a version's files never change
+    if key.startswith(("v/", "vendor/", "data/")):
+        return "public, max-age=31536000, immutable"   # a version's files never change, nor a data file
     return "no-cache"                                   # index.html, latest.json: always revalidate
 
 
 def upload(site: str | Path, bucket: str, prefix: str = "", client: Any = None) -> str:
-    """Upload the built site to s3://bucket/prefix: the new version's files and the page first,
-    latest.json last (so nobody is pointed at files that aren't there yet), then drop all but the
-    newest KEEP_VERSIONS versions. Returns the published version."""
+    """Upload the built site to s3://bucket/prefix: the data files the bucket doesn't have yet, the new
+    version's files and the page first, latest.json last (so nobody is pointed at files that aren't
+    there yet), then drop all but the newest KEEP_VERSIONS versions, and the data files none of them
+    reads. Returns the published version."""
     site = Path(site)
     if client is None:
         from . import backend
 
         client = backend.s3()
     prefix = prefix.strip("/") + "/" if prefix.strip("/") else ""
-    version = json.loads((site / "latest.json").read_text(encoding="utf-8"))["version"]
+    latest = (site / "latest.json").read_bytes()
+    version = json.loads(latest)["version"]
+    data = {e["file"] for e in json.loads(latest).get("data", [])}
     files = [p for p in site.rglob("*") if p.is_file() and not p.name.endswith(".tmp")]
     rel = lambda p: p.relative_to(site).as_posix()   # noqa: E731
     keep = {f"v/{version}/"}
-    order = ([p for p in files if rel(p).startswith(f"v/{version}/")]
+    order = ([p for p in files if rel(p) in data]
+             + [p for p in files if rel(p).startswith(f"v/{version}/")]
              + [p for p in files if rel(p).startswith("vendor/")]
              + [p for p in files if rel(p) in APP_FILES or rel(p).startswith("icons/")]
              + [site / "index.html"])
     existing = _list(client, bucket, prefix)
     for path in order:
         key = rel(path)
-        if key.startswith("vendor/") and prefix + key in existing:
-            continue   # vendored files are versioned by their folder name
+        if key.startswith(("vendor/", "data/")) and prefix + key in existing:
+            continue   # vendored files are versioned by their folder name, data files named by their content
         client.upload_file(str(path), bucket, prefix + key, ExtraArgs={
             "ContentType": CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
             "CacheControl": _cache_control(key)})
-    client.put_object(Bucket=bucket, Key=prefix + "latest.json", Body=json.dumps({"version": version}).encode(),
+    client.put_object(Bucket=bucket, Key=prefix + "latest.json", Body=latest,
                       ContentType=CONTENT_TYPES[".json"], CacheControl=_cache_control("latest.json"))
     versions = sorted({k[len(prefix) + 2:].split("/", 1)[0] for k in existing if k.startswith(prefix + "v/")}
                       | {version})
     keep |= {f"v/{v}/" for v in versions[-KEEP_VERSIONS:]}   # `keep` already has this one
     stale = [k for k in existing if k.startswith(prefix + "v/") and not any(k.startswith(prefix + d) for d in keep)]
+    used = _bucket_referenced(site, client, bucket, prefix, existing, [d[2:-1] for d in keep])
+    if used is not None:
+        stale += [k for k in existing if k.startswith(prefix + "data/") and k[len(prefix):] not in used | data]
     for chunk in range(0, len(stale), 1000):
         client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in stale[chunk:chunk + 1000]]})
     return version
+
+
+def _bucket_referenced(site: Path, client: Any, bucket: str, prefix: str, existing: set[str],
+                       versions: list[str]) -> set[str] | None:
+    """The data files these versions in the bucket read (the site's copy of their data.json, else the
+    bucket's); None if one can't be read (nothing's pruned then)."""
+    out: set[str] = set()
+    for v in versions:
+        key = f"v/{v}/data.json"
+        try:
+            if (site / key).is_file():
+                body = (site / key).read_bytes()
+            elif prefix + key in existing:
+                body = client.get_object(Bucket=bucket, Key=prefix + key)["Body"].read()
+            else:
+                continue   # a version from before data files, or the one just uploaded (`data`)
+            out |= {e["file"] for e in json.loads(body)}
+        except Exception as e:   # (pruned next time)
+            log.warning("data files not pruned: %s: %s", key, e)
+            return None
+    return out
 
 
 def _list(client: Any, bucket: str, prefix: str) -> set[str]:

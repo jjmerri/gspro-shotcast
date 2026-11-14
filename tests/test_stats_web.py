@@ -312,8 +312,9 @@ def test_server_serves_the_page_and_summary(tmp_path):
         r = body["rounds"][0]
         assert (r["gross"], r["to_par"], r["played"]) == (9, 1, 9)
         assert [h["hole"] for h in r["card"]] == [1, 2]
-        # The browser's SQLite reads stats.db in pieces: HEAD for the size, then byte ranges.
-        url = f"{base}/v/{version}/stats.db"
+        # The browser's SQLite reads a data file in pieces: HEAD for the size, then byte ranges.
+        data = json.loads(urllib.request.urlopen(base + "/latest.json").read())["data"]
+        url = f"{base}/{data[0]['file']}"
         head = urllib.request.urlopen(urllib.request.Request(url, method="HEAD"))
         size = int(head.headers["Content-Length"])
         assert head.headers["Accept-Ranges"] == "bytes" and size > 1024
@@ -1474,3 +1475,70 @@ def test_a_rounds_strokes_gained_split_over_two_nights_adds_up_to_the_same_summa
         merged = totals(shots[:k])
         stats_web.add_round_sg(merged, totals(shots[k:]))
         assert stats_web.round_sg_from(merged[(1, "Ann")]) == whole
+
+
+def test_the_page_reads_only_the_data_files_a_query_can_find_rows_in_newest_year_first():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = re.search(r"\nlet site = null;.*?\nlet loading = 0;", page, re.S).group(0)
+    new = {"year": "2026", "file": "data/new.db", "ts": [1000, 2000], "sessions": [5, 9], "rounds": [10, 20], "ids": [100, 400]}
+    old = {"year": "2025", "file": "data/old.db", "ts": [0, 999], "sessions": [1, 5], "rounds": [1, 10], "ids": [1, 99]}
+    empty = {"year": "2024", "file": "data/empty.db", "ts": None, "sessions": None, "rounds": None, "ids": None}
+    script = fns + """
+const asked = [];
+let gone = null;
+// each file's shots, newest first: [count, the newest's time]
+let rows = { "data/new.db": [300, 2000], "data/old.db": [300, 999], "data/next.db": [1, 3000] };
+async function runQuery(file, sql, args) {
+  asked.push(file + " " + (sql.match(/LIMIT (\\d+)/) || [])[1]);
+  if (file === gone) throw new Error("404");
+  if (sql.includes("pub_transcript")) return file === "data/old.db" ? [{ json: "[1]" }] : [];
+  const [n, top] = rows[file] || [0, 0];
+  return Array.from({ length: Math.min(n, Number(sql.match(/LIMIT (\\d+)/)[1])) },
+                    (_, i) => ({ json: JSON.stringify({ id: `${file}:${i}`, ts: top - i }) }));
+}
+let latest = null;
+const getJSON = async () => latest;
+const out = {};
+(async () => {
+  const data = %s;
+  site = siteOf({ version: "v1", data });
+  const pick = w => pickFiles(data, w).map(e => e.year);
+  out.pick = [pick({}), pick({ date: "2025-06-01" }), pick({ from: "2025-01-01", to: "2025-12-31" }), pick({ from: "2026-01-01" }),
+              pick({ round: 10 }), pick({ id: 150 }), pick({ session: 7 }), pick({ ts: [990, 1001] }), pick({ ts: [5000, 6000] })];
+  const ids = shots => shots.map(s => s.id);
+  let shots = ids(await queryShots(null, {}));
+  out.shots = [shots.length, shots[299], shots[300], asked.splice(0)];
+  out.lastYear = [(await queryShots(null, { to: "2025-12-31" })).length, asked.splice(0)];
+  rows["data/new.db"] = [600, 2000];   // a full year: the year before has nothing newer
+  shots = ids(await queryShots(null, {}));
+  out.full = [shots.length, shots[499], asked.splice(0)];
+  data[1].ts = [0, 2500];   // ...unless its times reach past the 500th
+  rows["data/old.db"] = [300, 2500];
+  shots = ids(await queryShots(null, {}));
+  out.overlap = [shots.length, shots[0], shots[1], shots[499], asked.splice(0)];
+  out.transcript = [await queryTranscript(5), asked.splice(0)];
+  gone = "data/new.db";   // open across a publish that dropped it
+  latest = { version: "v2", data: [{ year: "2026", file: "data/next.db", ids: [100, 500] }] };
+  out.moved = [ids(await queryShots(null, {})), site.version, asked.splice(0)];
+  out.legacy = siteOf({ version: "v0" }).data;
+  console.log(JSON.stringify(out));
+})();
+""" % json.dumps([new, old, empty])
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    assert got["pick"] == [["2026", "2025", "2024"], ["2025"], ["2025"], ["2026"], ["2026", "2025"], ["2026"], ["2026"],
+                           ["2026", "2025"], []]
+    assert got["shots"] == [500, "data/new.db:299", "data/old.db:0", ["data/new.db 500", "data/old.db 500"]]
+    assert got["lastYear"] == [300, ["data/old.db 500"]]
+    assert got["full"] == [500, "data/new.db:499", ["data/new.db 500"]]
+    assert got["overlap"] == [500, "data/old.db:0", "data/old.db:1", "data/new.db:199", ["data/new.db 500", "data/old.db 500"]]
+    assert got["transcript"] == [[1], ["data/new.db undefined", "data/old.db undefined"]]
+    assert got["moved"] == [["data/next.db:0"], "v2", ["data/new.db 500", "data/next.db 500"]]
+    assert got["legacy"] == [{"file": "v/v0/stats.db"}]

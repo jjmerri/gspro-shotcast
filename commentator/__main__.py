@@ -782,7 +782,8 @@ def cmd_publish(cfg: Config, args) -> None:
     site = Path(args.out or Path(cfg.log_dir) / "stats-site")
     names = {key: persona.name for key, persona in cfg.personas.items()}
     if args.build_only:
-        version = stats_site.build(path, site, names, **cfg.publish.brand)
+        with stats_site.site_lock(site):   # (the data files are shared between builds of the site)
+            version = stats_site.build(path, site, names, **cfg.publish.brand)
         print(f"Built {version} in {site}")
         return
     if not cfg.publish.bucket:

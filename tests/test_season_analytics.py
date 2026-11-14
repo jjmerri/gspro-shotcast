@@ -317,7 +317,8 @@ def test_published_site_has_the_summary_shots_and_transcripts(db, tmp_path):
     db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text) VALUES (1, 0, 'opener', 'pbp', 'Hello.')")
     db.commit()
     vdir = tmp_path / "site" / "v" / stats_site.build(db.path, tmp_path / "site", {"pbp": "Nigel"})
-    pub = sqlite3.connect(vdir / "stats.db")
+    [data] = json.loads((vdir / "data.json").read_text())
+    pub = sqlite3.connect(tmp_path / "site" / data["file"])
     sql, args = stats_site.shot_query(None, {"player": "Ann", "club": "DR"})
     assert [json.loads(r[0])["club"] for r in pub.execute(sql, args)] == ["DR"]
     t = json.loads(pub.execute("SELECT json FROM pub_transcript WHERE session_id = 1").fetchone()[0])

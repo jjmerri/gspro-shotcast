@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from contextlib import closing
 
@@ -250,3 +251,37 @@ def test_a_round_resumed_after_midnight_is_in_both_its_nights_signatures(tmp_pat
         db.execute("UPDATE shots SET left_out = 1 WHERE id = ?", (shots[4],))
     after = sigs()
     assert all(after[d] != before[d] for d in ("2023-11-14", "2023-11-15"))
+
+
+def test_the_pages_data_files_are_kept_per_year_and_an_edit_builds_only_its_year_again(tmp_path, monkeypatch):
+    from commentator import stats_site
+
+    path = tmp_path / "season.db"
+    shots = _season(path)
+    with closing(sqlite3.connect(path)) as db, db:
+        for n, (sid,) in enumerate(db.execute("SELECT id FROM sessions ORDER BY id").fetchall()):
+            db.execute("UPDATE sessions SET date = ? WHERE id = ?", (f"202{2 + n}-11-14", sid))
+    built = []
+    real = stats_site._year_file
+    monkeypatch.setattr(stats_site, "_year_file", lambda src, site, year, *a: built.append(year) or real(src, site, year, *a))
+    site = tmp_path / "site"
+
+    def build():
+        built.clear()
+        stats_site.build(path, site)
+        return json.loads((site / "latest.json").read_text())["data"]
+
+    first = build()
+    assert [e["year"] for e in first] == ["2023", "2022"] and built == ["2023", "2022"]
+    assert build() == first and built == []
+    with closing(sqlite3.connect(path)) as db, db:   # the first year's drive left out
+        db.execute("UPDATE shots SET left_out = 1 WHERE id = ?", (shots[0],))
+    after = build()
+    assert built == ["2022"] and after[0] == first[0] and after[1]["file"] != first[1]["file"]
+    assert sorted(p.name for p in (site / "data").iterdir()) == sorted({e["file"][5:] for e in first + after})
+    with closing(sqlite3.connect(path)) as db, db:   # the second year's practice shot (no round, no replay)
+        db.execute("UPDATE shots SET club = '3W' WHERE id = ?", (shots[-1] + 1,))
+    last = build()
+    assert built == ["2023"] and last[1] == after[1] and last[0]["file"] != after[0]["file"]
+    stats_cache.clear(path)   # the same files as a build that works every year out
+    assert build() == last and built == ["2023", "2022"]

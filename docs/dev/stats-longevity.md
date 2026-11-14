@@ -152,6 +152,8 @@ merged like any other, and its record is in both nights' signatures.
   every build), the summary 32 s. Both are what's left below; the target is flat. With the round
   digests and reel bests: 3 years 31.6 s (`build_data_db` 17.3 s, the summary 12.8 s), 6 years
   66.6 s (36.3 s and 26.9 s). Still linear: those two are the page files and the families left.
+  With the per-year page files: 3 years 17.8 s warm, 23.5 s after an edit to the newest night; 6
+  years 33.4 s and 44.8 s. What's left growing is the summary (the families still to port).
 - **To port:** records, courses, the booth tab, predictions, broadcasts, filters, the handicap index,
   the usual gimme; then the page files (below).
 - **Decisions:**
@@ -165,10 +167,25 @@ merged like any other, and its record is in both nights' signatures.
   - The booth: rates are total over total (today `season_rounds` averages per-round rates), band
     lookups snap to 1 ft / 5 yd buckets, it merges the frozen nights once at startup and adds tonight
     live; `spoken_lines` looks back 12 months, `side_rounds` gets a limit.
-- **Page files.** The shot log `stats.db` is split by calendar year; a past year's file is built once
-  and named by a hash of its content. Summary and player files are content-addressed too, so an
-  unchanged file is skipped on upload, and pruning never deletes a file `latest.json` still points at.
-  Past years' lists (rounds, broadcasts, trends) move to per-year files the page loads when paged back.
+- **Page files (done for the shot log).** The page's `stats.db` is one file per calendar year of play
+  (`stats_site.page_files`):
+  - A session's shots, swing times and transcript go in its date's year; a round's hole replays in its
+    first hole's year, with the minimaps they draw on. Rows of a session not on file go in the newest.
+  - A year is built again only when its signature changes (stats cache, kind `page_year`, per site):
+    its nights' signatures, the records of a line about a shot in another year, its rounds' replay
+    signatures and the speakers' names. Otherwise the last build's file is kept.
+  - Files are `data/<sha256[:20]>.db`, served immutable; `v/<version>/data.json` and `latest.json`'s
+    `data` list them newest first with their year and ranges (times, sessions, rounds, shot ids).
+    Building a year again from scratch gives the same bytes, so an unchanged year is never re-sent.
+  - `stats_site.upload` sends only data files the bucket lacks, and deletes those no kept version
+    reads (each one's `data.json`: the site's copy, else the bucket's; if one can't be read, none).
+  - The page picks the files a query can find rows in, takes each one's 500 newest, merges them by
+    time and keeps 500, skipping a file whose times are all older than the 500th kept; a worker per file, kept across versions. Same rows, same order as the single file
+    (checked on 1 and 3 years).
+  - A page left open across the first publish with data files can't find `v/<version>/stats.db` and
+    needs a refresh.
+  - Still to do: summary and player files content-addressed, and past years' lists (rounds,
+    broadcasts, trends) in per-year files the page loads when paged back.
 - **Bench** at 1, 3, 5 and 10 years: the after-a-round times must be flat.
 
 ### 3a. The build reads the file, not a copy in memory (done)
