@@ -30,6 +30,10 @@ class Booking:
     def practice(self) -> bool:
         return self.kind.strip().lower().startswith("practice")
 
+    @property
+    def league(self) -> bool:
+        return self.kind.strip().lower().startswith("league")
+
 
 class Bookings:
     def __init__(self, account: str, schedule_id: int, api_key: str, type_field: str = "field_1_r",
