@@ -325,6 +325,40 @@ def test_courses_are_kept_per_night_and_merged_with_the_first_cards_par_and_the_
     assert got == fresh and counts == (1, 1) and got[0]["holes"][0]["birdie_pct"] == 33
 
 
+def test_broadcasts_and_filters_are_kept_per_night_and_an_edit_works_out_only_its_night_again(tmp_path):
+    path = tmp_path / "season.db"
+    _season(path)
+    with closing(sqlite3.connect(path)) as db, db:
+        sids = [r[0] for r in db.execute("SELECT id FROM sessions ORDER BY id")]
+        for n, sid in enumerate(sids):
+            db.execute("UPDATE sessions SET date = ?, started_at = ? WHERE id = ?", (f"2023-11-1{4 + n}", T0 + n, sid))
+            db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text, record_uuid) VALUES (?, 0, 'opener', 'pbp',"
+                       " 'Hi.', (SELECT record_uuid FROM shots WHERE session_id = ? LIMIT 1))", (sid, sid))
+
+    def build():
+        with closing(stats_web.connect(path)) as db:
+            fresh = A.broadcasts(db), stats_web._filters(db)
+            with stats_cache.opened(db, path) as c:
+                got = A.broadcasts(db), stats_web._filters(db)
+                return got, fresh, (c.hits, c.misses)
+
+    got, fresh, counts = build()
+    assert got == fresh and counts == (0, 4)
+    (casts, (filters, league, tournament)) = got
+    assert [b["id"] for b in casts] == sids[::-1] and casts[0]["players"] == ["Ann", "Bo"]
+    assert filters["dates"] == ["2023-11-15", "2023-11-14"] and filters["clubs"] == ["Dr", "PT"]
+    assert filters["lies"] == ["Green", "Tee"] and league and not tournament   # (rounds are league ones by default)
+    assert build()[2] == (4, 0)
+    with closing(sqlite3.connect(path)) as db, db:   # the second night's drives were with a 3-wood
+        db.execute("UPDATE shots SET club = '3W' WHERE club = 'Dr' AND session_id = ?", (sids[1],))
+    got, fresh, counts = build()
+    assert got == fresh and counts == (2, 2) and got[1][0]["clubs"] == ["3W", "Dr", "PT"]
+    with closing(sqlite3.connect(path)) as db, db:   # the first session's start set later: it's the newest
+        db.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (T0 + 9, sids[0]))
+    got, fresh, counts = build()
+    assert got == fresh and [b["id"] for b in got[0]] == sids
+
+
 def test_the_pages_data_files_are_kept_per_year_and_an_edit_builds_only_its_year_again(tmp_path, monkeypatch):
     from commentator import stats_site
 

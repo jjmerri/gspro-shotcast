@@ -1046,6 +1046,52 @@ def _usual(db: sqlite3.Connection) -> float | None:
     return usual_gimme(db, reuse(db, ("round_gimmes",), lambda: round_gimmes(db)))
 
 
+def _filters(db: sqlite3.Connection) -> tuple[dict[str, list], bool, bool]:
+    """The page's filters (the nights with shots, newest first, and the courses, clubs and lies played)
+    and whether there are any league rounds, and any tournament ones. With no league rounds at all (no
+    league file, or the season hasn't started) the page drops the League filter, and with no tournament
+    rounds either, the filter and tags, since every round would be practice."""
+    def run() -> tuple[dict[str, list], bool, bool]:
+        dates, seen, league, tournament = [], {"courses": set(), "clubs": set(), "lies": set()}, False, False
+        for d, night in N.per_night(db, "filters", lambda ns: _collect_filters(db, ns)).items():
+            if night["shots"]:
+                dates.append(d)
+            for k in seen:
+                seen[k].update(night[k])
+            league = league or night["league"]
+            tournament = tournament or night["tournament"]
+        return {"dates": dates[::-1], **{k: sorted(v, key=_sql_order) for k, v in seen.items()}}, league, tournament
+    filters, league, tournament = reuse(db, ("filters",), run)
+    return {k: list(v) for k, v in filters.items()}, league, tournament
+
+
+def _sql_order(v: Any) -> tuple:
+    """SQLite's ORDER BY for a column's values: numbers before text, text by its bytes (code points)."""
+    return (isinstance(v, str), v)
+
+
+def _collect_filters(db: sqlite3.Connection, ns: "N.Nights") -> dict[str, dict[str, Any]]:
+    out = {d: {"shots": False, "courses": [], "clubs": [], "lies": [], "league": False, "tournament": False}
+           for d in ns.dates}
+    for sid, course, club, lie, league, tournament in db.execute(
+            "SELECT DISTINCT session_id, course, club, lie_before, is_league = 1, is_league = 0 AND is_tournament = 1"
+            " FROM shots WHERE 1=1" + ns.where):
+        night = out[ns.date[sid]]
+        night["shots"] = True
+        for k, v in (("courses", course), ("clubs", club), ("lies", lie)):
+            if v is not None and v not in night[k]:
+                night[k].append(v)
+        night["league"] = night["league"] or league == 1
+        night["tournament"] = night["tournament"] or tournament == 1
+    for sid, league, tournament in db.execute(
+            "SELECT DISTINCT session_id, is_league = 1, is_league = 0 AND is_tournament = 1 FROM rounds WHERE 1=1"
+            + ns.where):
+        night = out[ns.date[sid]]
+        night["league"] = night["league"] or league == 1
+        night["tournament"] = night["tournament"] or tournament == 1
+    return out
+
+
 def _booth(db: sqlite3.Connection, names: dict[str, str] | None) -> dict[str, Any]:
     """The booth tab; its signature phrases go by the last year (the 1y range's nights), so working
     them out never grows with the years kept."""
@@ -1172,21 +1218,7 @@ def summary(db: sqlite3.Connection, context: str | None = None,
         p["gapping"] = A.gapping(db, p["name"], context, finish)
         p["recovery"] = rec.get(p["name"], [])
         p["trend"] = trend.get(p["name"], [])
-    filters = {
-        "dates": [r[0] for r in db.execute("SELECT DISTINCT date FROM sessions s WHERE EXISTS"
-                                           " (SELECT 1 FROM shots WHERE session_id = s.id) ORDER BY date DESC")],
-        "courses": [r[0] for r in db.execute("SELECT DISTINCT course FROM shots WHERE course IS NOT NULL ORDER BY 1")],
-        "clubs": [r[0] for r in db.execute("SELECT DISTINCT club FROM shots WHERE club IS NOT NULL ORDER BY 1")],
-        "lies": [r[0] for r in db.execute("SELECT DISTINCT lie_before FROM shots WHERE lie_before IS NOT NULL ORDER BY 1")],
-    }
-    # No league rounds at all (no league file, or the season hasn't started): the page drops the
-    # League filter, and with no tournament rounds either, the filter and tags, since every round
-    # would be practice.
-    has_league = db.execute("SELECT EXISTS (SELECT 1 FROM rounds WHERE is_league = 1)"
-                            " OR EXISTS (SELECT 1 FROM shots WHERE is_league = 1)").fetchone()[0] == 1
-    has_tournament = db.execute("SELECT EXISTS (SELECT 1 FROM rounds WHERE is_league = 0 AND is_tournament = 1)"
-                                " OR EXISTS (SELECT 1 FROM shots WHERE is_league = 0 AND is_tournament = 1)"
-                                ).fetchone()[0] == 1
+    filters, has_league, has_tournament = _filters(db)
     rounds_ = rounds(db, context, gimmes)
     add_round_summaries(db, rounds_, fam["rounds"], people)
     return {"context": context or "all", "last_session": last, "has_league": has_league,
