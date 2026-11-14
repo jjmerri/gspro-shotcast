@@ -302,6 +302,10 @@ def round_groups(db: sqlite3.Connection, table: str = "rounds") -> tuple[list[di
     first row's id) and each row's round."""
     if not recorded(db):
         return _timed_round_groups(db, table)
+    return reuse(db, ("round_groups", table), lambda: _round_groups(db, table))
+
+
+def _round_groups(db: sqlite3.Connection, table: str) -> tuple[list[dict[str, Any]], dict[int, int]]:
     groups: list[dict[str, Any]] = []
     of_row: dict[int, int] = {}
     by_uuid: dict[str, dict[str, Any]] = {}

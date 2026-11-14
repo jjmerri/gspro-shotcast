@@ -162,6 +162,8 @@ merged like any other, and its record is in both nights' signatures.
     are grouped by course and session once instead of scanned per round (rounds × layouts before),
     and each player's index is worked out once per card. 0.65 s on 3 years; 1.28 s to 0.67 s with
     layouts logged for every round.
+  - the usual gimme: `round_groups` (the rounds as played, which it and a dozen others read) is worked
+    out once a build instead of 59 times; the usual gimme went from 0.84 s a build to 0.07 s on 3 years.
   - Output identical to before on the 1- and 50-season copies.
 - **Where it stands** (warm build, nothing changed): 18 s on 1.5 years, 37 s on 3, 74 s on 6: still
   linear. On 6 years: writing the page's shot list and replays 37 s (`build_data_db`, every shot
@@ -170,8 +172,7 @@ merged like any other, and its record is in both nights' signatures.
   66.6 s (36.3 s and 26.9 s). Still linear: those two are the page files and the families left.
   With the per-year page files: 3 years 17.8 s warm, 23.5 s after an edit to the newest night; 6
   years 33.4 s and 44.8 s. What's left growing is the summary (the families still to port).
-- **To port:** predictions, broadcasts, filters,
-  the usual gimme; then the page files (below).
+- **To port:** predictions, broadcasts, filters; then the page files (below).
 - **Decisions:**
   - The usual gimme stays as it is (the most common radius); the families it feeds put it in their
     signature, so a change in it (rare) works them all out once. No number changes.
