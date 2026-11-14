@@ -4,6 +4,13 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.130
+
+### Booth
+- In practice rounds the booth knows who's leading and by how much, so it no longer calls the leader "one behind" or invents a lead.
+- A call the booth makes ("I'm calling it in") is judged only by the shot it was about, never held to a later one or claimed as coming true when it didn't.
+- Every putt is called for what it's actually for: a par putt is no longer a "birdie putt".
+
 ## 0.1.129
 
 ### Booth
