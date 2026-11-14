@@ -192,12 +192,12 @@ async def test_the_stream_starts_with_a_round_and_stops_after_the_sign_off(tmp_p
     eng._schedule_live_stop()
     await asyncio.wait_for(eng._live_stop_task, 2)
     assert calls[-1] == "stop"
-    eng._live_on_air(False)
+    eng.set_commentary(False)
     await asyncio.sleep(0.05)
     calls.clear()
-    eng._live_preroll()                                   # held off air: stays off
+    eng._live_preroll()                                   # off air: the stream still comes on, silent
     await asyncio.sleep(0.05)
-    assert calls == []
+    assert calls == ["start"]
 
 
 def test_mirror_keeps_saying_its_live_so_the_page_can_tell_a_killed_booth(tmp_path):
@@ -234,7 +234,7 @@ def test_mirror_puts_the_week_board_up_for_its_stream_only_when_it_changes(tmp_p
     assert json.loads(s3.objects["live/week.json"][0]) == {"session": m.session, "week": None}
 
 
-async def test_off_air_and_idle_stop_the_stream_and_on_air_or_a_shot_starts_it(tmp_path, monkeypatch):
+async def test_off_air_keeps_the_stream_and_idle_stops_it_till_a_shot(tmp_path, monkeypatch):
     from tests.test_round import _engine as make
 
     calls = []
@@ -258,13 +258,15 @@ async def test_off_air_and_idle_stop_the_stream_and_on_air_or_a_shot_starts_it(t
     round_on = [True]
     monkeypatch.setattr(eng, "_round_on", lambda: round_on[0])
 
-    eng._live_on_air(False)
-    eng._live_round_start()                                          # a round starting off air: no stream
+    eng._live_round_start()
     await asyncio.sleep(0.05)
-    assert calls == ["stop"]
-    eng._live_on_air(True)                                           # back on air mid-round
+    assert calls == ["start"]
+    eng.set_commentary(False)                                        # the booth off air mid-round
     await asyncio.sleep(0.05)
-    assert calls == ["stop", "start"]
+    assert calls == ["start"]                                        # the stream carries on
+    eng.set_commentary(True)
+    await asyncio.sleep(0.05)
+    assert calls == ["start"]
 
     calls.clear()
     now = [5000.0]

@@ -841,7 +841,6 @@ class Engine:
         self.live_local = None   # the stream kept on the PC (live_stream.Mirror with a LocalRecorder)
         self._live_stop_task: asyncio.Task | None = None
         self._obs_lock = threading.Lock()
-        self._live_held = False             # OFF AIR on the badge: no stream until it's back on air
         self._live_last_shot = time.monotonic()
         self._live_prerolled = False        # on air for the next round's setup: the last one's sign-off doesn't stop it
         self._live_idle_session: str | None = None   # the mirror session the idle watch stopped
@@ -2054,7 +2053,6 @@ class Engine:
             return
         self.commentary_on = on
         log.info("Booth %s", "on air" if on else "off air: recording shots and rounds only")
-        self._live_on_air(on)
         if on and not self._minimap_tried:   # started off air: the hazard reader wasn't built
             self._minimap_tried = True
             self.minimap = self._make_minimap()
@@ -10681,7 +10679,7 @@ class Engine:
     def _live_round_start(self) -> None:
         self._live_last_shot, self._live_resume_on_shot = time.monotonic(), False
         self._live_prerolled = False
-        if not (self._live_on() and self.cfg.live.with_rounds) or self._live_held:
+        if not (self._live_on() and self.cfg.live.with_rounds):
             return
         try:
             loop = asyncio.get_running_loop()
@@ -10696,7 +10694,7 @@ class Engine:
         loads (before the round's own start, a few seconds on) is on the recording. Straight from the
         last round, its stream stays on. No round following, the idle stop takes it off again (and a
         recording with no shots isn't kept)."""
-        if not (self._live_on() and self.cfg.live.with_rounds) or self._live_held or self._round_on():
+        if not (self._live_on() and self.cfg.live.with_rounds) or self._round_on():
             return
         try:
             loop = asyncio.get_running_loop()
@@ -10748,25 +10746,9 @@ class Engine:
     def _round_on(self) -> bool:
         return self.round is not None and not self.round.ended and not self._round_end_queued
 
-    def _live_on_air(self, on: bool) -> None:
-        """The badge: OFF AIR stops the stream, ON AIR mid-round starts it again."""
-        if not (self._live_on() and self.cfg.live.with_rounds):
-            return
-        self._live_held = not on
-        if on and not self._round_on():
-            return
-        if self._live_stop_task and not self._live_stop_task.done():
-            self._live_stop_task.cancel()
-        if on:
-            self._live_last_shot, self._live_resume_on_shot = time.monotonic(), False
-        try:
-            asyncio.get_running_loop().create_task(self._live_call("start" if on else "stop"), name="live-air")
-        except RuntimeError:
-            pass
-
     def _live_shot(self) -> None:
         self._live_last_shot = time.monotonic()
-        if not self._live_resume_on_shot or self._live_held or not self._round_on():
+        if not self._live_resume_on_shot or not self._round_on():
             return
         self._live_resume_on_shot = False
         log.info("Live stream: a shot after the idle stop, back on")

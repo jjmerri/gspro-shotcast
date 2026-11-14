@@ -520,14 +520,15 @@ opening tee shot is on it, however quickly it's hit), or when a round starts, an
 30 seconds after its sign-off or after the quit if it's too short for one. The tray's
 **Start/Stop the live stream** does it by hand. It also stops:
 
-- **OFF AIR** on the badge stops it, and no round starts it until **ON AIR**, which starts it again
-  mid-round.
 - **Idle**: after 20 minutes with no shots (`live.idle_minutes`; 0 for never), a round left on a hole
   or a stream started by hand and forgotten. The round's next shot starts it again.
 - **Quit** in the tray (once confirmed) stops OBS's output and takes the page off air at once. A booth that crashed
   or was killed can't: while live it refreshes `live/status.json` every 30 seconds, and the page
   shows off air within about 2 minutes of that stopping, rather than a frozen player. A booth
   starting goes off air, and clears `live/` of everything but the week's kept streams.
+
+**OFF AIR** on the badge doesn't touch the stream: the booth goes quiet, but the round streams on
+(GSPro's sound only), so it still gets its replay and highlight reel.
 
 During a league round, the Live tab shows the week's board under the video. It lists the teams that
 have posted the week on Squabbit (or finished it on the sim) and the team on the sim with its running net and holes played (placed
