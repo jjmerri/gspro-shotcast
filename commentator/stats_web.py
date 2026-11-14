@@ -923,33 +923,82 @@ def records(db: sqlite3.Connection, context: str | None = None, player: str | No
     return records_table(db, context, {"": since})(player, "")
 
 
+def _record_queries() -> list[tuple[str, tuple, Callable[[Any], tuple]]]:
+    """Each record's shots (the longest drive, the closest approach from each band, the longest putt
+    holed), with its ranking key: lowest first, a tie going to the earlier shot."""
+    base = " AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0 AND left_out = 0"
+    cols = "session_id, is_league, is_tournament"
+    out: list[tuple[str, tuple, Callable[[Any], tuple]]] = [
+        (f"SELECT id, ts, player, {_DRIVE} AS v, course, hole, {cols} FROM shots WHERE {_TEE_DRIVER}"
+         f" AND {_DRIVE} IS NOT NULL" + base, (), lambda r: (-r["v"], r["ts"], r["id"]))]
+    for lo, hi in APPROACH_BANDS:   # 1 ft from 80 yd isn't the shot 2 ft from 200 is: a record for each
+        out.append((f"SELECT id, ts, player, finish_yards AS v, club, outcome, ROUND(to_pin_yards) AS from_yd, course,"
+                    f" hole, {cols} FROM shots WHERE {A.APPROACH_SQL} AND to_pin_yards > ? AND to_pin_yards <= ?"
+                    " AND finish_yards IS NOT NULL" + base, (lo, hi), lambda r: (r["v"], r["ts"], r["id"])))
+    out.append((f"SELECT id, ts, player, to_pin_yards AS v, course, hole, {cols} FROM shots WHERE is_putt = 1"
+                " AND outcome = 'holed' AND to_pin_yards IS NOT NULL" + base, (), lambda r: (-r["v"], r["ts"], r["id"])))
+    return out
+
+
+def _collect_records(db: sqlite3.Connection, ns: "N.Nights") -> dict[str, dict[str, list[dict]]]:
+    """Per night, per context, each record's best shot by each player that night (as [key, row]): all a
+    range's record can take from the night."""
+    out: dict[str, dict[str, list[dict]]] = {d: {} for d in ns.dates}
+    queries = _record_queries()
+    for i, (sql, args, rank) in enumerate(queries):
+        for r in db.execute(sql + ns.where, args):
+            ctx = N.context_of(r["is_league"], r["is_tournament"])
+            got = out[ns.date[r["session_id"]]].setdefault(ctx, [{} for _ in queries])[i]
+            key = rank(r)
+            if r["player"] not in got or key < tuple(got[r["player"]][0]):
+                row = {c: r[c] for c in r.keys() if c not in ("session_id", "is_league", "is_tournament")}
+                got[r["player"]] = [list(key), row]
+    return out
+
+
 def records_table(db: sqlite3.Connection, context: str | None,
                   starts: dict[str, str | None]) -> Callable[[str | None, str], dict[str, Any]]:
     """records() for every player (and everyone, None) and each of the date ranges `starts` (key: first
-    night, None for all time), from one pass over the shots: returns pick(player, key). A tie goes to
-    the earlier shot."""
-    base = " AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)
-    date = ", (SELECT date FROM sessions WHERE sessions.id = shots.session_id) AS _date"
-    drive = A.firsts(db.execute(f"SELECT id, ts, player, {_DRIVE} AS v, course, hole{date} FROM shots WHERE {_TEE_DRIVER}"
-                                f" AND {_DRIVE} IS NOT NULL" + base + " ORDER BY v DESC, ts, id"), starts, 1, "_date")
-    approaches = []
-    for lo, hi in APPROACH_BANDS:   # 1 ft from 80 yd isn't the shot 2 ft from 200 is: a record for each
-        approaches.append((lo, hi, A.firsts(db.execute(
-            f"SELECT id, ts, player, finish_yards AS v, club, outcome, ROUND(to_pin_yards) AS from_yd, course, hole{date}"
-            f" FROM shots WHERE {A.APPROACH_SQL} AND to_pin_yards > ? AND to_pin_yards <= ?"
-            " AND finish_yards IS NOT NULL" + base + " ORDER BY v, ts, id", (lo, hi)), starts, 1, "_date")))
-    putt = A.firsts(db.execute(f"SELECT id, ts, player, to_pin_yards AS v, course, hole{date} FROM shots WHERE is_putt = 1"
-                               " AND outcome = 'holed' AND to_pin_yards IS NOT NULL" + base + " ORDER BY v DESC, ts, id"),
-                    starts, 1, "_date")
+    night, None for all time), from each night's bests: returns pick(player, key). A tie goes to the
+    earlier shot."""
+    keep = N.wanted(context)
+    n = len(_record_queries())
+    nights = N.per_night(db, "records", lambda ns: _collect_records(db, ns))
+    # The ranges are the nights from their start on: going back from the newest night, each range's
+    # bests are the running bests once every night from its start has been taken in.
+    bests: list[dict[str, tuple]] = [{} for _ in range(n)]
+    got: dict[str, list[dict[str, tuple]]] = {}
+    order = sorted(starts.items(), key=lambda kv: kv[1] or "", reverse=True)
 
-    def best(got: dict[tuple, list[dict]], player: str | None, key: str) -> dict | None:
-        rows = got.get((player, key))
-        return dict(rows[0]) if rows else None
+    def snapshot(key: str) -> None:
+        got[key] = [dict(b) for b in bests]
+
+    i = 0
+    for d in reversed(list(nights)):
+        while i < len(order) and order[i][1] is not None and d < order[i][1]:
+            snapshot(order[i][0])
+            i += 1
+        for ctx, parts in nights[d].items():
+            if not keep(ctx):
+                continue
+            for b, part in zip(bests, parts):
+                for player, (key, row) in part.items():
+                    key = tuple(key)
+                    if player not in b or key < b[player][0]:
+                        b[player] = (key, row)
+    for key, _ in order[i:]:
+        snapshot(key)
+    allbest = {k: [min(b.values(), key=lambda kr: kr[0]) if b else None for b in got[k]] for k in got}
+
+    def best(key: str, j: int, player: str | None) -> dict | None:
+        kr = allbest[key][j] if player is None else got[key][j].get(player)
+        return dict(kr[1]) if kr else None
 
     def pick(player: str | None, key: str) -> dict[str, Any]:
-        return {"longest_drive": best(drive, player, key),
-                "approaches": [{"from": lo, "to": hi, "best": best(got, player, key)} for lo, hi, got in approaches],
-                "longest_putt": best(putt, player, key)}
+        return {"longest_drive": best(key, 0, player),
+                "approaches": [{"from": lo, "to": hi, "best": best(key, j + 1, player)}
+                               for j, (lo, hi) in enumerate(APPROACH_BANDS)],
+                "longest_putt": best(key, n - 1, player)}
     return pick
 
 

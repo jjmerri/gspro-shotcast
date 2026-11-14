@@ -253,6 +253,36 @@ def test_a_round_resumed_after_midnight_is_in_both_its_nights_signatures(tmp_pat
     assert all(after[d] != before[d] for d in ("2023-11-14", "2023-11-15"))
 
 
+def test_records_are_each_nights_bests_merged_per_range_and_an_edit_works_out_only_its_night_again(tmp_path):
+    path = tmp_path / "season.db"
+    shots = _season(path)
+    with closing(sqlite3.connect(path)) as db, db:
+        for n, (sid,) in enumerate(db.execute("SELECT id FROM sessions ORDER BY id").fetchall()):
+            db.execute("UPDATE sessions SET date = ? WHERE id = ?", (f"2023-11-1{4 + n}", sid))
+        db.execute("UPDATE shots SET club = 'DR', lie_before = 'tee' WHERE is_putt = 0")
+        db.execute("UPDATE shots SET total_yards = 260 WHERE id = ?", (shots[6],))   # Bo's second drive
+    starts = {"all": None, "late": "2023-11-15", "none": "2024-01-01"}
+
+    def build():
+        with closing(stats_web.connect(path)) as db, stats_cache.opened(db, path) as c:
+            pick = stats_web.records_table(db, None, starts)
+            got = {(p, k): (pick(p, k)["longest_drive"] or {}).get("id") for p in (None, "Ann", "Bo") for k in starts}
+            return got, (c.hits, c.misses)
+
+    got, counts = build()
+    assert counts == (0, 2)
+    # a tie goes to the earlier drive; a range takes only its nights'
+    assert got == {(None, "all"): shots[6], (None, "late"): shots[6], (None, "none"): None,
+                   ("Ann", "all"): shots[0], ("Ann", "late"): shots[4], ("Ann", "none"): None,
+                   ("Bo", "all"): shots[6], ("Bo", "late"): shots[6], ("Bo", "none"): None}
+    assert build() == (got, (2, 0))
+    with closing(sqlite3.connect(path)) as db, db:   # Bo's long drive left out
+        db.execute("UPDATE shots SET left_out = 1 WHERE id = ?", (shots[6],))
+    got, counts = build()
+    assert counts == (1, 1)
+    assert got[(None, "all")] == shots[0] and got[(None, "late")] == shots[4] and got[("Bo", "late")] is None
+
+
 def test_the_pages_data_files_are_kept_per_year_and_an_edit_builds_only_its_year_again(tmp_path, monkeypatch):
     from commentator import stats_site
 
