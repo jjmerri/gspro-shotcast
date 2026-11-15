@@ -8,9 +8,9 @@ Shot tracking, season stats and an AI broadcast booth for **GSPro 3.1.x** simula
   data, where it finished, what it scored, plus every round's card and stats (fairways, greens,
   putts, scrambling). It all goes into one local SQLite file. No cloud services, accounts or API
   keys needed.
-- **Stats web page.** Strokes gained, club gapping, approach and putting by distance, scorecards
-  with round summaries and shareable score cards, hole replays with each shot's curve, shot
-  shapes, a handicap index, and season highlights, in a local page over that file. Optionally published online
+- **Stats web page.** Strokes gained, club gapping and dispersion, approach and putting by
+  distance, scorecards with round summaries and shareable score cards, hole replays with each
+  shot's flight (from the side and overhead, too), shot shapes, a handicap index, and season highlights, in a local page over that file. Optionally published online
   after every round, behind a password, so the whole league can check their numbers from a phone,
   with a **Live** tab streaming the sim's screen and sound while a round is on.
 - **The booth.** Two AI commentators call your round live through the speakers. They know the
@@ -49,7 +49,8 @@ a mulligan, and the hole wrap-up.*
 
 **Hole replays.** Click a hole on any scorecard to watch the group play it again: every shot
 drawn over GSPro's minimap of the hole, with the club and where it finished, and penalty
-areas marked.
+areas marked. On GSPro 3.59 and later each shot follows GSPro's own tracked flight and roll; tap
+one to watch it from the side and overhead (apex, carry, hang time, landing angle).
 
 <img src="docs/screenshots/replay.png" alt="Hole replay: three players' shots on Paynes Valley 18, drawn over the hole's minimap" width="360">
 
@@ -201,7 +202,8 @@ beyond that is supported on paper but not yet run live:
   monitor, but only the EYE XO2 has been used ([Launch monitors](docs/tracking.md#launch-monitors)).
 - **Other screen sizes.** At 1920×1080 (16:9) the setup screen and the tee HUD have been checked
   live; the shot data tiles, the other lies, the scorecard and the ON AIR badge have not.
-  Ultrawide and 4:3 screens are untested. Run `screen-check` first on any screen.
+  Ultrawide screens (21:9 and wider) are read, checked on 2560×1080 and 3440×1440 screenshots
+  but not live; 4:3 screens are untested. Run `screen-check` first on any screen.
 - **GSPro must stay visible.** The screen is read live, so GSPro has to be on screen and not
   covered. A GSPro window smaller than the screen is only tested on saved screenshots.
 - **English GSPro and yards.** The screen and log reads expect GSPro's interface in English, with
@@ -270,8 +272,10 @@ beyond that is supported on paper but not yet run live:
    minutes, or GSPro's open but nobody's hit a shot for 30 minutes (then a window counts down a
    minute first, with **Postpone** to wait another 30); always with no round on and the stream off
    air, never mid-round. Untick **Install updates
-   automatically** to only update from the menu. One that didn't take isn't tried by itself again. Updating copies the season database to `pre-update-*.db.gz` in the backup folder
-   (the last three are kept), shows the installer's progress, then Shotcast starts again, shows
+   automatically** to only update from the menu. One that didn't take isn't tried by itself again. An update that changes the season database's format first copies it to
+   `pre-update-*.db.gz` in the backup folder (the last three are kept; `shotcast restore` puts one
+   back for going back to the earlier version), and the booth doesn't start if that copy can't be
+   made. Updating shows the installer's progress, then Shotcast starts again, shows
    **What's new** since the version it replaced ([the changelog](commentator/changelog.md)) and
    republishes the stats page a minute later; the stats page shows its part once on Home. Your settings, season database and backups are in
    `%LOCALAPPDATA%\Shotcast`, which updating and uninstalling leave alone.

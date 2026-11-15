@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.137
+
+### Stats page
+- A player's page lists their rounds 20 at a time, with a button for more.
+
 ## 0.1.136
 
 ### Stats page
