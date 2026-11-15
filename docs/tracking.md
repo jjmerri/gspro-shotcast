@@ -85,6 +85,12 @@ springbok's connector keeps its log in the folder it's run from, so a connector 
 somewhere else (not its exe or a shortcut to it) needs `source.club_logs`. Other Garmin R10 connectors print to a console, not a file, and Foresight and aboutGolf send GSPro ball
 data only, so those shots have none. The booth log says `Club data: reading <monitor> shots from
 <file>` the first time a log gives a reading.
+Once GSPro logs how it took a shot (its `LM Type` line's `connectType`), only the logs that can
+have that monitor's shots are followed: `ConnectDebug.txt` for `FlightScope`, the third-party
+connectors' logs (rela, OpenSkyPlus, springbok's, and the look for a running springbok connector)
+for `OpenAPI`, none for Uneekor or Foresight. A connectType not seen before keeps every log
+followed, and `source.club_logs` files always are. It follows each shot's line, so switching
+monitors switches the logs.
 
 FlightScope's and rela's lines also have the whole launch with a carry, so on GSPro 3.59 they're
 the fast feed for full swings (see `gspro_log` above; the booth log says `<monitor> log shot:`).

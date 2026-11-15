@@ -350,20 +350,29 @@ def springbok_dirs() -> list[Path]:
     return list(dict.fromkeys(out))
 
 
-def log_paths(connector_log: str, extra: Iterable[str] = ()) -> list[tuple[Path, str]]:
-    """(folder, glob) for every log a club reading can come from on this PC."""
-    out: list[tuple[Path, str]] = []
+# GSPro's LM Type connectType for a shot each log's readings can belong to: GSPconnect's FlightScope
+# form, or a third-party connector on GSPro's Open API (rela, OpenSkyPlus, springbok's).
+GSPCONNECT_FLIGHTSCOPE, OPEN_API = "FlightScope", "OpenAPI"
+# The connectTypes seen in players' GSPro logs. Only these narrow what's followed.
+KNOWN_CONNECTIONS = {"flightscope", "openapi", "uneekor", "foresight", "caltool"}
+
+
+def log_paths(connector_log: str, extra: Iterable[str] = ()) -> list[tuple[Path, str, str | None]]:
+    """(folder, glob, the connectType its shots come to GSPro by; None: any) for every log a club
+    reading can come from on this PC."""
+    out: list[tuple[Path, str, str | None]] = []
     connector = Path(connector_log)
-    out.append((connector.parent, connector.name + "*"))   # GSPconnect rotates through ConnectDebug.txt.1..N
+    # GSPconnect rotates through ConnectDebug.txt.1..N
+    out.append((connector.parent, connector.name + "*", GSPCONNECT_FLIGHTSCOPE))
     for var in ("LOCALAPPDATA", "TEMP"):
         if folder := os.environ.get(var):
-            out.append((Path(folder) / "rela" if var == "LOCALAPPDATA" else Path(folder), "rela.log"))
+            out.append((Path(folder) / "rela" if var == "LOCALAPPDATA" else Path(folder), "rela.log", OPEN_API))
     for d in skytrak_dirs():
-        out.append((d / "BepInEx", "LogOutput.log"))
-        out.append((d / "BepInEx" / "plugins" / "OpenSkyPlus", "Log.txt"))
-    for p in extra:
+        out.append((d / "BepInEx", "LogOutput.log", OPEN_API))
+        out.append((d / "BepInEx" / "plugins" / "OpenSkyPlus", "Log.txt", OPEN_API))
+    for p in extra:   # the player's own: always followed
         p = Path(os.path.expandvars(p))
-        out.append((p.parent, p.name))
+        out.append((p.parent, p.name, None))
     return out
 
 
@@ -371,8 +380,12 @@ _ROLLOVER = re.compile(r".*\.(txt|log)(\.\d+)?$", re.I)
 
 
 class ClubFeed:
-    def __init__(self, paths: list[tuple[Path, str]]) -> None:
-        self.paths = paths
+    def __init__(self, paths: list[tuple[Path, str] | tuple[Path, str, str | None]]) -> None:
+        self.paths: list[tuple[Path, str, str | None]] = [(p[0], p[1], p[2] if len(p) > 2 else None) for p in paths]
+        # How GSPro is taking shots (its LM Type's connectType), when known: only the logs that can
+        # have those shots are followed, so a PC with one monitor doesn't keep reading or looking for
+        # another's. Unknown (no shot logged it yet): every log.
+        self.connection: Callable[[], str | None] = lambda: None
         self.tails: dict[Path, _Tail] = {}
         self.readings: list[ClubReading] = []
         self.used: list[ClubReading] = []     # given to a shot: a later copy of the same one isn't another shot
@@ -391,7 +404,7 @@ class ClubFeed:
         folder found stays followed: the log outlives the connector. What its files already had
         is skipped, unless one was written just now (the connector started its log moments ago)."""
         now = time.monotonic()
-        if self._looked_at is not None and now - self._looked_at < DISCOVER_SECONDS:
+        if not self._wanted(OPEN_API) or (self._looked_at is not None and now - self._looked_at < DISCOVER_SECONDS):
             return
         self._looked_at = now
         try:
@@ -400,9 +413,9 @@ class ClubFeed:
             log.debug("Club feed: looking for a springbok connector failed", exc_info=True)
             return
         for d in dirs:
-            if (d, SPRINGBOK_LOGS) in self.paths:
+            if (d, SPRINGBOK_LOGS, OPEN_API) in self.paths:
                 continue
-            self.paths.append((d, SPRINGBOK_LOGS))
+            self.paths.append((d, SPRINGBOK_LOGS, OPEN_API))
             log.info("Club data: following the springbok connector's logs in %s", d)
             try:
                 old = list(d.glob(SPRINGBOK_LOGS))
@@ -415,10 +428,24 @@ class ClubFeed:
                     continue
                 self.tails.setdefault(f, _Tail(f, history=fresh and not first))
 
+    def _wanted(self, kind: str | None) -> bool:
+        try:
+            now = self.connection()
+        except Exception:
+            now = None
+        if kind is None or not now or now.lower() == kind.lower():
+            return True
+        return now.lower() not in KNOWN_CONNECTIONS   # one not seen yet might be either: keep looking
+
     def _files(self, first: bool = False) -> list[Path]:
+        """The logs to read now. Every one at the first read, to skip what they already had; then
+        only those of GSPro's connection. One not followed for a while keeps its place, so when GSPro
+        switches to its monitor what it logged meanwhile (that shot's line) is still read."""
         self._discover(first)
         files = []
-        for folder, pattern in self.paths:
+        for folder, pattern, kind in self.paths:
+            if not first and not self._wanted(kind):
+                continue
             try:
                 files += [p for p in folder.glob(pattern)
                       if ("*" not in pattern or _ROLLOVER.match(p.name)) and p.is_file()]

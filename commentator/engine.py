@@ -734,6 +734,7 @@ class Engine:
             from .sources.club_feeds import ClubFeed
 
             self._club_feed = ClubFeed.from_config(cfg.source)
+            self._club_feed.connection = lambda: self.gspro.lm_connection
             # GSPro 3.59's log shots can air straight from a monitor's line (sources/gspro_log_shots.py).
             if hasattr(log_source := getattr(source, "gspro_log", source), "club_feed"):
                 log_source.club_feed = self._club_feed

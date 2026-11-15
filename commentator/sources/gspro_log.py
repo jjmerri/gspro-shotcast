@@ -322,6 +322,8 @@ def parse_events(text: str) -> list[LogEvent]:
                 lm = json.loads(m.group(1))
                 if isinstance(lm, dict) and (name := str(lm.get("LMType") or lm.get("connectType") or "").strip()):
                     out.append(LogEvent("physics", physics={"launch_monitor": name}))
+                if isinstance(lm, dict) and (how := str(lm.get("connectType") or "").strip()):
+                    out.append(LogEvent("lm_connection", display=how))
             elif m := _ALTITUDE.match(line):
                 out.append(LogEvent("altitude", altitude_ft=float(m.group(1))))
             elif _reworded(line):
@@ -392,6 +394,9 @@ class GsproState:
     mode: str | None = None
     round_ends: int = 0               # "End Round Button Click"s seen (a finished or abandoned round)
     sgt: bool = False                 # this round is being played on the Simulator Golf Tour (an SGT Sync logged)
+    # How GSPro took the last shot from its launch monitor (its LM Type's connectType: Uneekor,
+    # FlightScope, Foresight, OpenAPI for a third-party connector, ...); None until a shot logs it.
+    lm_connection: str | None = None
     last_sgt: bool = False            # the last ended round's, kept past its reset like last_hole_scores
     round_completes: int = 0          # "Round Is Complete"s seen (every hole in the round holed out)
     # "AllPlayersHoledOut"s seen: the group finished a hole, and GSPro is about to show the scorecard.
@@ -535,6 +540,8 @@ class GsproState:
             self.unparsed = (self.unparsed + [ev.display])[-5:]
         elif ev.kind == "altitude":
             self.altitude_ft = ev.altitude_ft
+        elif ev.kind == "lm_connection":
+            self.lm_connection = ev.display
         elif ev.kind == "physics":
             if self.fires in self._fire_info:   # logged just after the shot it was played with
                 held = self._fire_info[self.fires].setdefault("physics", {})

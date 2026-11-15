@@ -227,3 +227,26 @@ def test_springbok_dirs_is_the_logs_folder_beside_the_running_exe(monkeypatch):
     monkeypatch.setattr(club_feeds, "_running_exes", lambda: [
         r"C:\Windows\explorer.exe", r"D:\Golf\MLM2PRO-GSPro-Connector_V1.04.51\MLM2Pro-GSPro-Connector.exe"])
     assert club_feeds.springbok_dirs() == [Path(r"D:\Golf\MLM2PRO-GSPro-Connector_V1.04.51", "appdata", "logs")]
+
+
+def test_only_the_logs_of_gspros_connection_are_followed_once_its_known(tmp_path, monkeypatch):
+    connect = tmp_path / "ConnectDebug.txt"
+    rela = tmp_path / "rela.log"
+    connect.write_text("")
+    rela.write_text(RELA_TEXT + "\n")                        # history: skipped at the first read
+    looked: list = []
+    monkeypatch.setattr(club_feeds, "springbok_dirs", lambda: looked.append(1) or [])
+    feed = ClubFeed([(tmp_path, "ConnectDebug.txt*", "FlightScope"), (tmp_path, "rela.log", "OpenAPI")])
+    gspro = ["Uneekor"]
+    feed.connection = lambda: gspro[0]
+    assert feed.poll() == [] and looked == []                 # a Uneekor: no connector to look for
+    with open(rela, "a") as fh:
+        fh.write(RELA_TEXT.replace("ball:speed=148.1", "ball:speed=120.0") + "\n")
+    with open(connect, "a") as fh:
+        fh.write(FS + "\n")
+    feed._looked_at = None
+    assert feed.poll() == [] and looked == []                 # neither is read
+    gspro[0] = "OpenAPI"                                      # switched to rela: the shot it logged is read
+    assert [(r.source, r.ball_mph) for r in feed.poll()] == [("rela", 120.0)] and looked == [1]
+    gspro[0] = "Garmin"                                       # a connection not seen before: every log
+    assert [r.source for r in feed.poll()] == ["FlightScope"]

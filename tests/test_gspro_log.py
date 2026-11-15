@@ -629,6 +629,7 @@ def test_a_4_0_out_of_bounds_is_called_on_its_own_shot():
     assert info["penalty_strokes"] == 1 and s.penalties(0) == 1
     assert info["physics"] == {"green_firmness": 0, "fairway_firmness": 0, "course_type": 1,
                                "launch_monitor": "UNEEKOR EYEXO2"}
+    assert s.lm_connection == "Uneekor"
     me = SimpleNamespace(gspro=s)
     drive = Shot(ball_speed=142.4, vla=13.7, carry=222.3)
     facts, tag = asyncio.run(Engine._penalty_shot_facts(me, s.fires, drive, [], wait=0))
