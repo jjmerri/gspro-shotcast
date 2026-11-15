@@ -1101,6 +1101,27 @@ async def test_cloud_voice_without_prevoice_keeps_branch_text_and_voices_it_as_i
     assert said[-1][0] == "prepared"
 
 
+def test_the_booth_checks_gspro_views_size_only_while_it_is_up_and_read(tmp_path):
+    from types import SimpleNamespace
+
+    size = [(3840, 2160)]
+    cfg = Config(log_dir=str(tmp_path))
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None,
+                    screen=SimpleNamespace(view_size=lambda: size[0]))
+    engine._health_checks("startup")
+    engine.health.clear_verified(screen=engine._view_size())
+    size[0] = (3450, 2160)
+    engine._health_checks("round start")
+    assert "3450x2160" in engine.health.get("changed.screen").message
+    size[0] = None                                       # GSPro closed: nothing checked
+    engine._health_checks("startup")
+    assert engine.health.get("changed.screen")
+    cfg.screen.ocr = False                               # nothing's read off the screen
+    engine._health_checks("startup")
+    assert engine.health.get("changed.screen") is None
+
+
 def test_usage_prices_openai_cached_tokens_and_summarizes_voice_cost_and_latency(tmp_path):
     from commentator.usage import UsageLog, estimate_cost, summarize, tts_cost
 

@@ -190,12 +190,14 @@ def test_a_windowed_gspro_is_read_from_its_game_view_not_the_monitor(monkeypatch
     box = s.grab(s.region("player_box"))
     assert box.size == (w, h) and box.getcolors() == [(w * h, (200, 10, 10))]
     assert s.monitor_size() == (1600, 1000) and s.monitor_rect() == (0, 0, 3840, 2160)
+    assert s.view_size() == (1600, 1000)
     window["minimized"] = True       # kept while minimized
     clock[0] += 10
     assert s.monitor_size() == (1600, 1000)
     window = None                    # GSPro closed: the whole monitor
     clock[0] += 10
     assert s.monitor_size() == (3840, 2160)
+    assert s.view_size() is None     # ...which isn't a size a round is read at
     window = {"title": "GSPro", "rect": (0, 0, 800, 600), "client": (0, 0, 800, 600), "minimized": False,
               "game": False}         # a browser tab titled GSPro isn't its view
     clock[0] += 10

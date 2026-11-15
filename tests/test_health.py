@@ -5,7 +5,7 @@ import pytest
 from commentator import fixtures
 from commentator.config import ScreenConfig, Region
 from commentator.health import (
-    Health, RoundCounters, check_changed, check_files, evaluate_round, report_line,
+    Health, RoundCounters, check_changed, check_files, check_screen, evaluate_round, report_line,
 )
 from commentator.sources.gspro_log import GsproState, parse_events
 
@@ -45,6 +45,58 @@ def test_a_changed_fact_waits_for_a_clean_round(tmp_path):
     assert issue.verify and "3.1.6.20 to 3.2.0" in issue.message
     h.clear_verified()
     assert not h.issues() and Health(tmp_path / "health.json").fact("gspro_version") == "3.2.0"
+
+
+def test_a_screen_size_is_flagged_only_until_a_clean_round_reads_it(tmp_path):
+    h = Health(tmp_path / "health.json")
+    check_screen(h, None)                                  # GSPro's view isn't up: nothing to check
+    check_screen(h, "3840x2160")
+    assert not h.issues()
+    h.clear_verified(screen="3840x2160")
+    check_screen(h, "3450x2160")                           # the projector came on
+    assert "3450x2160" in h.get("changed.screen").message
+    h.clear_verified(screen="3840x2126")                   # changed mid-round: proves no size
+    check_screen(h, "3450x2160")
+    assert h.get("changed.screen")
+    h.clear_verified(screen="3450x2160")
+    for size in ("3840x2160", "3450x2160", "3840x2160"):   # projector off, on, off: both are proven
+        check_screen(h, size)
+        assert not h.issues()
+    assert Health(tmp_path / "health.json").fact("screens_proven") == ["3840x2160", "3450x2160"]
+
+
+def test_the_last_screen_size_from_before_sizes_were_remembered_counts_as_read(tmp_path):
+    (tmp_path / "health.json").write_text('{"facts": {"screen": "1920x1080"}, "issues": []}')
+    h = Health(tmp_path / "health.json")
+    check_screen(h, "2560x1440")
+    assert "rounds at 1920x1080" in h.get("changed.screen").message
+    check_screen(h, "1920x1080")
+    assert not h.issues()
+
+
+def test_an_unproven_screen_size_is_never_taken_as_read(tmp_path):
+    # From before sizes were remembered, with the last size's change still waiting: not proven.
+    (tmp_path / "health.json").write_text(
+        '{"facts": {"screen": "3450x2160"}, "issues": [{"key": "changed.screen", "level": "warn", '
+        '"message": "the screen size changed", "since": "", "verify": true}]}')
+    h = Health(tmp_path / "health.json")
+    check_screen(h, "3450x2160")
+    h.clear_verified(screen="3840x2160")               # the round ended at another size
+    check_screen(h, "3450x2160")
+    assert h.get("changed.screen") and h.fact("screens_proven") == []
+    legacy = tmp_path / "legacy.json"                  # OCR turned off, then on again
+    legacy.write_text((tmp_path / "health.json").read_text().replace('"screens_proven": []', '"x": 0'))
+    off = Health(legacy)
+    off.note_screen(None)
+    off.clear("changed.screen")
+    check_screen(off, "3450x2160")
+    assert off.fact("screens_proven") == [] and off.get("changed.screen")
+    fresh = Health()
+    check_screen(fresh, "1920x1080")
+    check_screen(fresh, "1920x1080")                   # a first size isn't flagged, nor proven by startups
+    assert not fresh.issues() and fresh.fact("screens_proven") == []
+    check_screen(fresh, "2560x1440")
+    assert "no size is proven" in fresh.get("changed.screen").message
 
 
 def test_missing_files_fail_and_clear(tmp_path):

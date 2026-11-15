@@ -29,7 +29,7 @@ from .facts import (ctp_feet, ctp_text as _ctp_text,
     wrong_conceded_score, wrong_green_yards, wrong_holed_putt, wrong_putt_score, green_chip_fact, names_club,
 )
 from .flight_pick import FlightPlan, Hazard, aim_spot, aim_turn, aimed_short, pick_line, spot_words, pick_reaction, project
-from .health import Health, RoundCounters, check_changed, check_files, evaluate_round, report_line
+from .health import Health, RoundCounters, check_changed, check_files, check_screen, evaluate_round, report_line
 from .grounding import (SCENERY, bare_acknowledgement, check_line, cites_call, makes_call, meta_talk, ngrams, note_keywords, repeats, uses_note,
                         wrong_round_score)
 from .hud import NAME_DARK, Hud, Scorecard, deck_club, describe, hole_key, name_sig_changed
@@ -11214,15 +11214,26 @@ class Engine:
         check_files(h, files)
         if self._log_truth:
             check_changed(h, "gspro_version", self.gspro.version, "GSPro's version")
-        if self.screen:
-            try:
-                w, ht = self.screen.monitor_size()
-                check_changed(h, "screen", f"{w}x{ht}", "the screen size")
-            except Exception:
-                log.exception("Couldn't read the screen size")
+        if self.screen and self.cfg.screen.ocr:
+            check_screen(h, self._view_size())
+        else:
+            h.note_screen(None)   # settle the proven sizes first, so clearing this doesn't count as proof
+            h.clear("changed.screen", "the screen isn't read")
         issues = h.issues()
         log.info("Health check (%s): GSPro %s; %s", when, self.gspro.version or "version unknown",
                  "; ".join(f"{i.level} {i.message}" for i in issues) if issues else "all clear")
+
+    def _view_size(self) -> str | None:
+        """GSPro's view size as `WxH`, or None without screen reading (no screen, or OCR off: nothing's
+        read off it, so its size can't break or prove anything) or while GSPro's view isn't up."""
+        if not self.screen or not self.cfg.screen.ocr:
+            return None
+        try:
+            size = self.screen.view_size()
+        except Exception:
+            log.exception("Couldn't read the screen size")
+            return None
+        return f"{size[0]}x{size[1]}" if size else None
 
     def _health_shot(self, before: Hud, after: Hud, is_putt: bool, ocr: bool) -> None:
         """Count this shot's reads, and flag at once (not at round end) a data tile that never reads or
@@ -11320,7 +11331,7 @@ class Engine:
         if report["checked"]:
             h.clear_prefix("round.", keep={k for k, _, _ in found}, why="passed this round")
             if not found:
-                h.clear_verified()
+                h.clear_verified(screen=self._view_size())
         h.record_round(report)
         log.info("Health checkup, round %s: %s", r.id, report_line(report))
 

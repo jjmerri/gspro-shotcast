@@ -102,7 +102,9 @@ to an issue; they show player names, so look them over first.
 
 The booth reads GSPro's log lines and its HUD, so a GSPro update, a new monitor
 or a re-picked data tile can quietly break it. Checks run at startup and at every round start: the
-files it follows exist, and GSPro's version and the screen size match what it last ran against.
+files it follows exist, GSPro's version matches what it last ran against, and GSPro's view is a size
+a clean round has been read at (a projector or a windowed GSPro can switch between a few; each is
+flagged only until a round at it passes, and nothing is checked while GSPro isn't up).
 After every round (quit rounds included) it checks the round's reads:
 - GSPro's log logged the shots, with every line kind the booth uses and no reworded lines.
 - The HUD's shot number, distance to the pin and lie were read at most setups.

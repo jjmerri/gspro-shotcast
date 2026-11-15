@@ -27,6 +27,9 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 LEVELS = ("warn", "fail")
+PROVEN_SCREENS = "screens_proven"   # the GSPro view sizes a clean round was read at
+MAX_PROVEN_SCREENS = 20
+SCREEN_FLAGGED = "screen_flagged"   # a view size was ever flagged: from then on every unproven one is
 
 
 @dataclass
@@ -118,11 +121,42 @@ class Health:
         for key in [k for k in self.keys() if k.startswith(prefix) and k not in keep]:
             self.clear(key, why)
 
-    def clear_verified(self) -> None:
-        """A round's checks all passed: whatever was waiting to be proven by one is proven."""
+    def clear_verified(self, screen: str | None = None) -> None:
+        """A round's checks all passed: whatever was waiting to be proven by one is proven. `screen` is
+        GSPro's view size at the round's end: it's proven too when it's the one checked at its start. A
+        size that changed mid-round proves neither, and its warning stays up."""
+        with self._lock:
+            proved = bool(screen) and screen == self._facts.get("screen")
+            if proved:
+                proven = self._proven_screens()
+                if screen not in proven:
+                    self._facts[PROVEN_SCREENS] = (proven + [screen])[-MAX_PROVEN_SCREENS:]
+                    self._save()
         for issue in self.issues():
-            if issue.verify:
+            if issue.verify and (proved or issue.key != "changed.screen"):
                 self.clear(issue.key, "a clean round since")
+
+    def _proven_screens(self) -> list[str]:
+        """The proven view sizes (the caller holds the lock). Once, from before sizes were remembered:
+        the last size, with no change waiting on it, was read clean."""
+        proven = self._facts.get(PROVEN_SCREENS)
+        if proven is None:
+            old, pending = self._facts.get("screen"), "changed.screen" in self._issues
+            proven = self._facts[PROVEN_SCREENS] = [old] if old and not pending else []
+            if pending:
+                self._facts[SCREEN_FLAGGED] = True
+        return list(proven)
+
+    def note_screen(self, size: str | None) -> tuple[str | None, list[str], bool]:
+        """Record GSPro's view size (None: just settle the proven sizes), returning the size before, the
+        proven sizes and whether a size was ever flagged, in one step so concurrent checks can't take
+        each other's size as proven."""
+        with self._lock:
+            proven, old = self._proven_screens(), self._facts.get("screen")
+            if size:
+                self._facts["screen"] = size
+            self._save()
+            return old, proven, bool(self._facts.get(SCREEN_FLAGGED))
 
     def keys(self) -> list[str]:
         with self._lock:
@@ -210,6 +244,24 @@ def check_changed(health: Health, fact: str, value: object, what: str) -> None:
         health.raise_issue(f"changed.{fact}", "warn",
                            f"{what} changed from {old} to {value}: the next round's checks will confirm "
                            f"the booth still reads it", verify=True)
+
+
+def check_screen(health: Health, size: str | None) -> None:
+    """GSPro's view size (`WxH`): a projector or a windowed GSPro can switch between a few sizes, so
+    only one no clean round has been read at is flagged, until a clean round proves it. None (GSPro's
+    view isn't up, so there's nothing it'd be read at) checks nothing."""
+    if not size:
+        return
+    old, proven, flagged = health.note_screen(size)
+    if size in proven:
+        health.clear("changed.screen", "read clean at this size before")
+    elif proven or flagged or (old is not None and old != size):
+        # Only a booth's very first size goes unflagged; once any was, every unproven one is.
+        reads = f"it has read rounds at {', '.join(proven)}" if proven else "no size is proven by a round yet"
+        health.set_fact(SCREEN_FLAGGED, True)
+        health.raise_issue("changed.screen", "warn",
+                           f"GSPro's view is {size}, a size the booth hasn't read a round at ({reads}): the "
+                           f"next round's checks will confirm it reads it", verify=True)
 
 
 @dataclass

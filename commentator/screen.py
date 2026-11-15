@@ -623,6 +623,13 @@ class Screen:
             mon = self._area(sct)
             return mon["width"], mon["height"]
 
+    def view_size(self) -> tuple[int, int] | None:
+        """The size GSPro is read at, or None while its game view isn't up (when the booth follows its
+        window): the monitor's size then isn't what a round would be read at."""
+        if self.cfg.follow_window and self.gspro_view() is None:
+            return None
+        return self.monitor_size()
+
     def grab(self, region: Region | None = None) -> Image.Image:
         # Monitor mode grabs just the small region box; grabbing the whole 4K screen per read (then
         # cropping) moves far more pixels and stutters the game.
