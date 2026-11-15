@@ -537,6 +537,12 @@ class SourceConfig(BaseModel):
     # gspro_sniffer: capture Open Connect traffic on port 921 (third-party connectors; needs Npcap).
     type: Literal["connector_log", "gspro_log", "gspro_sniffer", "replay"] = "connector_log"
     connector_log: str = r"C:\GSProV1\Core\GSPC\ConnectDebug.txt"
+    # Club data for shots that come without it (any monitor but Uneekor), read from the logs some
+    # monitors' own software keeps: FlightScope through GSPconnect, rela, OpenSkyPlus. Matched to
+    # GSPro's shot by ball speed. club_logs: more files to follow, if one is somewhere unusual.
+    # See sources/club_feeds.py.
+    club_feeds: bool = True
+    club_logs: list[str] = Field(default_factory=list)
     # GSPro's own Unity log, tailed alongside the shot feed for game truth OCR only guesses at:
     # strokes taken (penalties included), lie, distance to pin, whose turn, and holed shots. On by
     # default: stats, round ends and range detection depend on it. Off falls back to OCR guesses.

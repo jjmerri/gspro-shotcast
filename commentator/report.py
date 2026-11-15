@@ -378,7 +378,22 @@ LM_FILES: list[tuple[str, str, str, int, int]] = [
     ("Uneekor VIEW log", r"%USERPROFILE%\AppData\LocalLow\UNEEKOR\VIEW", "Player*.log", 2, 1_000_000),
     ("Foresight SDK logs", r"%PROGRAMDATA%\Foresight", "FSS_SDK_*LOG.txt", 2, 1_000_000),
     ("Foresight FSX last shot", r"%ProgramFiles(x86)%\Foresight Sports Experience\System", "LastShot.CSV", 1, 200_000),
+    ("rela log", r"%LOCALAPPDATA%\rela", "rela*.log", 2, 2_000_000),
+    ("rela log (temp)", r"%TEMP%", "rela*.log", 1, 2_000_000),
 ]
+
+
+def _skytrak_files() -> list[tuple[str, str, str, int, int]]:
+    """LM_FILES entries for the SkyTrak app's BepInEx log (OpenSkyPlus 2) and OpenSkyPlus 1's own log,
+    wherever the app is installed."""
+    from .sources.club_feeds import skytrak_dirs
+
+    out = []
+    for d in skytrak_dirs():
+        if (d / "BepInEx").is_dir():
+            out += [("SkyTrak BepInEx log", str(d / "BepInEx"), "LogOutput*.log", 2, 2_000_000),
+                    ("OpenSkyPlus 1 log", str(d / "BepInEx" / "plugins" / "OpenSkyPlus"), "Log.txt", 1, 2_000_000)]
+    return out
 CONNECTOR_LOGS = 4          # rotated ConnectDebug files kept, newest first
 GSPRO_DB_ROWS = 20          # newest rows of each GSPro.db shot table
 # Where launch monitor software installs, and the vendor names its folders go by: the report lists
@@ -583,7 +598,7 @@ def _build(cfg: Config, config_path: Path) -> Path:
                                                        private=True, blobs=False))
 
         def vendor_files() -> None:
-            for what, where, pattern, n, cap in LM_FILES:
+            for what, where, pattern, n, cap in LM_FILES + _skytrak_files():
                 base = Path(os.path.expandvars(where))
                 found = _newest(base, pattern, n) if base.is_dir() else []
                 summary.append(f"{what}: {len(found)} file(s) from {base}" if found else f"{what}: none")

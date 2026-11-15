@@ -115,6 +115,8 @@ source:
   connector_log: 'C:\GSProV1\Core\GSPC\ConnectDebug.txt'
   gspro_log_truth: true   # tail GSPro's own log for strokes, penalties, holed shots, round ends
   # type: gspro_log       # any launch monitor: shots from GSPro's own log (ball data, no club data)
+  # club_feeds: true      # club data from FlightScope (GSPconnect), rela and OpenSkyPlus logs
+  # club_logs: []         # more of those logs to follow, if one is somewhere unusual
   # type: gspro_sniffer   # third-party Open Connect connectors instead (needs Npcap); or: replay
   # port: 921
   gspro_courses_dirs:                  # course libraries for par, stroke index and yardages

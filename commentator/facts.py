@@ -89,8 +89,9 @@ def shot_facts(shot: Shot, chip: bool = False) -> list[str]:
 #   VerticalFaceImpact   + = high, - = low    (mm; sign not yet confirmed, revisit if it reads wrong)
 def club_delivery_facts(shot: Shot) -> list[str]:
     """Club-delivery colour from the launch monitor's own club data: angle of attack, swing path,
-    face-to-path shape, smash factor and strike location. Only players with the EYE XO2 club markers
-    get this (club_measured); silent for everyone else. Each reading is sanity-bounded so a bad frame
+    face-to-path shape, smash factor and strike location. Only shots with club data get this
+    (club_measured: the EYE XO2 with club markers, or another monitor's log, sources/club_feeds.py);
+    silent for everyone else. Each reading is sanity-bounded so a bad frame
     never airs, and only clear deviations are stated so routine deliveries don't add noise."""
     if shot.is_putt or not shot.club_measured:
         return []

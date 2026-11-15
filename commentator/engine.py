@@ -729,6 +729,11 @@ class Engine:
         self.source = source
         if hasattr(source, "on_impact"):
             source.on_impact = self._capture_impact
+        self._club_feed = None
+        if source is not None and cfg.source.club_feeds and cfg.source.type != "replay":
+            from .sources.club_feeds import ClubFeed
+
+            self._club_feed = ClubFeed.from_config(cfg.source)
         self.live_llm = live_llm
         self.segment_llm = segment_llm
         self.flight_llm = flight_llm or live_llm
@@ -1162,6 +1167,8 @@ class Engine:
         tasks = [asyncio.create_task(self.speech.run(), name="speech")]
         if self.source is not None:
             tasks.append(asyncio.create_task(self._pump_source(), name="source"))
+        if self._club_feed is not None:
+            tasks.append(asyncio.create_task(self._club_feed.run(), name="club-feed"))
         if self._log_truth:
             self._follower = GsproLogFollower(self.cfg.source.gspro_log, self.gspro)
             tasks.append(asyncio.create_task(self._follower.run(), name="gspro-log"))
@@ -1241,6 +1248,15 @@ class Engine:
             async for event in self.source.events():
                 if isinstance(event, ShotEvent):
                     event.received_at, event.received_fires = time.monotonic(), self.gspro.fires
+                    if self._club_feed is not None and not event.shot.club_measured:
+                        def impact(event=event) -> None:
+                            # Waiting on the monitor's log: take the impact state now, as for a held shot.
+                            if event.impact_state is None:
+                                self._capture_impact(event)
+                        try:
+                            await self._club_feed.fill(event.shot, impact)
+                        except Exception:
+                            log.exception("Club feed: couldn't add club data to a shot")
                     self._keep_buffer_frames(event, event.received_at)
                 await self._events.put(event)
         except Exception:

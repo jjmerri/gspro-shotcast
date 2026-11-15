@@ -189,6 +189,9 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
   ball stops. The source asks the booth for its impact snapshot (`on_impact`) half a second after
   the fire, and the engine skips mid-flight calls for a shot that arrives after the ball is down.
 - `gspro_sniffer.py` sniffs GSPro Open Connect loopback (scapy, needs Npcap + admin).
+- `club_feeds.py` club data for shots that come without it: follows FlightScope's lines in
+  `ConnectDebug.txt`, rela's log and OpenSkyPlus's (BepInEx) logs, and the engine's `_pump_source`
+  gives a shot the reading with its ball speed.
 - `gspro_log.py` tails GSPro's `output_log.txt` into a live `GsproState` game-truth model,
   including each fire's ball position and minimap aim, and the hole list of a completed round.
   GSPro 3.59 (public beta) writes `Player.log` beside it instead; `live_log` picks whichever was

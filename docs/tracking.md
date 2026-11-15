@@ -35,8 +35,8 @@ monitor changes is how much of the swing gets recorded:
 | Recorded | With a launch monitor feed (`connector_log`, `gspro_sniffer`) | From GSPro's log only (`gspro_log`) |
 |---|---|---|
 | Ball speed, launch angle, start direction, spin, spin axis, carry | Yes | Yes |
-| Club speed | If the monitor measures it | No |
-| Club path, face, attack angle, strike location (kept in the shot's `raw` data; the booth talks about them) | If the monitor measures them (EYE XO2: with club markers) | No |
+| Club speed | If the monitor measures it | From the monitor's own log for FlightScope, rela and OpenSkyPlus (below) |
+| Club path, face, attack angle, strike location (kept in the shot's `raw` data; the booth talks about them) | If the monitor measures them (EYE XO2: with club markers) | FlightScope's, from its log (below) |
 | Club | From the HUD either way | From the HUD |
 | Player, hole, lie before and after, distance to the pin and where it finished, putts, strokes, penalties, scores, fairways, greens, scrambling | From GSPro's log and screen, the same for every monitor | Same |
 
@@ -65,6 +65,21 @@ The shot feeds:
   connectors. Gets whatever club data the connector sends. Needs Npcap with loopback support and
   an Administrator terminal.
 - **`replay`**: an offline `.jsonl` of shots, for testing.
+
+Club data for other monitors: a shot that arrives without club data (any monitor but Uneekor) is
+matched by ball speed to a reading from the monitor's own software log, followed alongside
+whichever feed is used (`source.club_feeds`, on by default; `source.club_logs` adds other files).
+Built from players' logs, not tested on the hardware:
+
+| Monitor software | Log it reads | Club data taken |
+|---|---|---|
+| FlightScope (Mevo, Mevo+, X3) through GSPconnect | `ConnectDebug.txt` (`source.connector_log`) | Club speed, attack angle, and path, face and dynamic loft when the radar measured them (Pro Package) |
+| rela (SkyTrak, SkyTrak+ and others) | `%LOCALAPPDATA%\rela\rela.log`, or `%TEMP%\rela.log` | What rela marks measured: club speed on a SkyTrak (rela models the rest from the ball, so it's left out) |
+| OpenSkyPlus (SkyTrak) | `<SkyTrak>\BepInEx\LogOutput.log` (version 2), `<SkyTrak>\BepInEx\plugins\OpenSkyPlus\Log.txt` (version 1) | Club speed. The SkyTrak folder is `C:\SkyTrak` or wherever SkyTrak's own log says it's installed |
+
+Garmin R10 connectors print to a console, not a file, and Foresight and aboutGolf send GSPro ball
+data only, so those shots have none. The booth log says `Club data: reading <monitor> shots from
+<file>` the first time a log gives a reading.
 
 To check a feed, run `python -m commentator run --no-commentary`, hit a shot, and look for
 `Connector shot:` or `GSPro log shot:` in `logs/booth-<date>.log`. Missing club data is stored

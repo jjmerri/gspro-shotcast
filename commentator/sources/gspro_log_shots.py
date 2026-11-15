@@ -16,9 +16,10 @@ ball stops (sources/gspro_files.py), 3-13 s after impact. The booth's impact sna
 while the ball is in the air (on_impact, half a second after the fire), so the shot airs late but is
 read as it was struck.
 
-There is no club data here (club speed, path, face, attack angle, strike location): that only comes
-from a launch monitor feed (connector_log or gspro_sniffer). Everything else the booth records
-comes from this log and the screen either way.
+There is no club data here (club speed, path, face, attack angle, strike location): that comes from
+a launch monitor feed (connector_log or gspro_sniffer), or for some monitors from their own software's
+log (sources/club_feeds.py). Everything else the booth records comes from this log and the screen
+either way.
 """
 
 import asyncio
