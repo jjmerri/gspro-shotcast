@@ -402,7 +402,7 @@ def _round_facts(db: sqlite3.Connection) -> dict[str, Any]:
     left: set[tuple] = set()
     mulligans: dict[int, Counter] = {}
     hole_putts: Counter = Counter()
-    for night in N.per_night(db, "round_facts", lambda ns: _collect_round_facts(db, ns)).values():
+    for night in N.per_night(db, "round_facts", lambda ns: _collect_round_facts(db, ns), memo=False).values():
         for rnd, names in night["who"]:
             who.setdefault(rnd, set()).update(names)
         for rnd, player, hole, yards, n in night["lengths"]:
@@ -681,44 +681,50 @@ def _new_player() -> dict[str, Any]:
 
 
 def _players_merged(db: sqlite3.Connection, context: str | None) -> dict[str, dict[str, Any]]:
-    """Each player's counts over every night in `context`."""
-    def run() -> dict[str, dict[str, Any]]:
-        keep = N.wanted(context)
-        out: dict[str, dict[str, Any]] = {}
-        for night in N.per_night(db, "players", lambda ns: _collect_players(db, ns)).values():
-            for ctx, people in night.items():
-                if not keep(ctx):
-                    continue
-                for name, part in people.items():
-                    m = out.setdefault(name, _new_player())
-                    m["listed"] = m["listed"] or part["listed"]
-                    for k in (*_RATES, "outcomes", "three", "three_any"):
-                        N.add(m[k], part[k])
-                    for k, v in part["by_par"].items():
-                        N.add(m["by_par"][k], v)
-                    m["rounds"] += part["rounds"]
-                    n, total, best = part["drive"]
-                    m["drive"][0] += n
-                    N.exact_merge(m["drive"][1], total)
-                    if best is not None and (m["drive"][2] is None or best > m["drive"][2]):
-                        m["drive"][2] = best
-                    m["shots"] += part["shots"]
-                    for club, (cn, fin, low, pin) in part["clubs"].items():
-                        c = m["clubs"].setdefault(club, [0, [], None, []])
-                        c[0] += cn
-                        N.exact_merge(c[1], fin)
-                        c[2] = low if c[2] is None or low < c[2] else c[2]
-                        N.exact_merge(c[3], pin)
-                    for into, got in ((m["putts_by"], part["putts_by"]), (m["three_by"], part["three_by"]),
-                                      (m["three_any_by"], part["three_any_by"])):
-                        for a, b in zip(into, got):
-                            N.add(a, b)
-        for m in out.values():
-            m["rounds"].sort(key=lambda r: (r[0], r[1]))
-            if context not in N.CONTEXTS:
-                m["three"], m["three_by"] = m["three_any"], m["three_any_by"]
-        return out
-    return reuse(db, ("players_merged", context), run)
+    """Each player's counts over every night in `context`. Every context's at once, from one read of
+    the nights' partials, which aren't kept after."""
+    def run() -> dict[str | None, dict[str, dict[str, Any]]]:
+        nights = N.per_night(db, "players", lambda ns: _collect_players(db, ns), memo=False)
+        return {c: _players_merge(nights, c) for c in (None, *N.CONTEXTS)}
+    return reuse(db, ("players_merged",), run)[context if context in N.CONTEXTS else None]
+
+
+def _players_merge(nights: dict[str, Any], context: str | None) -> dict[str, dict[str, Any]]:
+    keep = N.wanted(context)
+    out: dict[str, dict[str, Any]] = {}
+    for night in nights.values():
+        for ctx, people in night.items():
+            if not keep(ctx):
+                continue
+            for name, part in people.items():
+                m = out.setdefault(name, _new_player())
+                m["listed"] = m["listed"] or part["listed"]
+                for k in (*_RATES, "outcomes", "three", "three_any"):
+                    N.add(m[k], part[k])
+                for k, v in part["by_par"].items():
+                    N.add(m["by_par"][k], v)
+                m["rounds"] += part["rounds"]
+                n, total, best = part["drive"]
+                m["drive"][0] += n
+                N.exact_merge(m["drive"][1], total)
+                if best is not None and (m["drive"][2] is None or best > m["drive"][2]):
+                    m["drive"][2] = best
+                m["shots"] += part["shots"]
+                for club, (cn, fin, low, pin) in part["clubs"].items():
+                    c = m["clubs"].setdefault(club, [0, [], None, []])
+                    c[0] += cn
+                    N.exact_merge(c[1], fin)
+                    c[2] = low if c[2] is None or low < c[2] else c[2]
+                    N.exact_merge(c[3], pin)
+                for into, got in ((m["putts_by"], part["putts_by"]), (m["three_by"], part["three_by"]),
+                                  (m["three_any_by"], part["three_any_by"])):
+                    for a, b in zip(into, got):
+                        N.add(a, b)
+    for m in out.values():
+        m["rounds"].sort(key=lambda r: (r[0], r[1]))
+        if context not in N.CONTEXTS:
+            m["three"], m["three_by"] = m["three_any"], m["three_any_by"]
+    return out
 
 
 def _collect_players(db: sqlite3.Connection, ns: "N.Nights") -> dict[str, dict[str, dict[str, Any]]]:
@@ -956,14 +962,15 @@ def _collect_records(db: sqlite3.Connection, ns: "N.Nights") -> dict[str, dict[s
     return out
 
 
-def records_table(db: sqlite3.Connection, context: str | None,
-                  starts: dict[str, str | None]) -> Callable[[str | None, str], dict[str, Any]]:
+def records_table(db: sqlite3.Connection, context: str | None, starts: dict[str, str | None],
+                  nights: dict[str, Any] | None = None) -> Callable[[str | None, str], dict[str, Any]]:
     """records() for every player (and everyone, None) and each of the date ranges `starts` (key: first
     night, None for all time), from each night's bests: returns pick(player, key). A tie goes to the
-    earlier shot."""
+    earlier shot. `nights`: their partials, read already."""
     keep = N.wanted(context)
     n = len(_record_queries())
-    nights = N.per_night(db, "records", lambda ns: _collect_records(db, ns))
+    if nights is None:
+        nights = N.per_night(db, "records", lambda ns: _collect_records(db, ns))
     # The ranges are the nights from their start on: going back from the newest night, each range's
     # bests are the running bests once every night from its start has been taken in.
     bests: list[dict[str, tuple]] = [{} for _ in range(n)]
@@ -1053,7 +1060,7 @@ def _filters(db: sqlite3.Connection) -> tuple[dict[str, list], bool, bool]:
     rounds either, the filter and tags, since every round would be practice."""
     def run() -> tuple[dict[str, list], bool, bool]:
         dates, seen, league, tournament = [], {"courses": set(), "clubs": set(), "lies": set()}, False, False
-        for d, night in N.per_night(db, "filters", lambda ns: _collect_filters(db, ns)).items():
+        for d, night in N.per_night(db, "filters", lambda ns: _collect_filters(db, ns), memo=False).items():
             if night["shots"]:
                 dates.append(d)
             for k in seen:
@@ -1152,29 +1159,34 @@ def _collect_holes(db: sqlite3.Connection, ns: "N.Nights", usual: float | None) 
 
 def _holes_merged(db: sqlite3.Connection, context: str | None) -> dict[str, Any]:
     """_collect_holes' nights merged, in `context`: sg_summary, recovery and trends as A's give them,
-    round_sg_totals' rounds, and highlight_rows' lists."""
-    key = context if context in N.CONTEXTS else ""
+    round_sg_totals' rounds, and highlight_rows' lists. Every context's at once, from one read of the
+    nights' partials, which aren't kept after."""
     usual = _usual(db)
 
-    def run() -> dict[str, Any]:
-        sg: dict[str, dict[str, Any]] = {}
-        rec: dict[tuple, list] = {}
-        trend: dict[str, list[dict]] = {}
-        rounds_: dict[tuple, dict] = {}
-        hl: dict[str, Any] = {"moments": [], "streaks": [], "bounce": [], "blowups": [], "tops": {n: [] for n in A.TOPS}}
-        for night in N.per_night(db, "holes", lambda ns: _collect_holes(db, ns, usual), extra=(usual,)).values():
-            part = night[key]
-            A.add_sg(sg, part["sg"])
-            A.add_recovery(rec, part["rec"])
-            for name, pt in part["trend"].items():
-                trend.setdefault(name, []).append(pt)
-            add_round_sg(rounds_, part["rounds"])
-            for k in ("moments", "streaks", "bounce", "blowups"):
-                hl[k] += part["hl"][k]
-            for n in A.TOPS:
-                hl["tops"][n] += part["hl"]["tops"][n]
-        return {"sg": A.sg_from(sg), "recovery": A.recovery_from(rec), "trend": trend, "rounds": rounds_, "hl": hl}
-    return reuse(db, ("holes_merged", key, usual), run)
+    def run() -> dict[str, dict[str, Any]]:
+        nights = N.per_night(db, "holes", lambda ns: _collect_holes(db, ns, usual), extra=(usual,), memo=False)
+        return {k: _holes_merge(nights, k) for k in ("", *N.CONTEXTS)}
+    return reuse(db, ("holes_merged", usual), run)[context if context in N.CONTEXTS else ""]
+
+
+def _holes_merge(nights: dict[str, Any], key: str) -> dict[str, Any]:
+    sg: dict[str, dict[str, Any]] = {}
+    rec: dict[tuple, list] = {}
+    trend: dict[str, list[dict]] = {}
+    rounds_: dict[tuple, dict] = {}
+    hl: dict[str, Any] = {"moments": [], "streaks": [], "bounce": [], "blowups": [], "tops": {n: [] for n in A.TOPS}}
+    for night in nights.values():
+        part = night[key]
+        A.add_sg(sg, part["sg"])
+        A.add_recovery(rec, part["rec"])
+        for name, pt in part["trend"].items():
+            trend.setdefault(name, []).append(pt)
+        add_round_sg(rounds_, part["rounds"])
+        for k in ("moments", "streaks", "bounce", "blowups"):
+            hl[k] += part["hl"][k]
+        for n in A.TOPS:
+            hl["tops"][n] += part["hl"]["tops"][n]
+    return {"sg": A.sg_from(sg), "recovery": A.recovery_from(rec), "trend": trend, "rounds": rounds_, "hl": hl}
 
 
 def highlights_by_period(db: sqlite3.Connection, context: str | None = None,
@@ -1184,7 +1196,11 @@ def highlights_by_period(db: sqlite3.Connection, context: str | None = None,
     shorter range on the page, so each range is worked out on its own. `season`: publish.season_start."""
     starts = period_starts(today, season)
     key = tuple(starts.items())
-    recs = reuse(db, ("records_table", context, key), lambda: records_table(db, context, starts))
+    def tables() -> dict[str | None, Callable[[str | None, str], dict[str, Any]]]:
+        # every context's from one read of the nights' partials, which aren't kept after
+        nights = N.per_night(db, "records", lambda ns: _collect_records(db, ns), memo=False)
+        return {c: records_table(db, c, starts, nights) for c in (None, *N.CONTEXTS)}
+    recs = reuse(db, ("records_table", key), tables)[context if context in N.CONTEXTS else None]
     hl = _holes_merged(db, context)["hl"]
     highs = reuse(db, ("highlights_table", context, key),
                   lambda: A.highlights_pick(hl["moments"], hl["streaks"], hl["bounce"], hl["blowups"], hl["tops"], starts))

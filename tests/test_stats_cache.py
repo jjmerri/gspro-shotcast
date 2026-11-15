@@ -96,6 +96,20 @@ def test_one_years_replays_load_on_their_own_and_leave_the_others_kept(tmp_path)
         assert (c.hits, c.misses) == (2, 0)   # neither load dropped the other's
 
 
+def test_a_build_keeps_no_nights_partials_once_they_are_merged(tmp_path):
+    from commentator import round_record
+    path = tmp_path / "season.db"
+    _season(path)
+    for context in (None, *N.CONTEXTS):
+        with closing(stats_web.connect(path)) as db:
+            want = json.dumps(stats_web.summary(db, context), sort_keys=True, default=str)
+        with closing(stats_web.connect(path)) as db, round_record.frozen(db), stats_cache.opened(db, path) as c:
+            assert c is not None
+            got = stats_web.summary(db, context)
+            assert json.dumps(got, sort_keys=True, default=str) == want
+            assert not [k for k in round_record._frozen[id(db)] if k[0] == "per_night"]
+
+
 def test_a_change_to_the_code_or_the_file_throws_the_cache_away(tmp_path, monkeypatch):
     path = tmp_path / "season.db"
     _season(path)

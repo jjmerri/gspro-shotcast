@@ -539,18 +539,24 @@ def _add_course(into: dict[str, Any], part: dict[str, Any]) -> None:
 
 
 def _courses_merged(db: sqlite3.Connection, context: str | None) -> dict[tuple[str, str], dict[str, Any]]:
-    """Each (course, player)'s counts over every night in `context`."""
-    def run() -> dict[tuple[str, str], dict[str, Any]]:
-        keep = N.wanted(context)
-        out: dict[tuple[str, str], dict[str, Any]] = {}
-        for night in N.per_night(db, "courses", lambda ns: _collect_courses(db, ns)).values():
-            for ctx, cards in night.items():
-                if keep(ctx):
-                    for course, players in cards.items():
-                        for who, part in players.items():
-                            _add_course(out.setdefault((course, who), _new_course()), part)
-        return out
-    return reuse(db, ("courses_merged", context), run)
+    """Each (course, player)'s counts over every night in `context`. Every context's at once, from one
+    read of the nights' partials, which aren't kept after."""
+    def run() -> dict[str | None, dict[tuple[str, str], dict[str, Any]]]:
+        nights = N.per_night(db, "courses", lambda ns: _collect_courses(db, ns), memo=False)
+        return {c: _courses_merge(nights, c) for c in (None, *N.CONTEXTS)}
+    return reuse(db, ("courses_merged",), run)[context if context in N.CONTEXTS else None]
+
+
+def _courses_merge(nights: dict[str, Any], context: str | None) -> dict[tuple[str, str], dict[str, Any]]:
+    keep = N.wanted(context)
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for night in nights.values():
+        for ctx, cards in night.items():
+            if keep(ctx):
+                for course, players in cards.items():
+                    for who, part in players.items():
+                        _add_course(out.setdefault((course, who), _new_course()), part)
+    return out
 
 
 def _collect_courses(db: sqlite3.Connection, ns: "N.Nights") -> dict[str, dict[str, dict[str, dict[str, Any]]]]:
@@ -750,7 +756,7 @@ def booth(db: sqlite3.Connection, names: dict[str, str] | None = None, phrases_s
     per: dict[str, dict] = {}
     rounds_by_date: Counter = Counter()
     lines_by_date: dict[str, int] = {}
-    for d, night in N.per_night(db, "booth", lambda ns: _collect_booth(db, ns)).items():
+    for d, night in N.per_night(db, "booth", lambda ns: _collect_booth(db, ns), memo=False).items():
         for speaker, (lines, words, kinds) in night["speakers"].items():
             p = per.setdefault(speaker, {"key": speaker, "name": names.get(speaker, speaker),
                                          "lines": 0, "words": 0, "kinds": Counter()})
@@ -761,7 +767,7 @@ def booth(db: sqlite3.Connection, names: dict[str, str] | None = None, phrases_s
         rounds_by_date.update(night["rounds"])
     grams: dict[str, dict[str, list]] = defaultdict(dict)
     for night in N.per_night(db, "phrases", lambda ns: _collect_phrases(db, ns, set(on_air)), extra=(on_air,),
-                             since=phrases_since).values():
+                             since=phrases_since, memo=False).values():
         for speaker, got in night.items():
             mine = grams[speaker]
             for g, (n, first) in got.items():
@@ -869,7 +875,7 @@ def shot_log(db: sqlite3.Connection, context: str | None = None, *, player: str 
 def broadcasts(db: sqlite3.Connection) -> list[dict]:
     """Booth sessions that said anything, newest first, with the courses and players in them."""
     def run() -> list[dict]:
-        every = [b for night in N.per_night(db, "broadcasts", lambda ns: _collect_broadcasts(db, ns)).values()
+        every = [b for night in N.per_night(db, "broadcasts", lambda ns: _collect_broadcasts(db, ns), memo=False).values()
                  for b in night]
         # newest first (a session with no start last; a tie, the later session first); the start read now, as it's
         # not in a night's signature
