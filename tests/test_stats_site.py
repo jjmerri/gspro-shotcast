@@ -76,6 +76,23 @@ def test_every_published_swing_but_a_never_struck_gimme_has_its_time_published(t
             == [1, 3, 5, 6]
 
 
+def test_a_rounds_details_leave_the_lists_and_a_context_keeps_only_what_it_has_of_its_own():
+    def body(season, sg):
+        return {"rounds": [{"id": 7, "round": 7, "date": "2026-11-15", "gross": 36, "card": [{"hole": 1, "par": 4, "score": 3}],
+                            "penalties": 0, "summary": {"vs": [{"label": "Greens", "round": 50.0, "of": "gir_pct",
+                                                                "season": season}], "sg": {"total": sg}}}]}
+    details, bodies = {}, {"all": body(40.0, 1.5), "league": body(45.0, 1.5), "practice": body(30.0, -0.5)}
+    for name, b in bodies.items():
+        stats_site.split_rounds(name, b, details)
+    assert all(b["rounds"] == [{"id": 7, "round": 7, "date": "2026-11-15", "gross": 36}] for b in bodies.values())
+    row = details[7]["row"]
+    # the season's figure is the page's (its players'), so only practice's own strokes gained differ
+    assert row["summary"] == {"vs": [{"label": "Greens", "round": 50.0, "of": "gir_pct"}], "sg": {"total": 1.5}}
+    assert row["ctx"] == {"practice": {"summary": {"vs": [{"label": "Greens", "round": 50.0, "of": "gir_pct"}],
+                                                   "sg": {"total": -0.5}}}}
+    assert row["card"] == [{"hole": 1, "par": 4, "score": 3}] and row["penalties"] == 0
+
+
 def test_rebuilding_keeps_only_the_newest_versions(tmp_path):
     path = _season(tmp_path)
     site = tmp_path / "site"

@@ -60,9 +60,9 @@ records' own, not the round's.
   - Strokes gained and the best and worst shots come from the context's own shots
     (`stats_web._collect_holes`, around line 1117). A round with a shot in another context (a
     practice-tagged putt in a league round, say) gets a different summary in each. The row keeps the
-    "all" summary plus, under `summary_ctx`, the summary of each context where it differs. That's
+    "all" details plus, under `ctx[<context>]`, each field that differs in that context. That's
     rare (none on the live file once `season` is taken out: 3 rounds differed, all only in it), so
-    it costs next to nothing. The page uses `summary_ctx[state.ctx]` when present.
+    it costs next to nothing. The page lays `ctx[state.ctx]` over the row when present.
 - The build takes the rows from the "all" summary's rounds (and the other contexts' summaries where
   they differ) before stripping them, and `page_files` writes them. `build` already writes the summaries before `page_files`, so no second pass over the
   database is needed.
@@ -75,8 +75,9 @@ it through the nights' signatures, but a stored summary also follows things outs
 
 - Each year's signature also takes a hash of its rounds' `pub_round` JSON. The rows are computed on
   every build anyway; hashing them is cheap and exact.
-- The page-year cache kind gets a layout number, so the first build with this change rebuilds every
-  year once (each one is uploaded once; after that, a year with no changes is never re-sent).
+- Signatures cached by an older version don't have that hash, so the first build with this change
+  rebuilds every year once (each one is uploaded once; after that, a year with no changes is never
+  re-sent). No separate layout number is needed.
 
 ## The page
 
@@ -91,9 +92,10 @@ it through the nights' signatures, but a stored summary also follows things outs
   page still works.
 - The "Share card" button appears once the details are in. `shareRound` must build the image
   synchronously from the tap (iOS), so it can't wait on a fetch.
-- `roundSummary` fills each `vs[].season` from `state.data.players` for the current context
-  (`avg_to_par_9`, `fir_pct`, `gir_pct`, `putts_per_hole`), the same numbers the build uses today.
-  With no player row, there is no summary, as today.
+- `withDetails(r)` merges the list entry, the side's row and its context's overrides, and fills
+  each `vs[].season` from `state.data.players` for the current context. Each `vs` entry names its
+  figure in `of` (`avg_to_par_9`, `fir_pct`, `gir_pct`, `putts_per_hole`), the same numbers the
+  build uses today. With no player row, `season` is empty.
 - The local page (the tray's server) builds its site with the same `stats_site.build(local=True)`
   and serves its data files the same way, so it needs nothing of its own.
 
@@ -111,8 +113,9 @@ A page loaded before this version has the old script. It reloads the summary on 
 refresh, and a slim list with no `card` would break its round page. Today nothing tells an old page
 to reload: `latest.json` holds only the version and its data files. So:
 
-- `latest.json` gets `"page": <number>` (bumped when the summary's shape changes), and the new page
-  reloads itself when it differs from its own. This handles every later change.
+- `latest.json` gets `"page": <number>` (`stats_site.PAGE_FORMAT`, bumped when the summary's shape
+  changes), and the new page reloads itself once per tab when it differs from its own
+  (`PAGE_FORMAT` in the page). This handles every later change.
 - This one switch still needs a manual refresh from pages already open. That's the same as the first
   publish with data files.
 
@@ -122,9 +125,14 @@ to reload: `latest.json` holds only the version and its data files. So:
   round), `courses` 40 KB and `highlights` 38 KB. They aren't part of this change; measure them on
   the bench with the rest.
 - No migration: the page and its files are rebuilt together each version. Going back to 0.1.135
-  rebuilds the old layout (its own cache kind).
+  rebuilds every year again (its signatures don't match the new ones).
 - The cloud plan: details live in immutable, content-addressed per-year files, so past years upload
   once and are served from the CDN cache. That's the same shape the hosted version would use.
+
+## Paging
+
+The Rounds list shows 50 rows a page (`sortable`'s `page` option, as the shots and course lists
+already do), so a long list doesn't draw every row at once.
 
 ## Time filters (option 3, later)
 

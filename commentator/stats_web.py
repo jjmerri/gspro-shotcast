@@ -629,14 +629,16 @@ def add_round_summaries(db: sqlite3.Connection, rounds_: list[dict[str, Any]], r
         nine = row["nine_to_par"] if "nine_to_par" in row.keys() else None
         per_nine = nine if nine is not None else (
             round(r["to_par"] * 9 / played, 1) if r["to_par"] is not None and played else None)
+        # `of`: the player's figure `season` is (the published site leaves `season` to the page)
         vs = [
-            {"label": "Score / 9", "round": per_nine,
-             "season": p["avg_to_par_9"], "better": -1, "fmt": "to_par"},
-            {"label": "Fairways", "round": _pct(*r["fir"]), "season": p["fir_pct"], "better": 1, "fmt": "pct"},
-            {"label": "Greens", "round": _pct(*r["gir"]), "season": p["gir_pct"], "better": 1, "fmt": "pct"},
+            {"label": "Score / 9", "round": per_nine, "of": "avg_to_par_9", "better": -1, "fmt": "to_par"},
+            {"label": "Fairways", "round": _pct(*r["fir"]), "of": "fir_pct", "better": 1, "fmt": "pct"},
+            {"label": "Greens", "round": _pct(*r["gir"]), "of": "gir_pct", "better": 1, "fmt": "pct"},
             {"label": "Putts / hole", "round": round(r["putts"] / putt_holes, 2) if r["putts"] is not None and putt_holes else None,
-             "season": p["putts_per_hole"], "better": -1, "fmt": "num"},
+             "of": "putts_per_hole", "better": -1, "fmt": "num"},
         ]
+        for v in vs:
+            v["season"] = p[v["of"]]
         card = sorted(r["card"], key=lambda c: c["score"] - c["par"])
         spread = len(card) > 1 and card[0]["score"] - card[0]["par"] != card[-1]["score"] - card[-1]["par"]
         r["summary"] = {

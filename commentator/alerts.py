@@ -18,10 +18,10 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
-from . import push
+from . import push, stats_site
 
 log = logging.getLogger(__name__)
 
@@ -110,11 +110,12 @@ def _round_alerts(rows: list[dict]) -> list[push.Alert]:
     return out
 
 
-def diff(summary: dict, state: dict, now: float | None = None,
-         league: dict | None = None) -> tuple[list[push.Alert], dict]:
+def diff(summary: dict, state: dict, now: float | None = None, league: dict | None = None,
+         details: Callable[[int], dict[int, dict]] | None = None) -> tuple[list[push.Alert], dict]:
     """The alerts a new build calls for, and the state to keep after it: rounds, eagles and aces from
     its summary-all.json, records from its summary-league.json (`league`; none, no record alerts). A
-    state without a check yet (alerts just set up) only takes note of the build."""
+    state without a check yet (alerts just set up) only takes note of the build. `details`: a round's
+    sides' details (stats_site.round_details), which hold the scorecards the list leaves out."""
     now = time.time() if now is None else now
     rows = summary.get("rounds") or []
     holders = record_holders(league or {})
@@ -136,7 +137,8 @@ def diff(summary: dict, state: dict, now: float | None = None,
             continue
         seen.append(rnd)
         if max((r.get("ended") or 0) for r in group) >= since:
-            alerts += _round_alerts(group)
+            more = (details(rnd) if details else None) or {}
+            alerts += _round_alerts([{**r, **more.get(r["id"], {})} for r in group])
     new_state["rounds"] = seen[-KEEP_SEEN:]
     old = state.get("records") or {}
     for cat, shot in holders.items():
@@ -209,7 +211,8 @@ class Alerts:
             summary = json.loads((folder / "summary-all.json").read_text(encoding="utf-8"))
             league = json.loads((folder / "summary-league.json").read_text(encoding="utf-8"))
             with self._lock:
-                alerts, state = diff(summary, self._state(), league=league)
+                alerts, state = diff(summary, self._state(), league=league,
+                                     details=lambda rnd: stats_site.round_details(site, rnd))
                 self._save(state)
         except Exception as e:
             log.warning("Alerts: couldn't check the published stats: %s", e)
