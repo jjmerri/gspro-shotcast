@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.140
+
+### Booth
+- The booth only warns about a GSPro screen size it hasn't played a round at, so turning a projector on and off, or a windowed GSPro, no longer raises the warning again and again.
+
 ## 0.1.139
 
 ### Booth
