@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from .carry_model import CarryModel, correct_for_elevation
+from .carry_model import correct_for_elevation
 from .config import ROUND_STATUS, ROUND_STATUS_CHECK_S, ROUND_STATUS_EVERY_S, Config
 from .flight import point_at
 from .facts import (ctp_feet, ctp_text as _ctp_text,
@@ -874,8 +874,7 @@ class Engine:
         self._season_phrases: set[tuple[str, ...]] = set()
         for text in self.store.spoken_lines(since=time.time() - self.PHRASE_MEMORY_DAYS * 86400):
             self._season_phrases |= ngrams(text, 6)
-        self.carry = CarryModel(cfg.commentary.lie_carry_factors, self.store.carry_pairs(),
-                                cfg.commentary.course_altitude_ft)
+        self.carry = self.store.carry_model(cfg.commentary.lie_carry_factors, cfg.commentary.course_altitude_ft)
         self.current_course: str | None = None
         self._hole_snaps: set[tuple[str, int]] = set()   # (course, hole) minimaps kept this session
         # GSPro reports each player's handedness with their shots; slope talk depends on it.

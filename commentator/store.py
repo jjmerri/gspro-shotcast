@@ -244,6 +244,51 @@ CREATE INDEX IF NOT EXISTS shots_player ON shots(player);
 CREATE INDEX IF NOT EXISTS shots_lie ON shots(lie_before);
 """
 
+# The carry model learned from the shots before `before_ts` (Store.carry_model), so a start doesn't go
+# over every shot of every season again. Any write to a shot it learned from, or to a session's shots it
+# covers (a stroke's next one says where it came to rest), deletes it, from any connection.
+CARRY_SNAPSHOT_VERSION = 1   # bump when carry_pairs or CarryModel.observe learn differently
+# What carry_pairs reads, so a write to any other column (a round's record, the map, a putt's outcome)
+# leaves the snapshot be.
+_CARRY_COLUMNS = ("id, session_id, player, hole, shot_number, is_putt, mulligan, fmt, lie_before, carry_raw, units, "
+                  "carry_raw_tile_yards, carry_game_yards, elevation_yards, to_pin, course, launch_angle, "
+                  "finish_yards, ts, attributed, shared_ball, left_out, tree_hits, excluded")
+
+
+def _carry_covered(ts: str, sid: str) -> str:
+    t = "(SELECT before_ts FROM carry_snapshot)"
+    return f"({ts} < {t} OR EXISTS (SELECT 1 FROM shots c WHERE c.session_id = {sid} AND c.ts < {t}))"
+
+
+_ANY_SNAPSHOT = "EXISTS (SELECT 1 FROM carry_snapshot)"
+_DROP_SNAPSHOT = "BEGIN DELETE FROM carry_snapshot; END;"
+CARRY_SNAPSHOT = f"""
+CREATE TABLE IF NOT EXISTS carry_snapshot (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    key TEXT NOT NULL,                           -- CARRY_SNAPSHOT_VERSION and the configured altitudes
+    before_ts REAL NOT NULL,
+    state TEXT NOT NULL                          -- CarryModel.state(), JSON
+);
+CREATE TRIGGER IF NOT EXISTS shots_carry_insert AFTER INSERT ON shots
+WHEN {_ANY_SNAPSHOT} AND {_carry_covered("NEW.ts", "NEW.session_id")} {_DROP_SNAPSHOT}
+CREATE TRIGGER IF NOT EXISTS shots_carry_delete AFTER DELETE ON shots
+WHEN {_ANY_SNAPSHOT} AND {_carry_covered("OLD.ts", "OLD.session_id")} {_DROP_SNAPSHOT}
+CREATE TRIGGER IF NOT EXISTS shots_carry_update AFTER UPDATE OF {_CARRY_COLUMNS} ON shots
+WHEN {_ANY_SNAPSHOT} AND ({_carry_covered("OLD.ts", "OLD.session_id")} OR {_carry_covered("NEW.ts", "NEW.session_id")})
+{_DROP_SNAPSHOT}
+CREATE TRIGGER IF NOT EXISTS shots_carry_renumber AFTER UPDATE ON shots   -- (SET rowid = isn't an UPDATE OF id)
+WHEN {_ANY_SNAPSHOT} AND NEW.id IS NOT OLD.id
+     AND ({_carry_covered("OLD.ts", "OLD.session_id")} OR {_carry_covered("NEW.ts", "NEW.session_id")})
+{_DROP_SNAPSHOT}
+CREATE TRIGGER IF NOT EXISTS shots_carry_replace BEFORE INSERT ON shots
+WHEN {_ANY_SNAPSHOT} AND EXISTS (SELECT 1 FROM shots s WHERE (s.id = NEW.id OR s.uid = NEW.uid)
+                                 AND {_carry_covered("s.ts", "s.session_id")}) {_DROP_SNAPSHOT}
+CREATE TRIGGER IF NOT EXISTS shots_carry_replace_by BEFORE UPDATE ON shots
+WHEN {_ANY_SNAPSHOT} AND (NEW.id IS NOT OLD.id OR NEW.uid IS NOT OLD.uid)
+     AND EXISTS (SELECT 1 FROM shots s WHERE ((NEW.id IS NOT OLD.id AND s.id = NEW.id) OR (NEW.uid IS NOT OLD.uid AND s.uid = NEW.uid))
+                 AND {_carry_covered("s.ts", "s.session_id")}) {_DROP_SNAPSHOT}
+"""
+
 # Made by _migrate once their columns are sure to exist: name -> table(columns).
 INDEXES = {
     "shots_session_ts": "shots(session_id, ts)",
@@ -392,6 +437,7 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         self._migrate()
+        self.db.executescript(CARRY_SNAPSHOT)   # (after _migrate: it reads shots.uid)
         self._backfill_finishes()
         self._locate_hole_images()
         from .round_record import Live
@@ -1371,15 +1417,56 @@ class Store:
         corrected for how high the ball came down, course, launch angle, base). Base is GSPro's CARRY
         (raw) where it was read, else the launch monitor's carry. Shots whose landing height isn't
         known are left out (see correct_for_elevation)."""
+        return [pair for _, pair in self._carry_pairs()]
+
+    def carry_model(self, defaults: dict[str, float] | None = None, course_altitude_ft: dict[str, float] | None = None,
+                    now: float | None = None):
+        """CarryModel(defaults, carry_pairs(), course_altitude_ft), learning from the shots since the
+        carry_snapshot only: it keeps what the model had learned before today, saved here again each day."""
+        from .carry_model import CarryModel
+        model = CarryModel(defaults, None, course_altitude_ft)
+        key = json.dumps([CARRY_SNAPSHOT_VERSION, course_altitude_ft or {}], sort_keys=True)
+        t = time.localtime(time.time() if now is None else now)
+        midnight = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, -1))
+        own = not self.db.in_transaction   # (inside the caller's transaction: learn, don't save)
+        if own:
+            self.db.execute("BEGIN")   # a snapshot saved is of what was read: if another write came since, it isn't
+        try:
+            snap = self.db.execute("SELECT key, before_ts, state FROM carry_snapshot").fetchone()
+            since = None
+            if snap is not None and snap["key"] == key:
+                model.restore(json.loads(snap["state"]))
+                since = snap["before_ts"]
+            save, state = own and (since is None or since < midnight), None
+            for ts, pair in self._carry_pairs(since):
+                if save and state is None and ts >= midnight:
+                    state = model.state()
+                model.observe(*pair)
+            if save:
+                try:
+                    self.db.execute("DELETE FROM carry_snapshot")
+                    self.db.execute("INSERT INTO carry_snapshot (id, key, before_ts, state) VALUES (1, ?, ?, ?)",
+                                    (key, midnight, json.dumps(model.state() if state is None else state)))
+                except sqlite3.OperationalError as e:   # another connection wrote meanwhile: saved next start
+                    log.info("carry model snapshot not saved: %s", e)
+                    save = False
+        except BaseException:
+            if own:
+                self.db.rollback()
+            raise
+        if own:
+            (self.db.commit if save else self.db.rollback)()
+        return model
+
+    def _carry_pairs(self, since: float | None = None) -> list[tuple[float, tuple]]:
+        """carry_pairs, each with its shot's time, from the shots at `since` or later."""
         from .carry_model import correct_for_elevation
         from .facts import to_yards
 
         rows = self.db.execute(
-            """SELECT id, session_id, player, hole, shot_number, is_putt, mulligan, fmt, lie_before, carry_raw,
-                      units, carry_raw_tile_yards, carry_game_yards, elevation_yards, to_pin, course,
-                      launch_angle, finish_yards, ts, attributed, shared_ball, left_out, tree_hits
-               FROM shots WHERE excluded = 0 ORDER BY id"""
-        ).fetchall()
+            f"SELECT {_CARRY_COLUMNS} FROM shots WHERE excluded = 0"
+            + ("" if since is None else " AND ts >= ?") + " ORDER BY id",
+            () if since is None else (since,)).fetchall()
         # Each player's next stroke (by impact time: rows are written as shot handlers finish, which
         # can be out of order; a mulligan was taken back): if it's the very next
         # stroke on the same hole, its pin elevation, less this one's, is where this ball came to rest
@@ -1426,7 +1513,7 @@ class Store:
                     rest_rise = elev   # holed: it rested at the pin
             game = correct_for_elevation(r["carry_game_yards"], elev, to_yards(r["to_pin"]), carry, rest_rise)
             if game is not None:
-                out.append((r["lie_before"], carry, game, r["course"], r["launch_angle"], base))
+                out.append((r["ts"], (r["lie_before"], carry, game, r["course"], r["launch_angle"], base)))
         return out
 
     def season_stats(self, player: str, context: str | None = None) -> dict[str, Any]:
