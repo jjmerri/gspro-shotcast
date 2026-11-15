@@ -93,6 +93,12 @@ def test_a_rounds_details_leave_the_lists_and_a_context_keeps_only_what_it_has_o
     assert row["card"] == [{"hole": 1, "par": 4, "score": 3}] and row["penalties"] == 0
 
 
+def test_a_rounds_details_keep_their_order_in_its_years_file():
+    details = {7: {"round": 7, "date": "2026-11-15", "row": {"mulligans": {"Derek": 4, "Dan": 2}, "card": []}}}
+    rows = stats_site._round_rows({"2026": ([], [])}, details)
+    assert list(json.loads(rows["2026"][0][2])["mulligans"]) == ["Derek", "Dan"]
+
+
 def test_rebuilding_keeps_only_the_newest_versions(tmp_path):
     path = _season(tmp_path)
     site = tmp_path / "site"

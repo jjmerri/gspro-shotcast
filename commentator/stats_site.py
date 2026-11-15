@@ -269,12 +269,13 @@ def split_rounds(name: str, body: dict[str, Any], details: dict[int, dict[str, A
 def _round_rows(parts: dict[str, tuple[list[int], list[int]]],
                 details: dict[int, dict[str, Any]]) -> dict[str, list[tuple[int, int, str]]]:
     """Each year's rounds' details, as pub_round rows (id, round, JSON): a round's in the year with its
-    hole replays, else its date's, else the newest."""
+    hole replays, else its date's, else the newest. Keys keep the build's order (the page lists a round's
+    mulligans and the like as they come); it's the same every build."""
     year_of = {rnd: y for y, (_, rounds) in parts.items() for rnd in rounds}
     out: dict[str, list[tuple[int, int, str]]] = {y: [] for y in parts}
     for i, d in sorted(details.items()):
         y = year_of.get(d["round"]) or ((d["date"] or "")[:4] if (d["date"] or "")[:4] in parts else next(iter(parts)))
-        out[y].append((i, d["round"], json.dumps(d["row"], separators=(",", ":"), sort_keys=True)))
+        out[y].append((i, d["round"], json.dumps(d["row"], separators=(",", ":"))))
     return out
 
 
