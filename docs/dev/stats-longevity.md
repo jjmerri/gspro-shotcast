@@ -261,8 +261,13 @@ merged like any other, and its record is in both nights' signatures.
     (checked on 1 and 3 years).
   - A page left open across the first publish with data files can't find `v/<version>/stats.db` and
     needs a refresh.
-  - Still to do: summary and player files content-addressed, and past years' lists (rounds,
-    broadcasts, trends) in per-year files the page loads when paged back.
+  - A version's JSON (summaries, player files, `data.json`) is stored gzipped in the bucket
+    (`Content-Encoding: gzip`): CloudFront compresses only files up to 10 MB, and at 10 years
+    `summary-all.json` is 24.8 MB (2.6 MB gzipped), 20.3 MB of it the rounds list (13,284 rounds;
+    each one's `summary` 7.6 MB and `card` 4.0 MB). The site folder on the PC keeps them plain.
+  - Still to do: past years' lists (rounds, broadcasts, trends) in per-year files the page loads
+    when paged back. Player files are small (640 KB in all at 10 years); content-addressing them
+    isn't worth it.
 - **Bench** at 1, 3, 5 and 10 years: the after-a-round times must be flat.
 
 ### 3a. The build reads the file, not a copy in memory (done)

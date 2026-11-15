@@ -26,6 +26,7 @@ the files that changed, and an open page keeps the files it has read (immutable)
 from __future__ import annotations
 
 import gc
+import gzip
 import hashlib
 import json
 import logging
@@ -487,7 +488,7 @@ def _cache_control(key: str) -> str:
 
 def upload(site: str | Path, bucket: str, prefix: str = "", client: Any = None) -> str:
     """Upload the built site to s3://bucket/prefix: the data files the bucket doesn't have yet, the new
-    version's files and the page first, latest.json last (so nobody is pointed at files that aren't
+    version's files (its JSON stored gzipped) and the page first, latest.json last (so nobody is pointed at files that aren't
     there yet), then drop all but the newest KEEP_VERSIONS versions, and the data files none of them
     reads. Returns the published version."""
     site = Path(site)
@@ -512,6 +513,13 @@ def upload(site: str | Path, bucket: str, prefix: str = "", client: Any = None) 
         key = rel(path)
         if key.startswith(("vendor/", "data/")) and prefix + key in existing:
             continue   # vendored files are versioned by their folder name, data files named by their content
+        if key.startswith("v/") and path.suffix == ".json":
+            # Stored gzipped: CloudFront compresses only files up to 10 MB, and a summary passes that
+            # after a few years (25 MB at 10 years, 2.6 MB gzipped).
+            client.put_object(Bucket=bucket, Key=prefix + key, Body=gzip.compress(path.read_bytes(), 6, mtime=0),
+                              ContentType=CONTENT_TYPES[".json"], ContentEncoding="gzip",
+                              CacheControl=_cache_control(key))
+            continue
         client.upload_file(str(path), bucket, prefix + key, ExtraArgs={
             "ContentType": CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
             "CacheControl": _cache_control(key)})
@@ -541,6 +549,8 @@ def _bucket_referenced(site: Path, client: Any, bucket: str, prefix: str, existi
                 body = (site / key).read_bytes()
             elif prefix + key in existing:
                 body = client.get_object(Bucket=bucket, Key=prefix + key)["Body"].read()
+                if body[:2] == b"\x1f\x8b":   # (stored gzipped)
+                    body = gzip.decompress(body)
             else:
                 continue   # a version from before data files, or the one just uploaded (`data`)
             out |= {e["file"] for e in json.loads(body)}

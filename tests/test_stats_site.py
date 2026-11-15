@@ -1,4 +1,5 @@
 import asyncio
+import gzip
 import itertools
 import json
 import sqlite3
@@ -122,9 +123,10 @@ class FakeS3:
         if key.endswith("data.json"):
             self.bodies[key] = open(path, "rb").read()
 
-    def put_object(self, Bucket, Key, Body, ContentType, CacheControl):
-        self.calls.append(("put", Key, {"ContentType": ContentType, "CacheControl": CacheControl}))
+    def put_object(self, Bucket, Key, Body, ContentType, CacheControl, **more):
+        self.calls.append(("put", Key, {"ContentType": ContentType, "CacheControl": CacheControl, **more}))
         self.keys.add(Key)
+        self.bodies[Key] = Body
 
     def get_object(self, Bucket, Key):
         import io
@@ -157,6 +159,12 @@ def test_upload_points_latest_at_the_new_version_last_and_prunes_old_ones(tmp_pa
     assert app["stats/manifest.webmanifest"]["ContentType"] == "application/manifest+json"
     assert app["stats/icons/icon-192.png"] == {"ContentType": "image/png", "CacheControl": "no-cache"}
     assert app["stats/sw.js"]["CacheControl"] == "no-cache"   # a new service worker reaches phones at once
+    key = f"stats/v/{version}/summary-all.json"   # gzipped: CloudFront won't compress one over 10 MB
+    put = next(c for c in s3.calls if c[:2] == ("put", key))
+    assert put[2] == {"ContentType": "application/json", "ContentEncoding": "gzip",
+                      "CacheControl": "public, max-age=31536000, immutable"}
+    assert gzip.decompress(s3.bodies[key]) == (site / "v" / version / "summary-all.json").read_bytes()
+    assert s3.calls.index(put) < s3.calls.index(next(c for c in s3.calls if c[1] == "stats/index.html"))
 
 
 def test_upload_sends_only_new_data_files_and_drops_those_no_kept_version_reads(tmp_path):
@@ -182,7 +190,7 @@ def test_upload_sends_only_new_data_files_and_drops_those_no_kept_version_reads(
     (older / "data.json").unlink()
     three, _ = publish("4W")
     assert {k for k in s3.keys if k.startswith("stats/data/")} == {"stats/" + two, "stats/" + three}
-    assert json.loads(s3.bodies[f"stats/v/{older.name}/data.json"])[0]["file"] == two
+    assert json.loads(gzip.decompress(s3.bodies[f"stats/v/{older.name}/data.json"]))[0]["file"] == two
 
 
 def _engine(tmp_path, **publish):
