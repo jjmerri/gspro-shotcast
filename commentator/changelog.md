@@ -4,6 +4,12 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.136
+
+### Stats page
+- The stats page opens faster: a round's scorecard and details load when you open the round, so the page stays light however many rounds you've played.
+- The Rounds list shows 50 rounds at a time, with a button for more.
+
 ## 0.1.135
 
 ### Stats page
