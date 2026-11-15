@@ -227,7 +227,7 @@ merged like any other, and its record is in both nights' signatures.
   the SQLite copy, 3.6 s; its integrity check (16 s) and gzip (19 s) run in a thread after the start
   (`later`), and a copy they don't finish is kept as a plain `.db`, which `restore` takes too.
 - **Predictions** need no port: about 1,600 rows at 3 years, read in under 1 ms.
-- **To port:** the page files' remaining lists (below).
+- **Deferred:** the page files' remaining lists (below: the last 12 months by default, older on request).
 - **Decisions:**
   - The usual gimme stays as it is (the most common radius); the families it feeds put it in their
     signature, so a change in it (rare) works them all out once. No number changes.
@@ -267,8 +267,12 @@ merged like any other, and its record is in both nights' signatures.
     (`Content-Encoding: gzip`): CloudFront compresses only files up to 10 MB, and at 10 years
     `summary-all.json` is 24.8 MB (2.6 MB gzipped), 20.3 MB of it the rounds list (13,284 rounds;
     each one's `summary` 7.6 MB and `card` 4.0 MB). The site folder on the PC keeps them plain.
-  - Still to do: past years' lists (rounds, broadcasts, trends) in per-year files the page loads
-    when paged back. Player files are small (640 KB in all at 10 years); content-addressing them
+  - Deferred: past years' lists (rounds, broadcasts, trends). Direction: the page shows the last 12
+    months (like gapping) and older data only when asked for explicitly (a "show older" control
+    loading per-year files), not loaded behind the scenes. Nothing needs migrating to do it later:
+    the page and its files are rebuilt together each version. Smaller steps if it's needed sooner:
+    leave each round's `summary` (and `card`, with a stored front/back 9 label) out of the list and
+    fetch it when a round or its share card is opened (about 1.3 MB gzipped at 10 years). Player files are small (640 KB in all at 10 years); content-addressing them
     isn't worth it.
 - **Bench** at 1, 3, 5 and 10 years: the after-a-round times must be flat.
 
