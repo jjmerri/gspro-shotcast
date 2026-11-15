@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.134
+
+### Stats page
+- The side view of a shot draws the ground sloping from where it was hit to where it landed, so downhill and uphill shots read clearly, and says how far below or above the tee it came down.
+
 ## 0.1.133
 
 ### Stats page
