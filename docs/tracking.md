@@ -788,7 +788,10 @@ current file (even a corrupted one) as `pre-restore-*.db.gz` in the backup folde
 The tray's updates (Restart to update, or one installing itself) also save the file, with the booth stopped, as
 `pre-update-<when>-from-<version>.db.gz` there (the last three kept), to restore the same way. A
 version that changes the file's format (`store.FORMAT`) copies it first itself, as
-`pre-update-<when>-from-format-<n>.db.gz`, however it was installed. Going back to the release before (checked with 0.1.134, the last before
+`pre-update-<when>-from-format-<n>.db.gz`, however it was installed. The booth says so while it
+copies (the tray's status and a notification; up to a minute on a big file), and if the copy fails it
+doesn't start, leaves the file as it was and says why: free some room in the backup folder (or set
+`backup.dir`) and choose Restart. Going back to the release before (checked with 0.1.134, the last before
 format 6): it keeps working on the upgraded file, and the rows it writes join their rounds when the
 newer version starts again; restore the pre-update copy only to have the file exactly as it was.
 

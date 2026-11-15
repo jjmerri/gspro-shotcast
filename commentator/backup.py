@@ -22,7 +22,7 @@ import tempfile
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import stats_cache
 from .config import Config
@@ -153,12 +153,14 @@ def pre_update(cfg: Config, version: str, now: datetime | None = None) -> Path |
     return _copy_before(db_path, folder(cfg), version, now)
 
 
-def before_upgrade(db_path: str | Path, dest: str | Path, version: int, now: datetime | None = None) -> Path | None:
+def before_upgrade(db_path: str | Path, dest: str | Path, version: int, now: datetime | None = None,
+                   on_copy: Callable[[], None] | None = None) -> Path | None:
     """A pre-update copy of a season file whose format (PRAGMA user_version) is older than `version`,
     taken before the store upgrades it, so a release installed by hand can be gone back on like one
     installed from the menu (pre_update). None when there's nothing to keep: no season yet, or the
     file already upgraded. (After an update from the menu that's a second copy: one of another season
-    file sharing the folder can't be told from it without copying this one anyway.)
+    file sharing the folder can't be told from it without copying this one anyway.) `on_copy` is called
+    first when there's a copy to take (it takes a while on a big file).
 
     The format is read off the file's header, not through SQLite: a file in WAL mode with no -shm
     beside it (as the booth leaves it) can't be opened read-only, and one in an older format was never
@@ -173,6 +175,8 @@ def before_upgrade(db_path: str | Path, dest: str | Path, version: int, now: dat
     was = int.from_bytes(head[60:64], "big", signed=True)
     if was >= version:
         return None
+    if on_copy:
+        on_copy()
     return _copy_before(db_path, dest, f"format-{was}", now)
 
 

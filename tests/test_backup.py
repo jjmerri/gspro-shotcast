@@ -4,6 +4,8 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta
 
+import pytest
+
 from commentator import backup
 from commentator.config import Config
 from commentator.engine import Engine
@@ -247,7 +249,7 @@ def _older_season(path):
         db.commit()
 
 
-def test_a_season_file_in_an_older_format_is_copied_as_it_was_before_its_upgraded(tmp_path, caplog):
+def test_a_season_file_in_an_older_format_is_copied_as_it_was_before_its_upgraded(tmp_path):
     from commentator.store import FORMAT, Store
 
     path = tmp_path / "season.db"
@@ -271,7 +273,21 @@ def test_a_season_file_in_an_older_format_is_copied_as_it_was_before_its_upgrade
         (tmp_path / f"season.db{side}").unlink(missing_ok=True)
     Store(str(path)).db.close()   # upgraded already
     assert len(list((tmp_path / "backups").glob(backup.PRE_UPDATE + "*"))) == 1
-    assert "not copied" not in caplog.text
+
+
+def test_a_season_file_that_cant_be_copied_isnt_opened_or_upgraded(tmp_path):
+    from commentator.store import SeasonCopyFailed, Store
+
+    path = tmp_path / "season.db"
+    _older_season(path)
+    (tmp_path / "full").write_text("")   # (a file where the backups folder would go)
+    told = []
+    with pytest.raises(SeasonCopyFailed, match="couldn't be copied"):
+        Store(str(path), backups=tmp_path / "full", on_copy=lambda: told.append(1))
+    assert told == [1]
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
 
 
 def test_an_older_season_file_is_copied_even_beside_a_newer_copy_of_another(tmp_path):
@@ -285,14 +301,47 @@ def test_an_older_season_file_is_copied_even_beside_a_newer_copy_of_another(tmp_
     assert len(list(backup.folder(cfg).glob("*-from-format-5*"))) == 1
 
 
-def test_the_booth_copies_an_older_season_file_into_the_backup_folder_set(tmp_path):
+def test_the_booth_copies_an_older_season_file_into_the_backup_folder_set(tmp_path, monkeypatch):
     from commentator.__main__ import _build_engine
+    from commentator.store import SeasonCopyFailed
 
     cfg = Config(log_dir=str(tmp_path), db_path=str(tmp_path / "season.db"))
     cfg.backup.dir = str(tmp_path / "kept")
     cfg.league_file = "data/league.example.json"
     cfg.screen.ocr = cfg.screen.send_images = False
     cfg.commentary.enabled = False
+    monkeypatch.setenv("SHOTCAST_READY_FILE", str(tmp_path / "booth-ready"))
     _older_season(cfg.db_path)
     _build_engine(cfg).store.db.close()
     assert len(list((tmp_path / "kept").glob(backup.PRE_UPDATE + "*"))) == 1
+    assert "Copying the season file" in (tmp_path / "booth-note").read_text()   # (the tray shows it)
+    _older_season(cfg.db_path)
+    cfg.backup.dir = str(tmp_path / "booth-note")   # (a file: the copy fails)
+    cfg.commentary.enabled = True                    # and it isn't tried again recording only
+    monkeypatch.setattr("commentator.llm.build_llm", lambda c: None)
+    monkeypatch.setattr("commentator.tts.build_tts", lambda c: None)
+    tried = []
+    monkeypatch.setattr(backup, "before_upgrade", lambda *a, **k: tried.append(1) or 1 / 0)
+    with pytest.raises(SeasonCopyFailed):
+        _build_engine(cfg)
+    assert tried == [1]
+
+
+def test_a_booth_that_cant_copy_its_season_file_stops_saying_why(tmp_path, monkeypatch):
+    import argparse
+    import asyncio
+
+    from commentator import __main__ as main
+    from commentator.config import BOOTH_STOP_CODE
+    from commentator.store import SeasonCopyFailed
+
+    def fails(cfg):
+        raise SeasonCopyFailed("no room")
+    monkeypatch.setattr(main, "_build_engine", fails)
+    monkeypatch.setattr("commentator.perf.tune", lambda *a: None)
+    monkeypatch.setenv("SHOTCAST_READY_FILE", str(tmp_path / "booth-ready"))
+    args = argparse.Namespace(replay=None, console=False, no_commentary=False)
+    with pytest.raises(SystemExit) as stop:
+        asyncio.run(main.cmd_run(Config(log_dir=str(tmp_path)), args))
+    assert stop.value.code == BOOTH_STOP_CODE
+    assert (tmp_path / "booth-stopped").read_text() == "The booth didn't start: no room"

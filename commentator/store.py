@@ -424,20 +424,30 @@ def planner_counts_stale(db: sqlite3.Connection, grown: float = 2.0, least: int 
 FORMAT = 6
 
 
+class SeasonCopyFailed(RuntimeError):
+    """A season file in an older format couldn't be copied, so it wasn't opened (or upgraded)."""
+
+
 class Store:
-    def __init__(self, path: str | None, new_session: bool = True, backups: str | Path | None = None) -> None:
+    def __init__(self, path: str | None, new_session: bool = True, backups: str | Path | None = None,
+                 on_copy: Callable[[], None] | None = None) -> None:
         """Open (creating or upgrading) the season file. new_session=False opens it for maintenance, such
         as a backfill, without starting a booth session in it. `backups`: where a file in an older format
-        is copied first (default: a backups folder beside it, where the booth's own copies go by default)."""
+        is copied first (default: a backups folder beside it, where the booth's own copies go by default);
+        `on_copy` is called before that copy. If it can't be copied, SeasonCopyFailed and the file is left
+        as it was."""
         if path:
-            try:
-                from . import backup
+            from . import backup
 
-                made = backup.before_upgrade(path, backups or Path(path).parent / "backups", FORMAT)
-                if made:
-                    log.info("Season file copied before upgrading it: %s", made)
-            except Exception:
-                log.exception("Season file not copied before upgrading it (opening it anyway)")
+            where = backups or Path(path).parent / "backups"
+            try:
+                made = backup.before_upgrade(path, where, FORMAT, on_copy=on_copy)
+            except Exception as e:
+                log.exception("Season file not copied before upgrading it: not opening it")
+                raise SeasonCopyFailed(f"the season file ({path}) couldn't be copied to {where} before "
+                                       f"upgrading it, so it wasn't opened: {e}") from e
+            if made:
+                log.info("Season file copied before upgrading it: %s", made)
         # Long enough to outwait anything else holding the file (a backup's copy, a page edit), so the booth
         # doesn't stop over a busy moment.
         self.db = sqlite3.connect(path or ":memory:", timeout=30)

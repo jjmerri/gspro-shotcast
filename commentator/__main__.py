@@ -47,8 +47,12 @@ def _build_engine(cfg: Config):
     # be built (missing API keys), record only. Commentary on in config.yaml keeps the overlay up with
     # a warning on it; off, the overlay is hidden since it couldn't go on air anyway.
     if cfg.commentary.enabled or _overlay_wanted(cfg):
+        from .store import SeasonCopyFailed
+
         try:
             return _build_live_engine(cfg)
+        except SeasonCopyFailed:
+            raise
         except Exception as exc:
             if cfg.commentary.enabled:
                 logging.getLogger("commentator").warning(
@@ -69,7 +73,6 @@ def _build_recording_engine(cfg: Config, unavailable: str | None = None):
     from .screen import Screen
     from .sources import build_source
     from .speech import SpeechQueue
-    from .store import Store
     from .tts.console_tts import ConsoleTTS
 
     class _Off(LLMClient):
@@ -84,7 +87,7 @@ def _build_recording_engine(cfg: Config, unavailable: str | None = None):
         live_llm=off, segment_llm=off, speech=SpeechQueue(cfg, ConsoleTTS()),
         screen=Screen(cfg.screen) if cfg.source.type != "replay" and cfg.screen.ocr else None,
         await_preshot=cfg.source.type == "replay",
-        store=Store(cfg.db_path, backups=_backups(cfg)) if cfg.source.type != "replay" else None,
+        store=_store(cfg) if cfg.source.type != "replay" else None,
         health=_health(cfg), commentary_unavailable=unavailable,
     )
 
@@ -96,7 +99,6 @@ def _build_live_engine(cfg: Config):
     from .screen import Screen
     from .sources import build_source
     from .speech import SpeechQueue
-    from .store import Store
     from .tts import build_tts
 
     live = build_llm(cfg.llm.live)
@@ -117,15 +119,34 @@ def _build_live_engine(cfg: Config):
         screen=Screen(cfg.screen) if needs_screen else None,
         await_preshot=cfg.source.type == "replay",
         # Replays are made-up shots; only live play goes into the season.
-        store=Store(cfg.db_path, backups=_backups(cfg)) if cfg.source.type != "replay" else None,
+        store=_store(cfg) if cfg.source.type != "replay" else None,
         health=_health(cfg),
     )
 
 
-def _backups(cfg: Config) -> Path:
+def _store(cfg: Config):
+    """The booth's season file, copied first if it's in an older format (backup.before_upgrade)."""
     from . import backup
+    from .store import Store
 
-    return backup.folder(cfg)
+    def copying() -> None:
+        _booth_says("Copying the season file before upgrading it: the booth starts when it's done "
+                    "(up to a minute on a big file).")
+    return Store(cfg.db_path, backups=backup.folder(cfg), on_copy=copying)
+
+
+def _booth_says(text: str, file: str | None = None) -> None:
+    """Say what the booth is doing (or why it stopped): on the console and in the log, and to the tray
+    in the file beside its ready file (config.BOOTH_NOTE, or `file`)."""
+    from .config import BOOTH_NOTE
+
+    logging.getLogger("commentator").warning(text)
+    print(text, flush=True)
+    if ready := os.environ.get("SHOTCAST_READY_FILE"):
+        try:
+            Path(ready).with_name(file or BOOTH_NOTE).write_text(text, encoding="utf-8")
+        except OSError:
+            pass
 
 
 def _health(cfg: Config):
@@ -171,7 +192,14 @@ async def cmd_run(cfg: Config, args) -> None:
     tune(cfg.process_priority, cfg.max_cpu_cores)
     bid = build_id()
     logging.getLogger("commentator").info("Booth build: %s", bid)
-    engine = _build_engine(cfg)
+    from .config import BOOTH_STOP_CODE, BOOTH_STOPPED
+    from .store import SeasonCopyFailed
+
+    try:
+        engine = _build_engine(cfg)
+    except SeasonCopyFailed as e:
+        _booth_says(f"The booth didn't start: {e}", BOOTH_STOPPED)
+        sys.exit(BOOTH_STOP_CODE)
     if engine.commentary_on:
         print(f"On air (build {bid}). Brain: {cfg.llm.live.provider}:{cfg.llm.live.model}  Voice: {cfg.tts.provider}  "
               f"Source: {cfg.source.type}. Ctrl+C to stop.", flush=True)

@@ -978,6 +978,11 @@ class BackupConfig(BaseModel):
         return v
 
 
+# Beside the tray's booth-ready file (SHOTCAST_READY_FILE): a note on what a starting booth is doing that
+# takes a while, and why one stopped that won't start again as it is. The tray shows both.
+BOOTH_NOTE, BOOTH_STOPPED = "booth-note", "booth-stopped"
+BOOTH_STOP_CODE = 3   # the booth's exit code when it stopped for a reason starting it again won't fix
+
 # In log_dir: whether the booth is in a round, rewritten every ROUND_STATUS_EVERY_S, so the tray only
 # restarts it unasked between rounds (commentator/tray.py round_in_progress).
 ROUND_STATUS = "round.json"

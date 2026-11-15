@@ -222,8 +222,9 @@ merged like any other, and its record is in both nights' signatures.
   in it and builds its page; the next start here gives its rows their records, moving only the
   counters of the records they join (reconciling once moved every record's, so a rollback cost a cold
   build: on 1 year, 4,253 cache misses, now 37, as the same rows written here). A file older than
-  `store.FORMAT` is copied before it's upgraded (`backup.before_upgrade`): at 10 years (1.2 GB) 34 s,
-  once.
+  `store.FORMAT` is copied before it's upgraded (`backup.before_upgrade`; if it can't be, the file isn't
+  opened and the booth stops, saying why, in the tray). At 10 years (1.2 GB) 34 to 50 s: the SQLite
+  copy 3.6 s, its integrity check 16 s and gzip 19 s (the last two could run after the start), once.
 - **Predictions** need no port: about 1,600 rows at 3 years, read in under 1 ms.
 - **To port:** the page files' remaining lists (below).
 - **Decisions:**
