@@ -934,16 +934,17 @@ function shotViewData(s, P, k, W, H, color) {
   const cx = (L[0] + E[0]) / 2, cy = (L[1] + E[1]) / 2;
   const zoom = [Math.max(0, Math.min(W - zw, cx - zw / 2)), Math.max(0, Math.min(H - zh, cy - zh / 2)), zw, zh]
     .map(v => +v.toFixed(1));
-  return { pts: pts.map(p => p.map(v => +v.toFixed(2))), land, W, H, zoom, color, club: s.club || null, descent: s.descent ?? null };
+  return { pts: pts.map(p => p.map(v => +v.toFixed(2))), land, W, H, zoom, color, club: s.club || null, descent: s.descent ?? null, tee: s.n === 1 };
 }
 
-// The side-on frame: yards along the bottom, feet up the side, both from where the ball was played.
+// The side-on frame: yards along the bottom, feet up the side, both from where the ball was played,
+// with room under a ball that finished below it for the slope and its labels.
 function sideScale(sv, w) {
   const yds = sv.pts.map(p => p[2]), fts = sv.pts.map(p => p[3]);
   const far = Math.max(...yds), step = far > 150 ? 50 : far > 60 ? 25 : 10;
   const right = Math.ceil((far + step * 0.6) / step) * step;   // room for the labels past the ball
   const hi = Math.max(...fts), lo = Math.min(0, ...fts), hStep = hi - lo > 120 ? 50 : hi - lo > 40 ? 25 : 10;
-  const top = Math.max(hStep, Math.ceil((hi + 1) / hStep) * hStep), bot = Math.floor(lo / hStep) * hStep;
+  const top = Math.max(hStep, Math.ceil((hi + 1) / hStep) * hStep), bot = lo < 0 ? Math.floor((lo - hStep / 2) / hStep) * hStep : 0;
   const X = d => 44 + d / right * (w - 64), Y = f => 190 - (f - bot) / (top - bot) * 160;
   return { X, Y, right, step, top, bot, hStep, w };
 }
@@ -954,8 +955,13 @@ function sideView(sv) {
   const apex = pts.slice(0, sv.land + 1).reduce((a, p) => p[3] > a[3] ? p : a);
   const f = (x, d = 0) => x.toFixed(d);
   let g = `<rect x="0" y="190" width="${w}" height="40" fill="#2c5a3a"/>`;
-  for (let v = bot; v <= top; v += hStep) if (v) g += `<line x1="44" y1="${f(Y(v), 1)}" x2="${w - 20}" y2="${f(Y(v), 1)}" stroke="#fff" stroke-opacity=".08"/><text x="38" y="${f(Y(v) + 4, 1)}" text-anchor="end" style="fill:var(--dim)" font-size="11">${v} ft</text>`;
-  if (bot < 0) g += `<line x1="44" y1="${f(Y(0), 1)}" x2="${w - 20}" y2="${f(Y(0), 1)}" stroke="#fff" stroke-opacity=".25" stroke-dasharray="2 4"><title>Level with where it was played</title></line>`;
+  for (let v = hStep; v <= top; v += hStep) g += `<line x1="44" y1="${f(Y(v), 1)}" x2="${w - 20}" y2="${f(Y(v), 1)}" stroke="#fff" stroke-opacity=".08"/><text x="38" y="${f(Y(v) + 4, 1)}" text-anchor="end" style="fill:var(--dim)" font-size="11">${v} ft</text>`;
+  // The ground: GSPro has its height only where the ball was played, landed and stopped, so straight
+  // between those, level beyond. Downhill, the ball comes down onto the slope, not below a line.
+  const ground = [[0, 0], [L[2], L[3]], [E[2], E[3]]].sort((a, b) => a[0] - b[0]);
+  const gy = ground.map(q => Y(q[1]));
+  g += `<polygon points="0,${f(gy[0], 1)} ${ground.map((q, i) => `${f(X(q[0]), 1)},${f(gy[i], 1)}`).join(" ")} ${w},${f(gy[2], 1)} ${w},190 0,190" fill="#2c5a3a"/>`
+    + `<polyline points="0,${f(gy[0], 1)} ${ground.map((q, i) => `${f(X(q[0]), 1)},${f(gy[i], 1)}`).join(" ")} ${w},${f(gy[2], 1)}" fill="none" stroke="#4f8a5f" stroke-width="1.5"/>`;
   for (let d = 0; d <= right; d += step) g += `<line x1="${f(X(d), 1)}" y1="190" x2="${f(X(d), 1)}" y2="196" stroke="#cfe0d4"/><text x="${f(X(d), 1)}" y="210" text-anchor="middle" fill="#cfe0d4" font-size="11">${d} yd</text>`;
   g += `<rect x="${f(X(0) - 4, 1)}" y="${f(Y(0), 1)}" width="8" height="3" fill="#ddd"/>`;
   const label = (t, x, y, text, anchor = "middle", bold = false) => `<text data-at="${t}" opacity="0" x="${f(x, 1)}" y="${f(y, 1)}" text-anchor="${anchor}" fill="#e8efe9" font-size="12"${bold ? ' font-weight="600"' : ""} paint-order="stroke" stroke="#111" stroke-width="3">${text}</text>`;
@@ -963,15 +969,19 @@ function sideView(sv) {
     + label(apex[4], X(apex[2]), Y(apex[3]) - 10, `Apex ${f(apex[3])} ft`, "middle", true);
   // Carry and total under the ball, each on its own side of the roll (it can spin back).
   const back = E[2] < L[2];
+  // One that won't fit to the right of its ball (on a phone, a long shot's total) goes over the ball instead.
+  const under = (t, p, text, right, bold) => right && X(p[2]) + 4 + text.length * 7 > w
+    ? label(t, X(p[2]) + 6, Y(p[3]) - 12, text, "end", bold)
+    : label(t, X(p[2]) + (right ? 4 : -4), Y(p[3]) + 20, text, right ? "start" : "end", bold);
   g += `<circle data-at="${L[4]}" opacity="0" cx="${f(X(L[2]), 1)}" cy="${f(Y(L[3]), 1)}" r="6" fill="none" stroke="#fff"/>`
-    + label(L[4], X(L[2]) + (back ? -4 : 4), Y(L[3]) + 20, `Carry ${f(L[2])} yd`, back ? "start" : "end");
-  g += label(E[4], X(E[2]) + (back ? -4 : 4), Y(E[3]) + 20, `Total ${f(E[2])} yd`, back ? "end" : "start", true);
+    + under(L[4], L, `Carry ${f(L[2])} yd`, back, false) + under(E[4], E, `Total ${f(E[2])} yd`, !back, true);
   g += `<polyline id="sv-strail" fill="none" stroke="${sv.color}" stroke-width="2.5" stroke-linejoin="round"/>`
     + `<circle id="sv-sball" r="4.5" cx="${f(X(0), 1)}" cy="${f(Y(0), 1)}" fill="#fff" stroke="#111"/>`;
   const facts = [sv.club && esc(sv.club), `carry ${f(L[2])} yd`, `total ${f(E[2])} yd`, `apex ${f(apex[3])} ft`,
-                 `hang time ${L[4].toFixed(1)} s`, sv.descent != null && `came down at ${sv.descent}°`].filter(Boolean);
+                 `hang time ${L[4].toFixed(1)} s`, sv.descent != null && `came down at ${sv.descent}°`,
+                 Math.abs(L[3]) >= 3 && `landed ${f(Math.abs(L[3]))} ft ${L[3] < 0 ? "below" : "above"} ${sv.tee ? "the tee" : "where it was played"}`].filter(Boolean);
   return `<div class="sv-side"><div class="sv-box"><svg id="sv-side" viewBox="0 0 ${w} 230">${g}</svg><span class="sv-slow" hidden>SLOW-MO ¼×</span></div>
-    <div class="sub">Side-on: ${facts.join(" · ")}. Heights from where it was played.</div></div>`;
+    <div class="sub">Side-on: ${facts.join(" · ")}. Heights from ${sv.tee ? "the tee" : "where it was played"}.</div></div>`;
 }
 
 // Draws the shot view at this moment and asks for the next frame until it's done. Its clock is
