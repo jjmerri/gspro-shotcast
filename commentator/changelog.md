@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.133
+
+### Stats page
+- Tap a shot in a hole replay to watch it from the side and overhead: the ball's height all the way out, its apex, carry, total, hang time and how steeply it came down, with the landing in slow motion up close (GSPro 3.59 and later).
+
 ## 0.1.132
 
 ### Stats page
