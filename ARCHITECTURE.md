@@ -101,7 +101,14 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
   stats, the shot log and broadcast transcripts. The booth itself doesn't import them.
 - **`hole_replay.py`** each round's holes as drawn on the Rounds tab: shot lines from the logged
   ball positions, aims, tee and pin (`hole_layouts`, or the pin fitted to the shots' distances),
-  over the hole's minimap kept off the tee (`hole_images`, `minimap.snapshot`).
+  over the hole's minimap kept off the tee (`hole_images`, `minimap.snapshot`). A stroke GSPro's
+  round file tracked (`shot_tracks`) is drawn along its real flight and roll.
+- **`round_file.py`** GSPro's own record of the round in play (`currentRound.dat`, 3.59+), as
+  tracks: each stroke's start, touchdown, stop, flight and roll, lies and finish. The engine's
+  `_round_file_loop` applies it with `Store.apply_round_file` whenever the file changes: matched to
+  the stored shots by hole, stroke number, ball speed and player, it replaces the booth's start,
+  carry, total (`total_from_log = 2`), lies (a finer HUD lie stays) and finish, and the setters
+  that read those later leave it be.
 - **`log_backfill.py`** `backfill-log`: matches a saved GSPro log's shots to stored ones in order
   and fills their positions, aims and the hole layouts.
 - **`stats_site.py`** builds the stats page as a static site (per-context summary JSON plus a small

@@ -9,6 +9,7 @@ import os
 import random
 import re
 import shutil
+import sqlite3
 import sys
 import threading
 import time
@@ -39,7 +40,7 @@ from .league import League, course_match_score
 from .llm import LLMClient
 from .minimap import JevMinimap, MinimapRead, same_map, snapshot as minimap_snapshot
 from .putt_read import REGION as PUTT_REGION, PuttRead, read_break
-from . import recall
+from . import recall, round_file
 from . import report as problem_report
 from .models import (
     HoleChangeEvent, Line, PreShotEvent, RoundEndEvent, RoundStartEvent, ScorecardEvent, Shot, ShotEvent,
@@ -67,6 +68,7 @@ from .round import name_ratio as _name_ratio
 from .round import _join as _join_names
 from .screen import Screen, log_failure as log_capture_failure, name_signature, tone_of
 from .sources.base import ShotSource
+from .sources import gspro_files
 from .sources.gspro_log import M_TO_YD, MATERIAL_TO_LIE, GsproLogFollower, GsproState, live_log
 from .speech import SpeechQueue
 from .state import SessionState, ShotRecord
@@ -429,6 +431,8 @@ UNPLAYED_SHOT_WAIT_SECONDS = 2.5
 RANGE_TEE_SHOT_WAIT_SECONDS = 30.0
 RECAP_POLL_SECONDS = 30.0      # how often a league recap waiting on a round or its publish looks again
 LAYOUT_WAIT_SECONDS = 20.0     # after a round's end, for GSPro 3.1's logged layout before the course file's
+ROUND_FILE_CHECK_S = 2.0       # how often GSPro's round file (currentRound.dat) is looked at
+ROUND_FILE_RETRY_S = 180.0     # how long it's applied again after it changes, for shots recorded since
 # The scorecard title is read every HUD poll for this long after GSPro's log says a hole (or the round)
 # ended, the card being due; otherwise on the first poll SCORECARD_IDLE_SECONDS after the last read, to
 # catch a card opened from the menu or one whose hole end the log missed. GSPro 4 shows the card for about
@@ -1146,6 +1150,8 @@ class Engine:
         self._start_hud_buffer()
         if self.cfg.source.type != "replay":
             asyncio.create_task(self._round_status_loop(), name="round-status")
+            if self._log_truth:
+                asyncio.create_task(self._round_file_loop(), name="round-file")
         if self.screen and self.cfg.screen.ocr:
             tasks.append(asyncio.create_task(self._watch_hud(), name="hud-watch"))
             # Always: the setup screen's players, holes and game mode are the round's stats too. Only the
@@ -2943,6 +2949,47 @@ class Engine:
                     except Exception as e:
                         log.debug("Couldn't work out the week board: %s", e)
             await asyncio.sleep(ROUND_STATUS_CHECK_S)
+
+    async def _round_file_loop(self) -> None:
+        """Applies GSPro's own record of the round in play (currentRound.dat, 3.59+; see round_file.py) to
+        the stored shots: when it changes, and again for ROUND_FILE_RETRY_S after (the booth records a shot
+        after GSPro writes it, and till then a stroke can be matched to an earlier round's). Older GSPro
+        writes none. It's applied whole each time: which round the file is comes from all its strokes."""
+        sig, tracks, gone, pending, pending_since = None, [], set(), [], None
+
+        def same_player(gspro_name: str, player: str | None) -> bool:
+            return self.league is not None and player is not None and self.league.match_player(gspro_name) == player
+        while True:
+            await asyncio.sleep(ROUND_FILE_CHECK_S)
+            try:
+                path = Path(gspro_files.folder_of(self._follower.path if self._follower else
+                                                  self.cfg.source.gspro_log)) / gspro_files.ROUND_FILE
+                st = await asyncio.to_thread(path.stat)
+            except OSError:
+                continue
+            now_sig = (st.st_mtime_ns, st.st_size)
+            if now_sig != sig:
+                try:
+                    entries = await asyncio.to_thread(lambda: json.loads(path.read_text(encoding="utf-8-sig")))
+                except (OSError, ValueError):
+                    continue   # mid-write: read again next time
+                tracks = round_file.tracks(entries) if isinstance(entries, list) else []
+                gone = round_file.untracked(entries, tracks) if isinstance(entries, list) else set()
+            elif pending_since is None or time.monotonic() - pending_since >= ROUND_FILE_RETRY_S:
+                continue
+            try:
+                written, left = self.store.apply_round_file(tracks, now=st.st_mtime, same_player=same_player,
+                                                            rewrite=now_sig != sig, gone=gone)
+            except sqlite3.Error as e:
+                log.warning("Couldn't apply GSPro's round file: %s", e)
+                continue
+            if now_sig != sig:
+                log.info("GSPro's round file: %d strokes, %d applied, %d without a shot yet",
+                         len(tracks), written, len(left))
+                sig, pending_since = now_sig, time.monotonic()
+            elif len(left) < len(pending):
+                log.info("GSPro's round file: %d more strokes applied", len(pending) - len(left))
+            pending = left
 
     def _chat_open(self) -> bool:
         """Whether the page's chat is open: the booth on air (not muted) in a round."""

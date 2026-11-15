@@ -745,7 +745,7 @@ function replaySvg(rp, animate = false, { colors = {}, only = null, focus = null
   const drawn = only ? rp.players.filter(p => p.name === only) : rp.players;
   const toggle = focus && rp.players.length > 1 && rp.players.some(p => p.name === focus)
     ? ` · <button class="link" data-replayonly>${only ? "Show everyone" : `Only ${esc(focus)}`}</button>` : "";
-  const pts = [rp.tee, rp.pin, ...rp.players.flatMap(p => p.shots.flatMap(s => [s.from, s.to, s.aim]))].filter(Boolean);
+  const pts = [rp.tee, rp.pin, ...rp.players.flatMap(p => p.shots.flatMap(s => [s.from, s.to, s.aim, ...(s.path || [])]))].filter(Boolean);
   if (pts.length < 2) return '<p class="empty">Not enough positions logged to draw this hole.</p>';
   const a = rp.tee || pts[0], b = rp.pin || pts[pts.length - 1];
   let fx = b[0] - a[0], fz = b[1] - a[1];
@@ -784,10 +784,12 @@ function replaySvg(rp, animate = false, { colors = {}, only = null, focus = null
       if (s.from && s.aim) { const [x1, y1] = P(s.from), [x2, y2] = P(s.aim);
         g += `<g${at("rp-in", s.n)}><line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${c}" stroke-opacity=".45" stroke-dasharray="3 3"/><circle cx="${x2}" cy="${y2}" r="2.5" fill="none" stroke="${c}" stroke-opacity=".6"><title>${tip} · aim</title></circle></g>`; }
       if (s.from && s.to) { const [x1, y1] = P(s.from), [x2, y2] = P(s.to);
-        const { d, len } = flightPath(+x1, +y1, +x2, +y2, s.putt ? 0 : (s.bend || 0) * k);
+        const { d, len } = s.path ? trackPath(s.path.map(P)) : flightPath(+x1, +y1, +x2, +y2, s.putt ? 0 : (s.bend || 0) * k);
         g += `<path d="${d}" fill="none" stroke="${c}" stroke-width="${s.putt ? 1.5 : 2.5}"${at("rp-draw", s.n, 0.3, `--len:${(len + 1).toFixed(1)};`)}><title>${tip}${s.shape ? " · " + esc(s.shape) : ""}</title></path>`;
         const delay = ((starts[s.n] ?? 0) + 0.3).toFixed(2);
         if (animate) balls += `<circle r="2.5" fill="#fff" stroke="#111" stroke-width=".8" class="rp-ball" style="animation-delay:${delay}s"><animateMotion path="${d}" begin="${delay}s" dur=".55s" fill="freeze" calcMode="spline" keyTimes="0;1" keyPoints="0;1" keySplines=".42 0 .58 1"/></circle>`;
+        if (s.path && s.land != null && s.land < s.path.length - 1) { const [lx, ly] = P(s.path[s.land]);
+          g += `<circle cx="${lx}" cy="${ly}" r="1.8" fill="none" stroke="${c}"${at("rp-in", s.n, 0.6)}><title>${tip} · landed</title></circle>`; }
         if (s.penalty) g += `<g${at("rp-in", s.n, 0.85)}><path d="M${x2 - 4},${y2 - 4} l8,8 m0,-8 l-8,8" stroke="#e53935" stroke-width="2.2" stroke-linecap="round"/><title>${tip} · into the penalty area (penalty stroke, then the drop)</title></g>`; }
       if (s.from) { const [x, y] = P(s.from); g += `<g${at("rp-in", s.n)}><circle cx="${x}" cy="${y}" r="3.5" fill="${c}" stroke="#111"><title>${tip}</title></circle>`;
         g += `<text x="${+x + 6}" y="${+y + 3}" fill="${c}" font-size="10" paint-order="stroke" stroke="#111" stroke-width="2.5">${s.n ?? ""}${s.club && !s.putt ? " " + esc(s.club) : ""}</text></g>`; }
@@ -804,12 +806,20 @@ function replaySvg(rp, animate = false, { colors = {}, only = null, focus = null
   const notes = [rp.pin ? (rp.pin_estimated ? "Pin estimated from the shots' distances." : "") : "Pin position unknown.",
                  drawn.some(p => p.shots.some(s => s.aim)) ? "Dashed: where the player aimed." : "",
                  drawn.some(p => p.shots.some(s => s.penalty)) ? "✕: where a ball went into a penalty area (the next shot is the drop)." : "",
-                 drawn.some(p => p.shots.some(s => s.bend)) ? "Full shots curve by their shape, estimated from the spin axis." : "",
+                 drawn.some(p => p.shots.some(s => s.path)) ? "Shots drawn as GSPro tracked the ball, ○ where it landed." : "",
+                 drawn.some(p => p.shots.some(s => s.bend)) ? `${drawn.some(p => p.shots.some(s => s.path)) ? "Others curve" : "Full shots curve"} by their shape, estimated from the spin axis.` : "",
                  rp.map && rp.map.approx ? "Map from another round here: its tee, pin dot and yardages may differ a little." : ""].filter(Boolean).join(" ");
   return `<div class="replay"><div class="sub">${esc(rp.course)} · hole ${rp.hole}${rp.par ? ` · par ${rp.par}` : ""}
     · <button class="link" data-replayagain title="Play the hole again">↻ Play again</button>${toggle}${actions}</div>
     <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${g}</svg>
     <div class="sub">${legend}</div>${notes ? `<div class="sub">${notes}</div>` : ""}</div>`;
+}
+
+// A shot as GSPro tracked it: the line through its points (screen [x, y] strings), and its length.
+function trackPath(pts) {
+  let len = 0;
+  for (let i = 1; i < pts.length; i++) len += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+  return { d: "M" + pts.map(p => p.join(",")).join(" L"), len };
 }
 
 // A shot's flight from (x1, y1) to (x2, y2): a quadratic curve bowed `bend` pixels to the right of the

@@ -81,7 +81,8 @@ What's recorded, and from where:
 
 | Table | One row per | What's in it |
 |---|---|---|
-| `shots` | swing | Player, course, hole, shot number, club; launch monitor ball speed, launch angle, start direction, spin, spin axis, club speed, carry; club path, attack angle, face to target, dynamic loft and strike location on the face, when the monitor reported club data (NULL otherwise); lie before and after, slope, pin elevation, distance to the pin before and where it finished; GSPro's carry/total/offline; putt or full shot; a putt's result (holed, conceded, missed), or `holed` on a full shot that went in (a stroke the same player hits again on the same hole is never left `holed`: a putt becomes `missed`, a full shot loses its outcome); where GSPro had the ball before it (`start_x/y/z`, world metres, from the log's setup block; NULL on a tee shot, which has none) and the player's minimap aim click, if they moved it (`aim_map_x/y`); league, tournament or practice; `mulligan = 1` on a stroke GSPro took back; `left_out = 1` on a stroke left out of the stats (see below). `handed`: the player's hand, `RH` or `LH`. `tree_hits`: how many times GSPro's log had the ball hit a tree in flight, foliage or a trunk (NULL for none); such a shot's carry is left out of the carry model. A conceded tap-in gets its own putt row (`outcome = 'gimme'`, no ball data), so every putt on the card is here |
+| `shots` | swing | Player, course, hole, shot number, club; launch monitor ball speed, launch angle, start direction, spin, spin axis, club speed, carry; club path, attack angle, face to target, dynamic loft and strike location on the face, when the monitor reported club data (NULL otherwise); lie before and after, slope, pin elevation, distance to the pin before and where it finished; GSPro's carry/total/offline; putt or full shot; a putt's result (holed, conceded, missed), or `holed` on a full shot that went in (a stroke the same player hits again on the same hole is never left `holed`: a putt becomes `missed`, a full shot loses its outcome); where GSPro had the ball before it (`start_x/y/z`, world metres, from the log's setup block, or GSPro's round file on 3.59+; otherwise NULL on a tee shot, which the log gives none) and the player's minimap aim click, if they moved it (`aim_map_x/y`); league, tournament or practice; `mulligan = 1` on a stroke GSPro took back; `left_out = 1` on a stroke left out of the stats (see below). `handed`: the player's hand, `RH` or `LH`. `tree_hits`: how many times GSPro's log had the ball hit a tree in flight, foliage or a trunk (NULL for none); such a shot's carry is left out of the carry model. A conceded tap-in gets its own putt row (`outcome = 'gimme'`, no ball data), so every putt on the card is here |
+| `shot_tracks` | stroke GSPro's round file recorded (3.59+) | Where GSPro had the ball land and stop, and its flight and roll (world metres), from `currentRound.dat`, with the carry, total, finish and lie it set on the shot (see below) |
 | `hole_layouts` | hole of a completed round | Each played hole's tee, pin (as set that round) and GSPro's aim waypoint, in world metres, from the hole list GSPro logs when a round is complete; a round quit early logs none, so its holes are filled from the course's GKD file (see Rounds below) |
 | `hole_images` | course and hole | GSPro's minimap off the tee (JPEG, title bar trimmed), with where the ball and pin sit on it: the background of every replay of the hole. Kept at the first tee setup on a hole that has none yet, on or off air, once the round has started (an opening tee is snapped as the round starts, under its course and start hole) |
 | `course_tees` | course and tee | Each tee's course rating, slope and par from the course's `coursedetails.txt`, kept whenever a course loads; used for the handicap index |
@@ -103,6 +104,14 @@ strokes or fewer counting the bunker shot, whatever the score. The lie a shot wa
 (`lie_before`) is GSPro's too: the first stroke on a hole is `tee`, and GSPro logs the surface
 when a shot is struck from rough or sand; the next shot's lie then corrects where the previous
 one came to rest (`lie_after`).
+
+On GSPro 3.59 and later, GSPro's own record of the round in play (`currentRound.dat`, beside its
+log) is applied to each stroke once the ball stops: where it was played from (a tee shot and a
+drop included), the carry, the total, the lies and where it finished come from GSPro's physics
+rather than the screen, and the booth's later reads leave them be. A lie the screen reads finer
+than the file's (semi rough, fringe, pine straw) is kept. A scramble's finish stays the booth's, for
+the ball the team picked. Offline isn't in the file. The file starts over each round, so earlier
+rounds keep what the booth read.
 
 Mulligans and pick-ups follow GSPro's scoring. A mulligan's stroke stays in `shots`, flagged
 `mulligan = 1`, and is left out of every score and stat (the re-hit takes its shot number); its

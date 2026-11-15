@@ -7,8 +7,10 @@ hole's last stroke into the pin; a ball lost to a penalty area (water, OB) runs 
 (shots.hazard_*), and the drop is the next stroke's start. Positions are top-down (x, z): Unity's y is height, and +x is to the
 right of a player facing +z, so the plain (x, z) plane is the map as seen from above.
 
-A full shot is drawn bowed by its estimated curve (shot_shape.bend_yards, as "bend": metres to
-the right of the straight line at its middle); a putt is straight.
+A stroke GSPro's round file recorded (shot_tracks, GSPro 3.59+) is drawn as the ball went: "path", its
+top-down flight and roll from where it was played to where it stopped, with "land" the index of the
+touchdown. Otherwise a full shot is drawn bowed by its estimated curve (shot_shape.bend_yards, as
+"bend": metres to the right of the straight line at its middle), and a putt straight.
 
 A tee shot has no logged start (GSPro sets it up without a setup block), so it comes from the hole's
 tee in hole_layouts, from any round on the course. The pin moves round to round, so it's taken only
@@ -90,6 +92,58 @@ def estimate_pin(obs: list[tuple[tuple[float, float], float]]) -> tuple[float, f
             break
     rms = math.sqrt(sum((math.hypot(px - x, pz - z) - d) ** 2 for (x, z), d in obs) / len(obs))
     return (px, pz) if rms <= PIN_FIT_MAX_RMS_M else None
+
+
+PATH_TOLERANCE_M = 0.3          # a drawn path keeps the points it needs to stay within this of the ball's
+
+
+def _simplify(pts: list[tuple[float, float]], tol: float = PATH_TOLERANCE_M) -> list[int]:
+    """The indices of the points a line through them needs to stay within `tol` of all of them
+    (Douglas-Peucker), the first and last always."""
+    keep, stack = {0, len(pts) - 1}, [(0, len(pts) - 1)]
+    while stack:
+        i, j = stack.pop()
+        (ax, az), (bx, bz) = pts[i], pts[j]
+        n = math.hypot(bx - ax, bz - az)
+        far, at = 0.0, None
+        for k in range(i + 1, j):
+            px, pz = pts[k]
+            # Distance to the segment, not its line: a ball that rolls back past where it was stays drawn.
+            u = max(0.0, min(1.0, ((px - ax) * (bx - ax) + (pz - az) * (bz - az)) / (n * n))) if n > 1e-9 else 0.0
+            d = math.hypot(px - ax - u * (bx - ax), pz - az - u * (bz - az))
+            if d > far:
+                far, at = d, k
+        if at is not None and far > tol:
+            keep.add(at)
+            stack += [(i, at), (at, j)]
+    return sorted(keep)
+
+
+def _tracks(db: sqlite3.Connection) -> dict[int, dict[str, Any]]:
+    """Each tracked shot's top-down path (GSPro's round file, shot_tracks): {"path": [[x, z], ...], "land":
+    the touchdown's index (absent for a putt that never flew), "end": (x, z)}. A shot tracked with nothing
+    to draw (a penalty followed it) gets {}: its start is still GSPro's."""
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'shot_tracks'").fetchone():
+        return {}
+    out = {}
+    for r in db.execute("SELECT t.shot_id, t.flight, t.roll, t.end_x, t.end_z, s.start_x, s.start_z"
+                        " FROM shot_tracks t JOIN shots s ON s.id = t.shot_id"):
+        if r["end_x"] is None or r["start_x"] is None:
+            out[r["shot_id"]] = {}
+            continue
+        flight = [(p[0], p[2]) for p in json.loads(r["flight"] or "[]")]
+        roll = [(p[0], p[2]) for p in json.loads(r["roll"] or "[]")]
+        pts = [(r["start_x"], r["start_z"]), *flight, *roll, (r["end_x"], r["end_z"])]
+        land = len(flight) if flight else None   # the touchdown: the flight's last point
+        pts = [p for i, p in enumerate(pts) if i == 0 or math.dist(p, pts[i - 1]) > 0.01 or i == land]
+        if flight:
+            land = next((i for i, p in enumerate(pts) if p == flight[-1]), None)
+        idx = _simplify(pts)
+        if land is not None and land not in idx:
+            idx = sorted({*idx, land})
+        out[r["shot_id"]] = {"path": [_r(pts[i]) for i in idx], "end": (r["end_x"], r["end_z"]),
+                             **({"land": idx.index(land)} if land is not None else {})}
+    return out
 
 
 def _layouts(db: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -226,6 +280,7 @@ def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]
     teams = {rnd: _scramble_teams(rows) for rnd, rows in by_round.items()}
     sides = _sides(db)
     cards = _cards(db)
+    tracks = _tracks(db)
     out = {}
     for key, rows in groups.items():
         rows = _fill_gaps(rows)
@@ -236,7 +291,7 @@ def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]
             continue
         ses, _, last = span[key[0]]
         until = min((f for s, f, _ in span.values() if s & ses and f > last), default=None)
-        if (rp := _replay(rows, key[1], layouts, ses, until, teams[key[0]], sides.get(key[0]))) is not None:
+        if (rp := _replay(rows, key[1], layouts, ses, until, teams[key[0]], sides.get(key[0]), tracks)) is not None:
             if rp["tee"] and rp["pin"] and (m := _map_for(images, rp["course"], key[1], ses)):
                 rp["map"] = m
             rp["ts"] = min(r["ts"] for r in rows)   # the hole's first shot, for the page's video link
@@ -540,8 +595,9 @@ def _team_ends(played: list[sqlite3.Row], starts: dict[int, tuple | None], rows:
 
 def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sessions: set,
             until: float | None = None, teams: dict[str, str] | None = None,
-            sides: dict[str, int] | None = None) -> dict[str, Any] | None:
+            sides: dict[str, int] | None = None, tracks: dict[int, dict] | None = None) -> dict[str, Any] | None:
     first = rows[0]
+    tracks = tracks or {}
     this_round, any_round = _layout_for(layouts, first["course"], hole, sessions, first["ts"],
                                         rows[-1]["ts"], until)
     tee = _xz(any_round["tee_x"], any_round["tee_z"]) if any_round else None
@@ -557,7 +613,9 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
         par = int(m.group(1))
     # A tee shot starts on the tee whatever was stored: a group round recorded before positions
     # followed the shooter can have the previous player's ball there.
-    starts = {r["id"]: ((tee if r["shot_number"] == 1 else None) or _xz(r["start_x"], r["start_z"])
+    # GSPro's round file has it exactly (shot_tracks), a tee shot's too.
+    starts = {r["id"]: ((tee if r["shot_number"] == 1 and r["id"] not in tracks else None)
+                        or _xz(r["start_x"], r["start_z"])
                         or (tee if (r["shot_number"] or 0) <= 1 else None)) for r in played}
     team_ends, team_used = _team_ends(played, starts, rows, pin, teams or {})
     alt_ends = _alternate_ends(played, starts, rows, pin, sides or {})
@@ -587,19 +645,27 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
                 end = _xz(nxt["start_x"], nxt["start_z"])
             elif nxt is None and finished:
                 end = pin
+            trk = tracks.get(r["id"])
+            penalty = end is not None and end == hazard
+            # A scramble's ball is drawn only where the team played on; alternate shot's every stroke is the team's ball.
+            if trk and not penalty and (end is not None or r["fmt"] == "alternate" or not _shared(r)):
+                end = trk["end"]   # where GSPro had the ball stop (a drop after it is the next start)
+            else:
+                trk = None
             aim = None
             if (r["aim_map_x"] is not None and start and pin and not r["is_putt"]
                     and r["to_pin_yards"] and (f := _unit(pin[0] - start[0], pin[1] - start[1]))):
                 along, right = aim_offset(r["aim_map_x"], r["aim_map_y"], r["to_pin_yards"] / M_TO_YD)
                 aim = (start[0] + f[0] * along + f[1] * right, start[1] + f[1] * along - f[0] * right)
             shape = shot_shape.shape(r["start_direction"], r["spin_axis"], r["carry"], bool(r["is_putt"]), r["handed"])
-            bend = None if r["is_putt"] else shot_shape.bend_yards(r["spin_axis"], r["carry"])
+            bend = None if r["is_putt"] or trk else shot_shape.bend_yards(r["spin_axis"], r["carry"])
             shots.append({"n": r["shot_number"], "club": r["club"], "putt": bool(r["is_putt"]),
                           "lie": r["lie_before"], "to_pin": r["to_pin_yards"] and round(r["to_pin_yards"], 1),
                           "from": _r(start), "to": _r(end), "aim": _r(aim),
                           **({"shape": shape} if shape else {}),
                           **({"bend": round(bend / M_TO_YD, 2)} if bend else {}),
-                          **({"penalty": True} if end is not None and end == hazard else {})})
+                          **({"path": trk["path"], **({"land": trk["land"]} if "land" in trk else {})} if trk else {}),
+                          **({"penalty": True} if penalty else {})})
         if any(s["from"] or s["to"] for s in shots):
             # The hole's score counts strokes that are never drawn: a gimme or conceded putt, a penalty.
             mine_all = [r for r in rows if (r["player"] or "unknown") == name and not r["mulligan"]]

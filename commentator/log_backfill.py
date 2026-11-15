@@ -168,7 +168,10 @@ def _backfill(db_path: str, logs: list[str], fix_starts: bool = False) -> dict[s
         for i, j in pairs:
             f, r = got.fires[i], rows[j]
             row_of[i] = r
-            if fix_starts and r["start_x"] is not None and (
+            tracked = db.execute("SELECT 1 FROM shot_tracks WHERE shot_id = ?", (r["id"],)).fetchone()
+            if tracked:
+                pass   # GSPro's round file placed it (shot_tracks): exact, a sim drop included
+            elif fix_starts and r["start_x"] is not None and (
                     f.start is None or abs(f.start[0] - r["start_x"]) > 0.01 or abs(f.start[2] - r["start_z"]) > 0.01):
                 stats["fixed"] += 1   # a tee shot the log gives no start: the replay places it on the tee
                 db.execute("UPDATE shots SET start_x = ?, start_y = ?, start_z = ? WHERE id = ?",

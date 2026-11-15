@@ -4,6 +4,7 @@ One file, no server. Open it with any SQLite viewer (e.g. DB Browser for SQLite)
 export. Replays and evals use an in-memory database so made-up shots never reach the season.
 """
 
+import bisect
 import io
 import itertools
 import json
@@ -14,6 +15,7 @@ import sqlite3
 import time
 from typing import Any, Callable, Sequence
 
+from . import round_file
 from .hud import Hud
 from .models import Line, Shot
 from .sources.gspro_log import M_TO_YD
@@ -45,7 +47,8 @@ CREATE TABLE IF NOT EXISTS shots (
     lie_after TEXT,
     carry_raw_tile_yards REAL,                   -- GSPro CARRY (raw): flat-ground, no lie penalty (~launch monitor carry)
     carry_game_yards REAL, total_yards REAL, offline_yards REAL,   -- GSPro, after landing
-    total_from_log INTEGER NOT NULL DEFAULT 0,   -- 1 = total_yards came from GSPro's logged positions, not the HUD
+    total_from_log INTEGER NOT NULL DEFAULT 0,   -- 1 = total_yards came from GSPro's logged positions, not the
+                                                 -- HUD; 2 = from GSPro's round file (shot_tracks)
     tags TEXT,                                   -- JSON list from the interest scorer
     raw TEXT,                                    -- the Open Connect message
     -- Per-player stats, mostly from GSPro's own log (see sources/gspro_log.py). to_pin_yards is the
@@ -68,13 +71,25 @@ CREATE TABLE IF NOT EXISTS shots (
     club_path REAL, angle_of_attack REAL, face_to_target REAL, dynamic_loft REAL,
     face_impact_h REAL, face_impact_v REAL,
     -- From GSPro's log: where the ball sat for this shot, in the course's world metres (y is height;
-    -- NULL for a tee shot, which GSPro sets up without logging it: use hole_layouts' tee), and the
-    -- player's last minimap aim click before it, in minimap units (NULL when the aim wasn't moved).
+    -- NULL for a tee shot, which GSPro sets up without logging it, unless its round file gave it: use
+    -- hole_layouts' tee), and the player's last minimap aim click before it, in minimap units (NULL
+    -- when the aim wasn't moved).
     start_x REAL, start_y REAL, start_z REAL, aim_map_x REAL, aim_map_y REAL,
     -- Where the ball went into a penalty area (water, OB), world metres, from GSPro's log; else NULL.
     hazard_x REAL, hazard_y REAL, hazard_z REAL,
     handed TEXT                                  -- 'RH' / 'LH' as GSPro had the player set; NULL if unknown
 );
+CREATE TABLE IF NOT EXISTS shot_tracks (             -- GSPro's own record of a stroke (currentRound.dat, 3.59+; see
+    shot_id INTEGER PRIMARY KEY REFERENCES shots(id),   -- round_file.py), applied over the booth's reads
+    gspro_shot_id TEXT NOT NULL UNIQUE,
+    land_x REAL, land_y REAL, land_z REAL,       -- the touchdown (world metres), for a shot that flew
+    end_x REAL, end_y REAL, end_z REAL,          -- where it stopped; NULL when a penalty followed
+    flight TEXT,                                 -- JSON [[x, y, z], ...] from the strike to the touchdown
+    flight_s REAL,                               -- the flight's seconds
+    roll TEXT,                                   -- JSON [[x, y, z, seconds], ...] from the touchdown (a putt's run)
+    carry_yards REAL, total_yards REAL, finish_yards REAL, lie_after TEXT,  -- what it set on the shot
+    was TEXT                                     -- JSON of the shot's columns it replaced, put back if the
+);                                               -- stroke turns out to be another shot's
 CREATE TABLE IF NOT EXISTS hole_layouts (            -- each hole's geometry, logged by GSPro when a round is complete
     id INTEGER PRIMARY KEY,
     session_id INTEGER REFERENCES sessions(id),  -- NULL when backfilled from a log no session matched
@@ -600,7 +615,7 @@ class Store:
         want: dict[int, float] = {}
         for (_, course, hole), strokes in mine.items():
             for r, nxt in zip(strokes, strokes[1:]):
-                if ((r["total_yards"] is not None and not r["total_from_log"]) or r["is_putt"] or r["shared_ball"] or not r["attributed"]
+                if ((r["total_yards"] is not None and r["total_from_log"] != 1) or r["is_putt"] or r["shared_ball"] or not r["attributed"]
                         or r["fmt"] in ("scramble", "alternate") or not r["carry"] or nxt["start_x"] is None
                         or not r["shot_number"] or nxt["shot_number"] != r["shot_number"] + 1
                         or nxt["ts"] - r["ts"] > 1800 or any(r["ts"] < e < nxt["ts"] for e in ends)):
@@ -626,7 +641,7 @@ class Store:
                 want[r["id"]] = round(total, 1)
         filled = 0
         for r in rows:
-            if (r["total_yards"] is None or r["total_from_log"]) and want.get(r["id"]) != r["total_yards"]:
+            if (r["total_yards"] is None or r["total_from_log"] == 1) and want.get(r["id"]) != r["total_yards"]:
                 self.db.execute("UPDATE shots SET total_yards = ?, total_from_log = ? WHERE id = ?"
                                 " AND (total_yards IS NULL OR total_from_log = 1)",
                                 (want.get(r["id"]), int(r["id"] in want), r["id"]))
@@ -785,7 +800,7 @@ class Store:
         settles (for a putt, after the reaction path resolves it)."""
         if shot_id is None:
             return
-        if finish_yards is not None:
+        if finish_yards is not None and not self._tracked_finish(shot_id):
             self.db.execute("UPDATE shots SET finish_yards = ? WHERE id = ?", (finish_yards, shot_id))
         if outcome is not None:
             self.db.execute("UPDATE shots SET outcome = ? WHERE id = ?", (outcome, shot_id))
@@ -862,7 +877,11 @@ class Store:
                 (shot_id, row[0], row[1], None if row[2] is None else row[2] + 1))
         self.db.execute("UPDATE shots SET outcome = NULL WHERE id = ?", (shot_id,))
         if finish is not None:
-            self.db.execute("UPDATE shots SET lie_after = ?, finish_yards = ? WHERE id = ?", (*finish, shot_id))
+            tr = self._track(shot_id)
+            if tr is None or tr["lie_after"] is None:
+                self.db.execute("UPDATE shots SET lie_after = ? WHERE id = ?", (finish[0], shot_id))
+            if tr is None or tr["finish_yards"] is None:
+                self.db.execute("UPDATE shots SET finish_yards = ? WHERE id = ?", (finish[1], shot_id))
         self.db.commit()
 
     def set_mulligan(self, shot_id: int | None) -> None:
@@ -950,7 +969,8 @@ class Store:
             self.db.execute(
                 "UPDATE shots SET (start_x, start_y, start_z) = (SELECT start_x, start_y, start_z FROM shots"
                 " WHERE id = :old) WHERE id = :new AND EXISTS (SELECT 1 FROM shots o WHERE o.id = :old"
-                " AND o.start_x IS NOT NULL AND abs(o.to_pin_yards - shots.to_pin_yards) < 0.5)",
+                " AND o.start_x IS NOT NULL AND abs(o.to_pin_yards - shots.to_pin_yards) < 0.5)"
+                " AND NOT EXISTS (SELECT 1 FROM shot_tracks t WHERE t.shot_id = :new)",
                 {"old": replaced, "new": shot_id})
         self.db.commit()
 
@@ -964,7 +984,13 @@ class Store:
                        total_yards: float | None, offline_yards: float | None) -> None:
         """A shot's tiles read after it was recorded, at the next player's setup (GSPro hid them while the
         ball flew). They take the place of the follow's unconfirmed reads and of a total worked out from
-        the log; a tile not read leaves its column as it was."""
+        the log; a tile not read leaves its column as it was. GSPro's round file (shot_tracks) wins over
+        both: a carry or total it set stays."""
+        tr = self._track(shot_id)
+        if tr is not None and tr["carry_yards"] is not None:
+            carry_game_yards = None
+        if tr is not None and tr["total_yards"] is not None:
+            total_yards = None
         cols = {"carry_game_yards": carry_game_yards, "carry_raw_tile_yards": carry_raw_tile_yards,
                 "offline_yards": offline_yards, "total_yards": total_yards}
         sets = [f"{col} = ?" for col, v in cols.items() if v is not None]
@@ -976,10 +1002,158 @@ class Store:
             self.db.commit()
 
     def set_lie_after(self, shot_id: int | None, lie: str | None) -> None:
-        """Where the ball came to rest, corrected once the next shot says where it was played from."""
+        """Where the ball came to rest, corrected once the next shot says where it was played from. A lie
+        GSPro's round file set stays, unless this one is finer (semi rough for its rough)."""
         if shot_id is not None and lie:
+            tr = self._track(shot_id)
+            if tr is not None and tr["lie_after"] and lie.lower() in round_file.PLAIN_LIES:
+                return
             self.db.execute("UPDATE shots SET lie_after = ? WHERE id = ?", (lie, shot_id))
             self.db.commit()
+
+    def _tracked_finish(self, shot_id: int | None) -> bool:
+        """GSPro's round file set the shot's finish, so the booth's own reading of it stands aside."""
+        tr = self._track(shot_id)
+        return tr is not None and tr["finish_yards"] is not None
+
+    def _track(self, shot_id: int | None) -> sqlite3.Row | None:
+        """What GSPro's round file set on the shot (shot_tracks), if it's been applied."""
+        if shot_id is None:
+            return None
+        return self.db.execute("SELECT * FROM shot_tracks WHERE shot_id = ?", (shot_id,)).fetchone()
+
+    def apply_round_file(self, tracks: list, *, now: float, window_s: float = 12 * 3600,
+                         same_player=None, rewrite: bool = True, gone: set | frozenset = frozenset()
+                         ) -> tuple[int, list]:
+        """Apply GSPro's round file (round_file.tracks) to the shots it records: each stroke is matched to
+        the row with its hole, stroke number and ball speed and a player of its name (`same_player`, a
+        (gspro_name, player) test, for names that differ more than "Josh" / "Josh Merritt"), recorded
+        within `window_s` of `now`. GSPro's start, carry, total, lies and finish replace the booth's; a lie
+        the HUD read finer than GSPro's codes stays. Idempotent. Returns (shots written, tracks not
+        matched yet: a row is recorded only once the booth has the shot). `now` is when the file was
+        written: a stroke's row is from before then, or just after (the booth can record it late).
+        `rewrite` False leaves a stroke already applied to a shot it still fits as it is (the same file
+        applied again, for shots recorded since). `gone`: the file's ShotIDs that are no longer strokes
+        (round_file.untracked: a mulligan took one back), whose shots get back what they had."""
+        courses = [r[0] for r in self.db.execute("SELECT DISTINCT course FROM shots WHERE course IS NOT NULL")]
+        ends: list[float] = []   # each play's end: its sides' rounds end within 120 s of each other
+        for (e,) in self.db.execute("SELECT DISTINCT ended_at FROM rounds WHERE ended_at IS NOT NULL ORDER BY ended_at"):
+            if ends and e - ends[-1] <= 120:
+                ends[-1] = e
+            else:
+                ends.append(e)
+        known: dict = {}
+
+        def course_ok(key, row) -> bool:
+            # The shot's course, when GSPro's key names one we have; else (a key not like any course
+            # name) a shot from this session, the round in play.
+            if key not in known:
+                known[key] = any(round_file.course_fits(key, c) for c in courses)
+            if known[key]:
+                return round_file.course_fits(key, row["course"])
+            return row["session_id"] == self.session_id
+
+        def round_of(row) -> float:   # the end of the play the shot was in (inf: still in play)
+            i = bisect.bisect_left(ends, row["ts"])
+            return ends[i] if i < len(ends) else math.inf
+
+        def candidates(t) -> list:
+            rows = self.db.execute(
+                "SELECT * FROM shots WHERE ts >= ? AND ts <= ? AND shot_number = ? AND (hole = ? OR hole LIKE ?)"
+                " AND ball_speed IS NOT NULL AND mulligan = 0 AND outcome IS NOT 'gimme'",
+                (now - window_s, now + 600, t.shot_number, f"Hole {t.hole}", f"Hole {t.hole},%")).fetchall()
+            return [r for r in rows if course_ok(t.course_key, r)
+                    and abs(r["ball_speed"] - t.ball_speed) <= max(0.6, 0.01 * t.ball_speed)
+                    and (round_file.names_fit(t.player, r["player"])
+                         or (same_player is not None and same_player(t.player, r["player"])))]
+
+        # The file is one round's: the latest round with shots it could be (a round GSPro has started over
+        # since can't be). A stroke is matched only within it.
+        cands = {t.shot_id: candidates(t) for t in tracks}
+        latest = max((r for rs in cands.values() for r in rs), key=lambda r: r["ts"], default=None)
+        this_round = None if latest is None else round_of(latest)
+        rows_by_id = {r["id"]: r for rs in cands.values() for r in rs}
+        claimed = dict(self.db.execute("SELECT gspro_shot_id, shot_id FROM shot_tracks").fetchall())
+        changed = False
+        for gid in gone & claimed.keys():
+            self._release_track(claimed.pop(gid))
+            changed = True
+        for t in tracks:
+            sid = claimed.get(t.shot_id)
+            if sid is not None and (sid not in rows_by_id or round_of(rows_by_id[sid]) != this_round
+                                    or all(r["id"] != sid for r in cands[t.shot_id])):
+                self._release_track(sid)
+                del claimed[t.shot_id]
+                changed = True
+        taken = set(self.db.execute("SELECT shot_id FROM shot_tracks").fetchall())
+        taken = {r[0] for r in taken}
+        written, pending = 0, []
+        for t in tracks:
+            row = rows_by_id.get(claimed[t.shot_id]) if t.shot_id in claimed else None
+            if row is not None and not rewrite:
+                taken.add(row["id"])
+                continue
+            if row is None:
+                fits = [r for r in cands[t.shot_id] if r["id"] not in taken and round_of(r) == this_round]
+                row = min(fits, key=lambda r: (abs(r["ball_speed"] - t.ball_speed), -r["ts"]), default=None)
+            if row is None:
+                pending.append(t)
+                continue
+            taken.add(row["id"])
+            if changed:   # a release above may have put its columns back since it was read
+                row = self.db.execute("SELECT * FROM shots WHERE id = ?", (row["id"],)).fetchone()
+            self._apply_track(row, t)
+            written += 1
+        if written or changed:
+            self.db.commit()
+        return written, pending
+
+    _TRACKED = ("start_x", "start_y", "start_z", "lie_before", "lie_after", "carry_game_yards", "total_yards",
+                "total_from_log", "finish_yards")
+
+    def _release_track(self, shot_id: int) -> None:
+        """A stroke matched to the wrong shot: what it set goes back to what the shot had."""
+        tr = self._track(shot_id)
+        if tr is not None and tr["was"]:
+            was = json.loads(tr["was"])
+            cols = [c for c in self._TRACKED if c in was]
+            self.db.execute(f"UPDATE shots SET {', '.join(f'{c} = ?' for c in cols)} WHERE id = ?",
+                            (*(was[c] for c in cols), shot_id))
+        self.db.execute("DELETE FROM shot_tracks WHERE shot_id = ?", (shot_id,))
+
+    def _apply_track(self, row: sqlite3.Row, t) -> None:
+        def lie(old, new):   # GSPro's lie, unless the HUD read a finer one
+            return new if new and (not old or old.lower() in round_file.PLAIN_LIES) else old
+        carry, total = t.carry_yards, t.total_yards
+        # A scramble keeps a finish only for the ball the team picked (the booth's): see set_format.
+        shared = row["fmt"] == "scramble" or bool(row["shared_ball"])
+        finish = t.finish_yards if not (row["is_putt"] or shared) else None
+        lie_after = lie(row["lie_after"], t.lie_after)
+        # What an earlier read of the file set and this one takes back (a penalty since followed the
+        # stroke): where it stopped isn't where play went on.
+        old = self._track(row["id"])
+        was = old["was"] if old is not None else json.dumps({c: row[c] for c in self._TRACKED})
+        if old is not None:
+            if old["total_yards"] is not None and total is None:
+                self.db.execute("UPDATE shots SET total_yards = NULL, total_from_log = 0 WHERE id = ?"
+                                " AND total_from_log = 2", (row["id"],))
+            if old["finish_yards"] is not None and finish is None:
+                self.db.execute("UPDATE shots SET finish_yards = NULL WHERE id = ? AND finish_yards IS ?",
+                                (row["id"], old["finish_yards"]))
+            if old["lie_after"] is not None and t.lie_after is None and row["lie_after"] == old["lie_after"]:
+                lie_after = None
+        self.db.execute(
+            "UPDATE shots SET start_x = ?, start_y = ?, start_z = ?, lie_before = ?, lie_after = ?,"
+            " carry_game_yards = COALESCE(?, carry_game_yards), total_yards = COALESCE(?, total_yards),"
+            " total_from_log = CASE WHEN ? IS NULL THEN total_from_log ELSE 2 END,"
+            " finish_yards = COALESCE(?, finish_yards) WHERE id = ?",
+            (*t.start, lie(row["lie_before"], t.lie_before), lie_after, carry, total, total, finish, row["id"]))
+        self.db.execute(
+            "INSERT OR REPLACE INTO shot_tracks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (row["id"], t.shot_id, *(t.land or (None,) * 3), *(t.end or (None,) * 3),
+             json.dumps([[round(c, 2) for c in p] for p in t.flight]) if t.flight else None,
+             t.flight_s, json.dumps([[round(c, 2) for c in p] for p in t.roll]) if t.roll else None,
+             carry, total, finish, t.lie_after, was))
 
     def set_format(self, shot_ids: list[int], fmt: str | None) -> None:
         """Relabel a round's shots once its real format is known (a scramble GSPro's log revealed, or
@@ -989,6 +1163,15 @@ class Store:
             # player's are their own.
             self.db.executemany("UPDATE shots SET fmt = ?, shared_ball = ? WHERE id = ?",
                                 [(fmt, int(fmt == "scramble"), i) for i in shot_ids])
+            if fmt == "scramble":
+                # A finish GSPro's round file set before the scramble was known goes back to the booth's:
+                # a scramble's finish is only for the ball picked (carry_pairs, week_ctp).
+                for i in shot_ids:
+                    tr = self._track(i)
+                    if tr is not None and tr["finish_yards"] is not None:
+                        was = json.loads(tr["was"] or "{}")
+                        self.db.execute("UPDATE shots SET finish_yards = ? WHERE id = ?", (was.get("finish_yards"), i))
+                        self.db.execute("UPDATE shot_tracks SET finish_yards = NULL WHERE shot_id = ?", (i,))
             # The conceded putt a stroke left (record_gimme's row, which copied that stroke's format).
             self.db.executemany(
                 """UPDATE shots SET fmt = ? WHERE outcome = 'gimme' AND id > ? AND EXISTS (
@@ -1377,7 +1560,7 @@ class Store:
     def fill_finish(self, shot_id: int | None, yards: float, replace: bool = False) -> None:
         """A shared ball's finish from where the team's next stroke started, unless one's already known
         (or over it, with `replace`)."""
-        if shot_id is not None:
+        if shot_id is not None and not self._tracked_finish(shot_id):
             sql = "?" if replace else "COALESCE(finish_yards, ?)"
             self.db.execute(f"UPDATE shots SET finish_yards = {sql} WHERE id = ?", (yards, shot_id))
             self.db.commit()
@@ -1395,7 +1578,7 @@ class Store:
     def fill_tee_finish(self, shot_id: int | None, yards: float) -> None:
         """A tee shot's finish on the green from the HUD at the next stroke, when GSPro's log couldn't
         give one (alternate shot's shared ball has no per-player log index)."""
-        if shot_id is None:
+        if shot_id is None or self._tracked_finish(shot_id):
             return
         self.db.execute("UPDATE shots SET finish_yards = COALESCE(finish_yards, ?), lie_after = 'green' WHERE id = ?",
                         (yards, shot_id))
