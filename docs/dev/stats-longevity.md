@@ -167,10 +167,13 @@ merged like any other, and its record is in both nights' signatures.
   - broadcasts and the page's filters: per night, its sessions with lines (courses and players in
     order of first appearance), and the courses, clubs and lies played and whether any round was a
     league or tournament one. Each worked out once a build (broadcasts were four times).
-  - Python's cycle collector is off while a build runs (`stats_site.gc_paused`, process-wide, so the
-    booth's thread too, for the build's length): a build makes next to no cycles (the same peak
-    memory without it), but each full collection went over every object the build holds. On 3
-    years it was 2.0 s of an 8.3 s warm build (now 6.1 s) and 5.9 s of a 63.6 s cold one (now 55.4 s).
+  - Python's cycle collector runs rarely while a build runs (`stats_site.gc_paused`, process-wide,
+    so the booth's thread too): a build makes next to no cycles (the same peak memory without it),
+    but each full collection went over every object the build holds. Its thresholds go to
+    `GC_BUILD_THRESHOLDS` (100,000 / 50 / 10, from Python 3.12's 700 / 10 / 10), so young cycles
+    are still freed, and back when the last build ends or after `GC_TIME_LIMIT` (10 minutes),
+    whichever is first. On 3 years the collector took 2.0 s of an 8.5 s warm build (now 6.5 s; 6.3 s with it
+    fully off) and 5.8 s of a 63.2 s cold one (now 58.7 s).
     Loading the kept nights' results is about 0.9 s of what's left; it grows with the nights kept.
   - Output identical to before on the 1- and 50-season copies.
 - **Where it stands** (warm build, nothing changed): 18 s on 1.5 years, 37 s on 3, 74 s on 6: still

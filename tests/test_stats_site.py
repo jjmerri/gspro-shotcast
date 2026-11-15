@@ -412,20 +412,47 @@ def test_one_publish_at_a_time_holds_the_sites_lock(tmp_path):
         pass
 
 
-def test_the_cycle_collector_is_off_while_any_build_runs_and_back_on_after_the_last():
+def test_the_cycle_collector_runs_rarely_while_any_build_runs_and_as_usual_after_the_last():
     import gc
-    assert gc.isenabled()
+    usual = gc.get_threshold()
     first, second = stats_site.gc_paused(), stats_site.gc_paused()
     first.__enter__()
     second.__enter__()          # a publish overlapping the page's build
     first.__exit__(None, None, None)
-    assert not gc.isenabled()   # the other build still running
-    second.__exit__(None, None, None)
+    assert gc.get_threshold() == stats_site.GC_BUILD_THRESHOLDS   # the other build still running
     assert gc.isenabled()
-    gc.disable()
-    try:
+    second.__exit__(None, None, None)
+    assert gc.get_threshold() == usual
+    assert stats_site._gc_timer is None
+
+
+def test_a_build_past_the_time_limit_gets_the_usual_collector_back():
+    import gc
+    usual = gc.get_threshold()
+    with stats_site.gc_paused():
+        assert gc.get_threshold() == stats_site.GC_BUILD_THRESHOLDS
+        timer = stats_site._gc_timer
+        assert timer.interval == stats_site.GC_TIME_LIMIT
+        timer.function(*timer.args)                  # the time limit comes
+        assert gc.get_threshold() == usual
+        assert stats_site._gc_timer is None
+        with stats_site.gc_paused():                 # one starting meanwhile leaves it as usual
+            assert gc.get_threshold() == usual
+    assert gc.get_threshold() == usual
+    with stats_site.gc_paused():                     # the next build raises it again
+        assert gc.get_threshold() == stats_site.GC_BUILD_THRESHOLDS
+    assert gc.get_threshold() == usual
+
+
+def test_a_timer_that_will_not_start_leaves_the_collector_as_it_was(monkeypatch):
+    import gc
+    usual = gc.get_threshold()
+
+    def refuse(self):
+        raise RuntimeError("can't start new thread")
+    monkeypatch.setattr(stats_site.threading.Timer, "start", refuse)
+    with pytest.raises(RuntimeError):
         with stats_site.gc_paused():
             pass
-        assert not gc.isenabled()   # left as it was found
-    finally:
-        gc.enable()
+    assert gc.get_threshold() == usual
+    assert stats_site._gc_builds == 0 and stats_site._gc_timer is None

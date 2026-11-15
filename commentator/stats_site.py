@@ -371,27 +371,57 @@ def manifest(site_name: str = SITE_NAME, theme: dict[str, str] | None = None) ->
 
 _gc_lock = threading.Lock()
 _gc_builds = 0       # builds under way (the page's and a publish can overlap)
-_gc_was_on = False
+_gc_normal = None    # the collector's thresholds from before the first build, while raised
+_gc_timer = None
+GC_BUILD_THRESHOLDS = (100_000, 50, 10)
+GC_TIME_LIMIT = 600  # seconds; a build still going after this gets the usual collector back
+
+
+def _gc_restore():
+    global _gc_normal, _gc_timer
+    if _gc_normal is not None:
+        gc.set_threshold(*_gc_normal)
+        _gc_normal = None
+    if _gc_timer is not None:
+        _gc_timer.cancel()
+        _gc_timer = None
+
+
+def _gc_time_up(timer):
+    with _gc_lock:
+        if timer is _gc_timer:
+            _gc_restore()
 
 
 @contextmanager
 def gc_paused():
-    """Python's cycle collector off while a build runs. A build holds a great many objects and makes
-    next to no cycles (its peak memory is the same without the collector), so every full collection
-    went over all of them for nothing: a quarter of a build's time. Back on when the last build ends."""
-    global _gc_builds, _gc_was_on
+    """Python's cycle collector runs rarely while a build runs. A build holds a great many objects
+    and makes next to no cycles (its peak memory is the same without the collector), so every full
+    collection went over all of them for nothing: a quarter of a build's time. The young
+    collections still run now and then, so cycles made meanwhile (by the booth's thread, say) are
+    still freed. The usual thresholds come back when the last build ends, or after GC_TIME_LIMIT."""
+    global _gc_builds, _gc_normal, _gc_timer
     with _gc_lock:
         if _gc_builds == 0:
-            _gc_was_on = gc.isenabled()
-            gc.disable()
+            _gc_normal = gc.get_threshold()
+            gc.set_threshold(*GC_BUILD_THRESHOLDS)
+            _gc_timer = threading.Timer(GC_TIME_LIMIT, _gc_time_up)
+            _gc_timer.args = (_gc_timer,)
+            _gc_timer.daemon = True
+            try:
+                _gc_timer.start()
+            except BaseException:
+                _gc_timer = None
+                _gc_restore()
+                raise
         _gc_builds += 1
     try:
         yield
     finally:
         with _gc_lock:
             _gc_builds -= 1
-            if _gc_builds == 0 and _gc_was_on:
-                gc.enable()
+            if _gc_builds == 0:
+                _gc_restore()
 
 
 def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = None,
