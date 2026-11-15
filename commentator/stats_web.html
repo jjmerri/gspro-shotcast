@@ -170,6 +170,8 @@
   .charts { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:12px; }
   .chart { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
   .chart svg { width:100%; height:auto; max-height:170px; display:block; }
+  .chart.disp svg { max-height:420px; }
+  .chart.disp .seg { margin-bottom:6px; flex-wrap:wrap; }
   .sg { display:grid; grid-template-columns:120px 1fr 60px; gap:6px 10px; align-items:center; }
   .sgbar { position:relative; height:12px; background:var(--line); border-radius:3px; }
   .sgbar i { position:absolute; top:0; bottom:0; border-radius:3px; }
@@ -923,6 +925,47 @@ function gapChart(clubs) {
       <span class="lbl" style="left:calc(${pct(c.carry)} + 8px)">${c.game ? "≈" : ""}${Math.round(c.carry)} yd</span></div>`).join("")}</div>`;
 }
 
+// Sideways yards as a golfer says them: "4 L", "3 R".
+const lr = v => v === null || v === undefined ? "–" : Math.round(Math.abs(v)) === 0 ? "0" : Math.round(Math.abs(v)) + (v > 0 ? " R" : " L");
+
+// Where each club's full swings finished, looking down the target line: sideways of it across,
+// carry up, each club's 95% ellipse. A club picked (state.dispClub) shows its swings, one dot each.
+function dispChart(clubs) {
+  const cs = clubs.filter(c => c.landing && c.landing.length);
+  if (!cs.some(c => c.ellipse)) return `<p class="empty">Not enough full swings yet (a club needs 5).</p>`;
+  const ring = e => Array.from({ length: 49 }, (_, i) => {
+    const t = i / 48 * 2 * Math.PI, a = e.tilt * Math.PI / 180, u = e.long * Math.cos(t), v = e.short * Math.sin(t);
+    return [e.x + u * Math.sin(a) + v * Math.cos(a), e.y + u * Math.cos(a) - v * Math.sin(a)];
+  });
+  const rings = new Map(cs.filter(c => c.ellipse).map(c => [c, ring(c.ellipse)]));
+  const all = cs.flatMap(c => [...c.landing, ...(rings.get(c) || [])]);
+  const side = Math.max(20, ...all.map(p => Math.abs(p[0]))) * 1.05;
+  const hi = Math.max(...all.map(p => p[1])) * 1.03, lo = Math.max(0, Math.min(...all.map(p => p[1])) - 10);
+  const W = 300, H = 300, pad = { l: 30, r: 8, t: 8, b: 20 };
+  const x = v => (pad.l + (v + side) * (W - pad.l - pad.r) / (2 * side)).toFixed(1);
+  const y = v => (pad.t + (hi - v) * (H - pad.t - pad.b) / (hi - lo)).toFixed(1);
+  const step = hi - lo > 150 ? 50 : 25;
+  const grid = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step)
+    grid.push(`<line x1="${pad.l}" x2="${W - pad.r}" y1="${y(v)}" y2="${y(v)}" style="stroke:var(--line)"/><text x="${pad.l - 4}" y="${+y(v) + 3}" style="fill:var(--dim)" font-size="9" text-anchor="end">${v}</text>`);
+  const sx = Math.round(side / 2 / 5) * 5 || 10;
+  const pick = cs.find(c => c.club === state.dispClub) || null;
+  const buttons = [["", "All"], ...cs.map(c => [c.club, c.club])].map(([v, label]) =>
+    `<button data-dispclub="${esc(v)}" class="${(pick ? pick.club : "") === v ? "on" : ""}">${esc(label)}</button>`).join("");
+  return `<div class="chart disp"><div class="seg small">${buttons}</div><svg viewBox="0 0 ${W} ${H}">${grid.join("")}
+    <line x1="${x(0)}" x2="${x(0)}" y1="${pad.t}" y2="${H - pad.b}" style="stroke:var(--dim)" stroke-dasharray="3 3"/>
+    ${[-sx, sx].map(v => `<text x="${x(v)}" y="${H - 6}" style="fill:var(--dim)" font-size="9" text-anchor="middle">${lr(v)}</text>`).join("")}
+    ${cs.map(c => {
+      const r = rings.get(c), e = c.ellipse;
+      const on = c === pick, dim = pick && !on;
+      if (!r && !on) return "";
+      return `<g${dim ? ' opacity=".15"' : ""}><title>${esc(c.club)}: ${c.landing.length} swing${c.landing.length === 1 ? "" : "s"} (${c.side_logged} where GSPro's ball finished), typical miss ${lr(c.side)}${c.width !== null ? `; 95% finish within a ${c.width} yd wide band` : ""}</title>
+        ${!on ? "" : c.landing.map(p => `<circle cx="${x(p[0])}" cy="${y(p[1])}" r="1.6" style="fill:var(--accent)" opacity=".6"/>`).join("")}
+        ${r ? `<path d="${r.map((p, i) => `${i ? "L" : "M"}${x(p[0])},${y(p[1])}`).join("")}Z" style="stroke:var(--accent);fill:var(--accent)" fill-opacity="${on ? ".12" : ".05"}" stroke-width="${on ? 2 : 1.2}"/>
+        <text x="${x(e.x)}" y="${+y(e.y) + 3}" style="fill:var(--soft)" font-size="9" font-weight="600" text-anchor="middle">${esc(c.club)}</text>` : ""}</g>`;
+    }).join("")}</svg></div>`;
+}
+
 // ---- views ------------------------------------------------------------------------------------
 
 // Where to start: what's on now, the next booking, the picked player's latest round and numbers, the
@@ -1085,12 +1128,20 @@ function renderPlayer(p) {
       { key: "club", label: "Club" }, { key: "n", label: "Swings", title: "Full swings from the tee or fairway used (of all swings with the club)" }, { key: "carry", label: "Carry" },
       { key: "gap_to_next", label: "Gap", title: "Median carry gap to the next club down" },
       { key: "smash", label: "Smash", title: "Ball speed / club speed" }, { key: "launch", label: "Launch" },
-      { key: "spin", label: "Spin" }, { key: "miss", label: "Typical flight", cls: "l" }],
+      { key: "spin", label: "Spin" }, { key: "side", label: "Side", title: "Typical miss sideways of the aim where the ball finished (median)" },
+      { key: "width", label: "Width", title: "How wide a band 95% of swings finish in, yards (5 or more swings)" },
+      { key: "miss", label: "Typical flight", cls: "l" }],
       c => `<tr><td>${esc(c.club)}${c.any_lie ? `<span title="Too few tee and fairway swings: every lie counts">*</span>` : ""}</td><td>${c.n}${c.swings > c.n ? ` <span class="sub">/ ${c.swings}</span>` : ""}</td><td${c.game ? ` title="${c.game} of ${c.n} from GSPro's game carry"` : ""}>${c.game ? "≈" : ""}${dash(c.carry === null ? null : Math.round(c.carry), " yd")}</td>
         <td>${dash(c.gap_to_next, " yd")}</td><td>${dash(c.smash)}</td><td>${dash(c.launch, "°")}</td>
-        <td>${dash(c.spin === null ? null : Math.round(c.spin))}</td><td class="l">${esc(c.miss || "–")}</td></tr>`,
+        <td>${dash(c.spin === null ? null : Math.round(c.spin))}</td><td>${lr(c.side)}</td><td>${dash(c.width, " yd")}</td><td class="l">${esc(c.miss || "–")}</td></tr>`,
       { key: "carry", dir: -1 })}
       <p class="sub">Medians over full swings (ball speed within 80% of the club's best, so chips and knock-downs are left out; a mulligan's swing counts). Flight is for a right-hander: start line and curve from the spin axis.</p></div>
+  </div>
+  <h2>Dispersion</h2>
+  <div class="grid2">
+    <div>${dispChart(p.gapping)}</div>
+    <div><p class="sub">Where each club's full swings finished, looking down the target line: carry up, sideways across. Each ring holds 95% of a club's swings (from 5 swings); pick a club to see its swings, one dot each.</p>
+      <p class="sub">Sideways is where GSPro's ball came to rest, off the line it was aimed down (the aim set on the minimap, else the pin, or the course's aim point off a par 4 or 5 tee), so it takes in wind and bounces. A swing with no positions logged (the range, a mulligan, a long shot with no aim set) is estimated from the launch monitor's start line and spin axis. The same full swings as the gapping table.</p></div>
   </div>
   <div class="grid2">
     <div><h2>Approach by club</h2>
@@ -2668,8 +2719,13 @@ document.addEventListener("click", (e) => {
     return;
   }
   const t = e.target.closest("[data-tab],[data-section],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
-                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-exclround],[data-delround],[data-delvod],[data-leagueround],[data-sharecard],[data-period],[data-vod],[data-clip],[data-reel],[data-link],[data-more],[data-onlyme],[data-hcpclean],[data-recap]");
+                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-exclround],[data-delround],[data-delvod],[data-leagueround],[data-sharecard],[data-period],[data-vod],[data-clip],[data-reel],[data-link],[data-more],[data-onlyme],[data-hcpclean],[data-dispclub],[data-recap]");
   if (!t) return;
+  if ("dispclub" in t.dataset) {
+    state.dispClub = t.dataset.dispclub || null;
+    render();
+    return;
+  }
   if (t.dataset.hcpclean) {
     state.hcpClean = t.dataset.hcpclean === "1";
     store.set("shotcast.hcpclean", state.hcpClean ? "1" : null);

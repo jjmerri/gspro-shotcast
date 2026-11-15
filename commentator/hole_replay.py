@@ -251,10 +251,12 @@ def round_tees(db: sqlite3.Connection, round_of: dict[int, int] | None = None) -
     return {rnd: c.most_common(1)[0][0] for rnd, c in votes.items()}
 
 
-def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]]:
+def hole_replays(db: sqlite3.Connection,
+                 finish: dict[int, float] | None = None) -> dict[tuple[int, int], dict[str, Any]]:
     """Every replayable hole, keyed by (round, hole number): the round as stats_web.shot_rounds numbers
     it. A hole is replayable when at least one of its shots has a position, or it took one drawn stroke
-    (an ace, or a tee shot into the gimme circle), which runs from the tee to the pin."""
+    (an ace, or a tee shot into the gimme circle), which runs from the tee to the pin.
+    `finish`, when given, is filled with each swing's sideways finish (see finish_laterals)."""
     have = {r[1] for r in db.execute("PRAGMA table_info(shots)")}
     if "start_x" not in have:
         return {}
@@ -291,7 +293,8 @@ def hole_replays(db: sqlite3.Connection) -> dict[tuple[int, int], dict[str, Any]
             continue
         ses, _, last = span[key[0]]
         until = min((f for s, f, _ in span.values() if s & ses and f > last), default=None)
-        if (rp := _replay(rows, key[1], layouts, ses, until, teams[key[0]], sides.get(key[0]), tracks)) is not None:
+        if (rp := _replay(rows, key[1], layouts, ses, until, teams[key[0]], sides.get(key[0]), tracks,
+                          finish)) is not None:
             if rp["tee"] and rp["pin"] and (m := _map_for(images, rp["course"], key[1], ses)):
                 rp["map"] = m
             rp["ts"] = min(r["ts"] for r in rows)   # the hole's first shot, for the page's video link
@@ -593,9 +596,39 @@ def _team_ends(played: list[sqlite3.Row], starts: dict[int, tuple | None], rows:
     return ends, used
 
 
+FINISH_PIN_MAX = 250   # yards: further out, a swing with no aim set is as likely a lay-up as at the pin
+
+
+def finish_laterals(db: sqlite3.Connection) -> dict[int, float]:
+    """Where each swing GSPro logged positions for finished sideways of the line it was aimed down,
+    yards (positive = right, as seen), by shot id: from where it started to where the next stroke
+    started, after the roll (or where it went into a penalty area). The aim is the one set on the
+    minimap; with none set, the pin, or off the tee of a par 4 or 5 the course's own aim point. A swing
+    with no aim to go by (a long shot from the fairway with no aim set, a tee shot on a course with no
+    aim point logged) is left out, as is a mulligan, which GSPro puts back."""
+    out: dict[int, float] = {}
+    hole_replays(db, out)
+    return out
+
+
+def _target(r, start: tuple[float, float], aim: tuple[float, float] | None, pin: tuple[float, float] | None,
+            par: int | None, layout) -> tuple[float, float] | None:
+    """The point a swing was aimed at, for finish_laterals."""
+    if aim:
+        return aim
+    if r["shot_number"] == 1 and (par or 0) >= 4:
+        if layout is None or "wp_x" not in layout.keys():
+            return None
+        return _xz(layout["wp_x"], layout["wp_z"])
+    if pin and r["to_pin_yards"] and r["to_pin_yards"] <= FINISH_PIN_MAX:
+        return pin
+    return None
+
+
 def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sessions: set,
             until: float | None = None, teams: dict[str, str] | None = None,
-            sides: dict[str, int] | None = None, tracks: dict[int, dict] | None = None) -> dict[str, Any] | None:
+            sides: dict[str, int] | None = None, tracks: dict[int, dict] | None = None,
+            finish: dict[int, float] | None = None) -> dict[str, Any] | None:
     first = rows[0]
     tracks = tracks or {}
     this_round, any_round = _layout_for(layouts, first["course"], hole, sessions, first["ts"],
@@ -657,6 +690,10 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
                     and r["to_pin_yards"] and (f := _unit(pin[0] - start[0], pin[1] - start[1]))):
                 along, right = aim_offset(r["aim_map_x"], r["aim_map_y"], r["to_pin_yards"] / M_TO_YD)
                 aim = (start[0] + f[0] * along + f[1] * right, start[1] + f[1] * along - f[0] * right)
+            if finish is not None and not r["is_putt"] and start and end and (
+                    target := _target(r, start, aim, pin, par, lo)) and (f := _unit(target[0] - start[0],
+                                                                                    target[1] - start[1])):
+                finish[r["id"]] = ((end[0] - start[0]) * f[1] - (end[1] - start[1]) * f[0]) * M_TO_YD
             shape = shot_shape.shape(r["start_direction"], r["spin_axis"], r["carry"], bool(r["is_putt"]), r["handed"])
             bend = None if r["is_putt"] or trk else shot_shape.bend_yards(r["spin_axis"], r["carry"])
             shots.append({"n": r["shot_number"], "club": r["club"], "putt": bool(r["is_putt"]),

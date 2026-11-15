@@ -40,11 +40,11 @@ def shape(start: float | None, axis: float | None, carry: float | None, putt: bo
     return line or curve.capitalize() or "Straight"
 
 
-def curve_yards(axis: float | None, carry: float | None) -> float | None:
+def curve_yards(axis: float | None, carry: float | None, factor: float = CURVE_FACTOR) -> float | None:
     """How far the ball bent sideways off its start line, yards (positive = to the right)."""
     if axis is None or not carry or carry <= 0:
         return None
-    c = CURVE_FACTOR * carry * math.sin(math.radians(axis))
+    c = factor * carry * math.sin(math.radians(axis))
     cap = MAX_CURVE_SHARE * carry
     return max(-cap, min(cap, c))
 
