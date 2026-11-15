@@ -734,6 +734,9 @@ class Engine:
             from .sources.club_feeds import ClubFeed
 
             self._club_feed = ClubFeed.from_config(cfg.source)
+            # GSPro 3.59's log shots can air straight from a monitor's line (sources/gspro_log_shots.py).
+            if hasattr(log_source := getattr(source, "gspro_log", source), "club_feed"):
+                log_source.club_feed = self._club_feed
         self.live_llm = live_llm
         self.segment_llm = segment_llm
         self.flight_llm = flight_llm or live_llm

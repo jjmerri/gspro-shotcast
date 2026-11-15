@@ -145,11 +145,19 @@ class ConnectorWithLogFallback(ShotSource):
                             sent.append((now, speed))
                     yield ev
                 elif self.connector_live():
+                    if not isinstance(ev, ShotEvent) or take(sent, _speed(ev), now):
+                        continue   # GSPconnect's copy of it came first
+                    if ev.shot.raw.get("MonitorLog"):
+                        # From the monitor's own log (FlightScope's, through GSPconnect, which never logs
+                        # those shots as sent): no reason to wait. A GSPconnect copy after all is dropped.
+                        if (speed := _speed(ev)) is not None:
+                            filled.append((now, speed))
+                        yield ev
+                        continue
                     # GSPconnect normally has this shot too, with club data; hold it in case it doesn't.
-                    if isinstance(ev, ShotEvent) and not take(sent, _speed(ev), now):
-                        # A copy that comes late (GSPro 3.59's, once the ball stops) has its impact
-                        # snapshot already and is held from impact, not from when it came.
-                        held.append([ev.impact_at, ev, True] if ev.impact_at is not None else [now, ev, False])
+                    # A copy that comes late (GSPro 3.59's, once the ball stops) has its impact
+                    # snapshot already and is held from impact, not from when it came.
+                    held.append([ev.impact_at, ev, True] if ev.impact_at is not None else [now, ev, False])
                     continue
                 else:
                     if not self.using_log:

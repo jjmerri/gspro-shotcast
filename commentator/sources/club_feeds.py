@@ -21,6 +21,11 @@ Where each log is, and what it has:
   in m/s), or <SkyTrak>\\BepInEx\\plugins\\OpenSkyPlus\\Log.txt (version 1: the Open Connect JSON it
   sends, pretty-printed). Club speed only: the SkyTrak doesn't measure the rest.
 
+FlightScope and rela also log the whole launch with a carry (`ClubReading.launch`, the same keys as
+GSPro 3.1's `LaunchExt Vars` line). GSPro 3.59 doesn't log its ball data until the ball stops, so for
+those two the shot goes out from the monitor's line as soon as GSPro fires it (sources/gspro_log_shots.py).
+OpenSkyPlus logs no carry, so its shots still wait for GSPro's files.
+
 None of these formats is a published interface; they come from players' logs (2023-2026). A line
 that doesn't parse is skipped, and a shot no reading matches airs with ball data only, as before.
 """
@@ -41,6 +46,7 @@ from ..models import Shot
 log = logging.getLogger(__name__)
 
 MPS_TO_MPH = 3600 / 1609.344
+M_TO_YD = 1 / 0.9144
 POLL_SECONDS = 0.5
 KEEP_SECONDS = 120.0     # GSPro 3.59's copy of a shot comes once the ball stops, up to ~15 s after
 WAIT_SECONDS = 1.5       # a shot with no reading yet waits this long for one, while a monitor is logging
@@ -61,6 +67,15 @@ class ClubReading:
     face_to_target: float | None = None
     loft: float | None = None
     at: float = 0.0     # monotonic, when the booth read it
+    # The monitor's whole launch, in GSPro's units and signs, when its line has one with a carry:
+    # sp ball speed (mph), el launch angle, az start direction (- left), ts total spin, sa spin axis
+    # (- draw), cy carry (yards).
+    launch: dict[str, float] | None = None
+
+    @property
+    def has_club(self) -> bool:
+        return any(v is not None for v in (self.club_mph, self.angle_of_attack, self.path,
+                                            self.face_to_target, self.loft))
 
 
 def _num(v: Any) -> float | None:
@@ -69,16 +84,30 @@ def _num(v: Any) -> float | None:
     return float(v)
 
 
-def _reading(source: str, ball_mph: float | None, club_mph: float | None = None, **club: float | None) -> ClubReading | None:
-    """A reading with impossible numbers dropped; None when nothing usable is left."""
+def _launch(ball_mph: float, el: float | None, az: float | None, ts: float | None, sa: float | None,
+            cy: float | None) -> dict[str, float] | None:
+    """A full shot's launch, or None when a number is missing or impossible (or it has no carry: a
+    putt, or a monitor that leaves carry to GSPro)."""
+    if None in (el, az, ts, sa, cy):
+        return None
+    if not (-20 <= el <= 80 and -60 <= az <= 60 and 0 <= ts <= 14000 and -90 <= sa <= 90 and 0 < cy <= 450):
+        return None
+    return {"sp": ball_mph, "el": el, "az": az, "ts": ts, "sa": sa, "cy": cy}
+
+
+def _reading(source: str, ball_mph: float | None, club_mph: float | None = None,
+             launch: tuple[float | None, ...] | None = None, **club: float | None) -> ClubReading | None:
+    """A reading with impossible numbers dropped; None when nothing usable is left. launch is
+    (el, az, ts, sa, cy) in GSPro's units and signs."""
     if ball_mph is None or not 1 <= ball_mph <= 250:
         return None
     if club_mph is not None and not (5 <= club_mph <= 160 and (ball_mph < 30 or 0.3 <= ball_mph / club_mph <= 1.7)):
         club_mph = None
     club = {k: v for k, v in club.items() if v is not None and -45 <= v <= 80}
-    if club_mph is None and not club:
+    full = _launch(ball_mph, *launch) if launch else None
+    if club_mph is None and not club and full is None:
         return None
-    return ClubReading(source, ball_mph, club_mph, **club)
+    return ClubReading(source, ball_mph, club_mph, launch=full, **club)
 
 
 def parse_flightscope(line: str) -> ClubReading | None:
@@ -97,8 +126,13 @@ def parse_flightscope(line: str) -> ClubReading | None:
         return _num(d.get(key)) if d.get(key + "Available") is True else None
 
     ball, club = _num(d.get("launchSpeed")), measured("clubSpeed")
+    carry = measured("carryDistance")
+    spin = _num(d.get("spinRPM")) if d.get("spinRPMandEstimateAvailable") is True else None
+    # Signs as GSPro's: a negative start direction and spin axis are left (its lateral carry agrees).
+    launch = (measured("launchElevDeg"), measured("launchAzimDeg"), spin, measured("spinAxisDeg"),
+              carry * M_TO_YD if carry is not None else None)
     return _reading("FlightScope", ball * MPS_TO_MPH if ball else None, club * MPS_TO_MPH if club else None,
-                    angle_of_attack=measured("attackAngleDeg"), path=measured("clubPathDeg"),
+                    launch=launch, angle_of_attack=measured("attackAngleDeg"), path=measured("clubPathDeg"),
                     face_to_target=measured("clubFaceAngleDeg"), loft=measured("dynamicLoftDeg"))
 
 
@@ -115,15 +149,18 @@ def parse_rela(line: str) -> ClubReading | None:
             v, tag = fields.get(key, (None, ""))
             return v if tag in tags else None
 
+        # The ball numbers it sends GSPro (mph, yards, GSPro's signs) carry no tag.
+        launch = None if "type=PUTT" in line else tuple(take(k, ("",)) for k in ("vla", "hla", "spin", "axis", "carry"))
         return _reading("rela", fields.get("ball:speed", (None,))[0], take("club:speed", ("measured", "raw")),
-                        angle_of_attack=take("aoa"), path=take("path"), face_to_target=take("face"))
+                        launch=launch, angle_of_attack=take("aoa"), path=take("path"), face_to_target=take("face"))
     if m := _RELA_JSON.search(line):
         return _open_connect("rela", line[m.end():])
     return None
 
 
 def _open_connect(source: str, text: str) -> ClubReading | None:
-    """Club speed from an Open Connect shot message (the one field every sender measures)."""
+    """Club speed from an Open Connect shot message (the one club field every sender measures), and
+    its launch when it has a carry."""
     try:
         msg = json.loads(text)
     except ValueError:
@@ -132,9 +169,12 @@ def _open_connect(source: str, text: str) -> ClubReading | None:
         return None
     opts, ball, club = (msg.get(k) if isinstance(msg.get(k), dict) else {}
                         for k in ("ShotDataOptions", "BallData", "ClubData"))
-    if opts.get("IsHeartBeat") or not opts.get("ContainsClubData") or msg.get("Units", "Yards") != "Yards":
+    if opts.get("IsHeartBeat") or msg.get("Units", "Yards") != "Yards":
         return None
-    return _reading(source, _num(ball.get("Speed")), _num(club.get("Speed")))
+    launch = tuple(_num(ball.get(k)) for k in ("VLA", "HLA", "TotalSpin", "SpinAxis", "CarryDistance")) \
+        if opts.get("ContainsBallData") else None
+    return _reading(source, _num(ball.get("Speed")), _num(club.get("Speed")) if opts.get("ContainsClubData") else None,
+                    launch=launch)
 
 
 _OSP_LAUNCH = re.compile(r"\] Launch: BallSpeed=(-?\d+(?:\.\d+)?)")
@@ -316,8 +356,8 @@ class ClubFeed:
         return found
 
     def take(self, ball_mph: float) -> ClubReading | None:
-        """The kept reading for a ball this fast (the closest, then the newest), used up."""
-        near = [r for r in self.readings if abs(r.ball_mph - ball_mph) <= SAME_BALL_MPH]
+        """The kept reading with club data for a ball this fast (the closest, then the newest), used up."""
+        near = [r for r in self.readings if r.has_club and abs(r.ball_mph - ball_mph) <= SAME_BALL_MPH]
         if not near:
             return None
         best = min(near, key=lambda r: (abs(r.ball_mph - ball_mph), -r.at))
@@ -325,17 +365,28 @@ class ClubFeed:
         self.used.append(best)
         return best
 
+    def take_launch(self, fired_at: float, before: float, after: float) -> ClubReading | None:
+        """The kept reading with a full launch read from `before` seconds before a fire to `after`
+        seconds after it (the closest in time), used up."""
+        near = [r for r in self.readings if r.launch and fired_at - before <= r.at <= fired_at + after]
+        if not near:
+            return None
+        best = min(near, key=lambda r: abs(r.at - fired_at))
+        self.readings.remove(best)
+        self.used.append(best)
+        return best
+
     def active(self) -> bool:
         return self.read_at is not None and time.monotonic() - self.read_at < ACTIVE_SECONDS
 
-    async def _poll(self) -> None:
+    async def refresh(self) -> None:
         async with self._lock:
             await asyncio.to_thread(self.poll)
 
     async def run(self) -> None:
         while True:
             try:
-                await self._poll()
+                await self.refresh()
             except Exception:
                 log.exception("Club feed: reading the launch monitor logs failed")
             await asyncio.sleep(POLL_SECONDS)
@@ -344,12 +395,12 @@ class ClubFeed:
         """Gives a shot with no club data the reading for its ball, waiting briefly for one while a
         monitor is logging (its line can land just after GSPro's). True when it got one. before_wait
         is called once, if it's going to wait."""
-        if shot.club_measured or not shot.ball_speed:
-            return False
+        if shot.club_measured or not shot.ball_speed or shot.raw.get("MonitorLog"):
+            return False   # (a shot from a monitor's own line already had its reading)
         deadline = time.monotonic() + WAIT_SECONDS
         waited = False
         while True:
-            await self._poll()
+            await self.refresh()
             if (r := self.take(shot.ball_speed)) is not None:
                 apply(shot, r)
                 log.info("Club data from %s for the %.1f mph shot: club speed %s", r.source, shot.ball_speed,
@@ -364,6 +415,8 @@ class ClubFeed:
 
 
 def apply(shot: Shot, r: ClubReading) -> None:
+    if not r.has_club:
+        return
     shot.club_speed = r.club_mph
     shot.angle_of_attack = r.angle_of_attack
     shot.path = r.path

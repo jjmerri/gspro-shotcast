@@ -16,6 +16,11 @@ ball stops (sources/gspro_files.py), 3-13 s after impact. The booth's impact sna
 while the ball is in the air (on_impact, half a second after the fire), so the shot airs late but is
 read as it was struck.
 
+Faster where the monitor's own software logs the launch (FlightScope, rela: sources/club_feeds.py):
+a full swing's fire takes the monitor's line read around it and airs at once, in flight, with the
+monitor's numbers and carry (as a Uneekor shot does). GSPro's saved copy of it, with the same ball
+speed, is then dropped. A fire with no such line still waits for the files, as above.
+
 There is no club data here (club speed, path, face, attack angle, strike location): that comes from
 a launch monitor feed (connector_log or gspro_sniffer), or for some monitors from their own software's
 log (sources/club_feeds.py). Everything else the booth records comes from this log and the screen
@@ -32,6 +37,7 @@ from dataclasses import dataclass, field, replace
 
 from ..models import HoleChangeEvent, Shot, ShotEvent
 from .base import ShotSource
+from .club_feeds import SAME_BALL_MPH, apply
 from .gspro_files import GsproFiles, LastShot, folder_of, launch_of
 from .gspro_log import LOG_RECHECK_SECONDS, live_log
 
@@ -44,6 +50,10 @@ _MODE = re.compile(r"LaunchExt - (Regular|Putting) Mode")
 CAPTURE_AFTER = 0.5     # the booth's impact snapshot: the ball is still in the air
 FILES_WAIT = 45.0       # a fire with no saved shot by now (the range, a menu) is given up on
 LAST_SHOT_GRACE = 1.5   # LastShot changed and currentRound.dat didn't by now: a practice shot
+# A monitor logs a shot as it sends it to GSPro, so just before GSPro logs the fire; the booth reads
+# monitor logs every half second, and the log's line can be flushed late.
+EARLY_BEFORE = 2.0
+EARLY_AFTER = 1.5
 _PAIR = re.compile(r"\b(sp|el|az|ts|sa|cy|id)\s+(-?\d+(?:\.\d+)?)")
 
 
@@ -101,6 +111,9 @@ class GsproLogShotSource(ShotSource):
         self._waiting: list[_Fire] = []       # fires waiting on the shot files, oldest first
         self._last_shot: tuple[float, LastShot] | None = None
         self._round_sp = 0.0   # ball speed of the last shot from the round file (its LastShot row may come later)
+        # The launch monitors' own logs (sources/club_feeds.ClubFeed), set by the engine.
+        self.club_feed = None
+        self._early: list[tuple[_Fire, float]] = []   # fires aired from a monitor's line, and its ball speed
         # Called with a waiting fire's event while its ball is in the air, so the booth can snapshot
         # the impact-time state for when the shot airs (see Engine._capture_impact).
         self.on_impact = None
@@ -114,6 +127,7 @@ class GsproLogShotSource(ShotSource):
             log.info("GSPro is writing %s now; reading shots from it instead of %s", path, self.path)
             self.path, self._offset, self._buf = path, None, ""
             self._fired_at, self._waiting, self._last_shot, self._round_sp = None, [], None, 0.0
+            self._early = []
             self.files.move(folder_of(path))
 
     def _read_new_lines(self) -> list[str]:
@@ -144,9 +158,16 @@ class GsproLogShotSource(ShotSource):
             self.files.prime()
             return out
         new, written = self.files.new_swings()
+        for fire, sp in [e for e in self._early if now - e[0].at > FILES_WAIT]:
+            self._early.remove((fire, sp))
+            log.warning("GSPro saved no shot matching the %.1f mph one aired from the monitor's log", sp)
+        if new and self._early:
+            new = [entry for entry in new if not self._saved_early(launch_of(entry)["sp"], "file entry")]
         if self.files.db_changed(now) and (row := self.files.new_last_shot()) is not None:
             if abs((row.data.get("BallSpeed") or 0) - self._round_sp) < 0.01:
                 pass   # a round shot's row, read after its round file entry aired it
+            elif self._saved_early(row.data.get("BallSpeed") or 0, "LastShot row"):
+                pass
             elif self._waiting and self.files.db_written < self._waiting[-1].wall:
                 log.debug("LastShot row written before the latest fire: an earlier shot's")
             else:
@@ -193,6 +214,43 @@ class GsproLogShotSource(ShotSource):
             self._drop(1)
         return out
 
+    def _saved_early(self, sp: float, what: str) -> bool:
+        """GSPro's own copy of a shot already aired from the monitor's log: used up, not aired again."""
+        twin = next((e for e in self._early if abs(e[1] - sp) <= SAME_BALL_MPH), None)
+        if twin is None:
+            return False
+        self._early.remove(twin)
+        self._round_sp = sp
+        if self._last_shot and abs((self._last_shot[1].data.get("BallSpeed") or 0) - sp) < 0.01:
+            self._last_shot = None
+        log.info("GSPro %s for the shot aired from the monitor's log: ball speed %.2f (monitor %.1f)",
+                 what, sp, twin[1])
+        return True
+
+    async def _early_events(self, now: float) -> list[ShotEvent]:
+        """Full swings GSPro has fired whose launch a monitor's own log has: aired now, in flight."""
+        pending = [f for f in self._waiting if not f.putter and now - f.at <= EARLY_AFTER]
+        if self.club_feed is None or not pending:
+            return []
+        try:
+            await self.club_feed.refresh()
+        except Exception:
+            log.debug("Club feed: couldn't read the monitor logs for a fire", exc_info=True)
+            return []
+        out = []
+        for fire in pending:
+            if (r := self.club_feed.take_launch(fire.at, EARLY_BEFORE, EARLY_AFTER)) is None:
+                continue
+            self._waiting.remove(fire)
+            self._early.append((fire, r.ball_mph))
+            shot = shot_from_launch(r.launch)
+            apply(shot, r)
+            shot.raw = {**shot.raw, "Source": f"{r.source} log", "MonitorLog": r.source}
+            log.info("%s log shot: ball speed %.1f, carry %.1f, %.2fs after the fire (GSPro's files come "
+                     "when the ball stops)", r.source, r.ball_mph, r.launch["cy"], time.monotonic() - fire.at)
+            out.append(self._aired(fire, shot, landed=False))
+        return out
+
     def _drop(self, n: int) -> None:
         for fire in self._waiting[:max(0, n)]:
             self._drop_fire(fire)
@@ -203,9 +261,9 @@ class GsproLogShotSource(ShotSource):
                  "putt): dropped", time.monotonic() - fire.at)
 
     @staticmethod
-    def _aired(fire: _Fire, shot: Shot) -> ShotEvent:
+    def _aired(fire: _Fire, shot: Shot, landed: bool = True) -> ShotEvent:
         # Stamped when it was struck, not when GSPro saved it once the ball stopped.
-        ev = ShotEvent(shot=replace(shot, putter=fire.putter, timestamp=fire.wall or shot.timestamp), landed=True)
+        ev = ShotEvent(shot=replace(shot, putter=fire.putter, timestamp=fire.wall or shot.timestamp), landed=landed)
         ev.impact_at, ev.impact_state, ev.impact_read, ev.impact_seq = (
             fire.event.impact_at, fire.event.impact_state, fire.event.impact_read, fire.event.impact_seq)
         ev.setup_hud, ev.buffer_frames = fire.event.setup_hud, fire.event.buffer_frames
@@ -248,6 +306,8 @@ class GsproLogShotSource(ShotSource):
                     continue
                 log.info("GSPro log shot: id %s, ball speed %s", vals.get("id"), vals["sp"])
                 yield ShotEvent(shot=shot_from_launch(vals))
+            for ev in await self._early_events(now):
+                yield ev
             self._capture(now)
             try:
                 for ev in await asyncio.to_thread(self._files_events, now):

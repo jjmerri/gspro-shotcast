@@ -482,3 +482,65 @@ def test_a_saved_shot_gspconnect_skipped_airs_with_its_impact_snapshot():
     start = time.monotonic()
     got = _take(src, 1)
     assert got[0].impact_state == "in the air" and time.monotonic() - start < 0.45   # aired as it came
+
+
+RELA = ("[2026-10-03T18:33:40.1634733Z] SEND=> [ShotEnded] OUT type={type} mode=NORMAL club=DR ball:speed={sp} "
+        "hla=-5.4 vla=11.2 spin=2639 back=2236 side=-1400 axis=-32.1 carry={cy} sie=SIE-Assisted "
+        "club:speed=99.4(measured) aoa=7.22(SIE-physics+MLP)\n")
+
+
+def test_a_beta_full_swing_airs_from_the_monitors_log_and_gspros_copy_is_dropped(tmp_path):
+    from commentator.sources.club_feeds import ClubFeed
+    beta = _Beta(tmp_path)
+    rela = tmp_path / "rela"
+    rela.mkdir()
+    (rela / "rela.log").write_text("", encoding="utf-8")
+    feed = ClubFeed([(rela, "rela.log")])
+    feed.poll()   # the booth's feed is running before any shot
+    src = GsproLogShotSource(str(beta.log), poll_seconds=0.01)
+    src.club_feed = feed
+
+    def monitor(sp, type="FULL", cy=240.1):
+        with (rela / "rela.log").open("a", encoding="utf-8") as f:
+            f.write(RELA.format(sp=sp, type=type, cy=cy))
+
+    def lands(sid, sp, **kw):
+        def write():
+            beta.entries.append(_entry(sid, sp, **kw))
+            beta.write_round()
+        return write
+    got = _run_beta(src, [
+        (0.1, lambda: monitor(148.1)), (0, beta.fire),           # the monitor logs it as GSPro fires it
+        (0.3, lands("drive", 148.13)),                           # GSPro's own copy, once the ball stops
+        (0.1, beta.fire), (0.3, lambda: monitor(120.0)),         # its line flushed just after the fire
+        (0.3, lands("3w", 120.04, shot=2)),
+        (0.1, beta.fire), (1.7, lands("wedge", 98.0, shot=3)),   # no line for it: GSPro's files, as before
+        (0.1, lambda: monitor(6.0, "PUTT", 0.0)), (0, lambda: beta.fire("Putting")),
+        (0.3, lands("putt", 6.0, shot=4)),                       # a putt waits for the files too
+    ], 0.3)
+    assert [(round(e.shot.ball_speed, 2), e.landed) for e in got] == [
+        (148.1, False), (120.0, False), (98.0, True), (6.0, True)]
+    drive = got[0].shot
+    assert (drive.carry, drive.hla, drive.spin_axis, drive.club_speed, drive.club_measured, drive.putter) == (
+        240.1, -5.4, -32.1, 99.4, True, False)
+    assert drive.raw["MonitorLog"] == "rela" and not src._early and not src._waiting
+    assert got[3].shot.is_putt
+
+
+def test_gspconnect_passes_a_monitor_log_shot_straight_through():
+    import dataclasses
+    import time
+
+    from commentator.models import ShotEvent
+    from commentator.sources.fallback import ConnectorWithLogFallback
+    drive = shot_from_launch(parse_launch(DRIVE))
+    early = dataclasses.replace(drive, raw={"MonitorLog": "FlightScope"})
+    # GSPconnect heartbeating (FlightScope through it), and a copy from it after all: dropped.
+    conn = _Feed([(0.3, ShotEvent(shot=dataclasses.replace(drive)))], heard_at=time.monotonic())
+    src = ConnectorWithLogFallback(conn, _Feed([(0, ShotEvent(shot=early))]), missed_after=60)
+    got = _take_for(src, 0.6)   # a held shot wouldn't come out for a minute
+    assert [e.shot for e in got] == [early] and not src.using_log
+    # GSPconnect's copy first: the monitor's is the duplicate.
+    conn = _Feed([(0, ShotEvent(shot=drive))], heard_at=time.monotonic())
+    src = ConnectorWithLogFallback(conn, _Feed([(0.1, ShotEvent(shot=early))]), missed_after=0.2)
+    assert [e.shot for e in _take_for(src, 0.6)] == [drive]

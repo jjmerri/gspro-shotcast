@@ -58,7 +58,10 @@ The shot feeds:
   public beta) logs the fire without the numbers; there the same numbers are read from the files
   GSPro saves once the ball stops (`currentRound.dat`, or `GSPro.db`'s `LastShot` for practice),
   3-13 s after impact. Those shots are recorded and reacted to as usual but get no mid-flight
-  call. Use it if your
+  call, unless the monitor's own log has the shot (FlightScope and rela, below): then a full swing
+  airs as soon as GSPro fires it, with the monitor's numbers and carry, and gets its mid-flight call
+  like a Uneekor shot; GSPro's saved copy of it is dropped. Putts, and shots no monitor line
+  matches within a couple of seconds of the fire, still wait for the files. Use it if your
   monitor's shots don't show up with `connector_log`. Carry is read as yards and speed as mph
   (checked with GSPro set to yards; metric is untested).
 - **`gspro_sniffer`**: captures the Open Connect traffic on GSPro's port 921, for third-party
@@ -80,6 +83,10 @@ Built from players' logs, not tested on the hardware:
 Garmin R10 connectors print to a console, not a file, and Foresight and aboutGolf send GSPro ball
 data only, so those shots have none. The booth log says `Club data: reading <monitor> shots from
 <file>` the first time a log gives a reading.
+
+FlightScope's and rela's lines also have the whole launch with a carry, so on GSPro 3.59 they're
+the fast feed for full swings (see `gspro_log` above; the booth log says `<monitor> log shot:`).
+OpenSkyPlus logs no carry, so its shots keep waiting for GSPro's files.
 
 To check a feed, run `python -m commentator run --no-commentary`, hit a shot, and look for
 `Connector shot:` or `GSPro log shot:` in `logs/booth-<date>.log`. Missing club data is stored

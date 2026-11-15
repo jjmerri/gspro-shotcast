@@ -11,7 +11,10 @@ FS = ('2023-10-11 15:46:35,862 [1] INFO  VGPconnect.FlightscopeForm [(null)] - '
       + json.dumps({"guid": "{x}", "launchSpeed": 66.2, "launchSpeedAvailable": True, "clubSpeed": 44.449,
                     "clubSpeedAvailable": True, "attackAngleDeg": 3.4, "attackAngleDegAvailable": True,
                     "clubPathDeg": 0.0, "clubPathDegAvailable": False, "clubFaceAngleDeg": 0.0,
-                    "clubFaceAngleDegAvailable": False, "BounceRoll_X": [1, 2, 3]}))
+                    "clubFaceAngleDegAvailable": False, "launchElevDeg": 14.177, "launchElevDegAvailable": True,
+                    "launchAzimDeg": -1.324, "launchAzimDegAvailable": True, "spinRPM": 2436,
+                    "spinRPMandEstimateAvailable": True, "spinAxisDeg": -3.86, "spinAxisDegAvailable": True,
+                    "carryDistance": 219.63, "carryDistanceAvailable": True, "BounceRoll_X": [1, 2, 3]}))
 RELA_TEXT = ("[2026-07-28T15:51:07.1181010Z] SEND=> [ShotEnded] OUT type=FULL mode=NORMAL club=DR ball:speed=148.1 "
              "hla=-5.4 vla=11.2 spin=2639 back=2236 side=-1400 axis=-32.1 carry=240.1 sie=SIE-Assisted "
              "club:speed=99.4(measured) aoa=7.22(SIE-physics+MLP) path=-2.21(SIE-physics+MLP) face=n/a "
@@ -53,14 +56,28 @@ def test_flightscope_converts_to_mph_and_keeps_only_what_the_radar_measured():
     assert r.ball_mph == pytest.approx(148.09, abs=0.01) and r.club_mph == pytest.approx(99.43, abs=0.01)
     assert r.angle_of_attack == 3.4
     assert r.path is None and r.face_to_target is None and r.loft is None
+    assert r.launch == pytest.approx({"sp": r.ball_mph, "el": 14.177, "az": -1.324, "ts": 2436, "sa": -3.86,
+                                      "cy": 240.19}, abs=0.01)   # carry in yards
+    no_carry = json.loads(FS[FS.index("{"):]) | {"carryDistanceAvailable": False}
+    assert parse_flightscope("FlightscopeForm - " + json.dumps(no_carry)).launch is None
 
 
 def test_rela_keeps_measured_club_speed_and_drops_what_it_modelled():
     r = parse_rela(RELA_TEXT)
     assert (r.ball_mph, r.club_mph) == (148.1, 99.4)
     assert r.angle_of_attack is None and r.path is None and r.face_to_target is None
+    assert r.launch == {"sp": 148.1, "el": 11.2, "az": -5.4, "ts": 2639, "sa": -32.1, "cy": 240.1}
+    putt = RELA_TEXT.replace("type=FULL", "type=PUTT").replace("carry=240.1", "carry=0.0")
+    assert parse_rela(putt).launch is None
     j = parse_rela(RELA_JSON)
     assert (j.ball_mph, j.club_mph, j.path) == (113.92, 82.81, None)
+    assert j.launch is None   # no carry in this message
+    ball_only = RELA_JSON.replace('"BallData":{"Speed":113.92,"VLA":17.61}',
+                                  '"BallData":{"Speed":113.92,"VLA":17.61,"HLA":0,"TotalSpin":1886.79,'
+                                  '"SpinAxis":-2.73,"CarryDistance":163.8}').replace(
+                                      '"ContainsClubData":true', '"ContainsClubData":false')
+    b = parse_rela(ball_only)
+    assert b.club_mph is None and not b.has_club and b.launch["cy"] == 163.8
     heartbeat = '[2026-10-26T01:00:00Z] SEND=> {"ContainsBallData":false,"ContainsClubData":false,"IsHeartBeat":true}'
     assert parse_rela(heartbeat) is None
 
@@ -71,6 +88,7 @@ def test_openskyplus_both_versions():
     assert [r.source for r in got] == ["OpenSkyPlus", "OpenSkyPlus"]
     assert got[0].ball_mph == pytest.approx(97.02, abs=0.01) and got[0].club_mph == pytest.approx(76.35, abs=0.01)
     assert (got[1].ball_mph, got[1].club_mph) == (23.3710041, 44.89674)
+    assert got[0].launch is None and got[1].launch is None   # no carry: GSPro's files still air these
 
 
 def test_an_impossible_club_speed_is_dropped():
