@@ -1118,7 +1118,7 @@ function sgBars(sg) {
 
 function gapChart(clubs) {
   const cs = clubs.filter(c => c.carry);
-  if (!cs.length) return '<p class="empty">No launch-monitor carries yet.</p>';
+  if (!cs.length) return '<p class="empty">No launch-monitor carries in the last 12 months.</p>';
   const max = Math.max(...cs.map(c => c.carry_max || c.carry)) * 1.05;
   const pct = v => (100 * v / max).toFixed(1) + "%";
   return `<div class="gap">${cs.map(c => `<div>${esc(c.club)}${c.any_lie ? "*" : ""}</div><div class="gaptrack" title="${c.n} swings${c.any_lie ? " (any lie)" : ""}; middle half ${c.carry_lo}–${c.carry_hi} yd">
@@ -1325,7 +1325,7 @@ function renderPlayer(p) {
   </div>
   <h2>Gapping and typical miss</h2>
   <div class="grid2">
-    <div>${gapChart(p.gapping)}<p class="sub">Launch-monitor carry from the tee and fairway: the bar is the middle half of swings, the mark the median.${p.gapping.some(c => c.any_lie) ? " *: too few tee and fairway swings, so every lie counts (from the rough GSPro's club is often one less than the one swung)." : ""}${p.gapping.some(c => c.game) ? " ≈: some swings had no raw carry, so GSPro's game carry stands in (slope and weather included). Add GSPro's Carry (raw) data tile for exact numbers." : ""}</p></div>
+    <div>${gapChart(p.gapping)}<p class="sub">Launch-monitor carry from the tee and fairway over the last 12 months: the bar is the middle half of swings, the mark the median.${p.gapping.some(c => c.any_lie) ? " *: too few tee and fairway swings, so every lie counts (from the rough GSPro's club is often one less than the one swung)." : ""}${p.gapping.some(c => c.game) ? " ≈: some swings had no raw carry, so GSPro's game carry stands in (slope and weather included). Add GSPro's Carry (raw) data tile for exact numbers." : ""}</p></div>
     <div>${sortable("gap", p.gapping, [
       { key: "club", label: "Club" }, { key: "n", label: "Swings", title: "Full swings from the tee or fairway used (of all swings with the club)" }, { key: "carry", label: "Carry" },
       { key: "gap_to_next", label: "Gap", title: "Median carry gap to the next club down" },

@@ -265,24 +265,27 @@ GAPPING_MIN_CLEAN = 5
 
 
 def gapping(db: sqlite3.Connection, player: str, context: str | None = None,
-            finish: dict[int, float] | None = None) -> list[dict]:
+            finish: dict[int, float] | None = None, since: str | None = None) -> list[dict]:
     """Per club, carry and launch numbers from the launch monitor, over full swings only: a chip or a
     knock-down (ball speed well under the club's best) would drag a wedge's carry down. Every real swing
     counts, a mulligan's too. Medians and the middle half, so one mishit doesn't move the numbers.
     Only swings from the tee or fairway count (see GAPPING_CLEAN_LIES); a club with too few of those
     uses every lie, and says so (`any_lie`).
     A swing with no raw carry (a launch monitor that sends none, and no CARRY (raw) tile on screen) uses
-    GSPro's game carry, slope and weather in it: `game` counts those.
+    GSPro's game carry, slope and weather in it: `game` counts those. `since` (YYYY-MM-DD): the nights
+    from then on only.
     `finish`: hole_replay.finish_laterals, worked out here when not given."""
     if finish is None:
         from .hole_replay import finish_laterals   # hole_replay imports stats_web, which imports this
-        finish = finish_laterals(db)
+        finish = finish_laterals(db, since)
     raw = "COALESCE(NULLIF(carry_raw_tile_yards, 0), NULLIF(carry_raw, 0))"
     rows = db.execute(
         f"SELECT id, club, COALESCE({raw}, carry_game_yards) AS carry, {raw} IS NULL AS game, total_yards, ball_speed,"
         " club_speed, launch_angle, total_spin, spin_axis, start_direction, handed, lie_before FROM shots WHERE player = ?"
         " AND attributed = 1 AND is_putt = 0 AND left_out = 0 AND club IS NOT NULL AND club != 'PT'"
-        f" AND COALESCE({raw}, carry_game_yards) > 0" + _ctx(context), (player,)).fetchall()
+        f" AND COALESCE({raw}, carry_game_yards) > 0" + _ctx(context)
+        + ("" if since is None else " AND session_id IN (SELECT id FROM sessions WHERE date >= ?)"),
+        (player,) if since is None else (player, since)).fetchall()
     by_club: dict[str, list] = defaultdict(list)
     for r in rows:
         by_club[r["club"]].append(r)

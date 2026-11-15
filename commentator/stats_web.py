@@ -1222,8 +1222,9 @@ def summary(db: sqlite3.Connection, context: str | None = None,
     # Our own handicap index (handicap_index) goes by every counting round, whatever the context:
     # every such round, and without the rounds with a mulligan.
     own = reuse(db, ("indexes",), lambda: handicap_index.indexes(db))
+    year = period_starts()["1y"]   # gapping: the bag as it's been this last year (the 1y range's nights)
     from .hole_replay import finish_laterals   # hole_replay imports this module
-    finish = finish_laterals(db)
+    finish = finish_laterals(db, year)
     for p in people:
         mine = own.get(p["name"]) or {}
         clean = mine.get("without_mulligans") or {}
@@ -1231,7 +1232,7 @@ def summary(db: sqlite3.Connection, context: str | None = None,
         # without the rounds a mulligan was taken in, for the page's toggle
         p["index_clean"], p["index_history_clean"] = clean.get("index"), clean.get("history", [])
         p["sg"] = sg.get(p["name"])
-        p["gapping"] = A.gapping(db, p["name"], context, finish)
+        p["gapping"] = A.gapping(db, p["name"], context, finish, year)
         p["recovery"] = rec.get(p["name"], [])
         p["trend"] = trend.get(p["name"], [])
     filters, has_league, has_tournament = _filters(db)

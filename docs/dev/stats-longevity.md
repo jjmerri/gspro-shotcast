@@ -161,7 +161,9 @@ merged like any other, and its record is in both nights' signatures.
     course's layouts on other nights), but its lookups no longer grow with history: the layout batches
     are grouped by course and session once instead of scanned per round (rounds × layouts before),
     and each player's index is worked out once per card. 0.65 s on 3 years; 1.28 s to 0.67 s with
-    layouts logged for every round.
+    layouts logged for every round. The booth works it out (at startup and each round's end) in a
+    thread on its own connection, so its 4–9 s at 10 years doesn't hold up the round's wrap-up; the
+    new indexes land when it's done.
   - the usual gimme: `round_groups` (the rounds as played, which it and a dozen others read) is worked
     out once a build instead of 59 times; the usual gimme went from 0.84 s a build to 0.07 s on 3 years.
   - broadcasts and the page's filters: per night, its sessions with lines (courses and players in
@@ -207,7 +209,7 @@ merged like any other, and its record is in both nights' signatures.
   | 10 | 211 s | 25.1 s | 30.0 s | 88 s | 3.9 GB |
 
   After a round is at the 30 s target at 10 years but still grows. A warm 10-year build (31.7 s
-  under the profiler): gapping 7.3 s (every full swing a player hit; it waits on the bag resets),
+  under the profiler): gapping 7.3 s (every full swing a player hit; now the last 12 months, below),
   `rounds` 6.1 s, the handicap index 4.2 s, merging the kept nights about 11 s (holes 3.7 s,
   highlights 2.5 s, players 2.0 s, firsts 1.5 s) and loading them about 3 s.
 - **Predictions** need no port: about 1,600 rows at 3 years, read in under 1 ms.
@@ -218,12 +220,13 @@ merged like any other, and its record is in both nights' signatures.
   - Putting buckets are kept per `PUTT_EDGES` interval and merged at the usual gimme when shown.
   - The round summaries' `vs` figures (against the player's lifetime numbers, which every new round
     moves) are worked out by the page when it shows a round, not stored in the round.
-  - Gapping goes by the player's bag: a whole-bag reset and per-club resets, set on the local stats
-    page, instead of a time window.
+  - Gapping goes by the last 12 months of swings (the 1y range's nights); no bag resets. At 10 years,
+    every player's gapping in one context took 21.4 s cold; 1.4 s now.
   - The booth: rates are total over total (today `season_rounds` averages per-round rates), band
     lookups snap to 1 ft / 5 yd buckets, it merges the frozen nights once at startup and adds tonight
-    live; `spoken_lines` looks back 12 months, `side_rounds` gets a limit. (The history reads turned
-    out exact without buckets, read per player when first asked: see "Booth history reads" below.)
+    live; `spoken_lines` looks back 12 months; `side_rounds` keeps no limit (47 ms once a round, and
+    a limit would change what the booth says). (The history reads turned out exact without buckets,
+    read per player when first asked: see "Booth history reads" below.)
   - The booth tab's signature phrases go by the last 12 months (the 1y range's nights); its other
     numbers stay lifetime. Older nights' phrase partials are dropped from the cache.
 - **Page files (done for the shot log).** The page's `stats.db` is one file per calendar year of play

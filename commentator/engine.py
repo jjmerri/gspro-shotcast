@@ -670,6 +670,26 @@ def _hole_key(label: str | None) -> str:
     return re.sub(r"^Hole \d+,\s*", "", label or "")
 
 
+def _own_handicaps(db: Any) -> dict[str, float]:
+    """Each player's own handicap index (handicap_index.indexes), for those with one."""
+    from . import handicap_index
+
+    return {p: v["index"] for p, v in handicap_index.indexes(db).items() if v["index"] is not None}
+
+
+def _own_handicaps_from(path: str) -> dict[str, float]:
+    """_own_handicaps on a connection of its own to the season file, for a thread."""
+    import sqlite3
+    from contextlib import closing
+
+    with closing(sqlite3.connect(f"{Path(path).as_uri()}?mode=rw", uri=True, timeout=30)) as db:
+        db.execute("PRAGMA query_only = 1")
+        db.row_factory = sqlite3.Row
+        with db:   # one read transaction: the rounds and the layouts as of one moment
+            db.execute("BEGIN")
+            return _own_handicaps(db)
+
+
 class Engine:
     """Three moments per shot: a setup line while the player addresses the ball, a call
     while it's in the air, and a reaction once it stops."""
@@ -703,6 +723,9 @@ class Engine:
         self._hc = RoundCounters()      # this round's reads, for the post-round checkup
         self._follower: GsproLogFollower | None = None
         self.league = league
+        self._own_handicaps_task: asyncio.Task | None = None   # (_refresh_own_handicaps)
+        self._own_handicaps_wanted = False
+        self._own_handicaps_inline = 0   # counts inline workings out, so an older thread's result is dropped
         self.source = source
         if hasattr(source, "on_impact"):
             source.on_impact = self._capture_impact
@@ -8477,21 +8500,67 @@ class Engine:
 
     def _refresh_own_handicaps(self, backfill: bool = False) -> None:
         """Work out each player's own handicap index from the rounds on record, for anyone the league
-        has no handicap for. `backfill` first reads the tees of courses played before they were kept."""
+        has no handicap for. `backfill` first reads the tees of courses played before they were kept.
+        The working out (seconds, after years of rounds) runs in a thread on a connection of its own, so
+        the booth carries on meanwhile and the indexes land when it's done; one asked for while another
+        runs follows it."""
         try:
-            from . import course_card, handicap_index
+            from . import course_card
 
             if backfill:
                 # By name alone: the folder GSPro's log names is tonight's course, not these.
                 for course in self.store.courses_without_tees():
                     self._keep_course_tees(course, course_card.load(self.cfg.source.gspro_courses_dirs, course))
-
-            own = handicap_index.indexes(self.store.db)
-            self.league.own_indexes = {p: v["index"] for p, v in own.items() if v["index"] is not None}
-            if self.league.own_indexes:
-                log.info("Own handicap indexes: %s", ", ".join(f"{p} {i}" for p, i in sorted(self.league.own_indexes.items())))
+            path = self.store.db.execute("PRAGMA main.database_list").fetchone()[2]
         except Exception as e:
             log.warning("Own handicap indexes failed (%s)", e)
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None or not path or self.store.db.in_transaction:   # (a thread's connection wouldn't see it)
+            self._own_handicaps_inline += 1
+            self._own_handicaps_wanted = False   # (one asked for before is older than this)
+            self._set_own_handicaps(_own_handicaps, self.store.db)
+            return
+        self._own_handicaps_wanted = True
+        if self._own_handicaps_task is None or self._own_handicaps_task.done():
+            self._own_handicaps_task = loop.create_task(self._own_handicaps_in_thread(path), name="own-handicaps")
+
+    async def _own_handicaps_in_thread(self, path: str) -> None:
+        loop = asyncio.get_running_loop()
+        while self._own_handicaps_wanted:
+            self._own_handicaps_wanted = False
+            inline = self._own_handicaps_inline
+            done: asyncio.Future = loop.create_future()
+
+            def work() -> None:
+                # A daemon thread (not asyncio.to_thread), so quitting mid-way doesn't wait for it.
+                try:
+                    out: tuple = (_own_handicaps_from(path), None)
+                except Exception as e:
+                    out = (None, e)
+                try:
+                    loop.call_soon_threadsafe(lambda: done.done() or done.set_result(out))
+                except RuntimeError:   # the loop has closed: the booth has quit
+                    pass
+
+            threading.Thread(target=work, name="own-handicaps", daemon=True).start()
+            own, error = await done
+            if error is not None:
+                log.warning("Own handicap indexes failed (%s)", error)
+            elif inline == self._own_handicaps_inline:   # (else one worked out inline since is newer)
+                self._set_own_handicaps(lambda: own)
+
+    def _set_own_handicaps(self, compute: Callable[..., dict], *args: Any) -> None:
+        try:
+            self.league.own_indexes = compute(*args)
+        except Exception as e:
+            log.warning("Own handicap indexes failed (%s)", e)
+            return
+        if self.league.own_indexes:
+            log.info("Own handicap indexes: %s", ", ".join(f"{p} {i}" for p, i in sorted(self.league.own_indexes.items())))
 
     def _round_players(self, names: list[str]) -> list[str]:
         """Roster players in this round: every player on a team that has a GSPro name here.

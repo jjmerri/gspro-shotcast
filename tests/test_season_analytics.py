@@ -140,6 +140,18 @@ def test_gapping_leaves_out_the_rough_where_gspros_club_is_often_one_short(db):
     assert (pw["carry"], pw["n"], pw["any_lie"]) == (110, 3, True)
 
 
+def test_gapping_goes_by_the_nights_since_a_date(db):
+    old = db.execute("INSERT INTO sessions (started_at, date) VALUES (0, '2024-01-10')").lastrowid
+    db.execute("UPDATE sessions SET date = '2025-06-01' WHERE id = 1")
+    for carry in (150, 152, 154):
+        shot(db, club="7I", carry_raw=carry, ball_speed=110)
+        shot(db, club="7I", carry_raw=carry + 20, ball_speed=110, session_id=old)   # last year's 7-iron
+    shot(db, club="5I", carry_raw=190, ball_speed=120, session_id=old)
+    db.commit()
+    assert [(c["club"], c["n"], c["carry"]) for c in A.gapping(db, "Ann")] == [("5I", 1, 190), ("7I", 6, 162)]
+    assert [(c["club"], c["n"], c["carry"]) for c in A.gapping(db, "Ann", since="2025-06-01")] == [("7I", 3, 152)]
+
+
 def test_gapping_takes_the_game_carry_when_no_raw_carry_was_sent_or_read(db):
     # A launch monitor that sends a carry of 0 and no CARRY (raw) tile on screen.
     for carry in (100, 104, 98):

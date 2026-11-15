@@ -761,15 +761,20 @@ def _team_ends(played: list[sqlite3.Row], starts: dict[int, tuple | None], rows:
 FINISH_PIN_MAX = 250   # yards: further out, a swing with no aim set is as likely a lay-up as at the pin
 
 
-def finish_laterals(db: sqlite3.Connection) -> dict[int, float]:
+def finish_laterals(db: sqlite3.Connection, since: str | None = None) -> dict[int, float]:
     """Where each swing GSPro logged positions for finished sideways of the line it was aimed down,
     yards (positive = right, as seen), by shot id: from where it started to where the next stroke
     started, after the roll (or where it went into a penalty area). The aim is the one set on the
     minimap; with none set, the pin, or off the tee of a par 4 or 5 the course's own aim point. A swing
     with no aim to go by (a long shot from the fairway with no aim set, a tee shot on a course with no
-    aim point logged) is left out, as is a mulligan, which GSPro puts back."""
+    aim point logged) is left out, as is a mulligan, which GSPro puts back. `since` (YYYY-MM-DD): the
+    rounds with a night from then on only (their replays alone are read)."""
     out: dict[int, float] = {}
-    hole_replays(db, finish=out)
+    rounds = None
+    if since is not None:
+        recent = {sid for (sid,) in db.execute("SELECT id FROM sessions WHERE date >= ?", (since,))}
+        rounds = [rnd for rnd, (_, sessions) in replay_rounds(db).items() if recent.intersection(sessions)]
+    hole_replays(db, rounds, finish=out)
     return out
 
 
