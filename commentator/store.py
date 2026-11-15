@@ -430,18 +430,19 @@ class SeasonCopyFailed(RuntimeError):
 
 class Store:
     def __init__(self, path: str | None, new_session: bool = True, backups: str | Path | None = None,
-                 on_copy: Callable[[], None] | None = None) -> None:
+                 on_copy: Callable[[], None] | None = None, check_later: bool = False) -> None:
         """Open (creating or upgrading) the season file. new_session=False opens it for maintenance, such
         as a backfill, without starting a booth session in it. `backups`: where a file in an older format
         is copied first (default: a backups folder beside it, where the booth's own copies go by default);
         `on_copy` is called before that copy. If it can't be copied, SeasonCopyFailed and the file is left
-        as it was."""
+        as it was. `check_later`: the copy is checked and compressed in the background (the booth, so it
+        starts in seconds rather than a minute on a big file)."""
         if path:
             from . import backup
 
             where = backups or Path(path).parent / "backups"
             try:
-                made = backup.before_upgrade(path, where, FORMAT, on_copy=on_copy)
+                made = backup.before_upgrade(path, where, FORMAT, on_copy=on_copy, later=check_later)
             except Exception as e:
                 log.exception("Season file not copied before upgrading it: not opening it")
                 raise SeasonCopyFailed(f"the season file ({path}) couldn't be copied to {where} before "

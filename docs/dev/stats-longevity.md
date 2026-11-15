@@ -223,8 +223,9 @@ merged like any other, and its record is in both nights' signatures.
   counters of the records they join (reconciling once moved every record's, so a rollback cost a cold
   build: on 1 year, 4,253 cache misses, now 37, as the same rows written here). A file older than
   `store.FORMAT` is copied before it's upgraded (`backup.before_upgrade`; if it can't be, the file isn't
-  opened and the booth stops, saying why, in the tray). At 10 years (1.2 GB) 34 to 50 s: the SQLite
-  copy 3.6 s, its integrity check 16 s and gzip 19 s (the last two could run after the start), once.
+  opened and the booth stops, saying why, in the tray). At 10 years (1.2 GB) the booth waits only for
+  the SQLite copy, 3.6 s; its integrity check (16 s) and gzip (19 s) run in a thread after the start
+  (`later`), and a copy they don't finish is kept as a plain `.db`, which `restore` takes too.
 - **Predictions** need no port: about 1,600 rows at 3 years, read in under 1 ms.
 - **To port:** the page files' remaining lists (below).
 - **Decisions:**

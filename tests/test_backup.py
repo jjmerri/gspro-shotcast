@@ -1,6 +1,7 @@
 import gzip
 import json
 import sqlite3
+import threading
 from contextlib import closing
 from datetime import datetime, timedelta
 
@@ -290,6 +291,46 @@ def test_a_season_file_that_cant_be_copied_isnt_opened_or_upgraded(tmp_path):
         assert db.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
 
 
+def _copies_finished():
+    for t in threading.enumerate():
+        if t.name == "pre-update-copy":
+            t.join()
+
+
+def test_a_copy_checked_later_is_kept_as_it_is_if_the_check_fails(tmp_path, monkeypatch):
+    path, dest = tmp_path / "season.db", tmp_path / "backups"
+    _older_season(path)
+    dest.mkdir()
+    for day, kinds in ((1, [".db"]), (2, [".db.gz"]), (3, [".db.gz"]), (4, [".db", ".db.gz"])):
+        for kind in kinds:   # (one left uncompressed; one compressed but not yet removed uncompressed)
+            (dest / f"{backup.PRE_UPDATE}2026010{day}-090000-from-format-4{kind}").write_bytes(b"x")
+    raw = backup.before_upgrade(path, dest, 6, later=True, now=datetime(2027, 1, 1))
+    _copies_finished()
+    assert not raw.exists()
+    assert sorted(p.name[len(backup.PRE_UPDATE):] for p in dest.glob(backup.PRE_UPDATE + "*")) == [
+        "20260103-090000-from-format-4.db.gz", "20260104-090000-from-format-4.db",
+        "20260104-090000-from-format-4.db.gz", "20270101-000000-from-format-5.db.gz"]
+    with gzip.open(raw.with_name(raw.name + ".gz")) as fin:
+        (tmp_path / "unzipped.db").write_bytes(fin.read())
+    with closing(sqlite3.connect(tmp_path / "unzipped.db")) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
+
+    def bad(p):
+        raise RuntimeError("the copy failed its integrity check: page 2")
+    monkeypatch.setattr(backup, "_check", bad)
+    kept = backup.before_upgrade(path, dest, 6, later=True, now=datetime(2030, 1, 1))
+    _copies_finished()
+    assert kept.is_file() and not kept.with_name(kept.name + ".gz").exists()
+    with closing(sqlite3.connect(kept)) as db:
+        assert db.execute("SELECT player FROM shots").fetchall() == [("Ann",)]
+    assert sorted(p.name[len(backup.PRE_UPDATE):][:8] for p in dest.glob(backup.PRE_UPDATE + "*")) == [
+        "20260104", "20260104", "20270101", "20300101"]
+    monkeypatch.undo()
+    assert backup.restore(kept, tmp_path / "back.db", dest) is None   # restore takes the plain .db too
+    with closing(sqlite3.connect(tmp_path / "back.db")) as db:
+        assert db.execute("SELECT player FROM shots").fetchall() == [("Ann",)]
+
+
 def test_an_older_season_file_is_copied_even_beside_a_newer_copy_of_another(tmp_path):
     from commentator.store import Store
 
@@ -312,8 +353,10 @@ def test_the_booth_copies_an_older_season_file_into_the_backup_folder_set(tmp_pa
     cfg.commentary.enabled = False
     monkeypatch.setenv("SHOTCAST_READY_FILE", str(tmp_path / "booth-ready"))
     _older_season(cfg.db_path)
+    monkeypatch.setattr(backup, "_check", lambda p: 1 / 0)   # checked after the booth starts
     _build_engine(cfg).store.db.close()
-    assert len(list((tmp_path / "kept").glob(backup.PRE_UPDATE + "*"))) == 1
+    _copies_finished()
+    assert [p.suffix for p in (tmp_path / "kept").glob(backup.PRE_UPDATE + "*")] == [".db"]
     assert "Copying the season file" in (tmp_path / "booth-note").read_text()   # (the tray shows it)
     _older_season(cfg.db_path)
     cfg.backup.dir = str(tmp_path / "booth-note")   # (a file: the copy fails)

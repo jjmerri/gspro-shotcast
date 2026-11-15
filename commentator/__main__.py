@@ -131,8 +131,8 @@ def _store(cfg: Config):
 
     def copying() -> None:
         _booth_says("Copying the season file before upgrading it: the booth starts when it's done "
-                    "(up to a minute on a big file).")
-    return Store(cfg.db_path, backups=backup.folder(cfg), on_copy=copying)
+                    "(a few seconds on a big file).")
+    return Store(cfg.db_path, backups=backup.folder(cfg), on_copy=copying, check_later=True)
 
 
 def _booth_says(text: str, file: str | None = None) -> None:
