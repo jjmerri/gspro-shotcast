@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.132
+
+### Stats page
+- Each player's page has a dispersion chart: where each club's full swings finish, with a ring around 95% of them, and the gapping table shows each club's typical miss and how wide it sprays.
+
 ## 0.1.131
 
 ### Stats page
