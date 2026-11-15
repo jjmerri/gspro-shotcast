@@ -1518,6 +1518,43 @@ async def test_a_shot_delivered_after_the_ball_landed_gets_no_flight_call(tmp_pa
     assert engine.flight_latencies == []
 
 
+@pytest.mark.parametrize("launch, calls", [(None, 4), (3.0, 0)])
+async def test_a_monitor_that_sends_no_carry_gets_flight_calls_on_normal_swings_only(tmp_path, launch, calls):
+    import dataclasses
+    from commentator.models import ShotEvent
+
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.tts.console_simulate_duration = False
+    cfg.commentary.routine_comment_rate = 1.0
+    cfg.commentary.min_seconds_between_comments = 0
+    cfg.commentary.preshot_rate = 1.0
+
+    class PhaseLLM(LLMClient):
+        async def complete_json(self, system, user, schema, images=None):
+            kind = "flight" if user.startswith("IN FLIGHT") else "pre" if user.startswith("PRE-SHOT") else "after"
+            return LLMResult(text=json.dumps({"lines": [{"speaker": "pbp", "text": f"{kind} call"}]}))
+
+    class NoCarry:
+        """springbok's connector: GSPro gets the ball numbers with a carry of 0."""
+        def __init__(self, inner):
+            self.inner = inner
+
+        async def events(self):
+            async for ev in self.inner.events():
+                if isinstance(ev, ShotEvent):
+                    ev.shot = dataclasses.replace(ev.shot, carry=0.0, vla=launch or ev.shot.vla)
+                yield ev
+
+    llm = PhaseLLM(cfg.llm.live)
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"),
+                    source=NoCarry(ReplaySource("data/flight_test.jsonl", speed=1e6)), live_llm=llm,
+                    segment_llm=llm, speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0), await_preshot=True)
+    await engine.run()
+    said = [l.split(": ", 1)[1] for l in next(tmp_path.glob("transcript-*")).read_text().splitlines()]
+    assert said.count("flight call") == calls and len(engine.flight_latencies) == calls
+    assert all(not row[0] for row in engine.store.db.execute("SELECT carry_raw FROM shots"))   # never stored as measured
+
+
 async def test_the_impact_snapshot_ends_the_setups_moment(tmp_path):
     import dataclasses
     from commentator.models import ShotEvent

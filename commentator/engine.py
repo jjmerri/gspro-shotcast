@@ -19,6 +19,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from . import carry_estimate
 from .carry_model import correct_for_elevation
 from .config import ROUND_STATUS, ROUND_STATUS_CHECK_S, ROUND_STATUS_EVERY_S, Config
 from .flight import point_at
@@ -6206,6 +6207,13 @@ class Engine:
         ocr = use_screen and self.cfg.screen.ocr
         if ocr and not shot.is_putt and my_seq == self._shot_seq:
             self._tiles_wanted = my_seq
+        # A monitor that leaves the carry to GSPro (springbok's connector, other Open Connect bridges):
+        # GSPro's no-penalty carry estimated from the ball numbers, for the mid-flight call only.
+        estimated = None if shot.carry or shot.is_putt else carry_estimate.estimate(shot)
+        flight_carry = shot.carry or estimated or 0
+        if estimated:
+            log.info("%s no carry from the monitor: %.0f yd estimated from the ball numbers, for the "
+                     "mid-flight call", tag, estimated)
 
         # Play the pre-voiced flight line immediately, from the setup plan and the launch data, before
         # the (slow, under shot-animation load) impact OCR read. The line was voiced for this moment;
@@ -6219,9 +6227,9 @@ class Engine:
         plan = shot_plan = self.plan  # shot_plan survives the one-swing nulling below, for the reaction
         shot_plan_made_at = self._plan_made_at  # snapshot: the next player's pre-shot can rebind the live one
         if c.in_flight and not banter and not landed_already and not shot.is_putt \
-                and (shot.carry or 0) >= c.min_flight_carry and plan and time.monotonic() - self._plan_made_at < 180 and not self._tree_hit_logged(fires0, impact, shot):
-            carry0 = self._raw_yards(shot)
-            factor0 = self.carry.factor(plan.lie, carry0, self.current_course, shot.vla, "lm")
+                and flight_carry >= c.min_flight_carry and plan and time.monotonic() - self._plan_made_at < 180 and not self._tree_hit_logged(fires0, impact, shot):
+            carry0 = estimated or self._raw_yards(shot)
+            factor0 = self.carry.factor(plan.lie, carry0, self.current_course, shot.vla, "gspro" if estimated else "lm")
             picked = pick_line(plan, replace(shot, carry=carry0, units="Yards"), plan.to_pin, factor0, plan.elevation_yards,
                                self.gspro.aim_of(fires0, impact))
             # The sim logs the splash only when the ball ARRIVES at the water, so a mid-flight check is
@@ -6294,23 +6302,25 @@ class Engine:
         raw_now = _tile_yards(before.tiles, "carry (raw)", unit)
         game_now = _tile_yards(before.tiles, "carry (game)", unit)
         if raw_now and (game_now is None or game_now < raw_now * 0.5):  # fresh, not last shot's tiles
-            base, base_carry = "gspro", raw_now
+            base, base_carry, source = "gspro", raw_now, "GSPro raw"
+        elif estimated:   # (estimated as GSPro's own: its course level is GSPro's)
+            base, base_carry, source = "gspro", estimated, "an estimate"
         else:
-            base, base_carry = "lm", self._raw_yards(shot)
+            base, base_carry, source = "lm", self._raw_yards(shot), "launch monitor"
         projected = replace(shot, carry=base_carry, units="Yards")
         factor = self.carry.factor(before.lie, base_carry, self.current_course, shot.vla, base)
         if use_screen:
             log.info("%s impact HUD (read %.2fs): %r shot %s, %s to pin, lie %s, club %s, elevation %s; "
                      "carry %.1f yd from %s x %.3f for the lie", tag, self.screen.last_read_seconds if self.screen else 0,
                      before.player_text, before.shot_number, before.to_pin, before.lie, before.club,
-                     before.elevation_yards, base_carry, "GSPro raw" if base == "gspro" else "launch monitor", factor)
+                     before.elevation_yards, base_carry, source, factor)
         if self.screen and self.cfg.screen.save_review_images:
             await asyncio.to_thread(self._save_review_image, tag, "impact")
 
         flight_task = None
         plan, self.plan = self.plan, None  # a plan is good for one swing
         # Only the fallback here now: the fresh-plan line already played above, before this read.
-        if not flight_played and not banter and not landed_already and c.in_flight and not shot.is_putt and (shot.carry or 0) >= c.min_flight_carry:
+        if not flight_played and not banter and not landed_already and c.in_flight and not shot.is_putt and flight_carry >= c.min_flight_carry:
             fresh = plan and time.monotonic() - self._plan_made_at < 180 and plan.player in (None, player)
             aim = self.gspro.aim_of(fires0, impact)
             picked = pick_line(plan, projected, before.to_pin, factor, before.elevation_yards, aim) if fresh else None

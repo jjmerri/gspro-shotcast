@@ -87,6 +87,10 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
   sizes its HUD to the screen width. The ON AIR badge (`overlay.badge_geometry`) does the same.
 - **`carry_model.py`** learns how far GSPro actually lets a shot carry relative to the launch
   monitor: a course baseline and a per-lie penalty, learned from your own shots.
+- **`carry_estimate.py`** GSPro's no-penalty carry from the ball numbers, for the mid-flight call
+  when the monitor sends no carry (springbok's connector). Gradient-boosted trees trained by
+  `tools/train_carry_estimate.py` on the league's shots, shipped as `carry_estimate.json`; normal
+  full swings only. Never stored as a measured carry.
 - **`course_card.py`** reads a GSPro course's static card (par, stroke index, yardages,
   altitude) from its `.unity3d.csv` / `coursedetails.txt`.
 - **`round.py`** a league round: who is in it, the format, handicaps, hole scores, and the

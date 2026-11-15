@@ -96,6 +96,16 @@ FlightScope's and rela's lines also have the whole launch with a carry, so on GS
 the fast feed for full swings (see `gspro_log` above; the booth log says `<monitor> log shot:`).
 OpenSkyPlus logs no carry, so its shots keep waiting for GSPro's files.
 
+A shot that reaches the booth at impact with no carry (springbok's connector sends GSPro a carry of
+0, as other Open Connect bridges may) gets GSPro's carry estimated from its ball speed, launch,
+spin and spin axis (`carry_estimate.py`), so it still gets a mid-flight call. The estimate is learned
+from the league's own shots (`tools/train_carry_estimate.py`): on held-out rounds it's typically
+within a yard, and 99% of 50+ yard shots land inside the flight call's short/long tolerance. Only
+normal full swings are estimated: tops and thin shots (launch under 6°), big hooks and slices (spin
+axis past 35°) and numbers outside the ones learned from get no estimate and no mid-flight call. It's
+only used for that call: it isn't recorded as the shot's carry or learned from. The booth log says
+`no carry from the monitor: N yd estimated`.
+
 To check a feed, run `python -m commentator run --no-commentary`, hit a shot, and look for
 `Connector shot:` or `GSPro log shot:` in `logs/booth-<date>.log`. Missing club data is stored
 empty and the stats that need it skip those shots.
