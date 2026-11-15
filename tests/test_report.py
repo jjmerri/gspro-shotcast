@@ -29,6 +29,87 @@ def test_scrubber_blanks_short_secrets_but_not_ordinary_short_values():
     assert scrub("topic xy at info, xylophone") == "topic <redacted> at info, xylophone"
 
 
+def test_other_programs_files_lose_sign_ins_but_keep_the_shot_data():
+    text = ('Signed in as jo.smith+golf@mail.example.com\n'
+            '{"password": "hunter22", "access_token":"abc.def", "session_id": "821", "ClubSpeed": 40.5}\n'
+            'Authorization: Bearer abcDEF123456789xyz\n'
+            'apiKey=QWERTY12345; refresh_token=zzzz9999zzzz&next=1\n'
+            'jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.sig\n'
+            'key 9f8e7d6c5b4a39281706f5e4d3c2b1a0Zz998877 then C:\\Users\\jo\\AppData\\LocalLow\\UNEEKOR\\VIEW\n'
+            'serialized statistic info, shot_guid 5333396602524808431-30870-54801, serial GC3-12345\n'
+            '[65.4664459,29.970499,-3.88416982,-507.0,7274.689,7257.0,-3.99639463,0.0]\n'
+            'abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\n')
+    out = report.scrub_private(text)
+    for secret in ("jo.smith", "hunter22", "abc.def", "abcDEF123456789xyz", "QWERTY12345", "zzzz9999zzzz",
+                   "eyJhbGci", "9f8e7d6c5b4a"):
+        assert secret not in out
+    for kept in ('"session_id": "821"', '"ClubSpeed": 40.5', "&next=1", "C:\\Users\\jo\\AppData\\LocalLow\\UNEEKOR\\VIEW",
+                 "serialized statistic info", "5333396602524808431-30870-54801", "serial GC3-12345",
+                 "[65.4664459,29.970499,-3.88416982,-507.0,7274.689,7257.0,-3.99639463,0.0]",
+                 "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"):
+        assert kept in out
+    assert '"password": "<redacted>"' in out and "Signed in as <email>" in out
+    gspro = report.scrub_private("Game Object 'Bunker_Leftside_Group_-_Hole_12_Mesh_v2_Collider_9' a@b.co", blobs=False)
+    assert gspro == "Game Object 'Bunker_Leftside_Group_-_Hole_12_Mesh_v2_Collider_9' <email>"
+
+
+def test_sign_ins_in_xml_nested_json_and_cookies_go_and_json_stays_json():
+    out = report.scrub_private('<AccessToken>abcd1234-secret</AccessToken> <ns:Password a="1">pw 9</ns:Password>\n'
+                               'Cookie: theme=dark; session=2c95f03ea6ac47018ad7cb89171f93fe\n'
+                               'GET /api?token=abc123&club=7i\n', blobs=False)
+    assert "abcd1234" not in out and "pw 9" not in out and "2c95f03e" not in out and "abc123" not in out
+    assert "<AccessToken><redacted></AccessToken>" in out and "&club=7i" in out
+    nested = json.dumps({"message": json.dumps({"access_token": "abcd1234-secret", "n": 1})})
+    assert json.loads(json.loads(report.scrub_private(nested))["message"])["access_token"] == "<redacted>"
+    nested = json.dumps({"message": json.dumps({"password": 'before"after123', "ClubSpeed": 40.5})})
+    inner = json.loads(json.loads(report.scrub_private(nested))["message"])
+    assert inner == {"password": "<redacted>", "ClubSpeed": 40.5}
+    out = report.scrub_private("12:01 INFO Cookie: theme=dark; session=short-secret\n"
+                               "<Password><![CDATA[hunter22]]></Password>", blobs=False)
+    assert "short-secret" not in out and "hunter22" not in out and out.startswith("12:01 INFO Cookie: ")
+    for doc in ({"message": "Cookie: session=abc123", "ClubSpeed": 40.5},
+                {"password": ["liveCredential123"], "ClubSpeed": 40.5},
+                {"token": {"a": {"b": "liveCredential123"}, "c": "y"}, "ClubSpeed": 40.5}):
+        out = report.scrub_private(json.dumps(doc))
+        assert "liveCredential123" not in out and "abc123" not in out and json.loads(out)["ClubSpeed"] == 40.5
+    deep = json.dumps({"password": "liveCredential123", "n": 1})
+    for _ in range(2):
+        deep = json.dumps({"message": deep})
+    deep = json.loads(json.loads(json.loads(report.scrub_private(deep))["message"])["message"])
+    assert deep == {"password": "<redacted>", "n": 1}
+    deep = json.dumps({"payload": json.dumps({"message": "password=liveCredential123\nClubSpeed=40.5"})})
+    deep = json.loads(json.loads(report.scrub_private(deep))["payload"])
+    assert deep == {"message": "password=<redacted>\nClubSpeed=40.5"}
+    for raw in ('{"password": [\n"liveCredential123"\n], "ClubSpeed": 40.5}',
+                '{"message": "password=liveCredential123", "ClubSpeed": 40.5}',
+                '{"message": "Login failed: password=", "ClubSpeed": 40.5}', '{"m": "Cookie: ", "ClubSpeed": 40.5}',
+                json.dumps({"m": "GET /\r\nCookie: s=liveCredential123\r\nHost: x", "ClubSpeed": 40.5}),
+                json.dumps({"m": "Account:\tjo@example.com\nToken=liveCredential123", "ClubSpeed": 40.5}),
+                json.dumps({"m": "password=O'liveCredential123!", "ClubSpeed": 40.5}),
+                json.dumps({"m": "password=\\liveCredential123\nnext", "ClubSpeed": 40.5}),
+                json.dumps({"m": "Authorization: Token liveCredential123\r\nHost: x", "ClubSpeed": 40.5}),
+                json.dumps({"m": 'Authorization: Digest username="u", response="liveCredential123"', "ClubSpeed": 40.5})):
+        out = report.scrub_private(raw)
+        assert "liveCredential123" not in out and "jo@" not in out and json.loads(out)["ClubSpeed"] == 40.5
+    out = report.scrub_private('Cookie: session="liveCredential123"; other=private456\nClubSpeed=40.5\n'
+                               '<Password>\n  <![CDATA[liveCredential123]]>\n</Password>', blobs=False)
+    assert "liveCredential123" not in out and "private456" not in out and "ClubSpeed=40.5" in out
+    assert report.scrub_private('password=\n{"ClubSpeed":40.5}') == 'password=\n{"ClubSpeed":40.5}'
+    for doc in ({"password": None, "ClubSpeed": 40.5}, {"password": 'a"b c', "token": 12345, "Speed": 1}):
+        back = json.loads(report.scrub_private(json.dumps(doc)))
+        assert back["ClubSpeed" if "ClubSpeed" in doc else "Speed"] == doc.get("ClubSpeed", doc.get("Speed"))
+        assert back["password"] in (None, "<redacted>") and back.get("token", "<redacted>") == "<redacted>"
+
+
+def test_scrubbing_a_long_unbroken_run_is_quick():
+    import time
+    for run in ("a" * 200_000, "a-" * 100_000, "ab1" * 70_000, "<Password><![CDATA[" * 8_000, "\\" * 200_000,
+                'password="' * 50_000, "Cookie: " + "\\" * 100_000):
+        start = time.perf_counter()
+        report.scrub_private(run)
+        assert time.perf_counter() - start < 3.0   # quadratic would take minutes
+
+
 def test_report_zips_logs_screens_and_maps_without_the_env(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     logs = tmp_path / "logs"
@@ -219,7 +300,8 @@ def test_report_gathers_the_launch_monitor_data_gspro_and_its_software_keep(tmp_
         (gspc / name).write_text(f"{name} shot\n", encoding="utf-8")
     vendor = tmp_path / "Vendor"
     (vendor / "12").mkdir(parents=True)
-    (vendor / "12" / "shotinfo.json").write_text('{"clubspeed": "40"}', encoding="utf-8")
+    (vendor / "12" / "shotinfo.json").write_text('{"clubspeed": "40", "user": "jo@mail.example.com"}',
+                                                encoding="utf-8")
     monkeypatch.setattr(report, "LM_FILES", [("Some LM shots", str(vendor), "*/*.json", 5, 1000),
                                              ("Absent LM", str(tmp_path / "nowhere"), "*.txt", 1, 1000)])
     programs = tmp_path / "Programs"
@@ -236,10 +318,12 @@ def test_report_gathers_the_launch_monitor_data_gspro_and_its_software_keep(tmp_
         summary = z.read("summary.txt").decode()
         shots = json.loads(z.read("gspro/GSPro.db-shots.json"))
         software = z.read("launch-monitor/software.txt").decode()
+        vendor_shot = z.read("launch-monitor/Some_LM_shots/12/shotinfo.json").decode()
     assert "aboutGOLF" in software and "aG Bridge/bridge.log  5" in software and "Microsoft" not in software
     assert {"gspro/ConnectDebug.txt", "gspro/ConnectDebug.txt.1", "gspro/ConnectDebug.txt.2026-11-14",
             "gspro/currentRound.dat", "launch-monitor/Some_LM_shots/12/shotinfo.json"} <= names
     assert shots["LastShot"][0]["ShotData"] == {"ClubSpeed": 40.5}
+    assert '"clubspeed": "40"' in vendor_shot and "jo@" not in vendor_shot
     assert 'LM Type {"connectType":"Garmin","LMType":"R10"}' in summary
     assert "Some LM shots: 1 file(s)" in summary and "Absent LM: none" in summary
 

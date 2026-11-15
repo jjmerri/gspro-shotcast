@@ -3,7 +3,8 @@ user who can't easily dig through folders. Logs, GSPro's log, health, the screen
 behind, the hole maps it kept, the monitor layout and where GSPro's window is, the shot data GSPro
 and the launch monitor's own software keep (to learn a monitor we haven't seen), and config.yaml with
 anything secret blanked. The .env file (the API keys) never goes in: only its key names, and its
-values are scrubbed out of every text file that does.
+values are scrubbed out of every text file that does. GSPro's and the launch monitor's files also
+lose anything that looks like a sign-in (emails, tokens, passwords, keys).
 
 Player names and screenshots are in it, so whoever sends it should know that.
 """
@@ -95,6 +96,106 @@ class Scrubber:
         for p in self.patterns:
             text = p.sub("<redacted>", text)
         return text
+
+
+# Other programs' files (GSPro's, a launch monitor's) can hold an account's sign-in: these go
+# whatever the .env says. A credential-named key or tag keeps its name and loses its value. Each
+# pattern starts only where a run begins (the lookbehinds), so a long run of letters is scanned once,
+# and a credential's value is walked once by hand: a string at any depth of escaping, or [...] / {...}.
+_AFTER_ESCAPE = r"(?<=\\[nrt])"   # a JSON string's \n starts a word too, and its n isn't part of it
+_SECRET_NAME = r"[\w-]*(?:password|passwd|pwd|token|secret|api[_-]?key|apikey|authorization|cookie|license[_-]?key)\b"
+_EMAIL = re.compile(rf"(?:(?<![\w.+\\-])|{_AFTER_ESCAPE})[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_JWT = re.compile(rf"(?:(?<![\w\\-])|{_AFTER_ESCAPE})eyJ[\w-]{{8,}}\.[\w-]{{8,}}(?:\.[\w-]+)?")
+_BEARER = re.compile(rf"(?i)(?:(?<![\w\\-])|{_AFTER_ESCAPE})(bearer|basic)\s+[\w.~+/=-]{{8,}}")
+# A cookie or authorization header runs to the line's end, or to the end of the JSON string it's logged in
+# (a quote then , } or ] — but not `", nonce="`, a Digest header's next parameter).
+_COOKIE_HEADER = re.compile(rf"(?im)((?:(?<![\w\\-])|{_AFTER_ESCAPE})(?:(?:set-)?cookie|(?:proxy-)?authorization)[ \t]*:[ \t]*)[^\r\n]*?(?=(?<!\\)\\*+\"\s*(?:[}}\]]|,(?!\s*[\w-]+=))|(?<!\\)\\+[rn]|\r?$)")
+_XML_SECRET = re.compile(rf"(?i)<((?:[\w-]+:)?{_SECRET_NAME})(\s[^<>]*(?<!/))?>"     # the text, or a CDATA's, never
+                         r"(?:(\s*+<!\[CDATA\[)(?:[^\]]|\](?!\]>))*+|[^<]*+)")              # failing, so each runs once
+_CREDENTIAL_KEY = re.compile(rf"(?i)(?:(?<![\w\\-])|{_AFTER_ESCAPE})(\\*[\"'])?{_SECRET_NAME}(\\*[\"'])?[ \t]*[:=][ \t]*")
+VALUE_CAP = 65536   # an [...] or {...} longer than this was never closed
+_CLOSES = re.compile(r"\s*(?:[,}\]:]|$)", re.M)
+_SPACE = re.compile(r"\s*")
+_QUOTE = re.compile(r"\\*[\"']")
+_WORD = re.compile(r"(?:[^\s,;}\]&<\"\\]++|\\++(?![nrt\"]))*+")   # an escape (at any depth) of \n \r \t \" ends it
+_LONG_BLOB = re.compile(rf"(?:(?<![\w+=\\-])|{_AFTER_ESCAPE})[A-Za-z0-9+_-]{{40,}}={{0,2}}(?![\w+=-])")   # a key or token, not a word
+
+
+def _string_end(text: str, i: int, quote: str) -> int:
+    """Where the string opened by `quote` (a quote after its escapes, at whatever depth of JSON in
+    JSON) at `i` ends; a quote behind more backslashes is inside it. A line's end stops it."""
+    slashes, q = len(quote) - 1, quote[-1]
+    j = i + len(quote)
+    while j < len(text):
+        c = text[j]
+        if c == "\n":
+            return j
+        if c == q:
+            k = j
+            while k > i + len(quote) and text[k - 1] == "\\":
+                k -= 1
+            n = j - k   # an escaped backslash inside adds 2 * (slashes + 1)
+            if n >= slashes and (n - slashes) % (2 * (slashes + 1)) == 0:
+                return j + 1
+        j += 1
+    return j
+
+
+def _value_end(text: str, i: int, quote: str) -> int:
+    """The end of the value at `i`: a string, an array or object (to its closing bracket), or a word."""
+    if quote and text.startswith(quote, i):
+        return _string_end(text, i, quote)
+    if i < len(text) and text[i] in "[{":
+        depth, j = 0, i
+        while j < len(text) and j - i < VALUE_CAP:
+            if quote and text.startswith(quote, j):
+                j = _string_end(text, j, quote)
+                continue
+            depth += {"[": 1, "{": 1, "]": -1, "}": -1}.get(text[j], 0)
+            j += 1
+            if depth == 0:
+                return j
+        return text.find("\n", i) % (len(text) + 1)   # unclosed: the rest of the line
+    return _WORD.match(text, i).end()
+
+
+def _blank_credentials(text: str) -> str:
+    """A credential-named key keeps its name and loses its value, in plain text, key=value, or JSON
+    nested in JSON strings to any depth (a quoted key's value becomes a string, so JSON stays JSON)."""
+    out, at = [], 0
+    for m in _CREDENTIAL_KEY.finditer(text):
+        if m.start() < at:
+            continue
+        keyed = m.group(1) if m.group(1) == m.group(2) else ""   # "key": not "message": "key=
+        start = _SPACE.match(text, m.end()).end() if keyed else m.end()   # only JSON's value goes to the next line
+        opened = _QUOTE.match(text, start)
+        if opened and not keyed and _CLOSES.match(text, opened.end()):
+            continue   # "message": "... password=" — that quote closes the message
+        quote = opened[0] if opened else keyed or ""
+        end = _value_end(text, start, quote)
+        value = text[start:end]
+        if not value or value.lower() in ("null", "true", "false"):
+            continue
+        out.append(text[at:start])
+        out.append(quote + "<redacted>" + quote)
+        at = end
+    out.append(text[at:])
+    return "".join(out)
+
+
+def scrub_private(text: str, blobs: bool = True) -> str:
+    """`blobs`: also any long run of letters and digits that could be a bare key or a device's id (not
+    for GSPro's own log, where they're its objects' and courses' names)."""
+    text = _JWT.sub("<redacted>", text)
+    text = _BEARER.sub(lambda m: f"{m.group(1)} <redacted>", text)
+    text = _COOKIE_HEADER.sub(lambda m: m.group(1) + "<redacted>", text)
+    text = _XML_SECRET.sub(lambda m: f"<{m.group(1)}{m.group(2) or ''}>{m.group(3) or ''}<redacted>", text)
+    text = _blank_credentials(text)
+    text = _EMAIL.sub("<email>", text)
+    if not blobs:
+        return text
+    return _LONG_BLOB.sub(lambda m: "<redacted>" if re.search(r"\d", m[0]) and re.search(r"[A-Za-z]", m[0]) else m[0],
+                          text)
 
 
 def env_files(config_path: Path) -> list[Path]:
@@ -410,10 +511,11 @@ def _build(cfg: Config, config_path: Path) -> Path:
 
     tmp = path.with_suffix(".part")
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
-        def add_text(name: str, data: bytes) -> None:
-            z.writestr(name, scrub(data.decode("utf-8", errors="replace")))
+        def add_text(name: str, data: bytes, private: bool = False, blobs: bool = True) -> None:
+            text = scrub(data.decode("utf-8", errors="replace"))
+            z.writestr(name, scrub_private(text, blobs) if private else text)
 
-        def add_file(name: str, p: Path, cap: int | None = None) -> None:
+        def add_file(name: str, p: Path, cap: int | None = None, private: bool = False, blobs: bool = True) -> None:
             if p.is_file():
                 if p.suffix.lower() == ".png":   # a 4K PNG is ~12 MB: too big to send round
                     from PIL import Image
@@ -425,7 +527,7 @@ def _build(cfg: Config, config_path: Path) -> Path:
                 elif p.suffix.lower() in (".jpg", ".jpeg"):
                     z.write(p, name)
                 else:
-                    add_text(name, tail(p, cap) if cap else p.read_bytes())
+                    add_text(name, tail(p, cap) if cap else p.read_bytes(), private, blobs)
 
         guard("screen layout", lambda: summary.extend(screen_layout(cfg)))
 
@@ -438,8 +540,10 @@ def _build(cfg: Config, config_path: Path) -> Path:
         summary.append("Connector log " + _describe(Path(source.connector_log)))
         for p in _gspro_logs(cfg):
             summary.append("GSPro log " + _describe(p))
-            guard(f"GSPro log {p.name}", lambda p=p: add_file(f"gspro/{p.name}", p, GSPRO_LOG_CAP))
-        guard("connector log", lambda: add_file("gspro/ConnectDebug.txt", Path(source.connector_log), 1_000_000))
+            guard(f"GSPro log {p.name}", lambda p=p: add_file(f"gspro/{p.name}", p, GSPRO_LOG_CAP,
+                                                                                   private=True, blobs=False))
+        guard("connector log", lambda: add_file("gspro/ConnectDebug.txt", Path(source.connector_log), 1_000_000,
+                                                      private=True))
 
         def gspro_settings() -> None:
             from .gspro_settings import read_game_settings
@@ -460,7 +564,7 @@ def _build(cfg: Config, config_path: Path) -> Path:
             live = Path(source.connector_log)
             for p in _newest(live.parent, live.name + ".*", CONNECTOR_LOGS):
                 summary.append("Connector log " + _describe(p))
-                add_file(f"gspro/{p.name}", p, 1_000_000)
+                add_file(f"gspro/{p.name}", p, 1_000_000, private=True)
         guard("rotated connector logs", connector_logs)
 
         gspro_dir = Path(source.gspro_log).expanduser().parent
@@ -473,9 +577,10 @@ def _build(cfg: Config, config_path: Path) -> Path:
             tables, rows = _gspro_db_shots(db)
             summary.append(f"GSPro.db tables: {', '.join(tables)}")
             summary.extend(f"GSPro.db {t}: {len(r)} newest rows kept" for t, r in rows.items())
-            add_text("gspro/GSPro.db-shots.json", json.dumps(rows, indent=1).encode())
+            add_text("gspro/GSPro.db-shots.json", json.dumps(rows, indent=1).encode(), private=True, blobs=False)
         guard("GSPro.db shots", gspro_db)
-        guard("round file", lambda: add_file("gspro/currentRound.dat", gspro_dir / "currentRound.dat", 2_000_000))
+        guard("round file", lambda: add_file("gspro/currentRound.dat", gspro_dir / "currentRound.dat", 2_000_000,
+                                                       private=True, blobs=False))
 
         def vendor_files() -> None:
             for what, where, pattern, n, cap in LM_FILES:
@@ -484,14 +589,14 @@ def _build(cfg: Config, config_path: Path) -> Path:
                 summary.append(f"{what}: {len(found)} file(s) from {base}" if found else f"{what}: none")
                 tag = re.sub(r"[^\w.-]+", "_", what)
                 for p in found:
-                    add_file(f"launch-monitor/{tag}/{p.relative_to(base).as_posix()}", p, cap)
+                    add_file(f"launch-monitor/{tag}/{p.relative_to(base).as_posix()}", p, cap, private=True)
         guard("launch monitor files", vendor_files)
 
         def software() -> None:
             lines = _software_listing()
             summary.append(f"Launch monitor software folders: {sum(1 for l in lines if not l.startswith(' '))}"
                            " (listed in launch-monitor/software.txt)")
-            add_text("launch-monitor/software.txt", "\n".join(lines).encode())
+            add_text("launch-monitor/software.txt", "\n".join(lines).encode(), private=True, blobs=False)
         guard("launch monitor software", software)
 
         summary += ["", "== Health =="]
