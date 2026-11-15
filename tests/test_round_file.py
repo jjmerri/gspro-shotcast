@@ -126,10 +126,37 @@ def test_a_tracked_shot_is_replayed_along_its_flight_and_roll(tmp_path):
     shots = hole_replays(st.db)[(1, 1)]["players"][0]["shots"]
     drive = shots[0]
     assert drive["from"] == [0.0, 0.0] and drive["to"] == [5.0, 200.0] and "bend" not in drive
-    assert drive["path"][0] == [0.0, 0.0] and drive["path"][-1] == [5.0, 200.0]
-    assert drive["path"][drive["land"]] == [4.0, 180.0]
-    assert "land" not in shots[2] and shots[2]["path"][-1] == [0.0, 300.0]
+    assert drive["path"][0][:2] == [0.0, 0.0] and drive["path"][-1][:2] == [5.0, 200.0]
+    assert drive["path"][drive["land"]][:2] == [4.0, 180.0]
+    assert "land" not in shots[2] and shots[2]["path"][-1][:2] == [0.0, 300.0]
     json.dumps(shots)
+
+
+def test_a_tracked_shot_keeps_its_height_and_timing_for_the_shot_view(tmp_path):
+    st = _season(tmp_path)
+    arc = [(0, 0, 1.0), (1, 60, 21.0), (2, 120, 31.0), (3, 160, 16.0), (3.8, 176, 2.0)]
+    drive = {**DRIVE, "activeShot": {**DRIVE["activeShot"], "sd": {
+        **DRIVE["activeShot"]["sd"], "pos": [_p(x, z, y) for x, z, y in arc], "tdpoint": _p(4, 180, -1.0),
+        "path": [{"pos": _p(4, 180 + i * 10, -1.0), "time": 6.5 + i * 0.5} for i in range(3)]}}}
+    st.apply_round_file(round_file.tracks([drive]), now=1005.0)
+    shot = hole_replays(st.db)[(1, 1)]["players"][0]["shots"][0]
+    path, land = shot["path"], shot["land"]
+    # Height above the tee (which sat at y = 1) and seconds since the strike: the flight's points
+    # spread evenly over its 6.5 seconds up to GSPro's touchdown point, the roll's at their own times.
+    assert path[land] == [4.0, 180.0, -2.0, 6.5]
+    assert [2.0, 120.0, 30.0, 2.6] in path and path[-1] == [5.0, 200.0, 0.0, 7.5]
+    assert all(p[3] <= q[3] for p, q in zip(path, path[1:]))
+    assert shot["descent"] == round(math.degrees(math.atan2(14, math.hypot(0.8, 16))))
+
+
+def test_a_steep_flight_keeps_its_climb_and_each_points_time_when_thinned():
+    # Almost straight up: top-down its points are a few centimetres apart. GSPro's are 6.5 / 7 s apart
+    # (the touchdown is past the last), and the two around the top are too close to keep.
+    arc = [(0, 0, 1), (0.1, 0.2, 4), (0.2, 0.4, 6), (0.3, 0.5, 6.2), (0.4, 0.6, 6), (0.5, 0.8, 4), (0.6, 1.0, 1.2)]
+    lob = _entry(1, (0, 0), (0.7, 1.5), sp=40.0, flight=arc, land=(0.6, 1.1, 1.0), roll=[(0.6, 1.1), (0.7, 1.5)])
+    flight = round_file.tracks([lob])[0].flight
+    assert [p[1] for p in flight] == [1, 4, 6, 4, 1.2]
+    assert [round(p[3], 3) for p in flight] == [round(6.5 * i / 7, 3) for i in (0, 1, 2, 5, 6)]
 
 
 def test_a_stroke_is_not_matched_to_another_courses_shot(tmp_path):
@@ -162,7 +189,15 @@ def test_taking_back_a_putts_outcome_keeps_the_files_lie(tmp_path):
 
 def test_a_path_that_rolls_back_keeps_its_turn():
     from commentator.hole_replay import _simplify
-    assert _simplify([(0, 0), (0, 10), (0, 5)]) == [0, 1, 2]
+    assert _simplify([(0, 0, 0), (0, 10, 1), (0, 5, 2)]) == [0, 1, 2]
+    assert _simplify([(0, 0, 0), (0, 10, 1), (0, 5, 1)]) == [0, 1, 2]
+
+
+def test_a_straight_roll_keeps_the_points_that_slow_it_down():
+    from commentator.hole_replay import _simplify
+    # Straight on, but 15 m in its first second and 1 m in its last: played evenly it would lag 8 m.
+    assert 1 in _simplify([(0, 100, 5), (0, 115, 6), (0, 119, 7), (0, 120, 8)])
+    assert _simplify([(0, 100, 5), (0, 110, 6), (0, 120, 7)]) == [0, 2]
 
 
 def _replay_of(st, ts, sp):
@@ -231,7 +266,7 @@ def test_an_alternate_shot_stroke_is_drawn_as_tracked_without_a_pin(tmp_path):
     st.db.execute("UPDATE shots SET fmt = 'alternate'")
     st.apply_round_file(round_file.tracks([DRIVE, APPROACH, PUTT]), now=1005.0)
     putt = hole_replays(st.db)[(1, 1)]["players"][0]["shots"][2]
-    assert putt["to"] == [0.0, 300.0] and putt["path"][-1] == [0.0, 300.0]
+    assert putt["to"] == [0.0, 300.0] and putt["path"][-1][:2] == [0.0, 300.0]
 
 
 def test_a_scrambles_finish_stays_the_booths(tmp_path):

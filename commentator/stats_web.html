@@ -165,6 +165,14 @@
   /* The ball moves along its flight by its own animateMotion; this only shows it while it flies. */
   @keyframes rp-fly { 0% { opacity:0; } 1% { opacity:1; } 99% { opacity:1; } 100% { opacity:0; } }
   @media (prefers-reduced-motion: reduce) { .rp-in, .rp-draw, .rp-ball { animation:none; } .rp-ball { display:none; } }
+  /* The shot view (shotViewTick): lines stay as thick on screen however far it zooms in. */
+  .replay svg.sv :is(path, line, polyline, circle, rect) { vector-effect:non-scaling-stroke; }
+  .sv-pick button.link.on { text-decoration:underline; font-weight:700; }
+  .sv-row { display:flex; flex-wrap:wrap; gap:12px; align-items:flex-start; }
+  .sv-box { position:relative; max-width:100%; }
+  .sv-side { flex:1 1 340px; min-width:0; }
+  .sv-side svg { width:100%; height:auto; display:block; }
+  .sv-slow { position:absolute; top:8px; left:10px; font-weight:700; font-size:13px; color:#ffd54a; text-shadow:0 1px 3px #000; pointer-events:none; }
   .chip { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--accent); border-radius:999px; padding:4px 6px 4px 12px; background:var(--raised); }
   .chip button { background:none; border:none; color:var(--dim); cursor:pointer; font:inherit; padding:0 4px; }
   .charts { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:12px; }
@@ -277,7 +285,7 @@ const SHOT_LINK_KEYS = ["round", "from", "to", "course", "club", "lie", "who"];
 const state = { tab: "home", ctx: "", data: null, player: null, me: "", mine: null, lastView: {},
                 seen: Number(store.get("shotcast.seen")) || 0, hcpClean: store.get("shotcast.hcpclean") === "1",
                 round: null, roundGroup: null, sort: {}, more: {}, course: null, versus: [null, null], shotFilter: {}, shots: null, shotOpen: null,
-                session: null, transcript: null, transcriptFor: null, replays: {}, replayHole: null, replayOnly: false,
+                session: null, transcript: null, transcriptFor: null, replays: {}, replayHole: null, replayOnly: false, shotView: null,
                 vods: undefined, vodsAll: null, clips: undefined, vod: null, schedule: undefined, period: null };
 
 // A link holds the view: #view?player=…&ctx=… and the view's own keys (hashFor): a shots filter and an
@@ -311,6 +319,7 @@ function applyHash() {
     state.roundGroup = state.round ? null : num("r");
     state.replayHole = num("hole");
     state.replayPlayed = null;
+    state.shotView = null;
     if (state.replayHole) state.scrollTo = { sel: ".replay", until: Date.now() + 20000 };
   }
   if (state.tab === "courses" && q.get("course")) state.course = q.get("course");
@@ -742,7 +751,7 @@ const REPLAY_COLORS = ["#5fc58a", "#6fb3ff", "#ffb74d", "#e57373", "#ba68c8", "#
 // Animated, it plays the shots in turn (every player's nth shot together), each line drawing out
 // behind a ball, and ends on the static drawing. `colors` gives each player one colour for the whole
 // round; `only` draws just that player's shots (the frame still fits everyone's, so it doesn't jump).
-function replaySvg(rp, animate = false, { colors = {}, only = null, focus = null, actions = "" } = {}) {
+function replaySvg(rp, animate = false, { colors = {}, only = null, focus = null, actions = "", view = null } = {}) {
   const color = (pl, i) => colors[pl.name] || REPLAY_COLORS[i % REPLAY_COLORS.length];
   const drawn = only ? rp.players.filter(p => p.name === only) : rp.players;
   const toggle = focus && rp.players.length > 1 && rp.players.some(p => p.name === focus)
@@ -770,51 +779,182 @@ function replaySvg(rp, animate = false, { colors = {}, only = null, focus = null
     const turn = -90 - Math.atan2(vy, vx) * 180 / Math.PI, [tx, ty] = P(rp.tee);
     g += `<image href="${m.src}" width="${m.w}" height="${m.h}" opacity=".8" transform="translate(${tx} ${ty}) rotate(${turn.toFixed(2)}) scale(${s.toFixed(4)}) translate(${-m.ball[0]} ${-m.ball[1]})"/>`;
   }
-  if (rp.tee) { const [x, y] = P(rp.tee); g += `<rect x="${x - 4}" y="${y - 4}" width="8" height="8" fill="#ddd"><title>Tee</title></rect>`; }
+  // data-fx: drawn the same size on screen however far the shot view zooms in (shotViewTick).
+  if (rp.tee) { const [x, y] = P(rp.tee); g += `<rect data-fx="${x},${y}" x="${x - 4}" y="${y - 4}" width="8" height="8" fill="#ddd"><title>Tee</title></rect>`; }
   // Each shot number's start time: a step the length of its longest shot's flight, putts quicker.
   const starts = {}; let clock = 0.4;
   for (const n of [...new Set(drawn.flatMap(p => p.shots.map(s => s.n)))].sort((x, y) => x - y)) {
     starts[n] = clock; clock += drawn.some(p => p.shots.some(s => s.n === n && !s.putt)) ? 0.95 : 0.75;
   }
   const at = (cls, n, lag = 0, more = "") => animate ? ` class="${cls}" style="${more}animation-delay:${((starts[n] ?? 0) + lag).toFixed(2)}s"` : "";
-  let balls = "";
+  let balls = "", sv = null;
+  const viewable = [];   // [player, shot] with a shot view
   rp.players.forEach((pl, i) => {
     if (!drawn.includes(pl)) return;
     const c = color(pl, i);
     for (const s of pl.shots) {
+      const can = canShotView(s), picked = !!(view && can && view.player === pl.name && view.n === s.n);
+      if (can) viewable.push([pl, s, c]);
+      const dim = view && !picked ? ' opacity=".35"' : "";
       const tip = esc(`${pl.name}${s.n != null ? ` · shot ${s.n}` : ""}${s.club ? " · " + s.club : ""}${s.lie ? " from the " + s.lie : ""}${s.to_pin != null ? ` · ${s.to_pin} yd to the pin` : ""}`);
       if (s.from && s.aim) { const [x1, y1] = P(s.from), [x2, y2] = P(s.aim);
-        g += `<g${at("rp-in", s.n)}><line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${c}" stroke-opacity=".45" stroke-dasharray="3 3"/><circle cx="${x2}" cy="${y2}" r="2.5" fill="none" stroke="${c}" stroke-opacity=".6"><title>${tip} · aim</title></circle></g>`; }
+        g += `<g${at("rp-in", s.n)}${dim}><line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${c}" stroke-opacity=".45" stroke-dasharray="3 3"/><circle data-fx="${x2},${y2}" cx="${x2}" cy="${y2}" r="2.5" fill="none" stroke="${c}" stroke-opacity=".6"><title>${tip} · aim</title></circle></g>`; }
       if (s.from && s.to) { const [x1, y1] = P(s.from), [x2, y2] = P(s.to);
         const { d, len } = s.path ? trackPath(s.path.map(P)) : flightPath(+x1, +y1, +x2, +y2, s.putt ? 0 : (s.bend || 0) * k);
-        g += `<path d="${d}" fill="none" stroke="${c}" stroke-width="${s.putt ? 1.5 : 2.5}"${at("rp-draw", s.n, 0.3, `--len:${(len + 1).toFixed(1)};`)}><title>${tip}${s.shape ? " · " + esc(s.shape) : ""}</title></path>`;
+        if (picked) {
+          // The shot view draws this one itself, as the ball goes.
+          sv = shotViewData(s, P, k, W, H, c);
+          g += `<polyline id="sv-trail" fill="none" stroke="${c}" stroke-width="2.5" stroke-linejoin="round"/><circle id="sv-ring" fill="none" stroke="#fff" stroke-width="1.5" opacity="0"/>`;
+          balls += `<circle id="sv-ball" r="2.5" fill="#fff" stroke="#111" stroke-width=".8"/>`;
+        } else g += `<path d="${d}" fill="none" stroke="${c}" stroke-width="${s.putt ? 1.5 : 2.5}"${dim}${at("rp-draw", s.n, 0.3, `--len:${(len + 1).toFixed(1)};`)}><title>${tip}${s.shape ? " · " + esc(s.shape) : ""}</title></path>`;
+        if (can) g += `<path d="${d}" fill="none" stroke="transparent" stroke-width="10" pointer-events="stroke" style="cursor:pointer" data-shotview="${esc(pl.name)}" data-n="${s.n}"><title>${tip} · shot view</title></path>`;
         const delay = ((starts[s.n] ?? 0) + 0.3).toFixed(2);
-        if (animate) balls += `<circle r="2.5" fill="#fff" stroke="#111" stroke-width=".8" class="rp-ball" style="animation-delay:${delay}s"><animateMotion path="${d}" begin="${delay}s" dur=".55s" fill="freeze" calcMode="spline" keyTimes="0;1" keyPoints="0;1" keySplines=".42 0 .58 1"/></circle>`;
-        if (s.path && s.land != null && s.land < s.path.length - 1) { const [lx, ly] = P(s.path[s.land]);
-          g += `<circle cx="${lx}" cy="${ly}" r="1.8" fill="none" stroke="${c}"${at("rp-in", s.n, 0.6)}><title>${tip} · landed</title></circle>`; }
-        if (s.penalty) g += `<g${at("rp-in", s.n, 0.85)}><path d="M${x2 - 4},${y2 - 4} l8,8 m0,-8 l-8,8" stroke="#e53935" stroke-width="2.2" stroke-linecap="round"/><title>${tip} · into the penalty area (penalty stroke, then the drop)</title></g>`; }
-      if (s.from) { const [x, y] = P(s.from); g += `<g${at("rp-in", s.n)}><circle cx="${x}" cy="${y}" r="3.5" fill="${c}" stroke="#111"><title>${tip}</title></circle>`;
+        if (animate && !picked) balls += `<circle r="2.5" fill="#fff" stroke="#111" stroke-width=".8" class="rp-ball" style="animation-delay:${delay}s"><animateMotion path="${d}" begin="${delay}s" dur=".55s" fill="freeze" calcMode="spline" keyTimes="0;1" keyPoints="0;1" keySplines=".42 0 .58 1"/></circle>`;
+        if (s.path && s.land != null && s.land < s.path.length - 1 && !picked) { const [lx, ly] = P(s.path[s.land]);
+          g += `<circle data-fx="${lx},${ly}" cx="${lx}" cy="${ly}" r="1.8" fill="none" stroke="${c}"${dim}${at("rp-in", s.n, 0.6)}><title>${tip} · landed</title></circle>`; }
+        if (s.penalty) g += `<g data-fx="${x2},${y2}"${dim}${at("rp-in", s.n, 0.85)}><path d="M${x2 - 4},${y2 - 4} l8,8 m0,-8 l-8,8" stroke="#e53935" stroke-width="2.2" stroke-linecap="round"/><title>${tip} · into the penalty area (penalty stroke, then the drop)</title></g>`; }
+      if (s.from) { const [x, y] = P(s.from); g += `<g data-fx="${x},${y}"${dim}${at("rp-in", s.n)}><circle cx="${x}" cy="${y}" r="3.5" fill="${c}" stroke="#111"><title>${tip}</title></circle>`;
         g += `<text x="${+x + 6}" y="${+y + 3}" fill="${c}" font-size="10" paint-order="stroke" stroke="#111" stroke-width="2.5">${s.n ?? ""}${s.club && !s.putt ? " " + esc(s.club) : ""}</text></g>`; }
     }
   });
   if (!rp.pin) g += balls;
   if (rp.pin) { const [x, y] = P(rp.pin);
-    g += balls + `<line x1="${x}" y1="${y}" x2="${x}" y2="${y - 16}" stroke="#eee" stroke-width="1.5"/><path d="M${x},${y - 16} l10,4 l-10,4z" fill="#e53935"/><circle cx="${x}" cy="${y}" r="2.5" fill="#eee"><title>Pin${rp.pin_estimated ? " (estimated)" : ""}</title></circle>`; }
+    g += `<g data-fx="${x},${y}"><line x1="${x}" y1="${y}" x2="${x}" y2="${y - 16}" stroke="#eee" stroke-width="1.5"/><path d="M${x},${y - 16} l10,4 l-10,4z" fill="#e53935"/><circle cx="${x}" cy="${y}" r="2.5" fill="#eee"><title>Pin${rp.pin_estimated ? " (estimated)" : ""}</title></circle></g>` + balls; }
   // A scale bar: the round number of yards nearest a fifth of the drawing's length.
   const yd = [10, 25, 50, 100, 150, 200].reduce((a, v) => Math.abs(v - h * 1.0936 / 5) < Math.abs(a - h * 1.0936 / 5) ? v : a);
   const bar = yd / 1.0936 * k;
-  g += `<line x1="8" y1="${H - 8}" x2="${(8 + bar).toFixed(1)}" y2="${H - 8}" style="stroke:var(--dim)" stroke-width="2"/><text x="8" y="${H - 13}" style="fill:var(--dim)" font-size="10">${yd} yd</text>`;
+  g += `<g class="rp-scale"><line x1="8" y1="${H - 8}" x2="${(8 + bar).toFixed(1)}" y2="${H - 8}" style="stroke:var(--dim)" stroke-width="2"/><text x="8" y="${H - 13}" style="fill:var(--dim)" font-size="10">${yd} yd</text></g>`;
   const legend = rp.players.map((pl, i) => `<span style="color:${color(pl, i)}${drawn.includes(pl) ? "" : ";opacity:.45"}">● ${esc(pl.name)}${pl.used != null ? ` · ${usedText(pl)}` : pl.strokes ? ` · ${pl.strokes}${pl.capped ? " (max)" : ""}${pl.gimmes ? ` (incl. ${pl.gimmes} gimme${pl.gimmes > 1 ? "s" : ""})` : ""}` : ""}</span>`).join(" &nbsp;");
   const notes = [rp.pin ? (rp.pin_estimated ? "Pin estimated from the shots' distances." : "") : "Pin position unknown.",
                  drawn.some(p => p.shots.some(s => s.aim)) ? "Dashed: where the player aimed." : "",
                  drawn.some(p => p.shots.some(s => s.penalty)) ? "✕: where a ball went into a penalty area (the next shot is the drop)." : "",
-                 drawn.some(p => p.shots.some(s => s.path)) ? "Shots drawn as GSPro tracked the ball, ○ where it landed." : "",
+                 drawn.some(p => p.shots.some(s => s.path)) ? `Shots drawn as GSPro tracked the ball, ○ where it landed.${viewable.length && !sv ? " Tap one for its shot view." : ""}` : "",
                  drawn.some(p => p.shots.some(s => s.bend)) ? `${drawn.some(p => p.shots.some(s => s.path)) ? "Others curve" : "Full shots curve"} by their shape, estimated from the spin axis.` : "",
                  rp.map && rp.map.approx ? "Map from another round here: its tee, pin dot and yardages may differ a little." : ""].filter(Boolean).join(" ");
+  const many = new Set(viewable.map(([pl]) => pl)).size > 1;
+  const picker = viewable.length ? `<div class="sub sv-pick">🎥 Shot view: ${viewable.map(([pl, s, c]) => {
+    const on = sv && view.player === pl.name && view.n === s.n;
+    return `<button class="link${on ? " on" : ""}" data-shotview="${esc(pl.name)}" data-n="${s.n}" style="color:${c}">${many ? esc(pl.name.split(" ")[0]) + " " : ""}${s.n}${s.club ? " " + esc(s.club) : ""}</button>`;
+  }).join(" · ")}${sv ? ` · <button class="link" data-shotview="${esc(view.player)}" data-n="${view.n}">↻ Again</button> · <button class="link" data-shotview="">✕ Close</button>` : ""}</div>` : "";
+  const map = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}"${sv ? ` class="sv" data-sv="${esc(JSON.stringify(sv))}"` : ""}>${g}</svg>`;
   return `<div class="replay"><div class="sub">${esc(rp.course)} · hole ${rp.hole}${rp.par ? ` · par ${rp.par}` : ""}
-    · <button class="link" data-replayagain title="Play the hole again">↻ Play again</button>${toggle}${actions}</div>
-    <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${g}</svg>
+    · <button class="link" data-replayagain title="Play the hole again">↻ Play again</button>${toggle}${actions}</div>${picker}
+    ${sv ? `<div class="sv-row"><div class="sv-box">${map}<span class="sv-slow" hidden>SLOW-MO ¼×</span></div>${sideView(sv)}</div>` : map}
     <div class="sub">${legend}</div>${notes ? `<div class="sub">${notes}</div>` : ""}</div>`;
+}
+
+// The shot view: one tracked shot played on the hole map as the ball went, slowing to a quarter
+// speed and zooming in as it lands and rolls out, with its flight seen side-on beside it. A shot that
+// flew has its path's points as [x, z, height m, seconds since the strike] (hole_replay.py).
+// Only a shot GSPro timed to its touchdown: without that, it would seem to land the moment it was hit.
+const canShotView = s => !!(s.path && s.land > 0 && s.path[0].length >= 4 && s.path[s.land][3] > 0);
+const SV_YD = 1.0936, SV_FT = 3.2808;
+
+// What shotViewTick needs, worked out once: each point as [map x, map y, yards from where it was
+// played, feet above it, seconds], the flight smoothed through its points (a Catmull-Rom spline: the
+// path keeps only the points it needs to within a foot, which the side view's taller scale shows as
+// corners), and the close-up on the landing and roll (a viewBox): at least 80 yards across, at most
+// 2.5 times in (GSPro's map is coarse), inside the drawing.
+const SV_SPLIT = 8;
+function shotViewData(s, P, k, W, H, color) {
+  const o = s.path[0];
+  const raw = s.path.map(p => [...P(p).map(Number), Math.hypot(p[0] - o[0], p[1] - o[1]) * SV_YD, p[2] * SV_FT, p[3]]);
+  const cr = (a, b, c, d, u) => 0.5 * (2 * b + (c - a) * u + (2 * a - 5 * b + 4 * c - d) * u * u + (3 * b - a - 3 * c + d) * u * u * u);
+  const pts = [];
+  raw.forEach((p, i) => {
+    pts.push(p);
+    if (i >= s.land) return;
+    const p0 = raw[Math.max(0, i - 1)], p2 = raw[i + 1], p3 = raw[Math.min(s.land, i + 2)];
+    for (let j = 1; j < SV_SPLIT; j++) pts.push(p.map((v, c) => c === 4 ? v + (p2[4] - v) * j / SV_SPLIT : cr(p0[c], v, p2[c], p3[c], j / SV_SPLIT)));
+  });
+  const land = s.land * SV_SPLIT, L = pts[land], E = pts[pts.length - 1];
+  const zw = Math.min(W, Math.max(W / 2.5, 80 / SV_YD * k, Math.hypot(E[0] - L[0], E[1] - L[1]) * 3)), zh = zw * H / W;
+  const cx = (L[0] + E[0]) / 2, cy = (L[1] + E[1]) / 2;
+  const zoom = [Math.max(0, Math.min(W - zw, cx - zw / 2)), Math.max(0, Math.min(H - zh, cy - zh / 2)), zw, zh]
+    .map(v => +v.toFixed(1));
+  return { pts: pts.map(p => p.map(v => +v.toFixed(2))), land, W, H, zoom, color, club: s.club || null, descent: s.descent ?? null };
+}
+
+// The side-on frame: yards along the bottom, feet up the side, both from where the ball was played.
+function sideScale(sv, w) {
+  const yds = sv.pts.map(p => p[2]), fts = sv.pts.map(p => p[3]);
+  const far = Math.max(...yds), step = far > 150 ? 50 : far > 60 ? 25 : 10;
+  const right = Math.ceil((far + step * 0.6) / step) * step;   // room for the labels past the ball
+  const hi = Math.max(...fts), lo = Math.min(0, ...fts), hStep = hi - lo > 120 ? 50 : hi - lo > 40 ? 25 : 10;
+  const top = Math.max(hStep, Math.ceil((hi + 1) / hStep) * hStep), bot = Math.floor(lo / hStep) * hStep;
+  const X = d => 44 + d / right * (w - 64), Y = f => 190 - (f - bot) / (top - bot) * 160;
+  return { X, Y, right, step, top, bot, hStep, w };
+}
+
+function sideView(sv) {
+  // Narrower on a phone, so its writing isn't shrunk away.
+  const { X, Y, right, step, top, bot, hStep, w } = sideScale(sv, innerWidth < 600 ? 400 : 640), pts = sv.pts, L = pts[sv.land], E = pts[pts.length - 1];
+  const apex = pts.slice(0, sv.land + 1).reduce((a, p) => p[3] > a[3] ? p : a);
+  const f = (x, d = 0) => x.toFixed(d);
+  let g = `<rect x="0" y="190" width="${w}" height="40" fill="#2c5a3a"/>`;
+  for (let v = bot; v <= top; v += hStep) if (v) g += `<line x1="44" y1="${f(Y(v), 1)}" x2="${w - 20}" y2="${f(Y(v), 1)}" stroke="#fff" stroke-opacity=".08"/><text x="38" y="${f(Y(v) + 4, 1)}" text-anchor="end" style="fill:var(--dim)" font-size="11">${v} ft</text>`;
+  if (bot < 0) g += `<line x1="44" y1="${f(Y(0), 1)}" x2="${w - 20}" y2="${f(Y(0), 1)}" stroke="#fff" stroke-opacity=".25" stroke-dasharray="2 4"><title>Level with where it was played</title></line>`;
+  for (let d = 0; d <= right; d += step) g += `<line x1="${f(X(d), 1)}" y1="190" x2="${f(X(d), 1)}" y2="196" stroke="#cfe0d4"/><text x="${f(X(d), 1)}" y="210" text-anchor="middle" fill="#cfe0d4" font-size="11">${d} yd</text>`;
+  g += `<rect x="${f(X(0) - 4, 1)}" y="${f(Y(0), 1)}" width="8" height="3" fill="#ddd"/>`;
+  const label = (t, x, y, text, anchor = "middle", bold = false) => `<text data-at="${t}" opacity="0" x="${f(x, 1)}" y="${f(y, 1)}" text-anchor="${anchor}" fill="#e8efe9" font-size="12"${bold ? ' font-weight="600"' : ""} paint-order="stroke" stroke="#111" stroke-width="3">${text}</text>`;
+  g += `<g data-at="${apex[4]}" opacity="0"><line x1="${f(X(apex[2]), 1)}" y1="${f(Y(apex[3]), 1)}" x2="${f(X(apex[2]), 1)}" y2="190" stroke="${sv.color}" stroke-dasharray="3 4"/></g>`
+    + label(apex[4], X(apex[2]), Y(apex[3]) - 10, `Apex ${f(apex[3])} ft`, "middle", true);
+  // Carry and total under the ball, each on its own side of the roll (it can spin back).
+  const back = E[2] < L[2];
+  g += `<circle data-at="${L[4]}" opacity="0" cx="${f(X(L[2]), 1)}" cy="${f(Y(L[3]), 1)}" r="6" fill="none" stroke="#fff"/>`
+    + label(L[4], X(L[2]) + (back ? -4 : 4), Y(L[3]) + 20, `Carry ${f(L[2])} yd`, back ? "start" : "end");
+  g += label(E[4], X(E[2]) + (back ? -4 : 4), Y(E[3]) + 20, `Total ${f(E[2])} yd`, back ? "end" : "start", true);
+  g += `<polyline id="sv-strail" fill="none" stroke="${sv.color}" stroke-width="2.5" stroke-linejoin="round"/>`
+    + `<circle id="sv-sball" r="4.5" cx="${f(X(0), 1)}" cy="${f(Y(0), 1)}" fill="#fff" stroke="#111"/>`;
+  const facts = [sv.club && esc(sv.club), `carry ${f(L[2])} yd`, `total ${f(E[2])} yd`, `apex ${f(apex[3])} ft`,
+                 `hang time ${L[4].toFixed(1)} s`, sv.descent != null && `came down at ${sv.descent}°`].filter(Boolean);
+  return `<div class="sv-side"><div class="sv-box"><svg id="sv-side" viewBox="0 0 ${w} 230">${g}</svg><span class="sv-slow" hidden>SLOW-MO ¼×</span></div>
+    <div class="sub">Side-on: ${facts.join(" · ")}. Heights from where it was played.</div></div>`;
+}
+
+// Draws the shot view at this moment and asks for the next frame until it's done. Its clock is
+// shotClock's, not the page's, so a re-render mid-shot carries on where it was; one after it's done
+// draws the end. Flight at full speed, a quarter speed from just before the landing to a little after,
+// then the roll out at full speed; it zooms in for the slow part and back out once the ball stops.
+const shotClock = { start: 0, raf: 0 };
+function shotViewTick() {
+  shotClock.raf = 0;
+  const map = document.querySelector(".replay svg[data-sv]");
+  if (!map) return;
+  const sv = map._sv || (map._sv = JSON.parse(map.dataset.sv)), { pts, land, W, H, zoom } = sv;
+  const T = pts[pts.length - 1][4], tl = pts[land][4];
+  const a = Math.max(0, tl - 0.6), b = Math.min(T, tl + 1.2), rb = a + (b - a) * 4, rT = rb + (T - b);
+  const e = matchMedia("(prefers-reduced-motion: reduce)").matches ? Infinity : (performance.now() - shotClock.start) / 1000;
+  const sim = e < a ? e : e < rb ? a + (e - a) / 4 : Math.min(T, b + (e - rb));
+  const ease = x => { x = Math.max(0, Math.min(1, x)); return x * x * (3 - 2 * x); };
+  const z = Math.min(ease(e - a), 1 - ease(e - rT - 0.6));
+  const vb = [0, 0, W, H].map((v, i) => v + (zoom[i] - v) * z), s = vb[2] / W;
+  map.setAttribute("viewBox", vb.map(v => v.toFixed(2)).join(" "));
+  for (const el of map.querySelectorAll("[data-fx]")) {
+    const [x, y] = el.dataset.fx.split(",");
+    el.setAttribute("transform", s > 0.999 ? "" : `translate(${x} ${y}) scale(${s.toFixed(4)}) translate(${-x} ${-y})`);
+  }
+  for (const el of map.querySelectorAll(".rp-scale")) el.setAttribute("opacity", (1 - z).toFixed(2));
+  // Between the last point it has reached (the latest of any at the same moment) and the next.
+  const i = pts.findIndex(p => p[4] > sim), p = pts[i < 0 ? pts.length - 1 : Math.max(0, i - 1)], q = i < 0 ? p : pts[i];
+  const u = q[4] > p[4] ? (sim - p[4]) / (q[4] - p[4]) : 1;
+  const now = p.map((v, j) => v + (q[j] - v) * Math.max(0, Math.min(1, u)));
+  const done = pts.filter(r => r[4] <= sim);
+  const set = (el, attrs) => { if (el) for (const k in attrs) el.setAttribute(k, attrs[k]); };
+  set(map.querySelector("#sv-trail"), { points: [...done, now].map(r => `${r[0]},${r[1]}`).join(" ") });
+  set(map.querySelector("#sv-ball"), { cx: now[0], cy: now[1], r: ((3.5 + Math.max(0, now[3]) / 25) * s).toFixed(2) });
+  const age = (sim - tl) / 0.5, L = pts[land];
+  set(map.querySelector("#sv-ring"), age >= 0 && age < 1
+    ? { cx: L[0], cy: L[1], r: ((3 + age * 12) * s).toFixed(2), opacity: (1 - age).toFixed(2) } : { opacity: 0 });
+  for (const el of document.querySelectorAll(".replay .sv-slow")) el.hidden = !(e >= a && e < rb && rb > a);
+  const side = document.getElementById("sv-side");
+  if (side) {
+    const { X, Y } = side._sc || (side._sc = sideScale(sv, side.viewBox.baseVal.width));
+    set(side.querySelector("#sv-strail"), { points: [...done, now].map(r => `${X(r[2]).toFixed(1)},${Y(r[3]).toFixed(1)}`).join(" ") });
+    set(side.querySelector("#sv-sball"), { cx: X(now[2]).toFixed(1), cy: Y(now[3]).toFixed(1) });
+    for (const el of side.querySelectorAll("[data-at]")) el.setAttribute("opacity", sim >= +el.dataset.at - 1e-6 ? 1 : 0);
+  }
+  if (e < rT + 1.6) shotClock.raf = requestAnimationFrame(shotViewTick);
 }
 
 // A shot as GSPro tracked it: the line through its points (screen [x, y] strings), and its length.
@@ -1330,7 +1470,8 @@ function replayPart(reps, round) {
   state.replayPlayed = key;
   if (state.watch && state.watch.hole === state.replayHole) watchNow(rp.ts);
   const actions = ` · <span class="acts">${watchBtn(rp.ts, "▶ Watch the hole")}${shareBtn(hashFor("rounds", { round: state.round, hole: state.replayHole }), `hole ${rp.hole}`)}</span>`;
-  return replaySvg(rp, animate, { colors, focus, only: state.replayOnly && focus ? focus : null, actions });
+  const view = state.shotView && state.shotView.key === key ? state.shotView : null;
+  return replaySvg(rp, animate, { colors, focus, only: state.replayOnly && focus ? focus : null, actions, view });
 }
 
 const SCORE_NAMES = { "-3": "albatross", "-2": "eagle", "-1": "birdie", "0": "par", "1": "bogey", "2": "double bogey", "3": "triple bogey" };
@@ -2627,6 +2768,8 @@ function render() {
   if (state.tab === "live") pollChat();
   writeHash();
   if (state.watch && state.watch.ts) watchNow(state.watch.ts, state.watch.id);
+  cancelAnimationFrame(shotClock.raf);
+  shotViewTick();
   // A link to a round, hole or shot: bring it into view once it's drawn (replays and shots load later).
   const go = state.scrollTo;
   if (go) {
@@ -2719,7 +2862,7 @@ document.addEventListener("click", (e) => {
     return;
   }
   const t = e.target.closest("[data-tab],[data-section],[data-ctx],[data-sort],[data-player],[data-round],[data-course],[data-shot],"
-                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-leaveout],[data-exclround],[data-delround],[data-delvod],[data-leagueround],[data-sharecard],[data-period],[data-vod],[data-clip],[data-reel],[data-link],[data-more],[data-onlyme],[data-hcpclean],[data-dispclub],[data-recap]");
+                             + "[data-roundshots],[data-unround],[data-clearshots],[data-share],[data-replay],[data-replayagain],[data-replayonly],[data-shotview],[data-leaveout],[data-exclround],[data-delround],[data-delvod],[data-leagueround],[data-sharecard],[data-period],[data-vod],[data-clip],[data-reel],[data-link],[data-more],[data-onlyme],[data-hcpclean],[data-dispclub],[data-recap]");
   if (!t) return;
   if ("dispclub" in t.dataset) {
     state.dispClub = t.dataset.dispclub || null;
@@ -2826,9 +2969,15 @@ document.addEventListener("click", (e) => {
     render();
   } else if (t.dataset.replayagain !== undefined) {
     state.replayPlayed = null;
+    state.shotView = null;
+    render();
+  } else if (t.dataset.shotview !== undefined) {
+    state.shotView = t.dataset.shotview ? { key: `${state.round}:${state.replayHole}`, player: t.dataset.shotview, n: +t.dataset.n } : null;
+    shotClock.start = performance.now();
     render();
   } else if (t.dataset.replay) {
     state.replayPlayed = null;
+    state.shotView = null;
     state.replayHole = state.replayHole === +t.dataset.replay ? null : +t.dataset.replay;
     render();
   } else if (t.dataset.roundshots) {   // drill into a round: just its shots, with Back to the scorecard

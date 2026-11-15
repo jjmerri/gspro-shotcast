@@ -47,7 +47,7 @@ class Track:
     start: Point
     end: Point | None            # None when a penalty followed (where it stopped isn't where play went on)
     land: Point | None           # the touchdown, for a shot that flew
-    flight: list[Point] = field(default_factory=list)
+    flight: list[tuple[float, ...]] = field(default_factory=list)   # (x, y, z, seconds), or (x, y, z) untimed
     flight_s: float | None = None
     roll: list[tuple[float, float, float, float]] = field(default_factory=list)   # (x, y, z, seconds)
     lie_before: str | None = None
@@ -86,12 +86,12 @@ def _xyz(p) -> Point | None:
 
 
 def _thin(points: list) -> list:
-    """Points at least PATH_STEP_M apart (top-down), with the first and last kept."""
+    """Points at least PATH_STEP_M apart, with the first and last kept."""
     if len(points) <= 2:
         return points
     out = [points[0]]
     for p in points[1:-1]:
-        if math.hypot(p[0] - out[-1][0], p[2] - out[-1][2]) >= PATH_STEP_M:
+        if math.dist(p[:3], out[-1][:3]) >= PATH_STEP_M:
             out.append(p)
     out.append(points[-1])
     return out
@@ -113,6 +113,11 @@ def tracks(entries: list[dict]) -> list[Track]:
         penalty = any(o.get("ShotResult") in PENALTY_RESULTS and o.get("PlayerName") == e.get("PlayerName")
                       and o.get("Hole") == hole and o.get("HoleShot") == number + 1 for o in entries)
         flight = [p for p in (_xyz(q) for q in sd.get("pos") or []) if p]
+        land, secs = _xyz(sd.get("tdpoint")) if flight else None, shot.get("tdTime") if flight else None
+        if flight and isinstance(secs, (int, float)):
+            # GSPro samples the flight evenly up to the touchdown: timed before thinning loses the spacing.
+            steps = len(flight) if land is not None and math.dist(land, flight[-1]) > 0.01 else max(1, len(flight) - 1)
+            flight = [(*p, secs * i / steps) for i, p in enumerate(flight)]
         roll = []
         for q in sd.get("path") or []:
             if (p := _xyz((q or {}).get("pos"))) and isinstance(q.get("time"), (int, float)):
@@ -122,8 +127,7 @@ def tracks(entries: list[dict]) -> list[Track]:
                   player=str(e["PlayerName"]), hole=hole + 1, shot_number=number,
                   ball_speed=float(launch.get("sp") or e.get("BallSpeed") or 0.0), putt=bool(sd.get("isPutt")),
                   start=start, end=None if penalty else _xyz(e.get("EndingPOS")),
-                  land=_xyz(sd.get("tdpoint")) if flight else None,
-                  flight=_thin(flight), flight_s=shot.get("tdTime") if flight else None,
+                  land=land, flight=_thin(flight), flight_s=secs,
                   roll=_thin(roll), lie_before=SURFACES.get(e.get("StartingSurface")),
                   lie_after=None if penalty else SURFACES.get(e.get("EndingSurface")),
                   to_pin_m=float(dist) if isinstance(dist, (int, float)) else None,

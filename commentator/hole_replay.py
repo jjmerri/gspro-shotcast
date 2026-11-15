@@ -8,8 +8,8 @@ hole's last stroke into the pin; a ball lost to a penalty area (water, OB) runs 
 right of a player facing +z, so the plain (x, z) plane is the map as seen from above.
 
 A stroke GSPro's round file recorded (shot_tracks, GSPro 3.59+) is drawn as the ball went: "path", its
-top-down flight and roll from where it was played to where it stopped, with "land" the index of the
-touchdown. Otherwise a full shot is drawn bowed by its estimated curve (shot_shape.bend_yards, as
+flight and roll from where it was played to where it stopped, each point [x, z, height, seconds], with
+"land" the index of the touchdown and "descent" the angle it came down at (the page's shot view). Otherwise a full shot is drawn bowed by its estimated curve (shot_shape.bend_yards, as
 "bend": metres to the right of the straight line at its middle), and a putt straight.
 
 A tee shot has no logged start (GSPro sets it up without a setup block), so it comes from the hole's
@@ -97,20 +97,26 @@ def estimate_pin(obs: list[tuple[tuple[float, float], float]]) -> tuple[float, f
 PATH_TOLERANCE_M = 0.3          # a drawn path keeps the points it needs to stay within this of the ball's
 
 
-def _simplify(pts: list[tuple[float, float]], tol: float = PATH_TOLERANCE_M) -> list[int]:
-    """The indices of the points a line through them needs to stay within `tol` of all of them
-    (Douglas-Peucker), the first and last always."""
+def _simplify(pts: list[tuple[float, ...]], tol: float = PATH_TOLERANCE_M) -> list[int]:
+    """The indices of the timed points ((..., seconds), positions in any number of dimensions) that a
+    ball moving steadily from each kept point to the next needs to pass within `tol` of all the rest
+    at their times (Douglas-Peucker on the time-synchronised distance), the first and last always.
+    So a roll keeps the points that slow it down, not just its corners."""
     keep, stack = {0, len(pts) - 1}, [(0, len(pts) - 1)]
     while stack:
         i, j = stack.pop()
-        (ax, az), (bx, bz) = pts[i], pts[j]
-        n = math.hypot(bx - ax, bz - az)
+        a, b = pts[i], pts[j]
+        ab = [q - p for p, q in zip(a[:-1], b[:-1])]
+        dt, n2 = b[-1] - a[-1], sum(c * c for c in ab)
         far, at = 0.0, None
         for k in range(i + 1, j):
-            px, pz = pts[k]
-            # Distance to the segment, not its line: a ball that rolls back past where it was stays drawn.
-            u = max(0.0, min(1.0, ((px - ax) * (bx - ax) + (pz - az) * (bz - az)) / (n * n))) if n > 1e-9 else 0.0
-            d = math.hypot(px - ax - u * (bx - ax), pz - az - u * (bz - az))
+            ap = [q - p for p, q in zip(a[:-1], pts[k][:-1])]
+            if dt > 1e-9:
+                u = max(0.0, min(1.0, (pts[k][-1] - a[-1]) / dt))
+            else:
+                # No time between them: the distance to the segment, so a ball that rolls back stays drawn.
+                u = max(0.0, min(1.0, sum(x * y for x, y in zip(ap, ab)) / n2)) if n2 > 1e-18 else 0.0
+            d = math.sqrt(sum((x - u * y) ** 2 for x, y in zip(ap, ab)))
             if d > far:
                 far, at = d, k
         if at is not None and far > tol:
@@ -120,30 +126,57 @@ def _simplify(pts: list[tuple[float, float]], tol: float = PATH_TOLERANCE_M) -> 
 
 
 def _tracks(db: sqlite3.Connection) -> dict[int, dict[str, Any]]:
-    """Each tracked shot's top-down path (GSPro's round file, shot_tracks): {"path": [[x, z], ...], "land":
-    the touchdown's index (absent for a putt that never flew), "end": (x, z)}. A shot tracked with nothing
-    to draw (a penalty followed it) gets {}: its start is still GSPro's."""
+    """Each tracked shot's path (GSPro's round file, shot_tracks): {"path": [[x, z, height, seconds], ...],
+    the height in metres above where it was played and the seconds since the strike; "land": the
+    touchdown's index (GSPro's touchdown point; absent for a putt that never flew); "descent": the angle in degrees it came down
+    at; "end": (x, z)}. Flight and roll points carry their own times (a flight stored before they did
+    was recorded a fixed step apart, so its points are spread evenly over its seconds). A shot tracked with nothing to draw (a penalty
+    followed it) gets {}: its start is still GSPro's."""
     if not db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'shot_tracks'").fetchone():
         return {}
     out = {}
-    for r in db.execute("SELECT t.shot_id, t.flight, t.roll, t.end_x, t.end_z, s.start_x, s.start_z"
-                        " FROM shot_tracks t JOIN shots s ON s.id = t.shot_id"):
+    for r in db.execute("SELECT t.shot_id, t.flight, t.flight_s, t.roll, t.land_x, t.land_y, t.land_z,"
+                        " t.end_x, t.end_y, t.end_z,"
+                        " s.start_x, s.start_y, s.start_z FROM shot_tracks t JOIN shots s ON s.id = t.shot_id"):
         if r["end_x"] is None or r["start_x"] is None:
             out[r["shot_id"]] = {}
             continue
-        flight = [(p[0], p[2]) for p in json.loads(r["flight"] or "[]")]
-        roll = [(p[0], p[2]) for p in json.loads(r["roll"] or "[]")]
-        pts = [(r["start_x"], r["start_z"]), *flight, *roll, (r["end_x"], r["end_z"])]
-        land = len(flight) if flight else None   # the touchdown: the flight's last point
-        pts = [p for i, p in enumerate(pts) if i == 0 or math.dist(p, pts[i - 1]) > 0.01 or i == land]
-        if flight:
-            land = next((i for i, p in enumerate(pts) if p == flight[-1]), None)
+        flight, roll = json.loads(r["flight"] or "[]"), json.loads(r["roll"] or "[]")
+        base = r["start_y"] if r["start_y"] is not None else next((p[1] for p in [*flight, *roll]), 0.0)
+        secs = r["flight_s"] or 0.0
+        # The flight's points run up to the touchdown; GSPro's touchdown point is usually a little past the last.
+        td = [r["land_x"], r["land_y"], r["land_z"]] if flight and r["land_x"] is not None else None
+        apart = td is not None and math.dist(td, flight[-1][:3]) > 0.01
+        steps = len(flight) if apart else max(1, len(flight) - 1)
+        # Points stored with their time keep it; older rows' are spread evenly over the flight.
+        fly = [(p[0], p[2], p[1] - base, p[3] if len(p) > 3 else secs * i / steps)
+               for i, p in enumerate([*flight, *([[*td, secs]] if apart else [])])]
+        rolled = [(p[0], p[2], p[1] - base, max(p[3], secs)) for p in roll]
+        last_t = max([secs, *(p[3] for p in rolled)])
+        end_h = r["end_y"] - base if r["end_y"] is not None else (rolled or fly or [(0, 0, 0.0)])[-1][2]
+        pts = [(r["start_x"], r["start_z"], 0.0, 0.0), *fly, *rolled, (r["end_x"], r["end_z"], end_h, last_t)]
+        land = len(fly) if fly else None   # the touchdown: the flight's last point
+        pts = [p for i, p in enumerate(pts)
+               if i == 0 or i == land or math.dist(p[:3], pts[i - 1][:3]) > 0.01]
+        if fly:
+            land = next((i for i, p in enumerate(pts) if p == fly[-1]), None)
         idx = _simplify(pts)
         if land is not None and land not in idx:
             idx = sorted({*idx, land})
-        out[r["shot_id"]] = {"path": [_r(pts[i]) for i in idx], "end": (r["end_x"], r["end_z"]),
-                             **({"land": idx.index(land)} if land is not None else {})}
+        trk: dict[str, Any] = {"path": [_r4(pts[i]) for i in idx], "end": (r["end_x"], r["end_z"])}
+        if land is not None:
+            trk["land"] = idx.index(land)
+        if len(flight) >= 2:
+            (ax, ay, az), (bx, by, bz) = flight[-2][:3], flight[-1][:3]
+            if (run := math.hypot(bx - ax, bz - az)) > 1e-6:
+                trk["descent"] = round(math.degrees(math.atan2(ay - by, run)))
+        out[r["shot_id"]] = trk
     return out
+
+
+def _r4(p: tuple[float, float, float, float]) -> list[float]:
+    """A tracked point for the page: x and z to the centimetre, its height to the decimetre, its time."""
+    return [round(p[0], 2), round(p[1], 2), round(p[2], 1), round(p[3], 2)]
 
 
 def _layouts(db: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -701,7 +734,7 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
                           "from": _r(start), "to": _r(end), "aim": _r(aim),
                           **({"shape": shape} if shape else {}),
                           **({"bend": round(bend / M_TO_YD, 2)} if bend else {}),
-                          **({"path": trk["path"], **({"land": trk["land"]} if "land" in trk else {})} if trk else {}),
+                          **({"path": trk["path"], **{k: trk[k] for k in ("land", "descent") if k in trk}} if trk else {}),
                           **({"penalty": True} if penalty else {})})
         if any(s["from"] or s["to"] for s in shots):
             # The hole's score counts strokes that are never drawn: a gimme or conceded putt, a penalty.
