@@ -396,6 +396,8 @@ class Store:
         self._locate_hole_images()
         from .round_record import Live
         self.records = Live(self.db)   # which round or practice stretch each new row is in
+        from .booth_history import History
+        self.history = History(self.db, lambda: self.session_id)   # the booth's history reads, kept
         if not new_session:
             self.session_id = None
             self.db.commit()
@@ -1425,16 +1427,9 @@ class Store:
         return out
 
     def season_stats(self, player: str, context: str | None = None) -> dict[str, Any]:
-        """Season numbers for one player, in yards, excluding tonight so 'season best' means before tonight."""
-        r = self.db.execute(
-            """SELECT COUNT(*) AS shots,
-                      MAX(CASE WHEN {DRIVE_SQL} THEN {_DRIVE} END) AS longest_drive,
-                      AVG(CASE WHEN {DRIVE_SQL} THEN {_DRIVE} END) AS avg_drive,
-                      COUNT(DISTINCT session_id) AS nights
-               FROM shots WHERE player = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND mulligan = 0 AND left_out = 0 AND excluded = 0""".format(_DRIVE=_DRIVE, DRIVE_SQL=DRIVE_SQL) + _ctx_sql(context),
-            (player, self.session_id),
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        """Season numbers for one player, in yards, excluding tonight so 'season best' means before tonight:
+        shots, longest_drive, avg_drive, nights (booth_history)."""
+        return self.history.season_stats(player, context)
 
     def today_longest_drive(self, player: str) -> float | None:
         """The player's longest drive already recorded today, so a second big drive tonight isn't
@@ -1723,14 +1718,8 @@ class Store:
         self.db.commit()
 
     def season_longest_drive(self, context: str | None = None) -> tuple[str, float] | None:
-        r = self.db.execute(
-            f"""SELECT player, {_DRIVE} AS carry FROM shots
-               WHERE {DRIVE_SQL} AND player IS NOT NULL AND player != 'unknown' AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))
-                     AND mulligan = 0 AND left_out = 0 AND excluded = 0"""
-            + _ctx_sql(context) + " ORDER BY carry DESC LIMIT 1",
-            (self.session_id,),
-        ).fetchone()
-        return (r["player"], r["carry"]) if r else None
+        """The longest drive before today: (player, yards) (booth_history)."""
+        return self.history.season_longest_drive(context)
 
     def hole_scoring(self, course: str | None, hole: int | None, context: str | None = None) -> list[int]:
         """Every gross score recorded on this hole of this course across all rounds (including
@@ -1762,34 +1751,14 @@ class Store:
 
     def player_profile(self, player: str, context: str | None = None) -> dict[str, Any]:
         """Season colour for a player: how much they've played, their most-used club, and their
-        start-line tendency (the classic 'typical miss'). start_direction > 0 is right of the aim."""
-        r = self.db.execute(
-            """SELECT COUNT(*) AS shots, COUNT(DISTINCT session_id) AS nights,
-                      AVG(CASE WHEN is_putt = 0 THEN start_direction END) AS avg_start_dir,
-                      COUNT(CASE WHEN is_putt = 0 AND start_direction IS NOT NULL THEN 1 END) AS aimed
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0""" + _ctx_sql(context),
-            (player,),
-        ).fetchone()
-        fav = self.db.execute(
-            """SELECT club, COUNT(*) AS n FROM shots
-               WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND club IS NOT NULL AND club NOT IN ('PT')"""
-            + _ctx_sql(context) + " GROUP BY club ORDER BY n DESC LIMIT 1",
-            (player,),
-        ).fetchone()
-        d = {k: r[k] for k in r.keys()}
-        d["favorite_club"], d["favorite_club_n"] = (fav["club"], fav["n"]) if fav else (None, 0)
-        return d
+        start-line tendency (the classic 'typical miss'). start_direction > 0 is right of the aim
+        (booth_history)."""
+        return self.history.player_profile(player, context)
 
     def approach_proximity(self, player: str, yards: float, band: float = 15.0,
                            context: str | None = None) -> dict[str, Any]:
-        """How close this player's full shots from about `yards` finish to the pin, this season."""
-        r = self.db.execute(
-            """SELECT COUNT(*) AS n, ROUND(AVG(finish_yards), 1) AS avg_finish_yards
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 0
-                     AND finish_yards IS NOT NULL AND to_pin_yards BETWEEN ? AND ?""" + _ctx_sql(context),
-            (player, yards - band, yards + band),
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        """How close this player's full shots from about `yards` finish to the pin, this season (booth_history)."""
+        return self.history.approach_proximity(player, yards, band, context)
 
     def putting_make_rate(self, player: str, feet: float, band_feet: float = 2.5,
                           context: str | None = None) -> dict[str, Any]:
@@ -1798,13 +1767,7 @@ class Store:
         excluded so they don't read as misses, and so are the conceded tap-ins (outcome 'gimme'), which
         nobody hit."""
         lo, hi = max(0.0, feet - band_feet) / 3.0, (feet + band_feet) / 3.0   # feet -> yards
-        r = self.db.execute(
-            """SELECT COUNT(*) AS attempts, SUM(CASE WHEN outcome = 'holed' THEN 1 ELSE 0 END) AS made
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 1 AND outcome IS NOT NULL
-                     AND outcome != 'gimme' AND to_pin_yards BETWEEN ? AND ?""" + _ctx_sql(context),
-            (player, lo, hi),
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        return self.history.putting_make_rate(player, lo, hi, context)
 
     def three_putt_rate(self, player: str, feet: float, band_feet: float = 10.0,
                         context: str | None = None) -> dict[str, Any]:
@@ -1822,47 +1785,19 @@ class Store:
         the same course+hole twice in a single session (two rounds a night) has them merged - rare, and
         the min-sample gate on the caller blunts it."""
         lo, hi = max(0.0, feet - band_feet) / 3.0, (feet + band_feet) / 3.0   # feet -> yards
-        r = self.db.execute(
-            """WITH hole_putts AS (
-                   SELECT to_pin_yards,
-                          ROW_NUMBER() OVER (PARTITION BY session_id, course, hole ORDER BY ts) AS putt_no,
-                          COUNT(*) OVER (PARTITION BY session_id, course, hole) AS putts
-                   FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND hole IS NOT NULL
-                         AND (lie_before = 'green' OR (is_putt = 1 AND lie_before IS NULL))"""
-            + _ctx_sql(context) + """
-               )
-               SELECT COUNT(*) AS holes, SUM(CASE WHEN putts >= 3 THEN 1 ELSE 0 END) AS three_putts
-               FROM hole_putts WHERE putt_no = 1 AND to_pin_yards BETWEEN ? AND ?""",
-            (player, lo, hi),
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        return self.history.three_putt_rate(player, lo, hi, context)
 
     _BEFORE_TODAY = "session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))"
 
     def approach_leave(self, player: str, lo_yards: float, hi_yards: float | None = None) -> dict[str, Any]:
         """Season baseline for the round sheet, before today: how far from the hole this player's full
         shots from `lo_yards` up to `hi_yards` finish when they reach the green (holed = 0)."""
-        r = self.db.execute(
-            f"""SELECT COUNT(*) AS n,
-                       AVG(CASE WHEN outcome = 'holed' THEN 0 ELSE finish_yards END) AS avg_finish_yards
-                FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 0
-                      AND to_pin_yards >= ? AND to_pin_yards < ? AND finish_yards IS NOT NULL
-                      AND (lie_after = 'green' OR outcome IN ('holed', 'conceded')) AND {self._BEFORE_TODAY}""",
-            (player, lo_yards, hi_yards if hi_yards is not None else 1e9, self.session_id),
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        return self.history.approach_leave(player, lo_yards, hi_yards if hi_yards is not None else 1e9)
 
     def putt_band_rate(self, player: str, lo_feet: float, hi_feet: float | None = None) -> dict[str, Any]:
         """Season baseline for the round sheet, before today: putts from over `lo_feet` up to `hi_feet`.
         Conceded misses count as misses; the never-struck tap-ins ('gimme') don't count."""
-        r = self.db.execute(
-            f"""SELECT COUNT(*) AS attempts, SUM(CASE WHEN outcome = 'holed' THEN 1 ELSE 0 END) AS made
-                FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 1
-                      AND outcome IS NOT NULL AND outcome != 'gimme' AND to_pin_yards > ? AND to_pin_yards <= ?
-                      AND {self._BEFORE_TODAY}""",
-            (player, lo_feet / 3.0, (hi_feet if hi_feet is not None else 1e9) / 3.0, self.session_id),
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        return self.history.putt_band_rate(player, lo_feet / 3.0, (hi_feet if hi_feet is not None else 1e9) / 3.0)
 
     def length_norm(self, player: str, club: str | None = None) -> dict[str, Any]:
         """How far this player usually hits it (median total length, as GSPro measured it): drives (from
@@ -1871,19 +1806,8 @@ class Store:
         the club's typical length over everything but chips, then only shots whose pin was well beyond
         that, so the player wasn't hitting a partial. A club's swings count only off the tee or fairway:
         rough, sand and pine straw take distance off (a 3-wood out of the rough made "his reliable
-        110-yard option")."""
-        base = """SELECT total_yards, to_pin_yards FROM shots
-                  WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 0
-                        AND total_yards IS NOT NULL AND total_yards > 0"""
-        if club is None:
-            rows = self.db.execute(base + " AND lie_before = 'tee' AND to_pin_yards >= 250", (player,)).fetchall()
-            totals = [r["total_yards"] for r in rows]
-        else:
-            rows = self.db.execute(base + " AND club = ? AND to_pin_yards >= 40 AND lie_before IN ('tee', 'fairway')",
-                                   (player, club)).fetchall()
-            rough = _median([r["total_yards"] for r in rows])
-            totals = [r["total_yards"] for r in rows if rough and r["to_pin_yards"] > rough * 1.15]
-        return {"n": len(totals), "avg_total": _median(totals)}
+        110-yard option") (booth_history)."""
+        return self.history.length_norm(player, club)
 
     def shot_lengths(self, shot_ids: list[int]) -> dict[int, float]:
         """GSPro's total length for these shots, where the HUD showed it (none left out of the stats)."""
@@ -1941,30 +1865,17 @@ class Store:
     def fairways_hit(self, player: str, context: str | None = None) -> dict[str, Any]:
         """Driving accuracy: of this player's driver tee shots this season, how many found the fairway.
         A per-player SHOT stat, so it works in a TWO-ball scramble too; it's empty only for the shared-
-        ball formats (alternate, and a one-ball scramble), which are not attributed to a single player."""
-        r = self.db.execute(
-            f"""SELECT COUNT(*) AS tries, SUM(CASE WHEN lie_after = 'fairway' THEN 1 ELSE 0 END) AS hit
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 0
-                     AND ((club = 'DR' AND shot_number = 1) OR {UNKNOWN_CLUB_DRIVE_SQL}) AND lie_after IS NOT NULL""" + _ctx_sql(context),
-            (player,),
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        ball formats (alternate, and a one-ball scramble), which are not attributed to a single player
+        (booth_history)."""
+        return self.history.fairways_hit(player, context)
 
     def recovery_proximity(self, player: str, lies: tuple[str, ...], max_to_pin: float | None = None,
                            context: str | None = None) -> dict[str, Any]:
         """How close this player's shots from a given lie type (greenside sand, rough) finish to the pin,
         in yards. `max_to_pin` limits to greenside (a bunker within ~30 yd, not a fairway bunker). A
-        per-player SHOT stat; empty for the shared-ball formats, which aren't attributed to a player."""
-        placeholders = ",".join("?" for _ in lies)
-        clause = " AND to_pin_yards <= ?" if max_to_pin is not None else ""
-        params = [player, *lies] + ([max_to_pin] if max_to_pin is not None else [])
-        r = self.db.execute(
-            f"""SELECT COUNT(*) AS n, ROUND(AVG(finish_yards), 1) AS avg_finish_yards
-                FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 0 AND finish_yards IS NOT NULL
-                      AND lie_before IN ({placeholders}){clause}{_ctx_sql(context)}""",
-            params,
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        per-player SHOT stat; empty for the shared-ball formats, which aren't attributed to a player
+        (booth_history)."""
+        return self.history.recovery_proximity(player, tuple(lies), max_to_pin, context)
 
     def record_round(self, *, course, fmt, side, team, holes, stats, strokes, net_to_par, hole_number,
                      hole_pars=None, is_league: bool = True, complete: bool = True, players: list[str] | None = None,

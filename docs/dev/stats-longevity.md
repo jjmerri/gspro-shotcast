@@ -207,7 +207,8 @@ merged like any other, and its record is in both nights' signatures.
     page, instead of a time window.
   - The booth: rates are total over total (today `season_rounds` averages per-round rates), band
     lookups snap to 1 ft / 5 yd buckets, it merges the frozen nights once at startup and adds tonight
-    live; `spoken_lines` looks back 12 months, `side_rounds` gets a limit.
+    live; `spoken_lines` looks back 12 months, `side_rounds` gets a limit. (The history reads turned
+    out exact without buckets, read per player when first asked: see "Booth history reads" below.)
   - The booth tab's signature phrases go by the last 12 months (the 1y range's nights); its other
     numbers stay lifetime. Older nights' phrase partials are dropped from the cache.
 - **Page files (done for the shot log).** The page's `stats.db` is one file per calendar year of play
@@ -326,15 +327,25 @@ the first start after an update (a cold build) held the booth up. It now builds 
 (`make_server(build_in_background=True)`) and the booth starts at once. Pages wait for that build; if
 it fails, each request tries again and answers with an error rather than the last version's page.
 
-**Booth history reads (do they need stored tables?).** Timed on the 3-year copy (211k shots; the
-busiest player has 40,650): most per-shot history reads (`season_stats`, `fairways_hit`,
-`approach_proximity`, `putting_make_rate`, `recovery_proximity`) take 45–50 ms each, `player_profile`
-about 100 ms, `season_longest_drive` about 140 ms; hole, team and broadcast reads 1–21 ms. `carry_pairs`
-takes 2.1 s but runs once, when the booth starts. A tee shot makes roughly 5–8 heavy reads, so about
-0.3–0.6 s per shot after 3 years of heavy play (estimated from the parts, not timed end to end), well
-under the model's own latency, and growing in line with history. Stored tables aren't needed for this
-yet; if it grows, an index or a per-session in-memory cache is the cheaper fix. Step 4 below stays the
-plan only if those fall short or the cloud needs the rows.
+**Booth history reads (done, `commentator/booth_history.py`).** At 10 years (692k shots) each per-shot
+history read (`season_stats`, `season_longest_drive`, `player_profile`, `approach_proximity`,
+`putting_make_rate`, `three_putt_rate`, `fairways_hit`, `recovery_proximity`, `putt_band_rate`,
+`approach_leave`, `length_norm`) took 150–470 ms, several per tee shot. Now a player's nights before
+today are read once, the first time the booth asks about them, into sorted lists (SQLite still works out
+which rows count, with the old queries' filters); today's rows are read each time. Instead of the
+1 ft / 5 yd buckets agreed above, a band is two binary searches over the exact distances, so every
+figure is the old query's (a tie SQLite left to its plan goes to the earliest row; the favourite club's
+to the first by name). `tests/test_booth_history.py` keeps the old queries and checks them against the
+new reads through the booth's writes, the page's, rollbacks, replaced rows and a new day.
+- What's kept is dropped when anything it read may have changed: another connection's commit
+  (`PRAGMA data_version`), or this connection's write to a shot of an earlier day, to a session, or one
+  replacing another row (temp triggers set a random value, so a rolled-back write is noticed too).
+- 10 years: a player's first read 0.5–2.3 s once a night (it was that much each shot); after that all
+  12 reads together 2–10 ms, about 10 ms just after a new shot; 128 MB peak for the process with four
+  players read.
+- The other reads (hole, team and broadcast stats, `season_rounds`, `team_course_history`,
+  `hole_scoring`, `prediction_record`, `recent_form_mentions`, `today_longest_drive`) take under 11 ms
+  at 10 years; `side_rounds` 47 ms. At startup `spoken_lines` takes 265 ms and `carry_pairs` 7.6 s.
 
 ### 4. Stored totals instead of recomputing from every shot
 
