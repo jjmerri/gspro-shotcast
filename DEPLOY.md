@@ -16,9 +16,12 @@ minutes), serves the stats page on this PC and offers updates. Everything else (
 the league file, `logs\` with season.db, backups and the booth, tray and `booth-errors.log` logs)
 lives in `%LOCALAPPDATA%\Shotcast`.
 
-**Updating.** The tray offers new releases (**Check for updates** / **Restart to update**); it
-never installs one on its own. An update closes the booth, installs, and starts Shotcast again, so
-don't update mid-round.
+**Updating.** The tray offers new releases (**Check for updates** / **Restart to update**). With
+**Install updates automatically** ticked in the menu (the default), a downloaded update also
+installs by itself as Shotcast starts, or once GSPro's been closed for 30 minutes, or open with
+nobody hitting a shot for 30 minutes (after an on-screen countdown you can postpone), never with a
+round on or the stream on air. Untick it to install only from **Restart to update**. An update
+closes the booth, installs, and starts Shotcast again, so don't update mid-round.
 
 **Publishing the stats page** (optional): with sharing set up in **Settings**, the booth uploads
 the page right after each round's sign-off
