@@ -77,6 +77,23 @@ def test_a_warm_build_reuses_every_round_and_an_edit_works_out_only_its_round_ag
     assert after[2] == (2, 2)
 
 
+def test_gspros_record_of_a_stroke_going_works_its_rounds_replay_out_again(tmp_path):
+    path = tmp_path / "season.db"
+    shots = _season(path)
+    _build(path, True)
+    with closing(sqlite3.connect(path)) as db, db:   # the second round's first drive, as GSPro's round file had it
+        db.execute("INSERT INTO shot_tracks (shot_id, gspro_shot_id, end_x, end_y, end_z, flight, flight_s)"
+                   " VALUES (?, 'g1', 1, 0, 200, '[[0, 0, 0], [0.5, 30, 100], [1, 0, 200]]', 4)", (shots[4],))
+    tracked = _build(path, True)
+    assert tracked[:2] == _build(path, False)[:2] and tracked[2] == (2, 2)
+    assert any("path" in s for rp in tracked[0].values() for p in rp["players"] for s in p["shots"])
+    with closing(sqlite3.connect(path)) as db, db:   # taken back, leaving the shot's own columns as they were
+        db.execute("DELETE FROM shot_tracks")
+    after = _build(path, True)
+    assert after[:2] == _build(path, False)[:2] and after[0] != tracked[0]
+    assert after[2] == (2, 2)
+
+
 def test_one_years_replays_load_on_their_own_and_leave_the_others_kept(tmp_path):
     path = tmp_path / "season.db"
     shots = _season(path)

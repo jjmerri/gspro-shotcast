@@ -126,19 +126,25 @@ def _simplify(pts: list[tuple[float, ...]], tol: float = PATH_TOLERANCE_M) -> li
     return sorted(keep)
 
 
-def _tracks(db: sqlite3.Connection) -> dict[int, dict[str, Any]]:
+def _tracks(db: sqlite3.Connection, ids: set[int] | None = None) -> dict[int, dict[str, Any]]:
     """Each tracked shot's path (GSPro's round file, shot_tracks): {"path": [[x, z, height, seconds], ...],
     the height in metres above where it was played and the seconds since the strike; "land": the
     touchdown's index (GSPro's touchdown point; absent for a putt that never flew); "descent": the angle in degrees it came down
     at; "end": (x, z)}. Flight and roll points carry their own times (a flight stored before they did
     was recorded a fixed step apart, so its points are spread evenly over its seconds). A shot tracked with nothing to draw (a penalty
-    followed it) gets {}: its start is still GSPro's."""
+    followed it) gets {}: its start is still GSPro's. `ids`: those shots' only."""
     if not db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'shot_tracks'").fetchone():
         return {}
+    sql = ("SELECT t.shot_id, t.flight, t.flight_s, t.roll, t.land_x, t.land_y, t.land_z, t.end_x, t.end_y, t.end_z,"
+           " s.start_x, s.start_y, s.start_z FROM shot_tracks t JOIN shots s ON s.id = t.shot_id")
+    if ids is None:
+        rows = db.execute(sql).fetchall()
+    else:
+        some = sorted(ids)
+        rows = [r for i in range(0, len(some), 500) for r in db.execute(
+            f"{sql} WHERE t.shot_id IN ({','.join('?' * len(some[i:i + 500]))})", some[i:i + 500])]
     out = {}
-    for r in db.execute("SELECT t.shot_id, t.flight, t.flight_s, t.roll, t.land_x, t.land_y, t.land_z,"
-                        " t.end_x, t.end_y, t.end_z,"
-                        " s.start_x, s.start_y, s.start_z FROM shot_tracks t JOIN shots s ON s.id = t.shot_id"):
+    for r in rows:
         if r["end_x"] is None or r["start_x"] is None:
             out[r["shot_id"]] = {}
             continue
@@ -439,7 +445,7 @@ def _make_plan(db: sqlite3.Connection) -> tuple[dict[tuple[int, int], list], dic
         teams = {rnd: _scramble_teams(rows) for rnd, rows in by_round.items()}
         sides = _sides(db)
         cards = _cards(db)
-        tracks = _tracks(db)
+        tracks = _tracks(db, None if len(want) == len(span) else {r["id"] for r in rows_})
         out: dict[int, dict[int | str, dict]] = {}
         for key, rows in groups.items():
             rows = _fill_gaps(rows)

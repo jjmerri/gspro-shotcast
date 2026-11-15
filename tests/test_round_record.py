@@ -424,6 +424,19 @@ def test_a_round_begun_by_this_booth_is_never_continued(tmp_path):
     assert _record(s, u)[1] == "abandoned"
 
 
+def test_a_round_begun_again_keeps_its_record(tmp_path):
+    # The engine starting the same round again (a missed start joined after it was let go).
+    s = Store(str(tmp_path / "s.db"))
+    other = s.begin_round("r0", course="Pebble", players={"Bo": None})
+    assert s.begin_round("r1", course="Pebble", players={"Ann": None}) == "r1"
+    a = _hit(s, "Ann", T0)
+    assert s.begin_round("r1", course="Pebble", players={"Ann": None}) == "r1"   # still in progress
+    s.end_round("r1", complete=False)
+    assert s.begin_round("r1", course="Pebble", players={"Ann": None}) == "r1"   # ended, and taken up again
+    assert _record(s, "r1")[1:] == ("in_progress", None) and _rec(s, a)[0] == "r1"
+    assert _record(s, other)[1] == "abandoned"
+
+
 def test_a_booth_starting_ends_a_round_too_old_to_continue(tmp_path, monkeypatch):
     import time as _time
     s = Store(str(tmp_path / "s.db"))

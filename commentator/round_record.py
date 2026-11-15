@@ -109,6 +109,15 @@ WHEN {_COUNTS} BEGIN {_bump(rec.format("NEW"))} END;""")
 WHEN {_COUNTS} BEGIN UPDATE round_records SET gen = gen + 1 WHERE uuid IN ({rec.format("NEW")}, {rec.format("OLD")}); END;""")
     out.append(f"""CREATE TRIGGER IF NOT EXISTS week_results_gen_delete AFTER DELETE ON week_results
 WHEN {_COUNTS} BEGIN {_bump(rec.format("OLD"))} END;""")
+    # GSPro's round file's record of a stroke (store.shot_tracks) is drawn in its hole's replay: its
+    # changes are its shot's record's, even one that leaves the shot's own columns as they were.
+    shot_rec = "(SELECT record_uuid FROM shots WHERE id = {}.shot_id)"
+    out.append(f"""CREATE TRIGGER IF NOT EXISTS shot_tracks_gen_insert AFTER INSERT ON shot_tracks
+WHEN {_COUNTS} BEGIN {_bump(shot_rec.format("NEW"))} END;""")
+    out.append(f"""CREATE TRIGGER IF NOT EXISTS shot_tracks_gen_update AFTER UPDATE ON shot_tracks
+WHEN {_COUNTS} BEGIN UPDATE round_records SET gen = gen + 1 WHERE uuid IN ({shot_rec.format("NEW")}, {shot_rec.format("OLD")}); END;""")
+    out.append(f"""CREATE TRIGGER IF NOT EXISTS shot_tracks_gen_delete AFTER DELETE ON shot_tracks
+WHEN {_COUNTS} BEGIN {_bump(shot_rec.format("OLD"))} END;""")
     out.append(f"""CREATE TRIGGER IF NOT EXISTS round_records_gen AFTER UPDATE OF state, ended_at, course ON round_records
 WHEN {_COUNTS} BEGIN {_bump("NEW.uuid")} END;""")
     return "\n".join(out)
@@ -966,8 +975,11 @@ class Live:
         is on the same course with the same players; any other is abandoned."""
         names = {n.casefold() for n in players if n and n != "unknown"}
         go_on = None
+        if self.known(u):   # this round started again (a join after it was let go): it keeps its record
+            self.db.execute("UPDATE round_records SET state = 'in_progress', ended_at = NULL WHERE uuid = ?", (u,))
+            go_on = u
         for v, c in self.db.execute("SELECT uuid, course FROM round_records WHERE kind = 'round' AND state = 'in_progress'"
-                                    " AND assigned = 'live' ORDER BY started_at DESC").fetchall():
+                                    " AND assigned = 'live' AND uuid != ? ORDER BY started_at DESC", (u,)).fetchall():
             had = {r[0].casefold() for r in self.db.execute(
                 "SELECT name FROM round_slots WHERE round_uuid = ? AND name IS NOT NULL AND matched_by = 'booth'", (v,))}
             if go_on is None and v not in self.mine and names and _same(c, course) and had == names \

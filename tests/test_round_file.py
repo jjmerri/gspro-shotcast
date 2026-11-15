@@ -168,6 +168,17 @@ def test_a_stroke_is_not_matched_to_another_courses_shot(tmp_path):
     assert written == 0 and [t.shot_id for t in pending] == ["elsewhere"]
 
 
+def test_a_stroke_finds_its_course_whatever_case_it_was_stored_in_and_old_plays_dont_get_in_the_way(tmp_path):
+    st = _season(tmp_path)
+    st.db.execute("UPDATE shots SET course = 'TEST LINKS' WHERE shot_number > 1")
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, ball_speed,"
+                  " raw) VALUES (?, 1, 'Dan Smith', 'Other Hills', ?, 9, '7I', 0, 1, '{}')", (st.session_id, HOLE))
+    st.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes) VALUES (?, 5, '2020-01-01',"
+                  " 'Other Hills', 'Dan Smith', 1)", (st.session_id,))
+    written, pending = st.apply_round_file(round_file.tracks([DRIVE, APPROACH]), now=1005.0)
+    assert written == 2 and not pending
+
+
 def test_a_penalty_that_follows_a_stroke_takes_back_where_the_file_had_it_stop(tmp_path):
     st = _season(tmp_path)
     st.apply_round_file(round_file.tracks([APPROACH]), now=1005.0)

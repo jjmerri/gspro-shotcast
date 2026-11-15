@@ -182,6 +182,9 @@ merged like any other, and its record is in both nights' signatures.
     build with no year to build reads none. On 3 years, peak Python memory went from 495 MB to 364 MB
     on a warm build (the process's from 907 MB to 768 MB, up to 346 MB of which is the season file
     mapped in), and a cold build holds one year's replays at a time.
+  - GSPro's round file (`shot_tracks`) is in a replay's signature: triggers on `shot_tracks` bump the
+    change counter of its shot's record, so a stroke's path written, changed or taken back works its
+    round out again. A replay reads only its rounds' paths.
   - Nights' partials aren't kept for the rest of the build once merged (`per_night(memo=False)`):
     holes, players, courses and records merge every context's (all, league, tournament, practice)
     from one read, and the others are read once. What a warm 3-year build holds to its end went from
@@ -212,6 +215,9 @@ merged like any other, and its record is in both nights' signatures.
   under the profiler): gapping 7.3 s (every full swing a player hit; now the last 12 months, below),
   `rounds` 6.1 s, the handicap index 4.2 s, merging the kept nights about 11 s (holes 3.7 s,
   highlights 2.5 s, players 2.0 s, firsts 1.5 s) and loading them about 3 s.
+- **The round file** (`Store.apply_round_file`, every 2 s for 3 minutes after GSPro writes it) reads
+  the courses played one index step each and only the round ends from its window on, not every shot
+  and round: at 10 years, 80 ms a pass down to 20 ms.
 - **Predictions** need no port: about 1,600 rows at 3 years, read in under 1 ms.
 - **To port:** the page files' remaining lists (below).
 - **Decisions:**
@@ -220,8 +226,11 @@ merged like any other, and its record is in both nights' signatures.
   - Putting buckets are kept per `PUTT_EDGES` interval and merged at the usual gimme when shown.
   - The round summaries' `vs` figures (against the player's lifetime numbers, which every new round
     moves) are worked out by the page when it shows a round, not stored in the round.
-  - Gapping goes by the last 12 months of swings (the 1y range's nights); no bag resets. At 10 years,
-    every player's gapping in one context took 21.4 s cold; 1.4 s now.
+  - Gapping goes by the last 12 months of tee and fairway swings (the 1y range's nights); no bag
+    resets. At 10 years, every player's gapping in one context took 21.4 s cold; 1.4 s now. Its
+    dispersion's finish (`hole_replay.finish_laterals(db, since)`) comes from the hole replays of the
+    rounds with a night in those months, taken from the cache with the replays (each round's laterals
+    are kept beside its holes), not by replaying every round played.
   - The booth: rates are total over total (today `season_rounds` averages per-round rates), band
     lookups snap to 1 ft / 5 yd buckets, it merges the frozen nights once at startup and adds tonight
     live; `spoken_lines` looks back 12 months; `side_rounds` keeps no limit (47 ms once a round, and

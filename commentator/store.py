@@ -19,7 +19,6 @@ from . import round_file
 from .hud import Hud
 from .models import Line, Shot
 from .sources.gspro_log import M_TO_YD
-from .sources.gspro_log import M_TO_YD
 
 log = logging.getLogger(__name__)
 
@@ -1206,9 +1205,15 @@ class Store:
         `rewrite` False leaves a stroke already applied to a shot it still fits as it is (the same file
         applied again, for shots recorded since). `gone`: the file's ShotIDs that are no longer strokes
         (round_file.untracked: a mulligan took one back), whose shots get back what they had."""
-        courses = [r[0] for r in self.db.execute("SELECT DISTINCT course FROM shots WHERE course IS NOT NULL")]
+        # Every course played, one index step each (course_fits ignores case), not a scan of every shot.
+        courses = [r[0] for r in self.db.execute(
+            "WITH RECURSIVE c(x) AS (SELECT (SELECT min(course COLLATE NOCASE) FROM shots) UNION ALL"
+            " SELECT (SELECT min(course COLLATE NOCASE) FROM shots WHERE course COLLATE NOCASE > c.x)"
+            " FROM c WHERE c.x IS NOT NULL) SELECT x FROM c WHERE x IS NOT NULL")]
         ends: list[float] = []   # each play's end: its sides' rounds end within 120 s of each other
-        for (e,) in self.db.execute("SELECT DISTINCT ended_at FROM rounds WHERE ended_at IS NOT NULL ORDER BY ended_at"):
+        # (only those from the window on: a stroke's row is in it, and its play ends after it)
+        for (e,) in self.db.execute("SELECT DISTINCT ended_at FROM rounds WHERE ended_at >= ? ORDER BY ended_at",
+                                    (now - window_s,)):
             if ends and e - ends[-1] <= 120:
                 ends[-1] = e
             else:
