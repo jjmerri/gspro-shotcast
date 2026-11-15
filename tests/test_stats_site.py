@@ -1,4 +1,5 @@
 import asyncio
+import gzip
 import itertools
 import json
 import sqlite3
@@ -30,6 +31,12 @@ def _season(tmp_path):
     return path
 
 
+def _data_file(site):
+    """The site's only data file (a season in one year)."""
+    [entry] = json.loads((site / "latest.json").read_text())["data"]
+    return site / entry["file"]
+
+
 def test_published_shots_and_transcripts_match_the_live_queries(tmp_path):
     path = _season(tmp_path)
     names = {"pbp": "Nigel"}
@@ -39,7 +46,7 @@ def test_published_shots_and_transcripts_match_the_live_queries(tmp_path):
     for name in ("all", "league", "practice"):
         body = json.loads((vdir / f"summary-{name}.json").read_text())
         assert body["context"] == name and body["db"]["name"] == "season.db"
-    with closing(stats_web.connect(path)) as src, closing(sqlite3.connect(vdir / "stats.db")) as pub:
+    with closing(stats_web.connect(path)) as src, closing(sqlite3.connect(_data_file(tmp_path / "site"))) as pub:
         filters = [{}, {"club": "DR"}, {"player": "Bob", "lie": "tee"}, {"date": "2026-10-17", "course": "Riviera"},
                    {"club": "nope"}]
         for context, f in itertools.product((None, "league", "practice"), filters):
@@ -63,8 +70,8 @@ def test_every_published_swing_but_a_never_struck_gimme_has_its_time_published(t
         db.execute("UPDATE shots SET mulligan = 1 WHERE ts = 1")
         db.execute("UPDATE shots SET excluded = 1 WHERE ts = 2")   # (a round left out of the stats)
         db.execute("UPDATE shots SET outcome = 'gimme' WHERE ts = 4")
-    vdir = tmp_path / "site" / "v" / stats_site.build(path, tmp_path / "site")
-    with closing(sqlite3.connect(vdir / "stats.db")) as pub:
+    stats_site.build(path, tmp_path / "site")
+    with closing(sqlite3.connect(_data_file(tmp_path / "site"))) as pub:
         assert [r[0] for r in pub.execute("SELECT ts FROM pub_shot_ts WHERE ts BETWEEN ? AND ? ORDER BY ts", (0, 6))] \
             == [1, 3, 5, 6]
 
@@ -78,6 +85,17 @@ def test_rebuilding_keeps_only_the_newest_versions(tmp_path):
     assert list((site / "vendor").glob("*/sqlite.worker.js"))
 
 
+def test_a_build_keeps_the_data_files_while_another_builds_the_site(tmp_path):
+    path = _season(tmp_path)
+    site = tmp_path / "site"
+    stats_site.build(path, site)
+    theirs = site / "data" / ("f" * 20 + ".db")   # built, its version's data.json not yet written
+    theirs.write_bytes(b"")
+    (site / "v" / "99999999-999999.999999-ffffff").mkdir()
+    stats_site.build(path, site)
+    assert theirs.exists()
+
+
 def test_a_build_can_leave_out_whats_new(tmp_path):
     path = _season(tmp_path)
     news = lambda v: json.loads((tmp_path / v / "v" / stats_site.build(path, tmp_path / v, news=v == "site")
@@ -89,6 +107,7 @@ class FakeS3:
     def __init__(self, keys=()):
         self.keys = set(keys)
         self.calls = []
+        self.bodies = {}
 
     def get_paginator(self, _):
         keys = self.keys
@@ -101,10 +120,17 @@ class FakeS3:
     def upload_file(self, path, bucket, key, ExtraArgs):
         self.calls.append(("upload", key, ExtraArgs))
         self.keys.add(key)
+        if key.endswith("data.json"):
+            self.bodies[key] = open(path, "rb").read()
 
-    def put_object(self, Bucket, Key, Body, ContentType, CacheControl):
-        self.calls.append(("put", Key, {"ContentType": ContentType, "CacheControl": CacheControl}))
+    def put_object(self, Bucket, Key, Body, ContentType, CacheControl, **more):
+        self.calls.append(("put", Key, {"ContentType": ContentType, "CacheControl": CacheControl, **more}))
         self.keys.add(Key)
+        self.bodies[Key] = Body
+
+    def get_object(self, Bucket, Key):
+        import io
+        return {"Body": io.BytesIO(self.bodies[Key])}
 
     def delete_objects(self, Bucket, Delete):
         gone = [o["Key"] for o in Delete["Objects"]]
@@ -125,7 +151,7 @@ def test_upload_points_latest_at_the_new_version_last_and_prunes_old_ones(tmp_pa
     assert s3.calls[-1] == ("delete", [old[0]])                  # keeps the newest previous version
     assert uploads[-1][1] == "stats/index.html" and uploads[-1][2]["CacheControl"] == "no-cache"
     assert f"stats/{vendor[0]}" not in [c[1] for c in uploads]   # already there
-    db = next(c for c in uploads if c[1] == f"stats/v/{version}/stats.db")
+    db = next(c for c in uploads if c[1].startswith("stats/data/"))
     assert db[2] == {"ContentType": "application/vnd.sqlite3", "CacheControl": "public, max-age=31536000, immutable"}
     wasm = next(c for c in uploads if c[1].endswith(".wasm"))
     assert wasm[2]["ContentType"] == "application/wasm"
@@ -133,6 +159,38 @@ def test_upload_points_latest_at_the_new_version_last_and_prunes_old_ones(tmp_pa
     assert app["stats/manifest.webmanifest"]["ContentType"] == "application/manifest+json"
     assert app["stats/icons/icon-192.png"] == {"ContentType": "image/png", "CacheControl": "no-cache"}
     assert app["stats/sw.js"]["CacheControl"] == "no-cache"   # a new service worker reaches phones at once
+    key = f"stats/v/{version}/summary-all.json"   # gzipped: CloudFront won't compress one over 10 MB
+    put = next(c for c in s3.calls if c[:2] == ("put", key))
+    assert put[2] == {"ContentType": "application/json", "ContentEncoding": "gzip",
+                      "CacheControl": "public, max-age=31536000, immutable"}
+    assert gzip.decompress(s3.bodies[key]) == (site / "v" / version / "summary-all.json").read_bytes()
+    assert s3.calls.index(put) < s3.calls.index(next(c for c in s3.calls if c[1] == "stats/index.html"))
+
+
+def test_upload_sends_only_new_data_files_and_drops_those_no_kept_version_reads(tmp_path):
+    path = _season(tmp_path)
+    site = tmp_path / "site"
+    s3 = FakeS3(["stats/data/0123456789abcdef0123.db"])   # (a file from a version long gone)
+
+    def publish(club=None):
+        if club:
+            with closing(sqlite3.connect(path)) as db, db:
+                db.execute("UPDATE shots SET club = ? WHERE id = 1", (club,))
+        version = stats_site.build(path, site)
+        s3.calls.clear()
+        assert stats_site.upload(site, "bkt", "stats", client=s3) == version
+        return _data_file(site).relative_to(site).as_posix(), [c[1] for c in s3.calls if c[0] == "upload"]
+
+    one, sent = publish()
+    assert "stats/" + one in sent and "stats/data/0123456789abcdef0123.db" not in s3.keys
+    assert publish()[1].count("stats/" + one) == 0   # unchanged: not sent again
+    two, sent = publish("3W")
+    assert "stats/" + two in sent and {"stats/" + one, "stats/" + two} <= s3.keys   # the version before reads one
+    older = sorted((site / "v").iterdir())[-1]   # (kept next time, with its data files read from the bucket)
+    (older / "data.json").unlink()
+    three, _ = publish("4W")
+    assert {k for k in s3.keys if k.startswith("stats/data/")} == {"stats/" + two, "stats/" + three}
+    assert json.loads(gzip.decompress(s3.bodies[f"stats/v/{older.name}/data.json"]))[0]["file"] == two
 
 
 def _engine(tmp_path, **publish):
@@ -239,8 +297,8 @@ def test_shots_are_put_in_the_round_that_ended_next_on_their_course(tmp_path):
         assert {r["id"]: r["players"] for r in stats_web.rounds(ro) if r["id"] != kapalua} == {ann: ["Ann"], bob: ["Ann", "Bob"], riviera: ["Ann"]}
     db.close()
     site = tmp_path / "site"
-    vdir = site / "v" / stats_site.build(path, site)
-    with closing(sqlite3.connect(vdir / "stats.db")) as pub:
+    stats_site.build(path, site)
+    with closing(sqlite3.connect(_data_file(site))) as pub:
         sql, args = stats_site.shot_query(None, {"round": str(ann)})
         assert sorted(json.loads(r[0])["id"] for r in pub.execute(sql, args)) == [before_restart, after_restart]
 
@@ -262,7 +320,7 @@ def test_each_player_gets_a_file_of_just_their_courses_highlights_and_records(tm
     assert set(files) == {"Ann", "Bob"} and files["Ann"] == stats_site.player_key("Ann") != files["Bob"]
     ann = json.loads((vdir / "player" / "all" / f"{files['Ann']}.json").read_text())
     with closing(stats_web.connect(path)) as src:
-        assert ann == stats_site.player_file(src, "Ann", None, A.holes_played(src, None))
+        assert ann == stats_site.player_file(src, "Ann", None)
         everyone = stats_web.records(src, None)
     assert ann["name"] == "Ann" and [c["players"] for c in ann["courses"]] == [["Ann"]]
     assert {h["avg"] for h in ann["courses"][0]["holes"]} == {4}
@@ -360,3 +418,49 @@ def test_one_publish_at_a_time_holds_the_sites_lock(tmp_path):
     t.join()
     with stats_site.site_lock(tmp_path / "stats-site", timeout=1):
         pass
+
+
+def test_the_cycle_collector_runs_rarely_while_any_build_runs_and_as_usual_after_the_last():
+    import gc
+    usual = gc.get_threshold()
+    first, second = stats_site.gc_paused(), stats_site.gc_paused()
+    first.__enter__()
+    second.__enter__()          # a publish overlapping the page's build
+    first.__exit__(None, None, None)
+    assert gc.get_threshold() == stats_site.GC_BUILD_THRESHOLDS   # the other build still running
+    assert gc.isenabled()
+    second.__exit__(None, None, None)
+    assert gc.get_threshold() == usual
+    assert stats_site._gc_timer is None
+
+
+def test_a_build_past_the_time_limit_gets_the_usual_collector_back():
+    import gc
+    usual = gc.get_threshold()
+    with stats_site.gc_paused():
+        assert gc.get_threshold() == stats_site.GC_BUILD_THRESHOLDS
+        timer = stats_site._gc_timer
+        assert timer.interval == stats_site.GC_TIME_LIMIT
+        timer.function(*timer.args)                  # the time limit comes
+        assert gc.get_threshold() == usual
+        assert stats_site._gc_timer is None
+        with stats_site.gc_paused():                 # one starting meanwhile leaves it as usual
+            assert gc.get_threshold() == usual
+    assert gc.get_threshold() == usual
+    with stats_site.gc_paused():                     # the next build raises it again
+        assert gc.get_threshold() == stats_site.GC_BUILD_THRESHOLDS
+    assert gc.get_threshold() == usual
+
+
+def test_a_timer_that_will_not_start_leaves_the_collector_as_it_was(monkeypatch):
+    import gc
+    usual = gc.get_threshold()
+
+    def refuse(self):
+        raise RuntimeError("can't start new thread")
+    monkeypatch.setattr(stats_site.threading.Timer, "start", refuse)
+    with pytest.raises(RuntimeError):
+        with stats_site.gc_paused():
+            pass
+    assert gc.get_threshold() == usual
+    assert stats_site._gc_builds == 0 and stats_site._gc_timer is None

@@ -104,6 +104,19 @@ class CarryModel:
         for row in history or []:
             self.observe(*row)
 
+    def state(self) -> dict[str, list]:
+        """What it has learned, as JSON-able lists (restore takes it back)."""
+        return {name: [[list(k), a.value, a.n] for k, a in getattr(self, name).items()]
+                for name in ("baselines", "penalties")}
+
+    def restore(self, state: dict[str, list]) -> None:
+        for name in ("baselines", "penalties"):
+            learned = getattr(self, name)
+            learned.clear()
+            for k, value, n in state[name]:
+                a = learned[tuple(k)] = _Average()
+                a.value, a.n = value, n
+
     def baseline(self, course: str | None, base: str = "lm") -> float:
         learned = self.baselines.get((course, base))
         if learned and learned.n >= MIN_SAMPLES:

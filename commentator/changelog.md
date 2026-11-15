@@ -4,6 +4,18 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.135
+
+### Stats page
+- The stats page builds much faster and stays quick as the seasons pile up, even after years of play.
+- Gapping is worked out from each player's swings over the last 12 months, so it shows the bag as it is now.
+- A round and its shots can be excluded, deleted or edited from three minutes after the round ends, not while it's being played. Practice shots can still be edited straight away.
+
+### Booth
+- The booth starts right away, even after an update: the stats page builds in the background.
+- Before an update changes the season file, Shotcast keeps a copy of it, so you can go back to the earlier version with your stats as they were. If the copy can't be made, the booth doesn't start and says why.
+- The booth avoids repeating itself based on the last year of commentary, which keeps its start quick after years of play.
+
 ## 0.1.134
 
 ### Stats page

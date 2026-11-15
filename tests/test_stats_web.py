@@ -1,4 +1,5 @@
 import json
+import random
 import sqlite3
 import threading
 import time
@@ -93,6 +94,25 @@ def test_the_usual_gimme_is_the_one_most_league_rounds_used(tmp_path):
     assert sorted(r["gimme_ft"] for r in s["rounds"]) == [4.0, 4.0, 6.0, 6.0]
 
 
+def test_a_tie_for_the_usual_gimme_goes_to_the_radius_played_first_whatever_the_records_ids(tmp_path):
+    from commentator import round_record
+
+    path, db = _db(tmp_path)
+    for end, ft in ((1000, 3), (2000, 6)):
+        _shot(db, "Ann", ts=end - 100, course="Pebble", gimme_yards=ft / 3, is_league=1)
+        db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, gross, scores, hole_pars,"
+                   " is_league) VALUES (1, ?, '2026-10-01', 'Pebble', 'Ann', 9, 36, '{}', '{}', 1)", (end,))
+    round_record.reconcile(db)
+    for end, u in ((1000, "z"), (2000, "a")):   # the first round's record sorts last
+        (old,), = db.execute("SELECT round_uuid FROM rounds WHERE ended_at = ?", (end,))
+        for table, col in (("round_records", "uuid"), ("rounds", "round_uuid"), ("shots", "record_uuid"),
+                           ("round_slots", "round_uuid"), ("player_rounds", "round_uuid"), ("lines", "record_uuid")):
+            db.execute(f"UPDATE {table} SET {col} = ? WHERE {col} = ?", (u, old))
+    db.commit()
+    with stats_web.connect(path) as ro:
+        assert round_record.recorded(ro) and stats_web.summary(ro)["gimme_ft"] == 3.0
+
+
 def test_a_rounds_side_players_come_from_the_record_else_its_shots(tmp_path):
     path, db = _db(tmp_path)
     for player in ("Tony", "Priya"):
@@ -181,6 +201,95 @@ def test_a_page_being_built_doesnt_lock_the_booth_out_of_the_database(tmp_path):
         with sqlite3.connect(path, timeout=0.2) as booth:
             booth.execute("INSERT INTO sessions (started_at, date) VALUES (0, 'x')")
         assert len(reading.fetchall()) == 2     # it reads what it started with
+        with sqlite3.connect(path, timeout=0.2) as booth:
+            booth.execute("UPDATE shots SET player = 'Bo'")
+        assert ro.execute("SELECT count(*) FROM sessions").fetchone()[0] == 1   # and every read after it
+        assert [r[0] for r in ro.execute("SELECT player FROM shots")] == ["Ann"] * 3
+
+
+def test_a_page_reads_a_wal_file_no_booth_has_open(tmp_path):
+    path, db = _db(tmp_path)
+    _shot(db, "Ann", ts=0)
+    db.commit()
+    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    db.close()
+    for name in ("season.db-wal", "season.db-shm"):   # as the last connection leaves it (on Windows)
+        (tmp_path / name).unlink(missing_ok=True)
+    with stats_web.connect(path) as ro:
+        assert ro.execute("SELECT count(*) FROM shots").fetchone()[0] == 1
+        with pytest.raises(sqlite3.OperationalError):
+            ro.execute("INSERT INTO sessions (started_at, date) VALUES (0, 'x')")
+
+
+def test_a_page_built_from_a_file_not_in_wal_mode_reads_a_copy(tmp_path):
+    path, db = _db(tmp_path)
+    db.execute("PRAGMA journal_mode = DELETE")
+    _shot(db, "Ann", ts=0)
+    db.commit()
+    with stats_web.connect(path) as ro:
+        assert ro.execute("PRAGMA main.journal_mode").fetchone()[0] == "memory"
+        assert ro.execute("SELECT count(*) FROM shots").fetchone()[0] == 1
+        with sqlite3.connect(path, timeout=0.2) as booth:
+            booth.execute("INSERT INTO sessions (started_at, date) VALUES (0, 'x')")
+
+def test_a_server_building_in_the_background_answers_once_its_first_build_is_done(tmp_path, monkeypatch):
+    from commentator import stats_site
+
+    path, _ = _db(tmp_path)
+    (tmp_path / "site").mkdir()
+    (tmp_path / "site" / "index.html").write_text("the last version's page")
+    started, go = threading.Event(), threading.Event()
+    build = stats_site.build
+
+    def slow(*a, **k):
+        started.set()
+        go.wait(10)
+        return build(*a, **k)
+
+    monkeypatch.setattr(stats_site, "build", slow)
+    server = stats_web.make_server(path, port=0, site=tmp_path / "site", build_in_background=True)
+    assert started.wait(10)   # (make_server came back with the build under way)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    got = []
+    asking = threading.Thread(target=lambda: got.append(
+        urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/").read()))
+    try:
+        asking.start()
+        asking.join(0.5)
+        assert not got
+        go.set()
+        asking.join(10)
+        assert got and b"the last version's page" not in got[0]
+    finally:
+        go.set()
+        server.shutdown()
+
+
+def test_a_failed_background_build_is_tried_again_rather_than_serving_the_last_versions_page(tmp_path, monkeypatch):
+    from commentator import stats_site
+
+    path, _ = _db(tmp_path)
+    (tmp_path / "site").mkdir()
+    (tmp_path / "site" / "index.html").write_text("the last version's page")
+    build, fails = stats_site.build, [OSError("disk full"), OSError("disk full")]
+
+    def flaky(*a, **k):
+        if fails:
+            raise fails.pop()
+        return build(*a, **k)
+
+    monkeypatch.setattr(stats_site, "build", flaky)
+    server = stats_web.make_server(path, port=0, site=tmp_path / "site", build_in_background=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        with pytest.raises(urllib.error.HTTPError) as e:   # the first build, then the retry, fail
+            urllib.request.urlopen(base + "/")
+        assert e.value.code == 500
+        assert b"the last version's page" not in urllib.request.urlopen(base + "/").read()
+    finally:
+        server.shutdown()
+
 
 def test_server_serves_the_page_and_summary(tmp_path):
     path, db = _db(tmp_path)
@@ -203,8 +312,9 @@ def test_server_serves_the_page_and_summary(tmp_path):
         r = body["rounds"][0]
         assert (r["gross"], r["to_par"], r["played"]) == (9, 1, 9)
         assert [h["hole"] for h in r["card"]] == [1, 2]
-        # The browser's SQLite reads stats.db in pieces: HEAD for the size, then byte ranges.
-        url = f"{base}/v/{version}/stats.db"
+        # The browser's SQLite reads a data file in pieces: HEAD for the size, then byte ranges.
+        data = json.loads(urllib.request.urlopen(base + "/latest.json").read())["data"]
+        url = f"{base}/{data[0]['file']}"
         head = urllib.request.urlopen(urllib.request.Request(url, method="HEAD"))
         size = int(head.headers["Content-Length"])
         assert head.headers["Accept-Ranges"] == "bytes" and size > 1024
@@ -380,7 +490,7 @@ def test_a_round_has_its_tee_boxs_whole_course_length_from_the_course_file(tmp_p
                " VALUES (1, 100, '2026-10-01', 'Pebble', 'Ann', 9, 1, '{\"1\": 4}', '{\"1\": 4}')")
     db.execute("INSERT INTO tee_lengths VALUES ('PEBBLE', 'Blue', 6115, 18), ('Pebble', 'Red', 5000, 18)")
     db.commit()
-    monkeypatch.setattr(hole_replay, "round_tees", lambda db, of_shot: dict.fromkeys(of_shot.values(), "Blue"))
+    monkeypatch.setattr(hole_replay, "round_tees", lambda db: dict.fromkeys(stats_web.shot_rounds(db).values(), "Blue"))
     with stats_web.connect(path) as ro:
         r = stats_web.rounds(ro)[0]
     assert (r["tee"], r["course_yards"], r["course_holes"]) == ("Blue", 6115, 18)
@@ -915,6 +1025,17 @@ def test_three_putts_by_first_putt_length_leave_out_scramble_holes(tmp_path):
     assert bands["30-40 ft"] == (1, 2) and bands["0-10 ft"] == (0, 1)
 
 
+def test_a_holes_three_putts_count_within_each_context_and_across_them_with_all(tmp_path):
+    path, db = _db(tmp_path)
+    for ts, league in ((1, 1), (2, 1), (3, 0)):   # two league putts, then a practice one, on the same hole
+        _shot(db, "Ann", ts=ts, course="Pebble", hole="Hole 1, par 4", is_putt=1, lie_before="green",
+              to_pin_yards=5.0, is_league=league)
+    db.commit()
+    with stats_web.connect(path) as ro:
+        got = {c: stats_web.three_putts(ro, "Ann", c)["three_putts"] for c in ("league", "practice", None)}
+    assert got == {"league": [0, 1], "practice": [0, 1], None: [1, 1]}
+
+
 def test_the_pages_league_average_rounds_like_pythons_own_numbers():
     """A pooled figure (the page's pyRound) and a player's own (Python's round) must agree, or a tie
     shows as a win: 49/20 is 2.45 as a float just under, 2.5 in Python; 26/32 -> 81.25% -> 81.2."""
@@ -1298,7 +1419,7 @@ def test_the_pages_watch_links_and_next_shot_go_to_a_second_before_each_swing_sh
            + re.search(r"\nfunction loadMarks\(.*?\nfunction showNext\(.*?\n}\n", page, re.S).group(0))
     # A stream from 1000; shots logged at 1010, 1030 and 1031 (a mulligan), each on it 5 s later.
     script = ("const state = { vods: [{ session: 's', since: 1000, ended: 2000 }] }; let site = { version: 'v1' };"
-              "const query = async (sql, args) => [1010, 1030, 1031].filter(t => t >= args[0] && t <= args[1]).map(ts => ({ ts }));"
+              "const queryShotTimes = async (lo, hi) => [1010, 1030, 1031].filter(t => t >= lo && t <= hi);"
               + fns +
               "const me = { video: { currentTime: 0 } }; let player = me;"
               "loadMarks(me, state.vods[0]); setTimeout(() => { const seen = [];"
@@ -1331,3 +1452,93 @@ def test_an_alerts_watch_link_plays_its_shot_once_the_videos_are_known():
     got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
     # Nothing until the videos are known; then the record clip, else the round's video, else nothing.
     assert got == [[0, True], [{"clip": "7", "at": 3}, {"session": "s", "at": 14}], None]
+
+
+def test_a_rounds_strokes_gained_split_over_two_nights_adds_up_to_the_same_summary():
+    rnd = random.Random(7)
+    for _ in range(200):
+        shots = [{"id": i, "sg": rnd.choice([-0.31, -0.1, 0.0, 0.07, 0.31, 0.1 + 0.2]), "cat": rnd.choice(["putting", "approach"])}
+                 for i in range(rnd.randint(1, 12))]
+
+        def totals(part):
+            out = {}
+            stats_web.add_round_sg(out, {(1, "Ann"): {"cats": {}, "shots": 0, "best": None, "worst": None}})
+            for s in part:
+                stats_web.add_round_sg(out, {(1, "Ann"): {"cats": {s["cat"]: [s["sg"]]}, "shots": 1, "best": s, "worst": s}})
+            return out
+
+        whole = stats_web.round_sg_from(totals(shots)[(1, "Ann")])
+        ranked = sorted(shots, key=lambda s: -s["sg"])
+        assert whole["best_shot"] is ranked[0]
+        assert whole["worst_shot"] is (ranked[-1] if len(ranked) > 1 and ranked[-1]["sg"] < 0 else None)
+        k = rnd.randint(0, len(shots))
+        merged = totals(shots[:k])
+        stats_web.add_round_sg(merged, totals(shots[k:]))
+        assert stats_web.round_sg_from(merged[(1, "Ann")]) == whole
+
+
+def test_the_page_reads_only_the_data_files_a_query_can_find_rows_in_newest_year_first():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = re.search(r"\nlet site = null;.*?\nlet loading = 0;", page, re.S).group(0)
+    new = {"year": "2026", "file": "data/new.db", "ts": [1000, 2000], "sessions": [5, 9], "rounds": [10, 20], "ids": [100, 400]}
+    old = {"year": "2025", "file": "data/old.db", "ts": [0, 999], "sessions": [1, 5], "rounds": [1, 10], "ids": [1, 99]}
+    empty = {"year": "2024", "file": "data/empty.db", "ts": None, "sessions": None, "rounds": None, "ids": None}
+    script = fns + """
+const asked = [];
+let gone = null;
+// each file's shots, newest first: [count, the newest's time]
+let rows = { "data/new.db": [300, 2000], "data/old.db": [300, 999], "data/next.db": [1, 3000] };
+async function runQuery(file, sql, args) {
+  asked.push(file + " " + (sql.match(/LIMIT (\\d+)/) || [])[1]);
+  if (file === gone) throw new Error("404");
+  if (sql.includes("pub_transcript")) return file === "data/old.db" ? [{ json: "[1]" }] : [];
+  const [n, top] = rows[file] || [0, 0];
+  return Array.from({ length: Math.min(n, Number(sql.match(/LIMIT (\\d+)/)[1])) },
+                    (_, i) => ({ json: JSON.stringify({ id: `${file}:${i}`, ts: top - i }) }));
+}
+let latest = null;
+const getJSON = async () => latest;
+const out = {};
+(async () => {
+  const data = %s;
+  site = siteOf({ version: "v1", data });
+  const pick = w => pickFiles(data, w).map(e => e.year);
+  out.pick = [pick({}), pick({ date: "2025-06-01" }), pick({ from: "2025-01-01", to: "2025-12-31" }), pick({ from: "2026-01-01" }),
+              pick({ round: 10 }), pick({ id: 150 }), pick({ session: 7 }), pick({ ts: [990, 1001] }), pick({ ts: [5000, 6000] })];
+  const ids = shots => shots.map(s => s.id);
+  let shots = ids(await queryShots(null, {}));
+  out.shots = [shots.length, shots[299], shots[300], asked.splice(0)];
+  out.lastYear = [(await queryShots(null, { to: "2025-12-31" })).length, asked.splice(0)];
+  rows["data/new.db"] = [600, 2000];   // a full year: the year before has nothing newer
+  shots = ids(await queryShots(null, {}));
+  out.full = [shots.length, shots[499], asked.splice(0)];
+  data[1].ts = [0, 2500];   // ...unless its times reach past the 500th
+  rows["data/old.db"] = [300, 2500];
+  shots = ids(await queryShots(null, {}));
+  out.overlap = [shots.length, shots[0], shots[1], shots[499], asked.splice(0)];
+  out.transcript = [await queryTranscript(5), asked.splice(0)];
+  gone = "data/new.db";   // open across a publish that dropped it
+  latest = { version: "v2", data: [{ year: "2026", file: "data/next.db", ids: [100, 500] }] };
+  out.moved = [ids(await queryShots(null, {})), site.version, asked.splice(0)];
+  out.legacy = siteOf({ version: "v0" }).data;
+  console.log(JSON.stringify(out));
+})();
+""" % json.dumps([new, old, empty])
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    assert got["pick"] == [["2026", "2025", "2024"], ["2025"], ["2025"], ["2026"], ["2026", "2025"], ["2026"], ["2026"],
+                           ["2026", "2025"], []]
+    assert got["shots"] == [500, "data/new.db:299", "data/old.db:0", ["data/new.db 500", "data/old.db 500"]]
+    assert got["lastYear"] == [300, ["data/old.db 500"]]
+    assert got["full"] == [500, "data/new.db:499", ["data/new.db 500"]]
+    assert got["overlap"] == [500, "data/old.db:0", "data/old.db:1", "data/new.db:199", ["data/new.db 500", "data/old.db 500"]]
+    assert got["transcript"] == [[1], ["data/new.db undefined", "data/old.db undefined"]]
+    assert got["moved"] == [["data/next.db:0"], "v2", ["data/new.db 500", "data/next.db 500"]]
+    assert got["legacy"] == [{"file": "v/v0/stats.db"}]

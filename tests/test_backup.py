@@ -1,8 +1,11 @@
 import gzip
 import json
 import sqlite3
+import threading
 from contextlib import closing
 from datetime import datetime, timedelta
+
+import pytest
 
 from commentator import backup
 from commentator.config import Config
@@ -72,6 +75,29 @@ def test_restore_keeps_the_chosen_copy_and_saves_even_a_corrupted_current_file(t
     with gzip.open(saved) as fh:
         assert fh.read() == b"not a database"
     assert backup.keep([p.name for p in dest.iterdir()]) == {old.name}   # pruning never sees it
+
+
+def test_restore_saves_the_current_file_with_whats_still_in_its_log(tmp_path):
+    import shutil
+
+    db, dest, crashed = tmp_path / "season.db", tmp_path / "backups", tmp_path / "crashed"
+    _db(db, "old")
+    old = backup.back_up(db, dest, daily=1, weekly=0)
+    with closing(sqlite3.connect(db)) as booth:
+        booth.execute("PRAGMA journal_mode = WAL")
+        booth.execute("PRAGMA wal_autocheckpoint = 0")
+        booth.execute("UPDATE t SET v = 'last shot'")
+        booth.commit()
+        crashed.mkdir()   # the files as a crash leaves them: the last shot only in the log
+        for name in ("season.db", "season.db-wal", "season.db-shm"):
+            shutil.copy(tmp_path / name, crashed / name)
+    saved = backup.restore(old, crashed / "season.db", dest)
+    assert _value(crashed / "season.db") == "old"
+    with gzip.open(saved) as fh:
+        (tmp_path / "saved.db").write_bytes(fh.read())
+    assert _value(tmp_path / "saved.db") == "last shot"
+    with gzip.open(backup.back_up(db, dest, force=True)) as fh:
+        assert fh.read(20)[18:20] == b"\x01\x01"   # a copy is one file, not in WAL mode
 
 
 def test_restore_refuses_an_empty_or_foreign_file_and_puts_the_journal_back_on_failure(tmp_path, monkeypatch):
@@ -210,3 +236,155 @@ def test_a_copy_before_an_update_outlives_the_new_versions_first_copy(tmp_path):
     with gzip.open(pres[4]) as fin:
         (tmp_path / "restored.db").write_bytes(fin.read())
     assert _value(tmp_path / "restored.db") == "before"
+
+
+def _older_season(path):
+    """A season file as a release before store.FORMAT left it: an older format, no WAL, one shot."""
+    from commentator.store import Store
+
+    Store(str(path)).db.close()
+    with closing(sqlite3.connect(path)) as db:
+        db.execute("PRAGMA journal_mode = DELETE")
+        db.execute("INSERT INTO shots (session_id, ts, player, is_putt, raw) VALUES (1, 1, 'Ann', 0, '{}')")
+        db.execute("PRAGMA user_version = 5")
+        db.commit()
+
+
+def test_a_season_file_in_an_older_format_is_copied_as_it_was_before_its_upgraded(tmp_path):
+    from commentator.store import FORMAT, Store
+
+    path = tmp_path / "season.db"
+    Store(str(path)).db.close()   # a new season: nothing to keep
+    assert not (tmp_path / "backups").exists()
+    _older_season(path)
+    Store(str(path)).db.close()
+    made = list((tmp_path / "backups").glob(backup.PRE_UPDATE + "*"))
+    assert len(made) == 1 and "-from-format-5" in made[0].name
+    with gzip.open(made[0]) as fin:
+        (tmp_path / "restored.db").write_bytes(fin.read())
+    with closing(sqlite3.connect(tmp_path / "restored.db")) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        assert db.execute("SELECT player FROM shots").fetchall() == [("Ann",)]
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == FORMAT
+    with closing(sqlite3.connect(path)) as db:   # in WAL mode, as a closed booth leaves it: no -shm to read by
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    for side in ("-wal", "-shm"):
+        (tmp_path / f"season.db{side}").unlink(missing_ok=True)
+    Store(str(path)).db.close()   # upgraded already
+    assert len(list((tmp_path / "backups").glob(backup.PRE_UPDATE + "*"))) == 1
+
+
+def test_a_season_file_that_cant_be_copied_isnt_opened_or_upgraded(tmp_path):
+    from commentator.store import SeasonCopyFailed, Store
+
+    path = tmp_path / "season.db"
+    _older_season(path)
+    (tmp_path / "full").write_text("")   # (a file where the backups folder would go)
+    told = []
+    with pytest.raises(SeasonCopyFailed, match="couldn't be copied"):
+        Store(str(path), backups=tmp_path / "full", on_copy=lambda: told.append(1))
+    assert told == [1]
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+
+
+def _copies_finished():
+    for t in threading.enumerate():
+        if t.name == "pre-update-copy":
+            t.join()
+
+
+def test_a_copy_checked_later_is_kept_as_it_is_if_the_check_fails(tmp_path, monkeypatch):
+    path, dest = tmp_path / "season.db", tmp_path / "backups"
+    _older_season(path)
+    dest.mkdir()
+    for day, kinds in ((1, [".db"]), (2, [".db.gz"]), (3, [".db.gz"]), (4, [".db", ".db.gz"])):
+        for kind in kinds:   # (one left uncompressed; one compressed but not yet removed uncompressed)
+            (dest / f"{backup.PRE_UPDATE}2026010{day}-090000-from-format-4{kind}").write_bytes(b"x")
+    raw = backup.before_upgrade(path, dest, 6, later=True, now=datetime(2027, 1, 1))
+    _copies_finished()
+    assert not raw.exists()
+    assert sorted(p.name[len(backup.PRE_UPDATE):] for p in dest.glob(backup.PRE_UPDATE + "*")) == [
+        "20260103-090000-from-format-4.db.gz", "20260104-090000-from-format-4.db",
+        "20260104-090000-from-format-4.db.gz", "20270101-000000-from-format-5.db.gz"]
+    with gzip.open(raw.with_name(raw.name + ".gz")) as fin:
+        (tmp_path / "unzipped.db").write_bytes(fin.read())
+    with closing(sqlite3.connect(tmp_path / "unzipped.db")) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
+
+    def bad(p):
+        raise RuntimeError("the copy failed its integrity check: page 2")
+    monkeypatch.setattr(backup, "_check", bad)
+    kept = backup.before_upgrade(path, dest, 6, later=True, now=datetime(2030, 1, 1))
+    _copies_finished()
+    assert kept.is_file() and not kept.with_name(kept.name + ".gz").exists()
+    with closing(sqlite3.connect(kept)) as db:
+        assert db.execute("SELECT player FROM shots").fetchall() == [("Ann",)]
+    assert sorted(p.name[len(backup.PRE_UPDATE):][:8] for p in dest.glob(backup.PRE_UPDATE + "*")) == [
+        "20260104", "20260104", "20270101", "20300101"]
+    monkeypatch.undo()
+    assert backup.restore(kept, tmp_path / "back.db", dest) is None   # restore takes the plain .db too
+    with closing(sqlite3.connect(tmp_path / "back.db")) as db:
+        assert db.execute("SELECT player FROM shots").fetchall() == [("Ann",)]
+
+
+def test_an_older_season_file_is_copied_even_beside_a_newer_copy_of_another(tmp_path):
+    from commentator.store import Store
+
+    cfg = Config(log_dir=str(tmp_path / "logs"), db_path=str(tmp_path / "season.db"))
+    _older_season(cfg.db_path)
+    _older_season(tmp_path / "other.db")
+    backup.pre_update(cfg, "0.1.134")   # (the other season's copy, made since)
+    Store(str(tmp_path / "other.db"), backups=backup.folder(cfg)).db.close()
+    assert len(list(backup.folder(cfg).glob("*-from-format-5*"))) == 1
+
+
+def test_the_booth_copies_an_older_season_file_into_the_backup_folder_set(tmp_path, monkeypatch):
+    from commentator.__main__ import _build_engine
+    from commentator.store import SeasonCopyFailed
+
+    cfg = Config(log_dir=str(tmp_path), db_path=str(tmp_path / "season.db"))
+    cfg.backup.dir = str(tmp_path / "kept")
+    cfg.league_file = "data/league.example.json"
+    cfg.screen.ocr = cfg.screen.send_images = False
+    cfg.commentary.enabled = False
+    monkeypatch.setenv("SHOTCAST_READY_FILE", str(tmp_path / "booth-ready"))
+    _older_season(cfg.db_path)
+    monkeypatch.setattr(backup, "_check", lambda p: 1 / 0)   # checked after the booth starts
+    _build_engine(cfg).store.db.close()
+    _copies_finished()
+    assert [p.suffix for p in (tmp_path / "kept").glob(backup.PRE_UPDATE + "*")] == [".db"]
+    assert "Copying the season file" in (tmp_path / "booth-note").read_text()   # (the tray shows it)
+    _older_season(cfg.db_path)
+    cfg.backup.dir = str(tmp_path / "booth-note")   # (a file: the copy fails)
+    cfg.commentary.enabled = True                    # and it isn't tried again recording only
+    monkeypatch.setattr("commentator.llm.build_llm", lambda c: None)
+    monkeypatch.setattr("commentator.tts.build_tts", lambda c: None)
+    tried = []
+    monkeypatch.setattr(backup, "before_upgrade", lambda *a, **k: tried.append(1) or 1 / 0)
+    with pytest.raises(SeasonCopyFailed):
+        _build_engine(cfg)
+    assert tried == [1]
+
+
+def test_a_booth_that_cant_copy_its_season_file_stops_saying_why(tmp_path, monkeypatch):
+    import argparse
+    import asyncio
+
+    from commentator import __main__ as main
+    from commentator.config import BOOTH_STOP_CODE
+    from commentator.store import SeasonCopyFailed
+
+    def fails(cfg):
+        raise SeasonCopyFailed("no room")
+    monkeypatch.setattr(main, "_build_engine", fails)
+    monkeypatch.setattr("commentator.perf.tune", lambda *a: None)
+    monkeypatch.setenv("SHOTCAST_READY_FILE", str(tmp_path / "booth-ready"))
+    args = argparse.Namespace(replay=None, console=False, no_commentary=False)
+    with pytest.raises(SystemExit) as stop:
+        asyncio.run(main.cmd_run(Config(log_dir=str(tmp_path)), args))
+    assert stop.value.code == BOOTH_STOP_CODE
+    assert (tmp_path / "booth-stopped").read_text() == "The booth didn't start: no room"

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from .carry_model import CarryModel, correct_for_elevation
+from .carry_model import correct_for_elevation
 from .config import ROUND_STATUS, ROUND_STATUS_CHECK_S, ROUND_STATUS_EVERY_S, Config
 from .flight import point_at
 from .facts import (ctp_feet, ctp_text as _ctp_text,
@@ -670,9 +670,31 @@ def _hole_key(label: str | None) -> str:
     return re.sub(r"^Hole \d+,\s*", "", label or "")
 
 
+def _own_handicaps(db: Any) -> dict[str, float]:
+    """Each player's own handicap index (handicap_index.indexes), for those with one."""
+    from . import handicap_index
+
+    return {p: v["index"] for p, v in handicap_index.indexes(db).items() if v["index"] is not None}
+
+
+def _own_handicaps_from(path: str) -> dict[str, float]:
+    """_own_handicaps on a connection of its own to the season file, for a thread."""
+    import sqlite3
+    from contextlib import closing
+
+    with closing(sqlite3.connect(f"{Path(path).as_uri()}?mode=rw", uri=True, timeout=30)) as db:
+        db.execute("PRAGMA query_only = 1")
+        db.row_factory = sqlite3.Row
+        with db:   # one read transaction: the rounds and the layouts as of one moment
+            db.execute("BEGIN")
+            return _own_handicaps(db)
+
+
 class Engine:
     """Three moments per shot: a setup line while the player addresses the ball, a call
     while it's in the air, and a reaction once it stops."""
+
+    PHRASE_MEMORY_DAYS = 365   # how far back a 6-word phrase can't be said again
 
     def __init__(
         self,
@@ -701,6 +723,9 @@ class Engine:
         self._hc = RoundCounters()      # this round's reads, for the post-round checkup
         self._follower: GsproLogFollower | None = None
         self.league = league
+        self._own_handicaps_task: asyncio.Task | None = None   # (_refresh_own_handicaps)
+        self._own_handicaps_wanted = False
+        self._own_handicaps_inline = 0   # counts inline workings out, so an older thread's result is dropped
         self.source = source
         if hasattr(source, "on_impact"):
             source.on_impact = self._capture_impact
@@ -867,12 +892,12 @@ class Engine:
         self._live_prerolled = False        # on air for the next round's setup: the last one's sign-off doesn't stop it
         self._live_idle_session: str | None = None   # the mirror session the idle watch stopped
         self._live_resume_on_shot = False   # stopped for being idle mid-round: the next shot restarts it
-        # Every 6-word phrase said this season, so a line can't come back weeks later.
+        # Every 6-word phrase said in the last year, so a line can't come back weeks later (not every
+        # one ever said: years of a league's lines took seconds to read at each start).
         self._season_phrases: set[tuple[str, ...]] = set()
-        for text in self.store.spoken_lines():
+        for text in self.store.spoken_lines(since=time.time() - self.PHRASE_MEMORY_DAYS * 86400):
             self._season_phrases |= ngrams(text, 6)
-        self.carry = CarryModel(cfg.commentary.lie_carry_factors, self.store.carry_pairs(),
-                                cfg.commentary.course_altitude_ft)
+        self.carry = self.store.carry_model(cfg.commentary.lie_carry_factors, cfg.commentary.course_altitude_ft)
         self.current_course: str | None = None
         self._hole_snaps: set[tuple[str, int]] = set()   # (course, hole) minimaps kept this session
         # GSPro reports each player's handedness with their shots; slope talk depends on it.
@@ -4070,7 +4095,7 @@ class Engine:
         if r is None or r.is_league or r.is_tournament or not (g.sgt or (g.mode != "course" and g.last_sgt)):
             return
         r.is_tournament = True
-        n = self.store.mark_tournament(r.shot_floor) if r.shot_floor is not None else 0
+        n = self.store.mark_tournament(r.shot_floor, record=r.uuid) if r.shot_floor is not None else 0
         log.info("Round %s is a tournament round: GSPro is syncing it to the Simulator Golf Tour (%d shots so far marked)",
                  r.id, n)
 
@@ -4867,6 +4892,8 @@ class Engine:
         was = list(r.slot_names)
         r.note_slot_read(g, owner)
         r.learn_slots()
+        if r.slot_names != was:
+            self.store.round_players(r.uuid, dict(r.roster), r.slot_names)
         if self._recheck_slots(r, was):
             self._sync_log_scores(r)   # renames the shots it can, too
 
@@ -6557,6 +6584,7 @@ class Engine:
             # where GSPro's log had the ball for this shot, and the player's minimap aim, for the replay
             start=self.gspro.fire_info(fire).get("start"), aim=self.gspro.fire_info(fire).get("aim"),
             handed=before.handed or shot.handed or self.handed.get(player or ""), tree_hits=tree_hits or None,
+            record=r.uuid if r is not None else None,   # (its round's, even one ended or replaced since impact)
         )
         rec.shot_id = shot_id
         self._shots_unrecorded.pop(id(event), None)
@@ -8472,21 +8500,67 @@ class Engine:
 
     def _refresh_own_handicaps(self, backfill: bool = False) -> None:
         """Work out each player's own handicap index from the rounds on record, for anyone the league
-        has no handicap for. `backfill` first reads the tees of courses played before they were kept."""
+        has no handicap for. `backfill` first reads the tees of courses played before they were kept.
+        The working out (seconds, after years of rounds) runs in a thread on a connection of its own, so
+        the booth carries on meanwhile and the indexes land when it's done; one asked for while another
+        runs follows it."""
         try:
-            from . import course_card, handicap_index
+            from . import course_card
 
             if backfill:
                 # By name alone: the folder GSPro's log names is tonight's course, not these.
                 for course in self.store.courses_without_tees():
                     self._keep_course_tees(course, course_card.load(self.cfg.source.gspro_courses_dirs, course))
-
-            own = handicap_index.indexes(self.store.db)
-            self.league.own_indexes = {p: v["index"] for p, v in own.items() if v["index"] is not None}
-            if self.league.own_indexes:
-                log.info("Own handicap indexes: %s", ", ".join(f"{p} {i}" for p, i in sorted(self.league.own_indexes.items())))
+            path = self.store.db.execute("PRAGMA main.database_list").fetchone()[2]
         except Exception as e:
             log.warning("Own handicap indexes failed (%s)", e)
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None or not path or self.store.db.in_transaction:   # (a thread's connection wouldn't see it)
+            self._own_handicaps_inline += 1
+            self._own_handicaps_wanted = False   # (one asked for before is older than this)
+            self._set_own_handicaps(_own_handicaps, self.store.db)
+            return
+        self._own_handicaps_wanted = True
+        if self._own_handicaps_task is None or self._own_handicaps_task.done():
+            self._own_handicaps_task = loop.create_task(self._own_handicaps_in_thread(path), name="own-handicaps")
+
+    async def _own_handicaps_in_thread(self, path: str) -> None:
+        loop = asyncio.get_running_loop()
+        while self._own_handicaps_wanted:
+            self._own_handicaps_wanted = False
+            inline = self._own_handicaps_inline
+            done: asyncio.Future = loop.create_future()
+
+            def work() -> None:
+                # A daemon thread (not asyncio.to_thread), so quitting mid-way doesn't wait for it.
+                try:
+                    out: tuple = (_own_handicaps_from(path), None)
+                except Exception as e:
+                    out = (None, e)
+                try:
+                    loop.call_soon_threadsafe(lambda: done.done() or done.set_result(out))
+                except RuntimeError:   # the loop has closed: the booth has quit
+                    pass
+
+            threading.Thread(target=work, name="own-handicaps", daemon=True).start()
+            own, error = await done
+            if error is not None:
+                log.warning("Own handicap indexes failed (%s)", error)
+            elif inline == self._own_handicaps_inline:   # (else one worked out inline since is newer)
+                self._set_own_handicaps(lambda: own)
+
+    def _set_own_handicaps(self, compute: Callable[..., dict], *args: Any) -> None:
+        try:
+            self.league.own_indexes = compute(*args)
+        except Exception as e:
+            log.warning("Own handicap indexes failed (%s)", e)
+            return
+        if self.league.own_indexes:
+            log.info("Own handicap indexes: %s", ", ".join(f"{p} {i}" for p, i in sorted(self.league.own_indexes.items())))
 
     def _round_players(self, names: list[str]) -> list[str]:
         """Roster players in this round: every player on a team that has a GSPro name here.
@@ -9056,16 +9130,16 @@ class Engine:
             return False
         r.make_league(entry, done, self.cfg.commentary.round_format)
         if r.shot_floor is not None:
-            self.store.mark_league(r.shot_floor)
+            self.store.mark_league(r.shot_floor, record=r.uuid)
             # The league's format can change who a shot is credited to (one profile for an alternate
             # shot team is both partners): re-stamp the round's shots, gimmes included, the way they'd
             # have been recorded.
             anon = set(r.anonymous_players())
-            for player in self.store.players_after(r.shot_floor):
+            for player in self.store.players_after(r.shot_floor, record=r.uuid):
                 shared = not r.solo(r.side_for(player)) and (r.format == "scramble" or r.no_scramble
                                                              or self.gspro.team_scores)
                 self.store.restamp_shots(r.shot_floor, player, fmt=r.player_format(player),
-                                         attributed=player not in anon, shared_ball=shared)
+                                         attributed=player not in anon, shared_ball=shared, record=r.uuid)
         if r.format == "alternate":
             self._alternate_tee_finishes(r)
         log.info("Round %s: set up for %s holes but quit after week %s's %s: a league round after all (%s)",
@@ -9251,6 +9325,9 @@ class Engine:
         r.shot_floor = self.store.last_shot_id()
         if adopted := [v[0] for v in self._fire_rows.values() if v[0] is not None and v[1].round_id == r.id]:
             r.shot_floor = min(adopted) - 1   # the drives struck before it started are its own
+        # Its record, from here on every shot's (a round a stopped booth left open, continued, keeps its own).
+        r.uuid = self.store.begin_round(r.uuid, course=r.course, players=dict(r.roster), seats=r.slot_names,
+                                        since_id=r.shot_floor)
         self._note_tournament(r)   # a round joined mid-way already has its syncs in the log
         self._hc = RoundCounters(fires_at_start=self.gspro.fires, kinds_at_start=dict(self.gspro.kinds))
         if self.cfg.health.enabled and self.cfg.source.type != "replay":
@@ -9460,6 +9537,7 @@ class Engine:
             if not r.remove_player(g):
                 continue
             new = r.slot_names or []
+            self.store.round_players(r.uuid, dict(r.roster), r.slot_names)
             for cache in (self._pending_finish, self._finish_seq, self._last_row):
                 for k in [k for k in cache if (old[k] if k < len(old) else None) != (new[k] if k < len(new) else None)]:
                     del cache[k]
@@ -9470,6 +9548,7 @@ class Engine:
         if not r.add_player(name, **where):
             return
         new = r.slot_names or []
+        self.store.round_players(r.uuid, dict(r.roster), r.slot_names)
         # An index that's someone else's now: its last shot isn't this one's to finish or correct.
         for cache in (self._pending_finish, self._finish_seq, self._last_row):
             for k in [k for k in cache if (old[k] if k < len(old) else None) != (new[k] if k < len(new) else None)]:
@@ -9493,7 +9572,7 @@ class Engine:
         for x in self.state.shots:
             if x.round_id == r.id and x.player == g:
                 x.player = best
-        moved = self.store.rename_shots(g, best, after_id=r.shot_floor) if r.shot_floor is not None else 0
+        moved = self.store.rename_shots(g, best, after_id=r.shot_floor, record=r.uuid) if r.shot_floor is not None else 0
         log.info("Round %s: %r is read as %r: renamed (%s stored shots)", r.id, g, best, moved)
 
     def _admit_from_card(self, r: Round, card: Scorecard) -> bool:
@@ -9559,6 +9638,7 @@ class Engine:
         r.slot_names = list(names)
         r.setup_slots = None   # the tee's order is a guess at GSPro's
         r.slot_guess = True    # on a green it isn't even the tee's: screen reads place each player
+        self.store.round_players(r.uuid, dict(r.roster), r.slot_names)
 
     def _as_round_names(self, r: Round, slots: list[str | None],
                         pool: list[str] | None = None) -> list[str | None]:
@@ -9777,7 +9857,7 @@ class Engine:
             r.format == "scramble" or r.no_scramble or g.team_scores)
         self.store.set_shot_round_class(shot_id, is_league=r.is_league, fmt=r.player_format(name) if name else None,
                                         attributed=bool(name) and not self._anonymous(name), shared_ball=shared,
-                                        hole=label, course=r.course, is_tournament=r.is_tournament)
+                                        hole=label, course=r.course, is_tournament=r.is_tournament, record=r.uuid)
         if self._log_truth:
             self._owners_due.add(fire)
         return not attached
@@ -10654,6 +10734,7 @@ class Engine:
             r.stats_through = max(0, r.seq if done else r.seq - 1)
             if not r.stats_through:
                 log.info("Round %s quit before a hole was finished: nothing to record", r.id)
+                self.store.end_round(r.uuid, complete=False)
                 return {}
         stats = {s.key: r.side_stats(s, self.state.shots) for s in r.sides}
         net = {s.key: (r.net_to_par(s, stats[s.key]) if complete else r.net_to_par_played(s, stats[s.key]))
@@ -10676,7 +10757,8 @@ class Engine:
                                         stats=st, strokes=side.strokes, net_to_par=net[side.key],
                                         hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
                                         is_tournament=r.is_tournament, complete=complete,
-                                        first_nine=r.first_nine(st, r.hole_strokes_for(side)), physics=r.physics)
+                                        first_nine=r.first_nine(st, r.hole_strokes_for(side)), physics=r.physics,
+                                        record=r.uuid)
                 stored.append(row)
         r.stored_rows = stored
         if complete:
@@ -10696,7 +10778,10 @@ class Engine:
                 nine = r.first_nine(pst)
                 self.store.record_player_round(player=name, course=r.course, fmt=r.player_format(name), stats=pst,
                                                hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
-                                               is_tournament=r.is_tournament, complete=complete, nine_to_par=nine[0] if nine else None)
+                                               is_tournament=r.is_tournament, complete=complete, nine_to_par=nine[0] if nine else None,
+                                               record=r.uuid)
+        self.store.round_players(r.uuid, dict(r.roster), r.slot_names)   # its players and seats as they ended
+        self.store.end_round(r.uuid, complete=complete)
         self._refresh_own_handicaps()
         return stats
 

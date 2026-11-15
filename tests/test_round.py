@@ -4388,6 +4388,11 @@ async def test_a_wrong_holes_practice_quit_after_the_weeks_nine_is_the_league_ro
     rows = e.store.db.execute("SELECT is_league, complete, holes, team IS NOT NULL FROM rounds").fetchall()
     assert rows and all(tuple(x) == (1, 1, 9, 1) for x in rows)
     assert e.store.db.execute("SELECT MIN(is_league) FROM shots WHERE id > ?", (r.shot_floor,)).fetchone()[0] == 1
+    # Its record, begun as it started, ends with it; its rows carry it.
+    assert tuple(e.store.db.execute("SELECT kind, state FROM round_records WHERE uuid = ?", (r.uuid,)).fetchone()) \
+        == ("round", "finished")
+    assert {x[0] for x in e.store.db.execute("SELECT player_rounds.round_uuid FROM player_rounds UNION"
+                                             " SELECT round_uuid FROM rounds")} == {r.uuid}
     assert tuple(e.store.db.execute("SELECT fmt, attributed FROM shots WHERE id = ?", (sid,)).fetchone()) == ("best_ball", 1)
     # No course card: the strokes still land on holes, so the team has a net.
     assert all(s.hole_strokes for s in r.sides if s.strokes)
@@ -6111,3 +6116,88 @@ async def test_a_quit_on_an_unplayed_tee_drops_its_hole_intro(tmp_path):
     r.ended = False
     await e.handle_round_end(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
     assert drops == [wrapped]       # only what was queued since the tenth's intro began
+
+
+def test_a_rounds_stored_seats_follow_the_order_the_booth_learns(tmp_path):
+    e = _engine(tmp_path)
+    names = ["MikeD", "Sarah"]
+    r = e._build_round(names, "Pebble Beach", {}, is_league=False)
+    e._start_round(r)
+    e._reconcile_slots(r, ["Sarah", "MikeD"])
+    seats = dict(e.store.db.execute("SELECT name, seat FROM round_slots WHERE round_uuid = ?", (r.uuid,)).fetchall())
+    assert seats == {n: r.slot_names.index(n) for n in names} and r.slot_names == ["Sarah", "MikeD"]
+
+
+async def test_own_handicaps_are_worked_out_in_a_thread_without_holding_up_the_booth(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    from commentator import engine as engine_mod
+    from commentator import handicap_index
+    from commentator.league import League
+    from commentator.store import Store
+
+    e = _engine_with(tmp_path, League({"teams": [{"name": "A", "players": [{"name": "Ann"}]}]}))
+    e.store = Store(str(tmp_path / "season.db"))
+    pars = {str(h): 4 for h in range(1, 10)}
+    sid = e.store.db.execute("INSERT INTO sessions (started_at, date) VALUES (0, '2026-10-01')").lastrowid
+    for i, score in enumerate((5, 5, 6, 4, 5, 6)):
+        e.store.db.execute("INSERT INTO player_rounds (session_id, ended_at, player, course, scores, hole_pars)"
+                           " VALUES (?, ?, 'Ann', 'Links', ?, ?)",
+                           (sid, 1000.0 * (i + 1), json.dumps({h: score for h in pars}), json.dumps(pars)))
+    e.store.db.commit()
+    want = {"Ann": handicap_index.indexes(e.store.db)["Ann"]["index"]}
+    assert want["Ann"] is not None
+
+    go, threads = threading.Event(), []
+    real = engine_mod._own_handicaps_from
+
+    def slow(path):
+        threads.append(threading.current_thread())
+        assert go.wait(5)
+        return real(path)
+
+    monkeypatch.setattr(engine_mod, "_own_handicaps_from", slow)
+    e._refresh_own_handicaps()
+    await asyncio.sleep(0.05)
+    assert e.league.own_indexes == {} and len(threads) == 1   # the booth carries on meanwhile
+    e._refresh_own_handicaps()   # asked again while it runs: once more after it
+    await asyncio.sleep(0.05)
+    assert len(threads) == 1
+    go.set()
+    await e._own_handicaps_task
+    assert e.league.own_indexes == want and len(threads) == 2
+    assert threads[0] is not threading.current_thread() and threads[0].daemon
+
+    e.store.db.execute("UPDATE player_rounds SET excluded = 1")   # not committed: worked out here, now
+    e._refresh_own_handicaps()
+    assert e.league.own_indexes == {} and len(threads) == 2
+    e.store.db.rollback()
+
+    go.clear()
+    e._refresh_own_handicaps()   # a thread starts on the committed rounds...
+    await asyncio.sleep(0.05)
+    e.store.db.execute("UPDATE player_rounds SET excluded = 1")
+    e._refresh_own_handicaps()   # ...then one worked out inline is newer: the thread's is dropped
+    go.set()
+    await e._own_handicaps_task
+    assert e.league.own_indexes == {} and len(threads) == 3
+    e.store.db.rollback()
+
+    go.clear()
+    e._refresh_own_handicaps()
+    await asyncio.sleep(0.05)
+    e._refresh_own_handicaps()   # a rerun waits on the running thread...
+    e.store.db.execute("UPDATE player_rounds SET excluded = 1")
+    e._refresh_own_handicaps()   # ...and is older than this
+    go.set()
+    await e._own_handicaps_task
+    assert e.league.own_indexes == {} and len(threads) == 4
+    e.store.db.rollback()
+
+    e._refresh_own_handicaps()   # a thread asked for but not started yet...
+    e.store.db.execute("UPDATE player_rounds SET excluded = 1")
+    e._refresh_own_handicaps()   # ...is older too
+    await e._own_handicaps_task
+    assert e.league.own_indexes == {} and len(threads) == 4
+    e.store.db.rollback()

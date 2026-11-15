@@ -145,6 +145,42 @@ def test_the_booth_is_starting_until_it_says_its_ready(tmp_path):
     assert not booth.poll() and booth.state == "running"
 
 
+def test_the_booth_says_what_its_doing_and_why_it_stopped(tmp_path):
+    (tmp_path / "logs").mkdir()
+    started = []
+    booth = tray.Booth(tmp_path, popen=lambda *a, **k: started.append(_Proc()) or started[-1])
+    (tmp_path / "logs" / "booth-stopped").write_text("old")   # the last run's
+    booth.start()
+    t = tray.Tray.__new__(tray.Tray)
+    t.booth = booth
+    assert not booth.poll() and booth.news() is None and t.status() == "Starting the booth\u2026"
+    (tmp_path / "logs" / "booth-note").write_text("Copying the season file")
+    booth.poll()
+    assert t.status() == "Copying the season file" and booth.news() == "Copying the season file"
+    assert booth.news() is None   # given once
+    (tmp_path / "logs" / "booth-stopped").write_text("The booth didn't start: no room")
+    started[-1].returncode = tray.BOOTH_STOP_CODE
+    booth.poll()
+    assert len(started) == 1 and booth.state == "crashed"   # not started again: it'd stop the same way
+    assert t.status() == "The booth didn't start: no room" and booth.news() == t.status()
+    booth.restart()   # the menu's Restart tries again
+    assert len(started) == 2 and booth.state == "starting" and t.status() == "Starting the booth\u2026"
+    assert not (tmp_path / "logs" / "booth-stopped").exists()
+    (tmp_path / "logs" / "booth-stopped").write_text("The booth didn't start: no room")
+    started[-1].returncode = tray.BOOTH_STOP_CODE
+    booth.poll()
+    assert booth.news() == "The booth didn't start: no room"   # again, after the Restart
+    booth.restart()
+    started[-1].returncode = tray.BOOTH_STOP_CODE               # (it couldn't say why: a full disk)
+    booth.poll()
+    assert len(started) == 3 and booth.news() == "The booth didn't start: see Open logs"
+    booth.restart()
+    (tmp_path / "logs" / "booth-stopped").write_text("stale")
+    started[-1].returncode = 1                                  # an ordinary crash: started again
+    booth.poll()
+    assert len(started) == 5 and booth.state == "starting"
+
+
 def test_env_beside_the_config_wins(tmp_path, monkeypatch):
     from commentator.__main__ import _load_env
 

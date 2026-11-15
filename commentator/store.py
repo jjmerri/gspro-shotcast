@@ -13,12 +13,12 @@ import math
 import re
 import sqlite3
 import time
+from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from . import round_file
 from .hud import Hud
 from .models import Line, Shot
-from .sources.gspro_log import M_TO_YD
 from .sources.gspro_log import M_TO_YD
 
 log = logging.getLogger(__name__)
@@ -244,6 +244,62 @@ CREATE INDEX IF NOT EXISTS shots_player ON shots(player);
 CREATE INDEX IF NOT EXISTS shots_lie ON shots(lie_before);
 """
 
+# The carry model learned from the shots before `before_ts` (Store.carry_model), so a start doesn't go
+# over every shot of every season again. Any write to a shot it learned from, or to a session's shots it
+# covers (a stroke's next one says where it came to rest), deletes it, from any connection.
+CARRY_SNAPSHOT_VERSION = 1   # bump when carry_pairs or CarryModel.observe learn differently
+# What carry_pairs reads, so a write to any other column (a round's record, the map, a putt's outcome)
+# leaves the snapshot be.
+_CARRY_COLUMNS = ("id, session_id, player, hole, shot_number, is_putt, mulligan, fmt, lie_before, carry_raw, units, "
+                  "carry_raw_tile_yards, carry_game_yards, elevation_yards, to_pin, course, launch_angle, "
+                  "finish_yards, ts, attributed, shared_ball, left_out, tree_hits, excluded")
+
+
+def _carry_covered(ts: str, sid: str) -> str:
+    t = "(SELECT before_ts FROM carry_snapshot)"
+    return f"({ts} < {t} OR EXISTS (SELECT 1 FROM shots c WHERE c.session_id = {sid} AND c.ts < {t}))"
+
+
+_ANY_SNAPSHOT = "EXISTS (SELECT 1 FROM carry_snapshot)"
+_DROP_SNAPSHOT = "BEGIN DELETE FROM carry_snapshot; END;"
+CARRY_SNAPSHOT = f"""
+CREATE TABLE IF NOT EXISTS carry_snapshot (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    key TEXT NOT NULL,                           -- CARRY_SNAPSHOT_VERSION and the configured altitudes
+    before_ts REAL NOT NULL,
+    state TEXT NOT NULL                          -- CarryModel.state(), JSON
+);
+CREATE TRIGGER IF NOT EXISTS shots_carry_insert AFTER INSERT ON shots
+WHEN {_ANY_SNAPSHOT} AND {_carry_covered("NEW.ts", "NEW.session_id")} {_DROP_SNAPSHOT}
+CREATE TRIGGER IF NOT EXISTS shots_carry_delete AFTER DELETE ON shots
+WHEN {_ANY_SNAPSHOT} AND {_carry_covered("OLD.ts", "OLD.session_id")} {_DROP_SNAPSHOT}
+CREATE TRIGGER IF NOT EXISTS shots_carry_update AFTER UPDATE OF {_CARRY_COLUMNS} ON shots
+WHEN {_ANY_SNAPSHOT} AND ({_carry_covered("OLD.ts", "OLD.session_id")} OR {_carry_covered("NEW.ts", "NEW.session_id")})
+{_DROP_SNAPSHOT}
+CREATE TRIGGER IF NOT EXISTS shots_carry_renumber AFTER UPDATE ON shots   -- (SET rowid = isn't an UPDATE OF id)
+WHEN {_ANY_SNAPSHOT} AND NEW.id IS NOT OLD.id
+     AND ({_carry_covered("OLD.ts", "OLD.session_id")} OR {_carry_covered("NEW.ts", "NEW.session_id")})
+{_DROP_SNAPSHOT}
+CREATE TRIGGER IF NOT EXISTS shots_carry_replace BEFORE INSERT ON shots
+WHEN {_ANY_SNAPSHOT} AND EXISTS (SELECT 1 FROM shots s WHERE (s.id = NEW.id OR s.uid = NEW.uid)
+                                 AND {_carry_covered("s.ts", "s.session_id")}) {_DROP_SNAPSHOT}
+CREATE TRIGGER IF NOT EXISTS shots_carry_replace_by BEFORE UPDATE ON shots
+WHEN {_ANY_SNAPSHOT} AND (NEW.id IS NOT OLD.id OR NEW.uid IS NOT OLD.uid)
+     AND EXISTS (SELECT 1 FROM shots s WHERE ((NEW.id IS NOT OLD.id AND s.id = NEW.id) OR (NEW.uid IS NOT OLD.uid AND s.uid = NEW.uid))
+                 AND {_carry_covered("s.ts", "s.session_id")}) {_DROP_SNAPSHOT}
+"""
+
+# Made by _migrate once their columns are sure to exist: name -> table(columns).
+INDEXES = {
+    "shots_session_ts": "shots(session_id, ts)",
+    "shots_ts": "shots(ts)",
+    "lines_session": "lines(session_id)",
+    "lines_shot": "lines(shot_id)",
+    "rounds_session": "rounds(session_id)",
+    "player_rounds_session": "player_rounds(session_id)",
+    "shots_course": "shots(course COLLATE NOCASE)",   # course_name: as each round is saved, and in play
+}
+
 
 # A round row counts toward the season's round totals (rounds played, average/best net) when it was
 # finished, or quit early after at least a full nine. Older rows have no holes_played: use holes.
@@ -342,26 +398,113 @@ def _median(xs: list[float]) -> float | None:
     return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
 
 
+def planner_counts_stale(db: sqlite3.Connection, grown: float = 2.0, least: int = 1000) -> bool:
+    """Whether a table with indexes has `grown` times the rows ANALYZE last counted (or has `least`
+    rows and was never counted). SQLite plans by those counts: kept from a small season, a lookup of
+    a few hundred shots' lines reads every line instead of using the index (a 6-year season's build
+    went from seconds to minutes). ANALYZE again then: a few times in a file's life (a 6-year
+    season's takes 0.3 s)."""
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'sqlite_stat1'").fetchone():
+        counted: dict[str, int] = {}
+    else:
+        counted = {t: n for t, n in db.execute(
+            "SELECT tbl, MAX(CAST(stat AS INTEGER)) FROM sqlite_stat1 GROUP BY tbl")}
+    tables = [r[0] for r in db.execute("SELECT DISTINCT tbl_name FROM sqlite_master WHERE type = 'index'"
+                                       " AND sql IS NOT NULL AND tbl_name NOT LIKE 'sqlite_%'")]
+    for t in tables:
+        rows = db.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+        if rows >= least and rows > grown * counted.get(t, 0):
+            return True
+    return False
+
+
+# The season file's format (PRAGMA user_version) once upgraded: 6 is round_record.migrate's. Raise it
+# with any change to the file an older release would trip over: a file older than this is copied before
+# it's upgraded (backup.before_upgrade).
+FORMAT = 6
+
+
+class SeasonCopyFailed(RuntimeError):
+    """A season file in an older format couldn't be copied, so it wasn't opened (or upgraded)."""
+
+
 class Store:
-    def __init__(self, path: str | None, new_session: bool = True) -> None:
+    def __init__(self, path: str | None, new_session: bool = True, backups: str | Path | None = None,
+                 on_copy: Callable[[], None] | None = None, check_later: bool = False) -> None:
         """Open (creating or upgrading) the season file. new_session=False opens it for maintenance, such
-        as a backfill, without starting a booth session in it."""
+        as a backfill, without starting a booth session in it. `backups`: where a file in an older format
+        is copied first (default: a backups folder beside it, where the booth's own copies go by default);
+        `on_copy` is called before that copy. If it can't be copied, SeasonCopyFailed and the file is left
+        as it was. `check_later`: the copy is checked and compressed in the background (the booth, so it
+        starts in seconds rather than a minute on a big file)."""
+        if path:
+            from . import backup
+
+            where = backups or Path(path).parent / "backups"
+            try:
+                made = backup.before_upgrade(path, where, FORMAT, on_copy=on_copy, later=check_later)
+            except Exception as e:
+                log.exception("Season file not copied before upgrading it: not opening it")
+                raise SeasonCopyFailed(f"the season file ({path}) couldn't be copied to {where} before "
+                                       f"upgrading it, so it wasn't opened: {e}") from e
+            if made:
+                log.info("Season file copied before upgrading it: %s", made)
         # Long enough to outwait anything else holding the file (a backup's copy, a page edit), so the booth
         # doesn't stop over a busy moment.
         self.db = sqlite3.connect(path or ":memory:", timeout=30)
+        if path:
+            # Write-ahead logging: the stats page reads a snapshot of the file while the booth writes
+            # (stats_web.connect). Kept by the file once set. A file where it can't be (a network
+            # share) stays as it was, and the page reads a copy instead.
+            try:
+                if self.db.execute("PRAGMA journal_mode = WAL").fetchone()[0] != "wal":
+                    log.warning("season file not in WAL mode: the stats page reads a copy of it")
+            except sqlite3.OperationalError as e:
+                log.warning("season file not switched to WAL mode: %s", e)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         self._migrate()
+        self.db.executescript(CARRY_SNAPSHOT)   # (after _migrate: it reads shots.uid)
         self._backfill_finishes()
         self._locate_hole_images()
+        from .round_record import Live
+        self.records = Live(self.db)   # which round or practice stretch each new row is in
+        from .booth_history import History
+        self.history = History(self.db, lambda: self.session_id)   # the booth's history reads, kept
         if not new_session:
             self.session_id = None
             self.db.commit()
             return
+        self.records.start(time.time())
         self.session_id = self.db.execute(
             "INSERT INTO sessions (started_at, date) VALUES (?, ?)", (time.time(), time.strftime("%Y-%m-%d"))
         ).lastrowid
         self.db.commit()
+
+    def begin_round(self, uuid: str, *, course: str | None, players: dict[str, str | None],
+                    seats: list[str] | None = None, since_id: int | None = None) -> str:
+        """A round starting: its record (see round_record.Live.begin). Returns its UUID: a round a
+        stopped booth left in progress, continued, keeps its own."""
+        u = self.records.begin(uuid, session_id=self.session_id, course=self.course_name(course), players=players,
+                               seats=seats, since_id=since_id, now=time.time())
+        self.db.commit()
+        return u
+
+    def round_players(self, uuid: str, players: dict[str, str | None], seats: list[str] | None = None) -> None:
+        """A round's players changed mid-round: its slots follow (see round_record.Live.sync)."""
+        self.records.sync(uuid, players, seats)
+        self.db.commit()
+
+    def end_round(self, uuid: str, complete: bool = True) -> None:
+        self.records.end(uuid, complete, time.time())
+        self.db.commit()
+
+    def _scope(self, after_id: int, record: str | None) -> tuple[str, tuple]:
+        """A round's shots: its record's, plus any since its floor written with no record (a path that
+        stamps none); a round with no record (an older caller): every one since its floor."""
+        if self.records.known(record):
+            return "(record_uuid = ? OR (record_uuid IS NULL AND id > ?))", (record, after_id)
+        return "id > ?", (after_id,)
 
     def roll_session_if_idle(self, idle_hours: float = 6.0, now: float | None = None) -> bool:
         """Start a new session when this one has sat idle for hours: a booth left running overnight
@@ -382,6 +525,8 @@ class Store:
 
     def _migrate(self) -> None:
         """Add columns a pre-existing season.db is missing, so an older file keeps working."""
+        from . import round_record   # (it reads this module's constants)
+
         # hole_images was once kept per session: keep each hole's first map with its ball and pin found
         # (else its first), as record_hole_image does now.
         self.db.execute("""DELETE FROM hole_images WHERE id NOT IN (
@@ -433,6 +578,15 @@ class Store:
             self.db.execute("ALTER TABLE week_results ADD COLUMN holes TEXT")
         if "tee_box" not in {r["name"] for r in self.db.execute("PRAGMA table_info(hole_layouts)")}:
             self.db.execute("ALTER TABLE hole_layouts ADD COLUMN tee_box TEXT")
+        # Per-session and per-shot lookups (the booth's, during play, and the stats build's) would
+        # otherwise scan every shot ever recorded. Made here, after the columns exist; the first time,
+        # ANALYZE so the planner knows how the indexes compare (and again below as the season grows).
+        have_ix = {r[0] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+        for name, on in INDEXES.items():
+            self.db.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {on}")
+        round_record.install(self.db)
+        if not set(INDEXES) <= have_ix:
+            self.db.execute("ANALYZE")
         if self.db.execute("PRAGMA user_version").fetchone()[0] < 1:
             # Tee yardages were kept as the course CSV gives them, in metres, and from its old-format
             # file where a course has both: make them yards, and have the courses read again (see
@@ -463,6 +617,9 @@ class Store:
             for (course,) in self.db.execute(f"SELECT DISTINCT course FROM {table} WHERE course IS NOT NULL").fetchall():
                 if (name := self.course_name(course)) != course:
                     self.db.execute(f"UPDATE {table} SET course = ? WHERE course = ?", (name, course))
+        round_record.migrate(self.db)
+        if planner_counts_stale(self.db):   # (last: after the rows the migrations add)
+            self.db.execute("ANALYZE")
         self.db.commit()
 
     def course_name(self, course: str | None) -> str | None:
@@ -522,8 +679,9 @@ class Store:
         gimme_yards: float | None = None, outcome: str | None = None, fmt: str | None = None,
         attributed: bool = True, is_league: bool = True, shared_ball: bool = False,
         is_tournament: bool = False, start: tuple | None = None, aim: tuple | None = None, handed: str | None = None,
-        tree_hits: int | None = None,
+        tree_hits: int | None = None, record: str | None = None,
     ) -> int:
+        record, slot = self.records.place(self.session_id, player, shot.timestamp, course, record)
         cur = self.db.execute(
             """INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, ball_speed,
                    launch_angle, start_direction, total_spin, spin_axis, club_speed, carry_raw, units,
@@ -531,9 +689,10 @@ class Store:
                    score_to_par, lie_after, carry_raw_tile_yards, carry_game_yards, total_yards, offline_yards,
                    tags, raw, to_pin_yards, finish_yards, gimme_yards, outcome, fmt, attributed, is_league,
                    shared_ball, club_path, angle_of_attack, face_to_target, dynamic_loft, face_impact_h,
-                   face_impact_v, start_x, start_y, start_z, aim_map_x, aim_map_y, handed, tree_hits, is_tournament)
+                   face_impact_v, start_x, start_y, start_z, aim_map_x, aim_map_y, handed, tree_hits, is_tournament,
+                   record_uuid, slot_id)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                       ?,?,?,?,?,?,?,?)""",
+                       ?,?,?,?,?,?,?,?,?,?)""",
             (self.session_id, shot.timestamp, player, course, hole, before.shot_number or after.shot_number, shot.club,
              int(shot.is_putt), shot.ball_speed, shot.vla, shot.hla, shot.total_spin, shot.spin_axis,
              shot.club_speed, shot.carry, shot.units, before.lie, before.slope_updown, before.slope_side,
@@ -543,7 +702,8 @@ class Store:
              json.dumps(tags), json.dumps(shot.raw),
              to_pin_yards, finish_yards, gimme_yards, outcome, fmt, int(attributed), int(is_league),
              int(shared_ball), *_club_values(shot), *_position_values(start, aim),
-             (handed or before.handed or shot.handed or "").strip().upper() or None, tree_hits, int(is_tournament)),
+             (handed or before.handed or shot.handed or "").strip().upper() or None, tree_hits, int(is_tournament),
+             record, slot),
         )
         self._unhole_if_played_on(cur.lastrowid, later=False)
         self._fill_previous_finish(cur.lastrowid)
@@ -736,9 +896,36 @@ class Store:
 
     def _backfill_finishes(self) -> None:
         """Fill finishing distances the booth missed on older rows: from the next stroke, or 0 for a
-        full shot that holed out. Idempotent; only touches rows that have none."""
+        full shot that holed out. Idempotent; only touches rows that have none. Reads only the sessions
+        of the round records changed since it last did (a record's gen moves with any of its rows; it
+        notes the one it saw in finishes_gen) and those a shot was deleted from (finish_recheck), not every
+        shot each start: all of them the first time, or while any shot has no record."""
+        if self.db.in_transaction:
+            self.db.commit()
+        self.db.execute("BEGIN IMMEDIATE")   # (nothing changes a record between its look and its note)
+        try:
+            self._backfill_finishes_in()
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+
+    def _backfill_finishes_in(self) -> None:
+        where, args, stale = "", [], None
+        if self.db.execute("SELECT 1 FROM shots WHERE record_uuid IS NULL LIMIT 1").fetchone() is None:
+            stale = [u for (u,) in self.db.execute("SELECT uuid FROM round_records WHERE finishes_gen IS NOT gen")]
+            deleted = {s for (s,) in self.db.execute("SELECT session_id FROM finish_recheck")}
+            if not stale and not deleted:
+                return
+            if self.db.execute("SELECT 1 FROM round_records WHERE finishes_gen IS NOT NULL LIMIT 1").fetchone():
+                sessions = set(deleted)
+                for i in range(0, len(stale), 500):
+                    chunk = stale[i:i + 500]
+                    sessions.update(s for (s,) in self.db.execute(
+                        f"SELECT DISTINCT session_id FROM shots WHERE record_uuid IN ({','.join('?' * len(chunk))})", chunk))
+                where, args = f" AND session_id IN ({','.join('?' * len(sessions))})", sorted(sessions)
         rows = self.db.execute(f"SELECT {self._FINISH_COLS} FROM shots WHERE attributed = 1 AND player IS NOT NULL"
-                               " AND player != 'unknown' ORDER BY session_id, player, id").fetchall()
+                               f" AND player != 'unknown'{where} ORDER BY session_id, player, id", args).fetchall()
         updates = []
         for prev, nxt in zip(rows, rows[1:]):
             if prev["mulligan"] or (prev["session_id"], prev["player"]) != (nxt["session_id"], nxt["player"]):
@@ -751,8 +938,13 @@ class Store:
                     and r["finish_yards"] is None and not r["mulligan"]]
         if updates:
             self.db.executemany("UPDATE shots SET finish_yards = ? WHERE id = ?", updates)
-            self.db.commit()
             log.info("Filled %d missing shot finishing distances from the following strokes", len(updates))
+        self.db.execute("DELETE FROM finish_recheck")
+        if stale is not None:
+            for i in range(0, len(stale), 500):
+                chunk = stale[i:i + 500]
+                self.db.execute(f"UPDATE round_records SET finishes_gen = gen WHERE uuid IN ({','.join('?' * len(chunk))})",
+                                chunk)
 
     def _same_hole_next(self, earlier: sqlite3.Row, later: sqlite3.Row) -> bool:
         """`later` is the same player's next stroke on the same hole: same hole (the number may be read
@@ -815,32 +1007,37 @@ class Store:
         if shot_id is not None:
             self.db.execute("UPDATE shots SET player = ?, attributed = ?, fmt = ?, shared_ball = ? WHERE id = ?",
                             (player, int(attributed), fmt, int(shared_ball), shot_id))
+            self.records.reslot([shot_id])
             self.db.commit()
 
     def set_shot_round_class(self, shot_id: int | None, *, is_league: bool, fmt: str | None, attributed: bool,
                              shared_ball: bool, hole: str | None = None, course: str | None = None,
-                             is_tournament: bool = False) -> None:
+                             is_tournament: bool = False, record: str | None = None) -> None:
         """A shot recorded before its round started, now taken into it: the round's league/practice
         context and format, whether the stats can credit its player, and (`hole`, `course`) where it
-        was when it was labelled with the last round's."""
+        was when it was labelled with the last round's. Into the round's `record` too, once it has one
+        (before, its start takes in its opening shots)."""
         if shot_id is not None:
             self.db.execute("UPDATE shots SET is_league = ?, fmt = ?, attributed = ?, shared_ball = ?,"
                             " hole = coalesce(?, hole), course = coalesce(?, course), is_tournament = ? WHERE id = ?",
                             (int(is_league), fmt, int(attributed), int(shared_ball), hole, course,
                              int(is_tournament), shot_id))
+            self.records.take(shot_id, record)
             self.db.commit()
 
-    def mark_tournament(self, after_id: int) -> int:
+    def mark_tournament(self, after_id: int, record: str | None = None) -> int:
         """A round found to be a tournament one after it started (GSPro's first SGT sync follows its
-        first stroke): every shot since `after_id` (the round's shot floor) is its, and is marked."""
-        cur = self.db.execute("UPDATE shots SET is_tournament = 1 WHERE id > ? AND is_tournament = 0", (after_id,))
+        first stroke): its shots (`record`'s; or every one since `after_id`, its shot floor) are marked."""
+        where, arg = self._scope(after_id, record)
+        cur = self.db.execute(f"UPDATE shots SET is_tournament = 1 WHERE {where} AND is_tournament = 0", arg)
         self.db.commit()
         return cur.rowcount
 
-    def mark_league(self, after_id: int) -> int:
-        """A round found to be a league one only at its end (see Round.make_league): every shot since
-        `after_id` (its shot floor) is a league shot."""
-        cur = self.db.execute("UPDATE shots SET is_league = 1, is_tournament = 0 WHERE id > ?", (after_id,))
+    def mark_league(self, after_id: int, record: str | None = None) -> int:
+        """A round found to be a league one only at its end (see Round.make_league): its shots
+        (`record`'s; or every one since `after_id`, its shot floor) are league shots."""
+        where, arg = self._scope(after_id, record)
+        cur = self.db.execute(f"UPDATE shots SET is_league = 1, is_tournament = 0 WHERE {where}", arg)
         self.db.commit()
         return cur.rowcount
 
@@ -858,6 +1055,7 @@ class Store:
                             (player, fmt, gimme_id))
         self.db.execute("UPDATE shots SET player = ?, fmt = ?, shared_ball = ? WHERE id = ?",
                         (player, fmt, int(shared_ball), shot_id))
+        self.records.reslot([shot_id] + ([gimme_id] if gimme_id is not None else []))
         self.db.commit()
 
     def clear_shot_result(self, shot_id: int, outcome: str, finish: tuple | None = None,
@@ -1035,9 +1233,15 @@ class Store:
         `rewrite` False leaves a stroke already applied to a shot it still fits as it is (the same file
         applied again, for shots recorded since). `gone`: the file's ShotIDs that are no longer strokes
         (round_file.untracked: a mulligan took one back), whose shots get back what they had."""
-        courses = [r[0] for r in self.db.execute("SELECT DISTINCT course FROM shots WHERE course IS NOT NULL")]
+        # Every course played, one index step each (course_fits ignores case), not a scan of every shot.
+        courses = [r[0] for r in self.db.execute(
+            "WITH RECURSIVE c(x) AS (SELECT (SELECT min(course COLLATE NOCASE) FROM shots) UNION ALL"
+            " SELECT (SELECT min(course COLLATE NOCASE) FROM shots WHERE course COLLATE NOCASE > c.x)"
+            " FROM c WHERE c.x IS NOT NULL) SELECT x FROM c WHERE x IS NOT NULL")]
         ends: list[float] = []   # each play's end: its sides' rounds end within 120 s of each other
-        for (e,) in self.db.execute("SELECT DISTINCT ended_at FROM rounds WHERE ended_at IS NOT NULL ORDER BY ended_at"):
+        # (only those from the window on: a stroke's row is in it, and its play ends after it)
+        for (e,) in self.db.execute("SELECT DISTINCT ended_at FROM rounds WHERE ended_at >= ? ORDER BY ended_at",
+                                    (now - window_s,)):
             if ends and e - ends[-1] <= 120:
                 ends[-1] = e
             else:
@@ -1189,10 +1393,10 @@ class Store:
         cur = self.db.execute(
             """INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, units,
                    lie_before, to_pin, to_pin_yards, score_to_par, tags, raw, gimme_yards, outcome, fmt, attributed,
-                   is_league, is_tournament, excluded)
+                   is_league, is_tournament, excluded, record_uuid, slot_id, derived_from)
                SELECT session_id, ?, player, course, hole, shot_number + 1, NULL, 1, units, 'green', NULL, ?,
                       score_to_par, '["gimme"]', '{}', gimme_yards, 'gimme', fmt, attributed, is_league,
-                      is_tournament, excluded
+                      is_tournament, excluded, record_uuid, slot_id, uid
                FROM shots WHERE id = ?""",
             (time.time(), left_yards, shot_id),
         )
@@ -1207,15 +1411,19 @@ class Store:
         # Each line keeps its rows (`_line_ids`), for when it airs (mark_aired); one that's already
         # aired gets its air time now.
         now = time.time()
+        # Its record: its shot's, else the round being played or just ended (a closer), else practice.
+        on = self.db.execute("SELECT record_uuid FROM shots WHERE id = ?", (shot_id,)).fetchone() if shot_id else None
+        record = on[0] if on else self.records.place_line(self.session_id, now) if lines else None
         for l in lines:
             aired = getattr(l, "_aired", None) or (None, None)
             cur = self.db.execute(
-                "INSERT INTO lines (session_id, shot_id, ts, kind, speaker, text, excluded, aired_at, aired_seconds)"
+                "INSERT INTO lines (session_id, shot_id, ts, kind, speaker, text, excluded, aired_at, aired_seconds,"
+                " record_uuid)"
                 " VALUES (?1,?2,?3,?4,?5,?6,"
                 " COALESCE(CASE WHEN ?2 IS NOT NULL THEN (SELECT excluded FROM shots WHERE id = ?2)"
                 " ELSE (SELECT MAX(excluded) FROM rounds WHERE session_id = ?1 AND ended_at > ?3 - ?7 AND ended_at <= ?3) END, 0),"
-                " ?8, ?9)",
-                (self.session_id, shot_id, now, kind, l.speaker, l.text, CLOSER_SECONDS, *aired))
+                " ?8, ?9, ?10)",
+                (self.session_id, shot_id, now, kind, l.speaker, l.text, CLOSER_SECONDS, *aired, record))
             try:
                 l._line_ids = [*getattr(l, "_line_ids", []), cur.lastrowid]
             except AttributeError:
@@ -1231,23 +1439,67 @@ class Store:
                             [(began, round(seconds, 2), i) for i in ids])
         self.db.commit()
 
-    def spoken_lines(self) -> list[str]:
-        return [r[0] for r in self.db.execute("SELECT text FROM lines")]
+    def spoken_lines(self, since: float | None = None) -> list[str]:
+        """The booth's lines (since a time, when given)."""
+        if since is None:
+            return [r[0] for r in self.db.execute("SELECT text FROM lines")]
+        return [r[0] for r in self.db.execute("SELECT text FROM lines WHERE ts >= ?", (since,))]
 
     def carry_pairs(self) -> list[tuple]:
         """Past full shots for the carry model, oldest first: (lie, base carry yd, game carry yd
         corrected for how high the ball came down, course, launch angle, base). Base is GSPro's CARRY
         (raw) where it was read, else the launch monitor's carry. Shots whose landing height isn't
         known are left out (see correct_for_elevation)."""
+        return [pair for _, pair in self._carry_pairs()]
+
+    def carry_model(self, defaults: dict[str, float] | None = None, course_altitude_ft: dict[str, float] | None = None,
+                    now: float | None = None):
+        """CarryModel(defaults, carry_pairs(), course_altitude_ft), learning from the shots since the
+        carry_snapshot only: it keeps what the model had learned before today, saved here again each day."""
+        from .carry_model import CarryModel
+        model = CarryModel(defaults, None, course_altitude_ft)
+        key = json.dumps([CARRY_SNAPSHOT_VERSION, course_altitude_ft or {}], sort_keys=True)
+        t = time.localtime(time.time() if now is None else now)
+        midnight = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, -1))
+        own = not self.db.in_transaction   # (inside the caller's transaction: learn, don't save)
+        if own:
+            self.db.execute("BEGIN")   # a snapshot saved is of what was read: if another write came since, it isn't
+        try:
+            snap = self.db.execute("SELECT key, before_ts, state FROM carry_snapshot").fetchone()
+            since = None
+            if snap is not None and snap["key"] == key:
+                model.restore(json.loads(snap["state"]))
+                since = snap["before_ts"]
+            save, state = own and (since is None or since < midnight), None
+            for ts, pair in self._carry_pairs(since):
+                if save and state is None and ts >= midnight:
+                    state = model.state()
+                model.observe(*pair)
+            if save:
+                try:
+                    self.db.execute("DELETE FROM carry_snapshot")
+                    self.db.execute("INSERT INTO carry_snapshot (id, key, before_ts, state) VALUES (1, ?, ?, ?)",
+                                    (key, midnight, json.dumps(model.state() if state is None else state)))
+                except sqlite3.OperationalError as e:   # another connection wrote meanwhile: saved next start
+                    log.info("carry model snapshot not saved: %s", e)
+                    save = False
+        except BaseException:
+            if own:
+                self.db.rollback()
+            raise
+        if own:
+            (self.db.commit if save else self.db.rollback)()
+        return model
+
+    def _carry_pairs(self, since: float | None = None) -> list[tuple[float, tuple]]:
+        """carry_pairs, each with its shot's time, from the shots at `since` or later."""
         from .carry_model import correct_for_elevation
         from .facts import to_yards
 
         rows = self.db.execute(
-            """SELECT id, session_id, player, hole, shot_number, is_putt, mulligan, fmt, lie_before, carry_raw,
-                      units, carry_raw_tile_yards, carry_game_yards, elevation_yards, to_pin, course,
-                      launch_angle, finish_yards, ts, attributed, shared_ball, left_out, tree_hits
-               FROM shots WHERE excluded = 0 ORDER BY id"""
-        ).fetchall()
+            f"SELECT {_CARRY_COLUMNS} FROM shots WHERE excluded = 0"
+            + ("" if since is None else " AND ts >= ?") + " ORDER BY id",
+            () if since is None else (since,)).fetchall()
         # Each player's next stroke (by impact time: rows are written as shot handlers finish, which
         # can be out of order; a mulligan was taken back): if it's the very next
         # stroke on the same hole, its pin elevation, less this one's, is where this ball came to rest
@@ -1294,20 +1546,13 @@ class Store:
                     rest_rise = elev   # holed: it rested at the pin
             game = correct_for_elevation(r["carry_game_yards"], elev, to_yards(r["to_pin"]), carry, rest_rise)
             if game is not None:
-                out.append((r["lie_before"], carry, game, r["course"], r["launch_angle"], base))
+                out.append((r["ts"], (r["lie_before"], carry, game, r["course"], r["launch_angle"], base)))
         return out
 
     def season_stats(self, player: str, context: str | None = None) -> dict[str, Any]:
-        """Season numbers for one player, in yards, excluding tonight so 'season best' means before tonight."""
-        r = self.db.execute(
-            """SELECT COUNT(*) AS shots,
-                      MAX(CASE WHEN {DRIVE_SQL} THEN {_DRIVE} END) AS longest_drive,
-                      AVG(CASE WHEN {DRIVE_SQL} THEN {_DRIVE} END) AS avg_drive,
-                      COUNT(DISTINCT session_id) AS nights
-               FROM shots WHERE player = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND mulligan = 0 AND left_out = 0 AND excluded = 0""".format(_DRIVE=_DRIVE, DRIVE_SQL=DRIVE_SQL) + _ctx_sql(context),
-            (player, self.session_id),
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        """Season numbers for one player, in yards, excluding tonight so 'season best' means before tonight:
+        shots, longest_drive, avg_drive, nights (booth_history)."""
+        return self.history.season_stats(player, context)
 
     def today_longest_drive(self, player: str) -> float | None:
         """The player's longest drive already recorded today, so a second big drive tonight isn't
@@ -1321,9 +1566,18 @@ class Store:
         ).fetchone()
         return r["longest"] if r else None
 
-    def rename_shots(self, old: str, new: str, after_id: int) -> int:
-        """A player's shots since `after_id` (a round's) go to their right name. Returns how many."""
-        n = self.db.execute("UPDATE shots SET player = ? WHERE player = ? AND id > ?", (new, old, after_id)).rowcount
+    def rename_shots(self, old: str, new: str, after_id: int, record: str | None = None) -> int:
+        """A player's shots in a round (`record`'s; or every one since `after_id`) go to their right name,
+        and so does their slot. Returns how many."""
+        where, arg = self._scope(after_id, record)
+        olds = [old]
+        if self.records.known(record):
+            self.records.rename(record, old, new)
+            # (and in another case, as a restart or a misread had it: the same slot now)
+            olds = [p for (p,) in self.db.execute(f"SELECT DISTINCT player FROM shots WHERE {where}", arg)
+                    if p and p != new and p.casefold() in (old.casefold(), new.casefold())]
+        n = sum(self.db.execute(f"UPDATE shots SET player = ? WHERE player = ? AND {where}", (new, o, *arg)).rowcount
+                for o in olds)
         self.db.commit()
         return n
 
@@ -1368,17 +1622,19 @@ class Store:
                 best[hole] = (who, yards)
         return best
 
-    def players_after(self, after_id: int) -> list[str]:
-        """The named players on the shots recorded after `after_id`."""
+    def players_after(self, after_id: int, record: str | None = None) -> list[str]:
+        """The named players on a round's shots (`record`'s; or those recorded after `after_id`)."""
+        where, arg = self._scope(after_id, record)
         return [r[0] for r in self.db.execute(
-            "SELECT DISTINCT player FROM shots WHERE id > ? AND player IS NOT NULL AND player != 'unknown'",
-            (after_id,))]
+            f"SELECT DISTINCT player FROM shots WHERE {where} AND player IS NOT NULL AND player != 'unknown'", arg)]
 
     def restamp_shots(self, after_id: int, player: str, *, fmt: str | None, attributed: bool,
-                      shared_ball: bool) -> None:
-        """A player's shots after `after_id` re-read under their round's format (see Engine._league_after_quit)."""
-        self.db.execute("UPDATE shots SET fmt = ?, attributed = ?, shared_ball = ? WHERE id > ? AND player = ?",
-                        (fmt, int(attributed), int(shared_ball), after_id, player))
+                      shared_ball: bool, record: str | None = None) -> None:
+        """A player's shots in a round (`record`'s; or after `after_id`) re-read under its format (see
+        Engine._league_after_quit)."""
+        where, arg = self._scope(after_id, record)
+        self.db.execute(f"UPDATE shots SET fmt = ?, attributed = ?, shared_ball = ? WHERE {where} AND player = ?",
+                        (fmt, int(attributed), int(shared_ball), *arg, player))
         self.db.commit()
 
     HOLE_VISIT_SECONDS = 1800   # a hole's strokes are played well inside this; a later round's aren't
@@ -1585,14 +1841,8 @@ class Store:
         self.db.commit()
 
     def season_longest_drive(self, context: str | None = None) -> tuple[str, float] | None:
-        r = self.db.execute(
-            f"""SELECT player, {_DRIVE} AS carry FROM shots
-               WHERE {DRIVE_SQL} AND player IS NOT NULL AND player != 'unknown' AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))
-                     AND mulligan = 0 AND left_out = 0 AND excluded = 0"""
-            + _ctx_sql(context) + " ORDER BY carry DESC LIMIT 1",
-            (self.session_id,),
-        ).fetchone()
-        return (r["player"], r["carry"]) if r else None
+        """The longest drive before today: (player, yards) (booth_history)."""
+        return self.history.season_longest_drive(context)
 
     def hole_scoring(self, course: str | None, hole: int | None, context: str | None = None) -> list[int]:
         """Every gross score recorded on this hole of this course across all rounds (including
@@ -1624,34 +1874,14 @@ class Store:
 
     def player_profile(self, player: str, context: str | None = None) -> dict[str, Any]:
         """Season colour for a player: how much they've played, their most-used club, and their
-        start-line tendency (the classic 'typical miss'). start_direction > 0 is right of the aim."""
-        r = self.db.execute(
-            """SELECT COUNT(*) AS shots, COUNT(DISTINCT session_id) AS nights,
-                      AVG(CASE WHEN is_putt = 0 THEN start_direction END) AS avg_start_dir,
-                      COUNT(CASE WHEN is_putt = 0 AND start_direction IS NOT NULL THEN 1 END) AS aimed
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0""" + _ctx_sql(context),
-            (player,),
-        ).fetchone()
-        fav = self.db.execute(
-            """SELECT club, COUNT(*) AS n FROM shots
-               WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND club IS NOT NULL AND club NOT IN ('PT')"""
-            + _ctx_sql(context) + " GROUP BY club ORDER BY n DESC LIMIT 1",
-            (player,),
-        ).fetchone()
-        d = {k: r[k] for k in r.keys()}
-        d["favorite_club"], d["favorite_club_n"] = (fav["club"], fav["n"]) if fav else (None, 0)
-        return d
+        start-line tendency (the classic 'typical miss'). start_direction > 0 is right of the aim
+        (booth_history)."""
+        return self.history.player_profile(player, context)
 
     def approach_proximity(self, player: str, yards: float, band: float = 15.0,
                            context: str | None = None) -> dict[str, Any]:
-        """How close this player's full shots from about `yards` finish to the pin, this season."""
-        r = self.db.execute(
-            """SELECT COUNT(*) AS n, ROUND(AVG(finish_yards), 1) AS avg_finish_yards
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 0
-                     AND finish_yards IS NOT NULL AND to_pin_yards BETWEEN ? AND ?""" + _ctx_sql(context),
-            (player, yards - band, yards + band),
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        """How close this player's full shots from about `yards` finish to the pin, this season (booth_history)."""
+        return self.history.approach_proximity(player, yards, band, context)
 
     def putting_make_rate(self, player: str, feet: float, band_feet: float = 2.5,
                           context: str | None = None) -> dict[str, Any]:
@@ -1660,13 +1890,7 @@ class Store:
         excluded so they don't read as misses, and so are the conceded tap-ins (outcome 'gimme'), which
         nobody hit."""
         lo, hi = max(0.0, feet - band_feet) / 3.0, (feet + band_feet) / 3.0   # feet -> yards
-        r = self.db.execute(
-            """SELECT COUNT(*) AS attempts, SUM(CASE WHEN outcome = 'holed' THEN 1 ELSE 0 END) AS made
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 1 AND outcome IS NOT NULL
-                     AND outcome != 'gimme' AND to_pin_yards BETWEEN ? AND ?""" + _ctx_sql(context),
-            (player, lo, hi),
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        return self.history.putting_make_rate(player, lo, hi, context)
 
     def three_putt_rate(self, player: str, feet: float, band_feet: float = 10.0,
                         context: str | None = None) -> dict[str, Any]:
@@ -1684,47 +1908,19 @@ class Store:
         the same course+hole twice in a single session (two rounds a night) has them merged - rare, and
         the min-sample gate on the caller blunts it."""
         lo, hi = max(0.0, feet - band_feet) / 3.0, (feet + band_feet) / 3.0   # feet -> yards
-        r = self.db.execute(
-            """WITH hole_putts AS (
-                   SELECT to_pin_yards,
-                          ROW_NUMBER() OVER (PARTITION BY session_id, course, hole ORDER BY ts) AS putt_no,
-                          COUNT(*) OVER (PARTITION BY session_id, course, hole) AS putts
-                   FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND hole IS NOT NULL
-                         AND (lie_before = 'green' OR (is_putt = 1 AND lie_before IS NULL))"""
-            + _ctx_sql(context) + """
-               )
-               SELECT COUNT(*) AS holes, SUM(CASE WHEN putts >= 3 THEN 1 ELSE 0 END) AS three_putts
-               FROM hole_putts WHERE putt_no = 1 AND to_pin_yards BETWEEN ? AND ?""",
-            (player, lo, hi),
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        return self.history.three_putt_rate(player, lo, hi, context)
 
     _BEFORE_TODAY = "session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))"
 
     def approach_leave(self, player: str, lo_yards: float, hi_yards: float | None = None) -> dict[str, Any]:
         """Season baseline for the round sheet, before today: how far from the hole this player's full
         shots from `lo_yards` up to `hi_yards` finish when they reach the green (holed = 0)."""
-        r = self.db.execute(
-            f"""SELECT COUNT(*) AS n,
-                       AVG(CASE WHEN outcome = 'holed' THEN 0 ELSE finish_yards END) AS avg_finish_yards
-                FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 0
-                      AND to_pin_yards >= ? AND to_pin_yards < ? AND finish_yards IS NOT NULL
-                      AND (lie_after = 'green' OR outcome IN ('holed', 'conceded')) AND {self._BEFORE_TODAY}""",
-            (player, lo_yards, hi_yards if hi_yards is not None else 1e9, self.session_id),
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        return self.history.approach_leave(player, lo_yards, hi_yards if hi_yards is not None else 1e9)
 
     def putt_band_rate(self, player: str, lo_feet: float, hi_feet: float | None = None) -> dict[str, Any]:
         """Season baseline for the round sheet, before today: putts from over `lo_feet` up to `hi_feet`.
         Conceded misses count as misses; the never-struck tap-ins ('gimme') don't count."""
-        r = self.db.execute(
-            f"""SELECT COUNT(*) AS attempts, SUM(CASE WHEN outcome = 'holed' THEN 1 ELSE 0 END) AS made
-                FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 1
-                      AND outcome IS NOT NULL AND outcome != 'gimme' AND to_pin_yards > ? AND to_pin_yards <= ?
-                      AND {self._BEFORE_TODAY}""",
-            (player, lo_feet / 3.0, (hi_feet if hi_feet is not None else 1e9) / 3.0, self.session_id),
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        return self.history.putt_band_rate(player, lo_feet / 3.0, (hi_feet if hi_feet is not None else 1e9) / 3.0)
 
     def length_norm(self, player: str, club: str | None = None) -> dict[str, Any]:
         """How far this player usually hits it (median total length, as GSPro measured it): drives (from
@@ -1733,19 +1929,8 @@ class Store:
         the club's typical length over everything but chips, then only shots whose pin was well beyond
         that, so the player wasn't hitting a partial. A club's swings count only off the tee or fairway:
         rough, sand and pine straw take distance off (a 3-wood out of the rough made "his reliable
-        110-yard option")."""
-        base = """SELECT total_yards, to_pin_yards FROM shots
-                  WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 0
-                        AND total_yards IS NOT NULL AND total_yards > 0"""
-        if club is None:
-            rows = self.db.execute(base + " AND lie_before = 'tee' AND to_pin_yards >= 250", (player,)).fetchall()
-            totals = [r["total_yards"] for r in rows]
-        else:
-            rows = self.db.execute(base + " AND club = ? AND to_pin_yards >= 40 AND lie_before IN ('tee', 'fairway')",
-                                   (player, club)).fetchall()
-            rough = _median([r["total_yards"] for r in rows])
-            totals = [r["total_yards"] for r in rows if rough and r["to_pin_yards"] > rough * 1.15]
-        return {"n": len(totals), "avg_total": _median(totals)}
+        110-yard option") (booth_history)."""
+        return self.history.length_norm(player, club)
 
     def shot_lengths(self, shot_ids: list[int]) -> dict[int, float]:
         """GSPro's total length for these shots, where the HUD showed it (none left out of the stats)."""
@@ -1803,35 +1988,22 @@ class Store:
     def fairways_hit(self, player: str, context: str | None = None) -> dict[str, Any]:
         """Driving accuracy: of this player's driver tee shots this season, how many found the fairway.
         A per-player SHOT stat, so it works in a TWO-ball scramble too; it's empty only for the shared-
-        ball formats (alternate, and a one-ball scramble), which are not attributed to a single player."""
-        r = self.db.execute(
-            f"""SELECT COUNT(*) AS tries, SUM(CASE WHEN lie_after = 'fairway' THEN 1 ELSE 0 END) AS hit
-               FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 0
-                     AND ((club = 'DR' AND shot_number = 1) OR {UNKNOWN_CLUB_DRIVE_SQL}) AND lie_after IS NOT NULL""" + _ctx_sql(context),
-            (player,),
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        ball formats (alternate, and a one-ball scramble), which are not attributed to a single player
+        (booth_history)."""
+        return self.history.fairways_hit(player, context)
 
     def recovery_proximity(self, player: str, lies: tuple[str, ...], max_to_pin: float | None = None,
                            context: str | None = None) -> dict[str, Any]:
         """How close this player's shots from a given lie type (greenside sand, rough) finish to the pin,
         in yards. `max_to_pin` limits to greenside (a bunker within ~30 yd, not a fairway bunker). A
-        per-player SHOT stat; empty for the shared-ball formats, which aren't attributed to a player."""
-        placeholders = ",".join("?" for _ in lies)
-        clause = " AND to_pin_yards <= ?" if max_to_pin is not None else ""
-        params = [player, *lies] + ([max_to_pin] if max_to_pin is not None else [])
-        r = self.db.execute(
-            f"""SELECT COUNT(*) AS n, ROUND(AVG(finish_yards), 1) AS avg_finish_yards
-                FROM shots WHERE player = ? AND attributed = 1 AND mulligan = 0 AND left_out = 0 AND excluded = 0 AND is_putt = 0 AND finish_yards IS NOT NULL
-                      AND lie_before IN ({placeholders}){clause}{_ctx_sql(context)}""",
-            params,
-        ).fetchone()
-        return {k: r[k] for k in r.keys()}
+        per-player SHOT stat; empty for the shared-ball formats, which aren't attributed to a player
+        (booth_history)."""
+        return self.history.recovery_proximity(player, tuple(lies), max_to_pin, context)
 
     def record_round(self, *, course, fmt, side, team, holes, stats, strokes, net_to_par, hole_number,
                      hole_pars=None, is_league: bool = True, complete: bool = True, players: list[str] | None = None,
                      is_tournament: bool = False, first_nine: tuple[int, int | None] | None = None,
-                     physics: dict | None = None) -> int:
+                     physics: dict | None = None, record: str | None = None) -> int:
         """One side's round. A round quit early is recorded too (complete=0, holes_played short): its
         per-hole and per-try stats count, but it only counts as a round in the season totals once a
         full nine was played (see _COUNTS_AS_ROUND), and those totals are scored per nine holes.
@@ -1854,16 +2026,21 @@ class Store:
                    net_to_par, fir_hit, fir_tries, gir_hit, gir_tries, scramble_hit, scramble_tries, sand_hit,
                    sand_tries, putts, putt_holes, penalties, longest_drive, scores, hole_pars, source, is_league,
                    complete, holes_played, nine_to_par, nine_net_to_par, players, is_tournament, green_firmness,
-                   fairway_firmness, course_type, launch_monitor)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   fairway_firmness, course_type, launch_monitor, round_uuid)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (self.session_id, time.time(), time.strftime("%Y-%m-%d"), self.course_name(course), fmt, side, team, holes,
              stats.gross if stats.holes_scored else None, stats.par or None, strokes, net_to_par,
              *stats.fir, *stats.gir, *stats.scramble, *stats.sand,
              stats.putts if stats.putt_holes else None, stats.putt_holes, stats.penalties, stats.longest_drive,
              scores_json, pars_json, stats.source, int(is_league), int(complete), stats.holes_scored,
              nine, nine_net, json.dumps(players) if players else None, int(is_tournament),
-             *((physics or {}).get(k) for k in ("green_firmness", "fairway_firmness", "course_type", "launch_monitor"))),
+             *((physics or {}).get(k) for k in ("green_firmness", "fairway_firmness", "course_type", "launch_monitor")),
+             record if self.records.known(record) else None),
         )
+        if self.records.known(record):   # (its players' slots learn their side)
+            for name in players or []:
+                if slot := self.records.slot(record, name):
+                    self.db.execute("UPDATE round_slots SET side = ? WHERE slot_id = ?", (side, slot))
         self.db.commit()
         return cur.lastrowid
 
@@ -1922,7 +2099,8 @@ class Store:
 
     def record_player_round(self, *, player: str, course: str | None, fmt: str | None, stats,
                             hole_number, hole_pars=None, is_league: bool = True, complete: bool = True,
-                            nine_to_par: int | None = None, is_tournament: bool = False) -> None:
+                            nine_to_par: int | None = None, is_tournament: bool = False,
+                            record: str | None = None) -> None:
         """One individual player's round for per-player season stats: FIR/GIR/scrambling/sand-save
         counts, putts, and the per-hole scores and pars (keyed by real hole number, like record_round)
         for the scores-vs-par stats. Scrambling/sand and the hole-score stats are only meaningful in an
@@ -1935,12 +2113,14 @@ class Store:
         self.db.execute(
             """INSERT INTO player_rounds (session_id, ended_at, player, course, fmt, fir_hit, fir_tries,
                    gir_hit, gir_tries, scramble_hit, scramble_tries, sand_hit, sand_tries,
-                   putts, putt_holes, scores, hole_pars, is_league, complete, holes_played, nine_to_par, is_tournament)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   putts, putt_holes, scores, hole_pars, is_league, complete, holes_played, nine_to_par, is_tournament,
+                   round_uuid, slot_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (self.session_id, time.time(), player, self.course_name(course), fmt,
              *stats.fir, *stats.gir, *stats.scramble, *stats.sand,
              stats.putts if stats.putt_holes else None, stats.putt_holes, scores_json, pars_json, int(is_league),
-             int(complete), stats.holes_scored, None if complete else nine_to_par, int(is_tournament)),
+             int(complete), stats.holes_scored, None if complete else nine_to_par, int(is_tournament),
+             *((record, self.records.slot(record, player)) if self.records.known(record) else (None, None))),
         )
         self.db.commit()
 

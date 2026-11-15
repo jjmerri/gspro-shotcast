@@ -9,6 +9,7 @@ import difflib
 import itertools
 import logging
 import re
+import uuid
 from dataclasses import dataclass, field
 
 from . import handicap
@@ -126,6 +127,7 @@ class Round:
         slot_names: list[str] | None = None,
     ) -> None:
         self.id = next(Round._ids)
+        self.uuid = str(uuid.uuid4())   # its record in season.db (round_record), written as it starts
         self.league = league
         self.course = course
         # GSPro's setup-screen slots in order (every named slot, league player or not), captured only

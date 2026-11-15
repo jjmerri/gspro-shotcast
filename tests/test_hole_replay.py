@@ -224,6 +224,11 @@ def test_each_swing_finishes_sideways_of_the_line_it_was_aimed_down(tmp_path):
     st.db.execute("UPDATE shots SET to_pin_yards = 260 WHERE id = ?", (ids[1],))
     st.db.commit()
     assert ids[1] not in finish_laterals(st.db)
+    # `since`: only the rounds with a night from then on.
+    night = st.db.execute("SELECT date FROM sessions WHERE id = (SELECT session_id FROM shots WHERE id = ?)",
+                          (ids[0],)).fetchone()[0]
+    assert finish_laterals(st.db, night) == finish_laterals(st.db) and ids[0] in finish_laterals(st.db, night)
+    assert finish_laterals(st.db, "9999-12-31") == {}
 
 
 def test_a_scramble_draws_only_the_ball_the_team_played_on(tmp_path):

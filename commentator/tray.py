@@ -22,7 +22,7 @@ from collections import deque
 from pathlib import Path
 
 from . import changelog
-from .config import ROUND_STATUS, ROUND_STATUS_EVERY_S
+from .config import BOOTH_NOTE, BOOTH_STOP_CODE, BOOTH_STOPPED, ROUND_STATUS, ROUND_STATUS_EVERY_S
 from .settings_files import env_value, set_commentary, set_env, set_yaml
 
 log = logging.getLogger(__name__)
@@ -314,6 +314,8 @@ class Booth:
         self._wanted = False
         # The booth writes this once it's up (its startup checks done): until then it's "starting".
         self.ready_file = home / "logs" / "booth-ready"
+        self.note = None          # what a starting booth is doing that takes a while, or why it stopped
+        self._told = None         # the note last given by `news`
         self._started_at = 0.0
         self._announce = False   # say so when it's ready: started from here, not a crash's restart
 
@@ -328,10 +330,12 @@ class Booth:
         with self._lock:
             if self.proc is not None and self.proc.poll() is None:
                 return
-            try:
-                self.ready_file.unlink(missing_ok=True)
-            except OSError:
-                pass
+            for f in (self.ready_file, self._file(BOOTH_NOTE), self._file(BOOTH_STOPPED)):
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self.note = self._told = None
             err = open(self.home / "logs" / "booth-errors.log", "a", encoding="utf-8")
             try:
                 self.proc = self._popen([python_exe(), "-m", "commentator", "run"], cwd=self.home,
@@ -370,6 +374,9 @@ class Booth:
             if self.proc.poll() is None:
                 if self.state != "starting":
                     return False
+                if self.note is None and (note := self._read(BOOTH_NOTE)):
+                    self.note = note
+                    self.on_change()
                 if self.ready_file.exists():
                     self.state = "running"
                 elif self._clock() - self._started_at > STARTING_LIMIT_S:
@@ -384,9 +391,31 @@ class Booth:
         self.on_change()
         return announce
 
+    def _file(self, name: str) -> Path:
+        return self.ready_file.with_name(name)
+
+    def _read(self, name: str) -> str | None:
+        try:
+            return self._file(name).read_text(encoding="utf-8").strip() or None
+        except OSError:
+            return None
+
+    def news(self) -> str | None:
+        """A note from the booth not given yet (to show as a notification), else None."""
+        with self._lock:
+            if self.note == self._told:
+                return None
+            self._told = self.note
+            return self.note
+
     def _restart_crashed(self) -> None:
         with self._lock:
             code = self.proc.returncode
+            if code == BOOTH_STOP_CODE:   # starting it again won't help: it says why, if it could write it
+                stopped = self._read(BOOTH_STOPPED) or "The booth didn't start: see Open logs"
+                log.error("The booth stopped (exit code %s): %s", code, stopped)
+                self.proc, self.state, self.note, self._wanted = None, "crashed", stopped, False
+                return
             now = self._clock()
             self.crashes.append(now)
             while self.crashes and now - self.crashes[0] > RESTART_WINDOW_S:
@@ -500,11 +529,11 @@ class Tray:
         if s == "other":
             return "Another booth is running"
         if s == "crashed":
-            return "The booth keeps stopping: see Open logs"
+            return self.booth.note or "The booth keeps stopping: see Open logs"
         if s == "stopped":
             return "Stopped"
         if s == "starting":
-            return "Starting the booth\u2026"
+            return self.booth.note or "Starting the booth\u2026"
         issues = health_issues(self.cfg.log_dir)
         mode = "Commentary on" if self._commentary_on() else "Recording shots"
         return f"{mode} \u00b7 {len(issues)} warning{'s' * (len(issues) != 1)}" if issues else f"{mode} \u00b7 all good"
@@ -1163,7 +1192,7 @@ class Tray:
                 return []
             return [r for r in recs if isinstance(r, dict)] if isinstance(recs, list) else []
         hooks = {"on_change": publisher.changed, "publish_status": publisher.status, "video_deleted": video_deleted,
-                 "bucket_videos": bucket_videos}
+                 "bucket_videos": bucket_videos, "build_in_background": True}   # (the booth starts meanwhile)
         try:
             server = make_server(db, STATS_PORT, names, site, brand, videos, **hooks)
         except OSError:
@@ -1180,6 +1209,8 @@ class Tray:
         while not self._stop.wait(1 if self.booth.state == "starting" else 3):
             if self.booth.poll() and notifies_when_ready():
                 self.notify(self._ready_notice())
+            if news := self.booth.news():
+                self.notify(news[:250])
             now = (self.booth.state, self._light(), self.status())
             if now != last:
                 last = now

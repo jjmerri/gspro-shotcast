@@ -19,11 +19,13 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from . import stats_cache
 from .config import Config
 
 log = logging.getLogger(__name__)
@@ -86,10 +88,17 @@ def keep(names: list[str], daily: int = 14, weekly: int = 4) -> set[str]:
     return kept
 
 
-def _snapshot(db_path: Path, out: Path) -> None:
+def _snapshot(db_path: Path, out: Path, check: bool = True) -> None:
     with closing(sqlite3.connect(db_path)) as src, closing(sqlite3.connect(out)) as dst:
         src.backup(dst)
-        ok = dst.execute("PRAGMA integrity_check").fetchone()[0]
+        dst.execute("PRAGMA journal_mode = DELETE")   # one file, as it was before the season file used WAL
+    if check:
+        _check(out)
+
+
+def _check(path: Path) -> None:
+    with closing(sqlite3.connect(path)) as db:
+        ok = db.execute("PRAGMA integrity_check").fetchone()[0]
     if ok != "ok":
         raise RuntimeError(f"the copy failed its integrity check: {ok}")
 
@@ -145,23 +154,87 @@ def pre_update(cfg: Config, version: str, now: datetime | None = None) -> Path |
     """A copy of the season file as it was before an update (taken with the booth stopped), named apart
     from the daily/weekly copies so the new version's first copy, after any change it makes to the
     file, can't prune it. The newest PRE_UPDATE_KEPT are kept. None if there's no database yet."""
-    db_path, dest = Path(cfg.db_path), folder(cfg)
+    db_path = Path(cfg.db_path)
     if not db_path.exists():
         return None
+    return _copy_before(db_path, folder(cfg), version, now)
+
+
+def before_upgrade(db_path: str | Path, dest: str | Path, version: int, now: datetime | None = None,
+                   on_copy: Callable[[], None] | None = None, later: bool = False) -> Path | None:
+    """A pre-update copy of a season file whose format (PRAGMA user_version) is older than `version`,
+    taken before the store upgrades it, so a release installed by hand can be gone back on like one
+    installed from the menu (pre_update). None when there's nothing to keep: no season yet, or the
+    file already upgraded. (After an update from the menu that's a second copy: one of another season
+    file sharing the folder can't be told from it without copying this one anyway.) `on_copy` is called
+    first when there's a copy to take (it takes a while on a big file). `later`: only the copy is taken
+    now (seconds on a big file); it's checked and compressed in the background, and kept as it is
+    (the .db returned) if that fails or is cut short.
+
+    The format is read off the file's header, not through SQLite: a file in WAL mode with no -shm
+    beside it (as the booth leaves it) can't be opened read-only, and one in an older format was never
+    in WAL mode, so its header is up to date."""
+    db_path, dest = Path(db_path), Path(dest)
+    if not db_path.is_file():
+        return None
+    with open(db_path, "rb") as fh:
+        head = fh.read(100)
+    if len(head) < 100 or not head.startswith(b"SQLite format 3\0"):
+        return None   # no season yet (an empty file), or not a database: SQLite says so when it's opened
+    was = int.from_bytes(head[60:64], "big", signed=True)
+    if was >= version:
+        return None
+    if on_copy:
+        on_copy()
+    return _copy_before(db_path, dest, f"format-{was}", now, later)
+
+
+def _copy_before(db_path: Path, dest: Path, label: str, now: datetime | None, later: bool = False) -> Path:
     dest.mkdir(parents=True, exist_ok=True)
-    safe = "".join(c if c.isalnum() or c in ".-_" else "_" for c in version)
-    name = f"{PRE_UPDATE}{(now or datetime.now()).strftime(STAMP)}-from-{safe}{SUFFIX}"
+    safe = "".join(c if c.isalnum() or c in ".-_" else "_" for c in label)
+    raw = dest / f"{PRE_UPDATE}{(now or datetime.now()).strftime(STAMP)}-from-{safe}.db"
     with tempfile.TemporaryDirectory(dir=dest) as tmp:
-        raw = Path(tmp) / "season.db"
-        _snapshot(db_path, raw)
-        part = Path(tmp) / name
+        _snapshot(db_path, Path(tmp) / raw.name, check=not later)
+        os.replace(Path(tmp) / raw.name, raw)
+    if not later:
+        return _finish_copy(raw, check=False)   # (checked before it was moved in)
+    threading.Thread(target=_finish_copy_logged, args=(raw,), name="pre-update-copy").start()
+    return raw
+
+
+def _finish_copy(raw: Path, check: bool = True) -> Path:
+    """Compress a pre-update copy (checking it first if `check`) in place of it, and prune old ones."""
+    if check:
+        _check(raw)
+    done = raw.with_name(raw.name + ".gz")
+    with tempfile.TemporaryDirectory(dir=raw.parent) as tmp:
+        part = Path(tmp) / done.name
         with open(raw, "rb") as fin, gzip.open(part, "wb", compresslevel=6) as fout:
             shutil.copyfileobj(fin, fout, 1 << 20)
-        os.replace(part, dest / name)
-    olds = sorted(dest.glob(f"{PRE_UPDATE}*{SUFFIX}"), reverse=True)   # by their stamp
-    for old in olds[PRE_UPDATE_KEPT:]:
-        old.unlink(missing_ok=True)
-    return dest / name
+        os.replace(part, done)
+    raw.unlink()
+    _prune_pre_updates(raw.parent)
+    return done
+
+
+def _finish_copy_logged(raw: Path) -> None:
+    try:
+        log.info("Season file copy checked and compressed: %s", _finish_copy(raw))
+    except Exception:
+        log.exception("Season file copy %s kept as it is: it couldn't be checked or compressed", raw)
+        _prune_pre_updates(raw.parent)
+
+
+def _prune_pre_updates(dest: Path) -> None:
+    """Keep the newest PRE_UPDATE_KEPT pre-update copies, each either compressed or (one whose check or
+    compression didn't finish) as it was copied."""
+    copies: dict[str, list[Path]] = {}
+    for p in dest.glob(f"{PRE_UPDATE}*"):
+        if p.name.endswith((".db", SUFFIX)):
+            copies.setdefault(p.name.removesuffix(".gz"), []).append(p)
+    for old in sorted(copies, reverse=True)[PRE_UPDATE_KEPT:]:   # by their stamp
+        for p in copies[old]:
+            p.unlink(missing_ok=True)
 
 
 def upload(path: Path, bucket: str, prefix: str = "backups/", daily: int = 14, weekly: int = 4,
@@ -182,10 +255,28 @@ def upload(path: Path, bucket: str, prefix: str = "backups/", daily: int = 14, w
         client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in stale[chunk:chunk + 1000]]})
 
 
+def _with_its_log(db_path: Path, out: Path) -> Path | None:
+    """The file with what's still in its WAL log beside it (after a crash, the last shots may be only
+    there), read through SQLite without changing it; None if there's no log or it can't be read that
+    way (a corrupted file is then kept byte for byte)."""
+    wal = db_path.with_name(db_path.name + "-wal")
+    if not wal.exists() or wal.stat().st_size == 0:
+        return None
+    try:
+        with closing(sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)) as src, \
+                closing(sqlite3.connect(out)) as copy:
+            src.backup(copy)
+            copy.execute("PRAGMA journal_mode = DELETE")
+        return out
+    except sqlite3.Error as e:
+        log.warning("kept %s as it is, without its log: %s", db_path.name, e)
+        return None
+
+
 def restore(backup: str | Path, db_path: str | Path, dest: str | Path) -> Path | None:
     """Put a backup back as the database. The restored copy is checked before it replaces anything, and
-    the current file is kept as dest/pre-restore-*.db.gz (returned), copied byte for byte so a corrupted
-    one is kept too, and never pruned. Stop the booth first."""
+    the current file is kept as dest/pre-restore-*.db.gz (returned), with what's still in its WAL log,
+    or copied byte for byte so a corrupted one is kept too, and never pruned. Stop the booth first."""
     backup, db_path, dest = Path(backup), Path(db_path), Path(dest)
     stamp = datetime.now().strftime(STAMP)
     with tempfile.TemporaryDirectory(dir=db_path.parent) as tmp:
@@ -206,7 +297,8 @@ def restore(backup: str | Path, db_path: str | Path, dest: str | Path) -> Path |
         if db_path.exists():
             dest.mkdir(parents=True, exist_ok=True)
             saved = dest / f"pre-restore-{stamp}.db.gz"
-            with open(db_path, "rb") as fin, gzip.open(saved, "wb", compresslevel=6) as fout:
+            current = _with_its_log(db_path, Path(tmp) / "current.db") or db_path
+            with open(current, "rb") as fin, gzip.open(saved, "wb", compresslevel=6) as fout:
                 shutil.copyfileobj(fin, fout, 1 << 20)
         # A leftover journal belongs to the old file: SQLite would replay it into the restored one.
         moved: list[tuple[Path, Path]] = []
@@ -222,4 +314,5 @@ def restore(backup: str | Path, db_path: str | Path, dest: str | Path) -> Path |
             for aside, extra in reversed(moved):   # the old file still needs its journal to recover
                 os.replace(aside, extra)
             raise
+    stats_cache.forget(db_path)   # (stats kept for the file replaced)
     return saved

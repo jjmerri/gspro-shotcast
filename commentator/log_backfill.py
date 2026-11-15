@@ -11,9 +11,9 @@ have no position yet are filled, so running it again, or over overlapping logs, 
 from __future__ import annotations
 
 import re
-import shutil
 import sqlite3
 import tempfile
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -133,7 +133,10 @@ def backfill(db_path: str, logs: list[str], dry_run: bool = False, fix_starts: b
     where the previous player's ball stopped."""
     if dry_run:
         with tempfile.TemporaryDirectory() as tmp:
-            copy = shutil.copy(db_path, Path(tmp) / "season.db")
+            copy = Path(tmp) / "season.db"
+            # through SQLite: in WAL mode the latest writes may be in the log beside the file
+            with closing(sqlite3.connect(db_path)) as src, closing(sqlite3.connect(copy)) as dst:
+                src.backup(dst)
             return _backfill(str(copy), logs, fix_starts)
     return _backfill(db_path, logs, fix_starts)
 

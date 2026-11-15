@@ -1830,6 +1830,74 @@ def _backdate(store, date="2000-01-01"):
     store.db.commit()
 
 
+def test_booth_lookups_during_play_do_not_scan_history(tmp_path):
+    """Every query a shot runs (recording it, its lines and result, and the booth's lookups) finds its
+    rows by an index: a full scan of shots or lines grows with every season played."""
+    from commentator.models import Line
+    from commentator.store import Store
+
+    st = Store(str(tmp_path / "season.db"))
+
+    def rec(n, club="DR"):
+        return st.record_shot(player="Mike", hole="Hole 1, par 4, 400 yards", shot=Shot(club=club, carry=200.0),
+                              before=Hud(lie="tee", shot_number=n), after=Hud(lie="fairway"), tags=[],
+                              carry_game_yards=200.0, total_yards=210.0, offline_yards=1.0, course="Pebble")
+
+    first = rec(1)
+    seen: list[str] = []
+    st.db.set_trace_callback(seen.append)
+    putt = rec(2, "PT")
+    st.record_lines("shot", [Line("pbp", "Lovely.")], putt)
+    st.set_shot_result(putt, outcome="holed")
+    st.shot_struck_before(time.time() + 60, 600)
+    st.shot_struck_after(0, 600)
+    st.shot_brief(first)
+    st.course_name("PEBBLE")   # a round's course, as each round is saved and as the booth recalls a hole
+    st.db.set_trace_callback(None)
+    scans = []
+    for sql in seen:
+        if re.match(r"\s*(SELECT|UPDATE|DELETE|WITH)\b", sql, re.I):
+            plan = [r[3] for r in st.db.execute("EXPLAIN QUERY PLAN " + sql)]
+            scans += [(p, " ".join(sql.split())) for p in plan if re.match(r"SCAN (shots|lines)\b", p)]
+    assert len(seen) > 10 and scans == []
+    st.close()
+
+
+def test_store_counts_the_season_again_for_the_planner_once_it_has_outgrown_the_last_count(tmp_path):
+    import sqlite3
+
+    from commentator.store import Store
+
+    path = str(tmp_path / "season.db")
+
+    def add_lines(db, n):
+        db.executemany("INSERT INTO lines (session_id, shot_id, ts, kind, speaker, text) VALUES (1, ?, 0, 'shot', 'a', 'x')",
+                       [(i // 3,) for i in range(n)])
+        db.commit()
+
+    def plan(db):
+        sql = f"SELECT text FROM lines WHERE shot_id IN ({','.join('?' * 500)}) ORDER BY ts, id"
+        return [r[3] for r in db.execute("EXPLAIN QUERY PLAN " + sql, list(range(500)))]
+
+    st = Store(path)
+    add_lines(st.db, 1500)
+    st.close()
+    Store(path).close()                # counted at 1,500
+    with sqlite3.connect(path) as db:
+        add_lines(db, 12000)           # a few seasons later
+        assert any(p.startswith("SCAN lines") for p in plan(db))   # planned as if it were still small
+    Store(path).close()
+    with sqlite3.connect(path) as db:
+        assert any(p.startswith("SEARCH lines USING INDEX lines_shot") for p in plan(db))
+        counted = db.execute("SELECT MAX(CAST(stat AS INTEGER)) FROM sqlite_stat1 WHERE tbl = 'lines'").fetchone()[0]
+    assert counted == 13500
+    with sqlite3.connect(path) as db:
+        add_lines(db, 100)
+    Store(path).close()                # not again till it's grown that much more
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT MAX(CAST(stat AS INTEGER)) FROM sqlite_stat1 WHERE tbl = 'lines'").fetchone()[0] == 13500
+
+
 def test_store_keeps_the_season(tmp_path):
     from commentator.models import Line
     from commentator.store import Store
@@ -1881,6 +1949,50 @@ def test_store_keeps_club_delivery_and_backfills_older_files(tmp_path):
     st.close()
     reopened = Store(db)
     assert [tuple(r) for r in reopened.db.execute(f"SELECT {cols} FROM shots ORDER BY id")] == expected
+
+
+def test_the_startup_finish_backfill_rereads_only_the_round_records_changed_since_it_last_ran(tmp_path):
+    from commentator.store import Store
+
+    db = str(tmp_path / "season.db")
+    for night in range(2):
+        st = Store(db)
+        st.record_shot(player="Mike", hole="Hole 1", shot=Shot(club="7I", carry=150.0), before=Hud(lie="fairway"),
+                       after=Hud(lie="green"), tags=[], carry_game_yards=150.0, total_yards=155.0, offline_yards=1.0)
+        st.close()
+    st = Store(db, new_session=False)
+    (old, new), = [st.db.execute("SELECT min(session_id), max(session_id) FROM shots").fetchone()]
+    assert old != new and st.db.execute("SELECT count(*) FROM round_records WHERE finishes_gen IS NOT gen").fetchone()[0] == 0
+    # A holed-out full shot with no finish in each night; the newer night's record is noted as checked.
+    st.db.execute("UPDATE shots SET outcome = 'holed', finish_yards = NULL")
+    st.db.execute("UPDATE round_records SET finishes_gen = gen WHERE uuid IN"
+                  " (SELECT record_uuid FROM shots WHERE session_id = ?)", (new,))
+    st.db.commit()
+    st.close()
+    st = Store(db, new_session=False)
+    got = dict(st.db.execute("SELECT session_id, finish_yards FROM shots").fetchall())
+    assert got == {old: 0.0, new: None}   # the older night's edit is filled; the noted record isn't reread
+    assert st.db.execute("SELECT count(*) FROM round_records WHERE finishes_gen IS NOT gen").fetchone()[0] == 0
+    # A shot deleted from a night is noted against the night, not only its record (which may go with it).
+    st.close()
+    st = Store(db)
+    for hole in ("Hole 1", "Hole 2"):
+        st.record_shot(player="Mike", hole=hole, shot=Shot(club="7I", carry=150.0), before=Hud(lie="fairway"),
+                       after=Hud(lie="green"), tags=[], carry_game_yards=150.0, total_yards=155.0, offline_yards=1.0)
+    third = st.db.execute("SELECT max(session_id) FROM shots").fetchone()[0]
+    st.db.execute("UPDATE shots SET outcome = 'holed', finish_yards = NULL")
+    st.db.execute("INSERT INTO round_records (uuid, kind, session_id, state, assigned) VALUES"
+                  " ('alone', 'round', ?, 'finished', 'inferred')", (third,))
+    st.db.execute("UPDATE shots SET record_uuid = 'alone' WHERE id = (SELECT max(id) FROM shots)")
+    st.db.execute("UPDATE round_records SET finishes_gen = gen")
+    st.db.execute("DELETE FROM shots WHERE id = (SELECT max(id) FROM shots)")   # its record's only shot
+    st.db.commit()
+    st.close()
+    st = Store(db, new_session=False)
+    got = dict(st.db.execute("SELECT session_id, finish_yards FROM shots").fetchall())
+    assert got == {old: None, new: None, third: 0.0}
+    assert st.db.execute("SELECT count(*) FROM finish_recheck").fetchone()[0] == 0
+    st.close()
 
 
 def test_driving_records_count_only_tee_shots(tmp_path):
@@ -2734,6 +2846,15 @@ async def test_lines_from_earlier_weeks_are_not_repeated(tmp_path):
          Line("pbp", "A fresh line about a lovely strike.")], "Player: Tony")
     assert [l.text for l in good] == ["A fresh line about a lovely strike."]
     assert "already said this season" in problems[0]
+
+    old = Store(db, new_session=False)   # over a year ago: it can be said again
+    old.db.execute("UPDATE lines SET ts = ts - ? * 86400", (Engine.PHRASE_MEMORY_DAYS + 1,))
+    old.db.commit()
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, store=Store(db))
+    good, problems = engine._grounded(
+        [Line("color", "Well, that is the kind of swing that buys the first round, Nigel.")], "Player: Tony")
+    assert len(good) == 1 and not problems
 
 
 async def test_a_valid_line_survives_a_siblings_rejection(tmp_path):

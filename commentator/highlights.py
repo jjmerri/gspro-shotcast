@@ -23,7 +23,9 @@ import time
 from typing import Any
 
 from . import interest as I
+from . import night_totals
 from .live_stream import SHOT_SHOWS, TYPES, segment_durations
+from .round_record import round_shots
 
 MAX_MOMENTS = 8
 REEL_SECONDS = 180.0      # ...and no more than fit in this long a reel (each clip: PRE, its post, and
@@ -236,19 +238,25 @@ def _bests(shots: list[dict], before: dict[str, dict]) -> tuple[set[int], dict[i
     return out, near
 
 
-def _talk(db: sqlite3.Connection, shots: list[dict]) -> tuple:
+def _talk(db: sqlite3.Connection, shots: list[dict], sessions: list | None = None,
+          ts_of: dict[int, float] | None = None) -> tuple:
     """(session -> every line's (started, done, the time of the shot it's about: its call, a reaction
     or flight line, or None); session -> its swings' times; session -> its gimmes' times (each
     logged as the ball before it stopped)), in logged time. A line the booth noted
     the air time of is placed by that (and in a session with any, one without never aired: an
-    interrupted exchange's rest); others by their words, after the exchange before."""
+    interrupted exchange's rest); others by their words, after the exchange before. Each session's are
+    worked out on their own: with `sessions`, just theirs (`shots`: at least those sessions' shots;
+    `ts_of`: the times of the shots their lines are on, if those aren't all in `shots`)."""
+    where, args = "", []
+    if sessions is not None:
+        where, args = f" WHERE session_id IN ({','.join('?' * len(sessions))})", list(sessions)
     try:
         rows = db.execute("SELECT session_id, shot_id, ts, kind, text, aired_at, aired_seconds FROM lines"
-                          " ORDER BY ts, id").fetchall()
+                          f"{where} ORDER BY ts, id", args).fetchall()
     except sqlite3.OperationalError:
         try:
             rows = [(*r, None, None) for r in db.execute(
-                "SELECT session_id, shot_id, ts, kind, text FROM lines ORDER BY ts, id")]
+                f"SELECT session_id, shot_id, ts, kind, text FROM lines{where} ORDER BY ts, id", args)]
         except sqlite3.OperationalError:
             return ()   # (a database from before the booth logged its lines)
     noted = {r[0] for r in rows if r[5] is not None}
@@ -257,7 +265,7 @@ def _talk(db: sqlite3.Connection, shots: list[dict]) -> tuple:
     rests: dict[int, list[float]] = {}
     for s in shots:   # (a gimme's never struck)
         (rests if s.get("outcome") == "gimme" else times).setdefault(s["session_id"], []).append(s["ts"])
-    ts_of = {s["id"]: s["ts"] for s in shots}
+    ts_of = {s["id"]: s["ts"] for s in shots} if ts_of is None else ts_of
     batches: dict[tuple[int, float], list] = {}   # an exchange's lines share the time they're logged
     for session, shot_id, ts, kind, text, aired_at, aired_seconds in rows:
         if session in noted and aired_at is None:
@@ -552,60 +560,205 @@ def _entry(m: dict) -> dict:
             "what": m["what"], "bad": m["bad"], "level": m["level"], "post": m["post"], "stop": m["stop"], "must": m["must"]}
 
 
+_LIGHT = ["id", "ts", "session_id", "player", "hole", "mulligan", "left_out", "lie_before", "is_putt",
+          "total_yards", "to_pin_yards", "outcome", "picked"]
+
+
+def _light(db: sqlite3.Connection, where: str) -> list[dict]:
+    """The shots (`where`: night_totals.Nights' limit, or ""), what a best reads of them, by time."""
+    have = {r[1] for r in db.execute("PRAGMA table_info(shots)")}
+    return [{**DEFAULTS, **dict(zip(_LIGHT, r))} for r in db.execute(
+        f"SELECT {', '.join(c if c in have else 'NULL' for c in _LIGHT)} FROM shots WHERE 1 = 1{where} ORDER BY ts, id")]
+
+
+def _add_best(running: dict[str, dict], s: dict) -> None:
+    """Count a shot in its player's bests (player -> {"drive"/"putt": [most, count]}), if it's one."""
+    if s["mulligan"] or s["left_out"] or not s["player"]:
+        return
+    for kind, test, val in (("drive", _is_drive, "total_yards"), ("putt", _is_holed_putt, "to_pin_yards")):
+        if test(s):
+            b = running.setdefault(s["player"], {}).setdefault(kind, [0.0, 0])
+            b[0], b[1] = max(b[0], s[val]), b[1] + 1
+
+
+def _merge_bests(into: dict[str, list], part: dict[str, list]) -> None:
+    """Add bests counted later (`part`) to `into` (kind -> [most, count])."""
+    for kind, (most, n) in part.items():
+        b = into.setdefault(kind, [0.0, 0])
+        b[0], b[1] = max(b[0], most), b[1] + n
+
+
+def _as_bests(b: dict[str, list]) -> dict[str, tuple]:
+    return {k: tuple(b[k]) for k in sorted(b)}
+
+
+def _collect_bests(db: sqlite3.Connection, ns: "night_totals.Nights") -> dict[str, dict]:
+    """Per night: the first and last of its shots ([ts, id]), each player's bests over its shots, and,
+    for each round whose first shot is that night's, its players' bests that night before it."""
+    starts: dict[int, list[int]] = {}
+    digests = round_shots(db)
+    for rnd, d in digests.items():
+        if d["start"] is not None:
+            starts.setdefault(d["start"][1], []).append(rnd)
+    parts = {d: {"lo": None, "hi": None, "totals": {}, "rounds": {}} for d in ns.dates}
+    for s in _light(db, ns.where):
+        night = parts[ns.date[s["session_id"]]]
+        key = [s["ts"], s["id"]]
+        night["lo"] = night["lo"] or key
+        night["hi"] = key
+        for rnd in starts.get(s["id"], ()):
+            night["rounds"][rnd] = {p: _as_bests(night["totals"][p]) for p in digests[rnd]["players"]
+                                    if p in night["totals"]}
+        _add_best(night["totals"], s)
+    return parts
+
+
+def _bests_before(db: sqlite3.Connection, in_round: dict[int, set]) -> dict[int, dict] | None:
+    """Each round's players' bests before its first shot, from each night's (_collect_bests, kept per
+    night): the nights before it, then its own night's before it. None if nights' shots interleave
+    in time (one night's shots don't all come before the next's), when that doesn't add up."""
+    nights = night_totals.per_night(db, "reel_bests", lambda ns: _collect_bests(db, ns), tally=False)
+    hi = None
+    for night in nights.values():
+        if night["lo"] is not None:
+            if hi is not None and not list(hi) < list(night["lo"]):
+                return None
+            hi = night["hi"]
+    out: dict[int, dict] = {}
+    running: dict[str, dict] = {}
+    for night in nights.values():
+        for rnd, own in night["rounds"].items():
+            got = {}
+            for p in in_round.get(rnd, ()):
+                if p in running or p in own:
+                    b = {k: list(v) for k, v in running.get(p, {}).items()}
+                    _merge_bests(b, own.get(p, {}))
+                    got[p] = _as_bests(b)
+            out[rnd] = got
+        for p, part in night["totals"].items():
+            _merge_bests(running.setdefault(p, {}), part)
+    return out
+
+
 def rounds(db: sqlite3.Connection) -> dict[int, dict]:
     """Every round's reel: round -> {label, date, league, ended, moments: [{id, ts, player, hole, what,
     bad, level, post, stop, must}]}, for rounds with two moments or more (`db`: stats_web.connect's);
-    a league round's also `finish` (finish()'s, the same shape), cut on its own for the week's recap."""
-    from .stats_web import _late_gimmes, round_groups, shot_rounds
+    a league round's also `finish` (finish()'s, the same shape), cut on its own for the week's recap.
+    Kept per round between builds (stats_cache): a reel is worked out again when its round changes, its
+    players' bests before it do, or anything in a session it was played in (what the booth said there
+    sets where its clips end)."""
+    from . import stats_cache
+    from .stats_web import _late_gimmes, recorded, round_groups, shot_rounds
 
     groups, of_row = round_groups(db)
     of_shot = shot_rounds(db)
-    by_round: dict[int, list[dict]] = {}
-    every = [dict(r) for r in db.execute("SELECT * FROM shots ORDER BY ts, id")]
-    for r in every:
-        if (g := of_shot.get(r["id"])) is not None:
-            by_round.setdefault(g, []).append(r)
-    # (a putt conceded after its round was recorded is that round's finish, though not in its reel)
-    late = {sid: g for sid, g in _late_gimmes(db, groups, {}).items() if sid not in of_shot or of_shot[sid] != g}
-    talk = _talk(db, every)
+    late_of = {sid: g for sid, g in _late_gimmes(db, groups, {}).items() if sid not in of_shot or of_shot[sid] != g}
+    # Each round's players' bests before it: every shot of theirs before its first, any round or none.
+    # (Only the round's own players are kept: _bests looks no one else up.)
+    in_round: dict[int, set] = {}
+    sessions: dict[int, set] = {}
+    before_round: dict[int, dict] | None = None
+    if recorded(db):
+        # From each round's digest (round_record.record_shots) and each night's bests (_night_bests).
+        digests = round_shots(db)
+        for rnd, d in digests.items():
+            if d["ids"]:
+                in_round[rnd] = set(d["players"])
+                sessions[rnd] = set(d["sessions"])
+        for g in groups:
+            for _, ts, ses in (d := digests.get(g["round"])) and d["gimmes_out"] or ():
+                if ts > g["end"]:
+                    sessions.setdefault(g["round"], set()).add(ses)
+        before_round = _bests_before(db, in_round)
+    if before_round is None:
+        in_round, sessions, before_round = {}, {}, {}
+        light = _light(db, "")
+        for s in light:
+            if (g := of_shot.get(s["id"])) is not None:
+                in_round.setdefault(g, set()).add(s["player"])
+            if (g := of_shot.get(s["id"], late_of.get(s["id"]))) is not None:
+                sessions.setdefault(g, set()).add(s["session_id"])
+        running: dict[str, dict] = {}
+        for s in light:
+            g = of_shot.get(s["id"])
+            if g is not None and g not in before_round:
+                before_round[g] = {p: _as_bests(running[p]) for p in in_round[g] if p in running}
+            _add_best(running, s)
     league, rows = set(), {}
     for r in db.execute("SELECT * FROM rounds"):
         league |= {of_row[r["id"]]} if "is_league" in r.keys() and r["is_league"] else set()
         rows.setdefault(of_row[r["id"]], []).append(r)
-    # Each round's players' bests before it: every shot of theirs before its first, any round or none.
-    before_round: dict[int, dict] = {}
-    running: dict[str, dict] = {}
-    for r in db.execute("SELECT * FROM shots ORDER BY ts, id"):
-        s = {**DEFAULTS, **dict(r)}
-        g = of_shot.get(s["id"])
-        if g is not None and g not in before_round:
-            before_round[g] = {p: {k: tuple(v) for k, v in b.items()} for p, b in running.items()}
-        if s["mulligan"] or s["left_out"] or not s["player"]:
-            continue
-        for kind, test, val in (("drive", _is_drive, "total_yards"), ("putt", _is_holed_putt, "to_pin_yards")):
-            if test(s):
-                b = running.setdefault(s["player"], {}).setdefault(kind, [0.0, 0])
-                b[0], b[1] = max(b[0], s[val]), b[1] + 1
-    out: dict[int, dict] = {}
-    for g in groups:
-        shots = by_round.get(g["round"], [])
-        sides = None
-        if len(rows.get(g["round"], [])) > 1:   # sides by the players each named (an older row: none)
-            sides = {n: i for i, r in enumerate(rows[g["round"]])
-                     for n in (_names(r["players"]) if "players" in r.keys() else None) or []}
-        moments = pick(shots, sides=sides, before=before_round.get(g["round"], {}), talk=talk)
-        if len(moments) < 2:
-            continue
-        players = list(dict.fromkeys(s["player"] for s in shots if s["player"] and s["player"] != "unknown"))
-        out[g["round"]] = {
-            "label": " · ".join(x for x in (g["course"], " & ".join(players)) if x),
-            "date": time.strftime("%Y-%m-%d", time.localtime(g["end"])), "ended": g["end"],
-            "league": g["round"] in league,
-            "moments": [_entry(m) for m in moments]}
-        ends = sorted(shots + [r for r in every if late.get(r["id"]) == g["round"]], key=lambda r: (r["ts"], r["id"]))
-        if g["round"] in league and (f := finish(ends, talk)):
-            out[g["round"]]["finish"] = _entry(f)
-    return out
+    by_number = {g["round"]: g for g in groups}
+
+    sigs = {g["round"]: "" for g in groups}
+    if stats_cache.of(db):
+        gens, records = stats_cache.record_sigs(db), stats_cache.row_records(db)
+        # A session's content: the records with rows in it, as they stand (a line on a shot in another
+        # session takes that one's too: the shot's time places the line).
+        # (the sessions of every row of each record: its shots and lines, and its cards too)
+        in_session: dict[Any, set] = {}
+        for u, sids in night_totals.record_sessions(db).items():
+            for ses in sids:
+                in_session.setdefault(ses, set()).add(u)
+        for ses, other in db.execute("SELECT DISTINCT l.session_id, s.record_uuid FROM main.lines l"
+                                     " JOIN main.shots s ON s.id = l.shot_id WHERE s.session_id IS NOT l.session_id"):
+            in_session.setdefault(ses, set()).add(other)
+        content = {ses: sorted((u or "", gens.get(u)) for u in us) for ses, us in in_session.items()}
+        sigs = {g["round"]: stats_cache.sig(g["round"], records.get(g["round"]), gens.get(records.get(g["round"])),
+                                            g["end"], g["course"], time.timezone, time.altzone,
+                                            sorted(before_round.get(g["round"], {}).items()),
+                                            [(s, content.get(s)) for s in sorted(sessions.get(g["round"], ()), key=str)])
+                for g in groups}
+
+    def compute(rnds: list) -> dict[int, dict | None]:
+        want = set(rnds)
+        if len(want) == len(groups):
+            every = [dict(r) for r in db.execute("SELECT * FROM shots ORDER BY ts, id")]
+            talk = _talk(db, every)
+        else:
+            ses = sorted({s for g in want for s in sessions.get(g, ())}, key=str)
+            every = []
+            for i in range(0, len(ses), 500):
+                chunk = ses[i:i + 500]
+                every += [dict(r) for r in db.execute(
+                    f"SELECT * FROM shots WHERE session_id IN ({','.join('?' * len(chunk))})", chunk)]
+            every.sort(key=lambda r: (r["ts"], r["id"]))
+            ts_of: dict[int, float] = {}
+            for i in range(0, len(ses), 500):
+                chunk = ses[i:i + 500]
+                ts_of.update(db.execute(f"SELECT s.id, s.ts FROM lines l JOIN shots s ON s.id = l.shot_id"
+                                        f" WHERE l.session_id IN ({','.join('?' * len(chunk))})", chunk))
+            talk = _talk(db, every, ses, ts_of) if ses else _talk(db, [], [])
+        by_round: dict[int, list[dict]] = {}
+        late: dict[int, list[dict]] = {}
+        for r in every:
+            if (g := of_shot.get(r["id"])) in want:
+                by_round.setdefault(g, []).append(r)
+            if (g := late_of.get(r["id"])) in want:
+                late.setdefault(g, []).append(r)
+        out: dict[int, dict | None] = {}
+        for number in rnds:
+            g = by_number[number]
+            shots = by_round.get(number, [])
+            sides = None
+            if len(rows.get(number, [])) > 1:   # sides by the players each named (an older row: none)
+                sides = {n: i for i, r in enumerate(rows[number])
+                         for n in (_names(r["players"]) if "players" in r.keys() else None) or []}
+            moments = pick(shots, sides=sides, before=before_round.get(number, {}), talk=talk)
+            if len(moments) < 2:
+                continue
+            players = list(dict.fromkeys(s["player"] for s in shots if s["player"] and s["player"] != "unknown"))
+            out[number] = {
+                "label": " · ".join(x for x in (g["course"], " & ".join(players)) if x),
+                "date": time.strftime("%Y-%m-%d", time.localtime(g["end"])), "ended": g["end"],
+                "league": number in league,
+                "moments": [_entry(m) for m in moments]}
+            ends = sorted(shots + late.get(number, []), key=lambda r: (r["ts"], r["id"]))
+            if number in league and (f := finish(ends, talk)):
+                out[number]["finish"] = _entry(f)
+        return out
+
+    return stats_cache.per_key(db, "reels", sigs, compute)
 
 
 def _get(client: Any, bucket: str, key: str) -> bytes | None:

@@ -358,37 +358,73 @@ async function getJSON(url, opts) {
 }
 
 // The site (stats_site.py): latest.json names the version; its summary-<context>.json holds the
-// season stats, and its stats.db the shots and transcripts, read a few pages at a time.
+// season stats, and its data files (latest.json's "data", one per year of play, newest first) the
+// shots, transcripts and hole replays, read a few pages at a time. A site from before data files has
+// one, v/<version>/stats.db.
 const LIB = "vendor/sql.js-httpvfs-0.8.12/";
-let site = null;   // { version, db }
-async function query(sql, args) {
+let site = null;   // { version, data }
+const siteOf = latest => ({ version: latest.version, data: latest.data || [{ file: `v/${latest.version}/stats.db` }] });
+const workers = new Map();   // a data file's URL -> its database: a file a new version keeps is read on
+
+// The data files a query can find rows in (`w`: a date, a from/to date range, a round, a shot id, a
+// session, a span of times [lo, hi], or any shots), newest first. A file's year and its ranges of each say; one
+// without them (a site from before data files) may hold anything, and a null range holds none.
+function pickFiles(data, w) {
+  const meets = (r, lo, hi) => r === undefined || (r !== null && r[0] <= hi && lo <= r[1]);
+  return data.filter(e => {
+    if (e.year !== undefined) {
+      if (w.date && w.date.slice(0, 4) !== e.year) return false;
+      if (w.from && e.year < w.from.slice(0, 4)) return false;
+      if (w.to && e.year > w.to.slice(0, 4)) return false;
+    }
+    if (w.shots && e.ids === null) return false;
+    if (w.round != null && !meets(e.rounds, w.round, w.round)) return false;
+    if (w.id != null && !meets(e.ids, w.id, w.id)) return false;
+    if (w.session != null && !meets(e.sessions, w.session, w.session)) return false;
+    if (w.ts && !meets(e.ts, w.ts[0], w.ts[1])) return false;
+    return true;
+  });
+}
+
+// `run(data)` over the site's data files. Open across a couple of publishes, a file it read may be
+// gone: then it's run once more over the newest version's (once, even when several fail together).
+async function onSite(run) {
   const tried = site;
   try {
-    return await runQuery(sql, args);
+    return await run(tried.data);
   } catch (e) {
-    // Open across a couple of publishes: this version's stats.db is gone, so move to the newest
-    // (once, even when several queries fail together).
     if (site === tried) {
       const latest = await getJSON("latest.json", { cache: "no-store" });
       if (latest.version === tried.version) throw e;
-      if (site === tried) site = { version: latest.version, db: null };
+      if (site === tried) site = siteOf(latest);
     }
-    return await runQuery(sql, args);
+    return await run(site.data);
   }
 }
 
-async function runQuery(sql, args) {
-  if (!site.db) {
-    const abs = (u) => new URL(u, location.href).toString();
-    site.db = createDbWorker([{ from: "inline", config: { serverMode: "full", url: abs(`v/${site.version}/stats.db`),
-                                                          requestChunkSize: 1024 } }],
+async function runQuery(file, sql, args) {
+  const abs = (u) => new URL(u, location.href).toString(), url = abs(file);
+  if (!workers.has(url)) {
+    const w = createDbWorker([{ from: "inline", config: { serverMode: "full", url, requestChunkSize: 1024 } }],
                              abs(LIB + "sqlite.worker.js"), abs(LIB + "sql-wasm.wasm"));
+    workers.set(url, w);
+    w.catch(() => { if (workers.get(url) === w) workers.delete(url); });   // tried again next time
   }
-  const w = await site.db;
+  const w = await workers.get(url);
   return w.db.query(sql, args);
 }
 
-// The same SQL as stats_site.shot_query: newest first, up to 500.
+// The first row any of the files `w` picks has for this query.
+const firstRow = (w, sql, args) => onSite(async data => {
+  for (const e of pickFiles(data, w)) {
+    const [row] = await runQuery(e.file, sql, args);
+    if (row) return row;
+  }
+  return undefined;
+});
+
+// The same SQL as stats_site.shot_query: newest first, up to 500. Each file's newest 500, merged in
+// order, from every file that could hold a shot newer than the 500th so far (a file's times say).
 const SHOT_FILTERS = ["date", "player", "course", "club", "lie", "round"];
 const SHOT_RANGE = { from: ">=", to: "<=" };
 async function queryShots(ctx, f) {
@@ -397,31 +433,57 @@ async function queryShots(ctx, f) {
   for (const key of SHOT_FILTERS) if (f[key]) { where.push(`s.${key} = ?`); args.push(key === "round" ? Number(f[key]) : f[key]); }
   for (const [key, op] of Object.entries(SHOT_RANGE)) if (f[key]) { where.push(`s.date ${op} ?`); args.push(f[key]); }
   const sql = "SELECT j.json FROM pub_shot s JOIN pub_shot_json j ON j.ord = s.ord"
-    + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY s.ord LIMIT 500";
-  return (await query(sql, args)).map(r => JSON.parse(r.json));
+    + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY s.ord LIMIT ";
+  const w = { shots: true, date: f.date, from: f.from, to: f.to, round: f.round ? Number(f.round) : null };
+  return onSite(async data => {
+    let out = [];
+    for (const e of pickFiles(data, w)) {
+      if (out.length >= 500 && e.ts && e.ts[1] < out[499].ts) continue;
+      for (const r of await runQuery(e.file, sql + 500, args)) out.push(JSON.parse(r.json));
+      out = out.sort((a, b) => b.ts - a.ts || b.id - a.id).slice(0, 500);
+    }
+    return out;
+  });
 }
 
-// A round's hole replays (hole_replay.py), by hole number. A site built before replays has no table.
+// A round's hole replays (hole_replay.py), by hole number, and their minimaps, from the file that has
+// them. A site built before replays has no table.
 async function loadReplays(round) {
   state.replays[round] = "loading";
   let got = {};
   try {
-    for (const r of await query("SELECT hole, json FROM pub_replay WHERE round = ?", [Number(round)])) got[r.hole] = JSON.parse(r.json);
-    const ids = [...new Set(Object.values(got).filter(rp => rp.map).map(rp => rp.map.id))];
-    if (ids.length) {
-      const src = {};
-      for (const r of await query(`SELECT id, src FROM pub_hole_image WHERE id IN (${ids.map(() => "?").join(",")})`, ids)) src[r.id] = r.src;
-      for (const rp of Object.values(got)) if (rp.map) { if (src[rp.map.id]) rp.map.src = src[rp.map.id]; else delete rp.map; }
-    }
+    got = await onSite(async data => {
+      for (const e of pickFiles(data, { round: Number(round) })) {
+        const got = {};
+        for (const r of await runQuery(e.file, "SELECT hole, json FROM pub_replay WHERE round = ?", [Number(round)])) got[r.hole] = JSON.parse(r.json);
+        if (!Object.keys(got).length) continue;
+        const ids = [...new Set(Object.values(got).filter(rp => rp.map).map(rp => rp.map.id))];
+        if (ids.length) {
+          const src = {};
+          for (const r of await runQuery(e.file, `SELECT id, src FROM pub_hole_image WHERE id IN (${ids.map(() => "?").join(",")})`, ids)) src[r.id] = r.src;
+          for (const rp of Object.values(got)) if (rp.map) { if (src[rp.map.id]) rp.map.src = src[rp.map.id]; else delete rp.map; }
+        }
+        return got;
+      }
+      return {};
+    });
   } catch (e) { got = {}; }
   state.replays[round] = got;
   render();
 }
 
 async function queryTranscript(id) {
-  const rows = await query("SELECT json FROM pub_transcript WHERE session_id = ?", [Number(id)]);
-  return rows.length ? JSON.parse(rows[0].json) : [];
+  const row = await firstRow({ session: Number(id) }, "SELECT json FROM pub_transcript WHERE session_id = ?", [Number(id)]);
+  return row ? JSON.parse(row.json) : [];
 }
+
+// Every swing's time between lo and hi, in order, from the files with times then.
+const queryShotTimes = (lo, hi) => onSite(async data => {
+  const out = [];
+  for (const e of pickFiles(data, { ts: [lo, hi] }))
+    for (const r of await runQuery(e.file, "SELECT ts FROM pub_shot_ts WHERE ts BETWEEN ? AND ? ORDER BY ts", [lo, hi])) out.push(r.ts);
+  return out.sort((a, b) => a - b);
+});
 
 let loading = 0;   // only the latest load() may show its data (a slow older one can finish last)
 // The booth's own page: an edit goes up to the published site a minute after the last one (the tray's
@@ -456,7 +518,7 @@ async function load() {
     if (mine !== loading) return;
     state.local = !!latest.local;   // served by the booth's own stats server, which can leave shots out
     if (state.local && !pubPoll) pubWatch();
-    if (!site || site.version !== latest.version) { site = { version: latest.version, db: null }; state.transcriptFor = null; state.replays = {}; }
+    if (!site || site.version !== latest.version) { site = siteOf(latest); state.transcriptFor = null; state.replays = {}; }
     const body = await getJSON(`v/${site.version}/summary-${state.ctx || "all"}.json`);
     if (mine !== loading) return;
     state.data = body;
@@ -1066,7 +1128,7 @@ function sgBars(sg) {
 
 function gapChart(clubs) {
   const cs = clubs.filter(c => c.carry);
-  if (!cs.length) return '<p class="empty">No launch-monitor carries yet.</p>';
+  if (!cs.length) return '<p class="empty">No launch-monitor carries in the last 12 months.</p>';
   const max = Math.max(...cs.map(c => c.carry_max || c.carry)) * 1.05;
   const pct = v => (100 * v / max).toFixed(1) + "%";
   return `<div class="gap">${cs.map(c => `<div>${esc(c.club)}${c.any_lie ? "*" : ""}</div><div class="gaptrack" title="${c.n} swings${c.any_lie ? " (any lie)" : ""}; middle half ${c.carry_lo}–${c.carry_hi} yd">
@@ -1273,7 +1335,7 @@ function renderPlayer(p) {
   </div>
   <h2>Gapping and typical miss</h2>
   <div class="grid2">
-    <div>${gapChart(p.gapping)}<p class="sub">Launch-monitor carry from the tee and fairway: the bar is the middle half of swings, the mark the median.${p.gapping.some(c => c.any_lie) ? " *: too few tee and fairway swings, so every lie counts (from the rough GSPro's club is often one less than the one swung)." : ""}${p.gapping.some(c => c.game) ? " ≈: some swings had no raw carry, so GSPro's game carry stands in (slope and weather included). Add GSPro's Carry (raw) data tile for exact numbers." : ""}</p></div>
+    <div>${gapChart(p.gapping)}<p class="sub">Launch-monitor carry from the tee and fairway over the last 12 months: the bar is the middle half of swings, the mark the median.${p.gapping.some(c => c.any_lie) ? " *: too few tee and fairway swings, so every lie counts (from the rough GSPro's club is often one less than the one swung)." : ""}${p.gapping.some(c => c.game) ? " ≈: some swings had no raw carry, so GSPro's game carry stands in (slope and weather included). Add GSPro's Carry (raw) data tile for exact numbers." : ""}</p></div>
     <div>${sortable("gap", p.gapping, [
       { key: "club", label: "Club" }, { key: "n", label: "Swings", title: "Full swings from the tee or fairway used (of all swings with the club)" }, { key: "carry", label: "Carry" },
       { key: "gap_to_next", label: "Gap", title: "Median carry gap to the next club down" },
@@ -1665,8 +1727,8 @@ function renderRounds() {
     ...(state.local ? [{ key: "manage", label: "", val: () => null }] : []),
   ];
   // The local page only: exclude or delete a round from the list, as on its own page.
-  const manage = r => state.local ? `<td class="acts"><button class="link" data-exclround="${r.round}" data-ended="${r.round_end}" data-on="1" title="Keep it listed on this PC, but out of every stat (and off the published site)">Exclude</button>
-      · <button class="link" data-delround="${r.round}" data-ended="${r.round_end}" title="Remove the round and its shots for good">Delete</button></td>` : "";
+  const manage = r => state.local && settled(r.round) ? `<td class="acts"><button class="link" data-exclround="${r.round}" data-ended="${r.round_end}" data-on="1" title="Keep it listed on this PC, but out of every stat (and off the published site)">Exclude</button>
+      · <button class="link" data-delround="${r.round}" data-ended="${r.round_end}" title="Remove the round and its shots for good">Delete</button></td>` : state.local ? "<td></td>" : "";
   const row = r => `<tr class="click" data-round="${r.id}"><td>${esc(r.date)}${freshTag(r)}</td><td class="l">${esc(r.course)}</td>
       <td class="l">${esc(sideName(r))}${r.league && r.team && r.team !== r.side ? ` <span class="sub">${esc(r.team)}</span>` : ""}</td>
       <td>${dash(r.gross)}</td><td>${toPar(r.to_par)}</td>${net ? `<td>${r.net_to_par == null ? "–" : toPar(r.net_to_par)}</td>` : ""}
@@ -1675,6 +1737,19 @@ function renderRounds() {
   return `<h2>${meTitle("Rounds")}</h2><p class="sub">Tap a round for its page: the scorecard, hole replays, shots and video.${state.me ? " Includes team rounds they played in." : ""}</p>`
     + sortable("rounds", rows, cols, row, { empty: "No rounds in this view.", cls: "rounds" }) + excludedRounds();
 }
+
+// A round can be edited once the booth is done with it: its record closed and a few minutes past its end
+// (a putt conceded late, the closer). A shot can be left out once its round can (a practice shot any
+// time). `unsettled` and `unsettled_shots` map each that can't yet to when it can (null while its round
+// is still open). The server checks too.
+const settledBy = (key, id) => {
+  const at = ((state.data && state.data[key]) || {})[id];
+  return at === undefined || (at !== null && Date.now() / 1000 >= at);
+};
+const settled = round => settledBy("unsettled", round);
+const shotSettled = s => settledBy("unsettled_shots", s.id);
+
+const roundError = r => r.status === 409 ? "the round just ended: try again in a few minutes" : `HTTP ${r.status}`;
 
 // The local page only: the rounds excluded from the stats, to count again or delete for good.
 function excludedRounds() {
@@ -1729,7 +1804,7 @@ function renderRound() {
     ? `<a class="link" href="${esc(hashFor("broadcasts", { session: r.session }))}">What the booth said</a>` : "";
   const group = (label, items) => (items = items.filter(Boolean)).length
     ? `<div class="agroup"><span class="k">${label}</span>${items.join("")}</div>` : "";
-  const manage = state.local ? `<details class="manage"><summary>Manage ▾</summary><div class="agroup">${[
+  const manage = state.local && settled(r.round) ? `<details class="manage"><summary>Manage ▾</summary><div class="agroup">${[
       ...Object.keys(KIND_NAMES).filter(k => k !== roundKind(r)).map(k =>
         `<button class="link" data-leagueround="${r.round}" data-ended="${r.round_end}" data-kind="${k}" title="Which stats it counts in: League, Tournament or Practice">Make it a ${k} round</button>`),
       `<button class="link" data-exclround="${r.round}" data-ended="${r.round_end}" data-on="1" title="Keep it listed on this PC, but out of every stat (and off the published site)">Exclude from stats</button>`,
@@ -1806,7 +1881,7 @@ async function loadShots() {
     const id = state.shotLink;
     state.shotLink = null;
     try {
-      const [s] = await query("SELECT round, date FROM pub_shot WHERE id = ?", [id]);
+      const s = await firstRow({ id: Number(id) }, "SELECT round, date FROM pub_shot WHERE id = ?", [Number(id)]);
       if (s) state.shotFilter = s.round ? { round: String(s.round) } : { from: s.date, to: s.date };
     } catch (e) {}
   }
@@ -1853,7 +1928,7 @@ function renderShots() {
       axis ${dash(s.spin_axis && s.spin_axis.toFixed(1), "°")} · start ${dash(s.start_direction && s.start_direction.toFixed(1), "°")} · total ${yd(s.total)}</p>`;
     const said = s.lines.length ? s.lines.map(l => `<div class="line"><div class="who ${COLOR_KEYS.has(l.speaker) ? "color" : ""}">${esc(nameOf(l.speaker))}</div><div>${esc(l.text)} <span class="tag">${esc(l.kind)}</span></div></div>`).join("")
       : '<p class="empty">The booth said nothing tied to this shot.</p>';
-    const leave = state.local && !s.mulligan ? `<p><button class="link" data-leaveout="${s.id}" data-ts="${s.ts}" data-on="${s.left_out ? 0 : 1}">${s.left_out ? "Count this shot in the stats again" : "Leave this shot out of the stats"}</button>
+    const leave = state.local && !s.mulligan && shotSettled(s) ? `<p><button class="link" data-leaveout="${s.id}" data-ts="${s.ts}" data-on="${s.left_out ? 0 : 1}">${s.left_out ? "Count this shot in the stats again" : "Leave this shot out of the stats"}</button>
       <span class="sub">A bad read or a practice swing: it stays on the card and in the replay, but out of every average, record and strokes gained.</span></p>` : "";
     return head + `<tr class="detail"><td colspan="13">${brief}${launch}${said}${leave}</td></tr>`;
   };
@@ -2357,9 +2432,9 @@ function attachLive() {
 function loadMarks(me, v) {
   const from = me.marksFrom = site && site.version;
   const end = v.ended ?? Date.now() / 1000 + 60;
-  query("SELECT ts FROM pub_shot_ts WHERE ts BETWEEN ? AND ? ORDER BY ts", [v.since - 60, end + 1]).then(rows => {
+  queryShotTimes(v.since - 60, end + 1).then(times => {
     if (player !== me || me.marksFrom !== from) return;   // gone, or a newer version's asked for
-    me.marks = rows.map(r => Math.max(0, streamAt(r.ts, v)));
+    me.marks = times.map(ts => Math.max(0, streamAt(ts, v)));
     showNext(me);
   }).catch(() => {});   // a page published before shot times were: no button
 }
@@ -2929,7 +3004,7 @@ document.addEventListener("click", (e) => {
     t.textContent = "Saving…";
     fetch(`api/shots/${t.dataset.leaveout}/left-out`, { method: "POST", headers: { "Content-Type": "application/json" },
                                                        body: JSON.stringify({ left_out: t.dataset.on === "1", ts: +t.dataset.ts }) })
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); load(); pubWatch(); })
+      .then(r => { if (!r.ok) throw new Error(roundError(r)); load(); pubWatch(); })
       .catch(e => { t.textContent = `Couldn't save (${e.message})`; });
     return;
   }
@@ -2940,7 +3015,7 @@ document.addEventListener("click", (e) => {
                                                          body: JSON.stringify({ ended: +t.dataset.ended, league: t.dataset.kind === "league",
                                                                                 tournament: t.dataset.kind === "tournament" }) })
       .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        if (!r.ok) throw new Error(roundError(r));
         if (state.ctx) state.ctx = t.dataset.kind;   // stay on the round
         load();
         pubWatch();
@@ -2968,7 +3043,7 @@ document.addEventListener("click", (e) => {
     t.textContent = "Saving…";
     fetch(`api/rounds/${id}/${del ? "delete" : "excluded"}`, { method: "POST", headers: { "Content-Type": "application/json" },
                                                          body: JSON.stringify({ ended: +t.dataset.ended, ...(del ? { confirm: true } : { excluded: t.dataset.on === "1" }) }) })
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); state.tab = "rounds"; showTabs(); load(); pubWatch(); })
+      .then(r => { if (!r.ok) throw new Error(roundError(r)); state.tab = "rounds"; showTabs(); load(); pubWatch(); })
       .catch(e => { t.disabled = false; t.textContent = `Couldn't save (${e.message})`; });
     return;
   }

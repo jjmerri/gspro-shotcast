@@ -12,10 +12,13 @@ import math
 import re
 import sqlite3
 import statistics
+from fractions import Fraction
 from collections import Counter, defaultdict
-from typing import Any
+from typing import Any, Callable
 
+from . import night_totals as N
 from . import shot_shape
+from .round_record import reuse
 from .store import DRIVE_SQL
 
 SHARED_BALL = ("scramble", "alternate")
@@ -80,6 +83,14 @@ def _ctx(context: str | None, table: str = "") -> str:
             "practice": f" AND {t}is_league = 0 AND {t}is_tournament = 0"}.get(context or "", "")
 
 
+# _ctx's filters, on a row
+_IN_CONTEXT: dict[str, Callable[[Any], bool]] = {
+    "league": lambda r: r["is_league"] == 1,
+    "tournament": lambda r: r["is_league"] == 0 and r["is_tournament"] == 1,
+    "practice": lambda r: r["is_league"] == 0 and r["is_tournament"] == 0,
+}
+
+
 def _par_of(label: str | None) -> int | None:
     m = re.search(r"par (\d)", label or "")
     return int(m.group(1)) if m else None
@@ -100,14 +111,26 @@ def holes_played(db: sqlite3.Connection, context: str | None = None, player: str
     number goes back, or when the hole changes. Mulligans, unattributed strokes and shared-ball formats
     are left out. A stroke a player left out of their stats stays in its hole (it was still played, and
     it ends the stroke before it) but gains no strokes and counts toward no recovery or chip-in. A hole is `complete` when it ends holed, or in a conceded tap-in."""
-    where = "attributed = 1 AND mulligan = 0 AND player IS NOT NULL AND player != 'unknown'" \
-            " AND (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))" + _ctx(context)
-    args: tuple = ()
+    where, sql = HOLE_ROWS_WHERE, HOLE_ROWS_SQL
     if player:
-        where += " AND player = ?"
-        args = (player,)
-    rows = db.execute(f"SELECT s.*, sess.date FROM shots s JOIN sessions sess ON sess.id = s.session_id"
-                      f" WHERE {where} ORDER BY s.player, s.session_id, s.ts, s.id", args).fetchall()
+        rows = db.execute(sql.format(where + _ctx(context) + " AND player = ?"), (player,)).fetchall()
+    else:
+        # every context's rows read once a build (inside round_record.frozen), and each one's picked out
+        rows = reuse(db, ("holes_played_rows",), lambda: db.execute(sql.format(where)).fetchall())
+        if context in _IN_CONTEXT:
+            rows = [r for r in rows if _IN_CONTEXT[context](r)]
+    return holes_of(rows)
+
+
+# holes_played's strokes (WHERE fragment, and the query it goes into)
+HOLE_ROWS_WHERE = "attributed = 1 AND mulligan = 0 AND player IS NOT NULL AND player != 'unknown'" \
+                  " AND (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))"
+HOLE_ROWS_SQL = "SELECT s.*, sess.date FROM shots s JOIN sessions sess ON sess.id = s.session_id WHERE {}" \
+                " ORDER BY s.player, s.session_id, s.ts, s.id"
+
+
+def holes_of(rows) -> list[dict]:
+    """holes_played's holes from its strokes, in its order."""
     holes: list[dict] = []
     cur: dict | None = None
     for r in rows:
@@ -190,26 +213,46 @@ def strokes_gained(holes: list[dict], usual_gimme_ft: float | None = None) -> li
     return out
 
 
-def sg_summary(holes: list[dict], usual_gimme_ft: float | None = None) -> dict[str, dict]:
-    """Per player: strokes gained per category and in total, per nine holes played, against the tour."""
-    sg = strokes_gained(holes, usual_gimme_ft)
-    nines: dict[str, float] = defaultdict(float)
+def sg_summary(holes: list[dict], usual_gimme_ft: float | None = None,
+               sg: list[dict] | None = None) -> dict[str, dict]:
+    """Per player: strokes gained per category and in total, per nine holes played, against the tour.
+    `sg`: strokes_gained(holes, usual_gimme_ft), when already worked out."""
+    return sg_from(sg_totals(holes, strokes_gained(holes, usual_gimme_ft) if sg is None else sg))
+
+
+def sg_totals(holes: list[dict], sg: list[dict]) -> dict[str, dict[str, Any]]:
+    """What sg_summary is worked out from, per player: strokes gained per category (its sum, kept
+    exactly, and its strokes) and finished holes. Totals of some holes add up (add_sg) to theirs together."""
+    out: dict[str, dict[str, Any]] = {}
+    for s in sg:
+        c = out.setdefault(s["player"], {"cats": {}, "holes": 0})["cats"].setdefault(s["category"], [[], 0])
+        N.exact_add(c[0], s["sg"])
+        c[1] += 1
     for h in holes:
         if h["complete"]:
-            nines[h["player"]] += 1 / 9
-    totals: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-    counts: dict[str, Counter] = defaultdict(Counter)
-    for s in sg:
-        totals[s["player"]][s["category"]] += s["sg"]
-        counts[s["player"]][s["category"]] += 1
+            out.setdefault(h["player"], {"cats": {}, "holes": 0})["holes"] += 1
+    return out
+
+
+def add_sg(into: dict[str, dict[str, Any]], part: dict[str, dict[str, Any]]) -> None:
+    for player, got in part.items():
+        m = into.setdefault(player, {"cats": {}, "holes": 0})
+        m["holes"] += got["holes"]
+        for cat, (partials, n) in got["cats"].items():
+            c = m["cats"].setdefault(cat, [[], 0])
+            N.exact_merge(c[0], partials)
+            c[1] += n
+
+
+def sg_from(totals: dict[str, dict[str, Any]]) -> dict[str, dict]:
     out = {}
-    for player, cats in totals.items():
-        n = nines.get(player) or 0
-        if not n:
+    for player, m in totals.items():
+        if not m["cats"] or not m["holes"]:
             continue
-        per = {c: round(cats.get(c, 0.0) / n, 2) for c in SG_CATEGORIES}
+        per = {c: round(math.fsum(m["cats"][c][0]) * 9 / m["holes"], 2) if c in m["cats"] else 0.0
+               for c in SG_CATEGORIES}
         per["total"] = round(sum(per.values()), 2)
-        out[player] = {"per_nine": per, "strokes": dict(counts[player]), "holes": round(n * 9)}
+        out[player] = {"per_nine": per, "strokes": {c: n for c, (_, n) in m["cats"].items()}, "holes": m["holes"]}
     return out
 
 
@@ -222,24 +265,27 @@ GAPPING_MIN_CLEAN = 5
 
 
 def gapping(db: sqlite3.Connection, player: str, context: str | None = None,
-            finish: dict[int, float] | None = None) -> list[dict]:
+            finish: dict[int, float] | None = None, since: str | None = None) -> list[dict]:
     """Per club, carry and launch numbers from the launch monitor, over full swings only: a chip or a
     knock-down (ball speed well under the club's best) would drag a wedge's carry down. Every real swing
     counts, a mulligan's too. Medians and the middle half, so one mishit doesn't move the numbers.
     Only swings from the tee or fairway count (see GAPPING_CLEAN_LIES); a club with too few of those
     uses every lie, and says so (`any_lie`).
     A swing with no raw carry (a launch monitor that sends none, and no CARRY (raw) tile on screen) uses
-    GSPro's game carry, slope and weather in it: `game` counts those.
+    GSPro's game carry, slope and weather in it: `game` counts those. `since` (YYYY-MM-DD): the nights
+    from then on only.
     `finish`: hole_replay.finish_laterals, worked out here when not given."""
     if finish is None:
         from .hole_replay import finish_laterals   # hole_replay imports stats_web, which imports this
-        finish = finish_laterals(db)
+        finish = finish_laterals(db, since)
     raw = "COALESCE(NULLIF(carry_raw_tile_yards, 0), NULLIF(carry_raw, 0))"
     rows = db.execute(
         f"SELECT id, club, COALESCE({raw}, carry_game_yards) AS carry, {raw} IS NULL AS game, total_yards, ball_speed,"
         " club_speed, launch_angle, total_spin, spin_axis, start_direction, handed, lie_before FROM shots WHERE player = ?"
         " AND attributed = 1 AND is_putt = 0 AND left_out = 0 AND club IS NOT NULL AND club != 'PT'"
-        f" AND COALESCE({raw}, carry_game_yards) > 0" + _ctx(context), (player,)).fetchall()
+        f" AND COALESCE({raw}, carry_game_yards) > 0" + _ctx(context)
+        + ("" if since is None else " AND session_id IN (SELECT id FROM sessions WHERE date >= ?)"),
+        (player,) if since is None else (player, since)).fetchall()
     by_club: dict[str, list] = defaultdict(list)
     for r in rows:
         by_club[r["club"]].append(r)
@@ -341,6 +387,12 @@ def miss_label(start: float | None, axis: float | None, handed: str | None = Non
 def recovery(holes: list[dict]) -> dict[str, list[dict]]:
     """Per player and trouble lie (rough, deep rough, sand): strokes played from it, how close they
     finished, and how often they found the green (or holed out). Greenside (≤50 yd) and longer apart."""
+    return recovery_from(recovery_totals(holes))
+
+
+def recovery_totals(holes: list[dict]) -> dict[tuple, list]:
+    """recovery's counts per (player, lie, band): strokes, the sum of their distances (exact, as a
+    numerator and denominator), strokes with a finish and the sum of those, greens found, holed."""
     acc: dict[tuple, list] = defaultdict(list)
     for h in holes:
         s = h["strokes"]
@@ -355,24 +407,52 @@ def recovery(holes: list[dict]) -> dict[str, list[dict]]:
                 continue
             band = "greenside" if st["to_pin_yards"] <= AROUND_GREEN_YARDS else "long"
             acc[(h["player"], lie, band)].append((st["to_pin_yards"], st["finish_yards"], green, holed))
-    out: dict[str, list[dict]] = defaultdict(list)
-    for (player, lie, band), xs in sorted(acc.items()):
+    out = {}
+    for key, xs in acc.items():
         fin = [f for _, f, _, _ in xs if f is not None]
-        out[player].append({"lie": lie, "band": band, "n": len(xs),
-                            "avg_from": round(statistics.mean(d for d, _, _, _ in xs)),
-                            "avg_left": round(statistics.mean(fin), 1) if fin else None,
-                            "green_pct": round(100.0 * sum(g for _, _, g, _ in xs) / len(xs), 1),
-                            "holed": sum(h for _, _, _, h in xs)})
+        out[key] = [len(xs), _exact(sum(Fraction(d) for d, _, _, _ in xs)), len(fin), _exact(sum(map(Fraction, fin))),
+                    sum(g for _, _, g, _ in xs), sum(h for _, _, _, h in xs)]
+    return out
+
+
+def add_recovery(into: dict[tuple, list], part: dict[tuple, list]) -> None:
+    """Add recovery_totals' counts into another's."""
+    for key, (n, frm, n_fin, fin, green, holed) in part.items():
+        got = into.setdefault(key, [0, (0, 1), 0, (0, 1), 0, 0])
+        got[0] += n
+        got[1] = _exact(Fraction(*got[1]) + Fraction(*frm))
+        got[2] += n_fin
+        got[3] = _exact(Fraction(*got[3]) + Fraction(*fin))
+        got[4] += green
+        got[5] += holed
+
+
+def _exact(f: Fraction) -> tuple[int, int]:
+    return f.numerator, f.denominator
+
+
+def recovery_from(totals: dict[tuple, list]) -> dict[str, list[dict]]:
+    """recovery() from recovery_totals' counts: a mean is its exact sum over its count, as statistics.mean."""
+    out: dict[str, list[dict]] = defaultdict(list)
+    for (player, lie, band), (n, frm, n_fin, fin, green, holed) in sorted(totals.items()):
+        out[player].append({"lie": lie, "band": band, "n": n,
+                            "avg_from": round(float(Fraction(*frm) / n)),
+                            "avg_left": round(float(Fraction(*fin) / n_fin), 1) if n_fin else None,
+                            "green_pct": round(100.0 * green / n, 1),
+                            "holed": holed})
     return out
 
 
 def trends(db: sqlite3.Connection, holes: list[dict], context: str | None = None,
-           usual_gimme_ft: float | None = None) -> dict[str, list[dict]]:
+           usual_gimme_ft: float | None = None, sg: list[dict] | None = None, where: str = "") -> dict[str, list[dict]]:
     """Per player, one point per night: score to par per nine, putts per hole, fairways and greens hit,
-    and strokes gained per nine. From individual-ball rounds."""
+    and strokes gained per nine. From individual-ball rounds. `sg`: strokes_gained(holes,
+    usual_gimme_ft), when already worked out. `where`: a fragment limiting the cards (their sessions,
+    to go with `holes`')."""
     nights: dict[tuple, dict] = {}
     for r in db.execute("SELECT pr.*, s.date FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
-                        " WHERE (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))" + _ctx(context, "pr") + " ORDER BY pr.ended_at"):
+                        " WHERE (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))" + _ctx(context, "pr") + where
+                        + " ORDER BY pr.ended_at"):
         try:
             scores = {int(k): v for k, v in json.loads(r["scores"] or "{}").items()}
             pars = {int(k): v for k, v in json.loads(r["hole_pars"] or "{}").items()}
@@ -390,7 +470,7 @@ def trends(db: sqlite3.Connection, holes: list[dict], context: str | None = None
         n["gir"][0] += r["gir_hit"] or 0
         n["gir"][1] += r["gir_tries"] or 0
     sg_night: dict[tuple, float] = defaultdict(float)
-    for s in strokes_gained(holes, usual_gimme_ft):
+    for s in strokes_gained(holes, usual_gimme_ft) if sg is None else sg:
         sg_night[(s["player"], s["date"])] += s["sg"]
     holes_night: Counter = Counter((h["player"], h["date"]) for h in holes if h["complete"])
     out: dict[str, list[dict]] = defaultdict(list)
@@ -413,24 +493,94 @@ def courses(db: sqlite3.Connection, context: str | None = None, player: str | No
     """Per course: rounds, players, the best nine, and every hole's scoring average from the individual
     cards, so the hardest and easiest holes stand out. With `player`, from that player's cards only."""
     by_course: dict[str, dict] = {}
-    who = " AND pr.player = ?" if player else ""
+    for (course, who), m in _courses_merged(db, context).items():
+        if player and who != player:
+            continue
+        c = by_course.setdefault(course, _new_course())
+        c["players"].append(who)
+        _add_course(c, m)
+    out = []
+    for course, c in by_course.items():
+        holes = []
+        for h, (_, par, scores) in sorted(c["holes"].items()):
+            n = sum(scores.values())
+            f = Fraction(sum(s * k for s, k in scores.items()), n)
+            mean = int(f) if f.denominator == 1 else float(f)   # as statistics.mean gives it
+            holes.append({"hole": h, "par": par, "n": n, "avg": round(mean, 2), "to_par": round(mean - par, 2),
+                          "birdie_pct": round(100.0 * sum(k for s, k in scores.items() if s < par) / n),
+                          "bogey_plus_pct": round(100.0 * sum(k for s, k in scores.items() if s > par) / n),
+                          "best": min(scores), "worst": max(scores)})
+        ranked = sorted((h for h in holes if h["n"] >= 1), key=lambda h: h["to_par"])
+        out.append({"course": course, "rounds": c["rounds"], "players": sorted(c["players"]),
+                    "last_played": c["last_played"], "best": c["best"][1] if c["best"] else None, "holes": holes,
+                    "easiest": ranked[0]["hole"] if ranked else None, "hardest": ranked[-1]["hole"] if ranked else None})
+    out.sort(key=lambda c: (-c["rounds"], c["course"]))
+    return out
+
+
+def _new_course() -> dict[str, Any]:
+    """A course's counts over some cards (_collect_courses): rounds of a nine or more, the last date
+    played, the best nine as [rank key, best], and per hole [first card's key, its par, {score: holes}]."""
+    return {"rounds": 0, "players": [], "last_played": None, "best": None, "holes": {}}
+
+
+def _add_course(into: dict[str, Any], part: dict[str, Any]) -> None:
+    into["rounds"] += part["rounds"]
+    if part["last_played"] is not None:
+        into["last_played"] = max(into["last_played"] or "", part["last_played"])
+    if part["best"] is not None and (into["best"] is None or list(part["best"][0]) < list(into["best"][0])):
+        into["best"] = part["best"]
+    for h, (key, par, scores) in part["holes"].items():
+        e = into["holes"].get(h)
+        if e is None:
+            into["holes"][h] = [key, par, dict(scores)]
+            continue
+        if list(key) < list(e[0]):   # the par is the first card's
+            e[0], e[1] = key, par
+        for s, k in scores.items():
+            e[2][s] = e[2].get(s, 0) + k
+
+
+def _courses_merged(db: sqlite3.Connection, context: str | None) -> dict[tuple[str, str], dict[str, Any]]:
+    """Each (course, player)'s counts over every night in `context`. Every context's at once, from one
+    read of the nights' partials, which aren't kept after."""
+    def run() -> dict[str | None, dict[tuple[str, str], dict[str, Any]]]:
+        nights = N.per_night(db, "courses", lambda ns: _collect_courses(db, ns), memo=False)
+        return {c: _courses_merge(nights, c) for c in (None, *N.CONTEXTS)}
+    return reuse(db, ("courses_merged",), run)[context if context in N.CONTEXTS else None]
+
+
+def _courses_merge(nights: dict[str, Any], context: str | None) -> dict[tuple[str, str], dict[str, Any]]:
+    keep = N.wanted(context)
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for night in nights.values():
+        for ctx, cards in night.items():
+            if keep(ctx):
+                for course, players in cards.items():
+                    for who, part in players.items():
+                        _add_course(out.setdefault((course, who), _new_course()), part)
+    return out
+
+
+def _collect_courses(db: sqlite3.Connection, ns: "N.Nights") -> dict[str, dict[str, dict[str, dict[str, Any]]]]:
+    """Per night, per context, per course and player: the counts behind courses()."""
+    out: dict[str, dict[str, dict[str, dict[str, Any]]]] = {d: {} for d in ns.dates}
     for r in db.execute("SELECT pr.*, s.date FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
                         " WHERE course IS NOT NULL AND (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))"
-                        + _ctx(context, "pr") + who + " ORDER BY pr.ended_at",
-                        (player,) if player else ()):
+                        + ns.where):
         try:
             scores = {int(k): v for k, v in json.loads(r["scores"] or "{}").items() if isinstance(v, int)}
             pars = {int(k): v for k, v in json.loads(r["hole_pars"] or "{}").items() if isinstance(v, int)}
         except (TypeError, ValueError):
             continue
-        c = by_course.setdefault(r["course"], {"course": r["course"], "rounds": 0, "players": set(), "holes": {},
-                                               "best": None, "last_played": None})
-        c["players"].add(r["player"])
+        ctx = N.context_of(r["is_league"], r["is_tournament"])
+        c = out[ns.date[r["session_id"]]].setdefault(ctx, {}).setdefault(r["course"], {}).setdefault(
+            r["player"], _new_course())
+        key = [r["ended_at"], r["id"]]   # (cards in the order played)
         c["last_played"] = max(c["last_played"] or "", r["date"])
         played = [h for h in sorted(scores) if h in pars]
-        for h in played:
-            e = c["holes"].setdefault(h, {"hole": h, "par": pars[h], "scores": []})
-            e["scores"].append(scores[h])
+        _add_course(c, {"rounds": 0, "last_played": None, "best": None,
+                        "holes": {h: [key, pars[h], {scores[h]: 1}] for h in played}})
         if len(played) >= 9:   # a round of a nine or more (a one-hole 19th's birdie isn't a -9 nine)
             c["rounds"] += 1
             to_par = sum(scores[h] - pars[h] for h in played)
@@ -438,24 +588,10 @@ def courses(db: sqlite3.Connection, context: str | None = None, player: str | No
             # holes onto a nine would make the best a score nobody shot. Older rows have no stored nine.
             stored = r["nine_to_par"] if "nine_to_par" in r.keys() else None
             per9 = stored if stored is not None else (to_par * 9 / len(played) if played else None)
-            if per9 is not None and (c["best"] is None or per9 < c["best"]["to_par_9"]):
-                c["best"] = {"player": r["player"], "date": r["date"], "to_par": to_par, "holes": len(played),
-                             "to_par_9": round(per9, 1)}
-    out = []
-    for c in by_course.values():
-        holes = []
-        for e in sorted(c["holes"].values(), key=lambda e: e["hole"]):
-            s = e["scores"]
-            holes.append({"hole": e["hole"], "par": e["par"], "n": len(s), "avg": round(statistics.mean(s), 2),
-                          "to_par": round(statistics.mean(s) - e["par"], 2),
-                          "birdie_pct": round(100.0 * sum(x < e["par"] for x in s) / len(s)),
-                          "bogey_plus_pct": round(100.0 * sum(x > e["par"] for x in s) / len(s)),
-                          "best": min(s), "worst": max(s)})
-        ranked = sorted((h for h in holes if h["n"] >= 1), key=lambda h: h["to_par"])
-        out.append({"course": c["course"], "rounds": c["rounds"], "players": sorted(c["players"]),
-                    "last_played": c["last_played"], "best": c["best"], "holes": holes,
-                    "easiest": ranked[0]["hole"] if ranked else None, "hardest": ranked[-1]["hole"] if ranked else None})
-    out.sort(key=lambda c: (-c["rounds"], c["course"]))
+            if per9 is not None:
+                _add_course(c, {"rounds": 0, "last_played": None, "holes": {}, "best": [
+                    [per9, *key], {"player": r["player"], "date": r["date"], "to_par": to_par, "holes": len(played),
+                                   "to_par_9": round(per9, 1)}]})
     return out
 
 
@@ -463,20 +599,50 @@ def _to_par_name(d: int) -> str:
     return {-3: "albatross", -2: "eagle", -1: "birdie", 1: "bogey", 2: "double"}.get(d, f"+{d}" if d > 0 else f"{d}")
 
 
+def firsts(rows, starts: dict[str, str | None], k: int, date: str = "date") -> dict[tuple, list[dict]]:
+    """The first `k` of `rows` (in their order) in each of the date ranges `starts` (key: first night
+    YYYY-MM-DD, None for all time), for everyone (None, key) and for each player (player, key)."""
+    out: dict[tuple, list[dict]] = {}
+    for r in rows:
+        r = dict(r)
+        d = r.pop("_date") if date == "_date" else r[date]
+        for key, since in starts.items():
+            if since is not None and (d or "") < since:
+                continue
+            for who in (None, r["player"]):
+                got = out.setdefault((who, key), [])
+                if len(got) < k:
+                    got.append(r)
+    return out
+
+
 def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = None,
                player: str | None = None, since: str | None = None) -> dict[str, Any]:
     """The season's moments: aces, eagles, chip-ins, birdie streaks, bounce-backs and blow-ups from the
     cards; and top-five lists of drives, approaches, chips and putts holed from the shots. With
     `player`, that player's own; with `since` (YYYY-MM-DD), only nights from that date on."""
+    return highlights_table(db, holes, context, {"": since})(player, "")
+
+
+def highlights_table(db: sqlite3.Connection, holes: list[dict], context: str | None,
+                     starts: dict[str, str | None]) -> Callable[[str | None, str], dict[str, Any]]:
+    """highlights() for every player (and everyone, None) and each of the date ranges `starts` (key:
+    first night, None for all time), from one pass over the shots: returns pick(player, key)."""
+    return highlights_pick(*highlight_rows(db, holes, context), starts)
+
+
+TOPS = ("drives", "approaches", "chips", "putts")
+
+
+def highlight_rows(db: sqlite3.Connection, holes: list[dict], context: str | None,
+                   where: str = "") -> tuple[list[dict], list[dict], list[dict], list[dict], dict[str, list[dict]]]:
+    """highlights_table's moments, streaks, bounce-backs and blow-ups (in the order they happened), and
+    each top list's shots (best first, each with its sort key, `_k`). `where`: a fragment limiting them
+    to some sessions (`holes` being theirs)."""
     moments: list[dict] = []
     streaks: list[dict] = []
     bounce: list[dict] = []
     blowups: list[dict] = []
-    args = ((player,) if player else ()) + ((since,) if since else ())
-    if player:
-        holes = [h for h in holes if h["player"] == player]
-    if since:
-        holes = [h for h in holes if (h["date"] or "") >= since]
     # A card moment's stroke (its id and time, for the page's links and video): the player's hole in
     # that session, the last one played before the round ended.
     by_hole: dict[tuple, list[dict]] = {}
@@ -493,9 +659,7 @@ def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = 
 
     for r in db.execute("SELECT pr.*, s.date FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
                         " WHERE (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))"
-                        + _ctx(context, "pr")
-                        + (" AND pr.player = ?" if player else "") + (" AND s.date >= ?" if since else "")
-                        + " ORDER BY pr.ended_at", args):
+                        + _ctx(context, "pr") + where + " ORDER BY pr.ended_at, pr.id"):
         try:
             scores = {int(k): v for k, v in json.loads(r["scores"] or "{}").items() if isinstance(v, int)}
             pars = {int(k): v for k, v in json.loads(r["hole_pars"] or "{}").items() if isinstance(v, int)}
@@ -533,55 +697,85 @@ def highlights(db: sqlite3.Connection, holes: list[dict], context: str | None = 
             moments.append({"player": h["player"], "date": h["date"], "course": h["course"], "hole": h["hole"],
                             "id": last["id"], "ts": last["ts"], "kind": "holed out", "text": f"Holed out from {round(yd) if yd else '?'} yd"
                             f" ({last['lie_before'] or 'off the green'}, {last['club'] or '?'})"})
-    moments.sort(key=lambda m: m["date"] or "", reverse=True)
-    base = (" AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0 AND left_out = 0" + _ctx(context)
-            + (" AND player = ?" if player else "") + (" AND date >= ?" if since else ""))
+    base = " AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0 AND left_out = 0" \
+           + _ctx(context) + where
     drive = "COALESCE(total_yards, carry_game_yards, carry_raw)"
-
-    def top(sql: str) -> list[dict]:
-        return [dict(r) for r in db.execute(sql, args)]
-
     j = " FROM shots JOIN sessions ON sessions.id = shots.session_id"
-    return {
-        "moments": moments,
-        "streaks": sorted(streaks, key=lambda s: (-s["length"], s["date"] or ""))[:10],
-        "bounce_backs": sorted(bounce, key=lambda b: b["date"] or "", reverse=True)[:10],
-        "blowups": sorted(blowups, key=lambda b: (-b["over"], b["date"] or ""))[:5],
-        "drives": top(f"SELECT shots.id, ts, player, ROUND({drive}) AS v, course, hole, date{j} WHERE {DRIVE_SQL}"
-                      f" AND {drive} IS NOT NULL{base} ORDER BY v DESC LIMIT 5"),
-        "approaches": top(f"SELECT shots.id, ts, player, ROUND(finish_yards * 3) AS v, outcome, club, ROUND(to_pin_yards) AS from_yd, course,"
-                          f" hole, date{j} WHERE {APPROACH_SQL} AND finish_yards IS NOT NULL{base} ORDER BY finish_yards LIMIT 5"),
-        "chips": top(f"SELECT shots.id, ts, player, ROUND(finish_yards * 3) AS v, outcome, club, ROUND(to_pin_yards) AS from_yd, lie_before AS lie,"
-                     f" course, hole, date{j} WHERE {CHIP_SQL} AND finish_yards IS NOT NULL{base} ORDER BY finish_yards LIMIT 5"),
-        "putts": top(f"SELECT shots.id, ts, player, ROUND(to_pin_yards * 3) AS v, course, hole, date{j} WHERE is_putt = 1"
-                     f" AND outcome = 'holed' AND to_pin_yards IS NOT NULL{base} ORDER BY to_pin_yards DESC LIMIT 5"),
-    }
+    tops = {}
+    for name, (sql, k) in {
+        "drives": (f"SELECT shots.id, ts, player, ROUND({drive}) AS v, course, hole, date{j} WHERE {DRIVE_SQL}"
+                   f" AND {drive} IS NOT NULL{base} ORDER BY v DESC, ts, shots.id", lambda r: (-r["v"], r["ts"], r["id"])),
+        "approaches": (f"SELECT shots.id, ts, player, ROUND(finish_yards * 3) AS v, outcome, club, ROUND(to_pin_yards) AS from_yd,"
+                       f" course, hole, date, finish_yards AS _f{j} WHERE {APPROACH_SQL} AND finish_yards IS NOT NULL{base}"
+                       f" ORDER BY finish_yards, ts, shots.id", lambda r: (r["_f"], r["ts"], r["id"])),
+        "chips": (f"SELECT shots.id, ts, player, ROUND(finish_yards * 3) AS v, outcome, club, ROUND(to_pin_yards) AS from_yd,"
+                  f" lie_before AS lie, course, hole, date, finish_yards AS _f{j} WHERE {CHIP_SQL} AND finish_yards IS NOT NULL{base}"
+                  f" ORDER BY finish_yards, ts, shots.id", lambda r: (r["_f"], r["ts"], r["id"])),
+        "putts": (f"SELECT shots.id, ts, player, ROUND(to_pin_yards * 3) AS v, course, hole, date, to_pin_yards AS _f{j}"
+                  f" WHERE is_putt = 1 AND outcome = 'holed' AND to_pin_yards IS NOT NULL{base}"
+                  f" ORDER BY to_pin_yards DESC, ts, shots.id", lambda r: (-r["_f"], r["ts"], r["id"])),
+    }.items():
+        tops[name] = []
+        for r in db.execute(sql):
+            row = {c: r[c] for c in r.keys() if c != "_f"}
+            row["_k"] = k(r)
+            tops[name].append(row)
+    return moments, streaks, bounce, blowups, tops
+
+
+def highlights_pick(moments: list[dict], streaks: list[dict], bounce: list[dict], blowups: list[dict],
+                    tops: dict[str, list[dict]],
+                    starts: dict[str, str | None]) -> Callable[[str | None, str], dict[str, Any]]:
+    """highlights_table's pick(player, key), from highlight_rows' lists (tops' rows in any order)."""
+    tops = {name: firsts(({c: v for c, v in r.items() if c != "_k"} for r in sorted(rows, key=lambda r: r["_k"])),
+                         starts, 5)
+            for name, rows in tops.items()}
+
+    def pick(player: str | None, key: str) -> dict[str, Any]:
+        since = starts[key]
+
+        def mine(xs: list[dict]) -> list[dict]:
+            return [dict(x) for x in xs if (player is None or x["player"] == player)
+                    and (since is None or (x["date"] or "") >= since)]
+        return {
+            "moments": sorted(mine(moments), key=lambda m: m["date"] or "", reverse=True),
+            "streaks": sorted(mine(streaks), key=lambda s: (-s["length"], s["date"] or ""))[:10],
+            "bounce_backs": sorted(mine(bounce), key=lambda b: b["date"] or "", reverse=True)[:10],
+            "blowups": sorted(mine(blowups), key=lambda b: (-b["over"], b["date"] or ""))[:5],
+            **{name: [dict(r) for r in got.get((player, key), [])] for name, got in tops.items()},
+        }
+    return pick
 
 
 _STOP = set("a an and the of to in on at for is it's its it that this with he his him you your be was are as"
             " but so just from off up out there what all i we our by or not no have has into than".split())
 
 
-def booth(db: sqlite3.Connection, names: dict[str, str] | None = None) -> dict[str, Any]:
-    """The commentators: lines and words by kind, a few signature phrases, and putt-call accuracy by night."""
+def booth(db: sqlite3.Connection, names: dict[str, str] | None = None, phrases_since: str | None = None) -> dict[str, Any]:
+    """The commentators: lines and words by kind, a few signature phrases (from the nights since
+    `phrases_since`, a date; None: all of them), and putt-call accuracy by night."""
     names = names or {}
-    on_air = {n.lower() for n in names.values()} | {"nigel", "duke"}
+    on_air = tuple(sorted({n.lower() for n in names.values()} | {"nigel", "duke"}))
     per: dict[str, dict] = {}
-    grams: dict[str, Counter] = defaultdict(Counter)
-    for r in db.execute("SELECT speaker, kind, text FROM lines"):
-        p = per.setdefault(r["speaker"], {"key": r["speaker"], "name": names.get(r["speaker"], r["speaker"]),
-                                          "lines": 0, "words": 0, "kinds": Counter()})
-        words = re.findall(r"[a-z0-9']+", r["text"].lower().replace("\u2019", "'"))
-        p["lines"] += 1
-        p["words"] += len(words)
-        p["kinds"][r["kind"]] += 1
-        for g in zip(words, words[1:], words[2:]):
-            if (sum(w not in _STOP for w in g) >= 2 and all(w.isalpha() or "'" in w for w in g)
-                    and not any(w in on_air for w in g)):
-                grams[r["speaker"]][" ".join(g)] += 1
-    sessions = {r[0]: r[1] for r in db.execute("SELECT id, date FROM sessions")}
-    rounds_by_date = Counter(r[0] for r in db.execute("SELECT DISTINCT date, session_id, course FROM rounds"))
-    lines_by_date = Counter(sessions.get(r[0]) for r in db.execute("SELECT session_id FROM lines"))
+    rounds_by_date: Counter = Counter()
+    lines_by_date: dict[str, int] = {}
+    for d, night in N.per_night(db, "booth", lambda ns: _collect_booth(db, ns), memo=False).items():
+        for speaker, (lines, words, kinds) in night["speakers"].items():
+            p = per.setdefault(speaker, {"key": speaker, "name": names.get(speaker, speaker),
+                                         "lines": 0, "words": 0, "kinds": Counter()})
+            p["lines"] += lines
+            p["words"] += words
+            p["kinds"].update(kinds)
+            lines_by_date[d] = lines_by_date.get(d, 0) + lines
+        rounds_by_date.update(night["rounds"])
+    grams: dict[str, dict[str, list]] = defaultdict(dict)
+    for night in N.per_night(db, "phrases", lambda ns: _collect_phrases(db, ns, set(on_air)), extra=(on_air,),
+                             since=phrases_since, memo=False).values():
+        for speaker, got in night.items():
+            mine = grams[speaker]
+            for g, (n, first) in got.items():
+                have = mine.get(g)
+                mine[g] = [n, tuple(first)] if have is None else [have[0] + n, min(have[1], tuple(first))]
     calls = [{"date": r["date"], "who": names.get(r["commentator"], r["commentator"]), "calls": r["n"], "right": r["hits"] or 0}
              for r in db.execute("SELECT s.date, p.commentator, COUNT(*) n, SUM(correct) hits FROM predictions p"
                                  " JOIN sessions s ON s.id = p.session_id WHERE correct IS NOT NULL"
@@ -589,7 +783,7 @@ def booth(db: sqlite3.Connection, names: dict[str, str] | None = None) -> dict[s
     return {
         "commentators": [{**{k: v for k, v in p.items() if k != "kinds"}, "kinds": dict(p["kinds"]),
                           "words_per_line": round(p["words"] / p["lines"], 1) if p["lines"] else None,
-                          "phrases": [g for g, n in grams[k].most_common(8) if n >= 2]}
+                          "phrases": [g for g, n in _most_common(grams[k], 8) if n >= 2]}
                          for k, p in sorted(per.items())],
         "nights": [{"date": d, "lines": n, "rounds": rounds_by_date.get(d, 0)}
                    for d, n in sorted((d, n) for d, n in lines_by_date.items() if d)],
@@ -597,11 +791,61 @@ def booth(db: sqlite3.Connection, names: dict[str, str] | None = None) -> dict[s
     }
 
 
+def _most_common(counts: dict[str, list], k: int) -> list[tuple[str, int]]:
+    """The k commonest, a tie going to the phrase said first (as Counter.most_common over the lines
+    in order): counts are kept as [n, (line id, word) first said]."""
+    return [(g, n) for g, (n, _) in sorted(counts.items(), key=lambda kv: (-kv[1][0], kv[1][1]))[:k]]
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", text.lower().replace("\u2019", "'"))
+
+
+def _collect_booth(db: sqlite3.Connection, ns: "N.Nights") -> dict[str, dict[str, Any]]:
+    """Per night: each speaker's lines, words and lines by kind; and the rounds by their date (as many
+    as courses played in each session)."""
+    out: dict[str, dict[str, Any]] = {d: {"speakers": {}, "rounds": {}} for d in ns.dates}
+    for r in db.execute("SELECT session_id, speaker, kind, text FROM lines WHERE 1=1" + ns.where):
+        p = out[ns.date[r["session_id"]]]["speakers"].setdefault(r["speaker"], [0, 0, {}])
+        p[0] += 1
+        p[1] += len(_words(r["text"]))
+        p[2][r["kind"]] = p[2].get(r["kind"], 0) + 1
+    for sid, d, _ in db.execute("SELECT DISTINCT session_id, date, course FROM rounds WHERE 1=1" + ns.where):
+        got = out[ns.date[sid]]["rounds"]
+        got[d] = got.get(d, 0) + 1
+    return out
+
+
+def _collect_phrases(db: sqlite3.Connection, ns: "N.Nights", on_air: set[str]) -> dict[str, dict[str, dict]]:
+    """Per night, each speaker's phrases: three words, two of them not stop words, none a number or a
+    commentator's name; each with [times said, (line id, word) first said]."""
+    out: dict[str, dict[str, dict]] = {d: {} for d in ns.dates}
+    for r in db.execute("SELECT id, session_id, speaker, text FROM lines WHERE 1=1" + ns.where):
+        d = ns.date[r["session_id"]]
+        words = _words(r["text"])
+        usable = [(w.isalpha() or "'" in w) and w not in on_air for w in words]
+        stop = [w in _STOP for w in words]
+        mine = out[d].setdefault(r["speaker"], {})
+        for i in range(len(words) - 2):
+            if usable[i] and usable[i + 1] and usable[i + 2] and stop[i] + stop[i + 1] + stop[i + 2] <= 1:
+                g = f"{words[i]} {words[i + 1]} {words[i + 2]}"
+                got = mine.get(g)
+                if got is None:
+                    mine[g] = [1, (r["id"], i)]
+                else:
+                    got[0] += 1
+                    got[1] = min(got[1], (r["id"], i))
+    return out
+
+
 def shot_log(db: sqlite3.Connection, context: str | None = None, *, player: str | None = None,
              date: str | None = None, course: str | None = None, club: str | None = None,
-             lie: str | None = None, limit: int = 500) -> list[dict]:
-    """Shots, newest first, each with what the booth said about it."""
+             lie: str | None = None, limit: int = 500, sessions: list[int] | None = None) -> list[dict]:
+    """Shots, newest first, each with what the booth said about it. `sessions`: only theirs."""
     where, args = ["1=1"], []
+    if sessions is not None:
+        where.append("shots.session_id IN (SELECT value FROM json_each(?))")
+        args.append(json.dumps(list(sessions)))
     for col, val in (("player", player), ("date", date), ("course", course), ("club", club), ("lie_before", lie)):
         if val:
             where.append(f"{'sessions.' if col == 'date' else 'shots.'}{col} = ?")
@@ -633,15 +877,34 @@ def shot_log(db: sqlite3.Connection, context: str | None = None, *, player: str 
 
 def broadcasts(db: sqlite3.Connection) -> list[dict]:
     """Booth sessions that said anything, newest first, with the courses and players in them."""
-    out = []
-    for r in db.execute("SELECT s.id, s.date, COUNT(l.id) AS lines FROM sessions s JOIN lines l ON l.session_id = s.id"
+    def run() -> list[dict]:
+        every = [b for night in N.per_night(db, "broadcasts", lambda ns: _collect_broadcasts(db, ns), memo=False).values()
+                 for b in night]
+        # newest first (a session with no start last; a tie, the later session first); the start read now, as it's
+        # not in a night's signature
+        start = dict(db.execute("SELECT id, started_at FROM sessions"))
+        every.sort(key=lambda b: (start.get(b["id"]) is None, -(start.get(b["id"]) or 0), -b["id"]))
+        return every
+    return [dict(b) for b in reuse(db, ("broadcasts",), run)]
+
+
+def _collect_broadcasts(db: sqlite3.Connection, ns: "N.Nights") -> dict[str, list]:
+    """Per night, its sessions with lines and shots: {id, date, lines, courses, players}, the courses and players in the order each first appears in the session."""
+    courses: dict[int, list[str]] = {}
+    players: dict[int, list[str]] = {}
+    for sid, course in db.execute("SELECT session_id, course FROM shots WHERE course IS NOT NULL" + ns.where +
+                                  " GROUP BY session_id, course ORDER BY session_id, MIN(id)"):
+        courses.setdefault(sid, []).append(course)
+    for sid, player in db.execute("SELECT session_id, player FROM shots WHERE player IS NOT NULL AND player != 'unknown'"
+                                  + ns.where + " GROUP BY session_id, player ORDER BY session_id, MIN(id)"):
+        players.setdefault(sid, []).append(player)
+    out: dict[str, list] = {d: [] for d in ns.dates}
+    for r in db.execute("SELECT s.id, s.date, COUNT(l.id) AS lines FROM sessions s"
+                        " JOIN lines l ON l.session_id = s.id"
                         " WHERE EXISTS (SELECT 1 FROM shots WHERE shots.session_id = s.id)"
-                        " GROUP BY s.id ORDER BY s.started_at DESC"):
-        courses = [c[0] for c in db.execute("SELECT DISTINCT course FROM shots WHERE session_id = ? AND course IS NOT NULL",
-                                            (r["id"],))]
-        players = [p[0] for p in db.execute("SELECT DISTINCT player FROM shots WHERE session_id = ? AND player IS NOT NULL"
-                                            " AND player != 'unknown'", (r["id"],))]
-        out.append({"id": r["id"], "date": r["date"], "lines": r["lines"], "courses": courses, "players": players})
+                        + ns.where.replace("session_id", "s.id") + " GROUP BY s.id"):
+        out[ns.date[r["id"]]].append({"id": r["id"], "date": r["date"], "lines": r["lines"],
+                                      "courses": courses.get(r["id"], []), "players": players.get(r["id"], [])})
     return out
 
 

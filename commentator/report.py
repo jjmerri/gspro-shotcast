@@ -234,7 +234,9 @@ def _db_summary(db_path: Path, days: int = 14) -> tuple[list[str], list[tuple[st
     if not db_path.exists():
         return [f"No season database at {db_path}"], []
     lines, images = [], []
-    con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    # not mode=ro: that can't read a WAL file no other connection has open (stats_web.connect)
+    con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=rw", uri=True)
+    con.execute("PRAGMA query_only = ON")
     try:
         since = time.time() - days * 86400
         rows = con.execute(

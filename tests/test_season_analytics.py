@@ -140,6 +140,18 @@ def test_gapping_leaves_out_the_rough_where_gspros_club_is_often_one_short(db):
     assert (pw["carry"], pw["n"], pw["any_lie"]) == (110, 3, True)
 
 
+def test_gapping_goes_by_the_nights_since_a_date(db):
+    old = db.execute("INSERT INTO sessions (started_at, date) VALUES (0, '2024-01-10')").lastrowid
+    db.execute("UPDATE sessions SET date = '2025-06-01' WHERE id = 1")
+    for carry in (150, 152, 154):
+        shot(db, club="7I", carry_raw=carry, ball_speed=110)
+        shot(db, club="7I", carry_raw=carry + 20, ball_speed=110, session_id=old)   # last year's 7-iron
+    shot(db, club="5I", carry_raw=190, ball_speed=120, session_id=old)
+    db.commit()
+    assert [(c["club"], c["n"], c["carry"]) for c in A.gapping(db, "Ann")] == [("5I", 1, 190), ("7I", 6, 162)]
+    assert [(c["club"], c["n"], c["carry"]) for c in A.gapping(db, "Ann", since="2025-06-01")] == [("7I", 3, 152)]
+
+
 def test_gapping_takes_the_game_carry_when_no_raw_carry_was_sent_or_read(db):
     # A launch monitor that sends a carry of 0 and no CARRY (raw) tile on screen.
     for carry in (100, 104, 98):
@@ -179,13 +191,19 @@ def test_highlights_and_records_by_date_range(db):
     db.execute("INSERT INTO sessions (id, date, started_at) VALUES (2, '2025-01-10', 0)")
     db.execute("UPDATE sessions SET date = '2026-05-20' WHERE id = 1")
     tee = {"club": "DR", "shot_number": 1, "lie_before": "tee", "hole": "Hole 1, par 4, 400 yards"}
+    shot(db, "Bo", total_yards=320, ts=10**10, **tee)  # this year, matching it (stored first)
     shot(db, session_id=2, total_yards=320, **tee)      # last year's bomb
     shot(db, total_yards=250, **tee)
     db.commit()
-    got = stats_web.highlights_by_period(db, A.holes_played(db), today=date(2026, 5, 31))
-    assert [d["v"] for d in got["highlights"]["1y"]["drives"]] == [250]
-    assert [d["v"] for d in got["highlights"]["all"]["drives"]] == [320, 250]
-    assert got["records"]["3m"]["longest_drive"]["v"] == 250 and got["records"]["all"]["longest_drive"]["v"] == 320
+    got = stats_web.highlights_by_period(db, today=date(2026, 5, 31))
+    assert [(d["player"], d["v"]) for d in got["highlights"]["1y"]["drives"]] == [("Bo", 320), ("Ann", 250)]
+    # A tie goes to whoever hit it first.
+    assert [(d["player"], d["v"]) for d in got["highlights"]["all"]["drives"]] == [("Ann", 320), ("Bo", 320), ("Ann", 250)]
+    assert got["records"]["3m"]["longest_drive"]["player"] == "Bo" and got["records"]["all"]["longest_drive"]["player"] == "Ann"
+    ann = stats_web.highlights_by_period(db, player="Ann", today=date(2026, 5, 31))
+    assert [d["v"] for d in ann["highlights"]["1y"]["drives"]] == [250]
+    assert ann["records"]["3m"]["longest_drive"]["v"] == 250 and ann["records"]["all"]["longest_drive"]["v"] == 320
+    assert ann["records"]["1y"] == stats_web.records(db, None, "Ann", "2025-05-31")
     assert got["records"]["all"] == stats_web.records(db) and got["highlights"]["all"] == A.highlights(db, A.holes_played(db))
     # Jarod's league plays October to April: a putt from this autumn holds the season's record into
     # the new year, and the next October it starts over.
@@ -195,8 +213,22 @@ def test_highlights_and_records_by_date_range(db):
     assert stats_web.season_start("10-01", date(2026, 9, 30)) == "2025-10-01"
     assert stats_web.season_start("02-29", date(2027, 3, 1)) == "2027-02-28"
     assert stats_web.season_start(None) is None
-    got = stats_web.highlights_by_period(db, A.holes_played(db), today=date(2026, 5, 31), season="05-01")
-    assert got["records"]["season"]["longest_drive"]["v"] == 250
+    got = stats_web.highlights_by_period(db, today=date(2026, 5, 31), season="05-01")
+    assert got["records"]["season"]["longest_drive"]["player"] == "Bo"
+
+
+def test_holes_for_each_context_in_a_build_match_reading_that_context_alone(db):
+    from commentator.round_record import frozen
+
+    for i, (league, tournament) in enumerate([(1, 0), (0, 1), (0, 0), (1, 0)]):
+        for n, lie in ((1, "tee"), (2, "green")):
+            shot(db, hole=f"Hole {i + 1}, par 4, 400 yards", shot_number=n, lie_before=lie, to_pin_yards=400 / n,
+                 is_league=league, is_tournament=tournament, outcome="holed" if n == 2 else None)
+    db.commit()
+    alone = {c: A.holes_played(db, c) for c in (None, "league", "tournament", "practice")}
+    assert [len(h) for h in alone.values()] == [4, 2, 1, 1]
+    with frozen(db):
+        assert {c: A.holes_played(db, c) for c in alone} == alone
 
 
 def test_recovery_counts_greens_found_from_trouble(db):
@@ -275,6 +307,34 @@ def test_booth_phrases_shot_log_and_transcript(db):
     assert [x["id"] for x in A.broadcasts(db)] == [1]
 
 
+def test_booth_phrases_come_from_the_nights_since_while_its_counts_stay_lifetime(db):
+    db.execute("UPDATE sessions SET date = '2025-01-01' WHERE id = 1")
+    db.execute("INSERT INTO sessions (id, date, started_at) VALUES (2, '2025-01-08', 2)")
+    for sid, text in ((2, "Soft landing now. Soft landing now."), (1, "Big drive there. Big drive there.")):
+        db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text) VALUES (?, 0, 'shot', 'pbp', ?)", (sid, text))
+    db.commit()
+    (lifetime,) = A.booth(db)["commentators"]
+    assert lifetime["phrases"][:2] == ["soft landing now", "big drive there"]   # a tie: the line said first
+    b = A.booth(db, None, "2025-01-08")
+    (pbp,) = b["commentators"]
+    assert pbp["lines"] == 2 and "soft landing now" in pbp["phrases"] and not any("big" in p for p in pbp["phrases"])
+    assert [n["lines"] for n in b["nights"]] == [1, 1]
+
+
+def test_broadcasts_list_each_sessions_courses_and_players_in_order(db):
+    db.execute("INSERT INTO sessions (id, date, started_at) VALUES (2, '2025-01-08', 2)")
+    db.execute("UPDATE sessions SET started_at = 1 WHERE id = 1")
+    for sid, player, course in ((1, "Bo", "Pebble"), (2, "Cy", "Augusta"), (1, "Ann", "Pebble"), (2, "unknown", "Pebble"),
+                                (1, "Bo", "Augusta"), (2, "Ann", None), (1, None, "Pebble")):
+        shot(db, player, session_id=sid, course=course)
+    db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text) VALUES (1, 0, 'opener', 'pbp', 'Hi.'),"
+               " (2, 0, 'opener', 'pbp', 'Hi.'), (2, 1, 'opener', 'pbp', 'Again.')")
+    db.commit()
+    assert [(b["id"], b["lines"], b["courses"], b["players"]) for b in A.broadcasts(db)] == [
+        (2, 2, ["Augusta", "Pebble"], ["Cy", "Ann"]),
+        (1, 1, ["Pebble", "Augusta"], ["Bo", "Ann"])]
+
+
 def test_published_site_has_the_summary_shots_and_transcripts(db, tmp_path):
     from commentator import stats_site
 
@@ -283,7 +343,8 @@ def test_published_site_has_the_summary_shots_and_transcripts(db, tmp_path):
     db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text) VALUES (1, 0, 'opener', 'pbp', 'Hello.')")
     db.commit()
     vdir = tmp_path / "site" / "v" / stats_site.build(db.path, tmp_path / "site", {"pbp": "Nigel"})
-    pub = sqlite3.connect(vdir / "stats.db")
+    [data] = json.loads((vdir / "data.json").read_text())
+    pub = sqlite3.connect(tmp_path / "site" / data["file"])
     sql, args = stats_site.shot_query(None, {"player": "Ann", "club": "DR"})
     assert [json.loads(r[0])["club"] for r in pub.execute(sql, args)] == ["DR"]
     t = json.loads(pub.execute("SELECT json FROM pub_transcript WHERE session_id = 1").fetchone()[0])
