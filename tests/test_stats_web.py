@@ -1419,7 +1419,7 @@ def test_the_pages_watch_links_and_next_shot_go_to_a_second_before_each_swing_sh
            + re.search(r"\nfunction loadMarks\(.*?\nfunction showNext\(.*?\n}\n", page, re.S).group(0))
     # A stream from 1000; shots logged at 1010, 1030 and 1031 (a mulligan), each on it 5 s later.
     script = ("const state = { vods: [{ session: 's', since: 1000, ended: 2000 }] }; let site = { version: 'v1' };"
-              "const query = async (sql, args) => [1010, 1030, 1031].filter(t => t >= args[0] && t <= args[1]).map(ts => ({ ts }));"
+              "const queryShotTimes = async (lo, hi) => [1010, 1030, 1031].filter(t => t >= lo && t <= hi);"
               + fns +
               "const me = { video: { currentTime: 0 } }; let player = me;"
               "loadMarks(me, state.vods[0]); setTimeout(() => { const seen = [];"
