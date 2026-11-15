@@ -1,6 +1,7 @@
 """A problem report: one zip of everything the booth can gather on its own, for someone helping a
 user who can't easily dig through folders. Logs, GSPro's log, health, the screens the booth left
-behind, the hole maps it kept, the monitor layout and where GSPro's window is, and config.yaml with
+behind, the hole maps it kept, the monitor layout and where GSPro's window is, the shot data GSPro
+and the launch monitor's own software keep (to learn a monitor we haven't seen), and config.yaml with
 anything secret blanked. The .env file (the API keys) never goes in: only its key names, and its
 values are scrubbed out of every text file that does.
 
@@ -269,6 +270,108 @@ def _gspro_logs(cfg: Config) -> list[Path]:
     return [configured.parent / n for n in dict.fromkeys(names)]
 
 
+# Files a launch monitor's own software leaves on the PC, for learning a monitor's data from a
+# report by someone who has one: (what, folder, glob, newest how many, bytes kept from each).
+LM_FILES: list[tuple[str, str, str, int, int]] = [
+    ("Uneekor VIEW shots", r"%USERPROFILE%\AppData\LocalLow\UNEEKOR\VIEW\ShotData", "*/*.json", 12, 200_000),
+    ("Uneekor VIEW log", r"%USERPROFILE%\AppData\LocalLow\UNEEKOR\VIEW", "Player*.log", 2, 1_000_000),
+    ("Foresight SDK logs", r"%PROGRAMDATA%\Foresight", "FSS_SDK_*LOG.txt", 2, 1_000_000),
+    ("Foresight FSX last shot", r"%ProgramFiles(x86)%\Foresight Sports Experience\System", "LastShot.CSV", 1, 200_000),
+]
+CONNECTOR_LOGS = 4          # rotated ConnectDebug files kept, newest first
+GSPRO_DB_ROWS = 20          # newest rows of each GSPro.db shot table
+# Where launch monitor software installs, and the vendor names its folders go by: the report lists
+# what's in them (names, sizes, dates; no contents), to show where a monitor we haven't seen keeps
+# its shots.
+SOFTWARE_ROOTS = [r"%PROGRAMDATA%", r"%ProgramFiles%", r"%ProgramFiles(x86)%", r"%APPDATA%", r"%LOCALAPPDATA%",
+                  r"%USERPROFILE%\AppData\LocalLow", r"%USERPROFILE%\Documents"]
+LM_VENDORS = re.compile(r"aboutgolf|^ag[ _-]|uneekor|foresight|bushnell|flightscope|mevo|garmin|rapsodo|mlm2|"
+                        r"square ?golf|full ?swing|protee|skytrak|trugolf|trackman|nova|golfjoy|vtrack|bluetees|"
+                        r"rainmaker|voice ?caddie|swing ?caddie|golfzon|gsp.*connect|launch ?monitor", re.I)
+LISTING_DEPTH = 3
+LISTING_PER_FOLDER = 40
+LISTING_LINES = 3000
+LISTING_SKIP = {"cache", "ebwebview", "crashpad", "gpucache", "code cache"}   # an embedded browser's own files
+
+
+def _software_listing() -> list[str]:
+    """Every launch monitor vendor's folder under SOFTWARE_ROOTS, LISTING_DEPTH levels down."""
+    out: list[str] = []
+    for root in dict.fromkeys(Path(os.path.expandvars(r)) for r in SOFTWARE_ROOTS):
+        try:
+            tops = sorted(p for p in root.iterdir() if p.is_dir() and LM_VENDORS.search(p.name))
+        except OSError:
+            continue
+        for top in tops:
+            out.append(f"{top}/")
+            stack = [(top, 1)]
+            while stack and len(out) < LISTING_LINES:
+                d, depth = stack.pop()
+                try:
+                    kids = sorted(d.iterdir(), key=_mtime, reverse=True)
+                except OSError as e:
+                    out.append(f"  {d}: can't list ({e.strerror or e!r})")
+                    continue
+                if len(kids) > LISTING_PER_FOLDER:
+                    out.append(f"  {d.relative_to(top).as_posix()}: {len(kids)} entries, the newest {LISTING_PER_FOLDER} listed")
+                    kids = kids[:LISTING_PER_FOLDER]
+                for k in kids:
+                    rel = k.relative_to(top).as_posix()
+                    try:
+                        st = k.stat()
+                    except OSError:
+                        continue
+                    if k.is_dir():
+                        out.append(f"  {rel}/")
+                        if depth < LISTING_DEPTH and k.name.lower() not in LISTING_SKIP:
+                            stack.append((k, depth + 1))
+                    else:
+                        stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
+                        out.append(f"  {rel}  {st.st_size:,}  {stamp}")
+            if len(out) >= LISTING_LINES:
+                return out + ["[... listing cut short ...]"]
+    return out
+
+
+def _mtime(p: Path) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _newest(folder: Path, pattern: str, n: int) -> list[Path]:
+    return sorted((p for p in folder.glob(pattern) if p.is_file()), key=_mtime, reverse=True)[:n]
+
+
+def _gspro_db_shots(db: Path) -> tuple[list[str], dict]:
+    """GSPro.db's tables, and the newest rows of the ones holding shots (any launch monitor's ball and
+    club data, as GSPro took it). Read-only, giving up quickly if GSPro holds the lock."""
+    con = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
+    try:
+        tables = [r[0] for r in con.execute("select name from sqlite_master where type='table' order by name")]
+        rows = {}
+        for t in ("LastShot", "DrivingRangeShot"):
+            if t in tables:
+                rows[t] = [{"ID": i, "DateCreated": d, "ShotData": json.loads(s) if s else None}
+                           for i, d, s in con.execute(f"select ID, DateCreated, ShotData from {t} "
+                                                      f"order by ID desc limit {GSPRO_DB_ROWS}")]
+    finally:
+        con.close()
+    return tables, rows
+
+
+def _last_lm_type(logs: list[Path]) -> str | None:
+    """The launch monitor GSPro last logged a shot from (its `LM Type` line), from the newest log."""
+    from .sources.gspro_log import _LM_TYPE
+
+    for p in sorted((p for p in logs if p.is_file()), key=_mtime, reverse=True):
+        for line in reversed(tail(p, GSPRO_LOG_CAP).decode("utf-8", errors="replace").splitlines()):
+            if m := _LM_TYPE.match(line.strip()):
+                return m.group(1)
+    return None
+
+
 def build(cfg: Config, config_path: Path = Path("config.yaml")) -> Path:
     """Write the report zip into folder(cfg) and return its path."""
     with _building:
@@ -348,6 +451,48 @@ def _build(cfg: Config, config_path: Path) -> Path:
             found = read_game_settings(p)
             summary.append("GSPro settings: " + ", ".join(f"{k}={v}" for k, v in found.items()))
         guard("GSPro settings", gspro_settings)
+
+        summary += ["", "== Launch monitor =="]
+        guard("launch monitor type", lambda: summary.append(
+            f"GSPro last logged: LM Type {_last_lm_type(_gspro_logs(cfg)) or '(none found)'}"))
+
+        def connector_logs() -> None:
+            live = Path(source.connector_log)
+            for p in _newest(live.parent, live.name + ".*", CONNECTOR_LOGS):
+                summary.append("Connector log " + _describe(p))
+                add_file(f"gspro/{p.name}", p, 1_000_000)
+        guard("rotated connector logs", connector_logs)
+
+        gspro_dir = Path(source.gspro_log).expanduser().parent
+
+        def gspro_db() -> None:
+            db = gspro_dir / "GSPro.db"
+            if not db.is_file():
+                summary.append(f"{db}: missing")
+                return
+            tables, rows = _gspro_db_shots(db)
+            summary.append(f"GSPro.db tables: {', '.join(tables)}")
+            summary.extend(f"GSPro.db {t}: {len(r)} newest rows kept" for t, r in rows.items())
+            add_text("gspro/GSPro.db-shots.json", json.dumps(rows, indent=1).encode())
+        guard("GSPro.db shots", gspro_db)
+        guard("round file", lambda: add_file("gspro/currentRound.dat", gspro_dir / "currentRound.dat", 2_000_000))
+
+        def vendor_files() -> None:
+            for what, where, pattern, n, cap in LM_FILES:
+                base = Path(os.path.expandvars(where))
+                found = _newest(base, pattern, n) if base.is_dir() else []
+                summary.append(f"{what}: {len(found)} file(s) from {base}" if found else f"{what}: none")
+                tag = re.sub(r"[^\w.-]+", "_", what)
+                for p in found:
+                    add_file(f"launch-monitor/{tag}/{p.relative_to(base).as_posix()}", p, cap)
+        guard("launch monitor files", vendor_files)
+
+        def software() -> None:
+            lines = _software_listing()
+            summary.append(f"Launch monitor software folders: {sum(1 for l in lines if not l.startswith(' '))}"
+                           " (listed in launch-monitor/software.txt)")
+            add_text("launch-monitor/software.txt", "\n".join(lines).encode())
+        guard("launch monitor software", software)
 
         summary += ["", "== Health =="]
 

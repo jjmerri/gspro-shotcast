@@ -202,6 +202,48 @@ def test_report_lists_gspro_settings_but_not_its_players(tmp_path, monkeypatch):
     assert "Jane" not in summary
 
 
+def test_report_gathers_the_launch_monitor_data_gspro_and_its_software_keep(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    gspro = tmp_path / "GSPro"
+    gspro.mkdir()
+    (gspro / "Player.log").write_text('x\nLM Type {"connectType":"Garmin","LMType":"R10"}\ny\n', encoding="utf-8")
+    (gspro / "currentRound.dat").write_text('{"Shots": []}', encoding="utf-8")
+    con = sqlite3.connect(gspro / "GSPro.db")
+    con.execute("create table LastShot (ID integer, DateCreated text, ShotData text)")
+    con.execute("insert into LastShot values (7, '2099-01-01', ?)", (json.dumps({"ClubSpeed": 40.5}),))
+    con.commit()
+    con.close()
+    gspc = tmp_path / "GSPC"
+    gspc.mkdir()
+    for name in ("ConnectDebug.txt", "ConnectDebug.txt.1", "ConnectDebug.txt.2026-11-14"):
+        (gspc / name).write_text(f"{name} shot\n", encoding="utf-8")
+    vendor = tmp_path / "Vendor"
+    (vendor / "12").mkdir(parents=True)
+    (vendor / "12" / "shotinfo.json").write_text('{"clubspeed": "40"}', encoding="utf-8")
+    monkeypatch.setattr(report, "LM_FILES", [("Some LM shots", str(vendor), "*/*.json", 5, 1000),
+                                             ("Absent LM", str(tmp_path / "nowhere"), "*.txt", 1, 1000)])
+    programs = tmp_path / "Programs"
+    (programs / "aboutGOLF" / "aG Bridge").mkdir(parents=True)
+    (programs / "aboutGOLF" / "aG Bridge" / "bridge.log").write_bytes(b"shot\n")
+    (programs / "Microsoft").mkdir()
+    monkeypatch.setattr(report, "SOFTWARE_ROOTS", [str(programs), str(tmp_path / "absent")])
+    cfg = Config(log_dir="logs", db_path="logs/season.db")
+    cfg.source.gspro_log = str(gspro / "Player.log")
+    cfg.source.connector_log = str(gspc / "ConnectDebug.txt")
+
+    with zipfile.ZipFile(report.build(cfg, tmp_path / "config.yaml")) as z:
+        names = set(z.namelist())
+        summary = z.read("summary.txt").decode()
+        shots = json.loads(z.read("gspro/GSPro.db-shots.json"))
+        software = z.read("launch-monitor/software.txt").decode()
+    assert "aboutGOLF" in software and "aG Bridge/bridge.log  5" in software and "Microsoft" not in software
+    assert {"gspro/ConnectDebug.txt", "gspro/ConnectDebug.txt.1", "gspro/ConnectDebug.txt.2026-11-14",
+            "gspro/currentRound.dat", "launch-monitor/Some_LM_shots/12/shotinfo.json"} <= names
+    assert shots["LastShot"][0]["ShotData"] == {"ClubSpeed": 40.5}
+    assert 'LM Type {"connectType":"Garmin","LMType":"R10"}' in summary
+    assert "Some LM shots: 1 file(s)" in summary and "Absent LM: none" in summary
+
+
 def test_a_corrupt_settings_file_is_refused_rather_than_filling_memory():
     from commentator.gspro_settings import _Reader
 
