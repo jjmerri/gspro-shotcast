@@ -25,6 +25,7 @@ the files that changed, and an open page keeps the files it has read (immutable)
 """
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import logging
@@ -32,6 +33,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import threading
 import time
 from html import escape
 from contextlib import closing, contextmanager
@@ -367,6 +369,31 @@ def manifest(site_name: str = SITE_NAME, theme: dict[str, str] | None = None) ->
                        "icons": icons}, indent=1)
 
 
+_gc_lock = threading.Lock()
+_gc_builds = 0       # builds under way (the page's and a publish can overlap)
+_gc_was_on = False
+
+
+@contextmanager
+def gc_paused():
+    """Python's cycle collector off while a build runs. A build holds a great many objects and makes
+    next to no cycles (its peak memory is the same without the collector), so every full collection
+    went over all of them for nothing: a quarter of a build's time. Back on when the last build ends."""
+    global _gc_builds, _gc_was_on
+    with _gc_lock:
+        if _gc_builds == 0:
+            _gc_was_on = gc.isenabled()
+            gc.disable()
+        _gc_builds += 1
+    try:
+        yield
+    finally:
+        with _gc_lock:
+            _gc_builds -= 1
+            if _gc_builds == 0 and _gc_was_on:
+                gc.enable()
+
+
 def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = None,
           records: dict[int, dict] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB,
           local: bool = False, season_start: str | None = None, reels: dict[int, dict] | None = None,
@@ -384,7 +411,7 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
     version = new_version()
     vdir = site / "v" / version
     vdir.mkdir(parents=True, exist_ok=True)
-    with closing(stats_web.connect(db_path)) as src, frozen(src), stats_cache.opened(src, db_path):
+    with gc_paused(), closing(stats_web.connect(db_path)) as src, frozen(src), stats_cache.opened(src, db_path):
         for name, context in CONTEXTS.items():
             body: dict[str, Any] = stats_web.summary(src, context, names, local, season_start)
             if not news:

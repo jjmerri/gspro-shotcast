@@ -410,3 +410,22 @@ def test_one_publish_at_a_time_holds_the_sites_lock(tmp_path):
     t.join()
     with stats_site.site_lock(tmp_path / "stats-site", timeout=1):
         pass
+
+
+def test_the_cycle_collector_is_off_while_any_build_runs_and_back_on_after_the_last():
+    import gc
+    assert gc.isenabled()
+    first, second = stats_site.gc_paused(), stats_site.gc_paused()
+    first.__enter__()
+    second.__enter__()          # a publish overlapping the page's build
+    first.__exit__(None, None, None)
+    assert not gc.isenabled()   # the other build still running
+    second.__exit__(None, None, None)
+    assert gc.isenabled()
+    gc.disable()
+    try:
+        with stats_site.gc_paused():
+            pass
+        assert not gc.isenabled()   # left as it was found
+    finally:
+        gc.enable()
