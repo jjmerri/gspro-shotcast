@@ -218,6 +218,12 @@ merged like any other, and its record is in both nights' signatures.
 - **The round file** (`Store.apply_round_file`, every 2 s for 3 minutes after GSPro writes it) reads
   the courses played one index step each and only the round ends from its window on, not every shot
   and round: at 10 years, 80 ms a pass down to 20 ms.
+- **Going back a release.** 0.1.134 (format 5) opens a format-6 file, WAL included, records and edits
+  in it and builds its page; the next start here gives its rows their records, moving only the
+  counters of the records they join (reconciling once moved every record's, so a rollback cost a cold
+  build: on 1 year, 4,253 cache misses, now 37, as the same rows written here). A file older than
+  `store.FORMAT` is copied before it's upgraded (`backup.before_upgrade`): at 10 years (1.2 GB) 34 s,
+  once.
 - **Predictions** need no port: about 1,600 rows at 3 years, read in under 1 ms.
 - **To port:** the page files' remaining lists (below).
 - **Decisions:**

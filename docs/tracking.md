@@ -786,7 +786,11 @@ own AWS credentials (`aws s3 cp s3://<BucketName>/backups/<file> .`).
 `python -m commentator restore logs/backups/season-....db.gz`; it checks the copy, saves the
 current file (even a corrupted one) as `pre-restore-*.db.gz` in the backup folder, then swaps it in.
 The tray's updates (Restart to update, or one installing itself) also save the file, with the booth stopped, as
-`pre-update-<when>-from-<version>.db.gz` there (the last three kept), to restore the same way.
+`pre-update-<when>-from-<version>.db.gz` there (the last three kept), to restore the same way. A
+version that changes the file's format (`store.FORMAT`) copies it first itself, as
+`pre-update-<when>-from-format-<n>.db.gz`, however it was installed. Going back to the release before (checked with 0.1.134, the last before
+format 6): it keeps working on the upgraded file, and the rows it writes join their rounds when the
+newer version starts again; restore the pre-update copy only to have the file exactly as it was.
 
 ## Recording only
 

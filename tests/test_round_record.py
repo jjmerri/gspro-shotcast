@@ -128,6 +128,7 @@ def test_an_older_versions_rows_join_their_records_at_the_next_start(tmp_path):
     Store(str(path), new_session=False).close()
     db = _raw(path)
     before = _grouping(db)
+    gens = dict(db.execute("SELECT uuid, gen FROM round_records"))
     r1 = before["rounds"][1]
     # An older version (no records, no quiet) adds a line just after round 1 and a practice shot.
     db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text) VALUES (1, ?, 'shot', 'pbp', 'late')",
@@ -147,6 +148,9 @@ def test_an_older_versions_rows_join_their_records_at_the_next_start(tmp_path):
     assert after["lines"][max(after["lines"])] == r1
     assert db.execute("SELECT gen FROM round_records WHERE uuid = ?", (r1,)).fetchone()[0] > 0
     assert db.execute("SELECT kind FROM round_records WHERE uuid = ?", (after["shots"][shot],)).fetchone()[0] == "practice"
+    # The rest kept theirs: their kept results (stats_cache) stand.
+    moved = {u for u, g in db.execute("SELECT uuid, gen FROM round_records") if gens.get(u, g) != g}
+    assert moved <= {r1, after["shots"][shot]} and len(gens) > 2
 
 
 def test_a_live_record_is_never_regrouped(tmp_path):

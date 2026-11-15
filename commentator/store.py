@@ -13,6 +13,7 @@ import math
 import re
 import sqlite3
 import time
+from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from . import round_file
@@ -417,10 +418,26 @@ def planner_counts_stale(db: sqlite3.Connection, grown: float = 2.0, least: int 
     return False
 
 
+# The season file's format (PRAGMA user_version) once upgraded: 6 is round_record.migrate's. Raise it
+# with any change to the file an older release would trip over: a file older than this is copied before
+# it's upgraded (backup.before_upgrade).
+FORMAT = 6
+
+
 class Store:
-    def __init__(self, path: str | None, new_session: bool = True) -> None:
+    def __init__(self, path: str | None, new_session: bool = True, backups: str | Path | None = None) -> None:
         """Open (creating or upgrading) the season file. new_session=False opens it for maintenance, such
-        as a backfill, without starting a booth session in it."""
+        as a backfill, without starting a booth session in it. `backups`: where a file in an older format
+        is copied first (default: a backups folder beside it, where the booth's own copies go by default)."""
+        if path:
+            try:
+                from . import backup
+
+                made = backup.before_upgrade(path, backups or Path(path).parent / "backups", FORMAT)
+                if made:
+                    log.info("Season file copied before upgrading it: %s", made)
+            except Exception:
+                log.exception("Season file not copied before upgrading it (opening it anyway)")
         # Long enough to outwait anything else holding the file (a backup's copy, a page edit), so the booth
         # doesn't stop over a busy moment.
         self.db = sqlite3.connect(path or ":memory:", timeout=30)

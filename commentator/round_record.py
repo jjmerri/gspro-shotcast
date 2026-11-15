@@ -746,9 +746,11 @@ def reconcile(db: sqlite3.Connection, quiet: str = "0") -> None:
 
 
 def _store(db, records, meta, target, tables, sides, shots, cards) -> None:
+    # Only records that changed: the update moves a record's counter even when it writes the same values.
     db.executemany("UPDATE round_records SET kind = :kind, session_id = :session_id, course = :course,"
                    " started_at = :started_at, ended_at = :ended_at, state = :state WHERE uuid = :uuid",
-                   [{**m, "uuid": u} for u, m in meta.items() if u in records])
+                   [{**m, "uuid": u} for u, m in meta.items()
+                    if u in records and any(records[u][k] != v for k, v in m.items())])
     db.executemany("INSERT INTO round_records (uuid, kind, session_id, course, started_at, ended_at, state, assigned)"
                    " VALUES (:uuid, :kind, :session_id, :course, :started_at, :ended_at, :state, 'inferred')",
                    [{**m, "uuid": u} for u, m in meta.items() if u not in records])

@@ -84,7 +84,7 @@ def _build_recording_engine(cfg: Config, unavailable: str | None = None):
         live_llm=off, segment_llm=off, speech=SpeechQueue(cfg, ConsoleTTS()),
         screen=Screen(cfg.screen) if cfg.source.type != "replay" and cfg.screen.ocr else None,
         await_preshot=cfg.source.type == "replay",
-        store=Store(cfg.db_path) if cfg.source.type != "replay" else None,
+        store=Store(cfg.db_path, backups=_backups(cfg)) if cfg.source.type != "replay" else None,
         health=_health(cfg), commentary_unavailable=unavailable,
     )
 
@@ -117,9 +117,15 @@ def _build_live_engine(cfg: Config):
         screen=Screen(cfg.screen) if needs_screen else None,
         await_preshot=cfg.source.type == "replay",
         # Replays are made-up shots; only live play goes into the season.
-        store=Store(cfg.db_path) if cfg.source.type != "replay" else None,
+        store=Store(cfg.db_path, backups=_backups(cfg)) if cfg.source.type != "replay" else None,
         health=_health(cfg),
     )
+
+
+def _backups(cfg: Config) -> Path:
+    from . import backup
+
+    return backup.folder(cfg)
 
 
 def _health(cfg: Config):

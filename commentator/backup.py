@@ -147,11 +147,38 @@ def pre_update(cfg: Config, version: str, now: datetime | None = None) -> Path |
     """A copy of the season file as it was before an update (taken with the booth stopped), named apart
     from the daily/weekly copies so the new version's first copy, after any change it makes to the
     file, can't prune it. The newest PRE_UPDATE_KEPT are kept. None if there's no database yet."""
-    db_path, dest = Path(cfg.db_path), folder(cfg)
+    db_path = Path(cfg.db_path)
     if not db_path.exists():
         return None
+    return _copy_before(db_path, folder(cfg), version, now)
+
+
+def before_upgrade(db_path: str | Path, dest: str | Path, version: int, now: datetime | None = None) -> Path | None:
+    """A pre-update copy of a season file whose format (PRAGMA user_version) is older than `version`,
+    taken before the store upgrades it, so a release installed by hand can be gone back on like one
+    installed from the menu (pre_update). None when there's nothing to keep: no season yet, or the
+    file already upgraded. (After an update from the menu that's a second copy: one of another season
+    file sharing the folder can't be told from it without copying this one anyway.)
+
+    The format is read off the file's header, not through SQLite: a file in WAL mode with no -shm
+    beside it (as the booth leaves it) can't be opened read-only, and one in an older format was never
+    in WAL mode, so its header is up to date."""
+    db_path, dest = Path(db_path), Path(dest)
+    if not db_path.is_file():
+        return None
+    with open(db_path, "rb") as fh:
+        head = fh.read(100)
+    if len(head) < 100 or not head.startswith(b"SQLite format 3\0"):
+        return None   # no season yet (an empty file), or not a database: SQLite says so when it's opened
+    was = int.from_bytes(head[60:64], "big", signed=True)
+    if was >= version:
+        return None
+    return _copy_before(db_path, dest, f"format-{was}", now)
+
+
+def _copy_before(db_path: Path, dest: Path, label: str, now: datetime | None) -> Path:
     dest.mkdir(parents=True, exist_ok=True)
-    safe = "".join(c if c.isalnum() or c in ".-_" else "_" for c in version)
+    safe = "".join(c if c.isalnum() or c in ".-_" else "_" for c in label)
     name = f"{PRE_UPDATE}{(now or datetime.now()).strftime(STAMP)}-from-{safe}{SUFFIX}"
     with tempfile.TemporaryDirectory(dir=dest) as tmp:
         raw = Path(tmp) / "season.db"

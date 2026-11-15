@@ -233,3 +233,66 @@ def test_a_copy_before_an_update_outlives_the_new_versions_first_copy(tmp_path):
     with gzip.open(pres[4]) as fin:
         (tmp_path / "restored.db").write_bytes(fin.read())
     assert _value(tmp_path / "restored.db") == "before"
+
+
+def _older_season(path):
+    """A season file as a release before store.FORMAT left it: an older format, no WAL, one shot."""
+    from commentator.store import Store
+
+    Store(str(path)).db.close()
+    with closing(sqlite3.connect(path)) as db:
+        db.execute("PRAGMA journal_mode = DELETE")
+        db.execute("INSERT INTO shots (session_id, ts, player, is_putt, raw) VALUES (1, 1, 'Ann', 0, '{}')")
+        db.execute("PRAGMA user_version = 5")
+        db.commit()
+
+
+def test_a_season_file_in_an_older_format_is_copied_as_it_was_before_its_upgraded(tmp_path, caplog):
+    from commentator.store import FORMAT, Store
+
+    path = tmp_path / "season.db"
+    Store(str(path)).db.close()   # a new season: nothing to keep
+    assert not (tmp_path / "backups").exists()
+    _older_season(path)
+    Store(str(path)).db.close()
+    made = list((tmp_path / "backups").glob(backup.PRE_UPDATE + "*"))
+    assert len(made) == 1 and "-from-format-5" in made[0].name
+    with gzip.open(made[0]) as fin:
+        (tmp_path / "restored.db").write_bytes(fin.read())
+    with closing(sqlite3.connect(tmp_path / "restored.db")) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        assert db.execute("SELECT player FROM shots").fetchall() == [("Ann",)]
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == FORMAT
+    with closing(sqlite3.connect(path)) as db:   # in WAL mode, as a closed booth leaves it: no -shm to read by
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    for side in ("-wal", "-shm"):
+        (tmp_path / f"season.db{side}").unlink(missing_ok=True)
+    Store(str(path)).db.close()   # upgraded already
+    assert len(list((tmp_path / "backups").glob(backup.PRE_UPDATE + "*"))) == 1
+    assert "not copied" not in caplog.text
+
+
+def test_an_older_season_file_is_copied_even_beside_a_newer_copy_of_another(tmp_path):
+    from commentator.store import Store
+
+    cfg = Config(log_dir=str(tmp_path / "logs"), db_path=str(tmp_path / "season.db"))
+    _older_season(cfg.db_path)
+    _older_season(tmp_path / "other.db")
+    backup.pre_update(cfg, "0.1.134")   # (the other season's copy, made since)
+    Store(str(tmp_path / "other.db"), backups=backup.folder(cfg)).db.close()
+    assert len(list(backup.folder(cfg).glob("*-from-format-5*"))) == 1
+
+
+def test_the_booth_copies_an_older_season_file_into_the_backup_folder_set(tmp_path):
+    from commentator.__main__ import _build_engine
+
+    cfg = Config(log_dir=str(tmp_path), db_path=str(tmp_path / "season.db"))
+    cfg.backup.dir = str(tmp_path / "kept")
+    cfg.league_file = "data/league.example.json"
+    cfg.screen.ocr = cfg.screen.send_images = False
+    cfg.commentary.enabled = False
+    _older_season(cfg.db_path)
+    _build_engine(cfg).store.db.close()
+    assert len(list((tmp_path / "kept").glob(backup.PRE_UPDATE + "*"))) == 1
