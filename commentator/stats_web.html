@@ -1356,6 +1356,7 @@ function renderPlayerPage() {
 }
 
 function renderPlayer(p) {
+  if (state.histFor !== p.name) { state.histFor = p.name; delete state.more.hist; }   // each player's rounds start at a page
   const pa = p.par_avg;
   const only = state.me ? "" : `<button class="link" data-onlyme="${esc(p.name)}" title="Narrow every tab to ${esc(p.name)} (the picker at the top; remembered on this device)">Show only ${esc(p.name)} on every tab</button>`;
   const others = state.data.players.filter(x => x.name !== p.name);
@@ -1436,7 +1437,7 @@ function renderPlayer(p) {
     { key: "date", label: "Date" }, { key: "course", label: "Course", cls: "l" }, { key: "played", label: "Holes" },
     { key: "gross", label: "Gross" }, { key: "to_par", label: "To par" }],
     h => `<tr${h.side ? ` class="click" data-round="${h.side}"` : ""}><td>${esc(h.date)}</td><td class="l">${esc(h.course)}</td><td>${h.played}</td><td>${h.gross}</td><td>${toPar(h.to_par)}</td></tr>`,
-    { key: "date", dir: -1 })}`;
+    { key: "date", dir: -1, page: 20 })}`;
 }
 
 // A player's side of a round (its row id), when the round is in this view.
