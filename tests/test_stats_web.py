@@ -8,7 +8,7 @@ import urllib.request
 
 import pytest
 
-from commentator import stats_web
+from commentator import stats_site, stats_web
 from commentator.models import Line
 from commentator.store import Store
 
@@ -311,7 +311,10 @@ def test_server_serves_the_page_and_summary(tmp_path):
         assert body["context"] == "practice"
         r = body["rounds"][0]
         assert (r["gross"], r["to_par"], r["played"]) == (9, 1, 9)
-        assert [h["hole"] for h in r["card"]] == [1, 2]
+        # the list is slim: its scorecard is in its year's data file, read when the round's opened
+        assert "card" not in r
+        card = stats_site.round_details(tmp_path / "site", r["round"])[r["id"]]["card"]
+        assert [h["hole"] for h in card] == [1, 2]
         # The browser's SQLite reads a data file in pieces: HEAD for the size, then byte ranges.
         data = json.loads(urllib.request.urlopen(base + "/latest.json").read())["data"]
         url = f"{base}/{data[0]['file']}"
@@ -565,6 +568,34 @@ def test_a_rounds_replay_hides_with_it_and_goes_when_every_round_on_it_is_delete
               + "console.log(JSON.stringify(shownVods().map(v => v.session)))")
     got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
     assert got == ["20261016-200000-bbbbbb", "20261016-220000-dddddd", "20261016-230000-eeeeee", "live"]
+
+
+def test_the_page_shows_a_rounds_details_as_its_context_has_them_with_its_players_season():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = re.search(r"\nfunction withDetails\(.*?\n}\n", page, re.S).group(0)
+    vs = [{"label": "Greens", "round": 50.0, "of": "gir_pct", "better": 1, "fmt": "pct"}]
+    det = {"card": [{"hole": 1}], "summary": {"vs": vs, "sg": {"total": 1.5}},
+           "ctx": {"practice": {"summary": {"vs": vs, "sg": {"total": -0.5}}}}}
+    script = (f"const state = {{ details: {{ 7: {{ 7: {json.dumps(det)} }}, 8: \"loading\" }}, data: {{ players: "
+              f"[{{ name: 'Ann', gir_pct: 40 }}] }} }};" + fns + """
+      const r = { id: 7, round: 7, side: "Ann" }, out = [];
+      for (const ctx of ["", "league", "practice"]) {
+        state.ctx = ctx; const x = withDetails(r);
+        out.push([x.card.length, x.summary.sg.total, x.summary.vs[0].season, "ctx" in x]);
+      }
+      state.data.players = [];
+      out.push(withDetails(r).summary.vs[0].season, withDetails({ id: 8, round: 8 }), withDetails({ id: 9, round: 9 }));
+      console.log(JSON.stringify(out));""")
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    assert got == [[1, 1.5, 40, False], [1, 1.5, 40, False], [1, -0.5, 40, False], None, None, None]
 
 
 def test_the_pages_tee_line_gives_the_whole_course_and_the_nine_played():

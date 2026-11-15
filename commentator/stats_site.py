@@ -10,8 +10,8 @@ query needs over HTTP range requests, so the page stays fast however long the se
     v/<version>/summary-<ctx>.json  ctx: all, league, tournament, practice
     v/<version>/player/<ctx>/<key>.json   one player's courses, highlights and records
     v/<version>/data.json           the version's data files (below)
-    data/<hash>.db                  a year's shots, transcripts and hole replays
-    latest.json                     {"version": ..., "data": ...}: which v/ the page reads
+    data/<hash>.db                  a year's shots, transcripts, hole replays and rounds' details
+    latest.json                     {"version": ..., "data": ..., "page": ...}: which v/ the page reads
     manifest.webmanifest, sw.js, icons/   the home-screen app and its alerts (docs/tracking.md#alerts)
 
 Each build is a new version, and latest.json is written last, so a page that's open while a new
@@ -22,6 +22,9 @@ first in the version's data.json (and in latest.json, as "data"), each with the 
 it so the page only reads the files a query can find rows in. A year's file is built again only when
 something in it changes (stats_cache, per year), and named by its content, so a publish uploads only
 the files that changed, and an open page keeps the files it has read (immutable).
+
+The summaries list every round, slim: what only a round's own page and its share card read
+(ROUND_DETAILS) is in its year's file, read when the round is opened (docs/dev/round-details.md).
 """
 from __future__ import annotations
 
@@ -60,6 +63,11 @@ PAGE_SIZE = 1024   # small pages: a lookup fetches little more than the rows it 
 APP_FILES = ("manifest.webmanifest", "sw.js")
 KEEP_VERSIONS = 2  # the newest, plus the one before for pages opened just before a publish
 DATA_FILE = re.compile(r"[0-9a-f]{20}\.db")   # a data file's name: its content's hash
+# A summary round's fields only its own page reads: in its year's data file (pub_round), not the list.
+ROUND_DETAILS = ("card", "summary", "tee", "tee_yards", "course_yards", "course_holes", "mulligans",
+                 "putt_split", "scramble", "sand", "penalties", "longest_drive")
+# latest.json's "page": the summaries' shape. A page open across a publish that changes it reloads.
+PAGE_FORMAT = 2
 
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                  ".json": "application/json", ".wasm": "application/wasm",
@@ -87,9 +95,11 @@ def new_version() -> str:
 
 
 def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | None = None,
-                  part: tuple[list[int], list[int]] | None = None) -> None:
+                  part: tuple[list[int], list[int]] | None = None,
+                  rounds: list[tuple[int, int, str]] | None = None) -> None:
     """Shots (newest first, as the page lists them), their times, each session's transcript and each
-    round's hole replays. `part`: only those of these sessions and rounds (page_parts' year)."""
+    round's hole replays. `part`: only those of these sessions and rounds (page_parts' year). `rounds`:
+    the rounds' details (id, round, JSON) that go in this file (round_details_rows)."""
     tmp, packed = out.with_name(out.name + ".tmp"), out.with_name(out.name + ".packed")
     tmp.unlink(missing_ok=True)
     packed.unlink(missing_ok=True)
@@ -113,7 +123,10 @@ def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | No
             CREATE TABLE pub_replay (round INTEGER, hole INTEGER, json TEXT NOT NULL, PRIMARY KEY (round, hole));
             CREATE TABLE pub_hole_image (id INTEGER PRIMARY KEY, src TEXT NOT NULL);
             CREATE TABLE pub_shot_ts (ts REAL PRIMARY KEY);
+            CREATE TABLE pub_round (id INTEGER PRIMARY KEY, round INTEGER NOT NULL, json TEXT NOT NULL);
+            CREATE INDEX pub_round_round ON pub_round (round);
         """)
+        db.executemany("INSERT INTO pub_round VALUES (?, ?, ?)", rounds or [])
         # Every swing's time (a mulligan's too: it's on the stream) in the published rounds, for a replay's
         # Next shot button.
         db.executemany("INSERT OR IGNORE INTO pub_shot_ts VALUES (?)", src.execute(
@@ -202,12 +215,12 @@ def _year_sigs(src: sqlite3.Connection, parts: dict[str, tuple[list[int], list[i
 
 
 def _year_file(src: sqlite3.Connection, site: Path, year: str, part: tuple[list[int], list[int]],
-               names: dict[str, str] | None) -> dict[str, Any]:
+               names: dict[str, str] | None, rounds: list[tuple[int, int, str]] | None = None) -> dict[str, Any]:
     """Build one year's data file into site/data, named by its content; returns its data.json entry."""
     ddir = site / "data"
     ddir.mkdir(parents=True, exist_ok=True)
     tmp = ddir / f"building-{year or 'none'}-{secrets.token_hex(4)}.db.tmp"
-    build_data_db(src, tmp, names, part)
+    build_data_db(src, tmp, names, part, rounds)
     h = hashlib.sha256()
     with tmp.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -223,8 +236,8 @@ def _year_file(src: sqlite3.Connection, site: Path, year: str, part: tuple[list[
             " WHERE ord IN (0, (SELECT MAX(ord) FROM pub_shot_json)))")) if t]
         ts = [min(t[0] for t in ts), max(t[1] for t in ts)] if ts else None
         ids = span("SELECT MIN(id), MAX(id) FROM pub_shot")
-        a, b = span("SELECT MIN(round), MAX(round) FROM pub_shot"), span("SELECT MIN(round), MAX(round) FROM pub_replay")
-        rounds = [min(x[0] for x in (a, b) if x), max(x[1] for x in (a, b) if x)] if a or b else None
+        got = [x for x in (span(f"SELECT MIN(round), MAX(round) FROM {t}") for t in ("pub_shot", "pub_replay", "pub_round")) if x]
+        rounds = [min(x[0] for x in got), max(x[1] for x in got)] if got else None
     sessions = [part[0][0], part[0][-1]] if part[0] else None
     if (site / file).exists():
         tmp.unlink()
@@ -233,22 +246,78 @@ def _year_file(src: sqlite3.Connection, site: Path, year: str, part: tuple[list[
     return {"year": year, "file": file, "ts": ts, "sessions": sessions, "rounds": rounds, "ids": ids}
 
 
-def page_files(src: sqlite3.Connection, site: Path, names: dict[str, str] | None = None) -> list[dict[str, Any]]:
+def split_rounds(name: str, body: dict[str, Any], details: dict[int, dict[str, Any]]) -> None:
+    """Take each round's ROUND_DETAILS out of a summary's rounds into `details` (id -> {"round", "date",
+    "row"}), every context's in CONTEXTS' order. The "all" summary's, which lists every round, are each
+    round's row; another context's that differ (strokes gained from its own shots) go under the row's
+    "ctx". A summary's `vs` figures are kept without the season's, which the page takes from its players."""
+    for r in body["rounds"]:
+        mine = {k: r.pop(k) for k in ROUND_DETAILS if k in r}
+        if mine.get("summary"):
+            mine["summary"] = {**mine["summary"], "vs": [{k: v for k, v in x.items() if k != "season"}
+                                                         for x in mine["summary"]["vs"]]}
+        got = details.get(r["id"])
+        if got is None:
+            details[r["id"]] = {"round": r["round"], "date": r["date"], "row": mine}
+            continue
+        row = got["row"]
+        diff = {k: mine.get(k) for k in ROUND_DETAILS if mine.get(k) != row.get(k)}
+        if diff:
+            row.setdefault("ctx", {})[name] = diff
+
+
+def _round_rows(parts: dict[str, tuple[list[int], list[int]]],
+                details: dict[int, dict[str, Any]]) -> dict[str, list[tuple[int, int, str]]]:
+    """Each year's rounds' details, as pub_round rows (id, round, JSON): a round's in the year with its
+    hole replays, else its date's, else the newest. Keys keep the build's order (the page lists a round's
+    mulligans and the like as they come); it's the same every build."""
+    year_of = {rnd: y for y, (_, rounds) in parts.items() for rnd in rounds}
+    out: dict[str, list[tuple[int, int, str]]] = {y: [] for y in parts}
+    for i, d in sorted(details.items()):
+        y = year_of.get(d["round"]) or ((d["date"] or "")[:4] if (d["date"] or "")[:4] in parts else next(iter(parts)))
+        out[y].append((i, d["round"], json.dumps(d["row"], separators=(",", ":"))))
+    return out
+
+
+def round_details(site: str | Path, rnd: int) -> dict[int, dict[str, Any]]:
+    """One round's details (pub_round: each side's row, by id) from the site's latest version's data files."""
+    site = Path(site)
+    for e in json.loads((site / "latest.json").read_text(encoding="utf-8")).get("data") or []:
+        span = e.get("rounds")
+        if not span or not span[0] <= rnd <= span[1]:
+            continue
+        try:
+            with closing(sqlite3.connect(f"file:{site / e['file']}?mode=ro", uri=True)) as db:
+                got = {i: json.loads(j) for i, j in db.execute("SELECT id, json FROM pub_round WHERE round = ?", (rnd,))}
+        except sqlite3.Error:
+            continue   # (a file from before pub_round)
+        if got:
+            return got
+    return {}
+
+
+def page_files(src: sqlite3.Connection, site: Path, names: dict[str, str] | None = None,
+               details: dict[int, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """The page's data files, newest year first (data.json): each year's kept from the last build while
-    nothing in it has changed (and its file is still in this site), else built again."""
+    nothing in it has changed (and its file is still in this site), else built again. `details`: the
+    rounds' (split_rounds)."""
     parts = page_parts(src)
+    if details and not parts:
+        parts = {"": ([], [])}
+    rows = _round_rows(parts, details or {})
     cache = stats_cache.of(src)
     kept: dict = {}
     sigs: dict[str, str] = {}
     kind = "page_year:" + stats_cache.sig(str(site.resolve()))   # each site (the PC's, the published) its own files
     if cache is not None:
-        sigs = _year_sigs(src, parts, names)
+        sigs = {y: stats_cache.sig(s, hashlib.sha256("\n".join(j for _, _, j in rows[y]).encode()).hexdigest())
+                for y, s in _year_sigs(src, parts, names).items()}
         kept = cache.get(kind, sigs)
     out, new = [], {}
     for year, part in parts.items():
         entry = kept.get(year)
         if entry is None or not (site / entry["file"]).is_file():
-            entry = _year_file(src, site, year, part, names)
+            entry = _year_file(src, site, year, part, names, rows[year])
             new[year] = (sigs.get(year, ""), entry)
         out.append(entry)
     if cache is not None:
@@ -439,6 +508,7 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
     version = new_version()
     vdir = site / "v" / version
     vdir.mkdir(parents=True, exist_ok=True)
+    details: dict[int, dict[str, Any]] = {}
     with gc_paused(), closing(stats_web.connect(db_path)) as src, frozen(src), stats_cache.opened(src, db_path):
         for name, context in CONTEXTS.items():
             body: dict[str, Any] = stats_web.summary(src, context, names, local, season_start)
@@ -453,8 +523,9 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
                 pf = player_file(src, p["name"], context, season_start)
                 _note_records(records, pf["records"])
                 (pdir / f"{p['file']}.json").write_text(json.dumps(pf, separators=(",", ":")), encoding="utf-8")
+            split_rounds(name, body, details)
             (vdir / f"summary-{name}.json").write_text(json.dumps(body, separators=(",", ":")), encoding="utf-8")
-        data = page_files(src, site, names)
+        data = page_files(src, site, names, details)
         (vdir / "data.json").write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
         if reels is not None:
             reels.update(highlights.rounds(src))
@@ -465,7 +536,7 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
         if lib.is_dir():
             shutil.copytree(lib, site / "vendor" / lib.name, dirs_exist_ok=True)
     tmp = site / "latest.json.tmp"
-    tmp.write_text(json.dumps({"version": version, "data": data}), encoding="utf-8")
+    tmp.write_text(json.dumps({"version": version, "data": data, "page": PAGE_FORMAT}), encoding="utf-8")
     tmp.replace(site / "latest.json")
     for old in sorted((site / "v").iterdir(), key=lambda p: p.name)[:-KEEP_VERSIONS]:
         if old.name != version:

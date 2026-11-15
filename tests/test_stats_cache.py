@@ -451,6 +451,11 @@ def test_the_pages_data_files_are_kept_per_year_and_an_edit_builds_only_its_year
 
     first = build()
     assert [e["year"] for e in first] == ["2023", "2022"] and built == ["2023", "2022"]
+
+    def details(entry):   # each round's details go in its year's file
+        with closing(sqlite3.connect(site / entry["file"])) as db:
+            return [(i, rnd, "card" in json.loads(j)) for i, rnd, j in db.execute("SELECT id, round, json FROM pub_round")]
+    assert [details(e) for e in first] == [[(2, 2, True)], [(1, 1, True)]]
     assert build() == first and built == []
     with closing(sqlite3.connect(path)) as db, db:   # the first year's drive left out
         db.execute("UPDATE shots SET left_out = 1 WHERE id = ?", (shots[0],))
@@ -463,3 +468,7 @@ def test_the_pages_data_files_are_kept_per_year_and_an_edit_builds_only_its_year
     assert built == ["2023"] and last[1] == after[1] and last[0]["file"] != after[0]["file"]
     stats_cache.clear(path)   # the same files as a build that works every year out
     assert build() == last and built == ["2023", "2022"]
+    with closing(sqlite3.connect(path)) as db, db:   # a round's penalties put right: its details, in its year
+        db.execute("UPDATE rounds SET penalties = 2 WHERE id = 1")
+    fixed = build()
+    assert built == ["2022"] and fixed[0] == last[0] and fixed[1]["file"] != last[1]["file"]

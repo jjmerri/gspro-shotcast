@@ -73,6 +73,14 @@ def _check(rows, state, now, drive=None, anywhere=None):
     return alerts.diff({"rounds": rows, **_records(anywhere or drive)}, state, now=now, league=_records(drive))
 
 
+def test_an_eagle_is_alerted_from_the_rounds_details_the_list_leaves_out():
+    _, state = _check([], {}, 100)
+    row = {k: v for k, v in _row(1, 150, "Ann", 34, -2).items() if k != "card"}
+    cards = {1: {1: {"card": [{"hole": 3, "par": 5, "score": 3}]}}}
+    sent, _ = alerts.diff({"rounds": [row]}, state, now=200, details=cards.get)
+    assert [a.title for a in sent] == ["⛳ League round posted: Sheep Ranch", "🦅 Eagle! Ann"]
+
+
 def test_the_first_check_alerts_nothing_and_later_ones_only_whats_new():
     old = [_row(1, 100, "Ann", 36, 0, [(1, 4, 2)])]
     drive = {"id": 5, "ts": 90, "player": "Ann", "v": 300.4, "course": "Sheep Ranch", "hole": 1}
