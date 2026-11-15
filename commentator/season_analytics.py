@@ -8,6 +8,7 @@ out, and so are shared-ball rounds (scramble, alternate) wherever a stroke has t
 
 import bisect
 import json
+import math
 import re
 import sqlite3
 import statistics
@@ -256,7 +257,9 @@ def gapping(db: sqlite3.Connection, player: str, context: str | None = None) -> 
         carries = sorted(r["carry"] for r in rs)
         q = statistics.quantiles(carries, n=4) if len(carries) >= 2 else [carries[0]] * 3
         smash = [r["ball_speed"] / r["club_speed"] for r in rs if r["ball_speed"] and r["club_speed"]]
+        landed = [(lateral_yards(r["start_direction"], r["spin_axis"], r["carry"]), r["carry"]) for r in rs]
         out.append({"club": club, "n": len(rs), "swings": swings, "game": sum(r["game"] for r in rs),
+                    **dispersion([(x, y) for x, y in landed if x is not None]),
                     "any_lie": any_lie, "carry": med("carry"), "carry_lo": round(q[0]), "carry_hi": round(q[2]),
                     "carry_max": round(carries[-1]), "total": med("total_yards"), "ball_speed": med("ball_speed"),
                     "club_speed": med("club_speed"), "smash": round(statistics.median(smash), 2) if smash else None,
@@ -267,6 +270,47 @@ def gapping(db: sqlite3.Connection, player: str, context: str | None = None) -> 
         c["gap_to_next"] = None
     for a, b in zip(out, out[1:]):
         a["gap_to_next"] = round(a["carry"] - b["carry"]) if a["carry"] is not None and b["carry"] is not None else None
+    return out
+
+
+DISPERSION_MIN = 5       # swings a club needs before its spread is worked out
+ELLIPSE_95 = math.sqrt(5.991)   # 2-D normal: 95% of shots inside this many SDs (chi-square, 2 dof)
+
+
+def lateral_yards(start: float | None, axis: float | None, carry: float | None) -> float | None:
+    """Where a full swing landed sideways of the target line, yards (positive = right, as seen): the
+    start line carried out plus its estimated curve. GSPro's offline tile is rarely on screen, so
+    this is worked out from the launch monitor for every swing."""
+    if start is None or axis is None or not carry:
+        return None
+    return carry * math.sin(math.radians(start)) + (shot_shape.curve_yards(axis, carry) or 0.0)
+
+
+def dispersion(pts: list[tuple[float, float]]) -> dict[str, Any]:
+    """A club's landing spots (lateral, carry) and their spread: `side` is the median miss sideways,
+    `width` how wide 95% of swings land, and `ellipse` the 95% ellipse (centre, semi-axes, and the
+    tilt of its long axis from the carry line, degrees, positive leaning right with distance).
+    Spread needs DISPERSION_MIN swings."""
+    out: dict[str, Any] = {"landing": [[round(x, 1), round(y, 1)] for x, y in pts], "side": None,
+                           "width": None, "ellipse": None}
+    if not pts:
+        return out
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    out["side"] = round(statistics.median(xs), 1)
+    if len(pts) < DISPERSION_MIN:
+        return out
+    mx, my = statistics.fmean(xs), statistics.fmean(ys)
+    n = len(pts) - 1
+    sxx = sum((x - mx) ** 2 for x in xs) / n
+    syy = sum((y - my) ** 2 for y in ys) / n
+    sxy = sum((x - mx) * (y - my) for x, y in pts) / n
+    out["width"] = round(2 * 1.96 * math.sqrt(sxx))
+    # Eigen-decomposition of the 2x2 covariance: the ellipse's axes.
+    mid, diff = (sxx + syy) / 2, math.hypot((syy - sxx) / 2, sxy)
+    long_, short = mid + diff, max(0.0, mid - diff)
+    tilt = math.degrees(0.5 * math.atan2(2 * sxy, syy - sxx))
+    out["ellipse"] = {"x": round(mx, 1), "y": round(my, 1), "long": round(ELLIPSE_95 * math.sqrt(long_), 1),
+                      "short": round(ELLIPSE_95 * math.sqrt(short), 1), "tilt": round(tilt, 1)}
     return out
 
 

@@ -328,3 +328,28 @@ def test_a_season_db_from_before_the_stored_nine_still_opens(db):
     p = stats_web.player(db, "Ann")
     assert p["rounds"] == 1 and p["best_to_par_9"] == 0
     assert [c["rounds"] for c in A.courses(db)] == [1]
+
+
+def test_dispersion_lands_each_full_swing_and_rings_the_spread(db):
+    import math
+
+    from commentator import shot_shape
+
+    # Straight out on a 3° start: carried out sideways, and the curve on top of it.
+    assert A.lateral_yards(3, 0, 200) == pytest.approx(200 * math.sin(math.radians(3)))
+    assert A.lateral_yards(0, 10, 200) == pytest.approx(shot_shape.curve_yards(10, 200))
+    assert A.lateral_yards(None, 0, 200) is None
+    # Longer swings go further right: the ring leans right with distance.
+    for carry, start in ((140, -2), (145, -1), (150, 0), (155, 1), (160, 2)):
+        shot(db, club="7I", carry_raw=carry, ball_speed=110, start_direction=start, spin_axis=0)
+    for carry in (100, 104):                                   # too few for a spread
+        shot(db, club="PW", carry_raw=carry, ball_speed=90, start_direction=-1, spin_axis=0)
+    shot(db, club="PW", carry_raw=102, ball_speed=90)          # no launch direction: no landing spot
+    db.commit()
+    seven, pw = A.gapping(db, "Ann")
+    assert len(seven["landing"]) == 5 and seven["side"] == 0.0
+    e = seven["ellipse"]
+    assert (e["x"], e["y"]) == (pytest.approx(0, abs=0.5), 150) and 0 < e["tilt"] < 45
+    assert e["long"] > e["short"] >= 0 and seven["width"] > 0
+    assert (pw["n"], len(pw["landing"]), pw["ellipse"], pw["width"]) == (3, 2, None, None)
+    assert pw["side"] < 0
