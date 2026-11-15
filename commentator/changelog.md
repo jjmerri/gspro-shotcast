@@ -4,6 +4,13 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.138
+
+### Booth
+- Club speed, path, face and attack angle for more launch monitors, read from their own software as you play: FlightScope (Mevo, Mevo+, X3), rela and OpenSkyPlus (SkyTrak), and springbok's MLM2PRO-GSPro-Connector (MLM2PRO, Garmin R10 and the monitors it reads off the screen).
+- On GSPro 3.59, full swings from FlightScope and rela are called while the ball is still in the air, like Uneekor's.
+- Problem reports include the launch monitor's own files, with sign-ins and keys blanked out, so we can learn monitors we haven't seen yet.
+
 ## 0.1.137
 
 ### Stats page
