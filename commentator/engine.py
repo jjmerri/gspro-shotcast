@@ -674,6 +674,8 @@ class Engine:
     """Three moments per shot: a setup line while the player addresses the ball, a call
     while it's in the air, and a reaction once it stops."""
 
+    PHRASE_MEMORY_DAYS = 365   # how far back a 6-word phrase can't be said again
+
     def __init__(
         self,
         cfg: Config,
@@ -867,9 +869,10 @@ class Engine:
         self._live_prerolled = False        # on air for the next round's setup: the last one's sign-off doesn't stop it
         self._live_idle_session: str | None = None   # the mirror session the idle watch stopped
         self._live_resume_on_shot = False   # stopped for being idle mid-round: the next shot restarts it
-        # Every 6-word phrase said this season, so a line can't come back weeks later.
+        # Every 6-word phrase said in the last year, so a line can't come back weeks later (not every
+        # one ever said: years of a league's lines took seconds to read at each start).
         self._season_phrases: set[tuple[str, ...]] = set()
-        for text in self.store.spoken_lines():
+        for text in self.store.spoken_lines(since=time.time() - self.PHRASE_MEMORY_DAYS * 86400):
             self._season_phrases |= ngrams(text, 6)
         self.carry = CarryModel(cfg.commentary.lie_carry_factors, self.store.carry_pairs(),
                                 cfg.commentary.course_altitude_ft)

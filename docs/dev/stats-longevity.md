@@ -345,7 +345,10 @@ new reads through the booth's writes, the page's, rollbacks, replaced rows and a
   players read.
 - The other reads (hole, team and broadcast stats, `season_rounds`, `team_course_history`,
   `hole_scoring`, `prediction_record`, `recent_form_mentions`, `today_longest_drive`) take under 11 ms
-  at 10 years; `side_rounds` 47 ms. At startup `spoken_lines` takes 265 ms and `carry_pairs` 7.6 s.
+  at 10 years; `side_rounds` 47 ms, read once a round. At startup `carry_pairs` takes 7.6 s.
+- The phrases the booth won't repeat come from the last year's lines (`Engine.PHRASE_MEMORY_DAYS`),
+  not every line ever: at 10 years (345k lines) reading them and their phrases took about 14 s at each
+  start (timed under tracemalloc), 1.6 s for one year's.
 
 ### 4. Stored totals instead of recomputing from every shot
 

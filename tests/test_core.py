@@ -2847,6 +2847,15 @@ async def test_lines_from_earlier_weeks_are_not_repeated(tmp_path):
     assert [l.text for l in good] == ["A fresh line about a lovely strike."]
     assert "already said this season" in problems[0]
 
+    old = Store(db, new_session=False)   # over a year ago: it can be said again
+    old.db.execute("UPDATE lines SET ts = ts - ? * 86400", (Engine.PHRASE_MEMORY_DAYS + 1,))
+    old.db.commit()
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, store=Store(db))
+    good, problems = engine._grounded(
+        [Line("color", "Well, that is the kind of swing that buys the first round, Nigel.")], "Player: Tony")
+    assert len(good) == 1 and not problems
+
 
 async def test_a_valid_line_survives_a_siblings_rejection(tmp_path):
     from commentator.models import Line

@@ -1360,8 +1360,11 @@ class Store:
                             [(began, round(seconds, 2), i) for i in ids])
         self.db.commit()
 
-    def spoken_lines(self) -> list[str]:
-        return [r[0] for r in self.db.execute("SELECT text FROM lines")]
+    def spoken_lines(self, since: float | None = None) -> list[str]:
+        """The booth's lines (since a time, when given)."""
+        if since is None:
+            return [r[0] for r in self.db.execute("SELECT text FROM lines")]
+        return [r[0] for r in self.db.execute("SELECT text FROM lines WHERE ts >= ?", (since,))]
 
     def carry_pairs(self) -> list[tuple]:
         """Past full shots for the carry model, oldest first: (lie, base carry yd, game carry yd
