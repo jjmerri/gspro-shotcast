@@ -4,6 +4,12 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.131
+
+### Stats page
+- Hole replays draw each shot the way GSPro tracked it, its real flight and roll, with a ○ where it landed (GSPro 3.59 and later).
+- Carry, total, lies and where each shot finished come straight from GSPro's own record of the round, so they're exact, and tee shots and drops start from the right spot.
+
 ## 0.1.130
 
 ### Booth
