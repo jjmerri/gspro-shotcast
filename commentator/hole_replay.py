@@ -32,7 +32,7 @@ import math
 import re
 import sqlite3
 from collections import Counter
-from typing import Any
+from typing import Any, Callable, Iterable
 
 from . import round_record, shot_shape, stats_web
 from .sources.gspro_log import M_TO_YD, aim_offset
@@ -322,34 +322,48 @@ def round_tees(db: sqlite3.Connection, round_of: dict[int, int] | None = None) -
     return {rnd: c.most_common(1)[0][0] for rnd, c in votes.items()}
 
 
-def hole_replays(db: sqlite3.Connection,
+def hole_replays(db: sqlite3.Connection, rounds: Iterable[int] | None = None,
                  finish: dict[int, float] | None = None) -> dict[tuple[int, int], dict[str, Any]]:
     """Every replayable hole, keyed by (round, hole number): the round as stats_web.shot_rounds numbers
     it. A hole is replayable when at least one of its shots has a position, or it took one drawn stroke
     (an ace, or a tee shot into the gimme circle), which runs from the tee to the pin. Kept per round
-    between builds (stats_cache).
-    `finish`, when given, is filled with each swing's sideways finish (see finish_laterals)."""
-    replays, _, laterals = _reused(db)
+    between builds (stats_cache). `rounds`: only theirs (one year's data file's), so a build holds one
+    year's replays at a time. `finish`, when given, is filled with each swing's sideways finish in
+    them (see finish_laterals)."""
+    from . import stats_cache
+
+    holes, plan, compute = _plan(db)
+    sigs = {rnd: sig for rnd, (sig, _) in plan.items()}
+    want = sigs if rounds is None else {r: sigs[r] for r in rounds if r in sigs}
+    if stats_cache.of(db) is None:
+        per_round = round_record.reuse(db, ("hole_replays",), lambda: compute(list(sigs)))
+    else:
+        per_round = stats_cache.per_key(db, "hole_replays", want, compute, keep=set(sigs))
     if finish is not None:
-        finish.update(laterals)
-    return replays
+        for rnd in want:
+            finish.update(per_round.get(rnd, {}).get("finish", {}))
+    return {(rnd, hole): per_round[rnd][hole] for rnd, hole in holes
+            if rnd in want and rnd in per_round and hole in per_round[rnd]}
 
 
-def replay_rounds(db: sqlite3.Connection) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[int, tuple[str, list]]]:
-    """hole_replays, and each round that may have one: (the signature its replays are kept under, "" with
-    no cache open; its holes' sessions). Once per build (round_record.reuse)."""
-    return _reused(db)[:2]
+def replay_rounds(db: sqlite3.Connection) -> dict[int, tuple[str, list]]:
+    """Each round that may have a hole replay: (the signature its replays are kept under, "" with no cache
+    open; its holes' sessions). Without reading any replay."""
+    return _plan(db)[1]
 
 
-def _reused(db: sqlite3.Connection) -> tuple:
-    return round_record.reuse(db, ("hole_replays",), lambda: _hole_replays(db))
+def _plan(db: sqlite3.Connection) -> tuple[dict[tuple[int, int], list], dict[int, tuple[str, list]],
+                                         Callable[[list], dict[int, dict[int, dict]]]]:
+    """What hole_replays works from, once per build (round_record.reuse): each hole that may have a
+    replay, each round's (signature, sessions), and what works out rounds' replays."""
+    return round_record.reuse(db, ("hole_replay_plan",), lambda: _make_plan(db))
 
 
-def _hole_replays(db: sqlite3.Connection) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[int, tuple[str, list]],
-                                                   dict[int, float]]:
+def _make_plan(db: sqlite3.Connection) -> tuple[dict[tuple[int, int], list], dict[int, tuple[str, list]],
+                                                Callable[[list], dict[int, dict[int, dict]]]]:
     have = {r[1] for r in db.execute("PRAGMA table_info(shots)")}
     if "start_x" not in have:
-        return {}, {}, {}
+        return {}, {}, lambda rnds: {}
     cols = _COLS if "hazard_x" in have else _COLS.replace("hazard_x, hazard_z", "NULL AS hazard_x, NULL AS hazard_z")
     if "picked" not in have:
         cols = cols.replace(" picked,", " NULL AS picked,")
@@ -452,12 +466,7 @@ def _hole_replays(db: sqlite3.Connection) -> tuple[dict[tuple[int, int], dict[st
                 rnd.setdefault("finish", {}).update(lat)   # (finish_laterals', kept with the round's)
         return out
 
-    per_round = stats_cache.per_key(db, "hole_replays", sigs, compute)
-    laterals: dict[int, float] = {}
-    for rnd in per_round.values():
-        laterals.update(rnd.get("finish", {}))
-    return ({(rnd, hole): per_round[rnd][hole] for rnd, hole in holes if rnd in per_round and hole in per_round[rnd]},
-            {rnd: (sigs[rnd], sorted(span[rnd][0], key=str)) for rnd in span}, laterals)
+    return holes, {rnd: (sigs[rnd], sorted(span[rnd][0], key=str)) for rnd in span}, compute
 
 
 def _cards(db: sqlite3.Connection) -> dict[tuple[int, str], dict[str, Any]]:
@@ -760,7 +769,7 @@ def finish_laterals(db: sqlite3.Connection) -> dict[int, float]:
     with no aim to go by (a long shot from the fairway with no aim set, a tee shot on a course with no
     aim point logged) is left out, as is a mulligan, which GSPro puts back."""
     out: dict[int, float] = {}
-    hole_replays(db, out)
+    hole_replays(db, finish=out)
     return out
 
 

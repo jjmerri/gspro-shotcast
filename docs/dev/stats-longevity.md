@@ -175,6 +175,11 @@ merged like any other, and its record is in both nights' signatures.
     whichever is first. On 3 years the collector took 2.0 s of an 8.5 s warm build (now 6.5 s; 6.3 s with it
     fully off) and 5.8 s of a 63.2 s cold one (now 58.7 s).
     Loading the kept nights' results is about 0.9 s of what's left; it grows with the nights kept.
+  - Hole replays load a year at a time, for the year files being built: the year split and its
+    signatures only need each round's signature and sessions (`hole_replay.replay_rounds`), so a warm
+    build with no year to build reads none. On 3 years, peak Python memory went from 495 MB to 364 MB
+    on a warm build (the process's from 907 MB to 768 MB, up to 346 MB of which is the season file
+    mapped in), and a cold build holds one year's replays at a time.
   - Output identical to before on the 1- and 50-season copies.
 - **Where it stands** (warm build, nothing changed): 18 s on 1.5 years, 37 s on 3, 74 s on 6: still
   linear. On 6 years: writing the page's shot list and replays 37 s (`build_data_db`, every shot

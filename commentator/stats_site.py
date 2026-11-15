@@ -125,10 +125,7 @@ def build_data_db(src: sqlite3.Connection, out: Path, names: dict[str, str] | No
         db.executemany("INSERT INTO pub_transcript VALUES (?, ?)",
                        [(sid, json.dumps(A.transcript(src, sid, names), separators=(",", ":")))
                         for sid in sessions])
-        replays = hole_replay.hole_replays(src)
-        if part is not None:
-            rounds = set(part[1])
-            replays = {k: rp for k, rp in replays.items() if k[0] in rounds}
+        replays = hole_replay.hole_replays(src, None if part is None else part[1])
         db.executemany("INSERT INTO pub_replay VALUES (?, ?, ?)",
                        [(rnd, hole, json.dumps(rp, separators=(",", ":"))) for (rnd, hole), rp in replays.items()])
         # Each hole's minimap once, however many rounds' replays draw on it.
@@ -163,7 +160,7 @@ def page_parts(src: sqlite3.Connection) -> dict[str, tuple[list[int], list[int]]
         parts[y][0].append(sid)
     if loose:
         parts[years[0]][0].extend(loose)
-    for rnd, (_, sessions) in hole_replay.replay_rounds(src)[1].items():
+    for rnd, (_, sessions) in hole_replay.replay_rounds(src).items():
         placed = [year_of[s] for s in sessions if s in year_of]
         parts[min(placed) if placed else years[0]][1].append(rnd)
     for sessions, rounds in parts.values():
@@ -193,7 +190,7 @@ def _year_sigs(src: sqlite3.Connection, parts: dict[str, tuple[list[int], list[i
         for uuid, sessions in night_totals.record_sessions(src).items():
             if any(s not in dated for s in sessions):
                 per[newest].add(uuid or "")
-    replays = hole_replay.replay_rounds(src)[1]
+    replays = hole_replay.replay_rounds(src)
     by_year: dict[str, list] = {y: [] for y in parts}
     for d, s in nights.items():
         if d[:4] in by_year:

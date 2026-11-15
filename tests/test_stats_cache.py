@@ -77,6 +77,25 @@ def test_a_warm_build_reuses_every_round_and_an_edit_works_out_only_its_round_ag
     assert after[2] == (2, 2)
 
 
+def test_one_years_replays_load_on_their_own_and_leave_the_others_kept(tmp_path):
+    path = tmp_path / "season.db"
+    shots = _season(path)
+    every = _build(path, False)[0]
+    first, second = sorted({rnd for rnd, _ in every})
+    _build(path, True)
+    with closing(sqlite3.connect(path)) as db, db:   # a shot of the second round left out
+        db.execute("UPDATE shots SET left_out = 1 WHERE id = ?", (shots[-1],))
+    every = _build(path, False)[0]
+    with closing(stats_web.connect(path)) as db, stats_cache.opened(db, path) as c:
+        assert hole_replays(db, [second]) == {k: v for k, v in every.items() if k[0] == second}
+        assert (c.hits, c.misses) == (0, 1)
+        assert hole_replays(db, [first]) == {k: v for k, v in every.items() if k[0] == first}
+        assert (c.hits, c.misses) == (1, 1)
+    with closing(stats_web.connect(path)) as db, stats_cache.opened(db, path) as c:
+        assert hole_replays(db) == every
+        assert (c.hits, c.misses) == (2, 0)   # neither load dropped the other's
+
+
 def test_a_change_to_the_code_or_the_file_throws_the_cache_away(tmp_path, monkeypatch):
     path = tmp_path / "season.db"
     _season(path)
