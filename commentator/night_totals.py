@@ -125,22 +125,32 @@ class Nights:
         self.where = "" if len(dates) == len(every) else f" AND session_id IN ({','.join(map(str, sids)) or 'NULL'})"
 
 
+BATCH_NIGHTS = 64   # nights worked out per `collect` call, so a cold build holds a batch's rows, not all history's
+
+
+def _batched(db: sqlite3.Connection, collect: Callable[[Nights], dict[str, Any]], dates: list[str]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for i in range(0, len(dates), BATCH_NIGHTS):
+        out.update(collect(Nights(db, dates[i:i + BATCH_NIGHTS])))
+    return out
+
+
 def per_night(db: sqlite3.Connection, kind: str, collect: Callable[[Nights], dict[str, Any]],
               extra: Any = (), tally: bool = True, since: str | None = None, memo: bool = True) -> dict[str, Any]:
     """Each night's partial for a family: kept ones while the night's signature (and `extra`, anything
     else the partial reads) holds, `collect(nights)` for the rest, which returns one for each of its
-    dates. Oldest night first; with `since` (a date), only the nights from then on (the others' are
-    dropped from the cache). `tally`: count them in the cache's hits and misses. `memo`: kept for the
+    dates, `BATCH_NIGHTS` at a time. Oldest night first; with `since` (a date), only the nights from then
+    on (the others' are dropped from the cache). `tally`: count them in the cache's hits and misses. `memo`: kept for the
     rest of the build (round_record.reuse); False where they're only read once, merged, so a build
     doesn't hold every night's partials to its end."""
     def run() -> dict[str, Any]:
         dates = [d for d in nights(db) if since is None or d >= since]
         if stats_cache.of(db) is None:   # (no cache: nothing kept to check, and maybe no records to sign by)
-            got = collect(Nights(db, dates))
+            got = _batched(db, collect, dates)
             return {d: got[d] for d in dates}
         every = night_sigs(db)
         sigs = {d: stats_cache.sig(every[d], extra) for d in dates}
-        return stats_cache.per_key(db, kind, sigs, lambda ds: collect(Nights(db, ds)), tally=tally)
+        return stats_cache.per_key(db, kind, sigs, lambda ds: _batched(db, collect, ds), tally=tally)
     return reuse(db, ("per_night", kind, extra, since), run) if memo else run()
 
 

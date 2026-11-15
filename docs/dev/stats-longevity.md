@@ -185,6 +185,9 @@ merged like any other, and its record is in both nights' signatures.
     from one read, and the others are read once. What a warm 3-year build holds to its end went from
     440 MB to 180 MB (96 MB of it the holes' merged moments, streaks and trends, which the highlights
     are picked from); peak Python memory from 364 MB to 253 MB, the process's from 768 MB to 640 MB.
+  - A cold build works out the nights `BATCH_NIGHTS` (64) at a time (`night_totals.per_night`), not
+    all history in one go: the holes' rows and holes of every night were held at once. On 3 years a
+    cold build's peak memory went from 825 MB to 598 MB.
   - Output identical to before on the 1- and 50-season copies.
 - **Where it stands** (warm build, nothing changed): 18 s on 1.5 years, 37 s on 3, 74 s on 6: still
   linear. On 6 years: writing the page's shot list and replays 37 s (`build_data_db`, every shot

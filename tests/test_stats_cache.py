@@ -265,6 +265,28 @@ def test_hole_stats_are_kept_per_night_and_an_edit_works_out_only_its_night_agai
     assert got == want and counts == (1, 1)
 
 
+def test_a_cold_build_works_out_the_nights_a_batch_at_a_time(tmp_path, monkeypatch):
+    path = tmp_path / "season.db"
+    _season(path)
+    with closing(sqlite3.connect(path)) as db, db:
+        for n, (sid,) in enumerate(db.execute("SELECT id FROM sessions ORDER BY id").fetchall()):
+            db.execute("UPDATE sessions SET date = ? WHERE id = ?", (f"2023-11-1{4 + n}", sid))
+    with closing(stats_web.connect(path)) as db:
+        whole = stats_web._holes_merged(db, None)
+    asked, collect = [], stats_web._collect_holes
+    monkeypatch.setattr(stats_web, "_collect_holes", lambda db, ns, usual: asked.append(ns.dates) or collect(db, ns, usual))
+    monkeypatch.setattr(N, "BATCH_NIGHTS", 1)
+    for cached in (True, False):
+        asked.clear()
+        with closing(stats_web.connect(path)) as db:
+            if cached:
+                with stats_cache.opened(db, path):
+                    assert stats_web._holes_merged(db, None) == whole
+            else:
+                assert stats_web._holes_merged(db, None) == whole
+        assert asked == [["2023-11-14"], ["2023-11-15"]]
+
+
 def test_a_round_resumed_after_midnight_is_in_both_its_nights_signatures(tmp_path):
     path = tmp_path / "season.db"
     shots = _season(path)
