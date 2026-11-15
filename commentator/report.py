@@ -394,6 +394,19 @@ def _skytrak_files() -> list[tuple[str, str, str, int, int]]:
             out += [("SkyTrak BepInEx log", str(d / "BepInEx"), "LogOutput*.log", 2, 2_000_000),
                     ("OpenSkyPlus 1 log", str(d / "BepInEx" / "plugins" / "OpenSkyPlus"), "Log.txt", 1, 2_000_000)]
     return out
+
+
+# springbok's MLM2PRO-GSPro-Connector logs a Rapsodo account's token and web API secret in among its
+# shots, so only these of its lines go in a report.
+SPRINGBOK_KEEP = ("App Version:", "Sending to GSPro data:", "GSProConnect: Success:", "Received shot data from device:",
+                  "Ball data:", "Launch Ball payload:")
+
+
+def springbok_shot_lines(data: bytes) -> bytes:
+    return b"".join(line for line in data.splitlines(keepends=True)
+                    if any(k.encode() in line for k in SPRINGBOK_KEEP))
+
+
 CONNECTOR_LOGS = 4          # rotated ConnectDebug files kept, newest first
 GSPRO_DB_ROWS = 20          # newest rows of each GSPro.db shot table
 # Where launch monitor software installs, and the vendor names its folders go by: the report lists
@@ -605,6 +618,14 @@ def _build(cfg: Config, config_path: Path) -> Path:
                 tag = re.sub(r"[^\w.-]+", "_", what)
                 for p in found:
                     add_file(f"launch-monitor/{tag}/{p.relative_to(base).as_posix()}", p, cap, private=True)
+            from .sources.club_feeds import SPRINGBOK_LOGS, springbok_dirs
+
+            for i, base in enumerate(springbok_dirs()):   # a running connector's, as it has no fixed folder
+                found = _newest(base, SPRINGBOK_LOGS, 2)
+                summary.append(f"springbok connector log: {len(found)} file(s) from {base} (shot lines only)")
+                for p in found:
+                    add_text(f"launch-monitor/springbok_connector_log/{i}/{p.name}",
+                             springbok_shot_lines(tail(p, 2_000_000)), private=True)
         guard("launch monitor files", vendor_files)
 
         def software() -> None:

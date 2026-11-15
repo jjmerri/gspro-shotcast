@@ -5,7 +5,7 @@ import pytest
 
 from commentator.models import Shot
 from commentator.sources import club_feeds
-from commentator.sources.club_feeds import ClubFeed, _Parser, parse_flightscope, parse_rela
+from commentator.sources.club_feeds import ClubFeed, _Parser, parse_flightscope, parse_rela, parse_springbok
 
 FS = ('2023-10-11 15:46:35,862 [1] INFO  VGPconnect.FlightscopeForm [(null)] - '
       + json.dumps({"guid": "{x}", "launchSpeed": 66.2, "launchSpeedAvailable": True, "clubSpeed": 44.449,
@@ -97,6 +97,30 @@ def test_an_impossible_club_speed_is_dropped():
     assert [p.feed(x) for x in line.split("\n")] == [None, None]
 
 
+def _springbok(ball: float, club: float, aoa: float = 0, path: float = 0, face: float = 0) -> str:
+    """A line as springbok's connector logs it: its Open Connect message, as Python prints bytes."""
+    payload = {"DeviceID": "Rapsodo MLM2PRO", "Units": "Yards", "ShotNumber": 3, "APIversion": "1",
+               "BallData": {"Speed": ball, "SpinAxis": -2.1, "TotalSpin": 2900, "HLA": 1.2, "VLA": 12.5,
+                            "Backspin": 2898, "SideSpin": -106, "CarryDistance": 0},
+               "ClubData": {"Speed": club, "AngleOfAttack": aoa, "FaceToTarget": face, "Lie": 0, "Loft": 0,
+                            "Path": path, "SpeedAtImpact": 0, "VerticalFaceImpact": 0, "HorizontalFaceImpact": 0,
+                            "ClosureRate": 0},
+               "ShotDataOptions": {"ContainsBallData": True, "ContainsClubData": True, "LaunchMonitorIsReady": True,
+                                   "LaunchMonitorBallDetected": True, "IsHeartBeat": False}}
+    return f"2026-11-15:15:20:01,123 INFO     [gspro_connect.py:40] Sending to GSPro data: {json.dumps(payload).encode()}"
+
+
+def test_springbok_takes_what_the_monitor_gave_and_reads_its_zeros_as_missing():
+    mlm = parse_springbok(_springbok(141.3, 98.6))
+    assert (mlm.source, mlm.ball_mph, mlm.club_mph) == ("springbok", 141.3, 98.6)
+    assert (mlm.angle_of_attack, mlm.path, mlm.face_to_target) == (None, None, None)
+    assert mlm.launch is None   # it sends no carry: GSPro's own numbers still air these
+    r10 = _Parser().feed(_springbok(120.4, 86.2, aoa=-3.1, path=2.4, face=-0.8) + "\r")
+    assert (r10.club_mph, r10.angle_of_attack, r10.path, r10.face_to_target) == (86.2, -3.1, 2.4, -0.8)
+    assert parse_springbok(_springbok(141.3, 0)) is None   # nothing about the club
+    assert parse_springbok("Sending to GSPro data: b'{\"Speed\": 1") is None
+
+
 def _feed(tmp_path, *names):
     return ClubFeed([(tmp_path, n) for n in names])
 
@@ -169,3 +193,37 @@ def test_a_shot_that_waits_takes_its_impact_state_first(tmp_path, monkeypatch):
     calls = []
     assert not asyncio.run(feed.fill(Shot(ball_speed=60.0), lambda: calls.append(1)))
     assert calls == [1]
+
+
+def test_a_running_springbok_connectors_logs_are_found_and_only_new_shots_read(tmp_path, monkeypatch):
+    import os
+    import time
+
+    monkeypatch.setattr(club_feeds, "WAIT_SECONDS", 0.0)
+    logs = tmp_path / "appdata" / "logs"
+    logs.mkdir(parents=True)
+    old = logs / "mlm2pro-gspro-connect_20261101_120000.log"   # its kept history: old shots
+    old.write_text(_springbok(110.0, 80.0) + "\n")
+    os.utime(old, (time.time() - 3600, time.time() - 3600))
+    running: list = []
+    monkeypatch.setattr(club_feeds, "springbok_dirs", lambda: list(running))
+    feed = _feed(tmp_path, "rela.log")
+    assert feed.poll() == []
+    running.append(logs)                                         # the connector starts after the booth
+    (logs / "mlm2pro-gspro-connect_20261115_152000.log").write_text(_springbok(141.3, 98.6) + "\n")
+    feed._looked_at = None
+    assert [(r.source, r.ball_mph) for r in feed.poll()] == [("springbok", 141.3)]
+
+    async def go():
+        assert not await feed.fill(Shot(ball_speed=110.0))
+        shot = Shot(ball_speed=141.2)
+        assert await feed.fill(shot) and shot.club_speed == 98.6 and shot.path is None
+    asyncio.run(go())
+
+
+def test_springbok_dirs_is_the_logs_folder_beside_the_running_exe(monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setattr(club_feeds, "_running_exes", lambda: [
+        r"C:\Windows\explorer.exe", r"D:\Golf\MLM2PRO-GSPro-Connector_V1.04.51\MLM2Pro-GSPro-Connector.exe"])
+    assert club_feeds.springbok_dirs() == [Path(r"D:\Golf\MLM2PRO-GSPro-Connector_V1.04.51", "appdata", "logs")]

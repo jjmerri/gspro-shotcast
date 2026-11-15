@@ -20,6 +20,12 @@ Where each log is, and what it has:
   <SkyTrak>\\BepInEx\\LogOutput.log (OpenSkyPlus 2: `Launch: BallSpeed=` then `Club: ClubHeadSpeed=`,
   in m/s), or <SkyTrak>\\BepInEx\\plugins\\OpenSkyPlus\\Log.txt (version 1: the Open Connect JSON it
   sends, pretty-printed). Club speed only: the SkyTrak doesn't measure the rest.
+- springbok's MLM2PRO-GSPro-Connector (Rapsodo MLM2PRO and Garmin R10 over Bluetooth, and monitors
+  whose own app it reads off the screen: Square, Full Swing KIT, SkyTrak+ and others): it logs
+  `Sending to GSPro data: b'{...}'`, the Open Connect message it sends, to
+  <its folder>\\appdata\\logs\\mlm2pro-gspro-connect.log (with `_<date>_<time>` when it keeps log history).
+  It has no fixed folder, so it's found from the running connector's exe. It sends 0 for a club
+  number the monitor didn't give (an MLM2PRO gives club speed only), so a 0 is taken as missing.
 
 FlightScope and rela also log the whole launch with a carry (`ClubReading.launch`, the same keys as
 GSPro 3.1's `LaunchExt Vars` line). GSPro 3.59 doesn't log its ball data until the ball stops, so for
@@ -30,6 +36,7 @@ None of these formats is a published interface; they come from players' logs (20
 that doesn't parse is skipped, and a shot no reading matches airs with ball data only, as before.
 """
 
+import ast
 import asyncio
 import json
 import logging
@@ -38,7 +45,7 @@ import re
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from ..models import Shot
@@ -54,6 +61,8 @@ ACTIVE_SECONDS = 1800.0  # "logging": a reading came this recently
 COPY_SECONDS = 5.0       # a monitor's second line for one shot comes within this
 SAME_BALL_MPH = 0.6      # GSPro logs ball speed to two decimals; rela's text line to one
 MAX_READ = 8 << 20       # bytes read from a file at once (a log replaced with its history)
+DISCOVER_SECONDS = 10.0  # how often to look for a running springbok connector
+FRESH_SECONDS = 30.0     # a log found written this recently is read from its start
 SKYTRAK_DIRS = [r"C:\SkyTrak", r"C:\GolfSim\SkyTrak", r"%ProgramFiles%\SkyTrak", r"%ProgramFiles(x86)%\SkyTrak"]
 
 
@@ -158,11 +167,12 @@ def parse_rela(line: str) -> ClubReading | None:
     return None
 
 
-def _open_connect(source: str, text: str) -> ClubReading | None:
+def _open_connect(source: str, text: str | dict, whole_club: bool = False) -> ClubReading | None:
     """Club speed from an Open Connect shot message (the one club field every sender measures), and
-    its launch when it has a carry."""
+    its launch when it has a carry. whole_club: also its attack angle, path and face, a 0 taken as
+    not given (springbok sends 0 for a number the monitor didn't give)."""
     try:
-        msg = json.loads(text)
+        msg = json.loads(text) if isinstance(text, str) else text
     except ValueError:
         return None
     if not isinstance(msg, dict):
@@ -173,8 +183,26 @@ def _open_connect(source: str, text: str) -> ClubReading | None:
         return None
     launch = tuple(_num(ball.get(k)) for k in ("VLA", "HLA", "TotalSpin", "SpinAxis", "CarryDistance")) \
         if opts.get("ContainsBallData") else None
-    return _reading(source, _num(ball.get("Speed")), _num(club.get("Speed")) if opts.get("ContainsClubData") else None,
-                    launch=launch)
+    has_club = bool(opts.get("ContainsClubData"))
+    more = {name: _num(club.get(key)) or None for name, key in
+            (("angle_of_attack", "AngleOfAttack"), ("path", "Path"), ("face_to_target", "FaceToTarget"))} \
+        if has_club and whole_club else {}
+    return _reading(source, _num(ball.get("Speed")), _num(club.get("Speed")) if has_club else None,
+                    launch=launch, **more)
+
+
+_SPRINGBOK = "Sending to GSPro data: b"
+
+
+def parse_springbok(line: str) -> ClubReading | None:
+    at = line.find(_SPRINGBOK)
+    if at < 0:
+        return None
+    try:   # the message is logged as a Python bytes literal
+        msg = json.loads(ast.literal_eval(line[at + len(_SPRINGBOK) - 1:].strip()).decode("utf-8"))
+    except (ValueError, SyntaxError, MemoryError, RecursionError, AttributeError, UnicodeDecodeError):
+        return None
+    return _open_connect("springbok", msg, whole_club=True)
 
 
 _OSP_LAUNCH = re.compile(r"\] Launch: BallSpeed=(-?\d+(?:\.\d+)?)")
@@ -208,6 +236,8 @@ class _Parser:
         if m := _OSP_CLUB.search(line):
             ball, self.osp_ball = self.osp_ball, None
             return _reading("OpenSkyPlus", ball, float(m.group(1)) * MPS_TO_MPH)
+        if _SPRINGBOK in line:
+            return parse_springbok(line)
         if "FlightscopeForm" in line:
             return parse_flightscope(line)
         if "SEND=>" in line:
@@ -275,6 +305,51 @@ def skytrak_dirs() -> list[Path]:
     return [Path(d) for d in dict.fromkeys(dirs) if "%" not in d]
 
 
+SPRINGBOK_LOGS = "mlm2pro-gspro-connect*.log"
+
+
+def _running_exes() -> list[str]:
+    """The full path of every program running on this PC that the booth may look at (Windows)."""
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    k32, psapi = ctypes.WinDLL("kernel32", use_last_error=True), ctypes.WinDLL("psapi", use_last_error=True)
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                               ctypes.POINTER(wintypes.DWORD)]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    psapi.EnumProcesses.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    pids, got = (wintypes.DWORD * 4096)(), wintypes.DWORD()
+    if not psapi.EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(got)):
+        return []
+    out = []
+    for pid in pids[:got.value // ctypes.sizeof(wintypes.DWORD)]:
+        h = k32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            continue
+        try:
+            buf, n = ctypes.create_unicode_buffer(1024), wintypes.DWORD(1024)
+            if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)):
+                out.append(buf.value)
+        finally:
+            k32.CloseHandle(h)
+    return out
+
+
+def springbok_dirs() -> list[Path]:
+    """The log folder of each running springbok MLM2PRO-GSPro-Connector: appdata\\logs in the folder
+    it runs from (its exe's, when started from the exe or a shortcut to it)."""
+    out = []
+    for exe in _running_exes():
+        p = PureWindowsPath(exe)
+        if p.name.lower().startswith("mlm2pro-gspro-connector") and p.suffix.lower() == ".exe":
+            out.append(Path(str(p.parent), "appdata", "logs"))
+    return list(dict.fromkeys(out))
+
+
 def log_paths(connector_log: str, extra: Iterable[str] = ()) -> list[tuple[Path, str]]:
     """(folder, glob) for every log a club reading can come from on this PC."""
     out: list[tuple[Path, str]] = []
@@ -305,12 +380,43 @@ class ClubFeed:
         self._lock = asyncio.Lock()
         self._said: set[str] = set()
         self._started = False
+        self._looked_at: float | None = None   # monotonic, the last look for a springbok connector
 
     @classmethod
     def from_config(cls, source_cfg: Any) -> "ClubFeed":
         return cls(log_paths(source_cfg.connector_log, source_cfg.club_logs))
 
-    def _files(self) -> list[Path]:
+    def _discover(self, first: bool) -> None:
+        """Follows a springbok connector's log once it's seen running (it has no fixed folder). A
+        folder found stays followed: the log outlives the connector. What its files already had
+        is skipped, unless one was written just now (the connector started its log moments ago)."""
+        now = time.monotonic()
+        if self._looked_at is not None and now - self._looked_at < DISCOVER_SECONDS:
+            return
+        self._looked_at = now
+        try:
+            dirs = springbok_dirs()
+        except Exception:
+            log.debug("Club feed: looking for a springbok connector failed", exc_info=True)
+            return
+        for d in dirs:
+            if (d, SPRINGBOK_LOGS) in self.paths:
+                continue
+            self.paths.append((d, SPRINGBOK_LOGS))
+            log.info("Club data: following the springbok connector's logs in %s", d)
+            try:
+                old = list(d.glob(SPRINGBOK_LOGS))
+            except (OSError, ValueError):
+                old = []
+            for f in old:
+                try:
+                    fresh = time.time() - f.stat().st_mtime < FRESH_SECONDS
+                except OSError:
+                    continue
+                self.tails.setdefault(f, _Tail(f, history=fresh and not first))
+
+    def _files(self, first: bool = False) -> list[Path]:
+        self._discover(first)
         files = []
         for folder, pattern in self.paths:
             try:
@@ -325,7 +431,7 @@ class ClubFeed:
         now = time.monotonic()
         found = []
         first, self._started = not self._started, True
-        for f in self._files():
+        for f in self._files(first):
             if (tail := self.tails.get(f)) is None:
                 tail = self.tails[f] = _Tail(f, history=not first)
             for line in tail.read():

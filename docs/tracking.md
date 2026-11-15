@@ -35,8 +35,8 @@ monitor changes is how much of the swing gets recorded:
 | Recorded | With a launch monitor feed (`connector_log`, `gspro_sniffer`) | From GSPro's log only (`gspro_log`) |
 |---|---|---|
 | Ball speed, launch angle, start direction, spin, spin axis, carry | Yes | Yes |
-| Club speed | If the monitor measures it | From the monitor's own log for FlightScope, rela and OpenSkyPlus (below) |
-| Club path, face, attack angle, strike location (kept in the shot's `raw` data; the booth talks about them) | If the monitor measures them (EYE XO2: with club markers) | FlightScope's, from its log (below) |
+| Club speed | If the monitor measures it | From the monitor's own log for FlightScope, rela, OpenSkyPlus and springbok's connector (below) |
+| Club path, face, attack angle, strike location (kept in the shot's `raw` data; the booth talks about them) | If the monitor measures them (EYE XO2: with club markers) | FlightScope's and springbok's connector's, from their logs (below) |
 | Club | From the HUD either way | From the HUD |
 | Player, hole, lie before and after, distance to the pin and where it finished, putts, strokes, penalties, scores, fairways, greens, scrambling | From GSPro's log and screen, the same for every monitor | Same |
 
@@ -79,8 +79,10 @@ Built from players' logs, not tested on the hardware:
 | FlightScope (Mevo, Mevo+, X3) through GSPconnect | `ConnectDebug.txt` (`source.connector_log`) | Club speed, attack angle, and path, face and dynamic loft when the radar measured them (Pro Package) |
 | rela (SkyTrak, SkyTrak+ and others) | `%LOCALAPPDATA%\rela\rela.log`, or `%TEMP%\rela.log` | What rela marks measured: club speed on a SkyTrak (rela models the rest from the ball, so it's left out) |
 | OpenSkyPlus (SkyTrak) | `<SkyTrak>\BepInEx\LogOutput.log` (version 2), `<SkyTrak>\BepInEx\plugins\OpenSkyPlus\Log.txt` (version 1) | Club speed. The SkyTrak folder is `C:\SkyTrak` or wherever SkyTrak's own log says it's installed |
+| springbok's MLM2PRO-GSPro-Connector (Rapsodo MLM2PRO and Garmin R10 over Bluetooth; Square, Full Swing KIT, SkyTrak+ and others read off their app's screen) | `<its folder>\appdata\logs\mlm2pro-gspro-connect*.log`, found while the connector is running (it's looked for every 10 s) | What it sends GSPro: club speed (all an MLM2PRO gives), and attack angle, path and face when the monitor gives them (R10, and the screen-read ones) |
 
-Garmin R10 connectors print to a console, not a file, and Foresight and aboutGolf send GSPro ball
+springbok's connector keeps its log in the folder it's run from, so a connector started from
+somewhere else (not its exe or a shortcut to it) needs `source.club_logs`. Other Garmin R10 connectors print to a console, not a file, and Foresight and aboutGolf send GSPro ball
 data only, so those shots have none. The booth log says `Club data: reading <monitor> shots from
 <file>` the first time a log gives a reading.
 

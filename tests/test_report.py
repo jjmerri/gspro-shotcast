@@ -304,6 +304,14 @@ def test_report_gathers_the_launch_monitor_data_gspro_and_its_software_keep(tmp_
                                                 encoding="utf-8")
     monkeypatch.setattr(report, "LM_FILES", [("Some LM shots", str(vendor), "*/*.json", 5, 1000),
                                              ("Absent LM", str(tmp_path / "nowhere"), "*.txt", 1, 1000)])
+    sbk = tmp_path / "MLM2PRO" / "appdata" / "logs"
+    sbk.mkdir(parents=True)
+    (sbk / "mlm2pro-gspro-connect.log").write_text(
+        "2026-11-15:15:20:00,1   DEBUG    [mlm2pro_web_api.py:17] UserId: 42, Secret Key: k3y, Secret Value: v4lue\n"
+        "2026-11-15:15:20:01,1   INFO     [gspro_connect.py:40] Sending to GSPro data: b'{\"BallData\": {}}'\n",
+        encoding="utf-8")
+    from commentator.sources import club_feeds
+    monkeypatch.setattr(club_feeds, "springbok_dirs", lambda: [sbk])
     programs = tmp_path / "Programs"
     (programs / "aboutGOLF" / "aG Bridge").mkdir(parents=True)
     (programs / "aboutGOLF" / "aG Bridge" / "bridge.log").write_bytes(b"shot\n")
@@ -319,11 +327,13 @@ def test_report_gathers_the_launch_monitor_data_gspro_and_its_software_keep(tmp_
         shots = json.loads(z.read("gspro/GSPro.db-shots.json"))
         software = z.read("launch-monitor/software.txt").decode()
         vendor_shot = z.read("launch-monitor/Some_LM_shots/12/shotinfo.json").decode()
+        springbok = z.read("launch-monitor/springbok_connector_log/0/mlm2pro-gspro-connect.log").decode()
     assert "aboutGOLF" in software and "aG Bridge/bridge.log  5" in software and "Microsoft" not in software
     assert {"gspro/ConnectDebug.txt", "gspro/ConnectDebug.txt.1", "gspro/ConnectDebug.txt.2026-11-14",
             "gspro/currentRound.dat", "launch-monitor/Some_LM_shots/12/shotinfo.json"} <= names
     assert shots["LastShot"][0]["ShotData"] == {"ClubSpeed": 40.5}
     assert '"clubspeed": "40"' in vendor_shot and "jo@" not in vendor_shot
+    assert "Sending to GSPro data" in springbok and "Secret" not in springbok and "k3y" not in springbok
     assert 'LM Type {"connectType":"Garmin","LMType":"R10"}' in summary
     assert "Some LM shots: 1 file(s)" in summary and "Absent LM: none" in summary
 
