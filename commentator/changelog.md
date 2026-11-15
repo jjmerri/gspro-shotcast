@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.139
+
+### Booth
+- Launch monitors that don't send a carry (like springbok's MLM2PRO-GSPro-Connector) now get the in-flight call on normal full swings, from a carry worked out from the ball numbers. Tops, thin shots and big hooks or slices are left without one.
+
 ## 0.1.138
 
 ### Booth
