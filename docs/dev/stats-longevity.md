@@ -196,7 +196,22 @@ merged like any other, and its record is in both nights' signatures.
   66.6 s (36.3 s and 26.9 s). Still linear: those two are the page files and the families left.
   With the per-year page files: 3 years 17.8 s warm, 23.5 s after an edit to the newest night; 6
   years 33.4 s and 44.8 s. What's left growing is the summary (the families still to port).
-- **To port:** predictions; then the page files (below).
+- **Bench at 1, 3, 5 and 10 years** (copies of the 6-year file, `tools/scale_bench.py`; 72k, 211k,
+  350k and 692k shots), before the cold build was batched:
+
+  | Years | Cold build | Warm, nothing changed | After a round | Backup | Peak footprint |
+  |---|---|---|---|---|---|
+  | 1 | 20.1 s | 2.5 s | 7.5 s | 3.5 s | 530 MB |
+  | 3 | 58.6 s | 7.1 s | 11.9 s | 9.9 s | 1.2 GB |
+  | 5 | 102.6 s | 12.2 s | 16.6 s | 16.8 s | 2.0 GB |
+  | 10 | 211 s | 25.1 s | 30.0 s | 88 s | 3.9 GB |
+
+  After a round is at the 30 s target at 10 years but still grows. A warm 10-year build (31.7 s
+  under the profiler): gapping 7.3 s (every full swing a player hit; it waits on the bag resets),
+  `rounds` 6.1 s, the handicap index 4.2 s, merging the kept nights about 11 s (holes 3.7 s,
+  highlights 2.5 s, players 2.0 s, firsts 1.5 s) and loading them about 3 s.
+- **Predictions** need no port: about 1,600 rows at 3 years, read in under 1 ms.
+- **To port:** the page files' remaining lists (below).
 - **Decisions:**
   - The usual gimme stays as it is (the most common radius); the families it feeds put it in their
     signature, so a change in it (rare) works them all out once. No number changes.
