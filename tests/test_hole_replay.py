@@ -1,7 +1,9 @@
 """Hole replays from logged ball positions, and filling older shots' positions from a saved log."""
 import math
 
-from commentator.hole_replay import estimate_pin, hole_image_sources, hole_replays
+import pytest
+
+from commentator.hole_replay import estimate_pin, finish_laterals, hole_image_sources, hole_replays
 from commentator.log_backfill import backfill
 from commentator.sources.gspro_log import M_TO_YD
 from commentator.store import Store
@@ -197,6 +199,31 @@ def test_replay_runs_each_shot_to_the_next_and_the_last_into_the_pin(tmp_path):
     f = (-10 / d, 100 / d)
     want = (10.0 + f[0] * d - f[1] * 40 / 677 * d, 200.0 + f[1] * d + f[0] * 40 / 677 * d)
     assert math.dist(shots[1]["aim"], want) < 0.1
+
+
+def test_each_swing_finishes_sideways_of_the_line_it_was_aimed_down(tmp_path):
+    path, st = _season(tmp_path)
+    log = tmp_path / "output_log.txt"
+    log.write_text(_hole_log())
+    backfill(path, [str(log)])
+    ids = [r[0] for r in st.db.execute("SELECT id FROM shots ORDER BY id")]
+
+    def cross(start, aim, end):
+        d = math.dist(start, aim)
+        return ((end[0] - start[0]) * (aim[1] - start[1]) - (end[1] - start[1]) * (aim[0] - start[0])) / d * M_TO_YD
+    got = finish_laterals(st.db)
+    # Off a par 4's tee, the course's aim point (0, 200): 10 m right. The approach, down its minimap aim.
+    aim = hole_replays(st.db)[(1, 1)]["players"][0]["shots"][1]["aim"]
+    assert got[ids[0]] == pytest.approx(10 * M_TO_YD)
+    assert got[ids[1]] == pytest.approx(cross((10, 200), aim, (2, 295)), abs=0.01)   # the drawn aim is rounded
+    assert ids[2] not in got   # the putt
+    # With no aim set, at the pin; a long way out with none, no telling what it was aimed at.
+    st.db.execute("UPDATE shots SET aim_map_x = NULL, aim_map_y = NULL")
+    st.db.commit()
+    assert finish_laterals(st.db)[ids[1]] == pytest.approx(cross((10, 200), (0, 300), (2, 295)))
+    st.db.execute("UPDATE shots SET to_pin_yards = 260 WHERE id = ?", (ids[1],))
+    st.db.commit()
+    assert ids[1] not in finish_laterals(st.db)
 
 
 def test_a_scramble_draws_only_the_ball_the_team_played_on(tmp_path):

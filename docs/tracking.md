@@ -208,8 +208,8 @@ Broadcasts, Booth). A section with more than one view has its own row of tabs at
 - **Players**: the season table; tapping a player opens their page: strokes gained per nine (off the tee, approach,
   around the green, putting), night-by-night trends, club gapping with each club's typical flight
   (from full swings only, so chips don't shrink a wedge), dispersion (where each club's full swings
-  land, with its 95% ellipse; sideways is estimated from the start line and spin axis, since GSPro's
-  offline tile is rarely on screen), approach by club, putting by length, and
+  finish, with its 95% ellipse; sideways is where GSPro's ball came to rest off the line it was aimed
+  down, else estimated from the start line and spin axis), approach by club, putting by length, and
   recovery from rough and sand, the handicap index with its trend, and every round (a tap opens it).
   **Against the league** sets each of their numbers beside the league's (everyone else in the view, with
   their counts pooled, so a player with more rounds counts for more; the handicap index is the mean)

@@ -337,7 +337,7 @@ def test_dispersion_lands_each_full_swing_and_rings_the_spread(db):
 
     # Straight out on a 3° start: carried out sideways, and the curve on top of it.
     assert A.lateral_yards(3, 0, 200) == pytest.approx(200 * math.sin(math.radians(3)))
-    assert A.lateral_yards(0, 10, 200) == pytest.approx(shot_shape.curve_yards(10, 200))
+    assert A.lateral_yards(0, 10, 200) == pytest.approx(shot_shape.curve_yards(10, 200, A.DISPERSION_CURVE))
     assert A.lateral_yards(None, 0, 200) is None
     # Longer swings go further right: the ring leans right with distance.
     for carry, start in ((140, -2), (145, -1), (150, 0), (155, 1), (160, 2)):
@@ -353,3 +353,8 @@ def test_dispersion_lands_each_full_swing_and_rings_the_spread(db):
     assert e["long"] > e["short"] >= 0 and seven["width"] > 0
     assert (pw["n"], len(pw["landing"]), pw["ellipse"], pw["width"]) == (3, 2, None, None)
     assert pw["side"] < 0
+    # Where GSPro logged the ball finishing, that, over the estimate; a swing with no direction counts too.
+    ids = [r[0] for r in db.execute("SELECT id FROM shots WHERE club = 'PW' ORDER BY id")]
+    pw = next(c for c in A.gapping(db, "Ann", finish={ids[0]: 6.0, ids[2]: 8.0}) if c["club"] == "PW")
+    assert sorted(x for x, _ in pw["landing"]) == [round(A.lateral_yards(-1, 0, 104), 1), 6.0, 8.0]
+    assert pw["side_logged"] == 2

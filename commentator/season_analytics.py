@@ -221,17 +221,22 @@ GAPPING_CLEAN_LIES = ("tee", "fairway")
 GAPPING_MIN_CLEAN = 5
 
 
-def gapping(db: sqlite3.Connection, player: str, context: str | None = None) -> list[dict]:
+def gapping(db: sqlite3.Connection, player: str, context: str | None = None,
+            finish: dict[int, float] | None = None) -> list[dict]:
     """Per club, carry and launch numbers from the launch monitor, over full swings only: a chip or a
     knock-down (ball speed well under the club's best) would drag a wedge's carry down. Every real swing
     counts, a mulligan's too. Medians and the middle half, so one mishit doesn't move the numbers.
     Only swings from the tee or fairway count (see GAPPING_CLEAN_LIES); a club with too few of those
     uses every lie, and says so (`any_lie`).
     A swing with no raw carry (a launch monitor that sends none, and no CARRY (raw) tile on screen) uses
-    GSPro's game carry, slope and weather in it: `game` counts those."""
+    GSPro's game carry, slope and weather in it: `game` counts those.
+    `finish`: hole_replay.finish_laterals, worked out here when not given."""
+    if finish is None:
+        from .hole_replay import finish_laterals   # hole_replay imports stats_web, which imports this
+        finish = finish_laterals(db)
     raw = "COALESCE(NULLIF(carry_raw_tile_yards, 0), NULLIF(carry_raw, 0))"
     rows = db.execute(
-        f"SELECT club, COALESCE({raw}, carry_game_yards) AS carry, {raw} IS NULL AS game, total_yards, ball_speed,"
+        f"SELECT id, club, COALESCE({raw}, carry_game_yards) AS carry, {raw} IS NULL AS game, total_yards, ball_speed,"
         " club_speed, launch_angle, total_spin, spin_axis, start_direction, handed, lie_before FROM shots WHERE player = ?"
         " AND attributed = 1 AND is_putt = 0 AND left_out = 0 AND club IS NOT NULL AND club != 'PT'"
         f" AND COALESCE({raw}, carry_game_yards) > 0" + _ctx(context), (player,)).fetchall()
@@ -257,9 +262,12 @@ def gapping(db: sqlite3.Connection, player: str, context: str | None = None) -> 
         carries = sorted(r["carry"] for r in rs)
         q = statistics.quantiles(carries, n=4) if len(carries) >= 2 else [carries[0]] * 3
         smash = [r["ball_speed"] / r["club_speed"] for r in rs if r["ball_speed"] and r["club_speed"]]
-        landed = [(lateral_yards(r["start_direction"], r["spin_axis"], r["carry"]), r["carry"]) for r in rs]
+        side = [(finish.get(r["id"]), r["carry"]) for r in rs]
+        side = [(x if x is not None else lateral_yards(r["start_direction"], r["spin_axis"], r["carry"]), y, x is not None)
+                for (x, y), r in zip(side, rs)]
         out.append({"club": club, "n": len(rs), "swings": swings, "game": sum(r["game"] for r in rs),
-                    **dispersion([(x, y) for x, y in landed if x is not None]),
+                    **dispersion([(x, y) for x, y, _ in side if x is not None]),
+                    "side_logged": sum(known for _, _, known in side),
                     "any_lie": any_lie, "carry": med("carry"), "carry_lo": round(q[0]), "carry_hi": round(q[2]),
                     "carry_max": round(carries[-1]), "total": med("total_yards"), "ball_speed": med("ball_speed"),
                     "club_speed": med("club_speed"), "smash": round(statistics.median(smash), 2) if smash else None,
@@ -274,16 +282,19 @@ def gapping(db: sqlite3.Connection, player: str, context: str | None = None) -> 
 
 
 DISPERSION_MIN = 5       # swings a club needs before its spread is worked out
+# Of the launch monitor's curve, the share that shows in where a swing finishes sideways: fitted to the
+# swings GSPro logged positions for, which the sim's own flight curves less than shot_shape draws it.
+DISPERSION_CURVE = 0.45
 ELLIPSE_95 = math.sqrt(5.991)   # 2-D normal: 95% of shots inside this many SDs (chi-square, 2 dof)
 
 
 def lateral_yards(start: float | None, axis: float | None, carry: float | None) -> float | None:
-    """Where a full swing landed sideways of the target line, yards (positive = right, as seen): the
-    start line carried out plus its estimated curve. GSPro's offline tile is rarely on screen, so
-    this is worked out from the launch monitor for every swing."""
+    """Where a full swing finished sideways of the target line, estimated from the launch monitor,
+    yards (positive = right, as seen): the start line carried out plus its curve. For a swing GSPro
+    logged no positions for (hole_replay.finish_laterals has the rest)."""
     if start is None or axis is None or not carry:
         return None
-    return carry * math.sin(math.radians(start)) + (shot_shape.curve_yards(axis, carry) or 0.0)
+    return carry * math.sin(math.radians(start)) + (shot_shape.curve_yards(axis, carry, DISPERSION_CURVE) or 0.0)
 
 
 def dispersion(pts: list[tuple[float, float]]) -> dict[str, Any]:

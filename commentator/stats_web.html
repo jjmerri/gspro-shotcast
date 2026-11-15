@@ -918,7 +918,7 @@ function gapChart(clubs) {
 // Sideways yards as a golfer says them: "4 L", "3 R".
 const lr = v => v === null || v === undefined ? "–" : Math.round(Math.abs(v)) === 0 ? "0" : Math.round(Math.abs(v)) + (v > 0 ? " R" : " L");
 
-// Where each club's full swings landed, looking down the range: sideways of the target line across,
+// Where each club's full swings finished, looking down the target line: sideways of it across,
 // carry up, each club's 95% ellipse. A club picked (state.dispClub) shows its swings, one dot each.
 function dispChart(clubs) {
   const cs = clubs.filter(c => c.landing && c.landing.length);
@@ -949,7 +949,7 @@ function dispChart(clubs) {
       const r = rings.get(c), e = c.ellipse;
       const on = c === pick, dim = pick && !on;
       if (!r && !on) return "";
-      return `<g${dim ? ' opacity=".15"' : ""}><title>${esc(c.club)}: ${c.landing.length} swing${c.landing.length === 1 ? "" : "s"}, typical miss ${lr(c.side)}${c.width !== null ? `; 95% land within a ${c.width} yd wide band` : ""}</title>
+      return `<g${dim ? ' opacity=".15"' : ""}><title>${esc(c.club)}: ${c.landing.length} swing${c.landing.length === 1 ? "" : "s"} (${c.side_logged} where GSPro's ball finished), typical miss ${lr(c.side)}${c.width !== null ? `; 95% finish within a ${c.width} yd wide band` : ""}</title>
         ${!on ? "" : c.landing.map(p => `<circle cx="${x(p[0])}" cy="${y(p[1])}" r="1.6" style="fill:var(--accent)" opacity=".6"/>`).join("")}
         ${r ? `<path d="${r.map((p, i) => `${i ? "L" : "M"}${x(p[0])},${y(p[1])}`).join("")}Z" style="stroke:var(--accent);fill:var(--accent)" fill-opacity="${on ? ".12" : ".05"}" stroke-width="${on ? 2 : 1.2}"/>
         <text x="${x(e.x)}" y="${+y(e.y) + 3}" style="fill:var(--soft)" font-size="9" font-weight="600" text-anchor="middle">${esc(c.club)}</text>` : ""}</g>`;
@@ -1118,8 +1118,8 @@ function renderPlayer(p) {
       { key: "club", label: "Club" }, { key: "n", label: "Swings", title: "Full swings from the tee or fairway used (of all swings with the club)" }, { key: "carry", label: "Carry" },
       { key: "gap_to_next", label: "Gap", title: "Median carry gap to the next club down" },
       { key: "smash", label: "Smash", title: "Ball speed / club speed" }, { key: "launch", label: "Launch" },
-      { key: "spin", label: "Spin" }, { key: "side", label: "Side", title: "Typical miss sideways where the ball landed (median), from the start line and curve" },
-      { key: "width", label: "Width", title: "How wide a band 95% of swings land in, yards (5 or more swings)" },
+      { key: "spin", label: "Spin" }, { key: "side", label: "Side", title: "Typical miss sideways of the aim where the ball finished (median)" },
+      { key: "width", label: "Width", title: "How wide a band 95% of swings finish in, yards (5 or more swings)" },
       { key: "miss", label: "Typical flight", cls: "l" }],
       c => `<tr><td>${esc(c.club)}${c.any_lie ? `<span title="Too few tee and fairway swings: every lie counts">*</span>` : ""}</td><td>${c.n}${c.swings > c.n ? ` <span class="sub">/ ${c.swings}</span>` : ""}</td><td${c.game ? ` title="${c.game} of ${c.n} from GSPro's game carry"` : ""}>${c.game ? "≈" : ""}${dash(c.carry === null ? null : Math.round(c.carry), " yd")}</td>
         <td>${dash(c.gap_to_next, " yd")}</td><td>${dash(c.smash)}</td><td>${dash(c.launch, "°")}</td>
@@ -1130,8 +1130,8 @@ function renderPlayer(p) {
   <h2>Dispersion</h2>
   <div class="grid2">
     <div>${dispChart(p.gapping)}</div>
-    <div><p class="sub">Where each club's full swings landed, looking down the target line: carry up, sideways across. Each ring holds 95% of a club's swings (from 5 swings); pick a club to see its swings, one dot each.</p>
-      <p class="sub">Sideways is estimated from the launch monitor (the start line carried out, plus the curve from the spin axis), not where GSPro's ball came down, so slope, wind and bounces don't move it. The same full swings as the gapping table.</p></div>
+    <div><p class="sub">Where each club's full swings finished, looking down the target line: carry up, sideways across. Each ring holds 95% of a club's swings (from 5 swings); pick a club to see its swings, one dot each.</p>
+      <p class="sub">Sideways is where GSPro's ball came to rest, off the line it was aimed down (the aim set on the minimap, else the pin, or the course's aim point off a par 4 or 5 tee), so it takes in wind and bounces. A swing with no positions logged (the range, a mulligan, a long shot with no aim set) is estimated from the launch monitor's start line and spin axis. The same full swings as the gapping table.</p></div>
   </div>
   <div class="grid2">
     <div><h2>Approach by club</h2>
