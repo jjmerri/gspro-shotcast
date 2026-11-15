@@ -3,11 +3,18 @@
 // the page's views, and ends with ×, "End tour" or Esc at any point. The "Tour" button brings it back.
 (() => {
   const KEY = "shotcast.demo.tour";
-  const ME = "player=Josh+Mercer";
+  const NAME = "Josh Mercer", ME = "player=Josh+Mercer";
   const VOD = "20261104-133911-67149a";   // Premonition: the round with a recording
-  const HOLE = 8;                         // its replay and birdie putt
-  const PUTT = 4041;                      // the hole 8 birdie putt
+  const PUTT = 4041;                      // its hole 8 birdie putt
+  const COURSE = "Riviera";               // the round the card and replay show: Josh's latest there, tracked
+  const HOLE = 10;                        // ball flights and all; its hole 10, and Josh's drive's shot view
+  const DRIVE = `.replay [data-shotview="${NAME}"][data-n="1"]`;
   let roundId = null;
+  // Josh's own side of the round: Rounds lists a side for each player in it.
+  const latestThere = () => [...document.querySelectorAll("tr[data-round]")].find(r => {
+    const [course, side] = r.querySelectorAll("td.l");
+    return course && side && course.textContent.trim() === COURSE && side.textContent.startsWith(NAME);
+  });
 
   const STEPS = [
     { title: "Welcome to the Shotcast demo",
@@ -20,24 +27,39 @@
       text: "League weeks score themselves: each team's net, the week's results and the season standings." },
     { hash: "#home?player=", el: "[data-recap]", title: "The week's recap",
       text: "When a week ends, the booth writes and narrates a recap video over the round's best moments." },
-    { hash: `#rounds?${ME}`, el: "tr[data-round]", title: "Every round",
-      text: "Every round played at the sim, with the score and how it went. Next opens Josh's latest.",
-      leave: () => { const r = document.querySelector("tr[data-round]"); roundId = r && r.dataset.round; } },
+    { hash: `#rounds?${ME}`, el: latestThere, title: "Every round",
+      text: `Every round played at the sim, with the score and how it went. Next opens Josh's latest at ${COURSE}.`,
+      leave: () => { const r = latestThere(); roundId = r && r.dataset.round; } },
     { hash: () => roundId ? `#round?${ME}&id=${roundId}` : `#rounds?${ME}`, el: ".scorecard", title: "The card",
-      text: "Hole by hole, with the out and in nines. Every hole number opens a replay of that hole: press 8 (or Next).",
+      text: `Hole by hole, against par. Every hole number opens a replay of that hole: press ${HOLE} (or Next).`,
       click: `.scorecard [data-replay="${HOLE}"]` },
-    { hash: () => roundId ? `#round?${ME}&id=${roundId}&hole=${HOLE}` : `#rounds?${ME}`, el: ".replay svg", title: "Hole replays",
-      text: "The hole redrawn from the sim's shot data, every player's shots traced from tee to cup as they played it. "
-          + "Above it, ↻ plays it again and ▶ jumps to the hole in the broadcast." },
+    { hash: () => roundId ? `#round?${ME}&id=${roundId}&hole=${HOLE}` : `#rounds?${ME}`, el: ".replay", title: "Hole replays",
+      text: "The hole redrawn from the sim's shot data: every player's shots as GSPro tracked the ball, dashed where "
+          + "they aimed and ○ where it landed. ↻ plays it again. Press Josh's drive (or Next) for its shot view.",
+      click: DRIVE, enter: () => {   // (back from the shot view: close it)
+        const close = document.querySelector('.replay [data-shotview=""]');
+        if (close) close.click();
+        return !close && !!document.querySelector(".replay svg");
+      } },
+    { hash: () => roundId ? `#round?${ME}&id=${roundId}&hole=${HOLE}` : `#rounds?${ME}`, el: ".replay", title: "Shot view",
+      text: "The drive as the ball flew, slowing and zooming in as it lands and rolls out, and side-on: "
+          + "apex, carry, total, hang time and how steeply it came down. Any tracked shot opens this way.",
+      enter: () => {   // (back to it from a later step: open it again)
+        if (document.querySelector(".sv-row")) return true;
+        const drive = document.querySelector(DRIVE);
+        if (drive) drive.click();
+        return false;
+      } },
     { hash: `#shots?${ME}&course=Premonition&shot=${PUTT}`, el: `tr[data-shot="${PUTT}"]`, title: "Every shot",
-      text: "Each shot's launch numbers, where it finished, and what the booth said about it. Here's a birdie putt on 8." },
+      text: "Each shot's launch numbers, where it finished, and what the booth said about it. "
+          + "Here's a birdie putt on 8 at Premonition, a round that was recorded." },
     { hash: `#shots?${ME}&course=Premonition&shot=${PUTT}`, el: `tr[data-shot="${PUTT}"] [data-vod]`, title: "Jump to the video",
       text: "Rounds are recorded, and every shot links to its moment in the broadcast. Press ▶ (or Next) to watch this putt.",
       click: `tr[data-shot="${PUTT}"] [data-vod]` },
     { hash: `#vods?${ME}&vod=${VOD}&at=1504`, el: "#liveslot", title: "Right to the moment",
       text: "The round's replay, starting at the putt, with the booth's call. Every replay can be scrubbed and shared." },
     { hash: "#live", el: "#liveslot", title: "Live",
-      text: "While a round is on, it streams here live with the commentary. In the demo, hole 8 of that round plays on a loop." },
+      text: "While a round is on, it streams here live with the commentary. In the demo, hole 8 of that Premonition round plays on a loop." },
     { hash: "#live", el: "#chatslot", title: "Chat",
       text: "Viewers chat along, and the booth can read it out. This demo's chat is scripted: what you type is only kept in your browser." },
     { hash: `#player?${ME}&name=Josh+Mercer`, el: "#profile", title: "Players",
@@ -136,12 +158,14 @@
     clearInterval(timer);
     if (!s.el) return;
     const want = at, since = Date.now();
-    let lastY = -1, aligns = 0;
+    let lastY = -1, aligns = 0, entered = !s.enter;
     // The views draw after their data loads: wait for the step's element, then keep up with the layout.
     timer = setInterval(() => {
       if (at !== want) return;
+      // A step's enter() runs until it says the view is as the step needs it (once drawn), then not again.
+      if (!entered && Date.now() - since < 12000) entered = s.enter();
       if (!target || !target.isConnected) {
-        const el = document.querySelector(s.el);
+        const el = typeof s.el === "function" ? s.el() : document.querySelector(s.el);
         if (el && el.getClientRects().length) {
           target = el;
           el.scrollIntoView({ block: "center", behavior: "smooth" });
