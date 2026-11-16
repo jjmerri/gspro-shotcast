@@ -3604,6 +3604,9 @@ class Engine:
         if not self.round:
             return None
         whose = cites_call(line.text)
+        credited = credited_words(line.text) if whose is None else set()
+        if whose is None and not credited:
+            return None
         others = [k for k in self.speakers if k != line.speaker]
         calls, earlier = self._calls_made(whole_round), list(earlier)
 
@@ -3614,7 +3617,6 @@ class Engine:
             # "You called for simple" from the one who made that call ("I'm backing him to keep this one
             # simple") when the other voice made none: it gives his own call away. Only when the credited
             # words echo his call, so "you called that a pull" quoting a description still stands.
-            credited = credited_words(line.text)
             mine = set().union(*(call_words(c.text) for c in calls if c.speaker == line.speaker),
                                *(call_words(l.text) for l in earlier if l.speaker == line.speaker and makes_call(l.text)))
             if others and credited & mine and not called(set(others)):
