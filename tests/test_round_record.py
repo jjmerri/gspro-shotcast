@@ -85,7 +85,7 @@ def test_the_migration_stores_the_rounds_the_time_rules_give(tmp_path):
     _season(path)
     Store(str(path), new_session=False).close()
     db = _raw(path)
-    assert db.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert db.execute("PRAGMA user_version").fetchone()[0] == 7
     got = _grouping(db)
     assert all(u for rows in got.values() for u in rows.values())   # every row has a record
     groups = R.membership(db)
@@ -587,7 +587,7 @@ def test_a_rename_onto_a_misread_shots_name_keeps_the_players_slot(tmp_path):
     assert s.db.execute("SELECT player FROM shots WHERE id = ?", (c,)).fetchone()[0] == "Bo"
 
 
-def test_the_opener_aired_over_the_load_is_the_rounds(tmp_path):
+def test_the_opener_aired_over_the_load_is_the_rounds(tmp_path, monkeypatch):
     s = Store(str(tmp_path / "s.db"))
     import time
     p = _hit(s, "Ann", time.time())                    # practice, then the opener over the course load
@@ -606,9 +606,53 @@ def test_the_opener_aired_over_the_load_is_the_rounds(tmp_path):
     s3 = Store(str(tmp_path / "u.db"))                 # yesterday's practice talk, the booth left running
     _hit(s3, "Ann", time.time())
     old = _said(s3, text="Nice one")
-    assert s3.roll_session_if_idle(now=time.time() + 86400)
+    real = time.time
+    monkeypatch.setattr(time, "time", lambda: real() + 86400)
+    assert s3.roll_session_if_idle()
     w = s3.begin_round("r1", course="Pebble", players={"Ann": None})
     assert s3.db.execute("SELECT record_uuid FROM lines").fetchone()[0] == old != w
+    monkeypatch.setattr(time, "time", real)
+    s4 = Store(str(tmp_path / "v.db"))                 # the next morning's opener, aired before the round
+    _hit(s4, "Ann", time.time())                       # last night's practice
+    _said(s4, text="Nice one")
+    monkeypatch.setattr(time, "time", lambda: real() + 86400)
+    _said(s4, text="Good morning from Pebble")
+    old_session = s4.session_id
+    assert s4.roll_session_if_idle()
+    w = s4.begin_round("r1", course="Pebble", players={"Ann": None})
+    got = {t: (u, sid) for t, u, sid in s4.db.execute("SELECT text, record_uuid, session_id FROM lines")}
+    assert got["Good morning from Pebble"] == (w, s4.session_id) != (w, old_session)
+    assert got["Nice one"][0] != w
+    assert s4.db.execute("SELECT COUNT(*) FROM round_records WHERE kind = 'practice'").fetchone()[0] == 1
+
+
+def test_an_opener_left_in_the_old_sessions_practice_moves_to_its_round(tmp_path):
+    path = str(tmp_path / "s.db")
+    s = Store(path)
+    old = s.session_id
+    now = __import__("time").time()
+    db = s.db
+    db.execute("INSERT INTO round_records (uuid, kind, session_id, started_at, ended_at, state, assigned)"
+               " VALUES ('p', 'practice', ?, ?, ?, 'finished', 'live')", (old, now - 31, now - 31))
+    db.execute("INSERT INTO round_records (uuid, kind, session_id, started_at, ended_at, state, assigned)"
+               " VALUES ('lone', 'practice', ?, ?, ?, 'finished', 'live')", (old, now - 7200, now - 7200))
+    new = db.execute("INSERT INTO sessions (started_at, date) VALUES (?, '2026-11-16')", (now,)).lastrowid
+    db.execute("INSERT INTO round_records (uuid, kind, session_id, started_at, state, assigned)"
+               " VALUES ('r', 'round', ?, ?, 'finished', 'live')", (new, now - 24))
+    db.execute("INSERT INTO round_records (uuid, kind, session_id, started_at, ended_at, state, assigned)"
+               " VALUES ('talk', 'practice', ?, ?, ?, 'finished', 'live')", (old, now - 60, now - 60))
+    for text, rec, at, kind in (("Good morning", "p", now - 31, "opener"), ("Hole 1", "p", now - 31, "opener"),
+                                ("Earlier", "lone", now - 7200, "opener"), ("Idle", "talk", now - 60, "segment")):
+        db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text, record_uuid) VALUES (?, ?, ?, 'pbp', ?, ?)",
+                   (old, at, kind, text, rec))
+    db.execute("PRAGMA user_version = 6")
+    db.commit()
+    s.close()
+    s = Store(path, new_session=False)
+    got = {t: (u, sid) for t, u, sid in s.db.execute("SELECT text, record_uuid, session_id FROM lines")}
+    assert got == {"Good morning": ("r", new), "Hole 1": ("r", new), "Earlier": ("lone", old), "Idle": ("talk", old)}
+    assert {u for (u,) in s.db.execute("SELECT uuid FROM round_records")} == {"lone", "talk", "r"}
+    assert s.db.execute("PRAGMA user_version").fetchone()[0] == 7
 
 
 def test_the_readers_read_the_stored_record_once_every_row_has_one(tmp_path):

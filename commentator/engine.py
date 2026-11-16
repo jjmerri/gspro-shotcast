@@ -5411,7 +5411,9 @@ class Engine:
             self._narrated_pen[(idx, hole)] = penalties   # the splash call told it (or no setup line will)
         else:
             hud._penalty = ((idx, hole), penalties, True)
-            facts.append("The penalty hasn't been mentioned on air yet: say so.")
+            # "...: say so" aired as "one penalty already unmentioned" (Bethpage, 11-16).
+            facts.append("Nobody has called this penalty yet, so this line must tell the listener about it "
+                         "(that a penalty stroke was taken). Never say it went unmentioned.")
         return facts
 
     def _strategy_facts(self, minimap: "MinimapRead | None", hud: Hud) -> list[str]:
@@ -6509,7 +6511,9 @@ class Engine:
                 season_facts.append(f"That's a new personal best: longer than {beaten}. Excitement "
                                     f"{SEASON_BEST_DRIVE_LEVEL} out of 10.")
             elif shot_round is not None and shot_round.is_league \
-                    and (best := self.store.season_longest_drive(context="league")) and drive > best[1]:
+                    and (best := max(filter(None, (self.store.season_longest_drive(context="league"),
+                                                   self.store.today_longest_league_drive())),
+                                     key=lambda b: b[1], default=None)) and drive > best[1]:
                 tags.append("league_best_drive")
                 score = max(score + 0.6, c.big_moment_threshold)
                 season_facts.append(f"That's the longest drive in the league this season, past {best[0]}'s "
@@ -7868,11 +7872,13 @@ class Engine:
                                  poll: float = 0.1) -> float | None:
         """Where the ball came to rest, in yards from the pin, from GSPro's `Logging tdist` line
         (written as the ball settles, just after the score line). None if it doesn't change from the
-        impact value within the window, so a stale distance is never taken for this shot's."""
+        impact value within the window, so a stale distance is never taken for this shot's. Nor is a
+        scramble's pick copied onto the player (their teammate's ball, now theirs to play): Derek's
+        nine-iron, 34 yards out, "leaves fourteen feet", Dan's ball (Bethpage, 11-16)."""
         deadline = time.monotonic() + window
         while True:
             now = self.gspro.to_pin_by.get(idx)
-            if now is not None and now != at_impact:
+            if now is not None and now != at_impact and self.gspro.to_pin_from.get(idx, idx) == idx:
                 return self.gspro.to_pin_of(idx)
             if time.monotonic() >= deadline:
                 return None

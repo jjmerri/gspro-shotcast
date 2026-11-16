@@ -1995,6 +1995,12 @@ def test_store_keeps_the_season(tmp_path):
     assert ("rough", 160.0, 152.0, None, None, "lm") in week2.carry_pairs()
     board = week2.leaderboard()[0]
     assert board["player"] == "Mike" and board["fairway_pct"] == 100
+    # Today's league drives, anyone's (the record above is before today): not a practice one.
+    assert week2.today_longest_league_drive() is None
+    for who, total, league in (("Derek", 279.7, True), ("Dan", 300.0, False), ("Dan", 240.0, True)):
+        week2.record_shot(player=who, hole="Hole 1", shot=drive, before=Hud(lie="tee"), after=Hud(lie="rough"),
+                          tags=[], carry_game_yards=total - 10, total_yards=total, offline_yards=3.0, is_league=league)
+    assert week2.today_longest_league_drive() == ("Derek", 279.7)
 
 
 def test_store_keeps_club_delivery_and_backfills_older_files(tmp_path):
@@ -2604,6 +2610,14 @@ async def test_finish_distance_comes_from_the_log_and_never_a_stale_one(tmp_path
     assert await e._wait_finish_yards(0, 180.0, 0.05) is None   # no new tdist yet: not this shot's
     e.gspro.to_pin_by[0] = 1.5                                  # the ball settled ~5 yards away
     assert abs(await e._wait_finish_yards(0, 180.0, 0.05) - 1.5 * 1.0936133) < 0.01
+    # A scramble's pick copies the teammate's ball onto this player: not where this shot finished.
+    from commentator.sources.gspro_log import LogEvent
+    e.gspro.to_pin_by[1] = 120.0
+    for ev in (LogEvent("select", player=0), LogEvent("tdist", to_pin=4.37, gimmie=1.22),
+               LogEvent("team_copy", player=1)):
+        e.gspro.apply(ev)
+    assert e.gspro.to_pin_by[1] == 4.37 and await e._wait_finish_yards(1, 120.0, 0.05) is None
+    assert abs(await e._wait_finish_yards(0, 1.5, 0.05) - 4.37 * 1.0936133) < 0.01   # the picked ball's own
 
 
 def test_prewritten_putt_reactions_may_quote_the_putt_length_only(tmp_path):
@@ -3437,6 +3451,12 @@ def test_a_round_score_the_facts_dont_give_is_rejected():
     assert wrong_round_score("Forty-one over for the round.", "from +2 to +1")
     assert not check_line("Moving to three over for the round.", facts, "", mode="preshot").ok
     assert check_line("Moving to three over for the round.", facts, "", mode="round").ok
+    # Who it moves, between the verb and the score (Bethpage, 11-16: the team was at +1 both times).
+    at_one_over = "If this putt is holed it's a birdie on the hole, which moves the round from +2 to +1."
+    assert wrong_round_score("A birdie for Dan and Derek, moving the team to one under.", at_one_over)
+    assert wrong_round_score("It drops for par. Dan and Derek hold at one over.", "the round stays at +3")
+    assert wrong_round_score("It drops for par. Dan and Derek hold at three over.", "the round stays at +3") is None
+    assert wrong_round_score("That keeps Dan and Derek at one over.", at_one_over) is None
 
 
 def test_parse_lines_strips_a_speaker_label_run_into_the_line():
@@ -3531,7 +3551,7 @@ def test_an_unaired_dry_penalty_is_forced_into_the_setup_line_and_retried(tmp_pa
     engine._fire_rows[7] = (1, rec, 0, 5)
     hud = Hud(player_text="Tony", shot_number=3, lie="rough", to_pin="300 yards")
     facts = engine._penalty_facts_from_truth(0, hud)
-    assert "hasn't been mentioned on air" in " ".join(facts)
+    assert "Nobody has called this penalty yet" in " ".join(facts)
     assert hud._penalty == ((0, 5), 1, True) and engine._setup_line_rate(hud, False) == 1.0
     # Nothing aired: the next setup still carries it.
     assert engine._penalty_facts_from_truth(0, Hud(shot_number=3))

@@ -418,10 +418,11 @@ def planner_counts_stale(db: sqlite3.Connection, grown: float = 2.0, least: int 
     return False
 
 
-# The season file's format (PRAGMA user_version) once upgraded: 6 is round_record.migrate's. Raise it
+# The season file's format (PRAGMA user_version) once upgraded: 6 is round_record.migrate's, 7 the
+# stranded openers' repair (_repair_stranded_openers). Raise it
 # with any change to the file an older release would trip over: a file older than this is copied before
 # it's upgraded (backup.before_upgrade).
-FORMAT = 6
+FORMAT = 7
 
 
 class SeasonCopyFailed(RuntimeError):
@@ -618,6 +619,9 @@ class Store:
                 if (name := self.course_name(course)) != course:
                     self.db.execute(f"UPDATE {table} SET course = ? WHERE course = ?", (name, course))
         round_record.migrate(self.db)
+        if self.db.execute("PRAGMA user_version").fetchone()[0] == 6:
+            self._repair_stranded_openers()
+            self.db.execute("PRAGMA user_version = 7")
         if planner_counts_stale(self.db):   # (last: after the rows the migrations add)
             self.db.execute("ANALYZE")
         self.db.commit()
@@ -1566,6 +1570,20 @@ class Store:
         ).fetchone()
         return r["longest"] if r else None
 
+    def today_longest_league_drive(self) -> tuple[str, float] | None:
+        """The longest league drive already recorded today, anyone's: (player, yards). The season record
+        (season_longest_drive) is before today, so without it Derek's 255 was "the league's longest" an
+        hour after his 280 (Bethpage, 11-16)."""
+        r = self.db.execute(
+            f"""SELECT player, {_DRIVE} AS d FROM shots
+               WHERE {DRIVE_SQL} AND player IS NOT NULL AND player != 'unknown'
+                     AND session_id IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))
+                     AND mulligan = 0 AND left_out = 0{_ctx_sql('league')} AND {_DRIVE} IS NOT NULL
+               ORDER BY d DESC LIMIT 1""",
+            (self.session_id,),
+        ).fetchone()
+        return (r["player"], r["d"]) if r else None
+
     def rename_shots(self, old: str, new: str, after_id: int, record: str | None = None) -> int:
         """A player's shots in a round (`record`'s; or every one since `after_id`) go to their right name,
         and so does their slot. Returns how many."""
@@ -1638,6 +1656,34 @@ class Store:
         self.db.commit()
 
     HOLE_VISIT_SECONDS = 1800   # a hole's strokes are played well inside this; a later round's aren't
+
+    def _repair_stranded_openers(self) -> None:
+        """An opener aired over the load before a round that started a new session (the booth idle for
+        hours) stayed in the old session's practice stretch, a record of its own with no shot, so the
+        round showed none. Its opener lines from the last PRACTICE_IDLE_SECONDS before the round are the
+        round's (round_record.Live.begin now moves them as it starts), and the stretch left empty goes.
+        Only openers: other talk with no shot before a round can't be told from practice's."""
+        from .round_record import PRACTICE_IDLE_SECONDS
+        for p, sid in self.db.execute(
+                "SELECT uuid, session_id FROM round_records p WHERE kind = 'practice' AND state != 'in_progress'"
+                " AND NOT EXISTS (SELECT 1 FROM shots WHERE record_uuid = p.uuid)").fetchall():
+            last = self.db.execute("SELECT MAX(ts) FROM lines WHERE record_uuid = ? AND kind = 'opener'",
+                                   (p,)).fetchone()[0]
+            if last is None:
+                continue
+            r = self.db.execute(
+                "SELECT uuid, session_id, started_at FROM round_records WHERE kind = 'round' AND started_at >= ?"
+                " AND started_at - ? <= ? AND session_id IS NOT ? ORDER BY started_at LIMIT 1",
+                (last, last, PRACTICE_IDLE_SECONDS, sid)).fetchone()
+            if not r:
+                continue
+            n = self.db.execute("UPDATE lines SET record_uuid = ?, session_id = COALESCE(?, session_id)"
+                                " WHERE record_uuid = ? AND kind = 'opener' AND shot_id IS NULL AND ts > ?",
+                                (r[0], r[1], p, r[2] - PRACTICE_IDLE_SECONDS)).rowcount
+            log.info("Moved %d opener line(s) from practice stretch %s into round %s", n, p, r[0])
+            if not self.db.execute("SELECT 1 FROM lines WHERE record_uuid = ? LIMIT 1", (p,)).fetchone():
+                self.db.execute("DELETE FROM round_slots WHERE round_uuid = ?", (p,))
+                self.db.execute("DELETE FROM round_records WHERE uuid = ?", (p,))
 
     def _repair_tee_finishes(self) -> None:
         """A full shot saved as finishing on the tee kept the lie it was hit from (Corey's opening drive at

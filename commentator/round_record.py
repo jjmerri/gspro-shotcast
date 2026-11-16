@@ -1003,12 +1003,16 @@ class Live:
                 self.db.execute("UPDATE shots SET record_uuid = ?, slot_id = ? WHERE id = ?", (u, self.slot(u, player), sid))
                 self.db.execute("UPDATE lines SET record_uuid = ? WHERE shot_id = ?", (u, sid))
         if self.practice:
-            # What the booth said this session since practice's last shot (the opener, aired over the
-            # course load) is the round's: as the time rules had it.
+            # What the booth said since practice's last shot (the opener, aired over the course load) is
+            # the round's: as the time rules had it. A round starting a new session (the booth idle for
+            # hours) took over only what was said in the last PRACTICE_IDLE_SECONDS: the opener just
+            # aired under the old session, not last night's talk.
             p = self.practice[0]
-            if self.practice[1] == session_id:
-                self.db.execute("UPDATE lines SET record_uuid = ?1 WHERE record_uuid = ?2 AND shot_id IS NULL AND ts >"
-                                " COALESCE((SELECT MAX(ts) FROM shots WHERE record_uuid = ?2), -1e18)", (u, p))
+            since = -1e18 if self.practice[1] == session_id else now - PRACTICE_IDLE_SECONDS
+            self.db.execute("UPDATE lines SET record_uuid = ?1, session_id = COALESCE(?4, session_id) WHERE record_uuid = ?2"
+                            " AND shot_id IS NULL AND ts > ?3 AND ts >"
+                            " COALESCE((SELECT MAX(ts) FROM shots WHERE record_uuid = ?2), -1e18)",
+                            (u, p, since, session_id))
             self._close(p, "finished")
             self.practice = None
         self.round, self.closing = u, None

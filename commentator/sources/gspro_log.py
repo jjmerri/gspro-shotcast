@@ -422,6 +422,7 @@ class GsproState:
     # so these are keyed by that index; the engine maps a name to its index via roster slot order.
     lie_by: dict = field(default_factory=dict)       # index -> raw material of the ball about to be played
     to_pin_by: dict = field(default_factory=dict)    # index -> raw METRES to the pin (to_pin_of converts)
+    to_pin_from: dict = field(default_factory=dict)  # index -> whose ball its to_pin_by is (a scramble's pick copies it)
     gimme_by: dict = field(default_factory=dict)     # index -> raw METRES gimme radius (gimme_of converts)
     hole_by: dict = field(default_factory=dict)      # index -> the hole that player is on (the partner's
     #                                                  state line reverts the global current_hole)
@@ -604,6 +605,7 @@ class GsproState:
             self._tdist_last = (self.active_player, ev.to_pin)
             if self.active_player is not None:   # the block's player, set by the preceding state/select
                 self.to_pin_by[self.active_player] = ev.to_pin
+                self.to_pin_from[self.active_player] = self.active_player
                 self.gimme_by[self.active_player] = ev.gimmie
                 self.setups_by[self.active_player] = self.setups_by.get(self.active_player, 0) + 1
                 p = self.active_player
@@ -732,6 +734,8 @@ class GsproState:
                 for d in (self.lie_by, self.to_pin_by, self.gimme_by):
                     if s in d:
                         d[mate] = d[s]
+                if s in self.to_pin_by:
+                    self.to_pin_from[mate] = s
                 if s in self._rest_by:
                     self._rest_by[mate] = dict(self._rest_by[s])
         elif ev.kind == "state":
@@ -785,7 +789,7 @@ class GsproState:
         self.live_shots_since_course = 0
 
     def _reset_round(self) -> None:
-        for d in (self.players_seen, self.lie_by, self.to_pin_by, self.gimme_by, self.hole_by,
+        for d in (self.players_seen, self.lie_by, self.to_pin_by, self.to_pin_from, self.gimme_by, self.hole_by,
                   self.hole_outs_by, self.gimmies_by, self._score, self._penalties,
                   self._shot_since_state, self._gimmie_since_state, self._wet_since_shot, self._wet_at,
                   self._undo, self._picked, self.dropped_by, self.hole_scores, self._end_for,

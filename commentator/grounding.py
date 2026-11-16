@@ -27,8 +27,10 @@ _SCORE_NUM = r"(?<![\w-])(even|level|(?:" + "|".join(_TENS) + r")(?:[\s-](?:one|
 ROUND_SCORE_CLAIMS = (
     re.compile(rf"{_SCORE_NUM}(?:\s+(over|under))?(?:\s+par)?\s+(?:for|on)\s+the\s+(?:round|day|night)\b"),
     re.compile(rf"\b(?:moves?|moving|slips?|slipping|drops?|dropping|stays?|staying|stay|sits?|sitting|remains?|"
-               rf"goes|going|gets|getting|falls?|falling|climbs?|climbing|back|keeps? (?:him|her|them|it))"
-               rf"\s+(?:(?:him|her|them|it)\s+)?(?:to|at)\s+{_SCORE_NUM}(?:\s+(over|under)|\s+par)\b"),
+               rf"goes|going|gets|getting|falls?|falling|climbs?|climbing|back|keeps?|keeping|holds?|holding|"
+               rf"takes?|taking|puts?|putting|brings?|bringing|leaves?|leaving)"
+               # Who it moves: "moving the team to one under", "hold Dan and Derek at one over".
+               rf"\s+(?:[\w'’&-]+\s+){{0,4}}?(?:to|at)\s+{_SCORE_NUM}(?:\s+(over|under)|\s+par)\b"),
 )
 # Only whole signed numbers state a score to par: a "+3.5" swing path or a "+3 degrees" slope doesn't.
 _ROUND_FACT = re.compile(r"(?<![\w.])([+-]\d+)(?!\d|\.\d|\s*(?:°|%|(?:degrees?|mph|rpm|yards?|feet|ft|percent)\b))"
