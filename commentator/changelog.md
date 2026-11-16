@@ -4,6 +4,12 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.141
+
+### Booth
+- Super-ultrawide (32:9) screens now read the hole's par and length and the club box, and the booth spots a lefty's flipped HUD on screens wider than 16:9.
+- The screen check now recognises GSPro's setup tabs on 32:9 screens.
+
 ## 0.1.140
 
 ### Booth
