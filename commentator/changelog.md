@@ -4,6 +4,15 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.143
+
+### Stats page
+- Courses under the League filter now include the league's scramble and alternate-shot cards, one per team; practice stays individual rounds only.
+
+### Booth
+- League openers lead with the league race: the week's scores to beat, the standings, a rival team.
+- How the league has scored a hole now comes up on the holes that stand out (playing tough, the hardest or easiest of the round, or nobody has birdied it), up to three holes a round.
+
 ## 0.1.142
 
 ### Stats page
