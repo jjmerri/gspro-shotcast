@@ -16,6 +16,7 @@ import time
 from collections import Counter, deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -4700,7 +4701,8 @@ class Engine:
 
     def _recall_state(self, r: Round) -> dict[str, Any]:
         if self._recall["round"] != r.id:
-            self._recall = {"round": r.id, "rows": {}, "holes": {}, "moment": {}, "moment_told": set()}
+            self._recall = {"round": r.id, "rows": {}, "holes": {}, "moment": {}, "moment_told": set(),
+                            "field": {}, "field_avgs": None}
         return self._recall
 
     def _recall_rows(self, r: Round, side) -> list[dict]:
@@ -4790,14 +4792,7 @@ class Engine:
             hard = " (one of the toughest on the card)" if sidx <= 4 else \
                    " (one of the easiest)" if sidx >= 15 else ""
             facts.append(f"This hole is stroke index {sidx}{hard}.")
-        scores = self.store.hole_scoring(r.course, hole, context="league")   # this fact is league-only
-        if len(scores) >= 4:
-            avg = sum(scores) / len(scores)
-            under = sum(1 for s in scores if s < par)
-            facts.append(f"The league has played this hole {len(scores)} times this season, averaging "
-                         f"{avg:.1f} ({avg - par:+.1f} to par); {under} were under par.")
-            if (low := min(scores)) < par:
-                facts.append(f"The low score on this hole this season is a {low}.")
+        facts += self._field_scoring_facts(r, player)
         # Use the round's own per-hole allocation (it applies the holes/18 scaling and the format's
         # handicap allowance), so the net the booth states matches how the round is actually scored.
         side = r.side_for(player)
@@ -4813,6 +4808,55 @@ class Engine:
             if (others := self._week_others(r)):
                 facts.append(f"The best week {r.schedule.get('week')} score posted on Squabbit is "
                              f"{self.league.team_name(others[0].team)} at net {to_par(others[0].net)}.")
+        return facts
+
+    FIELD_MIN_SCORES = 2       # league cards on a hole before its scoring is worth a word
+    FIELD_HOLES_PER_ROUND = 3  # so it stays a story on the holes that stand out, not a fixture
+
+    def _field_scoring_facts(self, r: Round, player: str | None) -> list[str]:
+        """How the league has scored this hole, offered only when the hole stands out (it plays half a
+        stroke or more over par, it's the hardest or easiest of the round's holes, or nobody has birdied it in
+        four or more tries), on at most FIELD_HOLES_PER_ROUND holes a round. Kept per hole for the
+        player it was first offered to, so a rebuilt setup keeps it and a partner doesn't repeat it."""
+        state = self._recall_state(r)
+        told = state["field"]
+        if r.seq in told:
+            who, facts = told[r.seq]
+            return facts if who == player else []
+        if len(told) >= self.FIELD_HOLES_PER_ROUND:
+            return []
+        # This round's holes, read once (other cards don't change mid-round) - again when the start hole
+        # moves or a hole's par is learned during play.
+        key = (r.start_hole, tuple(sorted(r.par.items())))
+        if state["field_avgs"] is None or state["field_avgs"][0] != key:
+            avgs: dict[int, tuple[Fraction, list[int]]] = {}   # exact, so tied holes compare equal
+            for seq, p in r.par.items():
+                if (h := r.hole_number(seq)) is not None and p and \
+                        len(sc := self.store.hole_scoring(r.course, h, context="league")) >= self.FIELD_MIN_SCORES:
+                    avgs[seq] = (Fraction(sum(sc) - p * len(sc), len(sc)), sc)
+            state["field_avgs"] = (key, avgs)
+        avgs = state["field_avgs"][1]
+        if r.seq not in avgs:
+            return []
+        rel, scores = avgs[r.seq]
+        par = r.par[r.seq]
+        under = sum(1 for s in scores if s < par)
+        rels = [v for v, _ in avgs.values()]
+        ranked = len(rels) >= 3
+        hardest = ranked and rel == max(rels) and rels.count(rel) == 1
+        easiest = ranked and rel == min(rels) and rels.count(rel) == 1
+        if not (rel >= 0.5 or hardest or easiest or (under == 0 and len(scores) >= 4)):
+            return []
+        n = len(scores)
+        facts = [f"The league has played this hole {n} time{'s' if n != 1 else ''} this season, averaging "
+                 f"{float(rel) + par:.1f} ({float(rel):+.1f} to par); {under} {'was' if under == 1 else 'were'} under par."]
+        if hardest:
+            facts.append("By the league's scores it is the hardest of the holes in this round.")
+        elif easiest:
+            facts.append("By the league's scores it is the easiest of the holes in this round.")
+        if (low := min(scores)) < par:
+            facts.append(f"The low score on this hole this season is a {low}.")
+        told[r.seq] = (player, facts)
         return facts
 
     def _team_season_facts(self, side) -> list[str]:

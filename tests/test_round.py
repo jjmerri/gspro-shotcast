@@ -6213,3 +6213,71 @@ async def test_own_handicaps_are_worked_out_in_a_thread_without_holding_up_the_b
     await e._own_handicaps_task
     assert e.league.own_indexes == {} and len(threads) == 4
     e.store.db.rollback()
+
+
+def test_field_scoring_airs_only_on_standout_holes_and_at_most_three_a_round(tmp_path):
+    import json
+
+    from commentator.course_card import CourseCard
+
+    e = _engine(tmp_path)
+    cards = [{"1": 6, "2": 4, "3": 3, "4": 5, "5": 5, "6": 5},
+             {"1": 5, "2": 4, "3": 4, "4": 5, "5": 5, "6": 5}]
+    for scores in cards:
+        e.store.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, scores, is_league) "
+                           "VALUES (?,?,?,?,?,?,?,1)", (e.store.session_id, 0.0, "2026-11-01", "Somewhere", "X", 9,
+                                                       json.dumps(scores)))
+    e.store.db.commit()
+    r = e._build_round(["MikeD", "Sarah"], "Somewhere", {}, is_league=True)
+    r.start_hole, r.start_hole_assumed = 1, False
+    r.apply_course_card(CourseCard(name="Somewhere", par={h: 4 for h in range(1, 19)}, index={}))
+    e._start_round(r)
+
+    def field(seq, who="MikeD"):
+        r.seq = seq
+        return [f for f in e._hole_field_facts(who) if "league has played" in f or "of the holes" in f]
+
+    assert field(1) == ["The league has played this hole 2 times this season, averaging 5.5 (+1.5 to par); "
+                        "0 were under par.", "By the league's scores it is the hardest of the holes in this round."]
+    assert field(1, "Sarah") == [] and len(field(1)) == 2   # a partner doesn't repeat it; a rebuild keeps it
+    assert field(2) == []                                    # plays to par: nothing to say
+    assert "easiest of the holes" in field(3)[-1]
+    assert field(4) and field(5) == [] and field(6) == []    # +1.0 holes, but three is the cap
+
+
+def test_field_scoring_reads_a_hole_whose_par_is_learned_during_play(tmp_path):
+    import json
+
+    e = _engine(tmp_path)
+    for _ in range(2):
+        e.store.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, scores, is_league) "
+                           "VALUES (?,?,?,?,?,?,?,1)", (e.store.session_id, 0.0, "2026-11-01", "Somewhere", "X", 9,
+                                                       json.dumps({"1": 4, "2": 6})))
+    e.store.db.commit()
+    r = e._build_round(["MikeD"], "Somewhere", {}, is_league=True)
+    r.start_hole, r.start_hole_assumed, r.par = 1, False, {1: 4}
+    e._start_round(r)
+    r.seq = 1
+    e._hole_field_facts("MikeD")
+    r.seq, r.par[2] = 2, 4
+    assert any("+2.0 to par" in f for f in e._hole_field_facts("MikeD"))
+
+
+def test_field_scoring_treats_equal_averages_as_a_tie(tmp_path):
+    import json
+
+    from commentator.course_card import CourseCard
+
+    e = _engine(tmp_path)
+    for scores in ({"1": 3, "2": 4, "3": 5}, {"1": 3, "2": 4, "3": 5}, {"1": 4, "2": 5, "3": 6}):
+        e.store.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes, scores, is_league) "
+                           "VALUES (?,?,?,?,?,?,?,1)", (e.store.session_id, 0.0, "2026-11-01", "Somewhere", "X", 9,
+                                                       json.dumps(scores)))
+    e.store.db.commit()
+    r = e._build_round(["MikeD"], "Somewhere", {}, is_league=True)
+    r.start_hole, r.start_hole_assumed = 1, False
+    r.apply_course_card(CourseCard(name="Somewhere", par={1: 3, 2: 4, 3: 5} | {h: 4 for h in range(4, 19)}, index={}))
+    e._start_round(r)
+    for seq in (1, 2, 3):   # each plays exactly +1/3: no hardest, no easiest
+        r.seq = seq
+        assert not any("league has played" in f for f in e._hole_field_facts("MikeD"))
