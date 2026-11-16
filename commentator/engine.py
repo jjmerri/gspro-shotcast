@@ -9486,7 +9486,7 @@ class Engine:
             facts = [f for f in facts if not f.startswith("This is a practice round, not a league match")]
         c = self.cfg.commentary
         return opener_prompt(facts=facts, recent_lines=self.state.recent_lines, max_words=c.opener_max_words,
-                             max_lines=c.opener_max_lines)
+                             max_lines=c.opener_max_lines, league=r.is_league)
 
     def _same_course(self, x: str | None, y: str | None) -> bool:
         a, b = self._canonical_course(x), self._canonical_course(y)

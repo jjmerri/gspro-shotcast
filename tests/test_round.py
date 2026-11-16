@@ -3758,6 +3758,14 @@ def test_a_round_with_no_league_players_drops_the_league_framing(tmp_path):
     assert not e._no_members(member) and "This is a practice round" in e._opener_io(member)[1]
 
 
+def test_a_league_opener_makes_the_league_race_its_storyline_and_practice_does_not(tmp_path):
+    e = _engine(tmp_path)
+    league, _ = e._opener_io(e._build_round(["MikeD", "Sarah"], "Somewhere", {}, is_league=True))
+    practice, _ = e._opener_io(e._build_round(["MikeD", "Sarah"], "Somewhere", {}, is_league=False))
+    assert "league race the storyline" in league and "pick one storyline" not in league
+    assert "pick one storyline" in practice and "league race" not in practice
+
+
 def test_the_opener_gives_a_back_nine_start_its_own_par(tmp_path):
     from commentator.course_card import CourseCard
 

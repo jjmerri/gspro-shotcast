@@ -755,15 +755,17 @@ def time_of_day_fact(now: datetime | None = None) -> str:
 
 
 def opener_prompt(*, facts: list[str], recent_lines, now: datetime | None = None,
-                  max_words: int | None = None, max_lines: int = 3) -> tuple[str, str]:
+                  max_words: int | None = None, max_lines: int = 3, league: bool = False) -> tuple[str, str]:
     facts_text = "\n".join([*facts, time_of_day_fact(now)])
+    # A league round counts, so its opener leads with the race rather than a practice-style storyline.
+    story = ("make the league race the storyline (the week's scores to beat, the standings, a rival team), "
+             "told your way" if league else "pick one storyline or rivalry worth watching")
     prompt = (
         "THE ROUND IS ABOUT TO START. FACTS:\n" + facts_text
         + _recent_block(recent_lines)
         + f"\n\nOpen the broadcast: {max_lines} lines at most, alternating between the two commentators. "
         "Welcome "
-        "everyone, say what the round's format means for these players, pick one storyline or rivalry "
-        "worth watching, and send us to the opening hole: name the hole and its par (from a "
+        "everyone, say what the round's format means for these players, " + story + ", and send us to the opening hole: name the hole and its par (from a "
         "'First hole' fact) and who is first on the tee (from a 'First on the tee' fact), but only when "
         "the facts include them, and never invent a starter or a hole. Introduce each player by first and "
         "last name once, as the 'Playing' facts give it (a player with only one name there goes by that "
