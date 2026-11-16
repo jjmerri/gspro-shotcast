@@ -432,19 +432,27 @@ async def test_speech_queue_pauses_between_lines_but_not_after_silence():
         async def synthesize(self, text, voice, instructions=None):
             return Audio(samples=text, sample_rate=1)
 
+    # Gaps and plays long next to a busy CI runner's scheduling delays (70 ms seen), so "waited out a
+    # gap" and "started at once" stay far apart.
+    turn, line, play, prompt = 0.6, 0.3, 0.1, 0.15
     spans: list[tuple[str, float, float]] = []
+    started: list[str] = []
 
     async def fake_play(audio):
         start = time.monotonic()
-        await asyncio.sleep(0.02)
+        started.append(audio.samples)
+        await asyncio.sleep(play)
         spans.append((audio.samples, start, time.monotonic()))
 
-    async def drain():
-        while not speech.is_idle():
+    async def until(done):
+        while not done():
             await asyncio.sleep(0.005)
 
+    async def drain():
+        await until(speech.is_idle)
+
     cfg = Config()
-    cfg.tts.turn_gap_seconds, cfg.tts.line_gap_seconds = 0.2, 0.1
+    cfg.tts.turn_gap_seconds, cfg.tts.line_gap_seconds = turn, line
     speech = SpeechQueue(cfg, QuickTTS(), player=fake_play)
     task = asyncio.create_task(speech.run())
     try:
@@ -452,27 +460,27 @@ async def test_speech_queue_pauses_between_lines_but_not_after_silence():
         await drain()
         assert [s[0] for s in spans] == ["one", "two", "three"]
         slack = 0.02   # Windows' clock ticks about every 16 ms
-        assert spans[1][1] - spans[0][2] >= 0.1 - slack     # same speaker carries on
-        assert spans[2][1] - spans[1][2] >= 0.2 - slack     # the other one takes over
-        assert spans[2][1] - spans[1][2] < 0.3
+        assert spans[1][1] - spans[0][2] >= line - slack     # same speaker carries on
+        assert spans[2][1] - spans[1][2] >= turn - slack     # the other one takes over
+        assert spans[2][1] - spans[1][2] < turn + line            # one gap, not both
 
-        await asyncio.sleep(0.25)   # longer than either gap: the next line starts at once
+        await asyncio.sleep(turn + 0.1)   # longer than either gap: the next line starts at once
         queued = time.monotonic()
         speech.say([Line("pbp", "four")])
         await drain()
-        assert spans[3][1] - queued < 0.05
+        assert spans[3][1] - queued < prompt
 
         # An interrupt doesn't wait out a pending pause.
-        await asyncio.sleep(0.25)
+        await asyncio.sleep(turn + 0.1)
         speech.say([Line("color", "five")])
-        await asyncio.sleep(0.03)   # "five" is playing
+        await until(lambda: "five" in started)
         speech.say([Line("pbp", "six")])
-        await asyncio.sleep(0.03)   # "five" done; "six" is in its pause
+        await until(lambda: len(spans) == 5 and speech._gap is not None)   # "five" done; "six" is in its pause
         cut = time.monotonic()
         speech.say([Line("color", "seven")], interrupt=True)
         await drain()
         assert [s[0] for s in spans[4:]] == ["five", "seven"]
-        assert spans[5][1] - cut < 0.05
+        assert spans[5][1] - cut < prompt
     finally:
         task.cancel()
 
