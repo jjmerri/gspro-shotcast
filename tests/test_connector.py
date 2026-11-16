@@ -18,6 +18,30 @@ def _poll(src: ConnectorLogSource) -> list[dict]:
     return src.new_messages("\n".join(lines)) if lines else []
 
 
+def _follow(src: ConnectorLogSource, expected: int) -> list:
+    """The feed's events: until `expected` are out (however slow the machine), then ten more polls
+    for any that shouldn't be."""
+    import asyncio
+
+    async def run():
+        out = []
+
+        async def pump():
+            async for ev in src.events():
+                out.append(ev)
+
+        task = asyncio.create_task(pump())
+        for _ in range(500):
+            if len(out) >= expected:
+                break
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.2)
+        task.cancel()
+        return out
+
+    return asyncio.run(run())
+
+
 def test_connector_tails_incrementally_through_rollover(tmp_path):
     p = tmp_path / "ConnectDebug.txt"
     p.write_text("\n".join(_line(n) for n in range(100, 110)) + "\n", encoding="utf-8")
@@ -52,8 +76,6 @@ def test_connector_waits_for_a_whole_line(tmp_path):
 
 def test_connector_emits_a_shot_once_per_number(tmp_path):
     # GSPconnect logs one shot in more than one message with the same ShotNumber.
-    import asyncio
-
     p = tmp_path / "ConnectDebug.txt"
     p.write_text(_line(50) + "\n", encoding="utf-8")
     src = ConnectorLogSource(path=str(p), poll_seconds=0.02)
@@ -61,26 +83,12 @@ def test_connector_emits_a_shot_once_per_number(tmp_path):
     with p.open("a", encoding="utf-8") as f:
         f.write(_line(51, ball=True) + "\n" + _line(51, ball=True) + "\n")
 
-    async def run():
-        out = []
-
-        async def pump():
-            async for ev in src.events():
-                out.append(ev)
-
-        task = asyncio.create_task(pump())
-        await asyncio.sleep(0.2)
-        task.cancel()
-        return out
-
-    assert len(asyncio.run(run())) == 1  # the duplicate second message is not re-emitted
+    assert len(_follow(src, 1)) == 1  # the duplicate second message is not re-emitted
 
 
 def test_connector_reads_shots_from_any_rollover_file(tmp_path):
     # GSPconnect round-robins the active log through ConnectDebug.txt and .txt.1..N; a shot can land
     # in any of them, so the feed must follow them all.
-    import asyncio
-
     p = tmp_path / "ConnectDebug.txt"
     p1 = tmp_path / "ConnectDebug.txt.1"
     p.write_text(_line(100) + "\n", encoding="utf-8")
@@ -90,19 +98,7 @@ def test_connector_reads_shots_from_any_rollover_file(tmp_path):
     with p1.open("a", encoding="utf-8") as f:  # the next shot is written to the .1 file, not .txt
         f.write(_line(102, ball=True) + "\n")
 
-    async def run():
-        out = []
-
-        async def pump():
-            async for ev in src.events():
-                out.append(ev)
-
-        task = asyncio.create_task(pump())
-        await asyncio.sleep(0.2)
-        task.cancel()
-        return out
-
-    events = asyncio.run(run())
+    events = _follow(src, 1)
     assert len(events) == 1 and events[0].shot.shot_number == 102
 
 
@@ -110,8 +106,6 @@ def test_connector_emits_a_shot_behind_the_heartbeat_high_water_mark(tmp_path):
     # GSPconnect writes frequent heartbeats to the active file and can log a real shot to a lagging
     # rollover file with a ShotNumber the heartbeats have already pushed past. The shot must still
     # fire: deduping on a global "> last_number" mark dropped exactly these and lost live commentary.
-    import asyncio
-
     p = tmp_path / "ConnectDebug.txt"
     p1 = tmp_path / "ConnectDebug.txt.1"
     p.write_text(_line(100) + "\n", encoding="utf-8")
@@ -127,19 +121,7 @@ def test_connector_emits_a_shot_behind_the_heartbeat_high_water_mark(tmp_path):
     with p1.open("a", encoding="utf-8") as f:  # the shot lands in the lagging file, number behind
         f.write(_line(150, ball=True) + "\n")
 
-    async def run():
-        out = []
-
-        async def pump():
-            async for ev in src.events():
-                out.append(ev)
-
-        task = asyncio.create_task(pump())
-        await asyncio.sleep(0.2)
-        task.cancel()
-        return out
-
-    events = asyncio.run(run())
+    events = _follow(src, 1)
     assert [e.shot.shot_number for e in events] == [150]
 
 
@@ -169,8 +151,6 @@ def test_connector_feed_runs_past_the_alive_log(tmp_path):
 
 
 def test_connector_keeps_putts_and_drops_speed_glitches(tmp_path):
-    import asyncio
-
     p = tmp_path / "ConnectDebug.txt"
     p.write_text(_line(10) + "\n", encoding="utf-8")
     src = ConnectorLogSource(path=str(p), poll_seconds=0.02)
@@ -180,19 +160,7 @@ def test_connector_keeps_putts_and_drops_speed_glitches(tmp_path):
         f.write(_line(12, ball=True, speed=999) + "\n")  # a genuine speed glitch
         f.write(_line(13, ball=True) + "\n")  # a normal shot
 
-    async def run():
-        out = []
-
-        async def pump():
-            async for ev in src.events():
-                out.append(ev)
-
-        task = asyncio.create_task(pump())
-        await asyncio.sleep(0.2)
-        task.cancel()
-        return out
-
-    events = asyncio.run(run())
+    events = _follow(src, 2)
     nums = [e.shot.shot_number for e in events]
     assert 11 in nums and 13 in nums and 12 not in nums  # putt kept, speed glitch dropped
     putt = next(e for e in events if e.shot.shot_number == 11)

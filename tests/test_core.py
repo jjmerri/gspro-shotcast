@@ -477,9 +477,11 @@ async def test_speech_queue_pauses_between_lines_but_not_after_silence():
         task.cancel()
 
 
-async def test_a_logged_line_gets_the_time_it_played_whichever_comes_first(tmp_path):
+async def test_a_logged_line_gets_the_time_it_played_whichever_comes_first(tmp_path, monkeypatch):
     import sqlite3
+    from types import SimpleNamespace
 
+    import commentator.speech as speech_mod
     from commentator.models import Line
     from commentator.store import Store
     from commentator.tts.base import TTS, Audio
@@ -488,8 +490,16 @@ async def test_a_logged_line_gets_the_time_it_played_whichever_comes_first(tmp_p
         async def synthesize(self, text, voice, instructions=None):
             return Audio(samples=text, sample_rate=1)
 
+    # The queue's wall clock only, moved by the playback (Windows' clock ticks too coarsely to measure
+    # a short play): asyncio's sleeps and the queue's monotonic deadlines run on the real ones.
+    start, clock = 1_800_000_000.0, [1_800_000_000.0]
+    fake_time = SimpleNamespace(**{k: getattr(time, k) for k in dir(time) if not k.startswith("_")})
+    fake_time.time = lambda: clock[0]
+    monkeypatch.setattr(speech_mod, "time", fake_time)
+
     async def fake_play(audio):
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.01)
+        clock[0] += 0.05
 
     path = tmp_path / "season.db"
     with sqlite3.connect(path) as db:   # a database from before air times were logged
@@ -502,16 +512,14 @@ async def test_a_logged_line_gets_the_time_it_played_whichever_comes_first(tmp_p
     try:
         early, late = Line("pbp", "logged first"), Line("color", "played first")
         store.record_lines("shot", [early])
-        began = time.time()
         speech.say([early, late])
         while not speech.is_idle():
             await asyncio.sleep(0.01)
         store.record_lines("reaction", [late])
-        rows = store.db.execute("SELECT text, aired_at, aired_seconds FROM lines ORDER BY id").fetchall()
-        assert [r[0] for r in rows] == ["logged first", "played first"]
-        slack = 0.02   # Windows' clock ticks about every 16 ms: the 0.05 s play can end a tick early
-        assert all(began - slack <= r[1] <= time.time() and 0.05 - slack <= r[2] < 1 for r in rows)
-        assert rows[1][1] > rows[0][1]
+        rows = [tuple(r) for r in store.db.execute("SELECT text, aired_at, aired_seconds FROM lines ORDER BY id")]
+        played = pytest.approx(0.05, abs=1e-3)
+        assert rows == [("logged first", pytest.approx(start, abs=1e-6), played),
+                        ("played first", pytest.approx(start + 0.05, abs=1e-6), played)]
     finally:
         task.cancel()
         store.close()
