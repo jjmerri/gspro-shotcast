@@ -4,6 +4,12 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.144
+
+### Booth
+- The commentators no longer hand their own predictions to each other ("You called for simple" from the one who called it).
+- A solo round no longer says a player has never played a course they've played as part of a team.
+
 ## 0.1.143
 
 ### Stats page
