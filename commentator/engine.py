@@ -8141,6 +8141,11 @@ class Engine:
                 shot_id, rec = self._fire_rows[balls[idx]][:2]
                 if rec.mulligan:
                     continue
+                if card.lie == "tee":
+                    # Back on the tee: out of bounds or lost, played again from there, so it didn't finish here.
+                    log.info("Pick card %s (%s): shot %s is back on the tee, not its finish", card.name,
+                             names[idx], shot_id)
+                    continue
                 self.store.fill_finish(shot_id, round(card.yards, 1))
                 # The picked ball's lie is GSPro's log's (the team plays on from it); the pick screen only
                 # stands in for it when there's none, and is the only word on the balls lifted. Until the

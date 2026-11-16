@@ -292,3 +292,40 @@ def test_a_scrambles_finish_stays_the_booths(tmp_path):
     assert _row(st, 2)["finish_yards"] == 50.0
     st.set_shot_result(_row(st, 2)["id"], finish_yards=40.0)
     assert _row(st, 2)["finish_yards"] == 40.0
+
+
+def test_a_scrambles_drives_out_of_bounds_are_drawn_as_gspro_tracked_them(tmp_path):
+    # Dan and Derek's 5th, 11-15: both drives went out of bounds right (GSPro left Dan's ball resting
+    # past the stakes, Derek's it took away), and the team played stroke 3 from the tee.
+    st = Store(str(tmp_path / "season.db"))
+    for who, n, ts, picked, outcome in (("Dan", 1, 1001.0, 1, None), ("Derek", 1, 1002.0, 0, None),
+                                        ("Dan", 3, 1003.0, 1, None), ("Derek", 3, 1004.0, 0, None),
+                                        ("Dan", 4, 1005.0, 0, "holed")):
+        x, z = (0.0, 0.0) if n < 4 else (5.0, 200.0)
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, to_pin_yards,"
+                      " shared_ball, fmt, start_x, start_z, picked, outcome, raw) VALUES (?, ?, ?, 'Test Links', ?, ?,"
+                      " 'DR', 0, 300, 1, 'scramble', ?, ?, ?, ?, '{}')",
+                      (st.session_id, ts, who, HOLE, n, x, z, picked, outcome))
+    st.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, holes) VALUES (?, 2000, '2025-10-20',"
+                  " 'Test Links', 'Dan', 1)", (st.session_id,))
+    st.db.commit()
+    dan, derek = (r[0] for r in st.db.execute("SELECT id FROM shots WHERE shot_number = 1 ORDER BY id"))
+    flight = json.dumps([[0, 1, 0], [20, 30, 100], [45, 1, 200]])
+    st.db.execute("INSERT INTO shot_tracks (shot_id, gspro_shot_id, land_x, land_y, land_z, end_x, end_y, end_z, flight,"
+                  " flight_s) VALUES (?, 'dan', 45, 1, 200, 50, 1, 210, ?, 6.0)", (dan, flight))
+    st.db.execute("INSERT INTO shot_tracks (shot_id, gspro_shot_id, land_x, land_y, land_z, flight, flight_s)"
+                  " VALUES (?, 'derek', 45, 1, 200, ?, 6.0)", (derek, flight))
+    st.db.commit()
+    st.record_hole_layout("Test Links", [{"par": 4, "played": True, "tee": (0.0, 2.0, 0.0), "pin": (0.0, 1.0, 300.0)}],
+                          session_id=st.session_id, ts=1500.0)
+    players = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}
+    assert [(s["to"], s.get("penalty")) for s in players["Dan"]["shots"][:1]] == [([50.0, 210.0], "ob")]
+    assert [(s["to"], s.get("penalty")) for s in players["Derek"]["shots"][:1]] == [([45.0, 200.0], "ob")]
+    assert players["Derek"]["shots"][0]["path"][-1][:2] == [45.0, 200.0]
+    # The counts still add up to the team's 4: Dan's drive, its penalty, stroke 3 and the putt.
+    assert sum(players[n]["used"] + players[n]["used_pens"] for n in ("Dan", "Derek")) == 4
+    # With no pick logged for the drives, one still carries the stroke and the penalty.
+    st.db.execute("UPDATE shots SET picked = NULL WHERE shot_number = 1")
+    st.db.commit()
+    players = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}
+    assert sum(players[n]["used"] + players[n]["used_pens"] for n in ("Dan", "Derek")) == 4

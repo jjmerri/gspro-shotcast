@@ -5973,6 +5973,17 @@ def test_the_pick_screens_cards_give_each_balls_finish_and_lie(tmp_path):
     e._pick_cards_due.append(({0: 7, 1: 9}, {0: "Ozzy", 1: "Kyle Martin"}, cards, time.monotonic() - 61))
     e._apply_pick_cards()
     assert e.store.finish_of(kyle)[0] == "fringe" and not e._pick_cards_due
+    # Both balls back on the tee (Dan and Derek's 5th, 11-15: out of bounds, played again from there):
+    # not where either finished.
+    from commentator.hud import PickCard
+    before = {i: e.store.db.execute("SELECT finish_yards, lie_after FROM shots WHERE id = ?", (i,)).fetchone()[:]
+              for i in (ozzy, kyle)}
+    rec.picked, rec2.picked = True, False
+    e._pick_cards_due.append(({0: 7, 1: 9}, {0: "Ozzy", 1: "Kyle Martin"},
+                              [PickCard("AZZO", 405.0, "tee"), PickCard("KYLE MARTIN", 405.0, "tee")], time.monotonic()))
+    e._apply_pick_cards()
+    assert {i: e.store.db.execute("SELECT finish_yards, lie_after FROM shots WHERE id = ?", (i,)).fetchone()[:]
+            for i in (ozzy, kyle)} == before
 
 
 def test_pick_cards_read_older_gspros_use_buttons_and_garbled_lies():

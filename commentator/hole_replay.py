@@ -131,8 +131,9 @@ def _tracks(db: sqlite3.Connection, ids: set[int] | None = None) -> dict[int, di
     the height in metres above where it was played and the seconds since the strike; "land": the
     touchdown's index (GSPro's touchdown point; absent for a putt that never flew); "descent": the angle in degrees it came down
     at; "end": (x, z)}. Flight and roll points carry their own times (a flight stored before they did
-    was recorded a fixed step apart, so its points are spread evenly over its seconds). A shot tracked with nothing to draw (a penalty
-    followed it) gets {}: its start is still GSPro's. `ids`: those shots' only."""
+    was recorded a fixed step apart, so its points are spread evenly over its seconds). A ball GSPro
+    never brought to rest (out of bounds, lost) runs to its touchdown, "lost": True. A shot tracked
+    with nothing to draw gets {}: its start is still GSPro's. `ids`: those shots' only."""
     if not db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'shot_tracks'").fetchone():
         return {}
     sql = ("SELECT t.shot_id, t.flight, t.flight_s, t.roll, t.land_x, t.land_y, t.land_z, t.end_x, t.end_y, t.end_z,"
@@ -145,10 +146,14 @@ def _tracks(db: sqlite3.Connection, ids: set[int] | None = None) -> dict[int, di
             f"{sql} WHERE t.shot_id IN ({','.join('?' * len(some[i:i + 500]))})", some[i:i + 500])]
     out = {}
     for r in rows:
-        if r["end_x"] is None or r["start_x"] is None:
+        flight, roll = json.loads(r["flight"] or "[]"), json.loads(r["roll"] or "[]")
+        # No rest: GSPro took the ball away (out of bounds, lost), so its flight is drawn to the touchdown.
+        lost = r["end_x"] is None
+        if r["start_x"] is None or (lost and not flight):
             out[r["shot_id"]] = {}
             continue
-        flight, roll = json.loads(r["flight"] or "[]"), json.loads(r["roll"] or "[]")
+        if lost:
+            roll = []
         base = r["start_y"] if r["start_y"] is not None else next((p[1] for p in [*flight, *roll]), 0.0)
         secs = r["flight_s"] or 0.0
         # The flight's points run up to the touchdown; GSPro's touchdown point is usually a little past the last.
@@ -160,8 +165,12 @@ def _tracks(db: sqlite3.Connection, ids: set[int] | None = None) -> dict[int, di
                for i, p in enumerate([*flight, *([[*td, secs]] if apart else [])])]
         rolled = [(p[0], p[2], p[1] - base, max(p[3], secs)) for p in roll]
         last_t = max([secs, *(p[3] for p in rolled)])
-        end_h = r["end_y"] - base if r["end_y"] is not None else (rolled or fly or [(0, 0, 0.0)])[-1][2]
-        pts = [(r["start_x"], r["start_z"], 0.0, 0.0), *fly, *rolled, (r["end_x"], r["end_z"], end_h, last_t)]
+        if lost:
+            end_x, end_z, end_h = fly[-1][0], fly[-1][1], fly[-1][2]
+        else:
+            end_x, end_z = r["end_x"], r["end_z"]
+            end_h = r["end_y"] - base if r["end_y"] is not None else (rolled or fly or [(0, 0, 0.0)])[-1][2]
+        pts = [(r["start_x"], r["start_z"], 0.0, 0.0), *fly, *rolled, (end_x, end_z, end_h, last_t)]
         land = len(fly) if fly else None   # the touchdown: the flight's last point
         pts = [p for i, p in enumerate(pts)
                if i == 0 or i == land or math.dist(p[:3], pts[i - 1][:3]) > 0.01]
@@ -170,7 +179,7 @@ def _tracks(db: sqlite3.Connection, ids: set[int] | None = None) -> dict[int, di
         idx = _simplify(pts)
         if land is not None and land not in idx:
             idx = sorted({*idx, land})
-        trk: dict[str, Any] = {"path": [_r4(pts[i]) for i in idx], "end": (r["end_x"], r["end_z"])}
+        trk: dict[str, Any] = {"path": [_r4(pts[i]) for i in idx], "end": (end_x, end_z), **({"lost": True} if lost else {})}
         if land is not None:
             trk["land"] = idx.index(land)
         if len(flight) >= 2:
@@ -685,19 +694,22 @@ def _scramble_teams(rows: list[sqlite3.Row]) -> dict[str, str]:
 
 
 def _team_ends(played: list[sqlite3.Row], starts: dict[int, tuple | None], rows: list[sqlite3.Row],
-               pin: tuple | None, teams: dict[str, str]) -> tuple[dict[int, tuple], set[int]]:
+               pin: tuple | None, teams: dict[str, str]) -> tuple[dict[int, tuple], set[int], set[int]]:
     """Where the picked ball of each shared-ball stroke went, by shot id, and the ids of the picked
     shots: in a scramble each partner hits from the team's ball, the team plays on from one of them,
     and the others' are lifted, so only the picked shot is drawn on. GSPro's log names the pick
     (shots.picked); a stroke recorded without it is worked out: the same partners' next stroke starts
     where it finished, so the picked one is the shot whose length fits that (the one whose resting lie
     is that stroke's, on a tie). The stroke that holed or was conceded runs to the pin, and so does
-    the one that ended the hole when the team's last stroke was a gimme."""
+    the one that ended the hole when the team's last stroke was a gimme. Also the ids of strokes the
+    team took again from the same spot after a penalty with nowhere to drop (out of bounds, lost):
+    no ball was played on, and each is drawn as GSPro tracked it."""
     shared = [r for r in played if _shared(r) and r["shot_number"]]
     finished = {r["player"] for r in rows if r["outcome"] in ("holed", "gimme", "conceded") and not r["mulligan"]}
     def root(p):
         return teams.get(p, p)
     ends: dict[int, tuple] = {}
+    again: set[int] = set()
     # The log's pick stands whether or not its ball has a stored spot.
     logged_by = {(root(r["player"]), r["shot_number"]): r for r in shared if r["picked"] and r["player"]}
     used: set[int] = {r["id"] for r in logged_by.values()}
@@ -739,6 +751,12 @@ def _team_ends(played: list[sqlite3.Row], starts: dict[int, tuple | None], rows:
                 ends[pick["id"]] = (pick["hazard_x"], pick["hazard_z"])
                 used.add(pick["id"])
             continue
+        if skipped and any(starts.get(o["id"]) is not None and math.dist(starts[o["id"]], st) <= 1.0
+                           for o in later if o["shot_number"] == later[0]["shot_number"]):
+            again.update(o["id"] for o in group)   # stroke and distance: played again from here
+            if logged is None:
+                used.add(group[0]["id"])   # someone's ball carries the stroke and the penalty in the counts
+            continue
         if nxt:
             to, lie = (nxt[0]["start_x"], nxt[0]["start_z"]), nxt[0]["lie_before"]
         elif pin and names & finished and r["shot_number"] == last:
@@ -761,7 +779,7 @@ def _team_ends(played: list[sqlite3.Row], starts: dict[int, tuple | None], rows:
         if len(group) == 1 or err(best)[0] < math.inf:
             ends[best["id"]] = to
             used.add(best["id"])
-    return ends, used
+    return ends, used, again
 
 
 FINISH_PIN_MAX = 250   # yards: further out, a swing with no aim set is as likely a lay-up as at the pin
@@ -823,7 +841,7 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
     starts = {r["id"]: ((tee if r["shot_number"] == 1 and r["id"] not in tracks else None)
                         or _xz(r["start_x"], r["start_z"])
                         or (tee if (r["shot_number"] or 0) <= 1 else None)) for r in played}
-    team_ends, team_used = _team_ends(played, starts, rows, pin, teams or {})
+    team_ends, team_used, team_again = _team_ends(played, starts, rows, pin, teams or {})
     alt_ends = _alternate_ends(played, starts, rows, pin, sides or {})
     players = []
     for name in dict.fromkeys(r["player"] or "unknown" for r in rows):
@@ -853,9 +871,13 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
                 end = pin
             trk = tracks.get(r["id"])
             penalty = end is not None and end == hazard
-            # A scramble's ball is drawn only where the team played on; alternate shot's every stroke is the team's ball.
-            if trk and not penalty and (end is not None or r["fmt"] == "alternate" or not _shared(r)):
+            # A scramble's ball is drawn only where the team played on (or all of them, taken again from
+            # the tee after going out of bounds); alternate shot's every stroke is the team's ball.
+            if trk and not penalty and (end is not None or r["fmt"] == "alternate" or not _shared(r)
+                                        or r["id"] in team_again):
                 end = trk["end"]   # where GSPro had the ball stop (a drop after it is the next start)
+                if r["id"] in team_again or (trk.get("lost") and nxt is not None and not follows):
+                    penalty = True if "in_water" in tags else "ob"
             else:
                 trk = None
             aim = None
@@ -875,7 +897,7 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
                           **({"shape": shape} if shape else {}),
                           **({"bend": round(bend / M_TO_YD, 2)} if bend else {}),
                           **({"path": trk["path"], **{k: trk[k] for k in ("land", "descent") if k in trk}} if trk else {}),
-                          **({"penalty": True} if penalty else {})})
+                          **({"penalty": penalty} if penalty else {})})
         if any(s["from"] or s["to"] for s in shots):
             # The hole's score counts strokes that are never drawn: a gimme or conceded putt, a penalty.
             mine_all = [r for r in rows if (r["player"] or "unknown") == name and not r["mulligan"]]

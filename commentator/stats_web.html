@@ -924,7 +924,7 @@ function replaySvg(rp, animate = false, { colors = {}, only = null, focus = null
         if (animate && !picked) balls += `<circle r="2.5" fill="#fff" stroke="#111" stroke-width=".8" class="rp-ball" style="animation-delay:${delay}s"><animateMotion path="${d}" begin="${delay}s" dur=".55s" fill="freeze" calcMode="spline" keyTimes="0;1" keyPoints="0;1" keySplines=".42 0 .58 1"/></circle>`;
         if (s.path && s.land != null && s.land < s.path.length - 1 && !picked) { const [lx, ly] = P(s.path[s.land]);
           g += `<circle data-fx="${lx},${ly}" cx="${lx}" cy="${ly}" r="1.8" fill="none" stroke="${c}"${dim}${at("rp-in", s.n, 0.6)}><title>${tip} · landed</title></circle>`; }
-        if (s.penalty) g += `<g data-fx="${x2},${y2}"${dim}${at("rp-in", s.n, 0.85)}><path d="M${x2 - 4},${y2 - 4} l8,8 m0,-8 l-8,8" stroke="#e53935" stroke-width="2.2" stroke-linecap="round"/><title>${tip} · into the penalty area (penalty stroke, then the drop)</title></g>`; }
+        if (s.penalty) g += `<g data-fx="${x2},${y2}"${dim}${at("rp-in", s.n, 0.85)}><path d="M${x2 - 4},${y2 - 4} l8,8 m0,-8 l-8,8" stroke="#e53935" stroke-width="2.2" stroke-linecap="round"/><title>${tip} · ${s.penalty === "ob" ? "out of bounds (penalty stroke, then played again from the same spot)" : "into the penalty area (penalty stroke, then the drop)"}</title></g>`; }
       if (s.from) { const [x, y] = P(s.from); g += `<g data-fx="${x},${y}"${dim}${at("rp-in", s.n)}><circle cx="${x}" cy="${y}" r="3.5" fill="${c}" stroke="#111"><title>${tip}</title></circle>`;
         g += `<text x="${+x + 6}" y="${+y + 3}" fill="${c}" font-size="10" paint-order="stroke" stroke="#111" stroke-width="2.5">${s.n ?? ""}${s.club && !s.putt ? " " + esc(s.club) : ""}</text></g>`; }
     }
@@ -939,7 +939,8 @@ function replaySvg(rp, animate = false, { colors = {}, only = null, focus = null
   const legend = rp.players.map((pl, i) => `<span style="color:${color(pl, i)}${drawn.includes(pl) ? "" : ";opacity:.45"}">● ${esc(pl.name)}${pl.used != null ? ` · ${usedText(pl)}` : pl.strokes ? ` · ${pl.strokes}${pl.capped ? " (max)" : ""}${pl.gimmes ? ` (incl. ${pl.gimmes} gimme${pl.gimmes > 1 ? "s" : ""})` : ""}` : ""}</span>`).join(" &nbsp;");
   const notes = [rp.pin ? (rp.pin_estimated ? "Pin estimated from the shots' distances." : "") : "Pin position unknown.",
                  drawn.some(p => p.shots.some(s => s.aim)) ? "Dashed: where the player aimed." : "",
-                 drawn.some(p => p.shots.some(s => s.penalty)) ? "✕: where a ball went into a penalty area (the next shot is the drop)." : "",
+                 drawn.some(p => p.shots.some(s => s.penalty && s.penalty !== "ob")) ? "✕: where a ball went into a penalty area (the next shot is the drop)." : "",
+                 drawn.some(p => p.shots.some(s => s.penalty === "ob")) ? "✕: a ball out of bounds or lost (the next shot is played again from the same spot)." : "",
                  drawn.some(p => p.shots.some(s => s.path)) ? `Shots drawn as GSPro tracked the ball, ○ where it landed.${viewable.length && !sv ? " Tap one for its shot view." : ""}` : "",
                  drawn.some(p => p.shots.some(s => s.bend)) ? `${drawn.some(p => p.shots.some(s => s.path)) ? "Others curve" : "Full shots curve"} by their shape, estimated from the spin axis.` : "",
                  rp.map && rp.map.approx ? "Map from another round here: its tee, pin dot and yardages may differ a little." : ""].filter(Boolean).join(" ");
