@@ -52,6 +52,11 @@ def test_gspro_359_screens_are_told_apart_from_31():
     assert sc.detect_screen(lines(*tabs, "Game Mode")) == ("setup_match", "new")
     assert sc.detect_screen(lines(*tabs, "BACK", "FRONT")) == ("setup_holes", "new")
     assert sc.detect_screen(lines(*tabs, "Josh")) == ("setup_players", "new")
+    # On 32:9 the Match tab's icon OCRs as a mark too (GSPro 4.x, 3840x1080).
+    for match in ("# MATCH", "i MATCH"):
+        wide = ("ROUND SETTINGS", "+ PLAYERS", match, "5. HOLES")
+        assert sc.detect_screen(lines(*wide, "Game Mode")) == ("setup_match", "new")
+        assert sc.detect_screen(lines(*wide, "FRONT")) == ("setup_holes", "new")
     # Its scorecard lists the ROUND SETTINGS under the table, without the tabs.
     assert sc.detect_screen(lines("Built By: RUNPUDDRUN", "Hole", "Index", "ROUND SETTINGS", "Club Speed")) \
         == ("scorecard", "new")

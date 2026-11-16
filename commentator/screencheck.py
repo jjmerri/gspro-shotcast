@@ -146,7 +146,7 @@ def detect_screen(items: list[OcrItem]) -> tuple[str | None, str | None]:
         return "setup_players", "classic"
     # 3.59: the tabs read PLAYERS / MATCH / HOLES, often with their icon OCR'd as a mark in front.
     # Its scorecard has ROUND SETTINGS too, but not the tabs.
-    if has("ROUND SETTINGS") and has("MATCH") and has(r"(\S{1,3}\s+)?HOLES") and has(r"(\S{1,3}\s+)?PLAYERS"):
+    if has("ROUND SETTINGS") and has(r"(\S{1,3}\s+)?MATCH") and has(r"(\S{1,3}\s+)?HOLES") and has(r"(\S{1,3}\s+)?PLAYERS"):
         if has("GAME MODE"):
             return "setup_match", "new"
         if has("FRONT") or yards:
