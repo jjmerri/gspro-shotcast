@@ -205,7 +205,8 @@ def _group_lines(items: list[OcrItem]) -> list[str]:
 MIRRORED = ("lie", "club", "minimap", "slope")
 # Just inside the slope bar, past where the club boxes end: a dark grey panel with white text on the
 # minimap's side, the course on the other. Sampled on both sides to say which side the minimap is on.
-_MIRROR_PROBE = Region(left=0.10, top=0.955, width=0.04, height=0.03, anchor="bottom", aspect=HUD_ASPECT)
+_MIRROR_PROBE = Region(left=0.10, top=0.955, width=0.04, height=0.03, anchor="bottom", aspect=HUD_ASPECT,
+                       side="left")
 
 
 def mirrored_region(region: Region) -> Region:

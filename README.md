@@ -202,10 +202,11 @@ beyond that is supported on paper but not yet run live:
   monitor, but only the EYE XO2 has been used ([Launch monitors](docs/tracking.md#launch-monitors)).
 - **Other screen sizes.** At 1920×1080 (16:9) the setup screen and the tee HUD have been checked
   live; the shot data tiles, the other lies, the scorecard and the ON AIR badge have not.
-  Ultrawide screens (21:9 and wider) are read, checked on 2560×1080 and 3440×1440 screenshots
-  but not live; 4:3 screens are untested. Run `screen-check` first on any screen.
+  The tee HUD has also been checked live in a resized GSPro window at 4:3 (1600×1200, 2400×1800),
+  21:9 (2560×1080, 3440×1440) and 32:9 (3584×1008, 3840×1080); the setup screen was checked on
+  21:9 screenshots only. Run `screen-check` first on any screen.
 - **GSPro must stay visible.** The screen is read live, so GSPro has to be on screen and not
-  covered. A GSPro window smaller than the screen is only tested on saved screenshots.
+  covered. A GSPro window smaller than the screen is read as its own screen.
 - **English GSPro and yards.** The screen and log reads expect GSPro's interface in English, with
   yards and mph. Metres or another interface language will likely misread. (The commentary itself
   can be in another language.)

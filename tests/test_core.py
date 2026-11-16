@@ -4288,6 +4288,7 @@ def test_club_box_parsing():
     assert parse_club(["CLUB"]) == {}
     assert parse_club(["5 lron", "RIGHT", "HAND"]) == {"club": "5I", "handed": "RH"}   # OCR'd capital I
     assert parse_club(["4 1ron"])["club"] == "4I"
+    assert parse_club(["Driver", "RIGHT HÁND"]) == {"club": "DR", "handed": "RH"}   # OCR'd at 3584x1008
 
 
 def test_driver_shown_off_the_deck_is_a_three_wood():
@@ -4342,6 +4343,26 @@ def test_regions_adjust_to_the_screen_shape():
         for reg in DEFAULT_REGIONS.values():
             left, t, width, height = reg.to_pixels(w, h)
             assert 0 <= t and t + height <= h and height > 0
+
+
+def test_hud_boxes_follow_their_panels_on_a_32x9_screen():
+    """Wider than 16:9, GSPro lays its HUD out as on a 16:9 screen as tall, each panel pinned to its
+    side: on 3840x1080 a box is the size it is on 1920x1080, as far from its edge (measured on GSPro
+    4.x, 2026-11-15). A box as wide a share of the screen as on 16:9 took in the course beside its panel
+    and lost the hole's length."""
+    from commentator.config import DEFAULT_REGIONS
+    from commentator.screen import _MIRROR_PROBE, mirrored_region
+
+    hud = ("player_box", "player_name", "hole_box", "tiles", "tiles_left", "lie", "club", "minimap", "slope",
+           "others")
+    boxes = {n: DEFAULT_REGIONS[n] for n in hud} | {"mirror probe": _MIRROR_PROBE}
+    boxes |= {f"{n} (lefty)": mirrored_region(r) for n, r in boxes.items()}
+    for name, reg in boxes.items():
+        l, t, w, h = reg.to_pixels(3840, 1080)
+        sl, st, sw, sh = reg.to_pixels(1920, 1080)
+        assert abs(w - sw) <= 1 and (t, h) == (st, sh), name
+        gap, sgap = (l, sl) if reg.side == "left" else (3840 - l - w, 1920 - sl - sw)
+        assert abs(gap - sgap) <= 1, name
 
 
 def test_mixtape_16x9_frames_read_with_the_16x10_defaults():

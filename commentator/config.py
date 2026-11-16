@@ -18,8 +18,9 @@ class Region(BaseModel):
 
     Wider than 16:9 (WIDEST_HUD) GSPro scales to the height instead: the HUD is laid out as on a 16:9
     screen as tall as this one, each panel pinned to its side. So there the box keeps its 16:9 height.
-    Across, a panel only narrows toward its side, so a generous box reaching to that edge still holds
-    it as it is; a tight box set `side` (the edge its panel is pinned to, or "center") narrows with it.
+    Across, a box that sets `side` (the edge its panel is pinned to, or "center") keeps its 16:9 size
+    and its distance from that edge; one without keeps its share of the screen's width, which on 32:9
+    takes in the course beside a panel, so the boxes of the HUD's corner panels set it.
     A box in the setup screen's player grid sets `cell` (its 0-based place in the 4-wide grid, and the
     grid's column and row pitch as fractions): wider than 16:9 the cards keep their size and the grid,
     still centered, takes a column more for each pitch of extra width (5 across on 21:9), so the box
@@ -84,23 +85,23 @@ _SLOT_PITCH = (0.235, 0.264)
 # screen shapes (checked on 16:9) by the pinned edge each panel sits against (see Region).
 DEFAULT_REGIONS = {
     # Stops above the list of other players GSPro shows under the active one.
-    "player_box": Region(left=0.0, top=0.0, width=0.32, height=0.086, aspect=HUD_ASPECT),
+    "player_box": Region(left=0.0, top=0.0, width=0.32, height=0.086, aspect=HUD_ASPECT, side="left"),
     # Just the top row's name cell inside player_box (current player is always on top): opaque box
     # background, left of the score badge, above the shot/distance row. Pixel-compared, never OCR'd.
-    "player_name": Region(left=0.02, top=0.024, width=0.13, height=0.026, aspect=HUD_ASPECT),
-    "hole_box": Region(left=0.76, top=0.0, width=0.22, height=0.10, aspect=HUD_ASPECT),
-    "tiles": Region(left=0.85, top=0.08, width=0.15, height=0.40, aspect=HUD_ASPECT),
+    "player_name": Region(left=0.02, top=0.024, width=0.13, height=0.026, aspect=HUD_ASPECT, side="left"),
+    "hole_box": Region(left=0.76, top=0.0, width=0.22, height=0.10, aspect=HUD_ASPECT, side="right"),
+    "tiles": Region(left=0.85, top=0.08, width=0.15, height=0.40, aspect=HUD_ASPECT, side="right"),
     # A second tile panel some players show down the left edge (spin, launch, face, offline...).
-    "tiles_left": Region(left=0.0, top=0.08, width=0.16, height=0.40, aspect=HUD_ASPECT),
+    "tiles_left": Region(left=0.0, top=0.08, width=0.16, height=0.40, aspect=HUD_ASPECT, side="left"),
     # Tall, because the minimap header moves with the minimap's size (collapsed, it sits near the bottom).
-    "lie": Region(left=0.84, top=0.45, width=0.16, height=0.53, anchor="bottom", aspect=HUD_ASPECT),
+    "lie": Region(left=0.84, top=0.45, width=0.16, height=0.53, anchor="bottom", aspect=HUD_ASPECT, side="right"),
     # Bottom-left club and handedness boxes ("Driver" / "RH").
-    "club": Region(left=0.0, top=0.84, width=0.1, height=0.14, anchor="bottom", aspect=HUD_ASPECT),
+    "club": Region(left=0.0, top=0.84, width=0.1, height=0.14, anchor="bottom", aspect=HUD_ASPECT, side="left"),
     # GSPro's overhead minimap, read for hazards by minimap.provider: jev.
-    "minimap": Region(left=0.855, top=0.574, width=0.133, height=0.387, anchor="bottom", aspect=HUD_ASPECT),
-    "slope": Region(left=0.85, top=0.945, width=0.15, height=0.055, anchor="bottom", aspect=HUD_ASPECT),
+    "minimap": Region(left=0.855, top=0.574, width=0.133, height=0.387, anchor="bottom", aspect=HUD_ASPECT, side="right"),
+    "slope": Region(left=0.85, top=0.945, width=0.15, height=0.055, anchor="bottom", aspect=HUD_ASPECT, side="right"),
     # The other players in the match, one row each under the active player's box (up to 7).
-    "others": Region(left=0.0, top=0.083, width=0.22, height=0.27, aspect=HUD_ASPECT),
+    "others": Region(left=0.0, top=0.083, width=0.22, height=0.27, aspect=HUD_ASPECT, side="left"),
     # GSPro's scorecard pops up mid-screen between holes: its title, then the whole table.
     "scorecard_title": Region(left=0.3, top=0.12, width=0.4, height=0.2, anchor="middle", aspect=HUD_ASPECT),
     "scorecard": Region(left=0.04, top=0.15, width=0.92, height=0.68, anchor="middle", aspect=HUD_ASPECT),

@@ -15,6 +15,7 @@ Par 4 392 yds"); the handedness box says "RIGHT HAND"; the hole-out banner says 
 
 import difflib
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -349,7 +350,8 @@ def deck_club(club: str | None, shot_number: int | None, lie: str | None) -> str
 
 def parse_club(items: list[str]) -> dict:
     """GSPro's club box ("Driver", "7 Iron", ...) and handedness box ("RH"/"LH", 3.59 "RIGHT HAND")."""
-    text = " ".join(items).lower()
+    # OCR on a short screen can add an accent ("RIGHT H\u00c1ND"), so letters are read without them.
+    text = "".join(c for c in unicodedata.normalize("NFKD", " ".join(items).lower()) if not unicodedata.combining(c))
     out: dict = {}
     for pattern, code in CLUB_WORDS:
         if m := re.search(pattern, text):
