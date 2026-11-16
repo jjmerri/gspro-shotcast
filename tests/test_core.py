@@ -5943,8 +5943,12 @@ def test_the_pick_screens_cards_give_each_balls_finish_and_lie(tmp_path):
     e._apply_pick_cards()
     assert e._pick_cards_due   # Kyle's ball isn't recorded yet: kept
     e._fire_rows[9] = e._fire_rows.pop(8)
+    seen = []
+    e._pick_ctp = lambda balls: seen.append([(who, card.name) for _, who, card in balls])
     e._apply_pick_cards()
     assert e._pick_cards_due   # nor which ball was picked
+    # ...but a CTP hole's tee shots are read off the cards already, each ball its own player's.
+    assert seen == [[("Kyle Martin", "KYLE MARTIN"), ("Ozzy", "AZZO")]]
     rec.picked = rec2.picked = False
     e._apply_pick_cards()
     rows = {i: tuple(e.store.db.execute("SELECT finish_yards, lie_after FROM shots WHERE id = ?", (i,)).fetchone())

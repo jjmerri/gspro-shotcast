@@ -19,7 +19,7 @@ import json
 import logging
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -86,8 +86,10 @@ class LiveSync:
             self._save()
 
     @staticmethod
-    def ctp_key(target: Target, seq: int, uid: str) -> str:
-        return f"{target.tournament_round_id}/{target.hole(seq)}/{uid}"
+    def ctp_key(target: Target, seq: int, uid: str, shot: int | None = None) -> str:
+        """A mark's answer: per tee shot when it's known (a re-hit after a mulligan is asked again)."""
+        key = f"{target.tournament_round_id}/{target.hole(seq)}/{uid}"
+        return key if shot is None else f"{key}/{shot}"
 
     def ctp_answer(self, key: str) -> tuple[bool, float | None]:
         """Whether the players were asked about this mark, and the yards they confirmed (None: they'll
@@ -295,6 +297,7 @@ class Mark:
     who: str                  # the player (or the team label a shared ball was read under)
     yards: float | None       # None: unknown (only an unsure mark)
     why: str | None = None    # None: sure
+    shot: int | None = None   # the tee shot's season store id, when its answer is the shot's own
 
     @property
     def sure(self) -> bool:
@@ -304,7 +307,7 @@ class Mark:
 def team_ctp(r, team: str, uid_of: dict[str, str], match_player, found: list[Mark]) -> dict[tuple[int, str], Mark]:
     """The marks for one team's players: (hole of the round, user id) -> the mark, a sure one over an
     unsure one, then the closest. Only a player's own: a shared ball nobody can put a name to isn't
-    anyone's mark."""
+    anyone's mark. A scramble's team has one: its closest ball on each hole."""
     out: dict[tuple[int, str], Mark] = {}
     labels = {side.label for side in r.sides if len(side.players) > 1}   # a shared ball, not a player
     shared = set(r.anonymous_players())   # one profile's ball: whoever hit it, it's no one's mark
@@ -316,10 +319,19 @@ def team_ctp(r, team: str, uid_of: dict[str, str], match_player, found: list[Mar
         if side is None or side.team != team or not (uid := uid_of.get(player)):
             continue
         have = out.get((m.seq, uid))
-        far = lambda x: float("inf") if x.yards is None else x.yards
-        if have is None or (m.sure, -far(m)) > (have.sure, -far(have)):
-            out[(m.seq, uid)] = Mark(m.seq, player, m.yards, m.why)
+        if have is None or (m.sure, -_far(m)) > (have.sure, -_far(have)):
+            out[(m.seq, uid)] = replace(m, who=player)
+    if r.format == "scramble":
+        best: dict[int, tuple[int, str]] = {}
+        for key, m in out.items():
+            if (b := best.get(m.seq)) is None or (-_far(m), m.sure) > (-_far(out[b]), out[b].sure):
+                best[m.seq] = key
+        out = {key: out[key] for key in best.values()}
     return out
+
+
+def _far(m: Mark) -> float:
+    return float("inf") if m.yards is None else m.yards
 
 
 _FEET_INCHES = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(?:'|ft|feet|foot)?\s*(?:(\d+(?:\.\d+)?)\s*(?:\"|''|in|inch|inches)?)?\s*$",

@@ -8094,6 +8094,7 @@ class Engine:
             if cards:
                 names = {idx: (self._log_name(idx) or (None,))[0] for idx in balls}
                 self._pick_cards_due.append((balls, names, cards, time.monotonic()))
+                self._apply_pick_cards()   # a CTP hole's tee shots are asked about now, not after the pick
 
     async def _read_pick_panel(self, seen: int, balls: int) -> list:
         """The pick screen's cards, read until every ball's is with its lie (or the pick is made, or 15 s pass)."""
@@ -8120,10 +8121,6 @@ class Engine:
                 if time.monotonic() - at > 60:
                     self._pick_cards_due.remove(entry)
                 continue
-            # The log names the pick soon after: wait for it (a while), so the picked ball keeps its lie.
-            if any(self._fire_rows[f][1].picked is None for f in balls.values()) and time.monotonic() - at <= 60:
-                continue
-            self._pick_cards_due.remove(entry)
             names = {idx: gspro_names.get(idx) or self._fire_rows[f][1].player for idx, f in balls.items()}
             left, todo, pairs = dict(names), list(cards), []
             for card in sorted(cards, key=lambda c: -max((_name_ratio(c.name, n) for n in names.values()), default=0)):
@@ -8134,6 +8131,12 @@ class Engine:
                     todo.remove(card)
             if len(left) == 1 and len(todo) == 1:
                 pairs.append((next(iter(left)), todo[0]))
+            # Whose ball each card is: the log's name for its slot (the shot may not be named yet).
+            self._pick_ctp([(self._fire_rows[balls[idx]][1], names[idx], card) for idx, card in pairs])
+            # The log names the pick soon after: wait for it (a while), so the picked ball keeps its lie.
+            if any(self._fire_rows[f][1].picked is None for f in balls.values()) and time.monotonic() - at <= 60:
+                continue
+            self._pick_cards_due.remove(entry)
             for idx, card in pairs:
                 shot_id, rec = self._fire_rows[balls[idx]][:2]
                 if rec.mulligan:
@@ -8148,6 +8151,34 @@ class Engine:
                     self.store.set_lie_after(shot_id, card.lie)
                 log.info("Pick card %s (%s): shot %s finished %.0f yd, %s", card.name, names[idx], shot_id,
                          card.yards, card.lie)
+
+    def _pick_ctp(self, balls: list[tuple]) -> None:
+        """A scramble's tee shots on a closest-to-the-pin hole, from the pick screen's cards (each ball's
+        own, in feet and inches when it's on the green): whichever ball the team then plays, these are
+        the marks (see _ctp_marks). `balls`: (shot record, its player, its card)."""
+        from .squabbit_live import feet_text
+
+        r = self.round
+        if r is None or r.ended or r.format != "scramble":
+            return
+        tees = [(rec, r.current_name(who), card) for rec, who, card in balls
+                if who and who != "unknown" and card.lie is not None   # unread: not known to be off the green
+                and rec.round_id == r.id and rec.shot_number == 1 and not rec.mulligan
+                and rec.hole_seq is not None and r.hole_number(rec.hole_seq) in r.ctp_holes]
+        if not tees:
+            return
+        seq = tees[0][0].hole_seq
+        tees = [(rec.shot_id, who, card) for rec, who, card in tees if rec.hole_seq == seq]
+        got = {who: (card.yards if card.lie == "green" else None, sid) for sid, who, card in tees}
+        # One team's balls: the other teams' on this hole stay as they are.
+        was = r.ctp_picks.get(seq, {})
+        now = {p: y for p, y in was.items() if p not in got} | got
+        if now != was:
+            r.ctp_picks[seq] = now
+            log.info("Pick screen CTP, %s: %s", r.hole_name(seq),
+                     ", ".join(f"{p} {feet_text(y)}" for p, (y, _) in got.items() if y is not None)
+                     or "no tee shot on the green")
+            self._squabbit_kick()
 
     def _rest_grab(self, parts: list[str]) -> dict:
         """The follow's quick grab: the boxes through one capture handle (~80 ms for the lie, name and
@@ -8731,15 +8762,20 @@ class Engine:
 
     def _ctp_marks(self, r: Round) -> list:
         """This round's closest-to-the-pin tee shots on the green (squabbit_live.Mark), each with why
-        the booth isn't sure of it, if it isn't: the screen's distance against GSPro's log, a tee shot
-        conceded inside the gimme (on the green, or the fringe?), and a scramble ball the team didn't
-        play that the pick screen read on the green."""
+        the booth isn't sure of it, if it isn't: the screen's distance against GSPro's log, and a tee
+        shot conceded inside the gimme (on the green, or the fringe?). A scramble's come from the pick
+        screen, each ball its own player's whichever the team plays, and are always asked about."""
         from .facts import ctp_text, to_yards
-        from .squabbit_live import Mark
+        from .squabbit_live import Mark, feet_text
 
         marks = []
+        scramble = r.format == "scramble"
+        # A scramble team's next setup is the picked ball's (or the team's, before the log names the
+        # pick): its tee shots are read off the pick screen instead. A one-person side plays its own.
         for seq, by_who in r.ctp_results.items():
             for who, text in by_who.items():
+                if r.player_format(who) == "scramble":
+                    continue
                 seen = to_yards(text)
                 logged = self._log_finish.get(r.ctp_tees.get((seq, who)))
                 if logged is not None and (seen is None or abs(seen - logged) * 3 > max(1.0, logged * 0.3)):
@@ -8752,8 +8788,15 @@ class Engine:
                 if s.round_id == r.id and s.player not in shared and s.shot_number == 1 and not s.mulligan
                 and s.shot_id is not None and s.hole_seq is not None and r.hole_number(s.hole_seq) in r.ctp_holes}
         # Tee shots that ended the hole (an ace, or inside the gimme) leave no second-stroke setup to read.
+        # A scramble ball on the pick screen has its mark from there (the screen's name may be an alias),
+        # unless the shot was taken back since (a mulligan).
+        withdrawn = {s.shot_id for s in self.state.shots if s.round_id == r.id and s.mulligan}
+        picks = {(seq, who): (yards, sid) for seq, by in r.ctp_picks.items()
+                 for who, (yards, sid) in by.items() if sid not in withdrawn}
+        player_of = lambda n: self.league.match_player(n) or n
+        carded = {(seq, player_of(p)) for seq, p in picks}
         enders = {i: s for i, s in tees.items() if s.outcome in ("holed", "conceded")
-                  and (r.format != "scramble" or s.picked is not False)}
+                  and (not scramble or (s.picked is not False and (s.hole_seq, player_of(s.player)) not in carded))}
         sure_yards = self.cfg.squabbit.ctp_sure_gimme_feet / 3
         finished = self.store.tee_finishes(list(enders))
         for sid, shot in enders.items():
@@ -8770,11 +8813,10 @@ class Engine:
                                   f"{ctp_text(left)} from the hole. Is it on the green?"))
             else:
                 marks.append(Mark(shot.hole_seq, shot.player, left))
-        if r.format == "scramble":
-            lifted = {i: s for i, s in tees.items() if s.picked is False and s.outcome not in ("holed", "conceded")}
-            for sid, yards in self.store.tee_finishes(list(lifted)).items():
-                marks.append(Mark(lifted[sid].hole_seq, lifted[sid].player, yards,
-                                  "The team played the other ball; the pick screen read this one on the green."))
+        for (seq, who), (yards, sid) in picks.items():
+            if who not in shared and yards is not None:
+                marks.append(Mark(seq, who, yards, f"The pick screen has it on the green, "
+                                                   f"{feet_text(yards)} from the hole.", sid))
         return marks
 
     def _popup_where(self):
@@ -8900,22 +8942,37 @@ class Engine:
                     for uid, by in team_scores(view, t.team, uid_of).items()}
                 scores = {uid: by for uid, by in scores.items() if by}
                 marks: dict[tuple[int, str], float] = {}
-                for (seq, uid), m in team_ctp(view, t.team, uid_of, self.league.match_player, found).items():
+
+                def answered(m):
+                    """The mark at the distance the players confirmed, so a scramble team's closest is
+                    picked by it (a corrected ball can lose to a teammate's)."""
+                    if m.sure or (q := week_seq(m.seq)) is None:
+                        return m
+                    if not (uid := uid_of.get(self.league.match_player(m.who) or "")):
+                        return m
+                    asked, yards = live.ctp_answer(live.ctp_key(t, q, uid, m.shot))
+                    return replace(m, yards=yards) if asked and yards is not None else m
+
+                week_found = [answered(m) for m in found]
+                for (seq, uid), m in team_ctp(view, t.team, uid_of, self.league.match_player, week_found).items():
                     if (seq := week_seq(seq)) is None:
                         continue
                     m = replace(m, seq=seq)
-                    # Once the player's done the hole (GSPro's log has the tee shot's finish by then), and
-                    # only where the week's event has a contest.
-                    if t.hole(seq) not in t.ctp or not (r.ended or scores.get(uid, {}).get(seq) is not None):
+                    # Only where the week's event has a contest, and once the player's done the hole (GSPro's
+                    # log has the tee shot's finish by then, and a mulligan's been taken). A scramble's,
+                    # off the pick screen, are asked about as soon as it's read.
+                    done = r.ended or scores.get(uid, {}).get(seq) is not None
+                    if t.hole(seq) not in t.ctp or not (done or view.player_format(m.who) == "scramble"):
                         continue
                     if m.sure:
-                        marks[(seq, uid)] = m.yards
+                        if done:
+                            marks[(seq, uid)] = m.yards
                         continue
-                    key = live.ctp_key(t, seq, uid)
+                    key = live.ctp_key(t, seq, uid, m.shot)
                     asked, yards = live.ctp_answer(key)
                     if not asked:
                         self._squabbit_ask_ctp(s, t, key, m)
-                    elif yards is not None:
+                    elif yards is not None and done:
                         marks[(seq, uid)] = yards
                 # Only a score this round had and then lost is taken back (a mulligan on the green): a round
                 # rebuilt after a restart hasn't lost what it hasn't recovered yet.

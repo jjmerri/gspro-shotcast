@@ -195,6 +195,9 @@ class Round:
         self.ctp_results: dict[int, dict[str, str]] = {}
         # The tee shot (season store id) each result was read for: GSPro's log has its own finish to check.
         self.ctp_tees: dict[tuple[int, str], int | None] = {}
+        # A scramble's tee shots on the pick screen: hole of the round -> player -> (yards, None off the
+        # green; the shot's season store id).
+        self.ctp_picks: dict[int, dict[str, tuple[float | None, int | None]]] = {}
         # The season store's last shot id when the round started: the week's earlier CTP tee shots
         # are the ones at or below it (this round's come from ctp_results instead).
         self.shot_floor: int | None = None
@@ -323,7 +326,7 @@ class Round:
         self.renamed = {k: v for k, v in self.renamed.items() if v != g}
         self.log_agree = {k: n for k, n in self.log_agree.items() if k[1] != g}
         self.picked_up = {(x, seq) for x, seq in self.picked_up if x != g}
-        for results in self.ctp_results.values():
+        for results in (*self.ctp_results.values(), *self.ctp_picks.values()):
             results.pop(g, None)
         self.card_rows = [(n, None if x == g else x) for n, x in self.card_rows]
         self.sides = self._build_sides()
@@ -394,7 +397,7 @@ class Round:
             self.setup_slots = [new if n == old else n for n in self.setup_slots]
         self.held = {k: (raw, [new if g == old else g for g in teed], at) for k, (raw, teed, at) in self.held.items()}
         self.picked_up = {(new if g == old else g, seq) for g, seq in self.picked_up}
-        for results in self.ctp_results.values():
+        for results in (*self.ctp_results.values(), *self.ctp_picks.values()):
             if old in results:
                 results[new] = results.pop(old)
         self.card_rows = [(n, new if g == old else g) for n, g in self.card_rows]

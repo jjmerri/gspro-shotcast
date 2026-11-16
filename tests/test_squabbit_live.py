@@ -238,7 +238,7 @@ def test_a_typed_ctp_distance_reads_in_feet_and_inches():
 
 def test_the_booth_asks_about_ctp_marks_it_isnt_sure_of(tmp_path):
     e = _engine(tmp_path, League(LEAGUE_DATA))
-    r, _ = _league_round("Scramble")
+    r, _ = _league_round("Best Ball")
     r.ctp_holes = [12, 13, 14, 15, 17]
     e.round = r
     tee = lambda sid, seq, who, outcome=None, picked=None: SimpleNamespace(
@@ -261,11 +261,67 @@ def test_the_booth_asks_about_ctp_marks_it_isnt_sure_of(tmp_path):
         (4, "Mike"): (2.0, True),       # conceded inside the default 8 ft: on the green
         (5, "Sarah"): (3.5, False),     # conceded at 10.5 ft: maybe the fringe
         (6, "Mike"): (1.0, False),      # conceded, nobody knows how close
-        (3, "Sarah"): (5.0, False),     # a lifted scramble ball the pick screen read on the green
         (8, "Sarah"): (None, False),    # conceded, no distance at all: asked, with nothing filled in
     }   # hole 1 isn't a CTP hole
     e.cfg.squabbit.ctp_sure_gimme_feet = 0     # pins anywhere: every gimme's asked about
     assert not next(m for m in e._ctp_marks(r) if m.seq == 4).sure
+
+
+def test_a_scrambles_ctp_is_the_teams_closest_ball_off_the_pick_screen(tmp_path):
+    from commentator.hud import PickCard
+
+    # Riviera 11-16, hole 3: Dan 14' 4" and Derek 34 yd, both on the green. The next setup came before
+    # the log named the pick, so it went under the team and Dan's mark was never posted; Derek's was asked.
+    e = _engine(tmp_path, League(LEAGUE_DATA))
+    r, league = _league_round("Scramble")
+    r.ctp_holes = [12]
+    e.round = r
+    kicks = []
+    e._squabbit_kick = lambda: kicks.append(1)
+    # Each ball the log's slot names: the shot itself may not be named yet.
+    rec = lambda sid, seq=3, n=1: SimpleNamespace(shot_id=sid, round_id=r.id, hole_seq=seq, player="unknown",
+                                                  shot_number=n, mulligan=False, picked=None)
+    e._pick_ctp([(rec(1), "Mike", PickCard("MIKE", (14 + 4 / 12) / 3, "green")),
+                 (rec(2), "Sarah", PickCard("SARAH", 34.0, "green"))])
+    e._pick_ctp([(rec(3, n=2), "Mike", PickCard("MIKE", 1.0, "green"))])   # the second stroke's: not a tee shot
+    e._pick_ctp([(rec(3, seq=4), "Mike", PickCard("MIKE", 1.0, "green"))])  # hole 13 has no contest
+    e._pick_ctp([(rec(4), "Tony", PickCard("TONY", 3.5, None))])   # its lie unread: not known to be off the green
+    assert r.ctp_picks == {3: {"Mike": (pytest.approx(43 / 9), 1), "Sarah": (34.0, 2)}} and len(kicks) == 1
+    r.ctp_results = {3: {"Aces": "14 feet 4 inches"}}   # the team's setup read: not a mark
+    marks = e._ctp_marks(r)
+    assert [(m.who, m.sure) for m in marks] == [("Mike", False), ("Sarah", False)]
+    assert "14' 4\"" in marks[0].why
+    # One winner per team and hole: the closer ball, whoever's the team played on.
+    got = team_ctp(r, "Aces", UIDS, league.match_player, marks)
+    assert list(got) == [(3, "a")] and feet_text(got[(3, "a")].yards) == "14' 4\""
+    # Off the green, a ball isn't a mark; another team's pick screen leaves this one's as it is.
+    e._pick_ctp([(rec(1), "Mike", PickCard("MIKE", 30.0, "fringe")), (rec(2), "Sarah", PickCard("SARAH", 34.0, "green"))])
+    e._pick_ctp([(rec(5), "Tony", PickCard("TONY", 5.0, "green")), (rec(6), "Priya", PickCard("PRIYA", 9.0, "fringe"))])
+    assert r.ctp_picks == {3: {"Mike": (None, 1), "Sarah": (34.0, 2), "Tony": (5.0, 5), "Priya": (None, 6)}}
+    # A ball on the pick screen is its mark, to be asked about, even one the team then concedes (and
+    # under whatever name GSPro has the player).
+    r.ctp_picks[3]["Sarah K"] = r.ctp_picks[3].pop("Sarah")
+    sarah = SimpleNamespace(shot_id=2, round_id=r.id, hole_seq=3, player="Sarah", shot_number=1,
+                            mulligan=False, outcome="conceded", picked=True)
+    e.state.shots = [sarah]
+    e.store.tee_finishes = lambda ids: {2: 2.0}
+    e._gimme_left = lambda sid: 2.0
+    assert [(m.who, m.sure) for m in e._ctp_marks(r) if m.who.startswith(("Mike", "Sarah"))] == [("Sarah K", False)]
+    # A tee shot taken back (a mulligan) is no one's mark.
+    sarah.mulligan = True
+    assert [m.who for m in e._ctp_marks(r)] == ["Tony"]
+
+
+def test_a_player_alone_in_a_scramble_keeps_the_setup_read_ctp(tmp_path):
+    # No partner, no pick screen: the next setup is their own ball's, as in an individual round.
+    e = _engine(tmp_path, League(LEAGUE_DATA))
+    r = Round(league=e.league, gspro_players=["Mike", "Sarah", "Tony"], course="X", scheduled_format="stroke",
+              is_league=False, slot_names=["Mike", "Sarah", "Tony"], holes=9)
+    r.colour_teams = [["Mike", "Sarah"], ["Tony"]]
+    r.play_scramble(r.colour_teams)
+    e.round, r.ctp_holes = r, [3]
+    r.ctp_results = {3: {"Tony": "9 feet", r.side_for("Mike").label: "4 feet"}}
+    assert [(m.who, m.yards, m.sure) for m in e._ctp_marks(r)] == [("Tony", 3.0, True)]
 
 
 def test_the_round_is_posted_once_the_players_say_yes(tmp_path, monkeypatch):
@@ -494,7 +550,8 @@ def test_a_card_that_keeps_changing_is_a_failed_post_not_a_quiet_one(tmp_path):
         live.push(c, t, {"a": {1: 5}}, {})
 
 
-def test_an_unsure_ctp_mark_goes_in_as_the_players_confirm_it(tmp_path, monkeypatch):
+def _ctp_booth(tmp_path, monkeypatch):
+    """A booth posting week 6 on Squabbit (CTP on holes 12 and 13), its on-screen boxes in `boxes`."""
     import commentator.popup as popup
     import commentator.squabbit as sq
 
@@ -535,22 +592,35 @@ def test_an_unsure_ctp_mark_goes_in_as_the_players_confirm_it(tmp_path, monkeypa
     monkeypatch.setattr(popup, "Entry", Box)
     monkeypatch.setattr(sq, "SquabbitClient", Client)
 
-    async def settle(e):
-        for _ in range(50):
-            await asyncio.sleep(0.01)
-        if e._sq.get("task"):
-            await e._sq["task"]
+    return boxes, fake
+
+
+async def _settle(e):
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+    if e._sq.get("task"):
+        await e._sq["task"]
+
+
+def _ctp_round(tmp_path, fmt):
+    e = _engine(tmp_path, League(LEAGUE_DATA))
+    e.cfg.squabbit.enabled = True
+    e.cfg.source.type = "gspro"
+    e.cfg.db_path = str(tmp_path / "season.db")
+    r, _ = _league_round(fmt)
+    r.league = e.league
+    r.ctp_holes = [12, 13]
+    e.round = r
+    r.seq = 3
+    return e, r
+
+
+def test_an_unsure_ctp_mark_goes_in_as_the_players_confirm_it(tmp_path, monkeypatch):
+    boxes, fake = _ctp_booth(tmp_path, monkeypatch)
+    settle = _settle
 
     async def go():
-        e = _engine(tmp_path, League(LEAGUE_DATA))
-        e.cfg.squabbit.enabled = True
-        e.cfg.source.type = "gspro"
-        e.cfg.db_path = str(tmp_path / "season.db")
-        r, _ = _league_round("Best Ball")
-        r.league = e.league
-        r.ctp_holes = [12, 13]
-        e.round = r
-        r.seq = 3
+        e, r = _ctp_round(tmp_path, "Best Ball")
         e._ctp_marks = lambda r: [Mark(3, "Mike", 3.0, "Is it on the green?"), Mark(4, "Sarah", 2.0, "Hm?")]
         e._squabbit_kick()
         await settle(e)
@@ -578,5 +648,52 @@ def test_an_unsure_ctp_mark_goes_in_as_the_players_confirm_it(tmp_path, monkeypa
         assert len(boxes) == 3           # answered: never asked again
         assert json.loads((tmp_path / "squabbit_live.json").read_text())["ctp_answers"] == \
             {"TR/12/a": 112 / 36, "TR/13/b": None}
+
+    asyncio.run(go())
+
+
+def test_a_scrambles_ctp_is_asked_as_soon_as_the_pick_screen_is_read(tmp_path, monkeypatch):
+    boxes, fake = _ctp_booth(tmp_path, monkeypatch)
+
+    async def go():
+        e, r = _ctp_round(tmp_path, "Scramble")
+        r.ctp_picks = {3: {"Mike": (43 / 9, 1), "Sarah": (34.0, 2)}}   # no score for hole 12 yet: they're still putting
+        e._squabbit_kick()
+        await _settle(e)
+        boxes[0].on_answer(True)
+        await _settle(e)
+        assert len(boxes) == 2 and boxes[1].title.startswith("Mike") and boxes[1].value == "14' 4\""
+        boxes[1].on_answer(boxes[1].value)
+        await _settle(e)
+        assert len(boxes) == 2   # Sarah's farther ball isn't asked about
+        # Posted once the hole's done: a mulligan before then would have taken the tee shot back.
+        assert fake.docs[TR]["holeCompetitions"]["c12"]["results"] == {"z": 120.0}
+        r.log_scores = {"Mike": {3: 2}}
+        e._squabbit_kick()
+        await _settle(e)
+        assert fake.docs[TR]["holeCompetitions"]["c12"]["results"] == {"z": 120.0, "a": 172.0}
+        # A re-hit (a new tee shot) is asked about again, not given the old answer.
+        r.ctp_picks = {3: {"Mike": (40 / 9, 7)}}
+        e._squabbit_kick()
+        await _settle(e)
+        assert len(boxes) == 3 and boxes[2].value == "13' 4\""
+
+    asyncio.run(go())
+
+
+def test_a_scrambles_corrected_ctp_can_lose_to_a_teammates_ball(tmp_path, monkeypatch):
+    boxes, fake = _ctp_booth(tmp_path, monkeypatch)
+
+    async def go():
+        e, r = _ctp_round(tmp_path, "Scramble")
+        r.ctp_picks = {3: {"Mike": (3.0, 1), "Sarah": (5.0, 2)}}
+        e._squabbit_kick()
+        await _settle(e)
+        boxes[0].on_answer(True)
+        await _settle(e)
+        assert boxes[1].title.startswith("Mike")
+        boxes[1].on_answer("30'")   # it wasn't that close: Sarah's ball is the team's closest
+        await _settle(e)
+        assert len(boxes) == 3 and boxes[2].title.startswith("Sarah") and boxes[2].value == "15' 0\""
 
     asyncio.run(go())
