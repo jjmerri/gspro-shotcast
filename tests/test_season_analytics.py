@@ -268,6 +268,34 @@ def test_courses_rank_holes_and_highlights_find_streaks_bounce_backs_and_real_ho
     assert h["blowups"][0]["hole"] == 6 and h["blowups"][0]["over"] == 3
 
 
+def test_league_courses_count_a_team_formats_card_once_per_team_and_practice_never(db):
+    nine = {h: PARS[str(h)] for h in range(1, 10)}
+
+    def team_round(side, players, scores, league):
+        card = json.dumps({str(h): s for h, s in scores.items()})
+        db.execute("INSERT INTO rounds (session_id, ended_at, date, course, format, side, team, holes, gross, par,"
+                   " scores, hole_pars, is_league, players) VALUES (1, 0, '2026-11-16', 'Pebble', 'scramble', ?, ?,"
+                   " 9, 0, 36, ?, ?, ?, ?)", (side, side, card, json.dumps(PARS), league, json.dumps(players)))
+        for p in players:   # each partner's copy of the team card
+            player_round(db, p, scores, fmt="scramble", league=league)
+
+    db.execute("INSERT OR IGNORE INTO sessions (id, date) VALUES (1, '2026-11-16')")
+    team_round("Dan and Derek", ["Dan", "Derek"], {**nine, 3: 2}, 1)
+    team_round("Kyle and Mike", ["Kyle", "Mike"], {**nine, 7: 6}, 1)
+    team_round("Cam and Josh", ["Cam", "Josh"], {**nine, 1: 2, 2: 2}, 0)   # a practice scramble
+    player_round(db, "Ann", nine)                                           # a practice individual
+    db.commit()
+    (c,) = A.courses(db, "league")
+    assert c["rounds"] == 2 and c["players"] == ["Dan", "Derek", "Kyle", "Mike"]
+    assert c["best"]["player"] == "Dan and Derek" and c["best"]["to_par"] == -1
+    assert [h["n"] for h in c["holes"]] == [2] * 9 and c["hardest"] == 7
+    (mine,) = A.courses(db, "league", "Derek")
+    assert mine["rounds"] == 1 and mine["players"] == ["Dan", "Derek"]
+    for ctx in ("practice", None):   # never a scramble's nine outside league play
+        (c,) = A.courses(db, ctx)
+        assert c["rounds"] == 1 and c["players"] == ["Ann"] and c["best"]["player"] == "Ann"
+
+
 def test_highlights_point_at_their_stroke_for_links_and_video(db):
     player_round(db, "Ann", {**{h: PARS[str(h)] for h in range(1, 10)}, 4: 3})   # an eagle on the par-5 4th
     db.execute("UPDATE player_rounds SET ended_at = 1e9")

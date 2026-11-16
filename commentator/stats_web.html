@@ -1893,7 +1893,7 @@ function coursesView(cs, field) {
   const c = cs.find(c => c.course === state.course) || cs[0];
   state.course = c.course;
   const list = sortable("courses", cs, [
-    { key: "course", label: "Course" }, { key: "rounds", label: "Player rounds" },
+    { key: "course", label: "Course" }, { key: "rounds", label: state.ctx === "league" ? "Rounds" : "Player rounds" },
     { key: "players", label: "Players", cls: "l", val: c => c.players.length },
     { key: "best", label: "Best nine", val: c => c.best ? c.best.to_par_9 : null },
     { key: "last_played", label: "Last played" }],
@@ -1926,7 +1926,9 @@ function coursesView(cs, field) {
       <td>${toPar(r.to_par)}</td><td>${r.played}${r.played !== r.holes ? `/${r.holes}` : ""}</td></tr>`,
     { empty: "No rounds here in this view.", page: 10 });
   return `<h2>${meTitle("Courses")}</h2><p class="sub">Tap a course for its holes and rounds below.</p>${list}<h2 id="coursedetail">${esc(c.course)}: hole by hole</h2>${holes}
-    <p class="sub">${field ? `${esc(state.me)}'s individual-ball cards on this course, against everyone's.` : "Every individual-ball card on this course."} ${c.best ? `Best nine: ${esc(c.best.player)}, ${toPar(c.best.to_par)} over ${c.best.holes} holes on ${esc(c.best.date)}.` : ""}</p>
+    <p class="sub">${state.ctx === "league"
+      ? (field ? `${esc(state.me)}'s cards on this course (a team format's is the team's), against everyone's.` : "Every card on this course (a team format's is the team's).")
+      : (field ? `${esc(state.me)}'s individual-ball cards on this course, against everyone's.` : "Every individual-ball card on this course.")} ${c.best ? `Best nine: ${esc(c.best.player)}, ${toPar(c.best.to_par)} over ${c.best.holes} holes on ${esc(c.best.date)}.` : ""}</p>
     <h2>${esc(c.course)}: rounds</h2>${rounds}
     <p class="sub">Tap a round for its page. <a class="link" href="${esc(hashFor("shots", { course: (state.data.filters.courses.find(same) || c.course) }))}">Every shot here</a></p>`;
 }

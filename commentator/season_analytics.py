@@ -491,13 +491,16 @@ def trends(db: sqlite3.Connection, holes: list[dict], context: str | None = None
 
 def courses(db: sqlite3.Connection, context: str | None = None, player: str | None = None) -> list[dict]:
     """Per course: rounds, players, the best nine, and every hole's scoring average from the individual
-    cards, so the hardest and easiest holes stand out. With `player`, from that player's cards only."""
+    cards, so the hardest and easiest holes stand out. With `player`, from that player's cards only.
+    League play adds the team formats' cards (one per team, named for it): every league team plays the
+    week's format, so they compare like for like. Practice and all play don't, where a scramble's nine
+    isn't anyone's own."""
     by_course: dict[str, dict] = {}
     for (course, who), m in _courses_merged(db, context).items():
-        if player and who != player:
+        if player and who != player and player not in m["members"]:
             continue
         c = by_course.setdefault(course, _new_course())
-        c["players"].append(who)
+        c["players"].extend(p for p in (m["members"] or [who]) if p not in c["players"])
         _add_course(c, m)
     out = []
     for course, c in by_course.items():
@@ -520,12 +523,14 @@ def courses(db: sqlite3.Connection, context: str | None = None, player: str | No
 
 def _new_course() -> dict[str, Any]:
     """A course's counts over some cards (_collect_courses): rounds of a nine or more, the last date
-    played, the best nine as [rank key, best], and per hole [first card's key, its par, {score: holes}]."""
-    return {"rounds": 0, "players": [], "last_played": None, "best": None, "holes": {}}
+    played, the best nine as [rank key, best], per hole [first card's key, its par, {score: holes}], and a
+    team card's players (`members`; none on an individual's)."""
+    return {"rounds": 0, "players": [], "last_played": None, "best": None, "holes": {}, "members": []}
 
 
 def _add_course(into: dict[str, Any], part: dict[str, Any]) -> None:
     into["rounds"] += part["rounds"]
+    into.setdefault("members", []).extend(p for p in part.get("members", ()) if p not in into["members"])
     if part["last_played"] is not None:
         into["last_played"] = max(into["last_played"] or "", part["last_played"])
     if part["best"] is not None and (into["best"] is None or list(part["best"][0]) < list(into["best"][0])):
@@ -550,12 +555,16 @@ def _courses_merged(db: sqlite3.Connection, context: str | None) -> dict[tuple[s
     return reuse(db, ("courses_merged",), run)[context if context in N.CONTEXTS else None]
 
 
+# A night's league team-format cards (_collect_courses), kept apart: only league play counts them.
+LEAGUE_TEAM = "league_team"
+
+
 def _courses_merge(nights: dict[str, Any], context: str | None) -> dict[tuple[str, str], dict[str, Any]]:
     keep = N.wanted(context)
     out: dict[tuple[str, str], dict[str, Any]] = {}
     for night in nights.values():
         for ctx, cards in night.items():
-            if keep(ctx):
+            if (context == "league") if ctx == LEAGUE_TEAM else keep(ctx):
                 for course, players in cards.items():
                     for who, part in players.items():
                         _add_course(out.setdefault((course, who), _new_course()), part)
@@ -563,19 +572,19 @@ def _courses_merge(nights: dict[str, Any], context: str | None) -> dict[tuple[st
 
 
 def _collect_courses(db: sqlite3.Connection, ns: "N.Nights") -> dict[str, dict[str, dict[str, dict[str, Any]]]]:
-    """Per night, per context, per course and player: the counts behind courses()."""
+    """Per night, per context, per course and player (or league team, under LEAGUE_TEAM): the counts
+    behind courses()."""
     out: dict[str, dict[str, dict[str, dict[str, Any]]]] = {d: {} for d in ns.dates}
-    for r in db.execute("SELECT pr.*, s.date FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
-                        " WHERE course IS NOT NULL AND (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))"
-                        + ns.where):
+
+    def card(r: sqlite3.Row, ctx: str, who: str, members: list[str]) -> None:
         try:
             scores = {int(k): v for k, v in json.loads(r["scores"] or "{}").items() if isinstance(v, int)}
             pars = {int(k): v for k, v in json.loads(r["hole_pars"] or "{}").items() if isinstance(v, int)}
         except (TypeError, ValueError):
-            continue
-        ctx = N.context_of(r["is_league"], r["is_tournament"])
+            return
         c = out[ns.date[r["session_id"]]].setdefault(ctx, {}).setdefault(r["course"], {}).setdefault(
-            r["player"], _new_course())
+            who, _new_course())
+        c["members"] = members
         key = [r["ended_at"], r["id"]]   # (cards in the order played)
         c["last_played"] = max(c["last_played"] or "", r["date"])
         played = [h for h in sorted(scores) if h in pars]
@@ -590,8 +599,21 @@ def _collect_courses(db: sqlite3.Connection, ns: "N.Nights") -> dict[str, dict[s
             per9 = stored if stored is not None else (to_par * 9 / len(played) if played else None)
             if per9 is not None:
                 _add_course(c, {"rounds": 0, "last_played": None, "holes": {}, "best": [
-                    [per9, *key], {"player": r["player"], "date": r["date"], "to_par": to_par, "holes": len(played),
+                    [per9, *key], {"player": who, "date": r["date"], "to_par": to_par, "holes": len(played),
                                    "to_par_9": round(per9, 1)}]})
+
+    for r in db.execute("SELECT pr.*, s.date FROM player_rounds pr JOIN sessions s ON s.id = pr.session_id"
+                        " WHERE course IS NOT NULL AND (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))"
+                        + ns.where):
+        card(r, N.context_of(r["is_league"], r["is_tournament"]), r["player"], [])
+    # A league team format's card is the team's, one per team (player_rounds has a copy for each partner).
+    for r in db.execute("SELECT * FROM rounds WHERE course IS NOT NULL AND is_league = 1"
+                        " AND format IN ('scramble', 'alternate')" + ns.where):
+        try:
+            members = [p for p in json.loads(r["players"] or "[]") if isinstance(p, str)]
+        except (TypeError, ValueError):
+            members = []
+        card(r, LEAGUE_TEAM, r["side"], members)
     return out
 
 
