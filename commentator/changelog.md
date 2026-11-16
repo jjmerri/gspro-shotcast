@@ -4,6 +4,17 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.142
+
+### Stats page
+- The hole replay shows a scramble's out-of-bounds tee shots, where they landed, marked out of bounds.
+- A round's opening call now shows with the round even when the booth had sat idle before it.
+
+### Booth
+- Scramble closest to the pin: once both balls are in, the booth asks about entering the team's closer ball on the green, with its distance in feet and inches.
+- In a scramble, a player no longer gets credited with his partner's distance to the pin.
+- Fewer wrong running scores, no "longest drive in the league" when a longer one came earlier that day, and penalty calls no longer say "unmentioned".
+
 ## 0.1.141
 
 ### Booth
