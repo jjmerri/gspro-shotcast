@@ -59,6 +59,12 @@ def test_the_course_fact_tells_a_first_visit_only_against_a_real_record():
         "Dan has played Pebble 2 times before, most recently on October 20, 2 weeks ago; best: 38 (2 over par) for 9 holes."
     assert recall.course_fact("Dan", rows, "Bethpage", TODAY) == "This is Dan's first recorded round at Bethpage."
     assert recall.course_fact("Dan", rows[:2], "Bethpage", TODAY) is None
+    # Only ever played here in a scramble: not a first visit (a real opener said "never played here").
+    team = [{"course": "Bethpage", "date": "2026-10-28", "ended_at": None, "format": "scramble", "side": "Dan & Corey"}]
+    assert recall.course_fact("Dan", rows, "Bethpage", TODAY, team) == (
+        "Dan has played Bethpage before only as part of Dan & Corey in a scramble, most recently "
+        f"{recall.when(team[0], TODAY)}; this is the first time on their own.")
+    assert recall.course_fact("Dan", rows, "pebble", TODAY, team).startswith("Dan has played Pebble 2 times")
 
 
 def test_missing_counts_and_partial_pars_say_nothing_rather_than_something_wrong():

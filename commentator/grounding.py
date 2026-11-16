@@ -458,12 +458,38 @@ _CALL = re.compile(
 _CITED = re.compile(r"\b(?:(you|i)(?:'ve| have)? predicted|(your|my|that|the) predictions?)\b")
 
 
+# Looser: a line crediting the other commentator with a call ("you called for simple", "you said keep it
+# level", "your call was fairway"). Also how the booth quotes a description ("you called that a pull"),
+# so it's only held against the calls actually made (Engine._uncalled), never on its own.
+_CREDITS_YOU = re.compile(r"\b(?:you (?:called|said|backed|tipped|fancied|reckoned)|your (?:call|tip|pick))\b")
+
+
 def _plain(line: str) -> str:
     return line.lower().replace("\u2019", "'")
 
 
 def makes_call(line: str) -> bool:
     return bool(_CALL.search(_plain(line)))
+
+
+_CREDIT_STOP = {"that", "this", "with", "would", "there", "then", "than", "about", "just", "what", "they",
+                "them", "have", "been", "from", "into", "your", "were", "when", "it'd", "he'd", "he's", "it's"}
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z][a-z']{3,}", text) if w not in _CREDIT_STOP}
+
+
+def credited_words(line: str) -> set[str]:
+    """The words a line says the other commentator called or said ("you called for simple" -> {"simple"}),
+    to the end of that sentence; empty when it credits them with nothing."""
+    plain = _plain(line)
+    m = _CREDITS_YOU.search(plain)
+    return _content_words(re.split(r"[.!?;]", plain[m.end():], maxsplit=1)[0]) if m else set()
+
+
+def call_words(line: str) -> set[str]:
+    return _content_words(_plain(line))
 
 
 def cites_call(line: str) -> str | None:

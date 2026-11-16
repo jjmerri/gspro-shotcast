@@ -31,7 +31,7 @@ from .facts import (ctp_feet, ctp_text as _ctp_text,
 )
 from .flight_pick import FlightPlan, Hazard, aim_spot, aim_turn, aimed_short, pick_line, spot_words, pick_reaction, project
 from .health import Health, RoundCounters, check_changed, check_files, check_screen, evaluate_round, report_line
-from .grounding import (SCENERY, bare_acknowledgement, check_line, cites_call, makes_call, meta_talk, ngrams, note_keywords, repeats, uses_note,
+from .grounding import (SCENERY, bare_acknowledgement, check_line, call_words, cites_call, credited_words, makes_call, meta_talk, ngrams, note_keywords, repeats, uses_note,
                         wrong_round_score)
 from .hud import NAME_DARK, Hud, Scorecard, deck_club, describe, hole_key, name_sig_changed
 from .interest import (LEAGUE_BEST_DRIVE_LEVEL, REPLY_PUTT_LEVEL, SEASON_BEST_DRIVE_LEVEL,
@@ -3601,15 +3601,31 @@ class Engine:
     def _uncalled(self, line: Line, whole_round: bool, earlier: Iterable[Line] = ()) -> str | None:
         """Why a line holding a commentator to a call nobody made is wrong, or None. `earlier`: the
         lines kept so far in the same response, whose calls count too."""
-        whose = cites_call(line.text)
-        if whose is None or not self.round:
+        if not self.round:
             return None
+        whose = cites_call(line.text)
         others = [k for k in self.speakers if k != line.speaker]
+        calls, earlier = self._calls_made(whole_round), list(earlier)
+
+        def called(who: set[str]) -> bool:
+            return any(c.speaker in who for c in calls) or any(l.speaker in who and makes_call(l.text) for l in earlier)
+
+        if whose is None:
+            # "You called for simple" from the one who made that call ("I'm backing him to keep this one
+            # simple") when the other voice made none: it gives his own call away. Only when the credited
+            # words echo his call, so "you called that a pull" quoting a description still stands.
+            credited = credited_words(line.text)
+            mine = set().union(*(call_words(c.text) for c in calls if c.speaker == line.speaker),
+                               *(call_words(l.text) for l in earlier if l.speaker == line.speaker and makes_call(l.text)))
+            if others and credited & mine and not called(set(others)):
+                return ("credits the other commentator with a call the speaker made himself: only he made a "
+                        "call" + (" this round" if whole_round else " on this hole") + ", so it's \"I called\", "
+                        "not \"you called\"")
+            return None
         if whose == "you" and not others:
             return None
         who = {line.speaker} if whose == "me" else set(others) if whose == "you" else set(self.speakers)
-        if any(c.speaker in who for c in self._calls_made(whole_round)) or any(
-                l.speaker in who and makes_call(l.text) for l in earlier):
+        if called(who):
             return None
         return ("holds a commentator to a prediction nobody made" + (" this round" if whole_round else " on this hole")
                 + ": only a line that said what would happen (\"I think this slides by\") is a prediction")
@@ -4728,7 +4744,9 @@ class Engine:
             st = recall.standout(side.label, rows)
             if st and st.moment == "score":
                 facts.append(st.text)
-            elif not r.is_league and (cf := recall.course_fact(side.label, rows, course, today)):
+            elif not r.is_league and (cf := recall.course_fact(
+                    side.label, rows, course, today,
+                    self.store.player_team_rounds(side.players[0]) if len(side.players) == 1 else ())):
                 facts.append(cf)
         return facts
 

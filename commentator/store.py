@@ -2294,6 +2294,16 @@ class Store:
             + " ORDER BY ended_at DESC, id DESC", (side,)).fetchall()
         return [{k: r[k] for k in r.keys()} for r in rows]
 
+    def player_team_rounds(self, player: str) -> list[dict[str, Any]]:
+        """The rounds `player` played as part of a team (a side of more than them), newest first, with the
+        same counting rule as side_rounds: so a solo player's record on a course knows they've been there."""
+        rows = self.db.execute(
+            f"""SELECT id, ended_at, date, course, format, side FROM rounds
+               WHERE side != ? AND players IS NOT NULL AND gross IS NOT NULL AND {_COUNTS_AS_ROUND}
+                     AND EXISTS (SELECT 1 FROM json_each(rounds.players) WHERE value = ?)"""
+            + _ctx_sql(None) + " ORDER BY ended_at DESC, id DESC", (player, player)).fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
+
     def team_course_history(self, side: str, course: str | None, context: str | None = None) -> dict[str, Any]:
         """A side's record on one course this season (before tonight): rounds played, average and best
         net to par per nine holes. For the 'they love this track' line. None course -> no history."""

@@ -140,12 +140,18 @@ def standout(who: str, rows: list[dict]) -> Standout | None:
     return max(found, key=lambda f: f[0])[1] if found else None
 
 
-def course_fact(who: str, rows: list[dict], course: str | None, today: date) -> str | None:
+def course_fact(who: str, rows: list[dict], course: str | None, today: date,
+                team_rows: list[dict] = ()) -> str | None:
     """Their record here: how often, when last, and their best; or a first visit, once they've played
-    enough elsewhere for that to mean something."""
+    enough elsewhere for that to mean something. `team_rows`: a solo player's rounds as part of a team
+    (Store.player_team_rounds), so a course they've only played in a scramble isn't a first visit."""
     if not course:
         return None
     here = [r for r in rows if (r.get("course") or "").casefold() == course.casefold()]
+    if not here and (team := [t for t in team_rows if (t.get("course") or "").casefold() == course.casefold()]):
+        fmt = {"scramble": " in a scramble", "alternate": " in alternate shot"}.get(team[0].get("format") or "", "")
+        return (f"{who} has played {team[0]['course']} before only as part of {team[0]['side']}{fmt}, most recently "
+                f"{when(team[0], today)}; this is the first time on their own.")
     if not here:
         return f"This is {who}'s first recorded round at {course}." if len(rows) >= BASELINE_ROUNDS else None
     times = f"{len(here)} time{'s' if len(here) != 1 else ''}"

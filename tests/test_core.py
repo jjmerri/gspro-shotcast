@@ -3356,6 +3356,23 @@ def test_shot_level_per_player_stats(tmp_path):
     assert rp["n"] == 4 and abs(rp["avg_finish_yards"] - 2.0) < 0.01
 
 
+def test_player_team_rounds_finds_a_player_inside_a_team_side(tmp_path):
+    import json
+
+    from commentator.store import Store
+
+    s = Store(str(tmp_path / "s.db"))
+    for side, players, holes in (("Josh & Corey", ["Josh Merritt", "Corey Martin"], 9),
+                                 ("Josh Merritt", ["Josh Merritt"], 9),              # his own: not a team round
+                                 ("Dan & Derek", ["Dan Binder", "Derek Binder"], 9),
+                                 ("Josh & Matt", ["Josh Merritt", "Matt Ferri"], 3)):  # too short to count
+        s.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, format, side, holes, gross, players, "
+                     "complete) VALUES (?,?,?,?,?,?,?,?,?,1)", (s.session_id, 0.0, "2026-11-11", "Bethpage Black",
+                                                                "scramble", side, holes, 31, json.dumps(players)))
+    s.db.commit()
+    assert [r["side"] for r in s.player_team_rounds("Josh Merritt")] == ["Josh & Corey"]
+
+
 def test_hole_scoring_collects_gross_scores_across_rounds(tmp_path):
     import json
 

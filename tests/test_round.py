@@ -4015,6 +4015,19 @@ def test_a_line_holds_a_commentator_only_to_a_call_made_out_loud(tmp_path):
     assert not e._grounded([Line("color", "As I predicted, it held its line.")], "", mode="result")[0]   # not his call
     assert any('the only ones to hold anyone to' in f and "I think this slides by" in f for f in e._format_facts())
 
+    # From a real round: color backed a simple tee shot himself, then told pbp "You called for simple".
+    e._calls.clear()
+    e._write_transcript([Line("color", "After three holes of adventure, I'm backing him to keep this one simple.")])
+    good, problems = e._grounded([Line("color", "You called for simple, and he kept it simple.")], "", mode="result")
+    assert not good and any("a call the speaker made himself" in p for p in problems)
+    assert e._grounded([Line("color", "You said the pin was tucked away.")], "", mode="result")[0]   # not his call
+    e._write_transcript([Line("color", "After five pars, I fancy he'll keep the card level.")])
+    assert not e._grounded([Line("color", "You said keep the card level.")], "", mode="result")[0]
+    assert e._grounded([Line("pbp", "Your call was fairway, Duke.")], "", mode="result")[0]   # his call, rightly
+    assert e._grounded([Line("color", "I called for simple, and he kept it simple.")], "", mode="result")[0]
+    e._write_transcript([Line("pbp", "I fancy he'll miss this one left.")])   # both called: can't tell which
+    assert e._grounded([Line("color", "You called for simple, and he kept it simple.")], "", mode="result")[0]
+
     # Two holes on, it's no longer this hole's or the last's, but the closer may still hold them to it.
     e.round.seq += 2
     assert not e._grounded([cited], "", mode="result")[0]
