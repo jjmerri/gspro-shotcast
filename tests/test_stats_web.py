@@ -243,7 +243,7 @@ def test_a_server_building_in_the_background_answers_once_its_first_build_is_don
 
     def slow(*a, **k):
         started.set()
-        go.wait(10)
+        go.wait(60)
         return build(*a, **k)
 
     monkeypatch.setattr(stats_site, "build", slow)
@@ -251,15 +251,22 @@ def test_a_server_building_in_the_background_answers_once_its_first_build_is_don
     assert started.wait(10)   # (make_server came back with the build under way)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     got = []
-    asking = threading.Thread(target=lambda: got.append(
-        urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/").read()))
+
+    def ask():
+        try:
+            got.append(urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/", timeout=60).read())
+        except Exception as e:   # (shown by the assert below, not lost on the thread)
+            got.append(e)
+
+    asking = threading.Thread(target=ask)
     try:
         asking.start()
         asking.join(0.5)
         assert not got
         go.set()
-        asking.join(10)
-        assert got and b"the last version's page" not in got[0]
+        asking.join(60)   # (a slow CI runner builds the page in seconds)
+        assert got and isinstance(got[0], bytes), got
+        assert b"the last version's page" not in got[0]
     finally:
         go.set()
         server.shutdown()

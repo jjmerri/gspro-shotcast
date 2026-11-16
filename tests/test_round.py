@@ -3657,14 +3657,15 @@ async def test_a_quick_holes_tab_visit_between_polls_is_caught_by_the_sampler(tm
     players, nines = _players_tab(course, {1: "Alex", 2: "Jamie"}), _holes_tab(course, True, False)
     loading = {"load_course": course}
 
-    class Timed(_PixelSetupScreen):
+    class Busy(_PixelSetupScreen):
+        # PLAYERS until the watch reads it; the HOLES tab for as long as that read is busy (until the
+        # sampler has caught the nines, however slow the machine); then the course loads.
         def __init__(self):
             super().__init__([])
-            self.t0, self.slow = time.monotonic(), True
+            self.frame, self.busy = players, True
 
         def setup_frame(self):
-            t = time.monotonic() - self.t0
-            return players if t < 0.3 else nines if t < 1.5 else loading
+            return self.frame
 
         def region(self, name):
             return name
@@ -3673,15 +3674,18 @@ async def test_a_quick_holes_tab_visit_between_polls_is_caught_by_the_sampler(tm
             return Image.new("L", (4, 4), int(self.region_tones([region], self.setup_frame())[region].mean))
 
         def read_region_lines_cached(self, names, image, cache):
-            if self.slow and image is players:
-                self.slow = False
-                time.sleep(1.7)
+            if self.busy and image is players:
+                self.busy, self.frame = False, nines
+                deadline = time.monotonic() + 30
+                while e._holes_snap is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.frame = loading
             return super().read_region_lines_cached(names, image, cache)
 
     from commentator.league import League
 
     e = _engine_with(tmp_path, League({}))
-    p = await _run_setup_watch(e, None, until=lambda p: p is not None and p.aired, polls=400, screen=Timed())
+    p = await _run_setup_watch(e, None, until=lambda p: p is not None and p.aired, polls=3000, screen=Busy())
     assert p is not None and p.aired
     assert (p.round.start_hole, p.round.holes, p.round.holes_confirmed) == (1, 9, True)
 
