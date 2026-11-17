@@ -422,6 +422,96 @@ def test_the_round_is_posted_once_the_players_say_yes(tmp_path, monkeypatch):
     asyncio.run(go())
 
 
+def test_turning_squabbit_down_asks_if_its_a_league_round_and_no_makes_it_practice(tmp_path, monkeypatch):
+    import commentator.popup as popup
+    import commentator.squabbit as sq
+    from tests.test_board import _tee_shot
+
+    # Riviera 11-16: Kathy and Dylan posted week 1, then practised on week 2's course. They turned
+    # Squabbit down, and the round (and a restart of it, never asked) went in as their week 2.
+    asked = []
+
+    class Q:
+        def __init__(self, title, detail, yes, no, on_answer, where=None):
+            asked.append(self)
+            self.title, self.on_answer, self.closed = title, on_answer, False
+
+        def show(self):
+            return self
+
+        def close(self):
+            self.closed = True
+
+    fake = _client()
+    fake.tournaments = lambda lid: [{"_id": "T", "name": "Week 6 - Best Ball"}]
+    fake.player_rounds = lambda tid: [{"_id": "Ra", "userId": "a", "scorecardId": "S"},
+                                      {"_id": "Rb", "userId": "b", "scorecardId": "S"}]
+    fake.tournament_rounds = lambda tid: [{"_id": "TR", "startingHole": 10, "numHoles": 9}]
+    fake.league_by_invite = lambda code: {"_id": "L"}
+
+    class Client:
+        def __init__(self, *a):
+            pass
+
+        def __enter__(self):
+            return fake
+
+        def __exit__(self, *exc):
+            pass
+
+    monkeypatch.setattr(popup, "Question", Q)
+    monkeypatch.setattr(sq, "SquabbitClient", Client)
+
+    async def until(n):
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if len(asked) >= n:
+                return
+
+    async def go():
+        e = _engine(tmp_path, League(LEAGUE_DATA))
+        e.cfg.squabbit.enabled = True
+        e.cfg.source.type = "gspro"
+        e.cfg.db_path = str(tmp_path / "season.db")
+        before = _tee_shot(e, "Mike", 12, 4.0)        # the league round before it: stays league
+        r, _ = _league_round("Best Ball")
+        r.league, r.shot_floor = e.league, before
+        r.setup_mode, r.setup_groups = "alternate", [["Mike", "Sarah"]]   # GSPro's mode, read as it started
+        e.round = r
+        shot = _tee_shot(e, "Mike", 12, 3.0)
+        r.log_scores = {"Mike": {1: 5}}
+        e._squabbit_kick()
+        await until(1)
+        asked[0].on_answer(False)
+        await until(2)
+        assert asked[1].title == "Is this a league round?"
+        assert r.is_league and r.sides[0].strokes is not None
+        asked[1].on_answer(False)
+        await asyncio.sleep(0.05)
+        assert not r.is_league and r.schedule == {} and r.ctp_holes == [] and r.league_if_holes is None
+        # GSPro's alternate shot, not the schedule's best ball; no strokes.
+        assert r.format == "alternate" and r.no_scramble and all(side.strokes is None for side in r.sides)
+        league_of = dict(e.store.db.execute("SELECT id, is_league FROM shots"))
+        assert league_of == {before: 1, shot: 0}
+        assert fake.commits == []
+
+        # The round started again: Squabbit's no thanks is remembered, so only the league question is up.
+        e._sq = None
+        again, _ = _league_round("Best Ball")
+        again.league = e.league
+        e.round = again
+        e._squabbit_kick()
+        await until(3)
+        assert asked[2].title == "Is this a league round?" and len(asked) == 3
+        e._squabbit_round_end(again)                  # nobody answered before it ended: the box comes down
+        assert asked[2].closed
+        asked[2].on_answer(False)                     # (a click as it closed) changes nothing
+        await asyncio.sleep(0.05)
+        assert again.is_league and again.schedule
+
+    asyncio.run(go())
+
+
 def test_a_round_set_up_for_18_in_a_league_booking_is_asked_on_the_weeks_first_hole(tmp_path, monkeypatch):
     import commentator.popup as popup
     import commentator.squabbit as sq

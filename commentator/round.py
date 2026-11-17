@@ -187,6 +187,10 @@ class Round:
         self.teams_known = False
         # The setup screen's team colours (GSPro names), when they set a practice round's teams.
         self.colour_teams: list[list[str]] | None = None
+        # GSPro's game mode on the setup screen and who it put together (Engine._apply_setup_format):
+        # the setup read is gone once the round starts, and a league round made practice plays it again.
+        self.setup_mode: str | None = None
+        self.setup_groups: list[list[str]] | None = None
         self.ctp_holes = [int(h) for h in self.schedule.get("ctp_holes") or []]
         # Squabbit's card for this league week (`squabbit --cards`): its stroke index, tee rating and
         # slope, and the format's handicap settings are what the league's net scores use.
@@ -347,6 +351,18 @@ class Round:
         self.set_holes(holes, confirmed=True)
         if not self.course_card and not self.week_card:
             self._allocate_hole_strokes()   # (set_holes only re-allocates from a card)
+
+    def make_practice(self) -> None:
+        """A league round the players said is only practice: no league week, Squabbit card, strokes,
+        closest-to-the-pin holes or scheduled format, and never promoted back (make_league). The
+        format is GSPro's own again once the engine re-reads it (Engine._league_answer). Squabbit's par
+        stays where GSPro's course card doesn't say: it's the same course's."""
+        self.is_league, self.schedule, self.week_card = False, {}, None
+        self.league_if_holes, self.ctp_holes = None, []
+        self.format, self.format_warning, self.no_scramble, self.teams_known = None, None, False, False
+        self.sides = self._build_sides()
+        if self.course_card:
+            self.apply_course_card(self.course_card)
 
     def league_view(self, entry: dict, scheduled_format: str | None = None) -> "Round":
         """This practice round as league week `entry` would have it (its league teams and format), for

@@ -1045,6 +1045,14 @@ class Store:
         self.db.commit()
         return cur.rowcount
 
+    def mark_practice(self, after_id: int, record: str | None = None) -> int:
+        """A league round the players said is only practice (Engine._league_answer): its shots so far
+        (`record`'s; or every one since `after_id`, its shot floor) are practice shots."""
+        where, arg = self._scope(after_id, record)
+        cur = self.db.execute(f"UPDATE shots SET is_league = 0 WHERE {where} AND is_league = 1", arg)
+        self.db.commit()
+        return cur.rowcount
+
     def finish_of(self, shot_id: int) -> tuple[str | None, float | None]:
         """A shot's stored (lie_after, finish_yards)."""
         row = self.db.execute("SELECT lie_after, finish_yards FROM shots WHERE id = ?", (shot_id,)).fetchone()

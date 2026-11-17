@@ -8814,6 +8814,8 @@ class Engine:
                 s["question"].close()
             if s["ctp_q"] is not None:
                 s["ctp_q"][1].close()
+            if s.get("league_q") is not None:
+                s["league_q"].close()
             s["status"] = "off"
             self._sq = s = None
         if not r or r.ended or r.is_tournament or not self._squabbit_live_on():
@@ -8826,7 +8828,7 @@ class Engine:
                 return
             self._sq = {"round": r.id, "status": "finding", "targets": [], "question": None,
                         "dirty": False, "task": None, "last": None, "seen": {},
-                        "ctp_q": None, "ctp_queue": [], "ctp_asked": set(),
+                        "ctp_q": None, "ctp_queue": [], "ctp_asked": set(), "league_q": None,
                         "entry": entry, "offset": offset}
             self._bg(self._squabbit_offer(r, self._sq))
             return
@@ -8936,14 +8938,21 @@ class Engine:
             s["status"] = "off"
             return
         targets = []
+        declined = False
         for t, others in found:
             if others:
                 log.info("Squabbit live: %s's week %s card already has entries the booth didn't make (%s); "
                          "leaving it to them", t.team, week, "; ".join(others))
             elif live.answer(t) is not False:
                 targets.append(t)
+            else:
+                declined = True
         if s is not self._sq or r.ended or not targets:
             s["status"] = "off"
+            if declined and not targets:
+                # Said no thanks to this week's card already (an earlier start of this round, or a
+                # league round they're replaying for practice): is this one even league?
+                self._ask_league(r, s)
             return
         s["targets"] = targets
         if not r.is_league and not r.ctp_holes:
@@ -8974,6 +8983,8 @@ class Engine:
             self._sq_live.set_answer(t, yes)
         s["status"] = "on" if yes else "off"
         log.info("Squabbit live: %s", "yes, posting the round as it's played" if yes else "no thanks")
+        if not yes:
+            self._ask_league(self.round, s)
         if yes:
             r = self.round
             if r is not None and r.id == s["round"] and r.ended:
@@ -8981,6 +8992,67 @@ class Engine:
                 s["task"] = asyncio.create_task(self._squabbit_push(r, s))
             else:
                 self._squabbit_kick()
+
+    def _ask_league(self, r: Round | None, s: dict) -> None:
+        """Squabbit turned down for a league round: ask whether it's a league round at all (a team
+        practising on another week's course after their league round reads as that week's)."""
+        from .popup import Question
+
+        if (r is None or s is not self._sq or r.id != s["round"] or r.ended or not r.is_league
+                or s.get("league_q") is not None):
+            return
+        loop = asyncio.get_running_loop()
+        teams = " and ".join(sorted({side.team for side in r.sides if side.team})) or "this team"
+        s["league_q"] = Question(
+            "Is this a league round?",
+            f"The booth has this as {teams}'s week {s['entry'].get('week')} league round on "
+            f"{r.course or 'this course'}. If you're only practising, it's kept as practice: out of the "
+            "league's standings and league stats.",
+            "Yes, it's league", "No, practice",
+            on_answer=lambda yes: loop.call_soon_threadsafe(self._league_answer, s, yes),
+            where=self._popup_where(),
+        ).show()
+        log.info("Asking on screen whether round %s is a league round", r.id)
+
+    def _league_answer(self, s: dict, yes: bool) -> None:
+        if s is not self._sq or s.get("league_q") is None:
+            return
+        s["league_q"] = None
+        r = self.round
+        if yes or r is None or r.id != s["round"] or r.ended or not r.is_league:
+            log.info("Round %s: %s", s["round"], "a league round, the players say" if yes else
+                     "not a league round, but it's over (or changed) already: left as it is")
+            return
+        r.make_practice()
+        # GSPro's own format, as a practice round started this way would have: the setup screen's, then
+        # the scramble its log shows.
+        self._play_setup_format(r)
+        self._scramble_pairs = set()
+        self._sync_scramble()
+        n = self._restamp_practice(r)
+        log.info("Round %s: not a league round, the players say: practice from here (%d shots so far "
+                 "marked); format %s", r.id, n, FORMAT_NAMES.get(r.format or "", "not set"))
+        self._bg(self._restamp_practice_landed(r))
+
+    def _restamp_practice(self, r: Round) -> int:
+        """A round made practice: its shots so far filed under the format it is now (mark_practice).
+        How many were league shots."""
+        if r.shot_floor is None:
+            return 0
+        n = self.store.mark_practice(r.shot_floor, record=r.uuid)
+        anon = set(r.anonymous_players())
+        for player in self.store.players_after(r.shot_floor, record=r.uuid):
+            shared = not r.solo(r.side_for(player)) and (r.format == "scramble" or r.no_scramble
+                                                         or self.gspro.team_scores)
+            self.store.restamp_shots(r.shot_floor, player, fmt=r.player_format(player),
+                                     attributed=player not in anon, shared_ball=shared, record=r.uuid)
+        return n
+
+    async def _restamp_practice_landed(self, r: Round) -> None:
+        # A shot in flight as they answered took the league format before it landed: file it again.
+        await self._drain_shot_tasks(self.cfg.commentary.wrap_wait_seconds)
+        if not r.is_league:
+            self._restamp_practice(r)
 
     async def _squabbit_push(self, r: Round, s: dict) -> None:
         """Posts what's new until nothing is: a kick while a post is out just goes round again."""
@@ -9148,6 +9220,10 @@ class Engine:
         s = self._sq
         if not s or s["round"] != r.id:
             return
+        if s.get("league_q") is not None:
+            s["league_q"].close()
+            s["league_q"] = None
+            log.info("Round %s ended before anyone said whether it's league; left as league", r.id)
         if s["status"] == "asking":
             if s["question"] is not None:
                 s["question"].close()
@@ -10397,20 +10473,28 @@ class Engine:
     def _apply_setup_format(self, r: Round) -> None:
         """A scramble or alternate shot picked on the setup screen: the round is one from the start. Two
         players are one team; with more, the team colours on the PLAYERS tab say who's together (and a
-        scramble's log picks still have the last word)."""
-        if self._setup_format in ("shamble", "alternate"):
+        scramble's log picks still have the last word). Kept on the round: the setup screen's read is
+        gone once it starts, and a league round made practice plays it again (_play_setup_format)."""
+        names = [n for n in (r.slot_names or list(r.roster)) if n]
+        groups = ([names] if len(names) == 2 else self._setup_colour_teams(r)) \
+            if self._setup_format in ("scramble", "alternate") else None
+        r.setup_mode, r.setup_groups = self._setup_format, groups
+        self._play_setup_format(r)
+
+    def _play_setup_format(self, r: Round) -> None:
+        mode, groups = r.setup_mode, r.setup_groups
+        if mode in ("shamble", "alternate"):
             r.no_scramble = True   # GSPro copies balls between teammates here too: not a scramble
-        if self._setup_format not in ("scramble", "alternate"):
+        if mode not in ("scramble", "alternate"):
             return
         names = [n for n in (r.slot_names or list(r.roster)) if n]
-        groups = [names] if len(names) == 2 else self._setup_colour_teams(r)
         if len(names) > 2 and groups and not r.is_league:
             r.colour_teams = groups
-        if self._setup_format == "scramble" and (r.format != "scramble" or groups) \
+        if mode == "scramble" and (r.format != "scramble" or groups) \
                 and r.play_scramble(groups or []):
             log.info("Round %s: a scramble, from the setup screen%s", r.id,
                      f" (teams {groups})" if groups and len(names) > 2 else "")
-        if self._setup_format == "alternate" and (groups or r.is_league) and r.play_alternate(groups or []):
+        if mode == "alternate" and (groups or r.is_league) and r.play_alternate(groups or []):
             log.info("Round %s: alternate shot, from the setup screen%s", r.id,
                      f" (teams {groups})" if len(names) > 2 else "")
 
