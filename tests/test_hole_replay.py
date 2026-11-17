@@ -329,6 +329,19 @@ def test_a_scramble_draws_the_ball_gspro_picked_and_counts_each_partners_used_sh
     players = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}
     got = [(players[n]["used"], players[n]["used_gimmes"], players[n]["used_pens"]) for n in ("Dan", "Derek")]
     assert got == [(2, 1, 1), (1, 0, 0)] and sum(map(sum, got)) == 5
+    # The team's last stroke (Dan's alone, unpicked) missed: unfinished, it isn't credited yet; once the
+    # card says GSPro capped the hole at 4 (a pick-up), that ball carries it, though it isn't drawn on.
+    st.db.execute("DELETE FROM shots WHERE outcome = 'gimme' OR (player = 'Derek' AND shot_number = 4)")
+    st.db.execute("UPDATE shots SET picked = NULL, outcome = 'missed' WHERE player = 'Dan' AND shot_number = 4")
+    st.db.commit()
+    players = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}
+    assert (players["Dan"]["used"], players["Derek"]["used"]) == (1, 1)
+    st.db.execute("UPDATE rounds SET players = '[\"Dan\", \"Derek\"]', scores = '{\"1\": 4}'")
+    st.db.commit()
+    players = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}
+    got = [(players[n]["used"], players[n]["used_gimmes"], players[n]["used_pens"]) for n in ("Dan", "Derek")]
+    assert got == [(2, 0, 1), (1, 0, 0)] and sum(map(sum, got)) == 4
+    assert players["Dan"]["shots"][-1]["to"] is None
 
 
 def test_scramble_teams_sharing_a_tee_are_drawn_apart_and_a_penalty_gap_is_not_run_to_the_pin(tmp_path):

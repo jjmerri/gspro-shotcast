@@ -454,6 +454,7 @@ def _make_plan(db: sqlite3.Connection) -> tuple[dict[tuple[int, int], list], dic
         teams = {rnd: _scramble_teams(rows) for rnd, rows in by_round.items()}
         sides = _sides(db)
         cards = _cards(db)
+        player_cards = _player_cards(db)
         tracks = _tracks(db, None if len(want) == len(span) else {r["id"] for r in rows_})
         out: dict[int, dict[int | str, dict]] = {}
         for key, rows in groups.items():
@@ -466,8 +467,10 @@ def _make_plan(db: sqlite3.Connection) -> tuple[dict[tuple[int, int], list], dic
             ses = times[key[0]][0]
             until = next_start[key[0]]
             lat: dict[int, float] = {}
+            scored = {name: card[str(key[1])] for name, card in player_cards.get(key[0], {}).items()
+                      if isinstance(card.get(str(key[1])), int)}
             if (rp := _replay(rows, key[1], layouts, ses, until, teams[key[0]], sides.get(key[0]), tracks,
-                              lat)) is not None:
+                              lat, scored)) is not None:
                 if rp["tee"] and rp["pin"] and (m := _map_for(images, rp["course"], key[1], ses)):
                     rp["map"] = m
                 rp["ts"] = min(r["ts"] for r in rows)   # the hole's first shot, for the page's video link
@@ -497,6 +500,26 @@ def _cards(db: sqlite3.Connection) -> dict[tuple[int, str], dict[str, Any]]:
             continue
         if isinstance(card, dict) and rid in of_row and side:
             out[(of_row[rid], side.casefold())] = card
+    return out
+
+
+def _player_cards(db: sqlite3.Connection) -> dict[int, dict[str, dict[str, Any]]]:
+    """Each recorded side's card under each of its players' names (folded), by round as hole_replays
+    numbers it: a team's card is its partners'."""
+    cols = {r[1] for r in db.execute("PRAGMA table_info(rounds)")}
+    if not {"scores", "players"} <= cols:
+        return {}
+    _, of_row = stats_web.round_groups(db)
+    out: dict[int, dict[str, dict[str, Any]]] = {}
+    for rid, players, scores in db.execute("SELECT id, players, scores FROM rounds WHERE scores IS NOT NULL"):
+        try:
+            card, names = json.loads(scores), json.loads(players or "[]")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(card, dict) and isinstance(names, list) and rid in of_row:
+            for name in names:
+                if isinstance(name, str):
+                    out.setdefault(of_row[rid], {})[name.casefold()] = card
     return out
 
 
@@ -694,14 +717,17 @@ def _scramble_teams(rows: list[sqlite3.Row]) -> dict[str, str]:
 
 
 def _team_ends(played: list[sqlite3.Row], starts: dict[int, tuple | None], rows: list[sqlite3.Row],
-               pin: tuple | None, teams: dict[str, str]) -> tuple[dict[int, tuple], set[int], set[int]]:
+               pin: tuple | None, teams: dict[str, str],
+               scored: dict[str, int] | None = None) -> tuple[dict[int, tuple], set[int], set[int]]:
     """Where the picked ball of each shared-ball stroke went, by shot id, and the ids of the picked
     shots: in a scramble each partner hits from the team's ball, the team plays on from one of them,
     and the others' are lifted, so only the picked shot is drawn on. GSPro's log names the pick
     (shots.picked); a stroke recorded without it is worked out: the same partners' next stroke starts
     where it finished, so the picked one is the shot whose length fits that (the one whose resting lie
     is that stroke's, on a tie). The stroke that holed or was conceded runs to the pin, and so does
-    the one that ended the hole when the team's last stroke was a gimme. Also the ids of strokes the
+    the one that ended the hole when the team's last stroke was a gimme. A picked-up hole's last stroke
+    (none holed, and a partner's card, `scored`: player name folded -> the hole's strokes, ends the hole
+    on it) counts as used but isn't drawn on; an unfinished hole's isn't. Also the ids of strokes the
     team took again from the same spot after a penalty with nowhere to drop (out of bounds, lost):
     no ball was played on, and each is drawn as GSPro tracked it."""
     shared = [r for r in played if _shared(r) and r["shot_number"]]
@@ -761,6 +787,16 @@ def _team_ends(played: list[sqlite3.Row], starts: dict[int, tuple | None], rows:
             to, lie = (nxt[0]["start_x"], nxt[0]["start_z"]), nxt[0]["lie_before"]
         elif pin and names & finished and r["shot_number"] == last:
             to, lie = pin, None
+        elif (r["shot_number"] == last and not any(root(p) == root(r["player"]) for p in finished)
+              and any((scored or {}).get((o["player"] or "").casefold()) == last for o in mates)):
+            # A pick-up (GSPro capped the hole with no ball in): the team's last stroke is still one of
+            # its strokes, so a ball carries it, though it went nowhere drawn: the log's pick, else the
+            # one whose length best fits the pin.
+            group = [o for o in group if o["picked"] is None]
+            if logged is None and group:
+                used.add(min(group, key=lambda o: (abs(math.dist(st, pin) - t) if pin and (t := _travel_m(o))
+                                                   is not None else math.inf))["id"])
+            continue
         else:
             continue
         if logged is not None:
@@ -819,7 +855,8 @@ def _target(r, start: tuple[float, float], aim: tuple[float, float] | None, pin:
 def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sessions: set,
             until: float | None = None, teams: dict[str, str] | None = None,
             sides: dict[str, int] | None = None, tracks: dict[int, dict] | None = None,
-            finish: dict[int, float] | None = None) -> dict[str, Any] | None:
+            finish: dict[int, float] | None = None,
+            scored: dict[str, int] | None = None) -> dict[str, Any] | None:
     first = rows[0]
     tracks = tracks or {}
     this_round, any_round = _layout_for(layouts, first["course"], hole, sessions, first["ts"],
@@ -841,7 +878,7 @@ def _replay(rows: list[sqlite3.Row], hole: int, layouts: list[sqlite3.Row], sess
     starts = {r["id"]: ((tee if r["shot_number"] == 1 and r["id"] not in tracks else None)
                         or _xz(r["start_x"], r["start_z"])
                         or (tee if (r["shot_number"] or 0) <= 1 else None)) for r in played}
-    team_ends, team_used, team_again = _team_ends(played, starts, rows, pin, teams or {})
+    team_ends, team_used, team_again = _team_ends(played, starts, rows, pin, teams or {}, scored or {})
     alt_ends = _alternate_ends(played, starts, rows, pin, sides or {})
     players = []
     for name in dict.fromkeys(r["player"] or "unknown" for r in rows):
