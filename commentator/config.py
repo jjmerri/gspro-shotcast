@@ -205,7 +205,8 @@ class LLMConfig(BaseModel):
     temperature: float | None = 0.9
     # Reasoning effort, for providers that take it. Anthropic (not Haiku 4.5): low/medium/high, and
     # xhigh/max on Haiku 5.5 and the 5-series. OpenAI reasoning models (gpt-6): none/low/medium/high/
-    # xhigh, where "none" skips reasoning for the lowest latency. On Claude, "none" turns thinking off
+    # xhigh, where "none" skips reasoning for the lowest latency (gpt-6.2 rejects "none": "low" is its
+    # floor, and spends ~no reasoning tokens on these short replies). On Claude, "none" turns thinking off
     # (or falls back to "low" where a model can't). Higher effort trades latency for quality; for the
     # booth's short commentary the fast settings ("none" or "low") win.
     effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = "none"
@@ -240,10 +241,10 @@ class LLMSection(BaseModel):
     round: LLMConfig | None = None
     opener: LLMConfig | None = None
     closer: LLMConfig | None = None
-    # The booth's takes on the live chat (chat.enabled). Written ahead of the gap they air in, so a
-    # richer, slower model costs no latency: it has to follow who said what in a busy conversation.
+    # The booth's takes on the live chat (chat.enabled). Written ahead of the gap they air in, so it
+    # can take a richer model than `live`: it has to follow who said what in a busy conversation.
     chat: LLMConfig = Field(default_factory=lambda: LLMConfig(
-        provider="anthropic", model="claude-sonnet-5-5", effort="low", temperature=None, max_tokens=700))
+        provider="openai", model="gpt-6.2-sol", effort="low", temperature=None, max_tokens=700))
 
 
 # Commentary languages: code -> (name, Google voice locale). English keeps the configured voices'

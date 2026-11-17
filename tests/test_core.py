@@ -1149,6 +1149,9 @@ def test_usage_prices_openai_cached_tokens_and_summarizes_voice_cost_and_latency
     assert estimate_cost("gpt-6-luna", {"output_tokens": 1_000_000, "service_tier": "fast"}) == pytest.approx(1.0)
     assert estimate_cost("gpt-6-luna", {"output_tokens": 1_000_000}) == pytest.approx(1.0)
     assert estimate_cost("gpt-6-luna", {"output_tokens": 1_000_000, "service_tier": None}) == pytest.approx(0.5)
+    # gpt-6.2-sol (opener/closer/chat) is priced, not logged at $0.
+    assert estimate_cost("gpt-6.2-sol", {"input_tokens": 1_000_000, "cache_read_tokens": 500_000,
+                                         "output_tokens": 100_000, "service_tier": "default"}) == pytest.approx(2.05)
     # Cache reads: 0.05x input on Opus/Sonnet 5.5, the standard 0.1x elsewhere.
     assert estimate_cost("claude-opus-5-5", {"cache_read_tokens": 1_000_000}) == pytest.approx(0.20)
     assert estimate_cost("claude-haiku-4-5-20251001", {"cache_read_tokens": 1_000_000}) == pytest.approx(0.10)

@@ -38,20 +38,25 @@ llm:
   flight:  { provider: openai, model: gpt-6-luna, effort: none, service_tier: fast, max_tokens: 900 }
   # The hazard read from a screenshot of the hole (needs screen.send_images: true).
   preshot: { provider: anthropic, model: claude-haiku-5-5, effort: low, vision: true, max_tokens: 900 }
-  # The opener is raced against the course load, so it wants a fast model; the closer is fetched
-  # on the last hole with its latency hidden, so it can take the richest one.
-  opener:  { provider: anthropic, model: claude-sonnet-5-5, effort: low }
-  closer:  { provider: anthropic, model: claude-opus-5-5, effort: low, max_tokens: 2000 }
+  # The opener is raced against the course load, so it keeps the fast tier; the closer (also the
+  # news/trivia/score asides and the recap) is fetched ahead with its latency hidden, so it takes the
+  # half-price default tier. gpt-6.2 needs `effort: low` (it rejects `none`).
+  opener:  { provider: openai, model: gpt-6.2-sol, effort: low, service_tier: fast }
+  closer:  { provider: openai, model: gpt-6.2-sol, effort: low, service_tier: default, max_tokens: 2000 }
   # segment: { ... }   # between-hole segments; omit to reuse `live`
   # The booth's takes on the live chat (chat.enabled), written ahead of the gap: this is the default.
-  # chat:    { provider: anthropic, model: claude-sonnet-5-5, effort: low, max_tokens: 700 }
+  # chat:    { provider: openai, model: gpt-6.2-sol, effort: low, service_tier: fast, max_tokens: 700 }
 
   # --- Alternative: one key (Anthropic) -------------------------------------
   # Claude for every call, with Kokoro voices on the PC (set `tts: provider: kokoro` below), so
-  # .env needs only ANTHROPIC_API_KEY. Replace `live` and `flight` above with these; `effort: none`
-  # turns Claude's thinking off, which these short replies need to come back fast and whole.
+  # .env needs only ANTHROPIC_API_KEY. Replace `live`, `flight`, `opener` and `closer` above with these
+  # (and add `chat`); `effort: none` turns Claude's thinking off, which these short replies need to
+  # come back fast and whole.
   # live:   { provider: anthropic, model: claude-haiku-5-5, effort: none, max_tokens: 400 }
   # flight: { provider: anthropic, model: claude-haiku-5-5, effort: none, max_tokens: 900 }
+  # opener: { provider: anthropic, model: claude-sonnet-5-5, effort: low }
+  # closer: { provider: anthropic, model: claude-opus-5-5, effort: low, max_tokens: 2000 }
+  # chat:   { provider: anthropic, model: claude-sonnet-5-5, effort: low, max_tokens: 700 }
 
   # --- Local alternative: models on the PC itself (no per-token cost) --------
   # Install Ollama (https://ollama.com), `ollama pull qwen3:8b`, then replace the blocks above.

@@ -21,6 +21,7 @@ PRICES = {
 # already include the cached ones (Anthropic's input_tokens don't). Estimates; check current pricing.
 OPENAI_PRICES = {
     "gpt-6-luna": (0.10, 0.50, 0.01),
+    "gpt-6.2-sol": (2.0, 10.0, 0.10),
 }
 # OpenAI service tier -> price multiplier on all three rates. "fast" (formerly "priority") bills 2x.
 # A row without a service_tier predates the field; the config has always defaulted to "fast".
