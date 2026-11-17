@@ -4,6 +4,13 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.147
+
+### Booth
+- The round's opener, wrap-up, news asides and chat takes are written by a newer, quicker model that sticks to the facts better.
+- Players and guests can go by a nickname on air: introduced as First "Nickname" Last, then called by the nickname.
+- Fixed GSPro being misread when it draws black bars around its picture, which could turn a league round into practice.
+
 ## 0.1.146
 
 ### Booth
