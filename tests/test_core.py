@@ -6698,6 +6698,81 @@ def test_a_name_run_into_what_is_theirs_is_rejected(tmp_path):
     assert good
 
 
+_NICKNAMES = {"teams": [{"name": "Kyle and Mike", "players": [
+    {"name": "Mike Osborne", "gspro_name": "Ozzy", "nickname": "Ozzy"}, {"name": "Kyle Martin"}]}],
+    "nicknames": {"David": "Dave"}}
+
+
+def test_a_nickname_takes_the_first_names_place_in_a_prompt():
+    from commentator.league import OnAir
+
+    league = League(_NICKNAMES)
+    on_air = OnAir(league.nicknamed(), league.players + ["David"])
+    assert on_air.spoken("Playing: Mike Osborne. Mike's drive; Mike “Ozzy” Osborne again; David holes it.") == \
+        'Playing: Mike "Ozzy" Osborne. Ozzy\'s drive; Mike "Ozzy" Osborne again; Dave holes it.'
+    assert on_air.slip("Mike finds it.") == ("Mike", "Ozzy")
+    assert on_air.slip("Mike Osborne finds it.") == ("Mike", "Ozzy")
+    assert on_air.slip("Mike “Ozzy” Osborne tees off, and Ozzy finds it.") is None
+    # Another Mike playing, or someone who goes by Mike: only the full name is sure to be him.
+    shared = OnAir(league.nicknamed(), league.players + ["Mike"])
+    assert shared.spoken("Mike Osborne and Mike") == 'Mike "Ozzy" Osborne and Mike'
+    assert shared.slip("Mike finds it.") is None
+    both = OnAir({"Mike Osborne": "Ozzy", "Michael Smith": "Mike"}, [])
+    assert both.spoken("Michael Smith and Mike") == 'Michael "Mike" Smith and Mike'
+    assert both.slip('Michael "Mike" Smith leads, and Mike knows it.') is None
+    # A first name that's a word, or a commentator's name, is only the player capitalised and his own.
+    will = OnAir({"Will Smith": "Smitty", "Nigel Ross": "Rossi"}, ["Nigel"])
+    assert will.spoken("A good putt will leave Will a tap-in; Nigel calls it.") == \
+        "A good putt will leave Smitty a tap-in; Nigel calls it."
+    assert will.slip("This will drop.") is None
+    # ...and at a sentence's start, as likely the verb: "Will this drop?"
+    assert will.spoken("Will this drop? Over to Will.") == "Will this drop? Over to Smitty."
+    assert will.slip("Will this drop?") is None and will.slip("Over to Will.") == ("Will", "Smitty")
+    # The checks know players by name, so a nickname reads as the name to them.
+    assert on_air.named('Ozzy\'s two back; Mike "Ozzy" Osborne. Dave too.') == \
+        "Mike Osborne's two back; Mike Osborne. David too."
+    assert both.named("Mike leads") == "Mike leads"
+    scott = OnAir({"Scott Jones": "Scotty", "John Davis": "J.D."}, ["Dan Scott"])
+    assert scott.spoken("Dan Scott and Scott") == "Dan Scott and Scotty"
+    assert scott.slip("Dan Scott leads by two.") is None
+    assert scott.named("J.D. is two ahead.") == "John Davis is two ahead."
+    johnny = OnAir({"Scott Jones": "Scotty", "John Scott": "Johnny"}, [])
+    assert johnny.slip('John "Johnny" Scott looks ready.') is None
+    big = OnAir({"Mike Osborne": "Big Mike"}, [])
+    assert big.spoken("Mike Osborne, Mike and Big Mike") == 'Mike "Big Mike" Osborne, Big Mike and Big Mike'
+    assert big.slip("Big Mike looks ready.") is None and big.slip("Mike looks ready.") == ("Mike", "Big Mike")
+
+
+async def test_the_booth_is_prompted_with_a_nickname_and_held_to_it(tmp_path):
+    from commentator.models import Line
+
+    cfg = Config(log_dir=str(tmp_path))
+    llm = FakeLLM(cfg.llm.live)
+    e = Engine(cfg=cfg, league=League(_NICKNAMES), source=None, live_llm=llm, segment_llm=None,
+               speech=None, screen=None)
+    await e._complete("shot", llm, "Player: Mike Osborne. Mike's tee shot.", [])
+    assert llm.prompts == ['Player: Mike "Ozzy" Osborne. Ozzy\'s tee shot.']
+    good, problems = e._grounded([Line("pbp", "Mike looks ready for this one.")], "Tee shot.", mode="preshot")
+    assert not good and any("go by Ozzy" in p for p in problems)
+    good, _ = e._grounded([Line("pbp", "Ozzy looks ready for this one.")], "Tee shot.", mode="preshot")
+    assert good
+    standing = "Tee shot. On the card: Kyle Martin leads by 2 shots; Mike Osborne is 2 back."
+    good, problems = e._grounded([Line("pbp", "Ozzy is two ahead here.")], standing, mode="preshot")
+    assert not good and any("lead or deficit" in p for p in problems)
+    # A pre-written line skips grounding, so it's held to the nickname on its own.
+    assert e._build_reactions({"reaction_lines": {"holed": "Mike rolls it in.", "short": "Ozzy leaves it short."}},
+                              True) == {"short": "Ozzy leaves it short."}
+
+    class R:
+        roster = {"Mike Jones": None, "Ozzy": "Mike Osborne"}
+        ended = True
+
+    # A guest who shares his first name, in the round a closer (ended) or an early opener (`about`) is about.
+    assert e._on_air(about=R()).spoken("Mike Jones and Mike") == "Mike Jones and Mike"
+    e.round = R()
+    assert e._on_air().spoken("Mike Jones and Mike") == "Mike Jones and Mike"
+
+
 def test_a_great_finish_asks_for_excitement_and_names_the_score_without_a_stock_phrase():
     from commentator.engine import _great_shot_fact
 

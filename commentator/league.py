@@ -43,6 +43,10 @@ class League:
         self.week_cards: dict[int, dict[str, Any]] = {}
         # Our own handicap index per player (handicap_index), for whoever has no handicap here.
         self.own_indexes: dict[str, float] = {}
+        # Name (lowercase) -> what the booth calls them on air: a roster player's `nickname`, or the
+        # top-level `nicknames` map's, keyed by a guest's GSPro name (or a roster name).
+        self._nicknames: dict[str, str] = {str(k).casefold(): str(v).strip()
+                                           for k, v in (data.get("nicknames") or {}).items() if k and v and str(v).strip()}
         for team in data.get("teams", []):
             team_name = team.get("name", "")
             self.team_players[team_name] = []
@@ -53,11 +57,17 @@ class League:
                 self.player_info[name] = p
                 if p.get("squabbit_id"):
                     self.squabbit_ids[p["squabbit_id"]] = name
+                if (nick := str(p.get("nickname") or "").strip()):
+                    self._nicknames[name.casefold()] = nick
                 for alias in [name, *p.get("aliases", []), p.get("gspro_name")]:
                     if alias:
                         self._aliases[alias.lower()] = name
                         for key in _chat_keys(alias):
                             self._chat_names.setdefault(key, set()).add(name)
+
+    @property
+    def _roster_cf(self) -> set[str]:
+        return {p.casefold() for p in self.player_team}
 
     @classmethod
     def load(cls, path: str | Path | None) -> "League":
@@ -120,6 +130,22 @@ class League:
             if players:
                 return None   # shared by two players: either one
         return None
+
+    def nickname(self, name: str | None) -> str | None:
+        """What the booth calls this player (roster name) or guest (GSPro name) on air, if not their name."""
+        return self._nicknames.get(name.casefold()) if name else None
+
+    def nicknamed(self, guests: list[str] = ()) -> dict[str, str]:
+        """Every name with a nickname, spelled as the booth writes it (the roster's, a guest's as GSPro
+        has it) -> the nickname."""
+        out = {str(k): str(v).strip() for k, v in (self.data.get("nicknames") or {}).items()
+               if k and v and str(v).strip() and str(k).casefold() not in self._roster_cf}
+        out.update({p: n for p in self.players if (n := self.nickname(p))})
+        for g in guests:
+            if (n := self.nickname(g)) and g.casefold() not in self._roster_cf:
+                out = {k: v for k, v in out.items() if k.casefold() != g.casefold()}
+                out[g] = n
+        return out
 
     def names_for(self, player: str) -> list[str]:
         """Every name a player goes by: roster name, aliases and GSPro name."""
@@ -214,6 +240,119 @@ class League:
 def cards_path(league_file: str | Path | None) -> Path:
     """Where `squabbit --cards` saves the season's week cards: beside the league file."""
     return Path(league_file or "data/league.json").with_name("squabbit_cards.json")
+
+
+_OPEN_QUOTE, _CLOSE_QUOTE = "\"“'‘", "\"”'’"
+# First names that are also everyday words: at the start of a sentence "Will" is as likely the verb
+# ("Will this drop?") as the player, so only a mid-sentence one is taken for him.
+_WORD_NAMES = {
+    "will", "mark", "bill", "pat", "rob", "grant", "chase", "jack", "guy", "drew", "frank", "bob",
+    "rich", "ray", "max", "miles", "lane", "wade", "chip", "rusty", "sandy", "dean", "don", "earl",
+    "jay", "lee", "norm", "rocky", "gene", "may", "june", "april", "hope", "joy", "rose", "ruby",
+    "faith", "penny", "sky", "dawn", "art", "bud", "duke", "hunter", "carter", "page", "summer",
+}
+
+
+def _sentence_start(text: str, at: int) -> bool:
+    before = text[:at].rstrip(" \t(" + _OPEN_QUOTE)
+    return not before or before[-1] in ".!?:\n-"
+
+
+class OnAir:
+    """Players who go by a nickname, as the booth should say them. A prompt names a nicknamed player
+    in full as First "Nick" Last and by first name as the nickname, so the model never sees the first
+    name alone; a line that says it anyway is a slip. A first name someone else in `others` shares
+    is left alone: only the full name is sure to be them."""
+
+    def __init__(self, nicknamed: dict[str, str], others: list[str]) -> None:
+        """`nicknamed`: name as written -> nickname. `others`: everyone else the booth may name (the
+        roster, guests, the commentators). Names match as written, capitalised: "will" isn't Will."""
+        self._full: list[tuple[re.Pattern, str, str]] = []           # (pattern, nickname, name)
+        self._first: list[tuple[re.Pattern, str, bool, str]] = []    # (pattern, nickname, a word too, name)
+        self._named: list[tuple[re.Pattern, str]] = []         # the nickname back to the name
+        self._intros: list[re.Pattern] = []                    # First "Nick" Last, said right
+        # Someone else's full name is theirs, even with a nicknamed first name in it: Dan Scott's "Scott".
+        whole = sorted({o for o in others if len(o.split()) > 1 and o not in nicknamed}, key=len, reverse=True)
+        self._others = re.compile(r"\b(?:" + "|".join(r"\s+".join(map(re.escape, o.split())) for o in whole)
+                                  + r")\b") if whole else None
+        # A nickname is what it says, even with a first name in it: "Big Mike" isn't a slip for Mike.
+        nicks = sorted({n for n in nicknamed.values() if n.strip()}, key=len, reverse=True)
+        self._nicks = re.compile(r"(?<!\w)(?:" + "|".join(map(re.escape, nicks)) + r")(?!\w)") if nicks else None
+        # A first name that's also someone else's name or nickname could be either of them.
+        taken: dict[str, set[str]] = {}
+        for o in [*others, *nicknamed]:
+            if o and o.split():
+                taken.setdefault(o.split()[0].casefold(), set()).add(o.casefold())
+        for n in nicknamed.values():
+            for w in n.split():
+                taken.setdefault(w.casefold(), set()).add(f"\x00{n}")
+        for name, nick in nicknamed.items():
+            words = name.split()
+            if not words or nick.casefold() == words[0].casefold():
+                continue
+            quoted = rf"\s+[{_OPEN_QUOTE}]{re.escape(nick)}[{_CLOSE_QUOTE}]"
+            rest = r"\s+".join(map(re.escape, words[1:]))
+            self._intros.append(re.compile(rf"\b{re.escape(words[0])}{quoted}" + (rf"(?:\s+{rest}\b)?" if rest else "")))
+            if len(words) > 1:
+                self._full.append((re.compile(rf"\b({re.escape(words[0])})(?:{quoted})?\s+({rest})\b"), nick, name))
+            if not taken.get(words[0].casefold(), set()) - {name.casefold(), f"\x00{nick}"}:
+                self._first.append((re.compile(rf"\b{re.escape(words[0])}\b(?!{quoted})"), nick,
+                                    words[0].casefold() in _WORD_NAMES, name))
+            # The checks know players by name, so a line's nickname reads as the name to them - unless
+            # someone else answers to it too.
+            if not (taken.get(nick.split()[0].casefold(), set()) - {name.casefold(), f"\x00{nick}"}) \
+                    and sum(n == nick for n in nicknamed.values()) == 1:
+                self._named.append((re.compile(
+                    (rf"(?:\b{re.escape(words[0])}\s+)?" if len(words) > 1 else "")
+                    + rf"[{_OPEN_QUOTE}]?(?<!\w){re.escape(nick)}(?!\w)[{_CLOSE_QUOTE}]?(?!\w)"
+                    + (rf"(?:\s+{rest}\b)?" if len(words) > 1 else "")), name))
+
+    def __bool__(self) -> bool:
+        return bool(self._full or self._first)
+
+    def _firsts(self, pattern: re.Pattern, word: bool, text: str):
+        return (m for m in pattern.finditer(text) if not (word and _sentence_start(text, m.start())))
+
+    def spoken(self, text: str) -> str:
+        held: list[str] = []
+
+        def hold(s: str) -> str:
+            held.append(s)
+            return f"\x00{len(held) - 1}\x00"
+
+        for pattern, nick, _ in self._full:
+            text = pattern.sub(lambda m: hold(f'{m[1]} "{nick}" {m[2]}'), text)
+        for protect in (self._others, self._nicks):
+            if protect:
+                text = protect.sub(lambda m: hold(m[0]), text)
+        for pattern, nick, word, _ in self._first:
+            for m in reversed(list(self._firsts(pattern, word, text))):
+                text = text[:m.start()] + hold(nick) + text[m.end():]
+        return re.sub(r"\x00(\d+)\x00", lambda m: held[int(m[1])], text)
+
+    def slip(self, line: str) -> tuple[str, str] | None:
+        """(the first name said, the nickname) when a line calls a nicknamed player by first name."""
+        def mask(m: re.Match) -> str:
+            return "\x00" * len(m[0])
+
+        for protect in (*self._intros, self._others, self._nicks):
+            if protect:
+                line = protect.sub(mask, line)
+        for pattern, nick, word, name in self._first:
+            # Another nicknamed player's full name is his, whatever it shares with this one's first name.
+            theirs = line
+            for full, _, whose in self._full:
+                if whose != name:
+                    theirs = full.sub(mask, theirs)
+            if m := next(self._firsts(pattern, word, theirs), None):
+                return m[0], nick
+        return None
+
+    def named(self, line: str) -> str:
+        """The line with each nickname as the player's name, for checks that know players by name."""
+        for pattern, name in self._named:
+            line = pattern.sub(name, line)
+        return line
 
 
 _COURSE_FILLER = {"the", "golf", "club", "course", "cc", "country", "gc", "at", "and", "of", "dpc", "resort"}

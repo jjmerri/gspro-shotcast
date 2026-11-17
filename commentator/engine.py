@@ -1,5 +1,6 @@
 import asyncio
 import bisect
+import contextvars
 import datetime
 import hashlib
 import json
@@ -38,7 +39,7 @@ from .interest import (LEAGUE_BEST_DRIVE_LEVEL, REPLY_PUTT_LEVEL, SEASON_BEST_DR
                        approach_gimme_level, holed_out_level, holed_putt_level, holed_putt_score,
                        putt_to_par, score_shot,
                        short_game_gimme_level, stuffed_level)
-from .league import League, course_match_score
+from .league import League, OnAir, course_match_score
 from .llm import LLMClient
 from .minimap import JevMinimap, MinimapRead, same_map, snapshot as minimap_snapshot
 from .putt_read import REGION as PUTT_REGION, PuttRead, read_break
@@ -78,6 +79,8 @@ from .store import COUNTS_AS_ROUND_HOLES, Store, is_drive
 from .usage import UsageLog, audio_summary
 
 log = logging.getLogger(__name__)
+# Whose round a model call is about, when it isn't the live one (an early opener): see Engine._compose.
+_ON_AIR: contextvars.ContextVar["OnAir | None"] = contextvars.ContextVar("on_air", default=None)
 
 
 class HoleWatch:
@@ -924,7 +927,8 @@ class Engine:
         self._pen_called: dict[tuple[int, int], int] = {}    # of those, told on the shot's own call (4.0)
         # A player's personal note ("built this booth") is a callback, not a catchphrase: count the
         # aired lines that lean on it this round, and stop it after NOTE_USES_PER_ROUND.
-        names = {w for n in league.players for w in re.findall(r"[a-z]+", n.lower())}
+        names = {w for n in [*league.players, *league.nicknamed().values()] for w in re.findall(r"[a-z]+", n.lower())}
+        self._on_air_cache: tuple[tuple[str, ...], OnAir] | None = None
         self._note_keys = {p: k for p, info in league.player_info.items()
                            if (note := info.get("notes")) and (k := note_keywords(note, names))}
         self._note_uses: dict[str, int] = {}
@@ -3454,6 +3458,21 @@ class Engine:
         r = self.round
         return bool(r and not r.ended and player and player in r.anonymous_players())
 
+    def _on_air(self, about: Round | None = None) -> OnAir:
+        """Who goes by a nickname, against everyone the booth might name: the roster, the commentators,
+        and the guests of the round being talked about (`about`, an opener's before it's the live one)
+        and the live or just-ended one (a closer's)."""
+        guests: set[str] = set()
+        if self.league.nicknamed():
+            for r in (about, self.round):
+                guests |= {g for g, p in (getattr(r, "roster", None) or {}).items() if p is None}
+        key = tuple(sorted(guests))
+        if self._on_air_cache is None or self._on_air_cache[0] != key:
+            personas = [p.name for p in self.cfg.personas.values() if p.name]
+            self._on_air_cache = (key, OnAir(self.league.nicknamed(list(key)),
+                                             [*self.league.players, *key, *personas]))
+        return self._on_air_cache[1]
+
     def _display(self, player: str | None) -> str | None:
         """How the booth refers to whoever hit: the team, when the hitter can't be known."""
         if self._anonymous(player):
@@ -3866,7 +3885,8 @@ class Engine:
     def _missing_possessive(self, text: str) -> str | None:
         """A player's name run straight into what's theirs ("Josh round in 42" for "Josh's round")."""
         r = self.round
-        names = {n for s in getattr(r, "sides", None) or [] for p in s.players for n in (p, p.split()[0]) if n}
+        names = {n for s in getattr(r, "sides", None) or [] for p in s.players
+                 for n in (p, p.split()[0], self.league.nickname(p)) if n}
         for name in names:
             if m := re.search(rf"\b{re.escape(name)} {_OWNED}\b", text, re.I):
                 return m.group(0)
@@ -5988,7 +6008,7 @@ class Engine:
                 # The water tease names the water, which the unseen-scenery grounding would reject.
                 # It's only ever played when the GSPro log confirms the ball is wet, so the water is a
                 # fact, not a guess; guard only against an invented number (as the reactions do).
-                if line and not re.search(r"\d", line[0].text):
+                if line and not re.search(r"\d", line[0].text) and not self._on_air().slip(line[0].text):
                     plan.lines[outcome] = line[0].text
                 continue
             if line and _names_other_scenery(line[0].text, plan.named.get(outcome.removesuffix("_trouble"))
@@ -6082,6 +6102,9 @@ class Engine:
                 log.info("Dropped the pre-written gimme reaction (the hole is %s, not %s): %r",
                          " / ".join(x for x in (putt_for and putt_for[1], next_putts and f"a {next_putts}-putt") if x),
                          named, body)
+                continue
+            if called := self._on_air().slip(body):
+                log.info("Dropped the pre-written %s reaction (calls %s %s): %r", outcome, called[1], called[0], body)
                 continue
             if said := wrong_round_score(body, facts_text):
                 log.info("Dropped the pre-written %s reaction (round score %r isn't in the facts): %r", outcome, said, body)
@@ -10666,7 +10689,7 @@ class Engine:
         user, facts_text = self._opener_io(r, first=first, preround=True)
         lines = await self._compose("opener", self.opener_llm, user, facts_text, [], mode="round",
                                     system=self._system_league if is_league else self._system_practice,
-                                    max_words=self.cfg.commentary.opener_max_words)
+                                    max_words=self.cfg.commentary.opener_max_words, about=r)
         if not lines:
             log.info("Early opener for %r produced no lines; it'll be made at the tee", r.course)
             if gen is not None and gen == self._opener_gen:
@@ -11567,6 +11590,9 @@ class Engine:
         started = time.monotonic()
         try:
             no_cache = {"cache": False} if kind in UNCACHED_KINDS else {}
+            if (on_air := _ON_AIR.get()) is None:
+                on_air = self._on_air()
+            user = on_air.spoken(user)
             result = await llm.complete_json(system or self.system, user, schema or self.schema, images, **no_cache)
         except asyncio.CancelledError:
             # A deadline (the mid-flight call) or a newer shot gave up on it: still time it.
@@ -11589,17 +11615,20 @@ class Engine:
                            self._persona_names)
 
     def _grounded(
-        self, lines: list[Line], facts_text: str, mode: str = "result", seen_image: bool = False
+        self, lines: list[Line], facts_text: str, mode: str = "result", seen_image: bool = False,
+        on_air: OnAir | None = None,
     ) -> tuple[list[Line], list[str]]:
         good, problems = [], []
+        if on_air is None:
+            on_air = self._on_air()
         # Small models lift the prompt's example lines verbatim, and settle into catchphrases.
         # 5 words against the examples catches lifted lines; 6 against recent lines lets common
         # phrasing ("in the air with a") through while still stopping catchphrases.
         recent = [l.text for l in self.state.recent_lines]
         banned = self._banned_names() if mode not in ("round", "news") else []
         for line in lines:
-            check = check_line(line.text, facts_text, self.league_text, mode=mode, seen_image=seen_image,
-                               banned_names=banned)
+            check = check_line(on_air.named(line.text), facts_text, self.league_text, mode=mode,
+                               seen_image=seen_image, banned_names=banned)
             if (meta := meta_talk(line.text)):
                 check.ok = False
                 check.problems.append(f'"{meta}": talks about the booth\'s own rules or data, not the golf')
@@ -11607,6 +11636,9 @@ class Engine:
                     rf"\b{re.escape(own.name)}\b", line.text, re.I):
                 check.ok = False
                 check.problems.append(f"{own.name} says his own name; he'd only name the other commentator")
+            if (called := on_air.slip(line.text)):
+                check.ok = False
+                check.problems.append(f"calls a player by first name, but on air they go by {called[1]}: say {called[1]}")
             if (slip := self._missing_possessive(line.text)):
                 check.ok = False
                 check.problems.append(f'"{slip}" needs a possessive (\'s)')
@@ -11647,6 +11679,7 @@ class Engine:
     async def _compose(
         self, kind: str, llm: LLMClient, user: str, facts_text: str, images: list[bytes], mode: str = "result",
         system: str | None = None, must: str | None = None, max_words: int | None = None,
+        about: Round | None = None,
     ) -> list[Line]:
         """Generate, ground, and retry a line without airing it. `_speak` airs the result now; the
         pre-round opener holds it until the tee confirms the round. `system` forces a round variant.
@@ -11668,18 +11701,24 @@ class Engine:
                 out.append("the sign-off can't open with a greeting like \"good afternoon\": the show is ending")
             return out
 
-        lines, problems = self._grounded(await self._generate(kind, llm, user, images, system=system,
-                                                              max_words=max_words),
-                                         facts_text, mode, seen)
+        # The names as said about this round (an early opener's isn't the live one yet).
+        on_air = self._on_air(about)
+
+        async def generate(prompt: str) -> list[Line]:
+            token = _ON_AIR.set(on_air)
+            try:
+                return await self._generate(kind, llm, prompt, images, system=system, max_words=max_words)
+            finally:
+                _ON_AIR.reset(token)
+
+        lines, problems = self._grounded(await generate(user), facts_text, mode, seen, on_air)
         problems = problems + needs(lines)
         if problems:
             log.info("%s rejected, retrying: %s", kind, "; ".join(problems))
             # One retry with the reasons; a second failure means those lines just aren't said.
             self.stats["retries"] += 1
             retried, still_bad = self._grounded(
-                await self._generate(kind, llm, retry_prompt(user, problems), images, system=system,
-                                     max_words=max_words),
-                facts_text, mode, seen
+                await generate(retry_prompt(user, problems)), facts_text, mode, seen, on_air
             )
             if retried and not (needs(retried) and not needs(lines)):
                 lines = retried
@@ -11721,14 +11760,16 @@ class Engine:
             return
 
         def names(side) -> set[str]:
-            return {n.split()[0].casefold() for n in side.players if n} | {side.label.casefold()}
+            return ({n.split()[0].casefold() for n in side.players if n} | {side.label.casefold()}
+                    | {nick.casefold() for n in side.players if (nick := self.league.nickname(n))})
 
         ours = next((x for x in self.round.sides if x.key == side_key), None)
         if ours is None:
             return
         mine = names(ours)
         others = set().union(*(names(x) for x in self.round.sides if x.key != side_key),
-                             {n.split()[0].casefold() for n in self.league.player_info if n}) - mine
+                             {n.split()[0].casefold() for n in self.league.player_info if n},
+                             {nick.casefold() for nick in self.league.nicknamed().values()}) - mine
 
         def says(text: str, words: set[str]) -> bool:
             return any(re.search(rf"\b{re.escape(w)}\b", text, re.I) for w in words)

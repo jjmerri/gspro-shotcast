@@ -18,7 +18,7 @@ from .round import normalize_format
 
 KEEP_PLAYER = ("handicap", "notes", "gspro_name", "pronouns", "nickname")
 KEEP_TEAM = ("nickname", "notes")
-KEEP_LEAGUE = ("league_name", "storylines", "handicap_allowances", "notes", "pronunciations")
+KEEP_LEAGUE = ("league_name", "storylines", "handicap_allowances", "notes", "pronunciations", "nicknames")
 
 
 def ordinal(n: int) -> str:

@@ -16,6 +16,8 @@ to know (a file with just `league_name` and `storylines` is fine too). Fields th
 | `teams[].nickname` | What the booth calls the team, if set |
 | `teams[].players[].name` | The roster (required) |
 | `players[].gspro_name`, `players[].aliases` | Matching the name GSPro shows to a roster player |
+| `players[].nickname` | What the booth calls the player on air (`"Ozzy"` for Mike Osborne: introduced as Mike "Ozzy" Osborne, then Ozzy). Stats, Squabbit and popups keep the roster name |
+| `nicknames` | The same for guests, keyed by their GSPro name (`{"David": "Dave"}`) |
 | `players[].handicap` | 18-hole index, for net scores |
 | `pronunciations` | Respellings for the voice only (`{"Szabo": "Sah-bo"}`); plurals and possessives follow, and the transcript keeps the real spelling. Spell them for the booth's language |
 | `handicap_allowances` | Per-format allowance override (`{"scramble": [0.35, 0.15], ...}`) |
@@ -25,7 +27,7 @@ to know (a file with just `league_name` and `storylines` is fine too). Fields th
 
 A night counts as a league round only when the players are one registered team and tonight's
 course matches an open `schedule` entry; otherwise it's practice. Players not on the roster
-(guests, or everyone when there's no league file) are called by their GSPro name, and the early
+(guests, or everyone when there's no league file) are called by their GSPro name (or its `nicknames` entry), and the early
 opener over the course load includes them. `import-league` builds this file from one specific
 spreadsheet layout (Schedule, Teams, Results and Standings sheets); most leagues will write the
 file by hand.
