@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 
 from commentator import round_record as R
-from commentator.store import CLOSER_SECONDS, Store
+from commentator.store import CLOSER_SECONDS, FORMAT, Store
 
 T0 = 1_700_000_000.0
 
@@ -85,7 +85,7 @@ def test_the_migration_stores_the_rounds_the_time_rules_give(tmp_path):
     _season(path)
     Store(str(path), new_session=False).close()
     db = _raw(path)
-    assert db.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert db.execute("PRAGMA user_version").fetchone()[0] == FORMAT
     got = _grouping(db)
     assert all(u for rows in got.values() for u in rows.values())   # every row has a record
     groups = R.membership(db)
@@ -652,7 +652,7 @@ def test_an_opener_left_in_the_old_sessions_practice_moves_to_its_round(tmp_path
     got = {t: (u, sid) for t, u, sid in s.db.execute("SELECT text, record_uuid, session_id FROM lines")}
     assert got == {"Good morning": ("r", new), "Hole 1": ("r", new), "Earlier": ("lone", old), "Idle": ("talk", old)}
     assert {u for (u,) in s.db.execute("SELECT uuid FROM round_records")} == {"lone", "talk", "r"}
-    assert s.db.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert s.db.execute("PRAGMA user_version").fetchone()[0] == FORMAT
 
 
 def test_the_readers_read_the_stored_record_once_every_row_has_one(tmp_path):

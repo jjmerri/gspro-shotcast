@@ -264,9 +264,12 @@ class OnAir:
     name alone; a line that says it anyway is a slip. A first name someone else in `others` shares
     is left alone: only the full name is sure to be them."""
 
-    def __init__(self, nicknamed: dict[str, str], others: list[str]) -> None:
+    def __init__(self, nicknamed: dict[str, str], others: list[str], present: list[str] | None = None) -> None:
         """`nicknamed`: name as written -> nickname. `others`: everyone else the booth may name (the
-        roster, guests, the commentators). Names match as written, capitalised: "will" isn't Will."""
+        roster, guests, the commentators), whose full names are theirs. `present`: those of them a
+        first name alone could mean (the round's players and the commentators; default `others`): a
+        rostered Mike who isn't playing doesn't stop Mike being Ozzy. Names match as written,
+        capitalised: "will" isn't Will."""
         self._full: list[tuple[re.Pattern, str, str]] = []           # (pattern, nickname, name)
         self._first: list[tuple[re.Pattern, str, bool, str]] = []    # (pattern, nickname, a word too, name)
         self._named: list[tuple[re.Pattern, str]] = []         # the nickname back to the name
@@ -280,7 +283,7 @@ class OnAir:
         self._nicks = re.compile(r"(?<!\w)(?:" + "|".join(map(re.escape, nicks)) + r")(?!\w)") if nicks else None
         # A first name that's also someone else's name or nickname could be either of them.
         taken: dict[str, set[str]] = {}
-        for o in [*others, *nicknamed]:
+        for o in [*(others if present is None else present), *nicknamed]:
             if o and o.split():
                 taken.setdefault(o.split()[0].casefold(), set()).add(o.casefold())
         for n in nicknamed.values():

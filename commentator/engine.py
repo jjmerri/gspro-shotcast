@@ -1019,6 +1019,7 @@ class Engine:
         # when that read's frame was grabbed, so an older sample never undoes a newer read.
         self._setup_holes_read = False
         self._setup_holes_at = float("-inf")
+        self._setup_began_at = float("-inf")   # when this setup was first seen (a tab lit since: it could read them)
         # (when, (start, count)) of the latest HOLES-tab nines the quick sampler caught (see _sample_setup_tabs).
         self._holes_snap: tuple[float, tuple[int, int]] | None = None
         self._opener_prepared_holes: tuple[int, int] | None = None
@@ -1060,6 +1061,7 @@ class Engine:
         self._tiles_due: dict[int, tuple] = {}
         # (when, frame, tones) of the latest PLAYERS-tab frame the quick sampler caught (see _sample_players_tab).
         self._players_snap: tuple | None = None
+        self._setup_tab_lit_at = float("-inf")   # when a setup tab was last seen selected (either reader)
         self._idle_card_logged: dict | None = None
         self._scramble_pairs: set = set()   # the log's teammate pairs last applied to the round
         self._round_started_at = 0.0   # monotonic time the current round started
@@ -3461,16 +3463,21 @@ class Engine:
     def _on_air(self, about: Round | None = None) -> OnAir:
         """Who goes by a nickname, against everyone the booth might name: the roster, the commentators,
         and the guests of the round being talked about (`about`, an opener's before it's the live one)
-        and the live or just-ended one (a closer's)."""
+        and the live or just-ended one (a closer's). A first name is shared only with those rounds'
+        players and the commentators (with no round, the whole roster)."""
         guests: set[str] = set()
+        present: set[str] = set()
+        rounds = [r for r in (about, self.round) if getattr(r, "roster", None)]
         if self.league.nicknamed():
-            for r in (about, self.round):
-                guests |= {g for g, p in (getattr(r, "roster", None) or {}).items() if p is None}
-        key = tuple(sorted(guests))
+            for r in rounds:
+                guests |= {g for g, p in r.roster.items() if p is None}
+                present |= {p or g for g, p in r.roster.items()}
+        key = (tuple(sorted(guests)), tuple(sorted(present)))
         if self._on_air_cache is None or self._on_air_cache[0] != key:
             personas = [p.name for p in self.cfg.personas.values() if p.name]
-            self._on_air_cache = (key, OnAir(self.league.nicknamed(list(key)),
-                                             [*self.league.players, *key, *personas]))
+            self._on_air_cache = (key, OnAir(self.league.nicknamed(list(key[0])),
+                                             [*self.league.players, *key[0], *personas],
+                                             [*key[1], *personas] if rounds else None))
         return self._on_air_cache[1]
 
     def _display(self, player: str | None) -> str | None:
@@ -9292,6 +9299,8 @@ class Engine:
         `holes` (start, count) stands in for the setup screen's; () leaves the holes unchecked."""
         c = self.cfg.commentary
         setup_holes = self._setup_holes if holes is None else holes
+        if holes is None and setup_holes and not self._setup_holes_read:
+            setup_holes = self._unread_holes()
         today = time.strftime("%Y-%m-%d")
         if not self.league.players:
             return {}, "no league roster configured"
@@ -9334,6 +9343,22 @@ class Engine:
             if weeks and len(played) >= len(weeks):
                 return {}, f"{team} already played week {entry.get('week')}'s league round on {entry.get('course')}"
         return entry, None
+
+    def _unread_holes(self) -> tuple[int, int] | None:
+        """The holes to judge a setup by when its HOLES tab wasn't read. GSPro's log skipping hole 1
+        puts the round on the back nine (or wherever its first score was). Otherwise, GSPro's default
+        all 18 when the booth saw a setup tab selected (so it would have seen HOLES opened), and nothing
+        to check when it saw none: then it couldn't read the tabs at all (11-17: a back-nine league
+        round set aside as practice over an 18 the booth only assumed)."""
+        g = self.gspro
+        start = None
+        if self._log_rounds:
+            start = g.first_hole + 1 if g.first_hole is not None else 10 if g.starts_late else None
+        if start is not None and start != 1:
+            return start, 19 - start
+        if self._setup_tab_lit_at < self._setup_began_at:
+            return None
+        return self._setup_holes
 
     @staticmethod
     def _wrong_holes(entry: dict, start: int, count: int) -> str | None:
@@ -9523,8 +9548,11 @@ class Engine:
         start = entry.get("start_hole") or (self.hole_number if use_current_hole and self.hole_number_read else None)
         holes = entry.get("hole_count") or c.round_holes
         confirmed = bool(entry.get("hole_count"))
-        if self._setup_holes:   # what the setup screen showed beats the schedule's or config's guess
-            start, holes = self._setup_holes
+        # What the setup screen showed beats the schedule's or config's guess; for a league round, an
+        # unread HOLES tab only as far as it was judged by (_unread_holes).
+        setup = self._setup_holes if self._setup_holes_read or not is_league else self._unread_holes()
+        if setup:
+            start, holes = setup
             confirmed = self._setup_holes_read or entry.get("hole_count") == holes
         r = Round(league=self.league, gspro_players=names, course=course, scheduled_format=scheduled,
                   holes=holes, start_hole=start, schedule=entry,
@@ -10157,8 +10185,11 @@ class Engine:
                 return None
             at = time.monotonic()
             frame = self.screen.setup_frame()
-            return at, _nines_picked(self.screen.region_tones(
+            picked = _nines_picked(self.screen.region_tones(
                 ["setup_holes_tab", "setup_front9_box", "setup_back9_box"], frame))
+            if picked:   # (a tab read as selected only on a frame that showed the setup screen's)
+                self._setup_tab_lit_at = at
+            return at, picked
 
         def sample():
             if not lit("setup_players_tab", _PLAYERS_TAB_LIT):
@@ -10169,6 +10200,7 @@ class Engine:
             states = [_slot_state(tones[n]) for n in slots if n in tones]
             if not _tab_lit(tones["setup_players_tab"], _PLAYERS_TAB_LIT) or "list" in states or "filled" not in states:
                 return None
+            self._setup_tab_lit_at = at
             return at, frame, tones
 
         while True:
@@ -10230,6 +10262,8 @@ class Engine:
         frame_at = holes_since = float("-inf")   # this poll's grab; when this setup was first seen to begin
         seen_play: str | None = None   # the Play button's course on this poll (None off the setup screen)
         gate_read_at = float("-inf")   # when the Play button was last OCR'd away from the menus
+        setup_began = float("inf")     # when this setup was first seen (for the no-tab-lit check)
+        unlit_frame = None             # this setup's latest frame, kept should no tab ever read as selected
         while True:
             await asyncio.sleep(max(c.preround_poll_seconds, 0.2))
             self._sync_screen_ui()
@@ -10333,10 +10367,15 @@ class Engine:
                 if probed:
                     fresh = not seen_setup or play_course != course
                     if fresh:
+                        setup_began = grabbed_at
                         self._setup_tints = None   # another setup's team colours aren't this one's
                         # A HOLES sample since the last poll that didn't show this setup is this setup's;
                         # straight from another course's setup, one in between could be either's.
                         holes_since = frame_at if last_play and last_play != play_course else prev_at
+                    if any((t := tones.get(n)) is not None and _tab_lit(t, level) for n, level in (
+                            ("setup_players_tab", _PLAYERS_TAB_LIT), ("setup_holes_tab", _HOLES_TAB_LIT),
+                            ("setup_match_tab", _MATCH_TAB_LIT))):
+                        self._setup_tab_lit_at = grabbed_at   # (the Play button read: the setup screen's tabs)
                     self._read_setup_holes(tones, fresh=fresh, at=grabbed_at)
                     self._take_holes_sample(holes_since)
                     try:
@@ -10345,6 +10384,8 @@ class Engine:
                         log.exception("Setup game-mode read failed")
                     if (tab := tones.get("setup_holes_tab")) is not None and _tab_lit(tab, _HOLES_TAB_LIT):
                         self._keep_fixture_frame("setup_holes", frame)
+                    if not players_tab:
+                        unlit_frame = frame
                     if course and play_course == course and roster and c.preround:
                         self._maybe_front_load(play_course, roster, slot_order)   # recompose if the nines changed
                     states = {s: _slot_state(tones[s]) for s in slots if s in tones}
@@ -10418,6 +10459,13 @@ class Engine:
                            and course_match_score(load_title, course) >= 0.6)
             if loading and probed:
                 self._take_holes_sample(holes_since)   # nines changed in the moment before Play was pressed
+                if self._setup_tab_lit_at < setup_began and unlit_frame is not None:
+                    # Every tab click went unseen (11-17: GSPro's picture moved 17 px inside its window),
+                    # so the players and nines went unread. Keep what the setup looked like to see why.
+                    log.warning("Setup for %r: no setup tab ever read as selected, so its players and holes "
+                                "went unread; keeping the setup frame for a problem report", course)
+                    self._keep_fixture_frame("setup_unlit", unlit_frame)
+                setup_began, unlit_frame = float("inf"), None
             if loading and roster:
                 self._played_setup = (course, list(roster), list(slot_order), time.monotonic())
                 self._setup_seen = None
@@ -10487,11 +10535,12 @@ class Engine:
 
     def _apply_setup_holes(self, r: Round) -> None:
         """An opener composed before a late change on the HOLES tab: put its round on the nines picked."""
-        if self._setup_holes and (r.start_hole, r.holes) != self._setup_holes:
+        setup = self._setup_holes if self._setup_holes_read or not r.is_league else self._unread_holes()
+        if setup and (r.start_hole, r.holes) != setup:
             log.info("Round %s: the setup screen changed to %s holes from hole %s after the opener was made",
-                     r.id, self._setup_holes[1], self._setup_holes[0])
-            r.start_hole, r.start_hole_assumed = self._setup_holes[0], False
-            r.set_holes(self._setup_holes[1], confirmed=self._setup_holes_read)   # re-applies the course card for the new start
+                     r.id, setup[1], setup[0])
+            r.start_hole, r.start_hole_assumed = setup[0], False
+            r.set_holes(setup[1], confirmed=self._setup_holes_read)   # re-applies the course card for the new start
 
     def _apply_setup_format(self, r: Round) -> None:
         """A scramble or alternate shot picked on the setup screen: the round is one from the start. Two
@@ -10569,6 +10618,7 @@ class Engine:
         grabbed. Single holes left out aren't tracked."""
         if fresh:
             self._setup_holes, self._setup_holes_read, self._setup_holes_at = (1, 18), False, float("-inf")
+            self._setup_began_at = time.monotonic() if at is None else at
         picked = _nines_picked(tones)
         if picked is None:
             if fresh:

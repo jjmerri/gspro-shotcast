@@ -237,6 +237,50 @@ OTHER_SIDE = "@other_side"   # grab_regions' key for the other side's boxes (Scr
 
 FOLLOW_SECONDS = 3.0   # how often to look again for the monitor GSPro's window is on (and its view)
 MIN_VIEW = 200         # px: a smaller client area isn't GSPro's game view (mid-restore, say)
+# GSPro set to a resolution its window doesn't have (3450x2126 in a 3450x2160 borderless window, after
+# it fell back from exclusive fullscreen, 11-17) draws its picture centred between pure black bars,
+# and every box read off the window was 17 px low: the setup tabs' 10 px underline was missed
+# outright. The bars are looked for this often (and at once when the window changes), down a few
+# columns and across a few rows of the window.
+BARS_SECONDS = 15.0
+BARS_PROBES = (0.25, 0.5, 0.75)
+BAR_BLACK = 4          # a bar's pixels are pure black: no channel above this
+MAX_BAR = 0.15         # bars taking up more of the window than this aren't a letterbox
+
+
+def _black_run(px: list) -> int:
+    n = 0
+    for p in px:
+        if max(p) > BAR_BLACK:
+            break
+        n += 1
+    return n
+
+
+def _bar_pair(lines: list[list], size: int) -> tuple[int, int] | None:
+    """The black bars at the two ends of `lines` (pixel runs across the window, all `size` long): the
+    run every line starts and ends with, when both ends have one and they're about equal (GSPro centres
+    its picture); (0, 0) when they don't. None when a line is black end to end (a fade or a dark load
+    screen), which tells nothing."""
+    heads, tails = [], []
+    for px in lines:
+        head = _black_run(px)
+        if head >= len(px):
+            return None
+        heads.append(head)
+        tails.append(_black_run(px[::-1]))
+    a, b = min(heads), min(tails)
+    return (a, b) if a and b and abs(a - b) <= 1 and a + b <= size * MAX_BAR else (0, 0)
+
+
+def picture_bars(downs: list[list], acrosses: list[list], width: int, height: int
+                 ) -> tuple[int, int, int, int] | None:
+    """The black bars (left, top, right, bottom, px) around the picture GSPro draws in its window, from
+    pixel runs down the window (`downs`) and across it (`acrosses`); None when they can't tell."""
+    tb, lr = _bar_pair(downs, height), _bar_pair(acrosses, width)
+    if tb is None or lr is None:
+        return None
+    return lr[0], tb[0], lr[1], tb[1]
 
 
 def monitor_of(rect: tuple[int, int, int, int], monitors: list[dict]) -> int | None:
@@ -364,6 +408,10 @@ class Screen:
         self._monitor_lock = threading.Lock()
         self._view: tuple[int, int, int, int] | None = None   # GSPro's game view on the desktop (gspro_view)
         self._view_at = -1e9
+        self._client: tuple[int, int, int, int] | None = None   # GSPro's window's client area, bars and all
+        self._bars = (0, 0, 0, 0)   # black bars around GSPro's picture in that window (picture_bars)
+        self._bars_seen: tuple[int, int, int, int] | None = None   # the last look, awaiting a second
+        self._bars_at = -1e9
         self._masked_logged: dict[str, float] = {}   # who blanked a grab, and when that was last logged
 
     def _covered(self, box: tuple[int, int, int, int]) -> list[tuple[int, int, int, int]]:
@@ -475,8 +523,9 @@ class Screen:
     def gspro_view(self) -> tuple[int, int, int, int] | None:
         """GSPro's game view (left, top, right, bottom on the desktop): its window's client area, so a
         windowed GSPro of any size reads like a full screen, without its title bar pushing the HUD
-        down. Looked up every few seconds; kept while GSPro is minimized or the lookup fails; None
-        (read the whole monitor) when GSPro isn't up, off Windows, or without follow_window."""
+        down, less any black bars GSPro draws its picture between (_look_for_bars). Looked up every few
+        seconds; kept while GSPro is minimized or the lookup fails; None (read the whole monitor) when
+        GSPro isn't up, off Windows, or without follow_window."""
         if not self.cfg.follow_window:
             return None
         now = time.monotonic()
@@ -484,27 +533,78 @@ class Screen:
             if now - self._view_at < FOLLOW_SECONDS:
                 return self._view
             self._view_at = now
-            view = self._view
+            client = self._client
         try:
             from . import winshot
 
             info = winshot.window_info(self.cfg.window_title)
             if not info or not info.get("game"):
-                view = None
+                client = None
             elif not info["minimized"]:
                 c = info.get("client")
-                view = tuple(c) if c and c[2] - c[0] >= MIN_VIEW and c[3] - c[1] >= MIN_VIEW else None
+                client = tuple(c) if c and c[2] - c[0] >= MIN_VIEW and c[3] - c[1] >= MIN_VIEW else None
+                self._look_for_bars(client, now)
         except Exception:
             log.debug("Couldn't look up GSPro's window", exc_info=True)
         with self._monitor_lock:
+            if client is None:
+                self._bars, self._bars_seen = (0, 0, 0, 0), None
+            self._client = client
+            bl, bt, br, bb = self._bars
+            view = client and (client[0] + bl, client[1] + bt, client[2] - br, client[3] - bb)
             if view != self._view:
                 if view is None:
                     log.info("Reading the whole monitor (GSPro's game view isn't up)")
+                elif view != client:
+                    log.info("Reading GSPro's game view: %dx%d at (%d, %d), inside black bars in its %dx%d "
+                             "window (GSPro is set to a resolution its window isn't)", view[2] - view[0],
+                             view[3] - view[1], view[0], view[1], client[2] - client[0], client[3] - client[1])
                 else:
                     log.info("Reading GSPro's game view: %dx%d at (%d, %d)", view[2] - view[0],
                              view[3] - view[1], view[0], view[1])
             self._view = view
         return view
+
+    def _look_for_bars(self, client: tuple[int, int, int, int] | None, now: float) -> None:
+        """Look for black bars around GSPro's picture in its window (picture_bars), when the window
+        changed, a look is awaiting a second, or every BARS_SECONDS. Bars are taken (or dropped) only
+        when two looks in a row agree, so a dark scene can't pass for them; a look that can't tell
+        (a black screen, another window in front of GSPro's) changes nothing."""
+        if client is None:
+            return
+        if client != self._client:
+            with self._monitor_lock:
+                self._bars, self._bars_seen = (0, 0, 0, 0), None   # another window's bars aren't this one's
+        elif self._bars_seen == self._bars and now - self._bars_at < BARS_SECONDS:
+            return
+        self._bars_at = now
+        if self._covered(client):
+            return   # another window over GSPro's would be measured, not GSPro's picture
+        try:
+            import mss
+
+            l, t, r, b = client
+            w, h = r - l, b - t
+            with mss.mss() as sct:
+                def run(box: dict) -> list:
+                    raw = sct.grab(box)
+                    rgb = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX").tobytes()
+                    return [rgb[i:i + 3] for i in range(0, len(rgb), 3)]
+
+                downs = [run({"left": l + min(w - 1, round(w * f)), "top": t, "width": 1, "height": h})
+                         for f in BARS_PROBES]
+                acrosses = [run({"left": l, "top": t + min(h - 1, round(h * f)), "width": w, "height": 1})
+                            for f in BARS_PROBES]
+        except Exception:
+            log.debug("Couldn't look for black bars around GSPro's picture", exc_info=True)
+            return
+        seen = picture_bars(downs, acrosses, w, h)
+        if seen is None:
+            return
+        with self._monitor_lock:
+            if seen == self._bars_seen:
+                self._bars = seen
+            self._bars_seen = seen
 
     def _area(self, sct) -> dict:
         """What regions are fractions of, as an mss box: GSPro's game view, else the monitor."""
@@ -604,6 +704,9 @@ class Screen:
             log.warning("Couldn't capture the %r window; using the monitor grab", self.cfg.window_title)
         else:
             _capture_ok()
+            view, client = self.gspro_view(), self._client
+            if view and client and view != client and img.size == (client[2] - client[0], client[3] - client[1]):
+                img = img.crop((view[0] - client[0], view[1] - client[1], view[2] - client[0], view[3] - client[1]))
         return img
 
     def _grab_full(self) -> Image.Image:

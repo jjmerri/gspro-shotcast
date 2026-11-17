@@ -205,6 +205,73 @@ def test_a_windowed_gspro_is_read_from_its_game_view_not_the_monitor(monkeypatch
     assert Screen(ScreenConfig(follow_window=False)).gspro_view() is None
 
 
+def test_gspro_drawn_between_black_bars_is_read_from_its_picture(monkeypatch):
+    # 11-17: GSPro at 3450x2126 in its 3450x2160 borderless window, 17 px black bars above and below.
+    import sys
+    from types import SimpleNamespace
+
+    from commentator import screen as screen_mod, winshot
+
+    desktop = Image.new("RGB", (3450, 2160), (0, 0, 0))
+    desktop.paste((40, 90, 40), (0, 17, 3450, 2143))   # the picture
+    l, t, w, h = Screen(ScreenConfig()).region("player_box").to_pixels(3450, 2126)
+    desktop.paste((200, 10, 10), (l, 17 + t, l + w, 17 + t + h))
+
+    class Sct:
+        monitors = [None, {"left": 0, "top": 0, "width": 3450, "height": 2160}]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def grab(self, box):
+            img = desktop.crop((box["left"], box["top"], box["left"] + box["width"], box["top"] + box["height"]))
+            return SimpleNamespace(size=img.size, bgra=img.convert("RGBX").tobytes("raw", "BGRX"))
+
+    monkeypatch.setitem(sys.modules, "mss", SimpleNamespace(mss=Sct))
+    window = {"title": "GSPro", "rect": (0, 0, 3450, 2160), "client": (0, 0, 3450, 2160), "minimized": False,
+              "game": True}
+    monkeypatch.setattr(winshot, "window_info", lambda title: window)
+    clock = [100.0]
+    monkeypatch.setattr(screen_mod.time, "monotonic", lambda: clock[0])
+    s = Screen(ScreenConfig())
+    assert s.gspro_view() == (0, 0, 3450, 2160)   # one look isn't enough: a dark scene could pass for bars
+    clock[0] += 5
+    assert s.gspro_view() == (0, 17, 3450, 2143)
+    box = s.grab(s.region("player_box"))
+    assert box.size == (w, h) and box.getcolors() == [(w * h, (200, 10, 10))]
+    desktop.paste((0, 0, 0), (0, 0, 3450, 2160))   # a black screen (a fade) tells nothing: the bars stay
+    clock[0] += 20
+    assert s.gspro_view() == (0, 17, 3450, 2143)
+    desktop.paste((40, 90, 40), (0, 0, 3450, 2160))   # the resolution put right...
+    monkeypatch.setattr(winshot, "coverage", lambda title: ((0, 0, 3450, 2160), [((0, 0, 3450, 2160), 7)]))
+    monkeypatch.setattr(winshot, "exe_name", lambda pid: "chrome.exe")
+    for _ in range(3):   # ...but a browser in front is what the probes would see: nothing's measured
+        clock[0] += 20
+        assert s.gspro_view() == (0, 17, 3450, 2143)
+    monkeypatch.setattr(winshot, "coverage", lambda title: None)   # gone after two looks
+    clock[0] += 20
+    s.gspro_view()
+    clock[0] += 5
+    assert s.gspro_view() == (0, 0, 3450, 2160)
+
+
+def test_picture_bars_wants_matching_bars_at_both_ends():
+    from commentator.screen import picture_bars
+
+    def line(head, n, tail):
+        return [b"\0\0\0"] * head + [b"\x50\x50\x50"] * n + [b"\0\0\0"] * tail
+
+    across = [line(0, 100, 0)] * 3
+    assert picture_bars([line(7, 86, 7)] * 3, across, 100, 100) == (0, 7, 0, 7)
+    assert picture_bars([line(7, 93, 0)] * 3, across, 100, 100) == (0, 0, 0, 0)    # a dark sky, not a bar
+    assert picture_bars([line(7, 86, 7), line(2, 98, 0), line(7, 86, 7)], across, 100, 100) == (0, 0, 0, 0)
+    assert picture_bars([line(30, 40, 30)] * 3, across, 100, 100) == (0, 0, 0, 0)   # too much to be a letterbox
+    assert picture_bars([line(100, 0, 0)] + [line(7, 86, 7)] * 2, across, 100, 100) is None
+
+
 def test_the_on_air_badge_only_shows_while_gspro_is_up(monkeypatch):
     from commentator import winshot
     from commentator.config import OverlayConfig

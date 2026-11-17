@@ -153,6 +153,19 @@ def test_scorecard_drives_scores_and_stats():
     assert s.longest_drive == 150
 
 
+def test_a_best_ball_cards_team_score_row_isnt_a_player():
+    from commentator.hud import OcrItem, parse_scorecard
+
+    xs = [300 + 60 * i for i in range(3)]
+    items = [OcrItem("HOLE", 100, 10, 20), *(OcrItem(str(10 + i), x, 10, 20) for i, x in enumerate(xs)),
+             OcrItem("PAR", 100, 50, 20), *(OcrItem("4", x, 50, 20) for x in xs),
+             OcrItem("OZZY", 100, 90, 20), *(OcrItem("5", x, 90, 20) for x in xs),
+             OcrItem("KYLE MARTIN", 100, 130, 20), *(OcrItem("4", x, 130, 20) for x in xs),
+             OcrItem("TEAM  SCORE", 100, 170, 20), *(OcrItem("4", x, 170, 20) for x in xs)]
+    card = parse_scorecard(items)
+    assert set(card.scores) == {"OZZY", "KYLE MARTIN"} and card.scores["OZZY"] == {10: 5, 11: 5, 12: 5}
+
+
 def test_player_stats_computes_the_same_from_one_players_shots():
     # Per-player stats mirror side_stats. Here the card row keys ("MIKED") don't match the shot player
     # ("Mike"), so it falls back to the shot-based score, which equals the card, so the stats match.
@@ -3629,6 +3642,25 @@ async def test_setup_never_on_the_holes_tab_is_eighteen_holes(tmp_path):
     assert (r.start_hole, r.holes, r.start_hole_assumed) == (1, 18, False)
 
 
+async def test_a_setup_with_no_tab_ever_seen_selected_keeps_its_frame(tmp_path, monkeypatch, caplog):
+    # 11-17: GSPro's picture 17 px down its window, so every tab's underline was missed.
+    e = _engine(tmp_path)
+    kept = []
+    monkeypatch.setattr(e, "_keep_fixture_frame", lambda kind, frame=None: kept.append(kind))
+    course = "Beaver Creek"
+    unlit = _players_tab(course, {1: "Alex", 2: "Jamie"}, tab=_TAB_OFF)
+    reads = [unlit] * 3 + [{"load_course": course}] * 3
+    await _run_setup_watch(e, reads, until=lambda p: e.screen.i > len(reads), polls=1000)
+    assert "setup_unlit" in kept and "no setup tab ever read as selected" in caplog.text
+    kept.clear()
+    caplog.clear()
+    e2 = _engine(tmp_path / "lit")
+    monkeypatch.setattr(e2, "_keep_fixture_frame", lambda kind, frame=None: kept.append(kind))
+    reads = [_players_tab(course, {1: "Alex", 2: "Jamie"})] * 3 + [{"load_course": course}] * 3
+    await _run_setup_watch(e2, reads, until=lambda p: e2.screen.i > len(reads), polls=1000)
+    assert "setup_unlit" not in kept and "no setup tab ever read" not in caplog.text
+
+
 async def test_setup_front_nine_only(tmp_path):
     e, r = await _setup_then_load(tmp_path, [_holes_tab("Beaver Creek", True, False)] * 2)
     assert (r.start_hole, r.holes) == (1, 9)
@@ -4304,6 +4336,28 @@ def test_classify_round_calls_the_wrong_nines_practice(tmp_path):
     assert practice is None and entry_["week"] == 4
     e._setup_holes = None        # no setup screen seen (booth started at the tee): the schedule stands
     assert e._classify_round(["MikeD", "Sarah"], "Pebble Beach")[1] is None
+
+
+def test_classify_round_trusts_the_schedule_when_no_setup_tab_could_be_read(tmp_path, monkeypatch):
+    # 11-17: GSPro letterboxed in its window, so no tab ever read as selected and the HOLES tab's back
+    # nine went unread; the assumed 18 made Kyle and Mike's week 2 best ball a practice round.
+    e = _engine(tmp_path)
+    entry = next(w for w in e.league.data["schedule"] if w.get("week") == 4)
+    entry.update(start_hole=10, hole_count=9, holes="Back 9")
+    e._read_setup_holes({}, fresh=True, at=100.0)
+    assert e._setup_holes == (1, 18) and not e._setup_holes_read
+    entry_, practice = e._classify_round(["MikeD", "Sarah"], "Pebble Beach")
+    assert practice is None and entry_["week"] == 4
+    r = e._build_round(["MikeD", "Sarah"], "Pebble Beach", entry_, True)
+    assert (r.start_hole, r.holes) == (10, 9)
+    e._setup_tab_lit_at = 101.0   # a tab was seen: HOLES would have been, so the 18 is the setup's
+    assert e._classify_round(["MikeD", "Sarah"], "Pebble Beach")[1] == "set up for all 18, but week 4 is Back 9"
+    e._setup_tab_lit_at = float("-inf")
+    monkeypatch.setattr(type(e), "_log_rounds", property(lambda self: True))
+    e.gspro.first_hole = 9        # GSPro's log has the round starting on hole 10
+    assert e._unread_holes() == (10, 9)
+    e.gspro.first_hole = 0
+    assert e._unread_holes() is None
 
 
 def _match_tab(course, mode):

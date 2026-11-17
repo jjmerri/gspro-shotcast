@@ -6717,6 +6717,11 @@ def test_a_nickname_takes_the_first_names_place_in_a_prompt():
     shared = OnAir(league.nicknamed(), league.players + ["Mike"])
     assert shared.spoken("Mike Osborne and Mike") == 'Mike "Ozzy" Osborne and Mike'
     assert shared.slip("Mike finds it.") is None
+    # ...but only another Mike playing (or commentating): a rostered Mike at home doesn't share it,
+    # though his full name is still his own.
+    home = OnAir(league.nicknamed(), league.players + ["Mike Banester"], ["Mike Osborne", "Kyle Martin"])
+    assert home.spoken("Mike's drive; Mike Banester watches.") == "Ozzy's drive; Mike Banester watches."
+    assert home.slip("Mike finds it.") == ("Mike", "Ozzy")
     both = OnAir({"Mike Osborne": "Ozzy", "Michael Smith": "Mike"}, [])
     assert both.spoken("Michael Smith and Mike") == 'Michael "Mike" Smith and Mike'
     assert both.slip('Michael "Mike" Smith leads, and Mike knows it.') is None

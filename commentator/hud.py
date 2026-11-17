@@ -515,8 +515,10 @@ def parse_others(items: list[OcrItem]) -> list[OtherPlayer]:
     return out
 
 
+# Rows that aren't players. A best ball card adds a "Team Score" row under the players (11-17: it
+# was added to a round as a third player).
 SCORECARD_LABELS = {"hole", "par", "index", "hcp", "handicap", "distance", "yards", "out", "in", "total", "scorecard",
-                    "statistics"}
+                    "statistics", "team score", "team"}
 
 
 def parse_scorecard(items: list[OcrItem]) -> Scorecard | None:
@@ -551,7 +553,7 @@ def parse_scorecard(items: list[OcrItem]) -> Scorecard | None:
         name = label.text.strip()
         if label.x > first_x - spacing * 0.5 or ":" in name or not re.search(r"[A-Za-z]", name):
             continue
-        key = name.lower()
+        key = " ".join(name.lower().split())
         if key == "par":
             card.par = {h: v for h, v in values(row).items() if 3 <= v <= 6}
         elif key in ("index", "hcp", "handicap"):
