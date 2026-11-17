@@ -3206,7 +3206,7 @@ const ALERT_TOPICS = [["live", "We're live", "The booth goes on air with the str
                       ["record", "Records, eagles and aces", "A new league record, or an eagle or ace by anyone"],
                       ["recap", "League recap", "The week's recap video is up"]];
 // offered: the kinds the booth sends (none listed, from an older booth or stack: all of them).
-const app = { key: null, offered: null, install: null, topics: [], busy: false, error: "" };
+const app = { key: null, offered: null, install: null, topics: [], busy: false, error: "", changes: 0 };
 const offers = k => !app.offered || app.offered.includes(k);
 const hasLeague = () => offers("league");   // not a kind of alert: the booth saying it has a league
 // Without a league, the kinds that are about one say what's left of them.
@@ -3306,7 +3306,19 @@ async function postPush(sub, topics) {
                                     body: JSON.stringify({ subscription: sub.toJSON(), topics }) });
   const got = await r.json().catch(() => null);
   if (!r.ok) throw new Error((got || {}).error || `The site said ${r.status}.`);
-  return got && Array.isArray(got.topics) ? got.topics : topics;
+  const kept = got && Array.isArray(got.topics) ? got.topics : topics;
+  if (kept.length) store.set(SUB_AT, sub.endpoint);
+  else if (store.get(SUB_AT) === sub.endpoint) store.set(SUB_AT, null);
+  return kept;
+}
+
+// The subscription the server last heard about from this browser. One it has replaced (a new key, or
+// Firefox handing out a new one) is turned off there, or every alert would go to each of them.
+const SUB_AT = "shotcast.alerts.sub";
+async function dropOldSub(endpoint) {
+  const old = store.get(SUB_AT);
+  if (!old || old === endpoint) return;
+  await postPush({ endpoint: old, toJSON: () => ({ endpoint: old }) }, []);   // failed: kept, to try again
 }
 
 // The service worker's registration, active, and its push subscription (or null). Firefox can leave
@@ -3321,17 +3333,23 @@ async function pushReg() {
 
 // Asked for straight from the tap (before anything is awaited): Safari only asks the question then.
 function setAlerts(topics, asked = Promise.resolve(Notification.permission)) {
-  app.busy = true; app.error = "";
+  app.busy = true; app.error = ""; app.changes++;
   drawAppPanel();
   return (async () => {
     let [reg, sub] = await pushReg();
     if (!topics.length) {
+      await dropOldSub(sub && sub.endpoint);
       if (sub) { await postPush(sub, []); await sub.unsubscribe(); }
     } else {
       if (await asked !== "granted") throw new Error("Notifications weren't allowed for this site.");
       const key = keyBytes(app.key);
-      if (sub && !sameKey(sub.options.applicationServerKey, key)) { await sub.unsubscribe(); sub = null; }
+      if (sub && !sameKey(sub.options.applicationServerKey, key)) {
+        await dropOldSub(sub.endpoint);
+        store.set(SUB_AT, sub.endpoint);   // the server may have it: turned off there once it's replaced
+        await sub.unsubscribe(); sub = null;
+      }
       sub = sub || await within(reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }), 20000);
+      await dropOldSub(sub.endpoint);
       const kept = await postPush(sub, topics);
       // A site set up before a kind existed drops it: say so, and show what it kept.
       if (topics.some(t => !kept.includes(t))) {
@@ -3385,12 +3403,15 @@ async function initApp() {
   drawAppBtn();   // now, not after the check below: it may take a while, or never answer
   if (pushable()) {
     try {
-      const [, sub] = await pushReg();
-      if (!sub) { app.topics = []; store.set("shotcast.alerts", null); }
+      const changes = app.changes, [, sub] = await pushReg();
+      if (app.changes !== changes) {}   // the user changed them meanwhile: what they picked stands
+      else if (!sub) { app.topics = []; store.set("shotcast.alerts", null); dropOldSub(null).catch(() => {}); }
       else if (dropped && Notification.permission === "granted") setAlerts(app.topics);
-      // The booth's key changed (a new PC): subscribe again with the new one, as allowed already.
-      else if (app.topics.length && !sameKey(sub.options.applicationServerKey, keyBytes(app.key))
-               && Notification.permission === "granted") setAlerts(app.topics);
+      // The booth's key changed (a new PC): subscribe again with the new one, as allowed already. Or the
+      // server may not know this subscription (it's not the one last sent): send it again.
+      else if (app.topics.length && Notification.permission === "granted"
+               && (!sameKey(sub.options.applicationServerKey, keyBytes(app.key)) || store.get(SUB_AT) !== sub.endpoint))
+        setAlerts(app.topics);
     } catch (e) {}
     drawAppBtn();
   }

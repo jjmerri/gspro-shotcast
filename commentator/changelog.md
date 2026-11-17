@@ -4,6 +4,14 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.146
+
+### Booth
+- Turned Squabbit down? The booth now asks whether it's a league round, and "No, practice" keeps it out of the league.
+
+### Stats page
+- Phone alerts: turning alerts on or changing them no longer leaves extra copies of your phone signed up.
+
 ## 0.1.145
 
 ### Stats page

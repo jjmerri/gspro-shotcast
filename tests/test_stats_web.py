@@ -1346,6 +1346,71 @@ setTimeout(() => {
     assert got == {"straight": ["clips", False, True, 1], "heard": ["0.wav", "1.wav", "0.wav", "1.wav", "2.wav"], "done": "done", "again": True}
 
 
+def test_a_browser_that_hands_out_a_new_subscription_leaves_only_its_newest_on_the_server():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("needs node")
+    page = (Path(__file__).parent.parent / "commentator" / "stats_web.html").read_text(encoding="utf-8")
+    fns = "".join(re.search(pat, page, re.S).group(0) for pat in (
+        r"\nconst store = .*?\n.*?\n", r"\nconst PUSH_URL = .*?\n", r"\nconst ALERT_TOPICS = .*?\]\];\n",
+        r"\nconst offers = .*?\n", r"\nconst pushable = .*?\n", r"\nconst keyBytes = .*?\n", r"\nconst sameKey = .*?\n",
+        r"\nasync function postPush\(.*?\n}\n", r"\nconst SUB_AT = .*?\nasync function dropOldSub\(.*?\n}\n",
+        r"\nconst within = .*?\n.*?\n", r"\nasync function pushReg\(.*?\n}\n", r"\nfunction setAlerts\(.*?\n}\n",
+        r"\nasync function initApp\(.*?\n}\n"))
+    script = """
+const saved = {}, localStorage = { getItem: k => k in saved ? saved[k] : null, setItem: (k, v) => { saved[k] = v; },
+                                   removeItem: k => { delete saved[k]; } };
+const server = {}, KEY = "BBm6XXZx_ik9T4vgplIZkwQBKe9LounzxozFZQGTVegsTecCtK8KifzSGtIIZ9PXzVramYKNrkB7LRxZ-rfHq0s";
+async function fetch(url, opts) {
+  if (!opts || opts.method !== "POST") return { ok: true, json: async () => ({ key: KEY }) };
+  const { subscription, topics } = JSON.parse(opts.body);
+  if (topics.length) server[subscription.endpoint] = topics; else delete server[subscription.endpoint];
+  return { ok: true, json: async () => ({ topics }) };
+}
+// Like the Firefox the alerts came from: its subscription doesn't give back its key, so each one is replaced.
+let n = 0, current = null;
+const mint = () => { const s = { endpoint: "https://updates.push.services.mozilla.com/wpush/v2/" + ++n,
+  options: { applicationServerKey: null }, toJSON() { return { endpoint: this.endpoint }; },
+  unsubscribe: async () => { current = null; } }; return s; };
+const reg = { pushManager: { getSubscription: async () => current, subscribe: async () => (current = mint()) } };
+const navigator = { serviceWorker: { register: async () => reg, ready: Promise.resolve(reg) } };
+const window = { PushManager: 1, Notification: 1 }, Notification = { permission: "granted" };
+const app = { key: KEY, offered: null, topics: [], changes: 0 }, drawAppPanel = () => {}, drawAppBtn = () => {};
+""" + fns + """
+(async () => {
+  const seen = [];
+  const loaded = async () => {
+    await initApp();
+    for (let i = 0; i < 100 && !saved[SUB_AT]; i++) await new Promise(r => setTimeout(r, 1));
+  };
+  // Signed up before the page remembered what it sent: replaced on loading, and the old one turned off.
+  current = mint(); server[current.endpoint] = ["round"]; saved["shotcast.alerts"] = '["round"]';
+  await loaded();
+  seen.push(Object.entries(server));
+  for (const topics of [["round"], ["round", "record"], ["round", "record", "live"]]) {
+    await setAlerts(topics);
+    seen.push(Object.keys(server).length);
+  }
+  // Loaded again: the page sends its subscription, as the server may not have it.
+  for (const k in server) delete server[k];
+  delete saved[SUB_AT];
+  await loaded();
+  seen.push(Object.values(server));
+  await setAlerts([]);
+  seen.push(Object.keys(server).length, saved);
+  console.log(JSON.stringify(seen));
+  process.exit();   // past the page's timeouts
+})();"""
+    got = json.loads(subprocess.run([node], input=script, capture_output=True, encoding="utf-8", check=True).stdout)
+    assert got == [[["https://updates.push.services.mozilla.com/wpush/v2/2", ["round"]]], 1, 1, 1,
+                   [["round", "record", "live"]], 0, {}]
+
+
 def test_alerts_in_another_sites_iframe_point_to_the_page_in_its_own_tab():
     import re
     import shutil
