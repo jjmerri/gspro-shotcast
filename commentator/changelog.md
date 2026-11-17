@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.145
+
+### Stats page
+- A scramble round's "Shots used" now adds up to the score when a hole was picked up: the last stroke counts for whoever hit it.
+
 ## 0.1.144
 
 ### Booth
