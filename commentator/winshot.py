@@ -87,6 +87,10 @@ def window_info(substr: str) -> dict | None:
 # remember GSPro's window between grabs.
 WDA_EXCLUDEFROMCAPTURE = 0x11
 _FIND_SECONDS = 2.0
+# Windows' own see-through layers that span the whole screen yet draw nothing over the game: once the
+# touch keyboard (TabTip.exe) has been used to type a name, its handwriting canvas stays topmost over
+# everything, and counting it as a window in front blanked every read for hours.
+_SEE_THROUGH_CLASSES = frozenset({"ShellHandwritingCanvas"})
 if _AVAILABLE:
     _u = ctypes.WinDLL("user32")
     _dwm = ctypes.WinDLL("dwmapi")
@@ -100,7 +104,8 @@ if _AVAILABLE:
                                ("GetWindowDisplayAffinity", [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)],
                                 wintypes.BOOL),
                                ("GetWindowThreadProcessId", [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)],
-                                wintypes.DWORD)):
+                                wintypes.DWORD),
+                               ("GetClassNameW", [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int)):
         _f = getattr(_u, _name)
         _f.argtypes, _f.restype = _args, _res
     _dwm.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
@@ -126,6 +131,11 @@ def _pid(hwnd) -> int:
     pid = wintypes.DWORD()
     _u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     return pid.value
+
+
+def _class(hwnd) -> str:
+    buf = ctypes.create_unicode_buffer(256)
+    return buf.value if _u.GetClassNameW(hwnd, buf, 256) else ""
 
 
 def exe_name(pid: int) -> str:
@@ -185,7 +195,7 @@ def coverage(substr: str) -> tuple[tuple[int, int, int, int] | None, list[tuple[
             raise OSError("the window order ran out before GSPro's window")
         if h == hwnd:
             return bounds, front
-        if _shows(h) and (pid := _pid(h)) != own:
+        if _shows(h) and (pid := _pid(h)) != own and _class(h) not in _SEE_THROUGH_CLASSES:
             if (r := _frame(h)) is None:
                 raise OSError("couldn't tell where a window in front of GSPro is")
             front.append((r, pid))

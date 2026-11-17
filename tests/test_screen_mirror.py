@@ -368,3 +368,55 @@ def test_a_window_that_moves_during_a_grab_blacks_it_all_out(monkeypatch):
     monkeypatch.setattr(winshot, "coverage", lambda _t: 1 / 0)
     img = Screen(ScreenConfig())._sct_grab(sct, {"left": 0, "top": 0, "width": 10, "height": 10})
     assert img.getextrema() == ((0, 0),) * 3
+
+
+from commentator.winshot import coverage as _real_coverage   # before conftest stubs it out per test
+
+
+def test_the_touch_keyboards_handwriting_canvas_never_covers_gspro(monkeypatch):
+    """TabTip's full-screen, see-through canvas sat topmost over GSPro all afternoon and every read came
+    back blank; a real window in front (Chrome) is still masked."""
+    from commentator import winshot
+
+    # Front to back: the canvas, Chrome, GSPro.
+    windows = {1: ("ShellHandwritingCanvas", 10, (0, 0, 3840, 2160)), 2: ("Chrome_WidgetWin_1", 20, (0, 0, 50, 50)),
+               3: (winshot.UNITY_CLASS, 30, (0, 0, 3840, 2160))}
+    order = [1, 2, 3]
+
+    def put(ref, **kw):
+        for k, v in kw.items():
+            setattr(ref._obj, k, v)
+
+    class User32:
+        IsWindow = IsWindowVisible = staticmethod(lambda h: True)
+        IsIconic = staticmethod(lambda h: False)
+        GetWindowDisplayAffinity = staticmethod(lambda h, ref: 0)
+        GetTopWindow = staticmethod(lambda _h: order[0])
+        GetWindow = staticmethod(lambda h, _c: order[order.index(h) + 1] if h in order[:-1] else None)
+
+        @staticmethod
+        def GetWindowThreadProcessId(h, ref):
+            put(ref, value=windows[h][1])
+            return 1
+
+        @staticmethod
+        def GetClassNameW(h, buf, n):
+            buf.value = windows[h][0]
+            return len(buf.value)
+
+    class Dwm:
+        @staticmethod
+        def DwmGetWindowAttribute(h, attr, ref, size):
+            if attr == 9:
+                put(ref, **dict(zip(("left", "top", "right", "bottom"), windows[h][2])))
+            else:
+                put(ref, value=0)   # not cloaked
+            return 0
+
+    monkeypatch.setattr(winshot, "_AVAILABLE", True)
+    monkeypatch.setattr(winshot, "_u", User32, raising=False)
+    monkeypatch.setattr(winshot, "_user32", User32, raising=False)
+    monkeypatch.setattr(winshot, "_dwm", Dwm, raising=False)
+    monkeypatch.setattr(winshot, "find_window", lambda _t: 3)
+    monkeypatch.setattr(winshot, "_gspro", [None, 0.0])
+    assert _real_coverage("GSPro") == ((0, 0, 3840, 2160), [((0, 0, 50, 50), 20)])
