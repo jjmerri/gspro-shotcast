@@ -330,13 +330,16 @@ def test_a_beta_shot_comes_from_the_round_file_with_its_impact_snapshot(tmp_path
         (7.0, "in the air 0", []), (7.0, "in the air 1", [])]   # an empty snapshot is kept too
 
 
-def test_a_practice_shot_comes_from_lastshot_but_an_older_row_never_does(tmp_path, monkeypatch):
+def test_a_practice_shot_comes_from_lastshot_but_an_older_row_never_does(tmp_path, monkeypatch, caplog):
+    import logging
     from commentator.sources import gspro_files, gspro_log_shots
+    caplog.set_level(logging.INFO, logger="commentator.sources.gspro_log_shots")
     monkeypatch.setattr(gspro_log_shots, "LAST_SHOT_GRACE", 0.1)
     monkeypatch.setattr(gspro_files, "DB_SETTLE", 0.02)
     beta = _Beta(tmp_path)
     src = GsproLogShotSource(str(beta.log), poll_seconds=0.01)
-    wedge = dict(BallSpeed=52.3, VLA=38.8, HLA=-2.8, BackSpin=8245.0, SideSpin=-500.0, rawCarryLM=48.2, Carry=50.0)
+    wedge = dict(BallSpeed=52.3, VLA=38.8, HLA=-2.8, BackSpin=8245.0, SideSpin=-500.0, rawCarryLM=48.2, Carry=50.0,
+                 club="GW", ClubSpeed=68.5, Path=0.0, FaceToTarget=0.0)   # a GC3 with no face: 0, as is a square path
 
     def drive_lands():   # a round shot: its round file entry and its LastShot row
         beta.entries.append(_entry("drive", 135.51))
@@ -346,6 +349,10 @@ def test_a_practice_shot_comes_from_lastshot_but_an_older_row_never_does(tmp_pat
                           (0.3, lambda: beta.last_shot(**wedge))], 0.4)
     assert [e.shot.ball_speed for e in got] == [135.51, 52.3]   # the drive's row isn't the wedge's
     assert got[1].shot.carry == 48.2 and round(got[1].shot.total_spin) == 8260
+    # Each new row's club fields go in the booth log, zeros and all, with how long after the fire.
+    rows = [r.getMessage() for r in caplog.records if r.getMessage().startswith("GSPro LastShot ")]
+    assert len(rows) == 2 and "s after the last fire" in rows[1]
+    assert rows[1].endswith('{"club":"GW","ClubSpeed":68.5,"Path":0.0,"FaceToTarget":0.0}')
 
 
 def test_a_round_file_entry_goes_to_the_fire_before_it_not_a_later_one(tmp_path):

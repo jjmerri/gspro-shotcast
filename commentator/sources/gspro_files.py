@@ -60,6 +60,7 @@ def swings(entries: list[dict]) -> list[tuple[str, dict]]:
 class LastShot:
     id: int
     data: dict
+    saved: str | None = None   # its DateCreated, as GSPro wrote it (local time, to the second)
 
     def launch(self) -> dict | None:
         """An Open Connect BallData dict from the row (None without a ball speed)."""
@@ -172,7 +173,7 @@ class GsproFiles:
             # Read-only, and only after GSPro wrote it, so the read lock is brief and rare.
             con = sqlite3.connect(db.as_uri() + "?mode=ro", uri=True, timeout=0.2)
             try:
-                row = con.execute("select ID, ShotData from LastShot order by ID desc limit 1").fetchone()
+                row = con.execute("select ID, ShotData, DateCreated from LastShot order by ID desc limit 1").fetchone()
             finally:
                 con.close()
         except sqlite3.Error as e:
@@ -181,7 +182,7 @@ class GsproFiles:
         if not row:
             return True, None
         try:
-            return True, LastShot(int(row[0]), json.loads(row[1] or "{}"))
+            return True, LastShot(int(row[0]), json.loads(row[1] or "{}"), row[2])
         except (TypeError, ValueError):
             return True, None
 

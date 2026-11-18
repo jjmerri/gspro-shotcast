@@ -21,13 +21,15 @@ a full swing's fire takes the monitor's line read around it and airs at once, in
 monitor's numbers and carry (as a Uneekor shot does). GSPro's saved copy of it, with the same ball
 speed, is then dropped. A fire with no such line still waits for the files, as above.
 
-There is no club data here (club speed, path, face, attack angle, strike location): that comes from
+No club data is aired from here (club speed, path, face, attack angle, strike location): that comes from
 a launch monitor feed (connector_log or gspro_sniffer), or for some monitors from their own software's
 log (sources/club_feeds.py). Everything else the booth records comes from this log and the screen
-either way.
+either way. GSPro.db's LastShot row does carry the club numbers a monitor sent GSPro (zero where it
+sent none), but only once the ball stops; each new row's are logged, to learn what each monitor sends.
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -54,6 +56,9 @@ LAST_SHOT_GRACE = 1.5   # LastShot changed and currentRound.dat didn't by now: a
 # monitor logs every half second, and the log's line can be flushed late.
 EARLY_BEFORE = 2.0
 EARLY_AFTER = 1.5
+# LastShot's ball and flight fields; the rest of a row is the club's (and anything GSPro adds later).
+BALL_FIELDS = frozenset({"Carry", "TotalDistance", "BallSpeed", "BackSpin", "SideSpin", "HLA", "VLA", "Decent",
+                         "PeakHeight", "Offline", "rawSpinAxis", "rawCarryGame", "rawCarryLM", "DistanceToPin"})
 _PAIR = re.compile(r"\b(sp|el|az|ts|sa|cy|id)\s+(-?\d+(?:\.\d+)?)")
 
 
@@ -108,6 +113,7 @@ class GsproLogShotSource(ShotSource):
         self._buf = ""
         self.files = GsproFiles(folder_of(self.path))
         self._fired_at: float | None = None   # the last fire, until its Vars or mode line says which kind
+        self._last_fire: float | None = None  # the last fire, kept (to time GSPro.db's write after it)
         self._waiting: list[_Fire] = []       # fires waiting on the shot files, oldest first
         self._last_shot: tuple[float, LastShot] | None = None
         self._round_sp = 0.0   # ball speed of the last shot from the round file (its LastShot row may come later)
@@ -127,6 +133,7 @@ class GsproLogShotSource(ShotSource):
             log.info("GSPro is writing %s now; reading shots from it instead of %s", path, self.path)
             self.path, self._offset, self._buf = path, None, ""
             self._fired_at, self._waiting, self._last_shot, self._round_sp = None, [], None, 0.0
+            self._last_fire = None
             self._early = []
             self.files.move(folder_of(path))
 
@@ -164,6 +171,7 @@ class GsproLogShotSource(ShotSource):
         if new and self._early:
             new = [entry for entry in new if not self._saved_early(launch_of(entry)["sp"], "file entry")]
         if self.files.db_changed(now) and (row := self.files.new_last_shot()) is not None:
+            self._log_club_fields(row, time.monotonic())   # when it was read, not when the poll began
             if abs((row.data.get("BallSpeed") or 0) - self._round_sp) < 0.01:
                 pass   # a round shot's row, read after its round file entry aired it
             elif self._saved_early(row.data.get("BallSpeed") or 0, "LastShot row"):
@@ -213,6 +221,15 @@ class GsproLogShotSource(ShotSource):
         while self._waiting and now - self._waiting[0].at > FILES_WAIT:
             self._drop(1)
         return out
+
+    def _log_club_fields(self, row: LastShot, now: float) -> None:
+        """Every field of a LastShot row besides the ball's, zeros included, as GSPro saved them (km/h
+        in a metric round): which club numbers a monitor sends GSPro, and how long after the fire.
+        GSPro keeps only the latest row, so a shot overwritten before the booth reads it is gone."""
+        club = {k: v for k, v in row.data.items() if k not in BALL_FIELDS}
+        after = f"{now - self._last_fire:.1f}s after the last fire" if self._last_fire is not None else "no fire seen"
+        log.info("GSPro LastShot %s (%s, ball speed %s, %s): %s", row.id, row.saved or "no date",
+                 row.data.get("BallSpeed"), after, json.dumps(club, separators=(",", ":")))
 
     def _saved_early(self, sp: float, what: str) -> bool:
         """GSPro's own copy of a shot already aired from the monitor's log: used up, not aired again."""
@@ -290,7 +307,7 @@ class GsproLogShotSource(ShotSource):
             now = time.monotonic()
             for line in lines:
                 if _FIRED.search(line):
-                    self._fired_at = now
+                    self._fired_at = self._last_fire = now
                     continue
                 if (m := _MODE.search(line)) and self._fired_at is not None:
                     # No Vars line between the fire and its mode line: the numbers are in the files.
