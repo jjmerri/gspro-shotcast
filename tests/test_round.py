@@ -6715,3 +6715,14 @@ def test_round_end_keeps_gspros_round_file_and_only_warns_when_it_cant(tmp_path,
     with caplog.at_level(logging.WARNING):
         e._keep_round_file(r, time.time() - 5, ["MikeD"], [])
     assert "Keeping a copy of GSPro's round file failed" in caplog.text
+
+
+def test_gspros_wrong_hole_correction_is_noted_in_the_booth_log_once(tmp_path, caplog):
+    import logging
+
+    e = _engine(tmp_path)
+    e.gspro.wrong_holes.append((0, 4))
+    with caplog.at_level(logging.WARNING):
+        e._apply_log_corrections()
+        e._apply_log_corrections()
+    assert caplog.text.count("GSPro scored a shot by player 0 (unnamed) on the wrong hole and corrected it on hole 5") == 1

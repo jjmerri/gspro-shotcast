@@ -192,7 +192,7 @@ _CUP = re.compile(r"^Distance to cup = (\d+)mm")
 # edge on the way in. On the sim, holed putts crossed at 0-41 mm, then a gap, then 45-50 (about 1 in 11).
 LIP_IN_MM = 45.0
 _MARKERS = ("ActivePlayer:", "Logging tdist", "Selecting shot", "Using Material", "LaunchExt -", "Penalty Surface",
-            "Leaves", "Roll dist")
+            "Leaves", "Roll dist", "wrong hole")
 
 
 def _reworded(line: str) -> bool:
@@ -214,6 +214,10 @@ def parse_events(text: str) -> list[LogEvent]:
                 strokes = int(m.group(3))
                 out.append(LogEvent("state", player=int(m.group(1)), hole=int(m.group(2)),
                                      score=max(0, int(m.group(4)) + strokes), strokes=strokes))
+            elif line.startswith("Extra shot counted on wrong hole"):
+                # GSPro 4.x SetScore: a shot was scored against a hole other than the one in play. The
+                # shooter's score line follows with strokes forced to 0.
+                out.append(LogEvent("wrong_hole"))
             elif "Shot Fired" in line:
                 out.append(LogEvent("shot_fired"))
             elif m := _LAUNCH_MODE.match(line):
@@ -481,6 +485,11 @@ class GsproState:
     # stroke is conceded. Its player putted before a teammate, so that putt's own watch had already
     # settled as a miss by the time GSPro picked it. Append-only, like `pickups`.
     pick_gimmes: list = field(default_factory=list)
+    # GSPro 4.x's "Extra shot counted on wrong hole. Score corrected.": (index, hole) of the score line
+    # that follows it, its strokes forced to 0. Append-only, like `pickups`.
+    wrong_holes: list = field(default_factory=list)
+    _wrong_hole_next: bool = False
+    quiet: bool = False   # the backlog read at start-up: what happened then isn't news to warn of
     _since_select: bool = False
     _tdist_last: tuple | None = None   # (player, metres) of the last tdist line since a score or fire line
     _shot_score: dict = field(default_factory=dict)   # index -> the score line of the player's last shot
@@ -556,6 +565,9 @@ class GsproState:
             self.version = ev.display
         elif ev.kind == "unparsed":
             self.unparsed = (self.unparsed + [ev.display])[-5:]
+            self._wrong_hole_next = False   # its own score line, perhaps, reworded
+        elif ev.kind == "wrong_hole":
+            self._wrong_hole_next = True
         elif ev.kind == "altitude":
             self.altitude_ft = ev.altitude_ft
         elif ev.kind == "lm_connection":
@@ -653,6 +665,7 @@ class GsproState:
                 self._attach_lie(ev.player)
         elif ev.kind == "shot_fired":
             self.pick_screen_up = False
+            self._wrong_hole_next = False   # a correction's score line comes before any next shot
             self.shots_since_course += 1
             self.live_shots_since_course += 1
             self.fires += 1
@@ -812,7 +825,7 @@ class GsproState:
                   self._undo, self._picked, self.dropped_by, self.hole_scores, self._end_for,
                   self._score_shift):
             d.clear()
-        self._end_next = False
+        self._end_next = self._wrong_hole_next = False
         self.teammates.clear()
         self.selected = self.pick = None
         self.pick_screen_up = False
@@ -938,7 +951,18 @@ class GsproState:
                 a["pending"] = False   # a stroke played since: GSPro's own late penalty can't be this one
         undo = self._undo.pop(ev.player, None)
         undo = undo if undo and undo[0] == ev.hole else None
-        if prev is not None and ev.strokes is not None and ev.strokes < 0:
+        # Only the strokes-0 line GSPro logs with it: one that isn't is scored as usual.
+        wrong_hole, self._wrong_hole_next = self._wrong_hole_next and ev.strokes == 0, False
+        if wrong_hole:
+            # GSPro scored a shot on the wrong hole and left this one's score as it was (strokes 0). Not a
+            # mulligan's repeated line, a penalty or a replay: nothing changed on the hole.
+            self.wrong_holes.append(key)
+            if not self.quiet:
+                log.warning("GSPro corrected a shot counted on the wrong hole: player %s, hole %s, score left "
+                            "at %s", ev.player, ev.hole + 1, ev.score)
+            self._score[key] = max(prev or 0, ev.score)
+            shot = False
+        elif prev is not None and ev.strokes is not None and ev.strokes < 0:
             # Strokes taken back: a mulligan (the re-hit follows) or the first half of a pick-up (the
             # capped score follows with no shot). Which one is settled by the next score line.
             fires = self._fires_by.get(ev.player) or [None]
@@ -1270,7 +1294,7 @@ class GsproLogFollower:
             self._offset = 0
             self.primed = True
             return
-        past = GsproState()
+        past = GsproState(quiet=True)
         for ev in parse_events(text):
             past.apply(ev)
         s = self.state

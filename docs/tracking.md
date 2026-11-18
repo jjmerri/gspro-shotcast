@@ -165,7 +165,10 @@ mistaken for it); in alternate shot only GSPro's explicit take-back is used. The
 where the stroke it replaced did. In a scramble, a tee ball whose rest the screen never read still
 counts toward fairways hit: the team's second stroke is played from the drive it picked, so that
 stroke's lie says where it finished. A hole picked up is scored at GSPro's maximum, and
-those capped strokes are not counted as putts or penalties. Driving-range
+those capped strokes are not counted as putts or penalties. When GSPro 4.x corrects a shot it
+counted on the wrong hole ("Extra shot counted on wrong hole"), its strokes-0 score line isn't taken
+for a mulligan or a penalty; the booth log notes it and the round's health check flags it
+(`round.log_wrong_hole`) so the scores can be checked. Driving-range
 shots are not recorded, only rounds. Practice rounds are recorded and flagged
 (`is_league = 0`), and tournament rounds (played on the Simulator Golf Tour) also `is_tournament = 1`,
 so stats can be split league, tournament and practice. On an alternate-shot round the log

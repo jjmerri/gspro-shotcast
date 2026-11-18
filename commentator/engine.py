@@ -970,6 +970,7 @@ class Engine:
         self._totals_due = False   # a logged position or mulligan since totals were last worked out from the log
         self._pickups_seen = 0   # GSPro pick-ups (score capped at the maximum) already applied
         self._pick_gimmes_seen = 0   # scramble picks inside the gimme circle already credited
+        self._wrong_holes_seen = 0   # GSPro's wrong-hole score corrections already noted
         self._marks_due: list[tuple[str, int, int]] = []   # pickups/picks waiting on a shot's name
         self._void_watch: set[int] = set()   # shots whose result watch followed the wrong player's line
         self._before_result: dict[int, tuple] = {}   # a shot's finish as it was before its outcome landed
@@ -8103,6 +8104,12 @@ class Engine:
         while self._pickups_seen < len(g.pickups):
             self._marks_due.append(("pickup", *g.pickups[self._pickups_seen]))
             self._pickups_seen += 1
+        while self._wrong_holes_seen < len(g.wrong_holes):
+            idx, hole = g.wrong_holes[self._wrong_holes_seen]
+            self._wrong_holes_seen += 1
+            named = self._log_name(idx)
+            log.warning("GSPro scored a shot by player %s (%s) on the wrong hole and corrected it on hole %s: "
+                        "the round's scores there may be off", idx, named[1] if named else "unnamed", hole + 1)
         while self._pick_gimmes_seen < len(g.pick_gimmes):
             if r and r.format == "scramble":
                 self._marks_due.append(("pick", *g.pick_gimmes[self._pick_gimmes_seen]))

@@ -317,6 +317,10 @@ def evaluate_round(c: RoundCounters, fires: int, kinds: dict, unparsed: list[str
             found.append(("round.log_unparsed", "warn",
                           f"{new_unparsed} GSPro log line(s) changed wording, e.g. {unparsed[-1][:90]!r}"
                           if unparsed else f"{new_unparsed} GSPro log line(s) changed wording"))
+        if wrong := d_kinds.get("wrong_hole", 0):
+            # GSPro's own fix-up, so the round's scores may need a look against its scorecard.
+            found.append(("round.log_wrong_hole", "warn",
+                          f"GSPro corrected {wrong} shot(s) counted on the wrong hole: check the round's scores"))
     if screen:
         report.update(setups=c.setups, hud_missing={"shot": c.hud_shot_missing, "to_pin": c.hud_to_pin_missing,
                                                     "lie": c.hud_lie_missing},
