@@ -1002,6 +1002,7 @@ class Engine:
         self._totals_due = False   # a logged position or mulligan since totals were last worked out from the log
         self._pickups_seen = 0   # GSPro pick-ups (score capped at the maximum) already applied
         self._pick_gimmes_seen = 0   # scramble picks inside the gimme circle already credited
+        self._wrong_holes_seen = 0   # GSPro's wrong-hole score corrections already noted
         self._marks_due: list[tuple[str, int, int]] = []   # pickups/picks waiting on a shot's name
         self._void_watch: set[int] = set()   # shots whose result watch followed the wrong player's line
         self._before_result: dict[int, tuple] = {}   # a shot's finish as it was before its outcome landed
@@ -1568,9 +1569,11 @@ class Engine:
         # facts were built from an empty HUD and never reached the model. (Tradeoff: the model call no
         # longer overlaps this read; if the pre-shot line starts landing late, this is the place.)
         # "others" (the opponents' board) is needed on the tee (round-start, crediting the tee shot)
-        # and late in a league round, where _stakes_facts compares this player to the field.
+        # and late in a league round, where _stakes_facts compares this player to the field: only
+        # commentary uses that, so off air it isn't read.
         rr = self.round
-        late = (rr is not None and not rr.ended and rr.is_league and 1 <= rr.holes - rr.seq + 1 <= 4)
+        late = (self.commentary_on and rr is not None and not rr.ended and rr.is_league
+                and 1 <= rr.holes - rr.seq + 1 <= 4)
         join = self._should_join(hud)
         rest = ["lie", "player_name", "slope"] + (["others"] if hud.shot_number == 1 or late or join else [])
         tiles_for = stamp[0] if self._tiles_wanted == stamp[0] == self._shot_seq else None
@@ -5908,6 +5911,24 @@ class Engine:
         except OSError:
             log.exception("Keeping a copy of GSPro's log failed")
 
+    @staticmethod
+    def _round_file_names(r: Round) -> list[str]:
+        """The names GSPro's round file may give the round's players: as read on the tee, and every name
+        the league knows each one by (a misread on the tee still maps to the player)."""
+        return [*r.roster, *(n for p in r.roster.values() if p for n in r.league.names_for(p))]
+
+    def _keep_round_file(self, r: Round, started: float, players: list[str], speeds: list[float]) -> None:
+        """Copy GSPro's round file (currentRound.dat) into the booth's logs at round end, for looking into
+        a round later: GSPro overwrites it when the next round starts. `players` and `speeds` are taken
+        on the event loop (this runs in a thread)."""
+        try:
+            log_path = self._follower.path if self._follower else self.cfg.source.gspro_log
+            src = Path(gspro_files.folder_of(os.path.expanduser(log_path))) / gspro_files.ROUND_FILE
+            if out := round_file.archive(src, self.cfg.log_dir, started, r.course, players, speeds):
+                log.info("Round %s: kept GSPro's round file as %s", r.id, out.name)
+        except OSError as e:
+            log.warning("Keeping a copy of GSPro's round file failed: %s", e)
+
     def _settle_outcomes(self) -> None:
         """How the shots named after the fact ended, from GSPro's log: holed; a putt the player hit again
         on the same hole missed; their last stroke on a hole that ended without holing was conceded."""
@@ -8567,6 +8588,12 @@ class Engine:
         while self._pickups_seen < len(g.pickups):
             self._marks_due.append(("pickup", *g.pickups[self._pickups_seen]))
             self._pickups_seen += 1
+        while self._wrong_holes_seen < len(g.wrong_holes):
+            idx, hole = g.wrong_holes[self._wrong_holes_seen]
+            self._wrong_holes_seen += 1
+            named = self._log_name(idx)
+            log.warning("GSPro scored a shot by player %s (%s) on the wrong hole and corrected it on hole %s: "
+                        "the round's scores there may be off", idx, named[1] if named else "unnamed", hole + 1)
         while self._pick_gimmes_seen < len(g.pick_gimmes):
             if r and r.format == "scramble":
                 self._marks_due.append(("pick", *g.pick_gimmes[self._pick_gimmes_seen]))
@@ -12033,6 +12060,15 @@ class Engine:
         self._squabbit_round_end(r)
         if self._log_truth and self.cfg.source.type != "replay":
             self._bg(asyncio.to_thread(self._keep_gspro_log))
+        if self.cfg.source.type != "replay":
+            # From the record: a round continued after a booth restart started, and has strokes, from before it.
+            try:
+                started, speeds = self.store.round_start_and_speeds(r.uuid)
+            except sqlite3.Error:
+                log.exception("Reading round %s's record for its round file failed", r.id)
+                started, speeds = None, []
+            started = started or time.time() - (time.monotonic() - self._round_started_at)
+            self._bg(asyncio.to_thread(self._keep_round_file, r, started, self._round_file_names(r), speeds))
         self._round_ended_at = time.monotonic()
         # Asides can no longer play, so prep still in flight is money spent on nothing. The guards in
         # _prepare_news stop it starting another story; only a cancel stops the one already running

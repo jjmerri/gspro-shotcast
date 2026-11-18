@@ -491,6 +491,14 @@ class Store:
         self.db.commit()
         return u
 
+    def round_start_and_speeds(self, uuid: str) -> tuple[float | None, list[float]]:
+        """When a round's record started (a continued round's first start) and the ball speeds of its
+        strokes, mulligans aside: what tells GSPro's round file for it from another round's."""
+        row = self.db.execute("SELECT started_at FROM round_records WHERE uuid = ?", (uuid,)).fetchone()
+        speeds = [x for (x,) in self.db.execute("SELECT ball_speed FROM shots WHERE record_uuid = ? AND "
+                                                "ball_speed IS NOT NULL AND mulligan = 0", (uuid,))]
+        return (row["started_at"] if row else None), speeds
+
     def round_players(self, uuid: str, players: dict[str, str | None], seats: list[str] | None = None) -> None:
         """A round's players changed mid-round: its slots follow (see round_record.Live.sync)."""
         self.records.sync(uuid, players, seats)

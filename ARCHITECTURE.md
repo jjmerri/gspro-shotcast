@@ -113,6 +113,8 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
   the stored shots by hole, stroke number, ball speed and player, it replaces the booth's start,
   carry, total (`total_from_log = 2`), lies (a finer HUD lie stays) and finish, and the setters
   that read those later leave it be.
+  At round end `archive` copies the file to `log_dir/round-files/<start>-<course>.dat` (the
+  newest 200 kept; a problem report takes the newest few), as GSPro overwrites it next round.
 - **`log_backfill.py`** `backfill-log`: matches a saved GSPro log's shots to stored ones in order
   and fills their positions, aims and the hole layouts.
 - **`stats_site.py`** builds the stats page as a static site (per-context summary JSON plus a small

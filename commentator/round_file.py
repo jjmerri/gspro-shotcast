@@ -23,11 +23,21 @@ number is moved (Engine._refile_from_round_file). The store applies it to the re
 """
 from __future__ import annotations
 
+import json
+import logging
 import math
+import os
+import re
+import threading
+import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .sources.gspro_files import HOLED_COPY, launch_of, swings
 from .sources.gspro_log import M_TO_YD
+
+log = logging.getLogger(__name__)
 
 # StartingSurface / EndingSurface codes seen (3.59.11). Others are left alone.
 SURFACES = {18: "tee", 1: "rough", 2: "fairway", 3: "deep rough", 4: "cart path", 5: "green", 11: "sand"}
@@ -43,6 +53,14 @@ PENALTY_RESULTS = (2, 3)   # ShotResult of a penalty's own entry: water, out of 
 PENALTY_KINDS = {2: "water", 3: "out of bounds"}
 HOLED = 7                  # HoleResult once the ball is in (or conceded)
 PATH_STEP_M = 0.5          # points closer than this to the last one kept are dropped
+ARCHIVE_DIR = "round-files"   # under log_dir: a copy of the file from each round's end (see archive)
+KEEP_ARCHIVES = 200
+# A file last written this long before the round started is an earlier round's, left over (the round
+# ended before any stroke was written); a little slack for the strokes adopted from before the start.
+ARCHIVE_STALE_S = 600.0
+ARCHIVE_READ_TRIES = 3     # reads of a file GSPro may be mid-way through rewriting
+ARCHIVE_READ_WAIT_S = 0.5
+_archiving = threading.Lock()   # two round ends at once mustn't pick the same name
 
 
 Point = tuple[float, float, float]
@@ -197,3 +215,81 @@ def names_fit(gspro_name: str, player: str | None) -> bool:
     """Whether GSPro's short name ("Josh") is the shots' player ("Josh Merritt")."""
     g, p = gspro_name.casefold().strip(), (player or "").casefold().strip()
     return bool(g and p) and (p == g or p.split()[0] == g or g.split()[0] == p.split()[0])
+
+
+def _of_round(entries: list, players: Iterable[str], speeds: list[float]) -> bool:
+    """Whether the file's strokes are the round's: one of its players hit them and, when the booth
+    recorded ball speeds, at least half of those are among them. A next round noticed late (even the
+    same player's) has few strokes, mostly unlike the round's."""
+    names = {p.casefold() for p in players}
+    if not any(isinstance(e, dict) and str(e.get("PlayerName") or "").casefold() in names for e in entries):
+        return False
+    got = [v["sp"] for _, e in swings([e for e in entries if isinstance(e, dict)]) if (v := launch_of(e))]
+    # Each swing stands for one shot at most. Both in order, a shot takes the lowest swing still within
+    # reach (the reach grows with speed), which matches as many as any pairing can.
+    got, want, i, hits = sorted(got), sorted(speeds), 0, 0
+    for sp in want:
+        while i < len(got) and got[i] + max(0.6, 0.01 * got[i]) < sp:
+            i += 1
+        if i < len(got) and got[i] - max(0.6, 0.01 * got[i]) <= sp:
+            i, hits = i + 1, hits + 1
+    return not speeds or hits * 2 >= len(speeds)
+
+
+def archive(src: Path, log_dir: str | Path, started: float, course: str | None, players: Iterable[str],
+            speeds: Iterable[float] = (), keep: int = KEEP_ARCHIVES) -> Path | None:
+    """Copy the round's file into log_dir/ARCHIVE_DIR as <start>-<course>.dat (the next round overwrites
+    it), keeping the newest `keep`. `players` are the round's GSPro names, `speeds` the ball speeds the
+    booth recorded in it. None when there's no file of this round's to copy: missing, written before it
+    started (well before, when there are speeds to match), unreadable (mid-write) after a few tries, or another round's (see _of_round)."""
+    speeds = list(speeds)
+    for attempt in range(ARCHIVE_READ_TRIES):
+        if attempt:
+            time.sleep(ARCHIVE_READ_WAIT_S)
+        try:
+            st = src.stat()
+            data = src.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError as e:   # GSPro holding it while it writes (a sharing violation on Windows)
+            why = e
+            continue
+        # A while before the start can still be this round's (its strokes seen before the booth started
+        # it), but only strokes the booth recorded can show that: without any, the last round's file.
+        if st.st_mtime < started - (ARCHIVE_STALE_S if speeds else 0):
+            return None
+        try:
+            entries = json.loads(data.decode("utf-8-sig"))
+            break
+        except ValueError as e:
+            why = e
+    else:
+        log.warning("GSPro's round file stayed unreadable (mid-write?), not kept: %s", why)
+        return None
+    if not isinstance(entries, list) or not _of_round(entries, players, speeds):
+        return None
+    folder = Path(log_dir) / ARCHIVE_DIR
+    stem = time.strftime("%Y-%m-%d-%H%M%S", time.localtime(started))
+    if slug := re.sub(r"[^A-Za-z0-9]+", "-", course or "").strip("-")[:60]:
+        stem += f"-{slug}"
+    with _archiving:
+        folder.mkdir(parents=True, exist_ok=True)
+        # Two rounds started in the same second on the same course: "~" sorts the later one after.
+        out, n = folder / f"{stem}.dat", 2
+        while out.exists():
+            out, n = folder / f"{stem}~{n}.dat", n + 1
+        # Written aside and moved in whole, so a report made meanwhile (or a full disk) never sees half of it.
+        part = out.with_suffix(".part")
+        try:
+            part.write_bytes(data)
+            os.replace(part, out)
+        finally:
+            part.unlink(missing_ok=True)
+        for old in newest_archives(log_dir)[keep:]:
+            old.unlink(missing_ok=True)
+    return out
+
+
+def newest_archives(log_dir: str | Path) -> list[Path]:
+    """The round files archive kept, newest first: named by when each round started."""
+    return sorted((Path(log_dir) / ARCHIVE_DIR).glob("*.dat"), reverse=True)

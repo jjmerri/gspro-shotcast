@@ -151,7 +151,7 @@ drop included), the carry, the total, the lies and where it finished come from G
 rather than the screen, and the booth's later reads leave them be. A lie the screen reads finer
 than the file's (semi rough, fringe, pine straw) is kept. A scramble's finish stays the booth's, for
 the ball the team picked. Offline isn't in the file. The file starts over each round, so earlier
-rounds keep what the booth read. Strokes the booth recorded without a name (no round started, so
+rounds keep what the booth read; a copy is kept from each round's end in `logs/round-files/`. Strokes the booth recorded without a name (no round started, so
 no player, hole or stroke number) are named from the file too: lined up with its strokes from the
 last one back by ball speed, three or more in a row, they take its player, hole and stroke number.
 
@@ -165,7 +165,10 @@ mistaken for it); in alternate shot only GSPro's explicit take-back is used. The
 where the stroke it replaced did. In a scramble, a tee ball whose rest the screen never read still
 counts toward fairways hit: the team's second stroke is played from the drive it picked, so that
 stroke's lie says where it finished. A hole picked up is scored at GSPro's maximum, and
-those capped strokes are not counted as putts or penalties. Driving-range
+those capped strokes are not counted as putts or penalties. When GSPro 4.x corrects a shot it
+counted on the wrong hole ("Extra shot counted on wrong hole"), its strokes-0 score line isn't taken
+for a mulligan or a penalty; the booth log notes it and the round's health check flags it
+(`round.log_wrong_hole`) so the scores can be checked. Driving-range
 shots are not recorded, only rounds. Practice rounds are recorded and flagged
 (`is_league = 0`), and tournament rounds (played on the Simulator Golf Tour) also `is_tournament = 1`,
 so stats can be split league, tournament and practice. On an alternate-shot round the log

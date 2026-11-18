@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import struct
 import zipfile
@@ -367,6 +368,26 @@ def test_report_gathers_the_launch_monitor_data_gspro_and_its_software_keep(tmp_
     assert "Sending to GSPro data" in springbok and "Secret" not in springbok and "k3y" not in springbok
     assert 'LM Type {"connectType":"Garmin","LMType":"R10"}' in summary
     assert "Some LM shots: 1 file(s)" in summary and "Absent LM: none" in summary
+
+
+def test_report_takes_only_the_newest_round_files_kept_from_round_ends(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    kept = tmp_path / "logs" / "round-files"
+    kept.mkdir(parents=True)
+    for day in range(1, 6):
+        (kept / f"2026-11-0{day}-120000-Pebble.dat").write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(report, "ROUND_FILE_CAP", 10)
+    (kept / "2026-11-04-120000-Pebble.dat").write_text("[" + "{}," * 9 + "{}]", encoding="utf-8")
+    cfg = Config(log_dir="logs", db_path="logs/season.db")
+    cfg.source.gspro_log = str(tmp_path / "GSPro" / "Player.log")
+    cfg.source.connector_log = str(tmp_path / "missing.txt")
+
+    with zipfile.ZipFile(report.build(cfg, tmp_path / "config.yaml")) as z:
+        names = sorted(n for n in z.namelist() if n.startswith("gspro/round-files/"))
+        summary = z.read("summary.txt").decode()
+    # The one too big for a whole copy is left out rather than cut short.
+    assert names == [f"gspro/round-files/2026-11-0{d}-120000-Pebble.dat" for d in (3, 5)]
+    assert "2026-11-04-120000-Pebble.dat: 0.0 MB, too big to include" in summary
 
 
 def test_a_corrupt_settings_file_is_refused_rather_than_filling_memory():

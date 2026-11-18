@@ -34,6 +34,8 @@ log = logging.getLogger(__name__)
 LOG_DAYS = 3                  # booth and tray logs from the last few days
 LOG_CAP = 4_000_000           # bytes kept from the end of each log
 GSPRO_LOG_CAP = 3_000_000
+ROUND_FILES = 3
+ROUND_FILE_CAP = 2_000_000               # the newest round files kept from round ends (round_file.archive)
 FRAMES_DIR = "report-frames"  # under log_dir: the screens the booth leaves behind for a report
 KEEP_REPORTS = 3
 _building = threading.Lock()   # one report at a time: two clicks mustn't write the same zip
@@ -621,6 +623,19 @@ def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
         guard("GSPro.db shots", gspro_db)
         guard("round file", lambda: add_file("gspro/currentRound.dat", gspro_dir / "currentRound.dat", 2_000_000,
                                                        private=True, blobs=False))
+
+        def round_files() -> None:
+            from .round_file import ARCHIVE_DIR, newest_archives
+
+            kept = newest_archives(log_dir)[:ROUND_FILES]
+            summary.append(f"Round files kept from round ends: {len(kept)} (the newest {ROUND_FILES} at most)")
+            for p in kept:
+                # One JSON array: cut to its tail it's no use, so one too big is left out whole.
+                if (size := p.stat().st_size) > ROUND_FILE_CAP:
+                    summary.append(f"  {p.name}: {size / 1e6:.1f} MB, too big to include")
+                else:
+                    add_file(f"gspro/{ARCHIVE_DIR}/{p.name}", p, private=True, blobs=False)
+        guard("kept round files", round_files)
 
         def vendor_files() -> None:
             for what, where, pattern, n, cap in LM_FILES + _skytrak_files():

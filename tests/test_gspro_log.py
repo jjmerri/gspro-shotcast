@@ -511,6 +511,46 @@ def test_a_mulligan_with_no_negative_line_is_flagged_from_the_repeated_score():
     assert s.mulligan_fires == {1: "repeat"} and s.shot_number(0) == 3
 
 
+def test_a_wrong_hole_correction_is_recorded_and_its_strokes_0_line_isnt_a_mulligan(caplog, tmp_path):
+    # GSPro 4.x SetScore: a shot scored against another hole is taken off it, and the shooter's line
+    # follows with strokes forced to 0 (repeating their last score).
+    fixed = ("Extra shot counted on wrong hole. Score corrected.\n"
+             "UnityEngine.Debug:LogWarning (object)\n" + _line(4, 0, 2))
+    assert [e.kind for e in parse_events(fixed)] == ["wrong_hole", "state"]
+    with caplog.at_level("WARNING"):
+        s = _replay(FIRE + _line(4, 1, 0) + FIRE + _line(4, 1, 1) + FIRE + fixed)
+    assert s.wrong_holes == [(0, 4)] and s.kinds["wrong_hole"] == 1 and not s.unparsed
+    assert not s.mulligan_fires and s.penalties(0) == 0 and s.shot_number(0) == 3
+    assert "wrong hole: player 0, hole 5" in caplog.text
+    # Only the line straight after it: play goes on as usual, a later repeat still a mulligan.
+    s = _replay(FIRE + _line(4, 1, 0) + FIRE + _line(4, 1, 1) + FIRE + fixed + FIRE + _line(4, 1, 2)
+                + FIRE + _line(4, 1, 2))
+    assert s.wrong_holes == [(0, 4)] and s.mulligan_fires == {4: "repeat"} and s.shot_number(0) == 4
+    # Only its own strokes-0 line, and not one from after a reset: those score as usual.
+    s = _replay(FIRE + _line(4, 1, 0) + "Extra shot counted on wrong hole. Score corrected.\n"
+                + FIRE + _line(4, 1, 1))
+    assert not s.wrong_holes and s.shot_number(0) == 3
+    s = _replay(FIRE + _line(4, 1, 0) + "Extra shot counted on wrong hole. Score corrected.\n"
+                + FIRE + _line(4, 0, 1, player=1))
+    assert not s.wrong_holes
+    s = _replay(FIRE + _line(4, 1, 0) + "Extra shot counted on wrong hole. Score corrected.\n"
+                + "Shot counted on wrong hole, fixed\n" + _line(4, 0, 1))
+    assert not s.wrong_holes
+    s = _replay(FIRE + _line(4, 1, 0) + "Extra shot counted on wrong hole. Score corrected.\n")
+    s._reset_round()
+    s.apply(LogEvent("state", player=1, hole=0, score=0, strokes=0))
+    assert not s.wrong_holes
+    # One already in the log when the booth starts isn't warned of again.
+    path = tmp_path / "output_log.txt"
+    path.write_text(FIRE + _line(4, 1, 0) + fixed)
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        GsproLogFollower(str(path))._prime()
+    assert "wrong hole" not in caplog.text
+    # Reworded, it's flagged for the health checks rather than missed.
+    assert [e.kind for e in parse_events("Shot counted on wrong hole, fixed\n")] == ["unparsed"]
+
+
 def test_a_pick_up_caps_the_hole_without_counting_penalties():
     # Real log (Cabot Cliffs 11, par 4): four strokes, then GSPro takes them back, writes 7 and adds
     # the conceding stroke: 8, a quad bogey. Not seven penalty strokes.

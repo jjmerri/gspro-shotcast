@@ -130,6 +130,13 @@ def test_a_round_with_broken_reads_is_flagged():
     assert keys == {"round.log_kinds", "round.log_unparsed", "round.hud_lie", "round.tile.carry (game)"}
 
 
+def test_a_wrong_hole_correction_in_the_round_is_flagged():
+    c = RoundCounters(fires_at_start=10, kinds_at_start={**_kinds(10), "wrong_hole": 1}, shots=40)
+    found, report = evaluate_round(c, 50, {**_kinds(50), "wrong_hole": 2}, [], REQUIRED, True, False)
+    assert [(k, lvl) for k, lvl, _ in found] == [("round.log_wrong_hole", "warn")]
+    assert "1 shot(s) counted on the wrong hole" in found[0][2] and report["log_events"]["wrong_hole"] == 1
+
+
 def test_a_silent_log_and_a_short_round():
     c = RoundCounters(fires_at_start=10, kinds_at_start=_kinds(10), shots=12)
     found, _ = evaluate_round(c, 10, _kinds(10), [], REQUIRED, True, False)

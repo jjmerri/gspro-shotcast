@@ -409,6 +409,19 @@ def test_a_restart_mid_round_continues_it_on_the_same_course_with_the_same_playe
     assert _record(s, u)[1] == "abandoned"
 
 
+def test_a_continued_round_keeps_its_first_start_and_strokes_for_its_round_file(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None})
+    first, _ = s.round_start_and_speeds(u)
+    s.db.execute("UPDATE shots SET ball_speed = 150.5 WHERE id = ?", (_hit(s, "Ann", T0),))
+    s.db.execute("UPDATE shots SET ball_speed = 90, mulligan = 1 WHERE id = ?", (_hit(s, "Ann", T0 + 30),))
+    s.close()
+    s = Store(str(tmp_path / "s.db"))
+    assert s.begin_round("r2", course="Pebble", players={"Ann": None}) == u
+    assert s.round_start_and_speeds(u) == (first, [150.5]) and first
+    assert s.round_start_and_speeds("nope") == (None, [])
+
+
 def test_a_restart_into_another_round_abandons_the_old_one(tmp_path):
     s = Store(str(tmp_path / "s.db"))
     import time as _time
