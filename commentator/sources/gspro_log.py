@@ -1150,12 +1150,13 @@ class GsproState:
         return sum(a["n"] + a.get("absorbed", 0) for a in self._score_shift.get((player, self.hole_by.get(player)), [])
                    if stroke > a["at"] and a["seq"] > since)
 
-    def stroke_shift(self, player: int | None, stroke: int | None) -> int:
+    def stroke_shift(self, player: int | None, stroke: int | None, hole: int | None = None) -> int:
         """Penalty strokes add_penalty counted that GSPro's own stroke number `stroke` (its HUD's, for
-        the player's current hole) leaves out: those for strokes played after the one that drew them."""
+        the player's current hole, or GSPro's 0-based `hole`) leaves out: those for strokes played after
+        the one that drew them."""
         if player is None or not stroke:
             return 0
-        added = self._score_shift.get((player, self.hole_by.get(player)), [])
+        added = self._score_shift.get((player, self.hole_by.get(player) if hole is None else hole), [])
         # Once GSPro scored one late, its own numbers count it, but a read from before it did doesn't.
         return sum(a["n"] for a in added if stroke > a["at"]) \
             + sum(a.get("absorbed", 0) for a in added if stroke == a["at"] + 1)

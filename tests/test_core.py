@@ -2452,6 +2452,152 @@ async def test_follow_shot_gives_up_without_a_stop(tmp_path):
     assert not landed
 
 
+def _round_entry(n, sp, *, name="Dan", hole=0, end=(5, 200), surfaces=(18, 1), result=0, hole_result=3,
+                 holed=False, to_pin=50.0, sid=None):
+    """A currentRound.dat swing entry (see tests/test_round_file.py)."""
+    def p(x, z):
+        return {"x": x, "y": 1.0, "z": z}
+    return {"ShotID": sid or f"{name}-{hole}-{n}-{sp}", "RoundID": 7, "CourseKey": "test_links_gsp",
+            "PlayerName": name, "Hole": hole, "HoleShot": n, "ShotResult": result, "HoleResult": hole_result,
+            "StartingPOS": p(0, 0), "EndingPOS": p(*end), "StartingSurface": surfaces[0],
+            "EndingSurface": surfaces[1], "DistanceToPin": to_pin, "BallSpeed": sp,
+            "GhostData": {"sp": sp, "el": 12.0, "az": 0.5, "ts": 3000.0, "sa": 2.0, "cy": 200.0},
+            "activeShot": {"tdTime": 6.5, "sd": {"isPutt": False, "isHoled": holed,
+                                                 "pos": [p(0, 0), p(2, 100), p(4, 180)], "tdpoint": p(4, 180),
+                                                 "path": []}}}
+
+
+def _file_engine(tmp_path, frames, poll=0.05):
+    from commentator.sources.gspro_files import RoundFileWatch
+    reads = iter(frames)
+    count = [0]
+
+    class Screen:
+        async def read_hud_async(self, parts):
+            count[0] += 1
+            return next(reads)
+
+    cfg = Config(log_dir=str(tmp_path))
+    cfg.screen.follow_poll_seconds = poll
+    cfg.screen.follow_max_seconds = 5
+    e = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+               live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=Screen())
+    e._round_watch, e._round_watch_shared = RoundFileWatch(str(tmp_path)), True   # (not moved to GSPro's folder)
+    return e, count
+
+
+async def _watching(e):
+    while True:
+        await e._refresh_round_file()
+        await asyncio.sleep(0.02)
+
+
+async def test_gspros_round_file_has_the_ball_at_rest_before_the_screen_does(tmp_path):
+    from commentator import round_file
+    path = tmp_path / "currentRound.dat"
+    older = _round_entry(1, 150.2, name="Dan", hole=0)   # an earlier ball at this speed: not this shot
+    path.write_text(json.dumps([older]))
+    # The screen never shows the ball stopping: alone the follow would sit out its cap.
+    frames = [Hud(player_text="P", shot_number=2, lie="fairway",
+                  tiles={"carry (game)": f"{i}.0", "total length": f"{i}.0", "offline (raw)": "3.0"})
+              for i in range(1, 400)]
+    e, reads = _file_engine(tmp_path, frames)
+    watcher = asyncio.create_task(_watching(e))
+    await asyncio.sleep(0.1)
+    impact = time.monotonic()
+
+    async def gspro_writes():
+        await asyncio.sleep(0.4)
+        path.write_text(json.dumps([older, _round_entry(2, 150.0, name="Dan", hole=0, surfaces=(18, 1))]))
+    writer = asyncio.create_task(gspro_writes())
+    try:
+        after, landed, track, own, timing = await e._follow_with_file(
+            Hud(player_text="P", shot_number=2, lie="tee"), "[t]", False, None, None,
+            player="Dan Smith", ball_speed=150.3, impact=impact, unit="yards")
+    finally:
+        watcher.cancel()
+        await writer
+    took = time.monotonic() - impact
+    want = round_file.tracks([_round_entry(2, 150.0, surfaces=(18, 1))])[0]
+    assert track is not None and track.shot_number == 2 and own is None and landed
+    assert took < 1.0 and reads[0] < 20   # stopped within a poll or two of GSPro's write
+    assert after.lie == "rough"
+    assert after.tiles == {"carry (game)": f"{want.carry_yards:.1f}", "total length": f"{want.total_yards:.1f}"}
+    assert timing["file"] - impact < 0.7
+
+
+async def test_without_gspros_round_file_the_follow_is_the_screens_and_waits_no_more(tmp_path):
+    def f(lie, carry, total):
+        return Hud(player_text="P", shot_number=1, lie=lie, tiles={"carry (game)": str(carry), "total length": str(total)})
+    frames = [f("fairway", 170, 170), f("fairway", 180, 180), f("fairway", 180, 182), f("rough", 180, 190),
+              f("rough", 180, 195), f("rough", 180, 195), f("rough", 180, 195)]
+    e, _ = _file_engine(tmp_path, frames)   # no currentRound.dat: an older GSPro
+    watcher = asyncio.create_task(_watching(e))
+    try:
+        t0 = time.monotonic()
+        after, landed, track, own, _ = await e._follow_with_file(
+            Hud(player_text="P", shot_number=1, lie="fairway"), "[t]", False, None, None,
+            player="Dan Smith", ball_speed=150.0, impact=t0, unit="yards")
+        took = time.monotonic() - t0
+    finally:
+        watcher.cancel()
+    assert track is None and own is after and landed and after.lie == "rough" and after.tiles["carry (game)"] == "180"
+    assert took < 0.3 + 7 * 0.05 + 0.2   # the screen's reads, and no grace wait for a file that isn't there
+
+
+def test_two_shots_at_one_speed_each_take_their_own_stroke_from_gspros_round_file(tmp_path):
+    from commentator import round_file
+    e, _ = _file_engine(tmp_path, [])
+    first, second = _round_entry(1, 150.0, sid="a"), _round_entry(2, 150.3, sid="b")
+    e._file_tracks = round_file.tracks([first, second])
+    e._round_watch.seen_at = {"a": 5.0, "b": 6.0}
+    # Struck in turn (impact counts 1 and 2), the later handler finishing first takes the next stroke.
+    assert e._file_track_of("Dan", 150.1, 1.0, claim=2).shot_id == "a"
+    assert e._file_track_of("Dan", 150.1, 1.0, claim=1).shot_id == "b"
+    assert e._file_track_of("Dan", 150.1, 1.0, claim=2).shot_id == "a"   # its own, again
+    assert e._file_track_of("Dan", 150.1, 1.0, claim=3) is None
+    # A shot the feed took from the file itself is that entry, though it was read before the impact.
+    assert e._file_track_of("Dan", 150.1, 9.0, claim=4) is None
+    e._file_claims.clear()
+    assert e._file_track_of("Dan", 150.1, 9.0, claim=4, known="b").shot_id == "b"
+    e._file_claims.clear()
+    assert e._file_track_of("Al", 150.1, 9.0, claim=4, known="b") is None   # not if it's another player's
+
+
+async def test_a_round_file_stroke_just_after_the_screens_rest_is_still_taken(tmp_path):
+    path = tmp_path / "currentRound.dat"
+    path.write_text(json.dumps([_round_entry(1, 120.0, name="Al")]))   # written this session: a live GSPro
+    def f(lie, carry, total):
+        return Hud(player_text="P", shot_number=1, lie=lie, tiles={"carry (game)": str(carry), "total length": str(total),
+                                                                   "offline (raw)": "4.0"})
+    frames = [f("fairway", 170, 170), f("fairway", 180, 180), f("fairway", 180, 182), f("semi rough", 180, 190),
+              f("semi rough", 180, 195), f("semi rough", 180, 195), f("semi rough", 180, 195)]
+    e, reads = _file_engine(tmp_path, frames, poll=0.01)
+    e._booth_wall0 -= 5
+    watcher = asyncio.create_task(_watching(e))
+    impact = time.monotonic()
+
+    async def gspro_writes():   # just after the screen's last read
+        while reads[0] < len(frames):
+            await asyncio.sleep(0.005)
+        await asyncio.sleep(0.05)
+        path.write_text(json.dumps([_round_entry(1, 120.0, name="Al"), _round_entry(1, 150.0, surfaces=(18, 1))]))
+    try:
+        await asyncio.sleep(0.05)
+        writer = asyncio.create_task(gspro_writes())
+        after, landed, track, own, timing = await e._follow_with_file(
+            Hud(player_text="P", shot_number=1, lie="fairway"), "[t]", False, None, None,
+            player="Dan Smith", ball_speed=150.0, impact=impact, unit="yards")
+        await writer
+    finally:
+        watcher.cancel()
+    assert track is not None and "ocr_rest" in timing and timing["file"] - timing["ocr_rest"] <= 0.3
+    assert timing["ocr_end"] == "the screen had it at rest"
+    # The screen's finer word for GSPro's rough stays; its other tiles (read at rest) too.
+    assert after.lie == "semi rough" and after.tiles["offline (raw)"] == "4.0" and own is not None
+    assert after.tiles["carry (game)"] == f"{track.carry_yards:.1f}"
+
+
 def test_ocr_fast_sizes_the_detector_per_region_and_screen():
     from types import SimpleNamespace
     from PIL import Image
@@ -5396,6 +5542,47 @@ async def test_a_banner_that_flips_back_with_no_shot_undoes_the_hole_change(tmp_
     assert e.hole_number == 13
 
 
+async def test_the_banner_of_a_hole_gspros_round_file_already_moved_to_isnt_the_next_one(tmp_path):
+    from commentator.models import HoleChangeEvent
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    e.cfg.screen.hud_poll_seconds = 0
+    e.round = Round(league=e.league, gspro_players=["Dan"], course="Test Links", scheduled_format=None,
+                    holes=18, start_hole=1, is_league=False)
+    banners = [(4, "340 yards", 16)] * 3
+
+    class Screen:
+        i = 0
+        last_read_seconds = last_capture_seconds = 0.0
+
+        async def read_hud_async(self, parts):
+            par, length, number = banners[min(self.i, len(banners) - 1)]
+            self.i += 1
+            return Hud(par=par, hole_length=length, hole_number=number)
+
+    e.screen = Screen()
+    task = asyncio.create_task(e._watch_hud())
+
+    async def reads(new):
+        banners[:], e.screen.i = new, 0
+        for _ in range(100):
+            if e.screen.i > len(new) + 1:
+                break
+            await asyncio.sleep(0.01)
+    await reads(banners[:])
+    # GSPro's round file moved the group to 17 before its banner read (no number on it): it's 17's.
+    e.hole_number, e._file_moved_to = 17, 17
+    await reads([(4, "400 yards", None)] * 3)
+    # The next hole's banner after it is a hole change again.
+    await reads([(5, "520 yards", 18)] * 3)
+    task.cancel()
+    changes = []
+    while not e._events.empty():
+        if isinstance(x := e._events.get_nowait(), HoleChangeEvent):
+            changes.append(x.current)
+    assert changes == ["Hole 16, par 4, 340 yards", "Hole 18, par 5, 520 yards"] and e.hole_number == 18
+
+
 async def test_a_tee_read_with_a_stray_mark_before_the_name_still_settles(tmp_path):
     # GSPro 4.0's tee box read "9 Josh E …" and "Josh E …" on alternate polls: one player's setup.
     e = _mini_engine(tmp_path)
@@ -5688,6 +5875,154 @@ async def test_a_log_correction_leaves_the_finished_holes_shots_where_they_were(
     assert r.seq == 16 and all(x.hole_seq == 16 for x in recs)
     assert r.picked_up == {("Ann", 16), ("Steve", 16)}
     assert set(dict(e.store.db.execute("SELECT id, hole FROM shots")).values()) == {sixteen}
+
+
+def test_gspros_round_file_moves_a_shot_filed_under_another_hole_and_leaves_pickups_be(tmp_path):
+    # Steve's last stroke on 16 was filed under 17 (the booth moved on early) as stroke 1; GSPro's round
+    # file has it on 16 as stroke 3. Ann picked up on 16: a concession writes no stroke, so it stays.
+    from commentator import round_file
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Steve", "Ann"], course="Brasstown", scheduled_format=None,
+              holes=18, start_hole=1, is_league=False)
+    e.round, r.seq = r, 17
+    sixteen, seventeen = "Hole 16, par 4, 275 metres", "Hole 17, par 3"
+    r.picked_up = {("Ann", 16)}
+    recs = []
+    for n, hole, seq, sp, mull in ((1, sixteen, 16, 150.0, False), (2, sixteen, 16, 100.0, False),
+                                   (1, seventeen, 17, 40.1, True), (1, seventeen, 17, 40.0, False)):
+        sid = e.store.record_shot(player="Steve", hole=hole, shot=Shot(ball_speed=sp), before=Hud(shot_number=n),
+                                  after=Hud(), tags=[], carry_game_yards=None, total_yards=None, offline_yards=None)
+        rec = ShotRecord("Steve", Shot(ball_speed=sp), hole, Hud(), [], round_id=r.id, hole_seq=seq, shot_number=n,
+                         par=4 if seq == 16 else 3, shot_id=sid)
+        rec.mulligan = mull
+        e.state.record_shot(rec)
+        recs.append(rec)
+    entries = [_round_entry(1, 150.0, name="Steve", hole=15), _round_entry(2, 100.0, name="Steve", hole=15),
+               _round_entry(3, 40.0, name="Steve", hole=15)]
+    e._file_entries, e._file_tracks = entries, round_file.tracks(entries)
+    from commentator.sources.gspro_files import RoundFileWatch
+    e._round_watch = w = RoundFileWatch(str(tmp_path))
+    w.seen_at = {t.shot_id: time.monotonic() for t in e._file_tracks}
+    w.written = e._booth_wall0 - 1   # an earlier session's file: never relabels this round's shots
+    written, left = e.store.apply_round_file(e._file_tracks, now=time.time())
+    assert written == 2 and [t.shot_number for t in left] == [3]
+    assert not e._refile_from_round_file(left)
+    w.written = time.time()
+    e._round_started_at = time.monotonic() + 1   # strokes read before the round started: not this round's
+    assert not e._refile_from_round_file(left)
+    e._round_started_at = 0.0
+    assert e._refile_from_round_file(left)
+    moved = recs[3]
+    assert e._file_pins == {entries[2]["ShotID"]: moved.shot_id}   # the store takes it whatever its number
+    assert (moved.hole_seq, moved.hole, moved.shot_number, moved.par) == (16, sixteen, 3, 4)
+    assert (recs[2].hole_seq, recs[2].hole) == (17, seventeen)   # the mulligan isn't GSPro's stroke
+    row = e.store.db.execute("SELECT hole, shot_number FROM shots WHERE id = ?", (moved.shot_id,)).fetchone()
+    assert tuple(row) == (sixteen, 3)
+    assert r.picked_up == {("Ann", 16)} and r.seq == 17
+    written, left = e.store.apply_round_file(e._file_tracks, now=time.time(), rewrite=False)
+    assert written == 1 and not left and not e._refile_from_round_file(left)
+
+
+def test_two_strokes_refiled_at_one_speed_keep_their_order(tmp_path):
+    from commentator import round_file
+    from commentator.round import Round
+    from commentator.sources.gspro_files import RoundFileWatch
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Steve"], course="Brasstown", scheduled_format=None,
+              holes=18, start_hole=1, is_league=False)
+    e.round, r.seq = r, 17
+    recs = []
+    for n, sp in ((1, 150.1), (2, 150.0)):   # really his 16th's 2nd and 3rd
+        sid = e.store.record_shot(player="Steve", hole="Hole 17", shot=Shot(ball_speed=sp), before=Hud(shot_number=n),
+                                  after=Hud(), tags=[], carry_game_yards=None, total_yards=None, offline_yards=None)
+        rec = ShotRecord("Steve", Shot(ball_speed=sp), "Hole 17", Hud(), [], round_id=r.id, hole_seq=17,
+                         shot_number=n, shot_id=sid)
+        e.state.record_shot(rec)
+        recs.append(rec)
+    entries = [_round_entry(2, 150.0, name="Steve", hole=15), _round_entry(3, 150.1, name="Steve", hole=15)]
+    e._file_entries, e._file_tracks = entries, round_file.tracks(entries)
+    e._round_watch = w = RoundFileWatch(str(tmp_path))
+    w.seen_at = {t.shot_id: time.monotonic() for t in e._file_tracks}
+    w.written, e._round_started_at = time.time(), 0.0
+    _, left = e.store.apply_round_file(e._file_tracks, now=time.time())
+    assert len(left) == 2 and e._refile_from_round_file(left)
+    assert [(x.hole_seq, x.shot_number) for x in recs] == [(16, 2), (16, 3)]
+    assert e._file_pins == {entries[0]["ShotID"]: recs[0].shot_id, entries[1]["ShotID"]: recs[1].shot_id}
+
+
+def test_gspros_round_file_corrects_the_hole_the_group_is_on(tmp_path):
+    from commentator import round_file
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Steve"], course="Brasstown", scheduled_format=None,
+              holes=18, start_hole=1, is_league=False)
+    e.round, r.seq = r, 17
+    e.state.current_hole = seventeen = "Hole 17, par 3"
+    rec = ShotRecord("Steve", Shot(ball_speed=40.0), seventeen, Hud(), [], round_id=r.id, hole_seq=17, shot_id=1)
+    rec.impact_seq, e._shot_seq = 1, 2
+    e.state.record_shot(rec)
+    stroke = round_file.tracks([_round_entry(3, 40.0, name="Steve", hole=15)])[0]
+    # A ball struck since (a handler finishing late): only the shot moves, not the group.
+    e._file_hole_check(rec, stroke, r, 17, seventeen, "[t]")
+    assert e._events.empty() and (rec.hole_seq, rec.hole) == (16, "Hole 16")
+    rec.hole_seq, rec.hole, e._shot_seq = 17, seventeen, 1
+    assert e._file_hole_check(rec, stroke, r, 17, seventeen, "[t]") == ("Hole 16", None, 3)   # (called there)
+    ev = e._events.get_nowait()
+    assert (ev.current, ev.correction, e.hole_number) == ("Hole 16", "round file", 16)
+    # A stroke that ended the hole (in the cup, or a gimme) moves alone: the group may have moved on.
+    holed = round_file.tracks([_round_entry(3, 40.0, name="Steve", hole=15, hole_result=7, holed=True)])[0]
+    e._file_hole_check(rec, holed, r, 17, seventeen, "[t]")
+    assert e._events.empty() and (rec.hole_seq, rec.hole, rec.shot_number) == (16, "Hole 16", 3)
+    # On the round's hole, a shot recorded before the hole was read takes GSPro's hole (the group stays).
+    rec.hole, rec.shot_number = None, None
+    e._file_hole_check(rec, stroke, r, 16, None, "[t]")
+    assert e._events.empty() and (rec.hole_seq, rec.hole, rec.shot_number) == (16, "Hole 16", 3)
+    # The next hole's banner, held back while the ball was followed, moves the group on itself (its
+    # recap and all): the shot alone moves now.
+    from commentator.engine import HoleWatch
+    rec.hole_seq, rec.hole, e._shot_seq, r.seq, e.state.current_hole = 15, "Hole 15", 1, 15, "Hole 15"
+    e._hole_watch = HoleWatch()
+    e._hole_watch.current = "par 4 400"
+    e._hole_watch.changed("par 3 160", busy=True)
+    e._file_hole_check(rec, stroke, r, 15, "Hole 15", "[t]")
+    assert e._events.empty() and (rec.hole_seq, rec.hole) == (16, "Hole 16")
+    # ...and its banner, once read, gives the shot the hole's full label.
+    r.seq = 16
+    e._relabel_refiled(r, "Hole 16, par 3, 160 yards")
+    assert rec.hole == "Hole 16, par 3, 160 yards"
+    e._hole_watch, r.seq, e.state.current_hole = None, 17, seventeen
+    # Nor a group the booth has no hole read for: the shot alone moves, and is stored on GSPro's.
+    rec.hole_seq, rec.hole, e.state.current_hole, e._shot_seq = 17, None, None, 1
+    e._file_hole_check(rec, stroke, r, 17, None, "[t]")
+    assert e._events.empty() and (rec.hole_seq, rec.hole) == (16, "Hole 16")
+
+
+async def test_a_hole_correction_leaves_the_shots_gspros_round_file_has_on_their_hole(tmp_path):
+    from commentator import round_file
+    from commentator.models import HoleChangeEvent
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Steve"], course="Brasstown", scheduled_format=None,
+              holes=18, start_hole=1, is_league=False)
+    e.round, r.seq = r, 16
+    e.state.current_hole = sixteen = "Hole 16, par 4"
+    recs = []
+    for n, sp in ((1, 150.0), (2, 100.0)):   # his 16th's second shot was really the 17th's tee shot
+        sid = e.store.record_shot(player="Steve", hole=sixteen, shot=Shot(ball_speed=sp), before=Hud(shot_number=n),
+                                  after=Hud(), tags=[], carry_game_yards=None, total_yards=None, offline_yards=None)
+        rec = ShotRecord("Steve", Shot(ball_speed=sp), sixteen, Hud(), [], round_id=r.id, hole_seq=16, shot_number=n,
+                         shot_id=sid)
+        e.state.record_shot(rec)
+        recs.append(rec)
+    e._file_tracks = round_file.tracks([_round_entry(1, 150.0, name="Steve", hole=15),
+                                        _round_entry(1, 100.0, name="Steve", hole=16, sid="tee17")])
+    assert e.store.apply_round_file(e._file_tracks[:1], now=time.time())[0] == 1
+    # The log still had him on 16 at the tee shot, but the file (pinned live, not yet stored) has it on 17.
+    recs[1].log_hole, e._file_pins["tee17"] = 16, recs[1].shot_id
+    await e.handle_hole_change(HoleChangeEvent(previous=None, current="Hole 17", correction="round file"))
+    assert (recs[0].hole_seq, recs[0].hole) == (16, sixteen)
+    assert (recs[1].hole_seq, recs[1].hole) == (17, "Hole 17")
 
 
 async def test_a_log_correction_with_the_par_unread_takes_the_cards(tmp_path):

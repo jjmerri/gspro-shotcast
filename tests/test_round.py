@@ -4863,6 +4863,29 @@ def test_a_scramble_pick_of_a_shot_with_no_name_yet_is_conceded_once_its_named(t
     assert [tuple(x) for x in rows] == [("MikeD", 4, "conceded"), ("MikeD", 5, "gimme")]
 
 
+def test_a_shot_gspros_round_file_named_is_graded_once_the_log_agrees(tmp_path):
+    from commentator.hud import Hud
+    from commentator.models import Shot
+    from commentator.state import ShotRecord
+
+    e = _engine(tmp_path)
+    e.cfg.source.gspro_log_truth = True
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="Wynn", scheduled_format=None)
+    r.slot_names = ["MikeD", "Sarah"]
+    e.round = r
+    rec = ShotRecord("Mike", Shot(club="PT"), "Hole 2, par 4", Hud(), [], round_id=r.id,
+                     hole_seq=2, shot_number=4, shot_id=7)
+    e._fire_rows = {10: (7, rec, None, None)}
+    e._file_named.add(7)                       # recorded blind, named since from GSPro's round file
+    e.gspro._fire_info[10] = {"player": 1, "hole": 1}
+    e._own_shot(10, 1)                         # its shooter's score line, after the file named it
+    e._name_unnamed()                          # the log has the other player: not settled
+    assert 10 in e._unnamed and 10 not in e._outcomes_due
+    e.gspro._fire_info[10] = {"player": 0, "hole": 1}
+    e._name_unnamed()
+    assert 10 not in e._unnamed and 10 in e._outcomes_due and e._fire_rows[10][2:] == (0, 1)
+
+
 def test_best_ball_team_gross_beside_each_partners_own_score(tmp_path):
     r = Round(league=LEAGUE, gspro_players=["MikeD", "SarahK"], course="X", scheduled_format="best_ball",
               holes=3, is_league=False)

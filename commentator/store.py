@@ -1202,6 +1202,25 @@ class Store:
                         (new, self.session_id, old, since_id, *keep))
         self.db.commit()
 
+    def set_shot_hole(self, shot_ids: Iterable[int], hole: str, shot_number: int | None = None) -> None:
+        """Shots moved to the hole (and, given one, the stroke number) GSPro's round file has them on."""
+        ids = list(shot_ids)
+        if not ids:
+            return
+        marks = ", ".join("?" * len(ids))
+        self.db.execute(f"UPDATE shots SET hole = ? WHERE id IN ({marks})", (hole, *ids))
+        if shot_number is not None:
+            self.db.execute(f"UPDATE shots SET shot_number = ? WHERE id IN ({marks})", (shot_number, *ids))
+        self.db.commit()
+
+    def tracked_shots(self, gspro_shot_ids: Iterable[str]) -> dict[str, int]:
+        """GSPro's ShotIDs already applied to a shot (shot_tracks): ShotID -> the shot's id."""
+        ids = list(gspro_shot_ids)
+        if not ids:
+            return {}
+        return {r[0]: r[1] for r in self.db.execute(
+            f"SELECT gspro_shot_id, shot_id FROM shot_tracks WHERE gspro_shot_id IN ({', '.join('?' * len(ids))})", ids)}
+
     def set_shot_tiles(self, shot_id: int, *, carry_game_yards: float | None, carry_raw_tile_yards: float | None,
                        total_yards: float | None, offline_yards: float | None) -> None:
         """A shot's tiles read after it was recorded, at the next player's setup (GSPro hid them while the
@@ -1211,8 +1230,8 @@ class Store:
         tr = self._track(shot_id)
         if tr is not None and tr["carry_yards"] is not None:
             carry_game_yards = None
-        if tr is not None and tr["total_yards"] is not None:
-            total_yards = None
+        if tr is not None and (tr["total_yards"] is not None or tr["end_x"] is None):
+            total_yards = None   # (no end: a penalty followed, so the ball has no resting total)
         cols = {"carry_game_yards": carry_game_yards, "carry_raw_tile_yards": carry_raw_tile_yards,
                 "offline_yards": offline_yards, "total_yards": total_yards}
         sets = [f"{col} = ?" for col, v in cols.items() if v is not None]
@@ -1246,7 +1265,7 @@ class Store:
 
     def apply_round_file(self, tracks: list, *, now: float, window_s: float = 12 * 3600,
                          same_player=None, rewrite: bool = True, gone: set | frozenset = frozenset(),
-                         name_of=None) -> tuple[int, list]:
+                         name_of=None, pinned: dict | None = None) -> tuple[int, list]:
         """Apply GSPro's round file (round_file.tracks) to the shots it records: each stroke is matched to
         the row with its hole, stroke number and ball speed and a player of its name (`same_player`, a
         (gspro_name, player) test, for names that differ more than "Josh" / "Josh Merritt"), recorded
@@ -1258,7 +1277,9 @@ class Store:
         applied again, for shots recorded since). `gone`: the file's ShotIDs that are no longer strokes
         (round_file.untracked: a mulligan took one back), whose shots get back what they had.
         `name_of` (GSPro's name -> the player to store) also names the strokes the booth recorded blind
-        (no player read off the screen): see _fill_blind."""
+        (no player read off the screen): see _fill_blind. `pinned` (ShotID -> shot id): strokes the live
+        follow already tied to their shot, which is a candidate whatever its stroke number (the booth's
+        count can carry a penalty GSPro's leaves out)."""
         # Every course played, one index step each (course_fits ignores case), not a scan of every shot.
         courses = [r[0] for r in self.db.execute(
             "WITH RECURSIVE c(x) AS (SELECT (SELECT min(course COLLATE NOCASE) FROM shots) UNION ALL"
@@ -1287,23 +1308,35 @@ class Store:
             i = bisect.bisect_left(ends, row["ts"])
             return ends[i] if i < len(ends) else math.inf
 
+        pinned = pinned or {}
+        claimed = dict(self.db.execute("SELECT gspro_shot_id, shot_id FROM shot_tracks").fetchall())
+
         def candidates(t) -> list:
+            # Its stroke number on its hole; or the shot the follow pinned it to, or it was already
+            # matched to (a pin from before a restart), whatever the booth numbered it.
             rows = self.db.execute(
-                "SELECT * FROM shots WHERE ts >= ? AND ts <= ? AND shot_number = ? AND (hole = ? OR hole LIKE ?)"
+                "SELECT * FROM shots WHERE ts >= ? AND ts <= ?"
+                " AND ((shot_number = ? AND (hole = ? OR hole LIKE ?)) OR id = ? OR id = ?)"
                 " AND ball_speed IS NOT NULL AND mulligan = 0 AND outcome IS NOT 'gimme'",
-                (now - window_s, now + 600, t.shot_number, f"Hole {t.hole}", f"Hole {t.hole},%")).fetchall()
-            return [r for r in rows if course_ok(t.course_key, r)
+                (now - window_s, now + 600, t.shot_number, f"Hole {t.hole}", f"Hole {t.hole},%",
+                 pinned.get(t.shot_id, -1), claimed.get(t.shot_id, -1))).fetchall()
+            tied = (pinned.get(t.shot_id), claimed.get(t.shot_id))   # (its course was checked when tied)
+            return [r for r in rows if (r["id"] in tied or course_ok(t.course_key, r))
                     and abs(r["ball_speed"] - t.ball_speed) <= max(0.6, 0.01 * t.ball_speed)
-                    and (round_file.names_fit(t.player, r["player"])
+                    and (r["id"] == pinned.get(t.shot_id) or round_file.names_fit(t.player, r["player"])
                          or (same_player is not None and same_player(t.player, r["player"])))]
 
-        # The file is one round's: the latest round with shots it could be (a round GSPro has started over
-        # since can't be). A stroke is matched only within it.
+        # The file is one round's: the round of the shots the live follow pinned to it, else the latest
+        # round with shots it could be (a round GSPro has started over since can't be). A stroke is
+        # matched only within it.
         cands = {t.shot_id: candidates(t) for t in tracks}
-        latest = max((r for rs in cands.values() for r in rs), key=lambda r: r["ts"], default=None)
-        this_round = None if latest is None else round_of(latest)
         rows_by_id = {r["id"]: r for rs in cands.values() for r in rs}
-        claimed = dict(self.db.execute("SELECT gspro_shot_id, shot_id FROM shot_tracks").fetchall())
+        # A pin is the live follow's own match: it wins over one by stroke number and speed.
+        pin_of = {sid: gid for gid, sid in pinned.items()
+                  if gid in cands and any(r["id"] == sid for r in cands[gid])}
+        latest = max((rows_by_id[sid] for sid in pin_of), key=lambda r: r["ts"], default=None) \
+            or max(rows_by_id.values(), key=lambda r: r["ts"], default=None)
+        this_round = None if latest is None else round_of(latest)
         changed = False
         for gid in gone & claimed.keys():
             self._release_track(claimed.pop(gid))
@@ -1311,7 +1344,10 @@ class Store:
         for t in tracks:
             sid = claimed.get(t.shot_id)
             if sid is not None and (sid not in rows_by_id or round_of(rows_by_id[sid]) != this_round
-                                    or all(r["id"] != sid for r in cands[t.shot_id])):
+                                    or all(r["id"] != sid for r in cands[t.shot_id])
+                                    or pin_of.get(sid, t.shot_id) != t.shot_id
+                                    or (t.shot_id in pinned and pin_of.get(pinned[t.shot_id]) == t.shot_id
+                                        and pinned[t.shot_id] != sid)):
                 self._release_track(sid)
                 del claimed[t.shot_id]
                 changed = True
@@ -1326,8 +1362,10 @@ class Store:
                 matched[row["id"]] = t.shot_id
                 continue
             if row is None:
-                fits = [r for r in cands[t.shot_id] if r["id"] not in taken and round_of(r) == this_round]
-                row = min(fits, key=lambda r: (abs(r["ball_speed"] - t.ball_speed), -r["ts"]), default=None)
+                fits = [r for r in cands[t.shot_id] if r["id"] not in taken and round_of(r) == this_round
+                        and pin_of.get(r["id"], t.shot_id) == t.shot_id]
+                pin = [r for r in fits if pin_of.get(r["id"]) == t.shot_id]
+                row = min(pin or fits, key=lambda r: (abs(r["ball_speed"] - t.ball_speed), -r["ts"]), default=None)
             if row is None:
                 pending.append(t)
                 continue
@@ -1335,11 +1373,16 @@ class Store:
             matched[row["id"]] = t.shot_id
             if changed:   # a release above may have put its columns back since it was read
                 row = self.db.execute("SELECT * FROM shots WHERE id = ?", (row["id"],)).fetchone()
-            self._apply_track(row, t)
+            # A pinned shot the booth recorded blind takes its player from the file (as _fill_blind).
+            blind = pin_of.get(row["id"]) == t.shot_id and name_of is not None \
+                and (row["player"] is None or row["player"] == "unknown")
+            self._apply_track(row, t, self._blind_named(row, t, name_of) if blind else None)
             written += 1
         if name_of is not None and pending:
             filled = self._fill_blind(tracks, now=now, window_s=window_s, taken=taken, matched=matched,
-                                      name_of=name_of, course_ok=course_ok)
+                                      name_of=name_of, course_ok=course_ok,
+                                      in_round=lambda r: this_round is None or round_of(r) == this_round,
+                                      round_of=lambda r: (round_of(r), r["record_uuid"]))
             if filled:
                 pending = [t for t in pending if t.shot_id not in filled]
                 written += len(filled)
@@ -1353,7 +1396,7 @@ class Store:
     BLIND_RUN = 3   # strokes in a row whose ball speeds line up before blind shots are named from the file
 
     def _fill_blind(self, tracks: list, *, now: float, window_s: float, taken: set, matched: dict,
-                    name_of, course_ok) -> set[str]:
+                    name_of, course_ok, in_round=lambda r: True, round_of=lambda r: 0) -> set[str]:
         """Name the shots the booth recorded blind (no player read: the screen covered, the HUD unread)
         from GSPro's round file, which has every stroke's player. With no name or stroke number to go
         on, a stroke is lined up with the shots by order: the file's strokes and the booth's shots, back
@@ -1363,6 +1406,7 @@ class Store:
         rows = self.db.execute(
             "SELECT * FROM shots WHERE ts >= ? AND ts <= ? AND ball_speed IS NOT NULL AND mulligan = 0"
             " AND outcome IS NOT 'gimme' ORDER BY ts, id", (now - window_s, now + 120)).fetchall()
+        rows = [r for r in rows if in_round(r)]   # (the file's round only)
 
         def blind(row) -> bool:
             return row["player"] is None or row["player"] == "unknown"
@@ -1379,7 +1423,8 @@ class Store:
 
         def run(i: int, j: int) -> list:
             out = []
-            while i >= 0 and j >= 0 and fits(tracks[i], rows[j]):
+            play = round_of(rows[j]) if j >= 0 else None   # a run never spans a round's end
+            while i >= 0 and j >= 0 and round_of(rows[j]) == play and fits(tracks[i], rows[j]):
                 out.append((tracks[i], rows[j]))
                 i, j = i - 1, j - 1
             return out
@@ -1391,14 +1436,22 @@ class Store:
         for t, row in best:
             if row["id"] in taken:
                 continue
-            named = {"player": name_of(t.player) or t.player, "hole": f"Hole {t.hole}" + (f", par {t.par}" if t.par else ""),
-                     "shot_number": t.shot_number, "is_putt": int(t.putt or bool(row["is_putt"])), "attributed": 1}
-            self._apply_track(row, t, named)
+            self._apply_track(row, t, self._blind_named(row, t, name_of))
             taken.add(row["id"])
             filled.add(t.shot_id)
         if filled:
             log.info("GSPro's round file named %d shots the booth recorded without a player", len(filled))
         return filled
+
+    @staticmethod
+    def _blind_named(row: sqlite3.Row, t, name_of) -> dict:
+        """What a stroke in GSPro's round file names on a shot the booth recorded blind (its own label for
+        the hole kept, when it's that hole: stats group a hole's shots by it)."""
+        same = row["hole"] and re.match(rf"Hole {t.hole}\b", row["hole"])
+        return {"player": name_of(t.player) or t.player,
+                "hole": row["hole"] if same else f"Hole {t.hole}" + (f", par {t.par}" if t.par else ""),
+                "shot_number": t.shot_number, "is_putt": int(t.putt or bool(row["is_putt"])),
+                "attributed": 1}
 
     def _release_track(self, shot_id: int) -> None:
         """A stroke matched to the wrong shot: what it set goes back to what the shot had."""
@@ -1408,7 +1461,20 @@ class Store:
             cols = [c for c in self._TRACKED + self._NAMED if c in was]
             self.db.execute(f"UPDATE shots SET {', '.join(f'{c} = ?' for c in cols)} WHERE id = ?",
                             (*(was[c] for c in cols), shot_id))
+            if any(c in was for c in self._NAMED):
+                self._sync_gimme(shot_id)
         self.db.execute("DELETE FROM shot_tracks WHERE shot_id = ?", (shot_id,))
+
+    def _sync_gimme(self, shot_id: int) -> None:
+        """The conceded putt a shot left (record_gimme) follows it when the round file names it or takes
+        the name back: same player, hole and attribution, the stroke after it."""
+        p = self.db.execute("SELECT uid, player, hole, shot_number, attributed FROM shots WHERE id = ?",
+                            (shot_id,)).fetchone()
+        if p is not None and p["uid"] is not None:
+            self.db.execute("UPDATE shots SET player = ?, hole = ?, shot_number = ?, attributed = ?"
+                            " WHERE derived_from = ? AND outcome = 'gimme'",
+                            (p["player"], p["hole"], None if p["shot_number"] is None else p["shot_number"] + 1,
+                             p["attributed"], p["uid"]))
 
     def _apply_track(self, row: sqlite3.Row, t, named: dict | None = None) -> None:
         def lie(old, new):   # GSPro's lie, unless the HUD read a finer one
@@ -1423,6 +1489,8 @@ class Store:
         # stroke): where it stopped isn't where play went on.
         old = self._track(row["id"])
         was = old["was"] if old is not None else json.dumps({c: row[c] for c in self._TRACKED + tuple(named or ())})
+        if t.end is None and row["total_yards"] is not None:   # a penalty followed: no resting total, whoever read one
+            self.db.execute("UPDATE shots SET total_yards = NULL, total_from_log = 0 WHERE id = ?", (row["id"],))
         if old is not None:
             if old["total_yards"] is not None and total is None:
                 self.db.execute("UPDATE shots SET total_yards = NULL, total_from_log = 0 WHERE id = ?"
@@ -1441,6 +1509,7 @@ class Store:
         if named:
             self.db.execute(f"UPDATE shots SET {', '.join(f'{c} = ?' for c in named)} WHERE id = ?",
                             (*named.values(), row["id"]))
+            self._sync_gimme(row["id"])
         self.db.execute(
             "INSERT OR REPLACE INTO shot_tracks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (row["id"], t.shot_id, *(t.land or (None,) * 3), *(t.end or (None,) * 3),

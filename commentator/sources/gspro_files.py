@@ -8,7 +8,14 @@ GSPro writes these itself whatever launch monitor sent the shot, once the ball c
   el launch, az start direction, ts total spin, sa spin axis, cy launch-monitor carry). A new round
   starts the list over. Not every entry is a swing: a penalty (ShotResult 2 water, 3 out of bounds)
   is its own entry, a ball that drops after the stroke (a gimme, a holed putt) can add a copy of
-  that stroke with HoleResult 7, and a mulligan marks the replaced entry ShotResult 1.
+  that stroke with HoleResult 7, and a mulligan marks the replaced entry ShotResult 1. A concession
+  (GSPro's pickup at the max score) writes no entry at all, nor does a practice or range shot.
+  GSPro rewrites the whole file (File.WriteAllText) in the frame it decides the ball is at rest,
+  before it logs the shooter's score line, so it's the booth's earliest word of the rest: the lie,
+  carry, total and distance to the pin (round_file.py). RoundFileWatch parses it only when it
+  changed; on Windows a change notification (ReadDirectoryChangesW on GSPro's folder, ChangeNotifier)
+  has it read within milliseconds of the write, with a stat every WATCH_BACKUP_S as the backup for a
+  missed one (and the only check elsewhere). The engine's live follow and the shot feed share one.
 - GSPro.db, table LastShot: the latest shot only (ball speed, VLA, HLA, back and side spin,
   rawCarryLM). Written for practice shots too, which currentRound.dat isn't, but it skips some
   shots (into the water, holed), so it's only the fallback.
@@ -19,8 +26,13 @@ player hitting out of turn, a new round).
 
 import json
 import logging
+import math
 import os
 import sqlite3
+import struct
+import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +43,14 @@ DB_FILE = "GSPro.db"
 SWING = 0          # ShotResult of a real stroke (1 mulliganed, 2 water penalty, 3 out-of-bounds penalty)
 HOLED_COPY = 7     # HoleResult of the entry GSPro adds when the ball drops
 DB_SETTLE = 0.2    # seconds GSPro.db must stay unchanged before it's read
+# The backup look at currentRound.dat (a stat, parsed only when it changed), for a change notification
+# missed (its buffer overflowed, an antivirus held the file...), and the only one off Windows.
+WATCH_BACKUP_S = 1.0
+# GSPro's write truncates then writes, so a read on its notification can catch the file half-written: it's
+# read again every PARSE_RETRY_STEP_S for this long. A partial list never parses (it lacks its closing ]).
+PARSE_RETRY_S = 0.1
+PARSE_RETRY_STEP_S = 0.02
+_PARTIAL = object()
 
 
 def launch_of(entry: dict) -> dict[str, float] | None:
@@ -56,6 +76,215 @@ def swings(entries: list[dict]) -> list[tuple[str, dict]]:
     return out
 
 
+class ChangeNotifier:
+    """Windows change notifications for one file: ReadDirectoryChangesW on its folder, on a daemon
+    thread, calls `on_change` for each change to the file named `name` (and on a notification buffer
+    overflow, which may have hidden one). start() is False where there are none (not Windows, no folder)."""
+
+    def __init__(self, folder: str, name: str, on_change) -> None:
+        self.folder, self.name, self.on_change = str(folder), name.lower(), on_change
+        self._handle = None
+        self._stopping = False
+        self._k32 = None
+        self._lock = threading.Lock()
+
+    def start(self) -> bool:
+        if sys.platform != "win32":
+            return False
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = wintypes.HANDLE
+        k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        k32.ReadDirectoryChangesW.restype = wintypes.BOOL
+        k32.ReadDirectoryChangesW.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD, wintypes.BOOL,
+                                              wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID,
+                                              wintypes.LPVOID]
+        k32.CancelIoEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        file_list_directory, share_all, open_existing, backup_semantics = 0x1, 0x7, 3, 0x02000000
+        h = k32.CreateFileW(self.folder, file_list_directory, share_all, None, open_existing, backup_semantics, None)
+        if h is None or h == wintypes.HANDLE(-1).value:
+            log.debug("Can't watch %s for changes: error %d", self.folder, ctypes.get_last_error())
+            return False
+        self._k32, self._handle = k32, h
+        threading.Thread(target=self._run, args=(ctypes, wintypes), name="round-file-notify", daemon=True).start()
+        return True
+
+    def _run(self, ctypes, wintypes) -> None:
+        # FILE_NOTIFY_CHANGE_FILE_NAME | _SIZE | _LAST_WRITE: GSPro's rewrite, or a replace by rename.
+        flags = 0x1 | 0x8 | 0x10
+        buf = ctypes.create_string_buffer(64 * 1024)
+        got = wintypes.DWORD()
+        h = self._handle
+        try:
+            while not self._stopping:
+                if not self._k32.ReadDirectoryChangesW(h, buf, len(buf), False, flags, ctypes.byref(got), None, None):
+                    if not self._stopping:
+                        log.info("Lost change notifications for %s (error %d): checking it every %.0f s instead",
+                                 self.name, ctypes.get_last_error(), WATCH_BACKUP_S)
+                    break
+                if self._stopping:
+                    break
+                if got.value == 0 or self._names(buf.raw[:got.value]):   # 0: the buffer overflowed
+                    try:
+                        self.on_change()
+                    except Exception:
+                        log.exception("Change notification handler failed")
+        finally:
+            # Closed here, by the only thread reading it: never under a read, never used once closed.
+            with self._lock:
+                self._stopping, self._handle = True, None
+            self._k32.CloseHandle(h)
+
+    def _names(self, data: bytes) -> bool:
+        off = 0
+        while off + 12 <= len(data):
+            nxt, _, n = struct.unpack_from("<III", data, off)
+            if data[off + 12:off + 12 + n].decode("utf-16-le", "replace").lower() == self.name:
+                return True
+            if not nxt:
+                break
+            off += nxt
+        return False
+
+    def stop(self) -> None:
+        """Ends the thread: its blocked read is cancelled (one not yet begun ends at the folder's next
+        change, with no call), and it closes the folder."""
+        with self._lock:
+            self._stopping = True
+            if self._handle is not None:
+                self._k32.CancelIoEx(self._handle, None)
+
+
+class RoundFileWatch:
+    """currentRound.dat as GSPro last wrote it. poll() stats it and parses it only when its mtime or
+    size changed. GSPro rewrites the whole file (truncate, then write), so a read can catch it half
+    written: that fails to parse (or the file changes under it) and is never taken; poll(retry_s) reads
+    again till it parses, else the next poll does. Thread-safe, so the shot feed, the engine and the
+    change notifier (notify()) can share one.
+
+    `version` counts the writes read; `seen_at` is when (monotonic) each ShotID was first read, so an
+    entry can be told from one already there before a swing (-inf: in the file before the watch began); `written` is the file's mtime (wall-clock)."""
+
+    def __init__(self, folder: str) -> None:
+        self.folder = Path(folder)
+        self._lock = threading.Lock()
+        self.version = 0
+        self._clear()
+        self._on_change = None
+        self._notifier: ChangeNotifier | None = None
+
+    def notify(self, on_change) -> bool:
+        """Call `on_change` (from another thread) as soon as GSPro writes the file, read by then: Windows
+        change notifications on its folder. False when there are none here: poll on WATCH_BACKUP_S alone."""
+        self._on_change = on_change
+        return self._start_notifier()
+
+    def unnotify(self) -> None:
+        self._on_change = None
+        if self._notifier is not None:
+            self._notifier.stop()
+            self._notifier = None
+
+    def _start_notifier(self) -> bool:
+        if self._notifier is not None:
+            self._notifier.stop()
+            self._notifier = None
+        if self._on_change is None:
+            return False
+        n = ChangeNotifier(str(self.folder), ROUND_FILE, self._notified)
+        try:
+            ok = n.start()
+        except Exception as e:   # (ctypes on an odd Windows)
+            log.debug("Change notifications failed to start: %s", e)
+            ok = False
+        if ok:
+            self._notifier = n
+            log.info("Watching %s with change notifications (backup check every %.0f s)",
+                     self.path, WATCH_BACKUP_S)
+        else:
+            log.info("No change notifications for %s here: checking it every %.0f s", self.path, WATCH_BACKUP_S)
+        return ok
+
+    def _notified(self) -> None:
+        try:
+            self.poll(retry_s=PARSE_RETRY_S)
+        except Exception:
+            log.exception("Couldn't read %s", ROUND_FILE)
+        # Told even when another reader had the write first: the version says whether there's news.
+        if (cb := self._on_change) is not None:
+            cb()
+
+    def _clear(self) -> None:
+        self.sig = None
+        self.entries: list[dict] | None = None   # None: no file read (no file, or a GSPro that writes none)
+        self.written = 0.0
+        self.changed_at: float | None = None
+        self.seen_at: dict[str, float] = {}
+        self._since = time.time()   # the file as written before this (wall-clock) is history
+
+    @property
+    def path(self) -> Path:
+        return self.folder / ROUND_FILE
+
+    def move(self, folder: str) -> None:
+        with self._lock:
+            if Path(folder) == self.folder:
+                return
+            self.folder = Path(folder)
+            self._clear()
+            self.version += 1
+        if self._on_change is not None:
+            self._start_notifier()
+
+    def _read(self):
+        """(sig, parsed) for a changed file, None for no change (or no file), _PARTIAL mid-write."""
+        try:
+            st = self.path.stat()
+        except OSError:
+            return None
+        sig = (st.st_mtime_ns, st.st_size)
+        if sig == self.sig:
+            return None
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8-sig"))
+            st = self.path.stat()
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as e:
+            log.debug("Can't read %s yet: %s", ROUND_FILE, e)
+            return _PARTIAL
+        if (st.st_mtime_ns, st.st_size) != sig:   # written again under the read: which one was read?
+            return _PARTIAL
+        return sig, data
+
+    def poll(self, now: float | None = None, retry_s: float = 0.0) -> bool:
+        """Read the file if it changed since the last read, trying again for `retry_s` seconds if it's
+        caught mid-write. True when a new write was read."""
+        deadline = time.monotonic() + retry_s
+        with self._lock:
+            while (got := self._read()) is _PARTIAL and time.monotonic() < deadline:
+                time.sleep(PARSE_RETRY_STEP_S)
+            if got is None or got is _PARTIAL:
+                return False
+            sig, data = got
+            self.sig = sig
+            if not isinstance(data, list):
+                return False
+            now = time.monotonic() if now is None else now
+            # The first read of a file last written before the watch began: all of it was played before, so
+            # no stroke in it can be a shot struck since (however late that read comes).
+            seen = -math.inf if self.entries is None and sig[0] / 1e9 < self._since else now
+            self.entries, self.written, self.changed_at = data, sig[0] / 1e9, now
+            self.version += 1
+            for e in data:
+                if isinstance(e, dict) and e.get("ShotID") is not None:
+                    self.seen_at.setdefault(str(e["ShotID"]), seen)
+            return True
+
+
 @dataclass
 class LastShot:
     id: int
@@ -76,10 +305,11 @@ class LastShot:
 class GsproFiles:
     """Watches currentRound.dat and GSPro.db in a GSPro log's folder for shots added since it started."""
 
-    def __init__(self, folder: str) -> None:
+    def __init__(self, folder: str, watch: RoundFileWatch | None = None) -> None:
         self.folder = Path(folder)
         self.seen: set[str] = set()
-        self._round_sig = None
+        self.watch = watch or RoundFileWatch(folder)   # the engine's follow polls the same one
+        self._round_version = None
         self._db_mtime = None
         self._db_moving = None
         self._db_settled = None   # a settled change, acknowledged once it's been read
@@ -89,7 +319,9 @@ class GsproFiles:
 
     def move(self, folder: str) -> None:
         if Path(folder) != self.folder:
-            self.__init__(folder)
+            watch = self.watch
+            self.__init__(folder, watch)
+            watch.move(folder)
 
     def prime(self) -> None:
         """Take what's there now as history."""
@@ -108,24 +340,12 @@ class GsproFiles:
         except OSError:
             return None
 
-    def _load_round(self) -> list[dict] | None:
-        try:
-            data = json.loads((self.folder / ROUND_FILE).read_text(encoding="utf-8-sig"))
-        except FileNotFoundError:
-            return None
-        except (OSError, ValueError) as e:   # mid-write: read again on the next change
-            log.debug("Can't read %s yet: %s", ROUND_FILE, e)
-            self._round_sig = None
-            return None
-        return data if isinstance(data, list) else None
-
     def _entries_changed(self) -> list[tuple[str, dict]] | None:
-        sig = self._mtime(self.folder / ROUND_FILE)
-        if sig is None or sig == self._round_sig:
+        self.watch.poll()
+        if self.watch.entries is None or self.watch.version == self._round_version:
             return None
-        self._round_sig = sig
-        entries = self._load_round()
-        return swings(entries) if entries is not None else None
+        self._round_version = self.watch.version
+        return swings(self.watch.entries)
 
     def new_swings(self) -> tuple[list[dict], float]:
         """currentRound.dat entries for strokes not seen before, oldest first, and when the file was
@@ -135,7 +355,7 @@ class GsproFiles:
             if sid not in self.seen:
                 self.seen.add(sid)
                 out.append(e)
-        return out, (self._round_sig[0] / 1e9 if self._round_sig else 0.0)
+        return out, self.watch.written
 
     def db_changed(self, now: float) -> bool:
         """GSPro.db was written and has been still for DB_SETTLE seconds (read it then, not while

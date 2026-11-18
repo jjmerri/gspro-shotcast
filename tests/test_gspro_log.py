@@ -666,6 +666,14 @@ def test_a_4_0_out_of_bounds_is_called_on_its_own_shot():
     for ev in parse_events(" * ------- Shot Fired! ------- *\nActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 2"):
         s.apply(ev)
     assert asyncio.run(Engine._penalty_shot_facts(me, s.fires, drive, [], wait=0)) == ([], None)
+    # GSPro's round file has the stroke's penalty entry: said with no wait on the log's.
+    from commentator.round_file import Track
+    import time
+    oob = Track("x", 7, None, "Josh", 1, 2, 142.4, False, (0, 0, 0), None, None, penalty=True,
+                penalty_kind="out of bounds")
+    t0 = time.monotonic()
+    facts, tag = asyncio.run(Engine._penalty_shot_facts(me, s.fires, drive, [], wait=5, track=oob))
+    assert tag == "out_of_bounds" and time.monotonic() - t0 < 0.5
 
 
 def test_a_tree_hit_is_logged_on_its_shot_and_called_by_its_height():

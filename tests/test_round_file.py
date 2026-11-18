@@ -103,6 +103,48 @@ def test_a_stroke_is_matched_only_to_its_players_shot_and_waits_for_its_row(tmp_
     assert st.apply_round_file(round_file.tracks([APPROACH]), now=1000.0 + 13 * 3600)[0] == 0
 
 
+def test_a_stroke_the_follow_tied_to_its_shot_is_applied_whatever_the_booths_stroke_count(tmp_path):
+    st = _season(tmp_path)
+    # A re-tee: the booth counts the approach as its 3rd (the penalty), GSPro's file as its 2nd.
+    st.db.execute("UPDATE shots SET shot_number = 4 WHERE shot_number = 3")
+    st.db.execute("UPDATE shots SET shot_number = 3 WHERE shot_number = 2")
+    approach_id = _row(st, 3)["id"]
+    assert st.apply_round_file(round_file.tracks([APPROACH]), now=1005.0)[1] != []
+    written, pending = st.apply_round_file(round_file.tracks([APPROACH]), now=1005.0,
+                                           pinned={APPROACH["ShotID"]: approach_id})
+    assert (written, pending) == (1, [])
+    assert _row(st, 3)["lie_after"] == "green" and _row(st, 3)["shot_number"] == 3
+    # A pin needs no name: the HUD may have missed whose shot it was.
+    st.db.execute("UPDATE shots SET player = NULL WHERE id = ?", (approach_id,))
+    st.db.execute("DELETE FROM shot_tracks")
+    gimme = st.record_gimme(approach_id)   # (left inside the gimme circle, recorded before the file named it)
+    assert st.apply_round_file(round_file.tracks([APPROACH]), now=1005.0, name_of={"Dan": "Dan Smith"}.get,
+                               pinned={APPROACH["ShotID"]: approach_id}) == (1, [])
+    assert (_row(st, 2)["player"], _row(st, 2)["attributed"]) == ("Dan Smith", 1)   # (named as GSPro counts it)
+    assert _row(st, 2)["hole"] == HOLE   # its own label for the hole kept
+    assert tuple(st.db.execute("SELECT player, shot_number FROM shots WHERE id = ?", (gimme,)).fetchone()) \
+        == ("Dan Smith", 3)
+    st.db.execute("DELETE FROM shots WHERE id = ?", (gimme,))
+    # Still its shot after a restart (no pins, a new session: a course key matching no course's name).
+    st.session_id += 1
+    assert st.apply_round_file(round_file.tracks([{**APPROACH, "CourseKey": "zz_gsp"}]), now=1005.0) == (1, [])
+    assert st.tracked_shots([APPROACH["ShotID"]]) == {APPROACH["ShotID"]: approach_id}
+    # A pin wins over a shot the stroke number and a closer speed fit, and takes it back from one.
+    st.db.execute("UPDATE shots SET ball_speed = 100.0, shot_number = 2 WHERE shot_number = 1")
+    st.db.execute("UPDATE shot_tracks SET shot_id = (SELECT id FROM shots WHERE shot_number = 2)")
+    st.apply_round_file(round_file.tracks([APPROACH]), now=1005.0, pinned={APPROACH["ShotID"]: approach_id})
+    assert st.tracked_shots([APPROACH["ShotID"]]) == {APPROACH["ShotID"]: approach_id}
+    # A later round's shot like it doesn't take a pinned stroke over.
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, ball_speed, raw)"
+                  " VALUES (?, 2100, 'Dan Smith', 'Test Links', ?, 2, 0, 100.0, '{}')", (st.session_id, HOLE))
+    st.apply_round_file(round_file.tracks([APPROACH]), now=2105.0, pinned={APPROACH["ShotID"]: approach_id})
+    assert st.tracked_shots([APPROACH["ShotID"]]) == {APPROACH["ShotID"]: approach_id}
+    # Without the pin, a shot moved to another player since lets the stroke go.
+    st.db.execute("UPDATE shots SET player = 'Al Jones' WHERE id = ?", (approach_id,))
+    st.apply_round_file(round_file.tracks([APPROACH]), now=1005.0)
+    assert st.tracked_shots([APPROACH["ShotID"]]).get(APPROACH["ShotID"]) != approach_id
+
+
 def test_the_booths_later_reads_leave_the_round_files_numbers_be(tmp_path):
     st = _season(tmp_path)
     st.apply_round_file(round_file.tracks([DRIVE, APPROACH, PUTT]), now=1005.0)
@@ -188,6 +230,10 @@ def test_a_penalty_that_follows_a_stroke_takes_back_where_the_file_had_it_stop(t
     approach = _row(st, 2)
     assert (approach["total_yards"], approach["finish_yards"], approach["lie_after"]) == (None, None, None)
     assert approach["carry_game_yards"] == round(math.hypot(2.5, 90) * M_TO_YD, 1)
+    # Nor does the next setup's tile give it one back.
+    st.set_shot_tiles(approach["id"], carry_game_yards=None, carry_raw_tile_yards=None, total_yards=90.0,
+                      offline_yards=None)
+    assert _row(st, 2)["total_yards"] is None
 
 
 def test_taking_back_a_putts_outcome_keeps_the_files_lie(tmp_path):
@@ -364,3 +410,76 @@ def test_blind_shots_that_dont_line_up_are_left_unnamed(tmp_path):
     written, pending = st.apply_round_file(round_file.tracks([DRIVE, APPROACH, PUTT]), now=1005.0, name_of=str)
     assert written == 0 and len(pending) == 3
     assert st.db.execute("SELECT COUNT(*) FROM shots WHERE player IS NOT NULL").fetchone()[0] == 0
+
+
+def test_the_round_file_watch_reads_a_write_once_and_again_after_one_caught_half_written(tmp_path):
+    from commentator.sources.gspro_files import RoundFileWatch
+    w = RoundFileWatch(str(tmp_path))
+    assert not w.poll() and w.entries is None   # no file: a GSPro that writes none
+    path = tmp_path / "currentRound.dat"
+    path.write_text(json.dumps([DRIVE]))
+    assert w.poll(now=10.0) and w.version == 1 and not w.poll(now=11.0)   # unchanged: not parsed again
+    path.write_text(json.dumps([DRIVE, APPROACH])[:-20])   # GSPro mid-write
+    assert not w.poll(now=12.0) and len(w.entries) == 1
+    path.write_text(json.dumps([DRIVE, APPROACH]))
+    assert w.poll(now=13.0) and len(w.entries) == 2
+    assert w.seen_at == {DRIVE["ShotID"]: 10.0, APPROACH["ShotID"]: 13.0}
+
+
+def test_a_notified_read_waits_out_gspros_write_and_never_takes_half_a_list(tmp_path):
+    import threading
+    from commentator.sources.gspro_files import RoundFileWatch
+    w = RoundFileWatch(str(tmp_path))
+    path = tmp_path / "currentRound.dat"
+    path.write_text(json.dumps([DRIVE, APPROACH])[:-20])   # truncated and half rewritten
+    assert not w.poll(retry_s=0.0) and w.entries is None
+    threading.Timer(0.03, lambda: path.write_text(json.dumps([DRIVE, APPROACH]))).start()
+    assert w.poll(retry_s=0.5) and len(w.entries) == 2
+
+
+def test_the_change_notifier_hears_only_the_round_file(tmp_path):
+    import struct
+    import sys
+    from commentator.sources.gspro_files import ChangeNotifier, RoundFileWatch
+
+    def info(*names):   # FILE_NOTIFY_INFORMATION records, as ReadDirectoryChangesW fills its buffer
+        out = b""
+        for i, n in enumerate(names):
+            raw = n.encode("utf-16-le")
+            rec = struct.pack("<III", 0, 3, len(raw)) + raw
+            rec += b"\0" * (-len(rec) % 4)
+            if i < len(names) - 1:
+                rec = struct.pack("<I", len(rec)) + rec[4:]
+            out += rec
+        return out
+    n = ChangeNotifier(str(tmp_path), "currentRound.dat", lambda: None)
+    assert n._names(info("Player.log", "CurrentRound.dat"))
+    assert not n._names(info("Player.log", "GSPro.db"))
+    if sys.platform != "win32":   # elsewhere: the backup check alone
+        assert not RoundFileWatch(str(tmp_path)).notify(lambda: None)
+
+
+def test_a_stroke_says_what_its_penalty_was_and_whether_the_ball_dropped():
+    wet = _entry(1, (0, 0), (40, 150), sp=150.0, name="Al", flight=[(0, 0), (40, 150)], land=(40, 150))
+    water = _entry(2, (35, 140), (35, 140), sp=0.0, name="Al", result=2)
+    chip = _entry(3, (35, 140), (36, 141), sp=30.0, name="Al", to_pin=0.3, surfaces=(1, 5))
+    gimme = {**chip, "ShotID": "copy", "HoleShot": 4, "HoleResult": 7}
+    al_wet, al_chip = round_file.tracks([wet, water, chip, gimme])
+    assert (al_wet.penalty_kind, al_wet.dropped) == ("water", False)
+    assert (al_chip.penalty_kind, al_chip.dropped, al_chip.in_cup, al_chip.lie_after) == (None, True, False, "green")
+    putt = round_file.tracks([PUTT])[0]
+    assert putt.in_cup and putt.dropped
+    # In the cup before GSPro writes its copy; and a gimme's own stroke marked done keeps how far it was left.
+    chip_in = round_file.tracks([{**PUTT, "HoleResult": 3}])[0]
+    assert chip_in.in_cup and chip_in.dropped and chip_in.finish_yards == 0.0
+    given = round_file.tracks([{**chip, "HoleResult": 7}])[0]
+    assert given.dropped and not given.in_cup and given.finish_yards == round(0.3 * M_TO_YD, 1)
+
+
+def test_a_finer_hud_lie_is_kept_only_inside_gspros():
+    assert round_file.finer_lie("rough", "semi rough") == "semi rough"
+    assert round_file.finer_lie("green", "fringe") == "fringe"
+    assert round_file.finer_lie("sand", "fringe") == "sand"         # it rolled on from the fringe
+    assert round_file.finer_lie("fairway", "rough") == "fairway"    # not finer: GSPro's stands
+    assert round_file.finer_lie("fairway", None) == "fairway"
+    assert round_file.finer_lie(None, "structure") == "structure"   # a surface GSPro's code isn't known for

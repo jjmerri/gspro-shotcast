@@ -129,6 +129,7 @@ class ShotEvent:
     setup_hud: Any = None       # this stroke's setup read, kept at impact for an impact read that misses
     buffer_frames: Any = None   # the HUD buffer's frames before this shot, kept at impact (HudBuffer)
     landed: bool = False        # the feed only had it once the ball came to rest (GSPro 3.59's shot files)
+    round_shot_id: str | None = None   # the ShotID of GSPro's round file entry the feed took it from
     # When the booth took it off the feed (monotonic) and GSPro's "Shot Fired" count then: the shot
     # may queue behind other events before it's handled.
     received_at: float | None = None
