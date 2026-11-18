@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.149
+
+### Booth
+- Fixed the booth going blind after names were typed with the Windows touch keyboard: it no longer mistakes the keyboard's invisible handwriting layer for a window covering GSPro (0.1.148's fix missed it).
+
 ## 0.1.148
 
 ### Booth
