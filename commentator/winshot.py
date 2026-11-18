@@ -89,8 +89,9 @@ WDA_EXCLUDEFROMCAPTURE = 0x11
 _FIND_SECONDS = 2.0
 # Windows' own see-through layers that span the whole screen yet draw nothing over the game: once the
 # touch keyboard (TabTip.exe) has been used to type a name, its handwriting canvas stays topmost over
-# everything, and counting it as a window in front blanked every read for hours.
-_SEE_THROUGH_CLASSES = frozenset({"ShellHandwritingCanvas"})
+# everything, and counting it as a window in front blanked every read for hours. Matched by the start of
+# the class name: Windows adds a GUID ("ShellHandwritingCanvas {18E91349-...}").
+_SEE_THROUGH_CLASSES = ("ShellHandwritingCanvas",)
 if _AVAILABLE:
     _u = ctypes.WinDLL("user32")
     _dwm = ctypes.WinDLL("dwmapi")
@@ -195,7 +196,7 @@ def coverage(substr: str) -> tuple[tuple[int, int, int, int] | None, list[tuple[
             raise OSError("the window order ran out before GSPro's window")
         if h == hwnd:
             return bounds, front
-        if _shows(h) and (pid := _pid(h)) != own and _class(h) not in _SEE_THROUGH_CLASSES:
+        if _shows(h) and (pid := _pid(h)) != own and not _class(h).startswith(_SEE_THROUGH_CLASSES):
             if (r := _frame(h)) is None:
                 raise OSError("couldn't tell where a window in front of GSPro is")
             front.append((r, pid))

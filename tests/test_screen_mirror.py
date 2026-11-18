@@ -379,7 +379,7 @@ def test_the_touch_keyboards_handwriting_canvas_never_covers_gspro(monkeypatch):
     from commentator import winshot
 
     # Front to back: the canvas, Chrome, GSPro.
-    windows = {1: ("ShellHandwritingCanvas", 10, (0, 0, 3840, 2160)), 2: ("Chrome_WidgetWin_1", 20, (0, 0, 50, 50)),
+    windows = {1: ("ShellHandwritingCanvas {18E91349-E229-4995-8049-7437243BBCC3}", 10, (0, 0, 3840, 2160)), 2: ("Chrome_WidgetWin_1", 20, (0, 0, 50, 50)),
                3: (winshot.UNITY_CLASS, 30, (0, 0, 3840, 2160))}
     order = [1, 2, 3]
 
