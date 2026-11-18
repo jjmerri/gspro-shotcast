@@ -14,7 +14,7 @@ import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from . import round_file
 from .hud import Hud
@@ -1184,10 +1184,13 @@ class Store:
                 {"old": replaced, "new": shot_id})
         self.db.commit()
 
-    def relabel_hole(self, old: str, new: str, since_id: int) -> None:
-        """This session's shots from `since_id` on that were recorded on hole `old` move to `new`."""
-        self.db.execute("UPDATE shots SET hole = ? WHERE session_id = ? AND hole = ? AND id >= ?",
-                        (new, self.session_id, old, since_id))
+    def relabel_hole(self, old: str, new: str, since_id: int, keep: Iterable[int] = ()) -> None:
+        """This session's shots from `since_id` on that were recorded on hole `old` move to `new`, but
+        for those in `keep` (played on `old` after all)."""
+        keep = list(keep)
+        self.db.execute(f"UPDATE shots SET hole = ? WHERE session_id = ? AND hole = ? AND id >= ?"
+                        f" AND id NOT IN ({', '.join('?' * len(keep))})",
+                        (new, self.session_id, old, since_id, *keep))
         self.db.commit()
 
     def set_shot_tiles(self, shot_id: int, *, carry_game_yards: float | None, carry_raw_tile_yards: float | None,

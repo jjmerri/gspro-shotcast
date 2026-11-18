@@ -798,8 +798,15 @@ class Tray:
         def work():
             from . import report
 
+            description = ""
+            if self.ui is not None:
+                description = self.ui.describe(
+                    "What went wrong? Say what you saw and roughly when (optional: leave it blank if you "
+                    "like). It goes in the report with the logs.", "Make report")
+                if description is None:
+                    return
             try:
-                path = report.build(self.cfg, self.home / "config.yaml")
+                path = report.build(self.cfg, self.home / "config.yaml", description)
             except Exception as e:
                 log.exception("Problem report failed")
                 self.error(f"Couldn't make the problem report: {e}")

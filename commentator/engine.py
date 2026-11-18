@@ -6277,7 +6277,8 @@ class Engine:
                        #                                            instant the next state line advances it
                        dict(gs.dropped_by),   # scramble balls not picked, to leave their finish alone
                        gs.added_count,        # penalties the booth had added by then
-                       (gs.pick, gs.pick_stroke()))   # the scramble's pick: the team ball being played
+                       (gs.pick, gs.pick_stroke()),   # the scramble's pick: the team ball being played
+                       self._finished_holes())   # (player, hole)s finished by then
         fires0 = gs.fires   # GSPro's shot counter at impact, to find this shot's putting/regular mode
         setups0 = dict(gs.setups_by)   # each player's setups so far: the next one settles this shot
         lies0 = dict(gs.lie_by)   # each ball's logged surface going into this shot
@@ -6807,6 +6808,9 @@ class Engine:
             lie_before=before.lie, shot_number=before.shot_number, to_pin_before=before.to_pin,
             carry_game=carry_game, impact_seq=my_seq,
         )
+        if idx is not None and (log_hole := impact_snap[1].get(idx)) is not None \
+                and not self._log_hole_finished(idx, log_hole, impact_snap):
+            rec.log_hole = log_hole + 1   # (a finished one is the log's until the next tee shot: not this one's)
         if idx is not None and (start_m := impact_snap[0].get(idx)) is not None:
             # Where this stroke was struck from (GSPro's distance at impact, in metres, to the inch).
             rec.gimme_edge = gimme_edge(start_m * M_TO_YD, self.gspro.gimme_of(idx))
@@ -7636,8 +7640,29 @@ class Engine:
             return
         if self.hole_number is None or (hole := impact_snap[1].get(idx)) is None or hole + 1 != self.hole_number:
             return
+        if self._log_hole_finished(idx, hole, impact_snap):
+            return   # the log's count is the finished hole's: this is the next tee, the booth not there yet
         log.info("%s shot %s from GSPro's log (unread on screen)", tag, n)
         before.shot_number = n
+
+    def _finished_holes(self) -> frozenset:
+        """The (player, 0-based hole)s GSPro's log has finished: scored or picked up, and in a scramble
+        each teammate's too (the log scores the team's hole on one of them; a log's teams before the
+        round is known are taken as a scramble's)."""
+        g, r = self.gspro, self.round
+        done = {*g.hole_scores, *g._picked}
+        teams: list[set[int]] = []   # the log's pairs joined into teams (A-B and A-C: one team)
+        # (Not a shamble's: its partners share the drive, then each finish with their own ball.)
+        for pair in g.teammates if r is None or (r.format == "scramble" and not r.no_scramble) else ():
+            hit = [t for t in teams if t & pair]
+            teams = [t for t in teams if t not in hit] + [set(pair).union(*hit)]
+        return frozenset(done | {(j, h) for i, h in done for t in teams if i in t for j in t})
+
+    def _log_hole_finished(self, idx: int, hole: int, impact_snap: tuple) -> bool:
+        """Whether GSPro's log had the player done with this (0-based) hole at impact: scored, or picked
+        up. Its hole moves on only with the next tee shot, so until then its stroke count is the
+        finished hole's. (At impact: a stroke that holes out is scored before its HUD read is done.)"""
+        return (idx, hole) in (impact_snap[10] if len(impact_snap) > 10 else self._finished_holes())
 
     def _misread_shot_one(self, before: Hud, player: str | None, impact_snap: tuple, lies0: dict,
                           hole_label: str | None, tag: str = "") -> None:
@@ -7650,6 +7675,10 @@ class Engine:
         idx = self._gspro_idx(player)
         if (not self._log_truth or idx is None or self.hole_number is None
                 or (hole := impact_snap[1].get(idx)) is None or hole + 1 != self.hole_number):
+            return
+        if self._log_hole_finished(idx, hole, impact_snap):
+            # Steve at Brasstown's 17th, its banner's length unread so the booth was still on 16: GSPro
+            # had scored his 16th, so its "stroke 5" there wasn't this one. The HUD's 1 is the tee shot.
             return
         r = self.round
         if r and r.format == "scramble" and not r.no_scramble:
@@ -7774,8 +7803,8 @@ class Engine:
         to the hole GSPro's log names. Shots already recorded on the wrong hole move with it."""
         wrong, r = self.state.current_hole, self.round
         self.state.current_hole = event.current
-        if m := re.search(r"par (\d)", event.current, re.IGNORECASE):
-            self.current_par = int(m.group(1))
+        if new_par := re.search(r"par (\d)", event.current, re.IGNORECASE):
+            self.current_par = int(new_par.group(1))
         log.info("Hole corrected (%s): %s -> %s", event.correction, wrong, event.current)
         if not r or r.ended:
             return
@@ -7792,14 +7821,44 @@ class Engine:
         r.seq = new_seq
         for seq in [s for s in r.par if s > new_seq]:
             del r.par[seq]   # set by the wrong count; set again when play gets there
-        if self.current_par:
-            r.par[new_seq] = self.current_par
+        # The hole's par: the label's, else the card's for its number, else what the round had. Not the
+        # hole it's corrected from (a label with its par unread).
+        card, hole_n = r.course_card, re.match(r"Hole (\d+)", event.current)
+        par = (int(new_par.group(1)) if new_par
+               else card.par.get(int(hole_n.group(1))) if hole_n and card and card.par else None) \
+            or r.par.get(new_seq)
+        self.current_par = par or None   # unknown, not the hole it's corrected from
+        if par:
+            r.par[new_seq] = par
         moved = [x for x in self.state.shots if x.round_id == r.id and x.hole_seq == old_seq and x.hole == wrong]
+        kept = []
+        if new_seq > old_seq and (m := re.match(r"Hole (\d+)", event.current)):
+            # Shots GSPro's log had on an earlier hole at impact were played there: only the new hole's
+            # move (Steve's hole 16 was filed under 17 along with his tee shot there).
+            new_hole, g = int(m.group(1)), self.gspro
+            fires = {id(rec): f for f, (_, rec, _, _) in self._fire_rows.items()}
+
+            def played_on(x: ShotRecord) -> int | None:
+                # The hole its own score line credited (a tee shot is the log's once that's in), else
+                # the hole the log had the player playing at impact.
+                if (f := fires.get(id(x))) is not None and (h := g.fire_info(f).get("hole")) is not None:
+                    return h + 1
+                return x.log_hole
+            kept = [x for x in moved if (h := played_on(x)) is not None and h < new_hole]
+            moved = [x for x in moved if not any(x is k for k in kept)]
         for x in moved:
             x.hole_seq, x.hole = new_seq, event.current
+            x.par = par or None   # the hole's, not the one it was filed under
+        # A pickup goes with its player's shots, unless some of theirs stayed (it may be that hole's).
+        for name in {x.player for x in moved} - {x.player for x in kept}:
+            if (name, old_seq) in r.picked_up:
+                r.picked_up.discard((name, old_seq))
+                r.picked_up.add((name, new_seq))
         ids = [x.shot_id for x in moved if x.shot_id is not None]
         if wrong and ids:
-            self.store.relabel_hole(wrong, event.current, min(ids))
+            keep = [i for x in kept if x.shot_id is not None
+                    for i in (x.shot_id, self._gimme_ids.get(x.shot_id)) if i is not None]
+            self.store.relabel_hole(wrong, event.current, min(ids), keep)
         log.info("Round %s: hole %s of %s (was %s); %s shots moved", r.id, r.seq, r.holes, old_seq, len(moved))
 
     def _sync_scramble(self) -> None:
@@ -7965,6 +8024,8 @@ class Engine:
                 self.store.set_shot_position(self._fire_rows[fire][0], start)
                 self._totals_due = True
         for fire, row in self._fire_rows.items():
+            if (hole := g.fire_info(fire).get("hole")) is not None:
+                row[1].log_hole = hole + 1   # its score line's: kept on the record past the log's memory
             if fire not in self._hazards_done and (entry := g.fire_info(fire).get("hazard")):
                 self._hazards_done.add(fire)
                 self.store.set_shot_hazard(row[0], entry)

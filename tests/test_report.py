@@ -147,6 +147,37 @@ def test_report_zips_logs_screens_and_maps_without_the_env(tmp_path, monkeypatch
     assert "Log silent" in summary and "output_log.txt: missing" in summary
 
 
+def test_the_senders_description_heads_the_summary_and_empty_keys_arent_listed_as_set(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # A key set again blank further down: the booth keeps the value (dotenv.load_env skips blanks).
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-secret-value-123\nGEMINI_API_KEY=\nOPENAI_API_KEY=\n"
+                                   "SQUABBIT_PASSWORD=correct horse battery staple\n", encoding="utf-8")
+    cfg = Config(log_dir="logs", db_path="logs/season.db")
+
+    def summary(path):
+        with zipfile.ZipFile(path) as z:
+            return z.read("summary.txt").decode()
+
+    text = summary(report.build(cfg, tmp_path / "config.yaml",
+                                "  Hole 17's tee shot went on 16; key sk-secret-value-123\n"
+                                "Authorization: Bearer abcdef0123456789abcdef\n"
+                                "SQUABBIT_PASSWORD=correct horse battery staple\n"
+                                "Ocp-Apim-Subscription-Key: 0123456789abcdef0123456789abcdef\n"
+                                "AZURE_SPEECH_KEY=fedcba9876543210fedcba9876543210\n"
+                                "SQUABBIT_PASSWORD=&not-in-env-Pass123\n"
+                                "[default]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\n"
+                                "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n"))
+    said = text.split("== What went wrong (the sender's words) ==\n", 1)[1]
+    assert said.startswith("Hole 17's tee shot went on 16; key <redacted>\nAuthorization: ")
+    assert "abcdef0123456789abcdef" not in text and "\n\n== Screen ==" in said
+    assert "horse battery" not in text and "0123456789abcdef0123" not in text \
+        and "fedcba9876543210" not in text and "not-in-env" not in text \
+        and "AKIAIOSFODNN7" not in text and "wJalrXUtnFEMI" not in text   # keys not in .env
+    keys = next(line for line in text.splitlines() if line.startswith("Keys set in .env"))
+    assert "OPENAI_API_KEY" in keys and "GEMINI_API_KEY" not in keys
+    assert "(none given)" in summary(report.build(cfg, tmp_path / "config.yaml"))
+
+
 def test_keep_frame_keeps_only_the_newest_few(tmp_path, monkeypatch):
     stamps = iter(f"20990101-0000{i:02d}" for i in range(10))
     monkeypatch.setattr(report.time, "strftime", lambda fmt, *a: next(stamps) if fmt == "%Y%m%d-%H%M%S" else "x")

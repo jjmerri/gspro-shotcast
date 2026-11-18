@@ -843,7 +843,7 @@ def cmd_backup(cfg: Config, args) -> None:
 def cmd_report(cfg: Config, args) -> None:
     from . import report
 
-    path = report.build(cfg, Path(args.config))
+    path = report.build(cfg, Path(args.config), args.description or "")
     print(f"Saved the problem report to {path}")
     if args.send:
         if not cfg.report.upload_url:
@@ -1004,6 +1004,7 @@ def main() -> None:
 
     p = sub.add_parser("report", help="Zip the logs, screens and setup into a problem report (no API keys)")
     p.add_argument("--send", action="store_true", help="Also send it to report.upload_url and print its code")
+    p.add_argument("--description", "-m", help="What went wrong, in your own words (optional)")
 
     p = sub.add_parser("fetch-report", help="Download a sent problem report by its code (report-drop stack owner)")
     p.add_argument("code", help="The code the sender was given, like ABCD-EFGH")

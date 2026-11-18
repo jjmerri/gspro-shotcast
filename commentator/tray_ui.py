@@ -203,6 +203,56 @@ class Ui:
         done.wait()
         return bool(answer and answer[0])
 
+    def describe(self, text: str, go: str, title: str = TITLE) -> str | None:
+        """`text` over a box to type into, waiting for it (call it from any thread but Tk's): what was
+        typed (blank is fine) once `go` is pressed, None for Cancel or the window closed. Without
+        windows it's blank."""
+        if not self.ok:
+            return ""
+        done, answer = threading.Event(), []
+
+        def finish(value: str | None, w) -> None:
+            if not done.is_set():
+                answer.append(value)
+                done.set()
+                w.destroy()
+
+        def show():
+            import tkinter as tk
+            from tkinter import ttk
+
+            w = tk.Toplevel(self.root)
+            w.title(title)
+            w.attributes("-topmost", True)
+            w.protocol("WM_DELETE_WINDOW", lambda: finish(None, w))
+            f = ttk.Frame(w, padding=self.px(14))
+            f.pack(fill="both", expand=True)
+            ttk.Label(f, text=text, wraplength=self.px(420), justify="left").pack(anchor="w")
+            box = tk.Text(f, wrap="word", width=56, height=8, font=("Segoe UI", 10),
+                          padx=self.px(6), pady=self.px(6))
+            box.pack(fill="both", expand=True, pady=(self.px(10), 0))
+            bar = ttk.Frame(f)
+            bar.pack(fill="x", pady=(self.px(12), 0))
+            ttk.Button(bar, text="Cancel", command=lambda: finish(None, w)).pack(side="right")
+            ttk.Button(bar, text=go, command=lambda: finish(box.get("1.0", "end").strip(), w)).pack(
+                side="right", padx=self.px(6))
+            w.update_idletasks()
+            w.geometry(f"+{max(0, (w.winfo_screenwidth() - w.winfo_reqwidth()) // 2)}"
+                       f"+{max(0, (w.winfo_screenheight() - w.winfo_reqheight()) // 3)}")
+            w.focus_force()
+            box.focus_set()
+            w.after(1500, lambda: w.winfo_exists() and w.attributes("-topmost", False))
+
+        def go_safely():
+            try:
+                show()
+            except Exception:
+                done.set()
+                raise
+        self.call(go_safely)
+        done.wait()
+        return answer[0] if answer else ""
+
     def countdown(self, text: str, seconds: int, go: str, wait: str, title: str = TITLE) -> bool:
         """`text` (its "{s}" the seconds left) counting down on top of everything, waiting for it: True
         when it ran out or `go` was pressed, False for `wait` or the window closed. Call it from any

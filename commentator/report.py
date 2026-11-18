@@ -44,9 +44,10 @@ def folder(cfg: Config) -> Path:
     return Path(cfg.log_dir) / "reports"
 
 
-def read_env(path: Path) -> dict[str, str]:
-    """KEY=value pairs, as dotenv.load_env reads them, without touching the environment."""
-    out: dict[str, str] = {}
+def env_pairs(path: Path) -> list[tuple[str, str]]:
+    """Every KEY=value line dotenv.load_env would set, in order (a key set twice is here twice), without
+    touching the environment. A blank value sets nothing, so it's left out."""
+    out: list[tuple[str, str]] = []
     if not path.is_file():
         return out
     for raw in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
@@ -55,9 +56,14 @@ def read_env(path: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         key, value = key.strip(), value.strip().strip('"').strip("'")
-        if key:
-            out[key] = value
+        if key and value:
+            out.append((key, value))
     return out
+
+
+def read_env(path: Path) -> dict[str, str]:
+    """The KEY=value pairs dotenv.load_env would leave set, without touching the environment."""
+    return dict(env_pairs(path))
 
 
 def _redact(node):
@@ -103,7 +109,7 @@ class Scrubber:
 # pattern starts only where a run begins (the lookbehinds), so a long run of letters is scanned once,
 # and a credential's value is walked once by hand: a string at any depth of escaping, or [...] / {...}.
 _AFTER_ESCAPE = r"(?<=\\[nrt])"   # a JSON string's \n starts a word too, and its n isn't part of it
-_SECRET_NAME = r"[\w-]*(?:password|passwd|pwd|token|secret|api[_-]?key|apikey|authorization|cookie|license[_-]?key)\b"
+_SECRET_NAME = r"[\w-]*(?:password|passwd|pwd|token|secret|api[_-]?key|apikey|subscription[_-]?key|speech[_-]?key|access[_-]?key(?:[_-]?id)?|authorization|cookie|license[_-]?key)\b"
 _EMAIL = re.compile(rf"(?:(?<![\w.+\\-])|{_AFTER_ESCAPE})[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _JWT = re.compile(rf"(?:(?<![\w\\-])|{_AFTER_ESCAPE})eyJ[\w-]{{8,}}\.[\w-]{{8,}}(?:\.[\w-]+)?")
 _BEARER = re.compile(rf"(?i)(?:(?<![\w\\-])|{_AFTER_ESCAPE})(bearer|basic)\s+[\w.~+/=-]{{8,}}")
@@ -114,6 +120,8 @@ _XML_SECRET = re.compile(rf"(?i)<((?:[\w-]+:)?{_SECRET_NAME})(\s[^<>]*(?<!/))?>"
                          r"(?:(\s*+<!\[CDATA\[)(?:[^\]]|\](?!\]>))*+|[^<]*+)")              # failing, so each runs once
 _CREDENTIAL_KEY = re.compile(rf"(?i)(?:(?<![\w\\-])|{_AFTER_ESCAPE})(\\*[\"'])?{_SECRET_NAME}(\\*[\"'])?[ \t]*[:=][ \t]*")
 VALUE_CAP = 65536   # an [...] or {...} longer than this was never closed
+# A pasted line setting a credential, typed by hand: all the rest of the line is the value.
+_SECRET_LINE = re.compile(rf"(?im)^([ \t]*(?:export[ \t]+)?{_SECRET_NAME}[ \t]*[:=][ \t]*)\S.*$")
 _CLOSES = re.compile(r"\s*(?:[,}\]:]|$)", re.M)
 _SPACE = re.compile(r"\s*")
 _QUOTE = re.compile(r"\\*[\"']")
@@ -501,22 +509,23 @@ def _last_lm_type(logs: list[Path]) -> str | None:
     return None
 
 
-def build(cfg: Config, config_path: Path = Path("config.yaml")) -> Path:
-    """Write the report zip into folder(cfg) and return its path."""
+def build(cfg: Config, config_path: Path = Path("config.yaml"), description: str = "") -> Path:
+    """Write the report zip into folder(cfg) and return its path. `description` is the sender's own
+    words on what went wrong (optional), at the top of summary.txt."""
     with _building:
-        return _build(cfg, config_path)
+        return _build(cfg, config_path, description)
 
 
-def _build(cfg: Config, config_path: Path) -> Path:
+def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
     from .updater import current_version
 
     log_dir = Path(cfg.log_dir)
     env: dict[str, str] = {}
     pairs: list[tuple[str, str]] = []
     for p in env_files(config_path):
-        found = read_env(p)
+        found = env_pairs(p)
         env.update(found)
-        pairs += found.items()   # both files' values, even one the other overrides
+        pairs += found   # every value, even one a later line or the other file overrides
     scrub = Scrubber(pairs)
     out_dir = folder(cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -525,6 +534,9 @@ def _build(cfg: Config, config_path: Path) -> Path:
     summary: list[str] = [
         f"Shotcast problem report, {time.strftime('%Y-%m-%d %H:%M:%S %Z')}",
         f"Shotcast {current_version()} on {platform.platform()}, Python {platform.python_version()}",
+        "",
+        "== What went wrong (the sender's words) ==",
+        scrub_private(_SECRET_LINE.sub(r"\1<redacted>", scrub(description.strip()))) or "(none given)",
         "",
         "== Screen ==",
     ]

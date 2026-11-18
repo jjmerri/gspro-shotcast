@@ -1028,6 +1028,7 @@ class GsproState:
                     info["score"] = raw
             self._score[key] = ev.score
             self.hole_scores.pop(key, None)
+            self._picked.discard(key)   # nor a pickup: it's open again
             self._wet_since_shot.pop(ev.player, None)   # the replayed hole starts dry
             self._wet_at.pop(ev.player, None)
         else:
@@ -1277,7 +1278,7 @@ class GsproLogFollower:
         s.starts_late, s.own_range, s.sgt = past.starts_late, past.own_range, past.sgt
         s.course = past.course if past.own_range else s.course   # the course its Tee Off goes to
         s.hole_scores = dict(past.hole_scores)   # holes already finished in a round being joined
-        s._score.update({k: past._score[k] for k in past.hole_scores if k in past._score})   # so they can reopen
+        s._score.update({k: past._score[k] for k in {*past.hole_scores, *past._picked} if k in past._score})   # so they can reopen
         s._picked = set(past._picked)   # picked-up holes: finished, though not yet in hole_scores
         s.current_hole = past.current_hole if past.shots_since_course else None
         s.version, s.kinds, s.unparsed = past.version, Counter(past.kinds), list(past.unparsed)

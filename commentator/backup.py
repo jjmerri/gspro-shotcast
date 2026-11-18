@@ -172,8 +172,9 @@ def before_upgrade(db_path: str | Path, dest: str | Path, version: int, now: dat
     (the .db returned) if that fails or is cut short.
 
     The format is read off the file's header, not through SQLite: a file in WAL mode with no -shm
-    beside it (as the booth leaves it) can't be opened read-only, and one in an older format was never
-    in WAL mode, so its header is up to date."""
+    beside it (as the booth leaves it) can't be opened read-only. Only when the header is older and
+    the file is in WAL mode with a -wal beside it does SQLite read it: an upgrade the booth committed
+    but never checkpointed (stopped without closing the file) is in the -wal, not the header yet."""
     db_path, dest = Path(db_path), Path(dest)
     if not db_path.is_file():
         return None
@@ -182,6 +183,9 @@ def before_upgrade(db_path: str | Path, dest: str | Path, version: int, now: dat
     if len(head) < 100 or not head.startswith(b"SQLite format 3\0"):
         return None   # no season yet (an empty file), or not a database: SQLite says so when it's opened
     was = int.from_bytes(head[60:64], "big", signed=True)
+    if was < version and head[18] == 2 and db_path.with_name(db_path.name + "-wal").is_file():
+        with closing(sqlite3.connect(db_path, timeout=30)) as db:
+            was = db.execute("PRAGMA user_version").fetchone()[0]
     if was >= version:
         return None
     if on_copy:

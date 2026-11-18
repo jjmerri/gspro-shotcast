@@ -518,6 +518,22 @@ def test_a_pick_up_caps_the_hole_without_counting_penalties():
     s = _replay(text + _line(10, -4, 4) + _line(10, 7, 0) + _line(10, 1, 7))
     assert s.strokes_before(0) == 8 and s.penalties(0) == 0
     assert s.pickups == [(0, 10)] and s.picked_up(0, 10) and not s.mulligan_fires
+    # The hole replayed (a round restarted on this course): open again, not picked up.
+    s = _replay(text + _line(10, -4, 4) + _line(10, 7, 0) + _line(10, 1, 7) + _line(11, 1, 0) + FIRE + _line(10, 1, 0))
+    assert not s.picked_up(0, 10) and s.shot_number(0) == 2
+
+
+def test_a_pick_up_from_before_the_booth_started_can_still_reopen(tmp_path):
+    path = tmp_path / "output_log.txt"
+    path.write_text("Selected Course: x_gsp\n" + FIRE + _line(10, 1, 0)
+                    + "".join(FIRE + _line(10, 1, n) for n in (1, 2, 3))
+                    + _line(10, -4, 4) + _line(10, 7, 0) + _line(10, 1, 7))
+    f = GsproLogFollower(str(path))
+    f._prime()
+    assert f.state.picked_up(0, 10)
+    for e in parse_events(_line(11, 1, 0) + FIRE + _line(10, 1, 0)):
+        f.state.apply(e)
+    assert not f.state.picked_up(0, 10) and f.state.shot_number(0) == 2
 
 
 def test_penalty_surface_is_kept_per_shot():

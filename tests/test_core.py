@@ -5643,6 +5643,75 @@ async def test_gsprolog_hole_corrects_the_count_and_moves_the_holes_shots(tmp_pa
     assert r.par == {5: 3} and e.state.current_hole == "Hole 14, par 3, 158 yards"
 
 
+async def test_a_log_correction_leaves_the_finished_holes_shots_where_they_were(tmp_path):
+    # Steve, Brasstown 16 -> 17: the 17th's banner length unread, so its tee shot was recorded on 16; the
+    # log's hole then moved the booth on, and took all of 16's shots with it (16 left with none).
+    from commentator.models import HoleChangeEvent
+    from commentator.round import Round
+    from commentator.state import ShotRecord
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Steve"], course="Brasstown", scheduled_format=None,
+              holes=18, start_hole=1, is_league=False)
+    e.round, e.hole_number, r.seq = r, 16, 16
+    sixteen, seventeen = "Hole 16, par 4, 275 metres", "Hole 17, par 3"
+    e.state.current_hole = sixteen
+    recs = []
+    # Ann's tee shot on 17 is recorded before Steve's last putt on 16 (handlers finish out of order),
+    # and Ann's putt on 17, conceded, is in before the correction.
+    for who, n, log_hole, outcome in (("Steve", 1, 16, None), ("Steve", 2, 16, None), ("Ann", 1, 17, None),
+                                      ("Steve", 3, 16, "conceded"), ("Ann", 2, 17, "conceded"), ("Steve", 1, None, None)):
+        sid = e.store.record_shot(player=who, hole=sixteen, shot=Shot(ball_speed=80), before=Hud(shot_number=n),
+                                  after=Hud(), tags=[], carry_game_yards=None, total_yards=None, offline_yards=None)
+        rec = ShotRecord(who, Shot(), sixteen, Hud(), [], round_id=r.id, hole_seq=16, par=4, shot_id=sid)
+        rec.outcome, rec.log_hole = outcome, log_hole
+        e.state.record_shot(rec)
+        recs.append(rec)
+    gimme = e.store.record_gimme(recs[3].shot_id)   # Steve's putt conceded late: after later rows
+    e._gimme_ids[recs[3].shot_id] = gimme
+    # Steve's tee shot on 16: at impact the log still had 15 (finished), but its score line says 16;
+    # kept on the record, since the log forgets it after a few dozen shots.
+    recs[0].log_hole = None
+    e.gspro._fire_info[7] = {"player": 0, "hole": 15, "score": 1}
+    e._fire_rows[7] = (recs[0].shot_id, recs[0], 0, 14)
+    e._apply_log_corrections()
+    del e.gspro._fire_info[7], e._fire_rows[7]
+    r.picked_up = {("Ann", 16), ("Steve", 16)}
+    await e.handle_hole_change(HoleChangeEvent(previous=None, current=seventeen, correction="log"))
+    assert r.seq == 17 and [x.hole_seq for x in recs] == [16, 16, 17, 16, 17, 17]   # no log hole: moves
+    assert r.picked_up == {("Ann", 17), ("Steve", 16)}   # Ann's went with her shots; Steve's 16 stayed
+    assert [x.par for x in recs] == [4, 4, 3, 4, 3, 3]
+    holes = dict(e.store.db.execute("SELECT id, hole FROM shots"))
+    assert [holes[x.shot_id] for x in recs] == [sixteen if x.hole_seq == 16 else seventeen for x in recs]
+    assert holes[gimme] == sixteen
+    # Reverting a misread hole change takes every shot back, whatever the log said.
+    await e.handle_hole_change(HoleChangeEvent(previous=None, current=sixteen, correction="revert"))
+    assert r.seq == 16 and all(x.hole_seq == 16 for x in recs)
+    assert r.picked_up == {("Ann", 16), ("Steve", 16)}
+    assert set(dict(e.store.db.execute("SELECT id, hole FROM shots")).values()) == {sixteen}
+
+
+async def test_a_log_correction_with_the_par_unread_takes_the_cards(tmp_path):
+    from commentator.course_card import CourseCard
+    from commentator.models import HoleChangeEvent
+    from commentator.round import Round
+    from commentator.state import ShotRecord
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Steve"], course="Brasstown", scheduled_format=None,
+              holes=18, start_hole=1, is_league=False)
+    r.course_card = CourseCard(name="Brasstown", index={}, par={16: 4, 17: 3, 18: 5})
+    e.round, e.hole_number, r.seq, e.current_par = r, 16, 16, 4
+    r.par[16] = 4
+    e.state.current_hole = "Hole 16, par 4, 275 metres"
+    rec = ShotRecord("Steve", Shot(), e.state.current_hole, Hud(), [], round_id=r.id, hole_seq=16, par=4)
+    e.state.record_shot(rec)
+    await e.handle_hole_change(HoleChangeEvent(previous=None, current="Hole 17", correction="log"))
+    assert (rec.hole_seq, rec.par, r.par, e.current_par) == (17, 3, {16: 4, 17: 3}, 3)
+    # Nothing knows its par: unknown, not the hole before's.
+    r.course_card, r.par = None, {17: 3}
+    await e.handle_hole_change(HoleChangeEvent(previous=None, current="Hole 18", correction="log"))
+    assert (rec.hole_seq, rec.par, r.par, e.current_par) == (18, None, {17: 3}, None)
+
+
 def test_an_unnumbered_opening_banner_gets_the_start_hole(tmp_path):
     # Dan, Bethpage Black: the first banner read "par 4, 426 yards" with no "1" (and the count was reset
     # at the last round's end), so the opening hole's shots were stored without a hole number.
@@ -5742,6 +5811,11 @@ def test_a_shot_with_no_number_on_screen_takes_the_stroke_gspro_logged_at_impact
     team = Hud()
     e._number_from_log(team, "Kroll", snap)
     assert team.shot_number is None
+    e.round = None
+    e.gspro.hole_scores[(0, 0)] = 3   # the log scored hole 1: its count is that hole's, not the next tee's
+    done = Hud()
+    e._number_from_log(done, "Kroll", snap)
+    assert done.shot_number is None
 
 
 def test_an_impact_read_of_shot_1_away_from_the_tee_takes_the_stroke_gspro_logged(tmp_path, monkeypatch):
@@ -5785,6 +5859,26 @@ def test_an_impact_read_of_shot_1_away_from_the_tee_takes_the_stroke_gspro_logge
     unpicked = Hud(shot_number=1, to_pin="26.4 yards")   # no pick on this hole at impact
     e._misread_shot_one(unpicked, "Dan", snap, lies0, label)
     assert unpicked.shot_number == 1
+    # Steve at Brasstown's 17th: its banner's length unread, the booth was still on 16, but GSPro had
+    # scored 16 (its count there, "stroke 5", wasn't this one). The HUD's 1 at the 17th tee stands.
+    e.round = None
+    e.gspro.hole_scores[(0, 1)] = 4
+    next_tee = Hud(shot_number=1, to_pin="96.8 metres", lie="tee")
+    e._misread_shot_one(next_tee, "Dan", snap, lies0, label)
+    assert (next_tee.shot_number, next_tee.lie) == (1, "tee")
+    # As it stood at impact: a stroke scored by the time its slow HUD read is done was still on the hole.
+    finishing = Hud(shot_number=1, to_pin="19.6 yards", lie="tee")
+    e._misread_shot_one(finishing, "Dan", snap + (frozenset(),), lies0, label)
+    assert finishing.shot_number == 3
+    next_tee = Hud(shot_number=1, to_pin="96.8 metres", lie="tee")
+    e._misread_shot_one(next_tee, "Dan", snap + (frozenset({(0, 1)}),), lies0, label)
+    assert next_tee.shot_number == 1
+    e.gspro.hole_scores.clear()
+    e.gspro.hole_scores[(1, 1)] = 4   # a scramble's hole, scored on one teammate: finished for the team
+    e.gspro.teammates.add(frozenset((0, 2)))   # (the log links 1 to 2 only through 0)
+    assert e._impact_state()[0][10] == {(0, 1), (1, 1), (2, 1)}
+    e.round = SimpleNamespace(format="shamble", no_scramble=True)   # a shared drive, then their own balls
+    assert e._impact_state()[0][10] == {(1, 1)}
 
 
 def test_the_hud_buffer_reads_the_newest_address_frame_that_shows_the_player_box(monkeypatch):

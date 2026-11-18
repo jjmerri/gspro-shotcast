@@ -342,6 +342,33 @@ def test_an_older_season_file_is_copied_even_beside_a_newer_copy_of_another(tmp_
     assert len(list(backup.folder(cfg).glob("*-from-format-5*"))) == 1
 
 
+def test_an_upgrade_left_in_the_wal_isnt_copied_again(tmp_path):
+    # Steve: the booth upgraded the file at 10:05 and was stopped without checkpointing it; the header
+    # still said format 5, so the next start copied it again "before upgrading it".
+    import shutil
+    from commentator.store import FORMAT, Store
+
+    live, path = tmp_path / "live.db", tmp_path / "season.db"
+    _older_season(live)
+    store = Store(str(live), backups=tmp_path / "first")   # upgrades it, in WAL mode
+    store.db.execute("PRAGMA user_version = 5")
+    store.db.commit()
+    store.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")   # the header says 5
+    store.db.execute("PRAGMA wal_autocheckpoint = 0")
+    store.db.execute(f"PRAGMA user_version = {FORMAT}")
+    store.db.commit()
+    for suffix in ("", "-wal"):   # the files as a stopped booth leaves them: the upgrade only in the -wal
+        shutil.copy(f"{live}{suffix}", f"{path}{suffix}")
+    store.db.close()
+    with open(path, "rb") as fh:
+        assert int.from_bytes(fh.read(100)[60:64], "big") == 5
+    assert backup.before_upgrade(path, tmp_path / "kept", FORMAT) is None
+    assert not (tmp_path / "kept").exists()
+    # Still an older format once SQLite reads the -wal: copied.
+    _older_season(tmp_path / "old.db")
+    assert backup.before_upgrade(tmp_path / "old.db", tmp_path / "kept", FORMAT) is not None
+
+
 def test_the_booth_copies_an_older_season_file_into_the_backup_folder_set(tmp_path, monkeypatch):
     from commentator.__main__ import _build_engine
     from commentator.store import SeasonCopyFailed
