@@ -5478,6 +5478,95 @@ def test_one_quiet_hole_with_the_menu_opened_long_before_still_waits(tmp_path):
     assert r.left == {}
 
 
+def test_a_name_close_to_a_players_in_a_new_slot_after_the_menu_is_someone_added(tmp_path):
+    for opened in (False, True):
+        e = _logged_guests(tmp_path, ["Mike", "Smith"])
+        r = e.round
+        e._note_player(_tee("Mike"))
+        for seq in (1, 2, 3):
+            _played(e, seq, {0: ("Mike", 4), 1: ("Smith", 5)})
+        if opened:
+            _menu(e, 3)
+        e.gspro.active_player = 0
+        e._note_player(_tee("Mikey", score="+1"))           # Mike, misread: in his own slot
+        e.gspro.active_player = 2
+        e._note_player(_tee("Mikey", score="E"))
+        assert r.slot_names == (["Mike", "Smith", "Mikey"] if opened else ["Mike", "Smith"])
+        assert r.arrivals == []
+    e = _logged_guests(tmp_path, ["Mike", "Smith"])
+    e._note_player(_tee("Mike"))
+    _played(e, 1, {0: ("Mike", 4), 1: ("Smith", 5)})
+    _menu(e, 1)
+    e.gspro.active_player = None                            # no slot up in the log yet
+    e._note_player(_tee("Mikey", score="+1"))
+    assert e.round.slot_names == ["Mike", "Smith"]
+
+
+def test_a_player_added_as_another_is_removed_takes_the_slot_once_the_hole_is_done(tmp_path):
+    # One removed and one added at the same menu: GSPro's count of slots doesn't change.
+    for gone, order in (("Lee", ["Kroll", "Barrows", "Dan"]), ("Barrows", ["Kroll", "Lee", "Dan"])):
+        e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee"])
+        r = e.round
+        for seq in (1, 2, 3):
+            _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+        _menu(e, 3)
+        e.gspro.active_player = 2
+        e._note_player(_tee("Dan"))
+        assert "Dan" not in r.roster and r.arrivals == [("Dan", None, 4, 2)]
+        _played(e, 4, dict(enumerate([(x, 3 if x == "Dan" else 4) for x in order])))
+        assert r.left == {gone: 3} and r.slot_names == order and r.joined == {"Dan": 4} and r.arrivals == []
+        assert r.log_scores["Dan"] == {4: 3} and r.log_scores[gone] == {1: 5 if gone == "Barrows" else 6} | {
+            2: 5 if gone == "Barrows" else 6, 3: 5 if gone == "Barrows" else 6}
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee"])   # no menu: nothing says anyone was swapped
+    r = e.round
+    for seq in (1, 2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+    e.gspro.active_player = 2
+    e._note_player(_tee("Dan"))
+    _played(e, 4, {0: ("Kroll", 4), 1: ("Barrows", 4), 2: ("Dan", 3)})
+    assert r.arrivals == [] and r.left == {} and "Dan" not in r.roster
+
+
+def test_a_swap_settled_a_hole_late_keeps_the_hole_they_joined_and_everyone_can_be_replaced(tmp_path):
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee"])
+    r = e.round
+    for seq in (1, 2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+    _menu(e, 4)                                             # opened during hole 4, so still recent on 5
+    e.gspro.active_player = 2
+    e._note_player(_tee("Dan"))
+    _played(e, 4, {0: ("Kroll", 4), 1: ("Barrows", 4), 2: ("Dan", 3)}, unread={0})   # Kroll unread: not clear
+    e._note_player(_tee("Dan", score="-1"))                 # his next tee
+    _played(e, 5, {0: ("Kroll", 4), 1: ("Barrows", 4), 2: ("Dan", 3)})
+    assert r.left == {"Lee": 3} and r.joined == {"Dan": 4} and r.log_scores["Dan"] == {4: 3, 5: 3}
+
+    e = _logged_guests(tmp_path, ["Kroll"])
+    r = e.round
+    for seq in (1, 2):
+        _played(e, seq, {0: ("Kroll", 4)})
+    _menu(e, 2)
+    e.gspro.active_player = 0
+    e._note_player(_tee("Dan"))
+    _played(e, 3, {0: ("Dan", 3)})
+    assert r.left == {"Kroll": 2} and r.slot_names == ["Dan"] and r.log_scores["Dan"] == {3: 3}
+
+
+def test_a_swap_that_doesnt_settle_is_dropped(tmp_path):
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee"])
+    r = e.round
+    for seq in (1, 2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+    _menu(e, 3)
+    e.gspro.active_player = 2
+    e._note_player(_tee("Dan"))
+    for seq in (4, 5):                                      # Lee still read: who left isn't clear
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 4), 2: ("Lee", 3)})
+    assert r.arrivals == [("Dan", None, 4, 2)] and r.left == {}
+    _played(e, 6, {0: ("Kroll", 4), 1: ("Barrows", 4), 2: ("Lee", 3)})
+    assert r.arrivals == [] and "Dan" not in r.roster
+
+
 def test_a_newcomer_waits_while_a_slot_is_unnamed(tmp_path):
     e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
     r = e.round

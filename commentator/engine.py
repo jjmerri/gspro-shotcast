@@ -2046,16 +2046,33 @@ class Engine:
             got = {i for i, h in scores if h == seq + r.start_hole - 2}
             return len(got) if got == set(range(len(got))) else None
         m = slots(done)
-        if not m or m >= n:
-            return
         since = max(r.slot_since.get(g, 1) for g in r.slot_names)
-        first = done
-        while first - 1 >= max(2, since) and slots(first - 1) == m:
-            first -= 1
-        if first < max(2, since):
+        if r.arrivals and done > r.arrivals[0][2] + 1:
+            log.info("Round %s: who %s took the place of isn't clear two holes on: not added",
+                     r.id, ", ".join(repr(a[0]) for a in r.arrivals))
+            r.arrivals = []
+        arrived = r.arrivals
+        if arrived:
+            # Added in place of someone removed, on the hole they teed off on: the slots it finished are
+            # the ones that stayed and the newcomers', theirs the last of them.
+            first = arrived[0][2]
+            if not m or first > done or first < max(2, since) \
+                    or any(slots(seq) != m for seq in range(first, done + 1)) \
+                    or sorted(a[3] for a in arrived) != list(range(m - len(arrived), m)):
+                return
+        else:
+            if not m or m >= n:
+                return
+            first = done
+            while first - 1 >= max(2, since) and slots(first - 1) == m:
+                first -= 1
+            if first < max(2, since):
+                return
+            if first - 1 >= max(2, since) and (slots(first - 1) or 0) > m and slots(first - 1) != n:
+                return   # fewer slots before, but not all: more than one leaving, on different holes
+        k = n + len(arrived) - m   # how many left
+        if k < 1:
             return
-        if first - 1 >= max(2, since) and (slots(first - 1) or 0) > m and slots(first - 1) != n:
-            return   # fewer slots before, but not all: more than one leaving, on different holes
         menu = next((at for seq, at in reversed(r.menus) if first - 1 <= seq <= first), None)
 
         def quiet_by(after: int | None) -> list[str]:
@@ -2073,17 +2090,26 @@ class Engine:
                     seen |= {g for g in r.slot_names if raw and (g.casefold() == raw or (match and r.roster.get(g) == match))}
             return [g for g in r.slot_names if g not in seen]
         quiet = quiet_by(menu) if menu is not None else []
-        if len(quiet) != n - m:
-            if first == done:
+        if len(quiet) != k:
+            if first == done or arrived:
                 return   # one quiet hole, and nothing (yet) says who was removed: wait for the next
             quiet = quiet_by(None)
-        if len(quiet) != n - m:
+        if len(quiet) != k:
             return   # who left isn't clear (any of them would leave the last slots quiet): wait
-        if first < max(r.slot_since.get(g, 1) for g in quiet + r.slot_names[m:]):
+        if first < max(r.slot_since.get(g, 1) for g in quiet + r.slot_names[n - k:]):
             return   # those holes were before they took the slot (joined, or back)
         if not all(any(seq < first for seq in r.log_scores.get(g, {})) for g in quiet):
             return   # never scored here: not someone who was playing and left
         old = list(r.slot_names)
+        if arrived:
+            # In first, so those they replaced can all leave (a round keeps someone playing): GSPro adds
+            # each as the next slot, and the leavers' slots closing up puts them where GSPro has them.
+            if any(g not in r.roster or g in r.left for g in quiet):
+                return
+            r.arrivals = []
+            for name, match, _, _ in sorted(arrived, key=lambda a: a[3]):
+                last = next((x for x in reversed(r.slot_names) if x), None)
+                self._add_to_round(r, name, match, after=last, joined=first)
         gone = [g for g in quiet if r.leave_player(g, first - 1)]
         if not gone:
             return
@@ -2101,7 +2127,7 @@ class Engine:
                     and self._row_source.get(fire) not in ("screen", "setup read", "address frame"):
                 self._renames.add(fire)
         log.info("Round %s: %s left after %s (GSPro played on without them; players now %s, GSPro order %s)",
-                 r.id, ", ".join(map(repr, gone)), r.hole_name(first - 1), [n for n in r.roster if n not in r.left], new)
+                 r.id, ", ".join(map(repr, gone)), r.hole_name(first - 1), [x for x in r.roster if x not in r.left], new)
         self._sync_log_scores(r)   # those after them moved up a slot
 
     def _apply_log_holes(self, r: Round) -> None:
@@ -9892,7 +9918,27 @@ class Engine:
         # than one player: maybe a misread, maybe another player.
         near = (g and not match and g in r.teed and _name_key(g) != _name_key(raw)) or (
             not g and any(_name_ratio(n, raw) >= 0.8 for n in r.roster))
-        if not first_tee and hud.shot_number == 1 and (g in r.left if g else not near) and self._new_slot_up(r):
+        # GSPro's player menu opened since the last hole: a name close to a player's is likelier someone added.
+        menu = any(r.seq - 1 <= seq <= r.seq for seq, _ in r.menus)
+        fresh = near and menu
+        newcomer = not first_tee and hud.shot_number == 1 and (
+            (g in r.left) if g and not fresh else (fresh or not near))
+        up, swapping = self.gspro.active_player, any(a[2] == r.seq for a in r.arrivals)
+        if newcomer and menu and self._old_slot_up(r, len(r.arrivals) if swapping else 0) \
+                and (not near or up >= len(r.slot_names)):
+            # Teeing off in a slot the round has someone else in, since the menu opened: a player added as
+            # another was removed. Who left shows once the hole's done.
+            if r.is_league:
+                log.info("%r joined league round %s partway: not added", raw, r.id)
+                return
+            name = raw if fresh or not g else g
+            if any(a[0] == name for a in r.arrivals):
+                return   # read again on a later tee: the hole and slot they first teed off in stand
+            r.arrivals = [a for a in r.arrivals if a[2] == r.seq] + [(name, match, r.seq, up)]
+            log.info("Round %s: %r teed off in GSPro slot %s (%r's) since the player menu opened: added once "
+                     "who left is clear", r.id, name, up, r.slot_names[up] if up < len(r.slot_names) else None)
+            return
+        if newcomer and not swapping and self._new_slot_up(r):
             # Teeing off in a slot GSPro has and the round doesn't: someone added partway (or back).
             if r.is_league:
                 log.info("%r joined league round %s partway: not added", raw, r.id)
@@ -9903,7 +9949,7 @@ class Engine:
             scores, up, joined = self._log_view()[0], self.gspro.active_player, r.seq
             while joined > 1 and (up, joined - 1 + r.start_hole - 2) in scores:
                 joined -= 1
-            self._add_to_round(r, g or raw, match, after=last, joined=joined)
+            self._add_to_round(r, raw if fresh else (g or raw), match, after=last, joined=joined)
             return
         if g and not (first_tee and near):
             if first_tee and g not in r.teed:
@@ -9933,6 +9979,14 @@ class Engine:
         up = self.gspro.active_player
         return bool(self._log_rounds and r.slot_names and None not in r.slot_names and not r.slot_guess
                     and up == len(r.slot_names))
+
+    def _old_slot_up(self, r: Round, pending: int) -> bool:
+        """GSPro's log has one of the round's own slots up (or, with `pending` arrivals already seen this
+        hole, the slots just past them): see _note_player's swap."""
+        up = self.gspro.active_player
+        return bool(self._log_rounds and r.slot_names and None not in r.slot_names and not r.slot_guess
+                    and r.format not in TEAM_BALL and up is not None
+                    and 0 <= up < len(r.slot_names) + pending)
 
     @staticmethod
     def _shortened(r: Round, raw: str) -> bool:

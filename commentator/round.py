@@ -250,6 +250,10 @@ class Round:
         # Each time GSPro's player menu was opened during the round (see GsproState.player_menus): the
         # hole of the round it was opened on, or just after, and how many shots the booth had then.
         self.menus: list[tuple[int, int]] = []
+        # Players who teed off since the menu opened in a slot someone else had (one removed, one added, so
+        # GSPro's count didn't change): name, league match, the hole of the round, the GSPro slot. They're
+        # added once the hole's done and who left is clear (see the engine's _note_departures).
+        self.arrivals: list[tuple[str, str | None, int, int]] = []
 
         self.roster = {g: league.match_player(g) for g in gspro_players}
         teams: dict[str, list[str]] = {}
