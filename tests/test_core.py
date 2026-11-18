@@ -3929,6 +3929,21 @@ async def test_emit_setup_reads_the_hud_before_the_model_and_skips_others_off_th
     assert (impact.slope_updown, impact.slope_side, impact.slope_side_degrees) == (None, "left", 1.0)
 
 
+async def test_late_in_a_league_round_the_others_are_read_only_on_air(tmp_path):
+    # Late in a league round the opponents' board feeds only the stakes commentary.
+    from commentator.round import Round
+
+    engine, screen = _setup_engine(tmp_path)
+    engine.round = Round(league=engine.league, gspro_players=["Toby"], course="X", scheduled_format=None, holes=9)
+    engine.round.seq = 8
+    hud = lambda: Hud(player_text="Toby 2nd (+1) Shot 2 150 YDS", shot_number=2, score_to_par="+1",
+                      to_pin="150 yards")
+    await engine._emit_setup(hud())
+    engine.set_commentary(False)
+    await engine._emit_setup(hud())
+    assert [r[-1] for r in screen.reads] == ["others", "slope"]
+
+
 def test_finish_capture_uses_the_next_shots_impact_snapshot(tmp_path):
     from commentator.hud import Hud
     from commentator.models import Shot

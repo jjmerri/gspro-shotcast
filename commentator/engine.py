@@ -1531,9 +1531,11 @@ class Engine:
         # facts were built from an empty HUD and never reached the model. (Tradeoff: the model call no
         # longer overlaps this read; if the pre-shot line starts landing late, this is the place.)
         # "others" (the opponents' board) is needed on the tee (round-start, crediting the tee shot)
-        # and late in a league round, where _stakes_facts compares this player to the field.
+        # and late in a league round, where _stakes_facts compares this player to the field: only
+        # commentary uses that, so off air it isn't read.
         rr = self.round
-        late = (rr is not None and not rr.ended and rr.is_league and 1 <= rr.holes - rr.seq + 1 <= 4)
+        late = (self.commentary_on and rr is not None and not rr.ended and rr.is_league
+                and 1 <= rr.holes - rr.seq + 1 <= 4)
         join = self._should_join(hud)
         rest = ["lie", "player_name", "slope"] + (["others"] if hud.shot_number == 1 or late or join else [])
         tiles_for = stamp[0] if self._tiles_wanted == stamp[0] == self._shot_seq else None
