@@ -131,7 +131,8 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
 - **`league_import.py`** builds `league.json` and history from the yearly spreadsheets.
 
 ### External data
-- **`squabbit.py`** reads live handicaps and leaderboards from Squabbit at round start (read-only, best-effort),
+- **`squabbit.py`** reads live handicaps and leaderboards from Squabbit at round start, and the leaderboards again once
+  the booth has finished posting a round there (best-effort),
   and the season's week cards, rounds and leaderboards for `squabbit --cards`/`--validate`.
 - **`squabbit_live.py`** opt-in live posting (`squabbit.live_updates`): when a league round starts, a
   `popup.py` question on the sim's screen asks whether to update Squabbit. On yes, each finished hole's

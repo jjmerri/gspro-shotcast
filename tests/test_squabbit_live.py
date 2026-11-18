@@ -422,6 +422,121 @@ def test_the_round_is_posted_once_the_players_say_yes(tmp_path, monkeypatch):
     asyncio.run(go())
 
 
+def _reading_booth(tmp_path, monkeypatch):
+    """A booth posting week 6 on Squabbit, its leaderboard reads counted in `reads`."""
+    import commentator.engine as engine
+
+    monkeypatch.setattr(engine, "BOARD_REREAD_SECONDS", 0)
+    e, r = _ctp_round(tmp_path, "Best Ball")
+    reads = []
+
+    async def read():
+        reads.append(1)
+        await asyncio.sleep(0.02)
+    e._refresh_board = read
+    return e, r, reads
+
+
+def test_the_leaderboards_are_read_again_once_a_finished_round_is_all_in(tmp_path, monkeypatch):
+    boxes, fake = _ctp_booth(tmp_path, monkeypatch)
+
+    async def go():
+        e, r, reads = _reading_booth(tmp_path, monkeypatch)
+        r.log_scores = {"Mike": {1: 5}}
+        e._squabbit_kick()
+        await _settle(e)
+        boxes[0].on_answer(True)
+        await _settle(e)
+        assert fake.docs["rounds/Ra"]["holeScoresV2"] == {"10": 5} and reads == []   # mid-round: no read
+        r.ended = True
+        e._squabbit_round_end(r)
+        await _settle(e)
+        assert reads == [1]
+        e._squabbit_round_end(r)                 # nothing new went in: no second read
+        await _settle(e)
+        assert reads == [1]
+        # A read asked for while one's out goes again after it: that one may predate the post.
+        e._reread_board()
+        await asyncio.sleep(0.005)
+        e._reread_board()
+        await e._board_task
+        assert reads == [1, 1, 1]
+
+    asyncio.run(go())
+
+
+def test_another_teams_blocked_card_doesnt_hold_up_the_read(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    boxes, fake = _ctp_booth(tmp_path, monkeypatch)
+
+    async def go():
+        e, r, reads = _reading_booth(tmp_path, monkeypatch)
+        r.log_scores = {"Mike": {1: 5}}
+        e._squabbit_kick()
+        await _settle(e)
+        boxes[0].on_answer(True)
+        await _settle(e)
+        theirs = replace(e._sq["targets"][0], scorecard_id="S2")
+        e._sq["targets"].append(theirs)
+        push = e._sq_live.push
+
+        def blocking(client, t, scores, marks):
+            if t is theirs:
+                raise Blocked("someone else entered")
+            return push(client, t, scores, marks)
+        e._sq_live.push = blocking
+        r.log_scores = {"Mike": {1: 5, 2: 4}}
+        r.ended = True
+        e._squabbit_round_end(r)
+        await _settle(e)
+        assert fake.docs["rounds/Ra"]["holeScoresV2"] == {"10": 5, "11": 4}
+        assert theirs not in e._sq["targets"] and reads == [1]
+
+    asyncio.run(go())
+
+
+def test_a_read_queued_behind_a_timed_out_one_waits_for_its_thread(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    import commentator.squabbit as sq
+
+    out, most = [0], [0]
+    lock = threading.Lock()
+
+    class Client:
+        def __init__(self, *a):
+            pass
+
+        def __enter__(self):
+            with lock:
+                out[0] += 1
+                most[0] = max(most[0], out[0])
+            return self
+
+        def __exit__(self, *exc):
+            with lock:
+                out[0] -= 1
+
+        def league_by_invite(self, code):
+            time.sleep(0.15)
+            return None
+
+    monkeypatch.setattr(sq, "SquabbitClient", Client)
+
+    async def go():
+        e = _engine(tmp_path, League({**LEAGUE_DATA, "squabbit_invite": "X"}))
+        e.cfg.squabbit.timeout_seconds = 0.05
+        e._reread_board()
+        await asyncio.sleep(0.01)
+        e._reread_board()
+        await e._board_task
+
+    asyncio.run(go())
+    assert most == [1]
+
+
 def test_turning_squabbit_down_asks_if_its_a_league_round_and_no_makes_it_practice(tmp_path, monkeypatch):
     import commentator.popup as popup
     import commentator.squabbit as sq

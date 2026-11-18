@@ -515,6 +515,9 @@ def _names_other_scenery(text: str, allowed_kind: str | None) -> bool:
 
 # How much longer than the handicap fetch the league opener waits for Squabbit's leaderboards.
 BOARD_WAIT_SECONDS = 3.0
+# How long after a finished round's last post to Squabbit the booth reads the leaderboards again, giving
+# Squabbit time to total the team's round.
+BOARD_REREAD_SECONDS = 30.0
 
 
 _RATE_WORDS = ((0.0, "never"), (1 / 10, "one time in ten"), (1 / 5, "one time in five"),
@@ -1072,7 +1075,7 @@ class Engine:
         self._skip_opening_preshot = False
         self.history = History.load(cfg.history_file)
         # The league's week results and standings from Squabbit, refreshed with the handicaps at each
-        # round start. None until a fetch works; the history file's standings stand in.
+        # round start and once a finished round is all posted (_reread_board). None until a fetch works; the history file's standings stand in.
         self.board: Board | None = None
         self._league_page_on = False   # keeping the stats page's league.json (_publish_league_page)
         self._league_body: bytes | None = None   # the newest league.json to put up
@@ -1082,6 +1085,7 @@ class Engine:
         self._recap_tried: tuple | None = None   # the last recap built or tried, (key, digest)
         self._recap_holes: dict[tuple[int, str], tuple[int, dict]] = {}   # (week, team) -> (net, Squabbit's holes)
         self._board_task: asyncio.Task | None = None
+        self._board_again = False   # read Squabbit's leaderboards again once the read out now is done
         # Posting a league round to Squabbit as it's played (squabbit_live.py), once the players say yes:
         # the booth's record of what it wrote (made on the first league round), and this round's state
         # {"round", "status": finding/asking/on/off, "targets", "question", "dirty", "task", "last"}.
@@ -2384,8 +2388,8 @@ class Engine:
     def _publish_league_page(self) -> None:
         """Put the stats page's Home tab league cards (league.json: every due date's weeks with their
         closest-to-the-pin cards, the season standings) up. Written when they can change: after the
-        round-start Squabbit read, when a league round finishes, and at midnight (a passed deadline
-        makes a week final). Before a Squabbit read this run, the last one up stands. One upload at a
+        round-start Squabbit read and the one after a finished round's posted there, when a league
+        round finishes, and at midnight (a passed deadline makes a week final). Before a Squabbit read this run, the last one up stands. One upload at a
         time, the newest last."""
         board = self._league_board() if self._league_page_on else None
         if board is None:
@@ -8893,8 +8897,7 @@ class Engine:
             return
         self._squabbit_kick()
         # The week's leaderboards load alongside, in their own task: a slow read never costs the handicaps.
-        if self._board_task is None or self._board_task.done():
-            self._board_task = asyncio.create_task(self._refresh_board())
+        self._reread_board()
         ids = [i for p in players if (i := self.league.player_info.get(p, {}).get("squabbit_id"))]
         if ids:
             try:
@@ -8914,6 +8917,22 @@ class Engine:
         # handicaps); after that they fill in for the rest of the round.
         await asyncio.wait({self._board_task}, timeout=BOARD_WAIT_SECONDS)
 
+    def _reread_board(self) -> None:
+        """Read Squabbit's leaderboards again (_refresh_board). One read at a time: a call while one's
+        out reads again after it, since that one may have started before what's new went in."""
+        self._board_again = True
+        if self._board_task is None or self._board_task.done():
+            self._board_task = asyncio.create_task(self._board_reads())
+
+    async def _board_reads(self) -> None:
+        while self._board_again:
+            self._board_again = False
+            await self._refresh_board()
+
+    async def _reread_board_later(self) -> None:
+        await asyncio.sleep(BOARD_REREAD_SECONDS)
+        self._reread_board()
+
     async def _refresh_board(self) -> None:
         """Read every league week's Squabbit leaderboard into self.board. Best-effort: on failure the
         last board read (or the history file's standings) stands."""
@@ -8926,7 +8945,15 @@ class Engine:
                     return [(t, client.leaderboard(t["_id"])) for t in client.tournaments(league["_id"])] \
                         if league else None
 
-            items = await asyncio.wait_for(asyncio.to_thread(fetch), timeout=self.cfg.squabbit.timeout_seconds)
+            # A read that's taken too long is dropped, but this waits out its thread (it can't be stopped)
+            # so a read queued behind it (_board_reads) never runs alongside it.
+            work = asyncio.ensure_future(asyncio.to_thread(fetch))
+            try:
+                items = await asyncio.wait_for(asyncio.shield(work), timeout=self.cfg.squabbit.timeout_seconds)
+            except asyncio.TimeoutError:
+                await asyncio.wait({work})
+                work.cancelled() or work.exception()   # its own failure, if any, is the timeout's now
+                raise
             if items is None:
                 return
             season = self.history.current() or {}
@@ -9340,11 +9367,17 @@ class Engine:
                             "posting it", t.team, why)
                 s["targets"] = [x for x in s["targets"] if x is not t]
                 s["last"] = None
+                s["dirty"] = True   # round again for the cards left, so a finished round's still all in
             if not s["targets"]:
                 s["status"] = "off"
                 if s["ctp_q"] is not None:
                     s["ctp_q"][1].close()
                     s["ctp_q"] = None
+        # The finished round is all in on Squabbit: read the leaderboards again, so the stats page's
+        # league cards have Squabbit's total for the team instead of the sim's count. Once per change.
+        if r.ended and s["last"] is not None and s.get("board_read") != s["last"]:
+            s["board_read"] = s["last"]
+            self._bg(self._reread_board_later())
 
     def _squabbit_ask_ctp(self, s: dict, t, key: str, m) -> None:
         """Queues an on-screen check of a mark the booth isn't sure of: one box at a time."""
