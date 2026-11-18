@@ -151,7 +151,9 @@ drop included), the carry, the total, the lies and where it finished come from G
 rather than the screen, and the booth's later reads leave them be. A lie the screen reads finer
 than the file's (semi rough, fringe, pine straw) is kept. A scramble's finish stays the booth's, for
 the ball the team picked. Offline isn't in the file. The file starts over each round, so earlier
-rounds keep what the booth read.
+rounds keep what the booth read. Strokes the booth recorded without a name (no round started, so
+no player, hole or stroke number) are named from the file too: lined up with its strokes from the
+last one back by ball speed, three or more in a row, they take its player, hole and stroke number.
 
 Mulligans and pick-ups follow GSPro's scoring. A mulligan's stroke stays in `shots`, flagged
 `mulligan = 1`, and is left out of every score and stat (the re-hit takes its shot number); its

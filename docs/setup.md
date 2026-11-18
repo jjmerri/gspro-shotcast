@@ -111,7 +111,8 @@ After every round (quit rounds included) it checks the round's reads:
 - The required data tiles (`health.required_tiles`) were read on most full shots.
 
 A tile that never reads, or a log that logs no shots, is flagged mid-round, without waiting for the
-round to end. Anything off puts a **"!" chip** beside the ON AIR badge: amber for a warning, red for
+round to end. So is another program covering all of GSPro for over 3 minutes (the booth can't read
+names, holes or scores through it), as a failure until it's closed or added to `screen.show_through`. Anything off puts a **"!" chip** beside the ON AIR badge: amber for a warning, red for
 a failure. Hover it for the list; right-click it to dismiss it until something changes. A version or
 screen change shows as a warning until a round passes every check. Each change is logged
 (`HEALTH ...`) and saved to `logs/health.json`. Each round's report card goes to the booth log

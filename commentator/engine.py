@@ -437,6 +437,8 @@ RANGE_TEE_SHOT_WAIT_SECONDS = 30.0
 RECAP_POLL_SECONDS = 30.0      # how often a league recap waiting on a round or its publish looks again
 LAYOUT_WAIT_SECONDS = 20.0     # after a round's end, for GSPro 3.1's logged layout before the course file's
 ROUND_FILE_CHECK_S = 2.0       # how often GSPro's round file (currentRound.dat) is looked at
+SCREEN_COVER_CHECK_S = 15.0    # how often the booth checks whether another program is covering GSPro
+SCREEN_COVERED_S = 180.0       # covered this long and it's a health problem: the booth is reading blind
 ROUND_FILE_RETRY_S = 180.0     # how long it's applied again after it changes, for shots recorded since
 # The scorecard title is read every HUD poll for this long after GSPro's log says a hole (or the round)
 # ended, the card being due; otherwise on the first poll SCORECARD_IDLE_SECONDS after the last read, to
@@ -1197,6 +1199,8 @@ class Engine:
             if self._log_truth:
                 asyncio.create_task(self._round_file_loop(), name="round-file")
         if self.screen and self.cfg.screen.ocr:
+            if self.cfg.health.enabled and self.cfg.source.type != "replay":
+                asyncio.create_task(self._screen_cover_loop(), name="screen-cover")
             tasks.append(asyncio.create_task(self._watch_hud(), name="hud-watch"))
             # Always: the setup screen's players, holes and game mode are the round's stats too. Only the
             # early opener it can compose needs commentary.preround.
@@ -1967,12 +1971,15 @@ class Engine:
             self._apply_log_holes(r)
             if not self._round_end_queued:   # once it's ending, End Round's reset mustn't wipe the scores
                 self._sync_log_scores(r)
+                self._note_departures(r)
                 self._squabbit_kick()
         if g.round_completes != self._log_round_completes:
             self._log_round_completes = g.round_completes
             if live and not r.log_complete:
                 r.log_complete = True
                 log.info("Round %s: GSPro says the round is complete", r.id)
+                if not self._round_end_queued:
+                    self._note_departures(r)   # the last hole's finished too
         if live and r.log_complete and g.active_holes and g.active_holes != r.holes:
             log.info("Round %s: GSPro's layout has %s holes in the round (was counting %s)", r.id,
                      g.active_holes, r.holes)
@@ -2007,6 +2014,69 @@ class Engine:
             idx = self._gspro_idx(name, scores=True)
             if idx is not None:   # the log's holes are 0-based
                 r.set_log_scores(name, {hole + 2 - r.start_hole: v for (i, hole), v in scores.items() if i == idx})
+
+    def _note_departures(self, r: Round) -> None:
+        """Players who left partway (removed in GSPro): the two holes GSPro last moved on from were finished
+        by every slot but the last k (GSPro closes a removed player's slot up, so it's always the last that
+        go quiet), by players who'd scored before them. The slots closed up on the first hole the last
+        went quiet; who left are the k players the screen never named on a shot after it (fewer, or
+        more: not yet). Only the player box counts: a name from GSPro's log came by the old slots.
+        They stay in the round with their scores; nothing waits on them now. Two holes, so a hole the
+        log missed a score on isn't taken for a leaving; leavings on different holes not yet told
+        apart wait."""
+        done = r.seq if r.log_complete else r.seq - 1   # the last hole finished: GSPro's moved on, or it's over
+        if r.ended or r.start_hole_assumed or r.slot_guess or not r.slot_names or None in r.slot_names \
+                or r.format in TEAM_BALL or done < 3:
+            return
+        n = len(r.slot_names)
+        scores = self._log_view()[0]
+
+        def slots(seq: int) -> int | None:
+            """How many slots finished hole `seq`, if it was the first so many (else None)."""
+            got = {i for i, h in scores if h == seq + r.start_hole - 2}
+            return len(got) if got == set(range(len(got))) else None
+        m = slots(done)
+        if not m or m >= n or slots(done - 1) != m:
+            return
+        since = max(r.slot_since.get(g, 1) for g in r.slot_names)
+        first = done - 1
+        while first - 1 >= max(2, since) and slots(first - 1) == m:
+            first -= 1
+        if first - 1 >= max(2, since) and (slots(first - 1) or 0) > m and slots(first - 1) != n:
+            return   # fewer slots before, but not all: more than one leaving, on different holes
+        seen = set()
+        for x in self.state.shots:
+            if x.round_id == r.id and first < (x.hole_seq or 0) <= done and not x.mulligan and x.hud:
+                raw = _gspro_name(x.hud.player_text or "").casefold()
+                match = self.league.match_player(x.hud.player_text) if raw else None
+                seen |= {g for g in r.slot_names if raw and (g.casefold() == raw or (match and r.roster.get(g) == match))}
+        quiet = [g for g in r.slot_names if g not in seen]
+        if len(quiet) != n - m:
+            return   # who left isn't clear (any of them would leave the last slots quiet): wait
+        if first < max(r.slot_since.get(g, 1) for g in quiet + r.slot_names[m:]):
+            return   # those holes were before they took the slot (joined, or back)
+        if not all(any(seq < first for seq in r.log_scores.get(g, {})) for g in quiet):
+            return   # never scored here: not someone who was playing and left
+        old = list(r.slot_names)
+        gone = [g for g in quiet if r.leave_player(g, first - 1)]
+        if not gone:
+            return
+        new = r.slot_names
+        self.store.round_players(r.uuid, dict(r.roster), new)
+        moved = {i for i in range(len(old)) if old[i] != (new[i] if i < len(new) else None)}
+        for cache in (self._pending_finish, self._finish_seq, self._last_row):
+            for k in [k for k in cache if k in moved]:
+                del cache[k]
+        # Shots since that the log named by the old slots are whoever moved up into them (renamed below);
+        # a slot left empty is nobody's until someone's added to it.
+        for fire, (_, rec, slot, _) in self._fire_rows.items():
+            if rec.round_id == r.id and slot in moved and slot < len(new) and (rec.hole_seq or 0) >= first \
+                    and rec.player != "unknown" \
+                    and self._row_source.get(fire) not in ("screen", "setup read", "address frame"):
+                self._renames.add(fire)
+        log.info("Round %s: %s left after %s (GSPro played on without them; players now %s, GSPro order %s)",
+                 r.id, ", ".join(map(repr, gone)), r.hole_name(first - 1), [n for n in r.roster if n not in r.left], new)
+        self._sync_log_scores(r)   # those after them moved up a slot
 
     def _apply_log_holes(self, r: Round) -> None:
         """Where the round starts and how long it is, from GSPro's log. The league schedule's start and
@@ -3003,6 +3073,25 @@ class Engine:
                         log.debug("Couldn't work out the week board: %s", e)
             await asyncio.sleep(ROUND_STATUS_CHECK_S)
 
+    async def _screen_cover_loop(self) -> None:
+        while True:
+            await asyncio.sleep(SCREEN_COVER_CHECK_S)
+            self._check_screen_cover()
+
+    def _check_screen_cover(self) -> None:
+        """A program in front of all of GSPro for minutes (TabTip's handwriting canvas once did it for a
+        whole afternoon) leaves the booth reading black: no names, holes or scores. That's raised as a
+        health problem, pushed to the phone, so someone closes it; cleared once GSPro is read again."""
+        got = self.screen.covered_for() if self.screen is not None else None
+        if got and got[0] >= SCREEN_COVERED_S:
+            self.health.raise_issue(
+                "screen.covered", "fail",
+                f"{got[1]} has been covering GSPro for over {round(SCREEN_COVERED_S / 60)} minutes, so the booth "
+                f"can't read names, holes or scores. Close it (or, if GSPro shows through it, add it to "
+                f"screen.show_through).")
+        elif self.health.get("screen.covered") is not None:
+            self.health.clear("screen.covered", "GSPro is being read again" if not got else "a different cover")
+
     async def _round_file_loop(self) -> None:
         """Applies GSPro's own record of the round in play (currentRound.dat, 3.59+; see round_file.py) to
         the stored shots: when it changes, and again for ROUND_FILE_RETRY_S after (the booth records a shot
@@ -3012,6 +3101,9 @@ class Engine:
 
         def same_player(gspro_name: str, player: str | None) -> bool:
             return self.league is not None and player is not None and self.league.match_player(gspro_name) == player
+
+        def name_of(gspro_name: str) -> str:
+            return (self.league.match_player(gspro_name) if self.league is not None else None) or gspro_name
         while True:
             await asyncio.sleep(ROUND_FILE_CHECK_S)
             try:
@@ -3032,7 +3124,7 @@ class Engine:
                 continue
             try:
                 written, left = self.store.apply_round_file(tracks, now=st.st_mtime, same_player=same_player,
-                                                            rewrite=now_sig != sig, gone=gone)
+                                                            rewrite=now_sig != sig, gone=gone, name_of=name_of)
             except sqlite3.Error as e:
                 log.warning("Couldn't apply GSPro's round file: %s", e)
                 continue
@@ -9774,6 +9866,19 @@ class Engine:
         # than one player: maybe a misread, maybe another player.
         near = (g and not match and g in r.teed and _name_key(g) != _name_key(raw)) or (
             not g and any(_name_ratio(n, raw) >= 0.8 for n in r.roster))
+        if not first_tee and hud.shot_number == 1 and (g in r.left if g else not near) and self._new_slot_up(r):
+            # Teeing off in a slot GSPro has and the round doesn't: someone added partway (or back).
+            if r.is_league:
+                log.info("%r joined league round %s partway: not added", raw, r.id)
+                return
+            last = next((n for n in reversed(r.slot_names) if n), None)
+            # They've had the slot since the holes it finished in a row up to this one began (read
+            # late, perhaps); from the first hole, they were there all along.
+            scores, up, joined = self._log_view()[0], self.gspro.active_player, r.seq
+            while joined > 1 and (up, joined - 1 + r.start_hole - 2) in scores:
+                joined -= 1
+            self._add_to_round(r, g or raw, match, after=last, joined=joined)
+            return
         if g and not (first_tee and near):
             if first_tee and g not in r.teed:
                 r.teed.append(g)
@@ -9794,6 +9899,14 @@ class Engine:
                      raw, [n for n in r.roster if _name_ratio(n, raw) >= 0.8], r.id)
             return
         self._add_to_round(r, raw, match)
+
+    def _new_slot_up(self, r: Round) -> bool:
+        """GSPro's log has the slot just past the last of the round's up: a player added to GSPro's round
+        partway (it adds them as the last slot). One further on, or a slot the round hasn't named yet, waits
+        for whoever's in it, so nobody's put in someone else's."""
+        up = self.gspro.active_player
+        return bool(self._log_rounds and r.slot_names and None not in r.slot_names and not r.slot_guess
+                    and up == len(r.slot_names))
 
     @staticmethod
     def _shortened(r: Round, raw: str) -> bool:
@@ -11003,7 +11116,7 @@ class Engine:
             if len(r.sides) > 1 and self.current_par and not (
                 self._wrap_branches and self._wrap_branches.get("hole") == self.state.current_hole
             ):
-                remaining = [s for s in r.sides if r.card_score(s, r.seq) is None]
+                remaining = [s for s in r.sides if r.card_score(s, r.seq) is None and r.plays(s, r.seq)]
                 if len(remaining) == 1:
                     par = self.current_par
                     others = [self._score_fact(s, r.card_score(s, r.seq), par) for s in r.sides
@@ -11048,7 +11161,8 @@ class Engine:
         if not complete:
             # A side with no score on any hole (a misread name that became a phantom player) can't
             # say whether the current hole was finished; only the sides actually playing count.
-            playing = [s for s in r.sides if any(r.card_score(s, q) is not None for q in range(1, r.seq + 1))]
+            playing = [s for s in r.sides if r.plays(s, r.seq)
+                       and any(r.card_score(s, q) is not None for q in range(1, r.seq + 1))]
             done = bool(playing) and all(r.card_score(side, r.seq) is not None for side in playing)
             r.stats_through = max(0, r.seq if done else r.seq - 1)
             if not r.stats_through:
@@ -11056,14 +11170,17 @@ class Engine:
                 self.store.end_round(r.uuid, complete=False)
                 return {}
         stats = {s.key: r.side_stats(s, self.state.shots) for s in r.sides}
-        net = {s.key: (r.net_to_par(s, stats[s.key]) if complete else r.net_to_par_played(s, stats[s.key]))
+        # A finished round can still hold a side that didn't play all of it (joined late, or left
+        # early): that side is stored as part-played, so a seven-hole card isn't a season round.
+        whole = {s.key: complete and stats[s.key].holes_scored >= r.holes for s in r.sides}
+        net = {s.key: (r.net_to_par(s, stats[s.key]) if whole[s.key] else r.net_to_par_played(s, stats[s.key]))
                for s in r.sides}
         for side in r.sides:
             st = stats[side.key]
             log.info("Round %s over (%s): %s gross %s, strokes %s, net to par %s, FIR %s/%s, GIR %s/%s, putts %s "
                      "over %s holes, penalties %s, scores %s (from %s)%s", r.id, reason, side.label, st.gross,
                      side.strokes, net[side.key], *st.fir, *st.gir, st.putts, st.putt_holes, st.penalties,
-                     st.scores, st.source, "" if complete else f"; incomplete, {st.holes_scored} of {r.holes} holes")
+                     st.scores, st.source, "" if whole[side.key] else f"; incomplete, {st.holes_scored} of {r.holes} holes")
         row_of: dict[str, int] = {}   # each team's rounds row, for its week result
         stored: list[int] = []   # every side's row (teammates on their own balls share a row_of key)
         for side in r.sides:
@@ -11075,7 +11192,7 @@ class Engine:
                                         holes=r.holes, players=side.players,
                                         stats=st, strokes=side.strokes, net_to_par=net[side.key],
                                         hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
-                                        is_tournament=r.is_tournament, complete=complete,
+                                        is_tournament=r.is_tournament, complete=whole[side.key],
                                         first_nine=r.first_nine(st, r.hole_strokes_for(side)), physics=r.physics,
                                         record=r.uuid)
                 stored.append(row)
@@ -11097,7 +11214,9 @@ class Engine:
                 nine = r.first_nine(pst)
                 self.store.record_player_round(player=name, course=r.course, fmt=r.player_format(name), stats=pst,
                                                hole_number=r.hole_number, hole_pars=r.par, is_league=r.is_league,
-                                               is_tournament=r.is_tournament, complete=complete, nine_to_par=nine[0] if nine else None,
+                                               is_tournament=r.is_tournament,
+                                               complete=complete and pst.holes_scored >= r.holes,
+                                               nine_to_par=nine[0] if nine else None,
                                                record=r.uuid)
         self.store.round_players(r.uuid, dict(r.roster), r.slot_names)   # its players and seats as they ended
         self.store.end_round(r.uuid, complete=complete)

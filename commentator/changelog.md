@@ -4,6 +4,16 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.150
+
+### Stats page
+- A player who joined late or left partway now counts as a part-played round, not a finished one, so their score isn't compared with full rounds.
+- Shots the booth caught without a name (no round started in it) are named from GSPro's own record of the round: who hit them, which hole, and which stroke.
+
+### Booth
+- Players added or removed in GSPro partway through a round are followed: someone who leaves keeps the holes they played and nothing waits on them, and someone who joins gets only their own holes.
+- A phone alert when another program has covered GSPro for over 3 minutes, which leaves the booth unable to read the screen.
+
 ## 0.1.149
 
 ### Booth

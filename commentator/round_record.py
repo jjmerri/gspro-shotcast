@@ -668,7 +668,7 @@ def reconcile(db: sqlite3.Connection, quiet: str = "0") -> None:
             done = [sides[i]["complete"] for i in g["sides"]]
             meta[u] = {"kind": "round", "session_id": g["session"], "course": g["course"],
                        "started_at": min(at, default=g["end"]), "ended_at": g["end"],
-                       "state": "abandoned" if done and min(done) == 0 else "finished"}
+                       "state": "abandoned" if done and max(done) == 0 else "finished"}
     # Cards whose round no side was recorded for: a round of their own (those of one ending together).
     orphans = sorted((c["ended_at"], i) for i, c in cards.items()
                      if i not in matched_cards and not pinned("player_rounds", i))
@@ -684,7 +684,7 @@ def reconcile(db: sqlite3.Connection, quiet: str = "0") -> None:
             c = cards[run[0]]
             meta[u] = {"kind": "round", "session_id": c["session_id"], "course": c["course"],
                        "started_at": cards[run[0]]["ended_at"], "ended_at": cards[run[-1]]["ended_at"],
-                       "state": "abandoned" if min(cards[i]["complete"] for i in run) == 0 else "finished"}
+                       "state": "abandoned" if max(cards[i]["complete"] for i in run) == 0 else "finished"}
         round_ends.append(cards[run[-1]]["ended_at"])
         run.clear()
 

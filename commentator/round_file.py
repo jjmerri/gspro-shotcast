@@ -55,6 +55,7 @@ class Track:
     to_pin_m: float | None = None
     holed: bool = False
     penalty: bool = False
+    par: int | None = None
 
     @property
     def carry_yards(self) -> float | None:
@@ -131,7 +132,8 @@ def tracks(entries: list[dict]) -> list[Track]:
                   roll=_thin(roll), lie_before=SURFACES.get(e.get("StartingSurface")),
                   lie_after=None if penalty else SURFACES.get(e.get("EndingSurface")),
                   to_pin_m=float(dist) if isinstance(dist, (int, float)) else None,
-                  holed=bool(sd.get("isHoled")) or e.get("HoleResult") == HOLED, penalty=penalty)
+                  holed=bool(sd.get("isHoled")) or e.get("HoleResult") == HOLED, penalty=penalty,
+                  par=e.get("HolePar") if isinstance(e.get("HolePar"), int) else None)
         out.append(t)
     return out
 

@@ -236,6 +236,17 @@ class Round:
         self.log_disagreed = 0    # shots the screen and GSPro's log named different players for
         # The last scorecard's rows in order, each with the round's player it went to (None: nobody's).
         self.card_rows: list[tuple[str, str | None]] = []
+        # Players who left partway (GSPro name -> the last hole of the round they played): their scores
+        # stay, but nothing waits on them past it, and GSPro closed their slot up.
+        self.left: dict[str, int] = {}
+        # Players added partway (GSPro name -> the hole of the round they joined on), and the holes a
+        # player who left and came back missed: none of those are theirs to finish.
+        self.joined: dict[str, int] = {}
+        self.skipped: dict[str, set[int]] = {}
+        # The hole of the round each player has held their GSPro slot since, when that's not the first
+        # (they joined late, or a slot above closed up): the log's scores in that slot before it are
+        # someone else's.
+        self.slot_since: dict[str, int] = {}
 
         self.roster = {g: league.match_player(g) for g in gspro_players}
         teams: dict[str, list[str]] = {}
@@ -272,12 +283,15 @@ class Round:
         return scheduled, None
 
     def add_player(self, g: str, teed: list[str] | None = None, after: str | None = None,
-                   first: bool = False) -> bool:
+                   first: bool = False, joined: int | None = None) -> bool:
         """A GSPro player the round's start missed (the setup screen unread and not first up on the
         tee): into the roster as their own side, and into the slot order. That's right after `after`
         (the scorecard row above theirs), first in it if `first`, or else right after the last of
         `teed` (who'd set up their first tee shot before them: the first tee goes in slot order),
-        ahead of anyone not up yet. The format stays as it was. True if added."""
+        ahead of anyone not up yet. The format stays as it was. `joined`: the hole of the round they joined
+        GSPro's round on (not missed from the start), so the holes before it aren't theirs. True if added."""
+        if g in self.left:
+            return self._rejoin(g, joined or self.seq)
         if g in self.roster:
             return False
         self.renamed.pop(g, None)   # a name someone was renamed from is now this player's
@@ -301,6 +315,8 @@ class Round:
                 gap = next((i for i in range(at + 1, len(self.slot_names)) if not self.slot_names[i]), None)
                 if gap is not None:
                     del self.slot_names[gap]
+        if joined and joined > 1:
+            self.slot_since[g] = self.joined[g] = joined
         self.teed.append(g)
         self.sides = self._build_sides()
         if self.course_card:
@@ -308,6 +324,42 @@ class Round:
         elif self.week_card:
             self._allocate_hole_strokes()
         return True
+
+    def _rejoin(self, g: str, at: int) -> bool:
+        """A player who'd left, back in on hole `at`: GSPro adds them as a new last slot."""
+        self.skipped.setdefault(g, set()).update(range(self.left.pop(g) + 1, at))
+        if self.slot_names is not None:
+            self.slot_names.append(g)
+        self.slot_since[g] = at
+        return True
+
+    def leave_player(self, g: str, last_seq: int) -> bool:
+        """A player who left partway, after hole `last_seq` of the round: still in the round with the
+        scores they have, but nothing waits on them past it. GSPro closes their slot up, so everyone after
+        them moves up one from the next hole (what they logged in their old slot before then stays
+        theirs). True if they left."""
+        if g not in self.roster or g in self.left or len(self.roster) - len(self.left) < 2:
+            return False
+        self.left[g] = last_seq
+        if g in self.log_scores:   # what their slot logged after is whoever moved up into it
+            self.log_scores[g] = {seq: v for seq, v in self.log_scores[g].items() if seq <= last_seq}
+        for order in (self.slot_names, self.setup_slots):
+            if order is not None and g in order:
+                at = order.index(g)
+                for n in order[at + 1:]:
+                    if n and order is self.slot_names:
+                        self.slot_since[n] = max(self.slot_since.get(n, 1), last_seq + 1)
+                del order[at]
+        self.slot_held.pop(g, None)
+        return True
+
+    def plays(self, side: Side, seq: int) -> bool:
+        """Whether hole `seq` of the round is one this side is playing: not once all of it has left."""
+        return not side.gspro or any(self.playing(g, seq) for g in side.gspro)
+
+    def playing(self, g: str, seq: int) -> bool:
+        """Whether GSPro player `g` was in the round on hole `seq` (not before joining, nor after leaving)."""
+        return self.joined.get(g, 1) <= seq <= self.left.get(g, seq) and seq not in self.skipped.get(g, ())
 
     def remove_player(self, g: str) -> bool:
         """A player the round was started with who was never there (a misread setup slot): out of the
@@ -324,7 +376,8 @@ class Round:
             self.slot_names = [None if n == g else n for n in self.slot_names]
         if self.setup_slots is not None:
             self.setup_slots = [None if n == g else n for n in self.setup_slots]
-        for d in (self.card_scores, self.log_scores, self.spellings, self.slot_reads, self.slot_held):
+        for d in (self.card_scores, self.log_scores, self.spellings, self.slot_reads, self.slot_held,
+                  self.left, self.slot_since, self.joined, self.skipped):
             d.pop(g, None)
         self.teed = [x for x in self.teed if x != g]
         self.renamed = {k: v for k, v in self.renamed.items() if v != g}
@@ -404,7 +457,7 @@ class Round:
         if self.slot_names is not None:
             self.slot_names = [new if n == old else n for n in self.slot_names]
         for d in (self.card_scores, self.log_scores, self.spellings, self.slot_reads,
-                  self.slot_held):
+                  self.slot_held, self.left, self.slot_since, self.joined, self.skipped):
             if old in d:
                 d[new] = d.pop(old)
         self.teed = [new if g == old else g for g in self.teed]
@@ -760,6 +813,9 @@ class Round:
         reopened (a holed putt taken back as a mulligan) drops out again."""
         scores = {seq: v for seq, v in scores.items() if 1 <= seq <= self.holes}
         had = self.log_scores.get(gspro, {})
+        if (since := self.slot_since.get(gspro, 1)) > 1:   # their slot's earlier holes were someone else's
+            scores = {**{seq: v for seq, v in had.items() if seq < since},
+                      **{seq: v for seq, v in scores.items() if seq >= since}}
         if scores == had:
             return
         for seq in sorted(set(had) | set(scores)):
@@ -837,7 +893,8 @@ class Round:
         return tally
 
     def complete(self) -> bool:
-        return all(self.card_score(side, seq) is not None for side in self.sides for seq in range(1, self.holes + 1))
+        return all(self.card_score(side, seq) is not None for side in self.sides for seq in range(1, self.holes + 1)
+                   if self.plays(side, seq))
 
     # ---- stats ----------------------------------------------------------------------------
 
@@ -855,7 +912,7 @@ class Round:
             green = [r for r in recs if r.lie_before == "green"]
             score = self.card_score(side, seq)
             picked = self.was_picked_up([*side.gspro, *side.players], seq)
-            if score is None:
+            if score is None and self.plays(side, seq):   # a hole they left mid-way: unscored
                 score = _score_from_shots(recs, numbers, green)
             # The closer is pre-built before the final putt drops, branched by the score this side
             # might finish the last hole on; `final_override` supplies that hypothetical last-hole
@@ -1005,7 +1062,7 @@ class Round:
             if self.format in TEAM_BALL and (side := self.side_for(player)):
                 score = self.card_score(side, seq)   # a shared ball: everyone's score is the team's
             picked = self.was_picked_up([*gspro, player], seq)
-            if score is None:
+            if score is None and all(self.playing(g, seq) for g in gspro):   # a hole they left mid-way: unscored
                 score = _score_from_shots(recs, numbers, green)
             if score is not None:
                 stats.scores[seq] = score

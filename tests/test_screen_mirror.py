@@ -370,6 +370,42 @@ def test_a_window_that_moves_during_a_grab_blacks_it_all_out(monkeypatch):
     assert img.getextrema() == ((0, 0),) * 3
 
 
+def test_a_program_covering_all_of_gspro_for_minutes_is_a_health_problem(monkeypatch, tmp_path):
+    import types
+
+    from commentator import engine as engine_mod, screen as screen_mod, winshot
+    from tests.test_round import _engine
+
+    clock = [1000.0]
+    monkeypatch.setattr(screen_mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(winshot, "exe_name", lambda _p: "TabTip.exe")
+    sct = types.SimpleNamespace(grab=lambda box: types.SimpleNamespace(size=(10, 10), bgra=b"\xff" * 400))
+    box = {"left": 0, "top": 0, "width": 10, "height": 10}
+    s = Screen(ScreenConfig())
+    e = _engine(tmp_path)
+    e.screen = s
+    monkeypatch.setattr(winshot, "coverage", lambda _t: ((0, 0, 10, 10), [((0, 0, 10, 10), 7)]))
+    s._sct_grab(sct, box)
+    clock[0] += engine_mod.SCREEN_COVERED_S - 10
+    s._sct_grab(sct, box)
+    e._check_screen_cover()
+    assert e.health.get("screen.covered") is None   # not for long enough yet
+    clock[0] += 20
+    s._sct_grab(sct, box)
+    e._check_screen_cover()
+    assert "TabTip.exe" in e.health.get("screen.covered").message
+    # A corner of the picture is just a window in the way, not the booth reading blind.
+    monkeypatch.setattr(winshot, "coverage", lambda _t: ((0, 0, 10, 10), [((0, 0, 3, 3), 7)]))
+    s._sct_grab(sct, box)
+    e._check_screen_cover()
+    assert e.health.get("screen.covered") is None
+    # Nor do covered grabs long since stopped say anything about now.
+    monkeypatch.setattr(winshot, "coverage", lambda _t: ((0, 0, 10, 10), [((0, 0, 10, 10), 7)]))
+    s._sct_grab(sct, box)
+    clock[0] += 1000
+    assert s.covered_for() is None
+
+
 from commentator.winshot import coverage as _real_coverage   # before conftest stubs it out per test
 
 

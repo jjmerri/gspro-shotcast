@@ -237,6 +237,8 @@ OTHER_SIDE = "@other_side"   # grab_regions' key for the other side's boxes (Scr
 
 FOLLOW_SECONDS = 3.0   # how often to look again for the monitor GSPro's window is on (and its view)
 MIN_VIEW = 200         # px: a smaller client area isn't GSPro's game view (mid-restore, say)
+WHOLE_COVER = 0.9      # a window over this much of a grab blinds it (covered_for)
+COVER_STALE_S = 30.0   # covered_for says nothing about grabs older than this
 # GSPro set to a resolution its window doesn't have (3450x2126 in a 3450x2160 borderless window, after
 # it fell back from exclusive fullscreen, 11-17) draws its picture centred between pure black bars,
 # and every box read off the window was 17 px low: the setup tabs' 10 px underline was missed
@@ -413,10 +415,15 @@ class Screen:
         self._bars_seen: tuple[int, int, int, int] | None = None   # the last look, awaiting a second
         self._bars_at = -1e9
         self._masked_logged: dict[str, float] = {}   # who blanked a grab, and when that was last logged
+        # Since when every grab has been all but blacked out by one program, and the last grab's time:
+        # see covered_for.
+        self._covered_since: tuple[float, str] | None = None
+        self._grabbed_at = -1e9
 
-    def _covered(self, box: tuple[int, int, int, int]) -> list[tuple[int, int, int, int]]:
+    def _covered(self, box: tuple[int, int, int, int], whole: list | None = None) -> list[tuple[int, int, int, int]]:
         """The parts of a grab of `box` (left, top, right, bottom on the desktop) GSPro isn't showing,
-        in the grab's own pixels (see ScreenConfig.mask_other_windows)."""
+        in the grab's own pixels (see ScreenConfig.mask_other_windows). A program in front of nearly
+        all of it (WHOLE_COVER) is added to `whole`."""
         if not self.cfg.mask_other_windows:
             return []
         left, top, right, bottom = box
@@ -446,8 +453,29 @@ class Screen:
                 if hit[0] < hit[2] and hit[1] < hit[3]:
                     self._log_masked(f"{name} is in front of GSPro")
                     out.append(hit)
+                    if (hit[2] - hit[0]) * (hit[3] - hit[1]) >= WHOLE_COVER * (right - left) * (bottom - top):
+                        if whole is not None:
+                            whole.append(name)
         out = [(max(l, left), max(t, top), min(r, right), min(b, bottom)) for l, t, r, b in out]
         return [(l - left, t - top, r - left, b - top) for l, t, r, b in out if l < r and t < b]
+
+    def _note_cover(self, by: str | None) -> None:
+        now = time.monotonic()
+        self._grabbed_at = now
+        if by is None:
+            self._covered_since = None
+        elif self._covered_since is None or self._covered_since[1] != by:
+            self._covered_since = (now, by)
+
+    def covered_for(self) -> tuple[float, str] | None:
+        """(seconds, program) while a program GSPro doesn't show through (TabTip's handwriting canvas,
+        a browser) has covered every grab since then: the booth is reading blind. None once a grab
+        isn't, or when nothing has been grabbed lately."""
+        since = self._covered_since
+        now = time.monotonic()
+        if since is None or now - self._grabbed_at > COVER_STALE_S:
+            return None
+        return now - since[0], since[1]
 
     def _log_masked(self, why: str, every: float = 60) -> None:
         now = time.monotonic()
@@ -460,7 +488,9 @@ class Screen:
         looked at just before the grab and just after: when they moved meanwhile (a window dragged or
         closed), where one was at the moment of the grab isn't known, so it's all blacked out."""
         desk = (box["left"], box["top"], box["left"] + box["width"], box["top"] + box["height"])
-        before = self._covered(desk)
+        whole: list[str] = []
+        before = self._covered(desk, whole)
+        self._note_cover(whole[0] if whole else None)
         raw = sct.grab(box)
         _capture_ok()
         img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")

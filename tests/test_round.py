@@ -4550,6 +4550,20 @@ def test_a_quit_keeps_the_last_hole_when_a_phantom_side_never_scored(tmp_path):
     assert r.stats_through == 1
 
 
+def test_a_player_who_joined_late_is_stored_part_played_in_a_finished_round(tmp_path):
+    e = _engine(tmp_path)
+    r = e._build_round(["Paul", "Cody"], "Paynes Valley", {"hole_count": 18}, is_league=False)
+    e._start_round(r)
+    r.par = {q: 4 for q in range(1, 19)}
+    r.set_log_scores("Paul", {q: 4 for q in range(1, 19)})
+    r.set_log_scores("Cody", {q: 5 for q in range(12, 19)})   # joined on the 12th
+    r.seq = 18
+    e._record_round_stats(r, "round complete")
+    rows = dict(e.store.db.execute("SELECT side, complete FROM rounds").fetchall())
+    assert rows == {"Paul": 1, "Cody": 0}
+    assert e.store.season_rounds("Cody")["rounds"] == 0   # seven holes aren't a season round
+
+
 async def test_a_quit_before_a_full_nine_still_gets_no_closer(tmp_path):
     from commentator.models import RoundEndEvent
     e = _engine(tmp_path)
@@ -5231,6 +5245,192 @@ def _guest_round(tmp_path, names):
 
 def _tee(name, shot=1, score="E"):
     return Hud(player_text=f"{name} {score} Shot {shot} 150 YDS", shot_number=shot, score_to_par=score)
+
+
+def _logged_guests(tmp_path, names):
+    e = _guest_round(tmp_path, names)
+    e.cfg.source.gspro_log_truth = True
+    e.gspro.mode = "course"
+    e.gspro.first_hole = 0
+    e.gspro.players_seen.update(range(len(names)))
+    return e
+
+
+def _played(e, seq, who, unread=()):
+    """Hole `seq` of the round finished by `who` (slot -> strokes) on GSPro's log, with a tee shot each
+    on the booth's record (the player box read, but for slots `unread`), and the round on to the next hole."""
+    for slot, (name, strokes) in who.items():
+        e.gspro.hole_scores[(slot, seq - 1)] = strokes
+        e.state.shots.append(ShotRecord(name, Shot(club="Dr"), f"hole {seq} par 4",
+                                        Hud() if slot in unread else _tee(name), [],
+                                        round_id=e.round.id, hole_seq=seq))
+    e.round.seq = seq + 1
+    e._check_log_round()
+
+
+def test_a_player_who_leaves_partway_keeps_their_holes_and_a_late_joiner_gets_only_theirs(tmp_path):
+    # Round 1692: Josh was added on hole 2 and removed after 5, then Dan took that slot on 9. GSPro logs
+    # neither: a removed player's slot closes up, and one added partway is the next slot.
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee"])
+    r = e.round
+    for seq in (1, 2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+    _played(e, 4, {0: ("Kroll", 4), 1: ("Barrows", 5)})
+    assert r.left == {}                                     # one quiet hole could be a missed score
+    _played(e, 5, {0: ("Kroll", 4), 1: ("Barrows", 5)})
+    assert r.left == {"Lee": 3} and r.slot_names == ["Kroll", "Barrows"]
+    assert r.log_scores["Lee"] == {1: 6, 2: 6, 3: 6} and "Lee" in r.roster
+    _played(e, 6, {0: ("Kroll", 4), 1: ("Barrows", 5)})
+    _played(e, 7, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Dan", 3)})   # Dan's first tee went unread
+    e.gspro.active_player = 3                               # past a slot nobody's been read in yet
+    e._note_player(_tee("Sam", score="-1"))
+    assert "Sam" not in r.roster
+    e.gspro.active_player = 2                               # a slot the round doesn't have is up
+    e._note_player(_tee("Dan", score="-1"))
+    assert r.slot_names == ["Kroll", "Barrows", "Dan"] and r.joined == {"Dan": 7}
+    assert r.log_scores["Dan"] == {7: 3}                    # slot 2's holes 1-3 were Lee's
+    assert r.log_scores["Lee"] == {1: 6, 2: 6, 3: 6}
+    for seq in range(8, 19):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Dan", 3)})
+    assert r.left == {"Lee": 3}
+    assert r.complete()                                     # nobody waits on Lee's 4-18 or Dan's 1-6
+
+
+def test_a_round_quit_after_someone_left_keeps_the_hole_the_rest_finished(tmp_path):
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee"])
+    r = e.round
+    for seq in (1, 2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+    for seq in (4, 5, 6):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5)})
+    r.seq = 6                                               # hole 6 holed out, quit before the next tee
+    assert r.left == {"Lee": 3}
+    e.state.shots.append(ShotRecord("Lee", Shot(club="PT"), "hole 4 par 4", Hud(), [], round_id=r.id,
+                                    hole_seq=4, lie_before="green", shot_number=3))   # putted on 4, then removed
+    e._record_round_stats(r, "quit", complete=False)
+    assert r.stats_through == 6
+    lee = next(s for s in r.sides if "Lee" in s.gspro)
+    assert r.side_stats(lee, e.state.shots).holes_scored == 3 == r.player_stats("Lee", e.state.shots).holes_scored
+
+
+def test_a_player_found_late_keeps_the_holes_they_played_before_it(tmp_path):
+    e = _logged_guests(tmp_path, ["Kroll"])
+    r = e.round
+    e.gspro.hole_scores.update({(0, 0): 4, (1, 0): 5, (0, 1): 4, (1, 1): 6})
+    r.seq = 3
+    e.gspro.active_player = 1                               # slot 1 finished hole 2: there all along
+    e._note_player(_tee("Barrows", score="+2"))
+    assert r.slot_names == ["Kroll", "Barrows"] and r.joined == {}
+    assert r.log_scores["Barrows"] == {1: 5, 2: 6}
+
+
+def test_a_player_who_leaves_from_the_middle_is_named_by_the_shots_and_the_rest_move_up(tmp_path):
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee"])
+    r = e.round
+    for seq in (1, 2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+    e.state.shots.append(ShotRecord("Barrows", Shot(club="Dr"), "hole 4 par 4", _tee("Barrows"), [],
+                                    round_id=r.id, hole_seq=4))   # teed off on 4, then removed
+    for seq in (4, 5):                                      # Barrows gone: Lee's in slot 1 now
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Lee", 7)})
+    assert r.left == {"Barrows": 3} and r.slot_names == ["Kroll", "Lee"]
+    assert r.log_scores["Barrows"] == {1: 5, 2: 5, 3: 5}
+    assert r.log_scores["Lee"] == {1: 6, 2: 6, 3: 6, 4: 7, 5: 7}
+    e.gspro.active_player = 2
+    e._note_player(_tee("Barrows"))                         # and back on 6
+    assert r.slot_names == ["Kroll", "Lee", "Barrows"] and r.left == {} and r.skipped == {"Barrows": {4, 5}}
+    e._check_log_round()                                    # the holes they missed aren't a leaving again
+    assert r.left == {}
+    _played(e, 6, {0: ("Kroll", 4), 1: ("Lee", 7), 2: ("Barrows", 2)})
+    assert r.log_scores["Barrows"] == {1: 5, 2: 5, 3: 5, 6: 2}
+
+
+def test_who_left_is_only_taken_from_the_names_the_screen_read(tmp_path):
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee"])
+    r = e.round
+    for seq in (1, 2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+    for seq in (4, 5):                                      # Lee's box unread: the old slots named Barrows
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 7)}, unread={1})
+    assert r.left == {}
+
+
+def test_a_player_who_leaves_for_the_last_two_holes_is_seen_when_the_round_completes(tmp_path):
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee"])
+    r = e.round
+    r.set_holes(5)
+    for seq in (1, 2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+    _played(e, 4, {0: ("Kroll", 4), 1: ("Lee", 7)})
+    _played(e, 5, {0: ("Kroll", 4), 1: ("Lee", 7)})
+    r.seq = 5                                               # the last hole: GSPro doesn't move on from it
+    e.gspro.round_completes += 1
+    e._check_log_round()
+    assert r.left == {"Barrows": 3} and r.log_scores["Lee"] == {1: 6, 2: 6, 3: 6, 4: 7, 5: 7}
+
+
+def test_two_players_who_leave_together_both_leave_and_ones_on_different_holes_wait(tmp_path):
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee", "Moss"])
+    r = e.round
+    for seq in (1, 2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6), 3: ("Moss", 7)})
+    for seq in (4, 5):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Lee", 6)})
+    assert r.left == {"Barrows": 3, "Moss": 3} and r.slot_names == ["Kroll", "Lee"]
+    assert r.log_scores["Lee"] == {1: 6, 2: 6, 3: 6, 4: 6, 5: 6}
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee", "Moss"])
+    r = e.round
+    for seq in (1, 2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6), 3: ("Moss", 7)})
+    for seq in (4, 5):                                      # Moss gone after 3, then Lee after 5
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+    for seq in (6, 7):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5)})
+    assert r.left == {"Moss": 3, "Lee": 5} and r.slot_names == ["Kroll", "Barrows"]
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee", "Moss"])
+    r = e.round
+    for seq in (1, 2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6), 3: ("Moss", 7)})
+    _played(e, 4, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})   # Moss gone after 3, Lee after 4
+    for seq in (5, 6, 7):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5)})
+    assert r.left == {}                                     # which left when isn't told: wait
+
+
+def test_shots_the_log_named_by_the_old_slots_go_to_whoever_moved_up(tmp_path):
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee"])
+    r = e.round
+    for seq in (1, 2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+    early = ShotRecord("Barrows", Shot(club="PT"), "hole 3 par 4", Hud(), [], round_id=r.id, hole_seq=3)
+    named = ShotRecord("Barrows", Shot(club="7i"), "hole 4 par 4", Hud(), [], round_id=r.id, hole_seq=4)
+    read = ShotRecord("Kroll", Shot(club="9i"), "hole 4 par 4", _tee("Kroll"), [], round_id=r.id, hole_seq=4)
+    gone = ShotRecord("Lee", Shot(club="PT"), "hole 4 par 4", Hud(), [], round_id=r.id, hole_seq=4)   # slot 2 closes
+    for fire, (rec, slot, why) in enumerate([(early, 1, "GSPro's log (x)"), (named, 1, "GSPro's log (x)"),
+                                             (read, 0, "screen"), (gone, 2, "GSPro's log (x)")], start=900):
+        e._fire_rows[fire] = (None, rec, slot, slot)
+        e._row_source[fire] = why
+    for seq in (4, 5):                                      # Barrows gone after 3: Lee's in slot 1
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Lee", 7)})
+    assert r.left == {"Barrows": 3}
+    assert (early.player, named.player, read.player) == ("Barrows", "Lee", "Kroll")
+    _played(e, 6, {0: ("Kroll", 4), 1: ("Lee", 7)})
+    e.gspro.active_player = 2
+    e._note_player(_tee("Dan"))                             # a new player in the slot Lee's move left empty
+    assert r.joined == {"Dan": 7} and gone.player == "Lee"
+
+
+def test_a_newcomer_waits_while_a_slot_is_unnamed(tmp_path):
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    r = e.round
+    r.slot_names[1] = None
+    e.gspro.hole_scores.update({(0, 0): 4, (1, 0): 7, (0, 1): 4, (1, 1): 7})
+    r.seq = 3
+    e.gspro.active_player = 2
+    e._note_player(_tee("Derek", score="+1"))
+    assert "Derek" not in r.roster
 
 
 async def test_a_guests_misread_name_is_still_theirs_and_a_misread_admission_is_renamed(tmp_path):

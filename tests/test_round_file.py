@@ -329,3 +329,38 @@ def test_a_scrambles_drives_out_of_bounds_are_drawn_as_gspro_tracked_them(tmp_pa
     st.db.commit()
     players = {p["name"]: p for p in hole_replays(st.db)[(1, 1)]["players"]}
     assert sum(players[n]["used"] + players[n]["used_pens"] for n in ("Dan", "Derek")) == 4
+
+
+def _blind(st, speeds, t0=1000.0):
+    """Shots the booth recorded without reading the screen: no player, no stroke number, a stale hole."""
+    for n, sp in enumerate(speeds):
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, ball_speed,"
+                      " attributed, raw) VALUES (?, ?, NULL, 'Test Links', 'Hole 18, par 4, 404 yards', NULL, '7I', 0,"
+                      " ?, 0, '{}')", (st.session_id, t0 + n, sp))
+    st.db.commit()
+
+
+def test_shots_recorded_blind_are_named_from_the_round_file_by_order_and_ball_speed(tmp_path):
+    st = Store(str(tmp_path / "season.db"))
+    _blind(st, [151.0, 149.6, 100.2, 8.0])   # Dan's drive, Al's drive, Dan's approach, Dan's putt
+    al = _entry(1, (0, 0), (5, 200), sp=149.8, name="Al", flight=[(0, 0), (4, 180)], land=(4, 180), to_pin=99.0)
+    files = [{**DRIVE, "GhostData": {**DRIVE["GhostData"], "sp": 150.9}, "HolePar": 4}, al, APPROACH, PUTT]
+    written, pending = st.apply_round_file(round_file.tracks(files), now=1005.0, name_of={"Dan": "Dan Smith"}.get)
+    assert (written, pending) == (4, [])
+    rows = st.db.execute("SELECT player, hole, shot_number, is_putt, attributed, finish_yards FROM shots ORDER BY ts").fetchall()
+    assert [tuple(r)[:5] for r in rows] == [("Dan Smith", "Hole 1, par 4", 1, 0, 1), ("Al", "Hole 1", 1, 0, 1),
+                                            ("Dan Smith", "Hole 1", 2, 0, 1), ("Dan Smith", "Hole 1", 3, 1, 1)]
+    assert rows[3]["finish_yards"] is None   # a putt keeps no finish
+    # Applied again, by name now; a mulligan taking a stroke back gives its shot back its blind read.
+    assert st.apply_round_file(round_file.tracks(files), now=1005.0, name_of={"Dan": "Dan Smith"}.get)[1] == []
+    st.apply_round_file(round_file.tracks(files[:3]), now=1005.0, gone={PUTT["ShotID"]})
+    assert tuple(st.db.execute("SELECT player, hole, shot_number, attributed FROM shots WHERE ball_speed = 8.0")
+                 .fetchone()) == (None, "Hole 18, par 4, 404 yards", None, 0)
+
+
+def test_blind_shots_that_dont_line_up_are_left_unnamed(tmp_path):
+    st = Store(str(tmp_path / "season.db"))
+    _blind(st, [151.0, 120.0, 8.0])   # the booth missed the approach and has a practice swing in its place
+    written, pending = st.apply_round_file(round_file.tracks([DRIVE, APPROACH, PUTT]), now=1005.0, name_of=str)
+    assert written == 0 and len(pending) == 3
+    assert st.db.execute("SELECT COUNT(*) FROM shots WHERE player IS NOT NULL").fetchone()[0] == 0
