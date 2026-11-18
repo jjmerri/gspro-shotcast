@@ -11,7 +11,7 @@ stats page and in the app; "Booth" items only in the app. Plain words, one line 
 - Shots the booth caught without a name (no round started in it) are named from GSPro's own record of the round: who hit them, which hole, and which stroke.
 
 ### Booth
-- Players added or removed in GSPro partway through a round are followed: someone who leaves keeps the holes they played and nothing waits on them, and someone who joins gets only their own holes.
+- Players added or removed in GSPro partway through a round are followed: someone who leaves keeps the holes they played and nothing waits on them, and someone who joins gets only their own holes. GSPro opening its player menu mid-round is the cue to check, so a removal is picked up after the next hole.
 - A phone alert when another program has covered GSPro for over 3 minutes, which leaves the booth unable to read the screen.
 
 ## 0.1.149

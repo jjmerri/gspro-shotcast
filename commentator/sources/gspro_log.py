@@ -326,6 +326,11 @@ def parse_events(text: str) -> list[LogEvent]:
                     out.append(LogEvent("lm_connection", display=how))
             elif m := _ALTITUDE.match(line):
                 out.append(LogEvent("altitude", altitude_ft=float(m.group(1))))
+            elif line.endswith("(Game Object 'Item Label') is missing!"):
+                # Unity's warnings as GSPro builds its player list (72 lines, its "<null>" ones with
+                # them): the only trace a player added or removed partway leaves. Also logged at a
+                # course's setup, before its first shot.
+                out.append(LogEvent("menu_item"))
             elif _reworded(line):
                 out.append(LogEvent("unparsed", display=line[:160]))
         except (ValueError, IndexError):
@@ -532,10 +537,22 @@ class GsproState:
     layouts: int = 0
     # Every pin GSPro 3.59+ logged setting a hole up (_SCM_PIN), in order, a repeat of the last left out.
     pins: list = field(default_factory=list)
+    # Times the player menu was opened on a course once it's under way (a run of "menu_item" lines after
+    # its first shot; never resets): where a
+    # player's added or removed partway, which GSPro doesn't log as such. `menu_hole` is the hole
+    # (0-based, as logged) the last one was opened on, or just after.
+    player_menus: int = 0
+    menu_hole: int | None = None
+    _last_kind: str | None = None
 
     def apply(self, ev: LogEvent) -> None:
         self.kinds[ev.kind] += 1
-        if ev.kind == "version":
+        prev, self._last_kind = self._last_kind, ev.kind
+        if ev.kind == "menu_item":
+            if prev != "menu_item" and self.mode == "course" and self.shots_since_course:
+                self.player_menus += 1
+                self.menu_hole = self.current_hole
+        elif ev.kind == "version":
             self.version = ev.display
         elif ev.kind == "unparsed":
             self.unparsed = (self.unparsed + [ev.display])[-5:]

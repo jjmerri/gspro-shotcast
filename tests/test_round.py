@@ -5261,9 +5261,10 @@ def _played(e, seq, who, unread=()):
     on the booth's record (the player box read, but for slots `unread`), and the round on to the next hole."""
     for slot, (name, strokes) in who.items():
         e.gspro.hole_scores[(slot, seq - 1)] = strokes
+        e._shot_seq += 1
         e.state.shots.append(ShotRecord(name, Shot(club="Dr"), f"hole {seq} par 4",
                                         Hud() if slot in unread else _tee(name), [],
-                                        round_id=e.round.id, hole_seq=seq))
+                                        round_id=e.round.id, hole_seq=seq, impact_seq=e._shot_seq))
     e.round.seq = seq + 1
     e._check_log_round()
 
@@ -5420,6 +5421,61 @@ def test_shots_the_log_named_by_the_old_slots_go_to_whoever_moved_up(tmp_path):
     e.gspro.active_player = 2
     e._note_player(_tee("Dan"))                             # a new player in the slot Lee's move left empty
     assert r.joined == {"Dan": 7} and gone.player == "Lee"
+
+
+def _menu(e, hole):
+    """GSPro's player menu opened on hole `hole` of the round (or just after it), seen by the booth."""
+    e.gspro.player_menus += 1
+    e.gspro.menu_hole = hole + e.round.start_hole - 2
+    e._check_log_round()
+
+
+def test_a_player_removed_with_the_menu_opened_is_seen_after_one_hole(tmp_path):
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee"])
+    r = e.round
+    for seq in (1, 2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+    _menu(e, 3)                                             # after hole 3 holed out
+    _played(e, 4, {0: ("Kroll", 4), 1: ("Barrows", 5)})
+    assert r.menus == [(3, 9)] and r.left == {"Lee": 3}
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee"])
+    r = e.round
+    for seq in (1, 2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+    e._shot_seq += 1                                        # Barrows teed off on 4, then was removed;
+    tee = ShotRecord("Barrows", Shot(club="Dr"), "hole 4 par 4", _tee("Barrows"), [],
+                     round_id=r.id, hole_seq=4, impact_seq=e._shot_seq)
+    _menu(e, 4)
+    e.state.shots.append(tee)                               # his shot's record was kept after the menu opened
+    _played(e, 4, {0: ("Kroll", 4), 1: ("Lee", 7)})
+    assert r.left == {"Barrows": 3} and r.log_scores["Lee"] == {1: 6, 2: 6, 3: 6, 4: 7}
+
+
+def test_a_removal_the_menu_cant_settle_is_still_seen_after_two_holes(tmp_path):
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee"])
+    r = e.round
+    for seq in (1, 2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+    _menu(e, 3)
+    e._shot_seq += 1
+    e.state.shots.append(ShotRecord("Lee", Shot(club="PT"), "hole 4 par 4", _tee("Lee"), [],
+                                    round_id=r.id, hole_seq=4, impact_seq=e._shot_seq))   # a misread
+    _played(e, 4, {0: ("Kroll", 4), 1: ("Barrows", 5)})
+    assert r.left == {}
+    _played(e, 5, {0: ("Kroll", 4), 1: ("Barrows", 5)})
+    assert r.left == {"Lee": 3}
+
+
+def test_one_quiet_hole_with_the_menu_opened_long_before_still_waits(tmp_path):
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows", "Lee"])
+    r = e.round
+    _played(e, 1, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+    _menu(e, 1)
+    for seq in (2, 3):
+        _played(e, seq, {0: ("Kroll", 4), 1: ("Barrows", 5), 2: ("Lee", 6)})
+    _played(e, 4, {0: ("Kroll", 4), 1: ("Barrows", 5)})
+    assert r.left == {}
 
 
 def test_a_newcomer_waits_while_a_slot_is_unnamed(tmp_path):

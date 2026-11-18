@@ -1113,6 +1113,7 @@ class Engine:
         self._log_round_completes = 0
         self._log_layouts = 0
         self._log_pins = 0   # pins GSPro logged (GsproState.pins) already kept
+        self._log_menus = 0   # player menu openings (GsproState.player_menus) already noted
         self._range_noted = False
         self._practice = False   # GSPro's practice mode on screen: no round, so no commentary and nothing saved
         self._round_box_seen = False   # a round's player box has been on screen: practice isn't the first word
@@ -1967,6 +1968,13 @@ class Engine:
             log.info("Round %s: GSPro is on the range; ending the round and cutting the booth off", r.id)
             self.speech.interrupt()
             self._events.put_nowait(RoundEndEvent(reason="GSPro went to the range", abandoned=True))
+        if g.player_menus != self._log_menus:
+            self._log_menus = g.player_menus
+            if live and not self._round_end_queued:
+                seq = r.seq if g.menu_hole is None else g.menu_hole + 2 - r.start_hole
+                r.menus.append((seq, self._shot_seq))
+                log.info("Round %s: GSPro's player menu was opened on %s: watching for a player added or removed",
+                         r.id, r.hole_name(seq))
         if live:
             self._apply_log_holes(r)
             if not self._round_end_queued:   # once it's ending, End Round's reset mustn't wipe the scores
@@ -2016,17 +2024,19 @@ class Engine:
                 r.set_log_scores(name, {hole + 2 - r.start_hole: v for (i, hole), v in scores.items() if i == idx})
 
     def _note_departures(self, r: Round) -> None:
-        """Players who left partway (removed in GSPro): the two holes GSPro last moved on from were finished
+        """Players who left partway (removed in GSPro): the holes GSPro last moved on from were finished
         by every slot but the last k (GSPro closes a removed player's slot up, so it's always the last that
         go quiet), by players who'd scored before them. The slots closed up on the first hole the last
         went quiet; who left are the k players the screen never named on a shot after it (fewer, or
         more: not yet). Only the player box counts: a name from GSPro's log came by the old slots.
-        They stay in the round with their scores; nothing waits on them now. Two holes, so a hole the
-        log missed a score on isn't taken for a leaving; leavings on different holes not yet told
-        apart wait."""
+        They stay in the round with their scores; nothing waits on them now. Two such holes, so a hole
+        the log missed a score on isn't taken for a leaving, or one with GSPro's player menu opened on
+        it or the hole before (the only sign GSPro gives of someone removed): then only shots since the
+        menu count, so the leaver's own before it on that hole don't. Leavings on different holes not
+        yet told apart wait."""
         done = r.seq if r.log_complete else r.seq - 1   # the last hole finished: GSPro's moved on, or it's over
         if r.ended or r.start_hole_assumed or r.slot_guess or not r.slot_names or None in r.slot_names \
-                or r.format in TEAM_BALL or done < 3:
+                or r.format in TEAM_BALL or done < 2:
             return
         n = len(r.slot_names)
         scores = self._log_view()[0]
@@ -2036,21 +2046,37 @@ class Engine:
             got = {i for i, h in scores if h == seq + r.start_hole - 2}
             return len(got) if got == set(range(len(got))) else None
         m = slots(done)
-        if not m or m >= n or slots(done - 1) != m:
+        if not m or m >= n:
             return
         since = max(r.slot_since.get(g, 1) for g in r.slot_names)
-        first = done - 1
+        first = done
         while first - 1 >= max(2, since) and slots(first - 1) == m:
             first -= 1
+        if first < max(2, since):
+            return
         if first - 1 >= max(2, since) and (slots(first - 1) or 0) > m and slots(first - 1) != n:
             return   # fewer slots before, but not all: more than one leaving, on different holes
-        seen = set()
-        for x in self.state.shots:
-            if x.round_id == r.id and first < (x.hole_seq or 0) <= done and not x.mulligan and x.hud:
-                raw = _gspro_name(x.hud.player_text or "").casefold()
-                match = self.league.match_player(x.hud.player_text) if raw else None
-                seen |= {g for g in r.slot_names if raw and (g.casefold() == raw or (match and r.roster.get(g) == match))}
-        quiet = [g for g in r.slot_names if g not in seen]
+        menu = next((at for seq, at in reversed(r.menus) if first - 1 <= seq <= first), None)
+
+        def quiet_by(after: int | None) -> list[str]:
+            """Who the screen named on no shot since the slots closed up: struck after the menu was
+            opened (on its hole too), or else on the holes after it."""
+            seen = set()
+            for x in self.state.shots:
+                if after is not None:
+                    on = x.impact_seq is not None and x.impact_seq > after and first <= (x.hole_seq or 0) <= done
+                else:
+                    on = first < (x.hole_seq or 0) <= done
+                if x.round_id == r.id and on and not x.mulligan and x.hud:
+                    raw = _gspro_name(x.hud.player_text or "").casefold()
+                    match = self.league.match_player(x.hud.player_text) if raw else None
+                    seen |= {g for g in r.slot_names if raw and (g.casefold() == raw or (match and r.roster.get(g) == match))}
+            return [g for g in r.slot_names if g not in seen]
+        quiet = quiet_by(menu) if menu is not None else []
+        if len(quiet) != n - m:
+            if first == done:
+                return   # one quiet hole, and nothing (yet) says who was removed: wait for the next
+            quiet = quiet_by(None)
         if len(quiet) != n - m:
             return   # who left isn't clear (any of them would leave the last slots quiet): wait
         if first < max(r.slot_since.get(g, 1) for g in quiet + r.slot_names[m:]):

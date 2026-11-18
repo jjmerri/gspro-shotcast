@@ -1094,3 +1094,24 @@ def test_a_replayed_hole_starts_without_the_penalty_the_booth_added():
           " * ------- Shot Fired! ------- *", "ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 2",
           " * ------- Shot Fired! ------- *", "ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 0")
     assert (s.strokes_before(0), s.penalties(0), s.fire_info(s.fires)["score"]) == (1, 0, 1)
+
+
+def test_the_player_menu_opened_partway_is_counted_once_and_not_at_the_setup():
+    # Round 1692: the same block of Unity warnings at each player added or removed; the setup screen's
+    # player list logs it too, before the first shot.
+    burst = ("The referenced script on this Behaviour (Game Object '<null>') is missing!\n"
+             + "The referenced script on this Behaviour (Game Object 'Item Label') is missing!\n" * 2) * 24
+    s = GsproState()
+    for ev in parse_events("Selected Course: riviera_gsp\n" + burst + "Loading course Riviera\n"
+                           " * ------- Shot Fired! ------- *\n"
+                           "ActivePlayer: 0  currentHole: 4  strokes: 1  Previous Score: 4\n" + burst[:900]):
+        s.apply(ev)
+    for ev in parse_events(burst[900:]):                    # the rest of it, read on the next poll
+        s.apply(ev)
+    assert (s.player_menus, s.menu_hole) == (1, 4)
+    for ev in parse_events("ActivePlayer: 0  currentHole: 5  strokes: 1  Previous Score: 0\n" + burst):
+        s.apply(ev)
+    assert (s.player_menus, s.menu_hole) == (2, 5)
+    for ev in parse_events("End Round Button Click\nSelected Course: bethpage_black_v2_gsp\n" + burst):
+        s.apply(ev)
+    assert s.player_menus == 2

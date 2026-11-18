@@ -247,6 +247,9 @@ class Round:
         # (they joined late, or a slot above closed up): the log's scores in that slot before it are
         # someone else's.
         self.slot_since: dict[str, int] = {}
+        # Each time GSPro's player menu was opened during the round (see GsproState.player_menus): the
+        # hole of the round it was opened on, or just after, and how many shots the booth had then.
+        self.menus: list[tuple[int, int]] = []
 
         self.roster = {g: league.match_player(g) for g in gspro_players}
         teams: dict[str, list[str]] = {}
