@@ -1,6 +1,7 @@
 """GSPro's round file (currentRound.dat, 3.59+) applied to the stored shots and drawn in hole replays."""
 import json
 import math
+from pathlib import Path
 
 from commentator import round_file
 from commentator.hole_replay import hole_replays
@@ -364,3 +365,71 @@ def test_blind_shots_that_dont_line_up_are_left_unnamed(tmp_path):
     written, pending = st.apply_round_file(round_file.tracks([DRIVE, APPROACH, PUTT]), now=1005.0, name_of=str)
     assert written == 0 and len(pending) == 3
     assert st.db.execute("SELECT COUNT(*) FROM shots WHERE player IS NOT NULL").fetchone()[0] == 0
+
+
+def test_round_end_keeps_a_copy_named_by_start_and_course_and_prunes_the_oldest(tmp_path):
+    import os
+    import time
+
+    src = tmp_path / "currentRound.dat"
+    src.write_text(json.dumps([_entry(1, (0, 0), (0, 200), sp=150.0)]), encoding="utf-8")
+    started = time.mktime((2026, 11, 18, 14, 12, 30, 0, 0, -1))
+    os.utime(src, (started + 60, started + 60))
+    kept = tmp_path / "logs" / round_file.ARCHIVE_DIR
+    kept.mkdir(parents=True)
+    for i in range(3):
+        (kept / f"2026-01-0{i + 1}-1200-Old.dat").write_text("[]")
+    course = "Pebble Beach / Links (GSPro)"
+
+    out = round_file.archive(src, tmp_path / "logs", started, course, ["dan"], [150.2], keep=3)
+    assert out.name == "2026-11-18-141230-Pebble-Beach-Links-GSPro.dat" and out.read_text() == src.read_text()
+    assert sorted(p.name for p in kept.iterdir()) == [
+        "2026-01-02-1200-Old.dat", "2026-01-03-1200-Old.dat", out.name]
+    # A second round started the same second never overwrites the first, and is the newer one kept.
+    again = round_file.archive(src, tmp_path / "logs", started, course, ["Dan"], keep=1)
+    assert again.name == "2026-11-18-141230-Pebble-Beach-Links-GSPro~2.dat"
+    assert [p.name for p in kept.iterdir()] == [again.name]
+    # One started a few seconds later on another course is newer whatever the course is called.
+    later = round_file.archive(src, tmp_path / "logs", started + 20, "Augusta", ["Dan"], keep=1)
+    assert [p.name for p in kept.iterdir()] == [later.name] == ["2026-11-18-141250-Augusta.dat"]
+
+
+def test_no_copy_of_a_missing_unreadable_earlier_or_next_rounds_file(tmp_path, monkeypatch):
+    import os
+    import time
+
+    monkeypatch.setattr(round_file, "ARCHIVE_READ_WAIT_S", 0)
+    src, logs, now = tmp_path / "currentRound.dat", tmp_path / "logs", time.time()
+    dan = json.dumps([_entry(1, (0, 0), (0, 200), sp=150.0), _entry(2, (0, 200), (0, 300), sp=90.0)])
+    assert round_file.archive(src, logs, now, "X", ["Dan"]) is None
+    src.write_text(dan, encoding="utf-8")
+    os.utime(src, (now - round_file.ARCHIVE_STALE_S - 10,) * 2)
+    assert round_file.archive(src, logs, now, "X", ["Dan"], [150.0, 90.0]) is None
+    # Last written a minute before this round started: this round's only if its strokes are in it.
+    os.utime(src, (now - 60,) * 2)
+    assert round_file.archive(src, logs, now, "X", ["Dan"]) is None
+    src.write_text(dan[:40], encoding="utf-8")   # mid-write
+    assert round_file.archive(src, logs, now - 5, "X", ["Dan"]) is None
+    src.write_text("[]", encoding="utf-8")
+    assert round_file.archive(src, logs, now - 5, "X", ["Dan"]) is None
+    # The round end noticed after the next round began: someone else's, or Dan's first strokes of it.
+    src.write_text(json.dumps([_entry(1, (0, 0), (0, 200), sp=150.0, name="Sue")]), encoding="utf-8")
+    assert round_file.archive(src, logs, now - 5, "X", ["Dan"]) is None
+    src.write_text(dan, encoding="utf-8")
+    assert round_file.archive(src, logs, now, "X", ["Dan"], [120.0, 60.0, 30.0, 150.0]) is None
+    assert round_file.archive(src, logs, now, "X", ["Dan"], [149.5, 150.0, 150.4, 8.0]) is None   # one 150 swing
+    assert not logs.exists()
+    assert round_file.archive(src, logs, now, "X", ["Dan"], [150.3, 89.8, 30.0]) is not None
+    src.write_text(json.dumps([_entry(1, (0, 0), (0, 200), sp=100.0), _entry(2, (0, 200), (0, 300), sp=101.5)]),
+                   encoding="utf-8")
+    assert round_file.archive(src, logs, now, "X", ["Dan"], [100.7, 99.5, 50.0, 30.0]) is not None
+    # GSPro holding the file a moment (a sharing violation on Windows) is waited out.
+    read, tries = Path.read_bytes, []
+
+    def busy_once(p):
+        tries.append(p)
+        if len(tries) == 1:
+            raise PermissionError("in use")
+        return read(p)
+    monkeypatch.setattr(Path, "read_bytes", busy_once)
+    assert round_file.archive(src, logs, now + 60, "Y", ["Dan"], [100.0]) is not None and len(tries) == 2

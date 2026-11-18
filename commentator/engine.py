@@ -5549,6 +5549,24 @@ class Engine:
         except OSError:
             log.exception("Keeping a copy of GSPro's log failed")
 
+    @staticmethod
+    def _round_file_names(r: Round) -> list[str]:
+        """The names GSPro's round file may give the round's players: as read on the tee, and every name
+        the league knows each one by (a misread on the tee still maps to the player)."""
+        return [*r.roster, *(n for p in r.roster.values() if p for n in r.league.names_for(p))]
+
+    def _keep_round_file(self, r: Round, started: float, players: list[str], speeds: list[float]) -> None:
+        """Copy GSPro's round file (currentRound.dat) into the booth's logs at round end, for looking into
+        a round later: GSPro overwrites it when the next round starts. `players` and `speeds` are taken
+        on the event loop (this runs in a thread)."""
+        try:
+            log_path = self._follower.path if self._follower else self.cfg.source.gspro_log
+            src = Path(gspro_files.folder_of(os.path.expanduser(log_path))) / gspro_files.ROUND_FILE
+            if out := round_file.archive(src, self.cfg.log_dir, started, r.course, players, speeds):
+                log.info("Round %s: kept GSPro's round file as %s", r.id, out.name)
+        except OSError as e:
+            log.warning("Keeping a copy of GSPro's round file failed: %s", e)
+
     def _settle_outcomes(self) -> None:
         """How the shots named after the fact ended, from GSPro's log: holed; a putt the player hit again
         on the same hole missed; their last stroke on a hole that ended without holing was conceded."""
@@ -11391,6 +11409,15 @@ class Engine:
         self._squabbit_round_end(r)
         if self._log_truth and self.cfg.source.type != "replay":
             self._bg(asyncio.to_thread(self._keep_gspro_log))
+        if self.cfg.source.type != "replay":
+            # From the record: a round continued after a booth restart started, and has strokes, from before it.
+            try:
+                started, speeds = self.store.round_start_and_speeds(r.uuid)
+            except sqlite3.Error:
+                log.exception("Reading round %s's record for its round file failed", r.id)
+                started, speeds = None, []
+            started = started or time.time() - (time.monotonic() - self._round_started_at)
+            self._bg(asyncio.to_thread(self._keep_round_file, r, started, self._round_file_names(r), speeds))
         self._round_ended_at = time.monotonic()
         # Asides can no longer play, so prep still in flight is money spent on nothing. The guards in
         # _prepare_news stop it starting another story; only a cancel stops the one already running

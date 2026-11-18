@@ -6693,3 +6693,25 @@ def test_field_scoring_treats_equal_averages_as_a_tie(tmp_path):
     for seq in (1, 2, 3):   # each plays exactly +1/3: no hardest, no easiest
         r.seq = seq
         assert not any("league has played" in f for f in e._hole_field_facts("MikeD"))
+
+
+def test_round_end_keeps_gspros_round_file_and_only_warns_when_it_cant(tmp_path, caplog, monkeypatch):
+    import logging
+    import time
+
+    e = _engine(tmp_path)
+    e.cfg.log_dir = str(tmp_path / "logs")
+    (tmp_path / "currentRound.dat").write_text('[{"PlayerName": "MikeD"}]', encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))   # the config's "~" is the user's folder
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    e.cfg.source.gspro_log = "~/Player.log"
+    # The tee read "M1keD": still Mike, whose GSPro name the file has.
+    r = Round(league=LEAGUE, gspro_players=["M1keD"], course="Pebble", scheduled_format=None, is_league=False)
+    e._keep_round_file(r, time.time() - 5, e._round_file_names(r), [])
+    assert [p.name.endswith("-Pebble.dat") for p in (tmp_path / "logs" / "round-files").iterdir()] == [True]
+
+    (tmp_path / "blocked").write_text("a file where the folder would go")
+    e.cfg.log_dir = str(tmp_path / "blocked")
+    with caplog.at_level(logging.WARNING):
+        e._keep_round_file(r, time.time() - 5, ["MikeD"], [])
+    assert "Keeping a copy of GSPro's round file failed" in caplog.text
