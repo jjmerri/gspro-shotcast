@@ -26,7 +26,7 @@ from .carry_model import correct_for_elevation
 from . import club_fields
 from .config import ROUND_STATUS, ROUND_STATUS_CHECK_S, ROUND_STATUS_EVERY_S, Config
 from .flight import point_at
-from .facts import (ctp_feet, ctp_text as _ctp_text,
+from .facts import (ctp_feet, ctp_text as _ctp_text, course_listing_facts,
     PUTT_COUNT_FACT, PUTT_FOR, PUTT_FOR_FACT, SCORE_NAMES, _PUTT_WORDS, _fmt_to_par, _to_par_value, club_delivery_facts, club_delivery_notable, club_name, flight_facts,
     CHIP_YARDS, gimme_edge, history_facts, is_chip, lie_cost_fact, moment_facts, ordinal, preshot_facts, putt_count_fact, putt_elevation_inches, shot_facts, to_yards, WRONG_GREEN_YARDS, wrong_green_fact,
     wrong_conceded_score, wrong_green_yards, wrong_holed_putt, wrong_putt_score, green_chip_fact, names_club,
@@ -2256,6 +2256,12 @@ class Engine:
             return
         self.commentary_on = on
         log.info("Booth %s", "on air" if on else "off air: recording shots and rounds only")
+        if on and (card := getattr(self.round, "course_card", None)):   # read off air: no listing notes yet
+            try:
+                from . import course_card
+                course_card.add_notes(card)
+            except Exception as e:
+                log.info("Couldn't read the course listing's notes (%s)", e)
         if on and not self._minimap_tried:   # started off air: the hazard reader wasn't built
             self._minimap_tried = True
             self.minimap = self._make_minimap()
@@ -2885,10 +2891,11 @@ class Engine:
             return
         title, article = found
         told = self.store.recent_asides("trivia", title)
+        listing = course_listing_facts(r.course_card)   # GSPro's notes too
         made = 0
         for _ in range(max(0, self.cfg.trivia.per_round if n is None else n)):
             user, facts_text = trivia_prompt(course=course, title=title, article=article, told=told,
-                                             openings=self._aside_openings())
+                                             openings=self._aside_openings(), listing=listing)
             try:
                 good, data = await self._write_aside(f"Trivia on {title!r}", user, facts_text,
                                                      trivia_schema(self.speakers))
@@ -8859,7 +8866,8 @@ class Engine:
 
             # GSPro's log names the selected course's folder, which settles a name two courses share.
             folder = self.gspro.course if self._log_truth else None
-            return course_card.load(self.cfg.source.gspro_courses_dirs, course, folder=folder)
+            return course_card.load(self.cfg.source.gspro_courses_dirs, course, folder=folder,
+                                    notes=self.commentary_on)
         except Exception as e:
             log.warning("Course card load failed (%s); par and index come from the scorecard", e)
             return None
@@ -8914,7 +8922,8 @@ class Engine:
             if backfill:
                 # By name alone: the folder GSPro's log names is tonight's course, not these.
                 for course in self.store.courses_without_tees():
-                    self._keep_course_tees(course, course_card.load(self.cfg.source.gspro_courses_dirs, course))
+                    self._keep_course_tees(course, course_card.load(self.cfg.source.gspro_courses_dirs, course,
+                                                                    notes=False))
             path = self.store.db.execute("PRAGMA main.database_list").fetchone()[2]
         except Exception as e:
             log.warning("Own handicap indexes failed (%s)", e)
@@ -9717,6 +9726,37 @@ class Engine:
         sched = self.league.schedule_entry(time.strftime("%Y-%m-%d"), course) if course else None
         return (self._card_name(sched) if sched and self._course_matches(sched, course) else None) or course
 
+    def _doubt_card_notes(self, card, course: str | None, lookup: str | None, entry: dict | None = None) -> None:
+        """Mark a card found by a schedule week's name (`lookup`; see _card_course, _card_name) rather than
+        the course as read unsure, so its scorecard stands but its listing's notes aren't said, unless the
+        name as read is exactly one of that week's names (GSPro's Balsams Panorama for Wentworth) or
+        finds that same card, surely, itself. "Swiss Alpine Valley" isn't the scheduled "Alpine Valley -
+        Meadows & Sugar Creek". Off air the notes aren't read and that search isn't run: the card is
+        unsure, which only withholds the notes if commentary comes on mid-round."""
+        from . import course_card
+
+        if not card or not lookup or lookup == course:
+            return
+        if not course:   # nothing read to corroborate the week's name
+            card.name_unsure = True
+            return
+        if entry is None:
+            entry = self.league.schedule_entry(time.strftime("%Y-%m-%d"), course) or {}
+        plain = course_card.plain_name
+        if plain(course) in {plain(entry.get("course") or ""), plain(entry.get("gspro_course") or "")}:
+            return
+        if not self.commentary_on:
+            card.name_unsure = True
+            return
+        try:
+            path, unsure = course_card.locate(self.cfg.source.gspro_courses_dirs, course,
+                                              self.gspro.course if self._log_truth else None)
+            sure = not unsure and path is not None and path == card.path
+        except Exception:
+            sure = False
+        if not sure:
+            card.name_unsure = True
+
     def _card_name(self, entry: dict) -> str | None:
         """The name a schedule week's course card is found by. GSPro lists Wentworth by the Sea as
         Balsams Panorama (the schedule's gspro_course): the league copies Wentworth's files into GSPro's
@@ -9763,7 +9803,9 @@ class Engine:
     def _refresh_course_card(self, r: Round, course: str | None) -> None:
         """Re-find a pre-built round's card now that GSPro's log has surely named the selected folder:
         the setup screen can be read before it does, and a name two courses share took the wrong one."""
-        card = self._load_course_card(self._card_course(course))
+        lookup = self._card_course(course)
+        card = self._load_course_card(lookup)
+        self._doubt_card_notes(card, course, lookup)
         self._keep_course_tees(course, card)
         if card and (r.course_card is None or card.name != r.course_card.name):
             log.info("Course card for %r is %s, not %s, now GSPro's log names the course", course, card.name,
@@ -9797,8 +9839,10 @@ class Engine:
                   is_league=is_league, slot_names=slot_names)
         r.holes_confirmed = confirmed
         self._apply_setup_format(r)
-        card = self._load_course_card(card_course or (self._card_name(entry) if entry.get("gspro_course") else None)
-                                      or course)
+        lookup = card_course or (self._card_name(entry) if entry.get("gspro_course") else None) or course
+        card = self._load_course_card(lookup)
+        if not card_course:
+            self._doubt_card_notes(card, course, lookup, entry)
         self._keep_course_tees(course, card)
         if card:
             r.apply_course_card(card)
@@ -9915,7 +9959,8 @@ class Engine:
             facts = [f for f in facts if not f.startswith("This is a practice round, not a league match")]
         c = self.cfg.commentary
         return opener_prompt(facts=facts, recent_lines=self.state.recent_lines, max_words=c.opener_max_words,
-                             max_lines=c.opener_max_lines, league=r.is_league)
+                             max_lines=c.opener_max_lines, league=r.is_league,
+                             course_notes=course_listing_facts(r.course_card))
 
     def _same_course(self, x: str | None, y: str | None) -> bool:
         a, b = self._canonical_course(x), self._canonical_course(y)
@@ -11012,9 +11057,11 @@ class Engine:
         elif air:
             log.info("Setup read %s on %r is a practice round (%s); preparing its opener", names, course, practice)
         colour_teams = self._setup_teams_key()   # what _build_round's teams come from
+        lookup = self._card_course(course)
         r = self._build_round(names, sched.get("course") or course, entry if is_league else {}, is_league,
-                              card_course=self._card_course(course), use_current_hole=False,
+                              card_course=lookup, use_current_hole=False,
                               slot_names=slot_names)   # None (not the filtered roster) is the safe signal
+        self._doubt_card_notes(r.course_card, course, lookup)
         if guessed:
             r.setup_slots = None   # the last roster read, not this setup's
             r.slot_guess = True

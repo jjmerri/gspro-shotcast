@@ -92,7 +92,10 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
   `tools/train_carry_estimate.py` on the league's shots, shipped as `carry_estimate.json`; normal
   full swings only. Never stored as a measured carry.
 - **`course_card.py`** reads a GSPro course's static card (par, stroke index, yardages,
-  altitude) from its `.unity3d.csv` / `coursedetails.txt`.
+  altitude) from its `.unity3d.csv` / `coursedetails.txt`, and, with commentary on, the GSPro
+  listing's notes from `coursedetails.txt` and the course file (`.GKD`): the description and style
+  tags. These are background for the course-trivia asides and a touch of colour in the opener,
+  whose substance stays the format and the players (`facts.course_listing_facts`).
 - **`round.py`** a league round: who is in it, the format, handicaps, hole scores, and the
   derived numbers (net, fairways, GIR, putts, penalties). Opener/closer trigger logic.
 - **`store.py`** the SQLite season history (`season.db`): records every shot and line, serves

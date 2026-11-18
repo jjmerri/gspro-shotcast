@@ -442,10 +442,13 @@ def trivia_schema(speakers: list[str]) -> dict[str, Any]:
     return schema
 
 
-def trivia_prompt(*, course: str, title: str, article: str, told: list[str] = (), openings=()) -> tuple[str, str]:
-    """A piece of the real course's history, written at round start from its Wikipedia article."""
+def trivia_prompt(*, course: str, title: str, article: str, told: list[str] = (), openings=(),
+                  listing: list[str] = ()) -> tuple[str, str]:
+    """A piece of the real course's history, written at round start from its Wikipedia article and any
+    notes in the course's GSPro listing (`listing`, see facts.course_listing_facts)."""
     facts_text = (f"The course being played in the simulator, {course}, is GSPro's version of the real "
-                  f"{title}. From its Wikipedia article:\n{article}")
+                  f"{title}. From its Wikipedia article:\n{article}"
+                  + "".join(f"\n{f}" for f in listing))
     prompt = (
         "FACTS:\n" + facts_text
         + "\n\nWrite an aside the booth will play later in the round, on a quiet moment between shots: one "
@@ -454,7 +457,7 @@ def trivia_prompt(*, course: str, title: str, article: str, told: list[str] = ()
         "Pick ONE thing, specific and worth telling - a famous moment, a winner, a quirk, a nickname, how it "
         "was built - and tell it the way someone who loves the game drops it into conversation, not a "
         "recital of the article. The reply gives a real take of its own in at least one full sentence.\n"
-        "Tell only what the article says: don't invent any name, number, year or detail, and don't join "
+        "Tell only what the article or the listing says: don't invent any name, number, year or detail, and don't join "
         "two of its facts into a new claim (a nickname isn't a namesake). If unsure of a specific, stay "
         "general. \"Here\" or \"this place\" is fine, but don't mention the players, the round or any shot.\n"
         "hole: if your story is about one hole of the course, its number, and the aside plays while the "
@@ -757,8 +760,10 @@ def time_of_day_fact(now: datetime | None = None) -> str:
 
 
 def opener_prompt(*, facts: list[str], recent_lines, now: datetime | None = None,
-                  max_words: int | None = None, max_lines: int = 3, league: bool = False) -> tuple[str, str]:
-    facts_text = "\n".join([*facts, time_of_day_fact(now)])
+                  max_words: int | None = None, max_lines: int = 3, league: bool = False,
+                  course_notes: list[str] = ()) -> tuple[str, str]:
+    # The course's notes go last: the round's own facts lead.
+    facts_text = "\n".join([*facts, time_of_day_fact(now), *course_notes])
     # A league round counts, so its opener leads with the race rather than a practice-style storyline.
     story = ("make the league race the storyline (the week's scores to beat, the standings, a rival team), "
              "told your way" if league else "pick one storyline or rivalry worth watching")
@@ -775,6 +780,8 @@ def opener_prompt(*, facts: list[str], recent_lines, now: datetime | None = None
         "everyone's numbers; one detail that matters beats five that don't. Make it sound like the top of a "
         "real broadcast with personality, not a press release: give the second voice an opinion or a needle "
         "rather than a recited stat, and no predictions."
+        + (" The format and the players are the opener; the GSPro listing's notes on the course are "
+           "background for at most a brief touch of colour, never its subject." if course_notes else "")
         + (aside_room(max_words) if max_words else "")
     )
     return prompt, facts_text
