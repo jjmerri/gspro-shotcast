@@ -714,6 +714,15 @@ class Store:
         self.db.commit()
         return cur.lastrowid
 
+    def club_fields_seen(self, player: str, club: str) -> set[str]:
+        """The club columns (club_speed and CLUB_COLS) ever recorded non-zero for this player with this
+        club: the fields their monitor measures with it (see club_fields.py). Only their own shots: not
+        a shared ball's, which a partner may have hit."""
+        cols = ("club_speed", *CLUB_COLS)
+        row = self.db.execute(f"SELECT {', '.join(f'MAX({c} != 0)' for c in cols)} FROM shots"
+                              " WHERE player = ? AND club = ? AND attributed = 1", (player, club)).fetchone()
+        return {c for c, v in zip(cols, row) if v}
+
     def record_hole_layout(self, course: str | None, holes: list[dict], *, session_id: int | None = -1,
                            ts: float | None = None) -> int:
         """Store the geometry of each played hole in a completed round's layout (the log's hole list,

@@ -23,6 +23,7 @@ from typing import Any
 
 from . import carry_estimate
 from .carry_model import correct_for_elevation
+from . import club_fields
 from .config import ROUND_STATUS, ROUND_STATUS_CHECK_S, ROUND_STATUS_EVERY_S, Config
 from .flight import point_at
 from .facts import (ctp_feet, ctp_text as _ctp_text,
@@ -6716,16 +6717,6 @@ class Engine:
 
         prior = self.state.player_shots(player or "unknown")
         score, tags = score_shot(shot, prior, hud, to_yards(before.to_pin))
-        # A standout club delivery (big angle of attack, a real shape, a flush or a clear mishit) is
-        # worth a word even when the result was ordinary, so it crosses the interest threshold and
-        # gets a live reaction carrying the club facts below. Only for players with the markers.
-        # Club delivery is spice: a notable one now and then, an ordinary one rarely, never on two
-        # reactions in a row (every shot's face-to-path got old fast).
-        notable_delivery = club_delivery_notable(shot) and not is_chip(shot, before.to_pin)
-        use_delivery = self._delivery_turn(notable_delivery)
-        if notable_delivery and use_delivery:
-            score += 0.5
-            tags.append("club_notable")
         # The player's own longest/avg drive is a lifetime personal best (a long drive is a long drive,
         # league or practice). The LEAGUE record, though, must be league-only: a huge practice drive is
         # not "the league's best drive this season", so that bar reads from the league slice.
@@ -6802,6 +6793,21 @@ class Engine:
         r = shot_round
         if r and player:
             player = r.current_name(player)   # a guest renamed while this shot was in flight
+        # The player and club are final here: drop the club fields this player's monitor doesn't measure
+        # with this club (zeros it wrote for them), before the shot is recorded or talked about. Not on a
+        # shared ball: the name on it isn't who hit it.
+        if (seen := getattr(self.store, "club_fields_seen", None)) and not self._anonymous(player):
+            shot = club_fields.apply(player, shot, seen)
+        # A standout club delivery (big angle of attack, a real shape, a flush or a clear mishit) is
+        # worth a word even when the result was ordinary, so it crosses the interest threshold and
+        # gets a live reaction carrying the club facts below. Only for players with the markers.
+        # Club delivery is spice: a notable one now and then, an ordinary one rarely, never on two
+        # reactions in a row (every shot's face-to-path got old fast).
+        notable_delivery = club_delivery_notable(shot) and not is_chip(shot, before.to_pin)
+        use_delivery = self._delivery_turn(notable_delivery)
+        if notable_delivery and use_delivery:
+            score += 0.5
+            tags.append("club_notable")
         rec = ShotRecord(
             player or "unknown", shot, shot_hole, hud, tags,
             round_id=r.id if r else None, hole_seq=round_hole, par=shot_par,
