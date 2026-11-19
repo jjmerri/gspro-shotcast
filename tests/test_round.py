@@ -7468,3 +7468,47 @@ async def test_a_file_lie_is_recorded_over_the_screens_which_it_keeps_to_go_back
     assert e.state.shots[-1].lie_before == "sand"
     assert e.store.db.execute("SELECT lie_before FROM shots").fetchone()[0] == "fairway"
     assert e._file_pins.get("s2") == e.state.shots[-1].shot_id
+
+
+async def test_a_setup_lie_gspros_file_gave_goes_back_to_the_screens_with_a_rejected_match(tmp_path):
+    # The setup read had the fairway, GSPro's file sand (the screen's lie it overrode is kept): the file
+    # turns out another round's by the time the shot's recorded, and the fairway stands.
+    from commentator import round_file
+    from commentator.engine import _setup_key
+    from commentator.models import ShotEvent
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    e.commentary_on = False
+    e.screen = None
+    track = round_file.Track("s2", None, None, "Kroll", 1, 2, 120.0, False, (0.0, 0.0, 0.0), (0.0, 0.0, 150.0),
+                             None, lie_before="sand", lie_after="green")
+
+    async def refreshed():
+        return None
+    checks = []
+    e._round_watch, e._refresh_round_file = type("W", (), {"written": 0.0})(), refreshed
+    e._file_track_of = lambda *a, **k: track
+    e._file_ours = lambda *a, **k: checks.append(1) or len(checks) == 1
+    hud = _tee("Kroll", shot=2)
+    hud.to_pin, hud.lie = "150 yards", "sand"
+    e._setup_lies[_setup_key(hud)], e._setup_screen_lies[_setup_key(hud)] = "sand", "fairway"
+    await e.handle_shot(ShotEvent(shot=Shot(club="7I", carry=150.0, ball_speed=120.0), hud_hint=hud,
+                                  impact_hud_hint=hud))
+    assert len(checks) == 2 and e.state.shots[-1].lie_before == "fairway"
+    assert e.store.db.execute("SELECT lie_before FROM shots").fetchone()[0] == "fairway"
+
+
+def test_gspros_round_file_confirming_a_guessed_slot_grades_the_shots_named_right_before(tmp_path):
+    e = _guest_round(tmp_path, ["Alice", "Bob"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.slot_guess = True
+    e.round.slot_names = ["Alice", "Bob"]
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    rec = shot(1, "Alice", 0, sp=150.0)
+    e._fire_rows[1] = (*e._fire_rows[1][:2], None, None)   # credited before Alice was placed
+    e._outcomes_due.discard(1)
+    e._file_entries, e._file_version = [_file_ball("Alice", 150.0)], 2
+    e._apply_log_corrections()
+    assert rec.player == "Alice" and e._fire_rows[1][2] == 0 and 1 in e._outcomes_due

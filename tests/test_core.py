@@ -7831,3 +7831,16 @@ def test_a_shot_gspros_round_file_makes_a_putt_after_the_live_follow_is_graded_a
     assert rec.shot.is_putt and 7 in e._outcomes_due
     e._settle_outcomes()
     assert rec.outcome == "missed"
+
+
+def test_a_full_shot_conceded_then_made_a_putt_by_gspros_round_file_keeps_its_concession(tmp_path):
+    from commentator.round import Round
+
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Paul"], course="X", scheduled_format=None, holes=9, is_league=False)
+    e.round = r
+    sid, rec = _row(e, r, 7, 2, "fringe", hole=0, seq=1)
+    rec.shot_id, rec.outcome = sid, "conceded"   # a full shot's: only its conceded putt is stored
+    e.store.db.execute("UPDATE shots SET club = 'PT', is_putt = 1 WHERE id = ?", (sid,))
+    e._sync_file_clubs()
+    assert e.store.db.execute("SELECT outcome FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "conceded"

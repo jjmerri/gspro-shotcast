@@ -928,6 +928,7 @@ class Engine:
         # The lie read at each setup, while the player stood over the ball, by _setup_key: the impact
         # read comes ~3 s after the swing, when the lie box may already show where the ball landed.
         self._setup_lies: dict[tuple, str] = {}
+        self._setup_screen_lies: dict[tuple, str | None] = {}   # what the screen read where GSPro's file overrode it
         self._setup_slopes: dict[tuple, tuple] = {}   # (up/down, side, side degrees) by setup key
         # A lie the GSPro log filled in at setup when OCR missed it. The log has where the ball LANDED,
         # so this only fills an empty impact read; it never overrides one like a setup read does.
@@ -1616,6 +1617,7 @@ class Engine:
                 del self._late_tiles[next(iter(self._late_tiles))]
             self._apply_late_tiles(tiles_for)
         hud.lie = hud.box_lie or extra.lie   # the player box's lie (3.59/4.0), else the minimap's
+        screen_lie = hud.lie
         if (hud.lie or "").lower() != "tee" and (
                 file_lie := self._file_rest_lie(self._player(hud.player_text, None), hud.shot_number)):
             # Where GSPro's round file has the ball at rest outranks the screen, but a finer word of the
@@ -1625,7 +1627,7 @@ class Engine:
                 hud.lie = lie
         if not hud.lie and hud.shot_number != 1 and self.cfg.screen.ocr:
             seq = self._shot_seq
-            hud.lie = await self._reread_setup_lie(extra.name_sig, seq)
+            hud.lie = screen_lie = await self._reread_setup_lie(extra.name_sig, seq)
             if self._shot_seq != seq:   # swung during the re-reads: this setup's moment has passed
                 log.info("Setup dropped: the ball was struck during the lie re-read")
                 for task in (minimap_task, putt_task):
@@ -1640,6 +1642,12 @@ class Engine:
             self._setup_lies[key] = hud.lie
             while len(self._setup_lies) > 8:
                 del self._setup_lies[next(iter(self._setup_lies))]
+            if hud.lie != screen_lie:   # (should GSPro's file turn out another round's)
+                self._setup_screen_lies[key] = screen_lie
+            else:
+                self._setup_screen_lies.pop(key, None)
+            while len(self._setup_screen_lies) > 8:
+                del self._setup_screen_lies[next(iter(self._setup_screen_lies))]
         hud.slope_updown, hud.slope_side = extra.slope_updown, extra.slope_side
         hud.slope_side_degrees = extra.slope_side_degrees
         if (hud.slope_updown is not None or hud.slope_side) and (key := _setup_key(hud)):
@@ -3620,7 +3628,10 @@ class Engine:
             if club != x.shot.club or bool(putt) != x.shot.is_putt:
                 was_putt = x.shot.is_putt
                 x.shot = replace(x.shot, club=club, putter=bool(putt))
-                if putt and not was_putt and x.outcome is None and (f := fires.get(i)) is not None:
+                if putt and not was_putt and x.outcome not in (None, "holed"):
+                    # (a putt's result is stored, as a full shot's concession isn't: its conceded putt is)
+                    self.store.set_shot_result(i, outcome=x.outcome)
+                elif putt and not was_putt and x.outcome is None and (f := fires.get(i)) is not None:
                     self._outcomes_due.add(f)
                     self._resettle.add(f)
             if lie != x.lie_before:
@@ -6058,14 +6069,13 @@ class Engine:
             self.store.round_players(r.uuid, dict(r.roster), r.slot_names)
         if self._recheck_slots(r, was):
             self._sync_log_scores(r)
-            # (a shot the screen named right, followed on the slot the old order gave that name: graded
-            # on its own now)
-            self._follow_placed(r)
         self._own_misread(r)
 
     def _own_misread(self, r: Round) -> None:
         """Shots the screen named for someone else in a slot GSPro's round file has just named, whose
-        score line came in before the file was matched: the slot's player's (_own_shot)."""
+        score line came in before the file was matched: the slot's player's (_own_shot). Those it named
+        right, with no slot yet (or followed on the one an old order gave the name), are graded on it."""
+        self._follow_placed(r)
         for fire, (owner, _) in list(self._fire_log.items()):
             row = self._fire_rows.get(fire)
             if row is None or row[1].round_id != r.id or fire in self._renames or owner not in r.file_slots.values() \
@@ -7785,7 +7795,10 @@ class Engine:
             log.info("%s set up in yards: off the green, recorded as %s", tag, played_from)
         # Where it was played from without GSPro's round file, should that round turn out another's.
         # (recorded with it: GSPro's goes on with the stroke's pin, which keeps this one to go back to)
-        screen_played = played(replace(before, shot_number=screen_before.shot_number), None)[0] if file_lie else None
+        unfiled = replace(before, shot_number=screen_before.shot_number)
+        if (k := _setup_key(screen_before)) in self._setup_screen_lies and before.lie == self._setup_lies.get(k):
+            unfiled = replace(unfiled, lie=self._setup_screen_lies[k])   # the setup's, before the file's word
+        screen_played = played(unfiled, None)[0] if file_lie else None
         # The HUD's Tee recast only for want of a distance to check it by may still be a re-tee: keep its driver.
         retee = (before.lie or "").lower() == "tee" and self._at_tee_length(before, shot_hole) is None
         if played_from != before.lie:
@@ -10158,6 +10171,7 @@ class Engine:
         previous_course = self.current_course
         self.state.current_hole = event.current
         self._last_hud_shot = {}  # stroke counts start over on a new hole
+        self._setup_screen_lies.clear()
         self._setup_lies.clear()   # a stroke's key (who, shot, distance) can recur on another hole
         self._setup_log_lies.clear()
         self._setup_slopes.clear()
