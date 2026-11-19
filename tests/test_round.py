@@ -1949,6 +1949,29 @@ def test_wentworth_listed_as_balsams_panorama_gets_wentworths_card(tmp_path):
     e.league = League({**LEAGUE.data, "schedule": [{**entry, "end_date": "2099-01-01"}]})
     r = e._build_round(["MikeD"], "Balsams Panorama", {}, is_league=False)
     assert r.course_card.folder == "balsams_gsp" and e._round_course_folder(r) == "balsams_gsp"
+    # GSPro loads Wentworth's files from balsams_gsp and says so (lines from its log, 2026-11-18): its
+    # round file keys the strokes by Wentworth's own course, so the folder can't tie them; the name does.
+    # (read from the log already there as the booth starts: GSPro loaded the course before it)
+    from types import SimpleNamespace
+    from commentator.sources.gspro_log import GsproLogFollower, parse_events
+    gspro_log = tmp_path / "Player.log"
+    gspro_log.write_text("Selected Course: balsams_gsp\nLoading course Wentworth by the Sea\n")
+    follower = GsproLogFollower(str(gspro_log))
+    follower._prime()
+    e.gspro = follower.state
+    with gspro_log.open("a") as f:   # (its load finishing once the booth is up)
+        f.write("[Pipeline] Active cameras: 3\nCourse File Mismatch Detected!\n")
+    for ev in parse_events(follower._read_new()):
+        e.gspro.apply(ev)
+    r.loaded_folder, r.uuid, e.round = "balsams_gsp", "u1", r
+    e.store.apply_round_file([], now=0.0, folders={"u1": "balsams_gsp"})   # kept before the fix
+    e.store.courses_played = lambda: ["Riviera", "Wentworth by the Sea"]
+    stroke = SimpleNamespace(round_id=None, course_key="wentworth_sea_rpn")
+    assert e._round_course_folder(r) is None
+    assert e._file_round_test(r)(stroke, "Wentworth by the Sea")
+    assert not e._file_round_test(r)(SimpleNamespace(round_id=None, course_key="riviera_gsp"), "Wentworth by the Sea")
+    e.store.apply_round_file([], now=0.0, folders=e._round_file_folders())
+    assert e.store.round_folder("u1") is None
     # Nothing installed by the league's name: GSPro's name, as before.
     (tmp_path / "balsams_gsp" / "coursedetails.txt").unlink()
     (tmp_path / "balsams_gsp").rmdir()
@@ -3907,7 +3930,7 @@ async def test_joining_on_the_next_tee_before_its_first_shot_takes_the_huds_hole
     from pathlib import Path
 
     from commentator.models import RoundStartEvent
-    from commentator.sources.gspro_log import GsproLogFollower
+    from commentator.sources.gspro_log import GsproLogFollower, parse_events
 
     shot = " * ------- Shot Fired! ------- *"
 

@@ -2663,6 +2663,66 @@ async def test_a_round_file_stroke_just_after_the_screens_rest_is_still_taken(tm
     assert after.tiles["carry (game)"] == f"{track.carry_yards:.1f}"
 
 
+async def test_a_live_round_file_is_waited_for_past_the_follows_cap_until_another_ball_is_struck(tmp_path):
+    # Dan's drive rolled on past the follow's cap (called 177 yd; it went 197): a live GSPro's stroke ends the shot.
+    path = tmp_path / "currentRound.dat"
+    path.write_text(json.dumps([_round_entry(1, 120.0, name="Al")]))
+    rolling = [Hud(player_text="P", shot_number=1, lie="fairway",
+                   tiles={"carry (game)": "170", "total length": f"{170 + i}"}) for i in range(400)]
+    e, _ = _file_engine(tmp_path, rolling, poll=0.01)
+    e.cfg.screen.follow_max_seconds = 0.2
+    e._booth_wall0 -= 5
+    watcher = asyncio.create_task(_watching(e))
+
+    async def gspro_writes():
+        await asyncio.sleep(1.2)
+        path.write_text(json.dumps([_round_entry(1, 120.0, name="Al"), _round_entry(1, 150.0)]))
+    try:
+        await asyncio.sleep(0.05)
+        writer = asyncio.create_task(gspro_writes())
+        impact = time.monotonic()
+        after, landed, track, own, timing = await e._follow_with_file(
+            Hud(player_text="P", shot_number=1, lie="tee"), "[t]", False, None, None,
+            player="Dan Smith", ball_speed=150.0, impact=impact, unit="yards")
+        await writer
+        assert track is not None and landed and timing["ocr_end"] == "it ran out of time"
+        assert after.tiles["total length"] == f"{track.total_yards:.1f}"
+        # No stroke ever comes: the next ball struck ends the wait, and the screen's read stands.
+        e._shot_seq = 5
+
+        async def next_swing():
+            await asyncio.sleep(0.6)
+            e._shot_seq += 1
+        swing = asyncio.create_task(next_swing())
+        impact = time.monotonic()
+        after, landed, track, own, _ = await e._follow_with_file(
+            Hud(player_text="P", shot_number=2, lie="fairway"), "[t]", False, None, None,
+            player="Dan Smith", ball_speed=99.0, impact=impact, unit="yards", seq=5)
+        took = time.monotonic() - impact
+        await swing
+    finally:
+        watcher.cancel()
+    assert track is None and own is after and 0.6 <= took < 1.2
+    # GSPro writes the ball under a name that isn't this player's (a guest the screen took for him): no
+    # write will make it his, so the screen's read stands once it's there.
+    async def guest_ball():
+        await asyncio.sleep(0.4)
+        path.write_text(json.dumps([_round_entry(1, 120.0, name="Al"), _round_entry(1, 150.0),
+                                    _round_entry(1, 131.0, name="Daniel")]))
+    watcher = asyncio.create_task(_watching(e))
+    writer = asyncio.create_task(guest_ball())
+    try:
+        impact = time.monotonic()
+        after, landed, track, own, _ = await e._follow_with_file(
+            Hud(player_text="P", shot_number=1, lie="tee"), "[t]", False, None, None,
+            player="Dan Smith", ball_speed=131.0, impact=impact, unit="yards", seq=6)
+        took = time.monotonic() - impact
+        await writer
+    finally:
+        watcher.cancel()
+    assert track is None and took < 1.2
+
+
 def test_ocr_fast_sizes_the_detector_per_region_and_screen():
     from types import SimpleNamespace
     from PIL import Image

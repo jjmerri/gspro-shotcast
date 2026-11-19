@@ -282,6 +282,10 @@ def parse_events(text: str) -> list[LogEvent]:
                 out.append(LogEvent("round_complete"))
             elif line.startswith("Selected Course:"):
                 out.append(LogEvent("course", course=line.split(":", 1)[1].strip()))
+            elif line.startswith("Course File Mismatch Detected!"):
+                # The selected course's folder holds another course's files (a copy under another
+                # folder name): its round file's CourseKey is that course's, not the folder's.
+                out.append(LogEvent("course_mismatch"))
             elif line.startswith("Loading course ") and "Course file" not in line:
                 out.append(LogEvent("course_display", display=line[len("Loading course "):].strip()))
             elif line.startswith("[{") and '"par"' in line:
@@ -392,6 +396,10 @@ class GsproState:
 
     course: str | None = None
     course_display: str | None = None
+    # Course folders GSPro found another course's files in ("Course File Mismatch Detected!" as it loaded
+    # them): no CourseKey in its round file is theirs.
+    mismatched_folders: set = field(default_factory=set)
+    selected_folder: str | None = None   # the last `Selected Course:` (the folder a mismatch is of)
     # The range on now is the selected course's own ("Go to Range" at setup: its "Practice" load comes
     # with the course still selected, and no multi-range marker), so its Tee Off is onto that course.
     own_range: bool = False
@@ -581,9 +589,13 @@ class GsproState:
         elif ev.kind == "sgt":
             self.sgt = True
         elif ev.kind == "course":
+            self.selected_folder = ev.course
             if ev.course != self.course:
                 self._reset_round()         # a real course change is a new round; forget the old one
             self._on_course(ev.course, None)   # the display name waits for this course's load
+        elif ev.kind == "course_mismatch":
+            if self.selected_folder:
+                self.mismatched_folders.add(self.selected_folder.lower())
         elif ev.kind == "course_display":
             if ev.display == "Practice":    # the range's load line
                 self.own_range = self.mode == "course"
@@ -1312,6 +1324,8 @@ class GsproLogFollower:
         s.current_hole = past.current_hole if past.shots_since_course else None
         s.version, s.kinds, s.unparsed = past.version, Counter(past.kinds), list(past.unparsed)
         s.course_entries = past.course_entries
+        # (a course loaded, or selected and still loading, before the booth started)
+        s.mismatched_folders, s.selected_folder = set(past.mismatched_folders), past.selected_folder
         self.primed = True
 
     async def run(self) -> None:

@@ -1374,8 +1374,9 @@ class Store:
         of the strokes the live follow tied to its shots): a stroke of another GSPro round isn't its.
         `folders` (a round record's uuid -> its GSPro course folder, when the booth is sure of it): a shot
         of such a round is a stroke's only when the stroke's course key is that folder, whatever other
-        course the key's name is like (Wentworth by the Sea is in balsams_gsp). They're kept
-        (round_folders), so a file read again before the round is (a restart) still goes by them."""
+        course the key's name is like. They're kept (round_folders), so a file read again before the
+        round is (a restart) still goes by them; a folder of None forgets the round's (GSPro found another
+        course's files in it: Wentworth by the Sea's in balsams_gsp, keyed by Wentworth's own name)."""
         courses = self.courses_played()
         rounds = rounds or {}
 
@@ -1392,9 +1393,13 @@ class Store:
                 ends.append(e)
         known: dict = {}
         if folders:
-            self.db.executemany("INSERT OR REPLACE INTO round_folders VALUES (?, ?)", folders.items())
+            self.db.executemany("INSERT OR REPLACE INTO round_folders VALUES (?, ?)",
+                                [(u, f) for u, f in folders.items() if f])
+            self.db.executemany("DELETE FROM round_folders WHERE record_uuid = ?",
+                                [(u,) for u, f in folders.items() if not f])
             self.db.commit()
-        folders = {**dict(self.db.execute("SELECT record_uuid, folder FROM round_folders").fetchall()), **(folders or {})}
+        folders = {**dict(self.db.execute("SELECT record_uuid, folder FROM round_folders").fetchall()),
+                   **{u: f for u, f in (folders or {}).items() if f}}
 
         def folder_of(row) -> str | None:
             return folders.get(row["record_uuid"]) if row["record_uuid"] else None

@@ -2,27 +2,19 @@
 
 Deferred work, newest last. Take an entry out when it's done.
 
-## Remove the OCR ball follow once currentRound.dat has proven itself
+## Remove the rest of the OCR ball follow
 
-OCR ball-stop/follow detection is kept as a fallback behind currentRound.dat. After a session or two,
-compare the new INFO timing logs (file vs log vs OCR rest). If the file is never later than OCR, remove
-the OCR ball follow.
+A live GSPro's currentRound.dat now decides when a full shot has ended (`_follow_with_file` in
+`commentator/engine.py`): a follow that ends first no longer ends the shot; the stroke is waited for until
+it comes, another ball is struck, or GSPro's round ends (`_file_wait_over`). The screen follow still
+runs beside it for two things the file doesn't give: the finer lie word (fringe, first cut, semi rough;
+`round_file.finer_lie`) and the screen's other tiles (offline, raw carry, the health check's reads). It is
+also the whole follow when no live round file is there (a GSPro that wrote none this session).
 
-The lines to compare (from `commentator/engine.py`, one set per full shot):
-
-- `<tag> rest latency: GSPro's round file X.XXs after impact; its log Y.YYs (+/-Z.ZZs file vs log); the
-  screen W.WWs (+/-V.VVs file vs screen)`. This is the main one: the file should never be behind. The
-  screen part says `stopped by the file` when the file ended the follow first, and `none (the follow
-  ended at ...: <why>)` when the follow stopped for some other reason (the log's rest, the hole's end,
-  its time cap), which gives no screen timing.
-- `<tag> ball at rest in GSPro's round file X.XXs after impact ...`: the file ended the follow (or came
-  within the grace window after it).
-- `<tag> no stroke in GSPro's round file 0.30s after the follow ended (...): the screen's read stands`:
-  the file missed the grace window. Any of these is a reason to keep the OCR follow.
-- At startup, `Watching ...currentRound.dat with change notifications`. If it says `No change
-  notifications for ...: checking it every 1 s`, or later `Lost change notifications ...`, the timings
-  above are not the fast path's.
-
+Check the booth logs for `no stroke in GSPro's round file ... : the screen's read stands`. It should only
+appear when a shot was really never written (a mulligan struck before the ball stopped, a round quit
+mid-shot). Once it's clear the follow is only needed for those words and tiles, it can shrink to one read
+of them at rest, with no rest detection of its own.
 
 ## Retire the setup-screen slot order once the round file names every slot
 

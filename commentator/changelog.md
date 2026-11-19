@@ -4,6 +4,12 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.152
+
+### Stats page
+- Long drives that keep rolling get their full distance: the booth now waits for GSPro's own record of where the ball stopped instead of giving up after a few seconds.
+- Wentworth by the Sea (played from GSPro's Balsams folder) gets the same GSPro round records as every other course.
+
 ## 0.1.151
 
 ### Stats page

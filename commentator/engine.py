@@ -445,10 +445,11 @@ RANGE_TEE_SHOT_WAIT_SECONDS = 30.0
 RECAP_POLL_SECONDS = 30.0      # how often a league recap waiting on a round or its publish looks again
 LAYOUT_WAIT_SECONDS = 20.0     # after a round's end, for GSPro 3.1's logged layout before the course file's
 ROUND_FILE_CHECK_S = 2.0       # how often strokes in GSPro's round file with no shot yet are tried again
-# GSPro writes its round file (currentRound.dat) in the frame it has the ball at rest, before the shooter's
-# score line in its log (the booth's other rest signal): so the file is behind that line only by Windows'
-# change notification and a read (milliseconds). A follow ended without it waits this long more for it.
-FILE_REST_GRACE_S = 0.3
+# GSPro writes its round file (currentRound.dat) in the frame it has the ball at rest, so a live one's
+# stroke ends the follow; one not there yet when the follow ends is waited for (_follow_with_file). That
+# wait wakes on the file's writes, and this often to look for a reason to stop (_file_wait_over).
+FILE_WAIT_POLL_S = 0.25
+FILE_WAIT_MAX_S = 120.0   # no ball rolls this long: GSPro has stopped writing (hung, or its file elsewhere)
 # A stroke's penalty or drop is GSPro's next entry, written by its own rewrite in the same frame: a stroke
 # read that soon after the file's write is read again once this has passed.
 FILE_SETTLE_S = 0.05
@@ -3930,20 +3931,32 @@ class Engine:
         """Round `r`'s GSPro course folder, when the booth is sure of it: the folder GSPro's log said it
         had loaded when the round started, else its course card's, found surely by name (or by the
         schedule's own name for the course).
-        None (go by the course's name) when a near miss or a name two courses share found the card."""
+        None (go by the course's name) when a near miss or a name two courses share found the card, or
+        when GSPro found another course's files in that folder (a copy: Wentworth by the Sea in
+        balsams_gsp), whose strokes it keys by that other course."""
         if r is not None and r.loaded_folder:   # (as the round started: a later load is the next round's)
-            return r.loaded_folder
-        card = r.course_card if r is not None else None
-        if card is None or not card.folder or card.name_unsure:
-            return None
-        return card.folder
+            folder = r.loaded_folder
+        else:
+            card = r.course_card if r is not None else None
+            if card is None or not card.folder or card.name_unsure:
+                return None
+            folder = card.folder
+        return None if folder.lower() in self.gspro.mismatched_folders else folder
 
-    def _round_file_folders(self) -> dict[str, str]:
+    def _round_file_folders(self) -> dict[str, str | None]:
         """The live round's record (uuid) -> its GSPro course folder, when sure of it (_round_course_folder),
-        for store.apply_round_file."""
+        for store.apply_round_file; -> None to forget one kept for it that GSPro found another course's
+        files in (a round continued from before that was known)."""
         r = self.round
-        folder = self._round_course_folder(r)
-        return {r.uuid: folder} if folder else {}
+        if r is None:
+            return {}
+        if folder := self._round_course_folder(r):
+            return {r.uuid: folder}
+        card = r.course_card
+        if {(r.loaded_folder or "").lower(), ((card.folder if card else None) or "").lower()} \
+                & self.gspro.mismatched_folders:
+            return {r.uuid: None}
+        return {}
 
     def _file_ours(self, t: round_file.Track, r, tag: str, course: str | None = None) -> bool:
         """Whether the stroke GSPro's round file has for a shot of booth round `r` (stored on `course`;
@@ -7728,7 +7741,8 @@ class Engine:
         if ocr:
             after, landed, file_track, own, file_timing = await self._follow_with_file(
                 before, tag, shot.is_putt, hole_over, at_rest, player=player, ball_speed=shot.ball_speed,
-                impact=impact, unit=unit, seq=my_seq, since=file_since, known=event.round_shot_id)
+                impact=impact, unit=unit, seq=my_seq, since=file_since, known=event.round_shot_id,
+                shot_round=shot_round)
         else:
             after, landed, own = Hud(), event.hud_hint is not None, None
             # (no follow to wait on: a shot fed from GSPro's files comes once the file has it)
@@ -9713,14 +9727,16 @@ class Engine:
     async def _follow_with_file(self, before: Hud, tag: str, is_putt: bool, ended: Callable[[], bool] | None,
                                 at_rest: Callable[[], bool] | None, *, player: str | None,
                                 ball_speed: float | None, impact: float, unit: str, seq: int | None = None,
-                                since: float | None = None, known: str | None = None
+                                since: float | None = None, known: str | None = None, shot_round=...
                                 ) -> tuple[Hud, bool, round_file.Track | None, Hud | None, dict]:
         """_follow_shot, raced against GSPro's round file (3.59+): GSPro writes it in the frame it has the
         ball at rest, so a new stroke there with this shot's ball speed (and player) ends the follow at
         once, and its lie, carry and total are the resting read. A finer lie the screen already read of
         the ball stopped (fringe, semi rough, ...; round_file.finer_lie) is kept; none is waited for.
-        A follow that ends first waits up to FILE_REST_GRACE_S more for the file (once a live GSPro has
-        written one), else its read stands as today; a GSPro that writes none never gets the file.
+        A follow that ends first (its cap, the log's rest or hole end) doesn't end the shot while a live
+        GSPro writes the file: the stroke is waited for until _file_wait_over says it won't come (a ball
+        struck since, the round ended), and only then does the follow's read stand. A GSPro that has
+        written no file this session never gets one: the follow's read stands at once.
 
         Returns (the resting read, landed, the file's stroke or None, the follow's own read (None if it
         was cancelled or, with the file's stroke, saw no rest), timings for the latency log)."""
@@ -9735,6 +9751,10 @@ class Engine:
         progress: dict = {}
         timing: dict = {}
         started = time.monotonic()
+        seq0, ends0 = (seq if seq is not None else self._shot_seq), self.gspro.round_ends
+        # the booth round it was struck in (`shot_round`, from impact; else the one on now, as _impact_hole)
+        round0 = shot_round if shot_round is not ... else self.round if self.round and not self.round.ended else None
+        round_then = self.round
         if known is not None:   # the feed has read the file since this engine last looked, maybe
             await self._refresh_round_file()
         follow = asyncio.create_task(self._follow_shot(before, tag, is_putt, ended, at_rest, progress))
@@ -9760,22 +9780,36 @@ class Engine:
                     else "the hole ended" if ended is not None and ended()
                     else "it ran out of time" if timing["ocr_rest"] - started >= self.cfg.screen.follow_max_seconds - 0.25
                     else "it lost the ball before a rest")
-                live = w.entries is not None and w.written >= self._booth_wall0
-                deadline = time.monotonic() + (FILE_REST_GRACE_S if live else 0.0)
-                while (left := deadline - time.monotonic()) > 0:
+                # A live GSPro writes every stroke once its ball is at rest (a long roll well past the
+                # follow's cap, a chip-in after the log's hole end): wait for it, however long, until
+                # something says it won't come for this shot.
+                stop = None
+                # (a shot with no ball speed can't be told in the file: nothing to wait for)
+                while w.entries is not None and w.written >= self._booth_wall0 and ball_speed is not None:
                     changed = self._file_changed
                     if (track := self._file_track_of(player, ball_speed, since or impact, claim=seq,
                                                      known=known)) is not None:
                         break
-                    try:
-                        await asyncio.wait_for(changed.wait(), left)
-                    except asyncio.TimeoutError:
+                    if (stop := self._file_wait_over(seq0, ends0, round0, started, round_then)) is not None:
                         break
+                    if known is not None and any(isinstance(x, dict) and str(x.get("ShotID")) == known
+                                                 for x in self._file_entries):
+                        stop = "the stroke the feed took it from isn't one to take"   # (no write will change that)
+                        break
+                    if known is None and any(
+                            (w.seen_at.get(t.shot_id) or -math.inf) >= (since or impact)
+                            and abs(t.ball_speed - ball_speed) <= SAME_BALL_MPH for t in self._file_tracks):
+                        stop = "the stroke with its ball speed isn't this player's"   # (a name it can't match)
+                        break
+                    try:   # (woken by a write; the look again is only for a stop above)
+                        await asyncio.wait_for(changed.wait(), FILE_WAIT_POLL_S)
+                    except asyncio.TimeoutError:
+                        pass
                 if track is None:
-                    if live:
-                        log.info("%s no stroke in GSPro's round file %.2fs after the follow ended (%.2fs after "
-                                 "impact; %s): the screen's read stands", tag, FILE_REST_GRACE_S,
-                                 timing["ocr_rest"] - impact, timing["ocr_end"])
+                    if stop is not None:
+                        log.warning("%s no stroke in GSPro's round file %.1fs after impact (the follow ended "
+                                    "at %.1fs: %s), and %s: the screen's read stands", tag,
+                                    time.monotonic() - impact, timing["ocr_rest"] - impact, timing["ocr_end"], stop)
                     hud, landed = follow.result()
                     return hud, landed, None, hud, timing
         except BaseException:
@@ -9816,6 +9850,27 @@ class Engine:
                  "total %s, %s yd to the pin%s", tag, timing["file"] - impact, when, track.lie_after, hud_lie,
                  track.carry_yards, track.total_yards, track.finish_yards, f", {end}" if end else "")
         return self._file_after(base, track, unit, hud_lie), True, track, own[0] if rested else None, timing
+
+    def _file_wait_over(self, seq: int, round_ends: int, r, started: float, then=None) -> str | None:
+        """Why a stroke not yet in GSPro's round file won't come for shot `seq` (struck in booth round
+        `r`, its follow begun at `started` with `then` the booth's round), else None: a ball struck after
+        it (its stroke would be the next), GSPro's round or the booth's ended (quit to the menu: GSPro
+        writes no more of it; struck in none, the round started since, that may adopt it), the file gone,
+        or (GSPro hung, say) FILE_WAIT_MAX_S, far past any ball's roll."""
+        if self._shot_seq > seq:
+            return "another ball was struck"
+        if self.gspro.round_ends > round_ends:
+            return "GSPro's round ended"
+        if r is not None and (r.ended or r.closing or self.round is not r):
+            return "the booth's round ended"
+        if r is None and (cur := self.round) is not None and cur is not then and (cur.ended or cur.closing):
+            return "the booth's round ended"
+        w = self._round_watch
+        if w is None or not w.path.exists():
+            return "the round file is gone"
+        if time.monotonic() - started >= FILE_WAIT_MAX_S:
+            return f"{FILE_WAIT_MAX_S:.0f}s passed"
+        return None
 
     async def _log_file_latency(self, tag: str, timing: dict, fires0: int, impact: float) -> None:
         """When GSPro's round file had the shot at rest, next to its log's rest (the shooter's score line)
@@ -13189,13 +13244,18 @@ class Engine:
         r = self.round
         if not r or r.ended:
             return
-        # The last shot's handler may still be reading: its record goes into the round's totals.
-        await self._drain_shot_tasks(self.cfg.commentary.wrap_wait_seconds)
-        if r.ended:
-            return
-        self._apply_log_corrections()   # whose the last unnamed shots were, while the round still maps them
-        self._log_name_summary(r)
-        r.ended = True
+        # The last shot's handler may still be reading: its record goes into the round's totals. (One
+        # waiting on GSPro's round file for a stroke it won't write stops at `closing`: _file_wait_over.)
+        r.closing = True
+        try:
+            await self._drain_shot_tasks(self.cfg.commentary.wrap_wait_seconds)
+            if r.ended:
+                return
+            self._apply_log_corrections()   # whose the last unnamed shots were, while the round still maps them
+            self._log_name_summary(r)
+            r.ended = True
+        finally:
+            r.closing = r.ended and r.closing   # (a close that failed: the round goes on)
         self._squabbit_round_end(r)
         if self._log_truth and self.cfg.source.type != "replay":
             self._bg(asyncio.to_thread(self._keep_gspro_log))
