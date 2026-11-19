@@ -9,6 +9,7 @@ stats page and in the app; "Booth" items only in the app. Plain words, one line 
 ### Stats page
 - Long drives that keep rolling get their full distance: the booth now waits for GSPro's own record of where the ball stopped instead of giving up after a few seconds.
 - Wentworth by the Sea (played from GSPro's Balsams folder) gets the same GSPro round records as every other course.
+- A hole conceded on the tee counts as a picked-up hole at your concede setting, not as penalty strokes.
 
 ## 0.1.151
 

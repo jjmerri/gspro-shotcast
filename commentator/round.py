@@ -846,6 +846,20 @@ class Round:
                          f"scored {scores[seq]}" if seq in scores else "reopened", self.hole_name(seq))
         self.log_scores[gspro] = scores
 
+    def reopen(self, gspro: str, seq: int, card: bool = True) -> None:
+        """A hole GSPro's log no longer has this player finished, with the rest of their holes as they
+        were (their slot isn't known to copy them afresh): as set_log_scores reopens one, card read too
+        (though losing their slot has already dropped the log's). Not `card`: the log's score was
+        another player's, and their own card read stands."""
+        if self.log_scores.get(gspro, {}).pop(seq, None) is not None:
+            log.info("Round %s: %s %s on %s (GSPro's log)", self.id, gspro,
+                     "reopened" if card else "had another player's score", self.hole_name(seq))
+        if not card:
+            return
+        side = self.side_for(gspro) if self.format in TEAM_BALL else None
+        for g in (side.gspro if side else [gspro]):
+            self.card_scores.get(g, {}).pop(seq, None)
+
     def score_of(self, gspro: str, seq: int) -> int | None:
         """One GSPro player's score on a hole of the round: GSPro's log, else the on-screen card."""
         logged = self.log_scores.get(gspro, {}).get(seq)

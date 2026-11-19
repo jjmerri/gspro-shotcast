@@ -563,6 +563,53 @@ def test_a_pick_up_caps_the_hole_without_counting_penalties():
     assert not s.picked_up(0, 10) and s.shot_number(0) == 2
 
 
+def test_a_hole_conceded_on_the_tee_is_a_pick_up_not_penalties():
+    # GSPro's ConcedeActivePlayer with no stroke taken (Dylan and Mom each conceded hole 15 on the tee,
+    # 2026-11-16, "SCORE: 8" at their double-par setting): nothing to take back, the capped score, then
+    # the conceding stroke.
+    s = _replay(_line(14, 0, 0) + _line(14, 7, 0) + _line(14, 1, 7))
+    assert s.strokes_before(0) == 8 and s.penalties(0) == 0
+    assert s.tee_concedes == {(0, 14)} and s.picked_up(0, 14) and not s.pickups
+    s = _replay(_line(14, 0, 0) + _line(14, 7, 0) + _line(14, 1, 7) + "Selecting shot for player: 0\n" + _line(15, 0, 0))
+    assert s.hole_scores[(0, 14)] == 8
+    # The hole replayed (a round restarted on this course) and conceded on the tee this time.
+    s = _replay(FIRE + _line(14, 1, 0) + FIRE + _line(14, 1, 1) + "Selecting shot for player: 0\n" + _line(15, 0, 0)
+                + _line(14, 0, 0) + _line(14, 7, 0) + _line(14, 1, 7))
+    assert s.strokes_before(0) == 8 and s.penalties(0) == 0 and s.tee_concedes == {(0, 14)}
+    # Replayed again, with a stroke this time: no longer conceded.
+    for ev in parse_events(FIRE + _line(14, 1, 0)):
+        s.apply(ev)
+    assert not s.tee_concedes and not s.picked_up(0, 14)
+    # A tee shot after a strokes-0 line is just the hole's first stroke.
+    s = _replay(_line(14, 0, 0) + FIRE + _line(14, 1, 0))
+    assert s.strokes_before(0) == 1 and s.penalties(0) == 0 and not s.pickups and not s.mulligan_fires
+
+
+def test_a_tee_concede_from_before_the_booth_started_is_scored_on_the_next_hole(tmp_path):
+    path = tmp_path / "output_log.txt"
+    path.write_text("Selected Course: x_gsp\n" + _line(14, 0, 0) + _line(14, 7, 0) + _line(14, 1, 7))
+    f = GsproLogFollower(str(path))
+    f._prime()
+    assert f.state.tee_concedes == {(0, 14)} and f.state.primed_seen == {0}
+    for e in parse_events(FIRE + _line(15, 1, 0)):
+        f.state.apply(e)
+    assert f.state.hole_scores[(0, 14)] == 8
+    # The backlog ending between the concede's lines.
+    path.write_text("Selected Course: x_gsp\n" + _line(14, 0, 0))
+    f = GsproLogFollower(str(path))
+    f._prime()
+    for e in parse_events(_line(14, 7, 0) + _line(14, 1, 7)):
+        f.state.apply(e)
+    assert f.state.tee_concedes == {(0, 14)} and f.state.penalties(0) == 0
+    # Or after it, with a tee shot struck since: that shot's score line is just its stroke.
+    path.write_text("Selected Course: x_gsp\n" + _line(14, 0, 0) + FIRE)
+    f = GsproLogFollower(str(path))
+    f._prime()
+    for e in parse_events(_line(14, 1, 0)):
+        f.state.apply(e)
+    assert not f.state.tee_concedes and not f.state.pickups and f.state.strokes_before(0) == 1
+
+
 def test_a_pick_up_from_before_the_booth_started_can_still_reopen(tmp_path):
     path = tmp_path / "output_log.txt"
     path.write_text("Selected Course: x_gsp\n" + FIRE + _line(10, 1, 0)

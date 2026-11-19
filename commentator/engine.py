@@ -1071,6 +1071,8 @@ class Engine:
         self._starts_due: set[int] = set()
         self._totals_due = False   # a logged position or mulligan since totals were last worked out from the log
         self._pickups_seen = 0   # GSPro pick-ups (score capped at the maximum) already applied
+        # round id -> {(name, hole of the round): the log's (slot, hole)}: holes conceded on the tee
+        self._tee_concedes: dict[str, dict[tuple[str, int], tuple[int, int]]] = {}
         self._pick_gimmes_seen = 0   # scramble picks inside the gimme circle already credited
         self._wrong_holes_seen = 0   # GSPro's wrong-hole score corrections already noted
         self._marks_due: list[tuple[str, int, int]] = []   # pickups/picks waiting on a shot's name
@@ -1220,6 +1222,7 @@ class Engine:
         # GSPro log counters already acted on (round ends / completions), and whether the range quiet
         # has been logged, so each transition is handled once.
         self._log_round_ends = 0
+        self._log_ended_round = None   # the round GSPro's log ended under the booth: its state is the snapshot
         self._log_round_completes = 0
         self._log_layouts = 0
         self._log_pins = 0   # pins GSPro logged (GsproState.pins) already kept
@@ -2113,7 +2116,9 @@ class Engine:
                 log.info("Round %s: GSPro's player menu was opened on %s: watching for a player added or removed",
                          r.id, r.hole_name(seq))
         if live:
-            self._apply_log_holes(r)
+            # (once End Round has reset the log, its start is the next round's)
+            if g.round_ends == self._log_round_ends and not self._round_end_queued:
+                self._apply_log_holes(r)
             if not self._round_end_queued:   # once it's ending, End Round's reset mustn't wipe the scores
                 self._sync_log_scores(r)
                 self._note_departures(r)
@@ -2135,6 +2140,8 @@ class Engine:
             self._events.put_nowait(RoundEndEvent(reason="final scorecard"))
         if g.round_ends != self._log_round_ends:
             self._log_round_ends = g.round_ends
+            if live:
+                self._log_ended_round = r.id
             if live and not self._round_end_queued:
                 self._round_end_queued = True
                 if r.log_complete:
@@ -2187,11 +2194,60 @@ class Engine:
             self._rename_remapped(r)
         if r.start_hole_assumed:
             return
-        scores = g.last_hole_scores if g.round_ends != self._log_round_ends else g.hole_scores
+        # (also once acted on: the round can still be closing, a late slot correction re-syncing it)
+        ended = g.round_ends != self._log_round_ends or self._log_ended_round == r.id
+        scores = g.last_hole_scores if ended else g.hole_scores
+        # Holes conceded on the tee: no stroke for the log's pick-up mark to settle on, so the slot says
+        # who. Worked out afresh each time, so a slot order corrected, a rename or a replayed hole takes
+        # back one given before.
+        conceded = g.last_tee_concedes if ended else g.tee_concedes
+        # (not by _gspro_idx's one-player shortcut when the round had more players than the live state
+        # shows: some before the booth started, or End Round has cleared it)
+        seen = g.last_players_seen if ended else g.players_seen | g.primed_seen
+        trust = len(seen) <= 1 or bool(r.slot_names)
+        tee = self._tee_concedes.setdefault(r.id, {})
+        held, since_of, want = [], {}, {}
         for name in r.roster:
             idx = self._gspro_idx(name, scores=True)
             if idx is not None:   # the log's holes are 0-based
+                since = r.slot_since.get(name, 1)   # the slot's earlier holes were someone else's
+                # A concede's score another slot gave them (a slot order corrected since) wasn't theirs:
+                # out first, so copying their slot doesn't take it for a replay and drop their card read.
+                for (n, seq), at in tee.items():
+                    if r.current_name(n) == name and at[0] != idx and seq >= since:
+                        r.reopen(name, seq, card=False)
                 r.set_log_scores(name, {hole + 2 - r.start_hole: v for (i, hole), v in scores.items() if i == idx})
+                held.append((idx, since))
+                since_of[name] = since
+                for i, hole in conceded if trust else ():
+                    if i == idx and (seq := hole + 2 - r.start_hole) >= since:
+                        want[(name, seq)] = (i, hole)
+        for (name, seq), at in list(tee.items()):
+            now = r.current_name(name)
+            del tee[(name, seq)]
+            if (now, seq) in want or (not trust and at in conceded and at not in want.values()):
+                tee[(now, seq)] = at   # (who holds the slot unknown now: only a replay takes it back)
+                continue
+            # Still theirs only from a slot they held before: they left the round after it, or moved up
+            # a slot when someone ahead of them did.
+            before = (now in r.left and seq <= r.left[now]) or (now in since_of and seq < since_of[now])
+            if at not in conceded or not before or any(i == at[0] and since <= seq for i, since in held):
+                for n in {name, now}:
+                    self._drop_pickup(r, n, seq)
+                    # The concede's score, not re-copied from a slot of theirs: replayed, it's no one's
+                    # (the card's copy too, unless the log has their replay's); else someone else's.
+                    stale = seq < since_of.get(n, seq + 1)   # (unplaced, or kept from a slot held before)
+                    if at not in conceded and (stale or seq not in r.log_scores.get(n, {})):
+                        r.reopen(n, seq)
+                    elif stale:
+                        r.reopen(n, seq, card=False)
+            else:
+                tee[(now, seq)] = at
+        for key, at in want.items():
+            if key not in r.picked_up:
+                log.info("%s conceded hole %s of the round on the tee: scored at the maximum", *key)
+            r.picked_up.add(key)
+            tee[key] = at
 
     def _note_departures(self, r: Round) -> None:
         """Players who left partway (removed in GSPro): the holes GSPro last moved on from were finished
@@ -6015,7 +6071,7 @@ class Engine:
                     return None
             pos = r.roster_position(name)
             return pos if pos is None or not r.slot_guess or self._slot_placed(pos) else None
-        if len(r.roster) <= 1 and not self.gspro.multiplayer:
+        if len(r.roster) <= 1 and len(self._round_seen()) <= 1:
             return 0                           # genuinely one player (the log shows one too): index 0
         return None                            # no slot order and more than one player: don't attribute
 
@@ -6360,18 +6416,29 @@ class Engine:
     def _solo_name(self) -> str | None:
         """The round's only player, when GSPro's log agrees there's only one: whoever hit, it was them."""
         r = self.round
-        if not self._log_truth or r is None or r.ended or len(r.roster) != 1 or self.gspro.multiplayer:
+        if not self._log_truth or r is None or r.ended or len(r.roster) != 1 or len(self._round_seen()) > 1:
             return None
         known = self._log_name(0)
         return known[1] if known else None
 
+    def _round_seen(self) -> set:
+        """The GSPro players the round has had: those before the booth started too, and while the round
+        GSPro ended is closing, its own (not the next round's, whatever GSPro is on)."""
+        g, r = self.gspro, self.round
+        if r is not None and not r.ended and (g.round_ends != self._log_round_ends or self._log_ended_round == r.id):
+            return g.last_players_seen
+        return g.players_seen | g.primed_seen
+
     def _log_view(self) -> tuple[dict, dict, set, set]:
         """GSPro's log's (finished hole scores, penalties, players seen, holes picked up) for the round:
-        the live ones, or once GSPro has ended the round (and reset them for the next), the ended round's."""
-        g = self.gspro
-        if g.mode == "menu":
+        the live ones, or once GSPro has ended the round (and reset them for the next), the ended round's:
+        in the menus, or while the round GSPro ended is still closing (GSPro may be on the next already)."""
+        g, r = self.gspro, self.round
+        closing = r is not None and not r.ended \
+            and (g.round_ends != self._log_round_ends or self._log_ended_round == r.id)
+        if g.mode == "menu" or closing:
             return g.last_hole_scores, g.last_penalties, g.last_players_seen, g.last_picked
-        return g.hole_scores, g._penalties, g.players_seen, g._picked
+        return g.hole_scores, g._penalties, g.players_seen | g.primed_seen, g._picked
 
     def _setup_slot(self, idx: int, g: str) -> bool:
         """Whether GSPro's setup screen showed `g` in slot `idx` (and the round still has them there)."""
@@ -9279,10 +9346,20 @@ class Engine:
             x.hole_seq, x.hole = new_seq, event.current
             x.par = par or None   # the hole's, not the one it was filed under
         # A pickup goes with its player's shots, unless some of theirs stayed (it may be that hole's).
-        for name in {x.player for x in moved} - {x.player for x in kept}:
-            if (name, old_seq) in r.picked_up:
+        tee = self._tee_concedes.get(r.id, {})   # (conceded on the tee: that hole's, whatever the shots)
+        given = set(self._picked_fires.values()) - {None}
+        stayed = {x.player for x in kept}
+        for name in {x.player for x in moved}:
+            if (name, old_seq) not in r.picked_up:
+                continue
+            if name not in stayed and (r.current_name(name), old_seq) not in tee:
                 r.picked_up.discard((name, old_seq))
                 r.picked_up.add((name, new_seq))
+            elif any(x.player == name and x.shot_id in given for x in moved):
+                r.picked_up.add((name, new_seq))   # a pick-up given to a shot that moved: that hole's
+                if (r.current_name(name), old_seq) not in tee \
+                        and not any(x.player == name and x.shot_id in given for x in kept):
+                    r.picked_up.discard((name, old_seq))
         ids = [x.shot_id for x in moved if x.shot_id is not None]
         if wrong and ids:
             keep = [i for x in kept if x.shot_id is not None
@@ -9531,8 +9608,9 @@ class Engine:
             kind, idx, hole = mark
             live = kind == "pick"
             at, row = next(((f, v) for f, v in sorted(self._fire_rows.items(), reverse=True)
-                            if v[2] == idx and v[3] == hole and not (live and v[1].mulligan)), (-1, None))
-            if any(f > at and not (live and v[1].mulligan)
+                            if v[2] == idx and v[3] == hole and not (live and v[1].mulligan)
+                            and r is not None and v[1].round_id == r.id), (-1, None))
+            if any(f > at and not (live and v[1].mulligan) and r is not None and v[1].round_id == r.id
                    and ((f in self._unnamed and v[1].player == "unknown")
                         or (v[2] is None and r is not None and r.slot_guess and v[1].player != "unknown"
                             and self._row_source.get(f) in ("screen", "setup read", "address frame")))

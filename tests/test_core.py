@@ -5375,6 +5375,146 @@ def test_a_pick_up_reaches_the_round(tmp_path):
     side = r.sides[0]
     assert "picked up" in e._score_fact(side, 8, 4, picked=True)
 
+    # Conceded on the tee: no stroke on the hole for the mark, so the log's slot names who, even with a
+    # shot on that hole from an earlier play of it.
+    e.cfg.source.gspro_log_truth, r.start_hole_assumed = True, False
+    _row(e, r, 9, 1, "tee", hole=14, seq=15)
+    e.gspro.tee_concedes |= {(0, 14), (0, 3)}
+    e._sync_log_scores(r)
+    assert r.picked_up == {("Paul", 11), ("Paul", 15), ("Paul", 4)}
+    # Replayed: taken back, under the name they were renamed to since. A row-backed pick-up stays.
+    r.rename_player("Paul", "Pauline")
+    r.card_scores["Pauline"] = {15: 8}   # (the card read the concede before the log posted it)
+    e.gspro.tee_concedes.discard((0, 14))
+    e._sync_log_scores(r)
+    assert r.picked_up == {("Pauline", 11), ("Pauline", 4)} and r.score_of("Pauline", 15) is None
+    # Their slot's earlier holes were someone else's (they took it over on hole 5): not theirs.
+    r.slot_since["Pauline"] = 5
+    e.gspro.tee_concedes.add((0, 1))
+    e._sync_log_scores(r)
+    assert ("Pauline", 2) not in r.picked_up and ("Pauline", 4) in r.picked_up   # (held before hole 5)
+    # Out of a slot with nothing to say why (a guessed one lost): no longer theirs.
+    e.cfg.source.gspro_log_truth = False
+    e._sync_log_scores(r)
+    assert ("Pauline", 4) not in r.picked_up
+    # After End Round, a round with more players than its known names isn't put on the only one.
+    e.cfg.source.gspro_log_truth = True
+    r2 = _log_round(e)
+    r2.start_hole_assumed = False
+    e.gspro.tee_concedes, e.gspro.primed_seen = {(0, 2)}, {0, 1}   # (slot 1 seen before the booth started)
+    e.gspro.hole_scores[(0, 2)] = 8
+    e._sync_log_scores(r2)
+    assert not r2.picked_up and r2.score_of("Paul", 3) is None   # nor slot 0's score
+    e.gspro.hole_scores.clear()
+    e.gspro.end_round()
+    e._sync_log_scores(r2)
+    assert not r2.picked_up
+    e.gspro.players_seen.add(0)   # (the next course's first shot, before the booth ends this round)
+    e._sync_log_scores(r2)
+    assert not r2.picked_up
+    # Given while one player was seen, then a second shows up: kept, until the hole is replayed.
+    e.gspro = type(e.gspro)()
+    e.gspro.tee_concedes, e.gspro.players_seen = {(0, 2)}, {0}
+    e._sync_log_scores(r2)
+    assert r2.picked_up == {("Paul", 3)}
+    e.gspro.hole_scores[(0, 2)] = 8
+    e._sync_log_scores(r2)
+    r2.card_scores["Paul"] = {3: 8}   # (the card read it too)
+    e.gspro.players_seen.add(1)
+    e._sync_log_scores(r2)
+    assert r2.picked_up == {("Paul", 3)}
+    e.gspro.tee_concedes.clear()
+    e.gspro.hole_scores.clear()
+    e._sync_log_scores(r2)
+    assert not r2.picked_up and r2.score_of("Paul", 3) is None   # nor its capped score
+    # A solo round's, once ended, stays though the next round has two players by the time it's synced.
+    e.gspro = type(e.gspro)()
+    e.gspro.tee_concedes, e.gspro.players_seen = {(0, 2)}, {0}
+    e._sync_log_scores(r2)
+    e.gspro.hole_scores[(0, 2)] = 8
+    e.gspro.end_round()
+    e.gspro.players_seen |= {0, 1}
+    e._sync_log_scores(r2)
+    assert r2.picked_up == {("Paul", 3)} and r2.score_of("Paul", 3) == 8
+
+def test_a_round_quit_early_keeps_its_start_hole_once_the_next_has_begun(tmp_path):
+    e = _mini_engine(tmp_path)
+    r = _log_round(e)
+    e.cfg.source.gspro_log_truth, r.start_hole_assumed, r.start_hole = True, False, 10
+    e.gspro.tee_concedes, e.gspro.players_seen = {(0, 11)}, {0}
+    e.gspro.first_hole = 9
+    e.gspro.end_round()
+    e.gspro.first_hole = 0   # the next round's first score line, on hole 1
+    e._check_log_round()
+    assert r.start_hole == 10 and r.picked_up == {("Paul", 3)}
+    e._check_log_round()   # polled again while the end waits on a shot in flight
+    assert r.start_hole == 10
+
+
+def test_a_tee_concede_given_with_end_round_counts_for_a_player_the_file_placed(tmp_path):
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Paul", "Mike"], course="X", scheduled_format=None, holes=18,
+              is_league=False)
+    e.round = r
+    e.cfg.source.gspro_log_truth, r.start_hole_assumed = True, False
+    r.slot_names, r.slot_guess, r.file_slots = ["Paul", "Mike"], True, {"Paul": 0}
+    e.gspro.tee_concedes, e.gspro.players_seen = {(0, 2)}, {0, 1}
+    e.gspro.hole_scores[(0, 2)] = 8
+    e.gspro.end_round()   # (in the same poll: the booth never saw the concede live)
+    e._sync_log_scores(r)
+    assert ("Paul", 3) in r.picked_up and r.score_of("Paul", 3) == 8
+    # Re-synced while the round closes (a late slot correction), after the end was acted on: still the
+    # ended round's.
+    e._check_log_round()
+    e._sync_log_scores(r)
+    assert ("Paul", 3) in r.picked_up and r.score_of("Paul", 3) == 8
+    # The next course shows only slot 0: slot 1 (of the ended round's three) isn't Mike's by elimination.
+    e.gspro.hole_scores[(1, 2)], e.gspro.last_hole_scores[(1, 2)] = 5, 8
+    e.gspro.last_players_seen, e.gspro.players_seen, e.gspro.mode = {0, 1, 2}, {0}, "course"
+    e._sync_log_scores(r)
+    assert r.score_of("Mike", 3) is None
+    # The file then puts Mike in that slot: his, and no longer Paul's too (his own card read stands).
+    r.card_scores["Paul"] = {3: 5}
+    r.slot_names, r.file_slots = ["Mike", "Paul"], {"Mike": 0, "Paul": 1}
+    e.gspro.last_hole_scores.pop((1, 2))   # (slot 1 hasn't finished it)
+    e._sync_log_scores(r)
+    assert ("Mike", 3) in r.picked_up and ("Paul", 3) not in r.picked_up
+    assert r.score_of("Mike", 3) == 8 and r.score_of("Paul", 3) == 5
+    # Mike's slot then lost too (its log scores dropped with it) and the hole replayed: the card's copy goes.
+    r.card_scores["Mike"] = {3: 8}
+    r.file_slots = {}
+    e.gspro.last_tee_concedes.discard((0, 2))
+    e._sync_log_scores(r)
+    assert ("Mike", 3) not in r.picked_up and r.score_of("Mike", 3) is None
+    # Placed by elimination against the ended round's players: Paul's file slot leaves Mike slot 1.
+    e.gspro.last_tee_concedes.add((1, 4))
+    r.slot_names, r.file_slots, e.gspro.last_players_seen = ["Paul", "Mike"], {"Paul": 0}, {0, 1}
+    e._sync_log_scores(r)
+    assert ("Mike", 5) in r.picked_up
+
+
+def test_a_replayed_tee_concede_from_a_slot_held_before_is_reopened(tmp_path):
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Paul", "Mike"], course="X", scheduled_format=None, holes=18,
+              is_league=False)
+    e.round = r
+    e.cfg.source.gspro_log_truth, r.start_hole_assumed = True, False
+    r.slot_names = ["Paul", "Mike"]
+    e.gspro.tee_concedes, e.gspro.players_seen = {(1, 2)}, {0, 1}
+    e.gspro.hole_scores[(1, 2)] = 8
+    e._sync_log_scores(r)
+    assert ("Mike", 3) in r.picked_up and r.score_of("Mike", 3) == 8
+    # Paul left after hole 4: Mike moved up to slot 0 from hole 5, keeping his slot-1 holes.
+    r.slot_names, r.slot_since["Mike"], r.left["Paul"] = ["Mike"], 5, 4
+    e.gspro.hole_scores = {(0, 4): 4}
+    e._sync_log_scores(r)
+    assert ("Mike", 3) in r.picked_up and r.score_of("Mike", 3) == 8
+    e.gspro.tee_concedes.clear()   # the hole replayed
+    e._sync_log_scores(r)
+    assert ("Mike", 3) not in r.picked_up and r.score_of("Mike", 3) is None
+
 
 def test_the_next_shot_corrects_where_the_last_one_finished(tmp_path):
     e = _mini_engine(tmp_path)
@@ -6083,6 +6223,24 @@ async def test_a_log_correction_leaves_the_finished_holes_shots_where_they_were(
     e._apply_log_corrections()
     del e.gspro._fire_info[7], e._fire_rows[7]
     r.picked_up = {("Ann", 16), ("Steve", 16)}
+    e._tee_concedes[r.id] = {("Ann", 16): (1, 15)}   # had Ann conceded 16 on the tee, it stays 16's
+    await e.handle_hole_change(HoleChangeEvent(previous=None, current=seventeen, correction="log"))
+    assert r.picked_up == {("Ann", 16), ("Steve", 16)}
+    await e.handle_hole_change(HoleChangeEvent(previous=None, current=sixteen, correction="revert"))
+    e._picked_fires[99] = recs[2].shot_id   # and a pick-up of her own on 17: that goes with her shots
+    await e.handle_hole_change(HoleChangeEvent(previous=None, current=seventeen, correction="log"))
+    assert r.picked_up == {("Ann", 16), ("Ann", 17), ("Steve", 16)}
+    # Steve's pick-up given to his shot that moves (filed under 16, the log's 17): it goes with it.
+    await e.handle_hole_change(HoleChangeEvent(previous=None, current=sixteen, correction="revert"))
+    e._picked_fires[98] = recs[5].shot_id
+    await e.handle_hole_change(HoleChangeEvent(previous=None, current=seventeen, correction="log"))
+    assert r.picked_up == {("Ann", 16), ("Ann", 17), ("Steve", 17)}
+    del e._picked_fires[98]
+    r.picked_up.add(("Steve", 16))
+    await e.handle_hole_change(HoleChangeEvent(previous=None, current=sixteen, correction="revert"))
+    r.picked_up.discard(("Ann", 17))
+    e._tee_concedes.clear()
+    e._picked_fires.clear()
     await e.handle_hole_change(HoleChangeEvent(previous=None, current=seventeen, correction="log"))
     assert r.seq == 17 and [x.hole_seq for x in recs] == [16, 16, 17, 16, 17, 17]   # no log hole: moves
     assert r.picked_up == {("Ann", 17), ("Steve", 16)}   # Ann's went with her shots; Steve's 16 stayed

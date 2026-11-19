@@ -504,6 +504,10 @@ class GsproState:
     _shot_score: dict = field(default_factory=dict)   # index -> the score line of the player's last shot
     _undo: dict = field(default_factory=dict)         # index -> (hole, penalties then, fire taken back)
     _picked: set = field(default_factory=set)          # (index, hole) capped at the maximum
+    # The picked-up holes conceded on the tee, no stroke taken: no shot for a pick-up in `pickups` to
+    # settle on, so they're kept apart. The last ended round's too, past its reset.
+    tee_concedes: set = field(default_factory=set)
+    last_tee_concedes: set = field(default_factory=set)
     team_scores: bool = False   # GSPro copied a score between teammates this round (a shared-ball format)
     # Finished holes, (index, hole) -> GSPro's final score, the same number its scorecard shows. A hole
     # ends on a ball holed or conceded: the score line that follows ("Hole out" names no player, so the
@@ -515,6 +519,7 @@ class GsproState:
     last_hole_scores: dict = field(default_factory=dict)   # the last ended round's, kept past its reset
     last_penalties: dict = field(default_factory=dict)
     last_players_seen: set = field(default_factory=set)
+    primed_seen: set = field(default_factory=set)   # players the round being joined had before the booth started
     last_picked: set = field(default_factory=set)
     _end_next: bool = False
     _end_for: set = field(default_factory=set)
@@ -827,18 +832,19 @@ class GsproState:
         self.round_ends += 1
         self._finish_picked()
         self.last_hole_scores = dict(self.hole_scores)   # for the booth to settle the round with
-        self.last_penalties, self.last_players_seen = dict(self._penalties), set(self.players_seen)
+        self.last_penalties, self.last_players_seen = dict(self._penalties), self.players_seen | self.primed_seen
         self.last_picked = set(self._picked)
+        self.last_tee_concedes = set(self.tee_concedes)
         self.last_sgt = self.sgt
         self._reset_round()             # the next round, even on this same course, starts clean
         self.shots_since_course, self.first_hole, self.starts_late = 0, None, False
         self.live_shots_since_course = 0
 
     def _reset_round(self) -> None:
-        for d in (self.players_seen, self.lie_by, self.to_pin_by, self.to_pin_from, self.gimme_by, self.hole_by,
+        for d in (self.players_seen, self.primed_seen, self.lie_by, self.to_pin_by, self.to_pin_from, self.gimme_by, self.hole_by,
                   self.hole_outs_by, self.gimmies_by, self._score, self._penalties,
                   self._shot_since_state, self._gimmie_since_state, self._wet_since_shot, self._wet_at,
-                  self._undo, self._picked, self.dropped_by, self.hole_scores, self._end_for,
+                  self._undo, self._picked, self.tee_concedes, self.dropped_by, self.hole_scores, self._end_for,
                   self._score_shift):
             d.clear()
         self._end_next = self._wrong_hole_next = False
@@ -985,15 +991,26 @@ class GsproState:
             self._undo[ev.player] = (ev.hole, self._penalties.get(key, 0), prev - ev.score, fires[-1])
             self._score[key] = ev.score
             self.hole_scores.pop(key, None)
+        elif ev.strokes == 0 and ev.score == 0 and not prev and not shot:
+            # A hole conceded on the tee: GSPro takes back the none taken (ConcedeActivePlayer's
+            # SetScore(-score) logs "strokes: 0  Previous Score: 0"), then writes the capped score. (A
+            # mulligan's strokes-0 line comes after a stroke: Previous Score 1 or more.)
+            self._undo[ev.player] = (ev.hole, self._penalties.get(key, 0), 0, None)
+            self._score[key] = 0
         elif undo and prev is not None and ev.score > prev and not shot:
             # The capped score written straight in after every stroke was taken back: a pick-up. Not a
             # penalty, and neither is the conceding stroke GSPro adds next.
             self._penalties[key] = undo[1]
             self._picked.add(key)
-            self.pickups.append(key)
+            if undo[2] == 0:
+                self.tee_concedes.add(key)
+            else:
+                self.pickups.append(key)
             self._score[key] = ev.score
         elif key in self._picked and prev is not None and ev.score > prev and not shot:
             self._score[key] = ev.score
+        elif undo and shot and undo[2] == 0:
+            self._score[key] = max(prev or 0, ev.score)   # no concede after all: the hole's first stroke
         elif undo and shot:
             # Strokes taken back, then a shot: a mulligan. Any strokes beyond the shot itself that were
             # taken back were the penalty it drew (a mulligan off a ball in the water or out of bounds).
@@ -1069,8 +1086,11 @@ class GsproState:
             self._score[key] = ev.score
             self.hole_scores.pop(key, None)
             self._picked.discard(key)   # nor a pickup: it's open again
+            self.tee_concedes.discard(key)
             self._wet_since_shot.pop(ev.player, None)   # the replayed hole starts dry
             self._wet_at.pop(ev.player, None)
+            if ev.strokes == 0 and ev.score == 0 and not shot:
+                self._undo[ev.player] = (ev.hole, 0, 0, None)   # and conceded on the tee straight away
         else:
             self._score[key] = max(prev or 0, ev.score)
         if shot:
@@ -1321,6 +1341,14 @@ class GsproLogFollower:
         s.hole_scores = dict(past.hole_scores)   # holes already finished in a round being joined
         s._score.update({k: past._score[k] for k in {*past.hole_scores, *past._picked} if k in past._score})   # so they can reopen
         s._picked = set(past._picked)   # picked-up holes: finished, though not yet in hole_scores
+        # (and the hole each such player is on, so their move to the next one posts the score)
+        s.hole_by.update({p: h for p, h in past.hole_by.items() if (p, h) in past._picked and (p, h) not in past.hole_scores})
+        s.tee_concedes, s.primed_seen = set(past.tee_concedes), set(past.players_seen)
+        # A tee concede the backlog ends partway through: its capped score is still to come.
+        for p, u in past._undo.items():
+            if u[2] == 0 and (k := (p, u[0])) in past._score and not past._shot_since_state.get(p) \
+                    and past._unowned_fire is None:   # (not with a shot struck since, its score line to come)
+                s._undo[p], s._score[k] = u, past._score[k]
         s.current_hole = past.current_hole if past.shots_since_course else None
         s.version, s.kinds, s.unparsed = past.version, Counter(past.kinds), list(past.unparsed)
         s.course_entries = past.course_entries
