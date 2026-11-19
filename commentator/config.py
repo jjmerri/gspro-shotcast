@@ -622,6 +622,8 @@ class CommentaryConfig(BaseModel):
     lie_carry_factors: dict[str, float] = Field(default_factory=dict)
     # Course name as GSPro shows it -> altitude in feet, for a course with no shots yet.
     course_altitude_ft: dict[str, float] = Field(default_factory=dict)
+    # A course played at least this high (feet) gets the thin air as a talking point on drives.
+    altitude_fact_min_ft: float = 3000.0
     # A shot this interesting (0..1, from the interest scorer) gets a three- or four-line exchange.
     big_moment_threshold: float = 0.9
     # An approach from at least this far that GSPro's log says finished this close is a big moment.

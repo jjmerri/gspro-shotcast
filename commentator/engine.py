@@ -5059,6 +5059,19 @@ class Engine:
                 f"the mulligan and judge this result on its own, but don't call it final or \"the one that "
                 f"counts\": another mulligan can still follow."]
 
+    def _altitude_facts(self) -> list[str]:
+        """The thin air at a high course, for a drive. The altitude is the config's for the course or
+        the one GSPro logs as the ball bounces (what its physics plays at), never the course file's:
+        a round can play at the global setting instead. The round's course (checked against GSPro's log
+        as it started) beats the screen's read, which can keep the last course's name."""
+        r = self.round
+        course = (r.course if r is not None and not r.ended else None) or self.current_course
+        alt = self.cfg.commentary.course_altitude_ft.get(course or "", self.gspro.altitude_ft)
+        if alt is None or alt < self.cfg.commentary.altitude_fact_min_ft:
+            return []
+        return [f"The course plays at {alt:,.0f} feet of altitude: the thin air adds about "
+                f"{2 * alt / 1000:.0f}% to every carry; bring it up now and then, not on every drive."]
+
     def _bunker_facts(self, player: str | None) -> list[str]:
         """A recurring theme: how often this player has finished in a bunker this round (taken-back
         swings excluded), once it has happened at least twice. Fed only where a bunker is on topic
@@ -8649,6 +8662,8 @@ class Engine:
         club = club_delivery_facts(shot) if use_delivery and not chip else []
         self._delivery_last = bool(club)
         if not shot.is_putt:
+            if self._is_drive(before):
+                club += self._altitude_facts()
             club += self._length_norm_facts(
                 player, shot.club, self._is_drive(before), to_yards(before.to_pin),
                 tile_yards("total length") if landed and "total length" in hud.tiles else None,

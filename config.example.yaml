@@ -198,6 +198,7 @@ commentary:
   # altitude before it has shots, if you need to:
   # lie_carry_factors: {pine straw: 0.97}
   # course_altitude_ft: {"Example Links": 5200}
+  # altitude_fact_min_ft: 3000   # drives at a course this high (ft) can mention the thin air
   big_moment_threshold: 0.9      # shots this interesting get a three- or four-line exchange
   # Rounds. The opener plays when everyone is on shot 1 at even par and nothing has been
   # recorded on the course today (front or back nine). The wrap-up plays when GSPro's

@@ -13,6 +13,7 @@ stats page and in the app; "Booth" items only in the app. Plain words, one line 
 
 ### Booth
 - The booth takes where the ball stopped from GSPro's own record of the shot instead of watching the screen for it.
+- At a course played 3,000 feet up or higher, the booth can mention the thin air on drives.
 
 ## 0.1.151
 

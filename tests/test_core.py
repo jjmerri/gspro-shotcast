@@ -5531,6 +5531,24 @@ def test_bunkers_become_a_theme_after_the_second(tmp_path):
     assert "recurring theme" in e._bunker_facts("Paul")[0]
 
 
+def test_altitude_is_a_fact_only_at_a_high_course(tmp_path):
+    e = _mini_engine(tmp_path)
+    e.current_course = "Denver CC"
+    assert e._altitude_facts() == []            # no bounce logged yet: unknown
+    e.gspro.altitude_ft = 1200
+    assert e._altitude_facts() == []            # below the threshold
+    e.gspro.altitude_ft = 5280
+    f = e._altitude_facts()
+    assert len(f) == 1 and "5,280 feet" in f[0] and "11%" in f[0]
+    e.cfg.commentary.course_altitude_ft["Denver CC"] = 0   # config's altitude beats the logged one
+    assert e._altitude_facts() == []
+    e.cfg.commentary.course_altitude_ft = {"Denver CC": 5280}
+    r = _log_round(e)
+    r.course = "Pebble Beach"                  # the round's course, not the screen's stale name
+    e.gspro.altitude_ft = 0
+    assert e._altitude_facts() == []
+
+
 def test_putt_facts_leave_out_face_path_and_start_line():
     from commentator.facts import shot_facts
     f = " ".join(shot_facts(Shot(club="PT", ball_speed=6, hla=2.5)))
