@@ -49,10 +49,12 @@ round file` against setups without it; if the gaps are only team balls, map thos
 ## Drop the scorecard and result-banner OCR once the log names every player
 
 Scores come from GSPro's log (`Round.log_scores`). The between-hole scorecard OCR is skipped while
-`Engine._log_scores_cover` holds (every player of the live round in a slot the log can be tied to);
+`Engine._log_scores_cover` holds (a followed log, every player of the live round in a slot the log
+can be tied to with a score on every earlier hole, and every hole's par and stroke index known);
 a score line on the hole in play queues `ScorecardEvent(card=None)` (`_note_log_scores`) for the
 wrap. A putt the log credits to a slot the booth can't name takes its result from that slot's score
-line (`_log_shooter`). The OCR fallbacks left: the scorecard while a slot is unnamed, a player the
+line (`_log_shooter`). The OCR fallbacks left: the scorecard while a slot is unnamed, a score line is missing, the
+course card has no stroke index, a player the
 round doesn't have is in the log (`_admit_from_card`), or the first hole is assumed; the idle card
 read with no round (mid-round join, `_note_idle_card`); and the result banner (`_hole_result`) for a
 putt the log never credits (GSPro 3.59 practice, no log). Once the slot naming (see "Retire the

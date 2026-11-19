@@ -6700,6 +6700,9 @@ def test_gspros_round_file_gives_each_scramble_balls_finish_and_lie(tmp_path):
     cards = e._file_pick_cards({0: 7, 1: 9})
     assert {i: (c.name, round(c.yards), c.lie) for i, c in cards.items()} == {
         0: ("Ozzy", 294, "deep rough"), 1: ("Kyle Martin", 24, "green")}
+    _pick_file(e, ("Ozzy", 150.0, 5, 3.33 / M_TO_YD, False), ("Kyle Martin", 140.0, 5, 3.3 / M_TO_YD, False))
+    near = e._file_pick_cards({0: 7, 1: 9})
+    assert near[0].yards > near[1].yards   # 9'11.9" and 9'10.8" both round to 3.3 yd: the CTP is to the inch
     r = Round(league=e.league, gspro_players=["Ozzy", "Kyle Martin"], course="X", scheduled_format=None, holes=9,
               is_league=False, slot_names=["Ozzy", "Kyle Martin"])
     e.round = r

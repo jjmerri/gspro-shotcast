@@ -2083,12 +2083,19 @@ class Engine:
 
     def _log_scores_cover(self, r: Round | None) -> bool:
         """Whether GSPro's log has every player of the live round placed in its slot, so their scores are
-        the log's as each hole finishes and the scorecard's OCR adds nothing: no more players in the log
-        than the round has, the first hole known, and none of them in a slot the booth can't tie a name to."""
-        if r is None or r.ended or not self._log_rounds or r.start_hole_assumed or not r.roster:
+        the log's as each hole finishes and the scorecard's OCR adds nothing: a log being followed, no more
+        players in it than the round has, the first hole known, none of them in a slot the booth can't tie
+        a name to, each with a logged score on every hole before this one, and every hole's par and stroke
+        index already known (the card fills those in too, for handicap strokes)."""
+        if r is None or r.ended or not self._fire_log_followed() or r.start_hole_assumed or not r.roster:
             return False
         if len(self.gspro.players_seen) > len(r.roster):
             return False   # someone the round doesn't have (the card admits them: _admit_from_card)
+        holes = range(1, r.holes + 1)
+        if any(s not in r.par or s not in r.index for s in holes):
+            return False
+        if any(s not in r.log_scores.get(g, {}) for g in r.roster for s in range(1, r.seq)):
+            return False   # a score line missed: the card has it
         return all(self._gspro_idx(g, scores=True) is not None for g in r.roster)
 
     def _note_log_scores(self, r: Round) -> None:
@@ -6170,6 +6177,12 @@ class Engine:
             # GSPro's own records name the slot (_learn_file_slots): the screen misread who was up.
             log.info("Shot %s: the screen said %s hit it, GSPro's log and round file have %s in slot %d: it's "
                      "theirs", shot_id, rec.player, name, owner + 1)
+            # Its finish and result were followed on the misread player's slot: void them, so the next
+            # shot from that slot isn't taken as where this ball went, and grade it on its own slot.
+            for cache in (self._pending_finish, self._last_row):
+                for k in [k for k, v in cache.items() if v is not None and v[0] == shot_id]:
+                    del cache[k]
+            self._void_result(shot_id, rec)
             self._fire_rows[fire] = (shot_id, rec, owner, self.gspro.fire_info(fire).get("hole"))
             self._renames.add(fire)
             self._rename_remapped(r)
@@ -7596,6 +7609,12 @@ class Engine:
             file_ours = False
             before = replace(before, shot_number=screen_before.shot_number, gspro_shot=screen_before.gspro_shot)
             hud = replace(hud, shot_number=screen_before.shot_number)
+        # GSPro's club for the stroke beats the one read off the screen, before the drive records and
+        # the club's monitor fields are worked out from it.
+        screen_club = None
+        if file_track is not None and file_ours and (club := round_file.club_fix(file_track, shot.club)) is not None:
+            log.info("%s club %s -> %s from GSPro's round file", tag, shot.club or "unread", club)
+            screen_club, shot = (shot.club,), replace(shot, club=club)
 
         prior = self.state.player_shots(player or "unknown")
         score, tags = score_shot(shot, prior, hud, to_yards(before.to_pin))
@@ -7698,11 +7717,11 @@ class Engine:
         if file_track is not None and file_ours and before.shot_number != screen_before.shot_number \
                 and not self._file_ours(file_track, shot_round, tag):   # GSPro's round tied to another since
             file_ours = False
+            if screen_club is not None:   # the club came from that round's stroke: back to the screen's
+                club = screen_club[0] if retee else deck_club(screen_club[0], screen_before.shot_number, before.lie)
+                shot = replace(shot, club=club)
             before = replace(before, shot_number=screen_before.shot_number, gspro_shot=screen_before.gspro_shot)
             hud = replace(hud, shot_number=screen_before.shot_number)
-        if file_track is not None and file_ours and (club := round_file.club_fix(file_track, shot.club)) is not None:
-            log.info("%s club %s -> %s from GSPro's round file", tag, shot.club or "unread", club)
-            shot = replace(shot, club=club)
         rec = ShotRecord(
             player or "unknown", shot, shot_hole, hud, tags,
             round_id=r.id if r else None, hole_seq=round_hole, par=shot_par,
@@ -9653,8 +9672,8 @@ class Engine:
                 continue
             if t.penalty:
                 out[idx] = round_file.PickBall(t.player, None, None, penalty=True)
-            elif (yards := t.finish_yards) is not None:
-                out[idx] = round_file.PickBall(t.player, yards, t.lie_after)
+            elif (yards := t.finish_yards) is not None:   # unrounded: a CTP mark is to the inch
+                out[idx] = round_file.PickBall(t.player, yards and t.to_pin_m * M_TO_YD, t.lie_after)
         return out
 
     def _apply_pick_cards(self) -> None:

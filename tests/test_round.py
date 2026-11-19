@@ -6294,7 +6294,11 @@ def test_gspros_round_file_places_the_players_the_setup_screen_misread(tmp_path)
     assert e._slot_trust(0, "Barrows") == "GSPro's round file names the slot" and e._slot_trust(0, "Kroll") is None
     assert e._gspro_idx("Barrows") == 0 and e._gspro_idx("Kroll") == 1
     shot = _row_maker(e)
-    assert shot(3, "Kroll", 0).player == "Barrows"           # the screen misread who was up: the file's stands
+    e._last_row[1] = e._pending_finish[1] = (e.store.db.execute("SELECT coalesce(max(id), 0) + 1 FROM shots")
+                                             .fetchone()[0], None, 0, 0, 0)   # followed on Kroll's slot
+    rec = shot(3, "Kroll", 0, outcome="holed")
+    assert rec.player == "Barrows"                           # the screen misread who was up: the file's stands
+    assert rec.outcome is None and 1 not in e._last_row and 1 not in e._pending_finish   # Kroll's slot's, void
     assert shot(4, None, 1).player == "Kroll"                # a hidden name is the file's slot's
 
 
@@ -7131,7 +7135,19 @@ async def test_gspros_log_scores_stand_in_for_the_scorecards_ocr(tmp_path):
     e.cfg.commentary.segments_on_hole_change = True
     e.current_par, r.par[1] = 4, 4
     e.state.current_hole = "par 4, 400 yards"
+    e._follower = type("F", (), {"primed": True})()
+    e.gspro.version = "4.1.9"
+    r.par = {s: 4 for s in range(1, r.holes + 1)}
+    assert not e._log_scores_cover(r)        # no stroke index yet: the card's is the handicap order
+    r.index = {s: s for s in range(1, r.holes + 1)}
     assert e._log_scores_cover(r)            # every player in a slot: the card has nothing to add
+    e._follower = None
+    assert not e._log_scores_cover(r)        # no log being read: only the card has the scores
+    e._follower = type("F", (), {"primed": True})()
+    r.seq = 2
+    r.log_scores = {"Kroll": {1: 4}}
+    assert not e._log_scores_cover(r)        # Barrows' first hole never reached the log
+    r.seq, r.log_scores = 1, {}
     e.gspro.players_seen.add(2)
     assert not e._log_scores_cover(r)        # someone the round doesn't have: the card admits them
     e.gspro.players_seen.discard(2)
@@ -7175,3 +7191,28 @@ async def test_a_putt_from_a_slot_the_booth_cant_name_takes_its_result_from_the_
     assert e._gspro_idx("Barrows") is None and watched == [(1, 1)]
     assert [tuple(x) for x in e.store.db.execute("SELECT outcome FROM shots")] == [("holed",)]
     assert banner == []                     # GSPro's log said it: no banner read
+
+
+async def test_gspros_club_for_a_tee_shot_comes_before_the_drive_records(tmp_path):
+    # The screen read a driver, GSPro's file a 3-wood: no driving record for it, and stored as the 3-wood.
+    from commentator import round_file
+    from commentator.models import ShotEvent
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    e.commentary_on = False
+    e.screen = None
+    track = round_file.Track("s1", None, None, "Kroll", 1, 1, 150.0, False, (0.0, 0.0, 0.0), (0.0, 0.0, 210.0), None,
+                             lie_before="tee", lie_after="fairway", club="3W")
+
+    async def refreshed():
+        return None
+    e._round_watch, e._refresh_round_file = type("W", (), {"written": 0.0})(), refreshed
+    e._file_track_of = lambda *a, **k: track
+    e._file_ours = lambda *a, **k: True
+    e.store.season_stats = lambda p: {"longest_drive": 100.0}
+    e.store.today_longest_drive = lambda p: None
+    hud = _tee("Kroll", shot=1)
+    await e.handle_shot(ShotEvent(shot=Shot(club="DR", carry=240.0, ball_speed=150.0), hud_hint=hud,
+                                  impact_hud_hint=hud))
+    rec = e.state.shots[-1]
+    assert rec.shot.club == "3W" and "season_best_drive" not in rec.tags
