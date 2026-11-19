@@ -520,7 +520,8 @@ FLIGHT_OUTCOMES = ("on_target", "short", "long", "left", "right", "left_trouble"
 # these (via _LIE_REACTION) falls back to a live model call, so coverage never costs a wrong reaction.
 # Pre-voicing every branch is cheap enough to be worth the instant, always-right result call.
 RESULT_OUTCOMES = (
-    "green", "fairway", "semi rough", "rough", "deep rough", "pine straw", "sand", "cart path", "structure", "water",
+    "green", "fairway", "semi rough", "rough", "deep rough", "pine straw", "leaves", "sand", "bare ground",
+    "rocks", "cart path", "structure", "water",
 )
 # lip_out / lip_in come from the GSPro log's cup lines (GsproState.cup_of): the ball ran over the cup
 # and stayed out, or dropped only after catching the edge.
@@ -541,8 +542,11 @@ _RESULT_GUIDANCE = (
     "green (on the putting surface), fairway (the short grass), semi rough (just off the fairway, "
     "light and playable), rough (in the rough, playable but not ideal), deep rough (buried in thick "
     "grass, real trouble), pine straw (in the trees or on pine straw, blocked or having to scramble), "
-    "sand (a bunker), cart path (on the cart path, relief or a flyer), structure (up against a man-made "
-    "structure like wooden steps, a railing or a bridge), water (found the water, a penalty)"
+    "leaves (sitting in a bed of fallen leaves, hard to find and hard to judge), sand (a bunker), bare "
+    "ground (on bare dirt, a tight lie with no grass under the ball), rocks (on stone or among rocks, "
+    "an awkward lie that could damage the club), cart path (on the cart path, relief or a flyer), "
+    "structure (up against a man-made structure like wooden steps, a railing or a bridge), water "
+    "(found the water, a penalty)"
 )
 # The water flight line is the one exception to "never name a feature you can't see": it's played only
 # when the sim confirms the ball went in, so naming the water is a fact, not a guess.

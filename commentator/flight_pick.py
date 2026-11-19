@@ -71,6 +71,9 @@ _LIE_REACTION = {
     "deep rough": "deep rough", "deeprough": "deep rough",
     "pine straw": "pine straw", "pinestraw": "pine straw", "trees": "pine straw",
     "sand": "sand", "bunker": "sand",
+    # GSPro's round file names these (round_file.SURFACES). A drop zone is left to the model: the ball
+    # resting there says nothing about the lie a canned line could safely claim.
+    "leaves": "leaves", "dirt": "bare ground", "earth": "bare ground", "stone": "rocks", "rocks": "rocks",
     "waste": "sand", "waste area": "sand", "desert": "sand",
     "cart path": "cart path", "concrete": "cart path",
     "structure": "structure", "wood": "structure", "timber": "structure",

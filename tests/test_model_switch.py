@@ -136,7 +136,7 @@ def test_result_outcomes_cover_the_distinct_lies_and_unmapped_fall_back():
     # pine straw and water are their own branches. A finish mapping to none falls back to a live call.
     assert set(RESULT_OUTCOMES) == {
         "green", "fairway", "semi rough", "rough", "deep rough", "pine straw",
-        "sand", "cart path", "structure", "water",
+        "leaves", "sand", "bare ground", "rocks", "cart path", "structure", "water",
     }
     assert set(reaction_outcomes(False)) == set(RESULT_OUTCOMES)
 
@@ -156,6 +156,15 @@ def test_result_outcomes_cover_the_distinct_lies_and_unmapped_fall_back():
         ("hazard", "water"),   # an OCR-read penalty area resolves to the splash reaction
     ]:
         assert pick_reaction(plan, lie, None, None)[0] == outcome, lie
+    # Every lie GSPro's round file can name a finish by gets its own pre-written reaction, except the
+    # tee box and the drop zone, which say nothing a canned line could safely claim.
+    from commentator.round_file import SURFACES
+    for lie in {v for v in SURFACES.values() if v and v not in ("tee", "drop zone")}:
+        assert pick_reaction(plan, lie, None, None) is not None, lie
+    assert pick_reaction(plan, "drop zone", None, None) is None
+    assert pick_reaction(plan, "dirt", None, None)[0] == "bare ground"
+    assert pick_reaction(plan, "leaves", None, None)[0] == "leaves"
+    assert pick_reaction(plan, "stone", None, None)[0] == "rocks"
     # Unmapped / OB / fringe finishes fall back to a live model call (None).
     for lie in ("out of bounds", "fringe", "lava", ""):
         assert pick_reaction(plan, lie, None, None) is None, lie

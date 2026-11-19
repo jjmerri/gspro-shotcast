@@ -12,7 +12,8 @@
    slope from the drift of GSPro's green-grid dots over a quick burst of frames), and the full set of
    pre-written branches (`flight`): a mid-flight line for on-target / short / long / left /
    right / toward-water, and a resting-lie reaction for every finish (fairway, green, each
-   rough severity, sand, pine straw, cart path, structure, water). A putt gets holed / short /
+   rough severity, sand, pine straw, leaves, bare ground, rocks, cart path,
+   structure, water). A putt gets holed / short /
    past instead, plus a "gimme" line from `commentary.gimme_lag_feet` (30 ft) or longer, which
    always plays when the lag stops inside the gimme circle. From hole
    `commentary.round_form_after_holes` (3; 0 turns it off) the setup line also gets the round so far
