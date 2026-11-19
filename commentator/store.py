@@ -1551,7 +1551,9 @@ class Store:
         same = row["hole"] and re.match(rf"Hole {t.hole}\b", row["hole"])
         return {"player": name_of(t.player) or t.player,
                 "hole": row["hole"] if same else f"Hole {t.hole}" + (f", par {t.par}" if t.par else ""),
-                "shot_number": t.shot_number, "is_putt": int(t.putt or bool(row["is_putt"])),
+                "shot_number": t.shot_number,
+                # (GSPro's club, when the file has it, says: a putt is the putter's)
+                "is_putt": int(t.club in PUTTER_CODES) if t.club else int(t.putt or bool(row["is_putt"])),
                 "attributed": 1}
 
     def _release_track(self, shot_id: int) -> None:
@@ -1584,7 +1586,11 @@ class Store:
         carry, total = t.carry_yards, t.total_yards
         # A scramble keeps a finish only for the ball the team picked (the booth's): see set_format.
         shared = row["fmt"] == "scramble" or bool(row["shared_ball"])
-        putt = (named or {}).get("is_putt", row["is_putt"])
+        # A putt is GSPro's putter (or not) when its club corrects the booth's, unless the file's naming
+        # the shot said.
+        club = round_file.club_fix(t, row["club"])
+        fix_putt = club is not None and "is_putt" not in (named or {}) and int(club in PUTTER_CODES) != row["is_putt"]
+        putt = (named or {}).get("is_putt", int(club in PUTTER_CODES) if fix_putt else row["is_putt"])
         finish = t.finish_yards if not (putt or shared) else None
         lie_after = lie(row["lie_after"], t.lie_after)
         # What an earlier read of the file set and this one takes back (a penalty since followed the
@@ -1612,11 +1618,9 @@ class Store:
             self.db.execute(f"UPDATE shots SET {', '.join(f'{c} = ?' for c in named)} WHERE id = ?",
                             (*named.values(), row["id"]))
             self._sync_gimme(row["id"])
-        if (club := round_file.club_fix(t, row["club"])) is not None:
-            # A putt is GSPro's putter (or not), unless the file's naming the shot said: what it replaces
-            # goes in the snapshot (one from before clubs were kept has no club either).
+        if club is not None:
+            # What it replaces goes in the snapshot (one from before clubs were kept has no club either).
             putter = int(club in PUTTER_CODES)
-            fix_putt = "is_putt" not in (named or {}) and putter != row["is_putt"]
             w = json.loads(was)
             was = json.dumps({"club": row["club"], **({"is_putt": row["is_putt"]} if fix_putt else {}), **w})
             log.info("Shot %d club %s -> %s from GSPro's round file", row["id"], row["club"] or "unread", club)
@@ -2124,6 +2128,11 @@ class Store:
                     if nnum == num + 1 and nout != "gimme" and npin is not None:
                         self.db.execute("UPDATE shots SET finish_yards = ? WHERE id = ?", (npin, sid))
                         break
+
+    def drop_finish(self, shot_id: int, yards: float) -> None:
+        """Take back the finish fill_finish wrote (`yards`), unless another has replaced it since."""
+        self.db.execute("UPDATE shots SET finish_yards = NULL WHERE id = ? AND finish_yards = ?", (shot_id, yards))
+        self.db.commit()
 
     def fill_finish(self, shot_id: int | None, yards: float, replace: bool = False) -> None:
         """A shared ball's finish from where the team's next stroke started, unless one's already known

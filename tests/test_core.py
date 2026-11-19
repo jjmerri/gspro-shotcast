@@ -6772,7 +6772,8 @@ def test_gspros_round_file_gives_each_scramble_balls_finish_and_lie(tmp_path):
     e._apply_pick_cards()
     assert e.store.finish_of(ozzy)[0] == "deep rough"
     # Both balls out of bounds (Dan and Derek's 5th, 11-15: played again from the tee): not where
-    # either finished.
+    # either finished. (Another hole: the picks written above are done with.)
+    e._pick_cards_kept.clear()
     _pick_file(e, ("Ozzy", 150.0, 1, 100.0, True), ("Kyle Martin", 140.0, 1, 90.0, True))
     cards = e._file_pick_cards({0: 7, 1: 9})
     assert [c.penalty for c in cards.values()] == [True, True]
@@ -6845,6 +6846,13 @@ def test_a_pick_ball_gspro_writes_a_penalty_for_later_loses_its_finish_and_ctp_m
     e._apply_pick_cards()
     assert r.ctp_picks[1]["Ozzy"][0] is None and not e._pick_cards_due
     assert e.store.db.execute("SELECT finish_yards FROM shots WHERE id = ?", (ozzy,)).fetchone()[0] is None
+    # Kyle's penalty read only after the pick was written: its finish and mark are taken back.
+    assert r.ctp_picks[1]["Kyle Martin"][0] is not None
+    assert e.store.db.execute("SELECT finish_yards FROM shots WHERE id = ?", (kyle,)).fetchone()[0] is not None
+    _pick_file(e, ("Ozzy", 150.0, 5, 3 / M_TO_YD, True), ("Kyle Martin", 140.0, 5, 24 / M_TO_YD, True))
+    e._apply_log_corrections()
+    assert r.ctp_picks[1]["Kyle Martin"][0] is None
+    assert e.store.db.execute("SELECT finish_yards FROM shots WHERE id = ?", (kyle,)).fetchone()[0] is None
 
 
 async def test_the_pick_watch_takes_each_ball_from_gspros_round_file_with_no_screen_read(tmp_path):

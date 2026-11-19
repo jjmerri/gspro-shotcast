@@ -726,6 +726,15 @@ def test_gspros_club_index_corrects_the_club_read_off_the_screen(tmp_path, caplo
     assert (_row(st, 3)["club"], _row(st, 3)["is_putt"]) == ("PT", 1)
     st._release_track(pid)
     assert (_row(st, 3)["club"], _row(st, 3)["is_putt"]) == ("7I", 0)
+    # An approach the booth took for a putt (a putter read): a full shot, its finish kept.
+    aid = _row(st, 2)["id"]
+    st._release_track(aid)
+    st.db.execute("UPDATE shots SET club = 'PT', is_putt = 1, finish_yards = NULL WHERE id = ?", (aid,))
+    st.apply_round_file(got, now=1005.0)
+    assert (_row(st, 2)["club"], _row(st, 2)["is_putt"]) == ("7I", 0) and _row(st, 2)["finish_yards"] is not None
+    # A shot recorded blind takes GSPro's club's word on a putt too, not the booth's guess.
+    named = Store._blind_named({"hole": None, "is_putt": 1}, got[1], lambda n: None)
+    assert named["is_putt"] == 0
     st.apply_round_file(got[1:], now=1005.0, gone={drive["ShotID"]})   # taken back (a mulligan): the read returns
     assert _row(st, 1)["club"] == "7I"
     # The screen's 3-wood for GSPro's driver off the deck (hud.deck_club), and its approach wedge for the

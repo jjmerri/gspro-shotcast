@@ -1030,6 +1030,9 @@ class Engine:
         # read at), each card written to its ball's row once that row is recorded (the unpicked ball's
         # only finish).
         self._pick_cards_due: list[tuple[dict, dict, dict, float]] = []
+        # Those written, watched a while yet for a penalty GSPro's file has only later: (balls, cards, when
+        # queued, GSPro index -> the finish written).
+        self._pick_cards_kept: list[tuple[dict, dict, float, dict]] = []
         self._gimme_ids: dict[int, int] = {}   # shot id -> its conceded putt row's id
         self._form_said: dict[tuple, list[tuple[int, list[str]]]] = {}   # (round, side) -> [(hole of round, angles)]
         self._form_pending: tuple | None = None   # (round, side, players, hole of round) the sheet last went to
@@ -9190,7 +9193,7 @@ class Engine:
                 row[1].picked = picked
         if r is not None and r.format in TEAM_BALL:
             self._team_finishes(r)
-        if self._pick_cards_due:
+        if self._pick_cards_due or self._pick_cards_kept:
             self._apply_pick_cards()
         for fire in sorted(self._owners_due):
             owner = g.fire_info(fire).get("player")
@@ -9742,6 +9745,7 @@ class Engine:
 
     def _apply_pick_cards(self) -> None:
         """Each pick card's yards and lie onto its ball's row (cards are by GSPro index, as the balls)."""
+        self._recheck_pick_penalties()
         for entry in list(self._pick_cards_due):
             balls, gspro_names, cards, at = entry
             late = time.monotonic() - at > 60
@@ -9765,6 +9769,8 @@ class Engine:
                     and not late:
                 continue
             self._pick_cards_due.remove(entry)
+            filled: dict[int, float] = {}
+            self._pick_cards_kept.append((balls, cards, at, filled))
             for idx, card in pairs:
                 shot_id, rec = self._fire_rows[balls[idx]][:2]
                 if rec.mulligan:
@@ -9774,6 +9780,7 @@ class Engine:
                     log.info("Pick ball %s (%s): shot %s took a penalty, no finish", card.name, names[idx], shot_id)
                     continue
                 self.store.fill_finish(shot_id, round(card.yards, 1))
+                filled[idx] = round(card.yards, 1)
                 # The picked ball's lie is GSPro's log's (the team plays on from it); the file's only
                 # stands in for it when there's none, and is the only word on the balls lifted. Until the
                 # log says which was picked, a ball keeps the lie it has. A saved "tee" is no lie at all: the
@@ -9783,6 +9790,27 @@ class Engine:
                     self.store.set_lie_after(shot_id, card.lie)
                 log.info("Pick ball %s (%s): shot %s finished %.0f yd, %s", card.name, names[idx], shot_id,
                          card.yards, card.lie)
+
+    def _recheck_pick_penalties(self) -> None:
+        """A written pick's ball GSPro's round file has a penalty for only now (its entry read after the
+        pick was): the finish written for it is taken back, and its CTP mark."""
+        now = time.monotonic()
+        for entry in list(self._pick_cards_kept):
+            balls, cards, at, filled = entry
+            if now - at > 60:
+                self._pick_cards_kept.remove(entry)
+                continue
+            for idx, card in self._file_pick_cards(balls).items():
+                if not card.penalty or (cards.get(idx) and cards[idx].penalty) or balls[idx] not in self._fire_rows:
+                    continue
+                cards[idx] = card
+                shot_id, rec = self._fire_rows[balls[idx]][:2]
+                log.info("Pick ball %s: shot %s took a penalty after all, no finish", card.name, shot_id)
+                if (yards := filled.pop(idx, None)) is not None:
+                    self.store.drop_finish(shot_id, yards)
+                r = self.round
+                who = (r is not None and self._file_roster_key(r, card.name)) or rec.player
+                self._pick_ctp([(rec, who, card)])
 
     def _pick_ctp(self, balls: list[tuple]) -> None:
         """A scramble's tee shots on a closest-to-the-pin hole, from each ball's finish in GSPro's round
