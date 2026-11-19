@@ -7766,3 +7766,21 @@ def test_gspros_round_of_a_booth_round_comes_from_its_pins_and_a_refused_pin_is_
     assert e._file_round_ids() == {r.uuid: {7}}
     e._drop_refused_pins([t])   # the store never took it
     assert t.shot_id not in e._file_pins and e._file_round_ids() == {}
+
+
+def test_a_club_gspros_round_file_corrects_after_the_live_follow_is_the_rounds_record_too(tmp_path):
+    # The store corrected the screen's driver to GSPro's 3-wood after the live follow had ended: the
+    # round's own record (its longest drive) goes by it, and by the screen's again if taken back.
+    from commentator.round import Round
+
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Paul"], course="X", scheduled_format=None, holes=9, is_league=False)
+    e.round = r
+    sid, rec = _row(e, r, 7, 1, "tee", hole=0, seq=1)
+    rec.shot_id = sid
+    e.store.db.execute("UPDATE shots SET club = '3W' WHERE id = ?", (sid,))
+    e._sync_file_clubs()
+    assert rec.shot.club == "3W" and not rec.shot.is_putt
+    e.store.db.execute("UPDATE shots SET club = 'DR' WHERE id = ?", (sid,))
+    e._sync_file_clubs()
+    assert rec.shot.club == "DR"

@@ -3543,6 +3543,7 @@ class Engine:
                     log.warning("Couldn't refile shots from GSPro's round file: %s", e)
             try:
                 self._sync_file_names()
+                self._sync_file_clubs()
             except sqlite3.Error as e:
                 log.debug("Couldn't read the names GSPro's round file gave: %s", e)
             try:
@@ -3593,6 +3594,23 @@ class Engine:
                 x.hole, x.hole_seq, x.shot_number, x.par = self._file_named.pop(x.shot_id)[0]
                 x.shot_number = n if n is not None else x.shot_number   # (as stored: _unrefile's, maybe)
                 self._unslot(x.shot_id)
+
+    def _sync_file_clubs(self) -> None:
+        """The live round's shots take the club (and putt or not) the store has for them: GSPro's round
+        file can correct one after the live follow ended, or take its correction back, and the round's
+        stats (its longest drive) are worked out from these."""
+        r = self.round
+        if r is None:
+            return
+        recs = {x.shot_id: x for x in self.state.shots if x.round_id == r.id and x.shot_id is not None}
+        if not recs:
+            return
+        ids = list(recs)
+        for i, club, putt in self.store.db.execute(
+                f"SELECT id, club, is_putt FROM shots WHERE id IN ({', '.join('?' * len(ids))})", ids).fetchall():
+            x = recs[i]
+            if club and club != x.shot.club:
+                x.shot = replace(x.shot, club=club, putter=bool(putt))
 
     def _unslot(self, shot_id: int) -> None:
         """A shot GSPro's round file named is no longer that player's: the log slot taken when the log
@@ -6051,16 +6069,21 @@ class Engine:
         log.info("Shot %s: the screen said %s hit it, GSPro's log and round file have %s in slot %d: it's "
                  "theirs", shot_id, rec.player, name, owner + 1)
         # Its finish and result were followed on the misread player's slot: void them, so the next
-        # shot from that slot isn't taken as where this ball went, and grade it on its own slot.
-        for cache in (self._pending_finish, self._last_row):
-            for k in [k for k, v in cache.items() if v is not None and v[0] == shot_id]:
-                del cache[k]
-        self._void_result(shot_id, rec)
+        # shot from that slot isn't taken as where this ball went, and grade it on its own slot. Ones
+        # followed on its own slot already (a misread setup order put the wrong name on the right slot)
+        # stand, and go with the shot (its conceded putt too: _rename_remapped).
+        regrade = self._fire_rows[fire][2] != owner
+        if regrade:
+            for cache in (self._pending_finish, self._last_row):
+                for k in [k for k, v in cache.items() if v is not None and v[0] == shot_id]:
+                    del cache[k]
+            self._void_result(shot_id, rec)
         self._fire_rows[fire] = (shot_id, rec, owner, self.gspro.fire_info(fire).get("hole"))
         self._renames.add(fire)
         self._rename_remapped(self.round)
-        self._outcomes_due.add(fire)
-        self._resettle.add(fire)   # graded however long ago, while the log still has it
+        if regrade:
+            self._outcomes_due.add(fire)
+            self._resettle.add(fire)   # graded however long ago, while the log still has it
 
     def _forget_fires(self, upto: int) -> None:
         """Let the recorded rows of fires `upto` and before go (keeping a guessed slot order's log-named

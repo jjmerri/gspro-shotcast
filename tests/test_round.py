@@ -6237,13 +6237,14 @@ def _row_maker(e):
     log corrections with the shooter's line (`owner`, `hole`) in."""
     from commentator.state import ShotRecord
 
-    def shot(fire, who, owner, hole=0, outcome=None, club="7I", sp=None):
+    def shot(fire, who, owner, hole=0, outcome=None, club="7I", sp=None, slot=None):
         rec = ShotRecord(who or "unknown", Shot(club=club), "hole 1 par 4", Hud(), [], round_id=e.round.id)
         rec.outcome = outcome
         sid = e.store.record_shot(player=who, hole="hole 1 par 4", shot=Shot(club=club), before=Hud(),
                                   after=Hud(), tags=[], carry_game_yards=None, total_yards=None,
                                   offline_yards=None, course="X", attributed=bool(who))
-        e._fire_rows[fire] = (sid, rec, owner if who else None, hole if who else None)
+        # (`slot`: the one the screen's name had when it was recorded, when not the log's)
+        e._fire_rows[fire] = (sid, rec, (owner if slot is None else slot) if who else None, hole if who else None)
         e._row_source[fire] = "screen" if who else "none yet"
         e._owners_due.add(fire)
         e.gspro._fire_info[fire] = {"player": owner, "hole": hole}
@@ -6299,7 +6300,7 @@ def test_gspros_round_file_places_the_players_the_setup_screen_misread(tmp_path)
     e._last_row[1] = e._pending_finish[1] = (e.store.db.execute("SELECT coalesce(max(id), 0) + 1 FROM shots")
                                              .fetchone()[0], None, 0, 0, 0)   # followed on Kroll's slot
     e._file_entries += [_file_ball("Barrows", 130.0, n=2), _file_ball("Kroll", 120.0, n=2)]
-    rec = shot(3, "Kroll", 0, outcome="holed", sp=130.0)
+    rec = shot(3, "Kroll", 0, outcome="holed", sp=130.0, slot=1)
     assert rec.player == "Barrows"                           # the screen misread who was up: the file's stands
     assert rec.outcome is None and 1 not in e._last_row and 1 not in e._pending_finish   # Kroll's slot's, void
     e.gspro._fire_info[3]["holed"], e.gspro.fires = True, 40   # re-graded on its own slot, however late
@@ -6311,6 +6312,23 @@ def test_gspros_round_file_places_the_players_the_setup_screen_misread(tmp_path)
     assert shot(5, "Kroll", 0, sp=120.0).player == "Kroll"
     # Kroll in two slots: neither is known to be his any more (slot 1 was, before the slots closed up).
     assert e.round.file_slots == {} and e._slot_trust(1, "Kroll") != "GSPro's round file names the slot"
+
+
+def test_a_result_followed_on_the_right_slot_under_a_misread_order_goes_with_the_shot_the_file_renames(tmp_path):
+    # The setup screen read Kroll first, and the screen read Kroll for Barrows' ball: its result was
+    # followed on slot 0, Barrows' own, so it stands when GSPro's round file has the ball as Barrows'.
+    e = _guest_round(tmp_path, ["Kroll", "Barrows"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.setup_slots = ["Kroll", "Barrows"]
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    rec = shot(1, "Kroll", 0, outcome="holed", sp=150.0)
+    sid = e._fire_rows[1][0]
+    e._file_entries, e._file_version = [_file_ball("Barrows", 150.0)], 2
+    e._apply_log_corrections()
+    assert rec.player == "Barrows" and rec.outcome == "holed" and sid not in e._void_watch
+    assert e.store.db.execute("SELECT player FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "Barrows"
 
 
 def test_a_setup_order_the_round_file_overturns_takes_back_the_log_scores_read_under_it(tmp_path):
