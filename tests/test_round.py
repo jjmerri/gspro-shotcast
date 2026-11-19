@@ -6311,6 +6311,23 @@ def test_gspros_round_file_places_the_players_the_setup_screen_misread(tmp_path)
     assert shot(4, None, 1).player == "Kroll"                # a hidden name is the file's slot's
 
 
+def test_a_setup_order_the_round_file_overturns_takes_back_the_log_scores_read_under_it(tmp_path):
+    # The setup screen's order was trusted, and the log's scores were read by it; GSPro's round file has
+    # Bob in slot 0, so none of its placements are known to hold: their scores go back to the log.
+    e = _guest_round(tmp_path, ["Alice", "Bob", "Carol", "Dan"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.setup_slots = ["Alice", "Bob", "Carol", "Dan"]
+    e.gspro.players_seen.update({0, 1, 2, 3})
+    e.gspro.mode = "course"
+    e.round.log_scores = {n: {1: 4} for n in ("Alice", "Bob", "Carol", "Dan")}
+    e._file_entries = [_file_ball("Bob", 150.0)]
+    e.gspro._fire_info = {1: {"player": 0, "hole": 0, "launch": {"sp": 150.0, **_LAUNCH}}}
+    e.gspro.fires = 1
+    e._apply_log_corrections()
+    assert e.round.file_slots == {"Bob": 0} and e.round.slot_guess
+    assert "Carol" not in e.round.log_scores and "Dan" not in e.round.log_scores
+
+
 def test_a_shot_the_log_credited_before_the_round_file_had_it_is_moved_once_the_file_names_the_slot(tmp_path):
     # The setup screen had the slots right, but the screen read Kroll for Barrows' ball, and its score
     # line came in before GSPro's round file was matched: kept as Kroll's then, Barrows' once it is.
@@ -7221,11 +7238,46 @@ async def test_a_putt_from_a_slot_the_booth_cant_name_takes_its_result_from_the_
     await e.handle_shot(ShotEvent(shot=Shot(club="PT", carry=5.0), hud_hint=hud, impact_hud_hint=hud))
     assert e._gspro_idx("Barrows") is None and watched == [(1, 1)]
     assert [tuple(x) for x in e.store.db.execute("SELECT outcome FROM shots")] == [("holed",)]
-    assert banner == []                     # GSPro's log said it: no banner read
+    assert e.last_hole_result is None       # GSPro's log said it: not the banner (watched for meanwhile)
+
+
+async def test_a_putt_the_log_never_credits_keeps_the_banner_shown_while_waiting_on_the_log(tmp_path):
+    import asyncio
+    import time
+    from commentator.models import ShotEvent
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    e.round.slot_names, e.round.slot_guess = ["Kroll", "Barrows"], True
+    c = e.cfg.commentary
+    c.hole_result_window_seconds = c.lag_result_window_seconds = 0.3
+    e.commentary_on = False
+    start = time.monotonic()
+
+    async def banner_now(*a, **k):   # up only briefly, right after the putt
+        return "Birdie" if time.monotonic() - start < 0.2 else None
+
+    async def no_credit(*a, **k):    # the log's wait for the stroke's credit runs out
+        await asyncio.sleep(0.3)
+        return None
+    e._hole_result, e._log_shooter = banner_now, no_credit
+    hud = _tee("Barrows", shot=3)
+
+    class Screen:   # (the screen read: the HUD as it was)
+        last_read_seconds = 0.0
+
+        async def read_hud_async(self, parts=None, **k):
+            return hud
+    e.screen = Screen()
+    e.cfg.screen.follow_max_seconds = 0.1
+    start = time.monotonic()
+    await e.handle_shot(ShotEvent(shot=Shot(club="PT", carry=5.0), hud_hint=None, impact_hud_hint=hud))
+    assert e.last_hole_result == "Birdie"
 
 
 async def test_gspros_club_for_a_tee_shot_comes_before_the_drive_records(tmp_path):
     # The screen read a driver, GSPro's file a 3-wood: no driving record for it, and stored as the 3-wood.
+    import time
+
     from commentator import round_file
     from commentator.models import ShotEvent
 
@@ -7247,6 +7299,15 @@ async def test_gspros_club_for_a_tee_shot_comes_before_the_drive_records(tmp_pat
                                   impact_hud_hint=hud))
     rec = e.state.shots[-1]
     assert rec.shot.club == "3W" and "season_best_drive" not in rec.tags
+    # Stored under the screen's driver; the stroke's pin sets GSPro's 3-wood, and a release takes it back.
+    sid = rec.shot_id
+    assert e._file_pins == {"s1": sid}
+    club = lambda: e.store.db.execute("SELECT club FROM shots WHERE id = ?", (sid,)).fetchone()[0]
+    assert club() == "DR"
+    e.store.apply_round_file([track], now=time.time(), pinned=e._file_pins)
+    assert club() == "3W"
+    e.store._release_track(sid)
+    assert club() == "DR"
 
 
 async def test_a_file_club_dropped_with_its_stroke_takes_its_driving_record_with_it(tmp_path):
@@ -7274,3 +7335,4 @@ async def test_a_file_club_dropped_with_its_stroke_takes_its_driving_record_with
                                   impact_hud_hint=hud))
     rec = e.state.shots[-1]
     assert len(checks) == 2 and rec.shot.club == "3W" and "season_best_drive" not in rec.tags
+

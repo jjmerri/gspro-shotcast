@@ -1,5 +1,6 @@
 import asyncio
 import bisect
+import contextlib
 import contextvars
 import datetime
 import hashlib
@@ -5993,6 +5994,9 @@ class Engine:
             if not r.slot_guess:
                 log.info("Round %s: GSPro's round file has %s in its slots, not as the setup screen's %s: "
                          "going by the file", r.id, slots, order)
+                # What the setup order placed is what _recheck_slots undoes where it no longer holds (a
+                # player left where the setup had them, but no longer known to be there, too).
+                r.slot_held = {**{k: i for i, k in enumerate(was) if k}, **r.slot_held}
                 r.slot_guess, r.setup_slots = True, None
             for k in slots:
                 if k not in order:
@@ -7665,6 +7669,7 @@ class Engine:
         drive = (tile_yards("total length") if landed else None) or carry_game or shot.carry
         # Only a drive off the tee counts against the driving records, never a putt or a fairway driver.
         tee_drive = is_drive(shot.club, shot.is_putt, before.shot_number, before.lie, to_yards(before.to_pin))
+        score_before_drive = score
         if tee_drive and drive and season.get("longest_drive"):
             # Earlier weeks are the record, but a longer drive earlier today already broke it: every
             # drive past last week's best was "a personal best" all night, the shorter ones included.
@@ -7689,6 +7694,7 @@ class Engine:
                                     f"{best[1]:.0f} yards. Excitement {LEAGUE_BEST_DRIVE_LEVEL} out of 10.")
         if tee_drive and season.get("avg_drive"):
             season_facts.append(f"{player}'s average drive in earlier weeks: {season['avg_drive']:.0f} yards.")
+        drive_facts, drive_bump = list(season_facts), score - score_before_drive   # (all of them, so far)
         idx = self._gspro_idx(player)
         # No live "closest approach of the season" callout: a full shot's finishing distance isn't in
         # the log until its NEXT shot, so it can't be known at impact. The finish is recorded later
@@ -7758,11 +7764,12 @@ class Engine:
             file_ours = False
             if screen_club is not None:   # the club came from that round's stroke: back to the screen's
                 club = screen_club[0] if retee else deck_club(screen_club[0], screen_before.shot_number, before.lie)
-                shot = replace(shot, club=club)
+                shot, screen_club = replace(shot, club=club), None
                 if tee_drive and not is_drive(club, shot.is_putt, screen_before.shot_number, before.lie,
                                               to_yards(before.to_pin)):   # its driving records were the file club's
                     tags = [t for t in tags if t not in ("season_best_drive", "league_best_drive")]
-                    season_facts = [f for f in season_facts if "drive" not in f]
+                    season_facts = [f for f in season_facts if f not in drive_facts]
+                    score -= drive_bump
             before = replace(before, shot_number=screen_before.shot_number, gspro_shot=screen_before.gspro_shot)
             hud = replace(hud, shot_number=screen_before.shot_number)
         rec = ShotRecord(
@@ -7814,7 +7821,9 @@ class Engine:
         # The round's course, fixed at its start: the hole box's read each hole can be cut short.
         shot_course = (r.course if r is not None else None) or self.current_course
         shot_id = self.store.record_shot(
-            player=player, hole=shot_hole, shot=shot, before=before, after=hud, tags=tags,
+            # (the screen's club: GSPro's goes on with the stroke's pin, which keeps the screen's to go back to)
+            player=player, hole=shot_hole, shot=shot if screen_club is None else replace(shot, club=screen_club[0]),
+            before=before, after=hud, tags=tags,
             carry_game_yards=carry_game, total_yards=tile_yards("total length"), offline_yards=tile_yards("offline (raw)"),
             course=shot_course, carry_raw_tile_yards=carry_flat,
             to_pin_yards=to_yards(before.to_pin),
@@ -7996,6 +8005,9 @@ class Engine:
                     player, shot.ball_speed, file_since, my_seq,
                     wait=c.hole_result_window_seconds if not screen and self._file_live() else 0.0)
                 window = c.hole_result_window_seconds
+                # The banner is up for ~2s only: watched for while the log's credit is waited on, so a
+                # stroke the log never credits still has it (one it does goes by its score line).
+                banner = asyncio.create_task(self._hole_result(window)) if putt_track is None and screen else None
                 if putt_track is None and (credit := await self._log_shooter(fires0, impact, window)):
                     # GSPro's log credited this stroke to a slot it can't name: its score line, not the banner.
                     shooter, fire = credit
@@ -8013,8 +8025,12 @@ class Engine:
                         if holed:
                             score = holed_putt_score(score, before, tags, c.interest_threshold,
                                                      c.big_moment_threshold, putt_to_par(before.shot_number, shot_par))
-                if putt_track is None and screen and not log_drop:   # the banner only says the hole ended
-                    self.last_hole_result = await self._hole_result(c.hole_result_window_seconds)
+                if banner is not None and log_drop:
+                    banner.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await banner
+                elif banner is not None:   # the banner only says the hole ended
+                    self.last_hole_result = await banner
                     holed = True if self.last_hole_result else None
                     putt_track = await self._file_hole_end(player, shot.ball_speed, file_since, my_seq)
                 if putt_track is not None:
@@ -9689,10 +9705,9 @@ class Engine:
             log.info("Pick from GSPro's round file: %s", ", ".join(
                 f"{c.name} " + ("penalty" if c.penalty else f"{c.yards:.0f} yd {c.lie or 'unknown lie'}")
                 for c in cards.values()) or "no ball in it")
-            if cards:
-                names = {idx: (self._log_name(idx) or (None,))[0] for idx in balls}
-                self._pick_cards_due.append((balls, names, cards, time.monotonic()))
-                self._apply_pick_cards()   # a CTP hole's tee shots are asked about now, not after the pick
+            names = {idx: (self._log_name(idx) or (None,))[0] for idx in balls}
+            self._pick_cards_due.append((balls, names, cards, time.monotonic()))   # (a ball missing: retried)
+            self._apply_pick_cards()   # a CTP hole's tee shots are asked about now, not after the pick
 
     def _file_pick_cards(self, balls: dict[int, int]) -> dict[int, round_file.PickBall]:
         """Each ball of a pick (GSPro index -> its "Shot Fired") that GSPro's round file has: its player's
@@ -9723,17 +9738,25 @@ class Engine:
         """Each pick card's yards and lie onto its ball's row (cards are by GSPro index, as the balls)."""
         for entry in list(self._pick_cards_due):
             balls, gspro_names, cards, at = entry
+            late = time.monotonic() - at > 60
+            if missing := {i: f for i, f in balls.items() if i not in cards}:
+                cards.update(self._file_pick_cards(missing))   # (its row or the file's stroke only now)
             if any(f not in self._fire_rows for f in balls.values()):
-                if time.monotonic() - at > 60:
+                if late:
                     self._pick_cards_due.remove(entry)
                 continue
             names = {idx: gspro_names.get(idx) or self._fire_rows[f][1].player for idx, f in balls.items()}
             pairs = [(idx, card) for idx, card in cards.items() if idx in balls]
-            # Whose ball each card is: the log's name for its slot (the shot may not be named yet).
-            self._pick_ctp([(self._fire_rows[balls[idx]][1], names[idx], card) for idx, card in pairs
-                            if not card.penalty])
-            # The log names the pick soon after: wait for it (a while), so the picked ball keeps its lie.
-            if any(self._fire_rows[f][1].picked is None for f in balls.values()) and time.monotonic() - at <= 60:
+            # Whose ball each card is: the player GSPro's round file has it under, else the log's name for
+            # its slot (the shot may not be named yet).
+            r = self.round
+            self._pick_ctp([(self._fire_rows[balls[idx]][1],
+                             (r is not None and self._file_roster_key(r, card.name)) or names[idx], card)
+                            for idx, card in pairs if not card.penalty])
+            # The log names the pick soon after: wait for it (a while), so the picked ball keeps its lie; and
+            # for a ball not yet matched in the file.
+            if (any(self._fire_rows[f][1].picked is None for f in balls.values()) or len(cards) < len(balls)) \
+                    and not late:
                 continue
             self._pick_cards_due.remove(entry)
             for idx, card in pairs:

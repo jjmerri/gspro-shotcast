@@ -6752,6 +6752,32 @@ def test_gspros_round_file_gives_each_scramble_balls_finish_and_lie(tmp_path):
             for i in (ozzy, kyle)} == before
 
 
+def test_a_pick_takes_a_ball_gspros_round_file_writes_late_and_its_ctp_goes_to_the_files_player(tmp_path):
+    from commentator.round import Round
+    from commentator.sources.gspro_log import M_TO_YD
+
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Ozzy", "Kyle Martin"], course="X", scheduled_format=None, holes=9,
+              is_league=False, slot_names=["Ozzy", "Kyle Martin"])
+    e.round = r
+    ozzy, rec = _row(e, r, 7, 1, "tee", hole=0, seq=1)
+    kyle, rec2 = _row(e, r, 9, 1, "tee", hole=0, seq=1)
+    rec2.player, rec.picked, rec2.picked = "Kyle Martin", True, False
+    _pick_file(e, ("Ozzy", 150.0, 3, 294 / M_TO_YD, False))   # Kyle's ball isn't in the file yet
+    cards = e._file_pick_cards({0: 7, 1: 9})
+    seen = []
+    e._pick_ctp = lambda balls: seen.append([(who, card.name) for _, who, card in balls])
+    # The log's name for slot 1 is the screen's misread; the file has the ball under Kyle Martin.
+    e._pick_cards_due.append(({0: 7, 1: 9}, {0: "Ozzy", 1: "Kyle"}, cards, time.monotonic()))
+    e._apply_pick_cards()
+    assert e._pick_cards_due   # kept for Kyle's ball
+    _pick_file(e, ("Ozzy", 150.0, 3, 294 / M_TO_YD, False), ("Kyle Martin", 140.0, 5, 24 / M_TO_YD, False))
+    e._apply_pick_cards()
+    assert not e._pick_cards_due
+    assert e.store.finish_of(kyle)[0] == "green"
+    assert seen[-1] == [("Ozzy", "Ozzy"), ("Kyle Martin", "Kyle Martin")]
+
+
 async def test_the_pick_watch_takes_each_ball_from_gspros_round_file_with_no_screen_read(tmp_path):
     from commentator.sources.gspro_log import M_TO_YD
 
