@@ -200,31 +200,60 @@ def untracked(entries: list[dict], got: list[Track]) -> set[str]:
     return ids - {t.shot_id for t in got}
 
 
+def _course_norm(s: str | None) -> str:
+    s = (s or "").casefold()
+    for tail in ("_gsp", "gsp"):
+        s = s.removesuffix(tail)
+    return "".join(ch for ch in s if ch.isalnum())
+
+
 def course_fits(course_key: str | None, course: str | None) -> bool:
     """Whether GSPro's course key ("riviera_gsp") names the shots' course ("Riviera")."""
-    def norm(s):
-        s = (s or "").casefold()
-        for tail in ("_gsp", "gsp"):
-            s = s.removesuffix(tail)
-        return "".join(ch for ch in s if ch.isalnum())
-    k, c = norm(course_key), norm(course)
+    k, c = _course_norm(course_key), _course_norm(course)
     return bool(k and c) and (k.startswith(c) or c.startswith(k))
 
 
+def course_named(course_key: str | None, course: str | None, courses: Iterable[str] = ()) -> bool:
+    """course_fits, unless the key is exactly another of the booth's `courses` ("augusta_national_par_3"
+    is Augusta National Par 3's, not Augusta National's)."""
+    k, c = _course_norm(course_key), _course_norm(course)
+    if not (k and c):
+        return False
+    return c == k or not any(_course_norm(x) == k for x in courses) and course_fits(course_key, course)
+
+
 def names_fit(gspro_name: str, player: str | None) -> bool:
-    """Whether GSPro's short name ("Josh") is the shots' player ("Josh Merritt")."""
-    g, p = gspro_name.casefold().strip(), (player or "").casefold().strip()
-    return bool(g and p) and (p == g or p.split()[0] == g or g.split()[0] == p.split()[0])
+    """Whether GSPro's short name ("Josh", "Josh M.") is the shots' player ("Josh Merritt"); two full
+    names that differ past the first ("Alex Jones", "Alex Smith") are two players."""
+    g, p = gspro_name.casefold().split(), (player or "").casefold().split()
+    if not (g and p) or g[0] != p[0]:
+        return False
+    a, b = sorted((g[1:], p[1:]), key=len)
+    if a and len(a) != len(b):   # (both full names: every word of the surname)
+        return False
+    return all(x == y or len(i := x.rstrip(".")) == 1 and y.startswith(i) or len(j := y.rstrip(".")) == 1
+               and x.startswith(j) for x, y in zip(a, b))
 
 
-def _of_round(entries: list, players: Iterable[str], speeds: list[float]) -> bool:
-    """Whether the file's strokes are the round's: one of its players hit them and, when the booth
-    recorded ball speeds, at least half of those are among them. A next round noticed late (even the
-    same player's) has few strokes, mostly unlike the round's."""
+def _of_round(entries: list, players: Iterable[str], speeds: list[float], course: str | None = None,
+              courses: Iterable[str] = (), shot_ids: Iterable[str] = ()) -> bool:
+    """Whether the file's strokes are the round's. Not when its course key names a course the booth
+    knows (`courses`) other than the round's. Else, when the booth tied any of the round's shots to
+    GSPro's strokes (`shot_ids`), when one of those is in it (GSPro's ShotIDs are its round's alone).
+    Else when one of its players hit them and, when the booth recorded ball speeds, at least half of
+    those are among them. A next round noticed late (even the same player's) has few strokes, mostly
+    unlike the round's."""
+    entries = [e for e in entries if isinstance(e, dict)]
+    courses = list(courses)
+    if course and any((k := e.get("CourseKey")) and not course_named(k, course, courses)
+                      and any(course_fits(k, c) for c in courses) for e in entries):
+        return False
+    if ids := set(shot_ids):
+        return any(str(e.get("ShotID")) in ids for e in entries if e.get("ShotID") is not None)
     names = {p.casefold() for p in players}
     if not any(isinstance(e, dict) and str(e.get("PlayerName") or "").casefold() in names for e in entries):
         return False
-    got = [v["sp"] for _, e in swings([e for e in entries if isinstance(e, dict)]) if (v := launch_of(e))]
+    got = [v["sp"] for _, e in swings(entries) if (v := launch_of(e))]
     # Each swing stands for one shot at most. Both in order, a shot takes the lowest swing still within
     # reach (the reach grows with speed), which matches as many as any pairing can.
     got, want, i, hits = sorted(got), sorted(speeds), 0, 0
@@ -237,10 +266,12 @@ def _of_round(entries: list, players: Iterable[str], speeds: list[float]) -> boo
 
 
 def archive(src: Path, log_dir: str | Path, started: float, course: str | None, players: Iterable[str],
-            speeds: Iterable[float] = (), keep: int = KEEP_ARCHIVES) -> Path | None:
+            speeds: Iterable[float] = (), keep: int = KEEP_ARCHIVES, *, courses: Iterable[str] = (),
+            shot_ids: Iterable[str] = ()) -> Path | None:
     """Copy the round's file into log_dir/ARCHIVE_DIR as <start>-<course>.dat (the next round overwrites
     it), keeping the newest `keep`. `players` are the round's GSPro names, `speeds` the ball speeds the
-    booth recorded in it. None when there's no file of this round's to copy: missing, written before it
+    booth recorded in it, `courses` every course the booth has shots on, `shot_ids` GSPro's ShotIDs the
+    booth tied the round's shots to. None when there's no file of this round's to copy: missing, written before it
     started (well before, when there are speeds to match), unreadable (mid-write) after a few tries, or another round's (see _of_round)."""
     speeds = list(speeds)
     for attempt in range(ARCHIVE_READ_TRIES):
@@ -266,7 +297,7 @@ def archive(src: Path, log_dir: str | Path, started: float, course: str | None, 
     else:
         log.warning("GSPro's round file stayed unreadable (mid-write?), not kept: %s", why)
         return None
-    if not isinstance(entries, list) or not _of_round(entries, players, speeds):
+    if not isinstance(entries, list) or not _of_round(entries, players, speeds, course, courses, shot_ids):
         return None
     folder = Path(log_dir) / ARCHIVE_DIR
     stem = time.strftime("%Y-%m-%d-%H%M%S", time.localtime(started))

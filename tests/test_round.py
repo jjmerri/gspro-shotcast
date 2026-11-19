@@ -3008,6 +3008,17 @@ def test_a_round_started_after_a_drive_off_its_courses_range_takes_the_drive(tmp
     e.gspro._fire_info[fire + 2] = {"player": 1, "hole": 0}
     e._adopt_late_shot(fire + 2)
     assert (taken.hole, taken.par) == ("Hole 1, par 4", 4)
+    # One GSPro's round file has filed on the next hole while its banner was still to come: it stays there.
+    e.gspro.apply(LogEvent("shot_fired"))
+    filed = ShotRecord("Mike", Shot(carry=250.0), "Hole 2, par 4", Hud(), [], round_id=r.id, hole_seq=2, par=4)
+    filed.shot_id = e.store.db.execute(
+        "INSERT INTO shots (session_id, ts, player, course, hole, is_putt, is_league, attributed)"
+        " VALUES (?, 0, 'Mike', 'York Golf Club', 'Hole 2, par 4', 0, 1, 1)", (e.store.session_id,)).lastrowid
+    e._fire_rows[fire + 3] = (filed.shot_id, filed, None, None)
+    e._file_pins["gspro-shot"] = filed.shot_id
+    e._adopt_late_shot(fire + 3)
+    assert (filed.hole_seq, filed.hole, filed.par) == (2, "Hole 2, par 4", 4)
+    assert e.store.db.execute("SELECT hole FROM shots WHERE id = ?", (filed.shot_id,)).fetchone()[0] == "Hole 2, par 4"
 
 
 async def test_a_swing_gspro_never_played_is_ignored(tmp_path, monkeypatch):
@@ -4876,7 +4887,7 @@ def test_a_shot_gspros_round_file_named_is_graded_once_the_log_agrees(tmp_path):
     rec = ShotRecord("Mike", Shot(club="PT"), "Hole 2, par 4", Hud(), [], round_id=r.id,
                      hole_seq=2, shot_number=4, shot_id=7)
     e._fire_rows = {10: (7, rec, None, None)}
-    e._file_named.add(7)                       # recorded blind, named since from GSPro's round file
+    e._file_named[7] = (("Hole 1", 1, 1, 4), None)   # recorded blind, named since from GSPro's round file
     e.gspro._fire_info[10] = {"player": 1, "hole": 1}
     e._own_shot(10, 1)                         # its shooter's score line, after the file named it
     e._name_unnamed()                          # the log has the other player: not settled

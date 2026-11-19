@@ -159,6 +159,11 @@ def test_the_booths_later_reads_leave_the_round_files_numbers_be(tmp_path):
     assert (after["carry_game_yards"], after["total_yards"]) == (drive["carry_game_yards"], drive["total_yards"])
     assert (after["carry_raw_tile_yards"], after["offline_yards"]) == (150.0, -3.0)
     assert (approach_after["lie_after"], approach_after["finish_yards"]) == ("green", approach["finish_yards"])
+    assert st.set_lie_after(approach["id"], "pine straw") == "green"   # not a finer word for GSPro's green
+    # A finer read that isn't a word for GSPro's lie (the screen's fringe for a ball in the sand) goes.
+    st.db.execute("UPDATE shots SET lie_after = 'pine straw' WHERE id = ?", (approach["id"],))
+    st.apply_round_file(round_file.tracks([DRIVE, APPROACH, PUTT]), now=1005.0)
+    assert _row(st, 2)["lie_after"] == "green"
     st.set_lie_after(approach["id"], "fringe")   # finer than GSPro's code
     assert _row(st, 2)["lie_after"] == "fringe"
 
@@ -209,6 +214,61 @@ def test_a_stroke_is_not_matched_to_another_courses_shot(tmp_path):
                   " raw) VALUES (?, 1001, 'Dan Smith', 'Other Hills', ?, 9, '7I', 0, 1, '{}')", (st.session_id, HOLE))
     written, pending = st.apply_round_file(round_file.tracks([elsewhere]), now=1005.0)
     assert written == 0 and [t.shot_id for t in pending] == ["elsewhere"]
+
+
+def test_a_stroke_matched_before_its_course_was_known_moves_to_its_courses_shot(tmp_path):
+    st = _season(tmp_path)
+    elsewhere = {**DRIVE, "ShotID": "elsewhere", "CourseKey": "other_hills_gsp"}
+    first = _row(st, 1)["id"]
+    assert st.apply_round_file(round_file.tracks([elsewhere]), now=1005.0)[0] == 1   # (a course like none known)
+    assert st.tracked_shots(["elsewhere"]) == {"elsewhere": first}
+    st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, ball_speed,"
+                  " raw) VALUES (?, 1004, 'Dan Smith', 'Other Hills', ?, 1, '7I', 0, 150.0, '{}')", (st.session_id, HOLE))
+    st.apply_round_file(round_file.tracks([elsewhere]), now=1005.0)
+    assert st.tracked_shots(["elsewhere"])["elsewhere"] != first
+
+
+def test_a_pinned_shot_whose_course_went_unread_still_takes_its_stroke(tmp_path):
+    st = _season(tmp_path)   # (Test Links is a course the booth knows)
+    cur = st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt,"
+                        " ball_speed, raw) VALUES (?, 1004, 'Dan Smith', NULL, ?, 9, '7I', 0, 150.0, '{}')",
+                        (st.session_id, HOLE)).lastrowid
+    pin = {**DRIVE, "ShotID": "pinned"}
+    assert st.apply_round_file(round_file.tracks([pin]), now=1005.0, pinned={"pinned": cur})[0] == 1
+    assert st.tracked_shots(["pinned"]) == {"pinned": cur}
+
+
+def test_a_pin_takes_its_shot_from_an_earlier_files_stroke(tmp_path):
+    # GSPro started over on the same course: the old file's drive was matched to the new round's first
+    # shot before the new file was written. The live follow pinned the new file's drive to it.
+    st = _season(tmp_path)
+    st.apply_round_file(round_file.tracks([DRIVE]), now=1005.0)
+    shot = st.tracked_shots([DRIVE["ShotID"]])[DRIVE["ShotID"]]
+    new = {**DRIVE, "ShotID": "restart", "RoundID": 8}
+    assert st.apply_round_file(round_file.tracks([new]), now=1005.0, pinned={"restart": shot})[0] == 1
+    assert st.tracked_shots(["restart", DRIVE["ShotID"]]) == {"restart": shot}
+
+
+def test_a_stroke_of_another_gspro_round_is_not_matched_to_a_booth_rounds_shot(tmp_path):
+    # The booth's round tied a stroke of GSPro's round 7 to one of its shots; GSPro started round 8 on
+    # the same course before the booth closed it. Round 8's drive is like the booth round's own.
+    st = _season(tmp_path)
+    st.db.execute("UPDATE shots SET record_uuid = 'r1'")
+    nxt = {**DRIVE, "ShotID": "next", "RoundID": 8}
+    written, pending = st.apply_round_file(round_file.tracks([nxt]), now=1005.0, rounds={"r1": {7}})
+    assert written == 0 and [t.shot_id for t in pending] == ["next"]
+    assert st.apply_round_file(round_file.tracks([nxt]), now=1005.0, rounds={"r1": {8}})[0] == 1
+    # Matched before the round's own GSPro round was known, it's taken back once it is.
+    written, pending = st.apply_round_file(round_file.tracks([nxt]), now=1005.0, rounds={"r1": {7}})
+    assert written == 0 and len(pending) == 1 and st.round_gspro_shots("r1") == []
+    # Nor named blind from it.
+    st = Store(str(tmp_path / "blind.db"))
+    _blind(st, [151.0, 100.2, 8.0])
+    st.db.execute("UPDATE shots SET record_uuid = 'r1'")
+    files = [{**e, "RoundID": 8} for e in (DRIVE, APPROACH, PUTT)]
+    assert st.apply_round_file(round_file.tracks(files), now=1005.0, name_of={"Dan": "Dan Smith"}.get,
+                               rounds={"r1": {7}})[0] == 0
+    assert st.apply_round_file(round_file.tracks(files), now=1005.0, name_of={"Dan": "Dan Smith"}.get)[0] == 3
 
 
 def test_a_stroke_finds_its_course_whatever_case_it_was_stored_in_and_old_plays_dont_get_in_the_way(tmp_path):
@@ -552,3 +612,39 @@ def test_no_copy_of_a_missing_unreadable_earlier_or_next_rounds_file(tmp_path, m
         return read(p)
     monkeypatch.setattr(Path, "read_bytes", busy_once)
     assert round_file.archive(src, logs, now + 60, "Y", ["Dan"], [100.0]) is not None and len(tries) == 2
+
+
+def test_round_file_archive_goes_by_gspros_shot_ids_and_course(tmp_path):
+    import time
+
+    src, logs, now = tmp_path / "currentRound.dat", tmp_path / "logs", time.time()
+    # Dan quit after one drive and started Augusta: his new round's first drive is like his old one.
+    nxt = [_entry(1, (0, 0), (0, 200), sp=150.3)]
+    nxt[0]["CourseKey"] = "augusta_national_gsp"
+    src.write_text(json.dumps(nxt), encoding="utf-8")
+    assert round_file.archive(src, logs, now, "Pebble Beach", ["Dan"], [150.2]) is not None   # (speeds alone)
+    assert round_file.archive(src, logs, now, "Pebble Beach", ["Dan"], [150.2],
+                              courses=["Pebble Beach", "Augusta National"]) is None
+    # A course key like no course the booth has (it can't be told apart) leaves it to the ShotIDs.
+    assert round_file.archive(src, logs, now, "Pebble Beach", ["Dan"], [150.2], courses=["Pebble Beach"],
+                              shot_ids=["Dan-0-1-150.0"]) is None
+    assert round_file.archive(src, logs, now, "Pebble Beach", ["Dan"], [99.0], courses=["Pebble Beach"],
+                              shot_ids=[nxt[0]["ShotID"]]) is not None
+    # A course whose name starts like the round's: its own exact key is another course's.
+    nxt[0]["CourseKey"] = "augusta_national_par_3_gsp"
+    src.write_text(json.dumps(nxt), encoding="utf-8")
+    both = ["Augusta National", "Augusta National Par 3"]
+    assert round_file.archive(src, logs, now, "Augusta National", ["Dan"], [150.2], courses=both) is None
+    assert round_file.archive(src, logs, now, "Augusta National Par 3", ["Dan"], [150.2], courses=both) is not None
+    assert round_file.course_named("augusta_national_gsp", "Augusta National", both)
+    assert not round_file.course_named("augusta_national_par_3_gsp", "Augusta National", both)
+    assert round_file.course_named("augusta_national_par_3_gsp", "Augusta National", ["Augusta National"])
+
+
+def test_two_full_names_alike_only_in_the_first_are_two_players():
+    from commentator.round_file import names_fit
+    assert names_fit("Josh", "Josh Merritt") and names_fit("Josh M.", "Josh Merritt")
+    assert names_fit("josh merritt", "Josh Merritt")
+    assert not names_fit("Alex Jones", "Alex Smith") and not names_fit("Dan", "Danny")
+    assert not names_fit("Alex Green", "Alex Greene") and not names_fit("Alex Greene", "Alex Green")
+    assert not names_fit("Alex Garcia Lopez", "Alex Garcia") and names_fit("Alex G. L.", "Alex Garcia Lopez")

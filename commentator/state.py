@@ -33,6 +33,7 @@ class ShotRecord:
     cup: str | None = None   # how the ball met the cup, from GSPro's log: lip_out / lip_in / flagstick
     gimme_edge: bool = False   # struck from just outside the gimme circle (its last stroke nearly conceded it)
     impact_seq: int | None = None   # the booth's count of strokes at impact: ties a mid-flight call to this one
+    impact_at: float | None = None   # when it was struck (monotonic)
     log_hole: int | None = None   # the course hole GSPro's log put it on: its score line's, else the impact's
 
 

@@ -2545,6 +2545,71 @@ async def test_without_gspros_round_file_the_follow_is_the_screens_and_waits_no_
     assert took < 0.3 + 7 * 0.05 + 0.2   # the screen's reads, and no grace wait for a file that isn't there
 
 
+async def test_gspros_round_file_tells_a_holed_putt_from_one_conceded_inside_the_gimme_circle(tmp_path):
+    # No log slot for the player: the banner alone would call both a make.
+    path = tmp_path / "currentRound.dat"
+    e, _ = _file_engine(tmp_path, [])
+    putt = dict(_round_entry(2, 8.0, sid="p", end=(5, 300), surfaces=(5, 5), to_pin=0.5), HoleResult=0)
+    gimme = dict(putt, ShotID="g", HoleResult=7)
+    path.write_text(json.dumps([putt, gimme]))
+    t = await e._file_hole_end("Dan Smith", 8.1, 0.0, 1)
+    assert t is not None and not t.in_cup
+    made = _round_entry(2, 8.0, sid="p", end=(5, 300), surfaces=(5, 5), to_pin=0.0, holed=True)
+    path.write_text(json.dumps([dict(made, HoleResult=0), dict(made, ShotID="g", HoleResult=7)]))
+    os.utime(path, (time.time() + 5, time.time() + 5))
+    t = await e._file_hole_end("Dan Smith", 8.1, 0.0, 1)
+    assert t is not None and t.in_cup
+    # A putt that stopped short (the hole conceded after it, with no entry) isn't a drop.
+    path.write_text(json.dumps([putt]))
+    os.utime(path, (time.time() + 10, time.time() + 10))
+    assert await e._file_hole_end("Dan Smith", 8.1, 0.0, 1) is None
+    # With no screen to read, a putt still rolling is waited for: GSPro writes it at rest.
+    path.unlink()
+
+    async def gspro_writes():   # the putt at rest, then its drop by a rewrite of its own
+        await asyncio.sleep(0.3)
+        path.write_text(json.dumps([dict(putt, ShotID="q")]))
+        await asyncio.sleep(0.02)
+        path.write_text(json.dumps([dict(putt, ShotID="q"), dict(gimme, ShotID="q2")]))
+    writer = asyncio.create_task(gspro_writes())
+    t = await e._file_hole_end("Dan Smith", 8.1, 0.0, 2, wait=2.0)
+    await writer
+    assert t is not None and t.shot_id == "q" and not t.in_cup
+
+
+async def test_a_shot_fed_in_flight_gets_its_gimme_once_gspros_round_file_has_it_at_rest(tmp_path):
+    # No screen, no log slot: the reaction has gone before the ball stops; the record still gets the tap-in.
+    path = tmp_path / "currentRound.dat"
+    e, _ = _file_engine(tmp_path, [])
+    sid = e.store.record_shot(player="Dan Smith", hole="Hole 1", shot=Shot(ball_speed=90.0), before=Hud(shot_number=2),
+                              after=Hud(), tags=[], carry_game_yards=None, total_yards=None, offline_yards=None)
+    approach = dict(_round_entry(2, 90.0, sid="a", surfaces=(2, 5), to_pin=0.6), HoleResult=0)
+
+    async def gspro_writes():
+        await asyncio.sleep(0.2)
+        path.write_text(json.dumps([approach, dict(approach, ShotID="a2", HoleResult=7)]))
+    writer = asyncio.create_task(gspro_writes())
+    await e._late_file_end(sid, "[t]", None, "Dan Smith", 90.2, 0.0, 1)
+    await writer
+    assert sid in e._conceded_ids and e._gimme_ids.get(sid) is not None
+    # A scramble's putt at rest short of the hole, conceded once the team picks it after a teammate's:
+    # GSPro's drop comes well after the stroke, and the round file's watcher records it.
+    putt_id = e.store.record_shot(player="Dan Smith", hole="Hole 1", shot=Shot(ball_speed=8.0, putter=True),
+                                  before=Hud(shot_number=3), after=Hud(), tags=[], carry_game_yards=None,
+                                  total_yards=None, offline_yards=None)
+    putt = dict(_round_entry(3, 8.0, sid="p", surfaces=(5, 5), to_pin=0.4), HoleResult=0)
+    path.write_text(json.dumps([approach, dict(approach, ShotID="a2", HoleResult=7), putt]))
+    os.utime(path, (time.time() + 1, time.time() + 1))
+    await e._late_file_end(putt_id, "[t]", None, "Dan Smith", 8.1, 0.0, 2, putt=True)
+    assert putt_id not in e._conceded_ids and "p" in e._file_ends_due
+    path.write_text(json.dumps([approach, dict(approach, ShotID="a2", HoleResult=7), putt,
+                                dict(putt, ShotID="p2", HoleResult=7)]))
+    os.utime(path, (time.time() + 2, time.time() + 2))
+    await e._refresh_round_file()
+    e._settle_file_ends()   # (as the watcher does on each new read)
+    assert putt_id in e._conceded_ids and not e._file_ends_due
+
+
 def test_two_shots_at_one_speed_each_take_their_own_stroke_from_gspros_round_file(tmp_path):
     from commentator import round_file
     e, _ = _file_engine(tmp_path, [])
@@ -3994,7 +4059,7 @@ async def test_tiles_hidden_through_the_follow_are_read_at_the_next_setup(tmp_pa
     rec = ShotRecord("Josh", Shot(ball_speed=130, club="5I", carry=201.2), "Hole 1", Hud(), [])
     engine._shot_seq = 7
     engine._tiles_wanted = 7
-    engine._tiles_due[7] = (sid, rec, None, "yards", engine._hc)
+    engine._tiles_due[7] = (sid, rec, None, "yards", engine._hc, set())
     setup = Hud(player_text="Corey E Shot 1 391.5 YDS", shot_number=1, score_to_par="E", to_pin="391.5 yards")
     await engine._emit_setup(setup)
     assert "tiles" in screen.reads[-1]
@@ -4015,7 +4080,7 @@ async def test_tiles_hidden_through_the_follow_are_read_at_the_next_setup(tmp_pa
                                    before=Hud(shot_number=2), after=Hud(), tags=[], carry_game_yards=None,
                                    total_yards=None, offline_yards=None)
     engine._shot_seq = engine._tiles_wanted = 3
-    engine._tiles_due[3] = (sid, rec, (203.4, None, 214.8, None), "yards", engine._hc)
+    engine._tiles_due[3] = (sid, rec, (203.4, None, 214.8, None), "yards", engine._hc, set())
     await engine._emit_setup(Hud(player_text="Corey E Shot 2 150 YDS", shot_number=2, score_to_par="E",
                                  to_pin="150 yards"))
     assert engine.store.db.execute("SELECT total_yards FROM shots WHERE id = ?", (sid,)).fetchone()[0] is None
@@ -5927,6 +5992,36 @@ def test_gspros_round_file_moves_a_shot_filed_under_another_hole_and_leaves_pick
     e._round_started_at = time.monotonic() + 1   # strokes read before the round started: not this round's
     assert not e._refile_from_round_file(left)
     e._round_started_at = 0.0
+    # GSPro on to another round before the booth closed this one: a known other course's stroke, or
+    # one of another GSPro round than the shots the follow tied to this one, isn't this round's.
+    from dataclasses import replace as _re
+    e.store.record_shot(player="Al", hole="Hole 1", shot=Shot(ball_speed=90.0), before=Hud(shot_number=1),
+                        after=Hud(), tags=[], carry_game_yards=None, total_yards=None, offline_yards=None,
+                        course="Augusta National")
+    r.course = "Brasstown"
+    elsewhere = [_re(t, course_key="augusta_national_gsp") for t in left]
+    assert not e._refile_from_round_file(elsewhere) and recs[3].hole_seq == 17
+    # A course whose name starts like this one's, known by its exact key, is another too.
+    e.store.record_shot(player="Al", hole="Hole 1", shot=Shot(ball_speed=90.0), before=Hud(shot_number=1),
+                        after=Hud(), tags=[], carry_game_yards=None, total_yards=None, offline_yards=None,
+                        course="Brasstown Par 3")
+    par3 = [_re(t, course_key="brasstown_par_3_gsp") for t in left]
+    assert not e._file_round_test(r)(par3[0]) and e._file_round_test(r)(left[0])
+    # The round's course unread at its start: the shot's own stored course tells.
+    r.course = None
+    e.store.db.execute("UPDATE shots SET course = 'Brasstown' WHERE id = ?", (recs[3].shot_id,))
+    assert not e._refile_from_round_file(elsewhere) and recs[3].hole_seq == 17
+    # GSPro's round 8 on the same course, the file replaced whole (round 7's pinned strokes gone from it).
+    e._pin_file_track(e._file_tracks[0], recs[0].shot_id)
+    e.store.db.execute("UPDATE shots SET record_uuid = ?", (r.uuid,))
+    later = [_re(t, round_id=8, shot_id="new-" + t.shot_id) for t in left]
+    e._file_tracks = later
+    w.seen_at.update({t.shot_id: time.monotonic() for t in later})
+    assert not e._file_round_test(r)(later[0]) and e._file_round_test(r)(left[0])
+    assert e._file_round_ids() == {r.uuid: {7}}   # (the store's, too)
+    assert not e._refile_from_round_file(later) and recs[3].hole_seq == 17
+    e._file_pins.clear()
+    e._file_tracks = round_file.tracks(entries)
     assert e._refile_from_round_file(left)
     moved = recs[3]
     assert e._file_pins == {entries[2]["ShotID"]: moved.shot_id}   # the store takes it whatever its number
@@ -5935,8 +6030,79 @@ def test_gspros_round_file_moves_a_shot_filed_under_another_hole_and_leaves_pick
     row = e.store.db.execute("SELECT hole, shot_number FROM shots WHERE id = ?", (moved.shot_id,)).fetchone()
     assert tuple(row) == (sixteen, 3)
     assert r.picked_up == {("Ann", 16)} and r.seq == 17
+    # The store refused the pin (another round, known since): the shot goes back where it was.
+    e._drop_refused_pins(e._file_tracks)
+    assert not e._file_pins and (moved.hole_seq, moved.hole, moved.shot_number, moved.par) == (17, seventeen, 1, 3)
+    row = e.store.db.execute("SELECT hole, shot_number FROM shots WHERE id = ?", (moved.shot_id,)).fetchone()
+    assert tuple(row) == (seventeen, 1)
+    assert e._refile_from_round_file(left) and (moved.hole_seq, moved.shot_number) == (16, 3)
     written, left = e.store.apply_round_file(e._file_tracks, now=time.time(), rewrite=False)
     assert written == 1 and not left and not e._refile_from_round_file(left)
+
+
+def test_a_shot_moved_for_a_stroke_found_to_be_another_shots_goes_back_whole(tmp_path):
+    # Moved (stroke number unread, a conceded tap-in with it) for a stroke the live handler then ties to
+    # another shot: it goes back to where it was, its unread number with it.
+    from commentator import round_file
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Steve"], course="Brasstown", scheduled_format=None,
+              holes=18, start_hole=1, is_league=False)
+    e.round, r.seq = r, 17
+    seventeen = "Hole 17, par 3"
+    ids = [e.store.record_shot(player="Steve", hole=h, shot=Shot(ball_speed=sp), before=Hud(shot_number=n),
+                               after=Hud(), tags=[], carry_game_yards=None, total_yards=None, offline_yards=None)
+           for n, sp, h in ((None, 40.0, seventeen), (4, 1.0, "Hole 16"), (1, 40.0, seventeen))]
+    e.store.db.execute("UPDATE shots SET shot_number = NULL WHERE id = ?", (ids[0],))
+    x = ShotRecord("Steve", Shot(ball_speed=40.0), seventeen, Hud(), [], round_id=r.id, hole_seq=17, par=3,
+                   shot_id=ids[0])
+    e.state.record_shot(x)
+    t = round_file.tracks([_round_entry(1, 150.0, name="Steve", hole=15), _round_entry(2, 100.0, name="Steve", hole=15),
+                           _round_entry(3, 40.0, name="Steve", hole=15)])[-1]
+    e._refile_shot(x, t, 16)
+    assert (x.hole_seq, x.shot_number) == (16, 3)
+    e._gimme_ids[ids[0]] = ids[1]   # its tap-in conceded since, on the hole it was moved to
+    e._pin_file_track(t, ids[2])
+    assert (x.hole_seq, x.hole, x.shot_number, x.par) == (17, seventeen, None, 3)
+    rows = e.store.db.execute(f"SELECT hole, shot_number FROM shots WHERE id IN ({ids[0]}, {ids[1]}) ORDER BY id")
+    assert [tuple(row) for row in rows] == [(seventeen, None), (seventeen, None)]
+    assert e._file_pins == {t.shot_id: ids[2]} and not e._file_unrefile
+    # Recorded live on GSPro's stroke 1 (the screen read 3), the pin refused since: the screen's count.
+    y = ShotRecord("Steve", Shot(ball_speed=40.0), seventeen, Hud(), [], round_id=r.id, hole_seq=17, par=3,
+                   shot_number=1, shot_id=ids[2])
+    t17 = round_file.tracks([_round_entry(1, 40.0, name="Steve", hole=16)])[0]
+    e._keep_screen_stroke(y, t17, 3)
+    e._pin_file_track(t17, ids[2])
+    e._drop_refused_pins([t17])
+    assert y.shot_number == 3 and e.store.db.execute(
+        "SELECT shot_number FROM shots WHERE id = ?", (ids[2],)).fetchone()[0] == 3
+    # Moved for a stroke the live handler, recording it on GSPro's number, finds is another shot's.
+    e._refile_shot(x, t, 16)
+    e._keep_screen_stroke(y, t, 2)
+    e._pin_file_track(t, ids[2])
+    assert (x.hole_seq, x.hole, x.shot_number) == (17, seventeen, None)
+
+
+def test_gspros_full_name_isnt_a_league_player_known_by_the_first_alone(tmp_path):
+    e = _mini_engine(tmp_path)
+    e.league._aliases.update({"alex smith": "Alex Smith", "alex": "Alex Smith", "smitty": "Alex Smith"})
+    assert e._file_player("Alex") == "Alex Smith" and e._file_player("SMITTY") == "Alex Smith"
+    assert e._file_player("Alex Smith") == "Alex Smith" and e._file_player("Alex S.") == "Alex Smith"
+    assert e._file_player("Alex Jones") is None and not e._file_names_fit("Alex Jones", "Alex Smith")
+    # A player known by a short form of the roster's name: GSPro's abbreviation of it is them.
+    e.league._aliases.update({"william smith": "William Smith", "bill": "William Smith", "bill smith": "William Smith"})
+    assert e._file_player("Bill S.") == "William Smith" and e._file_player("Bill Jones") is None
+    # An initial no alias spells out: the one player whose full name it fits, none if two do.
+    e.league._aliases["alex johnson"] = "Alex Johnson"
+    e.league.player_team.update({"Alex Smith": "", "Alex Johnson": "", "William Smith": ""})
+    assert e._file_player("Alex J.") == "Alex Johnson" and e._file_player("Alex Q.") is None
+    e.league._aliases["alex jones"] = "Alex Jones"
+    e.league.player_team["Alex Jones"] = ""
+    assert e._file_player("Alex J.") is None
+    # A guest whose name only contains a player's ("Daniel", with Dan Smith known as "Dan") isn't him.
+    e.league._aliases.update({"dan smith": "Dan Smith", "dan": "Dan Smith"})
+    assert e._file_player("Dan") == "Dan Smith" and e._file_player("Daniel") is None
+    assert not e._file_names_fit("Daniel", "Dan Smith")
 
 
 def test_two_strokes_refiled_at_one_speed_keep_their_order(tmp_path):
@@ -5966,6 +6132,35 @@ def test_two_strokes_refiled_at_one_speed_keep_their_order(tmp_path):
     assert e._file_pins == {entries[0]["ShotID"]: recs[0].shot_id, entries[1]["ShotID"]: recs[1].shot_id}
 
 
+def test_a_shot_struck_after_gspro_wrote_a_stroke_isnt_refiled_as_it(tmp_path):
+    # Steve's 3rd putt on 17 went unrecorded; his 4th, at nearly its speed, struck after GSPro wrote the
+    # 3rd, is a later stroke: not moved to the 3rd's number.
+    from commentator import round_file
+    from commentator.round import Round
+    from commentator.sources.gspro_files import RoundFileWatch
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Steve"], course="Brasstown", scheduled_format=None,
+              holes=18, start_hole=1, is_league=False)
+    e.round, r.seq = r, 17
+    sid = e.store.record_shot(player="Steve", hole="Hole 17", shot=Shot(ball_speed=8.0, putter=True),
+                              before=Hud(shot_number=4), after=Hud(), tags=[], carry_game_yards=None,
+                              total_yards=None, offline_yards=None)
+    now = time.monotonic()
+    rec = ShotRecord("Steve", Shot(ball_speed=8.0, putter=True), "Hole 17", Hud(), [], round_id=r.id, hole_seq=17,
+                     shot_number=4, shot_id=sid, impact_at=now)
+    e.state.record_shot(rec)
+    entry = _round_entry(3, 7.8, name="Steve", hole=16)
+    entry["activeShot"]["sd"]["isPutt"] = True
+    e._file_entries, e._file_tracks = [entry], round_file.tracks([entry])
+    assert e._file_tracks[0].putt
+    e._round_watch = w = RoundFileWatch(str(tmp_path))
+    w.seen_at = {entry["ShotID"]: now - 20}
+    w.written, e._round_started_at = time.time(), 0.0
+    assert not e._refile_from_round_file(e._file_tracks) and rec.shot_number == 4
+    w.seen_at = {entry["ShotID"]: now + 1}   # (written after it was struck: it may be the one)
+    assert e._refile_from_round_file(e._file_tracks) and rec.shot_number == 3
+
+
 def test_gspros_round_file_corrects_the_hole_the_group_is_on(tmp_path):
     from commentator import round_file
     from commentator.round import Round
@@ -5985,6 +6180,7 @@ def test_gspros_round_file_corrects_the_hole_the_group_is_on(tmp_path):
     assert e._file_hole_check(rec, stroke, r, 17, seventeen, "[t]") == ("Hole 16", None, 3)   # (called there)
     ev = e._events.get_nowait()
     assert (ev.current, ev.correction, e.hole_number) == ("Hole 16", "round file", 16)
+    assert e._file_moved_to is None   # (moved back: hole 16's banner was read already, not still to come)
     # A stroke that ended the hole (in the cup, or a gimme) moves alone: the group may have moved on.
     holed = round_file.tracks([_round_entry(3, 40.0, name="Steve", hole=15, hole_result=7, holed=True)])[0]
     e._file_hole_check(rec, holed, r, 17, seventeen, "[t]")
@@ -7308,3 +7504,86 @@ def test_a_named_shot_looks_past_a_frame_whose_club_box_was_already_hidden(monke
     hud = s.read_buffered(frames, want_club=True)
     assert hud.club == "DR" and hud.crops is frames[1]
     assert s.read_buffered(frames[:1], want_club=True).crops is frames[0]
+
+
+def test_late_tiles_on_a_file_owned_shot_still_count_as_read_for_health(tmp_path):
+    # GSPro's round file set the shot's carry and total; the screen read them too at the next setup.
+    # The shot keeps the file's, but the read happened: the checkup mustn't count those tiles missing.
+    e = _mini_engine(tmp_path)
+    e.cfg.health.enabled = True
+    sid = e.store.record_shot(player="Dan", hole="Hole 1", shot=Shot(ball_speed=150.0), before=Hud(shot_number=1),
+                              after=Hud(), tags=[], carry_game_yards=None, total_yards=None, offline_yards=None)
+    rec = ShotRecord("Dan", Shot(ball_speed=150.0), "Hole 1", Hud(), [], shot_id=sid)
+    hc = e._hc
+    hc.tiles_missing = {t: 1 for t in e.cfg.health.required_tiles}
+    e._file_shot_ids[sid] = (True, True)
+    late = {"carry (game)": "210.0", "carry (raw)": "205.0", "total length": "230.0", "offline (raw)": "4.0"}
+    e._tiles_due[4] = (sid, rec, None, "yds", hc, set(hc.tiles_missing))   # (the follow missed them)
+    e._late_tiles[4] = dict(late)
+    e._apply_late_tiles(4)
+    assert {"carry (game)", "total length"} <= hc.tiles_seen
+    assert not any(hc.tiles_missing.values())
+    assert "carry (game)" not in rec.hud.tiles and "total length" not in rec.hud.tiles   # the file's stand
+    # Another shot's miss stays: this one's late read takes back only what its own follow missed.
+    hc.tiles_missing["carry (game)"] = 1
+    e._file_shot_ids[sid] = (True, True)
+    e._tiles_due[5] = (sid, rec, None, "yds", hc, set())
+    e._late_tiles[5] = {k: str(float(v) + 1) for k, v in late.items()}
+    e._apply_late_tiles(5)
+    assert hc.tiles_missing["carry (game)"] == 1
+
+
+def test_a_blind_shot_named_from_gspros_round_file_goes_back_whole_when_the_match_is_taken_back(tmp_path):
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Steve"], course="Brasstown", scheduled_format=None,
+              holes=18, start_hole=1, is_league=False)
+    e.round = r
+    seventeen = "Hole 17, par 3"
+    sid = e.store.record_shot(player="unknown", hole=seventeen, shot=Shot(ball_speed=40.0), before=Hud(shot_number=1),
+                              after=Hud(), tags=[], carry_game_yards=None, total_yards=None, offline_yards=None)
+    rec = ShotRecord("unknown", Shot(ball_speed=40.0), seventeen, Hud(), [], round_id=r.id, hole_seq=17,
+                     shot_number=1, par=3, shot_id=sid)
+    e.state.record_shot(rec)
+    e.state.record_shot(ShotRecord("Al", Shot(ball_speed=90.0), "Hole 16, par 4", Hud(), [], round_id=r.id,
+                                   hole_seq=16, shot_number=1, par=4, shot_id=None))
+    e.store.db.execute("UPDATE shots SET player = 'Steve', hole = 'Hole 16', shot_number = 3 WHERE id = ?", (sid,))
+    e._sync_file_names()
+    assert (rec.player, rec.hole_seq, rec.shot_number, rec.par) == ("Steve", 16, 3, 4)
+    e._fire_rows[5] = (sid, rec, 0, 16)   # the log agreed it was Steve's: his slot taken
+    # Matched to another player's stroke in one pass (the first taken back): it follows.
+    e.store.db.execute("UPDATE shots SET player = 'Al', hole = ?, shot_number = 2 WHERE id = ?", (seventeen, sid))
+    e._sync_file_names()
+    assert (rec.player, rec.hole, rec.hole_seq, rec.shot_number, rec.par) == ("Al", seventeen, 17, 2, 3)
+    assert e._fire_rows[5][2] is None and 5 in e._unnamed   # Steve's slot freed: the log's to agree again
+    e.store.db.execute("UPDATE shots SET player = 'unknown', hole = ?, shot_number = 3 WHERE id = ?", (seventeen, sid))
+    e._sync_file_names()   # (stroke 3: the screen's, put back by _unrefile as the pin was refused)
+    assert (rec.player, rec.hole, rec.hole_seq, rec.shot_number, rec.par) == ("unknown", seventeen, 17, 3, 3)
+
+
+def test_gspros_round_of_a_booth_round_comes_from_its_pins_and_a_refused_pin_is_forgotten(tmp_path):
+    from commentator import round_file
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Steve"], course="Brasstown", scheduled_format=None,
+              holes=18, start_hole=1, is_league=False)
+    e.round = r
+    sid = e.store.record_shot(player="Steve", hole="Hole 1", shot=Shot(ball_speed=150.0), before=Hud(shot_number=1),
+                              after=Hud(), tags=[], carry_game_yards=None, total_yards=None, offline_yards=None)
+    rec = ShotRecord("Steve", Shot(ball_speed=150.0), "Hole 1", Hud(), [], shot_number=1, shot_id=sid)
+    e.state.record_shot(rec)
+    t = round_file.tracks([_round_entry(1, 150.0, name="Steve", hole=0)])[0]
+    e.store.db.execute("UPDATE shots SET record_uuid = NULL WHERE id = ?", (sid,))
+    e._pin_file_track(t, sid)   # struck before the round started: pinned with no round
+    assert e._file_round_ids() == {}
+    # No booth round yet: a stroke on a course the booth knows that isn't the one on screen isn't tied.
+    e.store.record_shot(player="Al", hole="Hole 1", shot=Shot(ball_speed=90.0), before=Hud(shot_number=1),
+                        after=Hud(), tags=[], carry_game_yards=None, total_yards=None, offline_yards=None,
+                        course="Augusta National")
+    e.current_course = "Brasstown"
+    from dataclasses import replace as _re
+    assert e._file_ours(t, None, "test") and not e._file_ours(_re(t, course_key="augusta_national_gsp"), None, "test")
+    e.store.db.execute("UPDATE shots SET record_uuid = ? WHERE id = ?", (r.uuid, sid))   # the round adopted it
+    assert e._file_round_ids() == {r.uuid: {7}}
+    e._drop_refused_pins([t])   # the store never took it
+    assert t.shot_id not in e._file_pins and e._file_round_ids() == {}

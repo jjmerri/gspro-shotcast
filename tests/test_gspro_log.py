@@ -714,6 +714,13 @@ def test_a_4_0_out_of_bounds_is_called_on_its_own_shot():
     t0 = time.monotonic()
     facts, tag = asyncio.run(Engine._penalty_shot_facts(me, s.fires, drive, [], wait=5, track=oob))
     assert tag == "out_of_bounds" and time.monotonic() - t0 < 0.5
+    # The log has the stroke counted but not where the ball went: the file's water entry says it.
+    from dataclasses import replace as _re
+    from types import SimpleNamespace as _NS
+    counted = _NS(gspro=_NS(fire_info=lambda f: {"penalty_strokes": 1}))
+    water = _re(oob, penalty_kind="water")
+    facts, tag = asyncio.run(Engine._penalty_shot_facts(counted, 1, drive, [], wait=0, track=water))
+    assert tag == "in_hazard" and "out of bounds" not in facts[0]
 
 
 def test_a_tree_hit_is_logged_on_its_shot_and_called_by_its_height():

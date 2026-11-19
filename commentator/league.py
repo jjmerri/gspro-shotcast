@@ -119,6 +119,14 @@ class League:
         close = difflib.get_close_matches(lowered, list(self._aliases), n=1, cutoff=0.75)
         return self._aliases[close[0]] if close else None
 
+    def exact_player(self, text: str | None) -> str | None:
+        """The roster name `text` is one of a player's names exactly (no OCR tolerance)."""
+        return self._aliases.get(text.lower().strip()) if text else None
+
+    def names_of(self, player: str) -> list[str]:
+        """Every name a roster player goes by (lowercased)."""
+        return [a for a, p in self._aliases.items() if p == player]
+
     def chat_member(self, name: str | None) -> str | None:
         """The league player a live-chat name is most likely: the whole name or its first word is one of
         a player's names, or a name's first word, exactly ("dan", "Dan M", "Dan!") and nobody else's.
