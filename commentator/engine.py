@@ -477,6 +477,7 @@ TREE_CALLS_BY_LANGUAGE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 # Calls whose prompt cache costs more to write (1.25x) than it saves: the closer runs once a round,
 # so its cache is rarely read back before it expires (usage log, Oct 2026).
 UNCACHED_KINDS = {"closer"}
+CLOSER_PROMPTS = "closer-prompts.jsonl"   # in log_dir: every closer call's prompt and reply
 
 # How long a putt's or short shot's setup line waits for the booth to stop talking before it's dropped.
 PRESHOT_IDLE_WAIT_SECONDS = 5.0
@@ -640,6 +641,47 @@ def _great_shot_fact(start_yards: float | None, where: str, strokes: int | None 
                        "phrase.")
     return fact + (". That is an exceptional shot: react with real excitement, in your own words rather "
                    "than a stock golf phrase.")
+
+
+# How a pre-written wrap says the hole was finished. It's written before the last putt, so it can only
+# guess: three birdie putts that dropped aired as "stopped inside the gimme circle".
+_WRAP_TAP_IN = re.compile(
+    r"\b((?<!no )(?<!not a )gimme|tap[- ]?in|tap(s|ped)? (it )?in|conceded|concession"
+    # a last putt that missed (so the next was conceded)
+    r"|(didn't|did not|doesn't|does not|won't|never) (quite )?(drop|fall|go in|find the (cup|hole|bottom))"
+    r"|never (quite )?(dropped|fell|went in|found the (cup|hole|bottom))"
+    r"|lip(ped|s)? out|slid(es)? (by|past)|burn(ed|t|s)? the edge|missed (the|his|her|their|that) (\w+ )?putt|putt (just )?(missed|misses|stayed out|stays out)"
+    r"|inside the (\w+ )?circle|inside (four|4|three|3) feet|left (it|himself|herself|themselves) (a|an) \w+)\b",
+    re.I)
+_WRAP_HOLED = re.compile(
+    r"\b(holed|holes (it|the|out)|drain(s|ed)?|sinks?|sunk|sank|roll(s|ed)? (it )?(in|home)"
+    r"|found the (bottom|cup)|in the (cup|hole)\b|(putt|it|ball) (dropped|drops|went in|goes in)"
+    r"|makes? (the|his|her|their|that) (\w+ )?putt|made (the|his|her|their|that) (\w+ )?putt)\b", re.I)
+
+
+# A hole-out from off the green: a pre-written wrap can't know the last stroke wasn't a putt.
+_WRAP_HOLE_OUT = re.compile(r"\b(chip(ped|s)?[- ]in|hol(ed|es) out from|pitch(ed|es)? in|from off the green)\b", re.I)
+_NEGATION = re.compile(r"\b(never|not|no|didn't|doesn't|won't|wouldn't|couldn't|nearly|almost)\b[\w\s,'-]{0,25}$", re.I)
+
+
+def _wrap_contradicts_finish(lines, finish: str | None, shared: bool = False) -> bool:
+    """A pre-written wrap that tells a different finish than the hole had: "holed" or "conceded".
+    With the finish not known yet (None) or "mixed" (one side holed, another was conceded, so who's
+    meant can't be checked), any finish it tells is a guess. A make it denies ("never found the
+    cup") or a hole-out off the green (a chip-in) isn't checked: always a guess. Nor is a make on a
+    `shared` ball (a scramble side's partners): which of them holed it isn't checked."""
+    text = " ".join(line.text for line in lines).replace("\u2019", "'")
+    if _WRAP_HOLE_OUT.search(text):
+        return True
+    tap_in = _WRAP_TAP_IN.search(text)
+    holed = [m for m in _WRAP_HOLED.finditer(text)]
+    if holed and (shared or any(_NEGATION.search(text[:m.start()]) for m in holed)):
+        return True
+    if finish == "holed":
+        return bool(tap_in)
+    if finish == "conceded":
+        return bool(holed)
+    return bool(tap_in or holed)
 
 
 WELCOME = re.compile(r"\b(welcome|good (morning|afternoon|evening|day)|hello|evening,? everyone)\b", re.I)
@@ -4011,10 +4053,12 @@ class Engine:
             if branches:
                 log.info("Wrap: branches ready for %s (%s) on %s", sorted(branches), side.label, finished)
 
-    def _play_prepared_wrap(self, finished_hole, finished_seq: int) -> bool:
+    def _play_prepared_wrap(self, finished_hole, finished_seq: int, last_chance: bool = True) -> bool:
         """Play the pre-made wrap branch for the score the deciding side actually came in on (from the
         scorecard at `finished_seq`). Returns False (fall back to the on-demand wrap) when there's no
-        branch for that score, or the scorecard hasn't posted it yet."""
+        branch for that score, or the scorecard hasn't posted it yet. A branch that tells how the hole
+        was finished is checked against GSPro's log; with the result not in yet and a `last_chance`
+        still to come (the hole change), it's kept for then rather than aired on a guess."""
         wb = self._wrap_branches
         r = self.round
         side = next((s for s in (r.sides if r else []) if s.key == wb["side"]), None) if wb else None
@@ -4024,6 +4068,16 @@ class Engine:
         branch = wb["by_score"].get(strokes) if strokes is not None else None
         if not branch:
             return False
+        finish = self._hole_finish(finished_seq)
+        if _wrap_contradicts_finish(branch[0], finish, shared=any(len(s.players) > 1 for s in r.sides)):
+            if finish is None and not last_chance:
+                return False
+            # Written before the last putt, it guessed the finish (wrong, or with no result to check it
+            # against); the on-demand wrap sees the whole hole.
+            log.info("Wrap: dropped the pre-made branch for %s strokes (the hole ended %s): %r",
+                     strokes, finish or "unknown", " ".join(line.text for line in branch[0]))
+            self._wrap_branches = None
+            return False
         self._wrap_branches = None
         self._wrapped_hole = finished_hole
         lines, audio = branch
@@ -4032,6 +4086,24 @@ class Engine:
         self._write_transcript(lines, "segment")
         log.info("Wrap: pre-made branch played for %s strokes, no model call", strokes)
         return True
+
+    def _hole_finish(self, seq: int) -> str | None:
+        """How hole `seq` was finished, from GSPro's log: "holed" (every side's last putt or shot went
+        in), "conceded" (every side's was inside the gimme circle), "mixed", or None while any side's
+        isn't known. A wrap can talk about any side, so its finish is checked against them all."""
+        r = self.round
+        if not r:
+            return None
+        finishes = set()
+        for side in r.sides:
+            if not r.plays(side, seq):
+                continue
+            outcomes = {x.outcome for x in self.state.shots if x.round_id == r.id and x.hole_seq == seq
+                        and not x.mulligan and r.side_for(x.player) is side}
+            finishes.add("holed" if "holed" in outcomes else "conceded" if "conceded" in outcomes else None)
+        if None in finishes or not finishes:
+            return None
+        return finishes.pop() if len(finishes) == 1 else "mixed"
 
     def _missing_possessive(self, text: str) -> str | None:
         """A player's name run straight into what's theirs ("Josh round in 42" for "Josh's round")."""
@@ -11231,7 +11303,9 @@ class Engine:
         await self._drain_shot_tasks(self.cfg.commentary.wrap_wait_seconds)
         await self._drain_speech(self.cfg.commentary.wrap_wait_seconds + 10)
         await self._wait_out_held_banter()
-        return self._play_prepared_wrap(finished_hole, finished_seq)
+        # The hole change tries again, unless this was the round's last hole (the closer comes next).
+        r = self.round
+        return self._play_prepared_wrap(finished_hole, finished_seq, last_chance=bool(r and r.complete()))
 
     def _record_round_stats(self, r: Round, reason: str, complete: bool = True) -> dict:
         """Log and store each side's (and individual's) round. A round quit early is stored as
@@ -11855,7 +11929,21 @@ class Engine:
         self.usage.record(kind, llm, result)
         log.info("%s call (%s:%s): %.1fs, %s in / %s out tokens", kind, llm.provider, llm.model,
                  result.latency_seconds, result.input_tokens, result.output_tokens)
+        if kind == "closer":
+            self._capture_closer(llm, system or self.system, user, schema or self.schema, result)
         return result.text
+
+    def _capture_closer(self, llm: LLMClient, system: str, user: str, schema: dict, result) -> None:
+        """Keep each closer call's exact prompt and reply in log_dir/closer-prompts.jsonl, so other
+        models can be run on the same prompts (tools/closer_ab.py) to compare sign-offs."""
+        try:
+            entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "provider": llm.provider, "model": llm.model,
+                     "system": system, "user": user, "schema": schema, "text": result.text,
+                     "latency_s": round(result.latency_seconds, 2), "output_tokens": result.output_tokens}
+            with open(Path(self.cfg.log_dir) / CLOSER_PROMPTS, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as e:   # a record for later comparison: never worth losing the sign-off over
+            log.debug("Couldn't keep the closer prompt: %s", e)
 
     async def _generate(self, kind: str, llm: LLMClient, user: str, images: list[bytes],
                         system: str | None = None, max_words: int | None = None) -> list[Line]:
