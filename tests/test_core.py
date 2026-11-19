@@ -7844,3 +7844,17 @@ def test_a_full_shot_conceded_then_made_a_putt_by_gspros_round_file_keeps_its_co
     e.store.db.execute("UPDATE shots SET club = 'PT', is_putt = 1 WHERE id = ?", (sid,))
     e._sync_file_clubs()
     assert e.store.db.execute("SELECT outcome FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "conceded"
+
+
+def test_a_full_shots_concession_after_gspros_round_file_made_it_a_putt_is_stored_as_a_putts(tmp_path):
+    from commentator.round import Round
+
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Paul"], course="X", scheduled_format=None, holes=9, is_league=False)
+    e.round = r
+    sid, rec = _row(e, r, 7, 2, "fringe", hole=0, seq=1)
+    rec.shot_id = sid
+    e.store.db.execute("UPDATE shots SET club = 'PT', is_putt = 1 WHERE id = ?", (sid,))
+    e._sync_file_clubs()
+    e._record_result(sid, "conceded", "[t]", putt=False, rec=rec)   # the full shot's watch, started before
+    assert e.store.db.execute("SELECT outcome FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "conceded"

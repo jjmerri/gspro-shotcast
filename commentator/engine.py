@@ -3608,6 +3608,13 @@ class Engine:
                 x.shot_number = n if n is not None else x.shot_number   # (as stored: _unrefile's, maybe)
                 self._unslot(x.shot_id)
 
+    def _unfiled_setup(self, before: Hud, screen_before: Hud) -> Hud:
+        """The setup as the screen read it: the lie GSPro's round file overrode at setup, put back."""
+        k = _setup_key(screen_before)
+        if k in self._setup_screen_lies and before.lie == self._setup_lies.get(k):
+            return replace(before, lie=self._setup_screen_lies[k])
+        return before
+
     def _sync_file_clubs(self) -> None:
         """The live round's shots take the club (and putt or not) and the lie played from the store has for
         them: GSPro's round file can correct one after the live follow ended, or take its correction back,
@@ -7785,6 +7792,11 @@ class Engine:
         off_wrong_green = None if shot.is_putt else wrong_green_yards(before.lie, before.to_pin)
         info, material = self.gspro.fire_info(fire), MATERIAL_TO_LIE.get(lies0.get(idx)) if idx is not None else None
         file_lie = file_track.lie_before if file_track is not None and file_ours else None
+        # The setup lie GSPro's file gave, from a round that isn't this one's: back to the screen's.
+        unfiled = self._unfiled_setup(before, screen_before)
+        if file_track is not None and not file_ours and unfiled.lie != before.lie:
+            log.info("%s set up on %s after all (not GSPro's round file's %s)", tag, unfiled.lie, before.lie)
+            before = unfiled
 
         def played(b: Hud, file_lie: str | None) -> tuple[str | None, bool]:
             p = self._played_from(b, shot, info, material, shot_hole, file_lie)
@@ -7795,9 +7807,7 @@ class Engine:
             log.info("%s set up in yards: off the green, recorded as %s", tag, played_from)
         # Where it was played from without GSPro's round file, should that round turn out another's.
         # (recorded with it: GSPro's goes on with the stroke's pin, which keeps this one to go back to)
-        unfiled = replace(before, shot_number=screen_before.shot_number)
-        if (k := _setup_key(screen_before)) in self._setup_screen_lies and before.lie == self._setup_lies.get(k):
-            unfiled = replace(unfiled, lie=self._setup_screen_lies[k])   # the setup's, before the file's word
+        unfiled = replace(self._unfiled_setup(before, screen_before), shot_number=screen_before.shot_number)
         screen_played = played(unfiled, None)[0] if file_lie else None
         # The HUD's Tee recast only for want of a distance to check it by may still be a re-tee: keep its driver.
         retee = (before.lie or "").lower() == "tee" and self._at_tee_length(before, shot_hole) is None
@@ -9365,7 +9375,8 @@ class Engine:
                 del self._before_result[next(iter(self._before_result))]
         if rec is not None:
             rec.outcome = outcome
-        if putt or outcome == "holed":
+        # (a watch started on a full shot GSPro's round file has since made a putt: stored as a putt's)
+        if putt or outcome == "holed" or (rec is not None and rec.shot.is_putt):
             self.store.set_shot_result(shot_id, outcome=outcome)
         if outcome == "conceded" and shot_id is not None:
             self._conceded_ids.add(shot_id)
