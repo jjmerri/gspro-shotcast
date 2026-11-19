@@ -219,7 +219,7 @@ class _AsideLLM:
 
 async def test_scores_are_planned_at_round_start_but_fetched_and_written_as_their_hole_starts(tmp_path):
     e = _engine(tmp_path)
-    e.closer_llm = llm = _AsideLLM()
+    e.news_llm = llm = _AsideLLM()
     item = ScoreItem("nhl:5", "team", "in", "NHL, live as of 6:05 pm: Bruins 2, Stars 1, 8:14 left in the 2nd.", "2-1")
     e.scores = _Scores([item])
     r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, is_tournament=False)
@@ -250,7 +250,7 @@ async def test_nothing_on_tonight_means_no_score_holes(tmp_path):
 
 async def test_course_trivia_is_written_from_the_article_and_remembers_what_aired(tmp_path):
     e = _engine(tmp_path)
-    e.closer_llm = llm = _AsideLLM(hole=17)
+    e.news_llm = llm = _AsideLLM(hole=17)
     e.cfg.news.banter_rate = 1.0
 
     class _Trivia:
@@ -397,7 +397,7 @@ def test_a_playoff_names_its_winner_and_keeps_the_final_rounds_score():
 
 async def test_an_expired_check_in_doesnt_block_an_update(tmp_path):
     e = _engine(tmp_path)
-    e.closer_llm = _AsideLLM()
+    e.news_llm = _AsideLLM()
     e.scores = _Scores([ScoreItem("nhl:5", "team", "in", "NHL: Bruins 2, Stars 1.", "2-1")])
     r = SimpleNamespace(holes=9, seq=4, ended=False, is_league=False, is_tournament=False)
     e.round = r

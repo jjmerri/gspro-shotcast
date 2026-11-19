@@ -765,6 +765,7 @@ class Engine:
         chat_llm: LLMClient | None = None,
         health: Health | None = None,
         commentary_unavailable: str | None = None,
+        news_llm: LLMClient | None = None,
     ) -> None:
         self.cfg = cfg
         # Is the booth still reading GSPro right? In memory unless the caller gives it a file.
@@ -797,6 +798,7 @@ class Engine:
         self.opener_llm = opener_llm or self.round_llm
         self.closer_llm = closer_llm or self.round_llm
         self.chat_llm = chat_llm or live_llm
+        self.news_llm = news_llm or self.closer_llm   # news, trivia and score asides
         self.speech = speech
         # Commentary off records shots and rounds but never calls a model or speaks (see _complete).
         # Why the model and voice clients couldn't be built (missing API keys): recording only, and the
@@ -1184,7 +1186,8 @@ class Engine:
     async def run(self) -> None:
         models = (("pre-shot", self.preshot_llm), ("in-flight fallback", self.flight_llm),
                   ("reactions", self.live_llm), ("segments", self.segment_llm),
-                  ("round opener", self.opener_llm), ("round closer", self.closer_llm))
+                  ("round opener", self.opener_llm), ("round closer", self.closer_llm),
+                  ("news asides", self.news_llm))
         if self.commentary_unavailable:
             log.warning("Commentary can't start: %s. Recording shots and rounds only", self.commentary_unavailable)
             models = ()
@@ -2743,7 +2746,7 @@ class Engine:
     def _split_asides(self, r, room: int) -> tuple[int, int]:
         """(trivia, news) to write for a nine into the airtime live scores left: taken in turn, news
         first; news up to its per-nine share, trivia up to what's left of its per-round share. Every
-        aside is written with the closer's model, and a nine has airtime for only so many (see
+        aside is written with the news model, and a nine has airtime for only so many (see
         _aside_slots), so one written past that is money never heard."""
         caps = [max(0, self.cfg.trivia.per_round - self._trivia_planned) if self.trivia is not None else 0,
                 self.cfg.news.per_nine if self.news is not None else 0]
@@ -2758,7 +2761,7 @@ class Engine:
     def _maybe_prep_asides(self, r) -> None:
         """At the second hole played of each nine, start writing that nine's asides. Written then,
         not at the round start, a false start or a round quit early pays for none (or only the nine
-        it reached): these are the closer's model, the dearest calls the booth makes, and no aside
+        it reached): these are the news model's, among the dearest calls the booth makes, and no aside
         can play on a nine's first hole anyway."""
         if not self._asides_on() or r.ended or r.seq < 2:
             return
@@ -2822,7 +2825,7 @@ class Engine:
     async def _write_aside(self, label: str, user: str, facts_text: str, schema: dict, kind: str = "news",
                            llm: LLMClient | None = None, declined=None, check=None,
                            cap: int | None = None) -> tuple[list[Line], dict]:
-        """A two-line exchange from the closer's model (or `llm`), checked against its facts; ([], {}) if
+        """A two-line exchange from the news model (or `llm`), checked against its facts; ([], {}) if
         none. `declined(data)`: the model chose to write nothing, so don't retry. `check(lines)`: any
         further problems with the two lines, to retry on. `cap`: each line's word limit, if not
         commentary.aside_max_words."""
@@ -2831,7 +2834,7 @@ class Engine:
         user = user + aside_room(cap)
         prompt, data = user, {}
         for _ in range(2):
-            raw = await self._complete(kind, llm or self.closer_llm, prompt, [], schema=schema, system=self.system)
+            raw = await self._complete(kind, llm or self.news_llm, prompt, [], schema=schema, system=self.system)
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:

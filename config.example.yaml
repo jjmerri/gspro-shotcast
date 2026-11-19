@@ -39,10 +39,11 @@ llm:
   # The hazard read from a screenshot of the hole (needs screen.send_images: true).
   preshot: { provider: anthropic, model: claude-haiku-5-5, effort: low, vision: true, max_tokens: 900 }
   # The opener is raced against the course load, so it keeps the fast tier; the closer (also the
-  # news/trivia/score asides and the recap) is fetched ahead with its latency hidden, so it takes the
-  # half-price default tier. gpt-6.2 needs `effort: low` (it rejects `none`).
+  # recap) and the news/trivia/score asides are fetched ahead with their latency hidden, so they take
+  # the half-price default tier. gpt-6.2 needs `effort: low` (it rejects `none`).
   opener:  { provider: openai, model: gpt-6.2-sol, effort: low, service_tier: fast }
   closer:  { provider: openai, model: gpt-6.2-sol, effort: low, service_tier: default, max_tokens: 2000 }
+  # news:  { ... }   # news, trivia and score asides; omit to reuse `closer`
   # segment: { ... }   # between-hole segments; omit to reuse `live`
   # The booth's takes on the live chat (chat.enabled), written ahead of the gap: this is the default.
   # chat:    { provider: openai, model: gpt-6.2-sol, effort: low, service_tier: fast, max_tokens: 700 }
@@ -236,7 +237,7 @@ news:
 
 # Live scores as between-shots asides, from ESPN's public scoreboards (no key): a tour leaderboard
 # and your local teams (live, just finished, or later tonight). The holes that get one are picked at
-# round start, but the scores are fetched, written (closer's model) and voiced as that hole starts,
+# round start, but the scores are fetched, written (the news model) and voiced as that hole starts,
 # so they're minutes old on air. They share the news asides' spacing (one every three holes at most).
 scores:
   enabled: false
@@ -246,7 +247,7 @@ scores:
   # per_nine: 1
   # max_age_minutes: 10       # a check-in that hasn't aired by then is dropped as stale
 
-# Course trivia from the real course's Wikipedia article, written (closer's model) and voiced at round
+# Course trivia from the real course's Wikipedia article, written (the news model) and voiced at round
 # start. A story about one hole waits for that hole. Courses with no confident match get none.
 trivia:
   enabled: false

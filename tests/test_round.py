@@ -2550,7 +2550,7 @@ def _news_engine(tmp_path, llm):
     from commentator.news import GolfNews, Headline
 
     e = _engine(tmp_path)
-    e.closer_llm = llm
+    e.news_llm = llm
     e.news = GolfNews(["x"])
     e.news.headlines = [Headline("Scheffler wins by five", "Scottie Scheffler won by five shots on Sunday.",
                                  "espn.com")]

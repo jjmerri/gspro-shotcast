@@ -114,6 +114,9 @@ def _build_live_engine(cfg: Config):
         round_llm=build_llm(cfg.round_llm),
         opener_llm=build_llm(cfg.opener_llm),
         closer_llm=build_llm(cfg.closer_llm),
+        # Only built when it's its own model and some aside needs it: else it's the closer's client,
+        # and an unused model's missing key can't take the booth offline.
+        news_llm=build_llm(cfg.llm.news) if cfg.llm.news and cfg.asides_on else None,
         chat_llm=build_llm(cfg.llm.chat) if cfg.chat.enabled else None,
         speech=SpeechQueue(cfg, build_tts(cfg.tts)),
         screen=Screen(cfg.screen) if needs_screen else None,
@@ -620,6 +623,7 @@ async def cmd_check(cfg: Config, args) -> None:
     # Every model the booth can call, each tried once (roles sharing a model share the call).
     roles = {"live": cfg.llm.live, "segment": cfg.segment_llm, "flight": cfg.flight_llm,
              "preshot": cfg.preshot_llm, "opener": cfg.opener_llm, "closer": cfg.closer_llm,
+             **({"news": cfg.news_llm} if cfg.asides_on else {}),
              **({"chat": cfg.llm.chat} if cfg.chat.enabled else {})}
     by_model: dict[tuple, tuple[list[str], object]] = {}
     for role, llm_cfg in roles.items():

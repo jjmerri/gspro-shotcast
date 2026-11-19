@@ -241,6 +241,9 @@ class LLMSection(BaseModel):
     round: LLMConfig | None = None
     opener: LLMConfig | None = None
     closer: LLMConfig | None = None
+    # The golf-world asides (news, course trivia, live-score check-ins), written ahead of the round.
+    # Falls back to `closer`.
+    news: LLMConfig | None = None
     # The booth's takes on the live chat (chat.enabled). Written ahead of the gap they air in, so it
     # can take a richer model than `live`: it has to follow who said what in a busy conversation.
     chat: LLMConfig = Field(default_factory=lambda: LLMConfig(
@@ -723,8 +726,8 @@ class NewsConfig(BaseModel):
     limit: int = 12
     # Re-fetch the feeds this often during a long session (golf news moves slowly).
     refresh_hours: float = 6.0
-    # Golf-world asides per nine holes. Each is written (by the closer's model) and voiced at round
-    # start, then held for a quiet moment, or for the kind of shot its story is about.
+    # Golf-world asides per nine holes. Each is written (by llm.news, else the closer's model) and
+    # voiced at round start, then held for a quiet moment, or for the kind of shot its story is about.
     per_nine: int = 2
     # Chance, on an ordinary shot the booth would otherwise skip, of playing an aside that isn't
     # waiting on a particular kind of shot (one every three holes at most either way). Shared by every
@@ -755,7 +758,7 @@ class ScoresConfig(BaseModel):
     # Live scores as a between-shots aside: a tour leaderboard ("Scheffler's at -12 thru 14") and the
     # home teams' games (live, just finished, or later tonight), from ESPN's public scoreboards, no key.
     # Which holes get one is set at round start; the scores are fetched as that hole starts and the
-    # aside is written (closer's model) and voiced then, so what's said is minutes old. Off by default.
+    # aside is written (the news model) and voiced then, so what's said is minutes old. Off by default.
     enabled: bool = False
     tours: list[str] = Field(default_factory=lambda: ["pga"])   # pga, lpga, eur, champions-tour
     # The local teams, by name or ESPN abbreviation: a list ([Bruins, Celtics, Red Sox, Patriots]) is
@@ -769,7 +772,7 @@ class ScoresConfig(BaseModel):
 
 class TriviaConfig(BaseModel):
     # Course trivia: the real course behind GSPro's, from its Wikipedia article (found by name; a
-    # course with no confident match gets none). Written (closer's model) and voiced at round start
+    # course with no confident match gets none). Written (the news model) and voiced at round start
     # like the news asides; a story about one hole waits for that hole. Off by default.
     enabled: bool = False
     per_round: int = 2
@@ -1073,6 +1076,15 @@ class Config(BaseModel):
     @property
     def closer_llm(self) -> LLMConfig:
         return self.llm.closer or self.round_llm
+
+    @property
+    def news_llm(self) -> LLMConfig:
+        return self.llm.news or self.closer_llm
+
+    @property
+    def asides_on(self) -> bool:
+        """News, trivia or live-score asides: the calls written with news_llm."""
+        return self.news.enabled or self.trivia.enabled or self.scores.enabled
 
 
 def load_config(path: str | Path) -> Config:
