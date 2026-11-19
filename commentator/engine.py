@@ -3309,9 +3309,9 @@ class Engine:
                 or not shot_number or shot_number < 2 or self.hole_number is None or r is None or r.ended
                 or r.format in ("scramble", "alternate") or r.no_scramble):
             return None
-        def theirs(name: str) -> bool:   # (not another of the round's, whose name it fits too: Kyle, Kyle Martin)
+        def theirs(name: str) -> bool:   # (the round's one player it names: not Kyle's for Kyle Martin)
             k = self._file_roster_key(r, name)
-            return self._file_names_fit(name, player) and (k is None or player in (k, r.roster.get(k)))
+            return k is not None and player in (k, r.roster.get(k)) and self._file_names_fit(name, player)
         t = next((t for t in reversed(self._file_tracks) if t.hole == self.hole_number
                   and t.shot_number == shot_number - 1 and theirs(t.player)), None)
         if t is None or t.penalty or t.dropped or t.in_cup or not t.lie_after:
@@ -9726,8 +9726,9 @@ class Engine:
         for idx, fire in balls.items():
             t = None
             if launch := self.gspro.fire_info(fire).get("launch"):
-                ids = {str(e["ShotID"]) for e in self._file_entries
-                       if isinstance(e, dict) and e.get("ShotID") is not None and round_file.same_launch(launch, e)}
+                ids = {str(e["ShotID"]) for e in self._file_entries   # (strokes: not a hole-end copy of one)
+                       if isinstance(e, dict) and e.get("ShotID") is not None and round_file.same_launch(launch, e)
+                       } & tracks.keys()
                 t = tracks.get(next(iter(ids))) if len(ids) == 1 else None
             if t is None and (row := self._fire_rows.get(fire)) is not None:
                 t = tracks.get(pinned.get(row[0]))
@@ -9744,8 +9745,8 @@ class Engine:
         for entry in list(self._pick_cards_due):
             balls, gspro_names, cards, at = entry
             late = time.monotonic() - at > 60
-            if missing := {i: f for i, f in balls.items() if i not in cards}:
-                cards.update(self._file_pick_cards(missing))   # (its row or the file's stroke only now)
+            # Read again each time: a ball the file has only now (or its row), or a penalty written after it.
+            cards.update(self._file_pick_cards(balls))
             if any(f not in self._fire_rows for f in balls.values()):
                 if late:
                     self._pick_cards_due.remove(entry)
@@ -9757,7 +9758,7 @@ class Engine:
             r = self.round
             self._pick_ctp([(self._fire_rows[balls[idx]][1],
                              (r is not None and self._file_roster_key(r, card.name)) or names[idx], card)
-                            for idx, card in pairs if not card.penalty])
+                            for idx, card in pairs])
             # The log names the pick soon after: wait for it (a while), so the picked ball keeps its lie; and
             # for a ball not yet matched in the file.
             if (any(self._fire_rows[f][1].picked is None for f in balls.values()) or len(cards) < len(balls)) \
@@ -9793,14 +9794,15 @@ class Engine:
         if r is None or r.ended or r.format != "scramble":
             return
         tees = [(rec, r.current_name(who), card) for rec, who, card in balls
-                if who and who != "unknown" and card.lie is not None   # no finish: not known to be off the green
+                if who and who != "unknown"
+                and (card.lie is not None or card.penalty)   # no finish: not known to be off the green
                 and rec.round_id == r.id and rec.shot_number == 1 and not rec.mulligan
                 and rec.hole_seq is not None and r.hole_number(rec.hole_seq) in r.ctp_holes]
         if not tees:
             return
         seq = tees[0][0].hole_seq
         tees = [(rec.shot_id, who, card) for rec, who, card in tees if rec.hole_seq == seq]
-        got = {who: (card.yards if card.lie == "green" else None, sid) for sid, who, card in tees}
+        got = {who: (card.yards if card.lie == "green" and not card.penalty else None, sid) for sid, who, card in tees}
         # One team's balls: the other teams' on this hole stay as they are.
         was = r.ctp_picks.get(seq, {})
         now = {p: y for p, y in was.items() if p not in got} | got

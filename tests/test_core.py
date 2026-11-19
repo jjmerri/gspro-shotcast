@@ -5103,6 +5103,13 @@ def test_the_setup_lie_from_gspros_round_file_is_not_another_players_whose_name_
     e._round_watch = w = RoundFileWatch(str(tmp_path))
     w.entries, w.written = entries, time.time()
     assert e._file_rest_lie("Kyle Martin", 2) == "sand" and e._file_rest_lie("Kyle", 2) == "rough"
+    # A name the file has that fits two of the round's players is neither's.
+    e.round = Round(league=e.league, gspro_players=["Josh Merritt", "Josh Martin"], course="Test Links",
+                    scheduled_format=None, holes=18, start_hole=1, is_league=False)
+    entries = [_round_entry(1, 150.0, name="Josh M.", surfaces=(18, 11))]
+    e._file_entries, e._file_tracks = entries, round_file.tracks(entries)
+    w.entries = entries
+    assert e._file_rest_lie("Josh Martin", 2) is None and e._file_rest_lie("Josh Merritt", 2) is None
 
 
 def _log_round(e, fmt=None):
@@ -6730,6 +6737,7 @@ def test_gspros_round_file_gives_each_scramble_balls_finish_and_lie(tmp_path):
     _pick_file(e, ("Ozzy", 150.0, 5, 3.33 / M_TO_YD, False), ("Kyle Martin", 140.0, 5, 3.3 / M_TO_YD, False))
     near = e._file_pick_cards({0: 7, 1: 9})
     assert near[0].yards > near[1].yards   # 9'11.9" and 9'10.8" both round to 3.3 yd: the CTP is to the inch
+    _pick_file(e, ("Ozzy", 150.0, 3, 294 / M_TO_YD, False), ("Kyle Martin", 140.0, 5, 24 / M_TO_YD, False))
     r = Round(league=e.league, gspro_players=["Ozzy", "Kyle Martin"], course="X", scheduled_format=None, holes=9,
               is_league=False, slot_names=["Ozzy", "Kyle Martin"])
     e.round = r
@@ -6801,6 +6809,42 @@ def test_a_pick_takes_a_ball_gspros_round_file_writes_late_and_its_ctp_goes_to_t
     assert not e._pick_cards_due
     assert e.store.finish_of(kyle)[0] == "green"
     assert seen[-1] == [("Ozzy", "Ozzy"), ("Kyle Martin", "Kyle Martin")]
+
+
+def test_a_pick_ball_gspro_copied_at_the_hole_end_is_still_its_stroke(tmp_path):
+    from commentator import round_file
+    from commentator.sources.gspro_log import M_TO_YD
+
+    e = _mini_engine(tmp_path)
+    _pick_file(e, ("Ozzy", 150.0, 5, 3 / M_TO_YD, False), ("Kyle Martin", 140.0, 5, 24 / M_TO_YD, False))
+    copy = {**e._file_entries[0], "ShotID": "Ozzy-copy", "HoleResult": round_file.HOLED_COPY}
+    e._file_entries = [e._file_entries[0], copy, *e._file_entries[1:]]   # (written right after the stroke)
+    e._file_tracks = round_file.tracks(e._file_entries)
+    assert set(e._file_pick_cards({0: 7, 1: 9})) == {0, 1}
+
+
+def test_a_pick_ball_gspro_writes_a_penalty_for_later_loses_its_finish_and_ctp_mark(tmp_path):
+    from commentator.round import Round
+    from commentator.sources.gspro_log import M_TO_YD
+
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Ozzy", "Kyle Martin"], course="X", scheduled_format=None, holes=9,
+              is_league=False, slot_names=["Ozzy", "Kyle Martin"])
+    r.format, r.ctp_holes, r.start_hole, r.start_hole_assumed = "scramble", [1], 1, False
+    e.round = r
+    ozzy, rec = _row(e, r, 7, 1, "tee", hole=0, seq=1)
+    kyle, rec2 = _row(e, r, 9, 1, "tee", hole=0, seq=1)
+    rec.shot_id, rec2.shot_id, rec2.player = ozzy, kyle, "Kyle Martin"
+    _pick_file(e, ("Ozzy", 150.0, 5, 3 / M_TO_YD, False), ("Kyle Martin", 140.0, 5, 24 / M_TO_YD, False))
+    e._pick_cards_due.append(({0: 7, 1: 9}, {0: "Ozzy", 1: "Kyle Martin"}, e._file_pick_cards({0: 7, 1: 9}),
+                              time.monotonic()))
+    e._apply_pick_cards()
+    assert r.ctp_picks[1]["Ozzy"][0] is not None
+    _pick_file(e, ("Ozzy", 150.0, 5, 3 / M_TO_YD, True), ("Kyle Martin", 140.0, 5, 24 / M_TO_YD, False))
+    rec.picked, rec2.picked = False, True
+    e._apply_pick_cards()
+    assert r.ctp_picks[1]["Ozzy"][0] is None and not e._pick_cards_due
+    assert e.store.db.execute("SELECT finish_yards FROM shots WHERE id = ?", (ozzy,)).fetchone()[0] is None
 
 
 async def test_the_pick_watch_takes_each_ball_from_gspros_round_file_with_no_screen_read(tmp_path):

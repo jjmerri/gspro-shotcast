@@ -718,6 +718,14 @@ def test_gspros_club_index_corrects_the_club_read_off_the_screen(tmp_path, caplo
     assert _row(st, 1)["club"] == "DR"
     st._release_track(sid)
     assert _row(st, 1)["club"] == "7I"
+    # A putt the booth took for a full shot (no putter on the screen): GSPro's putter makes it one.
+    pid = _row(st, 3)["id"]
+    st._release_track(pid)
+    st.db.execute("UPDATE shots SET club = '7I', is_putt = 0 WHERE id = ?", (pid,))
+    st.apply_round_file(got, now=1005.0)
+    assert (_row(st, 3)["club"], _row(st, 3)["is_putt"]) == ("PT", 1)
+    st._release_track(pid)
+    assert (_row(st, 3)["club"], _row(st, 3)["is_putt"]) == ("7I", 0)
     st.apply_round_file(got[1:], now=1005.0, gone={drive["ShotID"]})   # taken back (a mulligan): the read returns
     assert _row(st, 1)["club"] == "7I"
     # The screen's 3-wood for GSPro's driver off the deck (hud.deck_club), and its approach wedge for the

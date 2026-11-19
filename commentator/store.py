@@ -18,7 +18,7 @@ from typing import Any, Callable, Iterable, Sequence
 
 from . import round_file
 from .hud import Hud
-from .models import Line, Shot
+from .models import PUTTER_CODES, Line, Shot
 from .sources.gspro_log import M_TO_YD
 
 log = logging.getLogger(__name__)
@@ -1613,10 +1613,15 @@ class Store:
                             (*named.values(), row["id"]))
             self._sync_gimme(row["id"])
         if (club := round_file.club_fix(t, row["club"])) is not None:
-            if old is not None and "club" not in (w := json.loads(was)):   # (a match from before clubs were)
-                was = json.dumps({**w, "club": row["club"]})
+            # A putt is GSPro's putter (or not), unless the file's naming the shot said: what it replaces
+            # goes in the snapshot (one from before clubs were kept has no club either).
+            putter = int(club in PUTTER_CODES)
+            fix_putt = "is_putt" not in (named or {}) and putter != row["is_putt"]
+            w = json.loads(was)
+            was = json.dumps({"club": row["club"], **({"is_putt": row["is_putt"]} if fix_putt else {}), **w})
             log.info("Shot %d club %s -> %s from GSPro's round file", row["id"], row["club"] or "unread", club)
-            self.db.execute("UPDATE shots SET club = ? WHERE id = ?", (club, row["id"]))
+            self.db.execute("UPDATE shots SET club = ?, is_putt = CASE WHEN ? THEN ? ELSE is_putt END WHERE id = ?",
+                            (club, fix_putt, putter, row["id"]))
         self.db.execute(
             "INSERT OR REPLACE INTO shot_tracks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (row["id"], t.shot_id, *(t.land or (None,) * 3), *(t.end or (None,) * 3),
