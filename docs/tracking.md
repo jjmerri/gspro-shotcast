@@ -167,7 +167,10 @@ player sets up on is where the file has their last ball at rest (the screen's re
 has no such stroke: a team ball, a penalty, another round's file), and the shot's own call says the
 lie the file has it struck from. GSPro's log only names where a ball first landed (its bounce line),
 which is kept for the cart-path kick and tree calls and as the lie's last fallback. A scramble's
-finish stays the booth's, for the ball the team picked. Offline isn't in the file. The file starts over each round, so earlier
+finish stays the booth's, for the ball the team picked. The club read off the screen before the
+shot is corrected to the file's (`ClubIndex`) when they differ (logged as `club 7I -> 6I from GSPro's
+round file`); a driver the file has off the deck stays the booth's 3-wood, as the screen's does.
+Offline isn't in the file. The file starts over each round, so earlier
 rounds keep what the booth read; a copy is kept from each round's end in `logs/round-files/`. Strokes the booth recorded without a name (no round started, so
 no player, hole or stroke number) are named from the file too: lined up with its strokes from the
 last one back by ball speed, three or more in a row, they take its player, hole and stroke number.

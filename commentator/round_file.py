@@ -46,6 +46,11 @@ SURFACES = {18: "tee", 1: "rough", 2: "fairway", 3: "deep rough", 4: "cart path"
 FINER_LIES = {"semi rough": ("rough", "fairway"), "first cut": ("rough", "fairway"), "fringe": ("green", "fairway"),
               "pine straw": ("rough", "deep rough"), "fescue": ("rough", "deep rough"), "native": ("rough", "deep rough"),
               "bunker": ("sand",), "waste area": ("sand", "rough"), "waste": ("sand", "rough")}
+# ClubIndex: GSPro's club, in its bag's order (ClubSelect in the 4.x game code): driver, 2-7 woods, 2-7
+# hybrids, 1-9 irons, then pitching, gap, sand and lob wedges and the putter; 27 is none. As the booth's
+# codes (hud.CLUB_WORDS).
+CLUBS = {0: "DR", **{i: f"{i + 1}W" for i in range(1, 7)}, **{i: f"{i - 5}H" for i in range(7, 13)},
+         **{i: f"{i - 12}I" for i in range(13, 22)}, 22: "PW", 23: "GW", 24: "SW", 25: "LW", 26: "PT"}
 PENALTY_RESULTS = (2, 3)   # ShotResult of a penalty's own entry: water, out of bounds
 PENALTY_KINDS = {2: "water", 3: "out of bounds"}
 HOLED = 7                  # HoleResult once the ball is in (or conceded)
@@ -89,6 +94,7 @@ class Track:
     in_cup: bool = False         # GSPro has the ball in the hole (activeShot.sd.isHoled)
     dropped: bool = False        # the hole ended on it: in the cup, or inside the gimme circle (HoleResult 7)
     ending_code: int | None = None   # EndingSurface as GSPro wrote it (SURFACES names the known ones)
+    club: str | None = None      # ClubIndex as the booth's code (CLUBS)
 
     @property
     def carry_yards(self) -> float | None:
@@ -174,7 +180,8 @@ def tracks(entries: list[dict]) -> list[Track]:
                   holed=bool(sd.get("isHoled")) or e.get("HoleResult") == HOLED, penalty=penalty,
                   par=e.get("HolePar") if isinstance(e.get("HolePar"), int) else None,
                   penalty_kind=PENALTY_KINDS.get(pen), in_cup=bool(sd.get("isHoled")), dropped=dropped,
-                  ending_code=e.get("EndingSurface") if isinstance(e.get("EndingSurface"), int) else None)
+                  ending_code=e.get("EndingSurface") if isinstance(e.get("EndingSurface"), int) else None,
+                  club=CLUBS.get(e.get("ClubIndex")) if isinstance(e.get("ClubIndex"), int) else None)
         out.append(t)
     return out
 
@@ -188,6 +195,18 @@ def finer_lie(lie: str | None, hud_lie: str | None) -> str | None:
     if hud in FINER_LIES and lie in FINER_LIES[hud]:
         return hud
     return lie
+
+
+def club_fix(t: Track, club: str | None) -> str | None:
+    """The club GSPro's file has for stroke `t` when the booth's `club` (read off the screen) differs, else
+    None. A driver off the deck is taken as the booth takes the screen's (hud.deck_club: a 3-wood), and
+    an approach wedge is GSPro's gap wedge (its bag has no AW)."""
+    if t.club is None:
+        return None
+    file_club = "3W" if t.club == "DR" and t.lie_before != "tee" and t.shot_number != 1 else t.club
+    if (club or "").upper().replace("AW", "GW") == file_club:
+        return None
+    return file_club
 
 
 def untracked(entries: list[dict], got: list[Track]) -> set[str]:

@@ -58,3 +58,14 @@ read with no round (mid-round join, `_note_idle_card`); and the result banner (`
 putt the log never credits (GSPro 3.59 practice, no log). Once the slot naming (see "Retire the
 setup-screen slot order") covers every round, check booth logs for `Round ... scorecard:` lines in
 covered rounds and remove the in-round card read and the banner.
+
+## Check the round file's club against the screen's, then trust it outright
+
+GSPro's `ClubIndex` corrects the club the screen read before the shot (`round_file.club_fix`, applied
+live in `handle_shot` and by `Store._apply_track`). The index-to-club table (`round_file.CLUBS`) is
+GSPro 4.x's own (`ClubSelect`'s DR, W2-W7, H2-H7, I1-I9, PW, GW, SW, LW, PT, None) and matched one real
+4.x round (driver off tees, putter on greens, 5-wood and wedges where expected); it hasn't been checked
+on 3.59. Count the `club ... from GSPro's round file` log lines over a few nights: if the screen's
+club is only ever the one corrected, the club box OCR can be kept just for the pre-shot call (the
+only place the file can't help), and the driver-off-the-deck rule (`hud.deck_club`) rechecked
+against what the file records there.

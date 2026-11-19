@@ -7700,6 +7700,9 @@ class Engine:
             file_ours = False
             before = replace(before, shot_number=screen_before.shot_number, gspro_shot=screen_before.gspro_shot)
             hud = replace(hud, shot_number=screen_before.shot_number)
+        if file_track is not None and file_ours and (club := round_file.club_fix(file_track, shot.club)) is not None:
+            log.info("%s club %s -> %s from GSPro's round file", tag, shot.club or "unread", club)
+            shot = replace(shot, club=club)
         rec = ShotRecord(
             player or "unknown", shot, shot_hole, hud, tags,
             round_id=r.id if r else None, hole_seq=round_hole, par=shot_par,

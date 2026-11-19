@@ -1489,7 +1489,7 @@ class Store:
         return written, pending
 
     _TRACKED = ("start_x", "start_y", "start_z", "lie_before", "lie_after", "carry_game_yards", "total_yards",
-                "total_from_log", "finish_yards")
+                "total_from_log", "finish_yards", "club")
     _NAMED = ("player", "hole", "shot_number", "is_putt", "attributed")   # what _fill_blind sets too
     BLIND_RUN = 3   # strokes in a row whose ball speeds line up before blind shots are named from the file
 
@@ -1612,6 +1612,9 @@ class Store:
             self.db.execute(f"UPDATE shots SET {', '.join(f'{c} = ?' for c in named)} WHERE id = ?",
                             (*named.values(), row["id"]))
             self._sync_gimme(row["id"])
+        if (club := round_file.club_fix(t, row["club"])) is not None:
+            log.info("Shot %d club %s -> %s from GSPro's round file", row["id"], row["club"] or "unread", club)
+            self.db.execute("UPDATE shots SET club = ? WHERE id = ?", (club, row["id"]))
         self.db.execute(
             "INSERT OR REPLACE INTO shot_tracks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (row["id"], t.shot_id, *(t.land or (None,) * 3), *(t.end or (None,) * 3),

@@ -692,3 +692,23 @@ def test_slot_players_ties_the_logs_credited_shots_to_the_files_names_by_their_b
     # A slot whose shots name two players, or a name two slots claim, is left out.
     assert round_file.slot_players([(1, launch), (1, {**launch, "sp": 140.0})], [dan, sue]) == {}
     assert round_file.slot_players([(1, launch), (0, launch)], [dan, sue]) == {}
+
+
+def test_gspros_club_index_corrects_the_club_read_off_the_screen(tmp_path, caplog):
+    st = _season(tmp_path)   # every shot read as a 7-iron
+    drive, approach, putt = ({**e, "ClubIndex": i} for e, i in ((DRIVE, 0), (APPROACH, 19), (PUTT, 26)))
+    got = round_file.tracks([drive, approach, putt])
+    assert [t.club for t in got] == ["DR", "7I", "PT"]
+    with caplog.at_level("INFO"):
+        st.apply_round_file(got, now=1005.0)
+    assert [_row(st, n)["club"] for n in (1, 2, 3)] == ["DR", "7I", "PT"]
+    assert "club 7I -> DR from GSPro's round file" in caplog.text
+    st.apply_round_file(got[1:], now=1005.0, gone={drive["ShotID"]})   # taken back (a mulligan): the read returns
+    assert _row(st, 1)["club"] == "7I"
+    # The screen's 3-wood for GSPro's driver off the deck (hud.deck_club), and its approach wedge for the
+    # gap wedge, aren't disagreements.
+    deck = round_file.tracks([{**APPROACH, "ClubIndex": 0}])[0]
+    assert round_file.club_fix(deck, "3W") is None and round_file.club_fix(deck, "5W") == "3W"
+    gap = round_file.tracks([{**APPROACH, "ClubIndex": 23}])[0]
+    assert round_file.club_fix(gap, "AW") is None and round_file.club_fix(gap, None) == "GW"
+    assert round_file.club_fix(round_file.tracks([{**APPROACH, "ClubIndex": 27}])[0], "7I") is None
