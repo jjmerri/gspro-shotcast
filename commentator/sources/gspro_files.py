@@ -8,7 +8,8 @@ GSPro writes these itself whatever launch monitor sent the shot, once the ball c
   el launch, az start direction, ts total spin, sa spin axis, cy launch-monitor carry). A new round
   starts the list over. Not every entry is a swing: a penalty (ShotResult 2 water, 3 out of bounds)
   is its own entry, a ball that drops after the stroke (a gimme, a holed putt) can add a copy of
-  that stroke with HoleResult 7, and a mulligan marks the replaced entry ShotResult 1. A concession
+  that stroke with HoleResult 7 (in a scramble, one for every teammate: holed_copies), and a mulligan
+  marks the replaced entry ShotResult 1. A concession
   (GSPro's pickup at the max score) writes no entry at all, nor does a practice or range shot.
   GSPro rewrites the whole file (File.WriteAllText) in the frame it decides the ball is at rest,
   before it logs the shooter's score line, so it's the booth's earliest word of the rest: the lie,
@@ -61,19 +62,32 @@ def launch_of(entry: dict) -> dict[str, float] | None:
     return vals if vals.get("sp") else None
 
 
-def swings(entries: list[dict]) -> list[tuple[str, dict]]:
-    """(ShotID, entry) for each entry that is a stroke the player hit: not a penalty, not the copy
-    GSPro adds when the ball drops (the stroke before it again: same player, hole and ball data)."""
-    out, prev = [], None
-    for e in entries:
-        sid, vals = e.get("ShotID"), launch_of(e)
-        copy = (e.get("HoleResult") == HOLED_COPY and prev is not None and vals is not None
-                and vals == launch_of(prev) and e.get("PlayerName") == prev.get("PlayerName")
-                and e.get("Hole") == prev.get("Hole"))
-        if sid and vals and e.get("ShotResult") in (SWING, None) and not copy:
-            out.append((sid, e))
-        prev = e
+def holed_copies(entries: list) -> dict[int, int]:
+    """The copies GSPro adds when a hole ends on a ball (HoleResult 7): index in `entries` -> the index of
+    the stroke it copies. A copy carries the ball data of the stroke that ended the hole, often one
+    stroke number on. Alone it follows its own stroke; in a team format (scramble) GSPro adds one for
+    every teammate, in either order, so it's a HoleResult 7 entry with the same ball data as an earlier
+    entry on the hole, whoever's: the first entry with that ball is the stroke."""
+    out: dict[int, int] = {}
+    first: dict[tuple, int] = {}
+    for i, e in enumerate(entries):
+        if not isinstance(e, dict) or (vals := launch_of(e)) is None:
+            continue
+        key = (e.get("Hole"), tuple(sorted(vals.items())))
+        if key in first and e.get("HoleResult") == HOLED_COPY:
+            out[i] = first[key]
+        else:
+            first.setdefault(key, i)
     return out
+
+
+def swings(entries: list[dict]) -> list[tuple[str, dict]]:
+    """(ShotID, entry) for each entry that is a stroke the player hit: not a penalty, not a mulligan's
+    taken-back stroke, not a copy GSPro adds when the ball drops (holed_copies)."""
+    copies = holed_copies(entries)
+    return [(sid, e) for i, e in enumerate(entries)
+            if isinstance(e, dict) and i not in copies and (sid := e.get("ShotID")) and launch_of(e)
+            and e.get("ShotResult") in (SWING, None)]
 
 
 class ChangeNotifier:

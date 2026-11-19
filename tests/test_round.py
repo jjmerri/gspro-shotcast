@@ -7401,6 +7401,30 @@ async def test_a_putt_from_a_slot_the_booth_cant_name_takes_its_result_from_the_
     assert e.last_hole_result is None       # GSPro's log said it: not the banner (watched for meanwhile)
 
 
+async def test_a_miss_from_a_slot_the_booth_cant_name_that_isnt_a_putt_any_more_grades_no_call(tmp_path):
+    from commentator.models import ShotEvent
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    e.round.slot_names, e.round.slot_guess = ["Kroll", "Barrows"], True
+    c = e.cfg.commentary
+    c.hole_result_window_seconds = c.lag_result_window_seconds = 0.3
+    e.commentary_on = False
+
+    async def no_banner(*a, **k):
+        return None
+
+    async def missed(*a, **k):
+        return "missed"
+    e._hole_result, e._wait_putt_result = no_banner, missed
+    e._record_result = lambda *a, **k: False   # (GSPro's round file has made it a full shot meanwhile)
+    e.screen = object()
+    e.gspro._fire_info[1] = {"player": 1, "hole": 0}
+    e._pending_prediction["Barrows"] = ("Al", False, e.state.current_hole)
+    hud = _tee("Barrows", shot=3)
+    await e.handle_shot(ShotEvent(shot=Shot(club="PT", carry=5.0), hud_hint=hud, impact_hud_hint=hud))
+    assert e.store.db.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
+
+
 async def test_a_putt_the_log_never_credits_keeps_the_banner_shown_while_waiting_on_the_log(tmp_path):
     import asyncio
     import time
@@ -7435,7 +7459,7 @@ async def test_a_putt_the_log_never_credits_keeps_the_banner_shown_while_waiting
 
 
 async def test_gspros_club_for_a_tee_shot_comes_before_the_drive_records(tmp_path):
-    # The screen read a driver, GSPro's file a 3-wood: no driving record for it, and stored as the 3-wood.
+    # The screen read no club, GSPro's file a 3-wood: no driving record for it, and stored as the 3-wood.
     import time
 
     from commentator import round_file
@@ -7455,22 +7479,45 @@ async def test_gspros_club_for_a_tee_shot_comes_before_the_drive_records(tmp_pat
     e.store.season_stats = lambda p: {"longest_drive": 100.0}
     e.store.today_longest_drive = lambda p: None
     hud = _tee("Kroll", shot=1)
-    await e.handle_shot(ShotEvent(shot=Shot(club="DR", carry=240.0, ball_speed=150.0), hud_hint=hud,
+    await e.handle_shot(ShotEvent(shot=Shot(club=None, carry=240.0, ball_speed=150.0), hud_hint=hud,
                                   impact_hud_hint=hud))
     rec = e.state.shots[-1]
     assert rec.shot.club == "3W" and "season_best_drive" not in rec.tags
-    # Stored under the screen's driver; the stroke's pin sets GSPro's 3-wood, and a release takes it back.
+    # Stored with the screen's none; the stroke's pin sets GSPro's 3-wood, and a release takes it back.
     sid = rec.shot_id
     assert e._file_pins == {"s1": sid}
     club = lambda: e.store.db.execute("SELECT club FROM shots WHERE id = ?", (sid,)).fetchone()[0]
-    assert club() == "DR"
+    assert club() is None
     e.store.apply_round_file([track], now=time.time(), pinned=e._file_pins)
     assert club() == "3W"
     e.store._release_track(sid)
-    assert club() == "DR"
+    assert club() is None
 
 
-async def test_gspros_putter_for_a_club_the_screen_misread_is_stored_as_a_putt(tmp_path):
+async def test_the_screens_club_stands_over_gspros(tmp_path):
+    # The screen read a driver, GSPro's file (the club selected at rest) a 3-wood: the driver was hit.
+    from commentator import round_file
+    from commentator.models import ShotEvent
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    e.commentary_on = False
+    e.screen = None
+    track = round_file.Track("s1", None, None, "Kroll", 1, 1, 150.0, False, (0.0, 0.0, 0.0), (0.0, 0.0, 210.0), None,
+                             lie_before="tee", lie_after="fairway", club="3W")
+
+    async def refreshed():
+        return None
+    e._round_watch, e._refresh_round_file = type("W", (), {"written": 0.0})(), refreshed
+    e._file_track_of = lambda *a, **k: track
+    e._file_ours = lambda *a, **k: True
+    hud = _tee("Kroll", shot=1)
+    await e.handle_shot(ShotEvent(shot=Shot(club="DR", carry=240.0, ball_speed=150.0), hud_hint=hud,
+                                  impact_hud_hint=hud))
+    assert e.state.shots[-1].shot.club == "DR"
+    assert e.store.db.execute("SELECT club FROM shots").fetchone()[0] == "DR"
+
+
+async def test_gspros_putter_for_a_club_the_screen_missed_is_stored_as_a_putt(tmp_path):
     from commentator import round_file
     from commentator.models import ShotEvent
 
@@ -7487,14 +7534,251 @@ async def test_gspros_putter_for_a_club_the_screen_misread_is_stored_as_a_putt(t
     e._file_ours = lambda *a, **k: True
     hud = _tee("Kroll", shot=3)
     hud.lie = "green"
-    await e.handle_shot(ShotEvent(shot=Shot(club="7I", carry=5.0, ball_speed=8.0, vla=4.0), hud_hint=hud,
+    await e.handle_shot(ShotEvent(shot=Shot(club=None, carry=5.0, ball_speed=8.0, vla=4.0), hud_hint=hud,
                                   impact_hud_hint=hud))
-    assert tuple(e.store.db.execute("SELECT club, is_putt FROM shots").fetchone()) == ("7I", 1)
+    # (stored with the screen's none: the stroke's pin sets GSPro's putter)
+    assert tuple(e.store.db.execute("SELECT club, is_putt FROM shots").fetchone()) == (None, 1)
+
+
+async def test_a_live_club_fill_taken_back_by_a_late_hole_out_copy_leaves_the_screens_putt_call(tmp_path):
+    # A chip the screen read no club for, GSPro's file (read before its hole-out copy) the putter: once
+    # the copy says the hole ended on it, the file can't say, and the chip is a full shot again.
+    import time
+    from dataclasses import replace as _replace
+
+    from commentator import round_file
+    from commentator.models import ShotEvent
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    e.commentary_on = False
+    e.screen = None
+    track = round_file.Track("s1", None, None, "Kroll", 1, 3, 21.0, False, (0.0, 0.0, 0.0), (0.0, 0.0, 15.0), None,
+                             lie_before="fairway", lie_after="green", club="PT")
+
+    async def refreshed():
+        return None
+    e._round_watch, e._refresh_round_file = type("W", (), {"written": 0.0})(), refreshed
+    e._file_track_of = lambda *a, **k: track
+    e._file_ours = lambda *a, **k: True
+    hud = _tee("Kroll", shot=3)
+    hud.lie = "fairway"
+    shot = Shot(club=None, carry=14.0, ball_speed=21.0, vla=30.0)
+    assert not shot.is_putt
+    await e.handle_shot(ShotEvent(shot=shot, hud_hint=hud, impact_hud_hint=hud))
+    sid = e.state.shots[-1].shot_id
+    row = lambda: tuple(e.store.db.execute("SELECT club, is_putt FROM shots WHERE id = ?", (sid,)).fetchone())
+    assert row() == (None, 0)   # the screen's: the stroke's pin sets GSPro's
+    e.store.apply_round_file([track], now=time.time(), pinned=e._file_pins)
+    assert row() == ("PT", 1)
+    e.store.apply_round_file([_replace(track, dropped=True)], now=time.time(), pinned=e._file_pins)
+    assert row() == (None, 0)
+
+
+async def test_gspros_late_putt_call_on_a_filled_club_stands_once_the_fill_is_taken_back(tmp_path):
+    # GSPro's log says putter only on the second look, after the file filled the club the screen missed:
+    # the putt is the log's, and stays one when a hole-out copy takes the file's club back.
+    import time
+    from dataclasses import replace as _replace
+
+    from commentator import round_file
+    from commentator.models import ShotEvent
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    e.commentary_on = False
+    e.screen = None
+    track = round_file.Track("s1", None, None, "Kroll", 1, 3, 21.0, False, (0.0, 0.0, 0.0), (0.0, 0.0, 15.0), None,
+                             lie_before="fairway", lie_after="fringe", club="PT")
+
+    async def refreshed():
+        return None
+    looks = []
+
+    async def read_putter(shot, *a, **k):
+        looks.append(shot.club)
+        if len(looks) > 1:
+            shot.putter, shot.club = True, "PT"
+    e._round_watch, e._refresh_round_file = type("W", (), {"written": 0.0})(), refreshed
+    e._file_track_of = lambda *a, **k: track
+    e._file_ours = lambda *a, **k: True
+    e._read_putter = read_putter
+    hud = _tee("Kroll", shot=3)
+    hud.lie = "fairway"
+    await e.handle_shot(ShotEvent(shot=Shot(club=None, carry=14.0, ball_speed=21.0, vla=30.0, club_speed=6.0,
+                                            path=0.0, club_measured=True), hud_hint=hud, impact_hud_hint=hud))
+    assert looks == [None, "PT"]
+    sid = e.state.shots[-1].shot_id
+    row = lambda: tuple(e.store.db.execute("SELECT club, is_putt FROM shots WHERE id = ?", (sid,)).fetchone())
+    assert row() == ("PT", 1)
+    # (the putter's club fields as filtered for it: a 0 its monitor doesn't measure isn't stored)
+    assert e.store.db.execute("SELECT club_path FROM shots WHERE id = ?", (sid,)).fetchone()[0] is None
+    e.store.apply_round_file([track], now=time.time(), pinned=e._file_pins)
+    e.store.apply_round_file([_replace(track, dropped=True)], now=time.time(), pinned=e._file_pins)
+    assert row() == ("PT", 1)
+
+
+@pytest.mark.parametrize("copied_by", [1, 2, 3, 4, 99])
+async def test_gspros_club_isnt_filled_live_on_a_stroke_the_hole_may_yet_end_on(tmp_path, copied_by):
+    # The follow found the chip at rest on the green with GSPro's putter; its hole-out copy comes in by
+    # the shot's `copied_by`th look at the file again, maybe while its result is waited on, or never.
+    from dataclasses import replace as _replace
+
+    from commentator import round_file
+    from commentator.models import ShotEvent
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    e.commentary_on = False
+    e.screen = None
+    track = round_file.Track("s1", None, None, "Kroll", 1, 3, 21.0, False, (0.0, 0.0, 0.0), (0.0, 0.0, 15.0), None,
+                             lie_before="fairway", lie_after="green", club="PT")
+
+    async def refreshed():
+        return None
+    e._round_watch, e._refresh_round_file = type("W", (), {"written": 0.0})(), refreshed
+    looks = []
+
+    def track_of(p, b, i, sid=None, **k):
+        looks.append(sid)
+        return _replace(track, dropped=True) if sid and len([s for s in looks if s]) >= copied_by else track
+    e._file_track_of = track_of
+    e._file_ours = lambda *a, **k: True
+    hud = _tee("Kroll", shot=3)
+    hud.lie = "fairway"
+    await e.handle_shot(ShotEvent(shot=Shot(club=None, carry=14.0, ball_speed=21.0, vla=30.0), hud_hint=hud,
+                                  impact_hud_hint=hud))
+    rec = e.state.shots[-1]
+    assert (rec.shot.club, rec.shot.is_putt) == (None, False)
+    assert not {"putt", "long_putt"} & set(rec.tags)
+    stored = e.store.db.execute("SELECT tags FROM shots WHERE id = ?", (rec.shot_id,)).fetchone()[0]
+    assert not {"putt", "long_putt"} & set(json.loads(stored))
+    assert tuple(e.store.db.execute("SELECT club, is_putt FROM shots WHERE id = ?", (rec.shot_id,)).fetchone()) \
+        == (None, 0)
+
+
+async def test_gspros_late_putt_call_stands_when_the_filled_clubs_round_turns_out_another(tmp_path):
+    from commentator import round_file
+    from commentator.models import ShotEvent
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    e.commentary_on = False
+    e.screen = None
+    track = round_file.Track("s1", None, None, "Kroll", 1, 3, 21.0, False, (0.0, 0.0, 0.0), (0.0, 0.0, 15.0), None,
+                             lie_before="fairway", lie_after="fringe", club="PT")
+
+    async def refreshed():
+        return None
+    looks, ours = [], []
+
+    async def read_putter(shot, *a, **k):
+        looks.append(shot.club)
+        if len(looks) > 1:
+            shot.putter, shot.club = True, "PT"
+
+    def file_ours(*a, **k):
+        ours.append(1)
+        return len(ours) == 1
+    e._round_watch, e._refresh_round_file = type("W", (), {"written": 0.0})(), refreshed
+    e._file_track_of = lambda *a, **k: track
+    e._file_ours = file_ours
+    e._read_putter = read_putter
+    hud = _tee("Kroll", shot=3)
+    hud.lie = "fairway"
+    await e.handle_shot(ShotEvent(shot=Shot(club=None, carry=14.0, ball_speed=21.0, vla=30.0), hud_hint=hud,
+                                  impact_hud_hint=hud))
+    assert len(looks) == 2 and len(ours) >= 2
+    rec = e.state.shots[-1]
+    assert (rec.shot.club, rec.shot.is_putt) == ("PT", True)
+    assert tuple(e.store.db.execute("SELECT club, is_putt FROM shots WHERE id = ?", (rec.shot_id,)).fetchone()) \
+        == ("PT", 1)
+
+
+@pytest.mark.parametrize("file_putt, putt, ours", [(True, True, True), (None, False, True), (True, False, False)])
+async def test_gspros_putt_call_in_its_file_stands_for_a_club_and_mode_nothing_else_read(tmp_path, file_putt, putt,
+                                                                                          ours):
+    # A 21 mph lag on the green, no club read and no launch mode in GSPro's log: too quick for a putt on
+    # speed and launch alone, but GSPro's file says it played it as one (or doesn't say), unless the
+    # file turns out to be another round's by the time the shot is recorded.
+    import time
+    from dataclasses import replace
+
+    from commentator import round_file
+    from commentator.models import ShotEvent
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    e.commentary_on = False
+    e.screen = None
+    track = round_file.Track("s1", None, None, "Kroll", 1, 3, 21.0, file_putt, (0.0, 0.0, 0.0), (0.0, 0.0, 15.0),
+                             None, lie_before="green", lie_after="green", club="PT")
+
+    async def refreshed():
+        return None
+    e._round_watch, e._refresh_round_file = type("W", (), {"written": 0.0})(), refreshed
+    checks = []
+    e._file_track_of = lambda *a, **k: track
+    e._file_ours = lambda *a, **k: checks.append(1) == [] or ours or len(checks) == 1
+    hud = _tee("Kroll", shot=3)
+    hud.lie = "green"
+    shot = Shot(club=None, carry=0.0, ball_speed=21.0, vla=0.0)
+    assert not shot.is_putt
+    await e.handle_shot(ShotEvent(shot=shot, hud_hint=hud, impact_hud_hint=hud))
+    rec = e.state.shots[-1]
+    assert (rec.shot.club, rec.shot.is_putt) == (None, putt)
+    # (stored as the guess: GSPro's call is the stroke's pin's to make, and take back)
+    row = lambda: tuple(e.store.db.execute("SELECT club, is_putt FROM shots WHERE id = ?", (rec.shot_id,)).fetchone())
+    assert row() == (None, 0)
+    if ours:
+        e.store.apply_round_file([replace(track, dropped=True)], now=time.time(), pinned=e._file_pins)
+        assert row() == (None, int(putt))
+
+
+@pytest.mark.parametrize("by_log", [False, True])
+async def test_a_gimme_gspros_file_writes_after_the_store_filled_its_putter_settles_the_chip_as_a_full_shot(
+        tmp_path, by_log):
+    # The store filled GSPro's putter on a chip at rest on the green (synced onto its record), then the
+    # hole ended on it: settled from the file's drop, or first by the log, which goes by the record's putt.
+    # A miss settled on it while it was a putt (a scramble teammate played on) goes.
+    from commentator import round_file
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    track = round_file.Track("s1", None, None, "Kroll", 1, 3, 21.0, False, (0.0, 0.0, 0.0), (0.0, 0.0, 15.0), None,
+                             lie_before="fairway", lie_after="green", club="PT", dropped=True)
+    rec = type("R", (), {"shot": Shot(club="PT", putter=True, ball_speed=21.0), "outcome": None,
+                         "hud": _tee("Kroll", shot=3)})()
+    results = []
+    e.store.screen_putt = lambda shot_id: False if shot_id == 7 else None
+    e.store.set_shot_result = lambda shot_id, outcome: results.append((shot_id, outcome))
+    e.store.record_gimme = lambda shot_id, left: None
+    e.store.set_lie_after = lambda shot_id, lie: None
+    e.store.clear_miss = lambda shot_id, full: results.append((shot_id, full))
+    e._file_tracks = [track]
+    if by_log:
+        e._record_result(7, "conceded", "[t]", putt=rec.shot.is_putt, rec=rec)
+    else:
+        e._file_end_due("s1", 7, "[t]", rec, False)
+        e._settle_file_ends()
+    assert (rec.outcome, rec.shot.is_putt, results) == ("conceded", False, [(7, True)])
+    # (the miss goes too once the file's hole-out has taken the putter back first)
+    e.store.screen_putt = lambda shot_id: None
+    results.clear()
+    e._record_result(8, "conceded", "[t]", putt=False)
+    assert results == [(8, False)]
+
+
+def test_a_miss_taken_back_leaves_other_outcomes(tmp_path):
+    from commentator.store import Store
+    st = Store(str(tmp_path / "season.db"))
+    for putt, outcome in ((0, "missed"), (0, "holed"), (1, "missed")):
+        st.db.execute("INSERT INTO shots (session_id, ts, is_putt, outcome, raw) VALUES (?, 1.0, ?, ?, '{}')",
+                      (st.session_id, putt, outcome))
+    for i in (1, 2, 3):
+        st.clear_miss(i)
+    assert [r[0] for r in st.db.execute("SELECT outcome FROM shots ORDER BY id")] == [None, "holed", "missed"]
+    st.clear_miss(3, full=True)   # (a putt only by the club the file filled, before it's taken back)
+    assert st.db.execute("SELECT outcome FROM shots WHERE id = 3").fetchone()[0] is None
 
 
 async def test_a_file_club_dropped_with_its_stroke_takes_its_driving_record_with_it(tmp_path):
-    # The file's driver for a screen 3-wood, but by the time it's recorded GSPro's file is another
-    # round's: the 3-wood stands, with no driving record on it.
+    # The file's driver for a club the screen missed, but by the time it's recorded GSPro's file is
+    # another round's: the screen's none stands, with no driving record on it.
     from commentator import round_file
     from commentator.models import ShotEvent
 
@@ -7513,10 +7797,10 @@ async def test_a_file_club_dropped_with_its_stroke_takes_its_driving_record_with
     e.store.season_stats = lambda p: {"longest_drive": 100.0}
     e.store.today_longest_drive = lambda p: None
     hud = _tee("Kroll", shot=1)
-    await e.handle_shot(ShotEvent(shot=Shot(club="3W", carry=240.0, ball_speed=150.0), hud_hint=hud,
+    await e.handle_shot(ShotEvent(shot=Shot(club=None, carry=240.0, ball_speed=150.0), hud_hint=hud,
                                   impact_hud_hint=hud))
     rec = e.state.shots[-1]
-    assert len(checks) == 2 and rec.shot.club == "3W" and "season_best_drive" not in rec.tags
+    assert len(checks) == 2 and rec.shot.club is None and "season_best_drive" not in rec.tags
 
 
 

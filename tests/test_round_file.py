@@ -1,12 +1,17 @@
 """GSPro's round file (currentRound.dat, 3.59+) applied to the stored shots and drawn in hole replays."""
+import gzip
 import json
 import math
+from collections import Counter
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from commentator import round_file
 from commentator.hole_replay import hole_replays
-from commentator.sources.gspro_log import M_TO_YD
-from commentator.store import Store
+from commentator.sources.gspro_log import M_TO_YD, GsproState, parse_events
+from commentator.store import CLUB_COLS, Store
 
 HOLE = "Hole 1, par 4, 328 yards"
 
@@ -41,7 +46,7 @@ PUTT = _entry(3, (2, 295), (0, 300), sp=8.0, putt=True, roll=[(2, 295), (1, 298)
 def _season(tmp_path):
     st = Store(str(tmp_path / "season.db"))
     for n, (sp, putt, outcome, lie_after, total) in enumerate(
-            [(150.2, 0, None, "semi rough", 210.0), (99.8, 0, None, "fairway", 90.0), (8.0, 1, "holed", None, 2.0)], 1):
+            [(150.2, 0, None, "first cut", 210.0), (99.8, 0, None, "fairway", 90.0), (8.0, 1, "holed", None, 2.0)], 1):
         st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, ball_speed,"
                       " lie_before, lie_after, total_yards, carry_game_yards, outcome, raw)"
                       " VALUES (?, ?, 'Dan Smith', 'Test Links', ?, ?, '7I', ?, ?, ?, ?, ?, 150.0, ?, '{}')",
@@ -82,7 +87,7 @@ def test_the_round_file_replaces_the_booths_reads_and_applying_it_again_changes_
     assert drive["carry_game_yards"] == round(math.hypot(4, 180) * M_TO_YD, 1)
     assert (drive["total_yards"], drive["total_from_log"]) == (round(math.hypot(5, 200) * M_TO_YD, 1), 2)
     # The HUD's finer lie stays; a plain one gives way to GSPro's.
-    assert (drive["lie_after"], approach["lie_before"], approach["lie_after"]) == ("semi rough", "fairway", "green")
+    assert (drive["lie_after"], approach["lie_before"], approach["lie_after"]) == ("first cut", "fairway", "green")
     assert approach["finish_yards"] == round(5.4 * M_TO_YD, 1)
     assert putt["total_yards"] == round(math.hypot(2, 5) * M_TO_YD, 1) and putt["finish_yards"] is None
     before = [tuple(r) for r in st.db.execute("SELECT * FROM shots ORDER BY id")]
@@ -550,7 +555,8 @@ def test_a_stroke_says_what_its_penalty_was_and_whether_the_ball_dropped():
 
 
 def test_a_finer_hud_lie_is_kept_only_inside_gspros():
-    assert round_file.finer_lie("rough", "semi rough") == "semi rough"
+    assert round_file.finer_lie("rough", "first cut") == "first cut"
+    assert round_file.finer_lie("rough", "semi rough") == "rough"   # GSPro has its own code for semi rough
     assert round_file.finer_lie("green", "fringe") == "fringe"
     assert round_file.finer_lie("sand", "fringe") == "sand"         # it rolled on from the fringe
     assert round_file.finer_lie("fairway", "rough") == "fairway"    # not finer: GSPro's stands
@@ -699,48 +705,440 @@ def test_slot_players_ties_the_logs_credited_shots_to_the_files_names_by_their_b
     assert round_file.slot_players(moved, [al, dan, dan2]) == {}
 
 
-def test_gspros_club_index_corrects_the_club_read_off_the_screen(tmp_path, caplog):
+def test_gspros_club_index_fills_only_a_club_the_screen_read_none_for(tmp_path, caplog):
     st = _season(tmp_path)   # every shot read as a 7-iron
     drive, approach, putt = ({**e, "ClubIndex": i} for e, i in ((DRIVE, 0), (APPROACH, 19), (PUTT, 26)))
     got = round_file.tracks([drive, approach, putt])
     assert [t.club for t in got] == ["DR", "7I", "PT"]
     with caplog.at_level("INFO"):
         st.apply_round_file(got, now=1005.0)
-    assert [_row(st, n)["club"] for n in (1, 2, 3)] == ["DR", "7I", "PT"]
-    assert "club 7I -> DR from GSPro's round file" in caplog.text
-    # A match stored before clubs were tracked keeps no club to go back to: the one it replaces is added.
+    # The screen's read is the club hit: GSPro's (the club selected at rest) doesn't replace it.
+    assert [_row(st, n)["club"] for n in (1, 2, 3)] == ["7I", "7I", "7I"]
+    assert "from GSPro's round file" not in caplog.text
+    for sid in (_row(st, n)["id"] for n in (1, 2, 3)):
+        st._release_track(sid)
+    st.db.execute("UPDATE shots SET club = NULL")
+    with caplog.at_level("INFO"):
+        st.apply_round_file(got, now=1005.0)
+    # One the screen read none for is GSPro's, but never the holed putt's (a hole-out selects the putter).
+    assert [_row(st, n)["club"] for n in (1, 2, 3)] == ["DR", "7I", None]
+    assert "club unread -> DR from GSPro's round file" in caplog.text
     sid = _row(st, 1)["id"]
-    st.db.execute("UPDATE shots SET club = '7I' WHERE id = ?", (sid,))
-    was = json.loads(st.db.execute("SELECT was FROM shot_tracks WHERE shot_id = ?", (sid,)).fetchone()[0])
-    was.pop("club")
-    st.db.execute("UPDATE shot_tracks SET was = ? WHERE shot_id = ?", (json.dumps(was), sid))
-    st.apply_round_file(got, now=1005.0)
-    assert _row(st, 1)["club"] == "DR"
     st._release_track(sid)
-    assert _row(st, 1)["club"] == "7I"
-    # A putt the booth took for a full shot (no putter on the screen): GSPro's putter makes it one.
+    assert _row(st, 1)["club"] is None
+    # A putt the booth took for a full shot (no club read): GSPro's putter makes it one.
+    lag = {**putt, "ShotID": "lag", "HoleResult": 3, "activeShot": {**putt["activeShot"],
+                                                                     "sd": {**putt["activeShot"]["sd"], "isHoled": False}}}
+    missed = round_file.tracks([drive, approach, lag])
     pid = _row(st, 3)["id"]
     st._release_track(pid)
-    st.db.execute("UPDATE shots SET club = '7I', is_putt = 0 WHERE id = ?", (pid,))
-    st.apply_round_file(got, now=1005.0)
+    st.db.execute("UPDATE shots SET is_putt = 0 WHERE id = ?", (pid,))
+    st.apply_round_file(missed, now=1005.0)
     assert (_row(st, 3)["club"], _row(st, 3)["is_putt"]) == ("PT", 1)
     st._release_track(pid)
-    assert (_row(st, 3)["club"], _row(st, 3)["is_putt"]) == ("7I", 0)
-    # An approach the booth took for a putt (a putter read): a full shot, its finish kept.
+    assert (_row(st, 3)["club"], _row(st, 3)["is_putt"]) == (None, 0)
+    # An approach the booth took for a putt (no club read): a full shot, its finish kept.
     aid = _row(st, 2)["id"]
     st._release_track(aid)
-    st.db.execute("UPDATE shots SET club = 'PT', is_putt = 1, finish_yards = NULL WHERE id = ?", (aid,))
+    st.db.execute("UPDATE shots SET is_putt = 1, finish_yards = NULL WHERE id = ?", (aid,))
     st.apply_round_file(got, now=1005.0)
     assert (_row(st, 2)["club"], _row(st, 2)["is_putt"]) == ("7I", 0) and _row(st, 2)["finish_yards"] is not None
-    # A shot recorded blind takes GSPro's club's word on a putt too, not the booth's guess.
-    named = Store._blind_named({"hole": None, "is_putt": 1}, got[1], lambda n: None)
-    assert named["is_putt"] == 0
+    # A shot recorded blind takes GSPro's club's word on a putt too, where the screen read no club.
+    assert Store._blind_named({"hole": None, "is_putt": 1}, got[1], lambda n: None)["is_putt"] == 0
     st.apply_round_file(got[1:], now=1005.0, gone={drive["ShotID"]})   # taken back (a mulligan): the read returns
-    assert _row(st, 1)["club"] == "7I"
-    # The screen's 3-wood for GSPro's driver off the deck (hud.deck_club), and its approach wedge for the
-    # gap wedge, aren't disagreements.
+    assert _row(st, 1)["club"] is None
+    # GSPro's driver off the deck is the booth's 3-wood (hud.deck_club), as the screen's is.
     deck = round_file.tracks([{**APPROACH, "ClubIndex": 0}])[0]
-    assert round_file.club_fix(deck, "3W") is None and round_file.club_fix(deck, "5W") == "3W"
+    assert round_file.club_fix(deck, None) == "3W" and round_file.club_fix(deck, "5W") is None
     gap = round_file.tracks([{**APPROACH, "ClubIndex": 23}])[0]
     assert round_file.club_fix(gap, "AW") is None and round_file.club_fix(gap, None) == "GW"
-    assert round_file.club_fix(round_file.tracks([{**APPROACH, "ClubIndex": 27}])[0], "7I") is None
+    assert round_file.club_fix(round_file.tracks([{**APPROACH, "ClubIndex": 27}])[0], None) is None
+
+
+# Two real rounds GSPro 4.x wrote on 2026-11-18 (Bethpage Black, Josh Merritt and Corey Martin): a
+# single-player stroke round (RoundID 1696) and a two-man scramble of the front nine (1697), with the
+# scramble's GSPro log (its LaunchExt Vars and score lines) and the booth's shots for both, the club as
+# the screen read it (booth log `impact HUD ... club`).
+FIXTURES = Path(__file__).parent / "fixtures" / "round_files"
+BOOTH = json.loads((FIXTURES / "booth_shots_2026-11-18.json").read_text())
+SINGLE_HOLES = {1: 4, 2: 3, 3: 2, 4: 3, 5: 3, 6: 4, 7: 4, 8: 2, 9: 3}
+# Each team stroke is both players' ball, but for the hole-ending putt only one may play it.
+SCRAMBLE_HOLES = {1: 6, 2: 5, 3: 4, 4: 8, 5: 5, 6: 6, 7: 8, 8: 4, 9: 6}
+# GSPro's team score (its log's score lines), by hole.
+SCRAMBLE_SCORES = {1: 3, 2: 3, 3: 2, 4: 4, 5: 3, 6: 4, 7: 5, 8: 3, 9: 4}
+
+
+def _real(name):
+    return json.loads(gzip.decompress((FIXTURES / f"{name}.dat.gz").read_bytes()).decode("utf-8-sig"))
+
+
+def _scramble_fires():
+    """Each LaunchExt-logged shot of the scramble, as GsproState has it once the round is over."""
+    st, got = GsproState(), {}
+    for ev in parse_events(gzip.decompress((FIXTURES / "scramble_1697_gspro.log.gz").read_bytes()).decode()):
+        st.apply(ev)
+        for n in range(max(1, st.fires - 3), st.fires + 1):   # (it keeps only the latest fires' info)
+            if info := st.fire_info(n):
+                got[n] = dict(info)
+    return st, got
+
+
+def _booth_tracks(name):
+    """(booth shot, the one stroke of GSPro's file it is): tied by ball speed, start direction, launch
+    angle (none read on a putt) and player."""
+    entries = _real(name)
+    by_id = {str(e["ShotID"]): e for e in entries}
+    got = round_file.tracks(entries)
+    out = []
+    for b in BOOTH[name]:
+        hits = [t for t in got if t.player == b["player"].split()[0] and (v := round_file.launch_of(by_id[t.shot_id]))
+                and abs(v["sp"] - b["ball"]) <= 0.06 and abs(v["az"] - b["start"]) <= 0.06
+                and (b["launch"] is None or abs(v["el"] - b["launch"]) <= 0.06)]
+        assert len(hits) == 1, (b, [(t.hole, t.player, t.shot_number) for t in hits])
+        out.append((b, hits[0]))
+    assert len({t.shot_id for _, t in out}) == len(out) == len(got)
+    return out
+
+
+def test_a_real_single_players_round_file_has_each_stroke_once():
+    got = round_file.tracks(_real("single_1696"))   # 37 entries: 9 the copies of a hole's last stroke
+    assert len(got) == 28 and Counter(t.hole for t in got) == SINGLE_HOLES
+    for h in SINGLE_HOLES:
+        strokes = [t for t in got if t.hole == h]
+        assert [t.shot_number for t in strokes] == list(range(1, len(strokes) + 1))
+        assert [t.dropped for t in strokes] == [False] * (len(strokes) - 1) + [True]
+    _booth_tracks("single_1696")
+
+
+def test_a_scramble_holing_out_copies_its_ball_onto_every_teammate_not_a_stroke():
+    entries = _real("scramble_1697")
+    got = round_file.tracks(entries)   # 68 entries: 16 copies, one per teammate per hole
+    assert len(got) == 52 and Counter(t.hole for t in got) == SCRAMBLE_HOLES
+    for h in SCRAMBLE_HOLES:
+        for p in ("Josh", "Corey"):
+            assert [t.shot_number for t in got if t.hole == h and t.player == p] == \
+                list(range(1, (SCRAMBLE_HOLES[h] + (p == "Josh")) // 2 + 1))
+    # The stroke that ended the hole still did: holed (in the cup), or in the gimme circle (a stroke
+    # more); the team's score is GSPro's.
+    last = {h: max((t for t in got if t.hole == h), key=lambda t: (t.shot_number, t.dropped)) for h in SCRAMBLE_HOLES}
+    assert all(t.dropped for t in last.values()) and sum(t.dropped for t in got) == 9
+    assert {h: t.shot_number + (not t.in_cup) for h, t in last.items()} == SCRAMBLE_SCORES
+    st, fires = _scramble_fires()
+    assert {h + 1: n for (_, h), n in st.hole_scores.items()} == SCRAMBLE_SCORES
+    # Each shot GSPro logged is one stroke's ball (its LaunchExt line), the player it credits.
+    assert len(fires) == 52
+    roster = round_file.slot_players(((f["player"], f["launch"]) for f in fires.values()), entries)
+    assert roster == {0: "Josh", 1: "Corey"}
+    for f in fires.values():
+        balls = round_file.ball_entries(f["launch"], entries)
+        assert [(e["PlayerName"], e["Hole"]) for e in balls] == [(roster[f["player"]], f["hole"])]
+    assert {str(e["ShotID"]) for f in fires.values() for e in round_file.ball_entries(f["launch"], entries)} \
+        == {t.shot_id for t in got}
+    # And each the booth recorded.
+    assert len(_booth_tracks("scramble_1697")) == 52
+    assert round_file._of_round(entries, ["Josh", "Corey"], [b["ball"] for b in BOOTH["scramble_1697"]],
+                                "Bethpage Black")
+
+
+def test_every_surface_code_in_the_real_round_files_names_a_lie():
+    for name in ("single_1696", "scramble_1697"):
+        for e in _real(name):
+            for k in ("StartingSurface", "EndingSurface"):
+                assert round_file.SURFACES.get(e[k]), (name, k, e[k])
+    assert sorted(round_file.SURFACES) == list(range(23))   # GSPro's Trajectory.PhyMatList
+    assert round_file.SURFACES[0] is None and round_file.SURFACES[19] is None   # no surface: the screen's read
+    got = round_file.tracks([{**APPROACH, "StartingSurface": 12, "EndingSurface": 16}])[0]
+    assert (got.lie_before, got.lie_after) == ("semi rough", "pine straw")
+
+
+def _scramble_store(tmp_path, club=lambda b: b["club"], entries=None):
+    """The scramble's 52 booth shots stored (the club as `club` has it) and GSPro's file applied to them:
+    (the store, booth shot -> its club and putt or not). `entries`: the file as it was part way through."""
+    st = Store(str(tmp_path / "season.db"))
+    pairs = _booth_tracks("scramble_1697")
+    for i, (b, t) in enumerate(pairs):
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt,"
+                      " ball_speed, raw) VALUES (?, ?, ?, 'Bethpage Black', ?, ?, ?, ?, ?, '{}')",
+                      (st.session_id, 1000.0 + i, b["player"], f"Hole {t.hole}", t.shot_number, club(b),
+                       int(b["putt"]), b["ball"]))
+    st.db.commit()
+    got = round_file.tracks(_real("scramble_1697") if entries is None else entries)
+    written, pending = st.apply_round_file(got, now=1000.0 + len(pairs))
+    assert (written, pending) == (len(got), [])
+    return st, _clubs(st, pairs)
+
+
+def _clubs(st, pairs):
+    return {b["shot"]: tuple(st.db.execute("SELECT club, is_putt FROM shots WHERE ts = ?", (1000.0 + i,)).fetchone())
+            for i, (b, _) in enumerate(pairs)}
+
+
+def test_the_screens_club_stands_over_the_one_gspro_selected_at_rest(tmp_path):
+    # Booth shot 51 is Corey's lob-wedge chip-in on hole 4: GSPro's file has the putter (a hole-out
+    # selects it). Shots 65 and 66, hole 7's second shots off the fairway, are 3-woods it has as drivers.
+    entries = _real("scramble_1697")
+    chip = next(t for t in round_file.tracks(entries) if (t.hole, t.player, t.shot_number) == (4, "Corey", 4))
+    assert (chip.club, chip.in_cup, chip.putt) == ("PT", True, False)
+    assert round_file.club_fix(chip, "LW") is None and round_file.club_fix(chip, None) is None
+    assert {t.club for t in round_file.tracks(entries) if (t.hole, t.shot_number) == (7, 2)} == {"DR"}
+    st, rows = _scramble_store(tmp_path)
+    assert rows[51] == ("LW", 0)
+    assert rows[65] == rows[66] == ("3W", 0)
+    assert all(rows[b["shot"]][0] == b["club"] for b in BOOTH["scramble_1697"])
+
+
+def test_gspros_club_fills_a_club_the_screen_missed_but_not_on_the_stroke_that_ended_the_hole(tmp_path):
+    # Booth shot 29 is Josh's drive on hole 1; 51 Corey's chip-in (the file's putter).
+    st, rows = _scramble_store(tmp_path, club=lambda b: None if b["shot"] in (29, 51) else b["club"])
+    assert rows[29] == ("DR", 0)
+    assert rows[51] == (None, 0)
+
+
+def test_a_club_gspros_file_filled_goes_back_once_the_hole_ends_on_that_stroke(tmp_path):
+    # Corey's second stroke on hole 8, a lag the team took the gimme on: read before GSPro's hole-out
+    # copies of it, it has a club the file can give; once they're in, it hasn't.
+    entries = _real("scramble_1697")
+    lag = next(i for i, e in enumerate(entries) if (e["Hole"], e["PlayerName"], e["HoleShot"]) == (7, "Corey", 2))
+    shot = next(b["shot"] for b, t in _booth_tracks("scramble_1697") if (t.hole, t.player, t.shot_number) == (8, "Corey", 2))
+    st, rows = _scramble_store(tmp_path, club=lambda b: None if b["shot"] == shot else b["club"], entries=entries[:lag + 1])
+    assert rows[shot] == ("PT", 1)
+    st.apply_round_file(round_file.tracks(entries), now=2000.0)
+    assert _clubs(st, _booth_tracks("scramble_1697"))[shot] == (None, 1)
+    # (with no club to say, GSPro's own call at impact: a putt, here, as the fill had it)
+    st.apply_round_file([replace(t, putt=False) if (t.hole, t.player, t.shot_number) == (8, "Corey", 2) else t
+                         for t in round_file.tracks(entries)], now=2001.0)
+    assert _clubs(st, _booth_tracks("scramble_1697"))[shot] == (None, 0)
+
+
+def test_a_club_gspros_file_set_over_the_screens_goes_back_when_the_file_is_read_again(tmp_path):
+    # Corey's lob-wedge chip-in on hole 4 (booth shot 51), as the booth's earlier versions stored it:
+    # GSPro's putter over the screen's lob wedge, and a putt, with a snapshot of the screen's club but
+    # not the putt (they kept that only when the file's club changed it).
+    st, rows = _scramble_store(tmp_path)
+    sid = st.db.execute("SELECT id FROM shots WHERE club = 'LW' AND ball_speed = 19.5").fetchone()[0]
+    was = json.loads(st.db.execute("SELECT was FROM shot_tracks WHERE shot_id = ?", (sid,)).fetchone()[0])
+    assert was["club"] == "LW"
+    was.pop("is_putt", None)
+    st.db.execute("UPDATE shot_tracks SET was = ? WHERE shot_id = ?", (json.dumps(was), sid))
+    st.db.execute("UPDATE shots SET club = 'PT', is_putt = 1 WHERE id = ?", (sid,))
+    st.apply_round_file(round_file.tracks(_real("scramble_1697")), now=2000.0)
+    assert tuple(st.db.execute("SELECT club, is_putt FROM shots WHERE id = ?", (sid,)).fetchone()) == ("LW", 0)
+
+
+def test_a_club_gspros_file_fills_drops_the_zeros_its_monitor_writes_for_fields_that_club_doesnt_measure(tmp_path):
+    # Josh's drive on hole 1 (booth shot 29), read with no club: his monitor measures club speed and
+    # path with his driver, not face angle, which it sends as 0. (Each scramble swing is its player's:
+    # only the team's ball is shared.)
+    shot = 29
+    st = Store(str(tmp_path / "season.db"))
+    st.db.execute("INSERT INTO shots (session_id, ts, player, club, is_putt, club_speed, club_path, face_to_target, raw)"
+                  " VALUES (?, 1.0, 'Josh', 'DR', 0, 110.0, 2.0, 0.0, '{}')", (st.session_id,))
+    pairs = _booth_tracks("scramble_1697")
+    for i, (b, t) in enumerate(pairs):
+        st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt,"
+                      " ball_speed, club_speed, club_path, face_to_target, fmt, shared_ball, raw)"
+                      " VALUES (?, ?, ?, 'Bethpage Black', ?, ?, ?, ?, ?, ?, ?, ?, 'scramble', 1, '{}')",
+                      (st.session_id, 1000.0 + i, b["player"], f"Hole {t.hole}", t.shot_number,
+                       None if b["shot"] == shot else b["club"], int(b["putt"]), b["ball"],
+                       *((112.0, 1.5, 0.0) if b["shot"] == shot else (None, None, None))))
+    st.db.commit()
+    i = next(i for i, (b, _) in enumerate(pairs) if b["shot"] == shot)
+    fields = lambda: tuple(st.db.execute("SELECT club, club_speed, club_path, face_to_target FROM shots WHERE ts = ?",
+                                         (1000.0 + i,)).fetchone())
+    tracks = round_file.tracks(_real("scramble_1697"))
+    st.apply_round_file(tracks, now=2000.0)
+    assert fields() == ("DR", 112.0, 1.5, None)
+    drive = next(t for t in tracks if (t.hole, t.player, t.shot_number) == (1, "Josh", 1))
+    st.apply_round_file([replace(t, dropped=True) if t is drive else t for t in tracks], now=2001.0)
+    assert fields() == (None, 112.0, 1.5, 0.0)
+
+
+def test_the_store_drops_a_filled_clubs_fields_as_the_live_path_does(tmp_path):
+    # Josh's driver measures club speed only: a shot with none (a misread) teaches nothing, a blind
+    # shot's are checked against the player the file names it for, and a field his driver doesn't
+    # measure that reads 0 goes.
+    st = Store(str(tmp_path / "season.db"))
+    st.db.execute("INSERT INTO shots (session_id, ts, player, club, is_putt, club_speed, raw)"
+                  " VALUES (?, 1.0, 'Josh', 'DR', 0, 110.0, '{}')", (st.session_id,))
+    row = lambda **cols: {"player": None, "shared_ball": 0, "fmt": None, "club_speed": None,
+                          **{c: None for c in CLUB_COLS}, **cols}
+    assert st._unmeasured(row(club_path=3.0), "DR", "Josh") == ["club_path"]
+    assert st._unmeasured(row(club_speed=105.0, face_to_target=0.0), "DR", "Josh") == ["face_to_target"]
+    assert st._unmeasured(row(club_speed=105.0, face_to_target=0.0), "DR", None) == []
+
+
+def test_gspros_full_shot_call_names_a_blind_slow_chip_a_full_shot():
+    t = round_file.Track("s1", None, None, "Josh", 4, 4, 19.5, False, (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), None,
+                         club="PT", in_cup=True, dropped=True)
+    row = {"hole": None, "is_putt": 1}
+    assert Store._blind_named(row, t, lambda n: n, None)["is_putt"] == 0
+    assert Store._blind_named(row, replace(t, putt=None), lambda n: n, None)["is_putt"] == 1
+
+
+@pytest.mark.parametrize("at_rest", ["LW", "PT"])
+def test_a_blind_chip_named_and_filled_then_holed_keeps_gspros_full_shot_call(tmp_path, at_rest):
+    # Recorded blind with no club, the chip's slow speed guessed a putt: GSPro's file names it Josh's
+    # chip (not a putt, its isPutt says) with its club at rest, then the hole ends on it, which takes
+    # GSPro's club back. A putter at rest makes it a putt while it stands, not once it's taken back.
+    st = Store(str(tmp_path / "season.db"))
+    for n, sp in enumerate([151.0, 100.2, 12.0]):
+        st.db.execute("INSERT INTO shots (session_id, ts, is_putt, ball_speed, attributed, raw)"
+                      " VALUES (?, ?, ?, ?, 0, '{}')", (st.session_id, 1000.0 + n, int(sp < 20), sp))
+    st.db.commit()
+    mk = lambda n, sp, lie, **kw: round_file.Track(f"s{n}", 1, None, "Josh", 1, n, sp, False, (0.0, 0.0, 0.0),
+                                                   (0.0, 0.0, 1.0), None, lie_before=lie, lie_after="green",
+                                                   club={1: "DR", 2: "8I", 3: at_rest}[n], **kw)
+    tracks = [mk(1, 151.0, "tee"), mk(2, 100.2, "fairway"), mk(3, 12.0, "rough")]
+    st.apply_round_file(tracks, now=1005.0, name_of=str)
+    chip = lambda: tuple(st.db.execute("SELECT player, club, is_putt FROM shots WHERE ball_speed = 12.0").fetchone())
+    assert chip() == ("Josh", at_rest, int(at_rest == "PT"))
+    sid = st.db.execute("SELECT id FROM shots WHERE ball_speed = 12.0").fetchone()[0]
+    assert st.screen_putt(sid) is False   # (how a hole-out on it settles: a full shot's)
+    st.apply_round_file([*tracks[:2], replace(tracks[2], holed=True, dropped=True, in_cup=True)], now=1006.0,
+                        name_of=str)
+    assert chip() == ("Josh", None, 0)
+
+
+@pytest.mark.parametrize("fmt", ["scramble", "alternate"])
+def test_a_blind_shot_the_file_names_drops_its_zeros_only_when_the_swing_is_the_named_players(tmp_path, fmt):
+    # A scramble's swing is its player's; an alternate shot's ball is the side's, whichever partner hit it.
+    st = Store(str(tmp_path / "season.db"))
+    for n, sp in enumerate([151.0, 100.2, 60.0]):
+        st.db.execute("INSERT INTO shots (session_id, ts, is_putt, ball_speed, club_speed, club_path, fmt, shared_ball,"
+                      " attributed, raw) VALUES (?, ?, 0, ?, 90.0, 0.0, ?, 1, 0, '{}')", (st.session_id, 1000.0 + n, sp, fmt))
+    st.db.commit()
+    tracks = [round_file.Track(f"s{n}", 1, None, "Josh", 1, n, sp, False, (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), None,
+                               lie_before="fairway", lie_after="rough", club="7I")
+              for n, sp in enumerate([151.0, 100.2, 60.0], start=1)]
+    st.apply_round_file(tracks, now=1005.0, name_of=str)
+    paths = [r[0] for r in st.db.execute("SELECT club_path FROM shots ORDER BY ts")]
+    assert paths == ([None] * 3 if fmt == "scramble" else [0.0] * 3)
+
+
+def test_blind_shots_the_file_names_learn_their_club_fields_in_the_order_they_were_hit(tmp_path):
+    # Josh's driver, new to the booth: two real club speeds, then a misread with a speed of 0.
+    st = Store(str(tmp_path / "season.db"))
+    for n, (sp, cs, path) in enumerate([(151.0, 100.0, 0.0), (149.0, 97.0, 0.0), (150.0, 0.0, 2.0)]):
+        st.db.execute("INSERT INTO shots (session_id, ts, is_putt, ball_speed, club_speed, club_path, attributed, raw)"
+                      " VALUES (?, ?, 0, ?, ?, ?, 0, '{}')", (st.session_id, 1000.0 + n, sp, cs, path))
+    st.db.commit()
+    tracks = [round_file.Track(f"s{n}", 1, None, "Josh", n, 1, sp, False, (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), None,
+                               lie_before="tee", lie_after="fairway", club="DR")
+              for n, sp in enumerate([151.0, 149.0, 150.0], start=1)]
+    st.apply_round_file(tracks, now=1005.0, name_of=str)
+    assert [tuple(r) for r in st.db.execute("SELECT club_speed, club_path FROM shots ORDER BY ts")] == \
+        [(100.0, None), (97.0, None), (None, None)]
+
+
+def test_gspros_putt_call_decides_a_shot_with_no_club_and_goes_with_its_stroke(tmp_path):
+    # A 21 mph lag the screen read no club for, its launch too quick for a putt: GSPro's file says putt
+    # (holed, so its club at rest is no help), until the stroke turns out not to be this shot's.
+    st = Store(str(tmp_path / "season.db"))
+    st.db.execute("INSERT INTO shots (session_id, ts, player, hole, shot_number, is_putt, ball_speed, raw)"
+                  " VALUES (?, 1000.0, 'Josh', 'Hole 1', 3, 0, 21.0, '{}')", (st.session_id,))
+    st.db.commit()
+    t = round_file.Track("s3", 1, None, "Josh", 1, 3, 21.0, True, (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), None,
+                         lie_before="green", lie_after="green", club="PT", holed=True, dropped=True, in_cup=True)
+    row = lambda: tuple(st.db.execute("SELECT club, is_putt FROM shots").fetchone())
+    st.apply_round_file([t], now=1005.0)
+    assert row() == (None, 1)
+    st.db.execute("UPDATE shots SET outcome = 'missed'")   # (graded a putt meanwhile)
+    st.apply_round_file([], now=1005.0, gone={"s3"})
+    assert row() == (None, 0)
+    assert st.db.execute("SELECT outcome FROM shots").fetchone()[0] is None
+
+
+def test_gspros_full_shot_call_on_a_guessed_putt_takes_its_miss_until_released(tmp_path):
+    # A 12 mph chip the booth guessed a putt and graded a miss, its club unread (an empty box).
+    st = Store(str(tmp_path / "season.db"))
+    st.db.execute("INSERT INTO shots (session_id, ts, player, hole, shot_number, club, is_putt, outcome, ball_speed,"
+                  " raw) VALUES (?, 1000.0, 'Josh', 'Hole 1', 3, '', 1, 'missed', 12.0, '{}')", (st.session_id,))
+    st.db.commit()
+    t = round_file.Track("s3", 1, None, "Josh", 1, 3, 12.0, False, (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), None,
+                         lie_before="rough", lie_after="rough")
+    row = lambda: tuple(st.db.execute("SELECT is_putt, outcome FROM shots").fetchone())
+    st.apply_round_file([t], now=1005.0)
+    assert row() == (0, None)
+    st.apply_round_file([], now=1005.0, gone={"s3"})
+    assert row() == (1, "missed")
+
+
+def test_gspros_putt_call_on_a_full_shot_that_left_a_gimme_makes_it_a_conceded_putt_until_released(tmp_path):
+    # A 21 mph roll from 45 feet the booth took for a chip (its club unread), inside the gimme circle.
+    st = Store(str(tmp_path / "season.db"))
+    st.db.execute("INSERT INTO shots (session_id, ts, player, hole, shot_number, club, is_putt, ball_speed, raw)"
+                  " VALUES (?, 1000.0, 'Josh', 'Hole 1', 3, NULL, 0, 21.0, '{}')", (st.session_id,))
+    st.db.commit()
+    sid = st.db.execute("SELECT id FROM shots").fetchone()[0]
+    st.record_gimme(sid, 0.5)
+    t = round_file.Track("s3", 1, None, "Josh", 1, 3, 21.0, True, (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), None,
+                         lie_before="green", lie_after="green", dropped=True)
+    row = lambda: tuple(st.db.execute("SELECT is_putt, outcome FROM shots WHERE id = ?", (sid,)).fetchone())
+    st.apply_round_file([t], now=1005.0)
+    assert row() == (1, "conceded")
+    st.apply_round_file([], now=1005.0, gone={"s3"})
+    assert row() == (0, None)
+
+
+def test_gspros_full_shot_call_on_a_conceded_guessed_putt_leaves_the_concession_to_its_gimme(tmp_path):
+    st = Store(str(tmp_path / "season.db"))
+    st.db.execute("INSERT INTO shots (session_id, ts, player, hole, shot_number, club, is_putt, outcome, ball_speed,"
+                  " raw) VALUES (?, 1000.0, 'Josh', 'Hole 1', 3, '', 1, 'conceded', 12.0, '{}')", (st.session_id,))
+    st.db.commit()
+    t = round_file.Track("s3", 1, None, "Josh", 1, 3, 12.0, False, (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), None,
+                         lie_before="rough", lie_after="green", dropped=True)
+    row = lambda: tuple(st.db.execute("SELECT is_putt, outcome FROM shots").fetchone())
+    st.apply_round_file([t], now=1005.0)
+    assert row() == (0, None)
+    st.apply_round_file([], now=1005.0, gone={"s3"})
+    assert row() == (1, "conceded")
+
+
+def test_a_concession_graded_under_gspros_putt_call_follows_the_putt_or_not_put_back(tmp_path):
+    st = Store(str(tmp_path / "season.db"))
+    for n, putt in ((3, 0), (5, 1)):   # a chip the booth guessed (club unread), and a guessed putt
+        st.db.execute("INSERT INTO shots (session_id, ts, player, hole, shot_number, club, is_putt, ball_speed, raw)"
+                      " VALUES (?, ?, 'Josh', 'Hole 1', ?, NULL, ?, 12.0, '{}')", (st.session_id, 1000.0 + n, n, putt))
+    st.db.commit()
+    chip, putt = (i for (i,) in st.db.execute("SELECT id FROM shots ORDER BY id"))
+    ts = [round_file.Track(f"s{n}", 1, None, "Josh", 1, n, 12.0, not p, (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), None,
+                           lie_before="green", lie_after="green") for n, p in ((3, 0), (5, 1))]
+    st.apply_round_file(ts, now=1010.0)
+    st.set_shot_result(chip, outcome="conceded")   # (graded meanwhile: the chip as GSPro's putt, the putt a chip)
+    st.record_gimme(chip)
+    st.record_gimme(putt)
+    st.apply_round_file([], now=1010.0, gone={"s3", "s5"})
+    row = lambda i: tuple(st.db.execute("SELECT is_putt, outcome FROM shots WHERE id = ?", (i,)).fetchone())
+    assert (row(chip), row(putt)) == ((0, None), (1, "conceded"))
+
+
+def test_a_concession_graded_under_gspros_full_shot_call_beats_the_miss_it_took_off(tmp_path):
+    st = Store(str(tmp_path / "season.db"))
+    st.db.execute("INSERT INTO shots (session_id, ts, player, hole, shot_number, club, is_putt, outcome, ball_speed,"
+                  " raw) VALUES (?, 1000.0, 'Josh', 'Hole 1', 3, '', 1, 'missed', 12.0, '{}')", (st.session_id,))
+    st.db.commit()
+    sid = st.db.execute("SELECT id FROM shots").fetchone()[0]
+    t = round_file.Track("s3", 1, None, "Josh", 1, 3, 12.0, False, (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), None,
+                         lie_before="green", lie_after="green")
+    st.apply_round_file([t], now=1005.0)
+    st.record_gimme(sid)   # (the team picked the ball for a gimme meanwhile)
+    st.apply_round_file([], now=1005.0, gone={"s3"})
+    assert tuple(st.db.execute("SELECT is_putt, outcome FROM shots WHERE id = ?", (sid,)).fetchone()) \
+        == (1, "conceded")
+
+
+def test_gspros_full_shot_call_naming_a_blind_guessed_putt_takes_its_miss(tmp_path):
+    st = Store(str(tmp_path / "season.db"))
+    for n, (sp, putt, out) in enumerate([(151.0, 0, None), (100.2, 0, None), (12.0, 1, "missed")]):
+        st.db.execute("INSERT INTO shots (session_id, ts, is_putt, outcome, ball_speed, attributed, raw)"
+                      " VALUES (?, ?, ?, ?, ?, 0, '{}')", (st.session_id, 1000.0 + n, putt, out, sp))
+    st.db.commit()
+    tracks = [round_file.Track(f"s{n}", 1, None, "Josh", 1, n, sp, False, (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), None,
+                               lie_before="fairway", lie_after="rough")
+              for n, sp in enumerate([151.0, 100.2, 12.0], start=1)]
+    st.apply_round_file(tracks, now=1005.0, name_of=str)
+    chip = lambda: tuple(st.db.execute("SELECT player, is_putt, outcome FROM shots WHERE ball_speed = 12.0").fetchone())
+    assert chip() == ("Josh", 0, None)
+    st.apply_round_file(tracks[:2], now=1005.0, gone={"s3"}, name_of=str)
+    assert chip() == (None, 1, "missed")
+

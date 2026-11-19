@@ -34,17 +34,27 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .sources.gspro_files import HOLED_COPY, launch_of, swings
+from .sources.gspro_files import HOLED_COPY, holed_copies, launch_of, swings
 from .sources.gspro_log import M_TO_YD
 
 log = logging.getLogger(__name__)
 
-# StartingSurface / EndingSurface codes seen (3.59.11). Others are left alone.
-SURFACES = {18: "tee", 1: "rough", 2: "fairway", 3: "deep rough", 4: "cart path", 5: "green", 11: "sand"}
+# StartingSurface / EndingSurface: an index into GSPro's Trajectory.PhyMatList, its TVG<name> physics
+# materials (from the game code): 0 ball, 1 rough, 2 fairway, 3 deeprough, 4 concrete, 5 green, 6 earth,
+# 7 dropzone, 8 holecup, 9 holelip, 10 pin, 11 sand, 12 semirough, 13 stone, 14 wood, 15 water,
+# 16 pinestraw, 17 leaves, 18 tee, 19 none (no surface found under the ball), 20 teemarker, 21 Tree,
+# 22 timber. As the booth's lies (hud.LIES, gspro_log.MATERIAL_TO_LIE: concrete is a cart path, wood and
+# timber a structure) or a plain word where it has none. 0 and 19 (and any code past these) name no
+# lie: the screen's read stands.
+SURFACES = {0: None, 1: "rough", 2: "fairway", 3: "deep rough", 4: "cart path", 5: "green", 6: "dirt",
+            7: "drop zone", 8: "green", 9: "green", 10: "green", 11: "sand", 12: "semi rough", 13: "stone",
+            14: "structure", 15: "water", 16: "pine straw", 17: "leaves", 18: "tee", 19: None, 20: "tee",
+            21: "trees", 22: "structure"}
 # Live, a finer lie the follow already read off the HUD is kept only where it fits inside GSPro's code
-# for where the ball stopped (a read taken mid-roll may be somewhere it rolled through).
-FINER_LIES = {"semi rough": ("rough", "fairway"), "first cut": ("rough", "fairway"), "fringe": ("green", "fairway"),
-              "pine straw": ("rough", "deep rough"), "fescue": ("rough", "deep rough"), "native": ("rough", "deep rough"),
+# for where the ball stopped (a read taken mid-roll may be somewhere it rolled through). Semi rough and
+# pine straw are GSPro's own codes, so its word for them stands.
+FINER_LIES = {"first cut": ("rough", "fairway"), "fringe": ("green", "fairway"),
+              "fescue": ("rough", "deep rough"), "native": ("rough", "deep rough"),
               "bunker": ("sand",), "waste area": ("sand", "rough"), "waste": ("sand", "rough")}
 # ClubIndex: GSPro's club, in its bag's order (ClubSelect in the 4.x game code): driver, 2-7 woods, 2-7
 # hybrids, 1-9 irons, then pitching, gap, sand and lob wedges and the putter; 27 is none. As the booth's
@@ -77,7 +87,7 @@ class Track:
     hole: int                    # 1-based
     shot_number: int
     ball_speed: float
-    putt: bool
+    putt: bool | None            # GSPro's putt or not at impact (None: the file doesn't say)
     start: Point
     end: Point | None            # None when a penalty followed (where it stopped isn't where play went on)
     land: Point | None           # the touchdown, for a shot that flew
@@ -93,7 +103,7 @@ class Track:
     penalty_kind: str | None = None   # PENALTY_KINDS: what its penalty's entry was for
     in_cup: bool = False         # GSPro has the ball in the hole (activeShot.sd.isHoled)
     dropped: bool = False        # the hole ended on it: in the cup, or inside the gimme circle (HoleResult 7)
-    ending_code: int | None = None   # EndingSurface as GSPro wrote it (SURFACES names the known ones)
+    ending_code: int | None = None   # EndingSurface as GSPro wrote it (SURFACES names it)
     club: str | None = None      # ClubIndex as the booth's code (CLUBS)
 
     @property
@@ -141,6 +151,7 @@ def tracks(entries: list[dict]) -> list[Track]:
     """A Track for each stroke the players hit (not a penalty's entry, a mulligan's taken-back stroke or
     the copy GSPro adds when a ball drops), in the file's order."""
     out = []
+    copied = {id(entries[i]) for i in holed_copies(entries).values()}
     for _, e in swings(entries):
         launch = launch_of(e) or {}
         shot = e.get("activeShot") or {}
@@ -154,10 +165,8 @@ def tracks(entries: list[dict]) -> list[Track]:
                     if o.get("ShotResult") in PENALTY_RESULTS and o.get("PlayerName") == e.get("PlayerName")
                     and o.get("Hole") == hole and o.get("HoleShot") == number + 1), None)
         penalty = pen is not None
-        # The copy GSPro adds when the ball drops (holed, or a gimme): the same player, hole and ball.
-        dropped = bool(sd.get("isHoled")) or e.get("HoleResult") == HOLED or any(
-            o is not e and o.get("HoleResult") == HOLED_COPY and o.get("PlayerName") == e.get("PlayerName")
-            and o.get("Hole") == hole and launch_of(o) == launch_of(e) for o in entries)
+        # GSPro adds a copy of it when the ball drops (holed, or a gimme): gspro_files.holed_copies.
+        dropped = bool(sd.get("isHoled")) or e.get("HoleResult") == HOLED or id(e) in copied
         flight = [p for p in (_xyz(q) for q in sd.get("pos") or []) if p]
         land, secs = _xyz(sd.get("tdpoint")) if flight else None, shot.get("tdTime") if flight else None
         if flight and isinstance(secs, (int, float)):
@@ -171,7 +180,7 @@ def tracks(entries: list[dict]) -> list[Track]:
         dist = e.get("DistanceToPin")
         t = Track(shot_id=str(e["ShotID"]), round_id=e.get("RoundID"), course_key=e.get("CourseKey"),
                   player=str(e["PlayerName"]), hole=hole + 1, shot_number=number,
-                  ball_speed=float(launch.get("sp") or e.get("BallSpeed") or 0.0), putt=bool(sd.get("isPutt")),
+                  ball_speed=float(launch.get("sp") or e.get("BallSpeed") or 0.0), putt=None if sd.get("isPutt") is None else bool(sd["isPutt"]),
                   start=start, end=None if penalty else _xyz(e.get("EndingPOS")),
                   land=land, flight=_thin(flight), flight_s=secs,
                   roll=_thin(roll), lie_before=SURFACES.get(e.get("StartingSurface")),
@@ -207,16 +216,22 @@ def finer_lie(lie: str | None, hud_lie: str | None) -> str | None:
     return lie
 
 
+def file_club(t: Track) -> str | None:
+    """The club GSPro's file has for stroke `t`, as the booth would name it, or None where it can't say.
+    GSPro writes ClubIndex (its club selection) when the ball comes to rest, not at impact
+    (PlayerShotHistory), so it's the club selected then: a hole-out sets it to the putter (a chip-in
+    reads PT), so a holed or dropped stroke has none. A driver off the deck is taken as
+    the booth takes the screen's (hud.deck_club: a 3-wood)."""
+    if t.club is None or t.dropped or t.holed or t.in_cup:
+        return None
+    return "3W" if t.club == "DR" and t.lie_before != "tee" and t.shot_number != 1 else t.club
+
+
 def club_fix(t: Track, club: str | None) -> str | None:
-    """The club GSPro's file has for stroke `t` when the booth's `club` (read off the screen) differs, else
-    None. A driver off the deck is taken as the booth takes the screen's (hud.deck_club: a 3-wood), and
-    an approach wedge is GSPro's gap wedge (its bag has no AW)."""
-    if t.club is None:
-        return None
-    file_club = "3W" if t.club == "DR" and t.lie_before != "tee" and t.shot_number != 1 else t.club
-    if (club or "").upper().replace("AW", "GW") == file_club:
-        return None
-    return file_club
+    """The club GSPro's file has for stroke `t` (file_club) when the booth read none off the screen
+    (`club`), else None: the screen's read is the club hit. The file's is the selection at rest (a
+    chip-in's is the putter)."""
+    return None if club else file_club(t)
 
 
 def untracked(entries: list[dict], got: list[Track]) -> set[str]:
@@ -293,6 +308,13 @@ def same_launch(logged: dict, entry: dict) -> bool:
     return _launch_match(logged, launch_of(entry))
 
 
+def ball_entries(logged: dict, entries: list) -> list[dict]:
+    """The entries with a `LaunchExt Vars` line's ball (same_launch): its stroke, or a mulligan's taken-back
+    one, never the copies GSPro adds of it when the hole ends (one per teammate in a scramble)."""
+    copies = holed_copies(entries)
+    return [e for i, e in enumerate(entries) if i not in copies and isinstance(e, dict) and same_launch(logged, e)]
+
+
 def _launch_match(logged: dict, vals: dict | None) -> bool:
     return vals is not None and all(k in logged and k in vals and abs(logged[k] - vals[k]) <= LAUNCH_TOL
                                     for k in LAUNCH_KEYS)
@@ -306,8 +328,9 @@ def slot_players(credits: Iterable[tuple[int, dict]], entries: list) -> dict[int
     # By ball speed in hundredths (within LAUNCH_TOL: the next one either side): a late round's file is
     # hundreds of strokes, checked against every shot credited.
     by_sp: dict[int, list[tuple[str, dict]]] = {}
-    for e in entries:
-        if isinstance(e, dict) and e.get("PlayerName") and (vals := launch_of(e)) and "sp" in vals:
+    copies = holed_copies(entries)   # (a scramble's hole-out copies its ball onto every teammate)
+    for i, e in enumerate(entries):
+        if i not in copies and isinstance(e, dict) and e.get("PlayerName") and (vals := launch_of(e)) and "sp" in vals:
             by_sp.setdefault(round(vals["sp"] * 100), []).append((str(e["PlayerName"]), vals))
     votes: dict[int, set[str]] = {}
     for idx, launch in credits:

@@ -2635,8 +2635,8 @@ async def test_a_round_file_stroke_just_after_the_screens_rest_is_still_taken(tm
     def f(lie, carry, total):
         return Hud(player_text="P", shot_number=1, lie=lie, tiles={"carry (game)": str(carry), "total length": str(total),
                                                                    "offline (raw)": "4.0"})
-    frames = [f("fairway", 170, 170), f("fairway", 180, 180), f("fairway", 180, 182), f("semi rough", 180, 190),
-              f("semi rough", 180, 195), f("semi rough", 180, 195), f("semi rough", 180, 195)]
+    frames = [f("fairway", 170, 170), f("fairway", 180, 180), f("fairway", 180, 182), f("first cut", 180, 190),
+              f("first cut", 180, 195), f("first cut", 180, 195), f("first cut", 180, 195)]
     e, reads = _file_engine(tmp_path, frames, poll=0.01)
     e._booth_wall0 -= 5
     watcher = asyncio.create_task(_watching(e))
@@ -2659,7 +2659,7 @@ async def test_a_round_file_stroke_just_after_the_screens_rest_is_still_taken(tm
     assert track is not None and "ocr_rest" in timing and timing["file"] - timing["ocr_rest"] <= 0.3
     assert timing["ocr_end"] == "the screen had it at rest"
     # The screen's finer word for GSPro's rough stays; its other tiles (read at rest) too.
-    assert after.lie == "semi rough" and after.tiles["offline (raw)"] == "4.0" and own is not None
+    assert after.lie == "first cut" and after.tiles["offline (raw)"] == "4.0" and own is not None
     assert after.tiles["carry (game)"] == f"{track.carry_yards:.1f}"
 
 
@@ -7873,6 +7873,136 @@ def test_a_full_shot_conceded_then_made_a_putt_by_gspros_round_file_keeps_its_co
     e.store.db.execute("UPDATE shots SET club = 'PT', is_putt = 1 WHERE id = ?", (sid,))
     e._sync_file_clubs()
     assert e.store.db.execute("SELECT outcome FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "conceded"
+
+
+def test_a_miss_graded_on_a_putt_gspros_round_file_takes_back_goes_with_it(tmp_path):
+    from commentator.round import Round
+
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Paul"], course="X", scheduled_format=None, holes=9, is_league=False)
+    e.round = r
+    sid, rec = _row(e, r, 7, 2, "green", hole=0, seq=1)
+    rec.shot_id = sid
+    e.store.db.execute("UPDATE shots SET is_putt = 1 WHERE id = ?", (sid,))
+    e._sync_file_clubs()
+    rec.outcome = "missed"
+    e.store.db.execute("UPDATE shots SET is_putt = 0 WHERE id = ?", (sid,))   # (the store's pin released)
+    e._sync_file_clubs()
+    assert (rec.shot.is_putt, rec.outcome) == (False, None)
+
+
+def test_a_late_miss_on_a_putt_gspros_round_file_made_a_full_shot_isnt_recorded(tmp_path):
+    from commentator.round import Round
+
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Paul"], course="X", scheduled_format=None, holes=9, is_league=False)
+    e.round = r
+    sid, rec = _row(e, r, 7, 2, "rough", hole=0, seq=1)
+    rec.shot_id = sid
+    e._record_result(sid, "missed", "[t]", putt=True, rec=rec)   # (a watch started on the guessed putt)
+    assert (rec.outcome, e.store.db.execute("SELECT outcome FROM shots WHERE id = ?", (sid,)).fetchone()[0]) \
+        == (None, None)
+
+
+def test_a_late_miss_on_a_tracked_full_shot_a_stale_record_calls_a_putt_isnt_recorded(tmp_path):
+    e = _mini_engine(tmp_path)   # (no round: _sync_file_clubs has no record to put the file's call on)
+    putt = Shot(ball_speed=12, club="PT", putter=True)
+    sid = e.store.record_shot(player="Paul", hole="Hole 1", shot=putt, before=Hud(lie="green", shot_number=2),
+                              after=Hud(lie="green"), tags=[], carry_game_yards=None, total_yards=None,
+                              offline_yards=None)
+    rec = ShotRecord("Paul", putt, "Hole 1", Hud(lie="green"), [], shot_id=sid)
+    e.store.db.execute("INSERT INTO shot_tracks (shot_id, gspro_shot_id, was) VALUES (?, 's1', '{}')", (sid,))
+    e.store.db.execute("UPDATE shots SET is_putt = 0 WHERE id = ?", (sid,))   # (the file made it a full shot)
+    assert e._record_result(sid, "missed", "[t]", putt=True, rec=rec) is False
+    assert e.store.db.execute("SELECT outcome FROM shots WHERE id = ?", (sid,)).fetchone()[0] is None
+
+
+def test_a_late_miss_on_an_untracked_stroke_the_live_record_has_as_a_full_shot_isnt_recorded(tmp_path):
+    e = _mini_engine(tmp_path)
+    putt = Shot(ball_speed=12, club="PT", putter=True)
+    sid = e.store.record_shot(player="Paul", hole="Hole 1", shot=putt, before=Hud(lie="green", shot_number=2),
+                              after=Hud(lie="green"), tags=[], carry_game_yards=None, total_yards=None,
+                              offline_yards=None)   # (stored as the guessed putt)
+    rec = ShotRecord("Paul", Shot(ball_speed=12, club="LW", putter=False), "Hole 1", Hud(lie="green"), [],
+                     shot_id=sid)
+    assert e._record_result(sid, "missed", "[t]", putt=True, rec=rec) is False
+    assert e.store.db.execute("SELECT outcome FROM shots WHERE id = ?", (sid,)).fetchone()[0] is None
+
+
+def test_a_late_concession_on_a_tracked_full_shot_a_stale_record_calls_a_putt_is_a_full_shots(tmp_path):
+    e = _mini_engine(tmp_path)   # (no round: _sync_file_clubs has no record to put the file's call on)
+    putt = Shot(ball_speed=12, putter=True)
+    sid = e.store.record_shot(player="Paul", hole="Hole 1", shot=putt, before=Hud(lie="rough", shot_number=2),
+                              after=Hud(lie="rough"), tags=[], carry_game_yards=None, total_yards=None,
+                              offline_yards=None)
+    rec = ShotRecord("Paul", putt, "Hole 1", Hud(lie="rough"), [], shot_id=sid)
+    e.store.db.execute("INSERT INTO shot_tracks (shot_id, gspro_shot_id, was) VALUES (?, 's1', '{}')", (sid,))
+    e.store.db.execute("UPDATE shots SET is_putt = 0 WHERE id = ?", (sid,))   # (the file made it a full shot)
+    e._record_result(sid, "conceded", "[t]", putt=True, rec=rec)
+    assert tuple(e.store.db.execute("SELECT outcome, lie_after FROM shots WHERE id = ?", (sid,)).fetchone()) \
+        == (None, "green")
+
+
+def test_a_late_concession_on_a_putt_gspros_round_file_made_a_full_shot_is_a_full_shots(tmp_path):
+    from commentator.round import Round
+
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Paul"], course="X", scheduled_format=None, holes=9, is_league=False)
+    e.round = r
+    sid, rec = _row(e, r, 7, 2, "rough", hole=0, seq=1)
+    rec.shot_id = sid
+    e._record_result(sid, "conceded", "[t]", putt=True, rec=rec)   # (a watch started on the guessed putt)
+    assert tuple(e.store.db.execute("SELECT outcome, lie_after FROM shots WHERE id = ?", (sid,)).fetchone()) \
+        == (None, "green")
+
+
+def test_a_late_miss_on_a_putt_the_file_made_a_full_shot_grades_no_call(tmp_path):
+    from commentator.round import Round
+
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Paul"], course="X", scheduled_format=None, holes=9, is_league=False)
+    e.round = r
+    sid, rec = _row(e, r, 7, 2, "rough", hole=0, seq=1)
+    rec.shot_id = sid
+
+    async def missed(*a, **k):
+        return "missed"
+    e._wait_putt_result = missed
+    asyncio.run(e._late_result(sid, 0, 0, 0, 0, "[t]", True, ("Al", True, "Hole 1"), "Hole 1", rec=rec))
+    assert e.store.db.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
+
+
+def test_a_miss_the_store_gives_back_with_its_putt_comes_back_live(tmp_path):
+    from commentator.round import Round
+
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Paul"], course="X", scheduled_format=None, holes=9, is_league=False)
+    e.round = r
+    sid, rec = _row(e, r, 7, 2, "green", hole=0, seq=1)
+    rec.shot_id = sid
+    e.store.db.execute("UPDATE shots SET is_putt = 1, outcome = 'missed' WHERE id = ?", (sid,))
+    e._sync_file_clubs()
+    assert (rec.shot.is_putt, rec.outcome) == (True, "missed")
+
+
+def test_a_full_shot_conceded_after_gspros_file_filled_its_putter_stays_a_full_shot(tmp_path):
+    # The file filled the putter at rest on a chip the screen read no club for; the log concedes it
+    # before the file's hole-out copy takes the club back.
+    from commentator.round import Round
+
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Paul"], course="X", scheduled_format=None, holes=9, is_league=False)
+    e.round = r
+    sid, rec = _row(e, r, 7, 2, "fringe", hole=0, seq=1)
+    rec.shot_id = sid
+    e.store.db.execute("UPDATE shots SET club = 'PT', is_putt = 1 WHERE id = ?", (sid,))
+    e.store.db.execute("INSERT INTO shot_tracks (shot_id, gspro_shot_id, was) VALUES (?, 's1', ?)",
+                       (sid, json.dumps({"club": None, "is_putt": 0})))
+    e._sync_file_clubs()
+    e._record_result(sid, "conceded", "[t]", putt=rec.shot.is_putt, rec=rec)
+    e._sync_file_clubs()
+    assert not rec.shot.is_putt
+    assert e.store.db.execute("SELECT outcome FROM shots WHERE id = ?", (sid,)).fetchone()[0] is None
 
 
 def test_a_full_shots_concession_after_gspros_round_file_made_it_a_putt_is_stored_as_a_putts(tmp_path):

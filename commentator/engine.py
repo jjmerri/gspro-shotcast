@@ -3632,14 +3632,20 @@ class Engine:
             return
         ids = list(recs)
         fires = {v[0]: f for f, v in self._fire_rows.items() if v[2] is not None}
-        for i, club, putt, lie in self.store.db.execute(
-                f"SELECT id, club, is_putt, lie_before FROM shots WHERE id IN ({', '.join('?' * len(ids))})",
+        for i, club, putt, lie, outcome in self.store.db.execute(
+                f"SELECT id, club, is_putt, lie_before, outcome FROM shots WHERE id IN ({', '.join('?' * len(ids))})",
                 ids).fetchall():
             x = recs[i]
+            if x.outcome in ("holed", "conceded") and (screen_putt := self.store.screen_putt(i)) is not None:
+                putt = screen_putt   # (the hole ended on it: putt or not as before the file's club, _record_result)
             if club != x.shot.club or bool(putt) != x.shot.is_putt:
                 was_putt = x.shot.is_putt
                 x.shot = replace(x.shot, club=club, putter=bool(putt))
-                if putt and not was_putt and x.outcome not in (None, "holed"):
+                if not putt and was_putt and x.outcome == "missed":   # (the store's taken back with the putt)
+                    x.outcome = None
+                elif putt and not was_putt and x.outcome is None and outcome == "missed":
+                    x.outcome = outcome   # (the store's, back with the putt: _release_track)
+                elif putt and not was_putt and x.outcome not in (None, "holed"):
                     # (a putt's result is stored, as a full shot's concession isn't: its conceded putt is)
                     self.store.set_shot_result(i, outcome=x.outcome)
                 elif putt and not was_putt and x.outcome is None and (f := fires.get(i)) is not None:
@@ -3820,7 +3826,7 @@ class Engine:
             # (not one struck after GSPro had written the stroke: it's a later one)
             fits = [x for x in mine if lo < order[x.shot_id] < hi and self._file_names_fit(t.player, x.player)
                     and (x.impact_at is None or x.impact_at <= w.seen_at.get(t.shot_id, math.inf))
-                    and bool(x.shot.is_putt) == t.putt and x.hole_seq is not None and abs(x.hole_seq - seq) <= 1
+                    and (t.putt is None or bool(x.shot.is_putt) == t.putt) and x.hole_seq is not None and abs(x.hole_seq - seq) <= 1
                     and abs(x.shot.ball_speed - t.ball_speed) <= max(SAME_BALL_MPH, 0.01 * t.ball_speed)
                     and fits_round(t, course_of.get(x.shot_id))]
             if not fits:
@@ -6103,8 +6109,8 @@ class Engine:
         launch = self.gspro.fire_info(fire).get("launch")
         if not launch or self.round is None:
             return False
-        names = {str(e["PlayerName"]) for e in self._file_entries
-                 if isinstance(e, dict) and e.get("PlayerName") and round_file.same_launch(launch, e)}
+        names = {str(e["PlayerName"]) for e in round_file.ball_entries(launch, self._file_entries)
+                 if e.get("PlayerName")}
         return len(names) == 1 and self._file_roster_key(self.round, next(iter(names))) == g
 
     def _file_rename(self, fire: int, owner: int, name: str) -> None:
@@ -7745,15 +7751,27 @@ class Engine:
             file_ours = False
             before = replace(before, shot_number=screen_before.shot_number, gspro_shot=screen_before.gspro_shot)
             hud = replace(hud, shot_number=screen_before.shot_number)
-        # GSPro's club for the stroke beats the one read off the screen, before the drive records and
-        # the club's monitor fields are worked out from it.
-        screen_club = None
-        if file_track is not None and file_ours and (club := round_file.club_fix(file_track, shot.club)) is not None:
+        # GSPro's club for the stroke fills one the screen read none for (round_file.club_fix), before the
+        # drive records and the club's monitor fields are worked out from it.
+        screen_club, file_putt = None, False
+        if file_track is not None and file_ours:   # (as the file has it now: a hole-out since takes its club)
+            file_track = self._file_track_of(player, None, impact, file_track.shot_id) or file_track
+        # Not live on a stroke at rest on the green (or anywhere unknown): the hole may yet end on it (a
+        # gimme, holed), GSPro's club then the putter its hole-out selects. The stroke's pin fills it.
+        if file_track is not None and file_ours and file_track.lie_after not in (None, "green") \
+                and (club := round_file.club_fix(file_track, shot.club)) is not None:
             log.info("%s club %s -> %s from GSPro's round file", tag, shot.club or "unread", club)
-            screen_club, shot = (shot.club,), replace(shot, club=club)
+            screen_club, shot = (shot.club, shot.putter, shot.is_putt), replace(shot, club=club)
+        elif file_track is not None and file_ours and not shot.club and shot.putter is None \
+                and not self.gspro.logs_launch_mode and file_track.putt is not None \
+                and file_track.putt != shot.is_putt:
+            # (no club to say, nor GSPro's log: its file's call at impact over the speed-and-launch guess)
+            log.info("%s GSPro's round file has it %s", tag, "a putt" if file_track.putt else "a full shot")
+            shot, file_putt = replace(shot, putter=file_track.putt), True
 
         prior = self.state.player_shots(player or "unknown")
         score, tags = score_shot(shot, prior, hud, to_yards(before.to_pin))
+        scored = (score, list(tags), hud)   # (with the club as it stands: a fill taken back below rescores it)
         # The player's own longest/avg drive is a lifetime personal best (a long drive is a long drive,
         # league or practice). The LEAGUE record, though, must be league-only: a huge practice drive is
         # not "the league's best drive this season", so that bar reads from the league slice.
@@ -7850,9 +7868,54 @@ class Engine:
         r = shot_round
         if r and player:
             player = r.current_name(player)   # a guest renamed while this shot was in flight
+        relie = bool(file_lie) and screen_played != before.lie
+        if file_track is not None and file_ours and (before.shot_number != screen_before.shot_number
+                                                     or screen_club is not None or file_putt or relie) \
+                and not self._file_ours(file_track, shot_round, tag):   # GSPro's round tied to another since
+            file_ours = False
+            if relie:   # (not the lie its stroke started from either)
+                log.info("%s played from %s after all (not GSPro's round file's %s)", tag, screen_played, before.lie)
+                before = replace(before, lie=screen_played)
+                if screen_club is None and not retee:
+                    shot = replace(shot, club=deck_club(deck_from, screen_before.shot_number, before.lie))
+            before = replace(before, shot_number=screen_before.shot_number, gspro_shot=screen_before.gspro_shot)
+            hud = replace(hud, shot_number=screen_before.shot_number)
+        if screen_club is not None and file_ours:   # (a hole-out copy may have come in since)
+            file_track = self._file_track_of(player, None, impact, file_track.shot_id) or file_track
+
+        def take_back() -> None:
+            """The club GSPro's round file filled (club_fix) back to the screen's, or the putter GSPro's log
+            called only after the fill: the stroke turned out another round's, or one the hole has ended
+            on since (its hole-out selects the putter), and what that club scored it (a chip as a putt,
+            say) or the driving records it set go with it."""
+            nonlocal shot, screen_club, file_putt, tags, score, season_facts
+            if screen_club is None:   # (the file's putt or not, with no club to say: the guess again)
+                club = shot.club
+                log.info("%s GSPro's round file's putt call taken back", tag)
+                shot = replace(shot, putter=None)
+            else:
+                club = "PT" if screen_club[1] is None and shot.putter \
+                    else screen_club[0] if retee else deck_club(screen_club[0], before.shot_number, before.lie)
+                log.info("%s club %s -> %s: back to the screen's", tag, shot.club, club or "unread")
+                shot = replace(shot, club=club)
+            screen_club, file_putt = None, False
+            rescore, retags = score_shot(shot, prior, scored[2],
+                                         to_yards(screen_before.to_pin if not file_ours else before.to_pin))
+            tags = [*retags, *(t for t in tags if t not in scored[1] and t not in retags)]
+            score += rescore - scored[0]
+            if tee_drive and not is_drive(club, shot.is_putt, before.shot_number, before.lie,
+                                          to_yards(before.to_pin)):   # its driving records were the file club's
+                tags = [t for t in tags if t not in ("season_best_drive", "league_best_drive")]
+                season_facts = [f for f in season_facts if f not in drive_facts]
+                score -= drive_bump
+
+        if screen_club is not None and (not file_ours or round_file.club_fix(file_track, screen_club[0]) is None) \
+                or file_putt and not file_ours:
+            take_back()
         # The player and club are final here: drop the club fields this player's monitor doesn't measure
         # with this club (zeros it wrote for them), before the shot is recorded or talked about. Not on a
         # shared ball: the name on it isn't who hit it.
+        measured = shot   # (what's stored under a filled club: the stroke's pin filters it, reversibly)
         if (seen := getattr(self.store, "club_fields_seen", None)) and not self._anonymous(player):
             shot = club_fields.apply(player, shot, seen)
         # A standout club delivery (big angle of attack, a real shape, a flush or a clear mishit) is
@@ -7865,26 +7928,6 @@ class Engine:
         if notable_delivery and use_delivery:
             score += 0.5
             tags.append("club_notable")
-        relie = bool(file_lie) and screen_played != before.lie
-        if file_track is not None and file_ours and (before.shot_number != screen_before.shot_number
-                                                     or screen_club is not None or relie) \
-                and not self._file_ours(file_track, shot_round, tag):   # GSPro's round tied to another since
-            file_ours = False
-            if relie:   # (not the lie its stroke started from either)
-                log.info("%s played from %s after all (not GSPro's round file's %s)", tag, screen_played, before.lie)
-                before = replace(before, lie=screen_played)
-                if screen_club is None and not retee:
-                    shot = replace(shot, club=deck_club(deck_from, screen_before.shot_number, before.lie))
-            if screen_club is not None:   # the club came from that round's stroke: back to the screen's
-                club = screen_club[0] if retee else deck_club(screen_club[0], screen_before.shot_number, before.lie)
-                shot, screen_club = replace(shot, club=club), None
-                if tee_drive and not is_drive(club, shot.is_putt, screen_before.shot_number, before.lie,
-                                              to_yards(before.to_pin)):   # its driving records were the file club's
-                    tags = [t for t in tags if t not in ("season_best_drive", "league_best_drive")]
-                    season_facts = [f for f in season_facts if f not in drive_facts]
-                    score -= drive_bump
-            before = replace(before, shot_number=screen_before.shot_number, gspro_shot=screen_before.gspro_shot)
-            hud = replace(hud, shot_number=screen_before.shot_number)
         rec = ShotRecord(
             player or "unknown", shot, shot_hole, hud, tags,
             round_id=r.id if r else None, hole_seq=round_hole, par=shot_par,
@@ -7933,11 +7976,18 @@ class Engine:
             self._note_tournament(r)
         # The round's course, fixed at its start: the hole box's read each hole can be cut short.
         shot_course = (r.course if r is not None else None) or self.current_course
+        # The screen's club, and putt or not, with its fields unfiltered: GSPro's go on with the stroke's
+        # pin, which keeps the screen's to go back to. GSPro's log's call, when it came only after the club
+        # was filled: a putter it called is the putter's.
+        # The file's putt call with no club to go on is its pin's to make, reversibly: the guess here.
+        stored = replace(shot, putter=None) if file_putt else shot
+        if screen_club is not None and screen_club[1] is None and shot.putter:
+            stored = replace(shot, club="PT")
+        elif screen_club is not None:
+            late = screen_club[1] is None and shot.putter is not None
+            stored = replace(measured, club=screen_club[0], putter=shot.putter if late else screen_club[2])
         shot_id = self.store.record_shot(
-            # (the screen's club: GSPro's goes on with the stroke's pin, which keeps the screen's to go back to)
-            # (a putt or not as GSPro's club makes it, which the pin doesn't change)
-            player=player, hole=shot_hole,
-            shot=shot if screen_club is None else replace(shot, club=screen_club[0], putter=shot.is_putt),
+            player=player, hole=shot_hole, shot=stored,
             before=replace(before, lie=screen_played) if file_lie else before, after=hud, tags=tags,
             carry_game_yards=carry_game, total_yards=tile_yards("total length"), offline_yards=tile_yards("offline (raw)"),
             course=shot_course, carry_raw_tile_yards=carry_flat,
@@ -8096,8 +8146,9 @@ class Engine:
                     self._bg(self._late_result(shot_id, idx, base_outs, base_gim, base_shot, tag, True,
                                                self._pending_prediction.pop(player, None), shot_hole,
                                                base_hole=base_hole, base_setup=base_setup, rec=rec, fire=fire))
+                elif self._record_result(shot_id, outcome, tag, putt=True, rec=rec) is False:
+                    outcome = None   # (not a putt after all: nothing to grade a call on)
                 else:
-                    self._record_result(shot_id, outcome, tag, putt=True, rec=rec)
                     holed = outcome == "holed"
                     log.info("%s putt outcome from GSPro log: %s (%.1fs after impact)", tag, outcome,
                              time.monotonic() - impact)
@@ -8131,9 +8182,11 @@ class Engine:
                         impact_snap[6].get(shooter, self.gspro.shot_number(shooter)),
                         max(0.5, impact + c.hole_result_window_seconds - time.monotonic()),
                         base_hole=impact_snap[1].get(shooter), base_setup=setups0.get(shooter, 0), fire=fire)
-                    if outcome != "unknown":
+                    if outcome != "unknown" and self._record_result(shot_id, outcome, tag, putt=True,
+                                                                     rec=rec) is False:
+                        outcome = None   # (not a putt after all: nothing to grade a call on)
+                    elif outcome != "unknown":
                         log_drop = True
-                        self._record_result(shot_id, outcome, tag, putt=True, rec=rec)
                         holed = outcome == "holed"
                         log.info("%s putt outcome from GSPro's log (its slot %s's score line): %s", tag, shooter,
                                  outcome)
@@ -9385,8 +9438,9 @@ class Engine:
 
     def _record_result(self, shot_id: int | None, outcome: str, tag: str, putt: bool,
                        rec: ShotRecord | None = None, from_log: bool = False,
-                       left_yards: float | None = None) -> None:
-        """Store how a stroke ended. A putt keeps its outcome, and so does a full shot that holed out;
+                       left_yards: float | None = None) -> bool | None:
+        """Store how a stroke ended (False: a miss for a stroke GSPro's round file has made a full shot
+        since, not recorded). A putt keeps its outcome, and so does a full shot that holed out;
         any stroke that ended inside the gimme circle also gets a row for the conceded putt GSPro
         counts but nobody hits, so putting stats (putts per hole, three-putts) see every putt on the
         card. A full shot that ended inside the circle finished on the green, whatever the HUD read."""
@@ -9398,6 +9452,31 @@ class Engine:
             self._before_result[shot_id] = (*self.store.finish_of(shot_id), rec is not None, rec and rec.hud.lie)
             while len(self._before_result) > 100:
                 del self._before_result[next(iter(self._before_result))]
+        # (the store's call once GSPro's round file has given one, else the live record's, else the store's)
+        if outcome == "missed" and (stored := self.store.shot_is_putt(shot_id, tracked=True)) is None:
+            stored = bool(rec.shot.is_putt) if rec is not None else self.store.shot_is_putt(shot_id)
+        if outcome == "missed" and stored is False:
+            return False   # (a watch started on a guessed putt GSPro's round file has made a full shot since)
+        screen_putt = None
+        if outcome in ("holed", "conceded") and (screen_putt := self.store.screen_putt(shot_id)) is None:
+            # (putt or not as the record has it now, else the store: GSPro's round file may have called it
+            # since the watch started)
+            if (now := self.store.shot_is_putt(shot_id, tracked=True)) is not None:
+                if rec is not None:
+                    rec.shot = replace(rec.shot, putter=now)
+            else:
+                now = rec.shot.is_putt if rec is not None else self.store.shot_is_putt(shot_id)
+            putt = putt if now is None else now
+        elif outcome in ("holed", "conceded"):
+            # (a club the store filled from GSPro's file since, which a stroke the hole ended on can't have:
+            # putt or not as it was before, as the store has it once it takes the club back and
+            # _sync_file_clubs follows)
+            putt = screen_putt
+            if rec is not None:
+                rec.shot = replace(rec.shot, putter=putt)
+        if outcome in ("holed", "conceded"):
+            # (a miss settled while a putter the file filled made it a putt: a scramble's teammate played on)
+            self.store.clear_miss(shot_id, full=screen_putt is False)
         if rec is not None:
             rec.outcome = outcome
         # (a watch started on a full shot GSPro's round file has since made a putt: stored as a putt's)
@@ -9413,6 +9492,7 @@ class Engine:
                 self.store.set_lie_after(shot_id, "green")
                 if rec is not None and rec.hud.lie != "green":
                     rec.hud = replace(rec.hud, lie="green")
+        return True
 
     def _gimme_left(self, shot_id: int | None) -> float | None:
         """How far from the hole (yards) GSPro logged the ball this shot left inside the gimme circle."""
@@ -9433,7 +9513,8 @@ class Engine:
                                                    base_hole=base_hole, base_setup=base_setup, fire=fire)
             if outcome == "unknown" or (not putt and outcome == "missed"):
                 return
-            self._record_result(shot_id, outcome, tag, putt, rec)
+            if self._record_result(shot_id, outcome, tag, putt, rec) is False:
+                return
             if putt:
                 log.info("%s putt outcome from GSPro log (late): %s", tag, outcome)
             if prediction and prediction[2] == hole:
@@ -9841,9 +9922,8 @@ class Engine:
         for idx, fire in balls.items():
             t = None
             if launch := self.gspro.fire_info(fire).get("launch"):
-                ids = {str(e["ShotID"]) for e in self._file_entries   # (strokes: not a hole-end copy of one)
-                       if isinstance(e, dict) and e.get("ShotID") is not None and round_file.same_launch(launch, e)
-                       } & tracks.keys()
+                ids = {str(e["ShotID"]) for e in round_file.ball_entries(launch, self._file_entries)
+                       if e.get("ShotID") is not None} & tracks.keys()
                 t = tracks.get(next(iter(ids))) if len(ids) == 1 else None
             if t is None and (row := self._fire_rows.get(fire)) is not None:
                 t = tracks.get(pinned.get(row[0]))

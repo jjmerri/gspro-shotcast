@@ -45,8 +45,15 @@ stroke's EndingSurface), with the screen's finer word kept (`round_file.finer_li
 (and `_reread_setup_lie`'s retries) and the log's first-bounce material (`GsproState.lie_by`,
 `_setup_log_lies`) remain as fallbacks for a team ball (scramble, alternate shot), a penalty or drop,
 the first setup before the watcher has the stroke, a ball that ended on the cart path (free relief may
-have moved it; the stroke's own StartingSurface is recorded once it's in the file), and an unknown EndingSurface code (only 1, 2, 3, 4,
-5, 11 and 18 are mapped in `round_file.SURFACES`). Check the booth logs for `Setup lie ... from GSPro's
+have moved it; the stroke's own StartingSurface is recorded once it's in the file), and an EndingSurface
+code that names no lie. `round_file.SURFACES` maps every code GSPro has: the index into its
+`Trajectory.PhyMatList` (0-22, from the game code), semi rough (12) and pine straw (16) included, so
+the screen's word is kept over the file's only for the finer lies left in `FINER_LIES` (first cut,
+fringe, fescue, native, bunker, waste). Only 0 (the ball's own material) and 19 (`none`: GSPro found
+no surface under the ball) fall back to the screen. Codes 6 (earth), 7 (dropzone), 13 (stone) and
+17 (leaves) take plain words the booth had none for (dirt, drop zone, stone, leaves) and play no
+pre-written result line (`flight_pick._LIE_REACTION`); only 1, 2, 3, 5, 11 and 18 have been seen
+in a real file (the 2026-11-18 rounds in `tests/fixtures/round_files/`). Check the booth logs for `Setup lie ... from GSPro's
 round file` against setups without it; if the gaps are only team balls, map those from the file too
 (the pick's stroke) and drop the log's `lie_by` fallback.
 
@@ -65,20 +72,34 @@ putt the log never credits (GSPro 3.59 practice, no log). Once the slot naming (
 setup-screen slot order") covers every round, check booth logs for `Round ... scorecard:` lines in
 covered rounds and remove the in-round card read and the banner.
 
-## Check the round file's club against the screen's, then trust it outright
+## Find why the round file's club disagrees with the screen's
 
-GSPro's `ClubIndex` corrects the club the screen read before the shot (`round_file.club_fix`, applied
-live in `handle_shot` and by `Store._apply_track`). The index-to-club table (`round_file.CLUBS`) is
-GSPro 4.x's own (`ClubSelect`'s DR, W2-W7, H2-H7, I1-I9, PW, GW, SW, LW, PT, None) and matched one real
-4.x round (driver off tees, putter on greens, 5-wood and wedges where expected); it hasn't been checked
-on 3.59. Count the `club ... from GSPro's round file` log lines over a few nights: if the screen's
-club is only ever the one corrected, the club box OCR can be kept just for the pre-shot call (the
-only place the file can't help), and the driver-off-the-deck rule (`hud.deck_club`) rechecked
-against what the file records there.
+The club read off the screen before the shot is the club hit. GSPro's `ClubIndex` only fills one the
+screen read none for (`round_file.club_fix`, applied by `Store._apply_track`, and live in
+`handle_shot` except on a stroke at rest on the green, which the hole may yet end on), and never on a
+holed or conceded stroke (`round_file.file_club`; one it filled before the hole ended on the stroke
+goes back). A shot left with no club, read or filled, takes GSPro's `isPutt` (its putting mode at
+impact) for putt or not, reversibly with the stroke's pin. GSPro writes
+`ClubIndex = mGC.clubsel.clubSelection` when it records the stroke at rest, not at impact
+(decompiled `PlayerShotHistory.cs:79`), and sets the selection to the putter (26) on a hole-out, so a
+chip-in reads PT (the 2026-11-18 scramble's hole 4: Corey's lob-wedge chip-in). So the file can't
+replace the club box OCR. Against the booth's club on 2026-11-18 (its `impact HUD ... club` line,
+logged after `hud.deck_club` turns a driver read off the deck into a 3-wood) the file matched 28 of 28
+strokes in a single-player round but 49 of 52 in a scramble: the chip-in, and hole 7's second shots
+(both players, off the fairway, 124.9 and 150.7 mph), which the booth has as 3-woods and the file as
+the driver. Whether the screen itself showed the driver there (the deck rule's case: newer GSPro
+shows the driver for a long shot off the deck) or a 3-wood is unverified, as is why the file has a
+3-wood off the deck in the single-player round (holes 4 and 7, from the fairway and the rough). The index-to-club table
+(`round_file.CLUBS`) is GSPro 4.x's own (`ClubSelect`'s DR, W2-W7, H2-H7, I1-I9, PW, GW, SW, LW, PT,
+None). Keep the raw club box read for a few rounds (before the deck rule) to settle it, and find what
+moves the selection between impact and rest, before trusting the file's club anywhere the screen
+read one.
 
 ## Check the scramble pick against a real scramble round file
 
 The pick screen's OCR is gone: a scramble's unpicked balls take their finish and lie from
-`currentRound.dat` (`Engine._file_pick_cards`). No real scramble file has been seen yet, so check
+`currentRound.dat` (`Engine._file_pick_cards`). One real scramble file has been seen (2026-11-18, in
+`tests/fixtures/round_files/`): every teammate's ball is there, and a hole-out adds a copy of the
+holing ball for each teammate (`gspro_files.holed_copies`). It can't say when each was written, so check
 that GSPro writes every teammate's ball before the pick screen shows. A ball missing when the screen
 goes down gets no finish. On 3.59 (no `LaunchExt`), the tie relies on `_file_pins` only.

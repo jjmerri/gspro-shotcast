@@ -162,7 +162,8 @@ On GSPro 3.59 and later, GSPro's own record of the round in play (`currentRound.
 log) is applied to each stroke once the ball stops: where it was played from (a tee shot and a
 drop included), the carry, the total, the lies and where it finished come from GSPro's physics
 rather than the screen, and the booth's later reads leave them be. A lie the screen reads finer
-than the file's (semi rough, fringe, pine straw) is kept. The live calls use it too: the lie a
+than the file's (first cut, fringe, fescue) is kept; GSPro has its own codes for semi rough and pine
+straw, and a surface it names none for (`none`) leaves the screen's read. The live calls use it too: the lie a
 player sets up on is where the file has their last ball at rest (the screen's read only when the file
 has no such stroke: a team ball or a shamble, where GSPro copies balls between partners, a penalty,
 another round's file), and the shot's own call says the
@@ -171,8 +172,12 @@ which is kept for the cart-path kick and tree calls and as the lie's last fallba
 finish stays the booth's, for the ball the team picked; the balls it didn't pick take their finish
 and lie from the file when the pick screen comes up (GSPro writes each teammate's ball as it stops).
 The club read off the screen before the
-shot is corrected to the file's (`ClubIndex`) when they differ (logged as `club 7I -> 6I from GSPro's
-round file`); a driver the file has off the deck stays the booth's 3-wood, as the screen's does.
+shot is the club hit; the file's (`ClubIndex`) only fills one the screen read none for (logged as
+`club unread -> 6I from GSPro's round file`), and never on a holed or conceded stroke: GSPro writes
+the club selected when the ball comes to rest, and a hole-out selects the putter, so a chip-in reads
+as a putt there (one filled before the hole ended on the stroke goes back; the live call fills none
+on a stroke at rest on the green, which the hole may yet end on). A driver the file has off
+the deck stays the booth's 3-wood, as the screen's does.
 Offline isn't in the file. The file starts over each round, so earlier
 rounds keep what the booth read; a copy is kept from each round's end in `logs/round-files/`. Strokes the booth recorded without a name (no round started, so
 no player, hole or stroke number) are named from the file too: lined up with its strokes from the

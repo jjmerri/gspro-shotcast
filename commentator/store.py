@@ -1021,6 +1021,23 @@ class Store:
         log.warning("Shot %s was marked holed but %s hit again on the hole (shot %s): not holed",
                     h["id"], row["player"], nxt["id"])
 
+    def shot_is_putt(self, shot_id: int | None, tracked: bool = False) -> bool | None:
+        """Whether the stored shot is a putt now (None: no such shot; `tracked`: or no track from GSPro's
+        round file applied to it)."""
+        row = None if shot_id is None else self.db.execute("SELECT is_putt FROM shots WHERE id = ?",
+                                                          (shot_id,)).fetchone()
+        if row is None or (tracked and self._track(shot_id) is None):
+            return None
+        return bool(row[0])
+
+    def clear_miss(self, shot_id: int | None, full: bool = False) -> None:
+        """Take back a missed putt's outcome from a stroke the hole has since ended on, now a full shot (a
+        putter GSPro's round file filled, taken back; `full`: to be taken back)."""
+        if shot_id is not None:
+            self.db.execute("UPDATE shots SET outcome = NULL WHERE id = ? AND outcome = 'missed' AND"
+                            " (is_putt = 0 OR ?)", (shot_id, full))
+            self.db.commit()
+
     def set_shot_result(self, shot_id: int | None, *, finish_yards: float | None = None,
                         outcome: str | None = None) -> None:
         """Fill in a shot's finishing distance and holed/conceded outcome, known only once the ball
@@ -1481,7 +1498,7 @@ class Store:
             # A pinned shot the booth recorded blind takes its player from the file (as _fill_blind).
             blind = pin_of.get(row["id"]) == t.shot_id and name_of is not None \
                 and (row["player"] is None or row["player"] == "unknown")
-            self._apply_track(row, t, self._blind_named(row, t, name_of) if blind else None)
+            self._apply_track(row, t, self._blind_named(row, t, name_of, self._screen_club(row)) if blind else None)
             written += 1
         if name_of is not None and pending:
             filled = self._fill_blind(tracks, now=now, window_s=window_s, taken=taken, matched=matched,
@@ -1541,26 +1558,60 @@ class Store:
         if len(best) < self.BLIND_RUN:
             return set()
         filled = set()
-        for t, row in best:
+        for t, row in reversed(best):   # (oldest first, as recorded: _unmeasured learns from each)
             if row["id"] in taken:
                 continue
-            self._apply_track(row, t, self._blind_named(row, t, name_of))
+            self._apply_track(row, t, self._blind_named(row, t, name_of, self._screen_club(row)))
             taken.add(row["id"])
             filled.add(t.shot_id)
         if filled:
             log.info("GSPro's round file named %d shots the booth recorded without a player", len(filled))
         return filled
 
+    def screen_putt(self, shot_id: int | None) -> bool | None:
+        """Putt or not as the shot is once the club GSPro's round file filled (club_fix) is taken back
+        (GSPro's call at impact, else as it was before); None when it hasn't filled one."""
+        row = None if shot_id is None else self.db.execute("SELECT * FROM shots WHERE id = ?", (shot_id,)).fetchone()
+        if row is None or row["club"] == self._screen_club(row):
+            return None
+        tr = self._track(shot_id)
+        was = json.loads(tr["was"]) if tr is not None and tr["was"] else {}
+        return bool(was.get("ended_putt", was.get("is_putt", row["is_putt"])))
+
+    def _unmeasured(self, row: sqlite3.Row, club: str, player: str | None) -> list[str]:
+        """The club columns a shot recorded without a club has that `player`'s monitor doesn't measure
+        with `club`, as club_fields.apply has them (which a shot with no club skips): zeros it wrote for
+        them, not measurements. None with no player (a shot not attributed: a shared ball whose name
+        isn't who hit it)."""
+        if not player or player == "unknown":
+            return []
+        # (a shot without club data has no delivery fields: Shot.club_measured)
+        fields = ("club_speed", *CLUB_COLS) if any(row[c] is not None for c in CLUB_COLS) else ("club_speed",)
+        known = self.club_fields_seen(player, club)
+        if known and not any(row[c] for c in known.intersection(fields)):
+            return [c for c in fields if row[c] is not None]   # every field known for the club read 0: a misread
+        known |= {c for c in fields if row[c]}
+        return [c for c in fields if c not in known and row[c] is not None]
+
+    def _screen_club(self, row: sqlite3.Row) -> str | None:
+        """The club the booth read off the screen for a shot: not one an earlier read of GSPro's round file
+        set (club_fix), which the snapshot of what the file replaced keeps."""
+        tr = self._track(row["id"])
+        was = json.loads(tr["was"]) if tr is not None and tr["was"] else {}
+        return was["club"] if "club" in was else row["club"]
+
     @staticmethod
-    def _blind_named(row: sqlite3.Row, t, name_of) -> dict:
+    def _blind_named(row: sqlite3.Row, t, name_of, screen_club: str | None = None) -> dict:
         """What a stroke in GSPro's round file names on a shot the booth recorded blind (its own label for
-        the hole kept, when it's that hole: stats group a hole's shots by it)."""
+        the hole kept, when it's that hole: stats group a hole's shots by it). `screen_club`: the club the
+        booth read for it (_screen_club)."""
         same = row["hole"] and re.match(rf"Hole {t.hole}\b", row["hole"])
+        # (the club, where the screen read none, is GSPro's, which says whether it's a putt: club_fix)
+        club = round_file.club_fix(t, screen_club)
         return {"player": name_of(t.player) or t.player,
                 "hole": row["hole"] if same else f"Hole {t.hole}" + (f", par {t.par}" if t.par else ""),
                 "shot_number": t.shot_number,
-                # (GSPro's club, when the file has it, says: a putt is the putter's)
-                "is_putt": int(t.club in PUTTER_CODES) if t.club else int(t.putt or bool(row["is_putt"])),
+                "is_putt": int(club in PUTTER_CODES) if club else int(row["is_putt"]) if t.putt is None else int(t.putt),
                 "attributed": 1}
 
     def _release_track(self, shot_id: int) -> None:
@@ -1568,11 +1619,27 @@ class Store:
         tr = self._track(shot_id)
         if tr is not None and tr["was"]:
             was = json.loads(tr["was"])
-            cols = [c for c in self._TRACKED + self._NAMED if c in was]
+            cols = [c for c in self._TRACKED + self._NAMED + ("club_speed", *CLUB_COLS) if c in was]
             self.db.execute(f"UPDATE shots SET {', '.join(f'{c} = ?' for c in cols)} WHERE id = ?",
                             (*(was[c] for c in cols), shot_id))
+            if "outcome" in was and was["outcome"] is None:   # (a concession the file's putt call gave it)
+                self.db.execute("UPDATE shots SET outcome = NULL WHERE id = ? AND outcome = 'conceded'", (shot_id,))
+            elif "outcome" in was:   # (a miss or concession the file's full-shot call took off)
+                self.db.execute("UPDATE shots SET outcome = ? WHERE id = ? AND outcome IS NULL",
+                                (was["outcome"], shot_id))
+            if "is_putt" in was and not was["is_putt"]:   # (a putt only by the file's say: its miss goes too)
+                self.db.execute("UPDATE shots SET outcome = NULL WHERE id = ? AND outcome = 'missed'", (shot_id,))
             if any(c in was for c in self._NAMED):
                 self._sync_gimme(shot_id)
+            # (a concession graded meanwhile follows the putt or not put back - a full shot's is its gimme's -
+            # over a miss the snapshot had)
+            p = self.db.execute("SELECT uid, is_putt, outcome FROM shots WHERE id = ?", (shot_id,)).fetchone()
+            if p is not None and not p["is_putt"] and p["outcome"] == "conceded":
+                self.db.execute("UPDATE shots SET outcome = NULL WHERE id = ?", (shot_id,))
+            elif p is not None and p["is_putt"] and p["outcome"] in (None, "missed") and p["uid"] is not None \
+                    and self.db.execute("SELECT 1 FROM shots WHERE derived_from = ? AND outcome = 'gimme'",
+                                        (p["uid"],)).fetchone():
+                self.db.execute("UPDATE shots SET outcome = 'conceded' WHERE id = ?", (shot_id,))
         self.db.execute("DELETE FROM shot_tracks WHERE shot_id = ?", (shot_id,))
 
     def _sync_gimme(self, shot_id: int) -> None:
@@ -1593,17 +1660,33 @@ class Store:
         carry, total = t.carry_yards, t.total_yards
         # A scramble keeps a finish only for the ball the team picked (the booth's): see set_format.
         shared = row["fmt"] == "scramble" or bool(row["shared_ball"])
-        # A putt is GSPro's putter (or not) when its club corrects the booth's, unless the file's naming
-        # the shot said.
-        club = round_file.club_fix(t, row["club"])
+        old = self._track(row["id"])
+        was = old["was"] if old is not None else json.dumps({c: row[c] for c in self._TRACKED + tuple(named or ())})
+        # A putt is GSPro's putter (or not) when its club fills one the screen read none for (club_fix),
+        # unless the file's naming the shot said. One an earlier read set goes back to the screen's once
+        # the file can't say (the hole ended on the stroke since), or never could (a club the booth's
+        # earlier versions took from the file over the screen's), with the putt or not it changed.
+        before = json.loads(was) if was else {}
+        screen = self._screen_club(row)
+        club = round_file.club_fix(t, screen)
+        unfill = club is None and row["club"] != screen
+        club = None if club == row["club"] else club
         fix_putt = club is not None and "is_putt" not in (named or {}) and int(club in PUTTER_CODES) != row["is_putt"]
-        putt = (named or {}).get("is_putt", int(club in PUTTER_CODES) if fix_putt else row["is_putt"])
+        unfill_putt = unfill and "is_putt" not in (named or {})
+        # GSPro's putt or not at impact decides a shot with no club, read or filled (the screen's guess
+        # from speed and launch kept in the snapshot to go back to).
+        call = not named and club is None and not unfill and not row["club"] and t.putt is not None \
+            and int(t.putt) != row["is_putt"]
+        # (a snapshot without the putt it changed, from an earlier version: GSPro's own call at impact,
+        # or the screen's putter)
+        putt = (named or {}).get("is_putt", int(club in PUTTER_CODES) if fix_putt
+                                 else int(t.putt) if unfill_putt and not screen and t.putt is not None
+                                 else before.get("is_putt", int(bool(t.putt) or screen in PUTTER_CODES))
+                                 if unfill_putt else int(t.putt) if call else row["is_putt"])
         finish = t.finish_yards if not (putt or shared) else None
         lie_after = lie(row["lie_after"], t.lie_after)
         # What an earlier read of the file set and this one takes back (a penalty since followed the
         # stroke): where it stopped isn't where play went on.
-        old = self._track(row["id"])
-        was = old["was"] if old is not None else json.dumps({c: row[c] for c in self._TRACKED + tuple(named or ())})
         if t.end is None and row["total_yards"] is not None:   # a penalty followed: no resting total, whoever read one
             self.db.execute("UPDATE shots SET total_yards = NULL, total_from_log = 0 WHERE id = ?", (row["id"],))
         if old is not None:
@@ -1629,10 +1712,39 @@ class Store:
             # What it replaces goes in the snapshot (one from before clubs were kept has no club either).
             putter = int(club in PUTTER_CODES)
             w = json.loads(was)
-            was = json.dumps({"club": row["club"], **({"is_putt": row["is_putt"]} if fix_putt else {}), **w})
+            # (whose swing it was: an attributed shot's player, or the one the file names a blind shot for,
+            # unless the ball was shared some other way than a scramble's, where each swing is its player's)
+            own = row["attributed"] or (named and not (row["shared_ball"] and row["fmt"] != "scramble"))
+            who = (named or {}).get("player", row["player"]) if own else None
+            zeros = self._unmeasured(row, club, who) if not row["club"] else []
+            # (putt or not once the fill is taken back, as the unfill has it: screen_putt)
+            ended = int(t.putt) if t.putt is not None else w.get("is_putt", row["is_putt"])
+            was = json.dumps({"club": row["club"], "is_putt": row["is_putt"], **{c: row[c] for c in zeros},
+                              "ended_putt": ended, **w})
             log.info("Shot %d club %s -> %s from GSPro's round file", row["id"], row["club"] or "unread", club)
-            self.db.execute("UPDATE shots SET club = ?, is_putt = CASE WHEN ? THEN ? ELSE is_putt END WHERE id = ?",
+            self.db.execute("UPDATE shots SET club = ?, is_putt = CASE WHEN ? THEN ? ELSE is_putt END"
+                            f"{''.join(f', {c} = NULL' for c in zeros)} WHERE id = ?",
                             (club, fix_putt, putter, row["id"]))
+        elif call:
+            log.info("Shot %d %s from GSPro's round file", row["id"], "a putt" if t.putt else "a full shot")
+            was = json.dumps({"is_putt": row["is_putt"], **json.loads(was)})
+            self.db.execute("UPDATE shots SET is_putt = ? WHERE id = ?", (int(t.putt), row["id"]))
+        elif unfill:
+            log.info("Shot %d club %s -> %s: back to the screen's", row["id"], row["club"], screen or "unread")
+            back = [c for c in ("club_speed", *CLUB_COLS) if c in before]   # (the zeros the fill took off)
+            self.db.execute(f"UPDATE shots SET club = ?, is_putt = ?{''.join(f', {c} = ?' for c in back)} WHERE id = ?",
+                            (screen, putt, *(before[c] for c in back), row["id"]))
+        if row["is_putt"] and not putt and row["outcome"] in ("missed", "conceded"):
+            # (a miss or concession graded on it as a putt goes with the putt - a full shot's concession is
+            # its gimme's - kept to go back to: _release_track)
+            was = json.dumps({"outcome": row["outcome"], **json.loads(was)})
+            self.db.execute("UPDATE shots SET outcome = NULL WHERE id = ?", (row["id"],))
+        elif not row["is_putt"] and putt and row["outcome"] is None and row["uid"] is not None \
+                and self.db.execute("SELECT 1 FROM shots WHERE derived_from = ? AND outcome = 'gimme'",
+                                    (row["uid"],)).fetchone():
+            # (a full shot that left a gimme, now a putt: a conceded putt's)
+            was = json.dumps({"outcome": None, **json.loads(was)})
+            self.db.execute("UPDATE shots SET outcome = 'conceded' WHERE id = ?", (row["id"],))
         self.db.execute(
             "INSERT OR REPLACE INTO shot_tracks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (row["id"], t.shot_id, *(t.land or (None,) * 3), *(t.end or (None,) * 3),
