@@ -1,4 +1,5 @@
-"""The static scorecard (par, stroke index, tee yardages and ratings, altitude) for a GSPro course.
+"""The static scorecard (par, stroke index, tee yardages and ratings, altitude) for a GSPro course,
+and the GSPro listing's course notes the booth's commentary draws on.
 
 GSPro ships this per course in two files, between them covering every course: a labelled, tab
 separated CSV (also has yardages, in metres like every course file), and a pipe-delimited
@@ -7,6 +8,11 @@ separated CSV (also has yardages, in metres like every course file), and a pipe-
 from an earlier version of the course (another par, other tees), so the current one is read first.
 Reading either is exact and needs no OCR, so handicap stroke allocation and par-based scoring
 don't depend on catching the on-screen scorecard.
+
+The course file (`<course>.GKD`, JSON) gives each tee box's whole length, and the listing's metadata:
+the course description (`CourseInfo`, the same text as `coursedetails.txt`'s, which is read first)
+and its style tags (the `Keyword*` flags and `KeywordsString`). These are only
+commentary background: a field that's missing or malformed is left unset and never costs the scorecard.
 
 Course folder names are munged ("sandbox_gsp" is "The Sandbox", "giantoaks_gsp" is "Giant Oak
 Golf club"), so a course is found by the real name inside these files, not the folder name.
@@ -24,8 +30,9 @@ from .sources.gspro_log import M_TO_YD
 
 log = logging.getLogger(__name__)
 
-# base dir -> (folder count when built, {canonical course name: folder}). Rebuilt if the count changes.
-_index_cache: dict[str, tuple[int, dict[str, Path]]] = {}
+# base dir -> (folder count when built, {canonical course name: folder}, names more than one folder has).
+# Rebuilt if the count changes.
+_index_cache: dict[str, tuple[int, dict[str, Path], set[str]]] = {}
 
 
 @dataclass
@@ -39,20 +46,30 @@ class CourseCard:
     folder: str | None = None   # the GSPro course folder it was read from
     ratings: dict[str, tuple[float, float]] = field(default_factory=dict)  # tee name -> (course rating, slope)
     lengths: dict[str, tuple[int, int]] = field(default_factory=dict)  # GKD tee box -> (yards, holes): see tee_lengths
+    description: str | None = None   # the GSPro listing's description of the course, whitespace collapsed
+    styles: list[str] = field(default_factory=list)   # plain words: "links", "major championship venue", ...
+    notes_read: bool = False         # the two above were looked for (load's `notes`, or add_notes)
+    path: Path | None = field(default=None, repr=False, compare=False)   # the folder, in its course library
+    name_unsure: bool = False   # the name asked for was a near miss, or matched another course as well
 
 
 # The tees coursedetails.txt rates, in its order: the same as the CSV's tee rows.
 TEE_ORDER = ("Black", "White", "Green", "Blue", "Yellow", "Red", "Junior", "Par 3")
 
 
-def load(courses_dirs: str | Path | list, course_name: str | None, folder: str | None = None) -> CourseCard | None:
+def load(courses_dirs: str | Path | list, course_name: str | None, folder: str | None = None,
+         notes: bool = True) -> CourseCard | None:
     """The card for the GSPro course whose name best matches `course_name`, across one or more
-    course libraries, or None. See find() for `folder`."""
-    path = find(courses_dirs, course_name, folder)
+    course libraries, or None. See find() for `folder`. `notes` also reads the listing's course notes
+    (description and styles), which only commentary uses."""
+    path, unsure = _find(courses_dirs, course_name, folder)
     card = _load_folder(path) if path else None
     if card:
-        card.folder = path.name
-        card.lengths = tee_lengths(path)
+        card.folder, card.path, card.name_unsure = path.name, path, unsure
+        gkd = _read_gkd(path)
+        card.lengths = tee_lengths(gkd) if gkd else {}
+        if notes:
+            _add_listing(card, path, gkd)
     return card
 
 
@@ -60,27 +77,43 @@ def load(courses_dirs: str | Path | list, course_name: str | None, folder: str |
 GKD_TEES = ("Black", "White", "Green", "Blue", "Yellow", "Red", "Junior", "Par3")
 
 
-def tee_lengths(folder: Path) -> dict[str, tuple[int, int]]:
-    """Each tee box's length over the whole course, as the course file (GKD) gives it hole by hole, in
-    yards (it stores metres), with its hole count: tee box -> (yards, holes). The CSV's tee rows can't
-    say this: their units vary by course, and many courses have none. Boxes missing a hole are left out."""
+def _read_gkd(folder: Path) -> dict | None:
+    """The course file (GKD) as JSON, or None: the folder's shortest-named one that isn't its par-3 course."""
     files = [f for f in folder.glob("*") if f.suffix.lower() == ".gkd" and "par3" not in f.stem.lower()]
     if not files:
-        return {}
+        return None
     try:
         data = json.loads(min(files, key=lambda f: len(f.name)).read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         log.info("Couldn't read the course file in %s (%s)", folder, e)
-        return {}
-    holes = [h for h in data.get("Holes") or [] if isinstance(h, dict) and h.get("HoleNumber")
-             and h.get("Enabled", True)]
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def tee_lengths(data: dict) -> dict[str, tuple[int, int]]:
+    """Each tee box's length over the whole course, as the course file (GKD, read by _read_gkd) gives it
+    hole by hole, in yards (it stores metres), with its hole count: tee box -> (yards, holes). The CSV's
+    tee rows can't say this: their units vary by course, and many courses have none. Boxes missing a hole
+    are left out."""
+    holes = data.get("Holes")
+    holes = [h for h in holes if isinstance(h, dict) and h.get("HoleNumber")
+             and h.get("Enabled", True)] if isinstance(holes, list) else []
     per: dict[str, list[float]] = {}
     for h in holes:
-        for t in h.get("Tees") or []:
+        tees = h.get("Tees")
+        for t in tees if isinstance(tees, list) else []:
+            if not isinstance(t, dict):
+                continue
             d = t.get("Distance")
-            if t.get("TeeType") in GKD_TEES and t.get("Enabled", True) and isinstance(d, (int, float)) and d > 0:
+            if t.get("TeeType") in GKD_TEES and t.get("Enabled", True) and isinstance(d, (int, float)) \
+                    and not isinstance(d, bool) and 0 < d < 1e6:
                 per.setdefault(t["TeeType"], []).append(d)
     return {tee: (round(sum(ds) * M_TO_YD), len(ds)) for tee, ds in per.items() if len(ds) == len(holes)}
+
+
+# A match score (league.course_match_score) this high is the course itself, not a namesake: every word
+# of the shorter name is in the longer, or an OCR slip away.
+SURE_MATCH = 0.85
 
 
 def find(courses_dirs: str | Path | list, course_name: str | None, folder: str | None = None) -> Path | None:
@@ -89,23 +122,42 @@ def find(courses_dirs: str | Path | list, course_name: str | None, folder: str |
     Sugar Creek"): `folder`, the course folder GSPro's log says was selected, breaks that tie, then
     the closer spelling. It never beats a better match: it may still be the last course's, logged
     before this one was picked."""
+    return _find(courses_dirs, course_name, folder)[0]
+
+
+def locate(courses_dirs: str | Path | list, course_name: str | None,
+           folder: str | None = None) -> tuple[Path | None, bool]:
+    """find()'s folder for `course_name`, and whether it's unsure (see _find)."""
+    return _find(courses_dirs, course_name, folder)
+
+
+def _find(courses_dirs, course_name: str | None, folder: str | None = None) -> tuple[Path | None, bool]:
+    """find()'s folder, and whether it's unsure: a near miss (only some of the name's words, or other
+    numbers: Pinehurst No. 2 isn't No. 4), or another course's name matched as well (a tie the folder
+    or the spelling broke)."""
     if not course_name:
-        return None
+        return None, False
     dirs = [courses_dirs] if isinstance(courses_dirs, (str, Path)) else courses_dirs
-    best, key = None, (0.0, False, 0.0)
+    best, best_name, key, scores = None, "", (0.0, False, 0.0), []
     for d in dirs:
         base = Path(d)
         if not base.is_dir():
             continue
-        for name, path in _index(base).items():
+        index, shared = _indexes(base)
+        for name, path in index.items():
+            if name in shared:
+                scores.append((course_match_score(name, course_name), None))   # the folder it hides
             k = (course_match_score(name, course_name), bool(folder) and path.name.lower() == folder.lower(),
                  difflib.SequenceMatcher(None, name.lower(), course_name.lower()).ratio())
+            scores.append((k[0], path))
             if k > key:
-                best, key = path, k
+                best, best_name, key = path, name, k
     if best is None or key[0] < 0.6:
         log.info("No GSPro course matched %r (best score %.2f)", course_name, key[0])
-        return None
-    return best
+        return None, False
+    numbers = [set(re.findall(r"\d+", plain_name(n))) for n in (best_name, course_name)]
+    return best, (key[0] < SURE_MATCH or numbers[0] != numbers[1]
+                  or any(score == key[0] and path != best for score, path in scores))
 
 
 def identify(courses_dirs: str | Path | list, course_name: str | None) -> str | None:
@@ -126,17 +178,26 @@ def plain_name(name: str) -> str:
 
 
 def _index(base: Path) -> dict[str, Path]:
+    return _indexes(base)[0]
+
+
+def _indexes(base: Path) -> tuple[dict[str, Path], set[str]]:
+    """`base`'s course names to folders, and the names more than one folder has (two builds of one
+    course; the index keeps one of them)."""
     folders = [d for d in base.iterdir() if d.is_dir()]
     cached = _index_cache.get(str(base))
     if cached and cached[0] == len(folders):
-        return cached[1]
+        return cached[1], cached[2]
     index: dict[str, Path] = {}
+    shared: set[str] = set()
     for folder in folders:
         name = _canonical_name(folder)
         if name:
+            if name in index:
+                shared.add(name)
             index[name] = folder
-    _index_cache[str(base)] = (len(folders), index)
-    return index
+    _index_cache[str(base)] = (len(folders), index, shared)
+    return index, shared
 
 
 def _first_line(path: Path) -> str:
@@ -282,3 +343,90 @@ def _ratings(tokens: list[str]) -> dict[str, tuple[float, float]]:
             if 20 <= r <= 90 and 55 <= sl <= 155:
                 out[tee] = (r, sl)
     return out
+
+
+# ---- the listing's course notes (commentary background) ----------------------------------------
+
+# A description shorter than this is a placeholder ("A scenic place.", the course's name), not notes.
+MIN_DESCRIPTION = 40
+_PLACEHOLDER = re.compile(r"lorem ipsum|\bdescription goes here\b", re.I)
+
+# The course file's style flags, in plain words; None leaves one out (how the course was modelled,
+# not what it is).
+STYLE_WORDS = {
+    "links": "links", "parkland": "parkland", "heathland": "heathland", "coastal": "coastal",
+    "desert": "desert", "mountain": "mountain", "tropical": "tropical", "historic": "historic",
+    "majorvenue": "major championship venue", "tourstop": "pro tour stop",
+    "fantasy": "fictional course", "beginnerfriendly": "beginner-friendly",
+    "lowpoly": None, "training": None,
+}
+
+
+def add_notes(card: CourseCard) -> None:
+    """Read the listing's course notes into a card load() read without them (the booth went on air)."""
+    if not card.notes_read and card.path and card.path.is_dir():
+        _add_listing(card, card.path, _read_gkd(card.path))
+
+
+def _add_listing(card: CourseCard, folder: Path, gkd: dict | None) -> None:
+    """Fill in the card's course notes: coursedetails.txt's first, then the course file's."""
+    card.notes_read = True
+    try:
+        tokens = (folder / "coursedetails.txt").read_text(encoding="utf-8-sig", errors="replace").split("|")
+    except OSError:
+        tokens = []
+    gkd = gkd or {}
+    card.description = clean_description(tokens[3] if len(tokens) > 3 else None) \
+        or clean_description(gkd.get("CourseInfo"))
+    card.styles = _styles(gkd)
+
+
+def clean_description(value) -> str | None:
+    """A listing's description with its whitespace (newlines, paragraphs) collapsed, or None for a
+    missing one or a placeholder."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(re.sub(r"<br\s*/?>|\\n", " ", value, flags=re.I).split())
+    return text if len(text) >= MIN_DESCRIPTION and not _PLACEHOLDER.search(text) else None
+
+
+# A period that ends an abbreviation or an initial ("St. Andrews", "the U.S. Open", "A. W. Tillinghast").
+_NOT_AN_END = re.compile(r"(?:\b(?:St|Mt|Ft|Mr|Mrs|Ms|Dr|Jr|Sr|No|vs|approx|est)|(?:^|[\s.])[A-Z])\.$")
+
+
+def brief(text: str, limit: int = 4000) -> str:
+    """`text` cut to at most `limit` characters, at the last sentence end that fits (else a word end)."""
+    if len(text) <= limit:
+        return text
+    ends = [m.end() for m in re.finditer(r"[.!?][\"')\]]*(?=\s+[\"'(\[]?[A-Z0-9])", text[:limit + 8])
+            if m.end() <= limit and not _NOT_AN_END.search(text[:m.end()])]
+    if ends:
+        return text[:ends[-1]]
+    if limit < 4:
+        return text[:max(0, limit)]
+    room = limit - 3   # for the "..."
+    head = text[:room + 1]
+    head = head.rsplit(" ", 1)[0] if " " in head else head[:room]
+    return head.rstrip(",;:-") + "..."
+
+
+def _styles(gkd: dict) -> list[str]:
+    """The course's style tags in plain words: its true Keyword* flags, then KeywordsString's own."""
+    out: list[str] = []
+
+    def add(word: str | None) -> None:
+        if word and word.lower() not in (o.lower() for o in out):
+            out.append(word)
+    for key, on in gkd.items():
+        if isinstance(key, str) and key.startswith("Keyword") and key != "KeywordsString" and on is True:
+            add(STYLE_WORDS.get(key[len("Keyword"):].lower()))
+    extra = gkd.get("KeywordsString")
+    if isinstance(extra, str):
+        for tag in re.split(r"[,;|/#\n]+", extra):
+            tag = " ".join(tag.split())
+            plain = re.sub(r"[^a-z]", "", tag.lower())
+            if plain in STYLE_WORDS:
+                add(STYLE_WORDS[plain])
+            elif 2 < len(tag) <= 30:
+                add(tag.lower())
+    return out[:10]

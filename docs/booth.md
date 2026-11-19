@@ -100,7 +100,8 @@ on the first hole or the last two, and only after an ordinary shot, so the round
   air; one that hasn't found a quiet moment within `max_age_minutes` is dropped. If another aside
   aired too recently for it to play, the check-in moves to the first hole it can. A game the booth
   already mentioned comes back only as an update, once its score has moved.
-- **Course trivia** (`trivia`): a bit of the real course's history from its Wikipedia article. A story
+- **Course trivia** (`trivia`): a bit of the real course's history from its Wikipedia article, plus
+  the description and style tags in the course's GSPro listing when it has them. A story
   about one hole (the Road Hole, the island green) waits for that hole, even late in the round. What
   aired is remembered, so a course played again gets different stories.
 - **Golf news** (`news`): a real headline from the feed, told as of when it came out ("over the
@@ -276,6 +277,10 @@ for a tour leaderboard and your local teams), course trivia (`trivia.enabled`: t
 Wikipedia), and the local weather (`weather.enabled`), which sends only the shed's location (looked up
 once from `weather.location`) to Open-Meteo every 30 minutes. The weather is colour for
 the opener, the closer and the odd between-holes line; the booth also knows the day and time.
+The opener also gets the course's GSPro listing, read from the course's own files: its whole description
+(for the model to paraphrase; only an outlier over 4,000 characters is cut, at a sentence end) and
+style tags. They're colour for a brief touch at most: the opener is still about the format and the
+players.
 
 ## ON AIR badge
 

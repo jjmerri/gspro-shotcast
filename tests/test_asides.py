@@ -259,7 +259,8 @@ async def test_course_trivia_is_written_from_the_article_and_remembers_what_aire
 
     e.trivia = _Trivia()
     e.cfg.trivia.per_round = 1
-    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, is_tournament=False, course="The Ancient Course")
+    r = SimpleNamespace(holes=9, seq=1, ended=False, is_league=False, is_tournament=False, course="The Ancient Course",
+                        course_card=None)
     e.round = r
     await e._prepare_trivia(r)
     [bit] = e._news_bits

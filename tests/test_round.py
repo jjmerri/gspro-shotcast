@@ -1064,6 +1064,62 @@ def test_course_card_merges_the_details_ratings_into_the_csv_card(tmp_path):
     assert card.yards["Black"][9] == 464 and card.ratings["Black"] == (76.9, 145)
 
 
+def test_course_card_reads_the_listings_notes_without_disturbing_the_scorecard(tmp_path):
+    import json
+
+    from commentator import course_card
+
+    folder = tmp_path / "zz7_gsp"
+    folder.mkdir()
+    about = ("Test Links opened in 1911 on a windswept bay.\n\nIts   greens are firm,\r\nand the wind "
+             "decides most days.")
+    (folder / "coursedetails.txt").write_text(DETAILS.replace("A scenic place, links style.", about),
+                                              encoding="utf-8")
+    gkd = {"CourseInfo": "Unused: coursedetails.txt has its own description.", "KeywordLinks": True, "KeywordParkland": False, "KeywordMajorVenue": True,
+           "KeywordLowPoly": True, "KeywordTourStop": "yes", "KeywordsString": "Links, Seaside cliffs"}
+    (folder / "zz7_gsp.GKD").write_text(json.dumps(gkd), encoding="utf-8")
+    card = course_card.load(tmp_path, "Test Links")
+    assert sum(card.par.values()) == 72 and card.ratings == {"Black": (76.9, 145), "White": (70.5, 129)}
+    assert card.description == ("Test Links opened in 1911 on a windswept bay. Its greens are firm, and the "
+                                "wind decides most days.")
+    assert card.styles == ["links", "major championship venue", "seaside cliffs"]
+    off_air = course_card.load(tmp_path, "Test Links", notes=False)
+    assert off_air.description is None and off_air.styles == []
+    course_card.add_notes(off_air)   # the booth went on air
+    assert off_air.description == card.description and off_air.styles == card.styles
+    assert course_card.clean_description("No description can do justice to the views from the high tees.")
+
+    # No description of its own (a placeholder): the course file's; a malformed file costs only the notes.
+    (folder / "coursedetails.txt").write_text(DETAILS, encoding="utf-8")
+    gkd |= {"CourseInfo": "  A cliff-top course,\n carved into the headland by the sea. "}
+    (folder / "zz7_gsp.GKD").write_text(json.dumps(gkd), encoding="utf-8")
+    card = course_card.load(tmp_path, "Test Links")
+    assert card.description == "A cliff-top course, carved into the headland by the sea."
+    (folder / "zz7_gsp.GKD").write_text('{"CourseInfo": ', encoding="utf-8")
+    card = course_card.load(tmp_path, "Test Links")
+    assert card.description is None and card.styles == []
+    assert sum(card.par.values()) == 72
+    (folder / "zz7_gsp.GKD").write_text('{"Holes": 1, "CourseInfo": 5, "KeywordsString": 3}', encoding="utf-8")
+    card = course_card.load(tmp_path, "Test Links")
+    assert sum(card.par.values()) == 72 and card.lengths == {} and card.description is None
+
+
+def test_the_listings_description_is_cut_at_a_sentence():
+    from commentator.course_card import brief
+
+    text = "First sentence here. " * 60
+    cut = brief(text.strip(), 100)
+    assert cut == "First sentence here. First sentence here. First sentence here. First sentence here."
+    assert brief("short.", 100) == "short."
+    assert brief("Built in 1922. " + "And on " * 30, 100) == "Built in 1922."
+    # Not at an abbreviation or an initial: no sentence end fits, so a word end does.
+    assert brief("The links at St. Andrews by A. W. Tillinghast host the U.S. Open on broad fairways near the sea.",
+                 80) == "The links at St. Andrews by A. W. Tillinghast host the U.S. Open on broad..."
+    # Never over the limit, "..." and all, even with no word end to cut at.
+    assert len(brief(("the " * 1001).strip(), 4000)) <= 4000 and len(brief("x" * 4001, 4000)) == 4000
+    assert [brief("xyz long words", n) for n in (0, 2)] == ["", "xy"]
+
+
 def test_course_card_reads_the_current_format_csv_over_an_old_one_beside_it(tmp_path):
     from commentator import course_card
 
@@ -1095,6 +1151,28 @@ def test_course_card_takes_the_folder_gspro_logged_when_two_names_match(tmp_path
     # Nor does it beat a better match: the last course was Swiss, this one's full name was read.
     assert course_card.load(tmp_path, "Alpine Valley - Meadows & Sugar Creek", folder="alpine valley_gsp").name == \
         "Alpine Valley - Meadows & Sugar Creek"
+    # A tie (the folder may be the last course's) is no ground for the commentary's course notes.
+    assert course_card.load(tmp_path, "ALPINE VALLEY", folder="alpine valley_gsp").name_unsure
+    assert not course_card.load(tmp_path, "Alpine Valley - Meadows & Sugar Creek").name_unsure
+    # A near miss isn't sure either: Swiss Alpine Valley's scorecard, maybe, but not its notes.
+    assert course_card.load(tmp_path, "Swiss Alpine Valley").name == "Swiss Alpine Valley"
+    import shutil
+    shutil.rmtree(tmp_path / "Alpine Valley_GSP")
+    course_card._index_cache.clear()
+    card = course_card.load(tmp_path, "Swiss Alpine Valley")
+    assert card.name.startswith("Alpine Valley - Meadows") and card.name_unsure
+    # Two builds of one course share its name: which one's notes these are isn't known.
+    assert not course_card.load(tmp_path, "Pine Valley").name_unsure
+    (tmp_path / "pinevalley_v2_gsp").mkdir()
+    (tmp_path / "pinevalley_v2_gsp" / "coursedetails.txt").write_text(DETAILS.replace("Test Links", "Pine Valley"),
+                                                                       encoding="utf-8")
+    assert course_card.load(tmp_path, "Pine Valley").name_unsure
+    # Nor is a course of another number: No. 2's scorecard, maybe, but not its notes for No. 4.
+    (tmp_path / "pinehurst2_gsp").mkdir()
+    (tmp_path / "pinehurst2_gsp" / "coursedetails.txt").write_text(DETAILS.replace("Test Links", "Pinehurst No. 2"),
+                                                                    encoding="utf-8")
+    assert not course_card.load(tmp_path, "Pinehurst No 2").name_unsure
+    assert course_card.load(tmp_path, "Pinehurst No. 4").name_unsure
 
 
 def test_a_prebuilt_rounds_card_is_refound_once_gspro_logs_the_course(tmp_path):
@@ -1679,6 +1757,50 @@ async def test_preround_opener_is_set_aside_when_the_tee_differs(tmp_path):
     assert e._pending_opening is None  # consumed
     assert e.round is not None and {t for t in e.round.teams} == {"Duffers"}
     assert len(e.live_llm.prompts) > prompts_before_tee  # a tee-time opener was generated
+
+
+def test_a_card_found_by_a_near_miss_schedule_name_keeps_its_scorecard_but_not_its_notes(tmp_path, monkeypatch):
+    (tmp_path / "meadows_gsp").mkdir()
+    (tmp_path / "meadows_gsp" / "coursedetails.txt").write_text(
+        DETAILS.replace("Test Links", "Alpine Valley - Meadows & Sugar Creek"), encoding="utf-8")
+    (tmp_path / "balsams_gsp").mkdir()
+    (tmp_path / "balsams_gsp" / "coursedetails.txt").write_text(DETAILS.replace("Test Links", "Wentworth by the Sea"),
+                                                                encoding="utf-8")
+    e = _engine(tmp_path)
+    e.cfg.source.gspro_courses_dirs = [str(tmp_path)]
+    near = {"week": 6, "course": "Alpine Valley - Meadows & Sugar Creek"}
+    r = e._build_round(["MikeD"], "Swiss Alpine Valley", near, is_league=False)
+    assert r.course_card.folder == "meadows_gsp" and r.course_card.name_unsure
+    # The alias GSPro lists the course by is no near miss.
+    alias = {"week": 7, "course": "Wentworth by the Sea", "gspro_course": "Balsams Panorama"}
+    r = e._build_round(["MikeD"], "Balsams Panorama", alias, is_league=False)
+    assert r.course_card.folder == "balsams_gsp" and not r.course_card.name_unsure
+    # A read that finds another installed course itself doesn't take the alias's notes.
+    (tmp_path / "north_gsp").mkdir()
+    (tmp_path / "north_gsp" / "coursedetails.txt").write_text(DETAILS.replace("Test Links", "Balsams Panorama North"),
+                                                              encoding="utf-8")
+    from commentator import course_card
+    course_card._index_cache.clear()
+    r2 = e._build_round(["MikeD"], "Balsams Panorama North", alias, is_league=False)
+    assert r2.course_card.folder == "balsams_gsp" and r2.course_card.name_unsure
+    assert e._build_round(["MikeD"], None, alias, is_league=False).course_card.name_unsure   # nothing read
+    e.commentary_on = False   # off air the search isn't run, and the notes stay unsaid; the exact alias keeps them
+    assert e._build_round(["MikeD"], "Balsams Panorama North", alias, is_league=False).course_card.name_unsure
+    assert not e._build_round(["MikeD"], "Balsams Panorama", alias, is_league=False).course_card.name_unsure
+    e.commentary_on = True
+    monkeypatch.setattr(e.league, "schedule_entry", lambda date, course: near)   # the setup read, the tee's refresh
+    e._refresh_course_card(r, "Swiss Alpine Valley")
+    assert r.course_card.folder == "meadows_gsp" and r.course_card.name_unsure
+    # A name as read that two installed courses share is unsure, though the schedule's name is exact.
+    (tmp_path / "swiss_gsp").mkdir()
+    (tmp_path / "swiss_gsp" / "coursedetails.txt").write_text(DETAILS.replace("Test Links", "Swiss Alpine Valley"),
+                                                              encoding="utf-8")
+    course_card._index_cache.clear()
+    e._refresh_course_card(r, "Alpine Valley")
+    assert r.course_card.folder == "meadows_gsp" and r.course_card.name_unsure
+    # A card found by the name as read, which the near-miss week didn't pick, keeps its notes.
+    r = e._build_round(["MikeD"], "Swiss Alpine Valley", near, is_league=False)
+    assert r.course_card.folder == "swiss_gsp" and not r.course_card.name_unsure
 
 
 def test_wentworth_listed_as_balsams_panorama_gets_wentworths_card(tmp_path):
@@ -3818,6 +3940,41 @@ def test_the_opener_gives_a_back_nine_start_its_own_par(tmp_path):
     r.apply_course_card(CourseCard(name="Somewhere", par={h: 4 for h in range(1, 19)} | {1: 5, 10: 3},
                                    index={}))
     assert "First hole: hole 10, par 3." in e._opener_io(r)[1]
+
+
+def test_the_opener_and_trivia_get_the_courses_gspro_listing(tmp_path):
+    from commentator.course_card import CourseCard
+    from commentator.prompts import trivia_prompt
+
+    e = _engine(tmp_path)
+    r = e._build_round(["MikeD", "Sarah"], "Somewhere", {}, is_league=False)
+    r.format = "scramble"
+    bare_prompt, bare = e._opener_io(r)
+    assert "GSPro listing" not in bare and "brief touch of colour" not in bare_prompt
+    r.apply_course_card(CourseCard(name="Somewhere", par={h: 4 for h in range(1, 19)}, index={},
+                                   description="Somewhere was laid out in 1922 along a river. " * 30,
+                                   styles=["parkland", "historic"]))
+    prompt, facts = e._opener_io(r)
+    # The round's own facts all stay, and lead; the course's are colour, after them.
+    lines, n = facts.splitlines(), len(bare.splitlines())   # (the last of the round's is the clock's)
+    assert lines[:n - 1] == bare.splitlines()[:-1] and lines[n - 1].startswith("It's ")
+    assert lines[n].startswith("About the course, from its GSPro listing")
+    assert "This round's format" in facts and "Playing: " in facts
+    assert facts.index("Playing: ") < facts.index("GSPro listing") < facts.index("GSPro tags")
+    assert "never its subject" in prompt
+    about = next(line for line in facts.splitlines() if "GSPro listing" in line)
+    assert about.endswith(r.course_card.description) and len(about) > 1300   # whole, not trimmed
+    r.course_card.description = "Somewhere was laid out in 1922 along a river. " * 100   # an outlier
+    about = next(line for line in e._opener_io(r)[1].splitlines() if "GSPro listing" in line)
+    assert 3900 < len(about) - about.index("Somewhere") <= 4000 and about.endswith("river.")
+    r.course_card.description = "Somewhere was laid out in 1922 along a river. " * 30
+    assert "GSPro tags the course: parkland, historic." in facts
+    from commentator.facts import course_listing_facts
+    _, trivia = trivia_prompt(course="Somewhere", title="Somewhere Club", article="An article.",
+                              listing=course_listing_facts(r.course_card))
+    assert "laid out in 1922" in trivia and "parkland" in trivia
+    r.course_card.name_unsure = True   # read off a name another course has too
+    assert "GSPro listing" not in e._opener_io(r)[1]
 
 
 def test_a_round_takes_the_setup_holes_and_the_next_one_reads_its_own(tmp_path):

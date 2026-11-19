@@ -590,3 +590,19 @@ def preshot_facts(hud, hole_par: int | None, handed: str | None = None) -> list[
         facts.append(f"This putt is for {this}. If it misses, the next putt is for {nxt}, not {this}. "
                      f"If it stops inside the gimme circle, the next putt is conceded and the hole is {nxt}.")
     return facts
+
+
+def course_listing_facts(card, limit: int = 4000) -> list[str]:
+    """The GSPro listing's notes on the course being played (see course_card): background for the model
+    to draw on in its own words, never a script. The description goes whole: `limit` only cuts an
+    outlier, at a sentence end."""
+    if card is None or card.name_unsure:   # maybe another course: its notes may not be this one's
+        return []
+    from .course_card import brief
+    facts = []
+    if card.description:
+        facts.append("About the course, from its GSPro listing (background colour only: paraphrase a detail "
+                     f"if it helps, never read it out): {brief(card.description, limit)}")
+    if card.styles:
+        facts.append(f"GSPro tags the course: {', '.join(card.styles)}.")
+    return facts
