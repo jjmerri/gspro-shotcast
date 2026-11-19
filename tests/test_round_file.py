@@ -473,6 +473,18 @@ def test_blind_shots_that_dont_line_up_are_left_unnamed(tmp_path):
     assert st.db.execute("SELECT COUNT(*) FROM shots WHERE player IS NOT NULL").fetchone()[0] == 0
 
 
+def test_blind_shots_with_no_course_read_go_by_their_rounds_gspro_course_folder(tmp_path):
+    st = Store(str(tmp_path / "season.db"))
+    _blind(st, [151.0, 100.2, 8.0])
+    st.db.execute("UPDATE shots SET course = NULL, record_uuid = 'r'")
+    st.db.commit()
+    files = [{**f, "CourseKey": "foreign_gsp"} for f in (DRIVE, APPROACH, PUTT)]
+    written, pending = st.apply_round_file(round_file.tracks(files), now=1005.0, name_of=str, folders={"r": "mine_gsp"})
+    assert written == 0 and len(pending) == 3
+    files = [{**f, "CourseKey": "mine_gsp"} for f in files]
+    assert st.apply_round_file(round_file.tracks(files), now=1005.0, name_of=str) == (3, [])
+
+
 def test_the_round_file_watch_reads_a_write_once_and_again_after_one_caught_half_written(tmp_path):
     from commentator.sources.gspro_files import RoundFileWatch
     w = RoundFileWatch(str(tmp_path))
@@ -639,6 +651,27 @@ def test_round_file_archive_goes_by_gspros_shot_ids_and_course(tmp_path):
     assert round_file.course_named("augusta_national_gsp", "Augusta National", both)
     assert not round_file.course_named("augusta_national_par_3_gsp", "Augusta National", both)
     assert round_file.course_named("augusta_national_par_3_gsp", "Augusta National", ["Augusta National"])
+
+
+def test_round_file_archive_goes_by_the_rounds_gspro_course_folder(tmp_path):
+    import time
+
+    # Wentworth by the Sea is played from GSPro's balsams_gsp folder (GSPro lists it as Balsams
+    # Panorama), and the booth has shots on the real Balsams Panorama too.
+    src, logs, now = tmp_path / "currentRound.dat", tmp_path / "logs", time.time()
+    mine = [_entry(1, (0, 0), (0, 200), sp=150.3)]
+    mine[0]["CourseKey"] = "balsams_gsp"
+    src.write_text(json.dumps(mine), encoding="utf-8")
+    both, ids = ["Wentworth by the Sea", "Balsams Panorama"], [mine[0]["ShotID"]]
+    assert round_file.archive(src, logs, now, "Wentworth by the Sea", ["Dan"], [150.2], courses=both,
+                              shot_ids=ids) is None   # by name alone it's Balsams Panorama's
+    assert round_file.archive(src, logs, now, "Wentworth by the Sea", ["Dan"], [150.2], courses=both,
+                              shot_ids=ids, folder="balsams_gsp") is not None
+    # Another folder is another course, whatever its key's name is like.
+    mine[0]["CourseKey"] = "balsams_gsp - bak"
+    src.write_text(json.dumps(mine), encoding="utf-8")
+    assert round_file.archive(src, logs, now, "Balsams Panorama", ["Dan"], [150.2], courses=both,
+                              shot_ids=ids, folder="balsams_gsp") is None
 
 
 def test_two_full_names_alike_only_in_the_first_are_two_players():

@@ -1083,6 +1083,7 @@ class Engine:
         self._setup_mode_read = False   # the MATCH SETTINGS game mode was read (None then means stroke play)
         self._setup_format_at = float("-inf")   # when the game mode last changed
         self._opener_prepared_format: str | None = None
+        self._opener_prepared_course: str | None = None   # the setup course it was written for
         self._opener_prepared_teams: frozenset | None = None   # the colour teams it was written for
         # The last roster (and slot order) read off a setup screen's PLAYERS tab, for a setup that never shows it.
         self._last_setup_roster: tuple[list[str], list[str]] | None = None
@@ -1091,6 +1092,8 @@ class Engine:
         # The last setup read the watcher left the setup screen with, though no load screen it could read
         # followed (its title misread): still this round's players and slots if the tee agrees.
         self._setup_seen: tuple[str, list[str], list[str | None], float] | None = None
+        # The course the setup's nines, game mode and team colours were read on.
+        self._setup_course: str | None = None
         # The last setup the booth read: (its HUD, the shot count then, GSPro's logged active player,
         # when). The impact read's fallback when the player box is gone by the time it's grabbed.
         self._last_setup: tuple | None = None
@@ -3436,7 +3439,8 @@ class Engine:
             try:
                 written, left = self.store.apply_round_file(tracks, now=w.written, same_player=same_player,
                                                             rewrite=changed, gone=gone, name_of=name_of,
-                                                            pinned=self._file_pins, rounds=self._file_round_ids())
+                                                            pinned=self._file_pins, rounds=self._file_round_ids(),
+                                                            folders=self._round_file_folders())
                 self._drop_refused_pins(tracks)
             except sqlite3.Error as e:
                 log.warning("Couldn't apply GSPro's round file: %s", e)
@@ -3454,7 +3458,8 @@ class Engine:
                     if self._refile_from_round_file(left):
                         self.store.apply_round_file(tracks, now=w.written, same_player=same_player,
                                                     rewrite=False, gone=gone, name_of=name_of,
-                                                    pinned=self._file_pins, rounds=self._file_round_ids())
+                                                    pinned=self._file_pins, rounds=self._file_round_ids(),
+                                                    folders=self._round_file_folders())
                         self._drop_refused_pins(tracks)
                 except sqlite3.Error as e:
                     log.warning("Couldn't refile shots from GSPro's round file: %s", e)
@@ -3699,31 +3704,53 @@ class Engine:
     def _file_round_test(self, r):
         """Whether a stroke in GSPro's round file can be round `r`'s (a shot of it stored on `course`): not
         when GSPro's own round (RoundID) isn't the one strokes already pinned to `r`'s shots were of, nor
-        when its course key names a course the booth knows that isn't `r`'s or the shot's (GSPro started
-        another round before the booth closed this one)."""
+        when its course key is another course than `r`'s or the shot's (GSPro started another round before
+        the booth closed this one): another folder than the round's GSPro course folder, when that's known
+        (_round_course_folder: GSPro lists Wentworth by the Sea, in its balsams_gsp folder, as Balsams
+        Panorama), else a course the booth knows by another name (round_file.other_course)."""
         rounds = self._file_round_ids().get(r.uuid) if r is not None else None
+        folder = self._round_course_folder(r)
         courses: list[str] | None = None
-        known: dict[str, bool] = {}
+        known: dict[tuple, bool] = {}
 
         def other_course(key: str, course: str | None) -> bool:
             nonlocal courses
             if not course:
                 return False
-            if courses is None:
-                courses = self.store.courses_played()
-            if round_file.course_named(key, course, courses):
-                return False
-            if key not in known:
-                known[key] = any(round_file.course_fits(key, c) for c in courses)
-            return known[key]   # (a key like no course's name can't be told apart)
+            if (key, course) not in known:
+                if courses is None:
+                    courses = self.store.courses_played()
+                known[key, course] = round_file.other_course(key, course, courses)
+            return known[key, course]
 
         def fits(t: round_file.Track, course: str | None = None) -> bool:
             if rounds and t.round_id is not None and t.round_id not in rounds:
                 return False
             key = t.course_key
+            if key and folder:   # (the round's shots are all on its folder's course, whatever they're named)
+                return round_file.folder_is(key, folder)
             return not key or not (other_course(key, r.course if r is not None else None)
                                    or other_course(key, course))
         return fits
+
+    def _round_course_folder(self, r) -> str | None:
+        """Round `r`'s GSPro course folder, when the booth is sure of it: the folder GSPro's log said it
+        had loaded when the round started, else its course card's, found surely by name (or by the
+        schedule's own name for the course).
+        None (go by the course's name) when a near miss or a name two courses share found the card."""
+        if r is not None and r.loaded_folder:   # (as the round started: a later load is the next round's)
+            return r.loaded_folder
+        card = r.course_card if r is not None else None
+        if card is None or not card.folder or card.name_unsure:
+            return None
+        return card.folder
+
+    def _round_file_folders(self) -> dict[str, str]:
+        """The live round's record (uuid) -> its GSPro course folder, when sure of it (_round_course_folder),
+        for store.apply_round_file."""
+        r = self.round
+        folder = self._round_course_folder(r)
+        return {r.uuid: folder} if folder else {}
 
     def _file_ours(self, t: round_file.Track, r, tag: str, course: str | None = None) -> bool:
         """Whether the stroke GSPro's round file has for a shot of booth round `r` (stored on `course`;
@@ -6173,15 +6200,15 @@ class Engine:
         return [*r.roster, *(n for p in r.roster.values() if p for n in r.league.names_for(p))]
 
     def _keep_round_file(self, r: Round, started: float, players: list[str], speeds: list[float],
-                         courses: list[str] = (), shot_ids: list[str] = ()) -> None:
+                         courses: list[str] = (), shot_ids: list[str] = (), folder: str | None = None) -> None:
         """Copy GSPro's round file (currentRound.dat) into the booth's logs at round end, for looking into
-        a round later: GSPro overwrites it when the next round starts. `players`, `speeds`, `courses` and
-        `shot_ids` (see round_file.archive) are taken on the event loop (this runs in a thread)."""
+        a round later: GSPro overwrites it when the next round starts. `players`, `speeds`, `courses`,
+        `shot_ids` and `folder` (see round_file.archive) are taken on the event loop (this runs in a thread)."""
         try:
             log_path = self._follower.path if self._follower else self.cfg.source.gspro_log
             src = Path(gspro_files.folder_of(os.path.expanduser(log_path))) / gspro_files.ROUND_FILE
             if out := round_file.archive(src, self.cfg.log_dir, started, r.course, players, speeds,
-                                         courses=courses, shot_ids=shot_ids):
+                                         courses=courses, shot_ids=shot_ids, folder=folder):
                 log.info("Round %s: kept GSPro's round file as %s", r.id, out.name)
         except OSError as e:
             log.warning("Keeping a copy of GSPro's round file failed: %s", e)
@@ -10486,12 +10513,27 @@ class Engine:
             return None, "the players on the tee aren't partners on one team"
         return teams.pop(), None
 
-    @staticmethod
-    def _course_matches(entry: dict, course: str | None) -> bool:
+    def _course_week(self, course: str | None, today: str | None = None) -> dict | None:
+        """The schedule week on `course` (League.schedule_entry, of the weeks _course_matches), or None."""
+        if not course:
+            return None
+        entry = self.league.schedule_entry(today or time.strftime("%Y-%m-%d"), course,
+                                           fits=lambda e: self._course_matches(e, course))
+        return entry if entry and self._course_matches(entry, course) else None
+
+    def _course_matches(self, entry: dict, course: str | None) -> bool:
+        """Whether a schedule week is on `course`: by either of its names, unless that's surely another
+        course (_names_differ: a scheduled Pinehurst No. 2 isn't Pinehurst No. 4)."""
         if not course:
             return False
-        return max(course_match_score(entry.get("course") or "", course),
-                   course_match_score(entry.get("gspro_course") or "", course)) >= 0.6
+        from .course_card import plain_name
+
+        names = [n for n in (entry.get("course"), entry.get("gspro_course")) if n]
+        if plain_name(course) in {plain_name(n) for n in names}:
+            return True
+        # (a generic alias, "Pinehurst", doesn't overrule the week's numbered "Pinehurst No. 2")
+        return (any(course_match_score(n, course) >= 0.6 for n in names)
+                and not any(self._names_differ(n, course) for n in names))
 
     def _classify_round(self, names: list[str], course: str | None,
                         holes: tuple[int, int] | tuple[()] | None = None) -> tuple[dict, str | None]:
@@ -10520,8 +10562,7 @@ class Engine:
         if not entry:
             # Course only: schedule_entry falls back to a date match, which would wrongly claim an
             # unscheduled course played on a scheduled day, so require the entry to match the course.
-            found = self.league.schedule_entry(today, course) if course else None
-            entry = found if found and self._course_matches(found, course) else None
+            entry = self._course_week(course, today)
             if not entry:
                 return {}, f"{course!r} isn't on this year's schedule"
             end = entry.get("end_date")
@@ -10677,13 +10718,13 @@ class Engine:
         setup/load name and the HUD name to one string so a prepared opener matches its tee."""
         if not course:
             return course
-        entry = self.league.schedule_entry(time.strftime("%Y-%m-%d"), course)
-        return entry.get("course") if entry and self._course_matches(entry, course) else course
+        entry = self._course_week(course)
+        return entry.get("course") if entry else course
 
     def _card_course(self, course: str | None) -> str | None:
         """The name to find a setup-read course's card folder by: see _card_name, else the name as read."""
-        sched = self.league.schedule_entry(time.strftime("%Y-%m-%d"), course) if course else None
-        return (self._card_name(sched) if sched and self._course_matches(sched, course) else None) or course
+        sched = self._course_week(course)
+        return (self._card_name(sched) if sched else None) or course
 
     def _doubt_card_notes(self, card, course: str | None, lookup: str | None, entry: dict | None = None) -> None:
         """Mark a card found by a schedule week's name (`lookup`; see _card_course, _card_name) rather than
@@ -10700,7 +10741,7 @@ class Engine:
             card.name_unsure = True
             return
         if entry is None:
-            entry = self.league.schedule_entry(time.strftime("%Y-%m-%d"), course) or {}
+            entry = self._course_week(course) or {}
         plain = course_card.plain_name
         if plain(course) in {plain(entry.get("course") or ""), plain(entry.get("gspro_course") or "")}:
             return
@@ -10753,7 +10794,7 @@ class Engine:
         read = self.current_course or hud.course
         g = self.gspro
         logged = g.course_display if self._log_truth and g.mode == "course" else None
-        if not logged or (read and self._same_course(read, logged)):
+        if not logged or (read and self._same_course(read, logged) and not self._other_course(read, logged)):
             return read
         if read:
             log.info("Tee course: HUD read %r, but GSPro loaded %r; using GSPro's", read, logged)
@@ -10765,8 +10806,19 @@ class Engine:
         lookup = self._card_course(course)
         card = self._load_course_card(lookup)
         self._doubt_card_notes(card, course, lookup)
-        self._keep_course_tees(course, card)
-        if card and (r.course_card is None or card.name != r.course_card.name):
+        old = r.course_card
+        moved = card is not None and old is not None and (card.folder or "").lower() != (old.folder or "").lower()
+        logged = self.gspro.course if self._log_truth else None
+        if (moved and card.name_unsure and not old.name_unsure and self._same_course(course, old.name)
+                and not (logged and card.folder and logged.lower() == card.folder.lower())):
+            # A short name two courses share ("Alpine Valley") doesn't unseat the card the setup surely found.
+            card = old
+        # (under the round's own name too: its handicap differential looks the tees up by it)
+        for name in dict.fromkeys(n for n in (course, r.course) if n):
+            self._keep_course_tees(name, card)
+        if card is old:
+            return
+        if card and (old is None or card.name != old.name or moved or (old.name_unsure and not card.name_unsure)):
             log.info("Course card for %r is %s, not %s, now GSPro's log names the course", course, card.name,
                      r.course_card.name if r.course_card else "none")
             r.apply_course_card(card)
@@ -10798,10 +10850,10 @@ class Engine:
                   is_league=is_league, slot_names=slot_names)
         r.holes_confirmed = confirmed
         self._apply_setup_format(r)
-        lookup = card_course or (self._card_name(entry) if entry.get("gspro_course") else None) or course
+        lookup = card_course or (self._card_name(entry) if entry.get("gspro_course") else None) or self._card_course(course)
         card = self._load_course_card(lookup)
         if not card_course:
-            self._doubt_card_notes(card, course, lookup, entry)
+            self._doubt_card_notes(card, course, lookup, entry or None)
         self._keep_course_tees(course, card)
         if card:
             r.apply_course_card(card)
@@ -10843,6 +10895,7 @@ class Engine:
             self.state.shots.clear()   # "today" starts over with the new session
         struck = self._struck_new_round()
         self.round = r
+        r.loaded_folder = self.gspro.course if self._log_truth and self.gspro.mode == "course" else None
         self._squabbit_kick()   # a league round's question goes up; any other round ends the last one's
         self._round_started_at = time.monotonic()
         self._new_round_struck, self._range_exits_seen = None, self.gspro.range_exits
@@ -10858,6 +10911,7 @@ class Engine:
         # Its record, from here on every shot's (a round a stopped booth left open, continued, keeps its own).
         r.uuid = self.store.begin_round(r.uuid, course=r.course, players=dict(r.roster), seats=r.slot_names,
                                         since_id=r.shot_floor)
+        r.loaded_folder = r.loaded_folder or self.store.round_folder(r.uuid)   # (a round continued: its folder kept)
         self._note_tournament(r)   # a round joined mid-way already has its syncs in the log
         self._hc = RoundCounters(fires_at_start=self.gspro.fires, kinds_at_start=dict(self.gspro.kinds))
         if self.cfg.health.enabled and self.cfg.source.type != "replay":
@@ -10873,7 +10927,7 @@ class Engine:
         self._setup_holes_read, self._holes_snap = False, None
         self._setup_format = self._opener_prepared_format = None
         self._setup_tints = self._opener_prepared_teams = None
-        self._setup_mode_read = False
+        self._setup_mode_read, self._setup_course = False, None
         self._scramble_pairs = set()
         self._putted_on_last_hole = self._round_end_queued = False
         self._live_round_start()
@@ -10925,6 +10979,44 @@ class Engine:
         a, b = self._canonical_course(x), self._canonical_course(y)
         return bool(a and b and (a.lower() == b.lower() or course_match_score(a, b) >= 0.6))
 
+    def _setup_course_moved(self, x: str, y: str) -> bool:
+        """Whether setup course `y` is another than `x` (as _maybe_front_load writes the opener again)."""
+        return x != y and (not self._same_course(x, y) or self._other_course(x, y))
+
+    def _other_course(self, x: str | None, y: str | None) -> bool:
+        """Whether two names _same_course may take for one course are surely two (_names_differ), as
+        given or by the league's names for them (a week's "Pinehurst" is its Pinehurst No. 2)."""
+        return self._names_differ(x, y) or self._names_differ(self._canonical_course(x), self._canonical_course(y))
+
+    def _names_differ(self, x: str | None, y: str | None) -> bool:
+        """Whether two course names are surely two courses: other numbers
+        ("Pinehurst No. 2" isn't "Pinehurst No. 4"), or installed courses each surely found in another GSPro
+        folder ("Swiss Alpine Valley" isn't "Alpine Valley - Meadows & Sugar Creek"). A schedule week's own
+        two names for its course (Wentworth by the Sea, GSPro's Balsams Panorama) are one."""
+        from . import course_card
+
+        plain = course_card.plain_name
+        a, b = plain(x or ""), plain(y or "")
+        if not a or not b or a == b:
+            return False
+        alias: dict[str, str] = {}
+        for e in self.league.data.get("schedule") or []:
+            names = {plain(n) for n in (e.get("course"), e.get("gspro_course")) if n}
+            if {a, b} <= names:
+                return False
+            if e.get("course") and e.get("gspro_course") and names & {a, b}:
+                alias.update(dict.fromkeys(names & {a, b}, self._card_name(e)))
+        na, nb = (set(re.findall(r"\d+", n)) for n in (a, b))
+        if na and nb and na != nb:
+            return True
+        try:
+            dirs = self.cfg.source.gspro_courses_dirs
+            (fa, ua), (fb, ub) = (course_card.locate(dirs, alias.get(n, name)) for n, name in ((a, x), (b, y)))
+        except Exception:
+            return False
+        # (a short name two courses share, "Alpine Valley", proves nothing)
+        return bool(fa and fb and not ua and not ub and fa != fb)
+
     def _pending_mismatch(self, p: PendingOpening, is_league: bool, course: str | None,
                           names: list[str]) -> str | None:
         """Why a prepared opener (league or practice) doesn't fit this tee, or None when it does.
@@ -10932,7 +11024,7 @@ class Engine:
         so the GSPro setup name and the HUD name agree), and the same set of league players."""
         if p.is_league != is_league:
             return f"prepared {'league' if p.is_league else 'practice'}, tee reads {'league' if is_league else 'practice'}"
-        if not self._same_course(p.course, course):
+        if not self._same_course(p.course, course) or self._other_course(p.course, course):
             return f"course {p.course!r} != tee {course!r}"
         tee_players = frozenset(pl for n in names if (pl := self.league.match_player(n)))
         if p.players != tee_players:
@@ -10949,13 +11041,21 @@ class Engine:
         players are all on it. Taken once."""
         s, self._played_setup = self._played_setup, None
         seen, self._setup_seen = self._setup_seen, None
+        if (owner := self._setup_course) and self._other_course(owner, course):
+            # The tee is surely on another course than the setup read (its load screen was missed): the
+            # setup's nines, game mode and team colours aren't this round's either.
+            log.info("Tee on %r, not the setup's %r: its holes, game mode and team colours aren't used", course, owner)
+            self._setup_holes, self._setup_holes_read, self._holes_snap = None, False, None
+            self._setup_format, self._setup_mode_read, self._setup_tints = None, False, None
+            self._setup_course = None
         if not s and seen and self._same_course(seen[0], course):
             s = seen
             log.info("Using the setup screen's players %s (its load screen wasn't read)", seen[1])
         if not s:
             return names, None
         s_course, roster, slots, at = s
-        if time.monotonic() - at > self.cfg.commentary.preround_ttl_seconds or not self._same_course(s_course, course):
+        if (time.monotonic() - at > self.cfg.commentary.preround_ttl_seconds or not self._same_course(s_course, course)
+                or self._other_course(s_course, course)):
             return names, None
         tee = self._roster_key(names)
         if not tee <= self._roster_key(roster):
@@ -11287,6 +11387,7 @@ class Engine:
         # course the player then backed out of (or long ago) doesn't.
         p = self._pending_opening
         aired_players = (p.players if p and p.aired and self._same_course(p.course, course)
+                         and not self._other_course(p.course, course)
                          and time.monotonic() - p.created <= c.preround_ttl_seconds else None)
         # An opener prepared off the setup screen airs now, with no tee-time model or grounding wait,
         # when the tee confirms the same course and the same league team(s). Else it's made here.
@@ -11298,7 +11399,7 @@ class Engine:
                 log.info("Round %s: the setup screen's players were reordered after the opener was written; "
                          "GSPro's slots are %s", pending.round.id, slots)
             self._reconcile_slots(pending.round, names)
-            self._refresh_course_card(pending.round, pending.course)
+            self._refresh_course_card(pending.round, course or pending.course)
             self._apply_setup_holes(pending.round)
             self._apply_setup_format(pending.round)
             self._apply_log_holes(pending.round)
@@ -11546,6 +11647,7 @@ class Engine:
         seen_setup = False  # the setup screen has been up this session (so a load screen is a real Play)
         course: str | None = None
         roster: list[str] = []
+        roster_course: str | None = None   # the setup course `roster` was read on
         slot_order: list[str] = []   # every named setup slot in order (for the GSPro index mapping)
         logged_roster: list[str] = []   # last roster printed, so a live read can be watched changing
         last_read: list[str] = []    # previous poll's roster, to confirm a read before trusting it
@@ -11639,6 +11741,11 @@ class Engine:
                 if not seen_setup:
                     self._fetch_bookings("setup screen", fresh_within=BOOKINGS_FRESH_SECONDS)
                     self._live_preroll()
+                if roster and roster_course and self._setup_course_moved(roster_course, play_course):
+                    # Another course set up: the players read on the last one are only a guess at this
+                    # one's (held for the tee) until its PLAYERS tab is read.
+                    self._last_setup_roster = (list(roster), list(slot_order))
+                    roster, slot_order, self._played_setup, self._setup_seen = [], [], None, None
                 to_read = slots
                 states: dict[str, str] = {}
                 slot_frame = frame
@@ -11660,6 +11767,7 @@ class Engine:
                         log.info("Setup: reading the players off the PLAYERS tab seen %.1fs ago",
                                  time.monotonic() - snap[0])
                 if probed:
+                    self._setup_course = play_course
                     fresh = not seen_setup or play_course != course
                     if fresh:
                         setup_began = grabbed_at
@@ -11725,7 +11833,7 @@ class Engine:
                 accept = bool(names) and (not set(names) < set(roster) or names == last_read or emptied)
                 last_read = names
                 if accept:
-                    roster = names
+                    roster, roster_course = names, play_course
                     slot_order = positional
                     self._last_setup_roster = (list(names), list(positional))
                     if probed and players_tab:
@@ -11752,6 +11860,19 @@ class Engine:
             search_bar = "FILTERS" in load_title.upper()
             loading = bool(seen_setup and course and load_title and not search_bar
                            and course_match_score(load_title, course) >= 0.6)
+            if loading and self._other_course(course, load_title):
+                # Another course loading than the setup last read (Pinehurst No. 4, not No. 2): its own
+                # opener, not the setup's, and its players went unread (a setup missed), so the setup's
+                # are only a guess, held for the tee to confirm.
+                log.info("Load screen for %r, not the setup's %r: the opener is for the course loading",
+                         load_title, course)
+                if roster:
+                    self._last_setup_roster = (list(roster), list(slot_order))
+                course, roster, slot_order, self._setup_seen, self._played_setup = load_title, [], [], None, None
+                # (nor its nines, game mode or team colours: GSPro's defaults until the tee says otherwise)
+                self._setup_holes, self._setup_holes_read, self._holes_snap = None, False, None
+                self._setup_format, self._setup_mode_read, self._setup_tints = None, False, None
+                self._setup_course = None
             if loading and probed:
                 self._take_holes_sample(holes_since)   # nines changed in the moment before Play was pressed
                 if self._setup_tab_lit_at < setup_began and unlit_frame is not None:
@@ -11946,6 +12067,17 @@ class Engine:
         if not self.cfg.commentary.opener or not roster:
             return
         key = self._roster_key(roster)
+        if key == self._opener_prepared_for and self._opener_prepared_course is not None \
+                and self._setup_course_moved(self._opener_prepared_course, course):
+            # Another course picked for the same players: the opener written for the last one is out of
+            # date, so drop it (and any compose still running) and write this course's.
+            log.info("Setup course changed from %r to %r; the opener is written again",
+                     self._opener_prepared_course, course)
+            p = self._pending_opening
+            if p is not None and p.awaiting_load and not p.aired:
+                self._pending_opening = None
+            self._opener_gen += 1
+            self._opener_prepared_for = frozenset()
         if not key or (key == self._opener_prepared_for and self._setup_holes == self._opener_prepared_holes
                        and self._setup_format == self._opener_prepared_format
                        and self._setup_teams_key() == self._opener_prepared_teams):
@@ -11964,6 +12096,7 @@ class Engine:
             self._opener_prepared_format = "stale"
             return
         self._opener_prepared_for, self._opener_prepared_holes = key, self._setup_holes
+        self._opener_prepared_course = course
         self._opener_prepared_format = self._setup_format
         self._opener_prepared_teams = self._setup_teams_key()
         self._opener_gen += 1
@@ -11986,7 +12119,7 @@ class Engine:
         if p is None:
             return False
         return (p.roster_key == self._roster_key(roster) and bool(p.course) and bool(course)
-                and course_match_score(p.course, course) >= 0.6
+                and course_match_score(p.course, course) >= 0.6 and not self._other_course(p.course, course)
                 and (self._setup_holes is None or (p.round.start_hole, p.round.holes) == self._setup_holes)
                 and (self._setup_format != "scramble" or p.round.format == "scramble")
                 # Written before a game-mode change still waiting to settle: out of date.
@@ -12013,8 +12146,7 @@ class Engine:
         is_league = practice is None
         # Say the league's name for the course, not GSPro's (e.g. Wentworth, not Balsams Panorama), and
         # still find the course-card folder by GSPro's name. Works whether or not it's a league round.
-        sched = self.league.schedule_entry(time.strftime("%Y-%m-%d"), course)
-        sched = sched if sched and self._course_matches(sched, course) else {}
+        sched = self._course_week(course) or {}
         if is_league:
             await self._apply_live_handicaps(self._round_players(names))
         elif air:
@@ -12438,7 +12570,7 @@ class Engine:
                 started, speeds, courses, ids = None, [], [], []
             started = started or time.time() - (time.monotonic() - self._round_started_at)
             self._bg(asyncio.to_thread(self._keep_round_file, r, started, self._round_file_names(r), speeds,
-                                       courses, ids))
+                                       courses, ids, self._round_course_folder(r)))
         self._round_ended_at = time.monotonic()
         # Asides can no longer play, so prep still in flight is money spent on nothing. The guards in
         # _prepare_news stop it starting another story; only a cancel stops the one already running

@@ -163,6 +163,8 @@ class Round:
         self.index: dict[int, int] = {}
         # The course's static card (par, stroke index per hole), read from GSPro's files; authoritative.
         self.course_card = None
+        # The GSPro course folder its log had loaded as the round started (engine._start_round).
+        self.loaded_folder: str | None = None
         self.card_scores: dict[str, dict[int, int]] = {}  # GSPro name -> hole of the round -> strokes
         # The same, from GSPro's log: its own count of each finished hole, which beats a screen read (a
         # scorecard cell OCR can miss). The on-screen card fills any hole the log didn't settle.

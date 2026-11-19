@@ -128,6 +128,10 @@ CREATE TABLE IF NOT EXISTS course_tees (            -- each tee's rating and slo
     hole_index TEXT,                             -- JSON: hole number -> stroke index
     PRIMARY KEY (course, tee)
 );
+CREATE TABLE IF NOT EXISTS round_folders (          -- the GSPro course folder a round was surely played from
+    record_uuid TEXT PRIMARY KEY,                -- its record (shots.record_uuid)
+    folder TEXT NOT NULL                         -- e.g. balsams_gsp: GSPro's round file's CourseKey
+);
 CREATE TABLE IF NOT EXISTS tee_lengths (           -- each tee box's whole-course length, from GSPro's course files
     course TEXT NOT NULL,                        -- as the season names the course (shots.course)
     tee TEXT NOT NULL,                           -- the course file's tee box: Black, Blue, ..., Par3; '' when
@@ -498,6 +502,11 @@ class Store:
         speeds = [x for (x,) in self.db.execute("SELECT ball_speed FROM shots WHERE record_uuid = ? AND "
                                                 "ball_speed IS NOT NULL AND mulligan = 0", (uuid,))]
         return (row["started_at"] if row else None), speeds
+
+    def round_folder(self, uuid: str) -> str | None:
+        """The GSPro course folder kept for a round record (apply_round_file's `folders`), if any."""
+        row = self.db.execute("SELECT folder FROM round_folders WHERE record_uuid = ?", (uuid,)).fetchone()
+        return row[0] if row else None
 
     def round_gspro_shots(self, uuid: str) -> list[str]:
         """GSPro's ShotIDs the booth tied a round's shots to (shot_tracks)."""
@@ -1322,7 +1331,8 @@ class Store:
 
     def apply_round_file(self, tracks: list, *, now: float, window_s: float = 12 * 3600,
                          same_player=None, rewrite: bool = True, gone: set | frozenset = frozenset(),
-                         name_of=None, pinned: dict | None = None, rounds: dict | None = None) -> tuple[int, list]:
+                         name_of=None, pinned: dict | None = None, rounds: dict | None = None,
+                         folders: dict | None = None) -> tuple[int, list]:
         """Apply GSPro's round file (round_file.tracks) to the shots it records: each stroke is matched to
         the row with its hole, stroke number and ball speed and a player of its name (`same_player`, a
         (gspro_name, player) test, for names that differ more than "Josh" / "Josh Merritt"), recorded
@@ -1337,7 +1347,11 @@ class Store:
         (no player read off the screen): see _fill_blind. `pinned` (ShotID -> shot id): strokes the live
         follow already tied to their shot, which is a candidate whatever its stroke number (the booth's
         count can carry a penalty GSPro's leaves out). `rounds` (a round record's uuid -> GSPro's RoundIDs
-        of the strokes the live follow tied to its shots): a stroke of another GSPro round isn't its."""
+        of the strokes the live follow tied to its shots): a stroke of another GSPro round isn't its.
+        `folders` (a round record's uuid -> its GSPro course folder, when the booth is sure of it): a shot
+        of such a round is a stroke's only when the stroke's course key is that folder, whatever other
+        course the key's name is like (Wentworth by the Sea is in balsams_gsp). They're kept
+        (round_folders), so a file read again before the round is (a restart) still goes by them."""
         courses = self.courses_played()
         rounds = rounds or {}
 
@@ -1353,10 +1367,19 @@ class Store:
             else:
                 ends.append(e)
         known: dict = {}
+        if folders:
+            self.db.executemany("INSERT OR REPLACE INTO round_folders VALUES (?, ?)", folders.items())
+            self.db.commit()
+        folders = {**dict(self.db.execute("SELECT record_uuid, folder FROM round_folders").fetchall()), **(folders or {})}
+
+        def folder_of(row) -> str | None:
+            return folders.get(row["record_uuid"]) if row["record_uuid"] else None
 
         def course_ok(key, row) -> bool:
-            # The shot's course, when GSPro's key names one we have; else (a key not like any course
-            # name) a shot from this session, the round in play.
+            # The shot's round's folder, when sure of it; else the shot's course, when GSPro's key names
+            # one we have; else (a key not like any course name) a shot from this session, the round in play.
+            if key and (folder := folder_of(row)):
+                return round_file.folder_is(key, folder)
             if key not in known:
                 known[key] = any(round_file.course_fits(key, c) for c in courses)
             if known[key]:
@@ -1364,6 +1387,8 @@ class Store:
             return row["session_id"] == self.session_id
 
         def course_wrong(key, row) -> bool:   # GSPro's key names a course we have, not the shot's
+            if folder := folder_of(row):
+                return bool(key) and not round_file.folder_is(key, folder)
             return bool(row["course"]) and not course_ok(key, row) and known[key]
 
         def round_of(row) -> float:   # the end of the play the shot was in (inf: still in play)
@@ -1453,7 +1478,7 @@ class Store:
             written += 1
         if name_of is not None and pending:
             filled = self._fill_blind(tracks, now=now, window_s=window_s, taken=taken, matched=matched,
-                                      name_of=name_of, course_ok=course_ok, round_ok=round_ok,
+                                      name_of=name_of, course_ok=course_ok, round_ok=round_ok, folder_of=folder_of,
                                       in_round=lambda r: this_round is None or round_of(r) == this_round,
                                       round_of=lambda r: (round_of(r), r["record_uuid"]))
             if filled:
@@ -1470,7 +1495,7 @@ class Store:
 
     def _fill_blind(self, tracks: list, *, now: float, window_s: float, taken: set, matched: dict,
                     name_of, course_ok, in_round=lambda r: True, round_of=lambda r: 0,
-                    round_ok=lambda t, r: True) -> set[str]:
+                    round_ok=lambda t, r: True, folder_of=lambda r: None) -> set[str]:
         """Name the shots the booth recorded blind (no player read: the screen covered, the HUD unread)
         from GSPro's round file, which has every stroke's player. With no name or stroke number to go
         on, a stroke is lined up with the shots by order: the file's strokes and the booth's shots, back
@@ -1493,7 +1518,9 @@ class Store:
                 return False
             if row["id"] in taken or t.shot_id in row_of:
                 return matched.get(row["id"]) == t.shot_id
-            return blind(row) and (row["course"] is None or course_ok(t.course_key, row)) and round_ok(t, row)
+            # (a shot of a round whose folder is known is checked by it, course read or not)
+            return (blind(row) and ((row["course"] is None and not folder_of(row)) or course_ok(t.course_key, row))
+                    and round_ok(t, row))
 
         def run(i: int, j: int) -> list:
             out = []

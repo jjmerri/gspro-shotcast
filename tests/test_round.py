@@ -1788,7 +1788,7 @@ def test_a_card_found_by_a_near_miss_schedule_name_keeps_its_scorecard_but_not_i
     assert e._build_round(["MikeD"], "Balsams Panorama North", alias, is_league=False).course_card.name_unsure
     assert not e._build_round(["MikeD"], "Balsams Panorama", alias, is_league=False).course_card.name_unsure
     e.commentary_on = True
-    monkeypatch.setattr(e.league, "schedule_entry", lambda date, course: near)   # the setup read, the tee's refresh
+    monkeypatch.setattr(e.league, "schedule_entry", lambda date, course, fits=None: near)   # the setup read, the tee's refresh
     e._refresh_course_card(r, "Swiss Alpine Valley")
     assert r.course_card.folder == "meadows_gsp" and r.course_card.name_unsure
     # A name as read that two installed courses share is unsure, though the schedule's name is exact.
@@ -1798,6 +1798,23 @@ def test_a_card_found_by_a_near_miss_schedule_name_keeps_its_scorecard_but_not_i
     course_card._index_cache.clear()
     e._refresh_course_card(r, "Alpine Valley")
     assert r.course_card.folder == "meadows_gsp" and r.course_card.name_unsure
+    # A sure card isn't unseated by a short name two courses share, unless GSPro's log loaded the other.
+    sure = e._build_round(["MikeD"], "Alpine Valley - Meadows & Sugar Creek", {}, is_league=False)
+    assert sure.course_card.folder == "meadows_gsp" and not sure.course_card.name_unsure
+    monkeypatch.setattr(e.league, "schedule_entry", lambda date, course, fits=None: None)
+    kept = []
+    monkeypatch.setattr(e, "_keep_course_tees", lambda course, card: kept.append(card.folder))
+    e._refresh_course_card(sure, "Alpine Valley")
+    assert sure.course_card.folder == "meadows_gsp" and not sure.course_card.name_unsure
+    assert set(kept) == {"meadows_gsp"}   # (its tees, not the other's)
+    # A card corrected at the tee keeps its tees under the round's own name too.
+    kept.clear()
+    monkeypatch.setattr(e, "_keep_course_tees", lambda course, card: kept.append((course, card.folder)))
+    unsure = e._build_round(["MikeD"], "Alpine Valley", {}, is_league=False)
+    e._refresh_course_card(unsure, "Alpine Valley - Meadows & Sugar Creek")
+    assert unsure.course_card.folder == "meadows_gsp"
+    assert kept[-2:] == [("Alpine Valley - Meadows & Sugar Creek", "meadows_gsp"), ("Alpine Valley", "meadows_gsp")]
+    monkeypatch.undo()
     # A card found by the name as read, which the near-miss week didn't pick, keeps its notes.
     r = e._build_round(["MikeD"], "Swiss Alpine Valley", near, is_league=False)
     assert r.course_card.folder == "swiss_gsp" and not r.course_card.name_unsure
@@ -1816,6 +1833,10 @@ def test_wentworth_listed_as_balsams_panorama_gets_wentworths_card(tmp_path):
     r = e._build_round(["MikeD", "Sarah"], "Wentworth by the Sea", entry, is_league=False)
     assert r.course_card.name == "Wentworth by the Sea" and r.course_card.folder == "balsams_gsp"
     assert r.par[1] == 4
+    # A practice round (no week of its own) by GSPro's name for the scheduled course: Wentworth's too.
+    e.league = League({**LEAGUE.data, "schedule": [{**entry, "end_date": "2099-01-01"}]})
+    r = e._build_round(["MikeD"], "Balsams Panorama", {}, is_league=False)
+    assert r.course_card.folder == "balsams_gsp" and e._round_course_folder(r) == "balsams_gsp"
     # Nothing installed by the league's name: GSPro's name, as before.
     (tmp_path / "balsams_gsp" / "coursedetails.txt").unlink()
     (tmp_path / "balsams_gsp").rmdir()
@@ -1848,6 +1869,115 @@ async def test_preround_opener_survives_the_gspro_course_alias(tmp_path):
     assert e._pending_opening is None
     assert e.round is not None and e.round.course == "Wentworth by the Sea"
     assert len(e.live_llm.prompts) == prompts_before_tee  # aired the prepared opener, no tee-time call
+
+
+def test_an_opener_written_for_another_numbered_or_installed_course_is_set_aside(tmp_path, monkeypatch):
+    import time
+
+    from commentator import course_card
+    from commentator.engine import PendingOpening
+
+    for folder, name in (("pinehurst2_gsp", "Pinehurst No. 2"), ("pinehurst4_gsp", "Pinehurst No. 4"),
+                         ("swiss_gsp", "Swiss Alpine Valley"), ("meadows_gsp", "Alpine Valley - Meadows & Sugar Creek"),
+                         ("balsams_gsp", "Wentworth by the Sea")):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "coursedetails.txt").write_text(DETAILS.replace("Test Links", name), encoding="utf-8")
+    course_card._index_cache.clear()
+    e = _engine(tmp_path)
+    e.cfg.source.gspro_courses_dirs = [str(tmp_path)]
+    e.league = League({**LEAGUE.data, "schedule": [*LEAGUE.data.get("schedule", []), {
+        "week": 99, "course": "Wentworth by the Sea", "gspro_course": "Balsams Panorama", "end_date": "2099-01-01"}]})
+
+    def held(course):
+        is_league = e._classify_round(["MikeD"], course)[1] is None
+        return PendingOpening(course, frozenset(), frozenset({"Mike"}), is_league, None, [], awaiting_load=True,
+                              roster_key=e._roster_key(["MikeD"]))
+    for written, now in (("Pinehurst No. 2", "Pinehurst No. 4"),
+                         ("Swiss Alpine Valley", "Alpine Valley - Meadows & Sugar Creek")):
+        e._pending_opening = held(written)
+        assert not e._front_loaded_fits(now, ["MikeD"])   # at the load
+        assert e._pending_mismatch(e._pending_opening, e._pending_opening.is_league, now, ["MikeD"])   # at the tee
+        assert e._front_loaded_fits(written, ["MikeD"])
+    # A short name two installed courses share proves nothing.
+    assert not e._other_course("ALPINE VALLEY", "Alpine Valley - Meadows & Sugar Creek")
+    # The schedule's own two names for one course are one.
+    p = held("Balsams Panorama")
+    assert not e._pending_mismatch(p, p.is_league, "Wentworth by the Sea", ["MikeD"])
+    # The tee's remembered No. 2 gives way to the No. 4 GSPro's log loaded.
+    e.cfg.source.gspro_log_truth, e.cfg.source.type = True, "gsprolog"
+    e.gspro.mode, e.gspro.course_display, e.current_course = "course", "Pinehurst No. 4", "Pinehurst No. 2"
+    assert e._tee_course(Hud(course="Pinehurst No. 2")) == "Pinehurst No. 4"
+    # A week's generic alias doesn't put a numbered week on another number.
+    week = {"course": "Pinehurst No. 2", "gspro_course": "Pinehurst"}
+    assert not e._course_matches(week, "Pinehurst No. 4")
+    assert e._course_matches(week, "Pinehurst") and e._course_matches(week, "pinehurst no. 2")
+    # With that alias scheduled, a No. 4 week further on is No. 4's; and an opener written off the
+    # alias is No. 2's, not No. 4's.
+    e.league = League({**LEAGUE.data, "schedule": [{"week": 1, **week, "end_date": "2099-01-01"},
+                                                   {"week": 2, "course": "Pinehurst No. 4", "end_date": "2098-01-01"}]})
+    assert e._course_week("Pinehurst No. 4")["week"] == 2
+    assert e._course_week("Pinehurst")["week"] == 1
+    p = held("Pinehurst")
+    assert e._pending_mismatch(p, p.is_league, "Pinehurst No. 4", ["MikeD"])
+    assert not e._pending_mismatch(p, p.is_league, "Pinehurst No. 2", ["MikeD"])
+    # Players set up on No. 2 aren't added to a No. 4 tee.
+    e._played_setup = ("Pinehurst No. 2", ["MikeD", "Sarah"], ["MikeD", "Sarah"], time.monotonic())
+    assert e._with_setup_players(["MikeD"], "Pinehurst No. 4") == (["MikeD"], None)
+    # Nor No. 2's nines and game mode (its load screen missed).
+    for tee, kept in (("Pinehurst No. 2", True), ("Pinehurst No. 4", False)):
+        e._setup_course, e._setup_holes, e._setup_holes_read, e._setup_format = "Pinehurst No. 2", (10, 9), True, "scramble"
+        e._with_setup_players(["MikeD"], tee)
+        assert (e._setup_holes == (10, 9) and e._setup_format == "scramble") is kept
+
+    # Another course picked for the same players on the setup screen: written again, the old one dropped.
+    started: list[int] = []
+    monkeypatch.setattr(e, "_bg", lambda coro: (coro.close(), started.append(e._opener_gen)))
+    e._pending_opening = None
+    e._maybe_front_load("Pinehurst No. 2", ["MikeD"])
+    e._pending_opening = held("Pinehurst No. 2")
+    e._maybe_front_load("Pinehurst No. 2", ["MikeD"])
+    assert len(started) == 1
+    e._maybe_front_load("Pinehurst No. 4", ["MikeD"])
+    assert len(started) == 2 and e._pending_opening is None
+    e._maybe_front_load("Pinehurst No. 4", ["MikeD"])
+    assert len(started) == 2
+
+
+async def test_the_tee_refreshes_a_held_openers_card_by_the_tees_course(tmp_path, monkeypatch):
+    from commentator.models import RoundStartEvent
+
+    e = _engine(tmp_path)
+    e.current_par = 4
+    e.league = League({**LEAGUE.data, "schedule": [
+        {"week": 7, "course": "Wentworth by the Sea", "gspro_course": "Balsams Panorama", "format": "Best Ball",
+         "hole_count": 9, "start_hole": 1, "end_date": "2099-01-01"}]})
+    await e._prepare_speculative_round("Balsams Panorama", ["MikeD", "Sarah"])
+    refreshed = []
+    monkeypatch.setattr(e, "_refresh_course_card", lambda r, course: refreshed.append(course))
+    e.current_course = "Wentworth By The Sea"
+    tee = Hud(player_text="MikeD E Shot 1 400 YDS", shot_number=1, score_to_par="E", to_pin="400 yards",
+              others=[OtherPlayer("Sarah", "400 yards", "E")])
+    await e.handle_round_start(RoundStartEvent(hud=tee))
+    assert refreshed == ["Wentworth By The Sea"]
+
+
+def test_a_sure_refresh_replaces_an_unsure_card_of_the_same_name(tmp_path):
+    from dataclasses import replace
+
+    from commentator import course_card
+    from commentator.round import Round
+
+    (tmp_path / "links_gsp").mkdir()
+    (tmp_path / "links_gsp" / "coursedetails.txt").write_text(DETAILS, encoding="utf-8")
+    course_card._index_cache.clear()
+    e = _engine(tmp_path)
+    e.cfg.source.gspro_courses_dirs = [str(tmp_path)]
+    r = Round(league=e.league, gspro_players=["MikeD"], course="Test Links", scheduled_format=None, holes=18,
+              start_hole=1, is_league=False)
+    r.apply_course_card(replace(e._load_course_card("Test Links"), name_unsure=True))
+    assert e._round_course_folder(r) is None
+    e._refresh_course_card(r, "Test Links")
+    assert not r.course_card.name_unsure and e._round_course_folder(r) == "links_gsp"
 
 
 async def test_preround_preloads_a_practice_opener_and_airs_it(tmp_path):
@@ -2210,6 +2340,38 @@ async def test_backing_out_after_an_opener_aired_reads_the_next_setup(tmp_path):
         return "Pebble Beach" in aired
     p = await _run_setup_watch(e, None, screen=scr, until=until)
     assert aired == ["Augusta National", "Pebble Beach"] and p.aired
+
+
+async def test_a_load_screen_for_another_numbered_course_gets_its_own_opener(tmp_path):
+    # The setup was last read on Pinehurst No. 2, then No. 4 was picked and loaded: the opener written
+    # for No. 2 doesn't air over No. 4's load; No. 4's is written, its players (a setup missed) a guess
+    # held for the tee rather than aired as No. 4's.
+    setup = _players_tab("Pinehurst No. 2", {1: "MikeD", 2: "Sarah"})
+    e = _engine(tmp_path)
+    e.league = League({**LEAGUE.data, "schedule": [
+        {"week": 3, "course": "Pinehurst No. 2", "format": "Best Ball", "end_date": "2099-01-01"}]})
+    # (a pair that loaded No. 4 earlier and backed out isn't these players either)
+    e._played_setup = ("Pinehurst No. 4", ["MikeD", "Sarah"], ["MikeD", "Sarah"], __import__("time").monotonic())
+    p = await _run_setup_watch(e, [setup, setup, setup, {"load_course": "Pinehurst No. 4"}],
+                               until=lambda p: p is not None and p.course == "Pinehurst No. 4")
+    assert p is not None and p.round.course == "Pinehurst No. 4" and p.guessed and not p.aired
+    assert not p.is_league   # No. 2's week isn't No. 4's
+    assert e._played_setup is None and e._setup_seen is None   # No. 2's players aren't No. 4's confirmed
+    assert (e._setup_holes, e._setup_holes_read, e._setup_format, e._setup_tints) == (None, False, None, None)
+
+
+async def test_players_read_on_another_courses_setup_are_a_guess_at_the_next(tmp_path):
+    # Players read on No. 2's setup; No. 4 is then set up with only its HOLES tab seen and loaded: its
+    # opener is written for them as a guess held for the tee, not as No. 4's confirmed players.
+    setup = _players_tab("Pinehurst No. 2", {1: "MikeD", 2: "Sarah"})
+    other = _holes_tab("Pinehurst No. 4", True, True)
+    e = _engine(tmp_path)
+    # (a pair that loaded No. 4 earlier and backed out isn't these players either)
+    e._played_setup = ("Pinehurst No. 4", ["MikeD", "Sarah"], ["MikeD", "Sarah"], __import__("time").monotonic())
+    p = await _run_setup_watch(e, [setup, setup, other, other, other, {"load_course": "Pinehurst No. 4"}],
+                               until=lambda p: p is not None and p.course == "Pinehurst No. 4"
+                               and e.screen.i >= 6)
+    assert p is not None and p.guessed and not p.aired and e._played_setup is None
 
 
 async def test_setup_watcher_fires_the_opener_with_no_league(tmp_path):

@@ -222,6 +222,29 @@ def course_named(course_key: str | None, course: str | None, courses: Iterable[s
     return c == k or not any(_course_norm(x) == k for x in courses) and course_fits(course_key, course)
 
 
+def folder_is(course_key: str | None, folder: str | None) -> bool:
+    """Whether GSPro's course key is the course folder `folder` ("balsams_gsp"): the folder the booth
+    found the round's course card in is the course GSPro has loaded, whatever its listing calls it. Only
+    case is ignored: "pine_valley_gsp" and "pinevalley_gsp" are two folders."""
+    k, f = (course_key or "").strip().casefold(), (folder or "").strip().casefold()
+    return bool(k and f) and k == f
+
+
+def other_course(course_key: str | None, course: str | None, courses: Iterable[str] = (),
+                 folder: str | None = None) -> bool:
+    """Whether GSPro's course key is surely another course than `course`: with the course's GSPro folder
+    known, any other folder's; else (by name) one of the booth's `courses` that isn't `course`
+    (course_named). A key like no course's name can't be told apart by name."""
+    if not course_key:
+        return False
+    if folder:
+        return not folder_is(course_key, folder)
+    if not course:
+        return False
+    courses = list(courses)
+    return not course_named(course_key, course, courses) and any(course_fits(course_key, c) for c in courses)
+
+
 def names_fit(gspro_name: str, player: str | None) -> bool:
     """Whether GSPro's short name ("Josh", "Josh M.") is the shots' player ("Josh Merritt"); two full
     names that differ past the first ("Alex Jones", "Alex Smith") are two players."""
@@ -236,17 +259,17 @@ def names_fit(gspro_name: str, player: str | None) -> bool:
 
 
 def _of_round(entries: list, players: Iterable[str], speeds: list[float], course: str | None = None,
-              courses: Iterable[str] = (), shot_ids: Iterable[str] = ()) -> bool:
-    """Whether the file's strokes are the round's. Not when its course key names a course the booth
-    knows (`courses`) other than the round's. Else, when the booth tied any of the round's shots to
+              courses: Iterable[str] = (), shot_ids: Iterable[str] = (), folder: str | None = None) -> bool:
+    """Whether the file's strokes are the round's. Not when its course key is another course than the
+    round's (other_course: another folder than `folder`, the round's GSPro course folder when known;
+    else a course the booth knows, `courses`, other than the round's by name). Else, when the booth tied any of the round's shots to
     GSPro's strokes (`shot_ids`), when one of those is in it (GSPro's ShotIDs are its round's alone).
     Else when one of its players hit them and, when the booth recorded ball speeds, at least half of
     those are among them. A next round noticed late (even the same player's) has few strokes, mostly
     unlike the round's."""
     entries = [e for e in entries if isinstance(e, dict)]
     courses = list(courses)
-    if course and any((k := e.get("CourseKey")) and not course_named(k, course, courses)
-                      and any(course_fits(k, c) for c in courses) for e in entries):
+    if any(other_course(e.get("CourseKey"), course, courses, folder) for e in entries):
         return False
     if ids := set(shot_ids):
         return any(str(e.get("ShotID")) in ids for e in entries if e.get("ShotID") is not None)
@@ -267,11 +290,11 @@ def _of_round(entries: list, players: Iterable[str], speeds: list[float], course
 
 def archive(src: Path, log_dir: str | Path, started: float, course: str | None, players: Iterable[str],
             speeds: Iterable[float] = (), keep: int = KEEP_ARCHIVES, *, courses: Iterable[str] = (),
-            shot_ids: Iterable[str] = ()) -> Path | None:
+            shot_ids: Iterable[str] = (), folder: str | None = None) -> Path | None:
     """Copy the round's file into log_dir/ARCHIVE_DIR as <start>-<course>.dat (the next round overwrites
     it), keeping the newest `keep`. `players` are the round's GSPro names, `speeds` the ball speeds the
     booth recorded in it, `courses` every course the booth has shots on, `shot_ids` GSPro's ShotIDs the
-    booth tied the round's shots to. None when there's no file of this round's to copy: missing, written before it
+    booth tied the round's shots to, `folder` the round's GSPro course folder when known. None when there's no file of this round's to copy: missing, written before it
     started (well before, when there are speeds to match), unreadable (mid-write) after a few tries, or another round's (see _of_round)."""
     speeds = list(speeds)
     for attempt in range(ARCHIVE_READ_TRIES):
@@ -297,7 +320,7 @@ def archive(src: Path, log_dir: str | Path, started: float, course: str | None, 
     else:
         log.warning("GSPro's round file stayed unreadable (mid-write?), not kept: %s", why)
         return None
-    if not isinstance(entries, list) or not _of_round(entries, players, speeds, course, courses, shot_ids):
+    if not isinstance(entries, list) or not _of_round(entries, players, speeds, course, courses, shot_ids, folder):
         return None
     folder = Path(log_dir) / ARCHIVE_DIR
     stem = time.strftime("%Y-%m-%d-%H%M%S", time.localtime(started))

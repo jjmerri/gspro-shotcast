@@ -197,18 +197,27 @@ class League:
                 updated.append(name)
         return updated
 
-    def schedule_entry(self, date: str, course: str | None = None) -> dict[str, Any] | None:
+    def schedule_entry(self, date: str, course: str | None = None, fits=None) -> dict[str, Any] | None:
         """This round's week of the schedule. Teams play weeks early and two in one visit, so the
         course GSPro shows decides it; an entry with tonight's "date" (YYYY-MM-DD or M/D/YYYY) is
-        the fallback. Of two weeks on the same course, the one whose deadline comes first."""
+        the fallback. Of two weeks on the same course (one naming it exactly first), the one whose
+        deadline comes first. `fits`
+        (entry -> bool) leaves out weeks surely on another course before the course decides."""
         import datetime
 
         entries = self.data.get("schedule") or []
         if course:
             # "gspro_course" is GSPro's own name for a course, when it differs from the schedule's.
             scored = [(max(course_match_score(e.get("course", ""), course),
-                           course_match_score(e.get("gspro_course") or "", course)), e) for e in entries]
+                           course_match_score(e.get("gspro_course") or "", course)), e)
+                      for e in entries if fits is None or fits(e)]
             good = [(sc, e) for sc, e in scored if sc >= 0.6]
+            # A week naming the course exactly beats one merely as like it ("Pinehurst" is the week
+            # whose alias it is, not Pinehurst No. 4's)
+            plain = " ".join(re.findall(r"[a-z0-9]+", course.lower()))
+            exact = [(sc, e) for sc, e in good if plain in {" ".join(re.findall(r"[a-z0-9]+", (n or "").lower()))
+                                                             for n in (e.get("course"), e.get("gspro_course"))}]
+            good = exact or good
             if good:
                 best = max(sc for sc, _ in good)
                 today = datetime.date.fromisoformat(date).isoformat()

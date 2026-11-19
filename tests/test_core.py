@@ -6040,6 +6040,55 @@ def test_gspros_round_file_moves_a_shot_filed_under_another_hole_and_leaves_pick
     assert written == 1 and not left and not e._refile_from_round_file(left)
 
 
+def test_gspros_round_file_ties_strokes_to_the_round_by_its_gspro_course_folder(tmp_path):
+    # Wentworth by the Sea is played from GSPro's balsams_gsp folder (GSPro lists it as Balsams Panorama),
+    # and the booth has shots on the real Balsams Panorama too: the stroke's key is Wentworth's folder.
+    from dataclasses import replace as _re
+
+    from commentator import round_file
+    from commentator.course_card import CourseCard
+    from commentator.round import Round
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Dan"], course="Wentworth by the Sea", scheduled_format=None,
+              holes=18, start_hole=1, is_league=False)
+    e.round = r
+    for course, sp in (("Balsams Panorama", 90.0), ("Wentworth by the Sea", 150.0)):
+        e.store.record_shot(player="Dan", hole="Hole 1", shot=Shot(ball_speed=sp), before=Hud(shot_number=1),
+                            after=Hud(), tags=[], carry_game_yards=None, total_yards=None, offline_yards=None,
+                            course=course)
+    e.store.db.execute("UPDATE shots SET record_uuid = ? WHERE course = 'Wentworth by the Sea'", (r.uuid,))
+    t = round_file.tracks([{**_round_entry(1, 150.0), "CourseKey": "balsams_gsp"}])
+    assert not e._file_round_test(r)(t[0])   # no card: by name it's Balsams Panorama's
+    assert e.store.apply_round_file(t, now=time.time(), folders=e._round_file_folders()) == (0, t)
+    r.course_card = CourseCard(name="Wentworth by the Sea", par={}, index={}, folder="balsams_gsp")
+    assert e._file_round_test(r)(t[0]) and e._file_round_test(r)(t[0], "Wentworth by the Sea")
+    assert e._file_ours(t[0], r, "test")
+    assert not e._file_round_test(r)(_re(t[0], course_key="balsams_gsp - bak"))
+    assert e.store.apply_round_file(t, now=time.time(), folders=e._round_file_folders()) == (1, [])
+    # Read again before the round is (a booth restart): the folder kept still ties it.
+    assert e.store.apply_round_file(t, now=time.time()) == (1, [])
+    assert e.store.db.execute("SELECT count(*) FROM shot_tracks").fetchone()[0] == 1
+    assert not round_file.folder_is("pinevalley_gsp", "pine_valley_gsp") and round_file.folder_is("Balsams_GSP", "balsams_gsp")
+    # A card a near miss found isn't sure of its folder (unless GSPro's log loaded it): by name again.
+    r.course_card.name_unsure = True
+    assert e._round_course_folder(r) is None and not e._file_round_test(r)(t[0])
+    # Only the folder loaded as the round started confirms it, not the next course GSPro loads.
+    e.cfg.source.gspro_log_truth, e.gspro.mode, e.gspro.course = True, "course", "balsams_gsp"
+    assert e._round_course_folder(r) is None
+    r.loaded_folder = "balsams_gsp"
+    assert e._round_course_folder(r) == "balsams_gsp"
+    # What GSPro loaded is the round's folder, whatever card its name found.
+    r.course_card.name_unsure, r.loaded_folder = False, "balsams_v2_gsp"
+    assert e._round_course_folder(r) == "balsams_v2_gsp" and not e._file_round_test(r)(t[0])
+    # A round continued after a restart, GSPro's load unread: the folder kept for its record stands.
+    e.cfg.source.gspro_log_truth = False
+    again = Round(league=e.league, gspro_players=["Dan"], course="Wentworth by the Sea", scheduled_format=None,
+                  holes=18, start_hole=1, is_league=False)
+    again.uuid, again.voice_from_seq = r.uuid, 1
+    e._start_round(again)
+    assert again.uuid == r.uuid and again.loaded_folder == "balsams_gsp"
+
+
 def test_a_shot_moved_for_a_stroke_found_to_be_another_shots_goes_back_whole(tmp_path):
     # Moved (stroke number unread, a conceded tap-in with it) for a stroke the live handler then ties to
     # another shot: it goes back to where it was, its unread number with it.
