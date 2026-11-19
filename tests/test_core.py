@@ -5073,7 +5073,9 @@ def test_the_setup_lie_is_where_gspros_round_file_has_the_ball_at_rest(tmp_path)
     e.hole_number = 1
     e.round.format = "scramble"
     assert e._file_rest_lie("Dan", 2) is None                # the team's picked ball, not his own
-    e.round.format = None
+    e.round.format, e.round.no_scramble = None, True
+    assert e._file_rest_lie("Dan", 2) is None                # a shamble's: his partner's drive, maybe
+    e.round.no_scramble = False
     w.written = e._booth_wall0 - 1                           # an earlier session's file
     assert e._file_rest_lie("Dan", 2) is None
 

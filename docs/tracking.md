@@ -164,7 +164,8 @@ drop included), the carry, the total, the lies and where it finished come from G
 rather than the screen, and the booth's later reads leave them be. A lie the screen reads finer
 than the file's (semi rough, fringe, pine straw) is kept. The live calls use it too: the lie a
 player sets up on is where the file has their last ball at rest (the screen's read only when the file
-has no such stroke: a team ball, a penalty, another round's file), and the shot's own call says the
+has no such stroke: a team ball or a shamble, where GSPro copies balls between partners, a penalty,
+another round's file), and the shot's own call says the
 lie the file has it struck from. GSPro's log only names where a ball first landed (its bounce line),
 which is kept for the cart-path kick and tree calls and as the lie's last fallback. A scramble's
 finish stays the booth's, for the ball the team picked; the balls it didn't pick take their finish

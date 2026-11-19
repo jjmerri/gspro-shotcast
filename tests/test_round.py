@@ -6237,7 +6237,7 @@ def _row_maker(e):
     log corrections with the shooter's line (`owner`, `hole`) in."""
     from commentator.state import ShotRecord
 
-    def shot(fire, who, owner, hole=0, outcome=None, club="7I"):
+    def shot(fire, who, owner, hole=0, outcome=None, club="7I", sp=None):
         rec = ShotRecord(who or "unknown", Shot(club=club), "hole 1 par 4", Hud(), [], round_id=e.round.id)
         rec.outcome = outcome
         sid = e.store.record_shot(player=who, hole="hole 1 par 4", shot=Shot(club=club), before=Hud(),
@@ -6247,6 +6247,8 @@ def _row_maker(e):
         e._row_source[fire] = "screen" if who else "none yet"
         e._owners_due.add(fire)
         e.gspro._fire_info[fire] = {"player": owner, "hole": hole}
+        if sp is not None:
+            e.gspro._fire_info[fire]["launch"] = {"sp": sp, **_LAUNCH}
         e.gspro.fires = fire
         e._apply_log_corrections()
         return rec
@@ -6296,9 +6298,16 @@ def test_gspros_round_file_places_the_players_the_setup_screen_misread(tmp_path)
     shot = _row_maker(e)
     e._last_row[1] = e._pending_finish[1] = (e.store.db.execute("SELECT coalesce(max(id), 0) + 1 FROM shots")
                                              .fetchone()[0], None, 0, 0, 0)   # followed on Kroll's slot
-    rec = shot(3, "Kroll", 0, outcome="holed")
+    e._file_entries += [_file_ball("Barrows", 130.0, n=2), _file_ball("Kroll", 120.0, n=2)]
+    rec = shot(3, "Kroll", 0, outcome="holed", sp=130.0)
     assert rec.player == "Barrows"                           # the screen misread who was up: the file's stands
     assert rec.outcome is None and 1 not in e._last_row and 1 not in e._pending_finish   # Kroll's slot's, void
+    e.gspro._fire_info[3]["holed"], e.gspro.fires = True, 40   # re-graded on its own slot, however late
+    e._settle_outcomes()
+    assert rec.outcome == "holed"
+    # Kroll's own ball credited to slot 0 (Barrows left, and GSPro closed the slots up): the file has it
+    # under Kroll, so the screen's name stands.
+    assert shot(5, "Kroll", 0, sp=120.0).player == "Kroll"
     assert shot(4, None, 1).player == "Kroll"                # a hidden name is the file's slot's
 
 
@@ -6311,12 +6320,16 @@ def test_a_shot_the_log_credited_before_the_round_file_had_it_is_moved_once_the_
     e.gspro.players_seen.update({0, 1})
     e.gspro.mode = "course"
     shot = _row_maker(e)
-    rec = shot(1, "Kroll", 0)
+    rec = shot(1, "Kroll", 0, sp=150.0)
     assert rec.player == "Kroll"                             # nothing yet to say otherwise
-    e.gspro._fire_info[1]["launch"] = {"sp": 150.0, **_LAUNCH}
     e._file_entries, e._file_version = [_file_ball("Barrows", 150.0)], 2
     e._apply_log_corrections()
     assert e.round.file_slots == {"Barrows": 0} and rec.player == "Barrows"
+    rec = shot(2, "Kroll", 0, sp=140.0)                      # slot 0 is Barrows', but the file hasn't this ball
+    assert rec.player == "Kroll"
+    e._file_entries, e._file_version = [*e._file_entries, _file_ball("Barrows", 140.0, n=2)], 3
+    e._apply_log_corrections()
+    assert rec.player == "Barrows"                           # it has now: no new slot, still moved
 
 
 def test_no_file_slots_without_the_logs_launch_numbers(tmp_path):
@@ -7234,3 +7247,30 @@ async def test_gspros_club_for_a_tee_shot_comes_before_the_drive_records(tmp_pat
                                   impact_hud_hint=hud))
     rec = e.state.shots[-1]
     assert rec.shot.club == "3W" and "season_best_drive" not in rec.tags
+
+
+async def test_a_file_club_dropped_with_its_stroke_takes_its_driving_record_with_it(tmp_path):
+    # The file's driver for a screen 3-wood, but by the time it's recorded GSPro's file is another
+    # round's: the 3-wood stands, with no driving record on it.
+    from commentator import round_file
+    from commentator.models import ShotEvent
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    e.commentary_on = False
+    e.screen = None
+    track = round_file.Track("s1", None, None, "Kroll", 1, 1, 150.0, False, (0.0, 0.0, 0.0), (0.0, 0.0, 210.0),
+                             None, lie_before="tee", lie_after="fairway", club="DR")
+
+    async def refreshed():
+        return None
+    checks = []
+    e._round_watch, e._refresh_round_file = type("W", (), {"written": 0.0})(), refreshed
+    e._file_track_of = lambda *a, **k: track
+    e._file_ours = lambda *a, **k: checks.append(1) or len(checks) == 1
+    e.store.season_stats = lambda p: {"longest_drive": 100.0}
+    e.store.today_longest_drive = lambda p: None
+    hud = _tee("Kroll", shot=1)
+    await e.handle_shot(ShotEvent(shot=Shot(club="3W", carry=240.0, ball_speed=150.0), hud_hint=hud,
+                                  impact_hud_hint=hud))
+    rec = e.state.shots[-1]
+    assert len(checks) == 2 and rec.shot.club == "3W" and "season_best_drive" not in rec.tags

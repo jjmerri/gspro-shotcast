@@ -3300,11 +3300,12 @@ class Engine:
         """Where GSPro's round file has `player`'s ball sitting before their stroke `shot_number` on the
         hole in play: their last stroke's EndingSurface, as a booth lie. None when the file can't say:
         no such stroke yet, a penalty or a holed ball (play goes on from elsewhere), a code with no
-        name (round_file.SURFACES), a team ball (scramble, alternate shot), or another round's file."""
+        name (round_file.SURFACES), a team ball (scramble, alternate shot, or a shamble's picked drive:
+        GSPro copies balls between partners), or another round's file."""
         r = self.round
         if (not self._file_live() or not player or player == "unknown" or self._anonymous(player)
                 or not shot_number or shot_number < 2 or self.hole_number is None or r is None or r.ended
-                or r.format in ("scramble", "alternate")):
+                or r.format in ("scramble", "alternate") or r.no_scramble):
             return None
         t = next((t for t in reversed(self._file_tracks) if t.hole == self.hole_number
                   and self._file_stroke(t, player) == shot_number - 1 and self._file_names_fit(t.player, player)),
@@ -5967,6 +5968,7 @@ class Engine:
                 slots[k] = idx
         slots = {k: i for k, i in slots.items() if k not in clash}
         if slots == r.file_slots:
+            self._own_misread(r)   # (a ball the file has only now)
             return
         r.file_slots = slots
         was = list(r.slot_names or [])
@@ -6018,8 +6020,19 @@ class Engine:
                     or self._row_source.get(fire) not in ("screen", "setup read", "address frame"):
                 continue
             if (known := self._log_name(owner)) is not None and r.file_slots.get(known[0]) == owner \
-                    and r.current_name(row[1].player) != known[1] and not self._anonymous(known[1]):
+                    and r.current_name(row[1].player) != known[1] and not self._anonymous(known[1]) \
+                    and self._file_hit_by(fire, known[0]):
                 self._file_rename(fire, owner, known[1])
+
+    def _file_hit_by(self, fire: int, g: str) -> bool:
+        """Whether GSPro's round file has this fire's own ball (its launch numbers) under round player `g`:
+        the slot's player as the file named it may since have moved (a player who left closes it up)."""
+        launch = self.gspro.fire_info(fire).get("launch")
+        if not launch or self.round is None:
+            return False
+        names = {str(e["PlayerName"]) for e in self._file_entries
+                 if isinstance(e, dict) and e.get("PlayerName") and round_file.same_launch(launch, e)}
+        return len(names) == 1 and self._file_roster_key(self.round, next(iter(names))) == g
 
     def _file_rename(self, fire: int, owner: int, name: str) -> None:
         """GSPro's own records name the slot that hit a shot (_learn_file_slots): the screen misread who
@@ -6037,6 +6050,7 @@ class Engine:
         self._renames.add(fire)
         self._rename_remapped(self.round)
         self._outcomes_due.add(fire)
+        self._resettle.add(fire)   # graded however long ago, while the log still has it
 
     def _forget_fires(self, upto: int) -> None:
         """Let the recorded rows of fires `upto` and before go (keeping a guessed slot order's log-named
@@ -6209,7 +6223,7 @@ class Engine:
                 # log corrections and result were never followed. The log agrees whose it is.
                 self._fire_rows[fire] = (shot_id, rec, owner, self.gspro.fire_info(fire).get("hole"))
                 self._outcomes_due.add(fire)
-        elif r.file_slots.get(g) == owner and not self._anonymous(name):
+        elif r.file_slots.get(g) == owner and not self._anonymous(name) and self._file_hit_by(fire, g):
             self._file_rename(fire, owner, name)
         else:
             for k in [k for k in r.log_agree if k[0] == owner]:
@@ -7745,6 +7759,10 @@ class Engine:
             if screen_club is not None:   # the club came from that round's stroke: back to the screen's
                 club = screen_club[0] if retee else deck_club(screen_club[0], screen_before.shot_number, before.lie)
                 shot = replace(shot, club=club)
+                if tee_drive and not is_drive(club, shot.is_putt, screen_before.shot_number, before.lie,
+                                              to_yards(before.to_pin)):   # its driving records were the file club's
+                    tags = [t for t in tags if t not in ("season_best_drive", "league_best_drive")]
+                    season_facts = [f for f in season_facts if "drive" not in f]
             before = replace(before, shot_number=screen_before.shot_number, gspro_shot=screen_before.gspro_shot)
             hud = replace(hud, shot_number=screen_before.shot_number)
         rec = ShotRecord(
