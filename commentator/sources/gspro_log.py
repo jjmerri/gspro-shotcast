@@ -100,9 +100,8 @@ WOOD_TREE_SHORT = 0.7
 
 MATERIAL_TO_LIE = {
     "green": "green", "fairway": "fairway", "rough": "rough", "deeprough": "deep rough",
-    "semirough": "semi rough", "sand": "sand", "bunker": "bunker", "water": "water",
-    "tee": "tee", "fringe": "fringe", "pinestraw": "pine straw", "waste": "waste area",
-    "fescue": "fescue", "native": "native", "concrete": "cart path", "wood": "structure",
+    "semirough": "semi rough", "sand": "sand", "water": "water",
+    "tee": "tee", "pinestraw": "pine straw", "concrete": "cart path", "wood": "structure",
     "timber": "structure",
 }
 

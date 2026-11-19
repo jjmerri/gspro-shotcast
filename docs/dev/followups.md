@@ -32,11 +32,17 @@ code that names no lie. `round_file.SURFACES` maps every code GSPro has: the ind
 `Trajectory.PhyMatList` (0-22, from the game code), semi rough (12) and pine straw (16) included.
 Only 0 (the ball's own material) and 19 (`none`: GSPro found
 no surface under the ball) fall back to the screen. Codes 6 (earth), 7 (dropzone), 13 (stone) and
-17 (leaves) take plain words the booth had none for (dirt, drop zone, stone, leaves) and play no
-pre-written result line (`flight_pick._LIE_REACTION`); only 1, 2, 3, 5, 11 and 18 have been seen
-in a real file (the 2026-11-18 rounds in `tests/fixtures/round_files/`). Check the booth logs for `Setup lie ... from GSPro's
-round file` against setups without it; if the gaps are only team balls, map those from the file too
-(the pick's stroke) and drop the log's `lie_by` fallback.
+17 (leaves) take plain words the booth had none for (dirt, drop zone, stone, leaves); dirt, stone and
+leaves have pre-written result lines (`flight_pick._LIE_REACTION`), a drop zone is left to the model.
+Only 1, 2, 3, 5, 11 and 18 have been seen in a real file (the 2026-11-18 rounds in
+`tests/fixtures/round_files/`).
+
+**Needs verification:** which setups still take the screen's lie. The booth logs `Setup lie ... from
+GSPro's round file` only when the file's lie differs from the screen's, so first log every setup's
+lie source (file, log material or screen). Then check one stroke-play round (penalties, drops, the
+first setup, cart path) and one scramble or alternate-shot round (team balls, which only those
+formats have). If the gaps are only team balls, map those from the file too (the pick's stroke) and
+drop the screen read and the log's `lie_by` fallback.
 
 ## Drop the scorecard and result-banner OCR once the log names every player
 
