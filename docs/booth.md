@@ -51,8 +51,8 @@
    doesn't say whether it was a tree or a bush, so `flight.py` models the height at the first hit from
    the launch numbers: under 10 ft is a bush or low branches, 10-20 ft a big bush or a tree's low
    branches, 20-30 ft the branches of a tree, higher is high up in a tree, and a hit after the modelled
-   landing is the ball running into the trees as it came down. A first bounce off wood (`Using Material
-   TVGwood`) is taken as a tree trunk or branch, rising or falling, unless the ball met it at ground
+   landing is the ball running into the trees as it came down. A first bounce off wood (the bounce line's
+   `material TVGwood`) is taken as a tree trunk or branch, rising or falling, unless the ball met it at ground
    level: GSPro's carry (which ends at that first contact) at least 70% of the full carry, about where
    it would have landed anyway, is a bridge, steps or a wall. Leaves on the same shot, or no carry read,
    keep it a tree. Its shortened carry isn't learned from (`shots.tree_hits`).

@@ -27,10 +27,6 @@
 "descent": 37.8
 },
 {
-"kind": "material",
-"surface": "fairway"
-},
-{
 "kind": "sound_material",
 "surface": "fairway"
 },
@@ -76,10 +72,6 @@
 {
 "kind": "bounce",
 "descent": 23.1
-},
-{
-"kind": "material",
-"surface": "green"
 },
 {
 "kind": "sound_material",
@@ -174,10 +166,6 @@
 "descent": 35.6
 },
 {
-"kind": "material",
-"surface": "fairway"
-},
-{
 "kind": "sound_material",
 "surface": "fairway"
 },
@@ -231,10 +219,6 @@
 {
 "kind": "bounce",
 "descent": 16.5
-},
-{
-"kind": "material",
-"surface": "fairway"
 },
 {
 "kind": "sound_material",
@@ -362,10 +346,6 @@
 {
 "kind": "bounce",
 "descent": 44.5
-},
-{
-"kind": "material",
-"surface": "green"
 },
 {
 "kind": "sound_material",

@@ -22,12 +22,11 @@ drew, removed) before the re-hit, or sometimes nothing, so the re-hit's score li
 the previous one. A pick-up (the hole capped at its maximum, e.g. quad bogey) logs every stroke
 removed, then the capped score written in with no shot, then the conceding stroke.
 
-A ball in the water is flagged at the splash, logged the instant the ball goes in - well before
-the penalty score bump, which only lands after the drop animation. The splash shows up as a
-`Hit_water` line and a `| material water |` bounce-sound line (newer GSPro), or only as
-`Using Material TVGwater` (older); all three set the flag. That early signal drives the instant
-water reaction (a per-player "wet" flag, timestamped and cleared on the player's next shot, the
-next hole, or a same-course restart).
+A ball in the water is flagged at the splash, logged the instant the ball goes in - well before the
+penalty score bump, which only lands after the drop animation. The splash shows up as a `Hit_water`
+line and a `| material water |` bounce-sound line; either sets the flag. That early signal drives
+the instant water reaction (a per-player "wet" flag, timestamped and cleared on the player's next
+shot, the next hole, or a same-course restart).
 """
 
 import asyncio
@@ -93,8 +92,8 @@ class LogEvent:
     launch: dict | None = None        # launch: the ball's numbers for the shot just fired (see _LAUNCH_VARS)
 
 
-# GSPro's `Using Material TVG<surface>` names mapped to the booth's lie vocabulary (commentator/hud.py
-# LIES). Unmapped materials fall back to the OCR lie rather than guessing a word downstream can't use.
+# GSPro's `TVG<surface>` material names (the bounce-sound line's) mapped to the booth's lie vocabulary
+# (commentator/hud.py LIES). Unmapped materials fall back to the OCR lie rather than guessing a word downstream can't use.
 # Wood met at or past this share of the full carry was at ground level: a bridge or steps, not a tree
 # (see tree_wood). From the sim, trunks were hit at 8-17% of the carry; a leafy tree at 59%.
 WOOD_TREE_SHORT = 0.7
@@ -112,11 +111,10 @@ _STATE = re.compile(
 _SELECT = re.compile(r"Selecting shot for player:\s*(\d+)")
 # A scramble's pick: the chosen ball's result is copied onto each teammate, who plays on from there.
 _TEAMMATE = re.compile(r"Updating teammate score: player\s*(\d+)")
-_MATERIAL = re.compile(r"Using Material TVG(\w+)")
-# The first bounce's sound line also names the material: `magnitude: ... | material TVGfairway | ...`
-# (`material water` for a splash). GSPro 3.1 logs it right after the matching `Using Material` line;
-# the 3.59 builds dropped `Using Material`, so there this is the landing. `TVGpin` is the flagstick
-# (3.59 logs no "Flag hit" line), `TVGnone` something with no surface (a tree trunk).
+# The first bounce's sound line names the material: `magnitude: ... | material TVGfairway | ...`
+# (`material water` for a splash): where the ball landed, not where it stopped (GSPro's round file has
+# that). GSPro 3.1's `Using Material` line is gone from 3.59 on, and 3.1 isn't supported. `TVGpin` is the
+# flagstick (3.59 logs no "Flag hit" line), `TVGnone` something with no surface (a tree trunk).
 _SOUND_MATERIAL = re.compile(r"^magnitude:.*\|\s*material (?:TVG)?(\w+)\s*\|")
 M_TO_YD = 1.0936133       # GSPro's log distances are Unity metres; the booth works in yards
 _NUM = r"\d+(?:\.\d+)?"   # a plain number, so a stray "1.2.3" can't reach float()
@@ -134,7 +132,7 @@ _LAUNCH_VARS = re.compile(r"^LaunchExt Vars:\s*(.*)")
 _LAUNCH_PAIR = re.compile(rf"\b(sp|el|az|ts|sa)\s+(-?{_NUM})")
 # Logged right after "Shot Fired" when the ball was struck from a surface that costs it speed or spin
 # (rough, deep rough, sand...): GSPro's own word on the lie the shot was actually played from. The
-# "Using Material" line, by contrast, is where the ball first landed, not where it came to rest.
+# bounce's material, by contrast, is where the ball first landed, not where it came to rest.
 # The percentages are what the lie left the shot, and vary shot to shot on one surface: rough keeps
 # 57-81% of the spin (a flier at the low end), sand 100% from a clean lie down to ~63% when buried.
 _PENALTY_SURFACE = re.compile(r"^Penalty Surface TVG(\w+),(?: Spin(\d+)%, Speed (\d+)%)?")
@@ -174,7 +172,7 @@ _AIM = re.compile(rf"^\(({_FLOAT}), ({_FLOAT}), 0\.0+\)$")   # 3.59 writes 0.00
 _LEAVES = re.compile(rf"^\*\* Leaves hitTime,\s*({_NUM})\s*,\s*HitCount\s*(\d+),\s*Penalty\s*({_NUM})%\s*,"
                      rf"\s*Accumulated penalty\s*({_NUM})%")
 _LEAVES_PASS = re.compile(r"^\* Leaves pas thru at hit (\d+)")
-# The ball's first bounce, logged just before its "Using Material" line. A descent angle of 0.0 means
+# The ball's first bounce, logged just before its bounce-sound line. A descent angle of 0.0 means
 # it hadn't started coming down: it struck something standing up (a tree trunk) on the way up, or
 # barely left the ground.
 _BOUNCE = re.compile(rf"^Force {_NUM}\|\|.*\|\|\s*descent angle\s*({_NUM})\|\|")
@@ -197,7 +195,7 @@ _CUP = re.compile(r"^Distance to cup = (\d+)mm")
 # A holed ball that crossed the cup this far from its centre (mm; the cup's radius is ~54) caught the
 # edge on the way in. On the sim, holed putts crossed at 0-41 mm, then a gap, then 45-50 (about 1 in 11).
 LIP_IN_MM = 45.0
-_MARKERS = ("ActivePlayer:", "Logging tdist", "Selecting shot", "Using Material", "LaunchExt -", "Penalty Surface",
+_MARKERS = ("ActivePlayer:", "Logging tdist", "Selecting shot", "LaunchExt -", "Penalty Surface",
             "Leaves", "Roll dist", "wrong hole")
 
 
@@ -266,13 +264,6 @@ def parse_events(text: str) -> list[LogEvent]:
                 out.append(LogEvent("pick_screen"))
             elif m := _SELECT.search(line):
                 out.append(LogEvent("select", player=int(m.group(1))))
-            elif m := _MATERIAL.search(line):
-                surface = m.group(1).lower()
-                out.append(LogEvent("material", surface=surface))
-                if surface == "water":
-                    # Older GSPro flags the splash only as `Using Material TVGwater`, with no
-                    # `Hit_water` line; emit hit_water here too so the wet flag still sets.
-                    out.append(LogEvent("hit_water"))
             elif m := _TDIST.search(line):
                 out.append(LogEvent("tdist", to_pin=float(m.group(1)), gimmie=float(m.group(2))))
             elif line.startswith(_RANGE_MARKERS):
@@ -471,7 +462,7 @@ class GsproState:
     _unowned_fire: int | None = None
     _unowned_wet: float | None = None
     _unowned_outs: int = 0
-    _material_since_fire: bool = False   # a `Using Material` line since the last "Shot Fired" (GSPro 3.1)
+    _material_since_fire: bool = False   # the landing's material since the last "Shot Fired": its first bounce
     # Every "Shot Fired" (a running count that never resets), when it was ingested (monotonic), and
     # what GSPro logged for it (putting/regular mode, the penalty surface it was struck from, who hit
     # it), so the engine can ask how GSPro played a given shot.
@@ -632,7 +623,7 @@ class GsproState:
             if self._unowned_fire is not None and self._unowned_fire in self._fire_info:
                 self._fire_info[self._unowned_fire]["descent"] = ev.descent
         elif ev.kind == "sound_material":
-            if not self._material_since_fire:   # GSPro 3.59: no `Using Material` line came first
+            if not self._material_since_fire:   # the first bounce is the landing
                 self.apply(LogEvent("material", surface=ev.surface))
         elif ev.kind == "material":
             self._material_since_fire = True

@@ -159,8 +159,12 @@ On GSPro 3.59 and later, GSPro's own record of the round in play (`currentRound.
 log) is applied to each stroke once the ball stops: where it was played from (a tee shot and a
 drop included), the carry, the total, the lies and where it finished come from GSPro's physics
 rather than the screen, and the booth's later reads leave them be. A lie the screen reads finer
-than the file's (semi rough, fringe, pine straw) is kept. A scramble's finish stays the booth's, for
-the ball the team picked. Offline isn't in the file. The file starts over each round, so earlier
+than the file's (semi rough, fringe, pine straw) is kept. The live calls use it too: the lie a
+player sets up on is where the file has their last ball at rest (the screen's read only when the file
+has no such stroke: a team ball, a penalty, another round's file), and the shot's own call says the
+lie the file has it struck from. GSPro's log only names where a ball first landed (its bounce line),
+which is kept for the cart-path kick and tree calls and as the lie's last fallback. A scramble's
+finish stays the booth's, for the ball the team picked. Offline isn't in the file. The file starts over each round, so earlier
 rounds keep what the booth read; a copy is kept from each round's end in `logs/round-files/`. Strokes the booth recorded without a name (no round started, so
 no player, hole or stroke number) are named from the file too: lined up with its strokes from the
 last one back by ball speed, three or more in a row, they take its player, hole and stroke number.

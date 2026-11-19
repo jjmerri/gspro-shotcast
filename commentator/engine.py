@@ -1608,6 +1608,13 @@ class Engine:
                 del self._late_tiles[next(iter(self._late_tiles))]
             self._apply_late_tiles(tiles_for)
         hud.lie = hud.box_lie or extra.lie   # the player box's lie (3.59/4.0), else the minimap's
+        if (hud.lie or "").lower() != "tee" and (
+                file_lie := self._file_rest_lie(self._player(hud.player_text, None), hud.shot_number)):
+            # Where GSPro's round file has the ball at rest outranks the screen, but a finer word of the
+            # screen's for it (fringe, semi rough) is kept.
+            if (lie := round_file.finer_lie(file_lie, hud.lie)) != (hud.lie or "").lower():
+                log.info("Setup lie %s from GSPro's round file (the screen read %s)", lie, hud.lie)
+                hud.lie = lie
         if not hud.lie and hud.shot_number != 1 and self.cfg.screen.ocr:
             seq = self._shot_seq
             hud.lie = await self._reread_setup_lie(extra.name_sig, seq)
@@ -3251,6 +3258,28 @@ class Engine:
     def _file_names_fit(self, gspro_name: str, player: str | None) -> bool:
         return round_file.names_fit(gspro_name, player) or (
             player is not None and self._file_player(gspro_name) == player)
+
+    def _file_rest_lie(self, player: str | None, shot_number: int | None) -> str | None:
+        """Where GSPro's round file has `player`'s ball sitting before their stroke `shot_number` on the
+        hole in play: their last stroke's EndingSurface, as a booth lie. None when the file can't say:
+        no such stroke yet, a penalty or a holed ball (play goes on from elsewhere), a code with no
+        name (round_file.SURFACES), a team ball (scramble, alternate shot), or another round's file."""
+        r = self.round
+        if (not self._file_live() or not player or player == "unknown" or self._anonymous(player)
+                or not shot_number or shot_number < 2 or self.hole_number is None or r is None or r.ended
+                or r.format in ("scramble", "alternate")):
+            return None
+        t = next((t for t in reversed(self._file_tracks) if t.hole == self.hole_number
+                  and self._file_stroke(t, player) == shot_number - 1 and self._file_names_fit(t.player, player)),
+                 None)
+        if t is None or t.penalty or t.dropped or t.in_cup or not t.lie_after:
+            return None
+        try:
+            ours = self._file_round_test(r)(t, r.course or self.current_course)
+        except sqlite3.Error as e:
+            log.warning("Couldn't check GSPro's round file stroke is this round's: %s", e)
+            return None
+        return t.lie_after if ours else None
 
     def _file_live(self) -> bool:
         """A round on, and a live GSPro writing its round file (this session): a stroke of it will be there."""
@@ -7602,7 +7631,8 @@ class Engine:
         off_wrong_green = None if shot.is_putt else wrong_green_yards(before.lie, before.to_pin)
         played_from = self._played_from(before, shot, self.gspro.fire_info(fire),
                                         MATERIAL_TO_LIE.get(lies0.get(idx)) if idx is not None else None,
-                                        shot_hole)
+                                        shot_hole, file_track.lie_before if file_track is not None and file_ours
+                                        else None)
         if played_from == "green" and self._set_up_in_yards(before):
             played_from = self._off_green_lie(before)
             log.info("%s set up in yards: off the green, recorded as %s", tag, played_from)
@@ -8639,7 +8669,7 @@ class Engine:
         log.info("%s shot %s, not the HUD's 1: %s from the pin isn't the tee", tag, n, before.to_pin)
         before.shot_number = n
         if (before.lie or "").lower() == "tee":
-            before.lie = MATERIAL_TO_LIE.get(lies0.get(idx)) or before.lie
+            before.lie = self._file_rest_lie(player, n) or MATERIAL_TO_LIE.get(lies0.get(idx)) or before.lie
 
     def _use_setup_lie(self, before: Hud, tag: str = "") -> None:
         """The lie this stroke's setup read, while the player stood over the ball, over the impact
@@ -8677,13 +8707,17 @@ class Engine:
         return abs(yd - length) <= 10
 
     def _played_from(self, before: Hud, shot: Shot, info: dict, material: str | None,
-                     hole_label: str | None = None) -> str | None:
-        """The lie this shot was really struck from, for the record. The HUD's lie read and the log's
-        material (where the previous shot LANDED, not where it stopped) both misread: a ball that
-        landed on the green and rolled into a bunker, a bunker ball shown as rough. GSPro's own word
-        wins: the first stroke on a hole is off the tee, and a shot struck from a surface that costs it
-        speed or spin is logged with that surface. When this GSPro logs those and logged none for this
-        shot, it wasn't played from rough or sand, whatever the other reads said."""
+                     hole_label: str | None = None, file_lie: str | None = None) -> str | None:
+        """The lie this shot was really struck from, for the record. GSPro's round file says it outright
+        (`file_lie`, the stroke's StartingSurface; a finer HUD word for it is kept: round_file.finer_lie).
+        Without it, the HUD's lie read and the log's material (where the previous shot LANDED, not where
+        it stopped) both misread: a ball that landed on the green and rolled into a bunker, a bunker ball
+        shown as rough. GSPro's own word wins: the first stroke on a hole is off the tee, and a shot struck
+        from a surface that costs it speed or spin is logged with that surface. When this GSPro logs
+        those and logged none for this shot, it wasn't played from rough or sand, whatever the other
+        reads said."""
+        if file_lie:
+            return round_file.finer_lie(file_lie, before.lie)
         if before.shot_number == 1:
             return "tee"
         if (before.lie or "").lower() == "tee" and not shot.is_putt and self._at_tee_length(before, hole_label):

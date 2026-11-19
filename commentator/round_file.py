@@ -41,9 +41,6 @@ log = logging.getLogger(__name__)
 
 # StartingSurface / EndingSurface codes seen (3.59.11). Others are left alone.
 SURFACES = {18: "tee", 1: "rough", 2: "fairway", 3: "deep rough", 4: "cart path", 5: "green", 11: "sand"}
-# The booth's lies GSPro's codes can stand for: a finer one read off the HUD (semi rough, fringe, pine
-# straw, ...) says more, so it's kept.
-PLAIN_LIES = frozenset(SURFACES.values())
 # Live, a finer lie the follow already read off the HUD is kept only where it fits inside GSPro's code
 # for where the ball stopped (a read taken mid-roll may be somewhere it rolled through).
 FINER_LIES = {"semi rough": ("rough", "fairway"), "first cut": ("rough", "fairway"), "fringe": ("green", "fairway"),

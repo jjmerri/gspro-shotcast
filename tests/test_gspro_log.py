@@ -5,6 +5,8 @@ load, the 18-hole par layout, and several holes of play including a water-ball p
 hole-out.
 """
 
+import re
+
 from commentator.sources import gspro_log
 from commentator.sources.gspro_log import (
     GsproLogFollower, GsproState, LogEvent, _split_trailing, aim_offset, build_state, live_log, parse_events,
@@ -17,10 +19,21 @@ def _text():
     return open(SAMPLE, errors="replace").read()
 
 
+def _landing(material):
+    """GSPro 3.59+'s first-bounce sound line, which names where the ball landed."""
+    return f"magnitude: 7.6 | yForce 5.1 | material TVG{material} | SoundMultiplier 0.35 | elevation 1391"
+
+
+def _as_3_59(text):
+    """A GSPro 3.1 sample's landing lines as 3.59+ writes them (3.1's `Using Material` is gone)."""
+    return re.sub(r"^Using Material TVG(\w+)$", lambda m: _landing(m.group(1)), text, flags=re.M)
+
+
 def test_parser_ignores_unity_noise_and_extracts_events():
     kinds = {e.kind for e in parse_events(_text())}
     # The signal kinds we rely on are all present; the "(Filename:)" / Spline noise is dropped.
-    assert {"state", "shot_fired", "material", "tdist", "course", "layout", "hole_out"} <= kinds
+    assert {"state", "shot_fired", "sound_material", "tdist", "course", "layout", "hole_out"} <= kinds
+    assert "material" not in kinds and "unparsed" not in kinds   # 3.1's `Using Material` is no longer read
 
 
 def test_course_and_par_layout_are_read():
@@ -172,7 +185,7 @@ def test_follower_reads_only_appended_bytes_and_resets_on_truncation(tmp_path):
     # New shot lines appended after we started are parsed.
     with p.open("a") as fh:
         fh.write("ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 2\n")
-        fh.write("Using Material TVGsand\n")
+        fh.write(_landing("sand") + "\n")
     for ev in parse_events(f._read_new()):
         f.state.apply(ev)
     assert f.state.strokes_before(0) == 3 and f.state.lie == "sand"   # 1 stroke added to 2
@@ -204,20 +217,6 @@ def test_hit_water_sets_and_clears_the_wet_flag():
     for ev in parse_events(" * ------- Shot Fired! ------- *\n"):
         s.apply(ev)
     assert s.wet(0) is False
-
-
-def test_older_tvgwater_material_also_sets_the_wet_flag():
-    # Older GSPro flags a splash only as `Using Material TVGwater` (no Hit_water line); it must still
-    # set the wet flag, so the water reaction works across GSPro versions.
-    s = GsproState()
-    for ev in parse_events(
-        "ActivePlayer: 0  currentHole: 1  strokes: 1  Previous Score: 0\n"
-        "Selecting shot for player: 0\n"
-        " * ------- Shot Fired! ------- *\n"
-        "Using Material TVGwater\n"
-    ):
-        s.apply(ev)
-    assert s.wet(0) is True
 
 
 def test_wet_since_gates_a_stale_splash():
@@ -281,7 +280,7 @@ def test_new_surface_materials_map_to_their_lies():
     # Read end to end: a material event followed by the player's setup block attaches the lie.
     s = GsproState()
     for ev in parse_events(
-        "Using Material TVGconcrete\n"
+        _landing("concrete") + "\n"
         "ActivePlayer: 0  currentHole: 2  strokes: 1  Previous Score: 0\n"
     ):
         s.apply(ev)
@@ -426,8 +425,8 @@ def test_gspro_3_59_lines_give_the_same_landing_rest_aim_and_flag_as_3_1():
     assert "rest_at" in s.fire_info(s.fires)             # the shooter's score line: the ball stopped
     s = _replay(FIRE + bounce.format("pin"))
     assert s.fire_info(s.fires)["flag_hit"]
-    # 3.1 logs `Using Material` then the same bounce line: the first one names the landing, once.
-    s = _replay(FIRE + "Using Material TVGsand\n" + bounce.format("fairway") + "Roll dist ft3.2\n")
+    # The first bounce names the landing, once: the ones after it are the ball rolling out.
+    s = _replay(FIRE + bounce.format("sand") + bounce.format("fairway") + "Roll dist ft3.2\n")
     assert s.fire_info(s.fires)["landed"] == "sand" and s.kinds["material"] == 1
     rest = s.fire_info(s.fires)["rest_at"]
     time.sleep(0.01)
@@ -639,7 +638,7 @@ def test_the_rounds_first_shot_is_credited_to_its_shooter():
 def test_material_records_where_each_shot_landed():
     s = GsproState()
     for line in ["ActivePlayer: 0  currentHole: 12  strokes: 1  Previous Score: 0",
-                 " * ------- Shot Fired! ------- *", "LaunchExt - Regular Mode", "Using Material TVGconcrete",
+                 " * ------- Shot Fired! ------- *", "LaunchExt - Regular Mode", _landing("concrete"),
                  "ActivePlayer: 0  currentHole: 12  strokes: 1  Previous Score: 1"]:
         for ev in parse_events(line):
             s.apply(ev)
@@ -652,7 +651,7 @@ def test_a_kick_off_the_cart_path_is_a_fact():
     from commentator.engine import Engine
 
     s = GsproState()
-    for line in [" * ------- Shot Fired! ------- *", "Using Material TVGconcrete"]:
+    for line in [" * ------- Shot Fired! ------- *", _landing("concrete")]:
         for ev in parse_events(line):
             s.apply(ev)
     me = SimpleNamespace(gspro=s)
@@ -826,11 +825,11 @@ def test_wood_is_a_tree_unless_met_at_ground_level_where_the_ball_came_down():
 
     # From the sim: a trunk; leaves then wood coming down; wood met where the ball came down.
     s = GsproState()
-    for line in [" * ------- Shot Fired! ------- *", bounce("0.0"), "Using Material TVGwood",
+    for line in [" * ------- Shot Fired! ------- *", bounce("0.0"), _landing("wood"),
                  " * ------- Shot Fired! ------- *",
                  " ** Leaves hitTime, 1.05 , HitCount 1, Penalty 11.4% , Accumulated penalty 11.4% ",
-                 bounce("36.8"), "Using Material TVGwood",
-                 " * ------- Shot Fired! ------- *", bounce("0.0"), "Using Material TVGwood"]:
+                 bounce("36.8"), _landing("wood"),
+                 " * ------- Shot Fired! ------- *", bounce("0.0"), _landing("wood")]:
         for ev in parse_events(line):
             s.apply(ev)
     trunk, leafy, bridge = s.fires - 2, s.fires - 1, s.fires
@@ -859,7 +858,7 @@ def test_a_scramble_pick_is_read_and_the_dropped_ball_takes_the_picked_one():
     # A real two-player scramble hole: player 1's drive (fairway) was picked over player 0's (deep
     # rough), then player 0's approach (green) over player 1's (fairway), then a putt inside the gimme.
     s = GsproState()
-    text = open(SCRAMBLE).read().splitlines(keepends=True)
+    text = _as_3_59(open(SCRAMBLE).read()).splitlines(keepends=True)
     for ev in parse_events("".join(text[:24])):    # through the first pick
         s.apply(ev)
     assert s.team_scores and s.pick == (1, 0) and s.teammates == {frozenset((0, 1))}

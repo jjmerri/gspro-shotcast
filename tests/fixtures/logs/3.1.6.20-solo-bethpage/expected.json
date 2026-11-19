@@ -19,10 +19,6 @@
 "putting": false
 },
 {
-"kind": "material",
-"surface": "deeprough"
-},
-{
 "kind": "state",
 "player": 0,
 "hole": 0,
@@ -54,10 +50,6 @@
 ]
 },
 {
-"kind": "material",
-"surface": "deeprough"
-},
-{
 "kind": "state",
 "player": 0,
 "hole": 0,
@@ -87,10 +79,6 @@
 53,
 81
 ]
-},
-{
-"kind": "material",
-"surface": "green"
 },
 {
 "kind": "state",
@@ -149,10 +137,6 @@
 "putting": false
 },
 {
-"kind": "material",
-"surface": "fairway"
-},
-{
 "kind": "state",
 "player": 0,
 "hole": 1,
@@ -174,10 +158,6 @@
 {
 "kind": "launch_mode",
 "putting": false
-},
-{
-"kind": "material",
-"surface": "deeprough"
 },
 {
 "kind": "state",
@@ -209,10 +189,6 @@
 47,
 84
 ]
-},
-{
-"kind": "material",
-"surface": "rough"
 },
 {
 "kind": "state",
@@ -271,10 +247,6 @@
 "putting": false
 },
 {
-"kind": "material",
-"surface": "sand"
-},
-{
 "kind": "state",
 "player": 0,
 "hole": 2,
@@ -296,10 +268,6 @@
 {
 "kind": "launch_mode",
 "putting": false
-},
-{
-"kind": "material",
-"surface": "green"
 },
 {
 "kind": "state",
@@ -381,10 +349,6 @@
 "putting": false
 },
 {
-"kind": "material",
-"surface": "fairway"
-},
-{
 "kind": "state",
 "player": 0,
 "hole": 3,
@@ -406,10 +370,6 @@
 {
 "kind": "launch_mode",
 "putting": false
-},
-{
-"kind": "material",
-"surface": "fairway"
 },
 {
 "kind": "state",
@@ -435,10 +395,6 @@
 "putting": false
 },
 {
-"kind": "material",
-"surface": "deeprough"
-},
-{
 "kind": "state",
 "player": 0,
 "hole": 3,
@@ -460,10 +416,6 @@
 {
 "kind": "launch_mode",
 "putting": false
-},
-{
-"kind": "material",
-"surface": "green"
 },
 {
 "kind": "state",
@@ -529,10 +481,6 @@
 "putting": false
 },
 {
-"kind": "material",
-"surface": "deeprough"
-},
-{
 "kind": "state",
 "player": 0,
 "hole": 4,
@@ -562,10 +510,6 @@
 55,
 79
 ]
-},
-{
-"kind": "material",
-"surface": "deeprough"
 },
 {
 "kind": "state",
@@ -599,10 +543,6 @@
 ]
 },
 {
-"kind": "material",
-"surface": "deeprough"
-},
-{
 "kind": "state",
 "player": 0,
 "hole": 4,
@@ -634,10 +574,6 @@
 ]
 },
 {
-"kind": "material",
-"surface": "deeprough"
-},
-{
 "kind": "state",
 "player": 0,
 "hole": 4,
@@ -667,10 +603,6 @@
 53,
 81
 ]
-},
-{
-"kind": "material",
-"surface": "green"
 },
 {
 "kind": "state",
@@ -713,10 +645,6 @@
 "putting": false
 },
 {
-"kind": "material",
-"surface": "fairway"
-},
-{
 "kind": "state",
 "player": 0,
 "hole": 5,
@@ -738,10 +666,6 @@
 {
 "kind": "launch_mode",
 "putting": false
-},
-{
-"kind": "material",
-"surface": "deeprough"
 },
 {
 "kind": "state",
@@ -773,10 +697,6 @@
 44,
 85
 ]
-},
-{
-"kind": "material",
-"surface": "rough"
 },
 {
 "kind": "state",
@@ -819,10 +739,6 @@
 "putting": false
 },
 {
-"kind": "material",
-"surface": "fairway"
-},
-{
 "kind": "state",
 "player": 0,
 "hole": 6,
@@ -844,10 +760,6 @@
 {
 "kind": "launch_mode",
 "putting": false
-},
-{
-"kind": "material",
-"surface": "fairway"
 },
 {
 "kind": "state",
@@ -873,10 +785,6 @@
 "putting": false
 },
 {
-"kind": "material",
-"surface": "deeprough"
-},
-{
 "kind": "state",
 "player": 0,
 "hole": 6,
@@ -898,10 +806,6 @@
 {
 "kind": "launch_mode",
 "putting": false
-},
-{
-"kind": "material",
-"surface": "green"
 },
 {
 "kind": "state",
@@ -958,10 +862,6 @@
 {
 "kind": "launch_mode",
 "putting": false
-},
-{
-"kind": "material",
-"surface": "green"
 },
 {
 "kind": "state",
@@ -1043,10 +943,6 @@
 "putting": false
 },
 {
-"kind": "material",
-"surface": "rough"
-},
-{
 "kind": "state",
 "player": 0,
 "hole": 8,
@@ -1068,10 +964,6 @@
 {
 "kind": "launch_mode",
 "putting": false
-},
-{
-"kind": "material",
-"surface": "sand"
 },
 {
 "kind": "state",
@@ -1103,10 +995,6 @@
 74,
 76
 ]
-},
-{
-"kind": "material",
-"surface": "green"
 },
 {
 "kind": "state",

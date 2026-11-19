@@ -5046,6 +5046,36 @@ def test_the_recorded_lie_is_where_gspro_says_the_shot_was_played_from(tmp_path)
     assert e._played_from(Hud(lie="rough", shot_number=2), full, {}, "rough") == "rough"
     e.gspro.logs_penalty_surface = False
     assert e._played_from(Hud(lie="rough", shot_number=2), full, played, "fairway") == "rough"
+    # GSPro's round file has the stroke's StartingSurface: it's the lie, a finer HUD word for it kept.
+    assert e._played_from(Hud(lie="rough", shot_number=2), full, played, "fairway", None, "sand") == "sand"
+    assert e._played_from(Hud(lie="fringe", shot_number=3), putt, {"putting": True}, "fairway", None,
+                          "green") == "fringe"
+
+
+def test_the_setup_lie_is_where_gspros_round_file_has_the_ball_at_rest(tmp_path):
+    from commentator import round_file
+    from commentator.round import Round
+    from commentator.sources.gspro_files import RoundFileWatch
+    e = _mini_engine(tmp_path)
+    e.round = Round(league=e.league, gspro_players=["Dan"], course="Test Links", scheduled_format=None,
+                    holes=18, start_hole=1, is_league=False)
+    e.hole_number = 1
+    # Dan's drive landed in the fairway and ran into the sand (the log's landing material says fairway).
+    entries = [_round_entry(1, 150.0, surfaces=(18, 11))]
+    e._file_entries, e._file_tracks = entries, round_file.tracks(entries)
+    e._round_watch = w = RoundFileWatch(str(tmp_path))
+    w.entries, w.written = entries, time.time()
+    assert e._file_rest_lie("Dan", 2) == "sand"
+    assert e._file_rest_lie("Dan", 3) is None                # no stroke 2 in the file yet
+    assert e._file_rest_lie("Sue", 2) is None                # not hers
+    e.hole_number = 2
+    assert e._file_rest_lie("Dan", 2) is None                # another hole's ball
+    e.hole_number = 1
+    e.round.format = "scramble"
+    assert e._file_rest_lie("Dan", 2) is None                # the team's picked ball, not his own
+    e.round.format = None
+    w.written = e._booth_wall0 - 1                           # an earlier session's file
+    assert e._file_rest_lie("Dan", 2) is None
 
 
 def _log_round(e, fmt=None):
