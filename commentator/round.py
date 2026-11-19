@@ -205,7 +205,7 @@ class Round:
         self.ctp_results: dict[int, dict[str, str]] = {}
         # The tee shot (season store id) each result was read for: GSPro's log has its own finish to check.
         self.ctp_tees: dict[tuple[int, str], int | None] = {}
-        # A scramble's tee shots on the pick screen: hole of the round -> player -> (yards, None off the
+        # A scramble's tee shots up for the pick (from GSPro's round file): hole of the round -> player -> (yards, None off the
         # green; the shot's season store id).
         self.ctp_picks: dict[int, dict[str, tuple[float | None, int | None]]] = {}
         # The season store's last shot id when the round started: the week's earlier CTP tee shots

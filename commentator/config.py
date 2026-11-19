@@ -182,9 +182,6 @@ NEW_UI_REGIONS = {
     # HOLES tab: the FRONT and BACK checkboxes (white with a tick when checked, an outline when not).
     "setup_front9_box": Region(left=0.077, top=0.348, width=0.012, height=0.018, aspect=HUD_ASPECT, side="center"),
     "setup_back9_box": Region(left=0.077, top=0.632, width=0.012, height=0.018, aspect=HUD_ASPECT, side="center"),
-    # A scramble's pick screen (GSPro 4.1): a card per ball, centred low in the frame. Wide enough for
-    # four players' cards.
-    "pick_panel": Region(left=0.22, top=0.60, width=0.56, height=0.21, anchor="middle", aspect=HUD_ASPECT),
     # The course list's title is "LOCAL MATCH", top centre.
     "course_select": Region(left=0.40, top=0.010, width=0.20, height=0.055, aspect=HUD_ASPECT),
 }

@@ -6676,22 +6676,30 @@ def test_a_scramble_ball_that_was_not_picked_keeps_its_own_finish_and_lie(tmp_pa
     assert tuple(row) == (None, "fairway") and rec.hud.lie == "fairway"
 
 
-def test_the_pick_screens_cards_give_each_balls_finish_and_lie(tmp_path):
-    from commentator.hud import OcrItem, parse_pick_cards
+def _pick_file(e, *balls):
+    """GSPro's round file with a scramble team's tee balls: (name, ball speed, EndingSurface, metres to
+    the pin, penalty), each tied to its "Shot Fired" (7, 9, ...) by its launch numbers in the log."""
+    from commentator import round_file
+    entries = []
+    for fire, (name, sp, surface, to_pin, penalty) in zip((7, 9, 11), balls):
+        entries.append(_round_entry(1, sp, name=name, surfaces=(18, surface), to_pin=to_pin, sid=name))
+        if penalty:
+            entries.append(_round_entry(2, 0.0, name=name, result=3, sid=f"{name}-ob"))
+        e.gspro._fire_info[fire] = {"player": None, "launch": {"sp": sp, "el": 12.0, "az": 0.5, "ts": 3000.0,
+                                                               "sa": 2.0}}
+    e._file_entries, e._file_tracks = entries, round_file.tracks(entries)
+
+
+def test_gspros_round_file_gives_each_scramble_balls_finish_and_lie(tmp_path):
     from commentator.round import Round
+    from commentator.sources.gspro_log import M_TO_YD
 
-    # Bethpage, 11-07: GSPro logs where only the picked ball lies; the pick screen lists both. Card 1 is
-    # Ozzy's, the name GSPro has for the roster's Mike; card 2's badge ran into its name ("²KYLE MARTIN").
-    def item(text, x, y, h=30):
-        return OcrItem(text=text, x=x, y=y, h=h, left=x - 10 * len(text))
-
-    cards = parse_pick_cards([item("1", 30, 40, 20), item("AZZO", 100, 45), item("294", 100, 110, 40),
-                              item("DEEP ROUGH", 80, 160), item("2ND", 150, 160), item("Select", 100, 220),
-                              item("²KYLE MARTIN", 300, 45), item("71' 11\"", 300, 110, 40),
-                              item("GREEN 2ND", 300, 160), item("Select", 300, 220)])
-    assert [(c.name, round(c.yards, 1), c.lie) for c in cards] == [("AZZO", 294.0, "deep rough"),
-                                                                   ("KYLE MARTIN", 24.0, "green")]
+    # Bethpage, 11-07: GSPro logs where only the picked ball lies; its round file has both balls.
     e = _mini_engine(tmp_path)
+    _pick_file(e, ("Ozzy", 150.0, 3, 294 / M_TO_YD, False), ("Kyle Martin", 140.0, 5, 24 / M_TO_YD, False))
+    cards = e._file_pick_cards({0: 7, 1: 9})
+    assert {i: (c.name, round(c.yards), c.lie) for i, c in cards.items()} == {
+        0: ("Ozzy", 294, "deep rough"), 1: ("Kyle Martin", 24, "green")}
     r = Round(league=e.league, gspro_players=["Ozzy", "Kyle Martin"], course="X", scheduled_format=None, holes=9,
               is_league=False, slot_names=["Ozzy", "Kyle Martin"])
     e.round = r
@@ -6706,75 +6714,59 @@ def test_the_pick_screens_cards_give_each_balls_finish_and_lie(tmp_path):
     e._pick_ctp = lambda balls: seen.append([(who, card.name) for _, who, card in balls])
     e._apply_pick_cards()
     assert e._pick_cards_due   # nor which ball was picked
-    # ...but a CTP hole's tee shots are read off the cards already, each ball its own player's.
-    assert seen == [[("Kyle Martin", "KYLE MARTIN"), ("Ozzy", "AZZO")]]
+    # ...but a CTP hole's tee shots are taken already, each ball its own player's.
+    assert seen == [[("Ozzy", "Ozzy"), ("Kyle Martin", "Kyle Martin")]]
     rec.picked = rec2.picked = False
     e._apply_pick_cards()
-    rows = {i: tuple(e.store.db.execute("SELECT finish_yards, lie_after FROM shots WHERE id = ?", (i,)).fetchone())
-            for i in (ozzy, kyle)}
+    rows = {i: tuple(e.store.db.execute("SELECT round(finish_yards), lie_after FROM shots WHERE id = ?",
+                                        (i,)).fetchone()) for i in (ozzy, kyle)}
     assert rows == {ozzy: (294.0, "deep rough"), kyle: (24.0, "green")} and not e._pick_cards_due
-    # The ball the team played on keeps the lie it has (GSPro's log corrects it from the next stroke);
-    # the pick screen's misread doesn't replace it.
+    # The ball the team played on keeps the lie it has (GSPro's log corrects it from the next stroke).
     e.store.set_lie_after(ozzy, "rough")
     rec.picked = True
     e._pick_cards_due.append(({0: 7, 1: 9}, {0: "Ozzy", 1: "Kyle Martin"}, cards, time.monotonic()))
     e._apply_pick_cards()
     assert e.store.finish_of(ozzy)[0] == "rough" and e.store.finish_of(kyle)[0] == "green"
     # Unless the lie it has is "tee", the stale read of where it was hit from (Corey's opening drive at
-    # Bethpage, 11-11: the card said fairway).
+    # Bethpage, 11-11).
     e.store.set_lie_after(ozzy, "tee")
     e._pick_cards_due.append(({0: 7, 1: 9}, {0: "Ozzy", 1: "Kyle Martin"}, cards, time.monotonic()))
     e._apply_pick_cards()
     assert e.store.finish_of(ozzy)[0] == "deep rough"
-    # The log never named the pick (an older GSPro): after a while the cards only fill missing lies.
-    rec.picked = rec2.picked = None
-    e.store.set_lie_after(kyle, "fringe")
-    e._pick_cards_due.append(({0: 7, 1: 9}, {0: "Ozzy", 1: "Kyle Martin"}, cards, time.monotonic() - 61))
-    e._apply_pick_cards()
-    assert e.store.finish_of(kyle)[0] == "fringe" and not e._pick_cards_due
-    # Both balls back on the tee (Dan and Derek's 5th, 11-15: out of bounds, played again from there):
-    # not where either finished.
-    from commentator.hud import PickCard
+    # Both balls out of bounds (Dan and Derek's 5th, 11-15: played again from the tee): not where
+    # either finished.
+    _pick_file(e, ("Ozzy", 150.0, 1, 100.0, True), ("Kyle Martin", 140.0, 1, 90.0, True))
+    cards = e._file_pick_cards({0: 7, 1: 9})
+    assert [c.penalty for c in cards.values()] == [True, True]
     before = {i: e.store.db.execute("SELECT finish_yards, lie_after FROM shots WHERE id = ?", (i,)).fetchone()[:]
               for i in (ozzy, kyle)}
     rec.picked, rec2.picked = True, False
-    e._pick_cards_due.append(({0: 7, 1: 9}, {0: "Ozzy", 1: "Kyle Martin"},
-                              [PickCard("AZZO", 405.0, "tee"), PickCard("KYLE MARTIN", 405.0, "tee")], time.monotonic()))
+    e._pick_cards_due.append(({0: 7, 1: 9}, {0: "Ozzy", 1: "Kyle Martin"}, cards, time.monotonic()))
     e._apply_pick_cards()
     assert {i: e.store.db.execute("SELECT finish_yards, lie_after FROM shots WHERE id = ?", (i,)).fetchone()[:]
             for i in (ozzy, kyle)} == before
 
 
-def test_pick_cards_read_older_gspros_use_buttons_and_garbled_lies():
-    from commentator.hud import OcrItem, parse_pick_cards
+async def test_the_pick_watch_takes_each_ball_from_gspros_round_file_with_no_screen_read(tmp_path):
+    from commentator.sources.gspro_log import M_TO_YD
 
-    def card(x, *texts):
-        return [OcrItem(text=t, x=x, y=y, h=12) for t, y in zip(texts, (37, 61, 78, 100))]
-
-    # 11-02 (older GSPro): USE buttons, "DEEP" for deep rough, the lie run into the stroke.
-    assert [(c.name, round(c.yards, 1), c.lie) for c in parse_pick_cards(
-        card(314, "DYLAN", "20'9\"", "GREEN5TH", "USE") + card(402, "MOM", "12", "DEEP", "USE"))] == [
-        ("DYLAN", 6.9, "green"), ("MOM", 12.0, "deep rough")]
-    # 11-07: a dropped letter in SAND; a 9' 8" misread as a bare "8.6" leaves that card unread.
-    assert [(c.name, c.lie) for c in parse_pick_cards(
-        card(314, "OZZY", "141", "SND AND", "Select") + card(402, "KYLE", "187", "SNDSAND", "Select")
-        + card(490, "PAT", "90", "WASTEE 2ND", "Select"))] == [("OZZY", "sand"), ("KYLE", "sand"), ("PAT", "waste")]
-    assert [c.name for c in parse_pick_cards(
-        card(314, "OZZY", "8.6", "GREEN", "Select") + card(402, "KYLE", "28' 2\"", "GREEN", "Select"))] == ["KYLE"]
-
-
-async def test_the_pick_reader_keeps_reading_until_every_card_has_its_lie(tmp_path):
-    import types
-    from commentator.hud import PickCard
     e = _mini_engine(tmp_path)
-    e.gspro.pick_screens, e.gspro.pick_screen_up = 1, True
-    reads = iter([[PickCard("OZZY", 141.0, None), PickCard("KYLE", 187.0, "deep rough")],
-                  [PickCard("OZZY", 141.0, "sand"), PickCard("KYLE", 187.0, "deep rough")]])
-
-    async def read(_parts):
-        return types.SimpleNamespace(pick_cards=next(reads))
-    e.screen = types.SimpleNamespace(read_hud_async=read)
-    assert [c.lie for c in await e._read_pick_panel(1, 2)] == ["sand", "deep rough"]
+    e.screen = None   # nothing read off the screen
+    e._apply_pick_cards = lambda: None
+    _pick_file(e, ("Ozzy", 150.0, 3, 294 / M_TO_YD, False))   # Kyle's ball isn't written yet
+    watch = asyncio.create_task(e._watch_picks())
+    await asyncio.sleep(0)   # (it starts from the picks already shown)
+    try:
+        g = e.gspro
+        g.pick_balls, g.pick_screen_up, g.pick_screens = {0: 7, 1: 9}, True, g.pick_screens + 1
+        await asyncio.sleep(0.4)
+        assert not e._pick_cards_due   # waiting on the file for every ball
+        _pick_file(e, ("Ozzy", 150.0, 3, 294 / M_TO_YD, False), ("Kyle Martin", 140.0, 5, 24 / M_TO_YD, False))
+        await asyncio.sleep(0.4)
+    finally:
+        watch.cancel()
+    (balls, _, cards, _), = e._pick_cards_due
+    assert balls == {0: 7, 1: 9} and {i: c.lie for i, c in cards.items()} == {0: "deep rough", 1: "green"}
 
 
 def test_gspro_revealing_a_scramble_makes_the_round_one(tmp_path):

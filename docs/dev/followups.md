@@ -69,3 +69,10 @@ on 3.59. Count the `club ... from GSPro's round file` log lines over a few night
 club is only ever the one corrected, the club box OCR can be kept just for the pre-shot call (the
 only place the file can't help), and the driver-off-the-deck rule (`hud.deck_club`) rechecked
 against what the file records there.
+
+## Check the scramble pick against a real scramble round file
+
+The pick screen's OCR is gone: a scramble's unpicked balls take their finish and lie from
+`currentRound.dat` (`Engine._file_pick_cards`). No real scramble file has been seen yet, so check
+that GSPro writes every teammate's ball before the pick screen shows. A ball missing when the screen
+goes down gets no finish. On 3.59 (no `LaunchExt`), the tie relies on `_file_pins` only.

@@ -186,6 +186,16 @@ def tracks(entries: list[dict]) -> list[Track]:
     return out
 
 
+@dataclass
+class PickBall:
+    """A scramble ball the team picks from (Engine._file_pick_cards): who hit it, how far it lies from the
+    pin and on what, or that a penalty followed it (no finish)."""
+    name: str
+    yards: float | None
+    lie: str | None
+    penalty: bool = False
+
+
 def finer_lie(lie: str | None, hud_lie: str | None) -> str | None:
     """GSPro's lie for where the ball stopped, or the HUD's finer word for it when that fits inside it
     (FINER_LIES). With no code GSPro's lie is known by, the HUD's read (taken at rest) stands alone."""

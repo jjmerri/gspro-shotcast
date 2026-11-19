@@ -1028,7 +1028,7 @@ class Engine:
         # Scramble pick screens read off the screen: ({player index: fire}, {index: GSPro name}, cards,
         # read at), each card written to its ball's row once that row is recorded (the unpicked ball's
         # only finish).
-        self._pick_cards_due: list[tuple[dict, dict, list, float]] = []
+        self._pick_cards_due: list[tuple[dict, dict, dict, float]] = []
         self._gimme_ids: dict[int, int] = {}   # shot id -> its conceded putt row's id
         self._form_said: dict[tuple, list[tuple[int, list[str]]]] = {}   # (round, side) -> [(hole of round, angles)]
         self._form_pending: tuple | None = None   # (round, side, players, hole of round) the sheet last went to
@@ -1263,8 +1263,8 @@ class Engine:
             # Always: the setup screen's players, holes and game mode are the round's stats too. Only the
             # early opener it can compose needs commentary.preround.
             tasks.append(asyncio.create_task(self._watch_setup(), name="setup-watch"))
-            if self._log_truth:
-                tasks.append(asyncio.create_task(self._watch_picks(), name="pick-watch"))
+        if self._log_truth and self.cfg.source.type != "replay":   # (GSPro's round file: see _round_file_loop)
+            tasks.append(asyncio.create_task(self._watch_picks(), name="pick-watch"))
         try:
             while (event := await self._events.get()) is not None:
                 try:
@@ -9608,9 +9608,9 @@ class Engine:
         return _unsettled(last or landing or Hud(), tag), touchdown is not None
 
     async def _watch_picks(self) -> None:
-        """A scramble's pick screen (GSPro logs "SelectShotToUse") lists every ball the team hit with its
-        yards to the pin and its lie, and GSPro's log has where only the picked one lies: read the
-        cards while it's up (it shows a few seconds after the last ball stops, until the pick)."""
+        """A scramble's pick (GSPro logs "SelectShotToUse") is made from every ball the team hit, and GSPro's
+        log has where only the picked one lies. GSPro's round file has them all (it writes each teammate's
+        ball as it stops): each ball's yards to the pin and lie are taken from it while the pick is up."""
         seen = self.gspro.pick_screens
         while True:
             await asyncio.sleep(0.25)
@@ -9618,39 +9618,47 @@ class Engine:
             if g.pick_screens == seen:
                 continue
             seen, balls = g.pick_screens, dict(g.pick_balls)
-            region = getattr(self.screen, "region", None)
-            if len(balls) < 2 or not callable(region) or region("pick_panel") is None:
+            if len(balls) < 2:
                 continue
-            try:
-                cards = await self._read_pick_panel(seen, len(balls))
-            except Exception:
-                log.exception("Reading the pick screen failed")
-                continue
-            log.info("Pick screen: %s", ", ".join(f"{c.name} {c.yards:.0f} yd {c.lie}" for c in cards) or "not read")
+            deadline = time.monotonic() + PICK_SCREEN_SECONDS
+            while len(cards := self._file_pick_cards(balls)) < len(balls) and g.pick_screen_up \
+                    and g.pick_screens == seen and time.monotonic() < deadline:
+                await asyncio.sleep(0.25)   # (the file has each ball by now, bar a slow write)
+            log.info("Pick from GSPro's round file: %s", ", ".join(
+                f"{c.name} " + ("penalty" if c.penalty else f"{c.yards:.0f} yd {c.lie or 'unknown lie'}")
+                for c in cards.values()) or "no ball in it")
             if cards:
                 names = {idx: (self._log_name(idx) or (None,))[0] for idx in balls}
                 self._pick_cards_due.append((balls, names, cards, time.monotonic()))
                 self._apply_pick_cards()   # a CTP hole's tee shots are asked about now, not after the pick
 
-    async def _read_pick_panel(self, seen: int, balls: int) -> list:
-        """The pick screen's cards, read until every ball's is with its lie (or the pick is made, or 15 s pass)."""
-        g, best = self.gspro, []
-
-        def score(cards: list) -> tuple:
-            return len(cards), sum(1 for c in cards if c.lie)
-        deadline = time.monotonic() + PICK_SCREEN_SECONDS
-        while g.pick_screen_up and g.pick_screens == seen and time.monotonic() < deadline:
-            cards = (await self.screen.read_hud_async(["pick_panel"])).pick_cards
-            if score(cards) > score(best):
-                best = cards
-            if len(best) >= balls and all(c.lie for c in best):
-                break
-            await asyncio.sleep(0.4)
-        return best
+    def _file_pick_cards(self, balls: dict[int, int]) -> dict[int, round_file.PickBall]:
+        """Each ball of a pick (GSPro index -> its "Shot Fired") that GSPro's round file has: its player's
+        name in the file, yards to the pin and lie where it stopped. A ball a penalty followed (out of
+        bounds, played again) has no finish. The file's stroke is
+        the one with the ball's launch numbers (LaunchExt Vars), else the one the live follow tied to its
+        shot."""
+        tracks = {t.shot_id: t for t in self._file_tracks}
+        pinned = {sid: gid for gid, sid in self._file_pins.items()}
+        out = {}
+        for idx, fire in balls.items():
+            t = None
+            if launch := self.gspro.fire_info(fire).get("launch"):
+                ids = {str(e["ShotID"]) for e in self._file_entries
+                       if isinstance(e, dict) and e.get("ShotID") is not None and round_file.same_launch(launch, e)}
+                t = tracks.get(next(iter(ids))) if len(ids) == 1 else None
+            if t is None and (row := self._fire_rows.get(fire)) is not None:
+                t = tracks.get(pinned.get(row[0]))
+            if t is None:
+                continue
+            if t.penalty:
+                out[idx] = round_file.PickBall(t.player, None, None, penalty=True)
+            elif (yards := t.finish_yards) is not None:
+                out[idx] = round_file.PickBall(t.player, yards, t.lie_after)
+        return out
 
     def _apply_pick_cards(self) -> None:
-        """Each pick card's yards and lie onto its ball's row: the card's name against the GSPro name
-        of each ball's player, and a last card left to the last ball."""
+        """Each pick card's yards and lie onto its ball's row (cards are by GSPro index, as the balls)."""
         for entry in list(self._pick_cards_due):
             balls, gspro_names, cards, at = entry
             if any(f not in self._fire_rows for f in balls.values()):
@@ -9658,17 +9666,10 @@ class Engine:
                     self._pick_cards_due.remove(entry)
                 continue
             names = {idx: gspro_names.get(idx) or self._fire_rows[f][1].player for idx, f in balls.items()}
-            left, todo, pairs = dict(names), list(cards), []
-            for card in sorted(cards, key=lambda c: -max((_name_ratio(c.name, n) for n in names.values()), default=0)):
-                idx, n = max(left.items(), key=lambda kv: _name_ratio(card.name, kv[1]), default=(None, None))
-                if idx is not None and _name_ratio(card.name, n) >= 0.6:
-                    pairs.append((idx, card))
-                    left.pop(idx)
-                    todo.remove(card)
-            if len(left) == 1 and len(todo) == 1:
-                pairs.append((next(iter(left)), todo[0]))
+            pairs = [(idx, card) for idx, card in cards.items() if idx in balls]
             # Whose ball each card is: the log's name for its slot (the shot may not be named yet).
-            self._pick_ctp([(self._fire_rows[balls[idx]][1], names[idx], card) for idx, card in pairs])
+            self._pick_ctp([(self._fire_rows[balls[idx]][1], names[idx], card) for idx, card in pairs
+                            if not card.penalty])
             # The log names the pick soon after: wait for it (a while), so the picked ball keeps its lie.
             if any(self._fire_rows[f][1].picked is None for f in balls.values()) and time.monotonic() - at <= 60:
                 continue
@@ -9677,33 +9678,32 @@ class Engine:
                 shot_id, rec = self._fire_rows[balls[idx]][:2]
                 if rec.mulligan:
                     continue
-                if card.lie == "tee":
-                    # Back on the tee: out of bounds or lost, played again from there, so it didn't finish here.
-                    log.info("Pick card %s (%s): shot %s is back on the tee, not its finish", card.name,
-                             names[idx], shot_id)
+                if card.penalty:
+                    # A penalty followed (out of bounds, lost): played again, so it didn't finish here.
+                    log.info("Pick ball %s (%s): shot %s took a penalty, no finish", card.name, names[idx], shot_id)
                     continue
                 self.store.fill_finish(shot_id, round(card.yards, 1))
-                # The picked ball's lie is GSPro's log's (the team plays on from it); the pick screen only
+                # The picked ball's lie is GSPro's log's (the team plays on from it); the file's only
                 # stands in for it when there's none, and is the only word on the balls lifted. Until the
                 # log says which was picked, a ball keeps the lie it has. A saved "tee" is no lie at all: the
-                # stale hit-from read (Corey's opening drive at Bethpage, card "fairway").
+                # stale hit-from read (Corey's opening drive at Bethpage).
                 saved = self.store.finish_of(shot_id)[0]
                 if card.lie and (rec.picked is False or not saved or saved.lower() == "tee"):
                     self.store.set_lie_after(shot_id, card.lie)
-                log.info("Pick card %s (%s): shot %s finished %.0f yd, %s", card.name, names[idx], shot_id,
+                log.info("Pick ball %s (%s): shot %s finished %.0f yd, %s", card.name, names[idx], shot_id,
                          card.yards, card.lie)
 
     def _pick_ctp(self, balls: list[tuple]) -> None:
-        """A scramble's tee shots on a closest-to-the-pin hole, from the pick screen's cards (each ball's
-        own, in feet and inches when it's on the green): whichever ball the team then plays, these are
-        the marks (see _ctp_marks). `balls`: (shot record, its player, its card)."""
+        """A scramble's tee shots on a closest-to-the-pin hole, from each ball's finish in GSPro's round
+        file: whichever ball the team then plays, these are the marks (see _ctp_marks). `balls`: (shot
+        record, its player, its card)."""
         from .squabbit_live import feet_text
 
         r = self.round
         if r is None or r.ended or r.format != "scramble":
             return
         tees = [(rec, r.current_name(who), card) for rec, who, card in balls
-                if who and who != "unknown" and card.lie is not None   # unread: not known to be off the green
+                if who and who != "unknown" and card.lie is not None   # no finish: not known to be off the green
                 and rec.round_id == r.id and rec.shot_number == 1 and not rec.mulligan
                 and rec.hole_seq is not None and r.hole_number(rec.hole_seq) in r.ctp_holes]
         if not tees:
@@ -9716,7 +9716,7 @@ class Engine:
         now = {p: y for p, y in was.items() if p not in got} | got
         if now != was:
             r.ctp_picks[seq] = now
-            log.info("Pick screen CTP, %s: %s", r.hole_name(seq),
+            log.info("Scramble CTP from GSPro's round file, %s: %s", r.hole_name(seq),
                      ", ".join(f"{p} {feet_text(y)}" for p, (y, _) in got.items() if y is not None)
                      or "no tee shot on the green")
             self._squabbit_kick()

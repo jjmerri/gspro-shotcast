@@ -260,7 +260,7 @@ def parse_events(text: str) -> list[LogEvent]:
                 # writes it as "Water splash effect played at position: ...".
                 out.append(LogEvent("hit_water"))
             elif line == "SelectShotToUse":
-                # A scramble's pick screen: everyone on the team has hit, the cards list each ball.
+                # A scramble's pick screen: everyone on the team has hit (the round file has each ball).
                 out.append(LogEvent("pick_screen"))
             elif m := _SELECT.search(line):
                 out.append(LogEvent("select", player=int(m.group(1))))

@@ -267,8 +267,8 @@ def test_the_booth_asks_about_ctp_marks_it_isnt_sure_of(tmp_path):
     assert not next(m for m in e._ctp_marks(r) if m.seq == 4).sure
 
 
-def test_a_scrambles_ctp_is_the_teams_closest_ball_off_the_pick_screen(tmp_path):
-    from commentator.hud import PickCard
+def test_a_scrambles_ctp_is_the_teams_closest_ball_in_gspros_round_file(tmp_path):
+    from commentator.round_file import PickBall
 
     # Riviera 11-16, hole 3: Dan 14' 4" and Derek 34 yd, both on the green. The next setup came before
     # the log named the pick, so it went under the team and Dan's mark was never posted; Derek's was asked.
@@ -281,11 +281,11 @@ def test_a_scrambles_ctp_is_the_teams_closest_ball_off_the_pick_screen(tmp_path)
     # Each ball the log's slot names: the shot itself may not be named yet.
     rec = lambda sid, seq=3, n=1: SimpleNamespace(shot_id=sid, round_id=r.id, hole_seq=seq, player="unknown",
                                                   shot_number=n, mulligan=False, picked=None)
-    e._pick_ctp([(rec(1), "Mike", PickCard("MIKE", (14 + 4 / 12) / 3, "green")),
-                 (rec(2), "Sarah", PickCard("SARAH", 34.0, "green"))])
-    e._pick_ctp([(rec(3, n=2), "Mike", PickCard("MIKE", 1.0, "green"))])   # the second stroke's: not a tee shot
-    e._pick_ctp([(rec(3, seq=4), "Mike", PickCard("MIKE", 1.0, "green"))])  # hole 13 has no contest
-    e._pick_ctp([(rec(4), "Tony", PickCard("TONY", 3.5, None))])   # its lie unread: not known to be off the green
+    e._pick_ctp([(rec(1), "Mike", PickBall("MIKE", (14 + 4 / 12) / 3, "green")),
+                 (rec(2), "Sarah", PickBall("SARAH", 34.0, "green"))])
+    e._pick_ctp([(rec(3, n=2), "Mike", PickBall("MIKE", 1.0, "green"))])   # the second stroke's: not a tee shot
+    e._pick_ctp([(rec(3, seq=4), "Mike", PickBall("MIKE", 1.0, "green"))])  # hole 13 has no contest
+    e._pick_ctp([(rec(4), "Tony", PickBall("TONY", 3.5, None))])   # no lie in the file: not known to be off the green
     assert r.ctp_picks == {3: {"Mike": (pytest.approx(43 / 9), 1), "Sarah": (34.0, 2)}} and len(kicks) == 1
     r.ctp_results = {3: {"Aces": "14 feet 4 inches"}}   # the team's setup read: not a mark
     marks = e._ctp_marks(r)
@@ -294,11 +294,11 @@ def test_a_scrambles_ctp_is_the_teams_closest_ball_off_the_pick_screen(tmp_path)
     # One winner per team and hole: the closer ball, whoever's the team played on.
     got = team_ctp(r, "Aces", UIDS, league.match_player, marks)
     assert list(got) == [(3, "a")] and feet_text(got[(3, "a")].yards) == "14' 4\""
-    # Off the green, a ball isn't a mark; another team's pick screen leaves this one's as it is.
-    e._pick_ctp([(rec(1), "Mike", PickCard("MIKE", 30.0, "fringe")), (rec(2), "Sarah", PickCard("SARAH", 34.0, "green"))])
-    e._pick_ctp([(rec(5), "Tony", PickCard("TONY", 5.0, "green")), (rec(6), "Priya", PickCard("PRIYA", 9.0, "fringe"))])
+    # Off the green, a ball isn't a mark; another team's pick leaves this one's as it is.
+    e._pick_ctp([(rec(1), "Mike", PickBall("MIKE", 30.0, "fringe")), (rec(2), "Sarah", PickBall("SARAH", 34.0, "green"))])
+    e._pick_ctp([(rec(5), "Tony", PickBall("TONY", 5.0, "green")), (rec(6), "Priya", PickBall("PRIYA", 9.0, "fringe"))])
     assert r.ctp_picks == {3: {"Mike": (None, 1), "Sarah": (34.0, 2), "Tony": (5.0, 5), "Priya": (None, 6)}}
-    # A ball on the pick screen is its mark, to be asked about, even one the team then concedes (and
+    # A ball in the pick is its mark, to be asked about, even one the team then concedes (and
     # under whatever name GSPro has the player).
     r.ctp_picks[3]["Sarah K"] = r.ctp_picks[3].pop("Sarah")
     sarah = SimpleNamespace(shot_id=2, round_id=r.id, hole_seq=3, player="Sarah", shot_number=1,
