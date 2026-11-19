@@ -6850,8 +6850,10 @@ def test_a_pick_ball_gspro_writes_a_penalty_for_later_loses_its_finish_and_ctp_m
     assert r.ctp_picks[1]["Kyle Martin"][0] is not None
     assert e.store.db.execute("SELECT finish_yards FROM shots WHERE id = ?", (kyle,)).fetchone()[0] is not None
     _pick_file(e, ("Ozzy", 150.0, 5, 3 / M_TO_YD, True), ("Kyle Martin", 140.0, 5, 24 / M_TO_YD, True))
+    # (read only after a minute's pause in play: the file has a last look before the pick is let go)
+    e._pick_cards_kept[:] = [(b, c, time.monotonic() - 61, f) for b, c, _, f in e._pick_cards_kept]
     e._apply_log_corrections()
-    assert r.ctp_picks[1]["Kyle Martin"][0] is None
+    assert r.ctp_picks[1]["Kyle Martin"][0] is None and not e._pick_cards_kept
     assert e.store.db.execute("SELECT finish_yards FROM shots WHERE id = ?", (kyle,)).fetchone()[0] is None
 
 
@@ -7784,3 +7786,6 @@ def test_a_club_gspros_round_file_corrects_after_the_live_follow_is_the_rounds_r
     e.store.db.execute("UPDATE shots SET club = 'DR' WHERE id = ?", (sid,))
     e._sync_file_clubs()
     assert rec.shot.club == "DR"
+    e.store.db.execute("UPDATE shots SET club = NULL WHERE id = ?", (sid,))   # one the screen never read
+    e._sync_file_clubs()
+    assert rec.shot.club is None

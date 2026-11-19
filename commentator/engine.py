@@ -3541,6 +3541,11 @@ class Engine:
                         self._drop_refused_pins(tracks)
                 except sqlite3.Error as e:
                     log.warning("Couldn't refile shots from GSPro's round file: %s", e)
+            if changed and self._pick_cards_kept:   # a penalty written after a pick, with no swing since
+                try:
+                    self._recheck_pick_penalties()
+                except Exception:
+                    log.exception("Couldn't recheck the picks against GSPro's round file")
             try:
                 self._sync_file_names()
                 self._sync_file_clubs()
@@ -3609,7 +3614,7 @@ class Engine:
         for i, club, putt in self.store.db.execute(
                 f"SELECT id, club, is_putt FROM shots WHERE id IN ({', '.join('?' * len(ids))})", ids).fetchall():
             x = recs[i]
-            if club and club != x.shot.club:
+            if club != x.shot.club or bool(putt) != x.shot.is_putt:
                 x.shot = replace(x.shot, club=club, putter=bool(putt))
 
     def _unslot(self, shot_id: int) -> None:
@@ -5913,9 +5918,13 @@ class Engine:
         moved = {i for i in range(max(len(was), len(order)))
                  if (was[i] if i < len(was) else None) != (order[i] if i < len(order) else None)}
         moved |= {held[n] for n in changed}
+        # (a shot GSPro's log has its slot's own player hitting keeps its finish there: followed on its
+        # own line all along, whatever name it goes by)
+        own = {sid: self._fire_meta(f)[0] for f, (sid, *_) in self._fire_rows.items() if sid is not None}
         for cache in (self._pending_finish, self._last_row):
             for i in moved:
-                cache.pop(i, None)
+                if (v := cache.get(i)) is None or v[0] is None or own.get(v[0]) != i:
+                    cache.pop(i, None)
         g = self.gspro
         for fire, (shot_id, rec, slot, hole) in list(self._fire_rows.items()):
             if rec.round_id != r.id or slot not in moved or rec.player == "unknown":
@@ -9820,9 +9829,8 @@ class Engine:
         now = time.monotonic()
         for entry in list(self._pick_cards_kept):
             balls, cards, at, filled = entry
-            if now - at > 60:
+            if now - at > 60:   # (a last look at the file first)
                 self._pick_cards_kept.remove(entry)
-                continue
             for idx, card in self._file_pick_cards(balls).items():
                 if not card.penalty or (cards.get(idx) and cards[idx].penalty) or balls[idx] not in self._fire_rows:
                     continue

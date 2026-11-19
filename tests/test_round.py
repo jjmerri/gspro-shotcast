@@ -6325,9 +6325,11 @@ def test_a_result_followed_on_the_right_slot_under_a_misread_order_goes_with_the
     shot = _row_maker(e)
     rec = shot(1, "Kroll", 0, outcome="holed", sp=150.0)
     sid = e._fire_rows[1][0]
+    e._last_row[0] = e._pending_finish[0] = (sid, None, 0, 0, 0)
     e._file_entries, e._file_version = [_file_ball("Barrows", 150.0)], 2
     e._apply_log_corrections()
     assert rec.player == "Barrows" and rec.outcome == "holed" and sid not in e._void_watch
+    assert e._last_row[0][0] == sid and e._pending_finish[0][0] == sid   # where it stopped still follows
     assert e.store.db.execute("SELECT player FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "Barrows"
 
 
