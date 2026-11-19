@@ -7401,6 +7401,23 @@ async def test_the_closer_skips_prompt_caching_and_other_calls_keep_it(tmp_path)
     assert "cache_control" not in sent[0] and "cache_control" in sent[1]
 
 
+async def test_each_closer_prompt_is_kept_to_rerun_on_other_models(tmp_path):
+    import json as _json
+
+    from commentator.engine import CLOSER_PROMPTS
+
+    cfg = Config(log_dir=str(tmp_path))
+    llm = FakeLLM(cfg.llm.live)
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None, live_llm=llm,
+                    segment_llm=llm, speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0))
+    await engine._complete("closer", llm, "THE ROUND IS OVER.", [], system="league booth")
+    await engine._complete("segment", llm, "a wrap", [])   # only the closer is kept
+    rows = [_json.loads(l) for l in (tmp_path / CLOSER_PROMPTS).read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["system"] == "league booth" and "THE ROUND IS OVER." in rows[0]["user"]
+    assert rows[0]["schema"] == engine.schema and rows[0]["model"] == llm.model and "text" in rows[0]
+
+
 async def test_a_tree_hit_is_called_in_flight_as_the_ball_reaches_it(tmp_path):
     from commentator.sources.gspro_log import parse_events
 

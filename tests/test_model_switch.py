@@ -29,6 +29,9 @@ def test_opener_and_closer_split_from_round(tmp_path):
     cfg = load_config(yaml)
     assert cfg.opener_llm.model == "m-open"
     assert cfg.closer_llm.model == "m-close"
+    assert cfg.news_llm.model == "m-close"   # the asides follow the closer unless set apart
+    yaml.write_text(yaml.read_text() + "  news: {provider: openai, model: m-news}\n")
+    assert load_config(yaml).news_llm.model == "m-news"
 
 
 def test_opener_closer_fall_back_to_round_then_segment(tmp_path):

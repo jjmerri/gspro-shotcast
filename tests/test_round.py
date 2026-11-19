@@ -1364,6 +1364,84 @@ async def test_pre_made_wrap_branch_plays_for_the_scored_result(tmp_path):
     assert e._play_prepared_wrap("Hole 1, par 4, 400 yards", 1) is False
 
 
+async def test_pre_made_wrap_that_guessed_the_finish_wrong_is_dropped(tmp_path):
+    """Branches are written before the last putt: three holed birdie putts aired as "stopped inside
+    the gimme circle". A branch telling the wrong finish falls back to the on-demand wrap."""
+    from commentator.models import Line, RoundStartEvent
+    from commentator.state import ShotRecord
+
+    e = _engine(tmp_path)
+    e.current_par = 4
+    e.current_course = "Wynn"
+    await e.handle_round_start(RoundStartEvent(hud=Hud(player_text="MikeD E Shot 1 400.3 YDS", shot_number=1,
+                                                       score_to_par="E", to_pin="400.3 yards")))
+    r = e.round
+    r.par[1] = 4
+    r.apply_scorecard(Scorecard(holes=list(range(1, 19)), scores={"MikeD": {1: 3}}))
+    r.seq = 2
+    hole = e.state.current_hole = "Hole 1, par 4, 400 yards"
+    putt = ShotRecord("MikeD", Shot(), hole, Hud(), [], round_id=r.id, hole_seq=1, par=4,
+                      shot_number=3, outcome="holed")
+    e.state.shots.append(putt)
+
+    def branch(text):
+        e._wrap_branches = {"hole": hole, "side": r.sides[0].key,
+                            "by_score": {3: ([Line("pbp", text)], [b"clip"])}}
+
+    branch("Birdie three, the putt stopped inside the gimme circle for the tap-in.")
+    assert e._play_prepared_wrap(hole, 1) is False
+    assert e._wrap_branches is None and e._wrapped_hole is None   # the hole change wraps it on demand
+    branch("Birdie three to open: a dropped shot nowhere in sight.")   # says nothing of the finish
+    assert e._play_prepared_wrap(hole, 1) is True
+    # The other way round: a branch that drained the putt, on a hole finished by a conceded one.
+    putt.outcome = "conceded"
+    e._wrapped_hole = None
+    branch("Birdie three, and he drained it.")
+    assert e._play_prepared_wrap(hole, 1) is False
+    branch("Birdie three, he sinks the putt.")
+    assert e._play_prepared_wrap(hole, 1) is False
+    branch("Birdie three, a tap-in to finish.")
+    assert e._play_prepared_wrap(hole, 1) is True
+    putt.outcome = "holed"
+    e._wrapped_hole = None
+    branch("Birdie three, and that was no gimme.")
+    assert e._play_prepared_wrap(hole, 1) is True
+    branch("Birdie three, though the putt never found the cup.")   # denies the make it had
+    assert e._play_prepared_wrap(hole, 1) is False
+    # The result isn't in yet: a branch that tells the finish waits for the hole change, then goes.
+    putt.outcome = None
+    e._wrapped_hole = None
+    branch("Birdie three, the putt stopped inside the gimme circle.")
+    assert e._play_prepared_wrap(hole, 1, last_chance=False) is False and e._wrap_branches is not None
+    assert e._play_prepared_wrap(hole, 1) is False and e._wrap_branches is None
+    branch("Birdie three to open.")
+    assert e._play_prepared_wrap(hole, 1, last_chance=False) is True
+
+
+def test_a_wrap_telling_a_finish_is_unsafe_when_the_sides_finished_differently():
+    from commentator.engine import _wrap_contradicts_finish
+    from commentator.models import Line
+
+    # One side holed, another was conceded: "Mike drains his birdie" can't be checked against who.
+    assert _wrap_contradicts_finish([Line("pbp", "Mike drains his birdie putt. Paul walks off with par.")], "mixed")
+    assert not _wrap_contradicts_finish([Line("pbp", "A birdie for Mike, par for Paul.")], "mixed")
+    # A miss told for a putt that dropped, and a make for a hole finished on a conceded putt.
+    assert _wrap_contradicts_finish([Line("pbp", "Par, but the birdie putt didn't drop.")], "holed")
+    assert _wrap_contradicts_finish([Line("pbp", "He made the birdie putt.")], "conceded")
+    assert _wrap_contradicts_finish([Line("pbp", "He made the birdie putt.")], None)
+    assert not _wrap_contradicts_finish([Line("pbp", "He made the birdie putt.")], "holed")
+    assert _wrap_contradicts_finish([Line("pbp", "The last putt didn\u2019t drop.")], "holed")
+    assert _wrap_contradicts_finish([Line("pbp", "The last putt never dropped.")], "holed")
+    assert _wrap_contradicts_finish([Line("pbp", "He chips in for birdie.")], "holed")
+    assert _wrap_contradicts_finish([Line("pbp", "Dan rolls it home for birdie.")], "conceded")
+    assert _wrap_contradicts_finish([Line("pbp", "Mike tapped it in for birdie.")], "holed")
+    assert _wrap_contradicts_finish([Line("pbp", "The birdie putt missed.")], "holed")
+    assert _wrap_contradicts_finish([Line("pbp", "The birdie putt stopped inside the circle.")], "holed")
+    # A scramble side: which partner holed it isn't checked, so a make credited to one is a guess.
+    assert _wrap_contradicts_finish([Line("pbp", "Mike drains the birdie putt.")], "holed", shared=True)
+    assert not _wrap_contradicts_finish([Line("pbp", "Birdie for the team.")], "holed", shared=True)
+
+
 async def test_wrap_fires_on_the_scorecard_not_only_the_hole_change(tmp_path):
     from commentator.models import Line, RoundStartEvent
 
@@ -2756,7 +2834,7 @@ def _news_engine(tmp_path, llm):
     from commentator.news import GolfNews, Headline
 
     e = _engine(tmp_path)
-    e.closer_llm = llm
+    e.news_llm = llm
     e.news = GolfNews(["x"])
     e.news.headlines = [Headline("Scheffler wins by five", "Scottie Scheffler won by five shots on Sunday.",
                                  "espn.com")]

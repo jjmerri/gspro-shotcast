@@ -204,14 +204,15 @@ async def run_scenario(steps, real: bool, config_path: str = "config.yaml") -> N
         flight = build_llm(cfg.llm.flight) if cfg.llm.flight else live
         preshot = build_llm(cfg.llm.preshot) if cfg.llm.preshot else live
         round_llm, opener, closer = build_llm(cfg.round_llm), build_llm(cfg.opener_llm), build_llm(cfg.closer_llm)
+        news = build_llm(cfg.news_llm)
         frame = Path(__file__).resolve().parent / "sim_frame.jpg"
         image = frame.read_bytes() if frame.exists() else None
     else:
         live = segment = flight = preshot = FakeLLM(cfg.llm.live)
-        round_llm = opener = closer = live
+        round_llm = opener = closer = news = live
     engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
                     live_llm=live, segment_llm=segment, round_llm=round_llm, preshot_llm=preshot,
-                    flight_llm=flight, opener_llm=opener, closer_llm=closer,
+                    flight_llm=flight, opener_llm=opener, closer_llm=closer, news_llm=news,
                     speech=SpeechQueue(cfg, ConsoleTTS()), screen=screen, rng=random.Random(0))
     sim = Sim(engine, screen, image=image)
     if real and engine.news is not None:

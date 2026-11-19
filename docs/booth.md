@@ -91,7 +91,7 @@ screenshot to back them up.
 ## Asides: news, scores and course trivia
 
 On an ordinary shot the booth would otherwise pass on, it sometimes drifts into a two-line side
-conversation instead. Each one is written ahead by the closer's model (the richest one), so it plays
+conversation instead. Each one is written ahead by the news model (`llm.news`, else the closer's), so it plays
 with no model wait. They all share one budget: at most one every three holes, never
 on the first hole or the last two, and only after an ordinary shot, so the round's own calls come first.
 

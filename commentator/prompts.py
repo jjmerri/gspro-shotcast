@@ -256,7 +256,10 @@ def wrap_recap_prompt(*, finished_hole: str | None, result: list[str], recap: li
     )
     prompt = (
         "The hole just finished on the score in the facts. Give a short two-line exchange between the "
-        "commentators summing up how it played out and the result. Don't mention or tee up the next hole."
+        "commentators summing up how it played out and the result. Don't mention or tee up the next hole. "
+        "This is written before the hole's last strokes are played, so the shot list stops short of the "
+        "finish: state the score, but don't say how the hole was finished (a putt holed or drained, a "
+        "chip-in, a lag, a tap-in or gimme) or who finished it."
         + LEAD_CHANGE + "\n\nFACTS:\n" + facts_text
         + _recent_block(recent_lines)
     )

@@ -90,7 +90,9 @@ def _engine(cfg, league):
                   flight_llm=build_llm(cfg.llm.flight) if cfg.llm.flight else live,
                   preshot_llm=build_llm(cfg.llm.preshot) if cfg.llm.preshot else live,
                   round_llm=build_llm(cfg.round_llm), opener_llm=build_llm(cfg.opener_llm),
-                  closer_llm=build_llm(cfg.closer_llm), speech=SpeechQueue(cfg, ConsoleTTS()),
+                  closer_llm=build_llm(cfg.closer_llm),
+                  news_llm=build_llm(cfg.llm.news) if cfg.llm.news and cfg.asides_on else None,
+                  speech=SpeechQueue(cfg, ConsoleTTS()),
                   store=Store(":memory:"), rng=random.Random(4))
 
 
