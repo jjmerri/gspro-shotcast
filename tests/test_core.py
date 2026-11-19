@@ -5539,7 +5539,7 @@ def test_altitude_is_a_fact_only_at_a_high_course(tmp_path):
     assert e._altitude_facts() == []            # below the threshold
     e.gspro.altitude_ft = 5280
     f = e._altitude_facts()
-    assert len(f) == 1 and "5,280 feet" in f[0] and "11%" in f[0]
+    assert len(f) == 1 and "5,280 feet" in f[0] and "%" not in f[0]
     e.cfg.commentary.course_altitude_ft["Denver CC"] = 0   # config's altitude beats the logged one
     assert e._altitude_facts() == []
     e.cfg.commentary.course_altitude_ft = {"Denver CC": 5280}

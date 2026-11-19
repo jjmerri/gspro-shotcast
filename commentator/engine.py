@@ -5069,8 +5069,8 @@ class Engine:
         alt = self.cfg.commentary.course_altitude_ft.get(course or "", self.gspro.altitude_ft)
         if alt is None or alt < self.cfg.commentary.altitude_fact_min_ft:
             return []
-        return [f"The course plays at {alt:,.0f} feet of altitude: the thin air adds about "
-                f"{2 * alt / 1000:.0f}% to every carry; bring it up now and then, not on every drive."]
+        return [f"The course plays at {alt:,.0f} feet of altitude: the ball flies farther in the thin air. "
+                f"Don't put a number on how much farther; bring it up now and then, not on every drive."]
 
     def _bunker_facts(self, player: str | None) -> list[str]:
         """A recurring theme: how often this player has finished in a bunker this round (taken-back
