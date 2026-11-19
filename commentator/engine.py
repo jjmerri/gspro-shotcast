@@ -5925,23 +5925,13 @@ class Engine:
             for i in moved:
                 if (v := cache.get(i)) is None or v[0] is None or own.get(v[0]) != i:
                     cache.pop(i, None)
-        g = self.gspro
         for fire, (shot_id, rec, slot, hole) in list(self._fire_rows.items()):
             if rec.round_id != r.id or slot not in moved or rec.player == "unknown":
                 continue
             if self._row_source.get(fire) in ("screen", "setup read", "address frame"):
                 if (own := self._fire_meta(fire)[0]) is None or own == slot:
                     continue   # followed on its own line of the log all along (or there's no telling): it stands
-                # A pick-up it was given goes back to the log's marks, given again once it's followed.
-                if self._picked(fire, shot_id):
-                    self._picked_fires.pop(fire)
-                    self._drop_pickup(r, rec.player, rec.hole_seq)
-                    if ("pickup", slot, hole) not in self._marks_due:
-                        self._marks_due.append(("pickup", slot, hole))
-                # So does a scramble pick's concession, which voiding its result clears.
-                if shot_id in self._conceded_ids and (slot, hole) in g.pick_gimmes[:self._pick_gimmes_seen] \
-                        and ("pick", slot, hole) not in self._marks_due:
-                    self._marks_due.append(("pick", slot, hole))
+                self._requeue_marks(r, fire, shot_id, rec, slot, hole)
                 # Its result was followed on the slot the old order gave its name: graded again on its own.
                 self._void_result(shot_id, rec)
                 self._resettle.add(fire)
@@ -5953,6 +5943,19 @@ class Engine:
                 self._renames.add(fire)
         self._scramble_pairs = set()   # the log's teams are by slot: re-read them under the new order
         return True
+
+    def _requeue_marks(self, r: Round, fire: int, shot_id: int | None, rec: ShotRecord, slot: int,
+                       hole: int | None) -> None:
+        """A shot followed on the wrong slot: a pick-up it was given goes back to the log's marks, given
+        again once it's followed; so does a scramble pick's concession, which voiding its result clears."""
+        if self._picked(fire, shot_id):
+            self._picked_fires.pop(fire)
+            self._drop_pickup(r, rec.player, rec.hole_seq)
+            if ("pickup", slot, hole) not in self._marks_due:
+                self._marks_due.append(("pickup", slot, hole))
+        if shot_id in self._conceded_ids and (slot, hole) in self.gspro.pick_gimmes[:self._pick_gimmes_seen] \
+                and ("pick", slot, hole) not in self._marks_due:
+            self._marks_due.append(("pick", slot, hole))
 
     def _file_roster_key(self, r: Round, name: str) -> str | None:
         """The round's GSPro name for a name GSPro's round file has (typed, not read off the screen): the
@@ -6046,6 +6049,9 @@ class Engine:
             self.store.round_players(r.uuid, dict(r.roster), r.slot_names)
         if self._recheck_slots(r, was):
             self._sync_log_scores(r)
+            # (a shot the screen named right, followed on the slot the old order gave that name: graded
+            # on its own now)
+            self._follow_placed(r)
         self._own_misread(r)
 
     def _own_misread(self, r: Round) -> None:
@@ -6081,8 +6087,11 @@ class Engine:
         # shot from that slot isn't taken as where this ball went, and grade it on its own slot. Ones
         # followed on its own slot already (a misread setup order put the wrong name on the right slot)
         # stand, and go with the shot (its conceded putt too: _rename_remapped).
-        regrade = self._fire_rows[fire][2] != owner
+        _, _, slot, hole = self._fire_rows[fire]
+        regrade = slot != owner
         if regrade:
+            if slot is not None and self.round is not None:
+                self._requeue_marks(self.round, fire, shot_id, rec, slot, hole)
             for cache in (self._pending_finish, self._last_row):
                 for k in [k for k, v in cache.items() if v is not None and v[0] == shot_id]:
                     del cache[k]
@@ -6152,7 +6161,7 @@ class Engine:
                 return
         r.picked_up.discard((name, seq))
 
-    def _follow_placed(self, r: Round, skip: int) -> None:
+    def _follow_placed(self, r: Round, skip: int | None = None) -> None:
         """Shots the screen named before screen reads placed their player in a guessed slot order: GSPro's
         log now says whose slot they were, so their results are followed from it too."""
         for fire, (shot_id, rec, slot, _) in list(self._fire_rows.items()):
@@ -9801,7 +9810,7 @@ class Engine:
                     and not late:
                 continue
             self._pick_cards_due.remove(entry)
-            filled: dict[int, float] = {}
+            filled: dict[int, tuple] = {}   # (finish, lie, the lie it replaced) each ball was given
             self._pick_cards_kept.append((balls, cards, at, filled))
             for idx, card in pairs:
                 shot_id, rec = self._fire_rows[balls[idx]][:2]
@@ -9812,14 +9821,15 @@ class Engine:
                     log.info("Pick ball %s (%s): shot %s took a penalty, no finish", card.name, names[idx], shot_id)
                     continue
                 self.store.fill_finish(shot_id, round(card.yards, 1))
-                filled[idx] = round(card.yards, 1)
+                filled[idx] = (round(card.yards, 1), None, None)
                 # The picked ball's lie is GSPro's log's (the team plays on from it); the file's only
                 # stands in for it when there's none, and is the only word on the balls lifted. Until the
                 # log says which was picked, a ball keeps the lie it has. A saved "tee" is no lie at all: the
                 # stale hit-from read (Corey's opening drive at Bethpage).
                 saved = self.store.finish_of(shot_id)[0]
                 if card.lie and (rec.picked is False or not saved or saved.lower() == "tee"):
-                    self.store.set_lie_after(shot_id, card.lie)
+                    if (lie := self.store.set_lie_after(shot_id, card.lie)) and lie != saved:
+                        filled[idx] = (filled[idx][0], lie, saved)
                 log.info("Pick ball %s (%s): shot %s finished %.0f yd, %s", card.name, names[idx], shot_id,
                          card.yards, card.lie)
 
@@ -9837,8 +9847,8 @@ class Engine:
                 cards[idx] = card
                 shot_id, rec = self._fire_rows[balls[idx]][:2]
                 log.info("Pick ball %s: shot %s took a penalty after all, no finish", card.name, shot_id)
-                if (yards := filled.pop(idx, None)) is not None:
-                    self.store.drop_finish(shot_id, yards)
+                if (wrote := filled.pop(idx, None)) is not None:
+                    self.store.drop_finish(shot_id, *wrote)
                 r = self.round
                 who = (r is not None and self._file_roster_key(r, card.name)) or rec.player
                 self._pick_ctp([(rec, who, card)])

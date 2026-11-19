@@ -2129,9 +2129,12 @@ class Store:
                         self.db.execute("UPDATE shots SET finish_yards = ? WHERE id = ?", (npin, sid))
                         break
 
-    def drop_finish(self, shot_id: int, yards: float) -> None:
-        """Take back the finish fill_finish wrote (`yards`), unless another has replaced it since."""
+    def drop_finish(self, shot_id: int, yards: float, lie: str | None = None, was: str | None = None) -> None:
+        """Take back the finish fill_finish wrote (`yards`), and the lie written with it (`lie`, over `was`),
+        unless another has replaced them since."""
         self.db.execute("UPDATE shots SET finish_yards = NULL WHERE id = ? AND finish_yards = ?", (shot_id, yards))
+        if lie is not None:
+            self.db.execute("UPDATE shots SET lie_after = ? WHERE id = ? AND lie_after = ?", (was, shot_id, lie))
         self.db.commit()
 
     def fill_finish(self, shot_id: int | None, yards: float, replace: bool = False) -> None:

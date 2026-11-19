@@ -6333,6 +6333,42 @@ def test_a_result_followed_on_the_right_slot_under_a_misread_order_goes_with_the
     assert e.store.db.execute("SELECT player FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "Barrows"
 
 
+def test_a_shot_named_right_but_followed_on_a_misread_orders_slot_is_graded_on_its_own_once_the_file_places_it(tmp_path):
+    # The setup screen read Bob second, but GSPro has him first: his putt, named right, was followed on
+    # slot 1. GSPro's round file places him in slot 0, and the putt's graded there.
+    e = _guest_round(tmp_path, ["Alice", "Bob"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.setup_slots = ["Alice", "Bob"]
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    rec = shot(1, "Bob", 0, outcome="holed", sp=150.0, slot=1)
+    e._outcomes_due.discard(1)   # (the log's owner line was taken already)
+    e._file_entries, e._file_version = [_file_ball("Bob", 150.0)], 2
+    e._apply_log_corrections()
+    assert rec.player == "Bob" and e._fire_rows[1][2] == 0
+    e.gspro._fire_info[1]["holed"], e.gspro.fires = True, 40
+    e._settle_outcomes()
+    assert rec.outcome == "holed"
+
+
+def test_a_pickup_given_on_the_misread_players_slot_stays_theirs_when_the_file_renames_the_shot(tmp_path):
+    # Bob's ball read as Alice's, followed on Alice's slot, where GSPro logged Alice picking up: the
+    # pick-up is Alice's, not Bob's, once GSPro's round file has the ball as his.
+    e = _guest_round(tmp_path, ["Alice", "Bob"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.setup_slots = ["Alice", "Bob"]
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    rec = shot(1, "Alice", 1, sp=150.0, slot=0)
+    e._picked_fires[1] = e._fire_rows[1][0]
+    e.round.picked_up.add(("Alice", rec.hole_seq))
+    e._file_entries, e._file_version = [_file_ball("Bob", 150.0)], 2
+    e._apply_log_corrections()
+    assert rec.player == "Bob" and ("Bob", rec.hole_seq) not in e.round.picked_up and 1 not in e._picked_fires
+
+
 def test_a_setup_order_the_round_file_overturns_takes_back_the_log_scores_read_under_it(tmp_path):
     # The setup screen's order was trusted, and the log's scores were read by it; GSPro's round file has
     # Bob in slot 0, so none of its placements are known to hold: their scores go back to the log.

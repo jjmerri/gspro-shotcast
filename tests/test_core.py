@@ -6842,9 +6842,10 @@ def test_a_pick_ball_gspro_writes_a_penalty_for_later_loses_its_finish_and_ctp_m
     e._apply_pick_cards()
     assert r.ctp_picks[1]["Ozzy"][0] is not None
     _pick_file(e, ("Ozzy", 150.0, 5, 3 / M_TO_YD, True), ("Kyle Martin", 140.0, 5, 24 / M_TO_YD, False))
-    rec.picked, rec2.picked = False, True
+    rec.picked, rec2.picked = False, False   # (neither: the team took a third ball)
     e._apply_pick_cards()
     assert r.ctp_picks[1]["Ozzy"][0] is None and not e._pick_cards_due
+    assert e.store.finish_of(kyle)[0] == "green"
     assert e.store.db.execute("SELECT finish_yards FROM shots WHERE id = ?", (ozzy,)).fetchone()[0] is None
     # Kyle's penalty read only after the pick was written: its finish and mark are taken back.
     assert r.ctp_picks[1]["Kyle Martin"][0] is not None
@@ -6854,6 +6855,7 @@ def test_a_pick_ball_gspro_writes_a_penalty_for_later_loses_its_finish_and_ctp_m
     e._pick_cards_kept[:] = [(b, c, time.monotonic() - 61, f) for b, c, _, f in e._pick_cards_kept]
     e._apply_log_corrections()
     assert r.ctp_picks[1]["Kyle Martin"][0] is None and not e._pick_cards_kept
+    assert e.store.finish_of(kyle)[0] == "fairway"   # nor the lie the pick gave it
     assert e.store.db.execute("SELECT finish_yards FROM shots WHERE id = ?", (kyle,)).fetchone()[0] is None
 
 
