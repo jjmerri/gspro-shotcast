@@ -681,11 +681,15 @@ _WRAP_HOLED = re.compile(
 
 # A hole-out from off the green: a pre-written wrap can't know the last stroke wasn't a putt.
 _WRAP_HOLE_OUT = re.compile(r"\b(chip(ped|s)?[- ]in|hol(ed|es) out from|pitch(ed|es)? in|from off the green)\b", re.I)
+# Any putt named in a wrap for a hole ended on a full shot (a chip-in) is a guess: the on-demand wrap
+# sees how it finished.
+_WRAP_PUTT_WORD = re.compile(r"\bputt", re.I)
 _NEGATION = re.compile(r"\b(never|not|no|didn't|doesn't|won't|wouldn't|couldn't|nearly|almost)\b[\w\s,'-]{0,25}$", re.I)
 
 
 def _wrap_contradicts_finish(lines, finish: str | None, shared: bool = False) -> bool:
-    """A pre-written wrap that tells a different finish than the hole had: "holed" or "conceded".
+    """A pre-written wrap that tells a different finish than the hole had: "holed", "holed_out" (holed
+    with a full shot, a chip-in: any putt it names is wrong) or "conceded".
     With the finish not known yet (None) or "mixed" (one side holed, another was conceded, so who's
     meant can't be checked), any finish it tells is a guess. A make it denies ("never found the
     cup") or a hole-out off the green (a chip-in) isn't checked: always a guess. Nor is a make on a
@@ -699,6 +703,8 @@ def _wrap_contradicts_finish(lines, finish: str | None, shared: bool = False) ->
         return True
     if finish == "holed":
         return bool(tap_in)
+    if finish == "holed_out":
+        return bool(tap_in or _WRAP_PUTT_WORD.search(text))
     if finish == "conceded":
         return bool(holed)
     return bool(tap_in or holed)
@@ -4771,16 +4777,19 @@ class Engine:
         waits for it."""
         return self.speech is not None and getattr(self.speech, "banter_held", lambda: False)()
 
-    def _kick_wrap_branches(self, side_key: str, scores: list[int], other_facts: list[str]) -> None:
+    def _kick_wrap_branches(self, side_key: str, scores: list[int], other_facts: list[str],
+                            others: dict[str, int] | None = None) -> None:
         """(Re)start the background pre-build of the hole wrap, branched by the one side still to
         finish (`side_key`) over its possible `scores`, with the sides already in fixed in
-        `other_facts`."""
+        `other_facts` (their scores by side key in `others`, checked again before it airs)."""
         if self._wrap_task and not self._wrap_task.done():
             self._wrap_task.cancel()
-        self._wrap_task = asyncio.create_task(self._prepare_wrap_branches(side_key, scores, other_facts))
+        self._wrap_task = asyncio.create_task(
+            self._prepare_wrap_branches(side_key, scores, other_facts, others or {}))
         self._wrap_task.add_done_callback(lambda t: t.cancelled() or t.exception())
 
-    async def _prepare_wrap_branches(self, side_key: str, scores: list[int], other_facts: list[str]) -> None:
+    async def _prepare_wrap_branches(self, side_key: str, scores: list[int], other_facts: list[str],
+                                     others: dict[str, int] | None = None) -> None:
         """Pre-generate and pre-voice the hole wrap for each score the deciding side might finish on,
         so the recap plays the instant the scorecard posts the result, no model call, retry or banner.
         The deciding side is the last one still to hole out: solo that's the only player (fired when
@@ -4829,7 +4838,8 @@ class Engine:
             voiced = [await self._voice_ahead(l) for l in written.values()]
         branches: dict[int, tuple] = {k: v for k, v in zip(written, voiced) if v[0]}
         if self.state.current_hole == finished:  # a new hole hasn't started while we were working
-            self._wrap_branches = {"hole": finished, "side": side_key, "by_score": branches} if branches else None
+            self._wrap_branches = ({"hole": finished, "side": side_key, "by_score": branches,
+                                    "others": dict(others or {})} if branches else None)
             if branches:
                 log.info("Wrap: branches ready for %s (%s) on %s", sorted(branches), side.label, finished)
 
@@ -4843,6 +4853,15 @@ class Engine:
         r = self.round
         side = next((s for s in (r.sides if r else []) if s.key == wb["side"]), None) if wb else None
         if not wb or wb["hole"] != finished_hole or side is None:
+            return False
+        # The other sides' scores were written into every branch: a later correction (a stroke moved to
+        # another player by GSPro's round file) makes them all wrong, and so does a side still out.
+        others = {s.key: r.card_score(s, finished_seq) for s in r.sides
+                  if s.key != side.key and r.plays(s, finished_seq)}
+        if others != wb.get("others", {}):
+            log.info("Wrap: dropped the pre-made branches (the other scores are now %s, written for %s)",
+                     others, wb.get("others", {}))
+            self._wrap_branches = None
             return False
         strokes = r.card_score(side, finished_seq)
         branch = wb["by_score"].get(strokes) if strokes is not None else None
@@ -4868,8 +4887,9 @@ class Engine:
         return True
 
     def _hole_finish(self, seq: int) -> str | None:
-        """How hole `seq` was finished, from GSPro's log: "holed" (every side's last putt or shot went
-        in), "conceded" (every side's was inside the gimme circle), "mixed", or None while any side's
+        """How hole `seq` was finished, from GSPro's log: "holed" (every side's last putt went in),
+        "holed_out" (every side holed a full shot), "conceded" (every side's was inside the gimme
+        circle), "mixed", or None while any side's
         isn't known. A wrap can talk about any side, so its finish is checked against them all."""
         r = self.round
         if not r:
@@ -4878,9 +4898,17 @@ class Engine:
         for side in r.sides:
             if not r.plays(side, seq):
                 continue
-            outcomes = {x.outcome for x in self.state.shots if x.round_id == r.id and x.hole_seq == seq
-                        and not x.mulligan and r.side_for(x.player) is side}
-            finishes.add("holed" if "holed" in outcomes else "conceded" if "conceded" in outcomes else None)
+            shots = [x for x in self.state.shots if x.round_id == r.id and x.hole_seq == seq
+                     and not x.mulligan and r.side_for(x.player) is side]
+            holed = [x for x in shots if x.outcome == "holed"]
+            if holed:
+                last = holed[-1].shot
+                # GSPro's own call wins (a chip off the green isn't a putt); the lie only fills a gap.
+                putt = last.putter if last.putter is not None else (
+                    last.is_putt or (holed[-1].lie_before or "").lower() == "green")
+                finishes.add("holed" if putt else "holed_out")
+            else:
+                finishes.add("conceded" if any(x.outcome == "conceded" for x in shots) else None)
         if None in finishes or not finishes:
             return None
         return finishes.pop() if len(finishes) == 1 else "mixed"
@@ -13059,9 +13087,10 @@ class Engine:
                 remaining = [s for s in r.sides if r.card_score(s, r.seq) is None and r.plays(s, r.seq)]
                 if len(remaining) == 1:
                     par = self.current_par
-                    others = [self._score_fact(s, r.card_score(s, r.seq), par) for s in r.sides
-                              if r.card_score(s, r.seq) is not None]
-                    self._kick_wrap_branches(remaining[0].key, [par - 1, par, par + 1, par + 2], others)
+                    done = [s for s in r.sides if r.card_score(s, r.seq) is not None and r.plays(s, r.seq)]
+                    others = [self._score_fact(s, r.card_score(s, r.seq), par) for s in done]
+                    self._kick_wrap_branches(remaining[0].key, [par - 1, par, par + 1, par + 2], others,
+                                             {s.key: r.card_score(s, r.seq) for s in done})
             # The finished hole's score posts here, ~right after the last putt and well before GSPro's
             # hole change. If the wrap is pre-voiced, play it now so it lands on the green instead of
             # after the between-hole screen; the hole change then sees it's done and skips.

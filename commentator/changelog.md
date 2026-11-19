@@ -4,6 +4,22 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.151
+
+### Stats page
+- Scores, lies and who hit each shot now come from GSPro's own round records instead of reading the screen, so they're right more often, including in scrambles.
+- Fixed shots on one hole sometimes being filed under the next hole.
+- Scramble rounds no longer count the teammates' copies of a holing putt as extra strokes.
+- Club numbers a player's launch monitor doesn't measure for that club (it reports them as 0) are left out instead of dragging down their averages.
+
+### Booth
+- The opener and trivia can draw on GSPro's own notes about the course.
+- The booth picks up GSPro's wrong-hole score correction.
+- New reactions for a ball that finishes on bare dirt, in fallen leaves or on rocks.
+- News, trivia and live-score asides get their own model setting.
+- Hole wrap-ups are checked against how the hole actually finished.
+- Problem reports can include a short description of what went wrong.
+
 ## 0.1.150
 
 ### Stats page

@@ -1416,6 +1416,13 @@ async def test_pre_made_wrap_that_guessed_the_finish_wrong_is_dropped(tmp_path):
     assert e._play_prepared_wrap(hole, 1) is False and e._wrap_branches is None
     branch("Birdie three to open.")
     assert e._play_prepared_wrap(hole, 1, last_chance=False) is True
+    # A chip from the green that dropped (GSPro called it a full shot): a make named a putt is wrong.
+    putt.outcome, putt.lie_before, putt.shot = "holed", "green", Shot(putter=False)
+    e._wrapped_hole = None
+    branch("Birdie three, he drains the putt.")
+    assert e._play_prepared_wrap(hole, 1) is False
+    branch("Birdie three from the edge of the green.")
+    assert e._play_prepared_wrap(hole, 1) is True
 
 
 def test_a_wrap_telling_a_finish_is_unsafe_when_the_sides_finished_differently():
@@ -1433,6 +1440,13 @@ def test_a_wrap_telling_a_finish_is_unsafe_when_the_sides_finished_differently()
     assert _wrap_contradicts_finish([Line("pbp", "The last putt didn\u2019t drop.")], "holed")
     assert _wrap_contradicts_finish([Line("pbp", "The last putt never dropped.")], "holed")
     assert _wrap_contradicts_finish([Line("pbp", "He chips in for birdie.")], "holed")
+    # A hole finished on a full shot (GSPro's round file has the chip-in as a non-putt): a make it calls
+    # a putt is wrong; one that doesn't say how is fine.
+    assert _wrap_contradicts_finish([Line("pbp", "Mike made the birdie putt.")], "holed_out")
+    assert _wrap_contradicts_finish([Line("pbp", "Mike tapped it in for birdie.")], "holed_out")
+    assert not _wrap_contradicts_finish([Line("pbp", "Mike sinks it for birdie.")], "holed_out")
+    assert _wrap_contradicts_finish([Line("pbp", "Mike drains the birdie putt.")], "holed_out")
+    assert _wrap_contradicts_finish([Line("pbp", "Mike putts it in for birdie.")], "holed_out")
     assert _wrap_contradicts_finish([Line("pbp", "Dan rolls it home for birdie.")], "conceded")
     assert _wrap_contradicts_finish([Line("pbp", "Mike tapped it in for birdie.")], "holed")
     assert _wrap_contradicts_finish([Line("pbp", "The birdie putt missed.")], "holed")
@@ -1506,17 +1520,37 @@ async def test_multiplayer_wrap_pre_builds_for_the_last_side_still_out(tmp_path)
     sarah = next(s for s in r.sides if "Sarah" in s.gspro)
     # Capture the pre-build call (skip the real model/TTS) to check the decision, not the generation.
     calls = []
-    e._kick_wrap_branches = lambda side_key, scores, other: calls.append((side_key, scores, other))
+    e._kick_wrap_branches = lambda side_key, scores, other, *pinned: calls.append((side_key, scores, other, *pinned))
     # Mike has holed out on hole 1, Sarah hasn't: the second-to-last is in, one side left to putt.
     await e.handle_scorecard(ScorecardEvent(card=Scorecard(holes=list(range(1, 19)),
                                                            scores={"MikeD": {1: 4}, "Sarah": {}})))
     assert calls, "the second-to-last holing out should trigger a pre-build"
-    side_key, scores, other = calls[-1]
+    side_key, scores, other, pinned = calls[-1]
     assert side_key == sarah.key  # branched on the side still to putt
     assert set(scores) == {3, 4, 5, 6}  # par-1..par+2 for a par 4
     assert any("made 4" in f for f in other)  # Mike's known score is fixed in the facts
+    assert pinned == {mike.key: 4}  # ...and kept to check again before a branch airs
     assert mike.key != sarah.key
     assert r.card_score(mike, 1) == 4
+
+    # A branch airs only while the scores written into it still hold: GSPro's round file moving
+    # Mike's 4 to Sarah (a stroke credited to the wrong slot) leaves Mike still out, so every branch
+    # (each saying Mike made 4) is dropped for the on-demand wrap.
+    from commentator.models import Line
+    hole = e.state.current_hole
+
+    def branches(others):
+        e._wrap_branches = {"hole": hole, "side": sarah.key, "others": others,
+                            "by_score": {4: ([Line("pbp", "Pars all round.")], [b"clip"])}}
+
+    r.log_scores, r.card_scores = {}, {"Sarah": {1: 4}}
+    branches({mike.key: 4})
+    assert e._play_prepared_wrap(hole, 1) is False and e._wrap_branches is None
+    r.card_scores = {"MikeD": {1: 4}, "Sarah": {1: 4}}
+    branches({mike.key: 5})
+    assert e._play_prepared_wrap(hole, 1) is False   # Mike's score was corrected after the branch was written
+    branches({mike.key: 4})
+    assert e._play_prepared_wrap(hole, 1) is True
 
 
 def test_classify_round_separates_league_from_practice(tmp_path):
@@ -7438,7 +7472,7 @@ async def test_gspros_log_scores_stand_in_for_the_scorecards_ocr(tmp_path):
     e.gspro.players_seen.discard(2)
     r.log_scores = {}
     calls = []
-    e._kick_wrap_branches = lambda side_key, scores, other: calls.append((side_key, scores, other))
+    e._kick_wrap_branches = lambda side_key, scores, other, *pinned: calls.append((side_key, scores, other, *pinned))
     e.gspro.hole_scores = {(0, 0): 4}        # Kroll holes out on the first hole: one side still to putt
     e._sync_log_scores(r)
     e._note_log_scores(r)
