@@ -1304,16 +1304,12 @@ class Store:
 
     def set_lie_after(self, shot_id: int | None, lie: str | None) -> str | None:
         """Where the ball came to rest, corrected once the next shot says where it was played from. A lie
-        GSPro's round file set stays, unless this one is a finer word for it (semi rough for its rough:
-        round_file.finer_lie); a finer one stored already stays too. The lie the shot has now."""
+        GSPro's round file set stays. The lie the shot has now."""
         if shot_id is None or not lie:
             return None
         tr = self._track(shot_id)
         if tr is not None and tr["lie_after"]:
-            base = tr["lie_after"].lower()
-            if round_file.finer_lie(base, lie).lower() == base:
-                cur = (self.db.execute("SELECT lie_after FROM shots WHERE id = ?", (shot_id,)).fetchone() or [None])[0]
-                lie = cur if cur and round_file.finer_lie(base, cur).lower() == cur.lower() else tr["lie_after"]
+            lie = tr["lie_after"]
         self.db.execute("UPDATE shots SET lie_after = ? WHERE id = ?", (lie, shot_id))
         self.db.commit()
         return lie
@@ -1659,9 +1655,8 @@ class Store:
                              p["attributed"], p["uid"]))
 
     def _apply_track(self, row: sqlite3.Row, t, named: dict | None = None) -> None:
-        def lie(old, new):   # GSPro's lie, unless the HUD read a finer word for it
-            return old if not new else new if not old or round_file.finer_lie(new, old).lower() == new.lower() \
-                else old
+        def lie(old, new):   # GSPro's lie
+            return new or old
         carry, total = t.carry_yards, t.total_yards
         # A scramble keeps a finish only for the ball the team picked (the booth's): see set_format.
         shared = row["fmt"] == "scramble" or bool(row["shared_ball"])

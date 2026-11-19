@@ -46,7 +46,7 @@ PUTT = _entry(3, (2, 295), (0, 300), sp=8.0, putt=True, roll=[(2, 295), (1, 298)
 def _season(tmp_path):
     st = Store(str(tmp_path / "season.db"))
     for n, (sp, putt, outcome, lie_after, total) in enumerate(
-            [(150.2, 0, None, "first cut", 210.0), (99.8, 0, None, "fairway", 90.0), (8.0, 1, "holed", None, 2.0)], 1):
+            [(150.2, 0, None, "rough", 210.0), (99.8, 0, None, "fairway", 90.0), (8.0, 1, "holed", None, 2.0)], 1):
         st.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, club, is_putt, ball_speed,"
                       " lie_before, lie_after, total_yards, carry_game_yards, outcome, raw)"
                       " VALUES (?, ?, 'Dan Smith', 'Test Links', ?, ?, '7I', ?, ?, ?, ?, ?, 150.0, ?, '{}')",
@@ -86,8 +86,8 @@ def test_the_round_file_replaces_the_booths_reads_and_applying_it_again_changes_
     assert (drive["start_x"], drive["start_z"]) == (0.0, 0.0)
     assert drive["carry_game_yards"] == round(math.hypot(4, 180) * M_TO_YD, 1)
     assert (drive["total_yards"], drive["total_from_log"]) == (round(math.hypot(5, 200) * M_TO_YD, 1), 2)
-    # The HUD's finer lie stays; a plain one gives way to GSPro's.
-    assert (drive["lie_after"], approach["lie_before"], approach["lie_after"]) == ("first cut", "fairway", "green")
+    # The HUD's lie gives way to GSPro's.
+    assert (drive["lie_after"], approach["lie_before"], approach["lie_after"]) == ("fairway", "fairway", "green")
     assert approach["finish_yards"] == round(5.4 * M_TO_YD, 1)
     assert putt["total_yards"] == round(math.hypot(2, 5) * M_TO_YD, 1) and putt["finish_yards"] is None
     before = [tuple(r) for r in st.db.execute("SELECT * FROM shots ORDER BY id")]
@@ -164,13 +164,11 @@ def test_the_booths_later_reads_leave_the_round_files_numbers_be(tmp_path):
     assert (after["carry_game_yards"], after["total_yards"]) == (drive["carry_game_yards"], drive["total_yards"])
     assert (after["carry_raw_tile_yards"], after["offline_yards"]) == (150.0, -3.0)
     assert (approach_after["lie_after"], approach_after["finish_yards"]) == ("green", approach["finish_yards"])
-    assert st.set_lie_after(approach["id"], "pine straw") == "green"   # not a finer word for GSPro's green
-    # A finer read that isn't a word for GSPro's lie (the screen's fringe for a ball in the sand) goes.
+    assert st.set_lie_after(approach["id"], "pine straw") == "green"   # GSPro's lie stays
+    # A read stored before the file came goes.
     st.db.execute("UPDATE shots SET lie_after = 'pine straw' WHERE id = ?", (approach["id"],))
     st.apply_round_file(round_file.tracks([DRIVE, APPROACH, PUTT]), now=1005.0)
     assert _row(st, 2)["lie_after"] == "green"
-    st.set_lie_after(approach["id"], "fringe")   # finer than GSPro's code
-    assert _row(st, 2)["lie_after"] == "fringe"
 
 
 def test_a_tracked_shot_is_replayed_along_its_flight_and_roll(tmp_path):
@@ -552,16 +550,6 @@ def test_a_stroke_says_what_its_penalty_was_and_whether_the_ball_dropped():
     assert chip_in.in_cup and chip_in.dropped and chip_in.finish_yards == 0.0
     given = round_file.tracks([{**chip, "HoleResult": 7}])[0]
     assert given.dropped and not given.in_cup and given.finish_yards == round(0.3 * M_TO_YD, 1)
-
-
-def test_a_finer_hud_lie_is_kept_only_inside_gspros():
-    assert round_file.finer_lie("rough", "first cut") == "first cut"
-    assert round_file.finer_lie("rough", "semi rough") == "rough"   # GSPro has its own code for semi rough
-    assert round_file.finer_lie("green", "fringe") == "fringe"
-    assert round_file.finer_lie("sand", "fringe") == "sand"         # it rolled on from the fringe
-    assert round_file.finer_lie("fairway", "rough") == "fairway"    # not finer: GSPro's stands
-    assert round_file.finer_lie("fairway", None) == "fairway"
-    assert round_file.finer_lie(None, "structure") == "structure"   # a surface GSPro's code isn't known for
 
 
 def test_round_end_keeps_a_copy_named_by_start_and_course_and_prunes_the_oldest(tmp_path):

@@ -23,15 +23,14 @@ name: the shooter isn't in the log until the ball stops.
 ## Drop the screen's setup lie once the round file covers every setup
 
 The lie a player sets up on comes from `currentRound.dat` (`Engine._file_rest_lie`: the player's last
-stroke's EndingSurface), with the screen's finer word kept (`round_file.finer_lie`). The screen read
+stroke's EndingSurface), which outranks the screen's word. The screen read
 (and `_reread_setup_lie`'s retries) and the log's first-bounce material (`GsproState.lie_by`,
 `_setup_log_lies`) remain as fallbacks for a team ball (scramble, alternate shot), a penalty or drop,
 the first setup before the watcher has the stroke, a ball that ended on the cart path (free relief may
 have moved it; the stroke's own StartingSurface is recorded once it's in the file), and an EndingSurface
 code that names no lie. `round_file.SURFACES` maps every code GSPro has: the index into its
-`Trajectory.PhyMatList` (0-22, from the game code), semi rough (12) and pine straw (16) included, so
-the screen's word is kept over the file's only for the finer lies left in `FINER_LIES` (first cut,
-fringe, fescue, native, bunker, waste). Only 0 (the ball's own material) and 19 (`none`: GSPro found
+`Trajectory.PhyMatList` (0-22, from the game code), semi rough (12) and pine straw (16) included.
+Only 0 (the ball's own material) and 19 (`none`: GSPro found
 no surface under the ball) fall back to the screen. Codes 6 (earth), 7 (dropzone), 13 (stone) and
 17 (leaves) take plain words the booth had none for (dirt, drop zone, stone, leaves) and play no
 pre-written result line (`flight_pick._LIE_REACTION`); only 1, 2, 3, 5, 11 and 18 have been seen

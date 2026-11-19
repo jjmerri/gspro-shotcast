@@ -1624,8 +1624,8 @@ class Engine:
         screen_lie = hud.lie
         if (hud.lie or "").lower() != "tee" and (
                 file_lie := self._file_rest_lie(self._player(hud.player_text, None), hud.shot_number)):
-            # Where GSPro's round file has the ball at rest outranks the screen (round_file.finer_lie).
-            if (lie := round_file.finer_lie(file_lie, hud.lie)) != (hud.lie or "").lower():
+            # Where GSPro's round file has the ball at rest outranks the screen.
+            if (lie := file_lie) != (hud.lie or "").lower():
                 log.info("Setup lie %s from GSPro's round file (the screen read %s)", lie, hud.lie)
                 hud.lie = lie
         if not hud.lie and hud.shot_number != 1 and self.cfg.screen.ocr:
@@ -8371,9 +8371,10 @@ class Engine:
             near = (hud.lie or "").lower() in ("", "green", "fringe")
             base_hole = impact_snap[1].get(idx)
             base_setup = setups0.get(idx, 0)
-            # A short chip or splash that drops may have no stroke in GSPro's round file (it moves
-            # straight on to the next hole), so it counts as near without `landed`, with a longer
-            # window: the hole-out reaches the log a few seconds later. A chip that stays out resolves
+            # GSPro writes a holed stroke to its round file as the ball drops (BallInTheHole), but a short
+            # chip or splash can still reach here without it (no watch of the file, or the stroke not yet
+            # read), so it counts as near without `landed`, with a longer window: the hole-out reaches the
+            # log a few seconds later. A chip that stays out resolves
             # as soon as GSPro sets the player up again, so the wait costs a miss almost nothing.
             short = (start_yards := to_yards(before.to_pin)) is not None and start_yards <= SHORT_GAME_YARDS
             watch = logged and near and (landed or short or hole_over())
@@ -9141,7 +9142,7 @@ class Engine:
     def _played_from(self, before: Hud, shot: Shot, info: dict, material: str | None,
                      hole_label: str | None = None, file_lie: str | None = None) -> str | None:
         """The lie this shot was really struck from, for the record. GSPro's round file says it outright
-        (`file_lie`, the stroke's StartingSurface; a finer HUD word for it is kept: round_file.finer_lie).
+        (`file_lie`, the stroke's StartingSurface).
         Without it, the HUD's lie read and the log's material (where the previous shot LANDED, not where
         it stopped) both misread: a ball that landed on the green and rolled into a bunker, a bunker ball
         shown as rough. GSPro's own word wins: the first stroke on a hole is off the tee, and a shot struck
@@ -9149,7 +9150,7 @@ class Engine:
         those and logged none for this shot, it wasn't played from rough or sand, whatever the other
         reads said."""
         if file_lie:
-            return round_file.finer_lie(file_lie, before.lie)
+            return file_lie
         if before.shot_number == 1:
             return "tee"
         if (before.lie or "").lower() == "tee" and not shot.is_putt and self._at_tee_length(before, hole_label):

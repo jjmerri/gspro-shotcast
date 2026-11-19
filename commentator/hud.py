@@ -19,12 +19,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Documented on the GSPro HUD: Tee, Fairway, Rough, Deep Rough, Sand, Green. Pine straw and
-# concrete exist too (exact HUD spelling unconfirmed); the rest are surfaces courses may have.
-# Listing them gives each its own penalty instead of being read as nothing. Multi-word names
-# come before their parts.
-LIES = ("deep rough", "semi rough", "pine straw", "cart path", "waste area", "fairway", "rough", "green",
-        "fringe", "bunker", "sand", "tee", "water", "hazard", "out of bounds", "fescue", "native", "waste",
-        "concrete", "trees")
+# concrete exist too (exact HUD spelling unconfirmed). Listing them gives each its own penalty
+# instead of being read as nothing. Multi-word names come before their parts.
+LIES = ("deep rough", "semi rough", "pine straw", "cart path", "fairway", "rough", "green",
+        "sand", "tee", "water", "hazard", "out of bounds", "concrete", "trees")
 
 # Inches (0-11) only after feet. No \b after the unit: 3.59 OCRs a putt's "28ft 1" as "28ft1", and can
 # lose the elevation arrow between them ("5ft 5 ▼0ft 0" as "5ft 50ft 0"), hence a single inch digit

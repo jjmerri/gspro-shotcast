@@ -50,11 +50,6 @@ SURFACES = {0: None, 1: "rough", 2: "fairway", 3: "deep rough", 4: "cart path", 
             7: "drop zone", 8: "green", 9: "green", 10: "green", 11: "sand", 12: "semi rough", 13: "stone",
             14: "structure", 15: "water", 16: "pine straw", 17: "leaves", 18: "tee", 19: None, 20: "tee",
             21: "trees", 22: "structure"}
-# A finer lie word read off the HUD is kept only where it fits inside GSPro's code for where the ball
-# stopped. Semi rough and pine straw are GSPro's own codes, so its word for them stands.
-FINER_LIES = {"first cut": ("rough", "fairway"), "fringe": ("green", "fairway"),
-              "fescue": ("rough", "deep rough"), "native": ("rough", "deep rough"),
-              "bunker": ("sand",), "waste area": ("sand", "rough"), "waste": ("sand", "rough")}
 # ClubIndex: GSPro's club, in its bag's order (ClubSelect in the 4.x game code): driver, 2-7 woods, 2-7
 # hybrids, 1-9 irons, then pitching, gap, sand and lob wedges and the putter; 27 is none. As the booth's
 # codes (hud.CLUB_WORDS).
@@ -202,17 +197,6 @@ class PickBall:
     yards: float | None
     lie: str | None
     penalty: bool = False
-
-
-def finer_lie(lie: str | None, hud_lie: str | None) -> str | None:
-    """GSPro's lie for where the ball stopped, or the HUD's finer word for it when that fits inside it
-    (FINER_LIES). With no code GSPro's lie is known by, the HUD's read (taken at rest) stands alone."""
-    hud = (hud_lie or "").lower()
-    if lie is None:
-        return hud or None
-    if hud in FINER_LIES and lie in FINER_LIES[hud]:
-        return hud
-    return lie
 
 
 def file_club(t: Track) -> str | None:

@@ -4823,10 +4823,10 @@ def test_the_recorded_lie_is_where_gspro_says_the_shot_was_played_from(tmp_path)
     assert e._played_from(Hud(lie="rough", shot_number=2), full, {}, "rough") == "rough"
     e.gspro.logs_penalty_surface = False
     assert e._played_from(Hud(lie="rough", shot_number=2), full, played, "fairway") == "rough"
-    # GSPro's round file has the stroke's StartingSurface: it's the lie, a finer HUD word for it kept.
+    # GSPro's round file has the stroke's StartingSurface: it's the lie, over the HUD's.
     assert e._played_from(Hud(lie="rough", shot_number=2), full, played, "fairway", None, "sand") == "sand"
-    assert e._played_from(Hud(lie="fringe", shot_number=3), putt, {"putting": True}, "fairway", None,
-                          "green") == "fringe"
+    assert e._played_from(Hud(lie="rough", shot_number=3), putt, {"putting": True}, "fairway", None,
+                          "green") == "green"
 
 
 def test_the_setup_lie_is_where_gspros_round_file_has_the_ball_at_rest(tmp_path):
