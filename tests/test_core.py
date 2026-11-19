@@ -7814,3 +7814,20 @@ def test_a_pick_ball_a_finish_was_known_for_keeps_it_through_a_late_penalty_and_
     _pick_file(e, ("Ozzy", 150.0, 5, 0.03, False), ("Kyle Martin", 140.0, 5, 24 / M_TO_YD, True))
     e._apply_pick_cards()
     assert e.store.finish_of(kyle)[1] == 24.0   # the pick never wrote it: not the pick's to take back
+
+
+def test_a_shot_gspros_round_file_makes_a_putt_after_the_live_follow_is_graded_as_one(tmp_path):
+    from commentator.round import Round
+
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Paul"], course="X", scheduled_format=None, holes=9, is_league=False)
+    e.round = r
+    sid, rec = _row(e, r, 7, 2, "green", hole=0, seq=1)
+    rec.shot_id = sid
+    e.gspro._fire_info.update({7: {"player": 0, "hole": 0}, 8: {"player": 0, "hole": 0}})   # hit again there
+    e.gspro.fires = 8
+    e.store.db.execute("UPDATE shots SET club = 'PT', is_putt = 1 WHERE id = ?", (sid,))
+    e._sync_file_clubs()
+    assert rec.shot.is_putt and 7 in e._outcomes_due
+    e._settle_outcomes()
+    assert rec.outcome == "missed"

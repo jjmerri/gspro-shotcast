@@ -7442,3 +7442,29 @@ async def test_a_file_lie_dropped_with_its_stroke_leaves_the_lie_the_screen_had(
                                   impact_hud_hint=hud))
     assert len(checks) == 2 and e.state.shots[-1].lie_before == "fairway"
     assert e.store.db.execute("SELECT lie_before FROM shots").fetchone()[0] == "fairway"
+
+
+async def test_a_file_lie_is_recorded_over_the_screens_which_it_keeps_to_go_back_to(tmp_path):
+    from commentator import round_file
+    from commentator.models import ShotEvent
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    e.commentary_on = False
+    e.screen = None
+    track = round_file.Track("s2", None, None, "Kroll", 1, 2, 120.0, False, (0.0, 0.0, 0.0), (0.0, 0.0, 150.0),
+                             None, lie_before="sand", lie_after="green")
+
+    async def refreshed():
+        return None
+    e._round_watch, e._refresh_round_file = type("W", (), {"written": 0.0})(), refreshed
+    e._file_track_of = lambda *a, **k: track
+    e._file_ours = lambda *a, **k: True
+    hud = _tee("Kroll", shot=2)
+    hud.lie = "fairway"
+    await e.handle_shot(ShotEvent(shot=Shot(club="7I", carry=150.0, ball_speed=120.0), hud_hint=hud,
+                                  impact_hud_hint=hud))
+    # GSPro's sand is the shot's; the stored row has the screen's until the stroke's pin puts GSPro's on,
+    # so a pin taken back leaves the fairway.
+    assert e.state.shots[-1].lie_before == "sand"
+    assert e.store.db.execute("SELECT lie_before FROM shots").fetchone()[0] == "fairway"
+    assert e._file_pins.get("s2") == e.state.shots[-1].shot_id

@@ -3601,9 +3601,10 @@ class Engine:
                 self._unslot(x.shot_id)
 
     def _sync_file_clubs(self) -> None:
-        """The live round's shots take the club (and putt or not) the store has for them: GSPro's round
-        file can correct one after the live follow ended, or take its correction back, and the round's
-        stats (its longest drive) are worked out from these."""
+        """The live round's shots take the club (and putt or not) and the lie played from the store has for
+        them: GSPro's round file can correct one after the live follow ended, or take its correction back,
+        and the round's stats (its longest drive) are worked out from these. A shot it makes a putt is
+        graded as one (a miss the log showed, which a full shot isn't given)."""
         r = self.round
         if r is None:
             return
@@ -3611,11 +3612,19 @@ class Engine:
         if not recs:
             return
         ids = list(recs)
-        for i, club, putt in self.store.db.execute(
-                f"SELECT id, club, is_putt FROM shots WHERE id IN ({', '.join('?' * len(ids))})", ids).fetchall():
+        fires = {v[0]: f for f, v in self._fire_rows.items() if v[2] is not None}
+        for i, club, putt, lie in self.store.db.execute(
+                f"SELECT id, club, is_putt, lie_before FROM shots WHERE id IN ({', '.join('?' * len(ids))})",
+                ids).fetchall():
             x = recs[i]
             if club != x.shot.club or bool(putt) != x.shot.is_putt:
+                was_putt = x.shot.is_putt
                 x.shot = replace(x.shot, club=club, putter=bool(putt))
+                if putt and not was_putt and x.outcome is None and (f := fires.get(i)) is not None:
+                    self._outcomes_due.add(f)
+                    self._resettle.add(f)
+            if lie != x.lie_before:
+                x.lie_before = lie
 
     def _unslot(self, shot_id: int) -> None:
         """A shot GSPro's round file named is no longer that player's: the log slot taken when the log
@@ -7775,6 +7784,7 @@ class Engine:
         if in_yards:
             log.info("%s set up in yards: off the green, recorded as %s", tag, played_from)
         # Where it was played from without GSPro's round file, should that round turn out another's.
+        # (recorded with it: GSPro's goes on with the stroke's pin, which keeps this one to go back to)
         screen_played = played(replace(before, shot_number=screen_before.shot_number), None)[0] if file_lie else None
         # The HUD's Tee recast only for want of a distance to check it by may still be a re-tee: keep its driver.
         retee = (before.lie or "").lower() == "tee" and self._at_tee_length(before, shot_hole) is None
@@ -7811,7 +7821,7 @@ class Engine:
         if notable_delivery and use_delivery:
             score += 0.5
             tags.append("club_notable")
-        relie = screen_played is not None and screen_played != before.lie
+        relie = bool(file_lie) and screen_played != before.lie
         if file_track is not None and file_ours and (before.shot_number != screen_before.shot_number
                                                      or screen_club is not None or relie) \
                 and not self._file_ours(file_track, shot_round, tag):   # GSPro's round tied to another since
@@ -7884,7 +7894,7 @@ class Engine:
             # (a putt or not as GSPro's club makes it, which the pin doesn't change)
             player=player, hole=shot_hole,
             shot=shot if screen_club is None else replace(shot, club=screen_club[0], putter=shot.is_putt),
-            before=before, after=hud, tags=tags,
+            before=replace(before, lie=screen_played) if file_lie else before, after=hud, tags=tags,
             carry_game_yards=carry_game, total_yards=tile_yards("total length"), offline_yards=tile_yards("offline (raw)"),
             course=shot_course, carry_raw_tile_yards=carry_flat,
             to_pin_yards=to_yards(before.to_pin),
