@@ -5089,6 +5089,22 @@ def test_the_setup_lie_is_where_gspros_round_file_has_the_ball_at_rest(tmp_path)
     assert e._file_rest_lie("Dan", 2) is None
 
 
+def test_a_ball_gspros_round_file_left_on_the_cart_path_takes_the_setups_lie(tmp_path):
+    # Free relief from the cart path: the setup's rough is where the ball is now, not the drive's ending.
+    from commentator import round_file
+    from commentator.round import Round
+    from commentator.sources.gspro_files import RoundFileWatch
+    e = _mini_engine(tmp_path)
+    e.round = Round(league=e.league, gspro_players=["Dan"], course="Test Links", scheduled_format=None,
+                    holes=18, start_hole=1, is_league=False)
+    e.hole_number = 1
+    entries = [_round_entry(1, 150.0, surfaces=(18, 4))]
+    e._file_entries, e._file_tracks = entries, round_file.tracks(entries)
+    e._round_watch = w = RoundFileWatch(str(tmp_path))
+    w.entries, w.written = entries, time.time()
+    assert e._file_rest_lie("Dan", 2) is None
+
+
 def test_the_setup_lie_from_gspros_round_file_is_not_another_players_whose_name_fits(tmp_path):
     from commentator import round_file
     from commentator.round import Round

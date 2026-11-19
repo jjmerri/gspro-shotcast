@@ -3312,7 +3312,8 @@ class Engine:
         """Where GSPro's round file has `player`'s ball sitting before their stroke `shot_number` (GSPro's
         own number, as its HUD and log have it: no penalty the booth added) on the hole in play: their last
         stroke's EndingSurface, as a booth lie. None when the file can't say:
-        no such stroke yet, a penalty or a holed ball (play goes on from elsewhere), a code with no
+        no such stroke yet, a penalty or a holed ball (play goes on from elsewhere), the cart path (free
+        relief may have moved it: the stroke's own StartingSurface says where from), a code with no
         name (round_file.SURFACES), a team ball (scramble, alternate shot, or a shamble's picked drive:
         GSPro copies balls between partners), or another round's file."""
         r = self.round
@@ -3325,7 +3326,7 @@ class Engine:
             return k is not None and player in (k, r.roster.get(k)) and self._file_names_fit(name, player)
         t = next((t for t in reversed(self._file_tracks) if t.hole == self.hole_number
                   and t.shot_number == shot_number - 1 and theirs(t.player)), None)
-        if t is None or t.penalty or t.dropped or t.in_cup or not t.lie_after:
+        if t is None or t.penalty or t.dropped or t.in_cup or not t.lie_after or t.lie_after == "cart path":
             return None
         try:
             ours = self._file_round_test(r)(t, r.course or self.current_course)
@@ -6110,6 +6111,7 @@ class Engine:
         """GSPro's own records name the slot that hit a shot (_learn_file_slots): the screen misread who
         was up, so the shot is `name`'s."""
         shot_id, rec, _, _ = self._fire_rows[fire]
+        was = rec.player
         log.info("Shot %s: the screen said %s hit it, GSPro's log and round file have %s in slot %d: it's "
                  "theirs", shot_id, rec.player, name, owner + 1)
         # Its finish and result were followed on the misread player's slot: void them, so the next
@@ -6124,14 +6126,22 @@ class Engine:
             for cache in (self._pending_finish, self._last_row):
                 for k in [k for k, v in cache.items() if v is not None and v[0] == shot_id]:
                     del cache[k]
-                # Its owner's earlier shot isn't their last any more: their next setup is where this one stopped.
-                if shot_id is not None and (prev := cache.get(owner)) is not None and prev[0] is not None \
-                        and prev[0] < shot_id:
-                    del cache[owner]
+                # Its owner's earlier swing isn't their last any more: their next setup is where this one stopped.
+                # (by swing, not row: a slow handler can store an earlier swing's row after a later one's)
+                if (prev := cache.get(owner)) is not None and prev[0] is not None and shot_id is not None:
+                    pf = next((f for f, v in self._fire_rows.items() if v[0] == prev[0]), None)
+                    if (pf < fire) if pf is not None else prev[0] < shot_id:
+                        del cache[owner]
             self._void_result(shot_id, rec)
         self._fire_rows[fire] = (shot_id, rec, owner, self.gspro.fire_info(fire).get("hole"))
         self._renames.add(fire)
         self._rename_remapped(self.round)
+        if shot_id is not None and rec.player != was:
+            # Stored as the misread player's next stroke, it unholed their hole-out: that stands again.
+            for x in self.state.shots:
+                if x.round_id == rec.round_id and x.player == was and x.hole_seq == rec.hole_seq \
+                        and x.outcome == "holed" and x.shot_id is not None and x.shot_id < shot_id:
+                    self.store.set_shot_result(x.shot_id, outcome="holed")
         if regrade:
             self._outcomes_due.add(fire)
             self._resettle.add(fire)   # graded however long ago, while the log still has it

@@ -44,7 +44,8 @@ The lie a player sets up on comes from `currentRound.dat` (`Engine._file_rest_li
 stroke's EndingSurface), with the screen's finer word kept (`round_file.finer_lie`). The screen read
 (and `_reread_setup_lie`'s retries) and the log's first-bounce material (`GsproState.lie_by`,
 `_setup_log_lies`) remain as fallbacks for a team ball (scramble, alternate shot), a penalty or drop,
-the first setup before the watcher has the stroke, and an unknown EndingSurface code (only 1, 2, 3, 4,
+the first setup before the watcher has the stroke, a ball that ended on the cart path (free relief may
+have moved it; the stroke's own StartingSurface is recorded once it's in the file), and an unknown EndingSurface code (only 1, 2, 3, 4,
 5, 11 and 18 are mapped in `round_file.SURFACES`). Check the booth logs for `Setup lie ... from GSPro's
 round file` against setups without it; if the gaps are only team balls, map those from the file too
 (the pick's stroke) and drop the log's `lie_by` fallback.

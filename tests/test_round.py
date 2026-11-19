@@ -6337,6 +6337,62 @@ def test_a_shot_the_file_moves_to_its_shooters_slot_is_their_last_not_their_shot
     assert 0 not in e._last_row and 0 not in e._pending_finish
 
 
+def test_a_hole_out_the_screen_misread_next_stroke_unholed_stands_once_the_file_renames_it(tmp_path):
+    # Kroll holed out; Barrows' next stroke, read as Kroll's, was stored as Kroll's fourth (unholing his
+    # third). GSPro's round file has it as Barrows': Kroll's hole-out stands again.
+    e = _guest_round(tmp_path, ["Kroll", "Barrows"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.setup_slots = ["Kroll", "Barrows"]
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    e._file_entries = [_file_ball("Barrows", 150.0), _file_ball("Kroll", 140.0)]
+    e.gspro._fire_info = {1: {"player": 0, "hole": 0, "launch": {"sp": 150.0, **_LAUNCH}},
+                          2: {"player": 1, "hole": 0, "launch": {"sp": 140.0, **_LAUNCH}}}
+    e.gspro.fires = 2
+    e._apply_log_corrections()
+    assert e._gspro_idx("Kroll") == 1
+    shot = _row_maker(e)
+    holed = shot(2, "Kroll", 1, outcome="holed", sp=140.0)
+    holed.shot_id = hid = e._fire_rows[2][0]
+    e.state.shots.append(holed)
+    e.store.set_shot_result(hid, outcome="holed")
+    record = e.store.record_shot
+
+    def unholing(**kw):   # (the store's played-on check, with the strokes' numbers)
+        sid = record(**kw)
+        e.store.db.execute("UPDATE shots SET outcome = 'missed' WHERE id = ?", (hid,))
+        return sid
+    e.store.record_shot = unholing
+    e._file_entries += [_file_ball("Barrows", 130.0, n=2)]
+    rec = shot(3, "Kroll", 0, sp=130.0, slot=1)
+    assert rec.player == "Barrows"
+    assert e.store.db.execute("SELECT outcome FROM shots WHERE id = ?", (hid,)).fetchone()[0] == "holed"
+
+
+def test_a_late_stored_earlier_swing_the_file_moves_keeps_its_shooters_newer_finish(tmp_path):
+    # Barrows' later swing (fire 3) is already his last; the earlier one (fire 2), stored after it by a
+    # slow handler, moves to his slot: his newer swing's finish still follows.
+    e = _guest_round(tmp_path, ["Kroll", "Barrows"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.setup_slots = ["Kroll", "Barrows"]
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    e._file_entries = [_file_ball("Barrows", 150.0), _file_ball("Kroll", 140.0)]
+    e.gspro._fire_info = {1: {"player": 0, "hole": 0, "launch": {"sp": 150.0, **_LAUNCH}},
+                          2: {"player": 1, "hole": 0, "launch": {"sp": 140.0, **_LAUNCH}}}
+    e.gspro.fires = 2
+    e._apply_log_corrections()
+    assert e._gspro_idx("Barrows") == 0
+    shot = _row_maker(e)
+    newer = shot(4, "Barrows", 0, sp=150.0)
+    nid = e._fire_rows[4][0]
+    e._last_row[0] = e._pending_finish[0] = (nid, newer, 0, 0, 0)
+    e._file_entries += [_file_ball("Barrows", 130.0, n=2)]
+    rec = shot(3, "Kroll", 0, sp=130.0, slot=1)
+    assert rec.player == "Barrows" and e._fire_rows[3][0] > nid
+    assert e._last_row[0][0] == nid and e._pending_finish[0][0] == nid
+
+
 def test_a_result_followed_on_the_right_slot_under_a_misread_order_goes_with_the_shot_the_file_renames(tmp_path):
     # The setup screen read Kroll first, and the screen read Kroll for Barrows' ball: its result was
     # followed on slot 0, Barrows' own, so it stands when GSPro's round file has the ball as Barrows'.
