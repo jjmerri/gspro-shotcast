@@ -6477,6 +6477,19 @@ def test_a_shot_with_no_number_on_screen_takes_the_stroke_gspro_logged_at_impact
     assert done.shot_number is None
 
 
+def test_a_misread_shot_1_given_gspros_round_files_lie_keeps_the_logs_for_a_rejected_match(tmp_path, monkeypatch):
+    e = _mini_engine(tmp_path)
+    e.cfg.source.gspro_log_truth = True
+    monkeypatch.setattr(e, "_gspro_idx", lambda player: 0)
+    monkeypatch.setattr(e, "_file_rest_lie", lambda player, n: "sand")
+    snap = (None, {0: 1}) + (None,) * 4 + ({0: 3},) + (None, 0, (None, None))
+    e.hole_number = 2
+    hud = Hud(shot_number=1, to_pin="19.6 yards", lie="tee")
+    shot_one = e._misread_shot_one(hud, "Dan", snap, {0: "fairway"}, "Hole 2, par 4, 361 yards")
+    assert (hud.shot_number, hud.lie) == (3, "sand")
+    assert e._unfiled_setup(hud, hud, shot_one).lie == "fairway"
+
+
 def test_an_impact_read_of_shot_1_away_from_the_tee_takes_the_stroke_gspro_logged(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

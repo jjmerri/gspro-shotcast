@@ -3608,8 +3608,11 @@ class Engine:
                 x.shot_number = n if n is not None else x.shot_number   # (as stored: _unrefile's, maybe)
                 self._unslot(x.shot_id)
 
-    def _unfiled_setup(self, before: Hud, screen_before: Hud) -> Hud:
-        """The setup as the screen read it: the lie GSPro's round file overrode at setup, put back."""
+    def _unfiled_setup(self, before: Hud, screen_before: Hud, shot_one: tuple | None = None) -> Hud:
+        """The setup as the screen read it: the lie GSPro's round file overrode at setup (or for a
+        misread shot 1: `shot_one`, its file lie and the one without it), put back."""
+        if shot_one is not None and before.lie == shot_one[0]:
+            return replace(before, lie=shot_one[1])
         k = _setup_key(screen_before)
         if k in self._setup_screen_lies and before.lie == self._setup_lies.get(k):
             return replace(before, lie=self._setup_screen_lies[k])
@@ -6121,6 +6124,10 @@ class Engine:
             for cache in (self._pending_finish, self._last_row):
                 for k in [k for k, v in cache.items() if v is not None and v[0] == shot_id]:
                     del cache[k]
+                # Its owner's earlier shot isn't their last any more: their next setup is where this one stopped.
+                if shot_id is not None and (prev := cache.get(owner)) is not None and prev[0] is not None \
+                        and prev[0] < shot_id:
+                    del cache[owner]
             self._void_result(shot_id, rec)
         self._fire_rows[fire] = (shot_id, rec, owner, self.gspro.fire_info(fire).get("hole"))
         self._renames.add(fire)
@@ -7483,8 +7490,7 @@ class Engine:
         self._count_added_penalty(before, player, tag)
         if use_screen and before.shot_number is None:
             self._number_from_log(before, player, impact_snap, tag)
-        if use_screen:
-            self._misread_shot_one(before, player, impact_snap, lies0, shot_hole, tag)
+        shot_one = self._misread_shot_one(before, player, impact_snap, lies0, shot_hole, tag) if use_screen else None
         # GSPro's own club box beats guessing the club from loft.
         before.club = deck_club(before.club, before.shot_number, before.lie)
         if before.club:
@@ -7793,7 +7799,7 @@ class Engine:
         info, material = self.gspro.fire_info(fire), MATERIAL_TO_LIE.get(lies0.get(idx)) if idx is not None else None
         file_lie = file_track.lie_before if file_track is not None and file_ours else None
         # The setup lie GSPro's file gave, from a round that isn't this one's: back to the screen's.
-        unfiled = self._unfiled_setup(before, screen_before)
+        unfiled = self._unfiled_setup(before, screen_before, shot_one)
         if file_track is not None and not file_ours and unfiled.lie != before.lie:
             log.info("%s set up on %s after all (not GSPro's round file's %s)", tag, unfiled.lie, before.lie)
             before = unfiled
@@ -7807,7 +7813,7 @@ class Engine:
             log.info("%s set up in yards: off the green, recorded as %s", tag, played_from)
         # Where it was played from without GSPro's round file, should that round turn out another's.
         # (recorded with it: GSPro's goes on with the stroke's pin, which keeps this one to go back to)
-        unfiled = replace(self._unfiled_setup(before, screen_before), shot_number=screen_before.shot_number)
+        unfiled = replace(self._unfiled_setup(before, screen_before, shot_one), shot_number=screen_before.shot_number)
         screen_played = played(unfiled, None)[0] if file_lie else None
         # The HUD's Tee recast only for want of a distance to check it by may still be a re-tee: keep its driver.
         retee = (before.lie or "").lower() == "tee" and self._at_tee_length(before, shot_hole) is None
@@ -8880,7 +8886,7 @@ class Engine:
         return (idx, hole) in (impact_snap[10] if len(impact_snap) > 10 else self._finished_holes())
 
     def _misread_shot_one(self, before: Hud, player: str | None, impact_snap: tuple, lies0: dict,
-                          hole_label: str | None, tag: str = "") -> None:
+                          hole_label: str | None, tag: str = "") -> tuple[str, str | None] | None:
         """An impact read of "shot 1" away from the tee, where GSPro's log (as it stood at impact) has
         the player further on this hole: the strip's boxed digit misread (Dan's third at Sand Valley's
         2nd, a lob wedge from 19.6 yards, read "1", then recorded off the tee and called "for eagle").
@@ -8907,7 +8913,11 @@ class Engine:
         log.info("%s shot %s, not the HUD's 1: %s from the pin isn't the tee", tag, n, before.to_pin)
         before.shot_number = n
         if (before.lie or "").lower() == "tee":
-            before.lie = self._file_rest_lie(player, n) or MATERIAL_TO_LIE.get(lies0.get(idx)) or before.lie
+            fallback = MATERIAL_TO_LIE.get(lies0.get(idx)) or before.lie
+            before.lie = self._file_rest_lie(player, n) or fallback
+            if before.lie != fallback:
+                return before.lie, fallback   # (GSPro's file's: the lie without it, should it be another round's)
+        return None
 
     def _use_setup_lie(self, before: Hud, tag: str = "") -> None:
         """The lie this stroke's setup read, while the player stood over the ball, over the impact

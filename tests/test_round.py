@@ -6314,6 +6314,29 @@ def test_gspros_round_file_places_the_players_the_setup_screen_misread(tmp_path)
     assert e.round.file_slots == {} and e._slot_trust(1, "Kroll") != "GSPro's round file names the slot"
 
 
+def test_a_shot_the_file_moves_to_its_shooters_slot_is_their_last_not_their_shot_before(tmp_path):
+    # Barrows' earlier ball waits on his slot for where it stopped: the next one, credited to Kroll's
+    # slot, is Barrows' by GSPro's round file, and his next setup is where THAT one stopped.
+    e = _guest_round(tmp_path, ["Kroll", "Barrows"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.setup_slots = ["Kroll", "Barrows"]
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    e._file_entries = [_file_ball("Barrows", 150.0), _file_ball("Kroll", 140.0)]
+    e.gspro._fire_info = {1: {"player": 0, "hole": 0, "launch": {"sp": 150.0, **_LAUNCH}},
+                          2: {"player": 1, "hole": 0, "launch": {"sp": 140.0, **_LAUNCH}}}
+    e.gspro.fires = 2
+    e._apply_log_corrections()
+    assert e._gspro_idx("Barrows") == 0
+    shot = _row_maker(e)
+    older = shot(2, "Barrows", 0, sp=150.0)
+    e._last_row[0] = e._pending_finish[0] = (e._fire_rows[2][0], older, 0, 0, 0)
+    e._file_entries += [_file_ball("Barrows", 130.0, n=2)]
+    rec = shot(3, "Kroll", 0, sp=130.0, slot=1)
+    assert rec.player == "Barrows"
+    assert 0 not in e._last_row and 0 not in e._pending_finish
+
+
 def test_a_result_followed_on_the_right_slot_under_a_misread_order_goes_with_the_shot_the_file_renames(tmp_path):
     # The setup screen read Kroll first, and the screen read Kroll for Barrows' ball: its result was
     # followed on slot 0, Barrows' own, so it stands when GSPro's round file has the ball as Barrows'.
