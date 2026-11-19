@@ -27,6 +27,16 @@ what GSPro scored. Shotcast puts three feeds together (see `commentator/sources/
 Player names are matched against the league file (each player's `gspro_name` and `aliases`),
 tolerating small OCR errors; without one, players are recorded under their GSPro names.
 
+GSPro's log credits each stroke to a player slot (`ActivePlayer: N`) once the ball stops, but it
+never names the player. On GSPro 4.x the booth learns the names from the log and the round file
+together: the log's launch numbers for a shot (`LaunchExt Vars`) match the ball the round file
+saved under a `PlayerName`, so that slot is that player. From the first such match, the file's
+slot outranks the setup screen's player order and the HUD's name on the shot: a shot the screen
+gave to the wrong player is moved to the slot's player, and a setup order the file contradicts is
+dropped. Until then, and on GSPro 3.59 (no launch numbers in its log), the setup screen and the
+HUD's name are used as before. Who is up *before* a shot is never in the log, so the pre-shot
+call still reads the name off the screen.
+
 ## Launch monitors
 
 Shotcast records what GSPro plays, so it works with any launch monitor GSPro supports. What the

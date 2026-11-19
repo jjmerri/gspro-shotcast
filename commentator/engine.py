@@ -774,6 +774,10 @@ class Engine:
         # a ShotID whose hole may yet end on it with no log to say (a scramble's pick, later) ->
         # (the shot, its tag, record, putt?, monotonic deadline): _settle_file_ends
         self._file_ends_due: dict[str, tuple] = {}
+        # The round's shots GSPro's log credited to a slot, fire -> (slot, launch numbers), and what
+        # _learn_file_slots last worked them out from (the round, how many, the file's version).
+        self._file_credits: dict[int, tuple[int, dict]] = {}
+        self._file_slots_from: tuple | None = None
         self._booth_wall0 = time.time()   # a round file last written before this is no live GSPro's
         self.league = league
         self._own_handicaps_task: asyncio.Task | None = None   # (_refresh_own_handicaps)
@@ -3467,6 +3471,10 @@ class Engine:
                 self._sync_file_names()
             except sqlite3.Error as e:
                 log.debug("Couldn't read the names GSPro's round file gave: %s", e)
+            try:
+                self._learn_file_slots()
+            except Exception:
+                log.exception("Couldn't place the players in GSPro's slots from its round file")
 
     def _sync_file_names(self) -> None:
         """The live round's shots the booth recorded blind take the player, hole and stroke number the store
@@ -5845,6 +5853,94 @@ class Engine:
         self._scramble_pairs = set()   # the log's teams are by slot: re-read them under the new order
         return True
 
+    def _file_roster_key(self, r: Round, name: str) -> str | None:
+        """The round's GSPro name for a name GSPro's round file has (typed, not read off the screen): the
+        same, the one it fits word for word (round_file.names_fit), else the one the league player it
+        names goes by. None when no single one does."""
+        if name in r.roster:
+            return name
+        for fits in ([g for g in r.roster if g.casefold() == name.casefold()],
+                     [g for g in r.roster if round_file.names_fit(name, g) or round_file.names_fit(g, name)],
+                     [g for g in r.roster if (p := self._file_player(name)) and r.roster.get(g) == p]):
+            if len(fits) == 1:
+                return fits[0]
+            if fits:
+                return None
+        return None
+
+    def _learn_file_slots(self) -> None:
+        """Who's in each of GSPro's slots, from GSPro's own records: each of the round's shots the log
+        credited to a slot (its shooter's score line, once the ball stopped) is tied by its launch
+        numbers to the round file's stroke, which names the player (round_file.slot_players; GSPro 4.x,
+        which logs the numbers). Once known, a slot's name is taken over the setup screen's and the
+        screen reads' (Round.file_slots, Round.slot_read): an order they got wrong is re-read as a
+        guess, its players placed where the file says, and the log's attributions under it are undone
+        (_recheck_slots). Until then, the screen's stand."""
+        r, g = self.round, self.gspro
+        if r is None or r.ended or not self._log_truth:
+            return
+        if self._file_slots_from is None or self._file_slots_from[0] != r.id:
+            self._file_credits, self._file_slots_from = {}, (r.id, -1, None)
+        ours = {f for f, v in self._fire_rows.items() if v[1].round_id == r.id}
+        for fire in range(max(1, g.fires - 39), g.fires + 1):
+            if fire in self._file_credits or (fire <= self._hc.fires_at_start and fire not in ours):
+                continue   # (an earlier round's, unless the round adopted it)
+            info = g.fire_info(fire)
+            if info.get("player") is not None and info.get("launch"):
+                self._file_credits[fire] = (info["player"], info["launch"])
+        key = (r.id, len(self._file_credits), self._file_version)
+        if key == self._file_slots_from or not self._file_credits:
+            return
+        self._file_slots_from = key
+        slots: dict[str, int] = {}
+        clash: set[str] = set()
+        for idx, name in round_file.slot_players(self._file_credits.values(), self._file_entries).items():
+            if (k := self._file_roster_key(r, name)) is not None:
+                if k in slots:
+                    clash.add(k)
+                slots[k] = idx
+        slots = {k: i for k, i in slots.items() if k not in clash}
+        if slots == r.file_slots:
+            return
+        r.file_slots = slots
+        was = list(r.slot_names or [])
+        order = list(was)
+
+        def seat(k: str) -> None:
+            if None in order:
+                order[order.index(None)] = k
+            else:
+                order.append(k)
+        if not order:
+            if len(r.roster) < 2:
+                return   # (one player: GSPro's index 0 already)
+            order = [None] * (max(slots.values()) + 1)
+            for k, i in slots.items():
+                order[i] = k
+            for k in r.roster:   # the rest where there's room: a guess, till the file places them too
+                if k not in order:
+                    seat(k)
+            r.slot_guess = True
+        elif any(i >= len(order) or order[i] != k for k, i in slots.items()):
+            if not r.slot_guess:
+                log.info("Round %s: GSPro's round file has %s in its slots, not as the setup screen's %s: "
+                         "going by the file", r.id, slots, order)
+                r.slot_guess, r.setup_slots = True, None
+            for k in slots:
+                if k not in order:
+                    seat(k)
+        elif not r.slot_guess:
+            log.info("Round %s: GSPro's round file confirms the slots of %s", r.id, sorted(slots))
+            return
+        r.slot_names = order
+        r.learn_slots()
+        if r.slot_names != was:
+            log.info("Round %s: GSPro's round file places the players in GSPro's slots %s (was %s)",
+                     r.id, r.slot_names, was)
+            self.store.round_players(r.uuid, dict(r.roster), r.slot_names)
+        if self._recheck_slots(r, was):
+            self._sync_log_scores(r)
+
     def _forget_fires(self, upto: int) -> None:
         """Let the recorded rows of fires `upto` and before go (keeping a guessed slot order's log-named
         ones for the round, for a later re-map)."""
@@ -5953,11 +6049,16 @@ class Engine:
 
     def _slot_trust(self, owner: int, g: str) -> str | None:
         """Why GSPro's log index `owner` is known to be `g`, or None:
+        - GSPro's round file names them in that slot (_learn_file_slots), or another player there;
         - two screen reads named the player the log had up there;
         - the setup screen showed them in that slot, and no read has said otherwise;
         - every other player the log has seen is known, and the round, its slots and the log all
           have the same number of players: the one slot left is theirs (a round's only player too)."""
         r = self.round
+        if r.file_slots.get(g) == owner:
+            return "GSPro's round file names the slot"
+        if owner in r.file_slots.values() or g in r.file_slots:
+            return None
         if r.log_agree.get((owner, g), 0) >= 2:
             return "screen reads agreed"
         if r.slot_guess and r.slot_read(g) == owner:
@@ -5973,6 +6074,7 @@ class Engine:
         for i in seen - {owner}:
             k = self._log_name(i)
             if k is None or i in r.log_doubt or not (r.log_agree.get((i, k[0]), 0) >= 2 or self._setup_slot(i, k[0])
+                                                    or r.file_slots.get(k[0]) == i
                                                     or (r.slot_guess and r.slot_read(k[0]) == i)):
                 return None
         return "every other slot is known" if len(seen) > 1 else "the round's only player"
@@ -6010,6 +6112,14 @@ class Engine:
                 # log corrections and result were never followed. The log agrees whose it is.
                 self._fire_rows[fire] = (shot_id, rec, owner, self.gspro.fire_info(fire).get("hole"))
                 self._outcomes_due.add(fire)
+        elif r.file_slots.get(g) == owner and not self._anonymous(name):
+            # GSPro's own records name the slot (_learn_file_slots): the screen misread who was up.
+            log.info("Shot %s: the screen said %s hit it, GSPro's log and round file have %s in slot %d: it's "
+                     "theirs", shot_id, rec.player, name, owner + 1)
+            self._fire_rows[fire] = (shot_id, rec, owner, self.gspro.fire_info(fire).get("hole"))
+            self._renames.add(fire)
+            self._rename_remapped(r)
+            self._outcomes_due.add(fire)
         else:
             for k in [k for k in r.log_agree if k[0] == owner]:
                 del r.log_agree[k]
@@ -8867,6 +8977,7 @@ class Engine:
         """Apply what GSPro's log has since said about recorded shots: strokes it took back
         (mulligans), flagged so they leave the stats, and holes picked up (scored at the maximum)."""
         g, r = self.gspro, self.round
+        self._learn_file_slots()
         self._sync_scramble()
         # A score line that merely repeats is a mulligan when each player has their own ball and score,
         # and in a scramble, where each player hits once per stroke (the tracker leaves out the lines a

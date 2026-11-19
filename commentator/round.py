@@ -143,6 +143,10 @@ class Round:
         # GSPro name -> GSPro log slot -> screen reads that named them on a shot the log gave that slot.
         self.slot_reads: dict[str, dict[int, int]] = {}
         self.slot_held: dict[str, int] = {}   # the slots GSPro's log was last read by, in a guessed order
+        # GSPro name -> GSPro log slot, from GSPro's round file: a shot the log credited to the slot is
+        # the same ball (its launch numbers) as the file's stroke under that name (Engine._learn_file_slots).
+        # Taken over the screen reads and the setup screen.
+        self.file_slots: dict[str, int] = {}
         # A real league match (scheduled course, in date, correct team and player count) versus a
         # practice round the booth still calls, minus the league framing (points, standings, handicap).
         self.is_league = is_league
@@ -385,7 +389,7 @@ class Round:
             self.slot_names = [None if n == g else n for n in self.slot_names]
         if self.setup_slots is not None:
             self.setup_slots = [None if n == g else n for n in self.setup_slots]
-        for d in (self.card_scores, self.log_scores, self.spellings, self.slot_reads, self.slot_held,
+        for d in (self.card_scores, self.log_scores, self.spellings, self.slot_reads, self.slot_held, self.file_slots,
                   self.left, self.slot_since, self.joined, self.skipped):
             d.pop(g, None)
         self.teed = [x for x in self.teed if x != g]
@@ -466,7 +470,7 @@ class Round:
         if self.slot_names is not None:
             self.slot_names = [new if n == old else n for n in self.slot_names]
         for d in (self.card_scores, self.log_scores, self.spellings, self.slot_reads,
-                  self.slot_held, self.left, self.slot_since, self.joined, self.skipped):
+                  self.slot_held, self.file_slots, self.left, self.slot_since, self.joined, self.skipped):
             if old in d:
                 d[new] = d.pop(old)
         self.teed = [new if g == old else g for g in self.teed]
@@ -668,11 +672,15 @@ class Round:
         return idx if n >= 2 and n >= 3 * (sum(reads.values()) - n) else None
 
     def slot_read(self, g: str) -> int | None:
-        """The GSPro slot the screen reads place `g` in: two or more reads there, and at least three
-        times as many as anywhere else (one misread doesn't move anyone). None when another player's
-        reads claim the same slot too: one of them is misread, and the reads can't say which."""
+        """The GSPro slot GSPro's round file places `g` in (file_slots), else the one the screen reads
+        do: two or more reads there, and at least three times as many as anywhere else (one misread
+        doesn't move anyone). None when another player's reads (or the file) claim the same slot too:
+        one of them is misread, and the reads can't say which."""
+        if (idx := self.file_slots.get(g)) is not None:
+            return idx
         idx = self._slot_reads_say(g)
-        if idx is None or any(n != g and self._slot_reads_say(n) == idx for n in self.slot_reads):
+        if idx is None or idx in self.file_slots.values() \
+                or any(n != g and n not in self.file_slots and self._slot_reads_say(n) == idx for n in self.slot_reads):
             return None
         return idx
 

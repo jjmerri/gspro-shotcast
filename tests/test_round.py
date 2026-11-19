@@ -6267,6 +6267,48 @@ def test_the_setup_screens_slots_name_a_shot_gspro_hid_the_name_for(tmp_path):
     assert shot(5, None, 0).player == "Kroll"                # the other's still good
 
 
+def _file_ball(name, sp, hole=0, n=1):
+    """A currentRound.dat stroke of `name`'s with ball speed `sp` (the rest of its launch as _LAUNCH)."""
+    return {"ShotID": f"{name}-{hole}-{n}", "PlayerName": name, "Hole": hole, "HoleShot": n, "ShotResult": 0,
+            "HoleResult": 3, "EndingSurface": 2, "GhostData": {"sp": sp, **_LAUNCH}}
+
+
+_LAUNCH = {"el": 12.0, "az": 0.5, "ts": 3000.0, "sa": 2.0}
+
+
+def test_gspros_round_file_places_the_players_the_setup_screen_misread(tmp_path):
+    # The setup screen read Kroll first, but GSPro has Barrows in slot 0: the log credited slot 0 with
+    # the ball the round file has under Barrows.
+    e = _guest_round(tmp_path, ["Kroll", "Barrows"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.setup_slots = ["Kroll", "Barrows"]
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    e._file_entries = [_file_ball("Barrows", 150.0), _file_ball("Kroll", 140.0)]
+    e.gspro._fire_info = {1: {"player": 0, "hole": 0, "launch": {"sp": 150.0, **_LAUNCH}},
+                          2: {"player": 1, "hole": 0, "launch": {"sp": 140.0, **_LAUNCH}}}
+    e.gspro.fires = 2
+    assert e._slot_trust(0, "Kroll") == "the setup screen's slots"
+    e._apply_log_corrections()
+    assert e.round.slot_names == ["Barrows", "Kroll"] and e.round.setup_slots is None
+    assert e._slot_trust(0, "Barrows") == "GSPro's round file names the slot" and e._slot_trust(0, "Kroll") is None
+    assert e._gspro_idx("Barrows") == 0 and e._gspro_idx("Kroll") == 1
+    shot = _row_maker(e)
+    assert shot(3, "Kroll", 0).player == "Barrows"           # the screen misread who was up: the file's stands
+    assert shot(4, None, 1).player == "Kroll"                # a hidden name is the file's slot's
+
+
+def test_no_file_slots_without_the_logs_launch_numbers(tmp_path):
+    e = _guest_round(tmp_path, ["Kroll", "Barrows"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.setup_slots = ["Kroll", "Barrows"]
+    e._file_entries = [_file_ball("Barrows", 150.0)]
+    e.gspro._fire_info = {1: {"player": 0, "hole": 0}}       # GSPro 3.59 logs no launch numbers
+    e.gspro.fires = 1
+    e._apply_log_corrections()
+    assert e.round.file_slots == {} and e.round.slot_names == ["Kroll", "Barrows"] and not e.round.slot_guess
+
+
 def test_screen_reads_correct_a_guessed_slot_order_and_its_log_scores(tmp_path):
     # Joined mid-round on a green: the HUD's list put Dan first, but GSPro has Derek in slot 0, Dan in 2.
     e = _guest_round(tmp_path, ["Dan", "Drew", "Derek"])

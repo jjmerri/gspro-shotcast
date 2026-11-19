@@ -258,6 +258,35 @@ def names_fit(gspro_name: str, player: str | None) -> bool:
                and x.startswith(j) for x, y in zip(a, b))
 
 
+LAUNCH_KEYS = ("sp", "el", "az", "ts", "sa")
+LAUNCH_TOL = 0.006   # the log rounds each number to 2 places; the file has them whole
+
+
+def same_launch(logged: dict, entry: dict) -> bool:
+    """Whether a `LaunchExt Vars` line's numbers (rounded) are this entry's GhostData: the same ball."""
+    vals = launch_of(entry)
+    return vals is not None and all(k in logged and k in vals and abs(logged[k] - vals[k]) <= LAUNCH_TOL
+                                    for k in LAUNCH_KEYS)
+
+
+def slot_players(credits: Iterable[tuple[int, dict]], entries: list) -> dict[int, str]:
+    """GSPro's player index -> its PlayerName, from the shots GSPro's log credited to an index (its
+    shooter's score line, after the ball stopped) with their launch numbers, each tied to the file's
+    stroke with the same ball. An index whose shots name two players, a name two indices share, and a
+    ball two players' entries share are left out: nothing's guessed."""
+    entries = [e for e in entries if isinstance(e, dict) and e.get("PlayerName")]
+    votes: dict[int, set[str]] = {}
+    for idx, launch in credits:
+        names = {str(e["PlayerName"]) for e in entries if same_launch(launch, e)}
+        if len(names) == 1:
+            votes.setdefault(idx, set()).update(names)
+    named = {idx: next(iter(ns)) for idx, ns in votes.items() if len(ns) == 1}
+    taken: dict[str, int] = {}
+    for idx, name in named.items():
+        taken[name] = -1 if name in taken else idx
+    return {idx: name for idx, name in named.items() if taken[name] == idx}
+
+
 def _of_round(entries: list, players: Iterable[str], speeds: list[float], course: str | None = None,
               courses: Iterable[str] = (), shot_ids: Iterable[str] = (), folder: str | None = None) -> bool:
     """Whether the file's strokes are the round's. Not when its course key is another course than the

@@ -681,3 +681,14 @@ def test_two_full_names_alike_only_in_the_first_are_two_players():
     assert not names_fit("Alex Jones", "Alex Smith") and not names_fit("Dan", "Danny")
     assert not names_fit("Alex Green", "Alex Greene") and not names_fit("Alex Greene", "Alex Green")
     assert not names_fit("Alex Garcia Lopez", "Alex Garcia") and names_fit("Alex G. L.", "Alex Garcia Lopez")
+
+
+def test_slot_players_ties_the_logs_credited_shots_to_the_files_names_by_their_ball():
+    dan, sue = _entry(1, (0, 0), (5, 200), sp=150.0, name="Dan"), _entry(1, (0, 0), (5, 190), sp=140.0, name="Sue")
+    launch = {"sp": 150.0, "el": 12.0, "az": 0.5, "ts": 3000.0, "sa": 2.0}   # as the log rounds them
+    credits = [(1, launch), (0, {**launch, "sp": 140.004})]
+    assert round_file.slot_players(credits, [dan, sue]) == {1: "Dan", 0: "Sue"}
+    assert round_file.slot_players([(1, {**launch, "sp": 151.0})], [dan, sue]) == {}   # no such ball
+    # A slot whose shots name two players, or a name two slots claim, is left out.
+    assert round_file.slot_players([(1, launch), (1, {**launch, "sp": 140.0})], [dan, sue]) == {}
+    assert round_file.slot_players([(1, launch), (0, launch)], [dan, sue]) == {}

@@ -90,6 +90,7 @@ class LogEvent:
     cup_mm: float | None = None       # cup: how far from the cup's centre (mm) the ball crossed it
     lie_cost: tuple[int, int] | None = None   # penalty_surface: the (spin %, speed %) the lie left the shot
     physics: dict | None = None       # physics: GSPro's settings for the shot just fired (see _PHYSICS)
+    launch: dict | None = None        # launch: the ball's numbers for the shot just fired (see _LAUNCH_VARS)
 
 
 # GSPro's `Using Material TVG<surface>` names mapped to the booth's lie vocabulary (commentator/hud.py
@@ -126,6 +127,11 @@ _ACTIVE = re.compile(r'"active":(true|false)')
 # shot. That, not the lie or the ball speed, is what makes a stroke a putt: a chip off the green is a
 # full shot and a putt from the fringe is a putt.
 _LAUNCH_MODE = re.compile(r"^LaunchExt - (\w+) Mode")
+# GSPro 4.x logs the ball's launch right after each "Shot Fired": `LaunchExt Vars: sp 132.69, el 14.22,
+# az 4.76, ts 2774.93, sa 4.05, cy 0, id 15`. The same numbers, unrounded, are the stroke's GhostData in
+# currentRound.dat (its `id` isn't the same), so they tie a fired shot to its stroke there. 3.59 logs none.
+_LAUNCH_VARS = re.compile(r"^LaunchExt Vars:\s*(.*)")
+_LAUNCH_PAIR = re.compile(rf"\b(sp|el|az|ts|sa)\s+(-?{_NUM})")
 # Logged right after "Shot Fired" when the ball was struck from a surface that costs it speed or spin
 # (rough, deep rough, sand...): GSPro's own word on the lie the shot was actually played from. The
 # "Using Material" line, by contrast, is where the ball first landed, not where it came to rest.
@@ -220,6 +226,10 @@ def parse_events(text: str) -> list[LogEvent]:
                 out.append(LogEvent("wrong_hole"))
             elif "Shot Fired" in line:
                 out.append(LogEvent("shot_fired"))
+            elif m := _LAUNCH_VARS.match(line):
+                vals = {k: float(v) for k, v in _LAUNCH_PAIR.findall(m.group(1))}
+                if "sp" in vals:
+                    out.append(LogEvent("launch", launch=vals))
             elif m := _LAUNCH_MODE.match(line):
                 out.append(LogEvent("launch_mode", putting=m.group(1).lower() == "putting"))
             elif m := _PENALTY_SURFACE.match(line):
@@ -689,6 +699,9 @@ class GsproState:
             elif self.active_player is not None:
                 self._wet_since_shot[self.active_player] = True
                 self._wet_at[self.active_player] = time.monotonic()
+        elif ev.kind == "launch":
+            if self.fires in self._fire_info:
+                self._fire_info[self.fires].setdefault("launch", ev.launch)
         elif ev.kind == "launch_mode":
             if self.fires in self._fire_info:
                 self._fire_info[self.fires]["putting"] = ev.putting

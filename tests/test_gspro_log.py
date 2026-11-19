@@ -468,11 +468,12 @@ def test_putting_mode_is_read_per_shot_fired():
     assert s.putting_mode(base, impact) is None          # not logged yet
     evs = parse_events(text)
     assert [e.putting for e in evs if e.kind == "launch_mode"] == [True, False]
-    for e in evs[:2]:
+    assert [e.kind for e in evs[:3]] == ["shot_fired", "launch", "launch_mode"]
+    for e in evs[:3]:
         s.apply(e)
     assert s.logs_launch_mode and s.putting_mode(base, impact) is True    # the fire after impact
     assert s.putting_mode(s.fires, impact) is True       # already tailed when impact was snapshotted
-    for e in evs[2:]:
+    for e in evs[3:]:
         s.apply(e)
     s._fire_at[1] -= 20                                   # the putt was 20 s ago
     assert s.putting_mode(1, time.monotonic()) is False  # so the shot after it, played as a full shot
@@ -1186,3 +1187,12 @@ def test_the_player_menu_opened_partway_is_counted_once_and_not_at_the_setup():
     for ev in parse_events("End Round Button Click\nSelected Course: bethpage_black_v2_gsp\n" + burst):
         s.apply(ev)
     assert s.player_menus == 2
+
+
+def test_a_4x_launch_line_is_kept_on_its_shot_and_the_score_line_credits_it():
+    # Real GSPro 4.1 lines: the launch is logged right after "Shot Fired", its shooter after the ball stops.
+    s = _replay(FIRE + "LaunchExt Vars: sp 132.69, el 14.22, az 4.76, ts 2774.93, sa 4.05, cy 0, id 15\n"
+                "LaunchExt - Regular Mode\n" + _line(0, 1, 0, player=1))
+    info = s.fire_info(s.fires)
+    assert info["launch"] == {"sp": 132.69, "el": 14.22, "az": 4.76, "ts": 2774.93, "sa": 4.05}
+    assert info["player"] == 1 and info["putting"] is False and not s.unparsed
