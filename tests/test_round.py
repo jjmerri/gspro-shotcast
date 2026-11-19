@@ -7587,7 +7587,6 @@ async def test_a_putt_the_log_never_credits_keeps_the_banner_shown_while_waiting
         async def read_hud_async(self, parts=None, **k):
             return hud
     e.screen = Screen()
-    e.cfg.screen.follow_max_seconds = 0.1
     start = time.monotonic()
     await e.handle_shot(ShotEvent(shot=Shot(club="PT", carry=5.0), hud_hint=None, impact_hud_hint=hud))
     assert e.last_hole_result == "Birdie"

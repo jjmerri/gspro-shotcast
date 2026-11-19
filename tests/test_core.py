@@ -2299,159 +2299,6 @@ def test_slope_facts_follow_gspro_definitions():
     assert slope_facts(Hud(slope_updown=0.8, slope_side="left", slope_side_degrees=1.3), "RH") == []
 
 
-def _timeline(start: float, end: float) -> list[Hud]:
-    """HUD reads OCR'd from a real GSPro 3.1.6 round video at 3 frames a second (Palmer Hills,
-    Mixtape Golf, 2026-01-31; see data/screens/SOURCES.md)."""
-    import csv
-
-    huds = []
-    for r in csv.DictReader(open("tests/data/timeline_palmer_hills.csv")):
-        if not start <= float(r["t"]) <= end:
-            continue
-        tiles = {k: r[c] for k, c in (("total length", "total"), ("carry (raw)", "carry_raw"),
-                                      ("carry (game)", "carry_game")) if r[c]}
-        shot = int(r["shot"]) if r["shot"] else None
-        huds.append(Hud(player_text="Mixtape_Golf" if shot else None, shot_number=shot,
-                        to_pin=r["to_pin"] or None, lie=r["lie"] or None, tiles=tiles))
-    return huds
-
-
-async def _follow(frames: list[Hud], before: Hud, tmp_path, max_seconds: float = 25, roll_seconds: float = 8):
-    reads = iter(frames)
-
-    class VideoScreen:
-        async def read_hud_async(self, parts):
-            return next(reads)
-
-    cfg = Config(log_dir=str(tmp_path))
-    cfg.screen.follow_poll_seconds = 0.05
-    cfg.screen.follow_max_seconds = max_seconds
-    cfg.screen.follow_roll_seconds = roll_seconds
-    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
-                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=VideoScreen())
-    return await engine._follow_shot(before)
-
-
-async def test_follow_shot_on_real_gspro_drive(tmp_path):
-    # Impact 51.3 s: tiles count up in flight, touchdown in the rough at ~58.7 (carry (game) freezes
-    # at 271.0, ball still rolling), ball rolls out to rest by ~60.7. The follow now reads the ball at
-    # REST, not at touchdown, so it returns the resting lie (rough), the final carry (271.0, learned)
-    # and the settled total length (278.2, up from the 273.3 it was still at mid-roll).
-    before = Hud(player_text="Mixtape_Golf", shot_number=1, to_pin="359.1 yards", lie="tee")
-    hud, landed = await _follow(_timeline(51.3, 64), before, tmp_path)
-    assert landed and hud.shot_number == 1
-    assert hud.lie == "rough" and hud.tiles["carry (game)"] == "271.0" and hud.tiles["total length"] == "278.2"
-
-
-async def test_follow_shot_on_real_gspro_putt(tmp_path):
-    # Putt at 101.3 s; within 4 s GSPro has moved to the next hole's tee. That tee lie must not
-    # be credited to the putt.
-    before = Hud(player_text="Mixtape_Golf", shot_number=3, to_pin="10 feet 8 inches", lie="green")
-    hud, landed = await _follow(_timeline(101.3, 107), before, tmp_path)
-    assert landed and hud.shot_number == 3 and hud.lie == "green" and hud.tiles["total length"] == "3.5"
-
-
-async def test_follow_shot_keeps_following_a_long_roll_after_touchdown(tmp_path):
-    # A long drive lands late and is still rolling at follow_max_seconds: the follow runs on, up to
-    # follow_roll_seconds after touchdown, and reads the lie where it stops.
-    def f(lie, carry, total):
-        return Hud(player_text="P", shot_number=1, lie=lie,
-                   tiles={"carry (game)": str(carry), "total length": str(total)})
-    frames = [f("fairway", 200, 200), f("fairway", 224, 224), f("fairway", 224, 226)]
-    frames += [f("fairway", 224, 226 + i) for i in range(1, 25)]    # ~1.2 s of roll at 0.05 s polls
-    frames += [f("fairway", 224, 250)] * 5
-    before = Hud(player_text="P", shot_number=1, lie="tee")
-    reads = iter(frames)
-
-    class VideoScreen:
-        async def read_hud_async(self, parts):
-            return next(reads)
-
-    cfg = Config(log_dir=str(tmp_path))
-    cfg.screen.follow_poll_seconds = 0.05
-    cfg.screen.follow_max_seconds = 0.3
-    cfg.screen.follow_roll_seconds = 5
-    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
-                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=VideoScreen())
-    hud, landed = await engine._follow_shot(before)
-    assert landed and hud.lie == "fairway" and hud.tiles["total length"] == "250"
-
-
-async def test_follow_shot_stops_when_the_log_says_the_chip_ended_the_hole(tmp_path):
-    # Dan's chip on Kiawah 15: conceded, GSPro moved on with no touchdown or rest ever seen, and the
-    # follow sat out its 12 s cap. The log's gimmie ends it at once, naming no mid-roll lie.
-    frame = Hud(player_text="P", shot_number=3, lie="deep rough", tiles={"carry (game)": "9.0"})
-    reads = 0
-
-    class StuckScreen:
-        async def read_hud_async(self, parts):
-            nonlocal reads
-            reads += 1
-            return frame
-
-    cfg = Config(log_dir=str(tmp_path))
-    cfg.screen.follow_poll_seconds = 0.05
-    cfg.screen.follow_max_seconds = 12
-    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
-                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=StuckScreen())
-    started = time.monotonic()
-    hud, landed = await engine._follow_shot(Hud(player_text="P", shot_number=3, lie="deep rough"),
-                                            ended=lambda: reads >= 3)
-    assert time.monotonic() - started < 1 and reads == 3
-    assert not landed and hud.lie is None
-
-
-async def test_follow_shot_stops_when_the_log_has_the_ball_at_rest(tmp_path):
-    # Dan's 28-yard mishit: the screen never showed a landing, so the follow sat out its 12 s cap
-    # though the ball stopped at once. GSPro logging the roll's end stops it at the next read, which
-    # is at rest, so its lie is named and (the tiles having climbed: this shot's) its carry learnable.
-    frames = iter([Hud(player_text="P", shot_number=1, lie="rough", tiles={"carry (game)": c, "total length": c})
-                   for c in ("15.0", "20.6", "28.1", "28.1", "28.1", "28.1")])
-    reads = 0
-
-    class Screen:
-        async def read_hud_async(self, parts):
-            nonlocal reads
-            reads += 1
-            return next(frames)
-
-    cfg = Config(log_dir=str(tmp_path))
-    cfg.screen.follow_poll_seconds = 0.05
-    cfg.screen.follow_max_seconds = 12
-    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
-                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=Screen())
-    hud, landed = await engine._follow_shot(Hud(player_text="P", shot_number=1, lie="tee"),
-                                            at_rest=lambda: reads >= 3)
-    # Logged during the third read: that capture may predate the stop, so the fourth is the one used.
-    assert reads == 4 and landed and hud.lie == "rough" and hud.tiles["total length"] == "28.1"
-
-
-async def test_follow_shot_reads_the_resting_lie_not_the_landing_lie(tmp_path):
-    # Lands on the fairway, then releases into the rough and stops there. The follow must report the
-    # RESTING lie (rough), not the lie at touchdown (fairway): that is the whole point of following to
-    # rest. carry (game) freezes at touchdown and is still the value returned (so learning is correct).
-    def f(lie, carry, total):
-        return Hud(player_text="P", shot_number=1, lie=lie,
-                   tiles={"carry (game)": str(carry), "total length": str(total)})
-    frames = [
-        f("fairway", 170, 170), f("fairway", 180, 180),  # climbing
-        f("fairway", 180, 182),                            # touchdown: carry (game) frozen, landed on fairway
-        f("rough", 180, 190), f("rough", 180, 195),        # releasing into the rough
-        f("rough", 180, 195), f("rough", 180, 195),        # total steady: at rest in the rough
-    ]
-    before = Hud(player_text="P", shot_number=1, lie="fairway")
-    hud, landed = await _follow(frames, before, tmp_path)
-    assert landed and hud.lie == "rough" and hud.tiles["carry (game)"] == "180"
-
-
-async def test_follow_shot_gives_up_without_a_stop(tmp_path):
-    before = Hud(player_text="Mixtape_Golf", shot_number=1, lie="tee")
-    frames = [Hud(player_text="Mixtape_Golf", shot_number=1, lie="tee", tiles={"total length": str(10.0 * i)})
-              for i in range(1, 200)]
-    hud, landed = await _follow(frames, before, tmp_path, max_seconds=5)
-    assert not landed
-
-
 def _round_entry(n, sp, *, name="Dan", hole=0, end=(5, 200), surfaces=(18, 1), result=0, hole_result=3,
                  holed=False, to_pin=50.0, sid=None):
     """A currentRound.dat swing entry (see tests/test_round_file.py)."""
@@ -2467,7 +2314,7 @@ def _round_entry(n, sp, *, name="Dan", hole=0, end=(5, 200), surfaces=(18, 1), r
                                                  "path": []}}}
 
 
-def _file_engine(tmp_path, frames, poll=0.05):
+def _file_engine(tmp_path, frames):
     from commentator.sources.gspro_files import RoundFileWatch
     reads = iter(frames)
     count = [0]
@@ -2478,8 +2325,6 @@ def _file_engine(tmp_path, frames, poll=0.05):
             return next(reads)
 
     cfg = Config(log_dir=str(tmp_path))
-    cfg.screen.follow_poll_seconds = poll
-    cfg.screen.follow_max_seconds = 5
     e = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
                live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=Screen())
     e._round_watch, e._round_watch_shared = RoundFileWatch(str(tmp_path)), True   # (not moved to GSPro's folder)
@@ -2492,15 +2337,12 @@ async def _watching(e):
         await asyncio.sleep(0.02)
 
 
-async def test_gspros_round_file_has_the_ball_at_rest_before_the_screen_does(tmp_path):
+async def test_the_ball_at_rest_is_gspros_round_files_with_no_screen_follow(tmp_path):
     from commentator import round_file
     path = tmp_path / "currentRound.dat"
     older = _round_entry(1, 150.2, name="Dan", hole=0)   # an earlier ball at this speed: not this shot
     path.write_text(json.dumps([older]))
-    # The screen never shows the ball stopping: alone the follow would sit out its cap.
-    frames = [Hud(player_text="P", shot_number=2, lie="fairway",
-                  tiles={"carry (game)": f"{i}.0", "total length": f"{i}.0", "offline (raw)": "3.0"})
-              for i in range(1, 400)]
+    frames = [Hud(player_text="P", shot_number=2, lie="fairway", tiles={"carry (game)": "1.0"})] * 50
     e, reads = _file_engine(tmp_path, frames)
     watcher = asyncio.create_task(_watching(e))
     await asyncio.sleep(0.1)
@@ -2511,38 +2353,50 @@ async def test_gspros_round_file_has_the_ball_at_rest_before_the_screen_does(tmp
         path.write_text(json.dumps([older, _round_entry(2, 150.0, name="Dan", hole=0, surfaces=(18, 1))]))
     writer = asyncio.create_task(gspro_writes())
     try:
-        after, landed, track, own, timing = await e._follow_with_file(
-            Hud(player_text="P", shot_number=2, lie="tee"), "[t]", False, None, None,
+        after, landed, track, timing = await e._wait_for_file(
+            Hud(player_text="P", shot_number=2, lie="tee"), "[t]", False,
             player="Dan Smith", ball_speed=150.3, impact=impact, unit="yards")
     finally:
         watcher.cancel()
         await writer
     took = time.monotonic() - impact
     want = round_file.tracks([_round_entry(2, 150.0, surfaces=(18, 1))])[0]
-    assert track is not None and track.shot_number == 2 and own is None and landed
-    assert took < 1.0 and reads[0] < 20   # stopped within a poll or two of GSPro's write
+    assert track is not None and track.shot_number == 2 and landed
+    assert took < 1.0 and reads[0] == 0   # GSPro's write ends it; the screen isn't read
     assert after.lie == "rough"
     assert after.tiles == {"carry (game)": f"{want.carry_yards:.1f}", "total length": f"{want.total_yards:.1f}"}
     assert timing["file"] - impact < 0.7
 
 
-async def test_without_gspros_round_file_the_follow_is_the_screens_and_waits_no_more(tmp_path):
-    def f(lie, carry, total):
-        return Hud(player_text="P", shot_number=1, lie=lie, tiles={"carry (game)": str(carry), "total length": str(total)})
-    frames = [f("fairway", 170, 170), f("fairway", 180, 180), f("fairway", 180, 182), f("rough", 180, 190),
-              f("rough", 180, 195), f("rough", 180, 195), f("rough", 180, 195)]
-    e, _ = _file_engine(tmp_path, frames)   # no currentRound.dat: an older GSPro
-    watcher = asyncio.create_task(_watching(e))
+async def test_a_round_file_gspro_has_yet_to_write_is_waited_for(tmp_path):
+    # No currentRound.dat yet (GSPro writes it first at a round's first stroke): not "gone", waited for.
+    path = tmp_path / "currentRound.dat"
+    e, reads = _file_engine(tmp_path, [])
+
+    async def gspro_writes():
+        await asyncio.sleep(0.4)
+        path.write_text(json.dumps([_round_entry(1, 150.0, surfaces=(18, 2))]))
+    writer = asyncio.create_task(gspro_writes())
     try:
-        t0 = time.monotonic()
-        after, landed, track, own, _ = await e._follow_with_file(
-            Hud(player_text="P", shot_number=1, lie="fairway"), "[t]", False, None, None,
-            player="Dan Smith", ball_speed=150.0, impact=t0, unit="yards")
-        took = time.monotonic() - t0
+        after, landed, track, _ = await e._wait_for_file(
+            Hud(player_text="P", shot_number=1, lie="tee"), "[t]", False,
+            player="Dan Smith", ball_speed=150.0, impact=time.monotonic() - 0.1, unit="yards")
     finally:
-        watcher.cancel()
-    assert track is None and own is after and landed and after.lie == "rough" and after.tiles["carry (game)"] == "180"
-    assert took < 0.3 + 7 * 0.05 + 0.2   # the screen's reads, and no grace wait for a file that isn't there
+        await writer
+    assert track is not None and landed and after.lie == "fairway" and reads[0] == 0
+    # A shot with no ball speed can't be told in the file: nothing is waited for.
+    t0 = time.monotonic()
+    after, landed, track, _ = await e._wait_for_file(
+        Hud(player_text="P", shot_number=2, lie="fairway"), "[t]", False,
+        player="Dan Smith", ball_speed=None, impact=t0, unit="yards")
+    assert track is None and not landed and after == Hud() and time.monotonic() - t0 < 0.2
+    # Nor from a GSPro that writes no round file (before 3.59).
+    e.gspro.version = "3.1.6"
+    t0 = time.monotonic()
+    after, landed, track, _ = await e._wait_for_file(
+        Hud(player_text="P", shot_number=2, lie="fairway"), "[t]", False,
+        player="Dan Smith", ball_speed=120.0, impact=t0, unit="yards")
+    assert track is None and not landed and time.monotonic() - t0 < 0.2
 
 
 async def test_gspros_round_file_tells_a_holed_putt_from_one_conceded_inside_the_gimme_circle(tmp_path):
@@ -2629,49 +2483,11 @@ def test_two_shots_at_one_speed_each_take_their_own_stroke_from_gspros_round_fil
     assert e._file_track_of("Al", 150.1, 9.0, claim=4, known="b") is None   # not if it's another player's
 
 
-async def test_a_round_file_stroke_just_after_the_screens_rest_is_still_taken(tmp_path):
-    path = tmp_path / "currentRound.dat"
-    path.write_text(json.dumps([_round_entry(1, 120.0, name="Al")]))   # written this session: a live GSPro
-    def f(lie, carry, total):
-        return Hud(player_text="P", shot_number=1, lie=lie, tiles={"carry (game)": str(carry), "total length": str(total),
-                                                                   "offline (raw)": "4.0"})
-    frames = [f("fairway", 170, 170), f("fairway", 180, 180), f("fairway", 180, 182), f("first cut", 180, 190),
-              f("first cut", 180, 195), f("first cut", 180, 195), f("first cut", 180, 195)]
-    e, reads = _file_engine(tmp_path, frames, poll=0.01)
-    e._booth_wall0 -= 5
-    watcher = asyncio.create_task(_watching(e))
-    impact = time.monotonic()
-
-    async def gspro_writes():   # just after the screen's last read
-        while reads[0] < len(frames):
-            await asyncio.sleep(0.005)
-        await asyncio.sleep(0.05)
-        path.write_text(json.dumps([_round_entry(1, 120.0, name="Al"), _round_entry(1, 150.0, surfaces=(18, 1))]))
-    try:
-        await asyncio.sleep(0.05)
-        writer = asyncio.create_task(gspro_writes())
-        after, landed, track, own, timing = await e._follow_with_file(
-            Hud(player_text="P", shot_number=1, lie="fairway"), "[t]", False, None, None,
-            player="Dan Smith", ball_speed=150.0, impact=impact, unit="yards")
-        await writer
-    finally:
-        watcher.cancel()
-    assert track is not None and "ocr_rest" in timing and timing["file"] - timing["ocr_rest"] <= 0.3
-    assert timing["ocr_end"] == "the screen had it at rest"
-    # The screen's finer word for GSPro's rough stays; its other tiles (read at rest) too.
-    assert after.lie == "first cut" and after.tiles["offline (raw)"] == "4.0" and own is not None
-    assert after.tiles["carry (game)"] == f"{track.carry_yards:.1f}"
-
-
-async def test_a_live_round_file_is_waited_for_past_the_follows_cap_until_another_ball_is_struck(tmp_path):
-    # Dan's drive rolled on past the follow's cap (called 177 yd; it went 197): a live GSPro's stroke ends the shot.
+async def test_a_round_file_stroke_is_waited_for_until_another_ball_is_struck(tmp_path):
+    # Dan's drive rolled on past the old follow's cap (called 177 yd; it went 197): GSPro's stroke ends the shot.
     path = tmp_path / "currentRound.dat"
     path.write_text(json.dumps([_round_entry(1, 120.0, name="Al")]))
-    rolling = [Hud(player_text="P", shot_number=1, lie="fairway",
-                   tiles={"carry (game)": "170", "total length": f"{170 + i}"}) for i in range(400)]
-    e, _ = _file_engine(tmp_path, rolling, poll=0.01)
-    e.cfg.screen.follow_max_seconds = 0.2
-    e._booth_wall0 -= 5
+    e, reads = _file_engine(tmp_path, [])
     watcher = asyncio.create_task(_watching(e))
 
     async def gspro_writes():
@@ -2681,13 +2497,13 @@ async def test_a_live_round_file_is_waited_for_past_the_follows_cap_until_anothe
         await asyncio.sleep(0.05)
         writer = asyncio.create_task(gspro_writes())
         impact = time.monotonic()
-        after, landed, track, own, timing = await e._follow_with_file(
-            Hud(player_text="P", shot_number=1, lie="tee"), "[t]", False, None, None,
+        after, landed, track, timing = await e._wait_for_file(
+            Hud(player_text="P", shot_number=1, lie="tee"), "[t]", False,
             player="Dan Smith", ball_speed=150.0, impact=impact, unit="yards")
         await writer
-        assert track is not None and landed and timing["ocr_end"] == "it ran out of time"
+        assert track is not None and landed and timing["file"] - impact >= 1.1
         assert after.tiles["total length"] == f"{track.total_yards:.1f}"
-        # No stroke ever comes: the next ball struck ends the wait, and the screen's read stands.
+        # No stroke ever comes: the next ball struck ends the wait, with no resting read.
         e._shot_seq = 5
 
         async def next_swing():
@@ -2695,16 +2511,16 @@ async def test_a_live_round_file_is_waited_for_past_the_follows_cap_until_anothe
             e._shot_seq += 1
         swing = asyncio.create_task(next_swing())
         impact = time.monotonic()
-        after, landed, track, own, _ = await e._follow_with_file(
-            Hud(player_text="P", shot_number=2, lie="fairway"), "[t]", False, None, None,
+        after, landed, track, _ = await e._wait_for_file(
+            Hud(player_text="P", shot_number=2, lie="fairway"), "[t]", False,
             player="Dan Smith", ball_speed=99.0, impact=impact, unit="yards", seq=5)
         took = time.monotonic() - impact
         await swing
     finally:
         watcher.cancel()
-    assert track is None and own is after and 0.6 <= took < 1.2
+    assert track is None and not landed and after == Hud() and 0.6 <= took < 1.2 and reads[0] == 0
     # GSPro writes the ball under a name that isn't this player's (a guest the screen took for him): no
-    # write will make it his, so the screen's read stands once it's there.
+    # write will make it his, so the wait ends once it's there.
     async def guest_ball():
         await asyncio.sleep(0.4)
         path.write_text(json.dumps([_round_entry(1, 120.0, name="Al"), _round_entry(1, 150.0),
@@ -2713,8 +2529,8 @@ async def test_a_live_round_file_is_waited_for_past_the_follows_cap_until_anothe
     writer = asyncio.create_task(guest_ball())
     try:
         impact = time.monotonic()
-        after, landed, track, own, _ = await e._follow_with_file(
-            Hud(player_text="P", shot_number=1, lie="tee"), "[t]", False, None, None,
+        after, landed, track, _ = await e._wait_for_file(
+            Hud(player_text="P", shot_number=1, lie="tee"), "[t]", False,
             player="Dan Smith", ball_speed=131.0, impact=impact, unit="yards", seq=6)
         took = time.monotonic() - impact
         await writer
@@ -3039,66 +2855,6 @@ def test_the_putt_count_fact_counts_this_players_putts_on_the_hole(tmp_path):
     assert e._putt_count_facts("Paul", True, nxt) == []
 
 
-async def test_follow_shot_moves_on_at_the_next_player_placeholder(tmp_path):
-    # The next player's address HUD shows carry AND total as "--.--" (non-empty tiles, both parse to
-    # None). The follow must read that reset as moved-on and return THIS shot's last read, never theirs.
-    def f(lie, carry, total):
-        return Hud(player_text="P", shot_number=1, lie=lie,
-                   tiles={"carry (game)": str(carry), "total length": str(total)})
-    placeholder = {"carry (game)": "--.--", "total length": "--.--"}
-    frames = [
-        f("fairway", 150, 150), f("fairway", 160, 160), f("fairway", 160, 162),  # climb then touchdown
-        f("fairway", 160, 170), f("fairway", 160, 175),                           # rolling out (moving)
-        Hud(player_text="Q", shot_number=2, lie="tee", tiles=placeholder),        # next player's address
-        Hud(lie="tee", tiles=placeholder),
-    ]
-    before = Hud(player_text="P", shot_number=1, lie="fairway")
-    hud, landed = await _follow(frames, before, tmp_path)
-    assert landed and hud.lie == "fairway"   # the last this-shot read, not the next player's "tee"
-
-
-def _ct(lie, carry, total):
-    return Hud(player_text="P", shot_number=1, lie=lie,
-               tiles={"carry (game)": str(carry), "total length": str(total)})
-
-
-async def test_follow_shot_stops_when_the_top_name_switches(tmp_path):
-    # Nate's approach (10:34, Riviera 10), from video: the ball stops on the green, ~1.3s later the
-    # screen fades, and Leo's address appears with Nate's tiles STILL showing (84.8 / 92.0) under
-    # Leo's "rough". Same total, so the tiles can't see the switch; the top name cell can.
-    nate, leo = (True, False) * 8, (False, True) * 8
-    def f(lie, total, sig=nate, carry=84.8):
-        h = _ct(lie, carry, total)
-        h.name_sig = sig
-        return h
-    frames = [f("fairway", 60.0, carry=60.0), f("green", 84.8), f("green", 89.8), f("green", 92.0),
-              f("rough", 92.0, sig=leo), f("rough", 92.0, sig=leo)]
-    before = Hud(player_text="Nate", shot_number=2, lie="deep rough", name_sig=nate)
-    hud, landed = await _follow(frames, before, tmp_path)
-    assert landed and hud.lie == "green" and hud.tiles["total length"] == "92.0"
-    # The fade between players (a dark name cell) counts as the switch too.
-    from commentator.hud import NAME_DARK
-    frames = [f("fairway", 60.0, carry=60.0), f("green", 84.8), f("green", 92.0), f(None, 92.0, sig=NAME_DARK),
-              f("rough", 92.0, sig=leo), f("rough", 92.0, sig=leo)]
-    hud, landed = await _follow(frames, before, tmp_path)
-    assert landed and hud.lie == "green"
-
-
-async def test_a_lie_read_while_the_ball_still_rolls_off_the_green_is_not_named(tmp_path):
-    # Premonition 2, 10-21: the box switched 2 s after touchdown with the ball still running on, read
-    # "fairway"; it stopped in the rough. Off the green that read is dropped, the tiles kept.
-    josh, next_up = (True, False) * 8, (False, True) * 8
-    def f(lie, total, sig=josh, carry=250.0):
-        h = _ct(lie, carry, total)
-        h.name_sig = sig
-        return h
-    frames = [f("fairway", 240.0, carry=240.0), f("fairway", 255.0), f("fairway", 262.0),
-              f("rough", 262.0, sig=next_up)]
-    before = Hud(player_text="Josh", shot_number=1, lie="tee", name_sig=josh)
-    hud, landed = await _follow(frames, before, tmp_path)
-    assert landed and hud.lie is None and hud.tiles["total length"] == "262.0"
-
-
 def test_name_signature_tells_players_apart_and_ignores_brightness():
     from PIL import Image, ImageDraw, ImageEnhance
 
@@ -3139,45 +2895,6 @@ def test_name_signature_ignores_the_course_above_the_name_bar():
         ImageDraw.Draw(im).text((10, 12), "Josh", fill=(255, 255, 255), font_size=36)
         return im
     assert not name_sig_changed(name_signature(range_cell((0, 0, 0))), name_signature(range_cell((20, 30, 20))))
-
-async def test_follow_shot_rejects_frozen_stale_tiles_as_touchdown(tmp_path):
-    # The previous shot's carry (game) / total are already frozen and may still be on screen for the
-    # first reads. Without a "seen it climb" guard, that reads as an instant touchdown and hands back
-    # the hit-from lie + the last shot's carry. carry (game) never rises here, so it must NOT land.
-    frames = [_ct("fairway", 240, 250)] * 40          # stale, frozen from the first read, never climbs
-    hud, landed = await _follow(frames, Hud(player_text="P", shot_number=1, lie="tee"), tmp_path, max_seconds=0.5)
-    assert not landed
-
-
-async def test_follow_shot_still_learns_when_touchdown_seen_but_rest_times_out(tmp_path):
-    # carry (game) climbs then freezes (touchdown, so the carry is final and learnable), but total
-    # length keeps changing to the cap (a ball that never settles). landed must be True off touchdown.
-    climbing = [_ct("fairway", 170, 170), _ct("fairway", 185, 180), _ct("rough", 200, 195)]
-    rolling = [_ct("rough", 200, 200 + 10 * i) for i in range(1, 14)]   # carry frozen, total never steady
-    hud, landed = await _follow(climbing + rolling, Hud(player_text="P", shot_number=1, lie="tee"),
-                                tmp_path, max_seconds=0.5, roll_seconds=0.3)
-    assert landed and hud.tiles["carry (game)"] == "200"
-
-
-async def test_follow_shot_lands_a_frozen_chip_that_turned_over_from_the_baseline(tmp_path):
-    # A short chip can come to rest before the follow's first read, so carry (game) is already frozen
-    # and never climbs. It still lands quickly because the frozen value (18) differs from the impact
-    # baseline (the previous shot's 240, still on screen at impact): the tile has turned over to this shot.
-    before = _ct("fairway", 240, 250)
-    frames = [_ct("rough", 18, 20)] * 10
-    hud, landed = await _follow(frames, before, tmp_path, max_seconds=5)
-    assert landed and hud.lie == "rough" and hud.tiles["carry (game)"] == "18"
-
-
-async def test_follow_shot_rejects_stale_tiles_equal_to_the_impact_baseline(tmp_path):
-    # The impact baseline already held the previous shot's 240 and the follow keeps reading 240: the
-    # tile has NOT turned over to this shot, so it must not count as touchdown (the turnover guard only
-    # fires on a value that differs from the baseline).
-    before = _ct("fairway", 240, 250)
-    frames = [_ct("fairway", 240, 250)] * 40
-    hud, landed = await _follow(frames, before, tmp_path, max_seconds=0.5)
-    assert not landed
-
 
 def test_shot_wet_is_false_when_the_log_cant_be_attributed(tmp_path):
     cfg = Config(log_dir=str(tmp_path))
@@ -7271,278 +6988,6 @@ def test_the_opener_and_closer_greet_for_the_time_of_day():
     assert "Tuesday morning, 10:39" in morning and "good morning" in morning
     _, evening = closer_prompt(facts=[], recent_lines=[], now=datetime(2026, 10, 20, 19, 5))
     assert "good evening" in evening and '"tonight"' in evening
-
-
-async def test_after_touchdown_the_follow_reads_the_grab_where_the_ball_stopped(tmp_path):
-    from PIL import Image, ImageDraw
-
-    # Premonition, 10-21: OCR reads 1.2-1.5 s apart caught the drive mid-roll on the fairway; it ran on
-    # into the rough and GSPro moved on ~1 s after it stopped. Pixel grabs see the stop in time. Loudon,
-    # 10-21: the live scene beside the tile panel never holds still, so only Total Length's number is
-    # compared; and a ball creeping on a slope can hold one poll and roll on, so it must hold for two.
-    josh = Image.new("RGB", (40, 10), (200, 200, 200))
-    next_up = Image.new("RGB", (40, 10), (10, 10, 10))
-    frame = iter(range(1000))
-
-    def tiles(total):
-        img = Image.new("RGB", (120, 20))
-        draw = ImageDraw.Draw(img)
-        draw.rectangle((0, 0, 59, 19), fill=(next(frame) * 97 % 256,) * 3)   # the moving scene
-        draw.text((62, 2), str(total), fill=(255, 255, 255))
-        return img
-
-    grabs = [(tiles(t), "fairway") for t in (252.0, 254.5, 256.1, 256.1)] + [(tiles(258.1), "rough") for _ in range(3)]
-    grabs += [(tiles(258.1), "next") for _ in range(5)]
-    ocr = iter([Hud(player_text="P", shot_number=1, lie="fairway", tile_boxes={"total length": (60, 0, 120, 20)},
-                    tile_crop_size=(120, 20),
-                    tiles={"carry (game)": str(c), "total length": str(c)}) for c in (200.0, 240.0, 243.2, 243.2)])
-    names = {"next": next_up}
-
-    class Screen:
-        i = 0
-
-        async def read_hud_async(self, parts):
-            return next(ocr)
-
-        def grab_regions(self, parts):
-            img, lie = grabs[min(self.i, len(grabs) - 1)]
-            self.i += 1
-            return {"tiles": img, "player_name": names.get(lie, josh), "lie": lie}
-
-        def read_hud(self, parts, image=None, crops=None):
-            return Hud(lie=crops["lie"], tiles={"carry (game)": "243.2", "total length": "258.1"})
-
-    from commentator.screen import name_signature
-
-    cfg = Config(log_dir=str(tmp_path))
-    cfg.screen.follow_poll_seconds = 0.05
-    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
-                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=Screen())
-    before = Hud(player_text="P", shot_number=1, lie="tee", name_sig=name_signature(josh))
-    hud, landed = await engine._follow_shot(before)
-    assert landed and hud.lie == "rough" and hud.tiles["total length"] == "258.1"
-
-
-async def test_a_switch_right_after_the_ball_stops_reads_the_last_grab_before_it(tmp_path):
-    from PIL import Image, ImageDraw
-
-    # DPC Sodgrass, 11-06 (GSPro 4.0): the ball rolled into a bunker and showed at rest for about a
-    # second; grabs 0.45 s apart saw the total hold once, then the box switched before the confirming
-    # third. GSPro only moves on once the ball has stopped, so that last grab is the resting one. A
-    # switch while the total is still moving keeps the old answer: no resting lie.
-    def name(text):
-        img = Image.new("RGB", (60, 14), (30, 30, 30))
-        ImageDraw.Draw(img).text((2, 1), text, fill=(255, 255, 255))
-        return img
-
-    josh, next_up = name("JOSH"), name("EVAN M")
-
-    def tiles(total):
-        img = Image.new("RGB", (120, 20))
-        ImageDraw.Draw(img).text((62, 2), str(total), fill=(255, 255, 255))
-        return img
-
-    async def follow(totals, fade=None):
-        grabs = [(tiles(t) if fade is None else fade(t, i), lie, t) for i, (t, lie) in enumerate(totals)]
-        grabs += [(tiles(0), "next", 0)] * 3
-        ocr = iter([Hud(player_text="P", shot_number=1, lie="fairway", tile_boxes={"total length": (60, 0, 120, 20)},
-                        tile_crop_size=(120, 20),
-                        tiles={"carry (game)": str(c), "total length": str(c)}) for c in (100.0, 129.6, 129.6)])
-
-        class Screen:
-            i = 0
-
-            async def read_hud_async(self, parts):
-                return next(ocr)
-
-            def grab_regions(self, parts):
-                img, lie, total = grabs[min(self.i, len(grabs) - 1)]
-                self.i += 1
-                return {"tiles": img, "player_name": next_up if lie == "next" else josh, "lie": lie, "total": total}
-
-            def read_hud(self, parts, image=None, crops=None):
-                return Hud(lie=crops["lie"], tiles={"carry (game)": "129.6", "total length": str(crops["total"])})
-
-        from commentator.screen import name_signature
-        cfg = Config(log_dir=str(tmp_path))
-        cfg.screen.follow_poll_seconds = 0.05
-        engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
-                        live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=Screen())
-        return await engine._follow_shot(Hud(player_text="P", shot_number=1, lie="tee", name_sig=name_signature(josh)))
-
-    hud, landed = await follow([(125.2, "fairway"), (123.1, "rough"), (121.5, "sand"), (121.5, "sand")])
-    assert landed and hud.lie == "sand" and hud.tiles["total length"] == "121.5"
-    hud, landed = await follow([(125.2, "fairway"), (123.1, "rough"), (121.9, "sand")])
-    assert landed and hud.lie is None
-    # Bethpage, 11-11: a ball doesn't come to rest on the tee; that's the lie it was hit from, not yet
-    # redrawn (Corey's 275-yard drive was saved finishing there).
-    hud, landed = await follow([(125.2, "fairway"), (123.1, "rough"), (121.5, "tee"), (121.5, "tee")])
-    assert landed and hud.lie is None
-    # Bethpage, 11-07: the box fades out with the ball stopped, so no two grabs' pixels match. The last
-    # two grabs' totals do (or creep under a yard): that's the ball at rest.
-    def fading(total, i):
-        img = tiles(total)
-        ImageDraw.Draw(img).rectangle((110, 15, 119, 19), fill=(i * 50 + 20,) * 3)   # inside Total Length's box
-        return img
-
-    hud, landed = await follow([(125.2, "fairway"), (122.0, "rough"), (121.5, "sand"), (121.5, "sand")], fading)
-    assert landed and hud.lie == "sand"
-    hud, landed = await follow([(125.2, "fairway"), (123.1, "rough"), (121.9, "sand")], fading)
-    assert landed and hud.lie is None
-
-
-async def test_a_ball_pausing_on_a_crest_is_read_again_where_it_stops(tmp_path):
-    from PIL import Image, ImageDraw
-
-    # A held Total Length is only provisional: a ball can pause on a crest and roll on. It's kept once it
-    # has held REST_HOLD_SECONDS, or GSPro moves on with it unchanged (the fade itself may change pixels).
-    def name(text):
-        img = Image.new("RGB", (60, 14), (30, 30, 30))
-        ImageDraw.Draw(img).text((2, 1), text, fill=(255, 255, 255))
-        return img
-
-    josh, next_up = name("JOSH"), name("EVAN M")
-
-    def tiles(total, shade=0):
-        img = Image.new("RGB", (120, 20))
-        draw = ImageDraw.Draw(img)
-        draw.text((62, 2), str(abs(total)), fill=(255, 255, 255))
-        if shade:
-            draw.rectangle((110, 15, 119, 19), fill=(shade,) * 3)   # the fade, inside Total Length's box
-        return img
-
-    async def follow(grabs):
-        ocr = iter([Hud(player_text="P", shot_number=1, lie="fairway", tile_boxes={"total length": (60, 0, 120, 20)},
-                        tile_crop_size=(120, 20),
-                        tiles={"carry (game)": str(c), "total length": str(c)}) for c in (100.0, 129.6, 129.6)])
-
-        class Screen:
-            i = 0
-
-            async def read_hud_async(self, parts):
-                return next(ocr)
-
-            def grab_regions(self, parts):
-                total, lie, shade = grabs[min(self.i, len(grabs) - 1)]
-                self.i += 1
-                return {"tiles": tiles(total, shade), "player_name": next_up if lie == "next" else josh,
-                        "lie": lie, "total": None if shade or total < 0 else total}   # < 0: drawn, won't read
-
-            def read_hud(self, parts, image=None, crops=None):
-                total = crops["total"]
-                return Hud(lie=crops["lie"], tiles={"carry (game)": "129.6",
-                                                    "total length": "" if total is None else str(total)})
-
-        from commentator.screen import name_signature
-        cfg = Config(log_dir=str(tmp_path))
-        cfg.screen.follow_poll_seconds = 0.05
-        engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
-                        live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=Screen())
-        return await engine._follow_shot(Hud(player_text="P", shot_number=1, lie="tee", name_sig=name_signature(josh)))
-
-    paused = [(140.0, "fairway", 0)] * 3 + [(145.5, "rough", 0), (148.2, "rough", 0)] + [(148.2, "rough", 0)] * 3
-    hud, landed = await follow(paused + [(0, "next", 0)] * 3)
-    assert landed and hud.lie == "rough" and hud.tiles["total length"] == "148.2"
-    # No switch at all: held long enough is the rest.
-    hud, landed = await follow([(140.0, "fairway", 0)] * 30)
-    assert landed and hud.lie == "fairway"
-    # Held, then the fade changes the pixels (and won't read) before the switch: still the rest.
-    hud, landed = await follow([(140.0, "sand", 0)] * 3 + [(140.0, "sand", 90), (140.0, "sand", 160)] + [(0, "next", 0)] * 3)
-    assert landed and hud.lie == "sand"
-    # Held, then rolled on through the switch: not at rest.
-    hud, landed = await follow([(140.0, "fairway", 0)] * 3 + [(146.0, "rough", 0), (151.0, "rough", 0)] + [(0, "next", 0)] * 3)
-    assert landed and hud.lie is None
-    # ...even when the fade's dim grab, unreadable, comes last: the readable one before it rolled on.
-    hud, landed = await follow([(140.0, "fairway", 0)] * 3 + [(146.0, "rough", 0), (151.0, "rough", 0),
-                                                            (151.0, "rough", 120)] + [(0, "next", 0)] * 3)
-    assert landed and hud.lie is None
-    # ...or when the held frame's own total won't read: the readable totals after it say it moved.
-    hud, landed = await follow([(-140.0, "fairway", 0)] * 3 + [(146.0, "rough", 0), (151.0, "rough", 0)] + [(0, "next", 0)] * 3)
-    assert landed and hud.lie is None
-
-
-async def test_a_capture_just_before_the_switch_is_the_ball_at_rest(tmp_path, monkeypatch):
-    from PIL import Image, ImageDraw
-
-    import commentator.engine as engine_mod
-    from commentator.screen import name_signature
-
-    # Round 93, 11-07, replayed: the ball stopped in deep rough and the box switched before a second grab
-    # could confirm it (11 of 12 lies went unnamed). GSPro shows a stopped ball ~1 s before moving on, so
-    # a capture begun inside REST_SHOWN_SECONDS of the switch is the rest; one older than that is not.
-    def name(text):
-        img = Image.new("RGB", (60, 14), (30, 30, 30))
-        ImageDraw.Draw(img).text((2, 1), text, fill=(255, 255, 255))
-        return img
-
-    josh, next_up = name("JOSH"), name("EVAN M")
-
-    async def to_rest():   # touchdown read in deep rough, then the first grab is already the next player
-        ocr = iter([Hud(player_text="P", shot_number=1, lie="deep rough", tile_boxes={"total length": (60, 0, 120, 20)},
-                        tile_crop_size=(120, 20), tiles={"carry (game)": str(c), "total length": str(c)})
-                    for c in (100.0, 129.6, 129.6)])
-
-        class Screen:
-            async def read_hud_async(self, parts):
-                return next(ocr)
-
-            def grab_regions(self, parts):
-                return {"tiles": Image.new("RGB", (120, 20)), "player_name": next_up, "lie": "tee"}
-
-        cfg = Config(log_dir=str(tmp_path))
-        cfg.screen.follow_poll_seconds = 0.05
-        engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
-                        live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=Screen())
-        return await engine._follow_shot(Hud(player_text="P", shot_number=1, lie="tee", name_sig=name_signature(josh)))
-
-    def f(lie, total, sig=(True, False) * 8):
-        h = _ct(lie, 140.0, total)
-        h.name_sig = sig
-        return h
-
-    leo = (False, True) * 8
-    before = Hud(player_text="P", shot_number=1, lie="tee", name_sig=(True, False) * 8)
-    hud, landed = await to_rest()
-    assert landed and hud.lie == "deep rough"
-    hud, _ = await _follow([f("sand", 150.0), f("tee", 150.0, sig=leo)], before, tmp_path)   # OCR reads only
-    assert hud.lie == "sand"
-    monkeypatch.setattr(engine_mod, "REST_SHOWN_SECONDS", 0.0)   # the capture came too long before the switch
-    hud, landed = await to_rest()
-    assert landed and hud.lie is None
-    hud, _ = await _follow([f("sand", 150.0), f("tee", 150.0, sig=leo)], before, tmp_path)
-    assert hud.lie is None
-
-
-async def test_following_to_rest_never_takes_the_next_players_blank_tiles(tmp_path):
-    from PIL import Image
-
-    # No name signature to see the switch: two identical grabs of the next address (tiles "--.--")
-    # mustn't be read as this ball at rest; a failed grab is skipped, not fatal.
-    blank = Image.new("RGB", (60, 20))
-    ocr = iter([Hud(player_text="P", shot_number=1, lie="fairway",
-                    tiles={"carry (game)": str(c), "total length": str(c)}) for c in (150.0, 160.0, 160.0)])
-
-    class Screen:
-        n = 0
-
-        async def read_hud_async(self, parts):
-            return next(ocr)
-
-        def grab_regions(self, parts):
-            self.n += 1
-            if self.n == 1:
-                raise OSError("capture failed")
-            return {"tiles": blank}
-
-        def read_hud(self, parts, image=None, crops=None):
-            return Hud(lie="tee", tiles={"carry (game)": "--.--", "total length": "--.--"})
-
-    cfg = Config(log_dir=str(tmp_path))
-    cfg.screen.follow_poll_seconds = 0.05
-    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
-                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=Screen())
-    hud, landed = await engine._follow_shot(Hud(player_text="P", shot_number=1, lie="tee"))
-    assert landed and hud.lie is None and hud.tiles["carry (game)"] == "160.0"
 
 
 def test_tile_boxes_locate_each_value_in_the_unscaled_crop():

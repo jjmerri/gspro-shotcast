@@ -11,6 +11,9 @@ stats page and in the app; "Booth" items only in the app. Plain words, one line 
 - Wentworth by the Sea (played from GSPro's Balsams folder) gets the same GSPro round records as every other course.
 - A hole conceded on the tee counts as a picked-up hole at your concede setting, not as penalty strokes.
 
+### Booth
+- The booth takes where the ball stopped from GSPro's own record of the shot instead of watching the screen for it.
+
 ## 0.1.151
 
 ### Stats page

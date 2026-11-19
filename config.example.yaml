@@ -161,10 +161,6 @@ screen:
   mask_other_windows: true   # black out anything in front of GSPro (a browser, Discord) so it's never read or logged
   # show_through: [obs64.exe] # programs whose windows over GSPro are read anyway (an overlay the log says is blanking it)
   ocr_threads: 6             # cap OCR cores so it can't starve GSPro (null = all cores)
-  follow_poll_seconds: 0.3   # how often the HUD is read while following a shot
-  # rest_poll_seconds: 0.05  # after touchdown, how often it's grabbed (no OCR) to see the ball stop
-  # follow_max_seconds: 12   # give up following a shot after this (a lost or wet ball never stops)
-  # follow_roll_seconds: 8   # but once it lands, keep following at least this long for it to stop
   send_images: true       # screenshots for the vision call (the pre-shot hazard look)
   ocr: true               # check the screen read with `screen-check` first
   # Boxes around the GSPro HUD, as fractions of the screen. The built-in defaults fit the 3.1.x

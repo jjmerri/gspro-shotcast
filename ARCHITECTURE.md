@@ -27,7 +27,7 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
   `banter`, `check`, `eval`, `review`, `stats`, `stats-web`, `publish`, `import-league`, `cost`, `squabbit`,
   `fixture`, `notify-test`).
 - **`engine.py`** the orchestrator, and by far the largest file. Owns the live loop: the
-  three-way pre-shot split, the impact carry/offline projection, follow-to-rest, reactions,
+  three-way pre-shot split, the impact carry/offline projection, the ball at rest (GSPro's round file), reactions,
   water handling, the round lifecycle (opener/closer), and speech scheduling. Most behavior
   questions start here.
 - **`config.py`** the Pydantic config schema and loader. The source of truth for every setting
@@ -226,12 +226,11 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
 
 These were each the cause of a real bug. Preserve them.
 
-- **Follow-to-rest reads the resting lie, not the landing lie.** `engine._follow_shot` polls
-  only the `tiles` and `lie` regions (not the slow full-HUD read) until the ball stops. "Moved
-  on to the next player" is detected when the carry and total tiles **both** parse to `None`
-  (the next player's `--.--` address), not when a tile is merely blank: `--.--` is a kept tile
-  value and never reads as empty. The last reading that still belonged to this shot is what the
-  reaction uses, so the next player's lie is never credited to this shot.
+- **The ball at rest is GSPro's round file's, not the screen's.** `engine._wait_for_file` waits
+  for the stroke with the shot's ball speed and player in currentRound.dat (written in every
+  course mode, at rest) until `_file_wait_over` gives a reason it won't come. The screen isn't
+  followed after the swing; its offline and raw-carry tiles are read at the next setup
+  (`_apply_late_tiles`).
 - **`impact_snap` is a 7-tuple.** Index 6 is the per-player shot number captured at impact. Any
   code that unpacks `impact_snap` must unpack all 7 (this caused a crash when one reader still
   expected 6). The putt `base_shot` comes from `impact_snap[6]`, not a live read.
@@ -241,7 +240,7 @@ These were each the cause of a real bug. Preserve them.
   "missed" reaction.
 - **OCR is genuinely slow; do not add concurrency to beat it.** A full HUD read is ~2.6-2.8s,
   dominated by the player-box region (~1.4s). More OCR threads oversubscribe the CPU and make it
-  slower, and starve GSPro. This is why follow polls a narrow region set.
+  slower, and starve GSPro.
 - **League vs practice gates the prompt.** The `system` prompt is league-only when a league
   round is actually in progress (`r is not None and not r.ended and r.is_league`), else practice.
   The closer runs when `r.ended` is true, so it passes its variant explicitly rather than
@@ -261,7 +260,7 @@ These were each the cause of a real bug. Preserve them.
   is on the same hole with a higher stroke number, the putt becomes `missed` and a full shot
   loses its outcome. A mulligan's re-hit keeps the stroke number, so it doesn't count.
 - **Every full shot gets a finishing distance.** The booth sets `finish_yards` from GSPro's log
-  at the player's next shot. It used to skip that whenever the screen follow hadn't seen
+  at the player's next shot. It once skipped that whenever the old screen follow hadn't seen
   touchdown, which lost about half of them. As a safety net, `Store` also fills a missing
   finish from the same player's very next stroke on the hole (its `to_pin_yards`, or the gimme
   radius), and backfills old rows at startup. A penalty in between leaves the finish empty,
@@ -272,7 +271,7 @@ These were each the cause of a real bug. Preserve them.
 ## Tests
 
 `tests/` (400, run with `pytest`; CI in `.github/workflows/tests.yml`): `test_core.py` (engine,
-HUD, follow, OCR cache),
+HUD, round file wait, OCR cache),
 `test_round.py` (rounds, formats, handicaps, setup watcher), `test_handicap.py` (Squabbit's
 handicap rules and week cards), `test_board.py` (week results, standings, net and CTP facts), `test_gspro_log.py` (the log
 reader), `test_model_switch.py`, `test_connector.py`, `test_replay.py`, `test_minimap.py`,

@@ -9,7 +9,8 @@ plus any rule violations it finds.
     python tools/simulate.py --real       # real Anthropic model + modelled OCR delay, for timing
 
 A scenario is a list of (delay_seconds, action) steps. Actions: hole(), preshot(), shot(), putt().
-Each shot carries the HUD frames its follow should see, so touchdown/stop behave as on the PC.
+Each shot carries HUD frames for a ball follow the booth no longer runs: where a ball stopped now comes
+from GSPro's round file, which this doesn't write, so shots here have no resting read.
 """
 
 import argparse
@@ -191,8 +192,6 @@ async def run_scenario(steps, real: bool, config_path: str = "config.yaml") -> N
     cfg.commentary.routine_comment_rate = 1.0
     cfg.commentary.preshot_rate = 1.0
     cfg.screen.ocr = True
-    cfg.screen.follow_poll_seconds = 0.05
-    cfg.screen.follow_max_seconds = 12
     screen = ScriptedScreen(read_delay=2.0 if real else 0.0)
     image = None
     if real:

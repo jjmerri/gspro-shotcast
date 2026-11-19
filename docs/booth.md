@@ -33,21 +33,13 @@
    CARRY (raw) and CARRY (game) tiles visible so the model keeps learning. The code then picks
    the matching flight branch and speaks it, cutting off anything still playing. A ball headed
    for water gets the in-flight tease the instant the log shows it is wet.
-3. **Landing.** The HUD is polled from impact (`screen.follow_poll_seconds`): CARRY (game)
-   counts up and freezes at touchdown, Total Length counts until the ball stops, then GSPro
-   moves the player box to the next shot. The last reading that still belonged to this shot
-   gives the reaction its lie and numbers, so the next player's lie is never credited to this
-   shot. From touchdown on, the HUD is grabbed without OCR every `screen.rest_poll_seconds`
-   (GSPro shows a stopped ball for only about a second). Once Total Length holds for two grabs,
-   that grab is read for the resting lie while the grabs go on. It's kept once the number has
-   held 0.6 s more or GSPro moves on; a ball that pauses on a crest and rolls on is read again
-   where it stops. If the box moves on before the ball is seen to hold, the last two grabs'
-   totals are compared; still rolling, the lie isn't named (except the green), and the next
-   setup and GSPro's log record where it stopped.
-   A shot that GSPro's log says ended the hole (holed, or stopped inside the gimme circle) stops
-   the follow there, so a chip that ends the hole is called without waiting to see it at rest.
-   GSPro also logs the end of every shot's roll (`Roll dist ft`): the first read after that line is
-   taken as at rest, so a short or low ball the screen never shows landing doesn't wait out the cap.
+3. **Landing.** The screen isn't followed. GSPro writes each stroke to its round file
+   (`currentRound.dat`) in the frame the ball comes to rest, in every course mode including
+   practice. The booth waits for the stroke with this shot's ball speed and player, and takes its
+   lie, carry, total, distance to the pin, penalty and drop for the reaction. The wait ends early
+   when another ball is struck, GSPro's or the booth's round ends, or after 120 s; then the
+   reaction names no lie or numbers. Offline and raw carry, which the file doesn't have, are read
+   off the tiles at the next setup.
    A ball that GSPro's log says hit foliage in flight (`Leaves hitTime`) gets a reaction fact. GSPro
    doesn't say whether it was a tree or a bush, so `flight.py` models the height at the first hit from
    the launch numbers: under 10 ft is a bush or low branches, 10-20 ft a big bush or a tree's low

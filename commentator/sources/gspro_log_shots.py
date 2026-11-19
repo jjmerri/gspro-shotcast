@@ -14,8 +14,8 @@ The 3.59 builds (the 2026 public beta, Player.log) log the fire and the mode lin
 `LaunchExt Vars`. There the same numbers come from the files GSPro saves beside its log once the
 ball stops (sources/gspro_files.py), 3-13 s after impact. The booth's impact snapshot is still taken
 while the ball is in the air (on_impact, half a second after the fire), so the shot airs late but is
-read as it was struck. Its round file watch (GsproFiles.watch) is the engine's too: the live follow
-takes the ball at rest from the same reads (Engine._follow_with_file).
+read as it was struck. Its round file watch (GsproFiles.watch) is the engine's too: the shot handler
+takes the ball at rest from the same reads (Engine._wait_for_file).
 
 Faster where the monitor's own software logs the launch (FlightScope, rela: sources/club_feeds.py):
 a full swing's fire takes the monitor's line read around it and airs at once, in flight, with the

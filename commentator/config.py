@@ -454,19 +454,7 @@ class ScreenConfig(BaseModel):
     # read at about the size they'd have on a 1080p screen rather than all blown up to 736 px, ~5x
     # faster with the same reads. Off = every region at the detector's default size, as before.
     ocr_fast: bool = True
-    # After impact the HUD is polled to follow the ball: CARRY (game) counts up until touchdown,
-    # Total Length until it stops, and about 1-2 s later GSPro moves on to the next shot.
-    follow_poll_seconds: float = 0.3
-    # From touchdown the follow only grabs (no OCR) to see Total Length stop: GSPro shows the ball at
-    # rest for about a second, so it's grabbed this often (plus ~80 ms per grab at 4K).
-    rest_poll_seconds: float = 0.05
-    # How long to follow a shot from impact. The cap bites on odd outcomes (a water penalty, a lost
-    # ball) where the stop is never cleanly seen, so keep it short.
-    follow_max_seconds: float = 12.0
-    # Once the ball has landed, keep following at least this long after touchdown for it to roll out
-    # and stop. A long drive lands 6-8 s in and can still be rolling at follow_max_seconds.
-    follow_roll_seconds: float = 8.0
-    # Saves a small screenshot at impact and at the final reading of every shot under
+    # Saves a small screenshot at impact of every shot under
     # log_dir/shots/, for checking what the booth read against what was on screen. ~150 KB each.
     save_review_images: bool = False
     send_images: bool = False

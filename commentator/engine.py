@@ -36,7 +36,7 @@ from .flight_pick import FlightPlan, Hazard, aim_spot, aim_turn, aimed_short, pi
 from .health import Health, RoundCounters, check_changed, check_files, check_screen, evaluate_round, report_line
 from .grounding import (SCENERY, bare_acknowledgement, check_line, call_words, cites_call, credited_words, makes_call, meta_talk, ngrams, note_keywords, repeats, uses_note,
                         wrong_round_score)
-from .hud import NAME_DARK, Hud, Scorecard, deck_club, describe, hole_key, name_sig_changed
+from .hud import Hud, Scorecard, deck_club, describe, hole_key, name_sig_changed
 from .interest import (LEAGUE_BEST_DRIVE_LEVEL, REPLY_PUTT_LEVEL, SEASON_BEST_DRIVE_LEVEL,
                        approach_gimme_level, holed_out_level, holed_putt_level, holed_putt_score,
                        putt_to_par, score_shot,
@@ -71,7 +71,7 @@ from .round import FORMAT_NAMES, TEAM_BALL, Round, normalize_format, to_par
 from .round import name_key as _name_key
 from .round import name_ratio as _name_ratio
 from .round import _join as _join_names
-from .screen import Screen, log_failure as log_capture_failure, name_signature, tone_of
+from .screen import Screen, log_failure as log_capture_failure, tone_of
 from .sources.base import ShotSource
 from .sources import gspro_files
 from .sources.club_feeds import SAME_BALL_MPH
@@ -237,18 +237,8 @@ def _nines_picked(tones: dict) -> tuple[int, int] | None:
     return (1, 18) if f and b else (1, 9) if f else (10, 9) if b else None
 
 
-# How far Total Length may still move between the last two grabs before a player box switch for the
-# ball to count as stopped: a ball that rolls on (255 then 262 yards, Premonition 10-21) isn't.
-REST_CREEP_YARDS = 1.0
-# A held Total Length is kept as the ball at rest once it has held this long more (a ball pausing on a
-# crest rolls on within it); GSPro shows a stopped ball about a second before moving on.
-REST_HOLD_SECONDS = 0.6
-# GSPro shows a stopped ball 1.0-1.25 s (Bethpage 11-07) before moving the player box on, so a capture
-# begun less than this before the grab that sees the switch was taken with the ball at rest. Round 93
-# replayed: 11 of 12 unnamed lies were read right but went unconfirmed, the switch ~0.1-0.6 s after.
-REST_SHOWN_SECONDS = 0.9
 # How long after a shot is recorded to wait for GSPro's log to have its ball stop, to note when (a putt's
-# recorded before it stops; a long drive's roll can outlast the follow's cap).
+# recorded before it stops).
 REST_WAIT_SECONDS = 45.0
 # How long to keep reading a scramble's pick screen for its cards (it showed ~6.5 s, Bethpage 11-07).
 PICK_SCREEN_SECONDS = 15.0
@@ -257,47 +247,6 @@ PICK_SCREEN_SECONDS = 15.0
 # (50,782 times on 11-07). Still read now and then, in case the log's state is wrong. (The range isn't
 # read at all: its sky lights the tabs, and only End Round, which the log shows, leaves it for setup.)
 SETUP_AWAY_POLL_SECONDS = 5.0
-
-
-def _unsettled(hud: Hud, tag: str = "") -> Hud:
-    """A follow's last read from before the ball was seen at rest (GSPro shows the ball at rest only a
-    second or so before moving the player box on, and a read can miss that). Taken mid-roll, its lie
-    named the wrong spot about half the time off the green (fairway for a ball that ran on into the
-    rough, rough for one that ran into a bunker), so it's dropped and the reaction names no lie; the
-    next setup and GSPro's log fill in where it stopped. A ball already on the green stays there almost always, and the green read
-    drives the wrap's pre-build, so that one is kept."""
-    lie = (hud.lie or "").lower()
-    if not lie or lie == "green":
-        return hud
-    log.info("%s lie %s read before the ball was at rest; not naming it", tag, hud.lie)
-    return replace(hud, lie=None)
-
-
-def _rolled(older: Hud | None, newer: Hud, older_at: float | None, switched_at: float) -> bool:
-    """Two this-shot captures both begun inside REST_SHOWN_SECONDS of the switch should both show the
-    ball stopped: Total Length moving between them says it wasn't, so neither is trusted as the rest."""
-    if older is None or older_at is None or switched_at - older_at >= REST_SHOWN_SECONDS:
-        return False
-    a = _tile_yards(older.tiles, "total length", "yards")
-    b = _tile_yards(newer.tiles, "total length", "yards")
-    return a is not None and b is not None and abs(a - b) > REST_CREEP_YARDS
-
-
-def _this_shots_tiles(hud: Hud) -> bool:
-    """A read still shows a shot's distances: the next player's address has both tiles blank ("--.--")."""
-    return (_tile_yards(hud.tiles, "carry (game)", "yards") is not None
-            or _tile_yards(hud.tiles, "total length", "yards") is not None)
-
-
-def _pixels_changed(a, b, level: int = 40, count: int = 12) -> bool:
-    """Two grabs of a HUD region differ: more than `count` pixels moved by `level` grey levels (a tenth
-    of a yard ticking over in Total Length changes a few hundred)."""
-    from PIL import ImageChops
-
-    if a.size != b.size:
-        return True
-    hist = ImageChops.difference(a.convert("L"), b.convert("L")).histogram()
-    return sum(hist[level:]) > count
 
 
 def _slot_state(tone) -> str:
@@ -446,8 +395,8 @@ RECAP_POLL_SECONDS = 30.0      # how often a league recap waiting on a round or 
 LAYOUT_WAIT_SECONDS = 20.0     # after a round's end, for GSPro 3.1's logged layout before the course file's
 ROUND_FILE_CHECK_S = 2.0       # how often strokes in GSPro's round file with no shot yet are tried again
 # GSPro writes its round file (currentRound.dat) in the frame it has the ball at rest, so a live one's
-# stroke ends the follow; one not there yet when the follow ends is waited for (_follow_with_file). That
-# wait wakes on the file's writes, and this often to look for a reason to stop (_file_wait_over).
+# stroke is the ball at rest, waited for after the swing (_wait_for_file). That wait wakes on the file's
+# writes, and this often to look again and for a reason to stop (_file_wait_over).
 FILE_WAIT_POLL_S = 0.25
 FILE_WAIT_MAX_S = 120.0   # no ball rolls this long: GSPro has stopped writing (hung, or its file elsewhere)
 # A stroke's penalty or drop is GSPro's next entry, written by its own rewrite in the same frame: a stroke
@@ -800,7 +749,7 @@ class Engine:
         self._hc = RoundCounters()      # this round's reads, for the post-round checkup
         self._follower: GsproLogFollower | None = None
         # GSPro's round file (currentRound.dat, 3.59+): the one watch of it, its strokes as last read, and
-        # an event set each time it's read anew (see _round_file_loop, _follow_with_file).
+        # an event set each time it's read anew (see _round_file_loop, _wait_for_file).
         self._round_watch: gspro_files.RoundFileWatch | None = None
         self._round_watch_shared = False
         self._file_tracks: list[round_file.Track] = []
@@ -1165,8 +1114,8 @@ class Engine:
         self._setups_seen: deque[list] = deque(maxlen=60)
         self._hud_buffer: Any = None   # HudBuffer: the HUD's last seconds, for an impact read GSPro hid
         self._last_impact_at: float | None = None
-        # GSPro's "hide UI on shot" keeps the tiles off screen until the next player is up, so the follow
-        # can't read them; the next setup read does. The swing whose tiles are still wanted, the tiles a
+        # GSPro's "hide UI on shot" keeps the tiles off screen until the next player is up; the
+        # next setup read has them. The swing whose tiles are still wanted, the tiles a
         # setup read for a swing, and the recorded shot each swing's tiles go to: (shot id, record,
         # the tiles the shot before it showed, unit, health counts then).
         self._tiles_wanted: int | None = None
@@ -1240,7 +1189,7 @@ class Engine:
         self._new_round_struck: int | None = None
         self._range_exits_seen = 0
         self._opening_fire: tuple[int, int] | None = None   # (round id, its first fire): see _adopt_opening_shots
-        # Shot handlers run in the background (the follow/reaction mustn't block the loop); keep
+        # Shot handlers run in the background (the wait for the ball at rest and the reaction mustn't block the loop); keep
         # references so they aren't garbage-collected mid-flight.
         self._shot_tasks: set[asyncio.Task] = set()
         # Fire-and-forget background work (e.g. a handicap refresh once a prepared opener has aired).
@@ -1314,8 +1263,8 @@ class Engine:
         self._start_hud_buffer()
         if self.cfg.source.type != "replay":
             asyncio.create_task(self._round_status_loop(), name="round-status")
-            if self._log_truth:
-                asyncio.create_task(self._round_file_loop(), name="round-file")
+            # (GSPro's own record, with its text log followed or not: the ball at rest is the file's)
+            asyncio.create_task(self._round_file_loop(), name="round-file")
         if self.screen and self.cfg.screen.ocr:
             if self.cfg.health.enabled and self.cfg.source.type != "replay":
                 asyncio.create_task(self._screen_cover_loop(), name="screen-cover")
@@ -1330,7 +1279,7 @@ class Engine:
                 try:
                     if isinstance(event, ShotEvent):
                         # In the background: the in-flight line plays at the top of handle_shot, but
-                        # the follow and reaction take many seconds and must not block the next
+                        # the wait for the ball at rest and the reaction take many seconds and must not block the next
                         # pre-shot or shot behind them.
                         task = asyncio.create_task(self._shot_then_news(event))
                         self._shot_tasks.add(task)
@@ -1675,8 +1624,7 @@ class Engine:
         screen_lie = hud.lie
         if (hud.lie or "").lower() != "tee" and (
                 file_lie := self._file_rest_lie(self._player(hud.player_text, None), hud.shot_number)):
-            # Where GSPro's round file has the ball at rest outranks the screen, but a finer word of the
-            # screen's for it (fringe, semi rough) is kept.
+            # Where GSPro's round file has the ball at rest outranks the screen (round_file.finer_lie).
             if (lie := round_file.finer_lie(file_lie, hud.lie)) != (hud.lie or "").lower():
                 log.info("Setup lie %s from GSPro's round file (the screen read %s)", lie, hud.lie)
                 hud.lie = lie
@@ -3577,8 +3525,8 @@ class Engine:
     async def _round_file_loop(self) -> None:
         """Watches GSPro's own record of the round in play (currentRound.dat, 3.59+; see round_file.py): read
         the moment Windows says GSPro wrote it (RoundFileWatch.notify), else on a stat every
-        gspro_files.WATCH_BACKUP_S (parsed only when it changed). The live follow takes the
-        ball at rest from it (_follow_with_file). Applies it to the stored shots when it changes, as soon
+        gspro_files.WATCH_BACKUP_S (parsed only when it changed). The shot handler takes the
+        ball at rest from it (_wait_for_file). Applies it to the stored shots when it changes, as soon
         as a shot it has is recorded (_round_file_kick), and again every ROUND_FILE_CHECK_S for
         ROUND_FILE_RETRY_S after (till the booth records a shot, its stroke can be matched to an earlier
         round's), then moves any shot the booth filed under another hole or stroke number than GSPro's
@@ -3729,7 +3677,7 @@ class Engine:
 
     def _sync_file_clubs(self) -> None:
         """The live round's shots take the club (and putt or not) and the lie played from the store has for
-        them: GSPro's round file can correct one after the live follow ended, or take its correction back,
+        them: GSPro's round file can correct one after the shot was recorded, or take its correction back,
         and the round's stats (its longest drive) are worked out from these. A shot it makes a putt is
         graded as one (a miss the log showed, which a full shot isn't given)."""
         r = self.round
@@ -7434,7 +7382,7 @@ class Engine:
     # ---- the shot -------------------------------------------------------------------------
 
     def _impact_state(self) -> tuple:
-        # Snapshot this player's per-index log state at impact, BEFORE _follow_shot advances the log to
+        # Snapshot this player's per-index log state at impact, BEFORE the wait for the ball at rest advances the log to
         # the next shot's setup. Used to resolve the previous shot's finishing distance (this shot's
         # setup distance is where the previous ball came to rest) and to baseline this putt's outcome.
         gs = self.gspro
@@ -7764,7 +7712,7 @@ class Engine:
 
         # A ball in the water is a penalty with no resting lie to wait for, so SAY its splash NOW, off
         # the GSPro log's Hit_water (ingested by this point, after the impact read), instead of behind
-        # the slow ball-follow. It does NOT return: the handler still runs the follow and records the
+        # the wait for GSPro's round file. It does NOT return: the handler still waits for it and records the
         # shot below (so the fairway streak resets and the stroke is counted); `splash_said` then skips
         # the reaction section. Falls through to the reaction-path water check if not wet yet here.
         splash_said = False
@@ -7789,8 +7737,7 @@ class Engine:
 
         await self._read_putter(shot, fires0, impact, tag)
         # GSPro's log says a full shot ended the hole (holed, or stopped inside the gimme circle) a second
-        # or two after the ball stops, often before the screen shows it at rest: a chip that ends the hole
-        # can move GSPro straight on with no rest seen, and the follow waited out its whole cap (12 s).
+        # or two after the ball stops.
         end_idx = self._gspro_idx(player) if self._log_truth and not shot.is_putt else None
 
         def hole_over() -> bool:
@@ -7798,27 +7745,19 @@ class Engine:
                 self.gspro.hole_outs_of(end_idx) > impact_snap[2].get(end_idx, 0)
                 or self.gspro.gimmies_of(end_idx) > impact_snap[3].get(end_idx, 0))
 
-        def at_rest() -> bool:   # GSPro's log has this shot's ball stopped
-            return self._log_truth and "rest_at" in self.gspro.fire_info(self.gspro.fire_of(fires0, impact))
-
-        # GSPro's round file (3.59+) has the ball at rest first: the follow stops when it does. Its stroke
-        # is one first read after the swing (a shot with no impact time: after the feed delivered it).
+        # Where the ball stopped is GSPro's round file's (the screen isn't followed). Its stroke is one first
+        # read after the swing (a shot with no impact time: after the feed delivered it).
         file_track, file_timing = None, {}
         file_since = event.impact_at or event.received_at or impact
-        if ocr:
-            after, landed, file_track, own, file_timing = await self._follow_with_file(
-                before, tag, shot.is_putt, hole_over, at_rest, player=player, ball_speed=shot.ball_speed,
+        if event.hud_hint is None and not (event.landed and event.round_shot_id is None):
+            # (no screen needed: the file is read with OCR off too. A shot the feed had from GSPro.db's
+            # LastShot once its round file went unwritten, practice, isn't waited on.)
+            after, landed, file_track, file_timing = await self._wait_for_file(
+                before, tag, shot.is_putt, player=player, ball_speed=shot.ball_speed,
                 impact=impact, unit=unit, seq=my_seq, since=file_since, known=event.round_shot_id,
                 shot_round=shot_round)
-        else:
-            after, landed, own = Hud(), event.hud_hint is not None, None
-            # (no follow to wait on: a shot fed from GSPro's files comes once the file has it)
-            if self._round_watch is not None:
-                await self._refresh_round_file()
-                file_track = self._file_track_of(player, shot.ball_speed, file_since, claim=my_seq,
-                                                 known=event.round_shot_id)
-                if file_track is not None and not shot.is_putt:
-                    after, landed = self._file_after(after, file_track, unit, None), True
+        else:   # a replay's shot, its resting read with it; or LastShot's
+            after, landed = Hud(), event.hud_hint is not None
         if use_screen:
             log.info("%s final reading %.1fs after impact (landed=%s%s): lie %s, carry %s, total %s, offline %s", tag,
                      time.monotonic() - impact, landed, ", GSPro's round file" if file_track else "", after.lie,
@@ -7835,24 +7774,17 @@ class Engine:
         if shot_round is None and file_track is not None and file_ours and (cur := self.round) and not cur.ended \
                 and cur.seq == 1 and self._round_started_at >= impact and not self._file_ours(file_track, cur, tag):
             before, file_ours = screen_before, False   # the round that may adopt it isn't GSPro's: the screen's count
-        # Only a follow that saw the ball land vouches for its tiles: otherwise they may be the last shot's.
-        # (Ended by GSPro's file, the screen's other tiles weren't read at rest: the next setup reads them.)
-        follow_tiles = landed and (file_track is None or own is not None) and any(_tile_yards(after.tiles, t, "yards") is not None
-                                                             for t in ("carry (game)", "total length"))
+        # (the screen's tiles, offline and raw carry, are read at the next setup: _apply_late_tiles)
         shown_before = self._shown_tiles
-        if follow_tiles:
-            self._shown_tiles = _tile_values(after.tiles, unit)
-            if self._tiles_wanted == my_seq:
-                self._tiles_wanted = None
         if not held and self._fire_log_followed() and not await self._gspro_fired(fires0, impact, event):
             log.warning("%s dropped: GSPro never played it (no \"Shot Fired\" in its log; club %s, ball %.1f mph, "
                         "carry %.1f): not recorded or called", tag, shot.club, shot.ball_speed or 0, shot.carry or 0)
             return
         try:
-            # The screen's own read, not the round file's numbers: those would hide a tile it can't read.
-            screen_after = after if file_track is None else own
             hc = self._hc   # (this round's: another may have started by the time the tiles are read)
-            missed = self._health_shot(before, screen_after or Hud(), shot.is_putt, ocr and screen_after is not None)
+            # No screen read after the swing: the impact read's tiles count, and the next setup's
+            # read takes back any it missed (_apply_late_tiles).
+            missed = self._health_shot(before, Hud(), shot.is_putt, ocr)
         except Exception:
             missed = set()
             log.exception("Health shot count failed")
@@ -7883,7 +7815,7 @@ class Engine:
         carry_game = None if shot.is_putt or not landed else tile_yards("carry (game)")
         carry_flat = None if shot.is_putt or not landed else tile_yards("carry (raw)")
         if carry_flat is None and file_track is not None and carry_game and source == "GSPro raw":
-            carry_flat = raw_now   # the file cut the follow short of it: the fresh one read at impact
+            carry_flat = raw_now   # no screen read at rest: the fresh one read at impact
         if self.gspro.altitude_ft is not None and self.current_course \
                 and self.current_course not in self.cfg.commentary.course_altitude_ft:
             self.carry.altitude[self.current_course] = self.gspro.altitude_ft   # beats the course file's
@@ -7920,8 +7852,8 @@ class Engine:
             file_track = self._file_track_of(player, shot.ball_speed, file_since, claim=my_seq,
                                              known=event.round_shot_id)
             if file_track is not None:   # its resting read and stroke number, as an early find's
-                hud, landed = self._file_after(hud, file_track, unit, None), True
-                after = self._file_after(after, file_track, unit, None)
+                hud, landed = self._file_after(hud, file_track, unit), True
+                after = self._file_after(after, file_track, unit)
                 carry_game = tile_yards("carry (game)")
                 file_ours = self._file_ours(file_track, shot_round, tag)
                 if file_ours and (n := self._file_stroke(file_track, player)) != before.shot_number:
@@ -8042,10 +7974,10 @@ class Engine:
             shot = replace(shot, club=club)   # off the deck (from the feed's club, or a stale "tee" read)
         if not shot.is_putt and "in_water" not in tags and self._shot_wet(player, since=impact):
             tags = [*tags, "in_water"]   # the GSPro log saw the splash: the wrap can say where it went
-        if file_track is not None:   # a penalty or drop GSPro wrote since the follow
+        if file_track is not None:   # a penalty or drop GSPro wrote since it was taken
             file_track = self._file_track_of(player, None, impact, file_track.shot_id) or file_track
             if file_track.penalty and not shot.is_putt:   # where it stopped isn't where play goes on
-                hud = self._file_after(hud, file_track, unit, None)
+                hud = self._file_after(hud, file_track, unit)
         penalty_facts, penalty_tag = await self._penalty_shot_facts(fire, shot, tags, track=file_track)
         if penalty_tag and penalty_tag not in tags:
             tags = [*tags, penalty_tag]
@@ -8140,9 +8072,9 @@ class Engine:
         attributed = bool(player) and player != "unknown" and not self._anonymous(player)
         # The impact snapshot is where this player's ball sat going into this shot = the previous
         # shot's resting place, so it resolves the previous full shot's finishing distance (GSPro
-        # doesn't log a shot's finish until the following shot is set up, and _follow_shot has since
+        # doesn't log a shot's finish until the following shot is set up, and the wait for the ball at rest has since
         # advanced the live state, so a snapshot taken at THIS impact is the reliable source). Guarded
-        # by shot order: a slow earlier handler (stuck _follow_shot) must not resolve/stash after a
+        # by shot order: a slow earlier handler (a long wait on GSPro's round file) must not resolve/stash after a
         # later shot already did, which would scramble the "next setup = this rest" pairing.
         in_order = idx is not None and my_seq > self._finish_seq.get(idx, 0)
         # Alternate shot: a player's next stroke is the partner's ball after theirs (often on the next
@@ -8214,7 +8146,7 @@ class Engine:
                     before = replace(before, shot_number=moved[2])
         if self._log_truth and fire is not None and shot_id is not None:
             self._bg(self._note_rest(shot_id, fire, impact))
-        if ocr and not shot.is_putt and shot_id is not None and not follow_tiles:
+        if ocr and not shot.is_putt and shot_id is not None:
             self._tiles_due[my_seq] = (shot_id, rec, shown_before, unit, hc, missed)
             while len(self._tiles_due) > 4:
                 del self._tiles_due[next(iter(self._tiles_due))]
@@ -8346,7 +8278,7 @@ class Engine:
                 # or conceded. Else fall back to the on-screen result banner. It only says the hole ENDED -
                 # a conceded miss inside the gimme circle ends it too - so it's a holed HINT, not a
                 # definitive drop; no outcome written.
-                # (looked at again after the banner: a putt still rolling when the follow ended is written
+                # (looked at again after the banner: a putt still rolling at its first look is written
                 # at rest, before the banner shows)
                 # With no screen to read, the file alone, waited on while the ball may still be rolling
                 # (in a round, once a live GSPro has written the file: practice putts aren't in it).
@@ -8424,7 +8356,7 @@ class Engine:
         elif not shot.is_putt and file_track is None and not (idx is not None and self._log_truth) \
                 and self._file_live():
             # No log slot, and the ball not yet at rest in GSPro's round file (fed in flight with no screen,
-            # or the screen's follow ended first): the record still gets a hole-out or a gimme from it.
+            # or its stroke didn't come while it was waited for): the record still gets a hole-out or a gimme from it.
             self._bg(self._late_file_end(shot_id, tag, rec, player, shot.ball_speed, file_since, my_seq))
         elif not shot.is_putt and (idx is not None and self._log_truth or file_track is not None):
             # A full shot can end the hole: holed out, or stopped inside the gimme circle (the putt is
@@ -8439,8 +8371,8 @@ class Engine:
             near = (hud.lie or "").lower() in ("", "green", "fringe")
             base_hole = impact_snap[1].get(idx)
             base_setup = setups0.get(idx, 0)
-            # A short chip or splash that drops often ends the follow before touchdown is seen (GSPro
-            # moves straight on to the next hole), so it counts as near without `landed`, with a longer
+            # A short chip or splash that drops may have no stroke in GSPro's round file (it moves
+            # straight on to the next hole), so it counts as near without `landed`, with a longer
             # window: the hole-out reaches the log a few seconds later. A chip that stays out resolves
             # as soon as GSPro sets the player up again, so the wait costs a miss almost nothing.
             short = (start_yards := to_yards(before.to_pin)) is not None and start_yards <= SHORT_GAME_YARDS
@@ -8838,7 +8770,7 @@ class Engine:
         """Fill in the previous full shot's finishing distance using the CURRENT shot's impact snapshot
         (where that ball came to rest). A shot that holed finishes at 0; one that ended inside the gimme
         circle finishes within the gimme radius; a shot that found water/OB has no finish. The snapshot
-        is used rather than live state because _follow_shot has since advanced the log another shot."""
+        is used rather than live state because the wait for the ball at rest has since advanced the log another shot."""
         if idx is None or idx not in self._pending_finish:
             return
         prev_id, before = self._pending_finish.pop(idx)
@@ -9479,17 +9411,16 @@ class Engine:
             return
         (shot_id, rec, before, unit, hc, missed), tiles = self._tiles_due.pop(seq), self._late_tiles.pop(seq)
         game, raw, total, offline = values = _tile_values(tiles, unit)
-        # Only the fields both reads have: a follow reads one panel, a setup both.
+        # Only the fields both reads have.
         both = [(a, b) for a, b in zip(values, before or ()) if a is not None and b is not None]
         if both and all(a == b for a, b in both):
             log.info("[shot %s] tiles at the next setup (carry %s, total %s) are the shot before's: not kept",
                      seq, game, total)
             return
         self._shown_tiles = values
-        # The follow never saw this ball land, so whatever it read wasn't confirmed as this shot's.
         # GSPro's round file's carry and total, live, stand: the screen adds only what the file hadn't.
         file_carry, file_total = self._file_shot_ids.pop(shot_id, (False, False))
-        # A penalty GSPro's file has for it since (matched after the follow): no resting total.
+        # A penalty GSPro's file has for it since (matched after the swing): no resting total.
         file_total = file_total or any(t.penalty for t in self._file_tracks if self._file_pins.get(t.shot_id) == shot_id)
         read = set(tiles)   # what the screen showed, for health, whichever of it the shot takes
         tiles = {k: v for k, v in tiles.items()
@@ -9788,153 +9719,91 @@ class Engine:
                 return "unknown"  # window passed with no log signal: not a definitive miss
             await asyncio.sleep(poll)
 
-    async def _follow_shot(self, before: Hud, tag: str = "", is_putt: bool = False,
-                           ended: Callable[[], bool] | None = None,
-                           at_rest: Callable[[], bool] | None = None,
-                           progress: dict | None = None) -> tuple[Hud, bool]:
-        """_follow_reads, less a resting lie of "tee": no shot comes to rest there; it's the lie the
-        ball was hit from, not yet redrawn (Corey's 275-yard opening drive at Bethpage was saved there).
-        `progress["end"]` says how a confirmed rest was seen ("screen" or "log"), for a caller that may
-        cancel the follow (_follow_with_file)."""
-        hud, landed = await self._follow_reads(before, tag, is_putt, ended, at_rest, progress)
-        if not is_putt and (hud.lie or "").lower() == "tee":
-            log.info("%s lie tee read for where the ball stopped: the lie it was hit from; not naming it", tag)
-            hud = replace(hud, lie=None)
-        return hud, landed
+    async def _wait_for_file(self, before: Hud, tag: str, is_putt: bool, *, player: str | None,
+                             ball_speed: float | None, impact: float, unit: str, seq: int | None = None,
+                             since: float | None = None, known: str | None = None, shot_round=...
+                             ) -> tuple[Hud, bool, round_file.Track | None, dict]:
+        """Where the ball stopped, from GSPro's round file: GSPro writes each stroke there (every course
+        mode, practice too) in the frame it has the ball at rest. The stroke with this shot's ball speed
+        (and player) is waited for until _file_wait_over says it won't come (a ball struck since, the
+        round ended); its lie, carry and total are the resting read. The screen isn't followed.
 
-    async def _follow_with_file(self, before: Hud, tag: str, is_putt: bool, ended: Callable[[], bool] | None,
-                                at_rest: Callable[[], bool] | None, *, player: str | None,
-                                ball_speed: float | None, impact: float, unit: str, seq: int | None = None,
-                                since: float | None = None, known: str | None = None, shot_round=...
-                                ) -> tuple[Hud, bool, round_file.Track | None, Hud | None, dict]:
-        """_follow_shot, raced against GSPro's round file (3.59+): GSPro writes it in the frame it has the
-        ball at rest, so a new stroke there with this shot's ball speed (and player) ends the follow at
-        once, and its lie, carry and total are the resting read. A finer lie the screen already read of
-        the ball stopped (fringe, semi rough, ...; round_file.finer_lie) is kept; none is waited for.
-        A follow that ends first (its cap, the log's rest or hole end) doesn't end the shot while a live
-        GSPro writes the file: the stroke is waited for until _file_wait_over says it won't come (a ball
-        struck since, the round ended), and only then does the follow's read stand. A GSPro that has
-        written no file this session never gets one: the follow's read stands at once.
-
-        Returns (the resting read, landed, the file's stroke or None, the follow's own read (None if it
-        was cancelled or, with the file's stroke, saw no rest), timings for the latency log)."""
+        Returns (the resting read, whether the ball was had at rest, the file's stroke or None, timings
+        for the latency log). A putt isn't waited on (its result is the log's and the banner's): `before`,
+        with the stroke the feed took it from, if any. No stroke: an empty read; the next setup's read of
+        the tiles still gives the shot its numbers (_apply_late_tiles). Nor is anything waited for with no
+        watch of the file running (the engine's, with GSPro's log followed, or the feed's, from before any swing: one
+        begun after it would take this stroke for an old one), or from a GSPro before 3.59 (no such file)."""
         w = self._round_watch
-        if is_putt or w is None:
-            hud, landed = await self._follow_shot(before, tag, is_putt, ended, at_rest)
+        if w is None and isinstance(getattr(getattr(self.source, "gspro_log", self.source), "files", None),
+                                    gspro_files.GsproFiles):
+            w = self._round_watch_of()   # the feed's, watching since before the swing
+        if w is None:
+            return (before if is_putt else Hud()), False, None, {}
+        if known is not None:   # the feed has read the file since this engine last looked, maybe
+            await self._refresh_round_file()
+        if is_putt:
             track = None
-            if known is not None and w is not None:   # a putt the feed took from the file: its stroke, unwaited
-                await self._refresh_round_file()
+            if known is not None:   # a putt the feed took from the file: its stroke, unwaited
                 track = self._file_track_of(player, ball_speed, since or impact, claim=seq, known=known)
-            return hud, landed, track, hud, {}
-        progress: dict = {}
+            return before, False, track, {}
+        if self.gspro.version and gspro_ui(self.gspro.version) == "classic":
+            return Hud(), False, None, {}
         timing: dict = {}
         started = time.monotonic()
         seq0, ends0 = (seq if seq is not None else self._shot_seq), self.gspro.round_ends
         # the booth round it was struck in (`shot_round`, from impact; else the one on now, as _impact_hole)
         round0 = shot_round if shot_round is not ... else self.round if self.round and not self.round.ended else None
         round_then = self.round
-        if known is not None:   # the feed has read the file since this engine last looked, maybe
+        had_file = w is not None and w.entries is not None
+        track, stop = None, None
+        if ball_speed is None:
+            stop = "it has no ball speed to know its stroke by"
+        while stop is None:
+            changed = self._file_changed   # taken before the look, so a write in between still wakes it
+            if (track := self._file_track_of(player, ball_speed, since or impact, claim=seq,
+                                             known=known)) is not None:
+                break
+            if (stop := self._file_wait_over(seq0, ends0, round0, started, round_then, had_file)) is not None:
+                break
+            if known is not None and any(isinstance(x, dict) and str(x.get("ShotID")) == known
+                                         for x in self._file_entries):
+                stop = "the stroke the feed took it from isn't one to take"   # (no write will change that)
+                break
+            if known is None and any(
+                    (w.seen_at.get(t.shot_id) or -math.inf) >= (since or impact)
+                    and abs(t.ball_speed - ball_speed) <= SAME_BALL_MPH for t in self._file_tracks):
+                stop = "the stroke with its ball speed isn't this player's"   # (a name it can't match)
+                break
+            try:   # (woken by a write; polled too, for a file not yet there and the stops above)
+                await asyncio.wait_for(changed.wait(), FILE_WAIT_POLL_S)
+            except asyncio.TimeoutError:
+                pass
             await self._refresh_round_file()
-        follow = asyncio.create_task(self._follow_shot(before, tag, is_putt, ended, at_rest, progress))
-        track = None
-        try:
-            while True:
-                changed = self._file_changed   # taken before the look, so a write in between still wakes it
-                if (track := self._file_track_of(player, ball_speed, since or impact, claim=seq,
-                                                 known=known)) is not None or follow.done():
-                    break
-                waiter = asyncio.ensure_future(changed.wait())
-                try:
-                    await asyncio.wait({follow, waiter}, return_when=asyncio.FIRST_COMPLETED)
-                finally:
-                    waiter.cancel()
-            if track is None:
-                timing["ocr_rest"] = time.monotonic()
-                # What ended it: only a rest seen on screen is the screen's timing to set against the file's.
-                end = progress.get("end")
-                timing["ocr_end"] = (
-                    "the screen had it at rest" if end == "screen"
-                    else "GSPro's log had it at rest" if end == "log"
-                    else "the hole ended" if ended is not None and ended()
-                    else "it ran out of time" if timing["ocr_rest"] - started >= self.cfg.screen.follow_max_seconds - 0.25
-                    else "it lost the ball before a rest")
-                # A live GSPro writes every stroke once its ball is at rest (a long roll well past the
-                # follow's cap, a chip-in after the log's hole end): wait for it, however long, until
-                # something says it won't come for this shot.
-                stop = None
-                # (a shot with no ball speed can't be told in the file: nothing to wait for)
-                while w.entries is not None and w.written >= self._booth_wall0 and ball_speed is not None:
-                    changed = self._file_changed
-                    if (track := self._file_track_of(player, ball_speed, since or impact, claim=seq,
-                                                     known=known)) is not None:
-                        break
-                    if (stop := self._file_wait_over(seq0, ends0, round0, started, round_then)) is not None:
-                        break
-                    if known is not None and any(isinstance(x, dict) and str(x.get("ShotID")) == known
-                                                 for x in self._file_entries):
-                        stop = "the stroke the feed took it from isn't one to take"   # (no write will change that)
-                        break
-                    if known is None and any(
-                            (w.seen_at.get(t.shot_id) or -math.inf) >= (since or impact)
-                            and abs(t.ball_speed - ball_speed) <= SAME_BALL_MPH for t in self._file_tracks):
-                        stop = "the stroke with its ball speed isn't this player's"   # (a name it can't match)
-                        break
-                    try:   # (woken by a write; the look again is only for a stop above)
-                        await asyncio.wait_for(changed.wait(), FILE_WAIT_POLL_S)
-                    except asyncio.TimeoutError:
-                        pass
-                if track is None:
-                    if stop is not None:
-                        log.warning("%s no stroke in GSPro's round file %.1fs after impact (the follow ended "
-                                    "at %.1fs: %s), and %s: the screen's read stands", tag,
-                                    time.monotonic() - impact, timing["ocr_rest"] - impact, timing["ocr_end"], stop)
-                    hud, landed = follow.result()
-                    return hud, landed, None, hud, timing
-        except BaseException:
-            follow.cancel()
-            raise
+        if track is None:
+            log.warning("%s no stroke in GSPro's round file %.1fs after impact, and %s: no resting read",
+                        tag, time.monotonic() - impact, stop)
+            return Hud(), False, None, timing
         timing["file"] = w.seen_at.get(track.shot_id, time.monotonic())
-        own = None
-        if follow.done():
-            own = follow.result() if not follow.cancelled() and follow.exception() is None else None
-        else:
-            follow.cancel()
-            try:
-                await follow
-            except asyncio.CancelledError:
-                if asyncio.current_task().cancelling():
-                    raise
-            if self.screen and self.cfg.screen.save_review_images:   # the follow's own, cut short (off the clock)
-                asyncio.create_task(asyncio.to_thread(self._save_review_image, tag, "final"), name="review-final")
         # A stroke's penalty or drop is its own entry, written just after it: give it time to land.
         if (wait := FILE_SETTLE_S - (time.time() - w.written)) > 0:
             await asyncio.sleep(wait)
             await self._refresh_round_file()
             track = self._file_track_of(player, ball_speed, impact, track.shot_id) or track
-        hud_lie = None
-        # The follow's read stands beside the file's only as a rest it saw (touchdown alone isn't one),
-        # and its tiles only as this shot's (the follow saw them turn over).
-        rested = own is not None and progress.get("end") in ("screen", "log")
-        if rested:
-            hud_lie = own[0].lie
-            rested = own[1]
-        base = own[0] if rested else Hud()
-        if "ocr_rest" in timing:
-            when = f", {timing['file'] - timing['ocr_rest']:+.2f}s after the follow ended ({timing['ocr_end']})"
-        else:
-            when = ", the screen follow stopped there"
         end = track.penalty_kind or ("holed" if track.in_cup else "dropped" if track.dropped else "")
-        log.info("%s ball at rest in GSPro's round file %.2fs after impact%s: lie %s (screen %s), carry %s, "
-                 "total %s, %s yd to the pin%s", tag, timing["file"] - impact, when, track.lie_after, hud_lie,
-                 track.carry_yards, track.total_yards, track.finish_yards, f", {end}" if end else "")
-        return self._file_after(base, track, unit, hud_lie), True, track, own[0] if rested else None, timing
+        log.info("%s ball at rest in GSPro's round file %.2fs after impact: lie %s, carry %s, total %s, "
+                 "%s yd to the pin%s", tag, timing["file"] - impact, track.lie_after, track.carry_yards,
+                 track.total_yards, track.finish_yards, f", {end}" if end else "")
+        return self._file_after(Hud(), track, unit), True, track, timing
 
-    def _file_wait_over(self, seq: int, round_ends: int, r, started: float, then=None) -> str | None:
+    def _file_wait_over(self, seq: int, round_ends: int, r, started: float, then=None,
+                        had_file: bool = True) -> str | None:
         """Why a stroke not yet in GSPro's round file won't come for shot `seq` (struck in booth round
-        `r`, its follow begun at `started` with `then` the booth's round), else None: a ball struck after
+        `r`, its wait begun at `started` with `then` the booth's round), else None: a ball struck after
         it (its stroke would be the next), GSPro's round or the booth's ended (quit to the menu: GSPro
-        writes no more of it; struck in none, the round started since, that may adopt it), the file gone,
-        or (GSPro hung, say) FILE_WAIT_MAX_S, far past any ball's roll."""
+        writes no more of it; struck in none, the round started since, that may adopt it), the file gone
+        (`had_file`: there when the wait began; GSPro never deletes it, but writes it first at a first
+        stroke), or (GSPro hung, say) FILE_WAIT_MAX_S, far past any ball's roll."""
         if self._shot_seq > seq:
             return "another ball was struck"
         if self.gspro.round_ends > round_ends:
@@ -9944,183 +9813,35 @@ class Engine:
         if r is None and (cur := self.round) is not None and cur is not then and (cur.ended or cur.closing):
             return "the booth's round ended"
         w = self._round_watch
-        if w is None or not w.path.exists():
+        if had_file and (w is None or not w.path.exists()):
             return "the round file is gone"
         if time.monotonic() - started >= FILE_WAIT_MAX_S:
             return f"{FILE_WAIT_MAX_S:.0f}s passed"
         return None
 
     async def _log_file_latency(self, tag: str, timing: dict, fires0: int, impact: float) -> None:
-        """When GSPro's round file had the shot at rest, next to its log's rest (the shooter's score line)
-        and the screen's: for checking the latency on the sim PC."""
+        """When GSPro's round file had the shot at rest, next to its log's rest (the shooter's score line):
+        for checking the latency on the sim PC."""
         def rest_at() -> float | None:
             return self.gspro.fire_info(self.gspro.fire_of(fires0, impact)).get("rest_at")
         deadline = time.monotonic() + 3.0
         while (logged := rest_at()) is None and time.monotonic() < deadline:
             await asyncio.sleep(0.1)
-        f, end = timing["file"], timing.get("ocr_end")
-        if end is None:
-            screen = "stopped by the file"
-        elif end == "the screen had it at rest":
-            screen = f"{timing['ocr_rest'] - impact:.2f}s ({f - timing['ocr_rest']:+.2f}s file vs screen)"
-        else:   # not a rest the screen saw: no screen timing
-            screen = f"none (the follow ended at {timing['ocr_rest'] - impact:.2f}s: {end})"
-        log.info("%s rest latency: GSPro's round file %.2fs after impact; its log %s; the screen %s", tag,
-                 f - impact,
-                 "none in 3s" if logged is None else f"{logged - impact:.2f}s ({f - logged:+.2f}s file vs log)", screen)
+        f = timing["file"]
+        log.info("%s rest latency: GSPro's round file %.2fs after impact; its log %s", tag, f - impact,
+                 "none in 3s" if logged is None else f"{logged - impact:.2f}s ({f - logged:+.2f}s file vs log)")
 
     @staticmethod
-    def _file_after(base: Hud, t: round_file.Track, unit: str, hud_lie: str | None) -> Hud:
-        """The resting read from GSPro's round file: its lie (or the screen's finer word for it), carry and
-        total in the HUD's unit over `base`'s tiles."""
+    def _file_after(base: Hud, t: round_file.Track, unit: str) -> Hud:
+        """The resting read from GSPro's round file: its lie, carry and total in the HUD's unit over
+        `base`'s tiles."""
         tiles = dict(base.tiles)
         if t.penalty:
             tiles.pop("total length", None)   # a penalty's ball has no resting total (round_file.Track)
         for name, yd in (("carry (game)", t.carry_yards), ("total length", t.total_yards)):
             if yd is not None:
                 tiles[name] = f"{yd if unit != 'metres' else yd / M_TO_YD:.1f}"
-        return replace(base, lie=None if t.penalty else round_file.finer_lie(t.lie_after, hud_lie), tiles=tiles)
-
-    async def _follow_reads(self, before: Hud, tag: str = "", is_putt: bool = False,
-                            ended: Callable[[], bool] | None = None,
-                            at_rest: Callable[[], bool] | None = None,
-                            progress: dict | None = None) -> tuple[Hud, bool]:
-        """Follows the ball through the HUD from impact until it stops.
-
-        Checked on gameplay video: CARRY (game) counts up and freezes at touchdown (the lie flips
-        to where it LANDED), Total Length keeps counting while the ball rolls and then holds, and
-        1-2 s later GSPro blanks the HUD and moves the player box on to the next shot.
-
-        We follow past touchdown until the ball comes to rest (total length holds steady) and read
-        the lie THERE, so the reaction uses the resting lie, not the landing lie: a ball that lands
-        on the fairway and releases into the rough reads "rough", as it should. Touchdown is still
-        where CARRY (game) is final, so carry learning is unaffected. Returns the last read that
-        still belonged to this shot (never the next player's, via _moved_on), and whether it stopped.
-
-        Putts don't drive those tiles, so their stop can never be detected this way; the loop would
-        just burn an OCR read every poll for the whole cap, learn nothing, and starve the next shot's
-        reads (the main cause of late commentary and audio jitter late in a hole). A putt's result
-        comes from the score banner in the reaction path, not these tiles, so skip the follow for it.
-
-        `ended` says GSPro's log already shows the shot ended the hole: the follow stops there.
-
-        With GSPro's round file (3.59+) this runs under _follow_with_file, which cancels it as soon as
-        the file has the ball at rest: the screen is only the fallback for when it doesn't come.
-        """
-        if is_putt:
-            return before, False
-        poll = max(self.cfg.screen.follow_poll_seconds, 0.05)
-        max_seconds = self.cfg.screen.follow_max_seconds
-        # CARRY (game) as it read at impact: the previous shot's frozen value if its tiles are still on
-        # screen, else this shot's starting value. A freeze that DIFFERS from it means the tile has
-        # turned over to this shot (so a short chip already frozen at the first follow read still lands);
-        # a freeze EQUAL to it is the stale previous value and must not count as touchdown.
-        game_baseline = _tile_yards(before.tiles, "carry (game)", "yards")
-        # Who's up at impact (top row of the player box), as a pixel signature. GSPro keeps the last
-        # shot's tiles on screen after it moves to the next player (measured on video: ball at rest,
-        # ~1.3s, fade, then the next player's lie under the SAME tiles), so the tiles can't tell us the
-        # switch happened; the name cell can. A dark cell (the fade) counts as switched too.
-        who = before.name_sig if before.name_sig not in (None, NAME_DARK) else None
-        last, landing, prev_total, moving, steady = None, None, None, False, 0
-        started, prev_game, touchdown, rose = time.monotonic(), None, None, False
-        reads, mine = 0, False   # mine: the tiles have been seen holding this shot's values
-        last_at, prior = None, (None, None)   # when `last`'s read began; the this-shot read before it, and when
-        # Bound by wall-clock, not iteration count: OCR can be slow, and a slow follow blocks the
-        # next shot's reaction in the queue (a stuck follow ran two minutes once).
-        # Poll `lie`, the `player_name` cell (a pixel compare, no OCR) and `tiles`, in that order: the
-        # name is grabbed AFTER the lie, so an unchanged name proves the lie was captured before any
-        # switch to the next player.
-        deadline = max_seconds
-        while time.monotonic() - started < deadline:
-            if ended and ended():
-                log.info("%s hole over in the GSPro log %.1fs into the follow; not waiting to see the ball stop",
-                         tag, time.monotonic() - started)
-                return _unsettled(last or landing or Hud(), tag), touchdown is not None
-            reads += 1
-            # Asked BEFORE the read, so a rest logged mid-read can't vouch for a capture taken in flight.
-            logged_rest = at_rest is not None and at_rest()
-            read_at = time.monotonic()
-            hud = await self.screen.read_hud_async(["lie", "player_name", "tiles"])
-            if who is None and hud.name_sig not in (None, NAME_DARK):
-                who = hud.name_sig
-            elif name_sig_changed(who, hud.name_sig):
-                now = time.monotonic()
-                if last is not None and last_at is not None and now - last_at < REST_SHOWN_SECONDS and last.lie \
-                        and _this_shots_tiles(last) and not _rolled(prior[0], last, prior[1], now):
-                    log.info("%s player box switched %.1fs after the last read (%s reads, %.1fs); the ball was at "
-                             "rest there, resting lie %s", tag, now - last_at, reads, now - started, last.lie)
-                    if progress is not None:
-                        progress["end"] = "screen"
-                    return last, touchdown is not None
-                log.info("%s player box switched after %s reads (%.1fs); using the last this-shot read (lie %s)",
-                         tag, reads, time.monotonic() - started, (last or landing or Hud()).lie)
-                return _unsettled(last or landing or Hud(), tag), touchdown is not None
-            game = _tile_yards(hud.tiles, "carry (game)", "yards")
-            total = _tile_yards(hud.tiles, "total length", "yards")
-            # A freeze counts as touchdown only once the tile is known to belong to THIS shot: either
-            # CARRY (game) was seen climbing (the ball flew), or the frozen value differs from the
-            # impact baseline (the tile turned over, e.g. a chip already landed by the first read).
-            # A value still equal to the baseline is the previous shot's stale tile and is rejected.
-            if game is not None and prev_game is not None and game > prev_game:
-                rose = True
-            turned_over = game is not None and game_baseline is not None and game != game_baseline
-            mine = mine or rose or turned_over
-            if touchdown is None and (rose or turned_over) and game and game == prev_game:
-                touchdown = time.monotonic() - started
-                deadline = max(max_seconds, touchdown + self.cfg.screen.follow_roll_seconds)
-                landing, steady = hud, 0  # landing read; kept only as a fallback if the HUD moves on
-                log.info("%s touchdown ~%.1fs into the follow; following to rest", tag, touchdown)
-                if callable(getattr(self.screen, "grab_regions", None)):
-                    return await self._follow_to_rest(hud, who, tag, started, deadline, ended, at_rest, read_at,
-                                                      progress)
-            prev_game = game
-            if logged_rest:
-                # GSPro's log had the ball stopped before this read was taken, so it is at rest. Without it the
-                # follow waits for the screen to show a landing, which a short or low ball may never do
-                # (a 28-yard mishit waited out the whole cap). The carry is only learnable once the tiles
-                # are known to be this shot's.
-                log.info("%s ball at rest in the GSPro log %.1fs into the follow (%s reads), resting lie %s",
-                         tag, time.monotonic() - started, reads, hud.lie)
-                if game is None and total is None:   # the next player's address: not this shot's read
-                    return _unsettled(last or landing or Hud(), tag), touchdown is not None
-                if progress is not None:
-                    progress["end"] = "log"
-                return hud, touchdown is not None or mine
-            # Moved on to the next player: their address HUD shows carry (game) AND total length both
-            # blank or the "--.--" placeholder (both parse to None) - the next shot hasn't been hit. The
-            # tiles dict stays NON-empty on that placeholder, so test the parsed values, not emptiness.
-            # Requiring BOTH None avoids a one-tile OCR dropout ending the follow early. Once we've seen
-            # this shot's tiles, that reset means stop with the last this-shot read, never the next one's.
-            # A short chip can land and stop before the second read, so it never shows a touchdown or a
-            # roll: its tiles having turned over to this shot is enough (it waited out the cap before).
-            if last is not None and (touchdown is not None or moving or mine) and game is None and total is None:
-                log.info("%s HUD moved on after %s reads (%.1fs); using the last this-shot read (lie %s)",
-                         tag, reads, time.monotonic() - started, last.lie)
-                return last, True
-            if hud.tiles:
-                if last is not None:
-                    prior = (last, last_at)
-                last, last_at = hud, read_at
-            if total is not None and prev_total is not None and total != prev_total:
-                moving, steady = True, 0  # still climbing (flight) or rolling out
-            elif touchdown is not None and total is not None and total == prev_total:
-                # Landed, and total length has stopped changing: the ball is at rest. Covers a long
-                # release and a plug that never rolls (total already steady at touchdown).
-                steady += 1
-                if steady >= 2:
-                    log.info("%s ball at rest: total steady after %s reads (%.1fs), resting lie %s", tag,
-                             reads, time.monotonic() - started, hud.lie)
-                    if progress is not None:
-                        progress["end"] = "screen"
-                    if self.cfg.screen.save_review_images:
-                        asyncio.create_task(asyncio.to_thread(self._save_review_image, tag, "final"), name="review-final")
-                    return hud, True
-            prev_total = total
-            await asyncio.sleep(poll)
-        # Timed out without a confirmed rest. If touchdown was seen, CARRY (game) is already final, so
-        # the carry is still learnable (landed=True); only an unconfirmed touchdown skips learning.
-        log.info("%s ball not seen to come to rest within %.0fs (touchdown=%s)", tag, deadline, touchdown is not None)
-        return _unsettled(last or landing or Hud(), tag), touchdown is not None
+        return replace(base, lie=None if t.penalty else t.lie_after, tiles=tiles)
 
     async def _watch_picks(self) -> None:
         """A scramble's pick (GSPro logs "SelectShotToUse") is made from every ball the team hit, and GSPro's
@@ -10269,153 +9990,6 @@ class Engine:
                      ", ".join(f"{p} {feet_text(y)}" for p, (y, _) in got.items() if y is not None)
                      or "no tee shot on the green")
             self._squabbit_kick()
-
-    def _rest_grab(self, parts: list[str]) -> dict:
-        """The follow's quick grab: the boxes through one capture handle (~80 ms for the lie, name and
-        tiles at 4K on the sim PC, against ~180 ms one handle per box), else grab_regions."""
-        boxes = getattr(self.screen, "grab_boxes", None)
-        if callable(boxes) and (crops := boxes(parts)):
-            return crops
-        return self.screen.grab_regions(parts)
-
-    async def _follow_to_rest(self, landing: Hud, who, tag: str, started: float, deadline: float,
-                              ended: Callable[[], bool] | None = None,
-                              at_rest: Callable[[], bool] | None = None,
-                              landing_at: float | None = None,
-                              progress: dict | None = None) -> tuple[Hud, bool]:
-        """From touchdown on, watch the HUD's pixels rather than OCR it: GSPro shows the ball at rest
-        only about a second (1.0-1.25 s, Bethpage 11-07) before fading the box and moving on, and an
-        OCR read takes a third of that. Grabs (no OCR) every `rest_poll_seconds`: Total Length's number
-        stops changing when the ball stops. Only that number is compared (its box from the landing
-        read): the rest of the tiles region is the live scene beside the panel.
-
-        Held for two grab-to-grab comparisons, the grab is OCR'd for the resting lie in the background
-        while the grabs go on: that read is provisional. A ball can pause on a crest and roll on, or
-        creep on a slope slower than the polls, so it's kept only once the number has held REST_HOLD_
-        SECONDS more, or GSPro moves on (it does only with the ball stopped) with the number where it
-        was. If the number moves again, a later hold replaces it. With no hold seen before the switch,
-        the last two grabs' totals are compared (the fade changes the pixels with the ball stopped).
-        Failing those, the newest this-shot capture (the last grab, else the landing read begun at
-        `landing_at`) is the rest if it began within REST_SHOWN_SECONDS of the switch and nothing
-        showed the ball still rolling: GSPro moves on only that long after the ball stops."""
-        parts = ["lie", "player_name", "tiles"]
-        box = landing.tile_boxes.get("total length")
-        rest_poll = max(self.cfg.screen.rest_poll_seconds, 0.02)
-        prev, steady, prev_crops, older_crops = None, 0, None, None
-        held = None   # the provisional rest: (grab time, its OCR task, its crops), or None
-        moved = False  # the number changed since the provisional rest's grab
-        since: deque = deque(maxlen=12)   # the grabs since the number moved off the hold, newest last
-        newest_at = landing_at   # when the newest this-shot capture (prev_crops, else the landing read) began
-
-        def drop():
-            nonlocal held
-            if held is not None:
-                held[1].cancel()
-            held = None
-
-        async def kept(hud: Hud, how: str) -> tuple[Hud, bool]:
-            log.info("%s ball at rest: %s %.1fs into the follow, resting lie %s", tag, how,
-                     time.monotonic() - started, hud.lie)
-            if self.cfg.screen.save_review_images:
-                asyncio.create_task(asyncio.to_thread(self._save_review_image, tag, "final"), name="review-final")
-            # The next player's address shows both distance tiles blank ("--.--"): the box moved on
-            # unnoticed (no name signature), so this grab isn't this shot's.
-            if not _this_shots_tiles(hud):
-                return _unsettled(landing, tag), True
-            if progress is not None:
-                progress["end"] = "log" if how == "in the GSPro log" else "screen"
-            return hud, True
-
-        async def read(crops) -> Hud:
-            return await asyncio.to_thread(self.screen.read_hud, parts, None, crops)
-
-        try:
-            while time.monotonic() - started < deadline:
-                if ended and ended():
-                    log.info("%s hole over in the GSPro log %.1fs into the follow; not waiting to see the ball stop",
-                             tag, time.monotonic() - started)
-                    return _unsettled(landing, tag), True
-                logged_rest = at_rest is not None and at_rest()   # before the grab: it must come after the rest
-                grab_at = time.monotonic()
-                try:
-                    crops = await asyncio.to_thread(self._rest_grab, parts)
-                except Exception:
-                    log_capture_failure("%s HUD grab failed while following to rest", tag, logger=log, level=logging.WARNING)
-                    prev, steady, prev_crops, older_crops = None, 0, None, None   # a failed grab can't count toward a steady run
-                    newest_at = None
-                    await asyncio.sleep(rest_poll)
-                    continue
-                at = time.monotonic()
-                sig = name_signature(crops["player_name"]) if "player_name" in crops else None
-                if who is not None and name_sig_changed(who, sig):
-                    rolling, newest = False, None
-                    if held is not None:
-                        hud = await held[1]
-                        if not moved:
-                            return await kept(hud, "player box switched with the total still")
-                        # The number changed after the hold: the fade, or the ball rolling on. The
-                        # newest grab since that reads says which; none reading is the fade's dimming.
-                        b, a = _tile_yards(hud.tiles, "total length", "yards"), None
-                        for c in reversed(since):
-                            if (a := _tile_yards((await read(c)).tiles, "total length", "yards")) is not None:
-                                break
-                        # A later readable total the hold can't vouch for (its own unread) is no rest.
-                        if a is None or (b is not None and abs(a - b) <= REST_CREEP_YARDS):
-                            return await kept(hud, "player box switched, total %s then %s;" % (b, a))
-                        log.info("%s rolled on after a hold (total %s then %.1f)", tag, b, a)
-                        rolling = True
-                    if steady >= 1 and prev_crops is not None:
-                        hud = newest = await read(prev_crops)
-                        if _this_shots_tiles(hud):
-                            return await kept(hud, "player box switched with the total already still;")
-                    elif prev_crops is not None and older_crops is not None:
-                        # The box fading out changes the pixels with the ball already stopped, so the pixel
-                        # test never held (41 of 45 drives, 11-07): read the last two grabs' Total Length.
-                        last, before = await asyncio.gather(read(prev_crops), read(older_crops))
-                        newest = last
-                        a = _tile_yards(last.tiles, "total length", "yards")
-                        b = _tile_yards(before.tiles, "total length", "yards")
-                        if a is not None and b is not None and _this_shots_tiles(last) and last.lie:
-                            if abs(a - b) <= REST_CREEP_YARDS:
-                                return await kept(last, "player box switched, total %.1f then %.1f;" % (b, a))
-                            log.info("%s player box switched with the ball still rolling (total %.1f then %.1f, lie %s)",
-                                     tag, b, a, last.lie)
-                            rolling = True
-                    # Measured to the switching grab's end: the switch may have come while it ran.
-                    if not rolling and newest_at is not None and at - newest_at < REST_SHOWN_SECONDS:
-                        hud = landing if prev_crops is None else newest or await read(prev_crops)
-                        if hud.lie and _this_shots_tiles(hud):
-                            return await kept(hud, "player box switched %.1fs after the last capture;" % (at - newest_at))
-                    log.info("%s player box switched %.1fs into the follow, before the ball was seen at rest (lie %s)",
-                             tag, time.monotonic() - started, landing.lie)
-                    return _unsettled(landing, tag), True
-                if logged_rest:
-                    return await kept(await read(crops), "in the GSPro log")
-                tiles = crops.get("tiles")
-                # The box only fits a grab the same size as the landing read's crop (a capture fallback or
-                # resolution change moves everything); otherwise compare the whole region.
-                fits = box and tiles is not None and tiles.size == landing.tile_crop_size
-                total = tiles.crop(box) if fits else tiles
-                still = total is not None and prev is not None and not _pixels_changed(prev, total)
-                steady = steady + 1 if still else 0
-                if not still and held is not None:
-                    moved = True
-                if moved:
-                    since.append(crops)
-                if steady >= 2 and (held is None or moved):
-                    drop()   # a later hold replaces the last: the ball rolled on
-                    held, moved = (at, asyncio.create_task(read(crops)), crops), False
-                    since.clear()
-                if held is not None and not moved and at - held[0] >= REST_HOLD_SECONDS:
-                    return await kept(await held[1], ("total length" if fits else "tiles") + " still")
-                prev, prev_crops, older_crops, newest_at = total, crops, prev_crops, grab_at
-                await asyncio.sleep(rest_poll)
-            if held is not None and not moved:
-                return await kept(await held[1], "total length still at the cap")
-            log.info("%s ball not seen to come to rest within %.0fs (touchdown=True)", tag, deadline)
-            return _unsettled(landing, tag), True
-        finally:
-            drop()
 
     def _save_review_image(self, tag: str, moment: str) -> None:
         folder = Path(self.cfg.log_dir) / "shots" / time.strftime("%Y-%m-%d")

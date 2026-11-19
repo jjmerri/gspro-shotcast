@@ -14,9 +14,9 @@ It's GSPro's physics, so it's taken over what the booth reads off the screen and
 and the finish. The file starts over each round, so only the round in play can be read.
 
 GSPro writes it in the frame it has the ball at rest, before the shooter's score line in its log, so
-it's used live too: the engine's follow (Engine._follow_with_file) takes a new stroke with the shot's
-ball speed as the ball at rest, and its lie, carry, total, distance to the pin, penalty and drop
-(holed, or inside the gimme circle) for the reaction; no screen read is waited on once it's in. Its
+it's used live too: after the swing the engine waits for a new stroke with the shot's ball speed
+(Engine._wait_for_file) and takes it as the ball at rest: its lie, carry, total, distance to the pin,
+penalty and drop (holed, or inside the gimme circle) for the reaction. The screen isn't followed. Its
 Hole and HoleShot are GSPro's own count, so a stroke the booth filed under another hole or stroke
 number is moved (Engine._refile_from_round_file). The store applies it to the recorded shots
 (Store.apply_round_file) as soon as the shot is recorded, and again as it changes.
@@ -50,9 +50,8 @@ SURFACES = {0: None, 1: "rough", 2: "fairway", 3: "deep rough", 4: "cart path", 
             7: "drop zone", 8: "green", 9: "green", 10: "green", 11: "sand", 12: "semi rough", 13: "stone",
             14: "structure", 15: "water", 16: "pine straw", 17: "leaves", 18: "tee", 19: None, 20: "tee",
             21: "trees", 22: "structure"}
-# Live, a finer lie the follow already read off the HUD is kept only where it fits inside GSPro's code
-# for where the ball stopped (a read taken mid-roll may be somewhere it rolled through). Semi rough and
-# pine straw are GSPro's own codes, so its word for them stands.
+# A finer lie word read off the HUD is kept only where it fits inside GSPro's code for where the ball
+# stopped. Semi rough and pine straw are GSPro's own codes, so its word for them stands.
 FINER_LIES = {"first cut": ("rough", "fairway"), "fringe": ("green", "fairway"),
               "fescue": ("rough", "deep rough"), "native": ("rough", "deep rough"),
               "bunker": ("sand",), "waste area": ("sand", "rough"), "waste": ("sand", "rough")}
