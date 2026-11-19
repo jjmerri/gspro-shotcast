@@ -2085,7 +2085,8 @@ class Engine:
         """Whether GSPro's log has every player of the live round placed in its slot, so their scores are
         the log's as each hole finishes and the scorecard's OCR adds nothing: a log being followed, no more
         players in it than the round has, the first hole known, none of them in a slot the booth can't tie
-        a name to, each with a logged score on every hole before this one, and every hole's par and stroke
+        a name to, each (or their side, on a shared ball) with a logged score on every hole through the one
+        just played, and every hole's par and stroke
         index already known (the card fills those in too, for handicap strokes)."""
         if r is None or r.ended or not self._fire_log_followed() or r.start_hole_assumed or not r.roster:
             return False
@@ -2094,8 +2095,12 @@ class Engine:
         holes = range(1, r.holes + 1)
         if any(s not in r.par or s not in r.index for s in holes):
             return False
-        if any(s not in r.log_scores.get(g, {}) for g in r.roster for s in range(1, r.seq)):
-            return False   # a score line missed: the card has it
+        # A score on every hole through the one just played (the card's up between holes) for each side
+        # sharing a ball (a scramble's is logged under one partner), else each player: one missed, the
+        # card has it.
+        groups = [s.gspro for s in r.sides] if r.format in TEAM_BALL else [[g] for g in r.roster]
+        if any(not any(s in r.log_scores.get(g, {}) for g in grp) for grp in groups for s in range(1, r.seq + 1)):
+            return False
         return all(self._gspro_idx(g, scores=True) is not None for g in r.roster)
 
     def _note_log_scores(self, r: Round) -> None:
@@ -5992,6 +5997,7 @@ class Engine:
                     seat(k)
         elif not r.slot_guess:
             log.info("Round %s: GSPro's round file confirms the slots of %s", r.id, sorted(slots))
+            self._own_misread(r)
             return
         r.slot_names = order
         r.learn_slots()
@@ -6001,6 +6007,36 @@ class Engine:
             self.store.round_players(r.uuid, dict(r.roster), r.slot_names)
         if self._recheck_slots(r, was):
             self._sync_log_scores(r)
+        self._own_misread(r)
+
+    def _own_misread(self, r: Round) -> None:
+        """Shots the screen named for someone else in a slot GSPro's round file has just named, whose
+        score line came in before the file was matched: the slot's player's (_own_shot)."""
+        for fire, (owner, _) in list(self._fire_log.items()):
+            row = self._fire_rows.get(fire)
+            if row is None or row[1].round_id != r.id or fire in self._renames or owner not in r.file_slots.values() \
+                    or self._row_source.get(fire) not in ("screen", "setup read", "address frame"):
+                continue
+            if (known := self._log_name(owner)) is not None and r.file_slots.get(known[0]) == owner \
+                    and r.current_name(row[1].player) != known[1] and not self._anonymous(known[1]):
+                self._file_rename(fire, owner, known[1])
+
+    def _file_rename(self, fire: int, owner: int, name: str) -> None:
+        """GSPro's own records name the slot that hit a shot (_learn_file_slots): the screen misread who
+        was up, so the shot is `name`'s."""
+        shot_id, rec, _, _ = self._fire_rows[fire]
+        log.info("Shot %s: the screen said %s hit it, GSPro's log and round file have %s in slot %d: it's "
+                 "theirs", shot_id, rec.player, name, owner + 1)
+        # Its finish and result were followed on the misread player's slot: void them, so the next
+        # shot from that slot isn't taken as where this ball went, and grade it on its own slot.
+        for cache in (self._pending_finish, self._last_row):
+            for k in [k for k, v in cache.items() if v is not None and v[0] == shot_id]:
+                del cache[k]
+        self._void_result(shot_id, rec)
+        self._fire_rows[fire] = (shot_id, rec, owner, self.gspro.fire_info(fire).get("hole"))
+        self._renames.add(fire)
+        self._rename_remapped(self.round)
+        self._outcomes_due.add(fire)
 
     def _forget_fires(self, upto: int) -> None:
         """Let the recorded rows of fires `upto` and before go (keeping a guessed slot order's log-named
@@ -6174,19 +6210,7 @@ class Engine:
                 self._fire_rows[fire] = (shot_id, rec, owner, self.gspro.fire_info(fire).get("hole"))
                 self._outcomes_due.add(fire)
         elif r.file_slots.get(g) == owner and not self._anonymous(name):
-            # GSPro's own records name the slot (_learn_file_slots): the screen misread who was up.
-            log.info("Shot %s: the screen said %s hit it, GSPro's log and round file have %s in slot %d: it's "
-                     "theirs", shot_id, rec.player, name, owner + 1)
-            # Its finish and result were followed on the misread player's slot: void them, so the next
-            # shot from that slot isn't taken as where this ball went, and grade it on its own slot.
-            for cache in (self._pending_finish, self._last_row):
-                for k in [k for k, v in cache.items() if v is not None and v[0] == shot_id]:
-                    del cache[k]
-            self._void_result(shot_id, rec)
-            self._fire_rows[fire] = (shot_id, rec, owner, self.gspro.fire_info(fire).get("hole"))
-            self._renames.add(fire)
-            self._rename_remapped(r)
-            self._outcomes_due.add(fire)
+            self._file_rename(fire, owner, name)
         else:
             for k in [k for k in r.log_agree if k[0] == owner]:
                 del r.log_agree[k]
@@ -7714,7 +7738,8 @@ class Engine:
         if notable_delivery and use_delivery:
             score += 0.5
             tags.append("club_notable")
-        if file_track is not None and file_ours and before.shot_number != screen_before.shot_number \
+        if file_track is not None and file_ours and (before.shot_number != screen_before.shot_number
+                                                     or screen_club is not None) \
                 and not self._file_ours(file_track, shot_round, tag):   # GSPro's round tied to another since
             file_ours = False
             if screen_club is not None:   # the club came from that round's stroke: back to the screen's

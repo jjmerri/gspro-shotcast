@@ -290,7 +290,10 @@ LAUNCH_TOL = 0.006   # the log rounds each number to 2 places; the file has them
 
 def same_launch(logged: dict, entry: dict) -> bool:
     """Whether a `LaunchExt Vars` line's numbers (rounded) are this entry's GhostData: the same ball."""
-    vals = launch_of(entry)
+    return _launch_match(logged, launch_of(entry))
+
+
+def _launch_match(logged: dict, vals: dict | None) -> bool:
     return vals is not None and all(k in logged and k in vals and abs(logged[k] - vals[k]) <= LAUNCH_TOL
                                     for k in LAUNCH_KEYS)
 
@@ -300,10 +303,18 @@ def slot_players(credits: Iterable[tuple[int, dict]], entries: list) -> dict[int
     shooter's score line, after the ball stopped) with their launch numbers, each tied to the file's
     stroke with the same ball. An index whose shots name two players, a name two indices share, and a
     ball two players' entries share are left out: nothing's guessed."""
-    entries = [e for e in entries if isinstance(e, dict) and e.get("PlayerName")]
+    # By ball speed in hundredths (within LAUNCH_TOL: the next one either side): a late round's file is
+    # hundreds of strokes, checked against every shot credited.
+    by_sp: dict[int, list[tuple[str, dict]]] = {}
+    for e in entries:
+        if isinstance(e, dict) and e.get("PlayerName") and (vals := launch_of(e)) and "sp" in vals:
+            by_sp.setdefault(round(vals["sp"] * 100), []).append((str(e["PlayerName"]), vals))
     votes: dict[int, set[str]] = {}
     for idx, launch in credits:
-        names = {str(e["PlayerName"]) for e in entries if same_launch(launch, e)}
+        if "sp" not in launch:
+            continue
+        k = round(launch["sp"] * 100)
+        names = {n for b in (k - 1, k, k + 1) for n, vals in by_sp.get(b, ()) if _launch_match(launch, vals)}
         if len(names) == 1:
             votes.setdefault(idx, set()).update(names)
     named = {idx: next(iter(ns)) for idx, ns in votes.items() if len(ns) == 1}

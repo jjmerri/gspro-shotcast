@@ -6302,6 +6302,23 @@ def test_gspros_round_file_places_the_players_the_setup_screen_misread(tmp_path)
     assert shot(4, None, 1).player == "Kroll"                # a hidden name is the file's slot's
 
 
+def test_a_shot_the_log_credited_before_the_round_file_had_it_is_moved_once_the_file_names_the_slot(tmp_path):
+    # The setup screen had the slots right, but the screen read Kroll for Barrows' ball, and its score
+    # line came in before GSPro's round file was matched: kept as Kroll's then, Barrows' once it is.
+    e = _guest_round(tmp_path, ["Kroll", "Barrows"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.setup_slots = ["Barrows", "Kroll"]
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    shot = _row_maker(e)
+    rec = shot(1, "Kroll", 0)
+    assert rec.player == "Kroll"                             # nothing yet to say otherwise
+    e.gspro._fire_info[1]["launch"] = {"sp": 150.0, **_LAUNCH}
+    e._file_entries, e._file_version = [_file_ball("Barrows", 150.0)], 2
+    e._apply_log_corrections()
+    assert e.round.file_slots == {"Barrows": 0} and rec.player == "Barrows"
+
+
 def test_no_file_slots_without_the_logs_launch_numbers(tmp_path):
     e = _guest_round(tmp_path, ["Kroll", "Barrows"])
     e.cfg.source.gspro_log_truth = True
@@ -7140,17 +7157,18 @@ async def test_gspros_log_scores_stand_in_for_the_scorecards_ocr(tmp_path):
     r.par = {s: 4 for s in range(1, r.holes + 1)}
     assert not e._log_scores_cover(r)        # no stroke index yet: the card's is the handicap order
     r.index = {s: s for s in range(1, r.holes + 1)}
+    r.log_scores = {"Kroll": {1: 4}, "Barrows": {1: 5}}
     assert e._log_scores_cover(r)            # every player in a slot: the card has nothing to add
     e._follower = None
     assert not e._log_scores_cover(r)        # no log being read: only the card has the scores
     e._follower = type("F", (), {"primed": True})()
-    r.seq = 2
     r.log_scores = {"Kroll": {1: 4}}
-    assert not e._log_scores_cover(r)        # Barrows' first hole never reached the log
-    r.seq, r.log_scores = 1, {}
+    assert not e._log_scores_cover(r)        # Barrows' score on the hole just played never reached the log
+    r.log_scores = {"Kroll": {1: 4}, "Barrows": {1: 5}}
     e.gspro.players_seen.add(2)
     assert not e._log_scores_cover(r)        # someone the round doesn't have: the card admits them
     e.gspro.players_seen.discard(2)
+    r.log_scores = {}
     calls = []
     e._kick_wrap_branches = lambda side_key, scores, other: calls.append((side_key, scores, other))
     e.gspro.hole_scores = {(0, 0): 4}        # Kroll holes out on the first hole: one side still to putt

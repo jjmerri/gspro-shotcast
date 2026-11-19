@@ -34,6 +34,9 @@ for the first shot of a round, before the file has a ball to match, and for GSPr
 lines and, if the file always names every slot by the second shot, remove the screen-read slot
 learning (`slot_read`'s read counts, `_recheck_slots`) and keep the setup screen only for format and
 nines. The pre-shot "who's up" read stays: GSPro never logs it.
+A shot the screen misnamed is moved to the file's player once its score line and the file agree
+(`_file_rename`), but the live call already aired (and its prediction was graded) under the screen's
+name: the shooter isn't in the log until the ball stops.
 
 ## Drop the screen's setup lie once the round file covers every setup
 
