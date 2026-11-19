@@ -1190,6 +1190,9 @@ class Engine:
         # showing none means GSPro has started a new round.
         self._holes_played = 0
         self._holes_played_at = 0.0
+        # (round id, hole of the round) -> each player's score GSPro's log has posted on it, so a new one
+        # is acted on as the scorecard's would be (_note_log_scores).
+        self._log_posted: tuple[tuple[int, int], dict[str, int]] | None = None
 
     # ---- event plumbing -------------------------------------------------------------------
 
@@ -1407,8 +1410,9 @@ class Engine:
                 self._hole_watch = holes
                 continue
             if hud.scorecard_open:
-                # GSPro shows the scorecard between holes. Once per showing is plenty.
-                if time.monotonic() - card_read_at > 5:
+                # GSPro shows the scorecard between holes. Once per showing is plenty, and none while
+                # GSPro's log has every player's scores (_log_scores_cover): it posts them as they finish.
+                if time.monotonic() - card_read_at > 5 and not self._log_scores_cover(self.round):
                     card_read_at = time.monotonic()
                     card = (await self.screen.read_hud_async(["scorecard"])).scorecard
                     if card:
@@ -2050,6 +2054,7 @@ class Engine:
                 self._sync_log_scores(r)
                 self._note_departures(r)
                 self._squabbit_kick()
+                self._note_log_scores(r)
         if g.round_completes != self._log_round_completes:
             self._log_round_completes = g.round_completes
             if live and not r.log_complete:
@@ -2075,6 +2080,26 @@ class Engine:
                     self._events.put_nowait(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
             # Back to the menus: a fresh tee is a new round, and the setup watcher takes over.
             self._holes_played, self._holes_played_at = 0, 0.0
+
+    def _log_scores_cover(self, r: Round | None) -> bool:
+        """Whether GSPro's log has every player of the live round placed in its slot, so their scores are
+        the log's as each hole finishes and the scorecard's OCR adds nothing: no more players in the log
+        than the round has, the first hole known, and none of them in a slot the booth can't tie a name to."""
+        if r is None or r.ended or not self._log_rounds or r.start_hole_assumed or not r.roster:
+            return False
+        if len(self.gspro.players_seen) > len(r.roster):
+            return False   # someone the round doesn't have (the card admits them: _admit_from_card)
+        return all(self._gspro_idx(g, scores=True) is not None for g in r.roster)
+
+    def _note_log_scores(self, r: Round) -> None:
+        """A score GSPro's log has just posted on the hole in play: what the scorecard showing it would set
+        off (the group's last-side wrap, the wrap played on the last putt), with no card read."""
+        key = (r.id, r.seq)
+        posted = {g: v for g in r.roster if (v := r.log_scores.get(g, {}).get(r.seq)) is not None}
+        was = self._log_posted[1] if self._log_posted and self._log_posted[0] == key else {}
+        self._log_posted = (key, posted)
+        if any(was.get(g) != v for g, v in posted.items()):
+            self._events.put_nowait(ScorecardEvent(card=None))
 
     def _sync_log_scores(self, r: Round) -> None:
         """Copy each finished hole's score from GSPro's log into the round, where it beats the scorecard
@@ -7841,10 +7866,11 @@ class Engine:
         outcome = full_result = None
         wrong_green = None
         # A putt the feed took from GSPro's round file, which has the hole ended on it: a definitive drop.
+        log_drop = False   # the putt's result from the log's score line for its fire (no name for the slot)
         file_drop = shot.is_putt and file_track is not None and file_track.shot_id == event.round_shot_id \
             and file_track.dropped
         if shot.is_putt and ((self.screen is not None and ocr) or idx is not None or file_drop
-                             or self._round_watch is not None):
+                             or self._round_watch is not None or (self._log_truth and self.gspro.mode == "course")):
             base_outs, base_gim = impact_snap[2].get(idx, 0), impact_snap[3].get(idx, 0)
             if file_drop:   # GSPro's file has it: no waiting on the log
                 outcome = "holed" if file_track.in_cup else "conceded"
@@ -7904,7 +7930,25 @@ class Engine:
                 putt_track = await self._file_hole_end(
                     player, shot.ball_speed, file_since, my_seq,
                     wait=c.hole_result_window_seconds if not screen and self._file_live() else 0.0)
-                if putt_track is None and screen:
+                window = c.hole_result_window_seconds
+                if putt_track is None and (credit := await self._log_shooter(fires0, impact, window)):
+                    # GSPro's log credited this stroke to a slot it can't name: its score line, not the banner.
+                    shooter, fire = credit
+                    outcome = await self._wait_putt_result(
+                        shooter, impact_snap[2].get(shooter, 0), impact_snap[3].get(shooter, 0),
+                        impact_snap[6].get(shooter, self.gspro.shot_number(shooter)),
+                        max(0.5, impact + c.hole_result_window_seconds - time.monotonic()),
+                        base_hole=impact_snap[1].get(shooter), base_setup=setups0.get(shooter, 0), fire=fire)
+                    if outcome != "unknown":
+                        log_drop = True
+                        self._record_result(shot_id, outcome, tag, putt=True, rec=rec)
+                        holed = outcome == "holed"
+                        log.info("%s putt outcome from GSPro's log (its slot %s's score line): %s", tag, shooter,
+                                 outcome)
+                        if holed:
+                            score = holed_putt_score(score, before, tags, c.interest_threshold,
+                                                     c.big_moment_threshold, putt_to_par(before.shot_number, shot_par))
+                if putt_track is None and screen and not log_drop:   # the banner only says the hole ended
                     self.last_hole_result = await self._hole_result(c.hole_result_window_seconds)
                     holed = True if self.last_hole_result else None
                     putt_track = await self._file_hole_end(player, shot.ball_speed, file_since, my_seq)
@@ -7918,6 +7962,8 @@ class Engine:
                     if holed:
                         score = holed_putt_score(score, before, tags, c.interest_threshold,
                                                  c.big_moment_threshold, putt_to_par(before.shot_number, shot_par))
+                elif log_drop:
+                    pass
                 elif not screen and self._file_live():
                     # Still rolling, maybe (a long lag): the record gets its end once GSPro writes it.
                     self._bg(self._late_file_end(shot_id, tag, rec, player, shot.ball_speed, file_since, my_seq,
@@ -7928,7 +7974,8 @@ class Engine:
             # Grade this player's pre-putt call, only when the log could attribute the result (the
             # banner can't distinguish a drop from a conceded miss).
             pending_prediction = self._pending_prediction.pop(player, None)
-            if pending_prediction and (idx is not None or file_drop) and outcome not in (None, "unknown") \
+            if pending_prediction and (idx is not None or file_drop or log_drop) \
+                    and outcome not in (None, "unknown") \
                     and pending_prediction[2] == shot_hole:
                 commentator, predicted_make, _ = pending_prediction
                 made = outcome == "holed"
@@ -8384,6 +8431,22 @@ class Engine:
         if after["to_pin_m"] is not None:
             self._log_finish[prev_id] = after["to_pin_m"] * M_TO_YD
             self.store.set_shot_result(prev_id, finish_yards=after["to_pin_m"] * M_TO_YD)
+
+    async def _log_shooter(self, fires0: int, impact: float, window: float,
+                           poll: float = 0.1) -> tuple[int, int] | None:
+        """The slot GSPro's log credits the shot that hit at `impact` to (its shooter's score line, logged
+        as the ball stops), with the shot's "Shot Fired" number, waited on up to `window` after `impact`;
+        None with no log to go by."""
+        if not self._log_truth or self.gspro.mode != "course":
+            return None
+        deadline = impact + window
+        while True:
+            fire = self.gspro.fire_of(fires0, impact)
+            if (p := self.gspro.fire_info(fire).get("player")) is not None:
+                return p, fire
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(poll)
 
     async def _hole_result(self, timeout: float, poll: float = 0.3) -> str | None:
         """Poll GSPro's result banner until it shows or the window closes. It appears about a second
@@ -12556,6 +12619,10 @@ class Engine:
 
     async def handle_scorecard(self, event: ScorecardEvent) -> None:
         r = self.round
+        if event.card is None:   # GSPro's log posted a score: the card's numbers are already in
+            if r and not r.ended:
+                await self._after_hole_scores(r)
+            return
         if not r or r.ended:
             if event.card.scores != self._idle_card_logged:   # the card stays up after a round: once per change
                 self._idle_card_logged = event.card.scores
@@ -12569,6 +12636,26 @@ class Engine:
             r.apply_scorecard(event.card)
         log.info("Round %s scorecard: %s", r.id, {g: dict(sorted(v.items())) for g, v in r.card_scores.items()})
         self._squabbit_kick()
+        await self._after_hole_scores(r)
+        if r.complete() and self._log_rounds and not r.log_complete:
+            # GSPro logs the round's completion at the last putt, a beat before its scorecard shows;
+            # give the log follower a moment to catch up before deciding the round goes on.
+            for _ in range(10):
+                self._check_log_round()
+                if r.log_complete or r.ended:
+                    break
+                await asyncio.sleep(0.2)
+        if r.ended:
+            return
+        if r.complete():
+            if self._log_rounds and not r.log_complete:
+                # Every hole we were counting is scored but GSPro's round goes on (an 18 counted as 9).
+                self._extend_round(r)
+            else:
+                await self.handle_round_end(RoundEndEvent(reason="final scorecard"))
+
+    async def _after_hole_scores(self, r: Round) -> None:
+        """A score posted on the hole in play, read off the scorecard or GSPro's log (_note_log_scores)."""
         if self.cfg.commentary.segments_on_hole_change and self.state.current_hole \
                 and self._wrapped_hole != self.state.current_hole:
             # In a group, the moment the second-to-last side holes out (one side left to putt), pre-
@@ -12587,22 +12674,6 @@ class Engine:
             # hole change. If the wrap is pre-voiced, play it now so it lands on the green instead of
             # after the between-hole screen; the hole change then sees it's done and skips.
             await self._wrap_after_last_putt(self.state.current_hole, r.seq)
-        if r.complete() and self._log_rounds and not r.log_complete:
-            # GSPro logs the round's completion at the last putt, a beat before its scorecard shows;
-            # give the log follower a moment to catch up before deciding the round goes on.
-            for _ in range(10):
-                self._check_log_round()
-                if r.log_complete or r.ended:
-                    break
-                await asyncio.sleep(0.2)
-        if r.ended:
-            return
-        if r.complete():
-            if self._log_rounds and not r.log_complete:
-                # Every hole we were counting is scored but GSPro's round goes on (an 18 counted as 9).
-                self._extend_round(r)
-            else:
-                await self.handle_round_end(RoundEndEvent(reason="final scorecard"))
 
     async def _wrap_after_last_putt(self, finished_hole, finished_seq: int) -> bool:
         """Fire the pre-made wrap the moment the scorecard shows the hole's score. Lets the hole's

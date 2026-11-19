@@ -77,7 +77,8 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
 
 ### Shot and game state
 - **`models.py`** the shot and event types: `Shot` (ball/club data, `is_putt`), `ShotEvent`,
-  `PreShotEvent`, `HoleChangeEvent`, `RoundStartEvent`, `ScorecardEvent`, `RoundEndEvent`.
+  `PreShotEvent`, `HoleChangeEvent`, `RoundStartEvent`, `ScorecardEvent` (a read scorecard, or none when GSPro's log
+  posted a score), `RoundEndEvent`.
 - **`hud.py`** parses OCR of the GSPro 3.1.x HUD (player box, hole box, tile panels, minimap lie
   and slope, club box) into structured fields.
 - **`screen.py`** screen capture and OCR (RapidOCR/ONNX, CPU). Region reads, and the per-slot

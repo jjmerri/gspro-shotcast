@@ -143,7 +143,10 @@ What's recorded, and from where:
 | `sessions` | night | When the booth ran |
 
 Scores, strokes, penalties, lies and distances come from GSPro's own log, so they're GSPro's
-numbers, not OCR guesses; ball and club data come from the shot feed. Whether a stroke
+numbers, not OCR guesses; ball and club data come from the shot feed. The scorecard GSPro shows
+between holes is only read while the log can't name every player's slot, and a putt by a player
+the booth can't place yet takes its result from the score line GSPro logs for that stroke, not
+from the on-screen result banner. Whether a stroke
 is a putt (`is_putt`) is GSPro's own call, from whether the putter was selected, so a chip from
 the green is a full shot and a putt from the fringe is a putt. The round's putt count, though,
 follows the PGA Tour: every stroke played from the green counts, whatever the club (plus conceded

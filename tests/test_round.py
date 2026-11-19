@@ -5011,7 +5011,7 @@ async def test_log_scores_end_a_complete_round_without_waiting_for_end_round(tmp
     g.round_completes += 1                                # "Round Is Complete": no End Round yet
     e._check_log_round()
     assert r.log_complete and r.complete()
-    assert e._events.get_nowait().reason == "final scorecard"
+    assert [q.reason for q in _queued(e) if hasattr(q, "reason")] == ["final scorecard"]   # after the hole's score
     # The finished round's last green, read as a setup before the sign-off, isn't a shot to call.
     assert e._after_round(Hud(shot_number=3)) and not e._after_round(Hud(shot_number=1))
     # Ended, and long past the quiet window: still quiet until GSPro logs a new shot.
@@ -7121,3 +7121,57 @@ def test_gspros_wrong_hole_correction_is_noted_in_the_booth_log_once(tmp_path, c
         e._apply_log_corrections()
         e._apply_log_corrections()
     assert caplog.text.count("GSPro scored a shot by player 0 (unnamed) on the wrong hole and corrected it on hole 5") == 1
+
+
+async def test_gspros_log_scores_stand_in_for_the_scorecards_ocr(tmp_path):
+    from commentator.models import ScorecardEvent
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    r = e.round
+    e.cfg.commentary.segments_on_hole_change = True
+    e.current_par, r.par[1] = 4, 4
+    e.state.current_hole = "par 4, 400 yards"
+    assert e._log_scores_cover(r)            # every player in a slot: the card has nothing to add
+    e.gspro.players_seen.add(2)
+    assert not e._log_scores_cover(r)        # someone the round doesn't have: the card admits them
+    e.gspro.players_seen.discard(2)
+    calls = []
+    e._kick_wrap_branches = lambda side_key, scores, other: calls.append((side_key, scores, other))
+    e.gspro.hole_scores = {(0, 0): 4}        # Kroll holes out on the first hole: one side still to putt
+    e._sync_log_scores(r)
+    e._note_log_scores(r)
+    queued = _queued(e)
+    assert [type(q) for q in queued] == [ScorecardEvent] and queued[0].card is None
+    e._note_log_scores(r)
+    assert _queued(e) == []                  # once per score posted
+    await e.handle_scorecard(queued[0])
+    barrows = next(s for s in r.sides if "Barrows" in s.gspro)
+    assert calls and calls[-1][0] == barrows.key and any("made 4" in f for f in calls[-1][2])
+
+
+async def test_a_putt_from_a_slot_the_booth_cant_name_takes_its_result_from_the_logs_score_line(tmp_path):
+    from commentator.models import ShotEvent
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    e.round.slot_names, e.round.slot_guess = ["Kroll", "Barrows"], True   # a guess nobody's read has placed
+    c = e.cfg.commentary
+    c.hole_result_window_seconds = c.lag_result_window_seconds = 0.3
+    e.commentary_on = False
+    banner = []
+
+    async def no_banner(*a, **k):
+        banner.append(a)
+        return None
+    watched = []
+
+    async def from_the_log(idx, *a, **k):
+        watched.append((idx, k.get("fire")))
+        return "holed"
+    e._hole_result, e._wait_putt_result = no_banner, from_the_log
+    e.screen = object()
+    e.gspro._fire_info[1] = {"player": 1, "hole": 0}   # the log's score line for the stroke credits slot 1
+    hud = _tee("Barrows", shot=3)
+    await e.handle_shot(ShotEvent(shot=Shot(club="PT", carry=5.0), hud_hint=hud, impact_hud_hint=hud))
+    assert e._gspro_idx("Barrows") is None and watched == [(1, 1)]
+    assert [tuple(x) for x in e.store.db.execute("SELECT outcome FROM shots")] == [("holed",)]
+    assert banner == []                     # GSPro's log said it: no banner read

@@ -171,7 +171,7 @@ class RoundStartEvent:
 
 @dataclass
 class ScorecardEvent:
-    card: "Scorecard"
+    card: "Scorecard | None"   # None: GSPro's log posted a score on the hole in play (no card read)
 
 
 @dataclass
