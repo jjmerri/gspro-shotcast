@@ -6369,6 +6369,29 @@ def test_a_hole_out_the_screen_misread_next_stroke_unholed_stands_once_the_file_
     assert e.store.db.execute("SELECT outcome FROM shots WHERE id = ?", (hid,)).fetchone()[0] == "holed"
 
 
+def test_a_shared_profiles_shot_the_file_gives_its_own_shooter_counts_in_their_stats(tmp_path):
+    # Read as a shared profile's (not counted for anyone), GSPro's round file has the ball as Barrows' own.
+    e = _guest_round(tmp_path, ["Kroll", "Barrows"])
+    e.cfg.source.gspro_log_truth = True
+    e.round.setup_slots = ["Kroll", "Barrows"]
+    e.gspro.players_seen.update({0, 1})
+    e.gspro.mode = "course"
+    e._file_entries = [_file_ball("Barrows", 150.0), _file_ball("Kroll", 140.0)]
+    e.gspro._fire_info = {1: {"player": 0, "hole": 0, "launch": {"sp": 150.0, **_LAUNCH}},
+                          2: {"player": 1, "hole": 0, "launch": {"sp": 140.0, **_LAUNCH}}}
+    e.gspro.fires = 2
+    e._apply_log_corrections()
+    shot = _row_maker(e)
+    e._anonymous = lambda p: p == "Kroll"
+    record = e.store.record_shot
+    e.store.record_shot = lambda **kw: record(**{**kw, "attributed": kw["player"] != "Kroll"})
+    e._file_entries += [_file_ball("Barrows", 130.0, n=2)]
+    rec = shot(3, "Kroll", 0, sp=130.0, slot=1)
+    assert rec.player == "Barrows"
+    assert tuple(e.store.db.execute("SELECT player, attributed FROM shots WHERE id = ?",
+                                    (e._fire_rows[3][0],)).fetchone()) == ("Barrows", 1)
+
+
 def test_a_late_stored_earlier_swing_the_file_moves_keeps_its_shooters_newer_finish(tmp_path):
     # Barrows' later swing (fire 3) is already his last; the earlier one (fire 2), stored after it by a
     # slow handler, moves to his slot: his newer swing's finish still follows.

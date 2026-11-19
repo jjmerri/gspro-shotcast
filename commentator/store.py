@@ -1101,6 +1101,13 @@ class Store:
         self.records.reslot([shot_id] + ([gimme_id] if gimme_id is not None else []))
         self.db.commit()
 
+    def set_attributed(self, shot_ids: list[int], attributed: bool) -> None:
+        """Whether these shots count in their player's own stats (a shared profile's don't)."""
+        if shot_ids:
+            self.db.execute(f"UPDATE shots SET attributed = ? WHERE id IN ({', '.join('?' * len(shot_ids))})",
+                            (int(attributed), *shot_ids))
+            self.db.commit()
+
     def clear_shot_result(self, shot_id: int, outcome: str, finish: tuple | None = None,
                           gimme_id: int | None = None) -> None:
         """Take back a shot's `outcome`, and the conceded putt row it added (`gimme_id`, when known; it

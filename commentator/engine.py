@@ -6136,6 +6136,11 @@ class Engine:
         self._fire_rows[fire] = (shot_id, rec, owner, self.gspro.fire_info(fire).get("hole"))
         self._renames.add(fire)
         self._rename_remapped(self.round)
+        if shot_id is not None and rec.player != was and self._anonymous(was) != self._anonymous(rec.player):
+            # (a shared profile's shot, the file's shooter's own: it counts in their stats, or the reverse)
+            gimme = self._gimme_ids.get(shot_id) if shot_id in self._conceded_ids else None
+            self.store.set_attributed([shot_id] + ([gimme] if gimme is not None else []),
+                                      not self._anonymous(rec.player))
         if shot_id is not None and rec.player != was:
             # Stored as the misread player's next stroke, it unholed their hole-out: that stands again.
             for x in self.state.shots:
