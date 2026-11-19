@@ -7764,18 +7764,24 @@ class Engine:
         fire = self.gspro.fire_of(fires0, impact)
         # Read before the lie fix-up below, which can recast a green set up in yards as the fringe.
         off_wrong_green = None if shot.is_putt else wrong_green_yards(before.lie, before.to_pin)
-        played_from = self._played_from(before, shot, self.gspro.fire_info(fire),
-                                        MATERIAL_TO_LIE.get(lies0.get(idx)) if idx is not None else None,
-                                        shot_hole, file_track.lie_before if file_track is not None and file_ours
-                                        else None)
-        if played_from == "green" and self._set_up_in_yards(before):
-            played_from = self._off_green_lie(before)
+        info, material = self.gspro.fire_info(fire), MATERIAL_TO_LIE.get(lies0.get(idx)) if idx is not None else None
+        file_lie = file_track.lie_before if file_track is not None and file_ours else None
+
+        def played(b: Hud, file_lie: str | None) -> tuple[str | None, bool]:
+            p = self._played_from(b, shot, info, material, shot_hole, file_lie)
+            return (self._off_green_lie(b), True) if p == "green" and self._set_up_in_yards(b) else (p, False)
+
+        played_from, in_yards = played(before, file_lie)
+        if in_yards:
             log.info("%s set up in yards: off the green, recorded as %s", tag, played_from)
+        # Where it was played from without GSPro's round file, should that round turn out another's.
+        screen_played = played(replace(before, shot_number=screen_before.shot_number), None)[0] if file_lie else None
         # The HUD's Tee recast only for want of a distance to check it by may still be a re-tee: keep its driver.
         retee = (before.lie or "").lower() == "tee" and self._at_tee_length(before, shot_hole) is None
         if played_from != before.lie:
             log.info("%s played from %s (the HUD read %s)", tag, played_from, before.lie)
             before = replace(before, lie=played_from)
+        deck_from = shot.club
         if not retee and (club := deck_club(shot.club, before.shot_number, before.lie)) != shot.club:
             shot = replace(shot, club=club)   # off the deck (from the feed's club, or a stale "tee" read)
         if not shot.is_putt and "in_water" not in tags and self._shot_wet(player, since=impact):
@@ -7805,10 +7811,16 @@ class Engine:
         if notable_delivery and use_delivery:
             score += 0.5
             tags.append("club_notable")
+        relie = screen_played is not None and screen_played != before.lie
         if file_track is not None and file_ours and (before.shot_number != screen_before.shot_number
-                                                     or screen_club is not None) \
+                                                     or screen_club is not None or relie) \
                 and not self._file_ours(file_track, shot_round, tag):   # GSPro's round tied to another since
             file_ours = False
+            if relie:   # (not the lie its stroke started from either)
+                log.info("%s played from %s after all (not GSPro's round file's %s)", tag, screen_played, before.lie)
+                before = replace(before, lie=screen_played)
+                if screen_club is None and not retee:
+                    shot = replace(shot, club=deck_club(deck_from, screen_before.shot_number, before.lie))
             if screen_club is not None:   # the club came from that round's stroke: back to the screen's
                 club = screen_club[0] if retee else deck_club(screen_club[0], screen_before.shot_number, before.lie)
                 shot, screen_club = replace(shot, club=club), None
@@ -9780,8 +9792,9 @@ class Engine:
                 continue
             if t.penalty:
                 out[idx] = round_file.PickBall(t.player, None, None, penalty=True)
-            elif (yards := t.finish_yards) is not None:   # unrounded: a CTP mark is to the inch
-                out[idx] = round_file.PickBall(t.player, yards and t.to_pin_m * M_TO_YD, t.lie_after)
+            elif t.finish_yards is not None:   # unrounded: a CTP mark is to the inch
+                holed = t.in_cup or (t.holed and not t.to_pin_m)   # (as finish_yards has it)
+                out[idx] = round_file.PickBall(t.player, 0.0 if holed else t.to_pin_m * M_TO_YD, t.lie_after)
         return out
 
     def _apply_pick_cards(self) -> None:
@@ -9820,8 +9833,8 @@ class Engine:
                     # A penalty followed (out of bounds, lost): played again, so it didn't finish here.
                     log.info("Pick ball %s (%s): shot %s took a penalty, no finish", card.name, names[idx], shot_id)
                     continue
-                self.store.fill_finish(shot_id, round(card.yards, 1))
-                filled[idx] = (round(card.yards, 1), None, None)
+                yards = round(card.yards, 1)
+                filled[idx] = (yards if self.store.fill_finish(shot_id, yards) else None, None, None)
                 # The picked ball's lie is GSPro's log's (the team plays on from it); the file's only
                 # stands in for it when there's none, and is the only word on the balls lifted. Until the
                 # log says which was picked, a ball keeps the lie it has. A saved "tee" is no lie at all: the

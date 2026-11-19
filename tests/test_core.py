@@ -7791,3 +7791,26 @@ def test_a_club_gspros_round_file_corrects_after_the_live_follow_is_the_rounds_r
     e.store.db.execute("UPDATE shots SET club = NULL WHERE id = ?", (sid,))   # one the screen never read
     e._sync_file_clubs()
     assert rec.shot.club is None
+
+
+def test_a_pick_ball_a_finish_was_known_for_keeps_it_through_a_late_penalty_and_a_near_cup_ball_isnt_holed(tmp_path):
+    from commentator.round import Round
+    from commentator.sources.gspro_log import M_TO_YD
+
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Ozzy", "Kyle Martin"], course="X", scheduled_format=None, holes=9,
+              is_league=False, slot_names=["Ozzy", "Kyle Martin"])
+    e.round = r
+    ozzy, rec = _row(e, r, 7, 1, "tee", hole=0, seq=1)
+    kyle, rec2 = _row(e, r, 9, 1, "tee", hole=0, seq=1)
+    rec.shot_id, rec2.shot_id, rec2.player, rec.picked, rec2.picked = ozzy, kyle, "Kyle Martin", True, False
+    e.store.db.execute("UPDATE shots SET finish_yards = 24.0 WHERE id = ?", (kyle,))   # known already
+    _pick_file(e, ("Ozzy", 150.0, 5, 0.03, False), ("Kyle Martin", 140.0, 5, 24 / M_TO_YD, False))
+    cards = e._file_pick_cards({0: 7, 1: 9})
+    assert 0 < cards[0].yards < 0.05   # an inch from the cup: not in it
+    e._pick_cards_due.append(({0: 7, 1: 9}, {0: "Ozzy", 1: "Kyle Martin"}, cards, time.monotonic()))
+    e._apply_pick_cards()
+    assert not e._pick_cards_due
+    _pick_file(e, ("Ozzy", 150.0, 5, 0.03, False), ("Kyle Martin", 140.0, 5, 24 / M_TO_YD, True))
+    e._apply_pick_cards()
+    assert e.store.finish_of(kyle)[1] == 24.0   # the pick never wrote it: not the pick's to take back
