@@ -5076,8 +5076,33 @@ def test_the_setup_lie_is_where_gspros_round_file_has_the_ball_at_rest(tmp_path)
     e.round.format, e.round.no_scramble = None, True
     assert e._file_rest_lie("Dan", 2) is None                # a shamble's: his partner's drive, maybe
     e.round.no_scramble = False
+    # A penalty on the drive GSPro left out (the booth counts it): GSPro's 3rd is from its 2nd's ending.
+    entries = [*entries, _round_entry(2, 120.0, surfaces=(11, 1))]
+    e._file_entries, e._file_tracks = entries, round_file.tracks(entries)
+    w.entries = entries
+    e.gspro._score_shift[(0, 0)] = [{"at": 1, "n": 1}]
+    e.round.slot_names = ["Dan"]
+    e.cfg.source.gspro_log_truth = True
+    assert e._file_rest_lie("Dan", 3) == "rough"
+    e.cfg.source.gspro_log_truth = False
     w.written = e._booth_wall0 - 1                           # an earlier session's file
     assert e._file_rest_lie("Dan", 2) is None
+
+
+def test_the_setup_lie_from_gspros_round_file_is_not_another_players_whose_name_fits(tmp_path):
+    from commentator import round_file
+    from commentator.round import Round
+    from commentator.sources.gspro_files import RoundFileWatch
+    e = _mini_engine(tmp_path)
+    e.round = Round(league=e.league, gspro_players=["Kyle Martin", "Kyle"], course="Test Links",
+                    scheduled_format=None, holes=18, start_hole=1, is_league=False)
+    e.hole_number = 1
+    entries = [_round_entry(1, 150.0, name="Kyle Martin", surfaces=(18, 11)),
+               _round_entry(1, 140.0, name="Kyle", surfaces=(18, 1))]
+    e._file_entries, e._file_tracks = entries, round_file.tracks(entries)
+    e._round_watch = w = RoundFileWatch(str(tmp_path))
+    w.entries, w.written = entries, time.time()
+    assert e._file_rest_lie("Kyle Martin", 2) == "sand" and e._file_rest_lie("Kyle", 2) == "rough"
 
 
 def _log_round(e, fmt=None):

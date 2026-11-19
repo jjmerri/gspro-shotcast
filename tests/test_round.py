@@ -6305,10 +6305,12 @@ def test_gspros_round_file_places_the_players_the_setup_screen_misread(tmp_path)
     e.gspro._fire_info[3]["holed"], e.gspro.fires = True, 40   # re-graded on its own slot, however late
     e._settle_outcomes()
     assert rec.outcome == "holed"
+    assert shot(4, None, 1).player == "Kroll"                # a hidden name is the file's slot's
     # Kroll's own ball credited to slot 0 (Barrows left, and GSPro closed the slots up): the file has it
     # under Kroll, so the screen's name stands.
     assert shot(5, "Kroll", 0, sp=120.0).player == "Kroll"
-    assert shot(4, None, 1).player == "Kroll"                # a hidden name is the file's slot's
+    # Kroll in two slots: neither is known to be his any more (slot 1 was, before the slots closed up).
+    assert e.round.file_slots == {} and e._slot_trust(1, "Kroll") != "GSPro's round file names the slot"
 
 
 def test_a_setup_order_the_round_file_overturns_takes_back_the_log_scores_read_under_it(tmp_path):
@@ -7308,6 +7310,28 @@ async def test_gspros_club_for_a_tee_shot_comes_before_the_drive_records(tmp_pat
     assert club() == "3W"
     e.store._release_track(sid)
     assert club() == "DR"
+
+
+async def test_gspros_putter_for_a_club_the_screen_misread_is_stored_as_a_putt(tmp_path):
+    from commentator import round_file
+    from commentator.models import ShotEvent
+
+    e = _logged_guests(tmp_path, ["Kroll", "Barrows"])
+    e.commentary_on = False
+    e.screen = None
+    track = round_file.Track("s1", None, None, "Kroll", 1, 3, 8.0, True, (0.0, 0.0, 0.0), (0.0, 0.0, 5.0), None,
+                             lie_before="green", lie_after="green", club="PT")
+
+    async def refreshed():
+        return None
+    e._round_watch, e._refresh_round_file = type("W", (), {"written": 0.0})(), refreshed
+    e._file_track_of = lambda *a, **k: track
+    e._file_ours = lambda *a, **k: True
+    hud = _tee("Kroll", shot=3)
+    hud.lie = "green"
+    await e.handle_shot(ShotEvent(shot=Shot(club="7I", carry=5.0, ball_speed=8.0, vla=4.0), hud_hint=hud,
+                                  impact_hud_hint=hud))
+    assert tuple(e.store.db.execute("SELECT club, is_putt FROM shots").fetchone()) == ("7I", 1)
 
 
 async def test_a_file_club_dropped_with_its_stroke_takes_its_driving_record_with_it(tmp_path):

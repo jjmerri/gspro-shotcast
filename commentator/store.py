@@ -1613,6 +1613,8 @@ class Store:
                             (*named.values(), row["id"]))
             self._sync_gimme(row["id"])
         if (club := round_file.club_fix(t, row["club"])) is not None:
+            if old is not None and "club" not in (w := json.loads(was)):   # (a match from before clubs were)
+                was = json.dumps({**w, "club": row["club"]})
             log.info("Shot %d club %s -> %s from GSPro's round file", row["id"], row["club"] or "unread", club)
             self.db.execute("UPDATE shots SET club = ? WHERE id = ?", (club, row["id"]))
         self.db.execute(

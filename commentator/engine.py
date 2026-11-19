@@ -3298,8 +3298,9 @@ class Engine:
             player is not None and self._file_player(gspro_name) == player)
 
     def _file_rest_lie(self, player: str | None, shot_number: int | None) -> str | None:
-        """Where GSPro's round file has `player`'s ball sitting before their stroke `shot_number` on the
-        hole in play: their last stroke's EndingSurface, as a booth lie. None when the file can't say:
+        """Where GSPro's round file has `player`'s ball sitting before their stroke `shot_number` (GSPro's
+        own number, as its HUD and log have it: no penalty the booth added) on the hole in play: their last
+        stroke's EndingSurface, as a booth lie. None when the file can't say:
         no such stroke yet, a penalty or a holed ball (play goes on from elsewhere), a code with no
         name (round_file.SURFACES), a team ball (scramble, alternate shot, or a shamble's picked drive:
         GSPro copies balls between partners), or another round's file."""
@@ -3308,9 +3309,11 @@ class Engine:
                 or not shot_number or shot_number < 2 or self.hole_number is None or r is None or r.ended
                 or r.format in ("scramble", "alternate") or r.no_scramble):
             return None
+        def theirs(name: str) -> bool:   # (not another of the round's, whose name it fits too: Kyle, Kyle Martin)
+            k = self._file_roster_key(r, name)
+            return self._file_names_fit(name, player) and (k is None or player in (k, r.roster.get(k)))
         t = next((t for t in reversed(self._file_tracks) if t.hole == self.hole_number
-                  and self._file_stroke(t, player) == shot_number - 1 and self._file_names_fit(t.player, player)),
-                 None)
+                  and t.shot_number == shot_number - 1 and theirs(t.player)), None)
         if t is None or t.penalty or t.dropped or t.in_cup or not t.lie_after:
             return None
         try:
@@ -7822,7 +7825,9 @@ class Engine:
         shot_course = (r.course if r is not None else None) or self.current_course
         shot_id = self.store.record_shot(
             # (the screen's club: GSPro's goes on with the stroke's pin, which keeps the screen's to go back to)
-            player=player, hole=shot_hole, shot=shot if screen_club is None else replace(shot, club=screen_club[0]),
+            # (a putt or not as GSPro's club makes it, which the pin doesn't change)
+            player=player, hole=shot_hole,
+            shot=shot if screen_club is None else replace(shot, club=screen_club[0], putter=shot.is_putt),
             before=before, after=hud, tags=tags,
             carry_game_yards=carry_game, total_yards=tile_yards("total length"), offline_yards=tile_yards("offline (raw)"),
             course=shot_course, carry_raw_tile_yards=carry_flat,

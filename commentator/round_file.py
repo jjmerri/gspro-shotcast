@@ -317,11 +317,12 @@ def slot_players(credits: Iterable[tuple[int, dict]], entries: list) -> dict[int
         names = {n for b in (k - 1, k, k + 1) for n, vals in by_sp.get(b, ()) if _launch_match(launch, vals)}
         if len(names) == 1:
             votes.setdefault(idx, set()).update(names)
-    named = {idx: next(iter(ns)) for idx, ns in votes.items() if len(ns) == 1}
+    # (a name voted in a slot another name was voted in too counts: a player who moved slots is in neither)
     taken: dict[str, int] = {}
-    for idx, name in named.items():
-        taken[name] = -1 if name in taken else idx
-    return {idx: name for idx, name in named.items() if taken[name] == idx}
+    for idx, ns in votes.items():
+        for name in ns:
+            taken[name] = -1 if name in taken else idx
+    return {idx: name for idx, ns in votes.items() if len(ns) == 1 and taken[name := next(iter(ns))] == idx}
 
 
 def _of_round(entries: list, players: Iterable[str], speeds: list[float], course: str | None = None,

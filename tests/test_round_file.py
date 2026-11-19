@@ -692,6 +692,11 @@ def test_slot_players_ties_the_logs_credited_shots_to_the_files_names_by_their_b
     # A slot whose shots name two players, or a name two slots claim, is left out.
     assert round_file.slot_players([(1, launch), (1, {**launch, "sp": 140.0})], [dan, sue]) == {}
     assert round_file.slot_players([(1, launch), (0, launch)], [dan, sue]) == {}
+    # Al left slot 0 and Dan moved up from slot 1: neither slot is known to be Dan's.
+    al = _entry(1, (0, 0), (5, 180), sp=130.0, name="Al")
+    dan2 = _entry(2, (0, 0), (5, 20), sp=120.0, name="Dan")
+    moved = [(0, {**launch, "sp": 130.0}), (1, launch), (0, {**launch, "sp": 120.0})]
+    assert round_file.slot_players(moved, [al, dan, dan2]) == {}
 
 
 def test_gspros_club_index_corrects_the_club_read_off_the_screen(tmp_path, caplog):
@@ -703,6 +708,16 @@ def test_gspros_club_index_corrects_the_club_read_off_the_screen(tmp_path, caplo
         st.apply_round_file(got, now=1005.0)
     assert [_row(st, n)["club"] for n in (1, 2, 3)] == ["DR", "7I", "PT"]
     assert "club 7I -> DR from GSPro's round file" in caplog.text
+    # A match stored before clubs were tracked keeps no club to go back to: the one it replaces is added.
+    sid = _row(st, 1)["id"]
+    st.db.execute("UPDATE shots SET club = '7I' WHERE id = ?", (sid,))
+    was = json.loads(st.db.execute("SELECT was FROM shot_tracks WHERE shot_id = ?", (sid,)).fetchone()[0])
+    was.pop("club")
+    st.db.execute("UPDATE shot_tracks SET was = ? WHERE shot_id = ?", (json.dumps(was), sid))
+    st.apply_round_file(got, now=1005.0)
+    assert _row(st, 1)["club"] == "DR"
+    st._release_track(sid)
+    assert _row(st, 1)["club"] == "7I"
     st.apply_round_file(got[1:], now=1005.0, gone={drive["ShotID"]})   # taken back (a mulligan): the read returns
     assert _row(st, 1)["club"] == "7I"
     # The screen's 3-wood for GSPro's driver off the deck (hud.deck_club), and its approach wedge for the
