@@ -30,8 +30,12 @@ Player slots are now named from GSPro's log plus `currentRound.dat` (launch numb
 shot to the file's `PlayerName`; `_learn_file_slots` in `commentator/engine.py`). The setup screen's
 player order (`setup_slots`) and the HUD-name slot reads (`Round.slot_read`) are kept as the fallback
 for the first shot of a round, before the file has a ball to match, and for GSPro 3.59, which logs no
-`LaunchExt Vars`. Once 3.59 support is dropped, check the booth logs for `GSPro's round file places the players`
-lines and, if the file always names every slot by the second shot, remove the screen-read slot
+`LaunchExt Vars`. Only GSPro 4.x needs support, so 3.59 no longer blocks this.
+
+**Needs verification:** a multiplayer round on 0.1.151+. Only solo rounds have run on it so far (Dan,
+2026-11-19: `confirms the slots of ['Dan']`). Evan and Jason's round on the evening of 2026-11-19 is the
+first chance. Check the booth logs for `GSPro's round file places the players` lines and, if the file
+always names every slot by the second shot, remove the screen-read slot
 learning (`slot_read`'s read counts, `_recheck_slots`) and keep the setup screen only for format and
 nines. The pre-shot "who's up" read stays: GSPro never logs it.
 A shot the screen misnamed is moved to the file's player once its score line and the file agree
