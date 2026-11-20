@@ -65,6 +65,7 @@ from .chat import ChatMessage, ChatTable, chat_hazard_denial_problems, chat_lead
 from .news import GolfNews
 from .scores import LiveScores
 from .signature_holes import signature_hole
+from .tree_calls import TREE_CALLS, TREE_CALLS_BY_LANGUAGE, TREE_LOW_CALLS  # noqa: F401 (tests import them here)
 from .trivia import CourseTrivia, looks_like_a_course
 from .weather import Weather
 from .round import FORMAT_NAMES, TEAM_BALL, Round, normalize_format, to_par
@@ -418,32 +419,6 @@ SCORECARD_DUE_SECONDS = 30.0
 SCORECARD_IDLE_SECONDS = 2.0
 KEEP_GSPRO_LOGS = 5             # copies of GSPro's log kept from round ends (see _keep_gspro_log)
 GSPRO_LOG_KEEP_BYTES = 8_000_000   # from the end of it: a round's lines and plenty before
-TREE_CALLS = ("Oh, that's into the trees!", "That's caught a branch!", "Oh no, it's clipped the tree!",
-              "Ooh, that's found the trees!")
-TREE_LOW_CALLS = ("Oh, that's clipped something low!", "That's into the bushes!")
-# The stock tree calls in each commentary language (config.LANGUAGES): (in the trees, low).
-TREE_CALLS_BY_LANGUAGE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "en": (TREE_CALLS, TREE_LOW_CALLS),
-    "fr": (("Oh, c'est dans les arbres !", "Il a touché une branche !", "Oh non, il a accroché l'arbre !",
-            "Aïe, il a trouvé les arbres !"),
-           ("Oh, il a accroché quelque chose au ras du sol !", "C'est dans les buissons !")),
-    "es": (("¡Oh, se ha ido a los árboles!", "¡Ha tocado una rama!", "¡Oh no, ha golpeado el árbol!",
-            "¡Uy, ha encontrado los árboles!"),
-           ("¡Oh, ha tocado algo abajo!", "¡Se ha metido en los arbustos!")),
-    "de": (("Oh, der ist in den Bäumen!", "Der hat einen Ast erwischt!", "Oh nein, der hat den Baum getroffen!",
-            "Uh, der hat die Bäume gefunden!"),
-           ("Oh, der hat unten etwas erwischt!", "Der ist in den Büschen!")),
-    "it": (("Oh, è finita tra gli alberi!", "Ha preso un ramo!", "Oh no, ha colpito l'albero!",
-            "Uh, ha trovato gli alberi!"),
-           ("Oh, ha preso qualcosa in basso!", "È finita nei cespugli!")),
-    "pt": (("Ah, foi para as árvores!", "Pegou num galho!", "Ah não, bateu na árvore!",
-            "Opa, achou as árvores!"),
-           ("Ah, pegou em algo baixo!", "Foi parar nos arbustos!")),
-    "nl": (("Oh, die zit in de bomen!", "Die raakt een tak!", "Oh nee, die tikt de boom aan!",
-            "Oei, die vindt de bomen!"),
-           ("Oh, die raakt iets laag!", "Die zit in de struiken!")),
-}
-
 # Calls whose prompt cache costs more to write (1.25x) than it saves: the closer runs once a round,
 # so its cache is rarely read back before it expires (usage log, Oct 2026).
 UNCACHED_KINDS = {"closer"}

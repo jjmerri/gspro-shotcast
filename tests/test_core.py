@@ -150,6 +150,8 @@ def test_the_booth_speaks_the_configured_language():
     from typing import get_args
     from commentator.config import LANGUAGES, Language
     assert set(get_args(Language)) == set(LANGUAGES) == set(TREE_CALLS_BY_LANGUAGE)
+    for high, low in TREE_CALLS_BY_LANGUAGE.values():
+        assert len(set(high + low)) == len(high + low)   # no line repeated
 
 
 async def test_an_opener_in_another_language_needs_no_english_welcome(tmp_path):

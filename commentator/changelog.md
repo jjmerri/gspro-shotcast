@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.153
+
+### Booth
+- More variety when a shot hits a tree or bush in the air: 30 calls to pick from in each language, up from 6.
+
 ## 0.1.152
 
 ### Stats page
