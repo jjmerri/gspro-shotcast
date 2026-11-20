@@ -511,8 +511,9 @@ class GsproState:
     # Finished holes, (index, hole) -> GSPro's final score, the same number its scorecard shows. A hole
     # ends on a ball holed or conceded: the score line that follows ("Hole out" names no player, so the
     # next line, the shooter's; a gimmie is the active player's) carries the final count. A picked-up
-    # hole is final once the player has moved on to another, or the round is over. A stroke taken back
-    # reopens the hole. Only the finisher's own index is recorded: in a scramble the round takes the
+    # hole is final on the conceding stroke GSPro adds to the capped score, else once the player has
+    # moved on to another, or the round is over. A stroke taken back reopens the hole. Only the
+    # finisher's own index is recorded: in a scramble the round takes the
     # side's score from whichever partner has one (a shamble's partners finish on their own balls).
     hole_scores: dict = field(default_factory=dict)
     last_hole_scores: dict = field(default_factory=dict)   # the last ended round's, kept past its reset
@@ -1007,7 +1008,10 @@ class GsproState:
                 self.pickups.append(key)
             self._score[key] = ev.score
         elif key in self._picked and prev is not None and ev.score > prev and not shot:
+            # The conceding stroke GSPro adds to the capped score, in the same second: the hole's final
+            # count, the one its scorecard shows now (the move to another hole settles it again).
             self._score[key] = ev.score
+            self._finish(key, ev.score)
         elif undo and shot and undo[2] == 0:
             self._score[key] = max(prev or 0, ev.score)   # no concede after all: the hole's first stroke
         elif undo and shot:

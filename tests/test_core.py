@@ -1,6 +1,7 @@
 import pytest
 import os
 import asyncio
+import logging
 import time
 import contextlib
 import json
@@ -3025,10 +3026,27 @@ def test_a_stale_shot_1_hud_after_a_scramble_pick_takes_the_logs_stroke(tmp_path
     e = _mini_engine(tmp_path)
     g = e.gspro
     g.team_scores, g.pick, g.current_hole, g.hole_by[1] = True, (0, 5), 5, 5
+    g.teammates = {frozenset((0, 1))}   # GSPro's copy of the picked ball linked the partners
     g._score[(1, 5)], g._pick_stroke, g.to_pin_by[1], g.lie_by[1] = 3, 1, 262.1 / 1.0936133, None   # 3: a penalty on his unpicked ball
     hud = Hud(shot_number=1, to_pin="437.8 yards", lie="rough")
     e._fix_stale_pick_hud(hud, 1)
     assert hud.shot_number == 2 and hud.to_pin.startswith("262.") and hud.lie == "rough"
+    assert hud._lie_source == ("screen", "team ball")
+    g.hole_scores[(2, 5)] = 8   # another side picked up: this one plays on
+    hud = Hud(shot_number=1, to_pin="437.8 yards", lie="rough")
+    e._fix_stale_pick_hud(hud, 1)
+    assert hud.shot_number == 2
+    g.teammates = {frozenset((0, 1)), frozenset((0, 3))}
+    g.hole_scores[(3, 5)] = 4   # a partner linked through the picked ball's player: the team's done
+    tee = Hud(shot_number=1, to_pin="437.8 yards", lie="tee")
+    e._fix_stale_pick_hud(tee, 1)
+    assert tee.shot_number == 1
+    del g.hole_scores[(3, 5)]
+    g.teammates, g.pick = {frozenset((0, 1)), frozenset((2, 3))}, (2, 5)   # a rival team's pick: not this ball
+    hud = Hud(shot_number=1, to_pin="437.8 yards", lie="rough")
+    e._fix_stale_pick_hud(hud, 1)
+    assert hud.shot_number == 1
+    g.teammates, g.pick = {frozenset((0, 1))}, (0, 5)
     g.hole_scores[(0, 5)] = 4   # the hole is over: shot 1 is the next tee, left alone
     tee = Hud(shot_number=1, to_pin="437.8 yards", lie="tee")
     e._fix_stale_pick_hud(tee, 1)
@@ -4866,6 +4884,31 @@ def test_the_setup_lie_is_where_gspros_round_file_has_the_ball_at_rest(tmp_path)
     e.cfg.source.gspro_log_truth = False
     w.written = e._booth_wall0 - 1                           # an earlier session's file
     assert e._file_rest_lie("Dan", 2) is None
+
+
+def test_each_setups_lie_source_is_counted_for_the_round(tmp_path, caplog):
+    from commentator import round_file
+    from commentator.round import Round
+    from commentator.sources.gspro_files import RoundFileWatch
+    e = _mini_engine(tmp_path)
+    e.round = r = Round(league=e.league, gspro_players=["Dan"], course="Test Links", scheduled_format=None,
+                        holes=18, start_hole=1, is_league=False)
+    e.hole_number = 1
+    entries = [_round_entry(1, 150.0, surfaces=(18, 11))]
+    e._file_entries, e._file_tracks = entries, round_file.tracks(entries)
+    e._round_watch = w = RoundFileWatch(str(tmp_path))
+    w.entries, w.written = entries, time.time()
+    assert e._file_rest_lie_why("Dan", 2) == ("sand", "")
+    assert e._file_rest_lie_why("Dan", 3) == (None, "no previous stroke yet")
+    for src in [("round file", ""), ("screen", "holed"), ("GSPro's log", "penalty"), None]:
+        hud = Hud(player_text="Dan", shot_number=2, to_pin="150 yds")
+        if src:
+            hud._lie_source = src
+        e._count_lie_source(hud)
+    assert r.lie_sources == {"round file": 1, "screen (holed)": 1, "GSPro's log (penalty)": 1}
+    with caplog.at_level(logging.INFO):
+        e._log_lie_summary(r)
+    assert "3 setup lies from: 1 round file, 1 screen (holed), 1 GSPro's log (penalty)" in caplog.text
 
 
 def test_a_ball_gspros_round_file_left_on_the_cart_path_takes_the_setups_lie(tmp_path):

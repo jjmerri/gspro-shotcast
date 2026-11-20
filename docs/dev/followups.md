@@ -10,10 +10,12 @@ player order (`setup_slots`) and the HUD-name slot reads (`Round.slot_read`) are
 for the first shot of a round, before the file has a ball to match, and for GSPro 3.59, which logs no
 `LaunchExt Vars`. Only GSPro 4.x needs support, so 3.59 no longer blocks this.
 
-**Needs verification:** a multiplayer round on 0.1.151+. Only solo rounds have run on it so far (Dan,
-2026-11-19: `confirms the slots of ['Dan']`). Evan and Jason's round on the evening of 2026-11-19 is the
-first chance. Check the booth logs for `GSPro's round file places the players` lines and, if the file
-always names every slot by the second shot, remove the screen-read slot
+**Needs verification:** more multiplayer rounds on 0.1.151+. Evan and Jason's two-player round
+(Dinosaur Mountain, 2026-11-19 evening) passed: `confirms the slots of ['Evan', 'Jason']` right after
+the second shot, and no `GSPro's round file places the players` lines (the setup screen's order was
+right). Still to see: three or four players, and a round where the screen's order is wrong. (The
+round's `shots named by:` line counts only each shot's first naming source, so it says `screen` even
+when the file confirmed it.) If the file always names every slot by the second shot, remove the screen-read slot
 learning (`slot_read`'s read counts, `_recheck_slots`) and keep the setup screen only for format and
 nines. The pre-shot "who's up" read stays: GSPro never logs it.
 A shot the screen misnamed is moved to the file's player once its score line and the file agree
@@ -37,11 +39,14 @@ leaves have pre-written result lines (`flight_pick._LIE_REACTION`), a drop zone 
 Only 1, 2, 3, 5, 11 and 18 have been seen in a real file (the 2026-11-18 rounds in
 `tests/fixtures/round_files/`).
 
-**Needs verification:** which setups still take the screen's lie. The booth logs `Setup lie ... from
-GSPro's round file` only when the file's lie differs from the screen's, so first log every setup's
-lie source (file, log material or screen). Then check one stroke-play round (penalties, drops, the
-first setup, cart path) and one scramble or alternate-shot round (team balls, which only those
-formats have). If the gaps are only team balls, map those from the file too (the pick's stroke) and
+**Needs verification:** which setups still take the screen's lie. Every off-the-tee setup now logs its
+lie source (`Setup lie ... from GSPro's round file (the screen agreed | the screen read ...)`, `... from
+the screen (GSPro's round file: <why not>)`, `... from GSPro's log`), and the round ends with a
+`Round N: M setup lies from: ...` count. Offline, Evan and Jason's stroke-play round (2026-11-19) had
+the file agree with the screen on all 121 setups it covered; the 8 it didn't were after a conceded
+tap-in (holed). It had out-of-bounds and water re-tees but no drop, cart path or team ball. Still to
+check: one round with drops and cart-path finishes, and one scramble or alternate-shot round (team
+balls, which only those formats have). If the gaps are only team balls, map those from the file too (the pick's stroke) and
 drop the screen read and the log's `lie_by` fallback.
 
 ## Drop the scorecard and result-banner OCR once the log names every player
@@ -51,7 +56,9 @@ Scores come from GSPro's log (`Round.log_scores`). The between-hole scorecard OC
 can be tied to with a score on every earlier hole, and every hole's par and stroke index known);
 a score line on the hole in play queues `ScorecardEvent(card=None)` (`_note_log_scores`) for the
 wrap. A putt the log credits to a slot the booth can't name takes its result from that slot's score
-line (`_log_shooter`). The OCR fallbacks left: the scorecard while a slot is unnamed, a score line is missing, the
+line (`_log_shooter`). A pick-up's score is final on the conceding stroke GSPro logs with the capped score, so the card
+isn't read after one (it was, three times, in Evan and Jason's round on 2026-11-19, waiting for the
+next tee shot to settle it). The OCR fallbacks left: the scorecard while a slot is unnamed, a score line is missing, the
 course card has no stroke index, a player the
 round doesn't have is in the log (`_admit_from_card`), or the first hole is assumed; the idle card
 read with no round (mid-round join, `_note_idle_card`); and the result banner (`_hole_result`) for a
@@ -74,7 +81,8 @@ replace the club box OCR. Against the booth's club on 2026-11-18 (its `impact HU
 logged after `hud.deck_club` turns a driver read off the deck into a 3-wood) the file matched 28 of 28
 strokes in a single-player round but 49 of 52 in a scramble: the chip-in, and hole 7's second shots
 (both players, off the fairway, 124.9 and 150.7 mph), which the booth has as 3-woods and the file as
-the driver. Whether the screen itself showed the driver there (the deck rule's case: newer GSPro
+the driver. Evan and Jason's stroke-play round (2026-11-19) matched on 165 of 167 strokes; the two
+misses were holed chips the file has as PT. Whether the screen itself showed the driver there (the deck rule's case: newer GSPro
 shows the driver for a long shot off the deck) or a 3-wood is unverified, as is why the file has a
 3-wood off the deck in the single-player round (holes 4 and 7, from the fairway and the rough). The index-to-club table
 (`round_file.CLUBS`) is GSPro 4.x's own (`ClubSelect`'s DR, W2-W7, H2-H7, I1-I9, PW, GW, SW, LW, PT,

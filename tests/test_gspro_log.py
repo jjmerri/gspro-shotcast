@@ -558,6 +558,8 @@ def test_a_pick_up_caps_the_hole_without_counting_penalties():
     s = _replay(text + _line(10, -4, 4) + _line(10, 7, 0) + _line(10, 1, 7))
     assert s.strokes_before(0) == 8 and s.penalties(0) == 0
     assert s.pickups == [(0, 10)] and s.picked_up(0, 10) and not s.mulligan_fires
+    # Final on the conceding stroke, before any move to another hole: no scorecard read needed for it.
+    assert s.hole_scores == {(0, 10): 8}
     # The hole replayed (a round restarted on this course): open again, not picked up.
     s = _replay(text + _line(10, -4, 4) + _line(10, 7, 0) + _line(10, 1, 7) + _line(11, 1, 0) + FIRE + _line(10, 1, 0))
     assert not s.picked_up(0, 10) and s.shot_number(0) == 2
@@ -1027,12 +1029,12 @@ def test_a_pick_up_on_the_last_hole_is_settled_when_the_round_completes():
     s = GsproState()
     for ev in [LogEvent("state", player=0, hole=8, score=0, strokes=0)] + [
             e for n in range(1, 9) for e in (LogEvent("shot_fired"), LogEvent("state", player=0, hole=8, score=n, strokes=1))] + [
-            LogEvent("state", player=0, hole=8, score=0, strokes=-8), LogEvent("state", player=0, hole=8, score=8, strokes=8),
-            LogEvent("state", player=0, hole=8, score=9, strokes=1)]:
+            LogEvent("state", player=0, hole=8, score=0, strokes=-8), LogEvent("state", player=0, hole=8, score=8, strokes=8)]:
         s.apply(ev)
+    # (no conceding stroke logged after the capped score)
     assert s.picked_up(0, 8) and s.hole_scores == {}
     s.apply(LogEvent("round_complete"))
-    assert s.hole_scores == {(0, 8): 9}
+    assert s.hole_scores == {(0, 8): 8}
 
 
 def test_a_holed_shot_replayed_with_the_score_repeated_reopens_the_hole():

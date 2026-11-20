@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.154
+
+### Booth
+- After a pick-up, the booth takes the hole's score straight from GSPro instead of reading the scorecard off the screen.
+
 ## 0.1.153
 
 ### Booth

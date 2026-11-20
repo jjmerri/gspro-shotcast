@@ -1262,6 +1262,9 @@ class Engine:
                     elif isinstance(event, PreShotEvent):
                         # In the background: impact must never wait behind a setup line.
                         self._cancel_preshot()
+                        if event.model_task is not None:
+                            # (its lie fills ran before its first await: _emit_setup started it before this event)
+                            self._count_lie_source(event.hud)
                         self._preshot_task = asyncio.create_task(self.handle_preshot(event))
                         if self.await_preshot:
                             t = self._preshot_task
@@ -1597,12 +1600,16 @@ class Engine:
             self._apply_late_tiles(tiles_for)
         hud.lie = hud.box_lie or extra.lie   # the player box's lie (3.59/4.0), else the minimap's
         screen_lie = hud.lie
-        if (hud.lie or "").lower() != "tee" and (
-                file_lie := self._file_rest_lie(self._player(hud.player_text, None), hud.shot_number)):
+        off_tee = (hud.lie or "").lower() != "tee" and hud.shot_number != 1
+        file_lie, why = self._file_rest_lie_why(self._player(hud.player_text, None), hud.shot_number) \
+            if off_tee else (None, "")
+        if file_lie:
             # Where GSPro's round file has the ball at rest outranks the screen.
-            if (lie := file_lie) != (hud.lie or "").lower():
-                log.info("Setup lie %s from GSPro's round file (the screen read %s)", lie, hud.lie)
-                hud.lie = lie
+            agreed = file_lie == (hud.lie or "").lower()
+            log.info("Setup lie %s from GSPro's round file (%s)", file_lie,
+                     "the screen agreed" if agreed else f"the screen read {hud.lie}")
+            if not agreed:
+                hud.lie = file_lie
         if not hud.lie and hud.shot_number != 1 and self.cfg.screen.ocr:
             seq = self._shot_seq
             hud.lie = screen_lie = await self._reread_setup_lie(extra.name_sig, seq)
@@ -1612,6 +1619,12 @@ class Engine:
                     if task is not None:
                         task.cancel()
                 return
+        if off_tee:
+            if not file_lie:
+                log.info("Setup lie %s (GSPro's round file: %s)",
+                         f"{hud.lie} from the screen" if hud.lie else "unread on screen", why)
+            # (counted for the round once the setup's taken: handle_preshot)
+            hud._lie_source = ("round file", "") if file_lie else ("screen" if hud.lie else "none", why)
         if key := _setup_key(hud):
             self._setup_yards[key[:2]] = "yard" in key[2]
             while len(self._setup_yards) > 8:
@@ -3340,31 +3353,43 @@ class Engine:
             player is not None and self._file_player(gspro_name) == player)
 
     def _file_rest_lie(self, player: str | None, shot_number: int | None) -> str | None:
+        return self._file_rest_lie_why(player, shot_number)[0]
+
+    def _file_rest_lie_why(self, player: str | None, shot_number: int | None) -> tuple[str | None, str]:
         """Where GSPro's round file has `player`'s ball sitting before their stroke `shot_number` (GSPro's
         own number, as its HUD and log have it: no penalty the booth added) on the hole in play: their last
         stroke's EndingSurface, as a booth lie. None when the file can't say:
         no such stroke yet, a penalty or a holed ball (play goes on from elsewhere), the cart path (free
         relief may have moved it: the stroke's own StartingSurface says where from), a code with no
         name (round_file.SURFACES), a team ball (scramble, alternate shot, or a shamble's picked drive:
-        GSPro copies balls between partners), or another round's file."""
+        GSPro copies balls between partners), or another round's file. With it, why there's none, for
+        the setup's lie-source line."""
         r = self.round
-        if (not self._file_live() or not player or player == "unknown" or self._anonymous(player)
-                or not shot_number or shot_number < 2 or self.hole_number is None or r is None or r.ended
-                or r.format in ("scramble", "alternate") or r.no_scramble):
-            return None
+        if not self._file_live():
+            return None, "not being written"
+        if not player or player == "unknown" or self._anonymous(player):
+            return None, "player unnamed"
+        if not shot_number or shot_number < 2 or self.hole_number is None or r is None or r.ended:
+            return None, "no stroke to ask about"
+        if r.format in ("scramble", "alternate") or r.no_scramble:
+            return None, "team ball"
         def theirs(name: str) -> bool:   # (the round's one player it names: not Kyle's for Kyle Martin)
             k = self._file_roster_key(r, name)
             return k is not None and player in (k, r.roster.get(k)) and self._file_names_fit(name, player)
         t = next((t for t in reversed(self._file_tracks) if t.hole == self.hole_number
                   and t.shot_number == shot_number - 1 and theirs(t.player)), None)
-        if t is None or t.penalty or t.dropped or t.in_cup or not t.lie_after or t.lie_after == "cart path":
-            return None
+        if t is None:
+            return None, "no previous stroke yet"
+        why = ("penalty" if t.penalty else "dropped" if t.dropped else "holed" if t.in_cup
+               else "no lie code" if not t.lie_after else "cart path" if t.lie_after == "cart path" else None)
+        if why:
+            return None, why
         try:
             ours = self._file_round_test(r)(t, r.course or self.current_course)
         except sqlite3.Error as e:
             log.warning("Couldn't check GSPro's round file stroke is this round's: %s", e)
-            return None
-        return t.lie_after if ours else None
+            return None, "unchecked"
+        return (t.lie_after, "") if ours else (None, "another round's")
 
     def _file_live(self) -> bool:
         """A round on, and a live GSPro writing its round file (this session): a stroke of it will be there."""
@@ -6608,6 +6633,18 @@ class Engine:
             return info.get("player"), info.get("hole")
         return self._fire_log.get(fire, (None, None))
 
+    def _count_lie_source(self, hud: Hud) -> None:
+        """Count a taken off-the-tee setup's lie source (set at setup, `_emit_setup`) in the round's tally."""
+        if (r := self.round) is None or r.ended or not (src := getattr(hud, "_lie_source", None)):
+            return
+        label = src[0] if src[0] == "round file" else f"{src[0]} ({src[1]})"
+        r.lie_sources[label] = r.lie_sources.get(label, 0) + 1
+
+    def _log_lie_summary(self, r: Round) -> None:
+        """One line on where the round's off-the-tee setups got their lies (GSPro's round file, else why not)."""
+        counts = ", ".join(f"{n} {k}" for k, n in sorted(r.lie_sources.items(), key=lambda kv: -kv[1]) if n)
+        log.info("Round %s: %d setup lies from: %s", r.id, sum(r.lie_sources.values()), counts or "nothing")
+
     def _log_name_summary(self, r: Round) -> None:
         """One line on how the round's shots got their players' names, for a report to start from."""
         counts = ", ".join(f"{n} {k}" for k, n in sorted(r.name_sources.items(), key=lambda kv: -kv[1]) if n)
@@ -6838,16 +6875,22 @@ class Engine:
         """Right after a scramble pick GSPro's HUD can still show "Shot 1" and the tee distance (Derek
         "has 437 yards" for a stroke 2 from 262). The log has the team ball by then: trust it."""
         g = self.gspro
-        if (idx is not None and hud.shot_number == 1 and g.team_scores and g.pick
+        # (this team's: another side's hole-out or pick-up leaves this one playing on)
+        team = {idx}
+        while grown := {m for pair in g.teammates if pair & team for m in pair} - team:
+            team |= grown
+        if (idx is not None and hud.shot_number == 1 and g.team_scores and g.pick and g.pick[0] in team
                 and g.pick[1] == g.current_hole and g.hole_by.get(idx) == g.current_hole
-                and not any(h == g.current_hole for _, h in g.hole_scores)   # not the next tee
+                and not any(h == g.current_hole and i in team for i, h in g.hole_scores)   # not the next tee
                 and (n := (g.pick_stroke() or 0) + 1) > 1 and (tp := g.to_pin_of(idx)) is not None):
             # The team's ball sets the stroke: this player's own count can carry a penalty on a ball
             # the team didn't pick.
             log.info("Stale HUD after a scramble pick: shot 1 %s -> stroke %d, %.1f yards", hud.to_pin, n, tp)
             hud.shot_number, hud.to_pin = n, f"{tp:.1f} yards"
+            source = "screen"
             if (hud.lie or "").lower() == "tee":
-                hud.lie = g.lie_of(idx)
+                hud.lie, source = g.lie_of(idx), "GSPro's log"
+            hud._lie_source = (source if hud.lie else "none", "team ball")   # (a tee setup had none)
 
     async def _preshot_model(self, hud: Hud, player: str | None, images: list[bytes],
                              minimap_task: "asyncio.Task[MinimapRead] | None" = None,
@@ -6869,6 +6912,9 @@ class Engine:
         on_tee = hud.shot_number == 1 or (hud.lie or "").lower() == "tee"
         if idx is not None and not on_tee and not hud.lie and g.shot_number(idx) > 1 and (lie := g.lie_of(idx)):
             hud.lie = lie
+            if (src := getattr(hud, "_lie_source", None)) and src[0] == "none":
+                log.info("Setup lie %s from GSPro's log (its landing material; the round file: %s)", lie, src[1])
+                hud._lie_source = ("GSPro's log", src[1])
             if key := _setup_key(hud):   # for the impact too, whose own read may miss it again
                 self._setup_log_lies[key] = lie
                 while len(self._setup_log_lies) > 8:
@@ -7095,9 +7141,10 @@ class Engine:
         # The call was usually started at setup (overlapping the HUD read); await that. Replay and
         # tests post no task, so fall back to making it here.
         if event.model_task is not None:
-            raws, facts_text = await event.model_task
+            raws, facts_text = await event.model_task   # (its setup's lie source counted at dispatch)
         else:
             raws, facts_text = await self._preshot_model(event.hud, player, images)
+            self._count_lie_source(event.hud)
         # Merge the calls' JSON. Each is independent: if one isn't valid JSON (a truncation or a refusal),
         # keep whatever the others returned - a missing line, hazards or branches degrades to silence /
         # no hazards / a live reaction for this shot, never a lost plan across the board.
@@ -12896,6 +12943,7 @@ class Engine:
                 return
             self._apply_log_corrections()   # whose the last unnamed shots were, while the round still maps them
             self._log_name_summary(r)
+            self._log_lie_summary(r)
             r.ended = True
         finally:
             r.closing = r.ended and r.closing   # (a close that failed: the round goes on)

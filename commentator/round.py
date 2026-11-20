@@ -236,6 +236,9 @@ class Round:
         # Where each recorded shot's player came from (screen, setup read, GSPro's log, ...), for the
         # round's summary in the log.
         self.name_sources: dict[str, int] = {}
+        # Where each off-the-tee setup's lie came from: "round file", else the fallback and why the file
+        # had none ("screen (holed)", "GSPro's log (penalty)", "none (...)").
+        self.lie_sources: dict[str, int] = {}
         self.box_hidden = 0       # shots GSPro's player box was hidden for at impact
         # GSPro's physics settings and launch monitor as its log gave them with the round's shots (see
         # GsproState's physics), stored with the round.
