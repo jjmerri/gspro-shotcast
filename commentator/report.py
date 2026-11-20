@@ -27,6 +27,7 @@ from pathlib import Path
 
 import yaml
 
+from . import prompt_log
 from .config import Config
 
 log = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ log = logging.getLogger(__name__)
 LOG_DAYS = 3                  # booth and tray logs from the last few days
 LOG_CAP = 4_000_000           # bytes kept from the end of each log
 GSPRO_LOG_CAP = 3_000_000
+PROMPT_LOG_CAP = 8_000_000    # per day of model prompts (prompt_log), from the newest: ~1 MB zipped
 ROUND_FILES = 3
 ROUND_FILE_CAP = 2_000_000               # the newest round files kept from round ends (round_file.archive)
 FRAMES_DIR = "report-frames"  # under log_dir: the screens the booth leaves behind for a report
@@ -206,6 +208,29 @@ def scrub_private(text: str, blobs: bool = True) -> str:
         return text
     return _LONG_BLOB.sub(lambda m: "<redacted>" if re.search(r"\d", m[0]) and re.search(r"[A-Za-z]", m[0]) else m[0],
                           text)
+
+
+def scrub_jsonl(data: bytes, scrub) -> str:
+    """`scrub` applied to each value of each JSON line rather than the line's text, so a redacted number
+    becomes the string "<redacted>" and every line still parses. A line that doesn't parse is dropped."""
+    def walk(v):
+        if isinstance(v, dict):
+            return {scrub(k): walk(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        if isinstance(v, str):
+            return scrub(v)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and scrub(str(v)) != str(v):
+            return "<redacted>"
+        return v
+
+    out = []
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        try:
+            out.append(json.dumps(walk(json.loads(line))))
+        except ValueError:   # a write cut off mid-record: its secrets may be spelled escaped, so none of it
+            out.append(json.dumps({"note": "unreadable line left out"}))
+    return "".join(f"{line}\n" for line in out)
 
 
 def env_files(config_path: Path) -> list[Path]:
@@ -696,6 +721,14 @@ def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
             add_file("logs/booth-errors.log", log_dir / "booth-errors.log", 1_000_000)
             add_file("logs/live.json", log_dir / "live.json")
         guard("logs", logs)
+
+        def prompt_logs() -> None:
+            cutoff = time.time() - LOG_DAYS * 86400
+            for p in sorted(log_dir.glob(f"{prompt_log.PREFIX}*.jsonl")):
+                if _mtime(p) >= cutoff:   # each on its own: one gone or locked mustn't lose the newer days
+                    guard(f"prompt log {p.name}", lambda p=p: z.writestr(
+                        f"logs/{p.name}", scrub_jsonl(prompt_log.excerpt(p, PROMPT_LOG_CAP), scrub)))
+        guard("prompt logs", prompt_logs)
 
         def screens() -> None:
             names = []

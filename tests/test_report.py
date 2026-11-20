@@ -148,6 +148,40 @@ def test_report_zips_logs_screens_and_maps_without_the_env(tmp_path, monkeypatch
     assert "Log silent" in summary and "output_log.txt: missing" in summary
 
 
+def test_report_keeps_the_newest_prompts_with_the_system_prompt_they_refer_to(tmp_path, monkeypatch):
+    from commentator.prompt_log import PromptLog
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(report, "PROMPT_LOG_CAP", 2_000)
+    (tmp_path / ".env").write_text("SQUABBIT_PASSWORD=123456\n", encoding="utf-8")
+    plog = PromptLog(tmp_path / "logs")
+    for i in range(40):
+        plog.record("reaction", "openai", "m", "BOOTH SYSTEM PROMPT", f"shot {i:02d} " + "x" * 100, {"type": "object"},
+                    [], text="{}", output_tokens=123456)
+    cfg = Config(log_dir="logs", db_path="logs/season.db")
+
+    with zipfile.ZipFile(report.build(cfg, tmp_path / "config.yaml")) as z:
+        [name] = [n for n in z.namelist() if n.startswith("logs/prompts-")]
+        lines = z.read(name).decode().splitlines()
+    note, *rows = [json.loads(l) for l in lines]   # still JSONL throughout
+    assert note["note"] == "earlier prompts left out" and note["lines_left_out"] == 40 - len(rows)
+    assert "shot 39" in rows[-1]["user"] and not any("shot 00" in r["user"] for r in rows)
+    # The full text only sat on the first line, which was cut: it's put back on the first kept one.
+    assert rows[0]["system"] == "BOOTH SYSTEM PROMPT" and rows[0]["schema"] == {"type": "object"}
+    assert all("system" not in r for r in rows[1:])
+    # A secret that happens to look like a number is blanked without breaking the line.
+    assert rows[-1]["output_tokens"] == "<redacted>"
+
+
+def test_a_prompt_starting_right_at_the_cut_is_kept(tmp_path):
+    from commentator.prompt_log import excerpt
+
+    log = tmp_path / "prompts-2099-01-01.jsonl"
+    log.write_bytes(b'{"user": "old"}\n{"user": "new"}\n')
+    note, *rows = [json.loads(l) for l in excerpt(log, len(b'{"user": "new"}\n')).splitlines()]
+    assert rows == [{"user": "new"}] and note["lines_left_out"] == 1
+
+
 def test_the_senders_description_heads_the_summary_and_empty_keys_arent_listed_as_set(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     # A key set again blank further down: the booth keeps the value (dotenv.load_env skips blanks).

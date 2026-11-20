@@ -77,3 +77,63 @@ class PromptLog:
             written |= new   # only once the full text is actually in the file
         except Exception as e:
             log.debug("Couldn't log the %s prompt: %s", kind, e)
+
+
+def excerpt(path: Path, cap: int) -> bytes:
+    """The newest whole lines of a prompt log within about `cap` bytes, for a problem report. A system
+    prompt or schema whose full text was cut off with the older lines goes back into the first kept
+    line that refers to it, so every line can still be read on its own terms. Reads only the tail,
+    and the older part line by line as far as it needs, so a big day's log isn't held in memory."""
+    size = path.stat().st_size
+    if size <= cap:
+        return path.read_bytes()
+    with open(path, "rb") as f:
+        f.seek(size - cap - 1)
+        if f.read(1) != b"\n":
+            f.readline()   # start on a whole line
+        start = f.tell()
+        kept = f.read().splitlines(keepends=True)
+    entries: list = []
+    need: dict[str, str] = {}   # sha -> key, referenced in the tail before its full text
+    have: set[str] = set()
+    for line in kept:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            entry = None
+        entries.append(entry)
+        for key in ("system", "schema"):
+            if isinstance(entry, dict) and (sha := entry.get(f"{key}_sha")) and sha not in have:
+                have.add(sha)
+                if key not in entry:
+                    need[sha] = key
+    full: dict[str, object] = {}
+    left_out = 0
+    with open(path, "rb") as f:
+        for line in iter(f.readline, b""):
+            if f.tell() > start:
+                break
+            left_out += 1
+            if len(full) < len(need) and b'_sha"' in line:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                for sha, key in need.items():
+                    if entry.get(f"{key}_sha") == sha and key in entry:
+                        full.setdefault(sha, entry[key])
+    out = [(json.dumps({"note": "earlier prompts left out", "lines_left_out": left_out}) + "\n").encode("utf-8")]
+    filled: set[str] = set()
+    for line, entry in zip(kept, entries):
+        changed = False
+        for key in ("system", "schema"):
+            sha = entry.get(f"{key}_sha") if isinstance(entry, dict) else None
+            if sha in full and sha not in filled and key not in entry:
+                entry[key] = full[sha]
+                changed = True
+            if sha in full:
+                filled.add(sha)
+        out.append((json.dumps(entry) + "\n").encode("utf-8") if changed else line)
+    return b"".join(out)

@@ -254,7 +254,8 @@ beyond that is supported on paper but not yet run live:
      Set up the live stream again (OBS)...**.
    - **More**: open the Shotcast folder or the logs, edit `config.yaml` or `.env` by hand, and the
      command prompt.
-   - **Create a problem report**: zips the booth's and GSPro's logs, the health checks, the screens
+   - **Create a problem report**: zips the booth's and GSPro's logs, the prompts the booth sent the
+     AI models and what they answered, the health checks, the screens
      the booth kept when a read came up empty, the hole maps, the monitor layout (and which monitor
      GSPro is on) and `config.yaml` into `logs\reports`, for whoever is helping you. It has player
      names and screenshots but never the API keys in `.env`. It then offers to send it to Shotcast
