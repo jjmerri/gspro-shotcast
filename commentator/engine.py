@@ -44,6 +44,7 @@ from .interest import (LEAGUE_BEST_DRIVE_LEVEL, REPLY_PUTT_LEVEL, SEASON_BEST_DR
 from .league import League, OnAir, course_match_score
 from .llm import LLMClient
 from .minimap import JevMinimap, MinimapRead, same_map, snapshot as minimap_snapshot
+from .prompt_log import PromptLog
 from .putt_read import REGION as PUTT_REGION, PuttRead, read_break
 from . import recall, round_file
 from . import report as problem_report
@@ -886,6 +887,7 @@ class Engine:
             self.speech.tts.load_usage(self.usage)   # this month's characters by voice provider
         Path(cfg.log_dir).mkdir(parents=True, exist_ok=True)
         self.transcript = Path(cfg.log_dir) / f"transcript-{time.strftime('%Y-%m-%d')}.txt"
+        self.prompt_log = PromptLog(cfg.log_dir)
         self._events: asyncio.Queue[ShotEvent | HoleChangeEvent | PreShotEvent | None] = asyncio.Queue()
         self._preshot_task: asyncio.Task | None = None
         self._preshot_model_task: asyncio.Task | None = None
@@ -13478,26 +13480,35 @@ class Engine:
             # so the opener, plans, reactions, wraps and closer all come out empty and are skipped.
             return "{}"
         started = time.monotonic()
+        system, schema = system or self.system, schema or self.schema
+
+        def keep(**outcome) -> None:
+            self.prompt_log.record(kind, llm.provider, llm.model, system, user, schema, images, **outcome)
+
         try:
             no_cache = {"cache": False} if kind in UNCACHED_KINDS else {}
             if (on_air := _ON_AIR.get()) is None:
                 on_air = self._on_air()
             user = on_air.spoken(user)
-            result = await llm.complete_json(system or self.system, user, schema or self.schema, images, **no_cache)
+            result = await llm.complete_json(system, user, schema, images, **no_cache)
         except asyncio.CancelledError:
             # A deadline (the mid-flight call) or a newer shot gave up on it: still time it.
             log.info("%s call (%s:%s): cancelled after %.1fs", kind, llm.provider, llm.model,
                      time.monotonic() - started)
+            keep(outcome="cancelled", latency_s=time.monotonic() - started)
             raise
         except Exception as e:
             log.warning("%s call (%s:%s): failed after %.1fs: %s", kind, llm.provider, llm.model,
                         time.monotonic() - started, e)
+            keep(outcome="failed", error=str(e), latency_s=time.monotonic() - started)
             raise
+        keep(text=result.text, latency_s=result.latency_seconds, input_tokens=result.input_tokens,
+             output_tokens=result.output_tokens)
         self.usage.record(kind, llm, result)
         log.info("%s call (%s:%s): %.1fs, %s in / %s out tokens", kind, llm.provider, llm.model,
                  result.latency_seconds, result.input_tokens, result.output_tokens)
         if kind == "closer":
-            self._capture_closer(llm, system or self.system, user, schema or self.schema, result)
+            self._capture_closer(llm, system, user, schema, result)
         return result.text
 
     def _capture_closer(self, llm: LLMClient, system: str, user: str, schema: dict, result) -> None:

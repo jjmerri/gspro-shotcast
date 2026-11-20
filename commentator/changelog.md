@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.155
+
+### Booth
+- The end-of-round sign-off knows how the score moved hole by hole, so it won't claim a player stayed under par all day when they didn't.
+
 ## 0.1.154
 
 ### Booth

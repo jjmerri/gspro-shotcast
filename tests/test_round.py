@@ -560,6 +560,23 @@ def test_a_sand_save_on_a_bogey_hole_is_not_called_a_par_save():
     assert "saved par" not in facts
 
 
+def test_closing_facts_trace_the_score_against_par_hole_by_hole():
+    # Given only the final -2, the closer said the player "never left red figures", though he was
+    # back to even par midway. The path, as runs, makes that checkable.
+    r = Round(league=LEAGUE, gspro_players=["MikeD"], course="Wynn", scheduled_format="best ball", holes=5)
+    card = Scorecard(holes=list(range(1, 19)), par={1: 4, 2: 4, 3: 4, 4: 4, 5: 4}, index={q: q for q in range(1, 6)},
+                     scores={"MIKED": {1: 4, 2: 3, 3: 3, 4: 5, 5: 3}, "SCORECARD": {}})
+    r.apply_scorecard(card)
+    facts = "\n".join(r.closing_facts([], {}))
+    assert ("Aces' score against par as the round went: even par after hole 1; 1 under par after hole 2; "
+            "2 under par after hole 3; 1 under par after hole 4; 2 under par after hole 5.") in facts
+
+    card.scores["MIKED"] = {1: 3, 2: 4, 3: 4, 4: 4, 5: 5}
+    r.apply_scorecard(card)
+    facts = "\n".join(r.closing_facts([], {}))
+    assert "1 under par after holes 1 to 4; even par after hole 5." in facts
+
+
 def test_closing_facts_judge_net_and_team_best_ball():
     r, card, shots = _three_hole_round()
     r.apply_scorecard(card)

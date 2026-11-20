@@ -7144,6 +7144,37 @@ async def test_each_closer_prompt_is_kept_to_rerun_on_other_models(tmp_path):
     assert rows[0]["schema"] == engine.schema and rows[0]["model"] == llm.model and "text" in rows[0]
 
 
+async def test_every_prompt_is_logged_with_its_system_prompt_written_once_a_day(tmp_path):
+    import json as _json
+    import os as _os
+
+    stale = tmp_path / "prompts-2000-01-01.jsonl"
+    stale.write_text("{}\n")
+    _os.utime(stale, (0, 0))
+    cfg = Config(log_dir=str(tmp_path))
+    llm = FakeLLM(cfg.llm.live)
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None, live_llm=llm,
+                    segment_llm=llm, speech=SpeechQueue(cfg, ConsoleTTS()), rng=random.Random(0))
+    assert not stale.exists()   # a week's worth kept
+    await engine._complete("reaction", llm, "FACTS: 15 yards to the pin", [b"png" * 10])
+    await engine._complete("segment", llm, "a wrap", [])
+
+    async def broken(*a, **k):
+        raise RuntimeError("overloaded")
+    llm.complete_json = broken
+    with pytest.raises(RuntimeError):
+        await engine._complete("plan", llm, "a plan", [])
+
+    [log] = tmp_path.glob("prompts-*.jsonl")
+    rows = [_json.loads(l) for l in log.read_text().splitlines()]
+    assert [r["kind"] for r in rows] == ["reaction", "segment", "plan"]
+    assert "15 yards to the pin" in rows[0]["user"] and rows[0]["images"] == [30] and "text" in rows[0]
+    # The system prompt and schema are in full the first time, then referenced by their hash.
+    assert rows[0]["system"] == engine.system and rows[0]["schema"] == engine.schema
+    assert "system" not in rows[1] and rows[1]["system_sha"] == rows[0]["system_sha"]
+    assert rows[2]["outcome"] == "failed" and rows[2]["error"] == "overloaded" and "text" not in rows[2]
+
+
 async def test_a_tree_hit_is_called_in_flight_as_the_ball_reaches_it(tmp_path):
     from commentator.sources.gspro_log import parse_events
 

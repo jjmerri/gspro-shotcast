@@ -104,6 +104,7 @@ class SideStats:
     gross: int = 0
     par: int = 0
     scores: dict[int, int] = field(default_factory=dict)  # hole of the round -> strokes
+    pars: dict[int, int] = field(default_factory=dict)    # hole of the round -> par, for the scored holes
     fir: tuple[int, int] = (0, 0)  # hit, chances
     gir: tuple[int, int] = (0, 0)
     scramble: tuple[int, int] = (0, 0)  # up-and-downs made, greens missed (the chances)
@@ -960,6 +961,7 @@ class Round:
                 stats.holes_scored += 1
                 if par:
                     stats.par += par
+                    stats.pars[seq] = par
             # Penalties and the longest drive come from full shots already on the card, so count them
             # even for the overridden last hole (the closer is pre-built with the ball on the green and
             # those shots already struck); otherwise a pre-built closer under-reports both.
@@ -1105,6 +1107,7 @@ class Round:
                 stats.holes_scored += 1
                 if par:
                     stats.par += par
+                    stats.pars[seq] = par
             if not recs or not par:
                 continue
             tee = [r for r in recs if r.shot_number == 1 and r.hud.lie]
@@ -1499,6 +1502,32 @@ class Round:
                 f"{to_par(round(expected))} over {self.holes} holes; {to_par(s.gross - s.par)} is {verdict} that, "
                 f"a gauge of form. There's no net score or match in this round, so don't announce one.")
 
+    def _to_par_path(self, s: SideStats) -> str | None:
+        """Where the score stood against par after each hole, as runs ("even par after hole 1; 1 under
+        par after holes 2 to 7; ..."), so the closer can't claim a lead or a red number held all round
+        when it didn't. None unless holes 1..n were all scored on known pars (the card's, or the
+        shots' where the card has none, as side_stats resolved them)."""
+        seqs = sorted(s.scores)
+        if len(seqs) < 2 or seqs != list(range(1, len(seqs) + 1)) or any(q not in s.pars for q in seqs):
+            return None
+        runs: list[tuple[int, list[int]]] = []
+        total = 0
+        for q in seqs:
+            total += s.scores[q] - s.pars[q]
+            if runs and runs[-1][0] == total:
+                runs[-1][1].append(q)
+            else:
+                runs.append((total, [q]))
+        return "; ".join(f"{to_par(v)} after {self._holes_span(qs)}" for v, qs in runs)
+
+    def _holes_span(self, seqs: list[int]) -> str:
+        """holes_phrase, with a run of three or more as a range ("holes 2 to 7")."""
+        if len(seqs) < 3:
+            return self.holes_phrase(seqs)
+        if self.start_hole_assumed:
+            return f"the {_ordinal(seqs[0])} to {_ordinal(seqs[-1])} holes of the round"
+        return f"holes {self.hole_number(seqs[0])} to {self.hole_number(seqs[-1])}"
+
     def _side_facts(self, side: Side, s: SideStats, season: dict | None) -> list[str]:
         who = side.label
         if not s.holes_scored:
@@ -1538,6 +1567,8 @@ class Round:
                     where = None if name == "par" else self.holes_phrase(holes)
                     parts.append(f"{len(holes)} {label}" + (f" ({where})" if where else ""))
             facts.append(f"{possessive(who)} card: " + ", ".join(parts) + ".")
+        if path := self._to_par_path(s):
+            facts.append(f"{possessive(who)} score against par as the round went: {path}.")
         hit, tries = s.fir
         if tries:
             facts.append(f"{who} hit {hit} of {tries} fairways off the tee on the par 4s and 5s.")
