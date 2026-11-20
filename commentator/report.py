@@ -723,11 +723,11 @@ def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
         guard("logs", logs)
 
         def prompt_logs() -> None:
-            cutoff = time.time() - LOG_DAYS * 86400
+            # All still on disk (the booth prunes them to a week), each on its own: one gone or locked
+            # mustn't lose the newer days.
             for p in sorted(log_dir.glob(f"{prompt_log.PREFIX}*.jsonl")):
-                if _mtime(p) >= cutoff:   # each on its own: one gone or locked mustn't lose the newer days
-                    guard(f"prompt log {p.name}", lambda p=p: z.writestr(
-                        f"logs/{p.name}", scrub_jsonl(prompt_log.excerpt(p, PROMPT_LOG_CAP), scrub)))
+                guard(f"prompt log {p.name}", lambda p=p: z.writestr(
+                    f"logs/{p.name}", scrub_jsonl(prompt_log.excerpt(p, PROMPT_LOG_CAP), scrub)))
         guard("prompt logs", prompt_logs)
 
         def screens() -> None:

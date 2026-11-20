@@ -173,6 +173,23 @@ def test_report_keeps_the_newest_prompts_with_the_system_prompt_they_refer_to(tm
     assert rows[-1]["output_tokens"] == "<redacted>"
 
 
+def test_report_sends_every_prompt_log_the_pc_still_keeps(tmp_path, monkeypatch):
+    import os
+    import time
+
+    monkeypatch.chdir(tmp_path)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    for name, days in (("prompts-2099-01-01.jsonl", 9), ("booth-2099-01-01.log", 5)):
+        (logs / name).write_text('{"user": "x"}\n', encoding="utf-8")
+        os.utime(logs / name, (time.time() - days * 86400,) * 2)
+    cfg = Config(log_dir="logs", db_path="logs/season.db")
+    with zipfile.ZipFile(report.build(cfg, tmp_path / "config.yaml")) as z:
+        names = set(z.namelist())
+    # Whatever prompts the PC still has go, however old; the booth logs keep their window.
+    assert "logs/prompts-2099-01-01.jsonl" in names and "logs/booth-2099-01-01.log" not in names
+
+
 def test_a_prompt_starting_right_at_the_cut_is_kept(tmp_path):
     from commentator.prompt_log import excerpt
 
