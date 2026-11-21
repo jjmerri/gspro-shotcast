@@ -518,6 +518,12 @@ def _lie_prep(lie: str) -> str:
     return "on" if lie in ("green", "fringe", "fairway", "tee") else "in"
 
 
+def file_putt_outcome(t: round_file.Track) -> str:
+    """How a putt GSPro's round file has ending the hole went: in the cup, inside the gimme circle, or
+    short of it with the hole picked up at the maximum (a miss)."""
+    return "holed" if t.in_cup else "missed" if t.picked_up else "conceded"
+
+
 MISREAD_PUTT_MPH = 3.0   # no real putt this season left the face under 3 mph; a nudged ball does
 
 
@@ -3383,8 +3389,9 @@ class Engine:
                   and t.shot_number == shot_number - 1 and theirs(t.player)), None)
         if t is None:
             return None, "no previous stroke yet"
-        why = ("penalty" if t.penalty else "dropped" if t.dropped else "holed" if t.in_cup
-               else "no lie code" if not t.lie_after else "cart path" if t.lie_after == "cart path" else None)
+        why = ("penalty" if t.penalty else "dropped" if t.dropped else "picked up" if t.picked_up
+               else "holed" if t.in_cup else "no lie code" if not t.lie_after
+               else "cart path" if t.lie_after == "cart path" else None)
         if why:
             return None, why
         try:
@@ -3431,7 +3438,13 @@ class Engine:
             return
         now, tracks = time.monotonic(), {t.shot_id: t for t in self._file_tracks}
         for gid, (shot_id, tag, rec, putt, until) in list(self._file_ends_due.items()):
-            if (t := tracks.get(gid)) is not None and t.dropped:
+            if (t := tracks.get(gid)) is not None and t.picked_up:
+                del self._file_ends_due[gid]   # (the hole conceded at the maximum: the ball didn't drop)
+                if putt:
+                    self._record_result(shot_id, "missed", tag, putt=True, rec=rec)
+                log.info("%s %s picked up short (GSPro round file, after the reaction)", tag,
+                         "putt" if putt else "full shot")
+            elif t is not None and t.dropped:
                 del self._file_ends_due[gid]
                 outcome = "holed" if t.in_cup else "conceded"
                 self._record_result(shot_id, outcome, tag, putt=putt, rec=rec, left_yards=t.finish_yards)
@@ -3443,10 +3456,10 @@ class Engine:
     async def _file_hole_end(self, player: str | None, ball_speed: float | None, since: float,
                              seq: int | None, wait: float = 0.0) -> round_file.Track | None:
         """The stroke struck at `since` (player, ball speed) in GSPro's round file, when it ended the hole
-        there (holed, or stopped inside the gimme circle), else None. `wait`: up to how long (seconds)
-        to wait for GSPro to write it (at rest)."""
+        there (holed, stopped inside the gimme circle, or picked up short), else None. `wait`: up to how
+        long (seconds) to wait for GSPro to write it (at rest)."""
         t = await self._file_stroke_at(player, ball_speed, since, seq, wait)
-        return t if t is not None and t.dropped else None
+        return t if t is not None and (t.dropped or t.picked_up) else None
 
     async def _file_stroke_at(self, player: str | None, ball_speed: float | None, since: float,
                               seq: int | None, wait: float = 0.0) -> round_file.Track | None:
@@ -3459,7 +3472,7 @@ class Engine:
             changed = self._file_changed
             await self._refresh_round_file()
             t = self._file_track_of(player, ball_speed, since, claim=seq)
-            if t is not None and not t.dropped and await self._file_settle():
+            if t is not None and not t.dropped and not t.picked_up and await self._file_settle():
                 t = self._file_track_of(player, ball_speed, since, t.shot_id) or t
             if t is not None or (left := deadline - time.monotonic()) <= 0:
                 return t
@@ -3790,8 +3803,8 @@ class Engine:
         # The next hole's banner seen, held back while the ball was followed: it moves the group on (the
         # hole change, its recap and all); the shot is filed there now.
         banner = seq == round_hole + 1 and self._hole_watch is not None and self._hole_watch.pending
-        if not t.dropped and r.seq == round_hole and shot_hole and shot_hole == self.state.current_hole and newest \
-                and not banner:
+        if not t.dropped and not t.picked_up and r.seq == round_hole and shot_hole \
+                and shot_hole == self.state.current_hole and newest and not banner:
             log.info("%s GSPro's round file has this stroke on hole %s (round hole %s), not %s: correcting the hole",
                      tag, t.hole, seq, shot_hole)
             self.hole_number, self.hole_number_read = t.hole, True
@@ -8261,12 +8274,12 @@ class Engine:
         # A putt the feed took from GSPro's round file, which has the hole ended on it: a definitive drop.
         log_drop = False   # the putt's result from the log's score line for its fire (no name for the slot)
         file_drop = shot.is_putt and file_track is not None and file_track.shot_id == event.round_shot_id \
-            and file_track.dropped
+            and (file_track.dropped or file_track.picked_up)
         if shot.is_putt and ((self.screen is not None and ocr) or idx is not None or file_drop
                              or self._round_watch is not None or (self._log_truth and self.gspro.mode == "course")):
             base_outs, base_gim = impact_snap[2].get(idx, 0), impact_snap[3].get(idx, 0)
             if file_drop:   # GSPro's file has it: no waiting on the log
-                outcome = "holed" if file_track.in_cup else "conceded"
+                outcome = file_putt_outcome(file_track)
                 self._record_result(shot_id, outcome, tag, putt=True, rec=rec, left_yards=file_track.finish_yards)
                 holed = outcome == "holed"
                 log.info("%s putt outcome from GSPro's round file: %s", tag, outcome)
@@ -8357,7 +8370,7 @@ class Engine:
                     putt_track = await self._file_hole_end(player, shot.ball_speed, file_since, my_seq)
                 if putt_track is not None:
                     file_drop = True
-                    outcome = "holed" if putt_track.in_cup else "conceded"
+                    outcome = file_putt_outcome(putt_track)
                     self._record_result(shot_id, outcome, tag, putt=True, rec=rec,
                                         left_yards=putt_track.finish_yards)
                     holed = outcome == "holed"
@@ -8425,10 +8438,13 @@ class Engine:
                     return None
                 return await self._wait_finish_yards(idx, impact_snap[0].get(idx), window)
             if file_track is not None:
-                if not file_track.dropped:
+                if not file_track.dropped and not file_track.picked_up:
                     await self._file_settle()   # (its drop may be the next rewrite's)
                 file_track = self._file_track_of(player, None, impact, file_track.shot_id) or file_track
-            if file_track is not None and file_track.dropped:
+            if file_track is not None and file_track.picked_up:
+                full_result = None   # the hole conceded at the maximum where the ball lay: not in
+                log.info("%s full shot picked up short (GSPro round file)", tag)
+            elif file_track is not None and file_track.dropped:
                 # The ball dropped in GSPro's round file (holed, or inside the gimme circle).
                 full_result = "holed" if file_track.in_cup else "conceded"
             else:
@@ -8448,6 +8464,7 @@ class Engine:
                                            base_setup=base_setup, fire=fire))
             elif full_result == "unknown" and file_track is not None:
                 self._file_end_due(file_track.shot_id, shot_id, tag, rec, False)   # (no log to say: the file may)
+            picked_short = file_track is not None and file_track.picked_up
             if full_result == "conceded" and start_yards:
                 # GSPro logs where the ball stopped (tdist) the line before the gimmie, so it's in by now:
                 # a foot away nearly dropped, four feet is just a gimme.
@@ -8465,6 +8482,8 @@ class Engine:
                     log.info("%s to the gimme from %.0f yards (%s), finished %s feet: excitement %s", tag,
                              start_yards, before.lie, "?" if gimme_feet is None else f"{gimme_feet:.1f}",
                              gimme_level)
+            elif picked_short:
+                pass   # (the hole picked up after it: the next setup is another hole's, no distance to read)
             elif near and landed and start_yards and start_yards >= c.close_approach_from_yards \
                     and full_result != "holed":
                 finish = await finish_yards(1.5)
@@ -8473,7 +8492,8 @@ class Engine:
                     score = max(score, c.big_moment_threshold)
                     log.info("%s stuffed it: %.0f feet from the hole from %.0f yards (GSPro log)",
                              tag, close_feet, start_yards)
-            if (hud.lie or "").lower() == "green" and close_feet is None and full_result not in ("holed", "conceded"):
+            if (hud.lie or "").lower() == "green" and close_feet is None and not picked_short \
+                    and full_result not in ("holed", "conceded"):
                 # On a green, but whose? GSPro's finishing distance says (a drive "found the green" 322
                 # yards from the pin, then had "a putt for albatross").
                 finish = await finish_yards(1.0)
@@ -8638,10 +8658,15 @@ class Engine:
         if before.shot_number and shot_par and (name := SCORE_NAMES.get(before.shot_number + 1 - shot_par)):
             next_putt = (f"The ball is on the green in {before.shot_number}: the next putt "
                          f"is for {name.split(' ', 1)[1]}.")
+        picked = file_track is not None and file_track.picked_up
         if close_feet is not None:
             result = result + [_great_shot_fact(to_yards(before.to_pin),
                                                 f"finished {close_feet:.0f} feet from the hole",
                                                 level=stuffed_level(close_feet))]
+        elif not shot.is_putt and picked:
+            # (the next setup is another hole's: no distance left to wait for)
+            result = result + ["The ball did not go in. The player has picked up after this shot: the hole "
+                               "is over, scored at the maximum the game allows."]
         elif not shot.is_putt and full_result not in ("holed", "conceded"):
             # GSPro's own finishing distance (logged as the ball settles), so the model never reads the
             # starting distance as what's left: "still 102 yards" after a pitch to 8 yards.
@@ -8663,7 +8688,7 @@ class Engine:
                                    "left, and don't repeat the starting distance as if it were."]
         if wrong_green is not None:
             result = [wrong_green_fact(wrong_green)]
-        elif next_putt and not shot.is_putt and full_result not in ("holed", "conceded") and \
+        elif next_putt and not shot.is_putt and not picked and full_result not in ("holed", "conceded") and \
                 (close_feet is not None or (hud.lie or "").lower() == "green"):
             result = result + [next_putt]
         if off_wrong_green is not None:
@@ -9831,7 +9856,8 @@ class Engine:
             await asyncio.sleep(wait)
             await self._refresh_round_file()
             track = self._file_track_of(player, ball_speed, impact, track.shot_id) or track
-        end = track.penalty_kind or ("holed" if track.in_cup else "dropped" if track.dropped else "")
+        end = track.penalty_kind or ("holed" if track.in_cup else "dropped" if track.dropped
+                                     else "picked up" if track.picked_up else "")
         log.info("%s ball at rest in GSPro's round file %.2fs after impact: lie %s, carry %s, total %s, "
                  "%s yd to the pin%s", tag, timing["file"] - impact, track.lie_after, track.carry_yards,
                  track.total_yards, track.finish_yards, f", {end}" if end else "")

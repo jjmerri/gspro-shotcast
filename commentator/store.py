@@ -423,10 +423,10 @@ def planner_counts_stale(db: sqlite3.Connection, grown: float = 2.0, least: int 
 
 
 # The season file's format (PRAGMA user_version) once upgraded: 6 is round_record.migrate's, 7 the
-# stranded openers' repair (_repair_stranded_openers). Raise it
-# with any change to the file an older release would trip over: a file older than this is copied before
-# it's upgraded (backup.before_upgrade).
-FORMAT = 7
+# stranded openers' repair (_repair_stranded_openers), 8 the picked-up holes' (_repair_picked_up_holes).
+# Raise it with any change to the file an older release would trip over: a file older than this is copied
+# before it's upgraded (backup.before_upgrade).
+FORMAT = 8
 
 
 class SeasonCopyFailed(RuntimeError):
@@ -644,6 +644,9 @@ class Store:
         if self.db.execute("PRAGMA user_version").fetchone()[0] == 6:
             self._repair_stranded_openers()
             self.db.execute("PRAGMA user_version = 7")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] == 7:
+            self._repair_picked_up_holes()
+            self.db.execute("PRAGMA user_version = 8")
         if planner_counts_stale(self.db):   # (last: after the rows the migrations add)
             self.db.execute("ANALYZE")
         self.db.commit()
@@ -1684,6 +1687,9 @@ class Store:
                                  else before.get("is_putt", int(bool(t.putt) or screen in PUTTER_CODES))
                                  if unfill_putt else int(t.putt) if call else row["is_putt"])
         finish = t.finish_yards if not (putt or shared) else None
+        if finish is None and t.picked_up and old is not None and not (putt or shared) and old["finish_yards"]:
+            finish = old["finish_yards"]   # (a pick-up's own DistanceToPin is stale: an earlier read's stands,
+                                           # not the 0 an older version took it as holed with)
         lie_after = lie(row["lie_after"], t.lie_after)
         # What an earlier read of the file set and this one takes back (a penalty since followed the
         # stroke): where it stopped isn't where play went on.
@@ -2073,6 +2079,53 @@ class Store:
             if not self.db.execute("SELECT 1 FROM lines WHERE record_uuid = ? LIMIT 1", (p,)).fetchone():
                 self.db.execute("DELETE FROM round_slots WHERE round_uuid = ?", (p,))
                 self.db.execute("DELETE FROM round_records WHERE uuid = ?", (p,))
+
+    PICKED_UP_OFF_PIN_M = 1.0   # a holed ball's end this far from its round's pin was never in (a logged
+                                # pin can sit a few tenths off the cup GSPro drops the ball into)
+    PIN_AFTER_ROUND_S = 300     # how long after its round's end the hole's pin may be logged
+
+    def _repair_picked_up_holes(self) -> None:
+        """A hole GSPro auto-conceded at the maximum score marks the last stroke dropped in its round file,
+        where the ball lay, so it was stored holed with no distance left (Evan's 6-iron from 172 yards at
+        Dinosaur Mountain, 48 m short). Its ball stopped where the round file has it: holed no more (a
+        putt missed), and a full shot left that far from the hole's pin that round. The pin is the one
+        GSPro logged for the hole after the stroke, within its round (not the next one's): its layout, or
+        one course_layout.fill_missing stored (stamped with a shot's time) from a pin GSPro logged setting
+        the hole up that round, before the stroke. None (a round quit early, a course file's pin) and the shot is left be."""
+        rows = self.db.execute(
+            "SELECT s.id, s.session_id, s.course, s.hole, s.ts, s.is_putt, r.started_at, r.ended_at,"
+            " t.end_x, t.end_y, t.end_z, (SELECT MIN(n.started_at) FROM round_records n WHERE"
+            " n.session_id = r.session_id AND n.started_at > r.started_at) AS next_at FROM shots s"
+            " JOIN shot_tracks t ON t.shot_id = s.id JOIN round_records r ON r.uuid = s.record_uuid"
+            " WHERE s.outcome = 'holed' AND t.end_x IS NOT NULL AND r.ended_at IS NOT NULL").fetchall()
+        for r in rows:
+            if not (m := re.match(r"Hole (\d+)\b", r["hole"] or "")):
+                continue
+            until = r["ended_at"] + self.PIN_AFTER_ROUND_S
+            if r["next_at"] is not None:
+                until = min(until, r["next_at"])
+            pin = self.db.execute(
+                "SELECT pin_x, pin_y, pin_z FROM hole_layouts h WHERE session_id = ? AND course = ? COLLATE NOCASE"
+                " AND hole = ? AND pin_x IS NOT NULL AND ts >= ? AND ts <= ? AND (NOT EXISTS (SELECT 1 FROM shots x"
+                " WHERE x.session_id = h.session_id AND x.ts = h.ts) OR EXISTS (SELECT 1 FROM logged_pins p WHERE"
+                " p.session_id = h.session_id AND abs(p.x - h.pin_x) < 0.01 AND abs(p.y - h.pin_y) < 0.01"
+                " AND abs(p.z - h.pin_z) < 0.01 AND p.ts >= ? AND p.ts <= ?)) ORDER BY ts LIMIT 1",
+                (r["session_id"], r["course"], int(m[1]), max(r["ts"] - 60, r["started_at"] or 0), until,
+                 (r["started_at"] or 0) - 60, r["ts"])).fetchone()
+            if pin is None:
+                continue
+            off = math.dist((r["end_x"], r["end_y"], r["end_z"]), tuple(pin))
+            if off <= self.PICKED_UP_OFF_PIN_M:
+                continue
+            if r["is_putt"]:   # (a putt keeps no distance left: its miss is what counts)
+                self.db.execute("UPDATE shots SET outcome = 'missed', finish_yards = NULL WHERE id = ?", (r["id"],))
+                self.db.execute("UPDATE shot_tracks SET finish_yards = NULL WHERE shot_id = ?", (r["id"],))
+                log.info("Shot %s: a picked-up hole's last putt, missed", r["id"])
+                continue
+            left = round(off * M_TO_YD, 1)
+            self.db.execute("UPDATE shots SET outcome = NULL, finish_yards = ? WHERE id = ?", (left, r["id"]))
+            self.db.execute("UPDATE shot_tracks SET finish_yards = ? WHERE shot_id = ?", (left, r["id"]))
+            log.info("Shot %s: a picked-up hole's last stroke, not holed: %.1f yd from the pin", r["id"], left)
 
     def _repair_tee_finishes(self) -> None:
         """A full shot saved as finishing on the tee kept the lie it was hit from (Corey's opening drive at

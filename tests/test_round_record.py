@@ -668,6 +668,34 @@ def test_an_opener_left_in_the_old_sessions_practice_moves_to_its_round(tmp_path
     assert s.db.execute("PRAGMA user_version").fetchone()[0] == FORMAT
 
 
+def test_a_picked_up_holes_last_stroke_stored_as_holed_is_left_where_it_stopped(tmp_path):
+    path = str(tmp_path / "s.db")
+    s = Store(path)
+    db, sid = s.db, s.session_id
+    db.execute("INSERT INTO round_records (uuid, kind, session_id, started_at, ended_at, state, assigned)"
+               " VALUES ('r', 'round', ?, ?, ?, 'finished', 'live')", (sid, T0, T0 + 600))
+    # This round's pin, logged after the hole; and a round before's (another pin), logged before it.
+    db.execute("INSERT INTO hole_layouts (session_id, ts, course, hole, pin_x, pin_y, pin_z)"
+               " VALUES (?, ?, 'DINO', 11, 100.0, 5.0, 200.0), (?, ?, 'DINO', 11, 100.0, 5.0, 151.3)",
+               (sid, T0 + 120, sid, T0 - 3600))
+    # Evan's iron 48.7 m short, a putt holed at a cup 0.26 m off the logged pin, and a putt picked up 3 m off.
+    for n, (end, gid) in enumerate((((100.0, 5.0, 151.3), "iron"), ((100.26, 5.0, 200.0), "putt"),
+                                    ((103.0, 5.0, 200.0), "lag")), 1):
+        shot = db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt,"
+                          " outcome, finish_yards, raw, record_uuid) VALUES (?, ?, 'Evan', 'Dino', 'Hole 11, Par 4',"
+                          " ?, ?, 'holed', 0.0, '{}', 'r')", (sid, T0 + n, n, int(n > 1))).lastrowid
+        db.execute("INSERT INTO shot_tracks (shot_id, gspro_shot_id, end_x, end_y, end_z, finish_yards)"
+                   " VALUES (?, ?, ?, ?, ?, 0.0)", (shot, gid, *end))
+    db.execute("PRAGMA user_version = 7")
+    db.commit()
+    s.close()
+    s = Store(path, new_session=False)
+    got = [tuple(r) for r in s.db.execute("SELECT s.outcome, s.finish_yards, t.finish_yards FROM shots s"
+                                          " JOIN shot_tracks t ON t.shot_id = s.id ORDER BY s.shot_number")]
+    assert got == [(None, 53.3, 53.3), ("holed", 0.0, 0.0), ("missed", None, None)]
+    assert s.db.execute("PRAGMA user_version").fetchone()[0] == FORMAT
+
+
 def test_the_readers_read_the_stored_record_once_every_row_has_one(tmp_path):
     from commentator import stats_web
 

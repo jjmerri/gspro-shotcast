@@ -552,6 +552,32 @@ def test_a_stroke_says_what_its_penalty_was_and_whether_the_ball_dropped():
     assert given.dropped and not given.in_cup and given.finish_yards == round(0.3 * M_TO_YD, 1)
 
 
+def test_a_hole_picked_up_at_the_maximum_is_not_holed_where_the_ball_lay():
+    # GSPro's auto-concede marks the last stroke holed with the putter, its EndingPOS where the ball
+    # stopped (113 m on, 44 m short) and its DistanceToPin from where it was struck (Evan's 9th on 11).
+    iron = _entry(9, (0, 0), (5, 113), sp=120.0, to_pin=157.4, hole_result=7, holed=True,
+                  flight=[(0, 0), (5, 113)], land=(5, 113))
+    iron["ClubIndex"] = 26
+    t = round_file.tracks([iron])[0]
+    assert (t.picked_up, t.in_cup, t.dropped, t.holed, t.finish_yards, round_file.file_club(t)) == \
+        (True, False, False, False, None, None)
+    assert t.end is not None and t.total_yards == round(math.hypot(5, 113) * M_TO_YD, 1)
+    holed = round_file.tracks([PUTT])[0]      # start to cup 5.39 m, DistanceToPin 5.4: in
+    assert (holed.picked_up, holed.in_cup, holed.finish_yards) == (False, True, 0.0)
+
+
+def test_a_stroke_rewritten_as_picked_up_keeps_how_far_it_was_left(tmp_path):
+    st = _season(tmp_path)
+    st.apply_round_file(round_file.tracks([DRIVE, APPROACH]), now=1005.0)
+    # GSPro auto-concedes the hole after the approach: the same stroke, holed, its DistanceToPin stale.
+    picked = {**APPROACH, "HoleResult": 7, "DistanceToPin": 100.12,
+              "activeShot": {**APPROACH["activeShot"], "sd": {**APPROACH["activeShot"]["sd"], "isHoled": True}}}
+    assert st.apply_round_file(round_file.tracks([DRIVE, picked]), now=1006.0)[0] == 2
+    assert _row(st, 2)["finish_yards"] == round(5.4 * M_TO_YD, 1)
+    assert st.db.execute("SELECT finish_yards FROM shot_tracks WHERE gspro_shot_id = ?",
+                         (APPROACH["ShotID"],)).fetchone()[0] == round(5.4 * M_TO_YD, 1)
+
+
 def test_round_end_keeps_a_copy_named_by_start_and_course_and_prunes_the_oldest(tmp_path):
     import os
     import time

@@ -4,6 +4,14 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.157
+
+### Stats page
+- When GSPro picks up a hole at the maximum score, the last shot no longer shows as a hole-out; it shows how far the ball was left. Past rounds are corrected too.
+
+### Booth
+- The booth no longer calls a shot that ended in a pick-up a hole-out.
+
 ## 0.1.156
 
 ### Booth

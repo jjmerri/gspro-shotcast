@@ -6308,10 +6308,15 @@ def test_gspros_round_file_corrects_the_hole_the_group_is_on(tmp_path):
     ev = e._events.get_nowait()
     assert (ev.current, ev.correction, e.hole_number) == ("Hole 16", "round file", 16)
     assert e._file_moved_to is None   # (moved back: hole 16's banner was read already, not still to come)
-    # A stroke that ended the hole (in the cup, or a gimme) moves alone: the group may have moved on.
-    holed = round_file.tracks([_round_entry(3, 40.0, name="Steve", hole=15, hole_result=7, holed=True)])[0]
-    e._file_hole_check(rec, holed, r, 17, seventeen, "[t]")
-    assert e._events.empty() and (rec.hole_seq, rec.hole, rec.shot_number) == (16, "Hole 16", 3)
+    # A stroke that ended the hole (in the cup, a gimme, or picked up short) moves alone: the group may
+    # have moved on. (A holed stroke's DistanceToPin is from where it was struck: here, 200.06 m.)
+    for to_pin in (200.06, 50.0):
+        rec.hole_seq, rec.hole, rec.shot_number = 17, seventeen, None
+        ended = round_file.tracks([_round_entry(3, 40.0, name="Steve", hole=15, hole_result=7, holed=True,
+                                                to_pin=to_pin)])[0]
+        assert (ended.in_cup, ended.picked_up) == (to_pin > 100, to_pin < 100)
+        e._file_hole_check(rec, ended, r, 17, seventeen, "[t]")
+        assert e._events.empty() and (rec.hole_seq, rec.hole, rec.shot_number) == (16, "Hole 16", 3)
     # On the round's hole, a shot recorded before the hole was read takes GSPro's hole (the group stays).
     rec.hole, rec.shot_number = None, None
     e._file_hole_check(rec, stroke, r, 16, None, "[t]")

@@ -58,6 +58,11 @@ CLUBS = {0: "DR", **{i: f"{i + 1}W" for i in range(1, 7)}, **{i: f"{i - 5}H" for
 PENALTY_RESULTS = (2, 3)   # ShotResult of a penalty's own entry: water, out of bounds
 PENALTY_KINDS = {2: "water", 3: "out of bounds"}
 HOLED = 7                  # HoleResult once the ball is in (or conceded)
+# How far a holed stroke's start-to-finish may be from its DistanceToPin (metres) with the ball still
+# taken as in the cup. GSPro keeps a holed stroke's DistanceToPin from where it was struck and its
+# EndingPOS at the cup, so the two agree within a few centimetres; a hole auto-conceded at the maximum
+# score marks the last stroke holed where the ball lay (0.6 m to 44 m off, Dinosaur Mountain 11-19).
+AT_CUP_M = 0.15
 PATH_STEP_M = 0.5          # points closer than this to the last one kept are dropped
 ARCHIVE_DIR = "round-files"   # under log_dir: a copy of the file from each round's end (see archive)
 KEEP_ARCHIVES = 200
@@ -97,6 +102,8 @@ class Track:
     penalty_kind: str | None = None   # PENALTY_KINDS: what its penalty's entry was for
     in_cup: bool = False         # GSPro has the ball in the hole (activeShot.sd.isHoled)
     dropped: bool = False        # the hole ended on it: in the cup, or inside the gimme circle (HoleResult 7)
+    picked_up: bool = False      # the hole ended on it short of the cup: GSPro auto-conceded it at the
+                                 # maximum score (written as dropped, isHoled and the putter all the same)
     ending_code: int | None = None   # EndingSurface as GSPro wrote it (SURFACES names it)
     club: str | None = None      # ClubIndex as the booth's code (CLUBS)
 
@@ -112,7 +119,7 @@ class Track:
 
     @property
     def finish_yards(self) -> float | None:
-        if self.end is None:
+        if self.end is None or self.picked_up:   # (a pick-up's DistanceToPin is from where it was struck)
             return None
         if self.in_cup or (self.holed and not self.to_pin_m):   # (a gimme's drop keeps how far it was left)
             return 0.0
@@ -161,6 +168,11 @@ def tracks(entries: list[dict]) -> list[Track]:
         penalty = pen is not None
         # GSPro adds a copy of it when the ball drops (holed, or a gimme): gspro_files.holed_copies.
         dropped = bool(sd.get("isHoled")) or e.get("HoleResult") == HOLED or id(e) in copied
+        dist = e.get("DistanceToPin")
+        end = _xyz(e.get("EndingPOS"))
+        # Put in the cup by its own drop (no copy follows it) but not ended there: a pick-up, not a hole-out.
+        picked = e.get("HoleResult") == HOLED and sd.get("isHoled") and id(e) not in copied and end is not None \
+            and isinstance(dist, (int, float)) and abs(math.dist(start, end) - dist) > AT_CUP_M
         flight = [p for p in (_xyz(q) for q in sd.get("pos") or []) if p]
         land, secs = _xyz(sd.get("tdpoint")) if flight else None, shot.get("tdTime") if flight else None
         if flight and isinstance(secs, (int, float)):
@@ -171,18 +183,18 @@ def tracks(entries: list[dict]) -> list[Track]:
         for q in sd.get("path") or []:
             if (p := _xyz((q or {}).get("pos"))) and isinstance(q.get("time"), (int, float)):
                 roll.append((*p, float(q["time"])))
-        dist = e.get("DistanceToPin")
         t = Track(shot_id=str(e["ShotID"]), round_id=e.get("RoundID"), course_key=e.get("CourseKey"),
                   player=str(e["PlayerName"]), hole=hole + 1, shot_number=number,
                   ball_speed=float(launch.get("sp") or e.get("BallSpeed") or 0.0), putt=None if sd.get("isPutt") is None else bool(sd["isPutt"]),
-                  start=start, end=None if penalty else _xyz(e.get("EndingPOS")),
+                  start=start, end=None if penalty else end,
                   land=land, flight=_thin(flight), flight_s=secs,
                   roll=_thin(roll), lie_before=SURFACES.get(e.get("StartingSurface")),
                   lie_after=None if penalty else SURFACES.get(e.get("EndingSurface")),
                   to_pin_m=float(dist) if isinstance(dist, (int, float)) else None,
-                  holed=bool(sd.get("isHoled")) or e.get("HoleResult") == HOLED, penalty=penalty,
+                  holed=not picked and (bool(sd.get("isHoled")) or e.get("HoleResult") == HOLED), penalty=penalty,
                   par=e.get("HolePar") if isinstance(e.get("HolePar"), int) else None,
-                  penalty_kind=PENALTY_KINDS.get(pen), in_cup=bool(sd.get("isHoled")), dropped=dropped,
+                  penalty_kind=PENALTY_KINDS.get(pen), in_cup=not picked and bool(sd.get("isHoled")),
+                  dropped=dropped and not picked, picked_up=picked,
                   ending_code=e.get("EndingSurface") if isinstance(e.get("EndingSurface"), int) else None,
                   club=CLUBS.get(e.get("ClubIndex")) if isinstance(e.get("ClubIndex"), int) else None)
         out.append(t)
@@ -203,9 +215,9 @@ def file_club(t: Track) -> str | None:
     """The club GSPro's file has for stroke `t`, as the booth would name it, or None where it can't say.
     GSPro writes ClubIndex (its club selection) when the ball comes to rest, not at impact
     (PlayerShotHistory), so it's the club selected then: a hole-out sets it to the putter (a chip-in
-    reads PT), so a holed or dropped stroke has none. A driver off the deck is taken as
+    reads PT), so a holed, dropped or picked-up stroke has none. A driver off the deck is taken as
     the booth takes the screen's (hud.deck_club: a 3-wood)."""
-    if t.club is None or t.dropped or t.holed or t.in_cup:
+    if t.club is None or t.dropped or t.holed or t.in_cup or t.picked_up:
         return None
     return "3W" if t.club == "DR" and t.lie_before != "tee" and t.shot_number != 1 else t.club
 
