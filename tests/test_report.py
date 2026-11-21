@@ -175,11 +175,15 @@ def test_report_zips_logs_screens_and_maps_without_the_env(tmp_path, monkeypatch
     monkeypatch.chdir(tmp_path)
     logs = tmp_path / "logs"
     logs.mkdir()
-    (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-secret-value-123\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-secret-value-123\nNTFY_TOPIC=4207319\n", encoding="utf-8")
     (tmp_path / "config.yaml").write_text("screen:\n  monitor: 1\n", encoding="utf-8")
     monkeypatch.setenv("USERNAME", "Pat Golfer")
     (logs / "booth-2099-01-01.log").write_text("started with sk-secret-value-123 in C:\\Users\\Pat Golfer\\Shotcast\n",
                                                encoding="utf-8")
+    (logs / "perf-2099-01-01.jsonl").write_text('{"t":"2099-01-01T10:00:00","mark":"round_start","round":3}\n'
+                                                '{"t":"2099-01-01T10:00:05","cpu":20,"booth":{"cpu":2,"mb":400}}\n'
+                                                '{"t":"2099-01-01T10:00:10","cpu":20,"booth":{"cpu":2,"mb":4207319}}\n',
+                                                encoding="utf-8")
     (logs / "health.json").write_text(json.dumps(
         {"facts": {"gspro_version": "1.2"}, "issues": [{"key": "a", "level": "warn", "message": "Log silent",
                                                          "since": "now"}]}), encoding="utf-8")
@@ -201,11 +205,14 @@ def test_report_zips_logs_screens_and_maps_without_the_env(tmp_path, monkeypatch
         names = set(z.namelist())
         summary = z.read("summary.txt").decode()
         booth = z.read("logs/booth-2099-01-01.log").decode()
+        perf = z.read("logs/perf-2099-01-01.jsonl").decode()
+    assert "4207319" not in perf and all(json.loads(line) for line in perf.splitlines())   # a secret number: still JSON
     assert ".env" not in names and not any(n.endswith(".env") for n in names)
     assert "sk-secret-value-123" not in booth and "<redacted>" in booth
     assert "Pat Golfer" not in booth and "C:\\Users\\<user>\\Shotcast" in booth
     assert {"config.yaml", "gspro/Player.log", "screens/fixture-frame.jpg", "minimaps/Pebble-03-no-pin.jpg",
-            "logs/health.json"} <= names
+            "logs/health.json", "logs/perf-2099-01-01.jsonl"} <= names
+    assert "== Performance ==" in summary and "Booth CPU avg 2%" in summary
     assert any(n.startswith("screens/report-frames/no-player-") and n.endswith(".jpg") for n in names)
     assert "OPENAI_API_KEY" in summary and "sk-secret" not in summary
     assert "Log silent" in summary and "output_log.txt: missing" in summary
@@ -545,3 +552,10 @@ def test_the_report_says_what_pc_it_is():
         "Power plan: Power saver",
         "Battery: 40%, ON BATTERY",
         "Process GSPro (4120): 812 s of CPU, 3.0 GB in memory"]
+
+
+def test_a_capped_jsonl_file_stays_one_json_record_a_line(tmp_path):
+    p = tmp_path / "perf-2099-01-01.jsonl"
+    p.write_text("".join(json.dumps({"t": "x", "n": i}) + "\n" for i in range(200)))
+    lines = report.tail(p, 500).decode().splitlines()
+    assert all(isinstance(json.loads(line), dict) for line in lines) and json.loads(lines[-1])["n"] == 199

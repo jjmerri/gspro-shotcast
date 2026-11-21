@@ -5,6 +5,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from . import perf_log
 from .config import Config
 from .models import Line
 from .tts import TTS, Audio, StreamedAudio
@@ -43,6 +44,7 @@ async def play(audio: Audio) -> None:
         pad = np.zeros(int(audio.sample_rate * lead), dtype=samples.dtype)
         samples = np.concatenate([pad, samples])
 
+    @perf_log.timed("audio")
     def _play() -> None:
         sd.play(samples, audio.sample_rate)
         sd.wait()
@@ -64,6 +66,7 @@ async def _play_stream(audio: StreamedAudio, lead: float) -> None:
     need = int(audio.prebuffer * audio.sample_rate)
     underruns = 0
 
+    @perf_log.timed("audio")
     def _run() -> None:
         nonlocal underruns
         blocks = audio.blocks(stop)
@@ -345,6 +348,7 @@ class SpeechQueue:
             return {"excited": True}
         return {}
 
+    @perf_log.timed("voice")
     async def _synthesize(self, line: Line, until: float | None = None, live: bool = False) -> tuple[bool, Audio | None]:
         """Voice a line, returning (ok, audio). A cloud voice's requests either answer in a second or
         two or stall for 30 s+, so a request still unanswered after hedge_after_seconds gets a second

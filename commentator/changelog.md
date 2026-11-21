@@ -8,6 +8,7 @@ stats page and in the app; "Booth" items only in the app. Plain words, one line 
 
 ### Booth
 - Problem reports leave out your Windows account name wherever it shows up in a file path.
+- The booth keeps a light log of how much CPU, memory and graphics card it, GSPro and OBS use during a round, so problem reports can show whether it's slowing the game down.
 
 ## 0.1.155
 

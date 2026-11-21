@@ -47,6 +47,7 @@ SECTIONS: dict[str, Owner] = {
     "db_path": "pc",
     "process_priority": "pc",
     "max_cpu_cores": "pc",
+    "perf_log": "pc",
 }
 
 # Settings inside a section whose owner differs from the section's.

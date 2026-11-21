@@ -1037,6 +1037,9 @@ class Config(BaseModel):
     # wins contention, and optionally pin it to at most this many cores (None = no limit).
     process_priority: Literal["below_normal", "normal", "idle"] = "below_normal"
     max_cpu_cores: int | None = None
+    # A line every 5 s to log_dir/perf-DATE.jsonl: CPU, memory and GPU of the PC, the booth, GSPro and
+    # OBS, and what the booth was busy with (perf_log.py). Goes into problem reports.
+    perf_log: bool = True
 
     @property
     def segment_llm(self) -> LLMConfig:

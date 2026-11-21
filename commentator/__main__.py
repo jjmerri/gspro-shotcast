@@ -193,6 +193,18 @@ async def cmd_run(cfg: Config, args) -> None:
     from .perf import tune
 
     tune(cfg.process_priority, cfg.max_cpu_cores)
+    if cfg.perf_log:
+        from . import perf_log
+
+        perf_log.start(cfg.log_dir)
+    try:
+        await _run_booth(cfg)
+    finally:
+        if cfg.perf_log:
+            perf_log.stop()   # writes what's queued: the last round's end
+
+
+async def _run_booth(cfg: Config) -> None:
     bid = build_id()
     logging.getLogger("commentator").info("Booth build: %s", bid)
     from .config import BOOTH_STOP_CODE, BOOTH_STOPPED

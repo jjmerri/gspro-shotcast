@@ -44,6 +44,7 @@ from .interest import (LEAGUE_BEST_DRIVE_LEVEL, REPLY_PUTT_LEVEL, SEASON_BEST_DR
 from .league import League, OnAir, course_match_score
 from .llm import LLMClient
 from .minimap import JevMinimap, MinimapRead, same_map, snapshot as minimap_snapshot
+from . import perf_log
 from .prompt_log import PromptLog
 from .putt_read import REGION as PUTT_REGION, PuttRead, read_break
 from . import recall, round_file
@@ -11270,6 +11271,7 @@ class Engine:
             self.state.shots.clear()   # "today" starts over with the new session
         struck = self._struck_new_round()
         self.round = r
+        perf_log.mark("round_start", round=r.id)
         r.loaded_folder = self.gspro.course if self._log_truth and self.gspro.mode == "course" else None
         self._squabbit_kick()   # a league round's question goes up; any other round ends the last one's
         self._round_started_at = time.monotonic()
@@ -12964,6 +12966,7 @@ class Engine:
             self._bg(asyncio.to_thread(self._keep_round_file, r, started, self._round_file_names(r), speeds,
                                        courses, ids, self._round_course_folder(r)))
         self._round_ended_at = time.monotonic()
+        perf_log.mark("round_end", round=r.id)
         # Asides can no longer play, so prep still in flight is money spent on nothing. The guards in
         # _prepare_news stop it starting another story; only a cancel stops the one already running
         # from retrying its lines and voicing them.
@@ -13251,6 +13254,7 @@ class Engine:
                 log.exception("Stats page publish failed")
         self._recap_soon()   # a league round's reel is up now
 
+    @perf_log.timed("publish")
     async def _publish(self) -> None:
         from .stats_site import publish_command, site_dir
 
@@ -13295,7 +13299,8 @@ class Engine:
 
         async with self._backup_lock:
             try:
-                path = await asyncio.to_thread(backup.run, self.cfg)
+                with perf_log.work("backup"):
+                    path = await asyncio.to_thread(backup.run, self.cfg)
             except Exception as e:
                 log.exception("Season backup (%s) failed", why)
                 if self.cfg.health.enabled:
@@ -13468,6 +13473,7 @@ class Engine:
 
     # ---- generation and checking ----------------------------------------------------------
 
+    @perf_log.timed("model")
     async def _complete(
         self, kind: str, llm: LLMClient, user: str, images: list[bytes], schema: dict | None = None,
         system: str | None = None,

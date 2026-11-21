@@ -12,6 +12,8 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
+from . import perf_log
+
 from .config import HUD_ASPECT, NEW_UI_REGIONS, Region, ScreenConfig
 from .hud import (
     DISTANCE, NAME_DARK, Hud, OcrItem, arrow_direction, is_lie_cell, parse_club, parse_elevation, parse_hole_box, parse_lie,
@@ -481,6 +483,7 @@ class Screen:
             self._masked_logged[why] = now
             log.info("Screen read blanked where GSPro isn't showing: %s", why)
 
+    @perf_log.timed("capture")   # every monitor grab comes through here, so does every window one below
     def _sct_grab(self, sct, box: dict) -> Image.Image:
         """One mss grab of `box`, with every part GSPro isn't showing blacked out. The windows are
         looked at just before the grab and just after: when they moved meanwhile (a window dragged or
@@ -727,7 +730,8 @@ class Screen:
             return None
         from . import winshot
 
-        img = winshot.capture_window(self.cfg.window_title)
+        with perf_log.work("capture"):
+            img = winshot.capture_window(self.cfg.window_title)
         if img is None:
             log.warning("Couldn't capture the %r window; using the monitor grab", self.cfg.window_title)
         else:
@@ -827,6 +831,7 @@ class Screen:
             rlog.addFilter(lambda rec: "text detection result is empty" not in rec.getMessage())
         return self._ocr
 
+    @perf_log.timed("ocr")
     def ocr_items(self, img: Image.Image) -> list[OcrItem]:
         import numpy as np
 

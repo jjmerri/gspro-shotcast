@@ -27,7 +27,7 @@ from pathlib import Path
 
 import yaml
 
-from . import prompt_log
+from . import perf_log, prompt_log
 from .config import Config
 
 log = logging.getLogger(__name__)
@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 LOG_DAYS = 3                  # booth and tray logs from the last few days
 LOG_CAP = 4_000_000           # bytes kept from the end of each log
 GSPRO_LOG_CAP = 3_000_000
+PERF_LOG_CAP = 2_000_000      # per day of the perf log (perf_log), from the newest
 PROMPT_LOG_CAP = 8_000_000    # per day of model prompts (prompt_log), from the newest: ~1 MB zipped
 ROUND_FILES = 3
 ROUND_FILE_CAP = 2_000_000               # the newest round files kept from round ends (round_file.archive)
@@ -378,7 +379,9 @@ def tail(path: Path, cap: int) -> bytes:
         if size > cap:
             f.seek(size - cap)
             f.readline()   # start on a whole line
-            return b"[... earlier lines left out ...]\n" + f.read()
+            note = b'{"note":"earlier lines left out"}\n' if path.suffix.lower() == ".jsonl" else \
+                b"[... earlier lines left out ...]\n"   # a JSONL file stays one JSON record a line
+            return note + f.read()
         return f.read()
 
 
@@ -738,6 +741,9 @@ def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
         summary += ["", "== PC =="]
         guard("PC", lambda: summary.extend(pc_info()))
 
+        summary += ["", "== Performance =="]
+        guard("perf log", lambda: summary.extend(perf_log.summarize(log_dir)))
+
         summary += ["", "== GSPro =="]
         source = cfg.source
         summary.append(f"source.type: {source.type}")
@@ -867,6 +873,9 @@ def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
                 guard(f"prompt log {p.name}", lambda p=p: z.writestr(
                     f"logs/{p.name}", scrub_jsonl(prompt_log.excerpt(p, PROMPT_LOG_CAP), scrub)))
         guard("prompt logs", prompt_logs)
+        for p in sorted(log_dir.glob(f"{perf_log.PREFIX}*.jsonl")):   # ~200 KB a day of play
+            guard(f"perf log {p.name}", lambda p=p: z.writestr(
+                f"logs/{p.name}", scrub_jsonl(tail(p, PERF_LOG_CAP), scrub)))
 
         def screens() -> None:
             names = []

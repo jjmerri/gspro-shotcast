@@ -13,6 +13,7 @@ dependencies = [
     "httpx>=0.27",
     "numpy>=1.26",
     "pillow>=10",
+    "psutil>=5.9",        # the perf log (perf_log.py): what the booth, GSPro and OBS cost the PC
     "cryptography>=42",   # the stats page's phone alerts (push.py)
     "sounddevice>=0.4",   # speaker playback, whichever voice provider
     # Part-of-speech tagging, so the booth hears which descriptive words it keeps reusing (wordwatch.py).

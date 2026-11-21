@@ -13,6 +13,7 @@ history_file: data/history.json        # optional: earlier seasons (built by `im
 log_dir: logs
 process_priority: below_normal   # run under GSPro so OCR bursts don't stutter the game
 # max_cpu_cores: 8               # optional hard cap on how many cores the booth may use
+# perf_log: false                # stop logging what the booth, GSPro and OBS cost the PC (for problem reports)
 
 personas:
   pbp:

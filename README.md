@@ -255,7 +255,9 @@ beyond that is supported on paper but not yet run live:
    - **More**: open the Shotcast folder or the logs, edit `config.yaml` or `.env` by hand, and the
      command prompt.
    - **Create a problem report**: zips the booth's and GSPro's logs, the prompts the booth sent the
-     AI models and what they answered, the health checks, the screens
+     AI models and what they answered, the perf log (every 5 s: how much CPU, memory and GPU the
+     booth, GSPro and OBS used, and what the booth was busy with; `perf_log: false` turns it off),
+     the health checks, the screens
      the booth kept when a read came up empty, the hole maps, the monitor layout (and which monitor
      GSPro is on) and `config.yaml` into `logs\reports`, for whoever is helping you. It has player
      names and screenshots (whatever was on the screen) but never the API keys in `.env`, and your

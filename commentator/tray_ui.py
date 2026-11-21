@@ -540,6 +540,8 @@ CONFIG_FIELDS: list[tuple[str, str, tuple[str, ...], str, str]] = [
     ("Advanced", "Shotcast's CPU priority", ("process_priority",), "choice:below_normal|normal|idle",
      "below_normal keeps GSPro smooth."),
     ("Advanced", "CPU cores for Shotcast", ("max_cpu_cores",), "int", "Empty: all of them."),
+    ("Advanced", "Log what Shotcast costs the PC", ("perf_log",), "bool",
+     "CPU, memory and GPU every 5 s, for problem reports."),
 ]
 
 # (tab, label, .env key, secret, checkable)
