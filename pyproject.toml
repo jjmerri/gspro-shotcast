@@ -58,5 +58,7 @@ commentator = ["*.html", "*.md", "*.ps1", "carry_estimate.json", "stats_vendor/*
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests", "scoring/tests"]
-pythonpath = ["scoring/src"]   # this checkout's scoring package, whatever the venv maps
-addopts = "-n auto"   # in parallel, one worker per core; -n0 runs serially (quicker for one test)
+pythonpath = ["scoring/src", "."]   # this checkout's scoring package, whatever the venv maps
+# In parallel, one worker per core (-n0 runs serially: quicker for one test); tests.cloud_isolation
+# keeps every test away from this PC's own Shotcast Cloud pairing.
+addopts = "-n auto -p tests.cloud_isolation"
