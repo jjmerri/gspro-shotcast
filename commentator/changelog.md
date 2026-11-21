@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.156
+
+### Booth
+- Problem reports leave out your Windows account name wherever it shows up in a file path.
+
 ## 0.1.155
 
 ### Booth

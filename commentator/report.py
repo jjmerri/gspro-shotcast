@@ -92,20 +92,154 @@ def redact_config(text: str) -> str:
     return yaml.safe_dump(_redact(data), sort_keys=False, allow_unicode=True)
 
 
-class Scrubber:
-    """Blanks the .env's values out of text: every secret-looking key's value, and anything else long
-    enough not to be an ordinary word or number. A short one only where it stands alone, so a two-letter
-    topic doesn't blank every word with those letters in it."""
+_PROFILES_DIR = re.compile(r"(?i)(?<!\\)(\\+|/)Users(?=[\\/])")   # from a run's start: linear on long runs
+# Characters a Windows account name can't hold, and brackets: a diagnostic's punctuation ends a name.
+_NAME_END = set("/\"<>|*?:\r\n\t[];=,+()")
+_NAME_MAX = 64
+_SHARED_PROFILES = {"public", "default", "all users", "default user", "<user>"}
+_HEX = set("0123456789abcdefABCDEF")
 
-    def __init__(self, pairs) -> None:
+
+def _profile_name_end(text: str, i: int, sep: str) -> tuple[int, bool]:
+    r"""Where the folder name starting at text[i] ends, and whether a separator ends it (so it's
+    certainly a whole folder, spaces and all): a / always, a backslash run as wide as `sep`. A \uXXXX
+    escape or an apostrophe inside a word is part of it; a narrower backslash run before anything else
+    (an escaped quote) ends it, as does running past any account name's length in characters."""
+    j, n, chars = i, len(text), 0
+    while j < n and chars < _NAME_MAX:
+        chars += 1
+        c = text[j]
+        if c == "\\":
+            k = j
+            while k < len(text) and text[k] == "\\":
+                k += 1
+            if sep[0] == "\\" and k - j >= len(sep):
+                return j, _one_folder(text[i:j])
+            if text[k:k + 1] == "u" and k + 5 <= len(text) and all(ch in _HEX for ch in text[k + 1:k + 5]):
+                j = k + 5
+                continue
+            return j, False
+        if c == "/":
+            return j, _one_folder(text[i:j])
+        if c in _NAME_END:
+            return j, False
+        if c == "'" and not (j + 1 < len(text) and (text[j + 1].isalnum() or text[j + 1] == "\\")):
+            return j, False
+        j += 1
+    return j, False
+
+
+def _one_folder(name: str) -> bool:
+    """Whether what lies between two separators reads as one folder name rather than a message that runs
+    on to a later path (.\\backup): a display name has a few words at most, and none is a lone dot."""
+    words = name.split()
+    return len(words) <= 3 and not any(w.strip(".") == "" for w in words)
+
+
+def _scrub_profiles(text: str, known: re.Pattern | None = None) -> str:
+    r"""The folder after a Users directory (C:\Users\name, /Users/name), at any depth of JSON escaping:
+    the run of separators before "Users" says how wide a separator is in this text. A whole folder goes;
+    failing that, a known account's name (`known`, matched in place) wherever the path ends; failing
+    that, its first word."""
+    out, last = [], 0
+    for m in _PROFILES_DIR.finditer(text):
+        if m.start() < last:
+            continue
+        sep = m[1]
+        start = m.end() + len(sep)
+        if text[m.end():start] != sep:
+            continue
+        end, whole = _profile_name_end(text, start, sep)
+        if not whole:
+            hit = known.match(text, start) if known else None
+            if hit:
+                end = hit.end()
+            else:   # nothing after it says where it ends: a name with no spaces, as far as we can tell
+                end = next((k for k in range(start, end) if text[k].isspace()), end)
+        name = text[start:end]
+        if not name or name.lower() in _SHARED_PROFILES:
+            continue
+        out += [text[last:start], "<user>"]
+        last = end
+    return "".join(out) + text[last:]
+
+
+def _account_names() -> set[str]:
+    return {n for n in (os.environ.get("USERNAME"), os.environ.get("USER"), Path.home().name) if n}
+
+
+def _escaped_forms(name: str, depth: int = 4) -> set[str]:
+    r"""The name as it is, and as each further level of JSON escaping writes it (\uXXXX past ASCII)."""
+    forms = set()
+    for form in {name, name.lower(), name.upper(), name.title(), name.capitalize()}:   # \u00e9 isn't \u00c9
+        forms.add(form)
+        for _ in range(depth):
+            form = json.dumps(form)[1:-1]
+            forms.add(form)
+    return forms
+
+
+class Scrubber:
+    r"""Blanks the .env's values out of text: every secret-looking key's value, and anything else long
+    enough not to be an ordinary word or number. A short one only where it stands alone, so a two-letter
+    topic doesn't blank every word with those letters in it. Then account names: any profile folder
+    under Users, whole, and this PC's own account wherever it's a folder in a path (a profile moved to
+    D:\Profiles\name, a vendor's folder per player, a relative path in a listing)."""
+
+    def __init__(self, pairs, accounts: set[str] | None = None) -> None:
         values = sorted({v for k, v in pairs if v and (len(v) >= 6 or SECRET_KEY.search(k))}, key=len, reverse=True)
         self.patterns = [re.compile(re.escape(v) if len(v) >= 6 else rf"(?<![\w-]){re.escape(v)}(?![\w-])")
                          for v in values]
+        names = sorted({f for n in (_account_names() if accounts is None else accounts) for f in _escaped_forms(n)},
+                       key=len, reverse=True)
+        self.lowered = {n.lower() for n in names}
+        self.known = re.compile("(?i)(?:" + "|".join(map(re.escape, names)) + r")(?!\w)") if names else None
+        # After a separator and before a separator or the string's end; or, starting a relative path,
+        # after a space or quote and before a separator (so a player's name in a sentence stays).
+        alts = "|".join(map(re.escape, names))
+        self.accounts = re.compile(rf"(?i)(?:(?<=[\\/])(?:{alts})(?=[\\/\"'\s:;,)\]}}]|$)"
+                                   rf"|(?<![^\s\"'(\[])(?:{alts})(?=[\\/]))") if names else None
 
     def __call__(self, text: str) -> str:
         for p in self.patterns:
             text = p.sub("<redacted>", text)
+        text = _scrub_profiles(text, self.known)
+        if self.accounts and ("\\" in text or "/" in text):   # one pass, and only where there's a path
+            text = self.accounts.sub(lambda m: self._account_match(text, m), text)
         return text
+
+    def _account_match(self, text: str, m: re.Match) -> str:
+        r"""An escaped form starting with backslashes (\u00c9lodie) only where the run before it is a
+        separator twice as wide, so it never takes one of the separator's backslashes and leaves broken
+        JSON. The one alternation takes the longest spelling, so a run too long for it is re-split: a
+        third of the whole run is the name's own escape."""
+        lead = len(m[0]) - len(m[0].lstrip("\\"))
+        if lead:
+            k = m.start()
+            while k > 0 and text[k - 1] == "\\":
+                k -= 1
+            run = m.start() - k
+            if run and run != 2 * lead:
+                own = (run + lead) // 3
+                if (run + lead) % 3 or own >= lead or m[0][lead - own:].lower() not in self.lowered:
+                    return m[0]
+                return m[0][:lead - own] + "<user>"
+        return "<user>"
+
+
+def _decode(data: bytes) -> str:
+    """UTF-8, or UTF-16 for a Windows program's log (its NULs would keep a path from matching a scrub),
+    even tailed from an odd byte."""
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16", errors="replace")
+    if b"\x00" in data:   # the whole of it: a localized log's first pages may hold no ASCII at all
+        odd, even = data[1::2].count(0), data[0::2].count(0)
+        if odd >= 4 and even * 8 < odd:
+            return data[: len(data) // 2 * 2].decode("utf-16-le", errors="replace")
+        if even >= 4 and odd * 8 < even:
+            return data[1:][: (len(data) - 1) // 2 * 2].decode("utf-16-le", errors="replace")
+    text = data.decode("utf-8", errors="replace")
+    return text.replace("\x00", "") if "\x00" in text else text   # unsure: no NUL may split a path from its scrub
 
 
 # Other programs' files (GSPro's, a launch monitor's) can hold an account's sign-in: these go
@@ -578,9 +712,12 @@ def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
 
     tmp = path.with_suffix(".part")
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        def entry(name: str) -> str:   # a member name is a folder to unzip into: no <> in it on Windows
+            return scrub(name).replace("<user>", "_user_")
+
         def add_text(name: str, data: bytes, private: bool = False, blobs: bool = True) -> None:
-            text = scrub(data.decode("utf-8", errors="replace"))
-            z.writestr(name, scrub_private(text, blobs) if private else text)
+            text = scrub(_decode(data))
+            z.writestr(entry(name), scrub_private(text, blobs) if private else text)
 
         def add_file(name: str, p: Path, cap: int | None = None, private: bool = False, blobs: bool = True) -> None:
             if p.is_file():
@@ -590,9 +727,9 @@ def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
                     buf = io.BytesIO()
                     with Image.open(p) as img:
                         img.convert("RGB").save(buf, format="JPEG", quality=85)
-                    z.writestr(name[:-4] + ".jpg", buf.getvalue())
+                    z.writestr(entry(name[:-4] + ".jpg"), buf.getvalue())
                 elif p.suffix.lower() in (".jpg", ".jpeg"):
-                    z.write(p, name)
+                    z.write(p, entry(name))
                 else:
                     add_text(name, tail(p, cap) if cap else p.read_bytes(), private, blobs)
 
@@ -644,7 +781,8 @@ def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
             tables, rows = _gspro_db_shots(db)
             summary.append(f"GSPro.db tables: {', '.join(tables)}")
             summary.extend(f"GSPro.db {t}: {len(r)} newest rows kept" for t, r in rows.items())
-            add_text("gspro/GSPro.db-shots.json", json.dumps(rows, indent=1).encode(), private=True, blobs=False)
+            add_text("gspro/GSPro.db-shots.json", json.dumps(rows, indent=1, ensure_ascii=False).encode(), private=True,
+                     blobs=False)
         guard("GSPro.db shots", gspro_db)
         guard("round file", lambda: add_file("gspro/currentRound.dat", gspro_dir / "currentRound.dat", 2_000_000,
                                                        private=True, blobs=False))

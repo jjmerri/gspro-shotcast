@@ -30,6 +30,66 @@ def test_scrubber_blanks_short_secrets_but_not_ordinary_short_values():
     assert scrub("topic xy at info, xylophone") == "topic <redacted> at info, xylophone"
 
 
+def test_the_windows_account_name_goes_from_every_path():
+    scrub = report.Scrubber([], accounts={"Pat Golfer"})
+    assert scrub(r"C:\Users\Pat Golfer\AppData\Local\Shotcast") == r"C:\Users\<user>\AppData\Local\Shotcast"
+    assert scrub(json.dumps(r"C:\Users\Pat Golfer\x")) == json.dumps(r"C:\Users\<user>\x")   # escaped in JSON
+    # Another account, an 8.3 short name or a Mac's: the folder after Users goes whoever it is.
+    assert scrub(r"c:\users\PATGOL~1\Temp, /Users/pat/x") == r"c:\users\<user>\Temp, /Users/<user>/x"
+    assert scrub(r"C:\Users\Public\Documents; Users: 3") == r"C:\Users\Public\Documents; Users: 3"
+    # Another's name with a space in it goes whole; a shared folder is only spared as a whole name.
+    assert scrub(r"C:\Users\Jo Smith\x, C:\Users\Public Smith\x") == r"C:\Users\<user>\x, C:\Users\<user>\x"
+    # This PC's own anywhere it's a folder: a profile moved off C:\Users, or a vendor's folder per player.
+    assert scrub(r"D:\Profiles\Pat Golfer\AppData; shots/Pat Golfer/1.json") == r"D:\Profiles\<user>\AppData; shots/<user>/1.json"
+    # Escaped three deep, or with JSON's \u escapes: still gone, and still JSON.
+    deep = json.dumps(json.dumps(json.dumps(r"C:\Users\Pat Golfer\x")))
+    assert "Golfer" not in scrub(deep) and json.loads(json.loads(json.loads(scrub(deep)))) == r"C:\Users\<user>\x"
+    assert json.loads(report.Scrubber([], accounts={"Élodie"})(json.dumps(r"C:\Users\Élodie\x"))) == r"C:\Users\<user>\x"
+    assert json.loads(scrub(json.dumps(r"C:\Users\Zoë\x"))) == r"C:\Users\<user>\x"
+    # Non-ASCII two levels deep, under Users or a moved profile: gone, and still JSON.
+    jose = report.Scrubber([], accounts={"José"})
+    for path in (r"C:\Users\José\x", r"D:\Profiles\José\x", r"C:\Users\Élodie\x"):
+        out = jose(json.dumps(json.dumps({"p": path})))
+        assert json.loads(json.loads(out))["p"] == path.replace("José", "<user>").replace("Élodie", "<user>")
+    # A listing's relative path starting with the name; an apostrophe; another account sharing a first word.
+    assert scrub("  Pat Golfer/1.json\n  Pat Golfer hit it") == "  <user>/1.json\n  Pat Golfer hit it"
+    assert scrub(r"C:\Users\Sean O'Brien\x, C:\Users\Pat Smith\x") == r"C:\Users\<user>\x, C:\Users\<user>\x"
+    # This PC's own name whole where the path ends or mixes separators; a diagnostic after a shared folder stays.
+    assert scrub(json.dumps(r"C:\Users\Pat Golfer") + r" C:\Users\Pat Golfer/x") == json.dumps(r"C:\Users\<user>") + r" C:\Users\<user>/x"
+    msg = r"Cannot write to C:\Users\Public (access denied); falling back to .\cache"
+    assert scrub(msg) == msg
+    # An escaped name starting with \u never takes a separator's backslash: JSON at every depth.
+    elodie = report.Scrubber([], accounts={"Élodie"})
+    for depth in (1, 2, 3):
+        text = r"D:\Profiles\Élodie\x"
+        for _ in range(depth):
+            text = json.dumps(text)
+        out = elodie(text)
+        for _ in range(depth):
+            out = json.loads(out)
+        assert out == r"D:\Profiles\<user>\x"
+    # A shorter known name never takes just a longer profile's first word; case and length survive escaping.
+    assert report.Scrubber([], accounts={"Pat"})(r"C:\Users\Pat Smith\x") == r"C:\Users\<user>\x"
+    ipek = report.Scrubber([], accounts={"İpek"})   # lowercases to a longer string
+    for path in (r"C:\Users\İpek", r"C:\Users\İpek\x"):
+        assert json.loads(ipek(json.dumps(path, ensure_ascii=False))) == path.replace("İpek", "<user>")
+    assert json.loads(jose(json.dumps(r"D:\Profiles\JOSÉ\x"))) == r"D:\Profiles\<user>\x"
+    assert json.loads(scrub(json.dumps("C:\\Users\\" + "山田太郎" * 4 + "\\x"))) == r"C:\Users\<user>\x"
+    msg = r"C:\Users\Public not found - trying .\backup"
+    assert scrub(msg) == msg
+
+
+def test_a_utf16_log_is_read_as_text_so_its_paths_are_scrubbed():
+    log = (r"started in C:\Users\Pat Golfer\VIEW " + "x" * 80).encode("utf-16-le")
+    for data in (log, b"\xff\xfe" + log, b"\x00" + log[:-1]):   # as written, with a BOM, tailed from an odd byte
+        assert "C:\\Users\\<user>\\VIEW" in report.Scrubber([], accounts=set())(report._decode(data))
+    assert report._decode("C:\\x".encode("utf-16-le")) == "C:\\x" and report._decode(b"abcdefgh") == "abcdefgh"
+    localized = ("ステータス" * 500 + "\r\n" + r"C:\Users\Pat Golfer\x").encode("utf-16-le")   # mostly not ASCII
+    for data in (localized, localized[1:]):
+        text = report._decode(data)
+        assert "Golfer" not in report.Scrubber([], accounts=set())(text) and "テータス" in text
+
+
 def test_other_programs_files_lose_sign_ins_but_keep_the_shot_data():
     text = ('Signed in as jo.smith+golf@mail.example.com\n'
             '{"password": "hunter22", "access_token":"abc.def", "session_id": "821", "ClubSpeed": 40.5}\n'
@@ -117,7 +177,9 @@ def test_report_zips_logs_screens_and_maps_without_the_env(tmp_path, monkeypatch
     logs.mkdir()
     (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-secret-value-123\n", encoding="utf-8")
     (tmp_path / "config.yaml").write_text("screen:\n  monitor: 1\n", encoding="utf-8")
-    (logs / "booth-2099-01-01.log").write_text("started with sk-secret-value-123\n", encoding="utf-8")
+    monkeypatch.setenv("USERNAME", "Pat Golfer")
+    (logs / "booth-2099-01-01.log").write_text("started with sk-secret-value-123 in C:\\Users\\Pat Golfer\\Shotcast\n",
+                                               encoding="utf-8")
     (logs / "health.json").write_text(json.dumps(
         {"facts": {"gspro_version": "1.2"}, "issues": [{"key": "a", "level": "warn", "message": "Log silent",
                                                          "since": "now"}]}), encoding="utf-8")
@@ -141,6 +203,7 @@ def test_report_zips_logs_screens_and_maps_without_the_env(tmp_path, monkeypatch
         booth = z.read("logs/booth-2099-01-01.log").decode()
     assert ".env" not in names and not any(n.endswith(".env") for n in names)
     assert "sk-secret-value-123" not in booth and "<redacted>" in booth
+    assert "Pat Golfer" not in booth and "C:\\Users\\<user>\\Shotcast" in booth
     assert {"config.yaml", "gspro/Player.log", "screens/fixture-frame.jpg", "minimaps/Pebble-03-no-pin.jpg",
             "logs/health.json"} <= names
     assert any(n.startswith("screens/report-frames/no-player-") and n.endswith(".jpg") for n in names)
@@ -385,6 +448,9 @@ def test_report_gathers_the_launch_monitor_data_gspro_and_its_software_keep(tmp_
     (vendor / "12").mkdir(parents=True)
     (vendor / "12" / "shotinfo.json").write_text('{"clubspeed": "40", "user": "jo@mail.example.com"}',
                                                 encoding="utf-8")
+    monkeypatch.setenv("USERNAME", "Pat Golfer")   # a vendor's folder per player: no <> in the member name
+    (vendor / "Pat Golfer").mkdir()
+    (vendor / "Pat Golfer" / "1.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(report, "LM_FILES", [("Some LM shots", str(vendor), "*/*.json", 5, 1000),
                                              ("Absent LM", str(tmp_path / "nowhere"), "*.txt", 1, 1000)])
     sbk = tmp_path / "MLM2PRO" / "appdata" / "logs"
@@ -413,12 +479,14 @@ def test_report_gathers_the_launch_monitor_data_gspro_and_its_software_keep(tmp_
         springbok = z.read("launch-monitor/springbok_connector_log/0/mlm2pro-gspro-connect.log").decode()
     assert "aboutGOLF" in software and "aG Bridge/bridge.log  5" in software and "Microsoft" not in software
     assert {"gspro/ConnectDebug.txt", "gspro/ConnectDebug.txt.1", "gspro/ConnectDebug.txt.2026-11-14",
-            "gspro/currentRound.dat", "launch-monitor/Some_LM_shots/12/shotinfo.json"} <= names
+            "gspro/currentRound.dat", "launch-monitor/Some_LM_shots/12/shotinfo.json",
+            "launch-monitor/Some_LM_shots/_user_/1.json"} <= names
+    assert not any("Pat Golfer" in n or "<" in n for n in names)
     assert shots["LastShot"][0]["ShotData"] == {"ClubSpeed": 40.5}
     assert '"clubspeed": "40"' in vendor_shot and "jo@" not in vendor_shot
     assert "Sending to GSPro data" in springbok and "Secret" not in springbok and "k3y" not in springbok
     assert 'LM Type {"connectType":"Garmin","LMType":"R10"}' in summary
-    assert "Some LM shots: 1 file(s)" in summary and "Absent LM: none" in summary
+    assert "Some LM shots: 2 file(s)" in summary and "Absent LM: none" in summary
 
 
 def test_report_takes_only_the_newest_round_files_kept_from_round_ends(tmp_path, monkeypatch):
