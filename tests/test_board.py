@@ -57,6 +57,68 @@ def test_board_maps_teams_by_squabbit_ids_and_counts_only_final_weeks():
     assert empty.standings("2099-01-01") == ([], 0)
 
 
+def test_a_team_on_the_leaderboard_twice_places_and_scores_once_on_its_best_net():
+    from commentator.recap import week_facts
+
+    league = League(LEAGUE_DATA)
+    today = "2026-12-07"   # week 6 is past its deadline: final
+    for second in (2, None):   # Aces' second Squabbit row (same players): posted worse, or not posted
+        b = Board.from_squabbit([week(6, [("x1", ["a", "b"], "Team 1", -3), ("x2", ["c", "d"], "Team 2", -1),
+                                           ("x9", ["a", "b"], "Team 1 again", second),
+                                           ("x3", ["e", "f"], "Hackers", 0)])], league, POINTS)
+        assert [(e.team, e.net) for e in b.posted(6)] == [("Aces", -3), ("Duffers", -1), ("Hackers", 0)]
+        assert b.team_count(6) == 3
+        assert b.standings(today) == ([("Aces", 70.0, 1), ("Duffers", 60.0, 2), ("Hackers", 50.0, 3)], 1)
+        page = b.page(today)
+        card = page["dates"][0]["weeks"][0]
+        assert [(r["team"], r["net"]) for r in card["rows"]] == [("Aces", -3), ("Duffers", -1), ("Hackers", 0)]
+        assert card["waiting"] == []
+        assert [(r["team"], r["points"], r["place"]) for r in page["standings"]["rows"]] == \
+            [("Aces", 70.0, 1), ("Duffers", 60.0, 2), ("Hackers", 50.0, 3)]
+        facts = week_facts(b, 6, today)
+        assert [(r["team"], r["place"], r["points"]) for r in facts["rows"]] == \
+            [("Aces", 1, 70.0), ("Duffers", 2, 60.0), ("Hackers", 3, 50.0)]
+        assert [(r["team"], r["points"], r["place"]) for r in facts["standings"]] == \
+            [(r["team"], r["points"], r["place"]) for r in page["standings"]["rows"]]
+        assert facts["missed"] == []
+    # Board keeps the team's best posted row, where its first row was, as a copy with that row's fields.
+    from dataclasses import dataclass, field
+
+    @dataclass
+    class Tagged(Entry):
+        tag: str = ""
+
+    def kept(rows):
+        b = Board({6: rows}, league, POINTS)
+        assert b.standings(today)[0] == [("Aces", 70.0, 1), ("Duffers", 60.0, 2)]   # once, on -3
+        return b.weeks[6]
+
+    g = Entry("Duffers", -1, flight="g")   # (in Aces' flight, so the two are ranked together)
+    for rows, want in (
+        ([Tagged("Aces", 2, tag="worse"), g, Tagged("Aces", -3, sim=True, flight="g", tag="best")],
+         Tagged("Aces", -3, sim=True, flight="g", tag="best")),                     # the best comes later
+        ([Entry("Aces", None), Entry("Duffers", -1), Entry("Aces", -3)], Entry("Aces", -3)),
+        ([Entry("Aces", -3), Entry("Duffers", -1), Entry("Aces", -3, sim=True)], Entry("Aces", -3)),  # a tie: first
+        ([Entry("Aces", -3, sim=True), Entry("Duffers", -1), Entry("Aces", None)], Entry("Aces", -3, sim=True)),
+    ):
+        got = kept(rows)
+        assert got == [want, rows[1]] and type(got[0]) is type(want)
+        [again] = [e for e in Board({6: rows}, league, POINTS).with_sim({}).weeks[6] if e.team == "Aces"]
+        assert type(again) is type(want) and (again.net, again.sim) == (want.net, want.sim)   # and on, through boards
+        assert getattr(again, "tag", None) == getattr(want, "tag", None)
+        assert all(e is not r for e in got for r in rows)   # copies: the caller's later changes don't reach it
+        rows[0].net = rows[2].net = -9
+        assert got == [want, rows[1]]
+
+    @dataclass
+    class Marked(Entry):
+        mark: str = field(default="", init=False)
+
+    one = Marked("Aces", -3)
+    one.mark = "official"
+    assert Board({6: [one]}, league, POINTS).weeks[6][0].mark == "official"   # fields set after init survive too
+
+
 def _round(fmt="BestBall", settings=None, max_hole=None):
     card = H.week_card(tournament(fmt, settings or {"handicapPercentageForAll": 75.0}, max_hole=max_hole), ROUND)
     league = League(LEAGUE_DATA)

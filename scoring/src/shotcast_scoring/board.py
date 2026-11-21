@@ -8,6 +8,14 @@ place points.
 A week counts toward the standings once it's final: every team has posted, or its deadline (its
 schedule entry's end_date) has passed.
 
+A team is in a week once. A Board keeps one entry per team per week (also the boards with_sim and
+with_flights build): its best posted net, else a single unposted entry, with that entry's flight and
+sim mark. A team twice in a week is a setup mistake (two Squabbit teams matched to one league team);
+it never places or scores twice. Ties keep the team's first row.
+
+A Board is a snapshot of its inputs: it holds its own week lists and copies of the entries it keeps,
+so later changes to the caller's dict, lists or entries aren't seen. Build a new Board instead.
+
 In a league with flights a team places, scores points and stands among its own flight's teams that
 week: the flight it played the week in, else the one it's in now. An Entry's `flight` is that flight's
 id (None: none, or no flights).
@@ -28,6 +36,7 @@ nowhere and scores nothing.
 
 from __future__ import annotations
 
+import copy
 import datetime
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -62,6 +71,17 @@ def place_points(position: int, tied: int, table: list[float]) -> float:
     """Points for a place shared by `tied` teams: the average of the places they cover."""
     covered = [table[i] if i < len(table) else 0.0 for i in range(position - 1, position - 1 + tied)]
     return sum(covered) / len(covered)
+
+
+def _once(entries: list[Entry]) -> list[Entry]:
+    """`entries` with each team once, where its first row was: its best posted net (a tie: the first),
+    else its first unposted row. Shallow copies (copy.copy keeps an Entry subclass and all its fields)."""
+    kept: dict[str, Entry] = {}
+    for e in entries:
+        k = kept.get(e.team)
+        if k is None or e.net is not None and (k.net is None or e.net < k.net):
+            kept[e.team] = e
+    return [copy.copy(e) for e in kept.values()]
 
 
 class LeagueView(Protocol):
@@ -106,7 +126,7 @@ class LeagueData:
 class Board:
     def __init__(self, weeks: dict[int, list[Entry]], league: LeagueView, points_table: list[float] | None,
                  flights: dict[str, str] | None = None) -> None:
-        self.weeks = weeks
+        self.weeks = {w: _once(es) for w, es in weeks.items()}
         self.league = league
         self.points_table = points_table or []
         self.flights = flights or {}   # the flights its entries are in: id -> name (none: no flights)

@@ -15,7 +15,6 @@ A week counts toward the standings once it's final: every team has posted, or it
 
 from __future__ import annotations
 
-import datetime
 import re
 from typing import Any
 
@@ -80,31 +79,6 @@ class Board(_Board):
                 entries.append(Entry(team=team, net=None if total is None or e.get("dnf") else int(total)))
             weeks[week] = entries
         return cls(weeks, league, points_table)
-
-    def standings(self, today: str | None = None, flight=ALL) -> tuple[list[tuple[str, float, int]], int]:
-        """The package's standings, except that a board without flights (this league never has any) scores
-        each entry by its own net, so a team on a week's leaderboard twice (two Squabbit teams matched to
-        it) gets both entries' points as it always has; the package's flight-aware standings count a
-        team's points once per team."""
-        if self.flights or flight is not ALL:
-            return super().standings(today, flight)
-        today = today or datetime.date.today().isoformat()
-        if not self.points_table:
-            return [], 0
-        totals: dict[str, float] = {}
-        weeks = [w for w in sorted(self.weeks) if self.final(w, today)]
-        for w in weeks:
-            for e in self.weeks[w]:
-                totals.setdefault(e.team, 0.0)
-            nets = [e.net for e in self.weeks[w] if e.net is not None]
-            for e in self.weeks[w]:
-                if e.net is not None:
-                    pos, _ = place(e.net, nets)
-                    totals[e.team] += place_points(pos, nets.count(e.net), self.points_table)
-        if not weeks:
-            return [], 0
-        order = sorted(totals.items(), key=lambda kv: -kv[1])
-        return [(t, p, 1 + sum(1 for _, q in order if q > p)) for t, p in order], len(weeks)
 
     @staticmethod
     def _team(league: League, squabbit_team: dict, name: str | None) -> str:

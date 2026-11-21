@@ -30,7 +30,11 @@ Callers must pass clean data; the package does not validate. It is the app's sco
 always run, taking what the app has always passed and failing the way it always has. Shotcast Cloud
 validates its input (pydantic) before calling it. The few rules new with the package (in
 `team_holes`: `complete_sides`, which holes it leaves out, and its two ValueErrors) are in its
-docstring; changing what it skips or refuses is a rule change.
+docstring; changing what it skips or refuses is a rule change. The other is in Board: a team is in a
+week once (its best posted net, else one unposted entry), so a team listed twice never places or
+scores twice (a tie keeps its first row). A Board is a snapshot of its inputs (it copies the entries it
+keeps): later changes to the caller's week dict, lists or entries aren't seen, so build a new Board
+instead.
 
 Build standings the way the app does: `Board(weeks, league, points_table).with_flights(played)` (or
 `.with_sim(results, played)`). A Board doesn't resolve flights when it's built; with_flights and
