@@ -22,6 +22,7 @@ from collections import deque
 from pathlib import Path
 
 from . import changelog
+from .cloud import booth_config, web_stats_url
 from .config import BOOTH_NOTE, BOOTH_STOP_CODE, BOOTH_STOPPED, ROUND_STATUS, ROUND_STATUS_EVERY_S
 from .settings_files import env_value, set_commentary, set_env, set_yaml
 
@@ -248,12 +249,12 @@ def _when(at) -> str:
     return f"today {clock}" if days == 0 else f"yesterday {clock}" if days == 1 else at.strftime("%b %d").replace(" 0", " ")
 
 
-def health_issues(log_dir: str | Path) -> list[tuple[str, str]]:
+def health_issues(log_dir: str | Path, name: str = "health.json") -> list[tuple[str, str]]:
     """(level, message) for each open issue in the booth's health file, failures first."""
     import json
 
     try:
-        data = json.loads((Path(log_dir) / "health.json").read_text(encoding="utf-8"))
+        data = json.loads((Path(log_dir) / name).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     issues = [(i.get("level", "warn"), i.get("message", "")) for i in data.get("issues") or []]
@@ -281,7 +282,8 @@ def open_running_stats(home: Path) -> None:
         url = (home / "logs" / "stats-url.txt").read_text(encoding="utf-8").strip()
     except OSError:
         url = f"http://127.0.0.1:{STATS_PORT}/"
-    webbrowser.open(url)
+    if url:   # (none: paired with Shotcast Cloud, with no stats page there)
+        webbrowser.open(url)
 
 
 def open_file(path: Path) -> None:
@@ -498,10 +500,15 @@ class AutoPublisher:
 # ---- the tray --------------------------------------------------------------------------------
 
 class Tray:
-    def __init__(self, home: Path, cfg, first_run: bool = False) -> None:
+    def __init__(self, home: Path, cfg, first_run: bool = False, paired=None, launch_home: Path | None = None) -> None:
         from .updater import current_version
 
-        self.home, self.cfg, self.first_run = home, cfg, first_run
+        # Paired with Shotcast Cloud as the tray starts (a cloud.Profile, whose home `home` is): its
+        # mode till it stops (commentator.cloud). `launch_home`: the self-hosted home it was started
+        # for, which "Start with Windows" keeps (the pairing is looked for afresh at each start).
+        self.cloud = paired
+        self.launch_home = launch_home
+        self.home, self.cfg, self.first_run = home, booth_config(cfg, paired), first_run
         self.version = current_version()
         self.booth = Booth(home, on_change=self._refresh)
         self.stats_url: str | None = None
@@ -518,7 +525,7 @@ class Tray:
     def _publish_command(self) -> list[str] | None:
         from .stats_site import publish_command
 
-        if not self.cfg.publish.enabled:   # self.cfg as Settings last saved it
+        if not self.cfg.publish.enabled or getattr(self, "cloud", None) is not None:   # (none paired)
             return None
         cmd = publish_command(self.cfg)
         return cmd and [python_exe(), *cmd[1:]]   # python.exe: its output is caught
@@ -534,12 +541,12 @@ class Tray:
             return "Stopped"
         if s == "starting":
             return self.booth.note or "Starting the booth\u2026"
-        issues = health_issues(self.cfg.log_dir)
+        issues = self.issues()
         mode = "Commentary on" if self._commentary_on() else "Recording shots"
         return f"{mode} \u00b7 {len(issues)} warning{'s' * (len(issues) != 1)}" if issues else f"{mode} \u00b7 all good"
 
     def _ready_notice(self) -> str:
-        issues = health_issues(self.cfg.log_dir)
+        issues = self.issues()
         if not issues:
             return "The booth is ready: all good."
         n = len(issues)
@@ -567,7 +574,7 @@ class Tray:
         from .config import load_config
 
         try:
-            self.cfg = load_config(self.home / "config.yaml")
+            self.cfg = booth_config(load_config(self.home / "config.yaml"), self.cloud)
         except Exception:
             log.exception("Reloading config.yaml failed")
         self._refresh()
@@ -576,13 +583,18 @@ class Tray:
         """After Settings saved `keys` (config paths): a change under publish (the page's name, colours,
         season, where it goes) republishes the stats page shortly, as an edit on the local page does,
         and says so. True when it will."""
-        if not any(k and k[0] == "publish" for k in keys) or not self.publisher.changed():
+        if getattr(self, "cloud", None) is not None or not any(k and k[0] == "publish" for k in keys) \
+                or not self.publisher.changed():
             return False
         self.notify("Your stats page republishes with the new settings in about a minute.")
         return True
 
     # -- actions
     def open_stats(self, *_) -> None:
+        if self.cloud is not None:   # (the cloud's stats page, if this PC's league has one)
+            if url := web_stats_url(self.cloud):
+                webbrowser.open(url)
+            return
         if self.stats_url:
             webbrowser.open(self.stats_url)
 
@@ -644,6 +656,8 @@ class Tray:
             return False
 
     def toggle_live(self, *_) -> None:
+        if getattr(self, "cloud", None) is not None:   # (the self-hosted booth's: none paired)
+            return
         from .live_stream import Obs, ObsError
 
         obs = Obs(self.cfg.live.obs_host, self.cfg.live.obs_port)
@@ -687,6 +701,8 @@ class Tray:
         return "Recording GSPro: the video's kept on this PC (More, Open the recordings folder)."
 
     def open_recordings(self, *_) -> None:
+        if getattr(self, "cloud", None) is not None:   # (the self-hosted booth's: none paired)
+            return
         from . import local_video
 
         where = local_video.folder(self.cfg.live, self.home)
@@ -696,6 +712,8 @@ class Tray:
         open_file(where)
 
     def setup_live(self, *_) -> None:
+        if getattr(self, "cloud", None) is not None:   # (the self-hosted booth's: none paired)
+            return
         from . import obs_setup
 
         if not self._live_setup.acquire(blocking=False):
@@ -806,7 +824,8 @@ class Tray:
                 if description is None:
                     return
             try:
-                path = report.build(self.cfg, self.home / "config.yaml", description)
+                path = report.build(self.cfg, self.home / "config.yaml", description,
+                                    paired=getattr(self, "cloud", None) is not None)
             except Exception as e:
                 log.exception("Problem report failed")
                 self.error(f"Couldn't make the problem report: {e}")
@@ -841,7 +860,7 @@ class Tray:
             edit_file(self.home / "config.yaml")
 
     def toggle_start_with_windows(self, *_) -> None:
-        set_starts_with_windows(not starts_with_windows(), self.home)
+        set_starts_with_windows(not starts_with_windows(), getattr(self, "launch_home", None) or self.home)
         self._refresh()
 
     def toggle_ready_notice(self, *_) -> None:
@@ -1103,7 +1122,7 @@ class Tray:
         import pystray
 
         item, sep = pystray.MenuItem, pystray.Menu.SEPARATOR
-        warnings = lambda: health_issues(self.cfg.log_dir)  # noqa: E731
+        warnings = self.issues
 
         def warning_items():
             return [item(f"{'Problem' if lvl == 'fail' else 'Warning'}: {msg}"[:120], None, enabled=False)
@@ -1121,7 +1140,8 @@ class Tray:
                  safe(self.toggle_commentary)),
             item(lambda _: "Stop the live stream" if self.live_now() else "Start the live stream",
                  safe(self.toggle_live), visible=lambda _: self.cfg.live.enabled),
-            item("Set up the live stream...", safe(self.setup_live), visible=lambda _: not self.cfg.live.enabled),
+            item("Set up the live stream...", safe(self.setup_live),
+                 visible=lambda _: not self.cfg.live.enabled and self.cloud is None),   # (none paired)
             item("Settings...", safe(self.settings)),
             item("More", pystray.Menu(
                 item("Set up the live stream again (OBS)...", safe(self.setup_live),
@@ -1165,8 +1185,24 @@ class Tray:
             return "red"
         if self.booth.state == "starting":
             return "grey"
-        issues = health_issues(self.cfg.log_dir)
+        issues = self.issues()
+        if any(level == "fail" for level, _ in self.cloud_issues()):
+            return "red"
         return "orange" if issues else "green"
+
+    def issues(self) -> list[tuple[str, str]]:
+        """The booth's open issues and, paired with Shotcast Cloud, how its uploads stand; failures first."""
+        return sorted(health_issues(self.cfg.log_dir) + self.cloud_issues(), key=lambda i: i[0] != "fail")
+
+    def cloud_issues(self) -> list[tuple[str, str]]:
+        """Paired: the pairing's own problem (as the tray started) and the booth's upload health."""
+        prof = getattr(self, "cloud", None)
+        if prof is None:
+            return []
+        from .cloud_booth import HEALTH
+
+        mine = [("fail", f"Shotcast Cloud: {prof.problem}")] if prof.problem else []
+        return mine + [i for i in health_issues(self.cfg.log_dir, HEALTH) if i not in mine]
 
     # -- running
     def start_stats(self) -> None:
@@ -1174,6 +1210,11 @@ class Tray:
         from .stats_web import make_server
         from .store import Store
 
+        if self.cloud is not None:   # no stats page here: the cloud's, if any (open_stats)
+            self.stats_url = web_stats_url(self.cloud)
+            (self.home / "logs").mkdir(exist_ok=True)
+            (self.home / "logs" / "stats-url.txt").write_text(self.stats_url or "", encoding="utf-8")
+            return
         db = Path(self.cfg.db_path)
         if not db.exists():
             Store(str(db), new_session=False).db.close()   # an empty season, so the page opens before round one
@@ -1340,6 +1381,17 @@ def single_instance() -> bool:
     kernel32 = ctypes.windll.kernel32
     single_instance.handle = kernel32.CreateMutexW(None, False, "Local\\ShotcastTray")
     return kernel32.GetLastError() != 183   # ERROR_ALREADY_EXISTS
+
+
+def fatal(message: str) -> None:
+    """Tell whoever started the tray why it won't (no console: a message box on Windows)."""
+    log.error("%s", message)
+    if os.name == "nt":
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, message, APP, 0x10 | 0x40000)   # MB_ICONERROR | MB_TOPMOST
+    else:
+        print(message, file=sys.stderr)
 
 
 def self_test(home: Path, cfg) -> None:

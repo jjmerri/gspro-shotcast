@@ -368,8 +368,11 @@ def scrub_jsonl(data: bytes, scrub) -> str:
     return "".join(f"{line}\n" for line in out)
 
 
-def env_files(config_path: Path) -> list[Path]:
-    """Both .env files the booth loads (__main__._load_env): beside the code and beside config.yaml."""
+def env_files(config_path: Path, paired: bool = False) -> list[Path]:
+    """Both .env files the booth loads (__main__._load_env): beside the code and beside config.yaml
+    (`paired`, a Shotcast Cloud profile's: its own only)."""
+    if paired:
+        return [config_path.resolve().parent / ".env"]
     return list(dict.fromkeys((Path(__file__).resolve().parents[1] / ".env", config_path.resolve().parent / ".env")))
 
 
@@ -673,20 +676,25 @@ def _last_lm_type(logs: list[Path]) -> str | None:
     return None
 
 
-def build(cfg: Config, config_path: Path = Path("config.yaml"), description: str = "") -> Path:
+def build(cfg: Config, config_path: Path = Path("config.yaml"), description: str = "",
+          paired: bool = False) -> Path:
     """Write the report zip into folder(cfg) and return its path. `description` is the sender's own
-    words on what went wrong (optional), at the top of summary.txt."""
+    words on what went wrong (optional), at the top of summary.txt. `paired`: Shotcast started paired
+    with Shotcast Cloud (cloud.startup), so it's the profile's report."""
     with _building:
-        return _build(cfg, config_path, description)
+        return _build(cfg, config_path, description, paired)
 
 
-def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
+def _build(cfg: Config, config_path: Path, description: str = "", paired: bool = False) -> Path:
     from .updater import current_version
 
     log_dir = Path(cfg.log_dir)
+    # Paired with Shotcast Cloud: the report is the profile's, so what GSPro and the launch monitor's
+    # software kept (their logs, GSPro.db, the round file, and the booth's copies of GSPro's log and
+    # round files), from before the pairing too, is left out.
     env: dict[str, str] = {}
     pairs: list[tuple[str, str]] = []
-    for p in env_files(config_path):
+    for p in env_files(config_path, paired):
         found = env_pairs(p)
         env.update(found)
         pairs += found   # every value, even one a later line or the other file overrides
@@ -747,13 +755,16 @@ def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
         summary += ["", "== GSPro =="]
         source = cfg.source
         summary.append(f"source.type: {source.type}")
+        if paired:
+            summary.append("GSPro's and the launch monitor's own files: left out (paired with Shotcast Cloud)")
         summary.append("Connector log " + _describe(Path(source.connector_log)))
-        for p in _gspro_logs(cfg):
+        for p in [] if paired else _gspro_logs(cfg):
             summary.append("GSPro log " + _describe(p))
             guard(f"GSPro log {p.name}", lambda p=p: add_file(f"gspro/{p.name}", p, GSPRO_LOG_CAP,
                                                                                    private=True, blobs=False))
-        guard("connector log", lambda: add_file("gspro/ConnectDebug.txt", Path(source.connector_log), 1_000_000,
-                                                      private=True))
+        if not paired:
+            guard("connector log", lambda: add_file("gspro/ConnectDebug.txt", Path(source.connector_log), 1_000_000,
+                                                          private=True))
 
         def gspro_settings() -> None:
             from .gspro_settings import read_game_settings
@@ -767,15 +778,17 @@ def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
         guard("GSPro settings", gspro_settings)
 
         summary += ["", "== Launch monitor =="]
-        guard("launch monitor type", lambda: summary.append(
-            f"GSPro last logged: LM Type {_last_lm_type(_gspro_logs(cfg)) or '(none found)'}"))
+        if not paired:
+            guard("launch monitor type", lambda: summary.append(
+                f"GSPro last logged: LM Type {_last_lm_type(_gspro_logs(cfg)) or '(none found)'}"))
 
         def connector_logs() -> None:
             live = Path(source.connector_log)
             for p in _newest(live.parent, live.name + ".*", CONNECTOR_LOGS):
                 summary.append("Connector log " + _describe(p))
                 add_file(f"gspro/{p.name}", p, 1_000_000, private=True)
-        guard("rotated connector logs", connector_logs)
+        if not paired:
+            guard("rotated connector logs", connector_logs)
 
         gspro_dir = Path(source.gspro_log).expanduser().parent
 
@@ -789,9 +802,10 @@ def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
             summary.extend(f"GSPro.db {t}: {len(r)} newest rows kept" for t, r in rows.items())
             add_text("gspro/GSPro.db-shots.json", json.dumps(rows, indent=1, ensure_ascii=False).encode(), private=True,
                      blobs=False)
-        guard("GSPro.db shots", gspro_db)
-        guard("round file", lambda: add_file("gspro/currentRound.dat", gspro_dir / "currentRound.dat", 2_000_000,
-                                                       private=True, blobs=False))
+        if not paired:
+            guard("GSPro.db shots", gspro_db)
+            guard("round file", lambda: add_file("gspro/currentRound.dat", gspro_dir / "currentRound.dat", 2_000_000,
+                                                           private=True, blobs=False))
 
         def round_files() -> None:
             from .round_file import ARCHIVE_DIR, newest_archives
@@ -804,7 +818,8 @@ def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
                     summary.append(f"  {p.name}: {size / 1e6:.1f} MB, too big to include")
                 else:
                     add_file(f"gspro/{ARCHIVE_DIR}/{p.name}", p, private=True, blobs=False)
-        guard("kept round files", round_files)
+        if not paired:
+            guard("kept round files", round_files)
 
         def vendor_files() -> None:
             for what, where, pattern, n, cap in LM_FILES + _skytrak_files():
@@ -822,7 +837,8 @@ def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
                 for p in found:
                     add_text(f"launch-monitor/springbok_connector_log/{i}/{p.name}",
                              springbok_shot_lines(tail(p, 2_000_000)), private=True)
-        guard("launch monitor files", vendor_files)
+        if not paired:
+            guard("launch monitor files", vendor_files)
 
         def software() -> None:
             lines = _software_listing()
@@ -858,7 +874,7 @@ def _build(cfg: Config, config_path: Path, description: str = "") -> Path:
 
         def logs() -> None:
             cutoff = time.time() - LOG_DAYS * 86400
-            for pattern in ("booth-*.log", "tray-*.log", "gspro-*.log"):
+            for pattern in ("booth-*.log", "tray-*.log") + (() if paired else ("gspro-*.log",)):
                 for p in sorted(log_dir.glob(pattern)):
                     if p.name != "booth-errors.log" and p.stat().st_mtime >= cutoff:
                         add_file(f"logs/{p.name}", p, LOG_CAP)

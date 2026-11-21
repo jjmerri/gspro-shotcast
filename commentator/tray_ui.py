@@ -348,8 +348,14 @@ def _http_check(method: str, url: str, **kw) -> str:
     return f"It answered {r.status_code}: {r.text[:200]}"
 
 
-def check_key(name: str, values: dict[str, str], cfg) -> str:
-    """Try a key against its service. '' if it works, else what went wrong."""
+def check_key(name: str, values: dict[str, str], cfg, paired: bool = False) -> str:
+    """Try a key against its service. '' if it works, else what went wrong. `paired` (with Shotcast
+    Cloud): only the AI and voice keys; the self-hosted booth's services (AWS, OBS, ntfy) aren't tried."""
+    if paired:
+        from .cloud import ENV_KEYS
+
+        if name not in ENV_KEYS:
+            return "That's the self-hosted booth's: it isn't used while this PC is paired with Shotcast Cloud."
     v = values.get(name, "").strip()
     if name == "AWS_ACCESS_KEY_ID":
         secret = values.get("AWS_SECRET_ACCESS_KEY", "").strip()
@@ -563,6 +569,29 @@ ENV_FIELDS: list[tuple[str, str, str, bool, bool]] = [
 TABS = ["Booth", "Asides", "Chat", "API keys", "GSPro", "League", "Sharing", "Video", "Alerts", "Advanced"]
 
 
+def fields_for(paired: bool) -> tuple[list, list, list]:
+    """(tabs, config fields, .env fields) the Settings window has. Paired with Shotcast Cloud: only the
+    settings a cloud profile keeps (cloud.CARRIED) and the AI and voice keys (cloud.ENV_KEYS)."""
+    if not paired:
+        return TABS, CONFIG_FIELDS, ENV_FIELDS
+    from .cloud import CARRIED, ENV_KEYS
+
+    config = [f for f in CONFIG_FIELDS if f[2] and f[2][0] in CARRIED]
+    env = [f for f in ENV_FIELDS if f[2] in ENV_KEYS]
+    used = {f[0] for f in config + env} | {"GSPro", "Advanced"}
+    return [t for t in TABS if t in used], config, env
+
+
+def check_paired_changes(config_changes: dict, env_changes: dict) -> None:
+    """Paired with Shotcast Cloud: ValueError for a change to anything a cloud profile doesn't keep."""
+    from .cloud import CARRIED, ENV_KEYS
+
+    bad = [".".join(k) for k in config_changes if not k or k[0] not in CARRIED]
+    bad += [k for k in env_changes if k not in ENV_KEYS]
+    if bad:
+        raise ValueError("Not used while this PC is paired with Shotcast Cloud: " + ", ".join(bad))
+
+
 def _get(data: Any, keys: tuple[str, ...]) -> Any:
     for k in keys:
         if not isinstance(data, dict):
@@ -652,6 +681,8 @@ class SettingsWindow:
         from .config import load_config
 
         self.ui, self.tray, self.home = ui, tray, tray.home
+        self.paired = getattr(tray, "cloud", None) is not None
+        self.tabs, config_fields, env_fields = fields_for(self.paired)
         self.cfg = load_config(self.home / "config.yaml")
         env_path = self.home / ".env"
         self.env_text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
@@ -666,16 +697,16 @@ class SettingsWindow:
         self.nb.pack(fill="both", expand=True, padx=self._px(10), pady=(self._px(10), 0))
         self.frames = {}
         bg = ttk.Style().lookup("TFrame", "background") or None
-        for name in TABS:
+        for name in self.tabs:
             self.nb.add(self._scrolling(name, bg), text=name)
-        self.rows = {name: 0 for name in TABS}
+        self.rows = {name: 0 for name in self.tabs}
 
         self._gspro_tab()
-        for tab_name, label, keys, kind, note in CONFIG_FIELDS:
+        for tab_name, label, keys, kind, note in config_fields:
             self._config_row(tab_name, label, keys, kind, note)
         self._note("API keys", "Keys stay on this PC, in .env in the Shotcast folder. "
                                "Check tries one against its service.")
-        for tab_name, label, key, secret, checkable in ENV_FIELDS:
+        for tab_name, label, key, secret, checkable in env_fields:
             self._env_row(tab_name, label, key, secret, checkable)
         self._link("API keys", "Where to get them", KEYS_HELP)
         self._advanced_tab()
@@ -811,7 +842,7 @@ class SettingsWindow:
         values = {k: v[0].get() for k, v in self.vars.items() if isinstance(k, str)}
 
         def work():
-            problem = check_key(key, values, self.cfg)
+            problem = check_key(key, values, self.cfg, self.paired)
             if problem:
                 self.ui.error(f"{key}: {problem}")
             else:
@@ -885,8 +916,8 @@ class SettingsWindow:
             return False
 
     def show(self, tab: str | None = None) -> None:
-        if tab in TABS:
-            self.nb.select(TABS.index(tab))
+        if tab in self.tabs:
+            self.nb.select(self.tabs.index(tab))
         self.win.deiconify()
         self.win.lift()
         self.win.attributes("-topmost", True)
@@ -907,6 +938,8 @@ class SettingsWindow:
                 env_changes[k] = v.strip()
             else:
                 config_changes[k] = parse_field(kind, self.labels[k], v, config_value(self.cfg, k))
+        if self.paired:
+            check_paired_changes(config_changes, env_changes)
         gspro = self.gspro.get().strip()
         if not gspro and self.gspro_orig:
             raise ValueError("The GSPro folder is empty: choose GSPro's folder (or Cancel to keep it as it was).")

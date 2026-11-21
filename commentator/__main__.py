@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import contextlib
 import time
 import json
 import logging
@@ -238,7 +239,14 @@ async def _run_booth(cfg: Config) -> None:
                      dismiss=health.dismiss if health else None,
                      where=engine.screen.monitor_rect if engine.screen and cfg.screen.follow_window else None,
                      showing=engine.screen.gspro_showing if engine.screen else None).start()
-    await engine.run()
+    from .cloud_booth import start as start_uploads
+
+    uploads = start_uploads(cfg)   # paired with Shotcast Cloud: settled rounds go up (unpaired: None)
+    try:
+        await engine.run()
+    finally:
+        if uploads is not None:
+            uploads.cancel()
 
 
 async def cmd_sniff(cfg: Config, args) -> None:
@@ -864,7 +872,9 @@ def cmd_backup(cfg: Config, args) -> None:
 def cmd_report(cfg: Config, args) -> None:
     from . import report
 
-    path = report.build(cfg, Path(args.config), args.description or "")
+    from . import cloud
+
+    path = report.build(cfg, Path(args.config), args.description or "", paired=cloud.startup is not None)
     print(f"Saved the problem report to {path}")
     if args.send:
         if not cfg.report.upload_url:
@@ -901,22 +911,22 @@ def cmd_cost(cfg: Config, args) -> None:
     print(summarize(cfg.log_dir, weeks=args.weeks, as_model=args.as_model))
 
 
-def _load_env(config: str) -> None:
+def _load_env(config: str, profile: bool = False) -> None:
     """The booth's own .env, so its keys aren't shared machine-wide: next to config.yaml (the
     Windows app's home folder), else next to the code (a checkout or ZIP). Values here override
-    anything set system-wide."""
+    anything set system-wide. `profile`: a Shotcast Cloud profile's, next to its config.yaml only."""
     from .dotenv import load_env
 
     loaded: list[str] = []
     beside_code = Path(__file__).resolve().parents[1] / ".env"
     beside_config = Path(config).resolve().parent / ".env"
-    for path in dict.fromkeys((beside_code, beside_config)):   # the config's wins
+    for path in dict.fromkeys((beside_config,) if profile else (beside_code, beside_config)):
         loaded += load_env(path)
     if loaded:
         logging.info("Loaded %s from .env", ", ".join(dict.fromkeys(loaded)))
 
 
-def cmd_tray(parser, args) -> None:
+def cmd_tray(parser, args, prof=None) -> None:
     from . import tray
 
     if args.write_icon:
@@ -924,14 +934,25 @@ def cmd_tray(parser, args) -> None:
         return
     if args.config != "config.yaml":
         parser.error("tray uses config.yaml in its home folder: pass --home instead of -c")
-    home, first = tray.prepare_home(args.home)
+    if prof is not None:   # paired with Shotcast Cloud: the profile is its home (commentator.cloud)
+        home, first = prof.home, False
+        launch_home = Path(args.home).resolve() if args.home else tray.default_home()
+    else:
+        home, first = tray.prepare_home(args.home)
+        launch_home = home
     os.chdir(home)
     config = home / "config.yaml"
     _setup_logging(args.verbose, "logs", name="tray")
-    _load_env(str(config))
-    if not args.self_test:
+    if prof is not None:
+        from .cloud import clean_env
+
+        clean_env()
+    _load_env(str(config), profile=prof is not None)
+    if not args.self_test and prof is None:   # (the installer's pick is the self-hosted home's)
         tray.apply_installer_gspro_dir(home)
-    cfg = load_config(config)
+    from .cloud import booth_config
+
+    cfg = booth_config(load_config(config), prof)
     if args.self_test:
         tray.self_test(home, cfg)
         return
@@ -942,7 +963,37 @@ def cmd_tray(parser, args) -> None:
     from .updater import current_version
 
     logging.info("Shotcast %s starting in %s", current_version(), home)
-    tray.Tray(home, cfg, first_run=first).run()
+    if prof is None:
+        tray.Tray(home, cfg, first_run=first).run()
+        return
+    from .cloud import running
+
+    try:
+        with running(prof, "tray"):   # (so it isn't unpaired from under it)
+            tray.Tray(home, cfg, first_run=first, paired=prof, launch_home=launch_home).run()
+    except TimeoutError:
+        tray.fatal("Shotcast is already running with this PC's Shotcast Cloud pairing.")
+
+
+# Commands that read or write the self-hosted booth's data, its stats page or its keys and outside
+# services: refused while this PC is paired with Shotcast Cloud (main).
+SELF_HOSTED = frozenset({"stats", "stats-web", "publish", "restore", "backfill-log", "snap-minimap",
+                         "import-league", "squabbit", "fetch-report", "notify-test"})
+
+
+def _enter_profile(parser, args, prof) -> None:
+    """Run the command in the cloud profile's home: refuse the self-hosted booth's commands and
+    another config, keep the files named on the command line, and move there."""
+    if args.command in SELF_HOSTED:
+        sys.exit(f"This PC is paired with Shotcast Cloud: `{args.command}` is the self-hosted booth's "
+                 "(its data, stats page or keys), so it doesn't run while paired.")
+    if args.config != "config.yaml":
+        parser.error(f"this PC is paired with Shotcast Cloud: it uses {prof.config}, not -c")
+    for name in ("replay", "image", "log"):   # (inputs; what's written goes in the profile)
+        if isinstance(value := getattr(args, name, None), str):
+            setattr(args, name, os.path.abspath(value))
+    os.chdir(prof.home)
+    args.config = str(prof.config)
 
 
 def main() -> None:
@@ -1085,13 +1136,38 @@ def main() -> None:
                    help="Recompute every team's net on the league's leaderboards and report how many match")
 
     args = parser.parse_args()
-    if args.command == "tray":
+    from . import cloud
+
+    if args.command == "tray" and args.write_icon:
         return cmd_tray(parser, args)
+    if args.command == "tray" and args.self_test:   # (the release build's check, of the self-hosted app)
+        if args.home is None and cloud.marker().exists():
+            sys.exit("This PC is paired with Shotcast Cloud: tray --self-test runs only against a disposable "
+                     "folder given with --home.")
+        return cmd_tray(parser, args)
+    # Paired with Shotcast Cloud, everything runs in the cloud profile's own home: its config.yaml,
+    # .env, data and logs, never the self-hosted ones (commentator.cloud). Checked before anything is
+    # logged or captured: a pairing that can't be trusted starts nothing.
+    try:
+        prof = cloud.locate()
+    except cloud.Damaged as e:
+        if args.command == "tray":
+            from .tray import fatal
+
+            fatal(str(e))
+        sys.exit(str(e))
+    cloud.startup = prof
+    if args.command == "tray":
+        return cmd_tray(parser, args, prof)
+    if prof is not None:
+        _enter_profile(parser, args, prof)
+        cloud.clean_env()
     _setup_logging(args.verbose, "logs" if args.command == "run" else None)
-    _load_env(args.config)
+    _load_env(args.config, profile=prof is not None)
     cfg = load_config(args.config) if Path(args.config).exists() else Config()
     if not Path(args.config).exists():
         logging.warning("%s not found; using defaults", args.config)
+    cfg = cloud.booth_config(cfg, prof)   # (paired: the allow-list again, in the profile)
 
     handlers = {
         "run": cmd_run, "sniff": cmd_sniff, "calibrate": cmd_calibrate, "ocr-test": cmd_ocr_test, "screen-check": cmd_screen_check, "fixture": cmd_fixture, "notify-test": cmd_notify_test,
@@ -1101,12 +1177,18 @@ def main() -> None:
         "review": cmd_review,
         "cost": cmd_cost, "import-league": cmd_import_league, "squabbit": cmd_squabbit,
     }
-    result = handlers[args.command](cfg, args)
-    if asyncio.iscoroutine(result):
-        try:
-            asyncio.run(result)
-        except KeyboardInterrupt:
-            print("\nOff air.")
+    with contextlib.ExitStack() as held:
+        if prof is not None and args.command == "run":   # (so it isn't unpaired from under it)
+            try:
+                held.enter_context(cloud.running(prof, "run"))
+            except TimeoutError:
+                sys.exit("A booth is already running with this PC's Shotcast Cloud pairing.")
+        result = handlers[args.command](cfg, args)
+        if asyncio.iscoroutine(result):
+            try:
+                asyncio.run(result)
+            except KeyboardInterrupt:
+                print("\nOff air.")
 
 
 if __name__ == "__main__":
