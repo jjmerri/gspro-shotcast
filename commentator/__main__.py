@@ -920,7 +920,11 @@ def _load_env(config: str, profile: bool = False) -> None:
     loaded: list[str] = []
     beside_code = Path(__file__).resolve().parents[1] / ".env"
     beside_config = Path(config).resolve().parent / ".env"
-    for path in dict.fromkeys((beside_config,) if profile else (beside_code, beside_config)):
+    if profile:   # (only the AI and voice keys a profile keeps, whatever else is in the file)
+        from .cloud import load_profile_env
+
+        loaded += load_profile_env(beside_config)
+    for path in () if profile else dict.fromkeys((beside_code, beside_config)):   # the config's wins
         loaded += load_env(path)
     if loaded:
         logging.info("Loaded %s from .env", ", ".join(dict.fromkeys(loaded)))
@@ -934,7 +938,40 @@ def cmd_tray(parser, args, prof=None) -> None:
         return
     if args.config != "config.yaml":
         parser.error("tray uses config.yaml in its home folder: pass --home instead of -c")
+    with contextlib.ExitStack() as held:
+        if prof is not None:
+            prof = _paired_tray(args, prof, held)
+            if prof is None:
+                return
+        _tray(args, prof)
+
+
+def _paired_tray(args, prof, held):
+    """Paired with Shotcast Cloud, before the tray logs or starts anything: a second launch opens the
+    pairing's own stats page on Shotcast Cloud (none: nothing) and ends (None); the first takes the
+    profile's lifecycle lock (held by `held`, so it isn't unpaired from under it) and returns the
+    pairing as it stands once it's held (cloud.running)."""
+    from . import cloud, tray
+
+    if not tray.single_instance():
+        if url := cloud.web_stats_url(prof):
+            tray.webbrowser.open(url)
+        return None
+    try:
+        return held.enter_context(cloud.running(prof, "tray"))
+    except TimeoutError:
+        tray.fatal("Shotcast is already running with this PC's Shotcast Cloud pairing.")
+        return None
+    except cloud.CloudError as e:   # (unpaired, paired again or damaged while it started)
+        tray.fatal(str(e))
+        sys.exit(str(e))
+
+
+def _tray(args, prof) -> None:
+    from . import cloud, tray
+
     if prof is not None:   # paired with Shotcast Cloud: the profile is its home (commentator.cloud)
+        cloud.startup = prof
         home, first = prof.home, False
         launch_home = Path(args.home).resolve() if args.home else tray.default_home()
     else:
@@ -956,7 +993,7 @@ def cmd_tray(parser, args, prof=None) -> None:
     if args.self_test:
         tray.self_test(home, cfg)
         return
-    if not tray.single_instance():
+    if prof is None and not tray.single_instance():   # (paired: looked at already, in _paired_tray)
         logging.info("Shotcast is already running; opening the stats page")
         tray.open_running_stats(home)
         return
@@ -966,13 +1003,22 @@ def cmd_tray(parser, args, prof=None) -> None:
     if prof is None:
         tray.Tray(home, cfg, first_run=first).run()
         return
-    from .cloud import running
+    tray.Tray(home, cfg, first_run=first, paired=prof, launch_home=launch_home).run()
 
-    try:
-        with running(prof, "tray"):   # (so it isn't unpaired from under it)
-            tray.Tray(home, cfg, first_run=first, paired=prof, launch_home=launch_home).run()
-    except TimeoutError:
-        tray.fatal("Shotcast is already running with this PC's Shotcast Cloud pairing.")
+
+def _refuse(args, message: str) -> None:
+    """Nothing starts: say why to whoever started it (the tray's own window; a booth the tray started
+    tells the tray, which then doesn't start it again; else the console)."""
+    if args.command == "tray":
+        from .tray import fatal
+
+        fatal(message)
+    elif args.command == "run" and os.environ.get("SHOTCAST_READY_FILE"):
+        from .config import BOOTH_STOP_CODE, BOOTH_STOPPED
+
+        _booth_says(message, BOOTH_STOPPED)
+        sys.exit(BOOTH_STOP_CODE)
+    sys.exit(message)
 
 
 # Commands that read or write the self-hosted booth's data, its stats page or its keys and outside
@@ -1147,18 +1193,29 @@ def main() -> None:
         return cmd_tray(parser, args)
     # Paired with Shotcast Cloud, everything runs in the cloud profile's own home: its config.yaml,
     # .env, data and logs, never the self-hosted ones (commentator.cloud). Checked before anything is
-    # logged or captured: a pairing that can't be trusted starts nothing.
-    try:
-        prof = cloud.locate()
-    except cloud.Damaged as e:
+    # logged or captured: a pairing that can't be trusted starts nothing, nor does a booth whose tray
+    # started in another pairing (or in none). A paired booth then takes its profile's lifecycle lock,
+    # and runs in the pairing as it stands once that's held (so it isn't unpaired as it starts, or from
+    # under it).
+    with contextlib.ExitStack() as held:
+        try:
+            prof = cloud.locate()
+            cloud.check_expected(prof)
+            if prof is not None and args.command == "run":
+                prof = held.enter_context(cloud.running(prof, "run"))
+        except TimeoutError:
+            _refuse(args, "A booth is already running with this PC's Shotcast Cloud pairing.")
+        except cloud.CloudError as e:
+            _refuse(args, str(e))
+        cloud.startup = prof
         if args.command == "tray":
-            from .tray import fatal
+            return cmd_tray(parser, args, prof)
+        _main(parser, args, prof)
 
-            fatal(str(e))
-        sys.exit(str(e))
-    cloud.startup = prof
-    if args.command == "tray":
-        return cmd_tray(parser, args, prof)
+
+def _main(parser, args, prof) -> None:
+    from . import cloud
+
     if prof is not None:
         _enter_profile(parser, args, prof)
         cloud.clean_env()
@@ -1177,18 +1234,12 @@ def main() -> None:
         "review": cmd_review,
         "cost": cmd_cost, "import-league": cmd_import_league, "squabbit": cmd_squabbit,
     }
-    with contextlib.ExitStack() as held:
-        if prof is not None and args.command == "run":   # (so it isn't unpaired from under it)
-            try:
-                held.enter_context(cloud.running(prof, "run"))
-            except TimeoutError:
-                sys.exit("A booth is already running with this PC's Shotcast Cloud pairing.")
-        result = handlers[args.command](cfg, args)
-        if asyncio.iscoroutine(result):
-            try:
-                asyncio.run(result)
-            except KeyboardInterrupt:
-                print("\nOff air.")
+    result = handlers[args.command](cfg, args)
+    if asyncio.iscoroutine(result):
+        try:
+            asyncio.run(result)
+        except KeyboardInterrupt:
+            print("\nOff air.")
 
 
 if __name__ == "__main__":

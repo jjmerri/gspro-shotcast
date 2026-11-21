@@ -7,7 +7,7 @@ with, and nothing else about the booth changes.
 How uploads stand goes to logs/cloud-health.json (`HEALTH`) for the tray: a pairing the API no longer
 accepts, uploads stopped, the API needing a newer Shotcast (426), and what the season file keeps
 (cloud_rounds.health): rounds held as conflicts or refused, and rounds waiting to be tried again after
-failing again and again. It's rewritten after every try, so it clears once that's resolved.
+failing again and again; each of those turns the tray red. It's rewritten after every try, so it clears once that's resolved.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 DRAIN_S = 60.0         # how often the upload loop looks for settled rounds to send
 BLOCKED_S = 900.0      # how long it waits when the cloud refuses every upload from this PC
-FAILS_SHOWN = 3        # failed drains in a row before the tray shows it
+FAILS_SHOWN = 3        # failed tries in a row (of a drain, or of one round) before the tray goes red for it
 HEALTH = "cloud-health.json"
 
 
@@ -122,4 +122,4 @@ class Uploads:
 
     def _failed(self, what: str) -> None:
         self.fails += 1
-        self._health(*[("warn", f"Shotcast Cloud: {what}")] * (self.fails >= FAILS_SHOWN))
+        self._health(*[("fail", f"Shotcast Cloud: {what}")] * (self.fails >= FAILS_SHOWN))

@@ -214,6 +214,28 @@ def _due(db: sqlite3.Connection, now: float, settle: float) -> list[sqlite3.Row]
         (now - settle, now)).fetchall()
 
 
+def settle_idle(db: sqlite3.Connection, now: float) -> int:
+    """End the practice stretches left in progress with nothing struck or said for
+    PRACTICE_IDLE_SECONDS, so a session on the range that just stops goes up without waiting for the
+    next shot, round or restart. It's what the booth does itself at that next row
+    (round_record.Live._practice: the stretch is over, at its last row), done here once it's due; the
+    booth, finding it ended, starts the next stretch as it would have. One write transaction, the
+    last row read inside it: a stretch that just got a shot isn't ended. Returns how many were."""
+    from .round_record import PRACTICE_IDLE_SECONDS
+
+    ended = 0
+    with _txn(db, "IMMEDIATE"):
+        for (u,) in db.execute("SELECT uuid FROM round_records WHERE kind = 'practice' AND state = 'in_progress'"
+                               " AND assigned = 'live'").fetchall():
+            last = db.execute("SELECT MAX(at) FROM (SELECT MAX(ts) AS at FROM shots WHERE record_uuid = ?1"
+                              " UNION ALL SELECT MAX(ts) FROM lines WHERE record_uuid = ?1)", (u,)).fetchone()[0]
+            if last is None or now - last <= PRACTICE_IDLE_SECONDS:   # (no row yet: the booth's to drop)
+                continue
+            ended += db.execute("UPDATE round_records SET state = 'finished', ended_at = MAX(?, COALESCE(started_at, ?))"
+                                " WHERE uuid = ? AND state = 'in_progress'", (last, last, u)).rowcount
+    return ended
+
+
 def _freeze(db: sqlite3.Connection, uuid: str) -> bool:
     """Build the record's next revision and keep it until acknowledged. False if there's nothing new
     to send (it says what was last acknowledged, or the record is gone)."""
@@ -366,6 +388,7 @@ def drain(cl: Any, db_path: str, now: float | None = None, settle: float = CLOSE
 
 def _drain(cl: Any, db: sqlite3.Connection, now: float, settle: float) -> Drained:
     out = Drained()
+    settle_idle(db, now)
     for row in _due(db, now, settle):
         uuid = row["uuid"]
         u = db.execute("SELECT frozen_body FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()
@@ -428,13 +451,14 @@ def status(db_path: str, now: float | None = None, settle: float = CLOSER_SECOND
 
 def health(db_path: str, now: float | None = None, retries: int = 1) -> list[tuple[str, str]]:
     """How uploads stand for the tray, from what the season file keeps (so it holds till it's resolved,
-    whether or not a drain just tried): (level, message) for rounds held as conflicts or refused
-    ('fail'), and rounds that failed `retries` times or more and wait to be tried again ('warn')."""
+    whether or not a drain just tried): (level, message), each a failure ('fail': the tray goes red),
+    for rounds held as conflicts or refused, and for rounds that failed `retries` times or more and
+    wait to be tried again (through every wait between tries, till they're on Shotcast Cloud)."""
     db = connect(db_path)
     try:
         got = dict(db.execute(
             """SELECT CASE WHEN status IN ('conflict', 'parked') THEN status
-                           WHEN tries >= ? THEN 'retrying' END AS kind, COUNT(*)
+                           WHEN tries >= ? THEN 'failing' END AS kind, COUNT(*)
                FROM cloud_uploads GROUP BY kind""", (retries,)).fetchall())
     finally:
         db.close()
@@ -443,9 +467,9 @@ def health(db_path: str, now: float | None = None, retries: int = 1) -> list[tup
         out.append(("fail", f"Shotcast Cloud: {n} round(s) held as conflicts, not sent (see cloud status)"))
     if n := got.get("parked"):
         out.append(("fail", f"Shotcast Cloud: {n} round(s) refused (see cloud status)"))
-    if n := got.get("retrying"):
-        out.append(("warn", f"Shotcast Cloud: {n} round(s) not going up yet (the network, or Shotcast Cloud "
-                            "is busy); retrying"))
+    if n := got.get("failing"):
+        out.append(("fail", f"Shotcast Cloud: {n} round(s) aren't going up (the network, or Shotcast Cloud is "
+                            "busy); still retrying (see cloud status)"))
     return out
 
 

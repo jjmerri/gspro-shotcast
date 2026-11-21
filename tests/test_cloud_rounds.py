@@ -271,9 +271,55 @@ def test_no_answer_from_the_network_keeps_the_round_queued_to_retry(tmp_path, ap
     _drain(cloud.Cloud(cloud.store(), clock=lambda: api.now, sleep=lambda s: None), cfg)
     row = _upload(cfg, u)
     assert row["status"] == "queued" and row["tries"] == 1 and "couldn't reach" in row["error"]
-    [(level, msg)] = cloud_rounds.health(cfg.db_path)
-    assert level == "warn" and "retrying" in msg
+    assert cloud_rounds.health(cfg.db_path, retries=2) == []   # (one failed try isn't shown yet)
+    [(level, msg)] = cloud_rounds.health(cfg.db_path, retries=1)
+    assert level == "fail" and "retrying" in msg
     mock_http(monkeypatch, api)
     _retry_now(cfg)
     _drain(cl, cfg)
     assert u in api.rounds and cloud_rounds.health(cfg.db_path) == []
+
+
+def test_a_practice_stretch_left_idle_is_ended_and_goes_up_without_another_shot(tmp_path, api):
+    from commentator.round_record import PRACTICE_IDLE_SECONDS
+
+    cfg, s, cl = _booth(tmp_path, api)
+    t0 = time.time()
+    _hit(s, "Ann", t0)                      # on the range: a practice stretch, in progress
+    _hit(s, "Ann", t0 + 60)
+    s.db.commit()
+    [(u, kind, state)] = s.db.execute("SELECT uuid, kind, state FROM round_records").fetchall()
+    assert (kind, state) == ("practice", "in_progress")
+    soon = t0 + 60 + PRACTICE_IDLE_SECONDS - 1
+    assert cloud_rounds.drain(cl, cfg.db_path, now=soon).sent == [] and api.puts == []
+    assert s.db.execute("SELECT state FROM round_records").fetchone()[0] == "in_progress"   # (it may get a shot yet)
+    later = t0 + 60 + PRACTICE_IDLE_SECONDS + 1
+    assert cloud_rounds.drain(cl, cfg.db_path, now=later, settle=0).sent == [u]
+    assert tuple(s.db.execute("SELECT state, ended_at FROM round_records WHERE uuid = ?", (u,)).fetchone()) \
+        == ("finished", t0 + 60)            # (ended at its last row, as the booth ends it)
+    assert [(rid, n, len(b["shots"])) for rid, n, b in api.puts] == [(u, 1, 2)]
+    _hit(s, "Ann", later + 5)               # the booth, still running, finds it ended: a new stretch
+    s.db.commit()
+    rows = s.db.execute("SELECT uuid, state FROM round_records ORDER BY started_at").fetchall()
+    assert [tuple(r) for r in rows] == [(u, "finished"), (rows[1][0], "in_progress")] and rows[1][0] != u
+    assert s.db.execute("SELECT COUNT(*) FROM shots WHERE record_uuid = ?", (u,)).fetchone()[0] == 2
+
+
+def test_ending_idle_practice_leaves_a_round_being_played_and_a_stretch_that_just_got_a_shot(tmp_path, api):
+    from commentator.round_record import PRACTICE_IDLE_SECONDS
+
+    cfg, s, cl = _booth(tmp_path, api)
+    t0 = time.time()
+    _hit(s, "Ann", t0)
+    _said(s)                                # (said just now: time.time(), its last row)
+    s.db.commit()
+    db = cloud_rounds.connect(cfg.db_path)
+    try:
+        assert cloud_rounds.settle_idle(db, time.time() + PRACTICE_IDLE_SECONDS - 5) == 0
+        u = s.begin_round("r1", course="Pebble", players={"Ann": None})   # (ends the stretch itself)
+        _hit(s, "Ann", t0 + 10)
+        s.db.commit()
+        assert cloud_rounds.settle_idle(db, t0 + 10 * PRACTICE_IDLE_SECONDS) == 0
+        assert s.db.execute("SELECT state FROM round_records WHERE uuid = ?", (u,)).fetchone()[0] == "in_progress"
+    finally:
+        db.close()

@@ -54,7 +54,9 @@ from urllib.parse import urlsplit
 
 log = logging.getLogger(__name__)
 
-ROOT_ENV = "SHOTCAST_CLOUD_DIR"      # (tests) where the marker and profiles are, instead of the machine's
+TEST_ROOT: Path | None = None        # (tests only: tests/cloud_isolation.py) where the marker and profiles are
+INSTALL_ID = "install-id"            # in root(): this install's own id, for a machine with none (machine_id)
+EXPECT_ENV = "SHOTCAST_CLOUD_EXPECT" # set by the tray for the booth it starts: the pairing the tray started in
 MARKER = "device.json"               # in root(): this PC's pairing, with its tokens
 FOLDER_FILE = "pairing.json"         # in a profile's home: the folder_key it was made for
 DEVICE_HEADER = "X-Shotcast-Device"
@@ -133,9 +135,10 @@ class TooOld(CloudError):
 def root() -> Path:
     """The machine's Shotcast Cloud folder, which no config or command line moves, on this machine's
     own disk (never a roaming profile's): %LOCALAPPDATA%\\Shotcast\\cloud on Windows, ~/Library/
-    Application Support/Shotcast/cloud on a Mac, else ~/.config/Shotcast/cloud. ROOT_ENV moves it (tests)."""
-    if got := os.environ.get(ROOT_ENV):
-        return Path(got)
+    Application Support/Shotcast/cloud on a Mac, else ~/.config/Shotcast/cloud. Nothing in the
+    environment moves it either (only the tests do, with TEST_ROOT)."""
+    if TEST_ROOT is not None:
+        return Path(TEST_ROOT)
     if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
     elif sys.platform == "darwin":
@@ -155,9 +158,9 @@ def store() -> TokenStore:
 
 
 @cache
-def machine_id() -> str:
-    """This machine, as a pairing is bound to it: Windows' MachineGuid, a Mac's hardware UUID, else
-    /etc/machine-id (the network card's address if none of those can be read), hashed."""
+def _platform_id() -> str:
+    """The operating system's own id for this machine: Windows' MachineGuid, a Mac's hardware UUID,
+    else /etc/machine-id; '' when there's none to read."""
     got = ""
     try:
         if sys.platform == "win32":
@@ -177,12 +180,36 @@ def machine_id() -> str:
             for p in (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id")):
                 if p.is_file() and (got := p.read_text(encoding="utf-8").strip()):
                     break
-    except Exception:   # noqa: BLE001 - the fallback below
+    except Exception:   # noqa: BLE001 - none to read: the install's own id stands in
         got = ""
-    if not got:
-        import uuid
+    return got.strip()
 
-        got = f"node:{uuid.getnode():012x}"
+
+def _install_id() -> str:
+    """This install's own id, for a machine whose operating system gives none: made once, at random,
+    and kept in root() (this machine's own disk), one process at a time. Never a value that could
+    differ from one start to the next (a network card's address, say): that strands a sound pairing."""
+    from .locks import file_lock
+
+    path = root() / INSTALL_ID
+    try:
+        with file_lock(path.with_name(path.name + ".lock"), 30.0, "another process has held"):
+            try:
+                got = path.read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                got = secrets.token_hex(16)
+                _write_new(path, got, 0o600)
+    except (OSError, TimeoutError) as e:
+        raise CloudError(f"this computer can't be told from another ({path}: {e})") from None
+    if not re.fullmatch(r"[0-9a-f]{32}", got):
+        raise CloudError(f"this computer can't be told from another ({path} isn't valid)")
+    return got
+
+
+def machine_id() -> str:
+    """This machine, as a pairing is bound to it: the operating system's id for it (_platform_id), else
+    this install's own stored one (_install_id), hashed."""
+    got = _platform_id() or f"install:{_install_id()}"
     return hashlib.sha256(f"shotcast-machine:{got}".encode()).hexdigest()[:32]
 
 
@@ -277,6 +304,7 @@ class Profile:
     bound: tuple | None = None
     problem: str | None = None
     damage: str | None = None
+    seen: str | None = None   # a hash of the marker file as it was inspected (forget: a damaged one's)
 
     @property
     def connected(self) -> bool:
@@ -309,12 +337,23 @@ class Profile:
         return float(got) if isinstance(got, (int, float)) and not isinstance(got, bool) else None
 
 
+# The tables a season file has for a paired booth to capture into and upload from (cloud_rounds.body).
+SEASON_TABLES = ("meta", "sessions", "shots", "shot_tracks", "lines", "rounds", "player_rounds", "week_results",
+                 "round_records", "round_slots", "cloud_pairing")
+
+
 def _db_binding(db: Path) -> tuple | None:
-    """The pairing a profile's season file is bound to (cloud_rounds.bind), read only. Raises
-    sqlite3.Error for a file that isn't a season file, or is damaged."""
+    """The pairing a profile's season file is bound to (cloud_rounds.bind), once the whole file has
+    been checked, read only: SQLite's own check of every table and index, and the tables a booth
+    needs. Raises sqlite3.Error for a file that isn't a season file, or is damaged anywhere."""
     con = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
     try:
-        con.execute("SELECT COUNT(*) FROM round_records").fetchone()
+        found = [str(r[0]) for r in con.execute("PRAGMA quick_check(5)")]
+        if found != ["ok"]:
+            raise sqlite3.DatabaseError("it's damaged: " + "; ".join(found))
+        have = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if missing := [t for t in SEASON_TABLES if t not in have]:
+            raise sqlite3.DatabaseError(f"it has no {', '.join(missing)} table")
         row = con.execute("SELECT api, tenant_id, device_id FROM cloud_pairing WHERE one = 1").fetchone()
     finally:
         con.close()
@@ -322,7 +361,12 @@ def _db_binding(db: Path) -> tuple | None:
 
 
 class _Bad(Exception):
-    pass
+    """Why a marker or profile can't be trusted. `changed`: it reads, but isn't the pairing its pass
+    was issued for, on this computer."""
+
+    def __init__(self, why: str, changed: bool = False) -> None:
+        self.changed = changed
+        super().__init__(why)
 
 
 def _text(rec: dict[str, Any], name: str, optional: bool = False) -> None:
@@ -331,12 +375,14 @@ def _text(rec: dict[str, Any], name: str, optional: bool = False) -> None:
         raise _Bad(f"its {name} isn't valid")
 
 
-def _verify_marker(path: Path) -> tuple[dict[str, Any], tuple]:
-    """(clear part, protected binding) of a marker that can be trusted; else _Bad (why)."""
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        raise _Bad(f"{path} can't be read ({e})") from None
+def _number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _open_marker(raw: Any, path: Path) -> tuple[dict[str, Any], dict[str, Any], tuple]:
+    """(clear part, tokens, protected binding) of a marker's parsed JSON, the one check of every field
+    for whoever reads it (inspect, TokenStore.read): what comes back needs no checking further on.
+    Else _Bad (why)."""
     if not isinstance(raw, dict):
         raise _Bad(f"{path} isn't a pairing")
     if raw.get("v") != STORE_VERSION:
@@ -348,17 +394,27 @@ def _verify_marker(path: Path) -> tuple[dict[str, Any], tuple]:
         _text(clear, name, optional=True)
     try:
         secret = json.loads(unprotect(raw["secret"]))
-        bound, machine = secret["bind"], secret["machine"]
+        tokens, bound, machine = secret["tokens"], secret["bind"], secret["machine"]
         if not (isinstance(bound, list) and len(bound) == 3 and all(isinstance(x, str) and x for x in bound)):
             raise ValueError("no binding")
+        if not (isinstance(tokens, dict) and _number(tokens.get("access_exp"))
+                and all(isinstance(tokens.get(k), str) and tokens[k] for k in ("refresh_token", "access_token"))):
+            raise ValueError("its tokens aren't whole")
+        if not (isinstance(machine, str) and machine):
+            raise ValueError("no computer")
     except Exception as e:   # noqa: BLE001 - a damaged file, or another Windows user's
         raise _Bad(f"this PC's Shotcast Cloud pass can't be read ({e})") from None
-    if canon(bound[0]) != bound[0] or binding(clear) != bound:
+    try:   # (each address checked as one before it's put in its compared form)
+        same = check_api(bound[0]) == bound[0] and [check_api(clear["api"]), clear["tenant_id"],
+                                                    clear["device_id"]] == bound
+    except CloudError:
+        same = False
+    if not same:
         raise _Bad(f"{path} was changed outside Shotcast (its address, tenant or device isn't the one its "
-                   "pass was issued for)")
+                   "pass was issued for)", changed=True)
     if machine != machine_id():
-        raise _Bad(f"{path} was paired on another computer")
-    return clear, tuple(bound)
+        raise _Bad(f"{path} was paired on another computer", changed=True)
+    return clear, tokens, tuple(bound)
 
 
 def _verify_profile(home: Path, bound: tuple) -> None:
@@ -387,28 +443,43 @@ def _verify_profile(home: Path, bound: tuple) -> None:
         raise _Bad(f"its config.yaml ({home / 'config.yaml'}) isn't valid ({e})") from None
 
 
+def _seen(path: Path) -> str | None:
+    """A hash of the marker file as it is (None: it can't be read)."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
 def inspect() -> Profile | None:
     """This PC's pairing as it stands: None with no marker (the self-hosted Shotcast), else its Profile,
     with `damage` set when it can't be trusted. Every field is checked here, so a damaged marker is
     damage, never an error further on. Reads only: nothing is made."""
     path = marker()
     try:
-        path.stat()
+        data = path.read_bytes()
     except FileNotFoundError:
         return None
     except OSError as e:
         return Profile(None, damage=f"{path} can't be read ({e})")
+    seen = hashlib.sha256(data).hexdigest()
     clear: dict[str, Any] = {}
     home = None
     try:
-        clear, bound = _verify_marker(path)
+        try:
+            raw = json.loads(data.decode("utf-8"))
+        except ValueError as e:
+            raise _Bad(f"{path} can't be read ({e})") from None
+        if isinstance(raw, dict):
+            clear = {k: v for k, v in raw.items() if k != "secret"}
+        clear, _tokens, bound = _open_marker(raw, path)
         home = home_for(bound)
         _verify_profile(home, bound)
     except _Bad as e:
-        return Profile(home, clear, damage=str(e))
+        return Profile(home, clear, damage=str(e), seen=seen)
     except Exception as e:   # noqa: BLE001 - anything else about it is damage too
-        return Profile(home, clear, damage=f"{path} can't be used ({e})")
-    return Profile(home, clear, bound, problem=REPAIR if clear.get("refused") else None)
+        return Profile(home, clear, damage=f"{path} can't be used ({e})", seen=seen)
+    return Profile(home, clear, bound, problem=REPAIR if clear.get("refused") else None, seen=seen)
 
 
 def locate() -> Profile | None:
@@ -421,6 +492,22 @@ def locate() -> Profile | None:
     return prof
 
 
+def expectation(prof: Profile | None) -> str:
+    """The pairing a process started in, as the tray hands it to the booth it starts (EXPECT_ENV)."""
+    return json.dumps(list(prof.bound)) if prof is not None and prof.bound else "self-hosted"
+
+
+def check_expected(prof: Profile | None) -> None:
+    """A booth started by the tray runs only in the pairing the tray started in: PairingChanged when
+    this PC was paired or unpaired since (else a booth restarted after an unpair would run as the
+    self-hosted Shotcast inside the cloud profile, and one restarted after a pairing, in a profile
+    its tray knows nothing of)."""
+    want = os.environ.get(EXPECT_ENV)
+    if want is not None and want != expectation(prof):
+        raise PairingChanged("this PC was paired with Shotcast Cloud, or unpaired, since Shotcast started: "
+                             "quit Shotcast and start it again")
+
+
 def _lifecycle(home: Path, who: str, timeout: float):
     from .locks import file_lock
 
@@ -428,11 +515,39 @@ def _lifecycle(home: Path, who: str, timeout: float):
 
 
 @contextmanager
-def running(prof: Profile, who: str):
+def running(prof: Profile, who: str, wait: float = 30.0):
     """Held while a paired booth (`run`) or tray (`tray`) runs in the profile, so it isn't unpaired from
-    under it (`unpair` without --force refuses meanwhile)."""
-    with _lifecycle(prof.home, who, 30):
-        yield
+    under it (`unpair` without --force refuses meanwhile). Taken before anything is logged or captured,
+    and the pairing is looked at again once it's held, as an unpair may have finished between `prof`
+    being checked and the lock being taken: yields the pairing as it stands, the same one as `prof`,
+    else raises PairingChanged (unpaired, or paired again) or Damaged. TimeoutError: another holds it."""
+    with _lifecycle(prof.home, who, wait):
+        now = inspect()
+        if now is None:
+            raise PairingChanged("this PC was unpaired from Shotcast Cloud as Shotcast started: start it again")
+        if now.damage:
+            raise Damaged(now.damage)
+        if now.bound != prof.bound or now.home != prof.home:
+            raise PairingChanged("this PC's Shotcast Cloud pairing changed as Shotcast started: start it again")
+        yield now
+
+
+def load_profile_env(path: Path) -> list[str]:
+    """Paired: set the profile .env's AI and voice keys (ENV_KEYS) in this process, and nothing else
+    that's in the file (a self-hosted .env copied over it, say: its AWS and other service keys stay
+    out). Returns the names set."""
+    from .report import env_pairs
+
+    names, left = [], []
+    for k, v in env_pairs(path):
+        if k in ENV_KEYS:
+            os.environ[k] = v
+            names.append(k)
+        else:
+            left.append(k)
+    if left:
+        log.warning("Not used while paired with Shotcast Cloud (%s): %s", path, ", ".join(dict.fromkeys(left)))
+    return names
 
 
 # ---- making a profile -----------------------------------------------------------------------
@@ -564,10 +679,10 @@ def web_stats_url(prof: Profile | None) -> str | None:
 
 def check_api(api: str) -> str:
     """The API's origin (canon): https, or http only to this computer."""
-    raw = api.strip()
-    u = urlsplit(raw)
-    local = u.hostname in ("localhost", "127.0.0.1", "::1")
+    raw = str(api).strip()
     try:
+        u = urlsplit(raw)
+        local = u.hostname in ("localhost", "127.0.0.1", "::1")
         u.port
     except ValueError:
         raise CloudError(f"{api!r} isn't a Shotcast Cloud address (https://host)") from None
@@ -625,11 +740,14 @@ def protect(data: bytes) -> str:
 
 
 def unprotect(text: str) -> bytes:
-    kind, _, body = text.partition(":")
+    """On Windows only what DPAPI protected for this user is read: never a `plain:` one (development's,
+    elsewhere), which anyone could have written."""
+    kind, _, body = str(text).partition(":")
     raw = base64.b64decode(body)
-    if kind == "dpapi" and sys.platform == "win32":
-        return _dpapi(raw, False)
-    if kind == "plain":
+    if sys.platform == "win32":
+        if kind == "dpapi":
+            return _dpapi(raw, False)
+    elif kind == "plain":
         return raw
     raise CloudError("this PC's Shotcast Cloud pairing can't be read here; pair it again")
 
@@ -654,30 +772,18 @@ class TokenStore:
         return file_lock(self.path.with_name(self.path.name + ".lock"), timeout, "another process has held")
 
     def read(self) -> dict | None:
+        """The pairing with its tokens, every field checked (_open_marker); None unpaired."""
         try:
-            rec = json.loads(self.path.read_text(encoding="utf-8"))
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
         except (OSError, ValueError) as e:
             raise CloudError(f"couldn't read {self.path} ({e}); pair this PC again") from None
-        if not isinstance(rec, dict) or rec.get("v") != STORE_VERSION:
-            raise CloudError(f"{self.path} is from another version; pair this PC again")
-        if not all(isinstance(rec.get(k), str) and rec[k] for k in ("api", "tenant_id", "device_id")):
-            raise CloudError(f"{self.path} isn't a valid pairing; pair this PC again")
         try:
-            secret = json.loads(unprotect(rec.pop("secret")))
-            rec["tokens"], bound, machine = secret["tokens"], secret["bind"], secret["machine"]
-            same = binding(rec) == bound
-        except CloudError:
-            raise
-        except Exception as e:   # noqa: BLE001 - a damaged file
-            raise CloudError(f"couldn't read {self.path} ({e}); pair this PC again") from None
-        if not same:
-            raise PairingChanged(f"{self.path} was changed outside Shotcast (its address, tenant or device isn't "
-                                 "the one its pass was issued for); pair this PC again")
-        if machine != machine_id():
-            raise PairingChanged(f"{self.path} was paired on another computer; pair this PC again")
-        return rec
+            clear, tokens, _bound = _open_marker(raw, self.path)
+        except _Bad as e:
+            raise (PairingChanged if e.changed else CloudError)(f"{e}; pair this PC again") from None
+        return clear | {"tokens": tokens}
 
     def write(self, rec: dict) -> None:
         body = {k: v for k, v in rec.items() if k != "tokens"}
@@ -704,8 +810,13 @@ def _http(api: str, http: Any = None) -> Any:
 
     from .updater import current_version
 
-    return httpx.Client(base_url=api, timeout=30.0, follow_redirects=False,
-                        headers={"User-Agent": f"Shotcast/{current_version()}"})
+    # trust_env off: the pass goes straight to the API, by the system's own certificates, whatever
+    # proxy or certificate file the environment names (a stale SSL_CERT_FILE can't break it either).
+    try:
+        return httpx.Client(base_url=api, timeout=30.0, follow_redirects=False, trust_env=False,
+                            headers={"User-Agent": f"Shotcast/{current_version()}"})
+    except Exception as e:   # noqa: BLE001 - no client at all (its certificates can't be loaded, say)
+        raise Unreachable(f"couldn't reach Shotcast Cloud: {e}") from None
 
 
 def _message(r: Any) -> str:
@@ -888,17 +999,22 @@ class Cloud:
             raise CloudError(f"Shotcast Cloud didn't confirm removing this PC: {_message(r)}")
 
 
-def forget(st: TokenStore, bound: tuple | None) -> None:
-    """Delete this PC's pairing (its tokens), if it's still the one bound to `bound` (None: whatever is
-    there, for a pairing that can't be read)."""
+def forget(st: TokenStore, bound: tuple | None, seen: str | None = None) -> None:
+    """Delete this PC's pairing (its tokens), if it's still the one looked at, checked under the
+    store's lock: the one bound to `bound`, or, for a pairing that can't be read (`bound` None), the
+    very file that was inspected (`seen`: Profile.seen). A pairing made meanwhile is kept
+    (PairingChanged)."""
     with st.lock():
         if bound is not None:
             try:
                 rec = st.read()
-            except CloudError:
+            except Exception:   # noqa: BLE001 - it can't be read any more: nothing of another pairing's
                 rec = None
             if rec is not None and tuple(binding(rec)) != tuple(bound):
                 raise PairingChanged("this PC was paired again meanwhile; that pairing is kept")
+        elif st.path.exists() and _seen(st.path) != seen:
+            raise PairingChanged("this PC's pairing changed meanwhile (it was paired again, or repaired); "
+                                 "it's kept: run it again")
         st.delete()
 
 
@@ -1127,7 +1243,7 @@ def _unpair(prof: Profile, st: TokenStore, force: bool) -> None:
             print(f"Left on this PC only, never sent ({prof.home}):\n{_describe(left)}")
         print("The pairing couldn't be used, so Shotcast Cloud wasn't asked to remove this PC: remove it "
               "from the sims on the site.")
-        forget(st, None)
+        forget(st, None, prof.seen)
         return
     with ExitStack() as held:
         if not force:
@@ -1158,6 +1274,10 @@ def _unpair(prof: Profile, st: TokenStore, force: bool) -> None:
                 sys.exit(f"Not unpaired: {e}. Pass --force to forget the pairing here anyway (then remove this "
                          "PC from the sims on the site).")
             print(f"Shotcast Cloud didn't confirm removing this PC ({e}): remove it from the sims on the site.")
+        except Exception as e:   # noqa: BLE001 - whatever went wrong, a forced unpair still forgets it here
+            if not force:
+                raise
+            print(f"Shotcast Cloud wasn't asked to remove this PC ({e!r}): remove it from the sims on the site.")
         if left:
             print(f"Left on this PC only, never sent ({prof.home}):\n{_describe(left)}")
         forget(st, prof.bound)

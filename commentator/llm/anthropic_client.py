@@ -1,4 +1,5 @@
 import base64
+import os
 import time
 from typing import Any
 
@@ -40,8 +41,19 @@ class AnthropicClient(LLMClient):
         super().__init__(cfg)
         from anthropic import AsyncAnthropic
 
-        # Reads ANTHROPIC_API_KEY (or an `ant auth login` profile).
-        self._client = AsyncAnthropic(timeout=cfg.timeout_seconds, max_retries=1)
+        from .. import cloud
+
+        if cloud.startup is not None:
+            # Paired with Shotcast Cloud: only the profile's own key (its .env's), handed over as it
+            # is, never whatever else the SDK would find for this Windows user (an `ant auth login`
+            # profile on disk).
+            key = os.environ.get("ANTHROPIC_API_KEY")
+            if not key:
+                raise RuntimeError("ANTHROPIC_API_KEY is not set (in this PC's Shotcast Cloud profile: Settings, API keys)")
+            self._client = AsyncAnthropic(api_key=key, timeout=cfg.timeout_seconds, max_retries=1)
+        else:
+            # Reads ANTHROPIC_API_KEY (or an `ant auth login` profile).
+            self._client = AsyncAnthropic(timeout=cfg.timeout_seconds, max_retries=1)
         # How this model turns thinking off; None when it can't, so the lowest effort stands in.
         self._thinking_off: dict[str, str] | None = {"type": "disabled"}
 

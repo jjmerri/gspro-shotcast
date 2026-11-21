@@ -156,8 +156,8 @@ def _clock(monkeypatch):
     return now
 
 
-def test_uploads_failing_again_and_again_warn_the_tray_while_they_wait_and_clear_once_they_go(tmp_path, api,
-                                                                                            monkeypatch):
+def test_uploads_failing_again_and_again_turn_the_tray_red_while_they_wait_and_clear_once_they_go(tmp_path, api,
+                                                                                                 monkeypatch):
     import httpx
 
     monkeypatch.setattr(cloud_rounds, "CLOSER_SECONDS", 0.0)
@@ -173,7 +173,7 @@ def test_uploads_failing_again_and_again_warn_the_tray_while_they_wait_and_clear
     assert _health(cfg) == []   # (a failure or two isn't shown)
     _loop(cfg, 1, up)
     [(level, msg)] = _health(cfg)
-    assert level == "warn" and "retrying" in msg
+    assert level == "fail" and "retrying" in msg
     _loop(cfg, 1, up)   # (waiting for its retry: nothing tried, and still shown)
     assert _health(cfg) == [(level, msg)] and len(api.puts) == cloud_booth.FAILS_SHOWN
     now[0] += cloud_rounds.RETRY_MAX_S + 1
@@ -256,9 +256,10 @@ def test_paired_every_command_runs_in_the_profile_and_never_opens_the_self_hoste
     prof = paired(api)
     prof.env.write_text("OPENAI_API_KEY=profile-key\n", encoding="utf-8")
     opened = []
-    real_cfg, real_env = config.load_config, dotenv.load_env
+    real_cfg, real_env, real_profile = config.load_config, dotenv.load_env, cloud.load_profile_env
     monkeypatch.setattr(cli, "load_config", lambda p: opened.append(Path(p).resolve()) or real_cfg(p))
     monkeypatch.setattr(dotenv, "load_env", lambda p: opened.append(Path(p).resolve()) or real_env(p))
+    monkeypatch.setattr(cloud, "load_profile_env", lambda p: opened.append(Path(p).resolve()) or real_profile(p))
     monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     got = []
@@ -357,8 +358,8 @@ def test_the_paired_tray_has_no_stats_server_and_its_stats_opens_the_clouds_page
     assert t.cloud is not None and t._publish_command() is None
     t.start_stats()
     t.open_stats()
-    tray.open_running_stats(t.home)   # (a second Shotcast started meanwhile)
-    assert opened == [f"{API}/leagues/lg1/"] * 2
+    assert opened == [f"{API}/leagues/lg1/"] and not (t.home / "logs" / "stats-url.txt").exists()
+    del tray
 
 
 def test_the_paired_tray_with_no_cloud_stats_page_opens_nothing(api, monkeypatch):
@@ -367,8 +368,8 @@ def test_the_paired_tray_with_no_cloud_stats_page_opens_nothing(api, monkeypatch
     t, opened = _tray(api, monkeypatch, default=None)
     t.start_stats()
     t.open_stats()
-    tray.open_running_stats(t.home)
     assert t.stats_url is None and opened == []
+    del tray
 
 
 def test_the_paired_tray_offers_no_live_stream_and_keeps_its_mode_till_restarted(api, monkeypatch):
@@ -490,7 +491,7 @@ def test_paired_startup_drops_the_credentials_it_inherited(tmp_path, api, monkey
 
     _self_hosted_home(tmp_path, monkeypatch)
     prof = paired(api)
-    prof.env.write_text("ELEVENLABS_API_KEY=profile-key\n", encoding="utf-8")
+    prof.env.write_text("AZURE_SPEECH_KEY=profile-key\n", encoding="utf-8")
     monkeypatch.setenv("OPENAI_API_KEY", "inherited")
     monkeypatch.setenv("TYPESAFE_API_KEY", "inherited")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://elsewhere.test")
@@ -498,7 +499,7 @@ def test_paired_startup_drops_the_credentials_it_inherited(tmp_path, api, monkey
 
     def look(*a, **kw):
         seen.append({k: os.environ.get(k) for k in ("OPENAI_API_KEY", "TYPESAFE_API_KEY", "OPENAI_BASE_URL",
-                                                     "ELEVENLABS_API_KEY")})
+                                                     "AZURE_SPEECH_KEY")})
     monkeypatch.setattr(cli, "cmd_run", look)
     monkeypatch.setattr(cli, "_setup_logging", lambda *a, **kw: None)
     _run(monkeypatch, "run")
@@ -508,7 +509,7 @@ def test_paired_startup_drops_the_credentials_it_inherited(tmp_path, api, monkey
     monkeypatch.setattr(tray, "Tray", lambda *a, **kw: types.SimpleNamespace(run=look))
     _run(monkeypatch, "tray")
     want = {"OPENAI_API_KEY": None, "TYPESAFE_API_KEY": None, "OPENAI_BASE_URL": None,
-            "ELEVENLABS_API_KEY": "profile-key"}
+            "AZURE_SPEECH_KEY": "profile-key"}
     assert seen == [want, want]
 
 
@@ -581,3 +582,180 @@ def test_paired_the_release_self_test_runs_only_against_a_folder_it_is_given(tmp
     _run(monkeypatch, "tray", "--self-test", "--home", str(scratch))
     [(home, db)] = ran
     assert home.resolve() == scratch.resolve() and not Path(db).resolve().is_relative_to(cloud.root().resolve())
+
+
+# ---- review round 5 ----------------------------------------------------------------------------
+
+def test_drains_that_keep_failing_outright_turn_the_tray_red(tmp_path, api, monkeypatch):
+    cfg = paired_cfg(tmp_path, api)
+
+    def broken(*a, **kw):
+        raise OSError("the season file is busy")
+    monkeypatch.setattr(cloud_rounds, "drain", broken)
+    up = cloud_booth.Uploads(cfg, cloud.locate())
+    _loop(cfg, cloud_booth.FAILS_SHOWN - 1, up)
+    assert _health(cfg) == []
+    _loop(cfg, 1, up)
+    [(level, msg)] = _health(cfg)
+    assert level == "fail" and "aren't going up" in msg
+
+
+@pytest.mark.parametrize("argv", [["run"], ["tray"]])
+def test_an_unpair_that_finishes_as_shotcast_starts_starts_nothing(tmp_path, api, monkeypatch, argv):
+    from commentator import tray
+
+    _self_hosted_home(tmp_path, monkeypatch)
+    prof = paired(api)
+    ran, told = [], []
+    real = cloud.locate
+
+    def locate():
+        got = real()
+        cloud.store().delete()   # (an unpair finished between this look and the lifecycle lock)
+        return got
+    monkeypatch.setattr(cloud, "locate", locate)
+    monkeypatch.setattr(cli, "cmd_run", lambda cfg, args: ran.append("run"))
+    monkeypatch.setattr(cli, "_setup_logging", lambda *a, **kw: ran.append("logging"))
+    monkeypatch.setattr(tray, "single_instance", lambda: True)
+    monkeypatch.setattr(tray, "Tray", lambda *a, **kw: ran.append("tray"))
+    monkeypatch.setattr(tray, "fatal", told.append)
+    with pytest.raises(SystemExit, match="unpaired"):
+        _run(monkeypatch, *argv)
+    assert ran == [] and len(told) == (argv == ["tray"])
+    assert not list(prof.logs.glob("*.log")) and Path.cwd().resolve() != prof.home.resolve()
+
+
+def _booth_env(monkeypatch, tmp_path, expect):
+    ready = tmp_path / "ready" / "booth-ready"
+    ready.parent.mkdir(exist_ok=True)
+    monkeypatch.setenv("SHOTCAST_READY_FILE", str(ready))
+    monkeypatch.setenv(cloud.EXPECT_ENV, expect)
+    return ready
+
+
+def test_a_booth_the_paired_tray_restarts_after_an_unpair_never_runs_self_hosted_in_the_profile(tmp_path, api,
+                                                                                               monkeypatch):
+    from commentator.config import BOOTH_STOP_CODE, BOOTH_STOPPED
+
+    _self_hosted_home(tmp_path, monkeypatch)
+    t, _ = _tray(api, monkeypatch)
+    prof = t.cloud
+    started = []
+    t.booth._popen = lambda *a, **kw: started.append(kw) or types.SimpleNamespace(poll=lambda: None)
+    t.booth._spawn()
+    assert started[0]["env"][cloud.EXPECT_ENV] == cloud.expectation(prof) == json.dumps([API, "t1", "d1"])
+    ran = []
+    monkeypatch.setattr(cli, "cmd_run", lambda cfg, args: ran.append(Path.cwd()))
+    monkeypatch.setattr(cli, "_setup_logging", lambda *a, **kw: None)
+    ready = _booth_env(monkeypatch, tmp_path, started[0]["env"][cloud.EXPECT_ENV])
+    monkeypatch.chdir(prof.home)            # (as the tray starts it: in the profile)
+    _run(monkeypatch, "run")
+    assert len(ran) == 1                    # still paired as the tray was: it runs
+    cloud.main(["unpair", "--force"])
+    monkeypatch.chdir(prof.home)
+    with pytest.raises(SystemExit) as e:
+        _run(monkeypatch, "run")            # the tray's "Restart the booth", or its restart after a crash
+    assert e.value.code == BOOTH_STOP_CODE and len(ran) == 1
+    assert "start it again" in ready.with_name(BOOTH_STOPPED).read_text()
+
+
+def test_a_booth_the_self_hosted_tray_starts_after_a_pairing_waits_for_shotcast_to_restart(tmp_path, api,
+                                                                                          monkeypatch):
+    from commentator import tray
+    from commentator.config import BOOTH_STOP_CODE, load_config
+
+    home = _self_hosted_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(tray, "AutoPublisher", lambda *a, **kw: None)
+    t = tray.Tray(home, load_config(home / "config.yaml"))
+    assert t.booth._expect == {cloud.EXPECT_ENV: "self-hosted"} == {cloud.EXPECT_ENV: cloud.expectation(None)}
+    ran = []
+    monkeypatch.setattr(cli, "cmd_run", lambda cfg, args: ran.append(cfg.db_path))
+    monkeypatch.setattr(cli, "_setup_logging", lambda *a, **kw: None)
+    _booth_env(monkeypatch, tmp_path, "self-hosted")
+    _run(monkeypatch, "run")
+    assert ran == ["logs/season.db"]        # unpaired, as its tray: exactly as before
+    paired(api)
+    monkeypatch.chdir(home)
+    with pytest.raises(SystemExit) as e:
+        _run(monkeypatch, "run")
+    assert e.value.code == BOOTH_STOP_CODE and len(ran) == 1
+    monkeypatch.delenv(cloud.EXPECT_ENV)    # (started by hand, or by a restarted Shotcast: paired)
+    _run(monkeypatch, "run")
+    assert len(ran) == 2 and Path(ran[1]).is_relative_to(cloud.root())
+
+
+def test_an_update_from_the_paired_tray_restarts_shotcast_in_the_self_hosted_folder(tmp_path, api, monkeypatch):
+    from commentator import backup, tray, updater
+
+    t, _ = _tray(api, monkeypatch)
+    calls = []
+    monkeypatch.setattr(backup, "pre_update", lambda cfg, version: None)
+    monkeypatch.setattr(updater, "install", lambda installer, version, home=None: calls.append(home))
+    monkeypatch.setattr(tray, "default_home", lambda: tmp_path / "default")
+    t.launch_home = tmp_path / "custom"
+    t._install("9.9.9", t.home / "updates" / "Shotcast-Setup-9.9.9.exe")
+    t.launch_home = tmp_path / "default"
+    t._install("9.9.9", t.home / "updates" / "Shotcast-Setup-9.9.9.exe")
+    assert calls == [(tmp_path / "custom").resolve(), None]   # (never the cloud profile)
+
+
+@pytest.mark.parametrize("default, opens", [("lg1", [f"{API}/leagues/lg1/"]), (None, [])])
+def test_a_second_launch_while_paired_opens_the_pairings_own_stats_page_or_nothing(tmp_path, api, monkeypatch,
+                                                                                  default, opens):
+    from commentator import tray
+
+    home = _self_hosted_home(tmp_path, monkeypatch)
+    (home / "logs").mkdir()
+    (home / "logs" / "stats-url.txt").write_text("http://self-hosted.test/", encoding="utf-8")
+    api.default = default
+    prof = paired(api)
+    (prof.logs / "stats-url.txt").write_text("http://stale.test/", encoding="utf-8")
+    opened, ran = [], []
+    monkeypatch.setattr(tray.webbrowser, "open", opened.append)
+    monkeypatch.setattr(tray, "single_instance", lambda: False)
+    monkeypatch.setattr(tray, "Tray", lambda *a, **kw: ran.append("tray"))
+    monkeypatch.setattr(cli, "_setup_logging", lambda *a, **kw: ran.append("logging"))
+    _run(monkeypatch, "tray")
+    assert opened == opens and ran == []
+
+
+def test_paired_commentary_uses_only_the_profiles_anthropic_key(api, monkeypatch):
+    import importlib
+
+    from commentator.config import LLMConfig
+
+    made = []
+    fake = types.ModuleType("anthropic")
+    fake.BadRequestError = type("BadRequestError", (Exception,), {})
+    fake.AsyncAnthropic = lambda **kw: made.append(kw) or object()
+    monkeypatch.setitem(sys.modules, "anthropic", fake)
+    monkeypatch.delitem(sys.modules, "commentator.llm.anthropic_client", raising=False)
+    client = importlib.import_module("commentator.llm.anthropic_client")
+    try:
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        client.AnthropicClient(LLMConfig())
+        assert "api_key" not in made[-1]    # unpaired: the SDK finds the key itself, as before
+        monkeypatch.setattr(cloud, "startup", paired(api))
+        with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY is not set"):
+            client.AnthropicClient(LLMConfig())   # (never the SDK's own search: a login on disk)
+        assert len(made) == 1
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "profile-key")
+        client.AnthropicClient(LLMConfig())
+        assert made[-1]["api_key"] == "profile-key"
+    finally:
+        sys.modules.pop("commentator.llm.anthropic_client", None)
+
+
+def test_a_self_hosted_env_put_in_the_profile_gives_the_paired_booth_only_its_ai_keys(tmp_path, api, monkeypatch):
+    _self_hosted_home(tmp_path, monkeypatch)
+    prof = paired(api)
+    prof.env.write_text("OPENAI_API_KEY=profile-key\nAWS_ACCESS_KEY_ID=AKIA\nSQUABBIT_PASSWORD=p\n"
+                        "OBS_WEBSOCKET_PASSWORD=o\n", encoding="utf-8")
+    seen = []
+    monkeypatch.setattr(cli, "cmd_run", lambda cfg, args: seen.append(
+        {k: os.environ.get(k) for k in ("OPENAI_API_KEY", "AWS_ACCESS_KEY_ID", "SQUABBIT_PASSWORD",
+                                        "OBS_WEBSOCKET_PASSWORD")}))
+    monkeypatch.setattr(cli, "_setup_logging", lambda *a, **kw: None)
+    _run(monkeypatch, "run")
+    assert seen == [{"OPENAI_API_KEY": "profile-key", "AWS_ACCESS_KEY_ID": None, "SQUABBIT_PASSWORD": None,
+                     "OBS_WEBSOCKET_PASSWORD": None}]

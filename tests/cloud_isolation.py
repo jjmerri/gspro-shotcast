@@ -6,5 +6,5 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _own_cloud_root(tmp_path_factory, monkeypatch):
-    monkeypatch.setenv("SHOTCAST_CLOUD_DIR", str(tmp_path_factory.mktemp("shotcast-cloud")))
+    monkeypatch.setattr("commentator.cloud.TEST_ROOT", tmp_path_factory.mktemp("shotcast-cloud"))
     monkeypatch.setattr("commentator.cloud.startup", None)

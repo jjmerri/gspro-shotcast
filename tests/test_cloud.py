@@ -159,8 +159,9 @@ def paired_cfg(tmp_path, api, url=API):
 # ---- where the pairing and the profile are ---------------------------------------------------
 
 def test_the_pairing_is_the_machines_at_a_fixed_place_no_config_moves(tmp_path, monkeypatch):
-    assert cloud.root() == Path(os.environ[cloud.ROOT_ENV])   # (tests.cloud_isolation: each test its own)
-    monkeypatch.delenv(cloud.ROOT_ENV)
+    assert cloud.root() == cloud.TEST_ROOT   # (tests.cloud_isolation: each test its own)
+    monkeypatch.setattr(cloud, "TEST_ROOT", None)
+    monkeypatch.setenv("SHOTCAST_CLOUD_DIR", str(tmp_path / "elsewhere"))   # (nothing in the environment moves it)
     monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))      # (a roaming profile: never there)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
     for platform, want in (("win32", tmp_path / "Local" / "Shotcast" / "cloud"),
@@ -242,10 +243,10 @@ def test_a_request_only_goes_to_the_address_the_tokens_were_issued_for(api, monk
     assert evil.calls == [] and len(api.calls) == before
 
 
-def _forge(rec, bind, machine=None):
+def _forge(rec, bind, machine=None, tokens=None):
     """A marker with `rec` in the clear and `bind` protected (as TokenStore.write, by hand)."""
-    secret = {"tokens": {"refresh_token": "r0", "access_token": "a0", "access_exp": 0}, "bind": bind,
-              "machine": machine or cloud.machine_id()}
+    secret = {"tokens": {"refresh_token": "r0", "access_token": "a0", "access_exp": 0} if tokens is None else tokens,
+              "bind": bind, "machine": machine or cloud.machine_id()}
     cloud.marker().write_text(json.dumps({k: v for k, v in rec.items() if k != "secret"}
                                          | {"secret": cloud.protect(json.dumps(secret).encode())}))
 
@@ -750,3 +751,181 @@ def test_paired_startup_drops_the_service_keys_it_inherited(monkeypatch):
     gone = cloud.clean_env()
     assert set(gone) >= {"OPENAI_API_KEY", "OPENAI_BASE_URL", "TYPESAFE_API_KEY", "AWS_PROFILE", "NTFY_TOPIC"}
     assert not any(k in os.environ for k in gone) and os.environ["SHOTCAST_X"] == "kept"
+
+
+# ---- review round 5 ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("tokens", [{"refresh_token": "r0", "access_token": "a0"},
+                                    {"refresh_token": "r0", "access_token": "a0", "access_exp": "soon"},
+                                    {"refresh_token": "", "access_token": "a0", "access_exp": 0},
+                                    {"access_token": "a0", "access_exp": 0}, ["r0", "a0", 0]])
+def test_a_marker_whose_tokens_arent_whole_is_damage_at_startup_and_can_be_forcibly_unpaired(api, monkeypatch,
+                                                                                             capsys, tokens):
+    _pair_cli(api, monkeypatch)
+    rec = json.loads(cloud.marker().read_text())
+    _forge(rec, [API, "t1", "d1"], tokens=tokens)
+    with pytest.raises(cloud.Damaged, match="pass can't be read"):
+        cloud.locate()
+    with pytest.raises(cloud.CloudError, match="pair this PC again"):   # (never a KeyError further on)
+        cloud.Cloud(cloud.store())
+    cloud.main(["status"])
+    cloud.main(["unpair", "--force"])
+    assert not cloud.marker().exists()
+
+
+def test_a_forced_unpair_forgets_the_pairing_whatever_goes_wrong_asking_the_cloud(api, monkeypatch, capsys):
+    _pair_cli(api, monkeypatch)
+
+    def broken(*a, **kw):
+        raise KeyError("access_exp")
+    monkeypatch.setattr(cloud, "Cloud", broken)
+    with pytest.raises(KeyError):
+        cloud.main(["unpair"])
+    assert cloud.marker().exists()
+    cloud.main(["unpair", "--force"])
+    assert "remove it from the sims on the site" in capsys.readouterr().out and not cloud.marker().exists()
+
+
+def test_the_booth_checks_its_pairing_again_once_it_holds_the_lifecycle_lock(api, monkeypatch):
+    prof = _pair_cli(api, monkeypatch)
+    with cloud.running(prof, "run") as now:
+        assert now.bound == prof.bound and now.home == prof.home
+    cloud.main(["unpair"])   # (finished between the booth's first look and its taking the lock)
+    with pytest.raises(cloud.PairingChanged, match="unpaired"):
+        with cloud.running(prof, "run"):
+            pytest.fail("ran in a profile that was unpaired")
+    api2 = FakeAPI()
+    api2.device = "d2"
+    mock_http(monkeypatch, api2)
+    _PAIR(cloud.store(), API, "Sim PC", sleep=lambda s: None, say=lambda s: None,   # (and paired again meanwhile)
+          prepare=lambda rec: cloud.make_profile(cloud.folder_key(rec), rec))
+    again = cloud.locate()
+    assert again.bound != prof.bound
+    with pytest.raises(cloud.PairingChanged, match="changed"):
+        with cloud.running(prof, "tray"):
+            pytest.fail("ran in another pairing's place")
+    again.db.unlink()
+    with pytest.raises(cloud.Damaged):
+        with cloud.running(again, "run"):
+            pytest.fail("ran damaged")
+
+
+@pytest.mark.parametrize("damage", ["no-shots-table", "a-damaged-page"])
+def test_startup_checks_the_whole_season_file_not_only_its_binding(api, damage):
+    import sqlite3
+
+    prof = paired(api)
+    con = sqlite3.connect(prof.db)
+    size = con.execute("PRAGMA page_size").fetchone()[0]
+    page = con.execute("SELECT rootpage FROM sqlite_master WHERE name = 'shots'").fetchone()[0]
+    if damage == "no-shots-table":
+        con.execute("DROP TABLE shots")
+        con.commit()
+    con.close()
+    if damage == "a-damaged-page":
+        data = bytearray(prof.db.read_bytes())
+        data[(page - 1) * size:page * size] = b"\xff" * size
+        prof.db.write_bytes(bytes(data))
+    assert cloud._db_binding is not None
+    with pytest.raises(cloud.Damaged, match="season file"):
+        cloud.locate()
+    assert cloud.inspect().damage and cloud.locate.__doc__
+
+
+def test_recovering_a_damaged_pairing_never_deletes_one_made_meanwhile(api, monkeypatch, capsys):
+    _pair_cli(api, monkeypatch)
+    good = cloud.marker().read_text()
+    cloud.marker().write_text("{damaged")
+    prof = cloud.inspect()
+    assert prof.damage and prof.seen
+    cloud.marker().write_text(good)   # (another process repaired it, or paired again, meanwhile)
+    with pytest.raises(cloud.PairingChanged, match="kept"):
+        cloud._unpair(prof, cloud.store(), force=True)
+    assert cloud.marker().read_text() == good and cloud.locate() is not None
+    cloud.marker().write_text("{damaged")
+    cloud._unpair(cloud.inspect(), cloud.store(), force=True)   # (the one looked at: forgotten)
+    assert not cloud.marker().exists()
+
+
+def test_a_machine_with_no_id_of_its_own_gets_one_made_once_and_kept(monkeypatch):
+    import uuid
+
+    monkeypatch.setattr(cloud, "_platform_id", lambda: "")
+    nodes = iter(range(1, 100))
+    monkeypatch.setattr(uuid, "getnode", lambda: next(nodes))   # (a network card's address isn't stable)
+    first = cloud.machine_id()
+    kept = (cloud.root() / cloud.INSTALL_ID).read_text()
+    assert len(kept) == 32 and cloud.machine_id() == first and (cloud.root() / cloud.INSTALL_ID).read_text() == kept
+    (cloud.root() / cloud.INSTALL_ID).write_text("not an id")
+    with pytest.raises(cloud.CloudError, match="can't be told"):
+        cloud.machine_id()
+    (cloud.root() / cloud.INSTALL_ID).unlink()
+    assert cloud.machine_id() != first   # (another install: a pairing copied to it is damage, not adopted)
+    monkeypatch.setattr(cloud, "_platform_id", lambda: "the-os-id")
+    assert cloud.machine_id() == cloud.machine_id() != first
+
+
+def test_a_pairing_on_a_machine_with_no_id_of_its_own_still_starts_next_time(api, monkeypatch):
+    monkeypatch.setattr(cloud, "_platform_id", lambda: "")
+    prof = paired(api)
+    assert cloud.locate().home == prof.home
+
+
+def test_a_stale_certificate_file_or_proxy_in_the_environment_doesnt_reach_the_api_client(monkeypatch, tmp_path):
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "gone.pem"))
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(tmp_path / "gone.pem"))
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.test:3128")
+    made = []
+
+    def client(*a, **kw):
+        made.append(kw)
+        return _CLIENT(*a, **kw)
+    monkeypatch.setattr(httpx, "Client", client)
+    http = cloud._http(API)
+    assert made[0]["trust_env"] is False and http.trust_env is False and not made[0].get("follow_redirects")
+
+
+def test_no_api_client_at_all_is_the_network_failing_and_recovery_still_works(api, monkeypatch, capsys):
+    _pair_cli(api, monkeypatch)
+
+    def broken(*a, **kw):
+        raise FileNotFoundError(2, "No such file or directory")   # (as a stale SSL_CERT_FILE made it)
+    monkeypatch.setattr(httpx, "Client", broken)
+    with pytest.raises(cloud.Unreachable, match="couldn't reach"):
+        cloud.Cloud(cloud.store())
+    capsys.readouterr()
+    cloud.main(["status"])
+    assert "didn't answer" in capsys.readouterr().out
+    with pytest.raises(SystemExit, match="Not unpaired"):
+        cloud.main(["unpair"])
+    cloud.main(["unpair", "--force"])
+    assert not cloud.marker().exists()
+
+
+def test_on_windows_only_a_dpapi_protected_pass_is_read(monkeypatch):
+    plain = cloud.protect(b"{}")
+    assert plain.startswith("plain:") and cloud.unprotect(plain) == b"{}"
+    monkeypatch.setattr(cloud.sys, "platform", "win32")
+    with pytest.raises(cloud.CloudError, match="can't be read here"):
+        cloud.unprotect(plain)
+    monkeypatch.setattr(cloud, "_dpapi", lambda data, protect: b"opened:" + data)
+    assert cloud.unprotect("dpapi:" + "eA==") == b"opened:x"
+
+
+def test_a_paired_profiles_env_gives_only_the_ai_and_voice_keys(api, monkeypatch):
+    prof = paired(api)
+    prof.env.write_text("OPENAI_API_KEY=mine\nAWS_ACCESS_KEY_ID=AKIA\nAWS_SECRET_ACCESS_KEY=s\nNTFY_TOPIC=t\n"
+                        "OPENAI_BASE_URL=https://elsewhere.test\n", encoding="utf-8")
+    for k in ("OPENAI_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "NTFY_TOPIC", "OPENAI_BASE_URL"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "x")   # (so monkeypatch puts it back)
+    assert cloud.load_profile_env(prof.env) == ["OPENAI_API_KEY"]
+    assert os.environ["OPENAI_API_KEY"] == "mine"
+    assert not any(k in os.environ for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "NTFY_TOPIC",
+                                             "OPENAI_BASE_URL"))
+
+
+def test_a_check_of_an_address_that_doesnt_parse_is_a_cloud_error():
+    for bad in ("https://[cloud.test", "https://cloud.test:x", 7):
+        with pytest.raises(cloud.CloudError):
+            cloud.check_api(bad)

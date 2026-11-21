@@ -22,7 +22,7 @@ from collections import deque
 from pathlib import Path
 
 from . import changelog
-from .cloud import booth_config, web_stats_url
+from .cloud import EXPECT_ENV, booth_config, expectation, web_stats_url
 from .config import BOOTH_NOTE, BOOTH_STOP_CODE, BOOTH_STOPPED, ROUND_STATUS, ROUND_STATUS_EVERY_S
 from .settings_files import env_value, set_commentary, set_env, set_yaml
 
@@ -282,8 +282,7 @@ def open_running_stats(home: Path) -> None:
         url = (home / "logs" / "stats-url.txt").read_text(encoding="utf-8").strip()
     except OSError:
         url = f"http://127.0.0.1:{STATS_PORT}/"
-    if url:   # (none: paired with Shotcast Cloud, with no stats page there)
-        webbrowser.open(url)
+    webbrowser.open(url)
 
 
 def open_file(path: Path) -> None:
@@ -307,8 +306,12 @@ class Booth:
     """Runs `commentator run` in the home folder and restarts it if it dies, up to RESTARTS times in
     RESTART_WINDOW_S (then it waits for Restart in the menu, so a broken setup doesn't spin)."""
 
-    def __init__(self, home: Path, on_change=None, popen=subprocess.Popen, clock=time.monotonic) -> None:
+    def __init__(self, home: Path, on_change=None, popen=subprocess.Popen, clock=time.monotonic,
+                 expect: str | None = None) -> None:
         self.home, self.on_change, self._popen, self._clock = home, on_change or (lambda: None), popen, clock
+        # The pairing its tray started in (cloud.expectation), told to every booth it starts: one
+        # started after this PC was paired or unpaired stops, saying so, rather than run in the other mode.
+        self._expect = {} if expect is None else {EXPECT_ENV: expect}
         self.proc = None
         self.crashes: deque[float] = deque()
         self.state = "starting"   # starting / running / stopped / crashed / other
@@ -343,7 +346,7 @@ class Booth:
                 self.proc = self._popen([python_exe(), "-m", "commentator", "run"], cwd=self.home,
                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
                                         env={**os.environ, "SHOTCAST_FILE_LOG_ONLY": "1",
-                                             "SHOTCAST_READY_FILE": str(self.ready_file)},
+                                             "SHOTCAST_READY_FILE": str(self.ready_file), **self._expect},
                                         creationflags=NO_WINDOW)
             finally:
                 err.close()   # the child has its own handle
@@ -510,7 +513,7 @@ class Tray:
         self.launch_home = launch_home
         self.home, self.cfg, self.first_run = home, booth_config(cfg, paired), first_run
         self.version = current_version()
-        self.booth = Booth(home, on_change=self._refresh)
+        self.booth = Booth(home, on_change=self._refresh, expect=expectation(paired))
         self.stats_url: str | None = None
         self.update = None            # a downloaded, checked updater.Release and its file
         self.checked_at = None        # when GitHub last said this is the latest
@@ -936,8 +939,10 @@ class Tray:
             log.info("Season backup before the update: %s", path.name if path else "no database yet")
         except Exception:
             log.exception("Season backup before the update failed (updating anyway: it doesn't touch the season)")
-        custom = self.home.resolve() != default_home().resolve()
-        updater.install(installer, version, self.home.resolve() if custom else None)
+        # The folder Shotcast starts in again: paired, the self-hosted one it was started for, never
+        # the cloud profile (which would then be taken for the self-hosted home once unpaired).
+        home = (getattr(self, "launch_home", None) or self.home).resolve()
+        updater.install(installer, version, home if home != default_home().resolve() else None)
 
     def install_at_start(self) -> bool:
         """As Shotcast starts, before the booth: an update downloaded earlier installs now, unless
@@ -1212,8 +1217,6 @@ class Tray:
 
         if self.cloud is not None:   # no stats page here: the cloud's, if any (open_stats)
             self.stats_url = web_stats_url(self.cloud)
-            (self.home / "logs").mkdir(exist_ok=True)
-            (self.home / "logs" / "stats-url.txt").write_text(self.stats_url or "", encoding="utf-8")
             return
         db = Path(self.cfg.db_path)
         if not db.exists():
