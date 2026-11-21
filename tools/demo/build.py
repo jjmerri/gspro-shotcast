@@ -25,7 +25,7 @@ A build from --db keeps its redacted copy of the season, and --upload stores it 
 site's code changes without the real database. It skips the recap (which costs model and TTS calls);
 the last one uploaded stays.
 
-The stack, once (and again with DomainName/CertificateArn once demo.thegolfshed.app's certificate is
+The stack, once (and again with DomainName/CertificateArn once demo.shotcastgolf.com's certificate is
 issued; DNS is on Cloudflare: a CNAME from demo to the DistributionDomain output):
 
     aws cloudformation deploy --stack-name shotcast-demo --template-file tools/demo/demo-site.yaml \\

@@ -1,6 +1,6 @@
 name: demo
 
-# Rebuilds the public demo (demo.thegolfshed.app) from the redacted season stored in its bucket, so the
+# Rebuilds the public demo (demo.shotcastgolf.com) from the redacted season stored in its bucket, so the
 # demo keeps up with the stats site. Skips the week recap (model and TTS calls); the last one stays.
 # The role is the shotcast-demo stack's DeployRole (tools/demo/demo-site.yaml), assumable from main only.
 on:

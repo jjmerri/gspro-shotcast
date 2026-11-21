@@ -8,7 +8,7 @@ Parameters:
   DomainName:
     Type: String
     Default: ""
-    Description: The demo's own name (demo.thegolfshed.app), or empty for the cloudfront.net address only
+    Description: The demo's own name (demo.shotcastgolf.com), or empty for the cloudfront.net address only
   CertificateArn:
     Type: String
     Default: ""
