@@ -35,7 +35,8 @@ code, run it from a clone:
    compares the options.
 
 Your `config.yaml`, `.env`, `data/league.json` and `logs/` are gitignored, so `git pull` updates
-the code without touching your league or settings. See [DEPLOY.md](../DEPLOY.md) for running on
+the code without touching your league or settings. When a pull changes `pyproject.toml` (new
+packages, or the shared `scoring/` package it now ships), run the `pip install -e` line again. An editable install points at one checkout's code, so if you keep several checkouts, give each its own venv or rerun `pip install -e .` after switching. See [DEPLOY.md](../DEPLOY.md) for running on
 the sim PC.
 
 ## Bring-up, one step at a time

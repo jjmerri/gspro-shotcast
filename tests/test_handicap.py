@@ -1,6 +1,8 @@
 import copy
 import json
 
+import pytest
+
 from commentator import handicap as H
 from commentator.league import League
 from commentator.round import Round
@@ -54,12 +56,6 @@ def test_one_ball_sums_unrounded_shares_lowest_first():
     assert H.strokes_for(card, [22.2, 9.8], list(range(10, 19)), True) == 3
 
 
-def test_strokes_go_hardest_first_and_plus_handicaps_give_back():
-    assert H.allocate(3, [11, 13, 17, 10]) == {11: 1, 13: 1, 17: 1, 10: 0}
-    assert H.allocate(-1, [11, 13, 17, 10]) == {11: 0, 13: 0, 17: 0, 10: -1}
-    assert H.round_half_up(4.5) == 5 and H.round_half_up(-0.5) == -1
-
-
 def test_validate_recomputes_team_nets():
     t = tournament("BestBall", {"handicapPercentageForAll": 75.0})
     a = player("a", 12.0, [5, 6, 4, 5, 4, 3, 5, 6, 4])     # 12 -> 6 over nine -> 75% = 4.5 -> 5 strokes
@@ -76,6 +72,28 @@ def test_validate_recomputes_team_nets():
     card = H.week_card(t, ROUND)
     assert squabbit_holes(t, [a, b], card, League(LEAGUE_DATA)) == \
         {"Aces": {10: 0, 11: -1, 12: 0, 13: 0, 14: 0, 15: 0, 16: 0, 17: 0, 18: 0}}
+
+
+def test_a_squabbit_format_it_doesnt_know_is_scored_as_a_sum():
+    card = H.week_card(tournament("BestBall", {"handicapPercentageForAll": 75.0}), ROUND)
+    a = player("a", 12.0, [5, 6, 4, 5, 4, 3, 5, 6, 4])
+    b = player("b", 2.0, [4, 5, 3, 4, 4, 3, 4, 5, 4])
+    assert H.team_net(card, [a, b], "best_ball") == H.team_net(card, [a, b], "TeamSum") != \
+        H.team_net(card, [a, b], "BestBall")
+
+
+def test_squabbit_bools_count_as_numbers_and_a_card_without_handicap_or_tee_is_a_key_error():
+    card = H.week_card(tournament("TeamSum", {}, where="round", max_index=None), ROUND)
+    as_bool = player("a", True, [True, 5, 3, 4, 4, 3, 4, 5, 4])
+    as_int = player("a", 1, [1, 5, 3, 4, 4, 3, 4, 5, 4])
+    assert H.team_holes(card, [as_bool], "TeamSum") == H.team_holes(card, [as_int], "TeamSum")
+    no_tee = {k: v for k, v in as_int.items() if k != "tee"}   # plays the card's
+    for key in ("handicap", "tee"):
+        with pytest.raises(KeyError):
+            H.team_holes({k: v for k, v in card.items() if k != key}, [no_tee], "TeamSum")
+    # A player's own tee stands in for the card's.
+    assert H.team_holes({k: v for k, v in card.items() if k != "tee"}, [as_int], "TeamSum") == \
+        H.team_holes(card, [no_tee], "TeamSum")
 
 
 def test_net_max_hole_score_caps_a_blow_up():

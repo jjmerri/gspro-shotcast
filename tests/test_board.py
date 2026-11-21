@@ -1,7 +1,7 @@
 import random
 
 from commentator import handicap as H
-from commentator.board import Board, Entry, place, place_points
+from commentator.board import Board, Entry
 from commentator.config import Config
 from commentator.engine import Engine, _distance_text
 from commentator.hud import Hud, Scorecard
@@ -35,13 +35,6 @@ def week(n, entries):
         {"entityId": tid, "entityName": name, "total": None if net is None else float(net)}
         for tid, _, name, net in entries]}}}
     return t, lb
-
-
-def test_places_ties_and_points():
-    assert place(-3, [-5, -3, -3, 0]) == (2, True)
-    assert place(-5, [-5, -3, -3, 0]) == (1, False)
-    # A tie splits the places it covers; places past the table score nothing.
-    assert place_points(1, 2, POINTS) == 65.0 and place_points(3, 2, POINTS) == 25.0
 
 
 def test_board_maps_teams_by_squabbit_ids_and_counts_only_final_weeks():

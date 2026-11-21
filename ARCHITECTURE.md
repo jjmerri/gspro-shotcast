@@ -149,13 +149,24 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
   tee shot conceded farther out than `squabbit.ctp_sure_gimme_feet` (on the green or the fringe?), and
   a lifted scramble ball. What the booth wrote, and the players' answers, are kept in
   `squabbit_live.json`, next to the season db.
-- **`handicap.py`** Squabbit's handicap rules (course handicap, allowances, caps, stroke
-  allocation), the week card built from a Squabbit tournament, and the season validation that
-  recomputes leaderboard nets. `round.py` uses it, with the week card when one is saved.
-- **`board.py`** the week's posted results and the season standings from Squabbit's leaderboards
-  (places from the nets, tied places splitting their points), read with the handicaps at round
-  start. The engine's week facts: the week so far, standings, the closer's projected place, the
-  net stakes late in a round, and the week's closest to the pin (`Store.week_ctp`).
+- **`handicap.py`** the Squabbit side of the handicap rules: the week card built from a Squabbit
+  tournament (its allowances, max index and max hole score), a team's net scored from its players'
+  Squabbit rounds, and the season validation that recomputes leaderboard nets. The rules themselves
+  (course handicap, strokes, stroke allocation, caps, a team's net per hole by format) are
+  `shotcast_scoring.handicap`'s (below), re-exported here. `round.py` uses them, with the week card
+  when one is saved.
+- **`board.py`** the week's posted results and the season standings from Squabbit's leaderboards,
+  read with the handicaps at round start: `Board.from_squabbit` and the Squabbit team matching. The
+  places, points and standings (places from the nets, tied places splitting their points) are
+  `shotcast_scoring.board`'s `Board`, which this one extends; its names are re-exported here. (The
+  package's Board also does flights; this league has none, so it's one field.) The engine's week
+  facts: the week so far, standings, the closer's projected place, the net stakes late in a round,
+  and the week's closest to the pin (`Store.week_ctp`).
+- **`scoring/`** (`shotcast_scoring`, its own package): the pure league scoring rules, shared with
+  Shotcast Cloud, which installs it from a tag (`...#subdirectory=scoring`). Plain data in and out:
+  no I/O, no app imports, no third-party dependencies. The app ships it in its own install
+  (pyproject.toml's package discovery). A rule change needs a version bump and a tag; see
+  `scoring/README.md`.
 - **`news.py`** fetches real golf headlines (RSS/Atom) for between-shots banter, because the
   model's own news is stale. Teasers with no facts in them are skipped. At the second hole played
   of each nine the engine has the closer's model write and voice that nine's two-line asides (news,
@@ -273,7 +284,8 @@ These were each the cause of a real bug. Preserve them.
 `tests/` (400, run with `pytest`; CI in `.github/workflows/tests.yml`): `test_core.py` (engine,
 HUD, round file wait, OCR cache),
 `test_round.py` (rounds, formats, handicaps, setup watcher), `test_handicap.py` (Squabbit's
-handicap rules and week cards), `test_board.py` (week results, standings, net and CTP facts), `test_gspro_log.py` (the log
+handicap rules and week cards), `test_board.py` (week results, standings, net and CTP facts),
+`scoring/tests/` (the shared scoring package's own; `pytest` collects them too), `test_gspro_log.py` (the log
 reader), `test_model_switch.py`, `test_connector.py`, `test_replay.py`, `test_minimap.py`,
 `test_putt_read.py`, `test_gspro_log_shots.py`, `test_hole_replay.py`. They cover logic, not
 real GSPro/Uneekor traffic or live screen layouts. `tools/` holds the offline harnesses, an OCR

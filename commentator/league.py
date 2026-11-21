@@ -243,6 +243,22 @@ class League:
             text = re.sub(rf"\b{re.escape(word)}(?=(?:e?s)?\b)", say, text)
         return text
 
+    # With team_players, team_name and week_entry, what a shotcast_scoring Board reads of its league
+    # (LeagueView). This league has no flights: every team plays in one field.
+    @property
+    def flights(self) -> dict[str, tuple[str, str]]:
+        """The teams' flights (none)."""
+        return {}
+
+    def flight(self, team: str | None) -> tuple[str, str] | None:
+        """`team`'s flight (id, name): None, this league has no flights."""
+        return None
+
+    @property
+    def schedule(self) -> list[dict[str, Any]]:
+        """The season's weeks (the league file's `schedule`)."""
+        return self.data.get("schedule") or []
+
     def week_entry(self, week: int) -> dict[str, Any] | None:
         return next((e for e in self.data.get("schedule") or [] if e.get("week") == week), None)
 

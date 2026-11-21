@@ -1,64 +1,26 @@
 """Handicap strokes the way the league's Squabbit computes them, and the season check that proves it.
 
-Squabbit is the source of truth for net scores. These rules reproduce every 2025 team result on its
-leaderboards (`python -m commentator squabbit --validate`):
-
-- Each format's handicap settings say whether to use a USGA course handicap. Aggregate does:
-  index x slope/113 + (rating - par), scaled to the holes played (a 9-hole round uses half the
-  index and half the rating, against the par of the nine). The others use the bare index scaled to
-  the holes played. The index is capped at the format's max handicap (54 for aggregate).
-- Then the format's percentage: one per player (best ball 75%, aggregate 100%), or for one-ball
-  formats a percentage per teammate, lowest handicap first (25% + 20%), summed before rounding.
-- Strokes go to the played holes in stroke-index order (the tee's own index), the hardest first.
-  A plus handicap gives strokes back on the easiest holes.
+The rules themselves (strokes, their allocation, the max hole score, a team's net per hole) are
+shotcast_scoring.handicap's, shared with Shotcast Cloud (scoring/; re-exported here). This is the
+Squabbit side: its week card (week_card), its format settings (allowances), its players' rounds scored
+the way its leaderboard does (team_holes, team_net) and the season check (validate_season:
+`python -m commentator squabbit --validate`, which these rules pass for every 2025 team result).
 """
 
 from __future__ import annotations
 
-import math
 import re
 from typing import Any
 
+from shotcast_scoring import handicap as rules
+from shotcast_scoring.handicap import allocate, course_handicap, hole_cap, round_half_up, side_strokes, strokes_for
+
+__all__ = ["FORMAT_KEYS", "TEAM_BALL_TYPES", "allocate", "allowances", "course_handicap", "handicap_settings",
+           "hole_cap", "round_half_up", "side_strokes", "strokes_for", "team_holes", "team_net", "validate_season",
+           "week_card"]
+
 TEAM_BALL_TYPES = ("Scramble", "AlternateShot")
 FORMAT_KEYS = {"Scramble": "scramble", "AlternateShot": "alternate", "BestBall": "best_ball", "TeamSum": "aggregate"}
-
-
-def round_half_up(x: float) -> int:
-    """Handicaps round .5 away from zero (Python's round() would take 2.5 to 2)."""
-    return math.floor(x + 0.5) if x >= 0 else -math.floor(-x + 0.5)
-
-
-def course_handicap(index: float, holes: int, *, use_course: bool = False, rating: float | None = None,
-                    slope: float | None = None, par: int | None = None, max_index: float | None = None) -> float:
-    """Unrounded handicap for `holes` holes. `par` is the par of just the holes played."""
-    if max_index is not None:
-        index = min(index, max_index)
-    share = holes / 18
-    if use_course and rating is not None and slope and par is not None:
-        return index * share * slope / 113 + (rating * share - par)
-    return index * share
-
-
-def side_strokes(handicaps: list[float], allowances: list[float], team_ball: bool) -> int:
-    """A side's strokes from its players' unrounded handicaps. One ball: lowest handicap takes the
-    first allowance, the next the second, summed then rounded. Otherwise the side is one player."""
-    if team_ball:
-        return round_half_up(sum(h * a for h, a in zip(sorted(handicaps), allowances)))
-    return round_half_up(handicaps[0] * allowances[0])
-
-
-def allocate(strokes: int, order: list[int]) -> dict[int, int]:
-    """Strokes per hole, `order` listing the holes hardest first. A plus handicap (negative strokes)
-    gives them back from the easiest hole up."""
-    out = {h: 0 for h in order}
-    if not order:
-        return out
-    for i in range(abs(strokes)):
-        if strokes > 0:
-            out[order[i % len(order)]] += 1
-        else:
-            out[order[-1 - i % len(order)]] -= 1
-    return out
 
 
 def allowances(settings: dict[str, Any] | None) -> list[float] | None:
@@ -132,35 +94,6 @@ def week_card(tournament: dict[str, Any], tournament_round: dict[str, Any]) -> d
     }
 
 
-def hole_cap(card: dict[str, Any], par: int, strokes: int) -> int | None:
-    """The most a hole can count for, gross, under the format's max hole score (e.g. net par + 4)."""
-    rule = (card.get("handicap") or {}).get("max_hole_score") or {}
-    if rule.get("doublePar"):
-        cap = 2 * par
-    elif rule.get("amountOverPar") is not None:
-        cap = par + int(rule["amountOverPar"])
-    else:
-        return None
-    return cap if rule.get("isGross") else cap + strokes
-
-
-def strokes_for(card: dict[str, Any], indexes: list[float], holes: list[int], team_ball: bool,
-                tee: dict[str, Any] | None = None) -> int:
-    """A side's strokes over `holes` from its players' indexes, by the week card's settings."""
-    hc = card["handicap"]
-    tee = tee or card["tee"]
-    par = sum(int(card["par"][str(h)]) for h in holes)
-    cap = hc.get("max_index")
-    per = [course_handicap(i, len(holes), use_course=hc.get("use_course_handicap", False), rating=tee.get("rating"),
-                           slope=tee.get("slope"), par=par, max_index=cap) for i in indexes]
-    allow = hc.get("allowances") or [1.0]
-    if not team_ball and not hc.get("use_course_handicap"):
-        return side_strokes(per, allow, False)
-    if not team_ball:   # a USGA course handicap is a whole number before any percentage
-        return side_strokes([round_half_up(per[0])], allow, False)
-    return side_strokes(per, allow, True)
-
-
 def validate_season(tournaments: list[dict[str, Any]], rounds: list[dict[str, Any]]) -> dict[str, list]:
     """Recompute every team's net to par on each week's leaderboard from the players' rounds (scores,
     the handicap index stored on the round, its tee) and compare. `tournaments` items carry the
@@ -195,24 +128,43 @@ def team_net(card: dict[str, Any], members: list[dict[str, Any]], format_type: s
 
 
 def team_holes(card: dict[str, Any], members: list[dict[str, Any]], format_type: str | None) -> dict[int, int]:
-    """team_net hole by hole: each hole's team net to par, by the course's hole number."""
+    """team_net hole by hole: each hole's team net to par, by the course's hole number.
+
+    Reads Squabbit's documents as this always has (each lookup, int() and arithmetic in the same order,
+    so a malformed one fails the same way), capping and netting each posted score, then counts them by
+    the shared format rule (shotcast_scoring.handicap.team_holes) over the players who've posted each
+    hole. A Squabbit format it doesn't know scores as a sum."""
     first = members[0]
     holes = sorted(int(h) for h in first["holeScoresV2"])
     pars = {h: int(card["par"][str(h)]) for h in holes}
     order = sorted(holes, key=lambda h: (int(card["index"][str(h)]), h))
+    gross, given = [], []
+
+    def side(m: dict[str, Any], strokes: dict[int, int], scored: list[int]) -> None:
+        capped = {}
+        for h in scored:
+            capped[h] = _capped(card, m["holeScoresV2"][str(h)], pars[h], strokes[h])
+            capped[h] - strokes[h]   # a score that isn't a number fails here, where it always has
+        gross.append(capped)
+        given.append(strokes)
+
     if format_type in TEAM_BALL_TYPES:
-        strokes = strokes_for(card, [m["userHandicap"] for m in members], holes, True, first.get("tee"))
-        given = allocate(strokes, order)
-        return {h: _capped(card, first["holeScoresV2"][str(h)], pars[h], given[h]) - given[h] - pars[h] for h in holes}
-    nets = []
-    for m in members:
-        s = strokes_for(card, [m["userHandicap"]], holes, False, m.get("tee"))
-        given = allocate(s, order)
-        nets.append({h: _capped(card, m["holeScoresV2"][str(h)], pars[h], given[h]) - given[h]
-                     for h in holes if str(h) in m["holeScoresV2"]})
-    if format_type == "BestBall":
-        return {h: min(n[h] for n in nets if h in n) - pars[h] for h in holes}
-    return {h: sum(n[h] - pars[h] for n in nets if h in n) for h in holes}
+        fmt = FORMAT_KEYS[format_type]
+        side(first, allocate(strokes_for(card, [m["userHandicap"] for m in members], holes, True, first.get("tee")),
+                             order), holes)
+    else:
+        fmt = "best_ball" if format_type == "BestBall" else "aggregate"
+        for m in members:
+            strokes = allocate(strokes_for(card, [m["userHandicap"]], holes, False, m.get("tee")), order)
+            side(m, strokes, [h for h in holes if str(h) in m["holeScoresV2"]])
+    nets = rules.team_holes(fmt, gross, given, pars, None, holes, complete_sides=False)
+    if len(nets) == len(set(holes)):
+        return nets
+    # A hole none of the players has posted (a hole key Squabbit wrote another way): 0, as it always was,
+    # but best ball has no best of nothing.
+    if fmt == "best_ball":
+        raise ValueError("min() iterable argument is empty")
+    return {h: nets.get(h, 0) for h in holes}
 
 
 def _capped(card: dict[str, Any], gross: int, par: int, strokes: int) -> int:

@@ -1,5 +1,8 @@
 """The league's week results and season standings, live from Squabbit's leaderboards.
 
+The rules (places, points, standings: Board) are shotcast_scoring.board's, shared with
+Shotcast Cloud (scoring/); this is the Squabbit side: reading its leaderboards into a Board.
+
 Squabbit scores the league: each week's leaderboard has every team's net to par once they've posted.
 A week's places come from those nets (ties share a place), and the season's points from the league's
 points table (`points_table` in the history file): a tie splits the points of the places it covers, so
@@ -14,28 +17,14 @@ from __future__ import annotations
 
 import datetime
 import re
-from dataclasses import dataclass
 from typing import Any
+
+from shotcast_scoring.board import ALL, Entry, flight_label, place, place_points
+from shotcast_scoring.board import Board as _Board
 
 from .league import League
 
-
-@dataclass
-class Entry:
-    team: str            # the league file's team name (Squabbit's when it can't be matched)
-    net: int | None      # net to par; None until the team posts
-    sim: bool = False    # the net is the sim's count of the team's round, not yet posted on Squabbit
-
-
-def place(net: int, nets: list[int]) -> tuple[int, bool]:
-    """This net's place among `nets` (which include it): 1 + how many are better, and whether it's tied."""
-    return 1 + sum(1 for n in nets if n < net), sum(1 for n in nets if n == net) > 1
-
-
-def place_points(position: int, tied: int, table: list[float]) -> float:
-    """Points for a place shared by `tied` teams: the average of the places they cover."""
-    covered = [table[i] if i < len(table) else 0.0 for i in range(position - 1, position - 1 + tied)]
-    return sum(covered) / len(covered)
+__all__ = ["ALL", "Board", "Entry", "flight_label", "place", "place_points", "squabbit_holes", "week_of"]
 
 
 def week_of(tournament: dict[str, Any]) -> int | None:
@@ -68,11 +57,8 @@ def squabbit_holes(tournament: dict[str, Any], rounds: list[dict[str, Any]], car
     return out
 
 
-class Board:
-    def __init__(self, weeks: dict[int, list[Entry]], league: League, points_table: list[float] | None) -> None:
-        self.weeks = weeks
-        self.league = league
-        self.points_table = points_table or []
+class Board(_Board):
+    """shotcast_scoring's Board over the app's League, read from Squabbit's leaderboards."""
 
     @classmethod
     def from_squabbit(cls, items: list[tuple[dict, dict | None]], league: League,
@@ -90,113 +76,18 @@ class Board:
             entries = []
             for e in boards[0].get("teamEntries") or []:
                 total = e.get("total")
-                entries.append(Entry(team=cls._team(league, teams.get(e.get("entityId")) or {}, e.get("entityName")),
-                                     net=None if total is None or e.get("dnf") else int(total)))
+                team = cls._team(league, teams.get(e.get("entityId")) or {}, e.get("entityName"))
+                entries.append(Entry(team=team, net=None if total is None or e.get("dnf") else int(total)))
             weeks[week] = entries
         return cls(weeks, league, points_table)
 
-    @staticmethod
-    def _team(league: League, squabbit_team: dict, name: str | None) -> str:
-        """The league team behind a Squabbit team: by its players' Squabbit ids, else by its name."""
-        teams = {league.player_team.get(p) for u in squabbit_team.get("userIds") or []
-                 if (p := league.squabbit_ids.get(u))}
-        if len(teams) == 1 and None not in teams:
-            return teams.pop()
-        return league.match_team(name) or name or "?"
-
-    def with_sim(self, results: dict[int, dict[str, int]]) -> "Board":
-        """This board with the sim's finished rounds (Store.week_results) standing in for teams that
-        haven't posted on Squabbit yet. Squabbit's number wins once it's there."""
-        weeks: dict[int, list[Entry]] = {}
-        for w in sorted(set(self.weeks) | set(results)):
-            sim = results.get(w, {})
-            entries = self.weeks.get(w) or [Entry(t, None) for t in self.league.team_players]
-            known = {e.team for e in entries}
-            weeks[w] = [Entry(e.team, sim[e.team], sim=True) if e.net is None and e.team in sim else e
-                        for e in entries] + [Entry(t, n, sim=True) for t, n in sim.items()
-                                             if t not in known and t in self.league.team_players]
-        return Board(weeks, self.league, self.points_table)
-
-    def posted(self, week: int, exclude: str | None = None) -> list[Entry]:
-        """The week's posted results, best first."""
-        return sorted((e for e in self.weeks.get(week, []) if e.net is not None and e.team != exclude),
-                      key=lambda e: e.net)
-
-    def team_count(self, week: int) -> int:
-        return len(self.weeks.get(week, []))
-
-    def final(self, week: int, today: str) -> bool:
-        entries = self.weeks.get(week, [])
-        if not any(e.net is not None for e in entries):
-            return False
-        if all(e.net is not None for e in entries):
-            return True
-        end = (self.league.week_entry(week) or {}).get("end_date")
-        return bool(end) and str(end) < today
-
-    def current_week(self, today: str) -> int | None:
-        """The week to show as this week's: the earliest one teams have started posting that isn't final,
-        else the latest final one (its result stands till the next week's first post)."""
-        live = [w for w in sorted(self.weeks) if self.posted(w) and not self.final(w, today)]
-        if live:
-            return live[0]
-        done = [w for w in sorted(self.weeks) if self.final(w, today)]
-        return done[-1] if done else None
-
-    def by_date(self, today: str) -> tuple[list[tuple[str | None, list[int]]], int | None]:
-        """The league's weeks grouped by due date ([(end_date, weeks)] in schedule order, the weeks due the
-        same day together), only dates with a week teams have posted in; and which to show first: the
-        earliest with a week still open, else the latest. A week without a due date stands alone."""
-        groups: dict[str, tuple[str | None, list[int]]] = {}
-        schedule = {int(e["week"]) for e in self.league.data.get("schedule") or [] if e.get("week") is not None}
-        for w in sorted(set(self.weeks) | schedule):
-            end = (self.league.week_entry(w) or {}).get("end_date")
-            groups.setdefault(str(end) if end else f"week {w}", (str(end) if end else None, []))[1].append(w)
-        shown = [g for g in groups.values() if any(self.posted(w) for w in g[1])]
-        shown.sort(key=lambda g: min(g[1]))
-        if not shown:
-            return [], None
-        live = [i for i, (_, ws) in enumerate(shown) if any(self.posted(w) and not self.final(w, today) for w in ws)]
-        return shown, live[0] if live else len(shown) - 1
-
-    def _week_card(self, w: int, today: str) -> dict[str, Any]:
-        entry = self.league.week_entry(w) or {}
-        entries = self.weeks.get(w) or [Entry(t, None) for t in self.league.team_players]
-        end = entry.get("end_date")
-        # A week nobody posted in doesn't count toward the standings, but past its deadline it's over.
-        return {"week": w, "course": entry.get("course"), "deadline": end,
-                "final": self.final(w, today) or bool(end) and str(end) < today,
-                "rows": [{**self._row(e.team), "net": e.net, **({"sim": True} if e.sim else {})}
-                         for e in self.posted(w)],
-                "waiting": [self.league.team_name(e.team) for e in entries if e.net is None]}
-
-    def _row(self, t: str) -> dict[str, Any]:
-        return {"team": self.league.team_name(t), "players": self.league.team_players.get(t, [])}
-
-    def page(self, today: str) -> dict[str, Any]:
-        """The stats page's Home tab league cards (league.json): every due date's weeks (`dates`, each
-        week's results and who's yet to play), which date to open on (`current`, see by_date), and the
-        season standings (a sim-counted net is marked "sim", and standings that use one "provisional").
-        `week` is the one week older pages show (current_week). Teams by their display names, each with
-        its players, so the page can pick out a viewer's own team."""
-        team = self._row
-        out: dict[str, Any] = {"week": None, "dates": [], "current": None, "standings": None}
-        groups, current = self.by_date(today)
-        cards = {w: self._week_card(w, today) for _, ws in groups for w in ws}
-        out["dates"] = [{"date": d, "weeks": [cards[w] for w in ws]} for d, ws in groups]
-        out["current"] = current
-        if (w := self.current_week(today)) is not None:
-            out["week"] = cards.get(w) or self._week_card(w, today)
-        table, weeks = self.standings(today)
-        if weeks:
-            counted = [w for w in self.weeks if self.final(w, today)]
-            out["standings"] = {"weeks": weeks,
-                                "rows": [{**team(t), "points": round(p, 2), "place": pl} for t, p, pl in table],
-                                "provisional": any(e.sim for w in counted for e in self.weeks[w])}
-        return out
-
-    def standings(self, today: str | None = None) -> tuple[list[tuple[str, float, int]], int]:
-        """[(team, points, place)] best first over the final weeks, and how many weeks that is."""
+    def standings(self, today: str | None = None, flight=ALL) -> tuple[list[tuple[str, float, int]], int]:
+        """The package's standings, except that a board without flights (this league never has any) scores
+        each entry by its own net, so a team on a week's leaderboard twice (two Squabbit teams matched to
+        it) gets both entries' points as it always has; the package's flight-aware standings count a
+        team's points once per team."""
+        if self.flights or flight is not ALL:
+            return super().standings(today, flight)
         today = today or datetime.date.today().isoformat()
         if not self.points_table:
             return [], 0
@@ -214,3 +105,12 @@ class Board:
             return [], 0
         order = sorted(totals.items(), key=lambda kv: -kv[1])
         return [(t, p, 1 + sum(1 for _, q in order if q > p)) for t, p in order], len(weeks)
+
+    @staticmethod
+    def _team(league: League, squabbit_team: dict, name: str | None) -> str:
+        """The league team behind a Squabbit team: by its players' Squabbit ids, else by its name."""
+        teams = {league.player_team.get(p) for u in squabbit_team.get("userIds") or []
+                 if (p := league.squabbit_ids.get(u))}
+        if len(teams) == 1 and None not in teams:
+            return teams.pop()
+        return league.match_team(name) or name or "?"

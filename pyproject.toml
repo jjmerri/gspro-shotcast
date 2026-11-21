@@ -48,12 +48,15 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-xdist>=3"]
 shotcast = "commentator.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["commentator*"]
+# shotcast_scoring (scoring/: the league scoring rules, shared with Shotcast Cloud) ships inside the app.
+where = [".", "scoring/src"]
+include = ["commentator*", "shotcast_scoring*"]
 
 [tool.setuptools.package-data]
 commentator = ["*.html", "*.md", "*.ps1", "carry_estimate.json", "stats_vendor/*/*", "stats_app/*", "stats_app/icons/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+testpaths = ["tests", "scoring/tests"]
+pythonpath = ["scoring/src"]   # this checkout's scoring package, whatever the venv maps
 addopts = "-n auto"   # in parallel, one worker per core; -n0 runs serially (quicker for one test)

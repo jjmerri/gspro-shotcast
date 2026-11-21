@@ -12,6 +12,9 @@ import re
 import uuid
 from dataclasses import dataclass, field
 
+from shotcast_scoring import handicap as scoring
+from shotcast_scoring.handicap import TEAM_BALL
+
 from . import handicap
 from .facts import club_name, ctp_feet, to_yards, wrong_green_yards
 from .hud import Scorecard
@@ -39,9 +42,6 @@ _ALIASES = {
     "aggregate": {"aggregate", "teamsum", "sum", "total", "combined", "teamtotal", "teamaggregate"},
     "alternate": {"alternate", "alternateshot", "altshot", "alt", "foursomes"},
 }
-# One ball per team: the side that owns a score is the team.
-TEAM_BALL = ("scramble", "alternate")
-
 # Allowances as fractions of each player's course handicap. One-ball formats give the team
 # lowest x first + next x second. These match the Shed Sim League's Squabbit settings; the
 # league file can override them under "handicap_allowances".
@@ -1357,12 +1357,10 @@ class Round:
                 if self.par.get(q) and all(self.card_score(s, q) is not None for s in sides)]
         if not seqs:
             return None
-        out = {}
-        for q in seqs:
-            par = self.par[q]
-            nets = [self._capped_score(s, q) - s.hole_strokes.get(q, 0) - par for s in sides]
-            out[q] = min(nets) if self.format == "best_ball" else sum(nets)
-        return out
+        # A one-ball team the round has as several sides (each player's own) sums them, as it always has.
+        fmt = "aggregate" if self.format in TEAM_BALL and len(sides) > 1 else self.format
+        return scoring.team_holes(fmt, [{q: self.card_score(s, q) for q in seqs} for s in sides],
+                                  [s.hole_strokes for s in sides], self.par, self.week_card, seqs)
 
     def team_gross(self, team: str) -> tuple[int, int, list[tuple[Side, int]]] | None:
         """A best-ball team's running GROSS score to par: (team to par, holes counted, each partner's own
@@ -1477,14 +1475,6 @@ class Round:
                 out.append(run)
             totals.append(out)
         return [n for n, _ in comps], totals, net
-
-    def _capped_score(self, side: Side, seq: int) -> int:
-        score = self.card_score(side, seq)
-        if self.week_card:
-            cap = handicap.hole_cap(self.week_card, self.par[seq], side.hole_strokes.get(seq, 0))
-            if cap is not None:
-                return min(score, cap)
-        return score
 
     def _practice_form_fact(self, side: Side, s: SideStats) -> str | None:
         """A practice round has no net scoring, but a solo player's handicap still says whether they

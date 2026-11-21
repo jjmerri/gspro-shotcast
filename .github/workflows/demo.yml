@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - "commentator/**"
+      - "scoring/**"
       - "tools/demo/**"
       - "pyproject.toml"
       - ".github/workflows/demo.yml"

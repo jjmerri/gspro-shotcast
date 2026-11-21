@@ -176,9 +176,14 @@ def cmd_notify_test(cfg: Config, args) -> None:
 
 
 def build_id() -> str:
-    """The newest source timestamp in the package: which deployed build is actually running."""
-    pkg = Path(__file__).resolve().parent
-    mtimes = [p.stat().st_mtime for p in pkg.rglob("*.py")]
+    """The newest source timestamp in the app's packages (commentator and the shared scoring rules it
+    imports): which deployed build is actually running."""
+    import shotcast_scoring
+
+    pkgs = {Path(__file__).resolve().parent}
+    if f := getattr(shotcast_scoring, "__file__", None):   # (a frozen build may not say)
+        pkgs.add(Path(f).resolve().parent)
+    mtimes = [p.stat().st_mtime for pkg in pkgs for p in pkg.rglob("*.py")]
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(max(mtimes))) if mtimes else "unknown"
 
 
