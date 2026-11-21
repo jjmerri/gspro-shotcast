@@ -929,3 +929,39 @@ def test_a_check_of_an_address_that_doesnt_parse_is_a_cloud_error():
     for bad in ("https://[cloud.test", "https://cloud.test:x", 7):
         with pytest.raises(cloud.CloudError):
             cloud.check_api(bad)
+
+
+# ---- review round 6 ---------------------------------------------------------------------------
+
+def test_one_pairing_of_this_pc_at_a_time(api):
+    from commentator.locks import file_lock
+
+    with file_lock(cloud.marker().with_name("pairing.lock"), 0):   # (another window, waiting for approval)
+        with pytest.raises(cloud.CloudError, match="being paired already"):
+            pair(cloud.store(), api)
+    assert api.calls == [] and not cloud.marker().exists()   # (no second code, so no second device)
+    pair(cloud.store(), api)
+    assert cloud.marker().exists()
+
+
+def test_a_profile_is_never_seeded_from_another_cloud_profile(tmp_path, api, monkeypatch, capsys):
+    from commentator import tray
+
+    home = _self_hosted(tmp_path)
+    monkeypatch.setattr(tray, "default_home", lambda: home)
+    old = _pair_cli(api, monkeypatch)
+    old.env.write_text("OPENAI_API_KEY=the-first-pairings-key\n", encoding="utf-8")
+    old.config.write_text(old.config.read_text() + "\nmax_cpu_cores: 3\n", encoding="utf-8")
+    cloud.main(["unpair"])
+    monkeypatch.chdir(old.home)   # (a command prompt the paired tray opened, left open in the old profile)
+    path, envs = cloud._self_hosted_files(None)
+    assert path == home / "config.yaml" and old.env.resolve() not in [e.resolve() for e in envs]
+    with pytest.raises(cloud.CloudError, match="profile"):
+        cloud._self_hosted_files(str(old.config))
+    api2 = FakeAPI()
+    api2.tenant, api2.device = "t2", "d2"
+    mock_http(monkeypatch, api2)
+    cloud.main(["pair", "--api", API])
+    new = cloud.locate()
+    assert new.home != old.home and "the-first-pairings-key" not in new.env.read_text()
+    assert "max_cpu_cores: 3" not in new.config.read_text()

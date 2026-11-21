@@ -323,3 +323,49 @@ def test_ending_idle_practice_leaves_a_round_being_played_and_a_stretch_that_jus
         assert s.db.execute("SELECT state FROM round_records WHERE uuid = ?", (u,)).fetchone()[0] == "in_progress"
     finally:
         db.close()
+
+
+# ---- review round 6 ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("answer", [httpx.Response(404, json={"detail": "Not Found"}),
+                                    httpx.Response(409, json={"error": "something_new"}),
+                                    httpx.Response(400, json={"detail": "bad request"})])
+def test_an_answer_that_isnt_the_apis_own_refusal_of_the_round_is_tried_again(tmp_path, api, answer):
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    api.answers = [answer]
+    out = _drain(cl, cfg)
+    assert out.parked == [] and out.waiting == 1 and _upload(cfg, u)["status"] == "queued"
+    _retry_now(cfg)
+    assert _drain(cl, cfg).sent == [u] and _counts(cfg) == {"sent": 1}
+
+
+def test_a_refused_round_goes_again_once_it_changes_or_when_asked(tmp_path, api, capsys):
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    api.answers = [httpx.Response(422, json={"detail": "not a round"})]
+    assert _drain(cl, cfg).parked == [u] and _counts(cfg) == {"parked": 1}
+    assert _drain(cl, cfg).sent == [] and len(api.puts) == 1     # refused as it stands: not sent again
+    s.db.execute("UPDATE round_records SET gen = gen + 1 WHERE uuid = ?", (u,))   # (touched: it says the same)
+    s.db.commit()
+    assert _drain(cl, cfg).unchanged == 1 and len(api.puts) == 1 and _counts(cfg) == {"parked": 1}
+    api.answers = [httpx.Response(422, json={"detail": "not a round"})]
+    _change(s, u)                                                # corrected here: it goes again
+    assert _drain(cl, cfg).parked == [u] and len(api.puts) == 2  # (refused again: parked again)
+    assert cloud_rounds.requeue(cfg.db_path) == 1                # put right on Shotcast Cloud: asked to go again
+    assert _drain(cl, cfg).sent == [u] and _counts(cfg) == {"sent": 1} and api.puts[-1][1] == 1
+    assert cloud_rounds.requeue(cfg.db_path) == 0
+
+
+def test_the_command_line_can_send_refused_rounds_again(tmp_path, api, monkeypatch, capsys):
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    s.db.close()
+    api.answers = [httpx.Response(422, json={"detail": "not a round"})]
+    cloud.main(["upload", "--settle", "-100000"])
+    assert "1 refused" in capsys.readouterr().out
+    cloud.main(["upload", "--settle", "-100000"])
+    assert "Sent 0" in capsys.readouterr().out
+    cloud.main(["upload", "--settle", "-100000", "--refused"])
+    out = capsys.readouterr().out
+    assert "Trying 1 refused" in out and "Sent 1" in out and u in api.rounds

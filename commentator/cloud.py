@@ -1031,7 +1031,20 @@ def pair(store: TokenStore, api: str, name: str | None = None, http: Any = None,
     """Pair this PC: show a code for the owner to enter on the site, and wait for them to approve it.
     `prepare(rec)` runs once it's approved, before the pairing is stored (the CLI makes the profile
     then, so the marker is never there without it). Returns the stored pairing (without its tokens)."""
+    from .locks import file_lock
+
     api = check_api(api)
+    try:   # one pairing of this PC at a time, from its code to its pass being stored: a second one
+        # approved for the same sim would revoke the first's device and then not be kept itself
+        with file_lock(store.path.with_name("pairing.lock"), 0, "another pairing holds"):
+            return _pair(store, api, name, http, clock, sleep, say, prepare)
+    except TimeoutError:
+        raise CloudError("this PC is being paired already (in another window): finish or stop that one "
+                         "first") from None
+
+
+def _pair(store: TokenStore, api: str, name: str | None, http: Any, clock: Callable[[], float],
+          sleep: Callable[[float], None], say: Callable[[str], None], prepare: Callable[[dict], Any] | None) -> dict:
     with store.lock():
         if store.path.exists():
             raise CloudError("this PC is already paired; unpair it first")
@@ -1113,12 +1126,23 @@ def _self_hosted_files(config: str | None) -> tuple[Path | None, list[Path]]:
 
     if config is not None:
         path = Path(config)
+        if _in_profile(path):
+            raise CloudError(f"{path} is a Shotcast Cloud profile's (another pairing's settings and keys), not "
+                             "the self-hosted Shotcast's: give that one's config.yaml")
     else:
-        path = Path("config.yaml")
-        if not path.is_file():
+        path = Path("config.yaml")   # (not a cloud profile's: a prompt left open in one, say)
+        if not path.is_file() or _in_profile(path):
             path = default_home() / "config.yaml"
     envs = [Path(__file__).resolve().parents[1] / ".env", path.resolve().parent / ".env"]
-    return (path if path.is_file() else None), list(dict.fromkeys(envs))
+    return (path if path.is_file() else None), [e for e in dict.fromkeys(envs) if not _in_profile(e)]
+
+
+def _in_profile(path: Path) -> bool:
+    """Whether a file is in a cloud profile's home (this pairing's, or one kept from an earlier one):
+    never the seed of another profile, whose settings and keys would then pass from one pairing to
+    the next."""
+    folder = path.resolve().parent
+    return folder_identity(folder) is not None or folder == root().resolve() or root().resolve() in folder.parents
 
 
 def _seed(config: str | None) -> tuple[dict, dict]:
@@ -1145,6 +1169,8 @@ def main(argv: list[str] | None = None) -> None:
                                     "(default: this folder's, else the Windows app's)")
     sub.add_parser("status", help="Which tenant and sim this PC is, and how its rounds stand")
     s = sub.add_parser("upload", help="Send this PC's settled rounds now")
+    s.add_argument("--refused", action="store_true",
+                   help="try the rounds Shotcast Cloud refused again too (once what was wrong there is put right)")
     s.add_argument("--settle", type=float, help=argparse.SUPPRESS)   # (tests: don't wait out the closer)
     s = sub.add_parser("unpair", help="Stop using Shotcast Cloud and remove this PC from its tenant")
     s.add_argument("--force", action="store_true",
@@ -1175,6 +1201,8 @@ def main(argv: list[str] | None = None) -> None:
             if prof.problem:
                 sys.exit(f"Nothing sent: {prof.problem}")
             cl = Cloud(st, expect=prof.bound)
+            if a.refused and (n := cloud_rounds.requeue(str(prof.db))):
+                print(f"Trying {n} refused round(s) again")
             try:
                 out = cloud_rounds.drain(cl, str(prof.db), **({} if a.settle is None else {"settle": a.settle}))
             except (cloud_rounds.Blocked, cloud_rounds.NotThisPairing, TimeoutError) as e:

@@ -15,7 +15,9 @@ for that revision: JSON, `stored` (201) or `duplicate` (200) with the revision s
 a proxy's page say, is tried again later. The cloud having a revision this PC didn't send (a
 `duplicate` or `superseded` answer for a later one, or a `revision_conflict`: other bytes under that
 number) is never overwritten from here: the record is held as a conflict, its snapshot kept, for
-someone to reconcile (`cloud status` counts them). A 409 never counts as sent. Nothing is deleted here: the rounds stay on this PC.
+someone to reconcile (`cloud status` counts them). A 409 never counts as sent. A record the cloud
+refuses outright (too big, or not a round body) is parked, and goes again once it changes, or when
+asked (`cloud upload --refused`). Nothing is deleted here: the rounds stay on this PC.
 
 The queue (cloud_uploads) is kept in the profile's season.db, made the first time it's used.
 """
@@ -203,21 +205,24 @@ def encode(b: dict[str, Any], revision: int) -> bytes:
 
 def _due(db: sqlite3.Connection, now: float, settle: float) -> list[sqlite3.Row]:
     """Settled records to send (new, changed, or a revision waiting to be acknowledged), oldest first.
-    Held (conflict) and refused (parked) ones aren't."""
+    Held (conflict) ones aren't, nor refused (parked) ones till the record changes (_unpark)."""
     return db.execute(
         """SELECT r.uuid FROM round_records r
            LEFT JOIN cloud_uploads u ON u.uuid = r.uuid
            WHERE r.state != 'in_progress' AND COALESCE(r.ended_at, r.started_at, 0) <= ?
              AND (u.uuid IS NULL OR (u.status = 'queued' AND u.next_try <= ?
-                                     AND (u.frozen_body IS NOT NULL OR u.acked_gen IS NOT r.gen)))
+                                     AND (u.frozen_body IS NOT NULL OR u.acked_gen IS NOT r.gen))
+                  OR (u.status = 'parked' AND u.frozen_gen IS NOT r.gen))
            ORDER BY r.started_at, r.uuid""",
         (now - settle, now)).fetchall()
 
 
 def settle_idle(db: sqlite3.Connection, now: float) -> int:
     """End the practice stretches left in progress with nothing struck or said for
-    PRACTICE_IDLE_SECONDS, so a session on the range that just stops goes up without waiting for the
-    next shot, round or restart. It's what the booth does itself at that next row
+    PRACTICE_IDLE_SECONDS, so one that just stops goes up without waiting for the next shot, round or
+    restart. (A practice stretch is what the booth stored outside a round: shots on a course with no
+    round on, and what it said. Shots on the driving range and in GSPro's practice mode are never
+    stored, paired or not, so there is nothing of those to send.) It's what the booth does itself at that next row
     (round_record.Live._practice: the stretch is over, at its last row), done here once it's due; the
     booth, finding it ended, starts the next stretch as it would have. One write transaction, the
     last row read inside it: a stretch that just got a shot isn't ended. Returns how many were."""
@@ -265,6 +270,33 @@ def _park(db: sqlite3.Connection, uuid: str, error: str) -> None:
     log.warning("Shotcast Cloud won't take round %s: %s", uuid, error)
     db.execute("UPDATE cloud_uploads SET status = 'parked', error = ?, frozen_body = NULL, frozen_revision = NULL "
                "WHERE uuid = ?", (error, uuid))
+
+
+def _unpark(db: sqlite3.Connection, uuid: str) -> bool:
+    """A refused record that has changed since: queued again if it now says something else than what
+    was refused (True), else left refused, its change noted."""
+    got = body(db, uuid)
+    if got is None:
+        return False
+    b, gen = got
+    if _content(b) == db.execute("SELECT frozen_content FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()[0]:
+        db.execute("UPDATE cloud_uploads SET frozen_gen = ? WHERE uuid = ?", (gen, uuid))
+        return False
+    db.execute("UPDATE cloud_uploads SET status = 'queued', error = NULL, tries = 0, next_try = 0 WHERE uuid = ?",
+               (uuid,))
+    return True
+
+
+def requeue(db_path: str) -> int:
+    """Queue every refused (parked) record again, as it stands, for the next drain (`cloud upload
+    --refused`: once what made Shotcast Cloud refuse them is put right there). Held conflicts stay
+    held. Returns how many."""
+    db = connect(db_path)
+    try:
+        return db.execute("UPDATE cloud_uploads SET status = 'queued', error = NULL, tries = 0, next_try = 0 "
+                          "WHERE status = 'parked'").rowcount
+    finally:
+        db.close()
 
 
 def _hold(db: sqlite3.Connection, uuid: str, error: str) -> None:
@@ -346,7 +378,10 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained) 
         return True
     if r.status_code == 403 and answer is not None:
         raise Blocked(f"Shotcast Cloud isn't taking rounds from this PC: {_message(r)}")
-    if r.status_code in (400, 404, 409, 413, 415, 422) and answer is not None:
+    if r.status_code in (413, 415, 422) and answer is not None:
+        # The API's own refusals of this body (too big, not gzip, not a round body: koi's rounds.py).
+        # Anything else it doesn't say there (a 404 or another 409: a route or proxy between, say) is
+        # tried again below, and shows red in the tray while it keeps failing.
         _park(db, uuid, f"HTTP {r.status_code}: {_message(r)}")
         out.parked.append(uuid)
         return True
@@ -391,7 +426,10 @@ def _drain(cl: Any, db: sqlite3.Connection, now: float, settle: float) -> Draine
     settle_idle(db, now)
     for row in _due(db, now, settle):
         uuid = row["uuid"]
-        u = db.execute("SELECT frozen_body FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()
+        u = db.execute("SELECT frozen_body, status FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()
+        if u is not None and u["status"] == "parked" and not _unpark(db, uuid):
+            out.unchanged += 1
+            continue
         if (u is None or u["frozen_body"] is None) and not _freeze(db, uuid):
             out.unchanged += 1
             continue
