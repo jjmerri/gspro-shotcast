@@ -92,23 +92,25 @@ KNOWN = REFUSED | {"unsupported_format", "round_final", "not_bay_writer", "round
                    "access_token_invalid", "device_not_paired"}
 # When a round is done, and so sent. A round goes to Shotcast Cloud once, and nothing that changes
 # here afterwards follows it, so it waits till the booth has stopped adding to it: it has ended, and
-# what would be sent (the body itself) hasn't changed for QUIET_S: no shot or line added, no shot's
-# data changed, no line's air time filled in. So with commentary on it waits for the sign-off to
-# have been spoken (waiting holds nothing up: a player can scan their code before the round is on
-# the cloud); with it off there are no lines, and it goes after the quiet alone. (The body is used,
-# not the record's own change counter, round_records.gen, so that exactly what is sent is what is
-# watched.) Measured on a booth's logs (212 shots, 4 rounds): GSPro's round-file data for a shot lands
-# within 20 s of it (median 7), a round is declared over 5 to 14 s after its last shot, the closer is
-# written about 7 s after that and is still being spoken 24 to 98 s after the round ends. CEILING_S
-# after its end a round goes whatever is still changing, so one can't be held back for good. What
-# comes later than that stays on this PC (the round file can still give a stroke up to
-# store.FILE_END_DUE_S = 600 s after it: a pick-up on the last hole, say).
+# what would be sent hasn't changed for QUIET_S (no shot or line added, no shot's data changed).
+# "What would be sent" is the body itself, less the two columns that say when a line was spoken
+# (lines.aired_at, aired_seconds: filled as the sign-off airs, up to a minute and a half after the
+# round, for this PC's own highlight cuts). A round goes once it's known what was said, not once
+# it has been said: the claim cards are up the moment a round ends, so the round should be on the
+# cloud soon after. (The record's own change counter, round_records.gen, can't be used: airing a
+# line moves it.) Measured on a booth's logs (212 shots, 4 rounds): GSPro's round-file data for a shot
+# lands within 20 s of it (median 7), a round is declared over 5 to 14 s after its last shot, and the
+# closer is written about 7 s after that. CEILING_S after its end a round goes whatever is still
+# changing, so one can't be held back for good. What comes later stays on this PC: a closer that
+# takes longer than QUIET_S to be written, the air times of the last lines, and what the round file
+# gives after the ceiling (it can give a stroke up to store.FILE_END_DUE_S = 600 s after it: a
+# pick-up on the last hole, say).
 QUIET_S = 30.0
 CEILING_S = 180.0
 QUIET = """
 CREATE TABLE IF NOT EXISTS cloud_quiet (       -- a finished, unsent round: what it would send, and since when that has stood
     uuid TEXT PRIMARY KEY,
-    sig TEXT NOT NULL,                         -- a hash of its body (_signature)
+    sig TEXT NOT NULL,                         -- a hash of its body, less the lines' air times (_signature)
     since REAL NOT NULL
 );
 """
@@ -320,11 +322,6 @@ def _json(obj: Any) -> bytes:
     return json.dumps(obj, separators=(",", ":"), sort_keys=True).encode()
 
 
-def _content(b: dict[str, Any]) -> str:
-    """A hash of what a round's body says (to tell whether a refused one has changed since)."""
-    return hashlib.sha256(_json(b)).hexdigest()
-
-
 def encode(b: dict[str, Any]) -> bytes:
     """The bytes sent for a round: gzip with no timestamp, so building it again gives the same bytes.
 
@@ -357,8 +354,10 @@ def encode(b: dict[str, Any]) -> bytes:
 
 
 def _signature(b: dict[str, Any]) -> str:
-    """A hash of what a round would send: what has to stand still for QUIET_S before the round goes."""
-    return _content(b)
+    """A hash of what a round would send, less when its lines were spoken: what has to stand still for
+    QUIET_S before the round goes (and what a refused round is known by)."""
+    lines = [_without(ln, "aired_at", "aired_seconds") for ln in b["lines"]]
+    return hashlib.sha256(_json(b | {"lines": lines})).hexdigest()
 
 
 def _note(db: sqlite3.Connection, uuid: str, sig: str, now: float) -> bool:
@@ -383,14 +382,10 @@ def _watch(db: sqlite3.Connection, now: float) -> None:
     db.execute("DELETE FROM cloud_quiet WHERE uuid IN (SELECT uuid FROM cloud_uploads WHERE revision != 0)")
 
 
-# A finished round is ready to send: `settle` (the ceiling) past its end; or quiet for QUIET_S (as
-# last looked at: _watch, and again as its body is built, _freeze) with nothing said since it ended
-# still waiting to be spoken (a line is written, then spoken, and only then gets its air time: the
-# quiet between the two isn't the booth being done). A line that's never spoken waits for the ceiling.
+# A finished round is ready to send: `settle` (the ceiling) past its end, or quiet for QUIET_S (as
+# last looked at: _watch, and again as its body is built, _freeze).
 _READY = """(COALESCE(r.ended_at, r.started_at, 0) <= :now - :settle
-             OR (EXISTS (SELECT 1 FROM cloud_quiet q WHERE q.uuid = r.uuid AND q.since <= :now - :quiet)
-                 AND NOT EXISTS (SELECT 1 FROM lines l WHERE l.record_uuid = r.uuid AND l.aired_at IS NULL
-                                 AND l.ts >= COALESCE(r.ended_at, r.started_at, 0))))"""
+             OR EXISTS (SELECT 1 FROM cloud_quiet q WHERE q.uuid = r.uuid AND q.since <= :now - :quiet))"""
 
 
 def _due(db: sqlite3.Connection, now: float, settle: float) -> list[sqlite3.Row]:
@@ -436,7 +431,7 @@ def _freeze(db: sqlite3.Connection, uuid: str, now: float, settle: float) -> boo
     if db.execute("SELECT revision FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()[0]:
         return False
     db.execute("UPDATE cloud_uploads SET frozen_revision = 1, frozen_body = ?, frozen_gen = ?, frozen_content = ? "
-               "WHERE uuid = ?", (encode(b), gen, _content(b), uuid))
+               "WHERE uuid = ?", (encode(b), gen, _signature(b), uuid))
     return True
 
 
@@ -479,7 +474,7 @@ def _unpark(db: sqlite3.Connection, uuid: str) -> bool:
     if got is None:
         return False
     b, gen = got
-    if _content(b) == db.execute("SELECT frozen_content FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()[0]:
+    if _signature(b) == db.execute("SELECT frozen_content FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()[0]:
         db.execute("UPDATE cloud_uploads SET frozen_gen = ? WHERE uuid = ?", (gen, uuid))
         return False
     db.execute("UPDATE cloud_uploads SET status = 'queued', error = NULL, tries = 0, next_try = 0 WHERE uuid = ?",

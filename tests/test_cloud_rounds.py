@@ -582,9 +582,9 @@ def test_every_player_is_on_a_side_and_a_card_nobody_is_on_isnt_sent(tmp_path, a
 
 
 def test_a_round_goes_once_what_it_would_send_has_stood_still_or_at_the_ceiling(tmp_path, api):
-    """Done means the booth has stopped adding to it: nothing it would send has changed for QUIET_S
-    (a shot or line added, a shot's data, a line's air time: so the sign-off has been spoken), or
-    CEILING_S have passed since it ended."""
+    """Done means the booth has stopped adding to it: no shot or line added and no shot's data changed
+    for QUIET_S, or CEILING_S have passed since it ended. A line being spoken (its air time filled
+    in) isn't a change: the round goes once it's known what was said."""
     cfg, s, cl = _booth(tmp_path, api)
     u = _round(s, 1)
     ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (u,)).fetchone()[0]
@@ -592,19 +592,16 @@ def test_a_round_goes_once_what_it_would_send_has_stood_still_or_at_the_ceiling(
     def at(seconds):
         return cloud_rounds.drain(cl, cfg.db_path, now=ended + seconds)
     assert at(2).sent == [] and cloud_rounds.status(cfg.db_path, now=ended + 2)["settling"] == 1   # watched from now
-    _said(s, None, "and that's the round")                 # the closer is written
+    s.db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text, record_uuid) VALUES (?, ?, 'segment', 'A', ?, ?)",
+                 (s.session_id, ended + 7, "and that's the round", u))   # the closer is written, not yet spoken
     s.db.commit()
     assert at(8).sent == []                                 # (changed since it was first looked at: quiet from here)
-    s.db.execute("UPDATE lines SET aired_at = ?, aired_seconds = 6.0 WHERE record_uuid = ?", (ended + 20, u))
-    s.db.commit()                                           # ... and spoken
-    assert at(8 + cloud_rounds.QUIET_S).sent == []          # (that's a change too: quiet from when it was seen)
-    assert at(8 + 2 * cloud_rounds.QUIET_S).sent == [u]
-    said = api.puts[0][2]["lines"][-1]
-    assert said["text"] == "and that's the round" and said["aired_seconds"] == 6.0
-    # With no commentary there's nothing to wait for but the quiet itself.
-    q = _round(s, 150)
-    ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (q,)).fetchone()[0]
-    assert at(1).sent == [] and at(1 + cloud_rounds.QUIET_S).sent == [q]
+    assert at(8 + cloud_rounds.QUIET_S - 1).sent == []
+    s.db.execute("UPDATE lines SET aired_at = ?, aired_seconds = 6.0 WHERE record_uuid = ? AND text LIKE 'and that%'",
+                 (ended + 20, u))                           # ... and spoken: its air time is filled in
+    s.db.commit()
+    assert at(8 + cloud_rounds.QUIET_S).sent == [u]         # which didn't start the quiet again
+    assert api.puts[0][2]["lines"][-1]["text"] == "and that's the round"
     # A shot's data changing does start it again.
     w = _round(s, 300)
     ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (w,)).fetchone()[0]
@@ -646,32 +643,6 @@ def test_a_side_whose_card_was_written_twice_sends_its_last(tmp_path, api):
     s.db.commit()
     assert _drain(cl, cfg).sent == [u]
     assert [c["gross"] for c in api.puts[0][2]["scorecards"]] == [41]
-
-
-def test_a_closer_written_and_not_yet_spoken_isnt_the_booth_being_done(tmp_path, api):
-    """A line is written, then spoken, and only then gets its air time: the quiet in between doesn't
-    send the round. One that's never spoken (skipped) waits for the ceiling, not for ever."""
-    cfg, s, cl = _booth(tmp_path, api)
-    u = _round(s, 1)
-    ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (u,)).fetchone()[0]
-    s.db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text, record_uuid) VALUES (?, ?, 'segment', 'A', 'bye', ?)",
-                 (s.session_id, ended + 7, u))
-    s.db.commit()
-
-    def at(seconds):
-        return cloud_rounds.drain(cl, cfg.db_path, now=ended + seconds)
-    assert at(8).sent == [] and at(8 + cloud_rounds.QUIET_S).sent == [] and at(8 + 3 * cloud_rounds.QUIET_S).sent == []
-    assert cloud_rounds.status(cfg.db_path, now=ended + 8 + 3 * cloud_rounds.QUIET_S)["settling"] == 1
-    assert at(cloud_rounds.CEILING_S).sent == [u]
-    # Lines from during the round that never aired don't hold it.
-    v = s.begin_round("r2", course="Pebble", players={"Ann": None})
-    _hit(s, "Ann", 300)
-    _said(s, None, "dropped mid-round")
-    s.end_round(v, complete=True)
-    s.db.execute("UPDATE lines SET ts = ts - 1000, aired_at = NULL WHERE record_uuid = ?", (v,))
-    s.db.commit()
-    ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (v,)).fetchone()[0]
-    assert at(1).sent == [] and at(1 + cloud_rounds.QUIET_S).sent == [v]
 
 
 def test_a_refused_round_goes_again_when_what_it_would_send_changes_whatever_changed(tmp_path, api):
