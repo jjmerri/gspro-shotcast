@@ -1151,10 +1151,10 @@ def _pair(store: TokenStore, api: str, name: str | None, http: Any, clock: Calla
         f"and check the code {start['user_code']} and this PC's fingerprint {show_fingerprint(fingerprint)}.\n"
         f"Waiting for approval (the code lasts {start['expires_in'] // 60} minutes)...")
     interval = max(1, int(start["interval"]))
-    # Past the code's own time by as long as the API still hands out an approved pairing's first pass
-    # (COLLECT_S): an approval in the code's last seconds, or one whose answer was lost, is still
-    # collected. The API's own "turned down" or "ran out" ends it at once.
-    deadline = clock() + start["expires_in"] + COLLECT_S
+    # Past the code's own time by both of the API's windows (COLLECT_S each): an approved pairing can
+    # be collected for one, and the pass, once collected, is handed out again for another (an answer
+    # that was lost). The API's own "turned down" or "ran out" ends it at once.
+    deadline = clock() + start["expires_in"] + 2 * COLLECT_S
     while clock() < deadline:
         sleep(interval)
         try:

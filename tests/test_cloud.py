@@ -1150,3 +1150,21 @@ def test_pairing_collects_an_approval_for_as_long_as_the_api_still_hands_it_out(
     api.__class__ = type("Late", (FakeAPI,), {"__call__": late})
     rec = pair(cloud.store(), api)
     assert rec["device_id"] == "d1" and asked[-1] >= 1000 + 600 + 240
+
+
+def test_pairing_waits_through_both_of_the_apis_windows_for_a_lost_first_pass(api):
+    """Approved late and collected late, its answer lost: the API hands the pass out again for ten
+    minutes from when it was first collected, which can be twenty past the code's own time."""
+    asked = []
+    real = api.__call__
+
+    def late(self, req):
+        if req.url.path == "/api/devices/token":
+            asked.append(api.now)
+            api.now += 60
+            if api.now < 1000 + 600 + 1100:   # nothing gets through till eighteen minutes past the code's time
+                raise httpx.ConnectError("down")
+        return real(req)
+    api.polls = []
+    api.__class__ = type("Late", (FakeAPI,), {"__call__": late})
+    assert pair(cloud.store(), api)["device_id"] == "d1" and asked[-1] >= 1000 + 600 + 1000

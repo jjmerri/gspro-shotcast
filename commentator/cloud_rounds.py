@@ -86,8 +86,7 @@ THROTTLE_MAX_S = 86400.0     # (the API's longest allowance is a day's)
 
 # The API's upload refusals (its docs/dev/device-api.md): REFUSED are for good, as the revision is
 # (`action: fix`); the rest of KNOWN are handled each in its own way in _send.
-REFUSED = frozenset({"not_gzip", "body_too_large", "invalid_body", "round_id_mismatch", "claimed_slot_removed",
-                     "claimed_round_changed", "invalid_request"})
+REFUSED = frozenset({"not_gzip", "body_too_large", "invalid_body", "round_id_mismatch", "invalid_request"})
 KNOWN = REFUSED | {"unsupported_format", "revision_conflict", "not_bay_writer", "round_owned_elsewhere",
                    "league_suspended", "round_league_suspended", "rate_limited", "busy", "client_too_old",
                    "access_token_invalid", "device_not_paired"}
@@ -515,8 +514,9 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained,
     action = (answer or {}).get("action")
     if isinstance(error, str) and (error in REFUSED or (error not in KNOWN and action == "fix")):
         # The API's own word that it will never take this revision as it is (too big, not a round
-        # body, drops a claimed player: koi's rounds.py; or a code this app doesn't know, whose
-        # `action` says so). The round is kept, refused, till it changes or is sent again by hand.
+        # body: koi's rounds.py; or a code this app doesn't know, whose `action` says so). (It
+        # never refuses one for what it says of who played what: it owns that from the round's
+        # first revision, keeps its own, and says so in the receipt's `kept`.) The round is kept, refused, till it changes or is sent again by hand.
         # Anything else (a code or action this app doesn't know, an answer without them, a proxy's
         # page) is tried again below, the revision kept as it is, and shows red in the tray while
         # it keeps failing.
