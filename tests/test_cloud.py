@@ -972,3 +972,32 @@ def test_a_profile_is_never_seeded_from_another_cloud_profile(tmp_path, api, mon
     new = cloud.locate()
     assert new.home != old.home and "the-first-pairings-key" not in new.env.read_text()
     assert "max_cpu_cores: 3" not in new.config.read_text()
+
+
+# ---- review round 8 ---------------------------------------------------------------------------
+
+def test_a_pc_paired_before_its_first_start_gets_the_installers_gspro_folder(tmp_path, api, monkeypatch, capsys):
+    from commentator import tray
+    from commentator.config import load_config
+
+    monkeypatch.setattr(tray, "default_home", lambda: tmp_path / "never-started")   # (no self-hosted config yet)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(tray, "pending_installer_gspro_dir", lambda: r"D:\Golf\GSPro")
+    marked = []
+    monkeypatch.setattr(tray, "remember_gspro_dir", marked.append)
+    prof = _pair_cli(api, monkeypatch)
+    source = load_config(prof.config).source
+    assert source.connector_log == r"D:\Golf\GSPro\Core\GSPC\ConnectDebug.txt"
+    assert source.gspro_courses_dirs == [r"D:\Golf\GSPro\Courses", r"D:\Golf\GSPro\Core\GSP\Courses"]
+    assert marked == []   # (still pending for the self-hosted Shotcast's own config.yaml)
+
+
+def test_with_no_pick_pending_the_profile_keeps_the_self_hosted_gspro_folder(tmp_path, api, monkeypatch, capsys):
+    from commentator import tray
+    from commentator.config import Config, load_config
+
+    monkeypatch.setattr(tray, "default_home", lambda: tmp_path / "never-started")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(tray, "pending_installer_gspro_dir", lambda: None)
+    prof = _pair_cli(api, monkeypatch)
+    assert load_config(prof.config).source.connector_log == Config().source.connector_log

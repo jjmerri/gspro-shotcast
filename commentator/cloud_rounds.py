@@ -74,6 +74,15 @@ CREATE TABLE IF NOT EXISTS cloud_pairing (   -- the pairing this season file's r
 )"""
 
 
+THROTTLE = """
+CREATE TABLE IF NOT EXISTS cloud_throttle (  -- the API said to wait (429): nothing is sent from this PC till then
+    one INTEGER PRIMARY KEY CHECK (one = 1),
+    not_before REAL NOT NULL
+)"""
+THROTTLE_DEFAULT_S = 300.0   # a 429 with no Retry-After
+THROTTLE_MAX_S = 86400.0     # (the API's longest allowance is a day's)
+
+
 class Blocked(Exception):
     """The cloud refuses every upload from this PC for now; the message says why."""
 
@@ -99,6 +108,7 @@ def connect(db_path: str) -> sqlite3.Connection:
     db.execute("PRAGMA synchronous = FULL")
     db.executescript(TABLES)
     db.execute(PAIRING)
+    db.execute(THROTTLE)
     return db
 
 
@@ -257,6 +267,25 @@ def _backoff(db: sqlite3.Connection, uuid: str, now: float, error: str) -> None:
                (now + min(RETRY_MAX_S, RETRY_BASE_S * 2 ** tries), error, uuid))
 
 
+def _throttle(db: sqlite3.Connection, r: Any, now: float) -> float:
+    """The API's allowance for this PC is spent (429): its limits are the device's, not a round's, so
+    nothing more is sent, by the booth or the command line, till the time it gave (Retry-After).
+    Returns how long that is."""
+    try:
+        wait = float(r.headers.get("Retry-After", ""))
+    except (TypeError, ValueError):
+        wait = THROTTLE_DEFAULT_S
+    wait = min(max(wait, 1.0), THROTTLE_MAX_S)
+    db.execute("INSERT OR REPLACE INTO cloud_throttle (one, not_before) VALUES (1, ?)", (now + wait,))
+    return wait
+
+
+def throttled(db: sqlite3.Connection, now: float) -> float:
+    """Seconds still to wait before anything is sent (0: none)."""
+    row = db.execute("SELECT not_before FROM cloud_throttle WHERE one = 1").fetchone()
+    return max(0.0, min(row[0] - now, THROTTLE_MAX_S)) if row else 0.0
+
+
 def _park(db: sqlite3.Connection, uuid: str, error: str) -> None:
     log.warning("Shotcast Cloud won't take round %s: %s", uuid, error)
     db.execute("UPDATE cloud_uploads SET status = 'parked', error = ?, frozen_body = NULL, frozen_revision = NULL "
@@ -376,6 +405,13 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained) 
         _park(db, uuid, f"HTTP {r.status_code}: {_message(r)}")
         out.parked.append(uuid)
         return True
+    if r.status_code == 429:
+        wait = _throttle(db, r, now)
+        db.execute("UPDATE cloud_uploads SET error = ? WHERE uuid = ?",
+                   (f"Shotcast Cloud: this PC's upload allowance is spent; waiting {int(wait)}s", uuid))
+        log.warning("Shotcast Cloud: this PC's upload allowance is spent; nothing sent for %ds", int(wait))
+        out.waiting += 1
+        return False
     what = f"an answer this PC doesn't understand (HTTP {r.status_code})" if r.status_code in (200, 201) \
         else f"HTTP {r.status_code}"
     _backoff(db, uuid, now, f"Shotcast Cloud: {what}")
@@ -414,6 +450,9 @@ def drain(cl: Any, db_path: str, now: float | None = None, settle: float = CLOSE
 
 def _drain(cl: Any, db: sqlite3.Connection, now: float, settle: float) -> Drained:
     out = Drained()
+    if throttled(db, now):   # (the API said to wait: the whole queue does, every revision kept)
+        out.waiting = len(_due(db, now, settle))
+        return out
     for row in _due(db, now, settle):
         uuid = row["uuid"]
         u = db.execute("SELECT frozen_body, status FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()
@@ -437,9 +476,9 @@ _OUTSTANDING_WORDS = {"in_progress": "in progress", "settling": "settling (just 
                       "waiting": "sent, not yet acknowledged", "conflict": "conflict", "parked": "refused"}
 
 
-def _kinds(db: sqlite3.Connection, now: float, settle: float) -> list[tuple[str, str]]:
-    """(record uuid, kind) for every round (not practice stretches: those are never sent), from
-    round_records joined to the queue."""
+def _kinds(db: sqlite3.Connection, now: float, settle: float) -> list[tuple[str, str, float]]:
+    """(record uuid, kind, when it ended) for every round (not practice stretches: those are never
+    sent), from round_records joined to the queue."""
     out = []
     for r in db.execute(
             """SELECT r.uuid, r.state, COALESCE(r.ended_at, r.started_at, 0) AS ended, r.gen,
@@ -462,7 +501,7 @@ def _kinds(db: sqlite3.Connection, now: float, settle: float) -> list[tuple[str,
             kind = "changed"
         else:
             kind = "sent"
-        out.append((r["uuid"], kind))
+        out.append((r["uuid"], kind, r["ended"]))
     return out
 
 
@@ -471,7 +510,7 @@ def status(db_path: str, now: float | None = None, settle: float = CLOSER_SECOND
     db = connect(db_path)
     try:
         counts = dict.fromkeys((k for k, _ in STATUS_WORDS), 0)
-        for _, kind in _kinds(db, time.time() if now is None else now, settle):
+        for _, kind, _ended in _kinds(db, time.time() if now is None else now, settle):
             counts[kind] += 1
         return counts
     finally:
@@ -487,7 +526,19 @@ def behind(db_path: str, now: float | None = None, settle: float = CLOSER_SECOND
     while it stays above 0 for long, the tray is red (cloud_booth) and `cloud upload` fails."""
     db = connect(db_path)
     try:
-        return sum(kind in BEHIND for _, kind in _kinds(db, time.time() if now is None else now, settle))
+        return sum(kind in BEHIND for _, kind, _ended in _kinds(db, time.time() if now is None else now, settle))
+    finally:
+        db.close()
+
+
+def behind_since(db_path: str, now: float | None = None, settle: float = CLOSER_SECONDS) -> float | None:
+    """When the oldest round that isn't on Shotcast Cloud settled (None: none is behind): how long the
+    queue has already been behind, for a booth that's just starting."""
+    db = connect(db_path)
+    try:
+        late = [ended + settle for _, kind, ended in _kinds(db, time.time() if now is None else now, settle)
+                if kind in BEHIND]
+        return min(late) if late else None
     finally:
         db.close()
 
@@ -513,7 +564,7 @@ def outstanding(db_path: str, now: float | None = None, settle: float = CLOSER_S
     """(uuid, what) for each round record that isn't on Shotcast Cloud as it stands here."""
     db = connect(db_path)
     try:
-        return [(uuid, _OUTSTANDING_WORDS[kind]) for uuid, kind in _kinds(db, time.time() if now is None else now,
-                                                                          settle) if kind != "sent"]
+        return [(uuid, _OUTSTANDING_WORDS[kind]) for uuid, kind, _ended in _kinds(
+            db, time.time() if now is None else now, settle) if kind != "sent"]
     finally:
         db.close()

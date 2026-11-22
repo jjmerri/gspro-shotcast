@@ -363,3 +363,35 @@ def test_the_command_line_can_send_refused_rounds_again(tmp_path, api, monkeypat
     cloud.main(["upload", "--settle", "-100000", "--refused"])
     out = capsys.readouterr().out
     assert "Trying 1 refused" in out and "Sent 1" in out and u in api.rounds
+
+
+# ---- review round 8 ---------------------------------------------------------------------------
+
+def test_a_429_holds_the_whole_queue_till_the_time_the_api_gave(tmp_path, api):
+    cfg, s, cl = _booth(tmp_path, api)
+    a, b = _round(s, 1), _round(s, 100)
+    now = time.time() + LATER
+    api.answers = [httpx.Response(429, headers={"Retry-After": "600"}, json={"detail": "too many requests"})]
+    out = cloud_rounds.drain(cl, cfg.db_path, now=now)
+    assert out.sent == [] and out.waiting == 1 and len(api.puts) == 1
+    out = cloud_rounds.drain(cl, cfg.db_path, now=now + 599)     # the other round waits too: the limit is the PC's
+    assert out.sent == [] and out.waiting == 2 and len(api.puts) == 1
+    assert _upload(cfg, a)["frozen_body"] is not None            # (its revision is kept as built)
+    out = cloud_rounds.drain(cl, cfg.db_path, now=now + 601)
+    assert out.sent == [a, b] and len(api.puts) == 3
+
+
+def test_a_429_with_no_time_given_waits_a_while_and_never_longer_than_a_day(tmp_path, api):
+    cfg, s, cl = _booth(tmp_path, api)
+    _round(s, 1)
+    now = time.time() + LATER
+    db = cloud_rounds.connect(cfg.db_path)
+    try:
+        api.answers = [httpx.Response(429, json={"detail": "too many requests"})]
+        cloud_rounds.drain(cl, cfg.db_path, now=now)
+        assert cloud_rounds.throttled(db, now) == cloud_rounds.THROTTLE_DEFAULT_S
+        db.execute("UPDATE cloud_throttle SET not_before = ?", (now + 10 ** 9,))   # (a clock set wrong, say)
+        assert cloud_rounds.throttled(db, now) == cloud_rounds.THROTTLE_MAX_S
+        assert cloud_rounds.throttled(db, now + 10 ** 9 + 1) == 0
+    finally:
+        db.close()

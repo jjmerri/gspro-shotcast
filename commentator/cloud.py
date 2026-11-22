@@ -1152,7 +1152,24 @@ def _seed(config: str | None) -> tuple[dict, dict]:
 
     path, envs = _self_hosted_files(config)
     cfg = load_config(path) if path is not None else Config()
-    return seed_config(cfg), seed_env(envs)
+    seed = seed_config(cfg)
+    _installer_gspro(seed)
+    return seed, seed_env(envs)
+
+
+def _installer_gspro(seed: dict[str, Any]) -> None:
+    """The GSPro folder picked in the installer goes into a new profile's settings when the
+    self-hosted Shotcast hasn't taken it up yet (a PC paired straight after installing, before its
+    first start: the paired tray never applies the pick). The pick is left pending for the
+    self-hosted config.yaml, which this doesn't touch."""
+    from . import gspro_dir
+    from .tray import pending_installer_gspro_dir
+
+    folder = pending_installer_gspro_dir()
+    source = seed.get("source")
+    if not folder or not isinstance(source, dict):
+        return
+    source["connector_log"], source["gspro_courses_dirs"] = gspro_dir.paths(folder)
 
 
 def _describe(items: list[tuple[str, str]]) -> str:

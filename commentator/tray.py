@@ -197,11 +197,9 @@ def remember_gspro_dir(folder: str) -> None:
         pass
 
 
-def apply_installer_gspro_dir(home: Path) -> None:
-    """Point config.yaml at the GSPro folder picked in the installer, once per pick (a later change
-    in Settings or by hand stands until the installer is given a different folder)."""
+def pending_installer_gspro_dir() -> str | None:
+    """The GSPro folder picked in the installer, if it hasn't been put in a config.yaml yet."""
     from . import gspro_dir
-    from .config import load_config
 
     try:
         import winreg
@@ -213,8 +211,18 @@ def apply_installer_gspro_dir(home: Path) -> None:
             except OSError:
                 applied = ""
     except (OSError, ImportError):
-        return
-    if not folder or gspro_dir.same(folder, applied):
+        return None
+    return None if not folder or gspro_dir.same(folder, applied) else folder
+
+
+def apply_installer_gspro_dir(home: Path) -> None:
+    """Point config.yaml at the GSPro folder picked in the installer, once per pick (a later change
+    in Settings or by hand stands until the installer is given a different folder)."""
+    from . import gspro_dir
+    from .config import load_config
+
+    folder = pending_installer_gspro_dir()
+    if not folder:
         return
     path = home / "config.yaml"
     try:

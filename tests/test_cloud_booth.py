@@ -788,3 +788,26 @@ def test_a_self_hosted_env_put_in_the_profile_gives_the_paired_booth_only_its_ai
     _run(monkeypatch, "run")
     assert seen == [{"OPENAI_API_KEY": "profile-key", "AWS_ACCESS_KEY_ID": None, "SQUABBIT_PASSWORD": None,
                      "OBS_WEBSOCKET_PASSWORD": None}]
+
+
+# ---- review round 8 ----------------------------------------------------------------------------
+
+def test_restarting_the_booth_doesnt_give_a_stuck_queue_more_time_before_the_tray_goes_red(tmp_path, api, monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(cloud_rounds, "CLOSER_SECONDS", 0.0)
+    cfg = paired_cfg(tmp_path, api)
+    now = _clock(monkeypatch)
+    _round(Store(cfg.db_path), 1)
+    now[0] += cloud_booth.BEHIND_S + 3600   # (the round has been waiting since before this booth started)
+    api.answers = [httpx.Response(502)]
+    up = cloud_booth.Uploads(cfg, cloud.locate())
+    _loop(cfg, 1, up)
+    [(level, msg)] = _health(cfg)
+    assert level == "fail" and "haven't gone up" in msg
+    fresh = cloud_booth.Uploads(paired_cfg_again := cfg, cloud.locate())   # (and nothing waiting: from now)
+    del paired_cfg_again
+    now[0] += cloud_rounds.RETRY_MAX_S + 1
+    _loop(cfg, 1, fresh)
+    assert _health(cfg) == []
+    assert cloud_booth.Uploads(cfg, cloud.locate()).clear_at == now[0]

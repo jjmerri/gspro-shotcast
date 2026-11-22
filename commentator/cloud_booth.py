@@ -64,7 +64,18 @@ class Uploads:
     def __init__(self, cfg: Any, prof: cloud.Profile) -> None:
         self.cfg, self.bound, self.identity = cfg, prof.bound, cloud.identity(prof.rec)
         self.stopped = False   # the stored pairing isn't the booth's any more: nothing more goes out
-        self.clear_at = time.time()   # when every settled round was last on Shotcast Cloud (or the booth started)
+        # When every settled round was last on Shotcast Cloud: now, unless rounds are waiting already,
+        # in which case since the oldest of them settled (read once, here: restarting the booth doesn't
+        # give a queue that's stuck another BEHIND_S of green).
+        self.clear_at = time.time()
+        try:
+            from . import cloud_rounds
+
+            since = cloud_rounds.behind_since(cfg.db_path)
+            if since is not None:
+                self.clear_at = min(self.clear_at, since)
+        except Exception:   # noqa: BLE001 - a file that can't be read: `_behind` counts from now
+            log.debug("Couldn't read how uploads stand from %s", cfg.db_path, exc_info=True)
 
     def _cloud(self) -> cloud.Cloud:
         """This PC's pairing, if it's still the one the booth started with (else PairingChanged)."""
