@@ -1339,8 +1339,7 @@ def main(argv: list[str] | None = None) -> None:
                 out = cloud_rounds.drain(cl, str(prof.db), **({} if a.settle is None else {"settle": a.settle}))
             except (cloud_rounds.Blocked, cloud_rounds.NotThisPairing, TimeoutError) as e:
                 sys.exit(str(e))
-            print(f"Sent {len(out.sent)} round(s); {out.unchanged} unchanged, {out.waiting} to retry, "
-                  f"{len(out.conflicts)} held as conflicts, {len(out.parked)} refused")
+            print(f"Sent {len(out.sent)} round(s); {out.waiting} to retry, {len(out.parked)} refused")
             # How the queue stands now, not only what this run did: anything settled that still isn't
             # on Shotcast Cloud (held or refused before, too) fails the command.
             left = [(u, what) for u, what in cloud_rounds.outstanding(
@@ -1393,7 +1392,7 @@ def _status(prof: Profile) -> None:
             return
         print("Rounds: " + ", ".join(f"{q[k]} {what}" for k, what in cloud_rounds.STATUS_WORDS))
         for uuid, what in left:
-            if what in ("conflict", "refused"):
+            if what == "refused":
                 print(f"  {uuid}: {what}")
 
 

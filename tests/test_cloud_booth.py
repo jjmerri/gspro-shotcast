@@ -81,7 +81,7 @@ async def _until(cond, timeout=5.0):
 
 def test_the_running_booth_sends_settled_rounds_and_stops_for_good_when_the_pairing_changes(tmp_path, api, monkeypatch):
     monkeypatch.setattr(cloud_booth, "DRAIN_S", 0.01)
-    monkeypatch.setattr(cloud_rounds, "CLOSER_SECONDS", 0.0)
+    monkeypatch.setattr(cloud_rounds, "CEILING_S", 0.0)
     cfg = paired_cfg(tmp_path, api)
     s = Store(cfg.db_path)
     u = _round(s, 1)
@@ -102,7 +102,7 @@ def test_the_running_booth_sends_settled_rounds_and_stops_for_good_when_the_pair
 
 def test_a_season_file_that_isnt_the_pairings_stops_the_loop(tmp_path, api, monkeypatch):
     monkeypatch.setattr(cloud_booth, "DRAIN_S", 0.01)
-    monkeypatch.setattr(cloud_rounds, "CLOSER_SECONDS", 0.0)
+    monkeypatch.setattr(cloud_rounds, "CEILING_S", 0.0)
     cfg = paired_cfg(tmp_path, api)
     s = Store(cfg.db_path)
     _round(s, 1)
@@ -137,7 +137,7 @@ def _loop(cfg, rounds, up=None):
 
 
 def test_an_api_that_needs_a_newer_shotcast_shows_in_the_tray_till_it_takes_rounds_again(tmp_path, api, monkeypatch):
-    monkeypatch.setattr(cloud_rounds, "CLOSER_SECONDS", 0.0)
+    monkeypatch.setattr(cloud_rounds, "CEILING_S", 0.0)
     cfg = paired_cfg(tmp_path, api)
     u = _round(Store(cfg.db_path), 1)
     api.minimum = "9.0.0"
@@ -161,7 +161,7 @@ def test_rounds_that_arent_going_up_turn_the_tray_red_whatever_the_cause_and_cle
                                                                                                monkeypatch):
     import httpx
 
-    monkeypatch.setattr(cloud_rounds, "CLOSER_SECONDS", 0.0)
+    monkeypatch.setattr(cloud_rounds, "CEILING_S", 0.0)
     cfg = paired_cfg(tmp_path, api)
     now = _clock(monkeypatch)
     up = cloud_booth.Uploads(cfg, cloud.locate())
@@ -188,7 +188,7 @@ def test_rounds_that_arent_going_up_turn_the_tray_red_whatever_the_cause_and_cle
 @pytest.mark.parametrize("failure", [TimeoutError("another upload holds the lock"), OSError("the season file is busy"),
                                      cloud.CloudError("Shotcast Cloud refused to refresh this PC's pass")])
 def test_drains_that_cant_even_run_turn_the_tray_red_once_rounds_wait_too_long(tmp_path, api, monkeypatch, failure):
-    monkeypatch.setattr(cloud_rounds, "CLOSER_SECONDS", 0.0)
+    monkeypatch.setattr(cloud_rounds, "CEILING_S", 0.0)
     cfg = paired_cfg(tmp_path, api)
     now = _clock(monkeypatch)
     up = cloud_booth.Uploads(cfg, cloud.locate())
@@ -225,12 +225,11 @@ def test_a_season_file_that_cant_be_read_counts_as_behind(tmp_path, api, monkeyp
 
 
 @pytest.mark.parametrize("answer, shown", [
-    ({"status_code": 409, "json": {"error": "revision_conflict", "revision": 1, "sha256": "other"}}, "conflicts"),
     ({"status_code": 422, "json": {"error": "invalid_body", "message": "not a round"}}, "refused")])
-def test_a_round_held_or_refused_keeps_the_tray_red_till_it_is_resolved(tmp_path, api, monkeypatch, answer, shown):
+def test_a_round_refused_keeps_the_tray_red_till_it_is_resolved(tmp_path, api, monkeypatch, answer, shown):
     import httpx
 
-    monkeypatch.setattr(cloud_rounds, "CLOSER_SECONDS", 0.0)
+    monkeypatch.setattr(cloud_rounds, "CEILING_S", 0.0)
     cfg = paired_cfg(tmp_path, api)
     u = _round(Store(cfg.db_path), 1)
     api.answers = [httpx.Response(**answer)]
@@ -795,7 +794,7 @@ def test_a_self_hosted_env_put_in_the_profile_gives_the_paired_booth_only_its_ai
 def test_restarting_the_booth_doesnt_give_a_stuck_queue_more_time_before_the_tray_goes_red(tmp_path, api, monkeypatch):
     import httpx
 
-    monkeypatch.setattr(cloud_rounds, "CLOSER_SECONDS", 0.0)
+    monkeypatch.setattr(cloud_rounds, "CEILING_S", 0.0)
     cfg = paired_cfg(tmp_path, api)
     now = _clock(monkeypatch)
     _round(Store(cfg.db_path), 1)
