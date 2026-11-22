@@ -739,3 +739,25 @@ def test_the_upload_command_doesnt_wait_for_a_round_that_cant_be_read(api, monke
     with pytest.raises(SystemExit, match="1 round.*still aren't on Shotcast Cloud") as e:
         cloud.main(["upload"])
     assert u in str(e.value)
+
+
+def test_a_round_over_again_while_others_were_being_sent_is_waited_for(tmp_path, api):
+    """Its kept bytes aren't sent, and it counts as settling (so `cloud upload` looks again)."""
+    cfg, s, cl = _booth(tmp_path, api)
+    a, b = _round(s, 1), _round(s, 100)
+    pace = cloud_rounds.Pace()
+    api.answers = [httpx.Response(502), httpx.Response(502)]
+    _drain(cl, cfg, pace=pace)
+    _drain(cl, cfg, pace=pace)                              # (the first waits for its retry: both rounds' bytes are kept now)
+    assert _upload(cfg, a)["frozen_body"] is not None and _upload(cfg, b)["frozen_body"] is not None
+    real = cl.request
+
+    def meanwhile(method, path, *args, **kw):               # (as the first is sent, the second is played on and ends again)
+        s.db.execute("UPDATE round_records SET ended_at = ended_at + 600 WHERE uuid = ?", (b,))
+        s.db.commit()
+        return real(method, path, *args, **kw)
+    cl.request = meanwhile
+    out = _drain(cl, cfg)
+    assert out.sent == [a] and out.settling == 1 and out.unchanged == 0 and b not in api.rounds
+    cl.request = real
+    assert _drain(cl, cfg).sent == [b]

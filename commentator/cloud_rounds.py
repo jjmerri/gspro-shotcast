@@ -695,7 +695,12 @@ def _drain(cl: Any, db: sqlite3.Connection, pace: Pace, settle: float) -> Draine
                WHERE r.uuid = ? AND r.kind = 'round' AND r.state != 'in_progress'
                  AND r.ended_at IS u.frozen_ended""", (uuid,)).fetchone()
         if over is None:
-            out.unchanged += 1
+            again = db.execute("SELECT 1 FROM round_records WHERE uuid = ? AND kind = 'round' AND state != 'in_progress'",
+                               (uuid,)).fetchone()
+            if again is not None:
+                out.settling += 1   # (over again, with another ending: it's watched anew from the next look)
+            else:
+                out.unchanged += 1
             continue
         if not _send(cl, db, uuid, pace, out):
             break
