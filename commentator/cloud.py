@@ -1134,6 +1134,11 @@ def _default_league(d: dict) -> str:
     return f"with default league {d['league_id']}" if d.get("league_id") else "with no default league"
 
 
+# The .env beside the code (a checkout's or a ZIP's own), one of the two the self-hosted booth loads.
+# Only the tests move it (tests.cloud_isolation), so none reads this machine's keys.
+CODE_ENV = Path(__file__).resolve().parents[1] / ".env"
+
+
 def _self_hosted_files(config: str | None) -> tuple[Path | None, list[Path]]:
     """The self-hosted config.yaml to seed a profile from, and its .env files (the booth's own: beside
     the code and beside config.yaml), read only here, as the PC is paired. `config` None: the one in
@@ -1149,7 +1154,7 @@ def _self_hosted_files(config: str | None) -> tuple[Path | None, list[Path]]:
         path = Path("config.yaml")   # (not a cloud profile's: a prompt left open in one, say)
         if not path.is_file() or _in_profile(path):
             path = default_home() / "config.yaml"
-    envs = [Path(__file__).resolve().parents[1] / ".env", path.resolve().parent / ".env"]
+    envs = [CODE_ENV, path.resolve().parent / ".env"]
     return (path if path.is_file() else None), [e for e in dict.fromkeys(envs) if not _in_profile(e)]
 
 

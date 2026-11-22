@@ -910,6 +910,7 @@ def test_no_api_client_at_all_is_the_network_failing_and_recovery_still_works(ap
 
 
 def test_on_windows_only_a_dpapi_protected_pass_is_read(monkeypatch):
+    monkeypatch.setattr(cloud.sys, "platform", "linux")   # (development's: only encoded)
     plain = cloud.protect(b"{}")
     assert plain.startswith("plain:") and cloud.unprotect(plain) == b"{}"
     monkeypatch.setattr(cloud.sys, "platform", "win32")
