@@ -289,6 +289,8 @@ def test_practice_stretches_are_never_sent_or_counted_and_dont_hold_up_an_unpair
     kinds = [tuple(r) for r in s.db.execute("SELECT kind, state FROM round_records")]
     assert kinds and set(kinds) == {("practice", "finished")}
     u = _round(s, 10)
+    s.db.execute("UPDATE round_records SET ended_at = ended_at - 1000 WHERE uuid = ?", (u,))   # (long over)
+    s.db.commit()
     assert _drain(cl, cfg).sent == [u] and [rid for rid, _, _ in api.puts] == [u]
     assert _counts(cfg) == {"sent": 1} and cloud_rounds.behind(cfg.db_path, now=time.time() + LATER) == 0
     assert cloud_rounds.outstanding(cfg.db_path, now=time.time() + LATER) == []
