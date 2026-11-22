@@ -322,7 +322,7 @@ def test_a_refused_round_goes_again_once_it_changes_or_when_asked(tmp_path, api,
     assert _drain(cl, cfg).sent == [] and len(api.puts) == 1     # refused as it stands: not sent again
     s.db.execute("UPDATE round_records SET gen = gen + 1 WHERE uuid = ?", (u,))   # (touched: it says the same)
     s.db.commit()
-    assert _drain(cl, cfg).unchanged == 1 and len(api.puts) == 1 and _counts(cfg) == {"parked": 1}
+    assert _drain(cl, cfg).sent == [] and len(api.puts) == 1 and _counts(cfg) == {"parked": 1}
     api.answers = [httpx.Response(422, json={"error": "invalid_body", "message": "not a round"})]
     _change(s, u)                                                # corrected here: it goes again
     assert _drain(cl, cfg).parked == [u] and len(api.puts) == 2  # (refused again: parked again)
@@ -630,3 +630,95 @@ def test_a_round_goes_once_what_it_would_send_has_stood_still_or_at_the_ceiling(
     ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (x,)).fetchone()[0]
     assert cloud_rounds.behind(cfg.db_path, now=ended + 5) == 0
     assert cloud_rounds.behind_since(cfg.db_path, now=ended + cloud_rounds.CEILING_S) == ended + cloud_rounds.CEILING_S
+
+
+def test_a_side_whose_card_was_written_twice_sends_its_last(tmp_path, api):
+    """A booth that stopped between writing a round's cards and marking it over writes them again when
+    the round is finished: the cloud takes one card for a side, so the last is the one sent."""
+    cfg, s, cl = _booth(tmp_path, api)
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None})
+    _hit(s, "Ann", 1)
+    s.end_round(u, complete=True)
+    s.db.execute("UPDATE round_slots SET side = 'Ann' WHERE round_uuid = ?", (u,))
+    for gross in (40, 41):
+        s.db.execute("INSERT INTO rounds (session_id, ended_at, date, side, holes, gross, round_uuid)"
+                     " VALUES (?, 9, '2026-01-01', 'Ann', 9, ?, ?)", (s.session_id, gross, u))
+    s.db.commit()
+    assert _drain(cl, cfg).sent == [u]
+    assert [c["gross"] for c in api.puts[0][2]["scorecards"]] == [41]
+
+
+def test_a_closer_written_and_not_yet_spoken_isnt_the_booth_being_done(tmp_path, api):
+    """A line is written, then spoken, and only then gets its air time: the quiet in between doesn't
+    send the round. One that's never spoken (skipped) waits for the ceiling, not for ever."""
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (u,)).fetchone()[0]
+    s.db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text, record_uuid) VALUES (?, ?, 'segment', 'A', 'bye', ?)",
+                 (s.session_id, ended + 7, u))
+    s.db.commit()
+
+    def at(seconds):
+        return cloud_rounds.drain(cl, cfg.db_path, now=ended + seconds)
+    assert at(8).sent == [] and at(8 + cloud_rounds.QUIET_S).sent == [] and at(8 + 3 * cloud_rounds.QUIET_S).sent == []
+    assert cloud_rounds.status(cfg.db_path, now=ended + 8 + 3 * cloud_rounds.QUIET_S)["settling"] == 1
+    assert at(cloud_rounds.CEILING_S).sent == [u]
+    # Lines from during the round that never aired don't hold it.
+    v = s.begin_round("r2", course="Pebble", players={"Ann": None})
+    _hit(s, "Ann", 300)
+    _said(s, None, "dropped mid-round")
+    s.end_round(v, complete=True)
+    s.db.execute("UPDATE lines SET ts = ts - 1000, aired_at = NULL WHERE record_uuid = ?", (v,))
+    s.db.commit()
+    ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (v,)).fetchone()[0]
+    assert at(1).sent == [] and at(1 + cloud_rounds.QUIET_S).sent == [v]
+
+
+def test_a_refused_round_goes_again_when_what_it_would_send_changes_whatever_changed(tmp_path, api):
+    """Not only a row of the round (which moves its change counter): its session's date, say."""
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    api.answers = [httpx.Response(422, json={"error": "invalid_body", "action": "fix", "message": "its date"})]
+    assert _drain(cl, cfg).parked == [u]
+    assert _drain(cl, cfg).sent == [] and len(api.puts) == 1
+    s.db.execute("UPDATE sessions SET date = '2026-02-02'")
+    s.db.commit()
+    assert _drain(cl, cfg).sent == [u] and api.puts[1][2]["round"]["session"]["date"] == "2026-02-02"
+
+
+def test_a_clock_set_back_doesnt_hold_a_round_past_its_quiet(tmp_path, api):
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (u,)).fetchone()[0]
+    assert cloud_rounds.drain(cl, cfg.db_path, now=ended + 5).sent == []
+    db = cloud_rounds.connect(cfg.db_path)
+    db.execute("UPDATE cloud_quiet SET since = ?", (ended + 5000,))   # (noted before the clock was put right)
+    db.close()
+    assert cloud_rounds.drain(cl, cfg.db_path, now=ended + 10).sent == []          # stands from now
+    assert cloud_rounds.drain(cl, cfg.db_path, now=ended + 10 + cloud_rounds.QUIET_S).sent == [u]
+
+
+def test_a_change_seen_late_in_a_long_batch_starts_its_quiet_then(tmp_path, api, monkeypatch):
+    cfg, s, cl = _booth(tmp_path, api)
+    a, b = _round(s, 1), _round(s, 100)
+    ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (b,)).fetchone()[0]
+    start = ended + cloud_rounds.QUIET_S + 5
+    assert cloud_rounds.drain(cl, cfg.db_path, now=ended + 1).sent == []          # both seen; quiet from here
+    clock = [0.0]
+    monkeypatch.setattr(cloud_rounds, "_monotonic", lambda: clock[0])
+    real = cl.request
+
+    def slow(method, path, *args, **kw):   # (the first upload takes forty seconds, and the second round changes in them)
+        clock[0] += 40
+        s.db.execute("UPDATE shots SET total_yards = 199.0 WHERE record_uuid = ?", (b,))
+        s.db.commit()
+        return real(method, path, *args, **kw)
+    cl.request = slow
+    assert cloud_rounds.drain(cl, cfg.db_path, now=start).sent == [a]
+    cl.request = real
+    db = cloud_rounds.connect(cfg.db_path)
+    since = db.execute("SELECT since FROM cloud_quiet WHERE uuid = ?", (b,)).fetchone()[0]
+    db.close()
+    assert since == pytest.approx(start + 40)                                        # when it was seen, not the batch's start
+    assert cloud_rounds.drain(cl, cfg.db_path, now=start + 40 + cloud_rounds.QUIET_S - 1).sent == []
+    assert cloud_rounds.drain(cl, cfg.db_path, now=start + 40 + cloud_rounds.QUIET_S).sent == [b]
