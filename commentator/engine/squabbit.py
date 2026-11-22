@@ -1,6 +1,6 @@
 """Posting the round to Squabbit as it's played.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 from dataclasses import replace
 from pathlib import Path

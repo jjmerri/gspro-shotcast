@@ -1,6 +1,6 @@
 """Whose shot it is: GSPro's slots, names from the round file and the log, and each shot's row.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import os
 import shutil
 import time

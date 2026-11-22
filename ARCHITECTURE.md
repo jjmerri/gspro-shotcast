@@ -17,7 +17,7 @@ sources/  ─►  engine/    ─►  facts.py  ─►  prompts.py ─► LLM ─
 (3 feeds)     (orchestrate   (statements   (compose)            (reject bad     (queue +
               + project)      from state)                        lines)          play)
                    │
-                   └─► store.py (season.db), round.py (scorecard/format/handicap), usage.py (cost)
+                   └─► store/ (season.db) , round.py (scorecard/format/handicap), usage.py (cost)
 ```
 
 ## Modules
@@ -128,9 +128,21 @@ sources/  ─►  engine/    ─►  facts.py  ─►  prompts.py ─► LLM ─
   whose substance stays the format and the players (`facts.course_listing_facts`).
 - **`round.py`** a league round: who is in it, the format, handicaps, hole scores, and the
   derived numbers (net, fairways, GIR, putts, penalties). Opener/closer trigger logic.
-- **`store.py`** the SQLite season history (`season.db`): records every shot and line, serves
+- **`store/`** the SQLite season history (`season.db`): records every shot and line, serves
   season bests, rebuilds the per-lie carry factors at startup, backs `stats`. In-memory for
-  replays/evals so fake shots never persist.
+  replays/evals so fake shots never persist. One class, `Store`, written as one part per job and put
+  together in `core.py`, as the engine is:
+  - `core.py` opening the season file, sessions, round records and migrations
+  - `common.py` the schema, constants and small helpers the parts share
+  - `shots.py` recording a shot, and each hole's layout and image
+  - `finishes.py` where a shot finished: filled from the next shot, and backfilled
+  - `shot_edits.py` changing a recorded shot: its result, player, round class, hole, position and track
+  - `round_file.py` applying GSPro's round file to the recorded shots
+  - `session.py` what the booth notes as it goes: the format, gimmes, the lines spoken, and the carry model
+  - `stats.py` reads for the booth's facts: drives, closest to the pin, proximity, putting and scoring
+  - `repairs.py` repairs to rows an older version or a missed read left wrong, and finishes filled later
+  - `memory.py` what the booth remembers saying: form mentions, asides, news and predictions
+  - `rounds.py` rounds, week results, and each player's and team's season
 - **`stats_web.py`** / **`stats_web.html`** / **`season_analytics.py`** the `stats-web` viewer: a
   localhost-only server that opens `season.db` read-only (its own connection;
   `Store` would insert a session row) and a single-page UI. `season_analytics.py` holds the

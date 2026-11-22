@@ -1,6 +1,6 @@
 """The booth's side jobs: the commentary switch, weather, bookings, the schedule and the league page.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import json
 import os

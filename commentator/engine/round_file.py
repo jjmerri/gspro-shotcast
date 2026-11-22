@@ -1,6 +1,6 @@
 """GSPro's round file: watching it, and matching its strokes, names and clubs to the booth's shots.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import json
 import math
@@ -26,6 +26,8 @@ from ..sources.club_feeds import SAME_BALL_MPH
 
 class RoundFileMixin:
     """GSPro's round file: watching it, and matching its strokes, names and clubs to the booth's shots."""
+
+    CHAT_HEARTBEAT = 30.0   # seconds; the chat function counts the booth on air for 90 after one
 
     def _in_round(self) -> bool:
         """In a round, or still finishing one (the sign-off, stopping the stream): a restart now would cut

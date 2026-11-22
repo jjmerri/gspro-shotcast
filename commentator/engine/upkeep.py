@@ -1,6 +1,6 @@
 """Publishing the stats page, backing up the season file, and health checks.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import json
 import time

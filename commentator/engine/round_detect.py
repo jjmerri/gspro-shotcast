@@ -1,6 +1,6 @@
 """Telling when a round starts, goes on and ends, from the screen and GSPro's log, and keeping the log's scores.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import re
 import time

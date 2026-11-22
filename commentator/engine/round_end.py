@@ -1,6 +1,6 @@
 """The scorecard, the end of a hole and of the round, and the sign-off.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import sqlite3
 import time

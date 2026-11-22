@@ -1,6 +1,6 @@
 """A shot's result once it's known: corrections from the log and the round file, pick-ups, and what's recorded.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import math
 import re

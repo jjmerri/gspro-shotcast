@@ -1,6 +1,6 @@
 """The facts a pre-shot line can use: the player's season, form, recall, the field and the stakes.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import datetime
 from fractions import Fraction
 from typing import Any

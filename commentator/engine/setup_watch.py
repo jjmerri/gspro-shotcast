@@ -1,6 +1,6 @@
 """GSPro's setup screen before a round: its players, format, holes and teams, and the round prepared from them.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import time
 

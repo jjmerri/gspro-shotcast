@@ -44,7 +44,7 @@ the growth, not exact figures.
 
 ## Why it grows
 
-1. **Missing indexes.** `shots` has only `player` and `lie_before` indexes (`store.py`). Nothing
+1. **Missing indexes.** `shots` has only `player` and `lie_before` indexes (`store/common.py`). Nothing
    indexes `shots.session_id`, `shots.ts`, `lines.session_id`, `lines.shot_id`, `rounds.session_id`
    or `player_rounds.session_id`, so every per-session or per-time lookup scans every shot ever
    recorded:
@@ -81,7 +81,7 @@ the cloud.
 
 ### 1. Indexes and the two hot spots (small; first)
 
-- Add the indexes above in `store.py` (`CREATE INDEX IF NOT EXISTS`, so existing databases get them
+- Add the indexes above in `store/common.py` (`CREATE INDEX IF NOT EXISTS`, so existing databases get them
   at the next start; a one-off few seconds on a large database), then `ANALYZE`.
 - Rewrite `broadcasts` as one grouped query instead of two per session.
 - `highlights.rounds`: group late gimmes by round once; snapshot only the round's own players' bests.

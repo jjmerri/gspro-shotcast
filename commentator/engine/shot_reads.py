@@ -1,6 +1,6 @@
 """What's read around a shot: carry, the finish, trees, the lie, and which hole it was on.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import bisect
 import re

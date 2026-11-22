@@ -1,6 +1,6 @@
 """The pre-shot: the setup line, the plan for the shot's flight, and the reactions prepared for it.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import json
 import re

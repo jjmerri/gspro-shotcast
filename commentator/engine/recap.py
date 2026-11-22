@@ -1,6 +1,6 @@
 """The league week's recap (commentator/recap.py).
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import hashlib
 import time

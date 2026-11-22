@@ -1,6 +1,6 @@
 """Live chat: what the booth reads from it and answers on air.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import time
 from collections.abc import Iterable

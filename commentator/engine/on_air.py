@@ -1,6 +1,6 @@
 """Who is playing and what's been called: names on air, the calls made, score facts, the hole's wrap and closest to the pin.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import re
 from collections.abc import Iterable

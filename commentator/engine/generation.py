@@ -1,6 +1,6 @@
 """Generating and checking what's said: the model calls, grounding, and the transcript.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import json
 import re

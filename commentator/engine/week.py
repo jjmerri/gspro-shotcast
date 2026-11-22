@@ -1,6 +1,6 @@
 """The league week: Squabbit's leaderboard and the sim's closest to the pin.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import time
 
 from ..board import place

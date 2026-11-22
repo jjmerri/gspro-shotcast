@@ -1,6 +1,6 @@
 """Calls while the ball is in the air, and the change to the next hole.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import re
 import time

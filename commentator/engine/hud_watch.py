@@ -1,6 +1,6 @@
 """Watching GSPro's screen between shots: the HUD, the minimap, the putt read, and the setup it emits.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import time
 from dataclasses import replace

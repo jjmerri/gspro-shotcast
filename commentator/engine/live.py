@@ -1,6 +1,6 @@
 """The live stream.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import threading
 import time

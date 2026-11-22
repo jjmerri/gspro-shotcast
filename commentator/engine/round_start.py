@@ -1,6 +1,6 @@
 """Starting a round: building it, its players, and the shots hit before it was known.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import re
 import time

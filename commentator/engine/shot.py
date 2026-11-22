@@ -1,6 +1,6 @@
 """The shot: reading the screen at impact and handling the shot itself.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import contextlib
 import math

@@ -1,6 +1,6 @@
 """Whether a round is the league's: its week, its course, and what its card says.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import time
 
 from .common import log

@@ -1,6 +1,6 @@
 """What the booth says between shots: news, stories, course trivia and live scores.
 
-Part of the Engine (commentator/engine/core.py), which is these parts together."""
+Part of Engine (commentator/engine/core.py), which is these parts together."""
 import asyncio
 import datetime
 import json
@@ -450,6 +450,3 @@ class AsidesMixin:
     def _listeners(r) -> list[str]:
         """Everyone playing this round (both partners on a one-ball team), by roster name."""
         return sorted({p for side in getattr(r, "sides", None) or [] for p in side.players})
-
-
-    CHAT_HEARTBEAT = 30.0   # seconds; the chat function counts the booth on air for 90 after one
