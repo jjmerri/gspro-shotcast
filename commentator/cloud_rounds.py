@@ -87,7 +87,7 @@ THROTTLE_MAX_S = 86400.0     # (the API's longest allowance is a day's)
 # The API's upload refusals (its docs/dev/device-api.md): REFUSED are for good, as the revision is
 # (`action: fix`); the rest of KNOWN are handled each in its own way in _send.
 REFUSED = frozenset({"not_gzip", "body_too_large", "invalid_body", "round_id_mismatch", "claimed_slot_removed",
-                     "invalid_request"})
+                     "claimed_round_changed", "invalid_request"})
 KNOWN = REFUSED | {"unsupported_format", "revision_conflict", "not_bay_writer", "round_owned_elsewhere",
                    "league_suspended", "round_league_suspended", "rate_limited", "busy", "client_too_old",
                    "access_token_invalid", "device_not_paired"}

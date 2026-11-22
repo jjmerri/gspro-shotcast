@@ -28,8 +28,6 @@ class FakeAPI:
         self.n = 0
         self.revoked = False
         self.signed_out = False
-        self.grace = True                                      # a spent refresh token still gets its successor
-        self.attempts: dict[str, str | None] = {}              # refresh token -> the attempt that used it
         self.tenant, self.sim, self.device = "t1", "Bay 1", "d1"
         self.default: str | None = "lg1"
         self.rounds: dict[str, dict[int, bytes]] = {}          # round -> revision -> body
@@ -75,14 +73,12 @@ class FakeAPI:
             if self.revoked or old not in self.refresh:
                 return httpx.Response(401, json={"error": "refresh_token_invalid", "action": "repair",
                                                  "message": "refresh token not valid; pair this PC again"})
-            # as koi's refresh: a spent token gets its successor again for the attempt that used it
-            # (or within the grace, `self.grace`); any other reuse revokes the device
+            # as koi's refresh: a spent token gets its successor again until the successor is used
+            # itself; after that it's refused (and nothing is revoked)
             if self.refresh[old] is None:
                 new = f"r{len(self.refresh)}"
                 self.refresh[old], self.refresh[new] = new, None
-                self.attempts[old] = body.get("attempt")
-            elif not self.grace and (body.get("attempt") is None or self.attempts.get(old) != body.get("attempt")):
-                self.revoked = True
+            elif self.refresh[self.refresh[old]] is not None:
                 return httpx.Response(401, json={"error": "refresh_token_invalid", "action": "repair",
                                                  "message": "refresh token not valid; pair this PC again"})
             return httpx.Response(200, json=self.tokens(self.refresh[old]))
@@ -1043,32 +1039,25 @@ def test_only_the_apis_own_word_ends_a_pairing_on_refresh(api, answer):
 
 
 def test_a_refresh_whose_new_pass_was_never_saved_is_finished_after_a_restart(api):
-    """The API rotated the token and this PC stopped before saving the new one (a crash, a lost
-    answer). Long after the API's grace for a spent token, the same refresh is sent again as the same
-    attempt, and gets the same new token; without the attempt the API would revoke this PC."""
+    """The API rotated the token and this PC stopped before the new one was on its disk (a crash, a
+    power cut, a lost answer). Whenever it next runs, days later, it sends the token it still has
+    and gets the same new one: nothing was remembered about the refresh, and nothing is revoked."""
     paired(api)
     st = cloud.store()
     c = cloud.Cloud(st, clock=lambda: api.now, sleep=lambda s: None)
     api.now += 600
-    real_save, saves = c._save, []
 
-    def crash_after_the_answer(rec):   # the attempt is saved; the new tokens never are
-        saves.append(rec["tokens"].get("refresh_attempt"))
-        if len(saves) > 1:
-            raise KeyboardInterrupt
-        real_save(rec)
-    c._save = crash_after_the_answer
+    def crash(rec):
+        raise KeyboardInterrupt
+    c._save = crash
     with pytest.raises(KeyboardInterrupt):
         c.access_token()
-    kept = st.read()["tokens"]
-    assert kept["refresh_token"] == "r0" and kept["refresh_attempt"] == saves[0] and api.refresh["r0"] == "r1"
-    api.grace = False   # (a restart, well past the grace)
-    api.now += 3600
+    assert st.read()["tokens"]["refresh_token"] == "r0" and api.refresh["r0"] == "r1"
+    assert set(st.read()["tokens"]) == {"refresh_token", "access_token", "access_exp"}
+    api.now += 5 * 86400
     again = cloud.Cloud(st, clock=lambda: api.now, sleep=lambda s: None)
     assert again.access_token() and not api.revoked
-    now = st.read()["tokens"]
-    assert now["refresh_token"] == "r1" and "refresh_attempt" not in now
-    assert api.attempts["r0"] == saves[0]
+    assert st.read()["tokens"]["refresh_token"] == "r1" and len(api.refresh) == 2   # (the same new one)
 
 
 def test_an_unpair_whose_answer_was_lost_is_confirmed_the_next_time(api, monkeypatch, capsys):
@@ -1097,6 +1086,12 @@ def test_pairing_keeps_polling_through_an_answer_it_doesnt_know_and_sends_a_name
     httpx.Response(200, json={"device_id": "other", "tenant_id": "t1", "sim_name": "Bay 1", "refresh_token": "rX",
                               "access_token": "aX", "access_expires_in": 600}),
     httpx.Response(200, text="<html>ok</html>", headers={"content-type": "text/html"}),
+    httpx.Response(200, json={"device_id": "d1", "tenant_id": "t1", "sim_name": "Bay 1", "refresh_token": "rX",
+                              "access_token": "aX", "access_expires_in": 600, "league_id": 7}),
+    httpx.Response(200, json={"device_id": "d1", "tenant_id": "t1", "sim_name": "Bay 1", "refresh_token": "rX",
+                              "access_token": "aX", "access_expires_in": 600, "bay_id": ""}),
+    httpx.Response(200, json={"device_id": "d1", "tenant_id": "t1", "sim_name": "Bay 1", "refresh_token": "rX",
+                              "access_token": "aX", "access_expires_in": "600"}),
     httpx.Response(401, json={"error": "device_signed_out"}),          # (not the API's whole refusal)
     httpx.Response(401, json={"error": "refresh_token_invalid", "action": "retry", "message": "x"}),
 ])
@@ -1111,7 +1106,7 @@ def test_an_answer_to_a_refresh_that_isnt_whole_changes_nothing_this_pc_holds(ap
     with pytest.raises(cloud.Unreachable):
         c.access_token()
     kept = st.read()
-    assert kept["tokens"]["refresh_token"] == "r0" and kept["tokens"]["refresh_attempt"] and not kept.get("refused")
+    assert kept["tokens"]["refresh_token"] == "r0" and not kept.get("refused")   # (and still readable)
     api.__class__ = FakeAPI
     assert c.access_token() and st.read()["tokens"]["refresh_token"] == "r1"
 
@@ -1124,7 +1119,7 @@ def test_the_pass_is_on_the_disk_before_it_replaces_the_old_one(api, monkeypatch
     monkeypatch.setattr(os, "fsync", lambda fd: (done.append("sync"), real_sync(fd))[1])
     monkeypatch.setattr(os, "replace", lambda a, b: (done.append("replace"), real_replace(a, b))[1])
     st.write(st.read())
-    assert done[:2] == ["sync", "replace"]
+    assert done[:2] == ["sync", "replace"]   # (its contents on the disk before it takes the old file's name)
 
 
 def test_pairing_asks_again_after_an_answer_that_isnt_the_apis_whole_one(api):
@@ -1136,3 +1131,22 @@ def test_pairing_asks_again_after_an_answer_that_isnt_the_apis_whole_one(api):
         answers.pop(0) if req.url.path == "/api/devices/token" and answers else real(req))})
     rec = pair(cloud.store(), api)
     assert rec["device_id"] == "d1" and answers == []
+
+
+def test_pairing_collects_an_approval_for_as_long_as_the_api_still_hands_it_out(api):
+    """Approved in the code's last seconds, with the network away till after the code's own time: the
+    API still has the first pass for this PC, so this PC still asks."""
+    asked = []
+    real = api.__call__
+
+    def late(self, req):
+        if req.url.path == "/api/devices/token":
+            asked.append(api.now)
+            api.now += 60   # (each poll a minute on)
+            if api.now < 1000 + 600 + 300:   # nothing gets through till five minutes past the code's time
+                raise httpx.ConnectError("down")
+        return real(req)
+    api.polls = []
+    api.__class__ = type("Late", (FakeAPI,), {"__call__": late})
+    rec = pair(cloud.store(), api)
+    assert rec["device_id"] == "d1" and asked[-1] >= 1000 + 600 + 240
