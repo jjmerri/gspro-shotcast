@@ -8,3 +8,5 @@ import pytest
 def _own_cloud_root(tmp_path_factory, monkeypatch):
     monkeypatch.setattr("commentator.cloud.TEST_ROOT", tmp_path_factory.mktemp("shotcast-cloud"))
     monkeypatch.setattr("commentator.cloud.startup", None)
+    monkeypatch.setattr("commentator.cloud.ENABLED", True)   # (off in the app for now: the tests are of it on)
+    monkeypatch.delenv("SHOTCAST_CLOUD_PREVIEW", raising=False)

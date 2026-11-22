@@ -23,6 +23,7 @@ from pathlib import Path
 
 from . import changelog
 from .cloud import EXPECT_ENV, booth_config, expectation, web_stats_url
+from .cloud import enabled as cloud_enabled
 from .config import BOOTH_NOTE, BOOTH_STOP_CODE, BOOTH_STOPPED, ROUND_STATUS, ROUND_STATUS_EVERY_S
 from .settings_files import env_value, set_commentary, set_env, set_yaml
 
@@ -521,7 +522,7 @@ class Tray:
         self.launch_home = launch_home
         self.home, self.cfg, self.first_run = home, booth_config(cfg, paired), first_run
         self.version = current_version()
-        self.booth = Booth(home, on_change=self._refresh, expect=expectation(paired))
+        self.booth = Booth(home, on_change=self._refresh, expect=expectation(paired) if cloud_enabled() else None)
         self.stats_url: str | None = None
         self.update = None            # a downloaded, checked updater.Release and its file
         self.checked_at = None        # when GitHub last said this is the latest

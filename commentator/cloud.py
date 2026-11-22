@@ -89,6 +89,12 @@ LIFECYCLE = ("run", "tray")          # <home>/<who>.lock: held by a paired booth
 # overrides, and the self-hosted booth's services' (AWS, ntfy, Squabbit, SuperSaaS, OBS, TypeSafe).
 SCRUBBED = ("OPENAI_", "ANTHROPIC_", "CLAUDE_", "GOOGLE_", "GEMINI_", "GCLOUD_", "AZURE_", "SPEECH_",
             "ELEVENLABS_", "AWS_", "BOTO_", "NTFY_", "SQUABBIT_", "SUPERSAAS_", "OBS_", "TYPESAFE_")
+# The switch for everything Shotcast Cloud in this app. Shotcast Cloud isn't open yet, so it's off:
+# nothing here runs, a pairing file (a developer's) is ignored, and Shotcast is the self-hosted one,
+# exactly as before. PREVIEW_ENV=1 turns it on for one process and what it starts (development,
+# against a test API); a PC paired that way is paired only while it's set.
+ENABLED = False
+PREVIEW_ENV = "SHOTCAST_CLOUD_PREVIEW"
 startup: Profile | None = None       # the pairing Shotcast started in (set once by __main__): None, self-hosted
 
 
@@ -128,6 +134,11 @@ class TooOld(CloudError):
     def __init__(self, minimum: str | None) -> None:
         self.minimum = minimum or "a newer version"
         super().__init__(f"Shotcast Cloud needs Shotcast {self.minimum} or later: update Shotcast")
+
+
+def enabled() -> bool:
+    """Whether Shotcast Cloud is switched on in this app (ENABLED, or PREVIEW_ENV=1)."""
+    return ENABLED or os.environ.get(PREVIEW_ENV) == "1"
 
 
 # ---- where things are -----------------------------------------------------------------------
@@ -454,7 +465,10 @@ def _seen(path: Path) -> str | None:
 def inspect() -> Profile | None:
     """This PC's pairing as it stands: None with no marker (the self-hosted Shotcast), else its Profile,
     with `damage` set when it can't be trusted. Every field is checked here, so a damaged marker is
-    damage, never an error further on. Reads only: nothing is made."""
+    damage, never an error further on. Reads only: nothing is made. With Shotcast Cloud switched
+    off (`enabled`), None whatever is there."""
+    if not enabled():
+        return None
     path = marker()
     try:
         data = path.read_bytes()
@@ -503,7 +517,7 @@ def check_expected(prof: Profile | None) -> None:
     self-hosted Shotcast inside the cloud profile, and one restarted after a pairing, in a profile
     its tray knows nothing of)."""
     want = os.environ.get(EXPECT_ENV)
-    if want is not None and want != expectation(prof):
+    if enabled() and want is not None and want != expectation(prof):
         raise PairingChanged("this PC was paired with Shotcast Cloud, or unpaired, since Shotcast started: "
                              "quit Shotcast and start it again")
 
@@ -1143,6 +1157,8 @@ def check_self_hosted(config: str | Path) -> None:
     """Unpaired, as Shotcast starts: the self-hosted Shotcast never runs in a cloud profile's home (a
     prompt left open in one across an unpair, or --home naming one): its season file and keys are a
     pairing's, kept for it, not the self-hosted booth's to carry on in. CloudError says so."""
+    if not enabled():
+        return
     # The folder it's started in too: with -c naming a config elsewhere, whatever that config leaves
     # relative (logs/season.db, say) would still be the profile's.
     for where in (Path(config), Path.cwd() / "config.yaml"):
@@ -1208,6 +1224,8 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--force", action="store_true",
                    help="unpair even with rounds not yet on Shotcast Cloud, or if it can't be reached")
     a = p.parse_args(argv)
+    if not enabled():
+        sys.exit("Shotcast Cloud isn't available yet: Shotcast runs self-hosted, on this PC, as it always can.")
     st = store()
     restart = "Restart Shotcast to apply."
     try:

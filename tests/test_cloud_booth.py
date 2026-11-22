@@ -851,3 +851,58 @@ def test_paired_settings_leave_the_installers_gspro_pick_to_the_self_hosted_shot
     src = inspect.getsource(tray_ui.SettingsWindow)
     at = src.index("remember_gspro_dir(gspro)")
     assert "not self.paired" in src[src.rindex("if gspro", 0, at):at]
+
+
+# ---- the switch: Shotcast Cloud is off for now ---------------------------------------------------
+
+def test_shotcast_cloud_is_switched_off_in_the_app_as_shipped():
+    import importlib.util
+
+    spec = importlib.util.find_spec("commentator.cloud")
+    fresh = importlib.util.module_from_spec(spec)   # (the module as it ships, not as the tests set it)
+    spec.loader.exec_module(fresh)
+    assert fresh.ENABLED is False and fresh.enabled() is False
+
+
+def test_switched_off_a_pairing_on_the_pc_is_ignored_and_shotcast_is_self_hosted_as_before(tmp_path, api, monkeypatch,
+                                                                                         capsys):
+    from commentator import tray
+    from commentator.config import load_config
+
+    home = _self_hosted_home(tmp_path, monkeypatch)
+    prof = paired(api)                              # (a developer's pairing, made with it on)
+    monkeypatch.setattr(cloud, "ENABLED", False)
+    assert cloud.inspect() is None and cloud.locate() is None
+    ran = []
+    monkeypatch.setattr(cli, "cmd_run", lambda cfg, args: ran.append((cfg.db_path, Path.cwd().resolve())))
+    monkeypatch.setattr(cli, "cmd_stats", lambda cfg, args: ran.append("stats"))
+    monkeypatch.setattr(cli, "_setup_logging", lambda *a, **kw: None)
+    _run(monkeypatch, "run")
+    _run(monkeypatch, "stats")                      # (the self-hosted commands aren't refused)
+    assert ran == [("logs/season.db", home.resolve()), "stats"] and os.environ["AWS_ACCESS_KEY_ID"] == "SELF-HOSTED"
+    assert cloud_booth.start(load_config(home / "config.yaml")) is None and len(api.puts) == 0
+    for argv in (["status"], ["upload"], ["unpair"], ["pair", "--api", API]):
+        with pytest.raises(SystemExit, match="isn't available yet"):
+            cloud.main(argv)
+    assert cloud.marker().exists() and not api.revoked
+    monkeypatch.setattr(tray, "AutoPublisher", lambda *a, **kw: None)
+    t = tray.Tray(home, load_config(home / "config.yaml"))
+    assert t.cloud is None and t.booth._expect == {}   # (the booth is started exactly as before)
+    monkeypatch.chdir(prof.home)                    # (nor is a profile's folder anything special)
+    _run(monkeypatch, "run")
+    assert len(ran) == 3
+
+
+def test_the_preview_switch_turns_shotcast_cloud_on_for_a_process_and_what_it_starts(tmp_path, api, monkeypatch):
+    _self_hosted_home(tmp_path, monkeypatch)
+    prof = paired(api)
+    monkeypatch.setattr(cloud, "ENABLED", False)
+    monkeypatch.setenv(cloud.PREVIEW_ENV, "1")
+    assert cloud.enabled() and cloud.locate().home == prof.home
+    t, _ = _tray(api, monkeypatch, prof=prof)
+    started = []
+    t.booth._popen = lambda *a, **kw: started.append(kw) or types.SimpleNamespace(poll=lambda: None)
+    t.booth._spawn()
+    assert started[0]["env"][cloud.PREVIEW_ENV] == "1" and cloud.EXPECT_ENV in started[0]["env"]
+    monkeypatch.setenv(cloud.PREVIEW_ENV, "yes")    # (only "1")
+    assert not cloud.enabled()

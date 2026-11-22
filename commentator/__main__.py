@@ -1187,7 +1187,7 @@ def main() -> None:
     if args.command == "tray" and args.write_icon:
         return cmd_tray(parser, args)
     if args.command == "tray" and args.self_test:   # (the release build's check, of the self-hosted app)
-        if args.home is None and cloud.marker().exists():
+        if args.home is None and cloud.enabled() and cloud.marker().exists():
             sys.exit("This PC is paired with Shotcast Cloud: tray --self-test runs only against a disposable "
                      "folder given with --home.")
         return cmd_tray(parser, args)
