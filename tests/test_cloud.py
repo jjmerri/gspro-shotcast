@@ -714,7 +714,7 @@ def test_the_network_failing_is_a_cloud_error_and_status_and_forced_unpair_still
         _PAIR(cloud.TokenStore(cloud.root() / "other.json"), API, "Sim PC", sleep=lambda s: None, say=lambda s: None)
     cloud.main(["status"])
     out = capsys.readouterr().out
-    assert "didn't answer" in out and "1 settling" in out
+    assert "didn't answer" in out and "1 not sent yet" in out
     with pytest.raises(SystemExit, match="Not unpaired"):
         cloud.main(["unpair"])
     cloud.main(["unpair", "--force"])
@@ -1162,3 +1162,42 @@ def test_pairing_waits_through_both_of_the_apis_windows_for_a_lost_first_pass(ap
     api.polls = []
     api.__class__ = type("Late", (FakeAPI,), {"__call__": late})
     assert pair(cloud.store(), api)["device_id"] == "d1" and asked[-1] >= 1000 + 600 + 1000
+
+
+# ---- elapsed-time pacing, and the note as a PC is paired again -------------------------------------
+
+def test_pairing_again_says_that_an_earlier_pairings_unsent_rounds_stay_on_this_pc(api, monkeypatch, capsys):
+    prof = _pair_cli(api, monkeypatch)
+    assert "never reached" not in capsys.readouterr().out   # (nothing left behind the first time)
+    _unsent_round(prof)
+    cloud.main(["unpair", "--force"])
+    capsys.readouterr()
+    api.device = "d2"   # (pairing again makes another device on Shotcast Cloud)
+    cloud.main(["pair", "--api", API])   # (cloud.pair is still the test's)
+    again = cloud.locate()
+    out = capsys.readouterr().out
+    assert again.home != prof.home
+    assert "1 round(s) from an earlier pairing of this PC never reached Shotcast Cloud" in out
+    assert "stay on this PC only" in out
+
+
+def test_the_upload_command_waits_for_a_round_to_settle_then_sends_it(api, monkeypatch, capsys):
+    import time
+    import types
+
+    from commentator import cloud_rounds
+
+    prof = _pair_cli(api, monkeypatch)
+    u = _unsent_round(prof)
+    clock, naps = [500.0], []
+    monkeypatch.setattr(cloud_rounds, "_monotonic", lambda: clock[0])
+
+    def nap(s):
+        naps.append(s)
+        clock[0] += s
+    monkeypatch.setattr(cloud, "time", types.SimpleNamespace(sleep=nap, time=time.time))
+    capsys.readouterr()
+    cloud.main(["upload"])
+    out = capsys.readouterr().out
+    assert "Waiting for 1 round(s) to settle" in out and "Sent 1 round(s)" in out and u in api.rounds
+    assert sum(naps) == cloud_rounds.QUIET_S and set(naps) == {cloud.UPLOAD_LOOK_S}

@@ -6,7 +6,7 @@ to the pairing as it's made (`bind`): every round record in it is that pairing's
 and nothing goes up from a file bound to another pairing, or to none.
 
 A round is sent ONCE, when it's done: finished or abandoned, and quiet (what it would send hasn't
-changed for QUIET_S, or CEILING_S past its end whatever), as one body of its rows, with no
+changed for QUIET_S, or CEILING_S after it was first seen over, whatever), as one body of its rows, with no
 league (the PC is a capture device: the cloud decides a round's league). From then on the round is
 the cloud's: nothing that changes here afterwards (a startup repair, a round GSPro takes up again)
 is sent, and corrections are made in the cloud.
@@ -26,6 +26,11 @@ never holds up an unpair. (The booth can still move a stretch's rows into the ro
 a stretch isn't settled the way a round is; range sessions may be sent one day, as their own thing.)
 
 The queue (cloud_uploads) is kept in the profile's season.db, made the first time it's used.
+
+No time of day is kept or compared here. Every wait (a round's quiet, the ceiling, a retry, a wait
+the API asks for) is counted in elapsed seconds by the run that's uploading (`Pace`: the booth's
+loop, or one `cloud upload`), so nothing depends on the PC's clock, or on it being put right.
+A run that starts counts afresh: a round waits out its quiet again, and a retry is tried at once.
 """
 from __future__ import annotations
 
@@ -61,8 +66,7 @@ CREATE TABLE IF NOT EXISTS cloud_uploads (
     frozen_content TEXT,
     status TEXT NOT NULL DEFAULT 'queued', -- queued / parked (refused: see error)
     error TEXT,
-    tries INTEGER NOT NULL DEFAULT 0,
-    next_try REAL NOT NULL DEFAULT 0
+    tries INTEGER NOT NULL DEFAULT 0       -- failed tries so far (how long the next waits: Pace.retry)
 );
 """
 PAIRING = """
@@ -75,11 +79,6 @@ CREATE TABLE IF NOT EXISTS cloud_pairing (   -- the pairing this season file's r
 )"""
 
 
-THROTTLE = """
-CREATE TABLE IF NOT EXISTS cloud_throttle (  -- the API said to wait (429): nothing is sent from this PC till then
-    one INTEGER PRIMARY KEY CHECK (one = 1),
-    not_before REAL NOT NULL
-)"""
 THROTTLE_DEFAULT_S = 300.0   # a 429 with no Retry-After
 THROTTLE_MAX_S = 86400.0     # (the API's longest allowance is a day's)
 
@@ -92,7 +91,8 @@ KNOWN = REFUSED | {"unsupported_format", "round_final", "not_bay_writer", "round
                    "access_token_invalid", "device_not_paired"}
 # When a round is done, and so sent. A round goes to Shotcast Cloud once, and nothing that changes
 # here afterwards follows it, so it waits till the booth has stopped adding to it: it has ended, and
-# what would be sent hasn't changed for QUIET_S (no shot or line added, no shot's data changed).
+# what would be sent hasn't changed for QUIET_S (no shot or line added, no shot's data changed),
+# as the uploader has watched it (Pace: elapsed seconds, not the time of day).
 # "What would be sent" is the body itself, less the two columns that say when a line was spoken
 # (lines.aired_at, aired_seconds: filled as the sign-off airs, up to a minute and a half after the
 # round, for this PC's own highlight cuts). A round goes once it's known what was said, not once
@@ -100,20 +100,61 @@ KNOWN = REFUSED | {"unsupported_format", "round_final", "not_bay_writer", "round
 # cloud soon after. (The record's own change counter, round_records.gen, can't be used: airing a
 # line moves it.) Measured on a booth's logs (212 shots, 4 rounds): GSPro's round-file data for a shot
 # lands within 20 s of it (median 7), a round is declared over 5 to 14 s after its last shot, and the
-# closer is written about 7 s after that. CEILING_S after its end a round goes whatever is still
-# changing, so one can't be held back for good. What comes later stays on this PC: a closer that
+# closer is written about 7 s after that. CEILING_S after the uploader first saw it over (within
+# cloud_booth.DRAIN_S of its end) a round goes whatever is still changing, so one can't be held back for good. What comes later stays on this PC: a closer that
 # takes longer than QUIET_S to be written, the air times of the last lines, and what the round file
 # gives after the ceiling (it can give a stroke up to store.FILE_END_DUE_S = 600 s after it: a
 # pick-up on the last hole, say).
 QUIET_S = 30.0
 CEILING_S = 180.0
-QUIET = """
-CREATE TABLE IF NOT EXISTS cloud_quiet (       -- a finished, unsent round: what it would send, and since when that has stood
-    uuid TEXT PRIMARY KEY,
-    sig TEXT NOT NULL,                         -- a hash of its body, less the lines' air times (_signature)
-    since REAL NOT NULL
-);
-"""
+
+
+class Pace:
+    """What one run of the uploader (the booth's loop, or one `cloud upload`) remembers between its
+    looks at the queue, timed in elapsed seconds on its own clock (time.monotonic), never by the
+    time of day: when it first saw each finished round, what that round would send and since when
+    that has stood, when a failed round is next tried, and how long the API said to wait. None of
+    it is kept on disk: another run starts afresh."""
+
+    def __init__(self) -> None:
+        self.seen: dict[str, float] = {}               # round -> when this run first saw it over
+        self.stood: dict[str, tuple[str, float]] = {}  # round -> (what it would send: _signature; since when)
+        self.retry: dict[str, float] = {}              # round -> not tried again before
+        self.hold: float | None = None                 # nothing at all is sent before (the API's 429)
+
+    def clock(self) -> float:
+        return _monotonic()
+
+    def note(self, uuid: str, sig: str) -> None:
+        """A look at a finished round: one first seen, or that would now send something else,
+        stands from now."""
+        now = self.clock()
+        self.seen.setdefault(uuid, now)
+        if uuid not in self.stood or self.stood[uuid][0] != sig:
+            self.stood[uuid] = (sig, now)
+
+    def ready(self, uuid: str, settle: float) -> bool:
+        """Done: quiet for QUIET_S as last looked at, or `settle` (the ceiling) since first seen over."""
+        if uuid not in self.seen:
+            return False
+        now = self.clock()
+        return now - self.seen[uuid] >= settle or now - self.stood[uuid][1] >= QUIET_S
+
+    def held(self) -> float:
+        """Seconds still to wait before anything is sent (0: none)."""
+        return 0.0 if self.hold is None else max(0.0, self.hold - self.clock())
+
+    def waits(self, uuid: str) -> bool:
+        """Whether a round that failed is still waiting for its next try."""
+        return uuid in self.retry and self.retry[uuid] > self.clock()
+
+    def only(self, uuids: set[str]) -> None:
+        """Forget every round but these (the ones over and not sent): one sent, gone, or taken up
+        again is seen anew if it comes back."""
+        for kept in (self.seen, self.stood, self.retry):
+            for uuid in set(kept) - uuids:
+                del kept[uuid]
+
 
 
 class Blocked(Exception):
@@ -127,6 +168,7 @@ class NotThisPairing(Exception):
 @dataclass
 class Drained:
     sent: list[str] = field(default_factory=list)       # record uuids the cloud has (acknowledged now)
+    settling: int = 0                                    # over, and not done yet (still changing, or just seen)
     unchanged: int = 0                                   # nothing to send after all (not a settled round any more)
     parked: list[str] = field(default_factory=list)
     waiting: int = 0                                     # left for a later try (network, server busy, odd answer)
@@ -140,8 +182,6 @@ def connect(db_path: str) -> sqlite3.Connection:
     db.execute("PRAGMA synchronous = FULL")
     db.executescript(TABLES)
     db.execute(PAIRING)
-    db.execute(THROTTLE)
-    db.execute(QUIET)
     return db
 
 
@@ -360,105 +400,64 @@ def _signature(b: dict[str, Any]) -> str:
     return hashlib.sha256(_json(b | {"lines": lines})).hexdigest()
 
 
-def _note(db: sqlite3.Connection, uuid: str, sig: str, now: float) -> bool:
-    """Keep a round's signature and since when it has stood (cloud_quiet). True if it's the one kept
-    already (unchanged); one first seen, or changed, stands from now."""
-    row = db.execute("SELECT sig, since FROM cloud_quiet WHERE uuid = ?", (uuid,)).fetchone()
-    if row is not None and row["sig"] == sig and row["since"] <= now:   # (a `since` ahead of now: the
-        return True                                                     # clock was set back; stands from now)
-    db.execute("INSERT OR REPLACE INTO cloud_quiet (uuid, sig, since) VALUES (?, ?, ?)", (uuid, sig, now))
-    return False
+# Rounds that are over and not on the cloud, oldest first: what a drain looks at. One the cloud has
+# is never sent again, whatever changes here afterwards.
+_OVER = """SELECT r.uuid, u.status, u.frozen_body IS NOT NULL AS frozen, u.frozen_content
+           FROM round_records r LEFT JOIN cloud_uploads u ON u.uuid = r.uuid
+           WHERE r.kind = 'round' AND r.state != 'in_progress' AND COALESCE(u.revision, 0) = 0
+           ORDER BY r.started_at, r.uuid"""
 
 
-def _watch(db: sqlite3.Connection, now: float) -> None:
-    """Look at each finished round the cloud doesn't have, and note whether what it would send has
-    changed since it was last looked at: what `_READY` measures the quiet from."""
-    for (uuid,) in db.execute(
-            """SELECT r.uuid FROM round_records r LEFT JOIN cloud_uploads u ON u.uuid = r.uuid
-               WHERE r.kind = 'round' AND r.state != 'in_progress' AND COALESCE(u.revision, 0) = 0
-                 AND u.frozen_body IS NULL""").fetchall():
-        if (got := body(db, uuid)) is not None:
-            _note(db, uuid, _signature(got[0]), now)
-    db.execute("DELETE FROM cloud_quiet WHERE uuid IN (SELECT uuid FROM cloud_uploads WHERE revision != 0)")
+def _watch(db: sqlite3.Connection, pace: Pace, rows: list[sqlite3.Row]) -> None:
+    """Look at each finished round whose bytes aren't built yet, and note whether what it would send
+    has changed since it was last looked at: what its quiet is measured from (Pace.ready)."""
+    pace.only({r["uuid"] for r in rows})
+    for r in rows:
+        if not r["frozen"] and (got := body(db, r["uuid"])) is not None:
+            pace.note(r["uuid"], _signature(got[0]))
 
 
-# A finished round is ready to send: `settle` (the ceiling) past its end, or quiet for QUIET_S (as
-# last looked at: _watch, and again as its body is built, _freeze).
-_READY = """(COALESCE(r.ended_at, r.started_at, 0) <= :now - :settle
-             OR EXISTS (SELECT 1 FROM cloud_quiet q WHERE q.uuid = r.uuid AND q.since <= :now - :quiet))"""
-
-
-def _due(db: sqlite3.Connection, now: float, settle: float) -> list[sqlite3.Row]:
-    """Rounds to send, oldest first: over and done (_READY), and not on the cloud yet (never sent, or
-    their bytes waiting to be acknowledged). One the cloud has is never sent again, whatever changes
-    here afterwards. A refused (parked) one is tried again only once what it would send has changed
-    (as _watch last saw it: whatever changed, a row of the round or something else its body reads)."""
-    return db.execute(
-        f"""SELECT r.uuid FROM round_records r
-           LEFT JOIN cloud_uploads u ON u.uuid = r.uuid
-           WHERE r.kind = 'round' AND r.state != 'in_progress' AND {_READY}
-             AND (u.uuid IS NULL OR (u.status = 'queued' AND u.revision = 0 AND u.next_try <= :now)
-                  OR (u.status = 'parked' AND EXISTS (SELECT 1 FROM cloud_quiet q WHERE q.uuid = r.uuid
-                                                      AND q.sig IS NOT u.frozen_content)))
-           ORDER BY r.started_at, r.uuid""",
-        {"now": now, "settle": settle, "quiet": QUIET_S}).fetchall()
-
-
-def _settled(db: sqlite3.Connection, uuid: str, now: float, settle: float) -> bool:
-    """Whether the record, as it stands in this read, is a round that's over and done: what may be sent."""
-    return db.execute(
-        f"SELECT 1 FROM round_records r WHERE r.uuid = :uuid AND r.kind = 'round' AND r.state != 'in_progress'"
-        f" AND {_READY}", {"uuid": uuid, "now": now, "settle": settle, "quiet": QUIET_S}).fetchone() is not None
-
-
-def _freeze(db: sqlite3.Connection, uuid: str, now: float, settle: float) -> bool:
+def _freeze(db: sqlite3.Connection, uuid: str, pace: Pace, settle: float) -> bool:
     """Build the round's body and keep its bytes until the cloud acknowledges them: those same bytes
     are what's sent, however often, across restarts. False if there's nothing to send: the cloud has
-    the round already, the record is gone, or it isn't a settled round any more (checked in the very
-    read the body is built from: a round the booth took up again since the queue was looked at isn't
-    sent in progress)."""
+    the round already, the record is gone, or it isn't a done round any more (checked on the very
+    body that's built: a round the booth took up again since the queue was looked at isn't sent in
+    progress, and one that says something else than when it was last looked at starts its quiet
+    again, from now, unless the ceiling has passed)."""
     got = body(db, uuid)
     if got is None:
         return False
     b, gen = got
-    # (this very body is what has to have stood still: one that differs from what was last looked at
-    # starts its quiet again, unless the ceiling has passed)
-    stood = _note(db, uuid, _signature(b), now)
-    ended = b["round"].get("ended_at") if b["round"].get("ended_at") is not None else b["round"].get("started_at") or 0
-    if b["round"]["state"] == "in_progress" or not (ended <= now - settle or (stood and _settled(db, uuid, now, settle))):
+    sig = _signature(b)
+    pace.note(uuid, sig)
+    if b["round"]["kind"] != "round" or b["round"]["state"] == "in_progress" or not pace.ready(uuid, settle):
         return False
     db.execute("INSERT OR IGNORE INTO cloud_uploads (uuid) VALUES (?)", (uuid,))
     if db.execute("SELECT revision FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()[0]:
         return False
     db.execute("UPDATE cloud_uploads SET frozen_revision = 1, frozen_body = ?, frozen_gen = ?, frozen_content = ? "
-               "WHERE uuid = ?", (encode(b), gen, _signature(b), uuid))
+               "WHERE uuid = ?", (encode(b), gen, sig, uuid))
     return True
 
 
-def _backoff(db: sqlite3.Connection, uuid: str, now: float, error: str) -> None:
+def _backoff(db: sqlite3.Connection, uuid: str, pace: Pace, error: str) -> None:
     tries = db.execute("SELECT tries FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()[0]
     # (the exponent capped, not only the wait: a round that waits for weeks mustn't overflow)
-    db.execute("UPDATE cloud_uploads SET tries = tries + 1, next_try = ?, error = ? WHERE uuid = ?",
-               (now + min(RETRY_MAX_S, RETRY_BASE_S * 2 ** min(tries, 30)), error, uuid))
+    pace.retry[uuid] = pace.clock() + min(RETRY_MAX_S, RETRY_BASE_S * 2 ** min(tries, 30))
+    db.execute("UPDATE cloud_uploads SET tries = tries + 1, error = ? WHERE uuid = ?", (error, uuid))
 
 
-def _throttle(db: sqlite3.Connection, r: Any, now: float) -> float:
+def _throttle(r: Any, pace: Pace) -> float:
     """The API's allowance for this PC is spent (429): its limits are the device's, not a round's, so
-    nothing more is sent, by the booth or the command line, till the time it gave (Retry-After).
+    this run sends nothing more for as long as it said (Retry-After), counted from this answer.
     Returns how long that is."""
     try:
         wait = float(r.headers.get("Retry-After", ""))
     except (TypeError, ValueError):
         wait = THROTTLE_DEFAULT_S
-    wait = min(max(wait, 1.0), THROTTLE_MAX_S)
-    db.execute("INSERT OR REPLACE INTO cloud_throttle (one, not_before) VALUES (1, ?)", (now + wait,))
+    wait = min(max(wait, 1.0), THROTTLE_MAX_S) if wait == wait else THROTTLE_DEFAULT_S   # (not a number: nan)
+    pace.hold = pace.clock() + wait
     return wait
-
-
-def throttled(db: sqlite3.Connection, now: float) -> float:
-    """Seconds still to wait before anything is sent (0: none)."""
-    row = db.execute("SELECT not_before FROM cloud_throttle WHERE one = 1").fetchone()
-    return max(0.0, min(row[0] - now, THROTTLE_MAX_S)) if row else 0.0
 
 
 def _park(db: sqlite3.Connection, uuid: str, error: str) -> None:
@@ -477,8 +476,7 @@ def _unpark(db: sqlite3.Connection, uuid: str) -> bool:
     if _signature(b) == db.execute("SELECT frozen_content FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()[0]:
         db.execute("UPDATE cloud_uploads SET frozen_gen = ? WHERE uuid = ?", (gen, uuid))
         return False
-    db.execute("UPDATE cloud_uploads SET status = 'queued', error = NULL, tries = 0, next_try = 0 WHERE uuid = ?",
-               (uuid,))
+    db.execute("UPDATE cloud_uploads SET status = 'queued', error = NULL, tries = 0 WHERE uuid = ?", (uuid,))
     return True
 
 
@@ -488,7 +486,7 @@ def requeue(db_path: str) -> int:
     held. Returns how many."""
     db = connect(db_path)
     try:
-        return db.execute("UPDATE cloud_uploads SET status = 'queued', error = NULL, tries = 0, next_try = 0 "
+        return db.execute("UPDATE cloud_uploads SET status = 'queued', error = NULL, tries = 0 "
                           "WHERE status = 'parked'").rowcount
     finally:
         db.close()
@@ -509,12 +507,11 @@ def _sent(db: sqlite3.Connection, uuid: str, out: Drained) -> None:
     """The cloud has the round: it's never sent again."""
     db.execute("UPDATE cloud_uploads SET revision = 1, acked_gen = frozen_gen, acked_content = frozen_content,"
                " frozen_revision = NULL, frozen_body = NULL, frozen_gen = NULL, frozen_content = NULL,"
-               " status = 'queued', tries = 0, next_try = 0, error = NULL WHERE uuid = ?", (uuid,))
+               " status = 'queued', tries = 0, error = NULL WHERE uuid = ?", (uuid,))
     out.sent.append(uuid)
 
 
-def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained,
-          begun: float | None = None) -> bool:
+def _send(cl: Any, db: sqlite3.Connection, uuid: str, pace: Pace, out: Drained) -> bool:
     """Send a round's frozen bytes and act on the answer. False to stop draining for now."""
     from .cloud import CloudError, Unreachable, _message
 
@@ -523,13 +520,13 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained,
         r = cl.request("PUT", f"/api/rounds/{uuid}", raw=frozen,
                        headers={"Content-Encoding": "gzip", "Content-Type": "application/json"})
     except Unreachable as e:   # (the network, or a refresh that got no answer)
-        _backoff(db, uuid, now, str(e))
+        _backoff(db, uuid, pace, str(e))
         out.waiting += 1
         return False
     except CloudError:   # (not paired, or paired elsewhere meanwhile: nothing more is sent)
         raise
     except Exception as e:   # noqa: BLE001 - the network
-        _backoff(db, uuid, now, f"couldn't reach Shotcast Cloud: {e}")
+        _backoff(db, uuid, pace, f"couldn't reach Shotcast Cloud: {e}")
         out.waiting += 1
         return False
     answer = _answer(r)
@@ -561,7 +558,7 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained,
     if r.status_code == 422 and error == "unsupported_format":
         # The API is behind this app (it reads a new format before any app writes it, so this
         # passes): every round's bytes are kept, as they are, and sent once it isn't.
-        _backoff(db, uuid, now, f"Shotcast Cloud: {_message(r)}")
+        _backoff(db, uuid, pace, f"Shotcast Cloud: {_message(r)}")
         out.waiting += 1
         return False
     action = (answer or {}).get("action")
@@ -575,7 +572,7 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained,
         out.parked.append(uuid)
         return True
     if r.status_code == 429:
-        wait = _throttle(db, r, now + (0.0 if begun is None else max(0.0, _monotonic() - begun)))
+        wait = _throttle(r, pace)
         db.execute("UPDATE cloud_uploads SET error = ? WHERE uuid = ?",
                    (f"Shotcast Cloud: this PC's upload allowance is spent; waiting {int(wait)}s", uuid))
         log.warning("Shotcast Cloud: this PC's upload allowance is spent; nothing sent for %ds", int(wait))
@@ -583,7 +580,7 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained,
         return False
     what = f"an answer this PC doesn't understand (HTTP {r.status_code})" if r.status_code in (200, 201) \
         else f"HTTP {r.status_code}"
-    _backoff(db, uuid, now, f"Shotcast Cloud: {what}")
+    _backoff(db, uuid, pace, f"Shotcast Cloud: {what}")
     out.waiting += 1
     return False
 
@@ -592,14 +589,15 @@ def lock_path(db_path: str) -> Path:
     return Path(db_path).with_name(Path(db_path).name + ".upload.lock")
 
 
-def drain(cl: Any, db_path: str, now: float | None = None, settle: float = CEILING_S,
+def drain(cl: Any, db_path: str, pace: Pace | None = None, settle: float = CEILING_S,
           wait: float = 60.0) -> Drained:
-    """Send every settled round the cloud doesn't have yet. `cl`: a paired cloud.Cloud; `db_path`: the
-    season file in its pairing's profile (cloud.locate). `settle`: how long past its end a
-    record waits (shorter only to test). One drain at a time across processes: waits `wait` seconds
-    for another to finish, then TimeoutError. Raises NotThisPairing when the file isn't bound to `cl`'s
-    pairing, Blocked when the cloud refuses this PC, NotPaired / PairingChanged when the stored
-    pairing isn't `cl`'s any more."""
+    """Send every done round the cloud doesn't have yet. `cl`: a paired cloud.Cloud; `db_path`: the
+    season file in its pairing's profile (cloud.locate). `pace`: what this run of the uploader
+    remembers between drains (the same one each time; without one, only what needs no waiting goes:
+    bytes built already, and everything when `settle` is 0). `settle`: the ceiling (shorter only to
+    test). One drain at a time across processes: waits `wait` seconds for another to finish, then
+    TimeoutError. Raises NotThisPairing when the file isn't bound to `cl`'s pairing, Blocked when the
+    cloud refuses this PC, NotPaired / PairingChanged when the stored pairing isn't `cl`'s any more."""
     from .cloud import folder_identity, home_for
     from .locks import file_lock
 
@@ -612,54 +610,58 @@ def drain(cl: Any, db_path: str, now: float | None = None, settle: float = CEILI
         try:
             if bound(db) != key:
                 raise NotThisPairing(f"{db_path} isn't bound to this pairing; nothing sent")
-            return _drain(cl, db, time.time() if now is None else now, settle)
+            return _drain(cl, db, Pace() if pace is None else pace, settle)
         finally:
             db.close()
 
 
-def _drain(cl: Any, db: sqlite3.Connection, now: float, settle: float) -> Drained:
+def _drain(cl: Any, db: sqlite3.Connection, pace: Pace, settle: float) -> Drained:
     out = Drained()
-    begun = _monotonic()
-    _watch(db, now)
-    if throttled(db, now):   # (the API said to wait: the whole queue does, every revision kept)
-        out.waiting = len(_due(db, now, settle))
-        return out
-    for row in _due(db, now, settle):
+    rows = db.execute(_OVER).fetchall()
+    _watch(db, pace, rows)
+    held = pace.held() > 0   # (the API said to wait: the whole queue does, every round's bytes kept)
+    for row in rows:
         uuid = row["uuid"]
-        u = db.execute("SELECT frozen_body, status FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()
-        if u is not None and u["status"] == "parked" and not _unpark(db, uuid):
+        if row["status"] == "parked" and uuid in pace.stood and pace.stood[uuid][0] == row["frozen_content"]:
+            out.unchanged += 1   # (refused, and it would send the same again)
+            continue
+        if not row["frozen"] and not pace.ready(uuid, settle):
+            out.settling += 1
+            continue
+        if held:
+            out.waiting += 1
+            continue
+        if pace.waits(uuid):
+            continue
+        # A refused round goes again only once what it would send has changed (whatever changed: a
+        # row of the round, or something else its body reads).
+        if row["status"] == "parked" and not _unpark(db, uuid):
             out.unchanged += 1
             continue
-        # (a body is looked at when it is, however long the batch has been going: a change seen now
-        # starts its quiet now, not when the batch began)
-        if (u is None or u["frozen_body"] is None) and not _freeze(db, uuid, now + (_monotonic() - begun), settle):
+        if not row["frozen"] and not _freeze(db, uuid, pace, settle):
             out.unchanged += 1
             continue
-        # (`now` is when the batch began: what's settled is judged as of then. An answer is timed
-        # from when it came, so a wait the API gives late in a long batch isn't cut short.)
-        if not _send(cl, db, uuid, now, out, begun):
+        if not _send(cl, db, uuid, pace, out):
             break
     return out
 
 
 # How `cloud status` words each kind of record (status, outstanding).
-STATUS_WORDS = (("in_progress", "in progress"), ("settling", "settling"), ("never", "never sent"),
+STATUS_WORDS = (("in_progress", "in progress"), ("never", "not sent yet"),
                 ("waiting", "waiting for an answer"), ("parked", "refused"), ("sent", "on Shotcast Cloud"))
-_OUTSTANDING_WORDS = {"in_progress": "in progress", "settling": "settling (just ended)",
-                      "never": "never sent", "waiting": "sent, not yet acknowledged", "parked": "refused"}
+_OUTSTANDING_WORDS = {"in_progress": "in progress", "never": "not sent yet",
+                      "waiting": "sent, not yet acknowledged", "parked": "refused"}
 
 
-def _kinds(db: sqlite3.Connection, now: float, settle: float) -> list[tuple[str, str, float]]:
-    """(record uuid, kind, when it could first have been sent) for every round (not practice stretches: those are never
-    sent), from round_records joined to the queue."""
+def _kinds(db: sqlite3.Connection) -> list[tuple[str, str]]:
+    """(record uuid, kind) for every round (not practice stretches: those are never sent), from
+    round_records joined to the queue. (A round that's over and not sent is "never", whether it's
+    still settling or not: only the run that's uploading knows that, see Pace.)"""
     out = []
     for r in db.execute(
-            f"""SELECT r.uuid, r.state, COALESCE(r.ended_at, r.started_at, 0) AS ended, {_READY} AS ready,
-                      (SELECT since FROM cloud_quiet q WHERE q.uuid = r.uuid) AS since,
-                      u.revision, u.frozen_body IS NOT NULL AS frozen, u.status
+            """SELECT r.uuid, r.state, u.revision, u.frozen_body IS NOT NULL AS frozen, u.status
                FROM round_records r LEFT JOIN cloud_uploads u ON u.uuid = r.uuid
-               WHERE r.kind = 'round' ORDER BY r.started_at, r.uuid""",
-            {"now": now, "settle": settle, "quiet": QUIET_S}):
+               WHERE r.kind = 'round' ORDER BY r.started_at, r.uuid"""):
         if r["revision"]:
             kind = "sent"   # (the cloud has it: for good, whatever has happened to it here since)
         elif r["state"] == "in_progress":
@@ -668,50 +670,34 @@ def _kinds(db: sqlite3.Connection, now: float, settle: float) -> list[tuple[str,
             kind = "parked"
         elif r["frozen"]:
             kind = "waiting"
-        elif not r["ready"]:
-            kind = "settling"   # (over, and the booth may still be adding to it: _READY)
         else:
             kind = "never"
-        # (when it could first have gone: the ceiling, or its quiet if that was sooner)
-        could = r["ended"] + settle if r["since"] is None else min(r["ended"] + settle, r["since"] + QUIET_S)
-        out.append((r["uuid"], kind, could))
+        out.append((r["uuid"], kind))
     return out
 
 
-def status(db_path: str, now: float | None = None, settle: float = CEILING_S) -> dict[str, int]:
+def status(db_path: str) -> dict[str, int]:
     """How this PC's rounds stand, counted from its round records (STATUS_WORDS' kinds)."""
     db = connect(db_path)
     try:
         counts = dict.fromkeys((k for k, _ in STATUS_WORDS), 0)
-        for _, kind, _ended in _kinds(db, time.time() if now is None else now, settle):
+        for _, kind in _kinds(db):
             counts[kind] += 1
         return counts
     finally:
         db.close()
 
 
-BEHIND = ("never", "waiting", "parked")   # over and settled, and not on Shotcast Cloud
+BEHIND = ("never", "waiting", "parked")   # over, and not on Shotcast Cloud
 
 
-def behind(db_path: str, now: float | None = None, settle: float = CEILING_S) -> int:
-    """How many settled round records aren't on Shotcast Cloud as they stand here, whatever the reason
-    (never sent, waiting for an answer, refused). The one measure of upload health:
-    while it stays above 0 for long, the tray is red (cloud_booth) and `cloud upload` fails."""
+def behind(db_path: str) -> int:
+    """How many finished rounds aren't on Shotcast Cloud, whatever the reason (just over, never
+    sent, waiting for an answer, refused). The one measure of upload health: while it stays above 0
+    for long, the tray is red (cloud_booth) and `cloud upload` fails."""
     db = connect(db_path)
     try:
-        return sum(kind in BEHIND for _, kind, _ended in _kinds(db, time.time() if now is None else now, settle))
-    finally:
-        db.close()
-
-
-def behind_since(db_path: str, now: float | None = None, settle: float = CEILING_S) -> float | None:
-    """When the oldest round that isn't on Shotcast Cloud settled (None: none is behind): how long the
-    queue has already been behind, for a booth that's just starting."""
-    db = connect(db_path)
-    try:
-        late = [could for _, kind, could in _kinds(db, time.time() if now is None else now, settle)
-                if kind in BEHIND]
-        return min(late) if late else None
+        return sum(kind in BEHIND for _, kind in _kinds(db))
     finally:
         db.close()
 
@@ -731,11 +717,10 @@ def health(db_path: str) -> list[tuple[str, str]]:
     return out
 
 
-def outstanding(db_path: str, now: float | None = None, settle: float = CEILING_S) -> list[tuple[str, str]]:
+def outstanding(db_path: str) -> list[tuple[str, str]]:
     """(uuid, what) for each round record that isn't on Shotcast Cloud as it stands here."""
     db = connect(db_path)
     try:
-        return [(uuid, _OUTSTANDING_WORDS[kind]) for uuid, kind, _ended in _kinds(
-            db, time.time() if now is None else now, settle) if kind != "sent"]
+        return [(uuid, _OUTSTANDING_WORDS[kind]) for uuid, kind in _kinds(db) if kind != "sent"]
     finally:
         db.close()

@@ -64,6 +64,7 @@ MIN_VERSION_HEADER = "X-Shotcast-Min-Version"
 BODY_HASH = "x-amz-content-sha256"   # CloudFront's signed hop to the API needs every POST/PUT body's hash
 REFRESH_EARLY_S = 60                 # refresh an access token this long before it runs out
 REFRESH_WINDOW_S = 40                # how long one refresh keeps retrying before its caller is told to wait
+UPLOAD_LOOK_S = 5.0                  # `cloud upload`: how often it looks again while rounds are settling
 COLLECT_S = 600                      # how long after approving a pairing the API still hands out its first pass
 REFRESH_TIMEOUT_S = 10.0
 STORE_VERSION = 3                    # 3: the API, tenant, device and machine are protected with the tokens
@@ -1298,7 +1299,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--config", help="the self-hosted config.yaml to start the profile's settings from "
                                     "(default: this folder's, else the Windows app's)")
     sub.add_parser("status", help="Which tenant and sim this PC is, and how its rounds stand")
-    s = sub.add_parser("upload", help="Send this PC's settled rounds now")
+    s = sub.add_parser("upload", help="Send this PC's finished rounds now")
     s.add_argument("--refused", action="store_true",
                    help="try the rounds Shotcast Cloud refused again too (once what was wrong there is put right)")
     s.add_argument("--settle", type=float, help=argparse.SUPPRESS)   # (tests: don't wait out the closer)
@@ -1319,6 +1320,10 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Paired as {d['name']!r} (sim {d['sim_name']!r}) {_default_league(d)}; its Shotcast is in "
                   f"{home_for(folder_key(d))}, with {', '.join(env) or 'no API keys'} from this PC's .env. "
                   + restart)
+            if n := _left_behind(home_for(folder_key(d))):
+                # (a pairing's rounds go up under that pairing only: there's no way to move them to this one)
+                print(f"Note: {n} round(s) from an earlier pairing of this PC never reached Shotcast Cloud. "
+                      "They can't be sent under this pairing: they stay on this PC only.")
             return
         prof = inspect()   # (damaged, it can still be looked at and unpaired)
         if prof is None:
@@ -1335,16 +1340,27 @@ def main(argv: list[str] | None = None) -> None:
             cl = Cloud(st, expect=prof.bound)
             if a.refused and (n := cloud_rounds.requeue(str(prof.db))):
                 print(f"Trying {n} refused round(s) again")
+            # A round goes once what it would send has stood still for a while (cloud_rounds.QUIET_S),
+            # as this run has watched it: so it looks again till none is left settling.
+            pace, sent, parked, told = cloud_rounds.Pace(), 0, 0, False
             try:
-                out = cloud_rounds.drain(cl, str(prof.db), **({} if a.settle is None else {"settle": a.settle}))
+                while True:
+                    out = cloud_rounds.drain(cl, str(prof.db), pace,
+                                             **({} if a.settle is None else {"settle": a.settle}))
+                    sent, parked = sent + len(out.sent), parked + len(out.parked)
+                    if not out.settling or out.waiting:
+                        break
+                    if not told:
+                        print(f"Waiting for {out.settling} round(s) to settle (up to "
+                              f"{int(cloud_rounds.QUIET_S)} seconds; {int(cloud_rounds.CEILING_S)} for one still changing)")
+                        told = True
+                    time.sleep(UPLOAD_LOOK_S)
             except (cloud_rounds.Blocked, cloud_rounds.NotThisPairing, TimeoutError) as e:
                 sys.exit(str(e))
-            print(f"Sent {len(out.sent)} round(s); {out.waiting} to retry, {len(out.parked)} refused")
-            # How the queue stands now, not only what this run did: anything settled that still isn't
-            # on Shotcast Cloud (held or refused before, too) fails the command.
-            left = [(u, what) for u, what in cloud_rounds.outstanding(
-                str(prof.db), **({} if a.settle is None else {"settle": a.settle}))
-                if what not in ("in progress", "settling (just ended)")]
+            print(f"Sent {sent} round(s); {out.waiting} to retry, {parked} refused")
+            # How the queue stands now, not only what this run did: any finished round that still
+            # isn't on Shotcast Cloud (held or refused before, too) fails the command.
+            left = [(u, what) for u, what in cloud_rounds.outstanding(str(prof.db)) if what != "in progress"]
             if left:
                 sys.exit(f"{len(left)} round(s) still aren't on Shotcast Cloud:\n{_describe(left)}")
         elif a.cmd == "unpair":
@@ -1353,6 +1369,25 @@ def main(argv: list[str] | None = None) -> None:
                   + (f" (the profile is kept in {prof.home})" if prof.home else "") + ". " + restart)
     except CloudError as e:
         sys.exit(str(e))
+
+
+def _left_behind(home: Path) -> int:
+    """How many rounds in this PC's other profiles (earlier pairings') aren't on Shotcast Cloud. A
+    profile that can't be read counts for none: this is only for a note as the PC is paired."""
+    from . import cloud_rounds
+
+    n = 0
+    try:
+        others = [h for h in root().iterdir() if h.is_dir() and h.resolve() != home.resolve()
+                  and folder_identity(h) is not None and (h / "logs" / "season.db").is_file()]
+    except OSError:
+        return 0
+    for other in others:
+        try:
+            n += len(cloud_rounds.outstanding(str(other / "logs" / "season.db")))
+        except Exception:   # noqa: BLE001 - a damaged or busy season file
+            log.debug("Couldn't read %s", other, exc_info=True)
+    return n
 
 
 def _local(prof: Profile) -> list[tuple[str, str]] | None:
