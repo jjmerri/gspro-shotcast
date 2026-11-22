@@ -221,7 +221,7 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
 
     A player is named in one place, their slot (erasing an account in the cloud takes the name from
     its slot). So a shot and a card say whose they are by `slot_id` alone, with no `player`, and a
-    scorecard doesn't list its side's `players`. Not sent either: what only this PC's own pages use
+    scorecard doesn't list its side's `players` by name: it lists their slots (`slot_ids`). Not sent either: what only this PC's own pages use
     (a shot's raw launch-monitor message, what a track replaced, the row-level left-out and
     excluded marks, which `edit` carries, and the record's change counters)."""
     with _txn(db):   # (one snapshot: a record's rows and its gen read together)
@@ -258,8 +258,12 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
                         for t in tracks],
         "lines": [_without(ln, "id", "session_id", "record_uuid", "shot_id", "excluded")
                   | {"shot_uid": uid_of.get(ln["shot_id"])} for ln in lines],
+        # (whose a side's card is: the slots on that side. The cloud files a card by them, never by
+        # its label, and keeps its own key for the side.)
         "scorecards": [_wire(c, "id", "session_id", "round_uuid", "players", "excluded", flags=_CARD_FLAGS,
-                             holes=("scores", "hole_pars"), dates=("date",)) for c in cards],
+                             holes=("scores", "hole_pars"), dates=("date",))
+                       | {"slot_ids": sorted(sl["slot_id"] for sl in slots if sl["side"] is not None
+                                             and sl["side"] == c["side"])} for c in cards],
         "player_rounds": [_wire(p, "id", "session_id", "round_uuid", "player", "excluded", flags=_CARD_FLAGS,
                                 holes=("scores", "hole_pars")) for p in players],
         "week_results": [_wire(w, "id", "round_id", holes=("holes",)) for w in weeks],

@@ -454,6 +454,12 @@ def test_a_round_names_its_players_on_their_slots_only(tmp_path, api):
     assert [c["slot_id"] for c in b["player_rounds"]] == [ann] and len(b["scorecards"]) == 1
     assert not any("player" in r for r in b["shots"] + b["player_rounds"])
     assert "players" not in b["scorecards"][0] and b["scorecards"][0]["side"] == "Ann & Bo"
+    # A side's card says whose it is by its players' slots (the cloud files it by them, not its label).
+    s.db.execute("UPDATE round_slots SET side = 'Ann & Bo' WHERE round_uuid = ?", (u,))
+    s.db.execute("UPDATE round_records SET gen = gen + 1 WHERE uuid = ?", (u,))
+    s.db.commit()
+    assert _drain(cl, cfg).sent == [u]
+    assert sorted(api.puts[1][2]["scorecards"][0]["slot_ids"]) == sorted(slots) and api.puts[0][2]["scorecards"][0]["slot_ids"] == []
     names = json.dumps([b["shots"], b["player_rounds"], b["shot_tracks"]])
     assert "Ann" not in names and "Bo" not in names
 
