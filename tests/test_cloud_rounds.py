@@ -761,3 +761,17 @@ def test_a_round_over_again_while_others_were_being_sent_is_waited_for(tmp_path,
     assert out.sent == [a] and out.settling == 1 and out.unchanged == 0 and b not in api.rounds
     cl.request = real
     assert _drain(cl, cfg).sent == [b]
+
+
+def test_kept_bytes_from_an_earlier_builds_queue_are_built_again_not_waited_for_forever(tmp_path, api):
+    """A row an earlier build left (a status this build doesn't write, bytes kept, no ending
+    recorded): its bytes are dropped whatever its status, so the round is built and sent, and
+    `cloud upload` isn't left counting it as settling for good."""
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    db = cloud_rounds.connect(cfg.db_path)
+    db.execute("INSERT INTO cloud_uploads (uuid, status, frozen_revision, frozen_body) VALUES (?, 'conflict', 2, ?)",
+               (u, gzip.compress(b"{}")))
+    db.close()
+    out = _drain(cl, cfg)
+    assert out.sent == [u] and out.settling == 0 and api.puts[-1][2]["round"]["id"] == u
