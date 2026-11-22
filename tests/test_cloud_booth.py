@@ -150,10 +150,9 @@ def test_an_api_that_needs_a_newer_shotcast_shows_in_the_tray_till_it_takes_roun
 
 
 def _clock(monkeypatch):
-    """The upload queue's clock (cloud_rounds' time.time), moved by hand."""
-    now = [time.time()]
-    monkeypatch.setattr(cloud_rounds, "time", types.SimpleNamespace(time=lambda: now[0]))
-    monkeypatch.setattr(cloud_booth, "time", types.SimpleNamespace(time=lambda: now[0]))
+    """The uploader's clock (elapsed seconds: cloud_rounds.Pace), moved by hand."""
+    now = [1000.0]
+    monkeypatch.setattr(cloud_rounds, "_monotonic", lambda: now[0])
     return now
 
 
@@ -791,25 +790,29 @@ def test_a_self_hosted_env_put_in_the_profile_gives_the_paired_booth_only_its_ai
 
 # ---- review round 8 ----------------------------------------------------------------------------
 
-def test_restarting_the_booth_doesnt_give_a_stuck_queue_more_time_before_the_tray_goes_red(tmp_path, api, monkeypatch):
+def test_a_booth_that_restarts_counts_how_long_rounds_have_waited_afresh(tmp_path, api, monkeypatch):
+    """How long uploads have been behind is counted while the booth runs, not from the time of day:
+    after a restart a queue that's stuck shows again BEHIND_S later (rounds refused show at once)."""
     import httpx
 
     monkeypatch.setattr(cloud_rounds, "CEILING_S", 0.0)
     cfg = paired_cfg(tmp_path, api)
     now = _clock(monkeypatch)
     _round(Store(cfg.db_path), 1)
-    now[0] += cloud_booth.BEHIND_S + 3600   # (the round has been waiting since before this booth started)
-    api.answers = [httpx.Response(502)]
+    api.answers = [httpx.Response(502)] * 4
     up = cloud_booth.Uploads(cfg, cloud.locate())
+    _loop(cfg, 1, up)
+    now[0] += cloud_booth.BEHIND_S + 1
     _loop(cfg, 1, up)
     [(level, msg)] = _health(cfg)
     assert level == "fail" and "haven't gone up" in msg
-    fresh = cloud_booth.Uploads(paired_cfg_again := cfg, cloud.locate())   # (and nothing waiting: from now)
-    del paired_cfg_again
-    now[0] += cloud_rounds.RETRY_MAX_S + 1
+    fresh = cloud_booth.Uploads(cfg, cloud.locate())   # (the booth restarted: its kept bytes are tried at once)
     _loop(cfg, 1, fresh)
-    assert _health(cfg) == []
-    assert cloud_booth.Uploads(cfg, cloud.locate()).clear_at == now[0]
+    assert _health(cfg) == [] and len(api.puts) == 3
+    now[0] += cloud_booth.BEHIND_S + 1
+    _loop(cfg, 1, fresh)
+    [(level, msg)] = _health(cfg)
+    assert level == "fail" and "haven't gone up" in msg
 
 
 # ---- review round 9 ----------------------------------------------------------------------------

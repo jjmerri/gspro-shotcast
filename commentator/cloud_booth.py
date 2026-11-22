@@ -6,9 +6,12 @@ with, and nothing else about the booth changes.
 
 How uploads stand goes to logs/cloud-health.json (`HEALTH`) for the tray: a pairing the API no longer
 accepts, uploads stopped, the API needing a newer Shotcast (426), rounds refused
-(cloud_rounds.health), and, the one rule for everything else, settled rounds that haven't all been
+(cloud_rounds.health), and, the one rule for everything else, finished rounds that haven't all been
 on Shotcast Cloud for BEHIND_S (`Uploads._behind`: by its outcome, whatever the cause). Each turns the
 tray red. It's rewritten after every try, so it clears once that's resolved.
+
+Every wait here is counted in elapsed seconds while the booth runs (cloud_rounds.Pace), never by the
+time of day: a booth that starts counts afresh.
 """
 from __future__ import annotations
 
@@ -16,7 +19,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +29,7 @@ log = logging.getLogger(__name__)
 DRAIN_S = 15.0         # how often the upload loop looks for done rounds to send (a look at the season file:
                        # the API is only called when one is ready). A round goes up to this long after it's done.
 BLOCKED_S = 900.0      # how long it waits when the cloud refuses every upload from this PC
-BEHIND_S = 900.0       # settled rounds not all on Shotcast Cloud for this long: the tray goes red, whatever the cause
+BEHIND_S = 900.0       # finished rounds not all on Shotcast Cloud for this long: the tray goes red, whatever the cause
 HEALTH = "cloud-health.json"
 
 
@@ -65,18 +67,13 @@ class Uploads:
     def __init__(self, cfg: Any, prof: cloud.Profile) -> None:
         self.cfg, self.bound, self.identity = cfg, prof.bound, cloud.identity(prof.rec)
         self.stopped = False   # the stored pairing isn't the booth's any more: nothing more goes out
-        # When every settled round was last on Shotcast Cloud: now, unless rounds are waiting already,
-        # in which case since the oldest of them settled (read once, here: restarting the booth doesn't
-        # give a queue that's stuck another BEHIND_S of green).
-        self.clear_at = time.time()
-        try:
-            from . import cloud_rounds
+        from . import cloud_rounds
 
-            since = cloud_rounds.behind_since(cfg.db_path)
-            if since is not None:
-                self.clear_at = min(self.clear_at, since)
-        except Exception:   # noqa: BLE001 - a file that can't be read: `_behind` counts from now
-            log.debug("Couldn't read how uploads stand from %s", cfg.db_path, exc_info=True)
+        self.pace = cloud_rounds.Pace()   # what this run remembers between drains, and its clock
+        # When every finished round was last on Shotcast Cloud, on that clock: counted from the
+        # booth's start (a queue that was stuck before a restart shows again BEHIND_S after it;
+        # rounds refused show at once, from the season file).
+        self.clear_at = self.pace.clock()
 
     def _cloud(self) -> cloud.Cloud:
         """This PC's pairing, if it's still the one the booth started with (else PairingChanged)."""
@@ -88,11 +85,11 @@ class Uploads:
     def _behind(self) -> list[tuple[str, str]]:
         """The one rule of upload health, by its outcome and whatever the cause (the network, a busy
         or failing lock or season file, an answer this PC doesn't understand, a round held or
-        refused): a failure once settled rounds have gone BEHIND_S without all being on Shotcast
+        refused): a failure once finished rounds have gone BEHIND_S without all being on Shotcast
         Cloud. A season file that can't even be read counts as behind."""
         from . import cloud_rounds
 
-        now = time.time()
+        now = self.pace.clock()
         try:
             n: int | None = cloud_rounds.behind(self.cfg.db_path)
         except Exception:   # noqa: BLE001 - not known to be clear
@@ -124,7 +121,7 @@ class Uploads:
         while True:
             wait = DRAIN_S
             try:
-                out = await asyncio.to_thread(cloud_rounds.drain, self._cloud(), self.cfg.db_path, None,
+                out = await asyncio.to_thread(cloud_rounds.drain, self._cloud(), self.cfg.db_path, self.pace,
                                               cloud_rounds.CEILING_S, 0)
                 if out.sent or out.parked:
                     log.info("Shotcast Cloud: %s round(s) sent%s", len(out.sent),
