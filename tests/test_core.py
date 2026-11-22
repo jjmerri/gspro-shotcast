@@ -23,6 +23,7 @@ from commentator.sources.stream import JsonStreamDecoder
 from commentator.speech import SpeechQueue
 from commentator.state import ShotRecord
 from commentator.tts.console_tts import ConsoleTTS
+from tests.engine_patch import patch_engine
 
 SHOT = {
     "DeviceID": "Uneekor", "Units": "Yards", "ShotNumber": 3, "APIversion": "1",
@@ -3796,9 +3797,8 @@ async def test_a_tee_setup_keeps_the_holes_minimap_even_off_air(tmp_path):
 
 
 async def test_an_empty_setup_lie_is_read_again_unless_the_player_changes(tmp_path, monkeypatch):
-    import commentator.engine as eng
 
-    monkeypatch.setattr(eng, "SETUP_LIE_RETRY_SECONDS", 0)
+    patch_engine(monkeypatch, "SETUP_LIE_RETRY_SECONDS", 0)
     engine, screen = _setup_engine(tmp_path)
     lies, sigs = iter([None, None, "fairway"]), iter([(0,) * 100] * 3)
     real = screen.read_hud_async
@@ -5871,7 +5871,6 @@ def test_ocr_threads_are_capped_at_the_cpu_count_and_onnxruntime_does_not_spin(m
 
 async def test_the_scorecard_title_is_read_when_the_log_says_a_hole_ended_and_every_2s_otherwise(tmp_path, monkeypatch):
     import time as real_time
-    from commentator import engine as eng
     from commentator.sources.gspro_log import parse_events
     e = _mini_engine(tmp_path)
     e.cfg.screen.hud_poll_seconds = 0
@@ -5888,7 +5887,7 @@ async def test_the_scorecard_title_is_read_when_the_log_says_a_hole_ended_and_ev
         def monotonic(self):
             return clock[0]
 
-    monkeypatch.setattr(eng, "time", Clock())
+    patch_engine(monkeypatch, "time", Clock())
 
     class Screen:
         last_read_seconds = last_capture_seconds = 0.0
@@ -5926,16 +5925,16 @@ async def test_the_scorecard_title_is_read_when_the_log_says_a_hole_ended_and_ev
     e.gspro.version = "3.1.6.20"
     assert all(await watch([None] * 6))
     e.gspro.version = "4.0"
-    monkeypatch.setattr(eng, "SCORECARD_DUE_SECONDS", 0.0)
+    patch_engine(monkeypatch, "SCORECARD_DUE_SECONDS", 0.0)
     assert await watch([None] * 5) == [True, False, True, False, True]
 
     def holed_out():
         for ev in parse_events("Real putt made and all players done - AllPlayersHoledOut\n"):
             e.gspro.apply(ev)
-    monkeypatch.setattr(eng, "SCORECARD_DUE_SECONDS", 60.0)
+    patch_engine(monkeypatch, "SCORECARD_DUE_SECONDS", 60.0)
     got = await watch([None, None, holed_out] + [None] * 4)
     assert got == [True, False, True] + [True] * 4    # then the card is due: every poll
-    monkeypatch.setattr(eng, "SCORECARD_DUE_SECONDS", 0.0)
+    patch_engine(monkeypatch, "SCORECARD_DUE_SECONDS", 0.0)
     # A card opened from the menu, outside any hole end, is caught and then followed every poll.
     assert await watch([None, None, "card", "card", "card", None, None]) == \
         [True, False, True, True, True, True, False]

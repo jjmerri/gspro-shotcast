@@ -12,6 +12,7 @@ from commentator.league import League
 from commentator.models import Shot
 from commentator.round import Round, normalize_format
 from commentator.state import ShotRecord
+from tests.engine_patch import patch_engine
 
 LEAGUE = League({
     "league_name": "Test League",
@@ -327,10 +328,10 @@ async def test_a_round_played_to_the_end_takes_layouts_gspro_didnt_log_from_the_
     # GSPro 3.59 logs no layout even for a finished round: its hole replays need the course file's.
     import asyncio
 
-    from commentator import course_layout, engine as engine_mod
+    from commentator import course_layout
     from commentator.models import RoundEndEvent
 
-    monkeypatch.setattr(engine_mod, "LAYOUT_WAIT_SECONDS", 0.01)
+    patch_engine(monkeypatch, "LAYOUT_WAIT_SECONDS", 0.01)
     calls = []
     monkeypatch.setattr(course_layout, "fill_missing", lambda db, dirs, since=None: calls.append(since) or 0)
     e = _engine(tmp_path)
@@ -3331,7 +3332,6 @@ async def test_a_tee_shot_struck_while_the_log_says_its_courses_range_is_kept(tm
     import asyncio
     import time
 
-    import commentator.engine as engine_mod
     from commentator.models import Shot, ShotEvent
     from commentator.sources.gspro_log import LogEvent, parse_events
 
@@ -3363,7 +3363,7 @@ async def test_a_tee_shot_struck_while_the_log_says_its_courses_range_is_kept(tm
     for ev in parse_events("Selected Course: yorkgc_gsp\nLoading course Practice\n"):
         e.gspro.apply(ev)
     # A swing GSPro never played (no fire as it was struck) can't claim the real drive's fire after it.
-    monkeypatch.setattr(engine_mod, "UNPLAYED_SHOT_WAIT_SECONDS", 0.2)
+    patch_engine(monkeypatch, "UNPLAYED_SHOT_WAIT_SECONDS", 0.2)
     e.gspro._fire_at = {n: t - 10 for n, t in e.gspro._fire_at.items()}   # the range shot was a while ago
     phantom = asyncio.create_task(e.handle_shot(ShotEvent(shot=Shot(club="DR", carry=3.0))))
     await asyncio.sleep(0.4)
@@ -3458,12 +3458,11 @@ def test_a_round_started_after_a_drive_off_its_courses_range_takes_the_drive(tmp
 
 
 async def test_a_swing_gspro_never_played_is_ignored(tmp_path, monkeypatch):
-    import commentator.engine as engine_mod
     from commentator.models import Shot, ShotEvent
     from commentator.sources.gspro_log import LogEvent
 
     # A practice swing while the course loads: GSPconnect sends it, but GSPro's log never fires it.
-    monkeypatch.setattr(engine_mod, "UNPLAYED_SHOT_WAIT_SECONDS", 0.3)
+    patch_engine(monkeypatch, "UNPLAYED_SHOT_WAIT_SECONDS", 0.3)
     e = _engine(tmp_path)
     e.cfg.source.gspro_log_truth = True
     e._follower = type("Follower", (), {"primed": True})()
@@ -3479,13 +3478,12 @@ async def test_a_swing_gspro_never_played_is_ignored(tmp_path, monkeypatch):
 
 
 async def test_a_swing_gspro_never_played_mid_round_is_not_recorded(tmp_path, monkeypatch):
-    import commentator.engine as engine_mod
     from commentator.models import Shot, ShotEvent
     from commentator.sources.gspro_log import LogEvent
 
     # GSPconnect hung mid-round and sent a drive GSPro never played: it aired as a 2-yard drive and
     # went into the stats. In a round the check waits until the ball's followed, then drops it.
-    monkeypatch.setattr(engine_mod, "UNPLAYED_SHOT_WAIT_SECONDS", 0.3)
+    patch_engine(monkeypatch, "UNPLAYED_SHOT_WAIT_SECONDS", 0.3)
     e, r = await _log_round(tmp_path)
     e._follower = type("Follower", (), {"primed": True})()
     e.gspro.version, e.gspro.mode = "3.1.6.20", "course"
@@ -7099,7 +7097,7 @@ def test_round_end_keeps_the_end_of_gspros_log(tmp_path, monkeypatch):
     src = tmp_path / "output_log.txt"
     src.write_bytes(b"old\n" * 10 + b"Shot Fired\n")
     e.cfg.source.gspro_log = str(src)
-    monkeypatch.setattr(engine_mod, "GSPRO_LOG_KEEP_BYTES", 11)
+    patch_engine(monkeypatch, "GSPRO_LOG_KEEP_BYTES", 11)
     for i in range(7):
         (tmp_path / "logs" / f"gspro-2026-01-0{i + 1}-120000.log").write_text("x")
     e._keep_gspro_log()
@@ -7155,7 +7153,7 @@ def test_the_round_status_counts_the_sign_off_and_a_new_round_at_once(tmp_path, 
 
     from commentator import engine as engine_mod
 
-    monkeypatch.setattr(engine_mod, "ROUND_STATUS_CHECK_S", 0.01)
+    patch_engine(monkeypatch, "ROUND_STATUS_CHECK_S", 0.01)
     signing = asyncio.Event()
     done = asyncio.Event()
 
@@ -7339,7 +7337,7 @@ async def test_own_handicaps_are_worked_out_in_a_thread_without_holding_up_the_b
         assert go.wait(5)
         return real(path)
 
-    monkeypatch.setattr(engine_mod, "_own_handicaps_from", slow)
+    patch_engine(monkeypatch, "_own_handicaps_from", slow)
     e._refresh_own_handicaps()
     await asyncio.sleep(0.05)
     assert e.league.own_indexes == {} and len(threads) == 1   # the booth carries on meanwhile

@@ -13,7 +13,7 @@ counting and arithmetic happen in code: the model is handed statements ("hit 3 o
 small models invent things.
 
 ```
-sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─► grounding.py ─► speech.py ─► TTS
+sources/  ─►  engine/    ─►  facts.py  ─►  prompts.py ─► LLM ─► grounding.py ─► speech.py ─► TTS
 (3 feeds)     (orchestrate   (statements   (compose)            (reject bad     (queue +
               + project)      from state)                        lines)          play)
                    │
@@ -26,10 +26,39 @@ sources/  ─►  engine.py  ─►  facts.py  ─►  prompts.py ─► LLM ─
 - **`__main__.py`** CLI entry and subcommands (`run`, `sniff`, `calibrate`, `ocr-test`, `say`,
   `banter`, `check`, `eval`, `review`, `stats`, `stats-web`, `publish`, `import-league`, `cost`, `squabbit`,
   `fixture`, `notify-test`).
-- **`engine.py`** the orchestrator, and by far the largest file. Owns the live loop: the
+- **`engine/`** the orchestrator, and by far the largest part of the code. Owns the live loop: the
   three-way pre-shot split, the impact carry/offline projection, the ball at rest (GSPro's round file), reactions,
   water handling, the round lifecycle (opener/closer), and speech scheduling. Most behavior
-  questions start here.
+  questions start here. It is one class, `Engine`, written as one part per job and put together in
+  `core.py`; every part shares the engine's state through `self`, so a method in one file calls
+  methods in the others directly:
+  - `core.py` what the engine holds (`__init__`) and its main loop (`run`)
+  - `common.py` the constants, small helpers and records the parts share
+  - `hud_watch.py` watching GSPro's screen between shots: the HUD, the minimap, the putt read, and the setup it emits
+  - `round_detect.py` telling when a round starts, goes on and ends, from the screen and GSPro's log, and keeping the log's scores
+  - `services.py` the booth's side jobs: the commentary switch, weather, bookings, the schedule and the league page
+  - `recap.py` the league week's recap (commentator/recap.py)
+  - `asides.py` what the booth says between shots: news, stories, course trivia and live scores
+  - `round_file.py` gSPro's round file: watching it, and matching its strokes, names and clubs to the booth's shots
+  - `chat.py` live chat: what the booth reads from it and answers on air
+  - `on_air.py` who is playing and what's been called: names on air, the calls made, score facts, the hole's wrap and closest to the pin
+  - `facts.py` the facts a pre-shot line can use: the player's season, form, recall, the field and the stakes
+  - `identity.py` whose shot it is: GSPro's slots, names from the round file and the log, and each shot's row
+  - `preshot.py` the pre-shot: the setup line, the plan for the shot's flight, and the reactions prepared for it
+  - `shot.py` the shot: reading the screen at impact and handling the shot itself
+  - `shot_reads.py` what's read around a shot: carry, the finish, trees, the lie, and which hole it was on
+  - `results.py` a shot's result once it's known: corrections from the log and the round file, pick-ups, and what's recorded
+  - `in_flight.py` calls while the ball is in the air, and the change to the next hole
+  - `course.py` the course card, tee boxes, handicaps and the board for the round
+  - `squabbit.py` posting the round to Squabbit as it's played
+  - `league_round.py` whether a round is the league's: its week, its course, and what its card says
+  - `round_start.py` starting a round: building it, its players, and the shots hit before it was known
+  - `setup_watch.py` gSPro's setup screen before a round: its players, format, holes and teams, and the round prepared from them
+  - `week.py` the league week: Squabbit's leaderboard and the sim's closest to the pin
+  - `round_end.py` the scorecard, the end of a hole and of the round, and the sign-off
+  - `live.py` the live stream
+  - `upkeep.py` publishing the stats page, backing up the season file, and health checks
+  - `generation.py` generating and checking what's said: the model calls, grounding, and the transcript
 - **`config.py`** the Pydantic config schema and loader. The source of truth for every setting
   and its default (including the GSPro/connector log paths and course dirs).
 - **`facts.py`** turns launch data and state into plain statements so the model never interprets

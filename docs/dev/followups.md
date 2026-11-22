@@ -5,7 +5,7 @@ Deferred work, newest last. Take an entry out when it's done.
 ## Retire the setup-screen slot order once the round file names every slot
 
 Player slots are now named from GSPro's log plus `currentRound.dat` (launch numbers tie a credited
-shot to the file's `PlayerName`; `_learn_file_slots` in `commentator/engine.py`). The setup screen's
+shot to the file's `PlayerName`; `_learn_file_slots` in `commentator/engine/identity.py`). The setup screen's
 player order (`setup_slots`) and the HUD-name slot reads (`Round.slot_read`) are kept as the fallback
 for the first shot of a round, before the file has a ball to match, and for GSPro 3.59, which logs no
 `LaunchExt Vars`. Only GSPro 4.x needs support, so 3.59 no longer blocks this.

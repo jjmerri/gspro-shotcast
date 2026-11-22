@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from commentator.chat import ChatMessage, ChatTable, cursor_at
 from tests.test_round import _engine
+from tests.engine_patch import patch_engine
 
 REPLY = [{"speaker": "pbp", "text": "Paul in the chat wants to know who is buying the drinks tonight."},
          {"speaker": "color", "text": "Whoever loses the match, and I have a feeling I know who that is."}]
@@ -75,12 +76,11 @@ async def _settle(e):
 
 
 def _clock(monkeypatch, start=1000.0):
-    import commentator.engine as engine
     clock = [start]
     # The engine's own clock only: asyncio's sleeps run on the real one.
     fake = SimpleNamespace(**{k: getattr(time, k) for k in dir(time) if not k.startswith("_")})
     fake.monotonic = lambda: clock[0]
-    monkeypatch.setattr(engine, "time", fake)
+    patch_engine(monkeypatch, "time", fake)
     return clock
 
 
