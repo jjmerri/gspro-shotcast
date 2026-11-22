@@ -7,6 +7,11 @@ program on the machine can see. Values here override anything set system-wide.
 import os
 from pathlib import Path
 
+# The .env beside the code (a checkout's or a ZIP's own): one of the two the booth loads, the other
+# being the one beside config.yaml. Only the tests move it (tests.cloud_isolation), so none reads
+# this machine's keys.
+CODE_ENV = Path(__file__).resolve().parents[1] / ".env"
+
 
 def load_env(path: Path) -> list[str]:
     """Returns the names it set. Lines are KEY=value; # comments and blank lines are skipped."""

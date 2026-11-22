@@ -915,10 +915,11 @@ def _load_env(config: str, profile: bool = False) -> None:
     """The booth's own .env, so its keys aren't shared machine-wide: next to config.yaml (the
     Windows app's home folder), else next to the code (a checkout or ZIP). Values here override
     anything set system-wide. `profile`: a Shotcast Cloud profile's, next to its config.yaml only."""
+    from . import dotenv
     from .dotenv import load_env
 
     loaded: list[str] = []
-    beside_code = Path(__file__).resolve().parents[1] / ".env"
+    beside_code = dotenv.CODE_ENV
     beside_config = Path(config).resolve().parent / ".env"
     if profile:   # (only the AI and voice keys a profile keeps, whatever else is in the file)
         from .cloud import load_profile_env

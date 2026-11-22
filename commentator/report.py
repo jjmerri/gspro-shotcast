@@ -373,7 +373,9 @@ def env_files(config_path: Path, paired: bool = False) -> list[Path]:
     (`paired`, a Shotcast Cloud profile's: its own only)."""
     if paired:
         return [config_path.resolve().parent / ".env"]
-    return list(dict.fromkeys((Path(__file__).resolve().parents[1] / ".env", config_path.resolve().parent / ".env")))
+    from . import dotenv
+
+    return list(dict.fromkeys((dotenv.CODE_ENV, config_path.resolve().parent / ".env")))
 
 
 def tail(path: Path, cap: int) -> bytes:
