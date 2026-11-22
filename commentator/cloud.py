@@ -1143,10 +1143,13 @@ def check_self_hosted(config: str | Path) -> None:
     """Unpaired, as Shotcast starts: the self-hosted Shotcast never runs in a cloud profile's home (a
     prompt left open in one across an unpair, or --home naming one): its season file and keys are a
     pairing's, kept for it, not the self-hosted booth's to carry on in. CloudError says so."""
-    if _in_profile(Path(config)):
-        raise CloudError(f"{Path(config).resolve().parent} is a Shotcast Cloud profile, kept from when this PC "
-                         "was paired: the self-hosted Shotcast doesn't run in it. Start Shotcast from its own "
-                         "folder (or its Start menu shortcut).")
+    # The folder it's started in too: with -c naming a config elsewhere, whatever that config leaves
+    # relative (logs/season.db, say) would still be the profile's.
+    for where in (Path(config), Path.cwd() / "config.yaml"):
+        if _in_profile(where):
+            raise CloudError(f"{where.resolve().parent} is a Shotcast Cloud profile, kept from when this PC "
+                             "was paired: the self-hosted Shotcast doesn't run in it. Start Shotcast from its "
+                             "own folder (or its Start menu shortcut).")
 
 
 def _in_profile(path: Path) -> bool:

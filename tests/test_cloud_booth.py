@@ -830,10 +830,14 @@ def test_unpaired_shotcast_never_runs_self_hosted_in_a_cloud_profile_kept_from_a
     monkeypatch.setattr(tray, "fatal", told.append)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.chdir(prof.home)            # (a prompt the paired tray opened, left open across the unpair)
-    for argv in (["run"], ["backup"], ["-c", str(prof.config), "run"], ["tray", "--home", str(prof.home)]):
+    monkeypatch.setattr(cli, "cmd_publish", lambda cfg, args: ran.append("publish"))
+    for argv in (["run"], ["backup"], ["-c", str(prof.config), "run"], ["tray", "--home", str(prof.home)],
+                 ["-c", str(home / "config.yaml"), "publish"],     # (a config elsewhere, the profile's files here)
+                 ["-c", str(home / "config.yaml"), "run"]):
         with pytest.raises(SystemExit, match="Shotcast Cloud profile"):
             _run(monkeypatch, *argv)
     assert ran == [] and len(told) == 1 and "OPENAI_API_KEY" not in os.environ
+    assert "AWS_ACCESS_KEY_ID" not in os.environ   # (the self-hosted .env wasn't loaded either)
     monkeypatch.chdir(home)                 # from its own folder: as before
     _run(monkeypatch, "run")
     assert ran == ["logging", "logs/season.db"]
