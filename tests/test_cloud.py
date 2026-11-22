@@ -1088,3 +1088,51 @@ def test_pairing_keeps_polling_through_an_answer_it_doesnt_know_and_sends_a_name
         base_url=API, transport=httpx.MockTransport(api), headers={"User-Agent": "Shotcast/9.9"}),
         clock=lambda: api.now, sleep=lambda s: None, say=lambda s: None)
     assert rec["device_id"] == "d1" and names == [("Bay one " + "x" * 100)[:64]]
+
+
+@pytest.mark.parametrize("answer", [
+    httpx.Response(200, json={"device_id": "d1", "tenant_id": "t1", "sim_name": "Bay 1", "refresh_token": "",
+                              "access_token": "", "access_expires_in": 600}),
+    httpx.Response(200, json={"refresh_token": "rX", "access_token": "aX"}),
+    httpx.Response(200, json={"device_id": "other", "tenant_id": "t1", "sim_name": "Bay 1", "refresh_token": "rX",
+                              "access_token": "aX", "access_expires_in": 600}),
+    httpx.Response(200, text="<html>ok</html>", headers={"content-type": "text/html"}),
+    httpx.Response(401, json={"error": "device_signed_out"}),          # (not the API's whole refusal)
+    httpx.Response(401, json={"error": "refresh_token_invalid", "action": "retry", "message": "x"}),
+])
+def test_an_answer_to_a_refresh_that_isnt_whole_changes_nothing_this_pc_holds(api, answer):
+    paired(api)
+    st = cloud.store()
+    c = cloud.Cloud(st, clock=lambda: api.now, sleep=lambda s: None)
+    api.now += 600
+    real = api.__call__
+    api.__class__ = type("Odd", (FakeAPI,), {
+        "__call__": lambda self, req: answer if req.url.path == "/api/devices/refresh" else real(req)})
+    with pytest.raises(cloud.Unreachable):
+        c.access_token()
+    kept = st.read()
+    assert kept["tokens"]["refresh_token"] == "r0" and kept["tokens"]["refresh_attempt"] and not kept.get("refused")
+    api.__class__ = FakeAPI
+    assert c.access_token() and st.read()["tokens"]["refresh_token"] == "r1"
+
+
+def test_the_pass_is_on_the_disk_before_it_replaces_the_old_one(api, monkeypatch):
+    paired(api)
+    st = cloud.store()
+    done = []
+    real_sync, real_replace = os.fsync, os.replace
+    monkeypatch.setattr(os, "fsync", lambda fd: (done.append("sync"), real_sync(fd))[1])
+    monkeypatch.setattr(os, "replace", lambda a, b: (done.append("replace"), real_replace(a, b))[1])
+    st.write(st.read())
+    assert done[:2] == ["sync", "replace"]
+
+
+def test_pairing_asks_again_after_an_answer_that_isnt_the_apis_whole_one(api):
+    answers = [httpx.Response(200, text="<html>ok</html>", headers={"content-type": "text/html"}),
+               httpx.Response(200, json={"refresh_token": "r0"})]
+    real = api.__call__
+    api.polls = []
+    api.__class__ = type("Odd", (FakeAPI,), {"__call__": lambda self, req: (
+        answers.pop(0) if req.url.path == "/api/devices/token" and answers else real(req))})
+    rec = pair(cloud.store(), api)
+    assert rec["device_id"] == "d1" and answers == []

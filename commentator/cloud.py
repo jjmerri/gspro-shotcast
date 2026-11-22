@@ -815,7 +815,12 @@ class TokenStore:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(body, f, indent=1)
+            # On the disk before it replaces the old one: a refresh's attempt id has to outlive a
+            # power cut that comes after the API has spent the old token (access_token).
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self.path)
+        _sync_dir(self.path.parent)
 
     def delete(self) -> None:
         self.path.unlink(missing_ok=True)
@@ -877,6 +882,37 @@ def _send(http: Any, method: str, path: str, body: Any = None, headers: dict | N
                             **extra)
     except (httpx.TransportError, OSError) as e:   # (the network: no answer at all)
         raise Unreachable(f"couldn't reach Shotcast Cloud: {e}") from None
+
+
+def _sync_dir(folder: Path) -> None:
+    """Make a rename in `folder` durable where the platform lets a folder be synced (not Windows,
+    whose rename is durable once the file's contents are)."""
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(folder, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _tokens(got: Any) -> dict | None:
+    """A token answer, if it's a whole one (every field a pass needs, none empty): else None, and
+    nothing this PC holds is replaced by it."""
+    if not isinstance(got, dict):
+        return None
+    texts = ("refresh_token", "access_token", "device_id", "tenant_id", "sim_name")
+    if not all(isinstance(got.get(k), str) and got[k] for k in texts):
+        return None
+    life = got.get("access_expires_in")
+    if isinstance(life, bool) or not isinstance(life, (int, float)) or life <= 0:
+        return None
+    return got
 
 
 def _fresh(got: dict) -> dict:
@@ -1006,13 +1042,14 @@ class Cloud:
         # Only the API's own word that this pass is finished marks the pairing as needing pairing
         # again; any other refusal (a proxy's 401, a code this app doesn't know) keeps it and is
         # tried again later.
-        if r.status_code == 401 and isinstance(got, dict) and got.get("error") in REPAIR_CODES:
+        # (the whole refusal, as the API sends it: its code and that it means pairing again)
+        if r.status_code == 401 and isinstance(got, dict) and got.get("error") in REPAIR_CODES \
+                and got.get("action") == "repair" and isinstance(got.get("message"), str):
             refused = Refused(REPAIR)
             refused.code = got["error"]
             raise refused
-        if r.status_code != 200:
-            got = None
-        if not isinstance(got, dict) or not all(isinstance(got.get(k), str) for k in ("refresh_token", "access_token")):
+        got = _tokens(got) if r.status_code == 200 else None
+        if got is None or got["device_id"] != self.device.get("device_id"):
             raise Unreachable(f"Shotcast Cloud didn't refresh this PC's pass (tried again later): {_message(r)}")
         return got
 
@@ -1108,7 +1145,9 @@ def _pair(store: TokenStore, api: str, name: str | None, http: Any, clock: Calla
         f"and check the code {start['user_code']} and this PC's fingerprint {show_fingerprint(fingerprint)}.\n"
         f"Waiting for approval (the code lasts {start['expires_in'] // 60} minutes)...")
     interval = max(1, int(start["interval"]))
-    deadline = clock() + start["expires_in"]
+    # A minute past the code's own time: an approval in its last seconds, whose answer was lost, is
+    # still collected (the API hands the first pass out again while it's unused).
+    deadline = clock() + start["expires_in"] + 60
     while clock() < deadline:
         sleep(interval)
         try:
@@ -1117,7 +1156,12 @@ def _pair(store: TokenStore, api: str, name: str | None, http: Any, clock: Calla
             continue
         _too_old(r)
         if r.status_code == 200:
-            got = r.json()
+            try:
+                got = _tokens(r.json())
+            except ValueError:
+                got = None
+            if got is None:   # (not the API's whole answer: a proxy's page, say; ask again)
+                continue
             rec = {"api": api, "device_id": got["device_id"], **_fresh(got), "name": name,
                    "fingerprint": fingerprint,
                    "paired_at": time.time(),

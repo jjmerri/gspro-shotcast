@@ -554,3 +554,35 @@ def test_a_format_the_cloud_doesnt_read_yet_keeps_every_revision_to_send_later(t
     assert out.parked == [] and out.waiting == 1 and _upload(cfg, u)["status"] == "queued"
     _retry_now(cfg)
     assert _drain(cl, cfg).sent == [u]
+
+
+@pytest.mark.parametrize(("answer", "kept"), [
+    ({"error": "something_new", "action": "retry", "message": "later"}, True),    # a code from a later API: by its action
+    ({"error": "something_new", "action": "fix", "message": "never"}, False),
+    ({"error": "something_new", "action": "dance", "message": "?"}, True),        # nor the action known: kept
+    ({"error": "temporary"}, True),                                                # no action at all: kept
+    ({"error": "invalid_body", "message": "not a round"}, False),                  # the API's own, for good
+])
+def test_a_refusal_this_app_doesnt_know_is_acted_on_by_what_the_api_says_to_do(tmp_path, api, answer, kept):
+    """Only the API's word that a revision will never be taken refuses it; anything this app can't
+    read that way keeps the revision, as it is, to send again."""
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    api.answers = [httpx.Response(422, json=answer)]
+    out = _drain(cl, cfg)
+    up = _upload(cfg, u)
+    assert (up["status"], up["frozen_body"] is not None) == (("queued", True) if kept else ("parked", False))
+    assert (out.waiting, out.parked) == ((1, []) if kept else (0, [u]))
+
+
+def test_a_round_that_has_waited_for_weeks_still_gets_its_next_try(tmp_path, api):
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    api.answers = [httpx.Response(502)]
+    _drain(cl, cfg)
+    db = cloud_rounds.connect(cfg.db_path)
+    db.execute("UPDATE cloud_uploads SET tries = 5000, next_try = 0")
+    db.close()
+    api.answers = [httpx.Response(502)]
+    assert _drain(cl, cfg).waiting == 1   # (no overflow working out the wait)
+    assert 0 < _upload(cfg, u)["next_try"] - (time.time() + LATER) <= cloud_rounds.RETRY_MAX_S
