@@ -280,6 +280,10 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
         slots = _rows(db, "SELECT * FROM round_slots WHERE round_uuid = ? ORDER BY seat, slot_id", uuid)
     keys, side_of = _sides(slots)
     card_side = {c["id"]: c["side"] for c in cards}
+    # One card a side: its last (a booth that stopped between writing a round's cards and marking it
+    # over writes them again when the round is finished; the cloud takes one card for a side).
+    last = {c["side"]: c["id"] for c in cards}
+    cards = [c for c in cards if last[c["side"]] == c["id"]]
     for c in cards:
         if c["side"] not in side_of:   # (a card none of the round's players is on: nobody's to file)
             log.warning("Shotcast Cloud: round %s: the card for %r has no player in the round; not sent", uuid, c["side"])
@@ -360,9 +364,9 @@ def _signature(b: dict[str, Any]) -> str:
 def _note(db: sqlite3.Connection, uuid: str, sig: str, now: float) -> bool:
     """Keep a round's signature and since when it has stood (cloud_quiet). True if it's the one kept
     already (unchanged); one first seen, or changed, stands from now."""
-    row = db.execute("SELECT sig FROM cloud_quiet WHERE uuid = ?", (uuid,)).fetchone()
-    if row is not None and row["sig"] == sig:
-        return True
+    row = db.execute("SELECT sig, since FROM cloud_quiet WHERE uuid = ?", (uuid,)).fetchone()
+    if row is not None and row["sig"] == sig and row["since"] <= now:   # (a `since` ahead of now: the
+        return True                                                     # clock was set back; stands from now)
     db.execute("INSERT OR REPLACE INTO cloud_quiet (uuid, sig, since) VALUES (?, ?, ?)", (uuid, sig, now))
     return False
 
@@ -379,22 +383,28 @@ def _watch(db: sqlite3.Connection, now: float) -> None:
     db.execute("DELETE FROM cloud_quiet WHERE uuid IN (SELECT uuid FROM cloud_uploads WHERE revision != 0)")
 
 
-# A finished round is ready to send: `settle` (the ceiling) past its end, or quiet for QUIET_S (as
-# last looked at: _watch, and again as its body is built, _freeze).
+# A finished round is ready to send: `settle` (the ceiling) past its end; or quiet for QUIET_S (as
+# last looked at: _watch, and again as its body is built, _freeze) with nothing said since it ended
+# still waiting to be spoken (a line is written, then spoken, and only then gets its air time: the
+# quiet between the two isn't the booth being done). A line that's never spoken waits for the ceiling.
 _READY = """(COALESCE(r.ended_at, r.started_at, 0) <= :now - :settle
-             OR EXISTS (SELECT 1 FROM cloud_quiet q WHERE q.uuid = r.uuid AND q.since <= :now - :quiet))"""
+             OR (EXISTS (SELECT 1 FROM cloud_quiet q WHERE q.uuid = r.uuid AND q.since <= :now - :quiet)
+                 AND NOT EXISTS (SELECT 1 FROM lines l WHERE l.record_uuid = r.uuid AND l.aired_at IS NULL
+                                 AND l.ts >= COALESCE(r.ended_at, r.started_at, 0))))"""
 
 
 def _due(db: sqlite3.Connection, now: float, settle: float) -> list[sqlite3.Row]:
     """Rounds to send, oldest first: over and done (_READY), and not on the cloud yet (never sent, or
     their bytes waiting to be acknowledged). One the cloud has is never sent again, whatever changes
-    here afterwards. A refused (parked) one is tried again only once its record has changed (_unpark)."""
+    here afterwards. A refused (parked) one is tried again only once what it would send has changed
+    (as _watch last saw it: whatever changed, a row of the round or something else its body reads)."""
     return db.execute(
         f"""SELECT r.uuid FROM round_records r
            LEFT JOIN cloud_uploads u ON u.uuid = r.uuid
            WHERE r.kind = 'round' AND r.state != 'in_progress' AND {_READY}
              AND (u.uuid IS NULL OR (u.status = 'queued' AND u.revision = 0 AND u.next_try <= :now)
-                  OR (u.status = 'parked' AND u.frozen_gen IS NOT r.gen))
+                  OR (u.status = 'parked' AND EXISTS (SELECT 1 FROM cloud_quiet q WHERE q.uuid = r.uuid
+                                                      AND q.sig IS NOT u.frozen_content)))
            ORDER BY r.started_at, r.uuid""",
         {"now": now, "settle": settle, "quiet": QUIET_S}).fetchall()
 
@@ -622,7 +632,9 @@ def _drain(cl: Any, db: sqlite3.Connection, now: float, settle: float) -> Draine
         if u is not None and u["status"] == "parked" and not _unpark(db, uuid):
             out.unchanged += 1
             continue
-        if (u is None or u["frozen_body"] is None) and not _freeze(db, uuid, now, settle):
+        # (a body is looked at when it is, however long the batch has been going: a change seen now
+        # starts its quiet now, not when the batch began)
+        if (u is None or u["frozen_body"] is None) and not _freeze(db, uuid, now + (_monotonic() - begun), settle):
             out.unchanged += 1
             continue
         # (`now` is when the batch began: what's settled is judged as of then. An answer is timed
@@ -640,11 +652,12 @@ _OUTSTANDING_WORDS = {"in_progress": "in progress", "settling": "settling (just 
 
 
 def _kinds(db: sqlite3.Connection, now: float, settle: float) -> list[tuple[str, str, float]]:
-    """(record uuid, kind, when it ended) for every round (not practice stretches: those are never
+    """(record uuid, kind, when it could first have been sent) for every round (not practice stretches: those are never
     sent), from round_records joined to the queue."""
     out = []
     for r in db.execute(
             f"""SELECT r.uuid, r.state, COALESCE(r.ended_at, r.started_at, 0) AS ended, {_READY} AS ready,
+                      (SELECT since FROM cloud_quiet q WHERE q.uuid = r.uuid) AS since,
                       u.revision, u.frozen_body IS NOT NULL AS frozen, u.status
                FROM round_records r LEFT JOIN cloud_uploads u ON u.uuid = r.uuid
                WHERE r.kind = 'round' ORDER BY r.started_at, r.uuid""",
@@ -661,7 +674,9 @@ def _kinds(db: sqlite3.Connection, now: float, settle: float) -> list[tuple[str,
             kind = "settling"   # (over, and the booth may still be adding to it: _READY)
         else:
             kind = "never"
-        out.append((r["uuid"], kind, r["ended"]))
+        # (when it could first have gone: the ceiling, or its quiet if that was sooner)
+        could = r["ended"] + settle if r["since"] is None else min(r["ended"] + settle, r["since"] + QUIET_S)
+        out.append((r["uuid"], kind, could))
     return out
 
 
@@ -696,7 +711,7 @@ def behind_since(db_path: str, now: float | None = None, settle: float = CEILING
     queue has already been behind, for a booth that's just starting."""
     db = connect(db_path)
     try:
-        late = [ended + settle for _, kind, ended in _kinds(db, time.time() if now is None else now, settle)
+        late = [could for _, kind, could in _kinds(db, time.time() if now is None else now, settle)
                 if kind in BEHIND]
         return min(late) if late else None
     finally:
