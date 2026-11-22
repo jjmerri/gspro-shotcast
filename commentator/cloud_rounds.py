@@ -158,7 +158,11 @@ def _without(row: dict[str, Any], *keys: str) -> dict[str, Any]:
 
 def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None:
     """A record's v1 body and the gen it was read at, or None if the record is gone. Local integer ids
-    become uids or are dropped. No league: the PC is a capture device (the cloud decides)."""
+    become uids or are dropped. No league: the PC is a capture device (the cloud decides).
+
+    A player is named in one place, their slot (the cloud refuses a body that names one anywhere
+    else: erasing an account there takes the name from its slot). So a shot and a card say whose they
+    are by `slot_id` alone, with no `player`, and a scorecard doesn't list its side's `players`."""
     with _txn(db):   # (one snapshot: a record's rows and its gen read together)
         rec = db.execute("SELECT * FROM round_records WHERE uuid = ?", (uuid,)).fetchone()
         if rec is None:
@@ -187,12 +191,12 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
         "round": _without(rec, "uuid", "session_id", "gen", "finishes_gen")
         | {"id": uuid, "session": dict(session) if session else None, "league_id": None, "league": None},
         "slots": [_without(s, "round_uuid") for s in slots],
-        "shots": [_without(s, "id", "session_id", "record_uuid") | {"is_putt": bool(s["is_putt"])} for s in shots],
+        "shots": [_without(s, "id", "session_id", "record_uuid", "player") | {"is_putt": bool(s["is_putt"])} for s in shots],
         "shot_tracks": [_without(t, "shot_id") | {"shot_uid": uid_of[t["shot_id"]]} for t in tracks],
         "lines": [_without(ln, "id", "session_id", "record_uuid", "shot_id") | {"shot_uid": uid_of.get(ln["shot_id"])}
                   for ln in lines],
-        "scorecards": [_without(c, "id", "session_id", "round_uuid") for c in cards],
-        "player_rounds": [_without(p, "id", "session_id", "round_uuid") for p in players],
+        "scorecards": [_without(c, "id", "session_id", "round_uuid", "players") for c in cards],
+        "player_rounds": [_without(p, "id", "session_id", "round_uuid", "player") for p in players],
         "week_results": [_without(w, "id", "round_id") for w in weeks],
         "edit": {"excluded": any(c["excluded"] for c in cards), "mark": mark,
                  "left_out": [s["uid"] for s in shots if s["left_out"]]},

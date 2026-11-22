@@ -1,4 +1,5 @@
 import hashlib
+import json
 import shutil
 import time
 
@@ -419,3 +420,30 @@ def test_a_wait_the_api_gives_late_in_a_long_batch_counts_from_when_it_came(tmp_
     finally:
         db.close()
     del b
+
+
+def test_a_round_names_its_players_on_their_slots_only(tmp_path, api):
+    """The cloud takes a player's name from their slot when their account is erased, and refuses a
+    body naming one anywhere else: a shot and a card say whose they are by slot alone."""
+    cfg, s, cl = _booth(tmp_path, api)
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None, "Bo": None})
+    _hit(s, "Ann", 1)
+    _hit(s, "Bo", 2)
+    _hit(s, "unknown", 3)        # (the booth couldn't tell whose)
+    s.end_round(u, complete=True)
+    ann = s.db.execute("SELECT slot_id FROM round_slots WHERE round_uuid = ? AND name = 'Ann'", (u,)).fetchone()[0]
+    s.db.execute("INSERT INTO player_rounds (session_id, ended_at, player, round_uuid, slot_id)"
+                 " VALUES (?, 9, 'Ann', ?, ?)", (s.session_id, u, ann))
+    s.db.execute("INSERT INTO rounds (session_id, ended_at, date, side, holes, players, round_uuid)"
+                 " VALUES (?, 9, '2026-01-01', 'Ann & Bo', 9, ?, ?)", (s.session_id, '["Ann", "Bo"]', u))
+    s.db.commit()
+    assert _drain(cl, cfg).sent == [u]
+    b = api.puts[0][2]
+    slots = {sl["slot_id"]: sl["name"] for sl in b["slots"]}
+    assert sorted(slots.values()) == ["Ann", "Bo"]
+    assert sorted(slots.get(sh["slot_id"], "") for sh in b["shots"]) == ["", "Ann", "Bo"]
+    assert [c["slot_id"] for c in b["player_rounds"]] == [ann] and len(b["scorecards"]) == 1
+    assert not any("player" in r for r in b["shots"] + b["player_rounds"])
+    assert "players" not in b["scorecards"][0] and b["scorecards"][0]["side"] == "Ann & Bo"
+    names = json.dumps([b["shots"], b["player_rounds"], b["shot_tracks"]])
+    assert "Ann" not in names and "Bo" not in names
