@@ -906,3 +906,17 @@ def test_the_preview_switch_turns_shotcast_cloud_on_for_a_process_and_what_it_st
     assert started[0]["env"][cloud.PREVIEW_ENV] == "1" and cloud.EXPECT_ENV in started[0]["env"]
     monkeypatch.setenv(cloud.PREVIEW_ENV, "yes")    # (only "1")
     assert not cloud.enabled()
+
+
+def test_the_release_self_test_never_runs_against_a_cloud_profiles_home(tmp_path, api, monkeypatch):
+    from commentator import tray
+
+    prof = paired(api)
+    cloud.main(["unpair"])                  # (the profile is kept)
+    ran = []
+    monkeypatch.setattr(tray, "self_test", lambda home, cfg: ran.append(Path(home)))
+    with pytest.raises(SystemExit, match="Shotcast Cloud profile"):
+        _run(monkeypatch, "tray", "--self-test", "--home", str(prof.home))
+    assert ran == []
+    _run(monkeypatch, "tray", "--self-test", "--home", str(tmp_path / "scratch"))
+    assert len(ran) == 1

@@ -1190,6 +1190,12 @@ def main() -> None:
         if args.home is None and cloud.enabled() and cloud.marker().exists():
             sys.exit("This PC is paired with Shotcast Cloud: tray --self-test runs only against a disposable "
                      "folder given with --home.")
+        try:   # (nor against a cloud profile's home, kept from a pairing: that's no scratch folder)
+            from .tray import default_home
+
+            cloud.check_self_hosted((Path(args.home) if args.home else default_home()) / "config.yaml")
+        except cloud.CloudError as e:
+            sys.exit(str(e))
         return cmd_tray(parser, args)
     # Paired with Shotcast Cloud, everything runs in the cloud profile's own home: its config.yaml,
     # .env, data and logs, never the self-hosted ones (commentator.cloud). Checked before anything is

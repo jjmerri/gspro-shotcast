@@ -34,6 +34,7 @@ import json
 import logging
 import sqlite3
 import time
+from time import monotonic as _monotonic
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -349,7 +350,8 @@ def _sent(db: sqlite3.Connection, uuid: str, n: int, out: Drained) -> None:
     out.sent.append(uuid)
 
 
-def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained) -> bool:
+def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained,
+          begun: float | None = None) -> bool:
     """Send a record's frozen revision and act on the answer. False to stop draining for now."""
     from .cloud import CloudError, Unreachable, _message
 
@@ -406,7 +408,7 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained) 
         out.parked.append(uuid)
         return True
     if r.status_code == 429:
-        wait = _throttle(db, r, now)
+        wait = _throttle(db, r, now + (0.0 if begun is None else max(0.0, _monotonic() - begun)))
         db.execute("UPDATE cloud_uploads SET error = ? WHERE uuid = ?",
                    (f"Shotcast Cloud: this PC's upload allowance is spent; waiting {int(wait)}s", uuid))
         log.warning("Shotcast Cloud: this PC's upload allowance is spent; nothing sent for %ds", int(wait))
@@ -450,6 +452,7 @@ def drain(cl: Any, db_path: str, now: float | None = None, settle: float = CLOSE
 
 def _drain(cl: Any, db: sqlite3.Connection, now: float, settle: float) -> Drained:
     out = Drained()
+    begun = _monotonic()
     if throttled(db, now):   # (the API said to wait: the whole queue does, every revision kept)
         out.waiting = len(_due(db, now, settle))
         return out
@@ -462,7 +465,9 @@ def _drain(cl: Any, db: sqlite3.Connection, now: float, settle: float) -> Draine
         if (u is None or u["frozen_body"] is None) and not _freeze(db, uuid, now, settle):
             out.unchanged += 1
             continue
-        if not _send(cl, db, uuid, now, out):
+        # (`now` is when the batch began: what's settled is judged as of then. An answer is timed
+        # from when it came, so a wait the API gives late in a long batch isn't cut short.)
+        if not _send(cl, db, uuid, now, out, begun):
             break
     return out
 

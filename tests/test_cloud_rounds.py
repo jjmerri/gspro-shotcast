@@ -389,9 +389,33 @@ def test_a_429_with_no_time_given_waits_a_while_and_never_longer_than_a_day(tmp_
     try:
         api.answers = [httpx.Response(429, json={"detail": "too many requests"})]
         cloud_rounds.drain(cl, cfg.db_path, now=now)
-        assert cloud_rounds.throttled(db, now) == cloud_rounds.THROTTLE_DEFAULT_S
+        assert cloud_rounds.throttled(db, now) == pytest.approx(cloud_rounds.THROTTLE_DEFAULT_S, abs=5)
         db.execute("UPDATE cloud_throttle SET not_before = ?", (now + 10 ** 9,))   # (a clock set wrong, say)
         assert cloud_rounds.throttled(db, now) == cloud_rounds.THROTTLE_MAX_S
         assert cloud_rounds.throttled(db, now + 10 ** 9 + 1) == 0
     finally:
         db.close()
+
+
+def test_a_wait_the_api_gives_late_in_a_long_batch_counts_from_when_it_came(tmp_path, api, monkeypatch):
+    cfg, s, cl = _booth(tmp_path, api)
+    a, b = _round(s, 1), _round(s, 100)
+    now = time.time() + LATER
+    clock = [1000.0]
+    monkeypatch.setattr(cloud_rounds, "_monotonic", lambda: clock[0])
+    real = cl.request
+
+    def slow(method, path, *args, **kw):   # (each upload takes ten minutes)
+        clock[0] += 600
+        return real(method, path, *args, **kw)
+    cl.request = slow
+    api.answers = [httpx.Response(201, json={"status": "stored", "revision": 1, "seq": 1}),
+                   httpx.Response(429, headers={"Retry-After": "3600"}, json={"detail": "too many requests"})]
+    out = cloud_rounds.drain(cl, cfg.db_path, now=now)
+    assert out.sent == [a] and out.waiting == 1
+    db = cloud_rounds.connect(cfg.db_path)
+    try:   # twenty minutes into the batch, an hour's wait: till eighty minutes after it began
+        assert cloud_rounds.throttled(db, now) == 1200 + 3600
+    finally:
+        db.close()
+    del b
