@@ -920,3 +920,27 @@ def test_the_release_self_test_never_runs_against_a_cloud_profiles_home(tmp_path
     assert ran == []
     _run(monkeypatch, "tray", "--self-test", "--home", str(tmp_path / "scratch"))
     assert len(ran) == 1
+
+
+def test_consoles_the_paired_tray_opens_dont_carry_the_profiles_keys(tmp_path, api, monkeypatch):
+    from commentator import tray
+    from commentator.config import load_config
+
+    monkeypatch.setenv("OPENAI_API_KEY", "the-profiles-key")   # (as the paired tray loaded it)
+    monkeypatch.setenv("AZURE_SPEECH_KEY", "the-profiles-voice-key")
+    opened = []
+    monkeypatch.setattr(tray.subprocess, "Popen", lambda *a, **kw: opened.append(kw))
+    t, _ = _tray(api, monkeypatch)
+    t.notify = lambda *a, **kw: None
+    t.command_prompt()
+    t.screen_check()
+    assert len(opened) == 2
+    for kw in opened:
+        assert not set(kw["env"]) & set(cloud.ENV_KEYS) and "PATH" in kw["env"]
+    # Self-hosted, they're opened exactly as before, keys and all.
+    home = _self_hosted_home(tmp_path, monkeypatch)
+    plain = tray.Tray(home, load_config(home / "config.yaml"))
+    plain.notify = lambda *a, **kw: None
+    plain.command_prompt()
+    plain.screen_check()
+    assert opened[2]["env"]["OPENAI_API_KEY"] == "the-profiles-key" and "env" in opened[3] and opened[3]["env"] is None

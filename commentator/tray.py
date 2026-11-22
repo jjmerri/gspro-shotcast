@@ -794,9 +794,19 @@ class Tray:
             self._live_setup.release()
             self._refresh()
 
+    def _console_env(self, env: dict | None = None) -> dict | None:
+        """A console's environment: `env` (None: this process's, as it is). Paired with Shotcast Cloud,
+        without the profile's AI and voice keys this tray loaded: the window can stay open past an
+        unpair, and a Shotcast started in it loads the keys of whatever it then runs as for itself."""
+        if getattr(self, "cloud", None) is None:
+            return env
+        from .cloud import ENV_KEYS
+
+        return {k: v for k, v in (os.environ if env is None else env).items() if k not in ENV_KEYS}
+
     def screen_check(self, *_) -> None:
         subprocess.Popen(["cmd", "/k", python_exe(), "-m", "commentator", "screen-check", "--delay", "8"],
-                         cwd=self.home, creationflags=NEW_CONSOLE)
+                         cwd=self.home, env=self._console_env(), creationflags=NEW_CONSOLE)
         self.notify("Bring GSPro to the front: the screen check reads it in 8 seconds.")
 
     def command_prompt(self, *_) -> None:
@@ -804,7 +814,8 @@ class Tray:
         py = Path(python_exe()).parent
         env = {**os.environ, "PATH": os.pathsep.join([str(py), str(py / "Scripts"), os.environ.get("PATH", "")])}
         hello = "Shotcast commands: shotcast --help (for example shotcast publish, shotcast backup)"
-        subprocess.Popen(["cmd", "/k", "echo", hello], cwd=self.home, env=env, creationflags=NEW_CONSOLE)
+        subprocess.Popen(["cmd", "/k", "echo", hello], cwd=self.home, env=self._console_env(env),
+                         creationflags=NEW_CONSOLE)
 
     def back_up(self, *_) -> None:
         def work():
