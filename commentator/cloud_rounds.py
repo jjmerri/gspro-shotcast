@@ -156,26 +156,33 @@ def _without(row: dict[str, Any], *keys: str) -> dict[str, Any]:
     return {k: v for k, v in row.items() if k not in keys}
 
 
-# The cloud's limit on a track's points (its roundbody.MAX_POINTS): a longer one isn't sent.
+# The cloud's limits (its roundbody.py and rounds.py): a track of more points, or more tags, isn't
+# sent; a round over either size goes without its heaviest optional parts (encode).
 MAX_POINTS = 5_000
+MAX_TAGS = 50
+MAX_BODY = 4 * 1024 * 1024         # compressed
+MAX_INFLATED = 32 * 1024 * 1024    # as JSON
 _SHOT_FLAGS = ("is_putt", "attributed", "is_league", "is_tournament", "mulligan", "shared_ball", "picked")
 _CARD_FLAGS = ("is_league", "is_tournament", "complete")
 
 
 def _wire(row: dict[str, Any], *drop: str, flags: tuple[str, ...] = (), holes: tuple[str, ...] = (),
-          lists: tuple[str, ...] = ()) -> dict[str, Any]:
+          lists: tuple[str, ...] = (), most: int = MAX_POINTS, dates: tuple[str, ...] = ()) -> dict[str, Any]:
     """A table's row as the cloud's format has it (its contract/round-body-v1.schema.json): without
-    the `drop` columns, the 0/1 `flags` as true/false, and the columns kept as JSON text as what they
-    hold (`holes`: a hole number -> whole number map; `lists`: a list). What can't be read is sent
-    as not known (null), never as text."""
+    the `drop` columns, the 0/1 `flags` as true/false, the columns kept as JSON text as what they
+    hold (`holes`: a hole number -> whole number map; `lists`: a list of at most `most`), and an
+    empty `dates` column as not known. What can't be read is sent as not known (null), never as
+    text, nor as a guess: a flag that's neither 0 nor 1 isn't made true."""
     out = _without(row, *drop)
     for k in flags:
-        if out.get(k) is not None:
-            out[k] = bool(out[k])
+        v = out.get(k)
+        out[k] = None if isinstance(v, bool) or v not in (0, 1) else v == 1
     for k in holes:
         out[k] = _holes(out.get(k))
     for k in lists:
-        out[k] = _list(out.get(k))
+        out[k] = _list(out.get(k), most)
+    for k in dates:
+        out[k] = out.get(k) or None
     return out
 
 
@@ -190,12 +197,14 @@ def _holes(text: Any) -> dict[str, int] | None:
     data = _loads(text)
     if not isinstance(data, dict):
         return None
-    return {k: v for k, v in data.items() if k.isdigit() and isinstance(v, int) and not isinstance(v, bool)}
+    # (a hole's number as it's written, "7": not "07" as well, which would be the same hole twice)
+    return {k: v for k, v in data.items()
+            if isinstance(k, str) and k.isdigit() and k == str(int(k)) and isinstance(v, int) and not isinstance(v, bool)}
 
 
-def _list(text: Any) -> list | None:
+def _list(text: Any, most: int = MAX_POINTS) -> list | None:
     data = _loads(text)
-    return data if isinstance(data, list) and len(data) <= MAX_POINTS else None
+    return data if isinstance(data, list) and len(data) <= most else None
 
 
 def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None:
@@ -236,13 +245,13 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
         | {"id": uuid, "session": dict(session) if session else None, "league_id": None, "league": None},
         "slots": [_without(s, "round_uuid") for s in slots],
         "shots": [_wire(s, "id", "session_id", "record_uuid", "player", "raw", "left_out", "excluded",
-                        flags=_SHOT_FLAGS, lists=("tags",)) for s in shots],
+                        flags=_SHOT_FLAGS, lists=("tags",), most=MAX_TAGS) for s in shots],
         "shot_tracks": [_wire(t, "shot_id", "was", lists=("flight", "roll")) | {"shot_uid": uid_of[t["shot_id"]]}
                         for t in tracks],
         "lines": [_without(ln, "id", "session_id", "record_uuid", "shot_id", "excluded")
                   | {"shot_uid": uid_of.get(ln["shot_id"])} for ln in lines],
         "scorecards": [_wire(c, "id", "session_id", "round_uuid", "players", "excluded", flags=_CARD_FLAGS,
-                             holes=("scores", "hole_pars")) for c in cards],
+                             holes=("scores", "hole_pars"), dates=("date",)) for c in cards],
         "player_rounds": [_wire(p, "id", "session_id", "round_uuid", "player", "excluded", flags=_CARD_FLAGS,
                                 holes=("scores", "hole_pars")) for p in players],
         "week_results": [_wire(w, "id", "round_id", holes=("holes",)) for w in weeks],
@@ -261,11 +270,33 @@ def _content(b: dict[str, Any]) -> str:
 
 
 def encode(b: dict[str, Any], revision: int) -> bytes:
-    """The bytes sent for a revision: gzip with no timestamp, so building it again gives the same bytes."""
+    """The bytes sent for a revision: gzip with no timestamp, so building it again gives the same bytes.
+
+    A round too big for the cloud (MAX_BODY compressed, MAX_INFLATED as JSON) goes without its
+    heaviest optional parts, in the order the cloud's API gives, till it fits: the tracks' flight and
+    roll paths, then the tracks, then the commentary. The scores, cards and shots always go; one
+    still too big is sent whole, and the cloud says so (413)."""
     out = dict(b)
     if revision != 1:
         out.pop("edit", None)
-    return gzip.compress(_json(out), mtime=0)
+    lighter = (
+        lambda: out.update(shot_tracks=[t | {"flight": None, "roll": None} for t in out["shot_tracks"]]),
+        lambda: out.update(shot_tracks=[]),
+        lambda: out.update(lines=[]),
+    )
+    whole = None
+    for drop in (None, *lighter):
+        if drop is not None:
+            drop()
+        data = _json(out)
+        packed = gzip.compress(data, mtime=0)
+        whole = whole or packed
+        if len(data) <= MAX_INFLATED and len(packed) <= MAX_BODY:
+            if drop is not None:
+                log.warning("Shotcast Cloud: round %s is too big whole; sent without some of its tracks or commentary",
+                            out["round"].get("id"))
+            return packed
+    return whole
 
 
 # Draining the queue
@@ -390,9 +421,14 @@ def _answer(r: Any) -> dict[str, Any] | None:
     return got if isinstance(got, dict) else None
 
 
-def _revision(answer: dict[str, Any]) -> int | None:
-    rev = answer.get("revision")
+def _revision(answer: dict[str, Any], key: str = "revision") -> int | None:
+    rev = answer.get(key)
     return rev if isinstance(rev, int) and not isinstance(rev, bool) else None
+
+
+def content_sha(frozen: bytes) -> str:
+    """A frozen revision's checksum as the cloud keeps it: of the JSON itself, not its gzip bytes."""
+    return hashlib.sha256(gzip.decompress(frozen)).hexdigest()
 
 
 def _sent(db: sqlite3.Connection, uuid: str, n: int, out: Drained) -> None:
@@ -423,10 +459,13 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained,
         out.waiting += 1
         return False
     answer = _answer(r)
-    status, top = (answer or {}).get("status"), _revision(answer or {})
-    if answer is not None and top is not None and r.status_code in (200, 201):
+    status = (answer or {}).get("status")
+    # The cloud's receipt: `revision`, the one this answer is about (the one sent), and
+    # `current_revision`, the round's latest there.
+    mine, top = _revision(answer or {}), _revision(answer or {}, "current_revision")
+    if answer is not None and mine == n and top is not None and r.status_code in (200, 201):
         # The cloud's own word for this revision. Its `duplicate` is this PC's own revision, sent before
-        # (a lost answer, or a crash before it was noted): the same bytes, so the same revision.
+        # (a lost answer, or a crash before it was noted): the same content, so the same revision.
         if (r.status_code, status, top) in ((201, "stored", n), (200, "duplicate", n)):
             _sent(db, uuid, n, out)
             return True
@@ -436,12 +475,12 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained,
             return True
     error = (answer or {}).get("error")
     if r.status_code == 409 and error == "revision_conflict":
-        # Never counted as sent, even naming these bytes: the API answers its own copy of them as a
+        # Never counted as sent, even naming this content: the API answers its own copy of it as a
         # `duplicate`, so a conflict that matches is an inconsistency, kept for someone to look at.
         sha = (answer or {}).get("sha256")
-        same = top == n and sha == hashlib.sha256(frozen).hexdigest()
+        same = mine == n and sha == content_sha(frozen)
         _hold(db, uuid, f"Shotcast Cloud answered a conflict naming this PC's own revision {n} (inconsistent)"
-              if same else f"Shotcast Cloud has other content as revision {top} (this PC sent {n})")
+              if same else f"Shotcast Cloud has other content as revision {n} (its latest is {top})")
         out.conflicts.append(uuid)
         return True
     if r.status_code == 409 and error == "not_bay_writer":
@@ -450,12 +489,23 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained,
         _park(db, uuid, "the round belongs to another bay on Shotcast Cloud")
         out.parked.append(uuid)
         return True
-    if r.status_code == 403 and answer is not None:
+    if r.status_code == 403 and error == "league_suspended":
         raise Blocked(f"Shotcast Cloud isn't taking rounds from this PC: {_message(r)}")
-    if r.status_code in (413, 415, 422) and answer is not None:
-        # The API's own refusals of this body (too big, not gzip, not a round body: koi's rounds.py).
-        # Anything else it doesn't say there (a 404 or another 409: a route or proxy between, say) is
-        # tried again below, and shows red in the tray while it keeps failing.
+    if r.status_code == 403 and error == "round_league_suspended":
+        # This round's league only: it waits (kept, tried again later) and the rest of the queue goes.
+        _backoff(db, uuid, now, f"Shotcast Cloud: {_message(r)}")
+        out.waiting += 1
+        return True
+    if r.status_code == 422 and error == "unsupported_format":
+        # The API is behind this app (it reads a new format before any app writes it, so this
+        # passes): every revision is kept, as it is, and sent once it isn't.
+        _backoff(db, uuid, now, f"Shotcast Cloud: {_message(r)}")
+        out.waiting += 1
+        return False
+    if r.status_code in (413, 415, 422) and isinstance(error, str):
+        # The API's own refusals of this body (too big, not gzip, not a round body: koi's rounds.py),
+        # each with its code. Anything else (a 404, a code this app doesn't know, a proxy's page) is
+        # tried again below, keeping the revision, and shows red in the tray while it keeps failing.
         _park(db, uuid, f"HTTP {r.status_code}: {_message(r)}")
         out.parked.append(uuid)
         return True

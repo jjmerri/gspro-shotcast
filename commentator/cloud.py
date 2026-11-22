@@ -83,6 +83,10 @@ FIX = ("To repair it: `python -m commentator.cloud unpair --force`, then pair th
        "(`python -m commentator.cloud pair --api https://...`).")
 REPAIR = ("Shotcast Cloud no longer accepts this PC: remove it from the sims on the site, then "
           "`python -m commentator.cloud unpair --force` and pair it again")
+# The API's error codes that end a pairing (its devices.py): the pass is spent or the PC was removed.
+REPAIR_CODES = frozenset({"refresh_token_invalid", "device_not_paired", "device_signed_out"})
+SIGNED_OUT = "device_signed_out"     # this PC's own unpair went through (its answer was lost)
+NAME_MAX = 64                        # a PC's name on the API (its devices.NAME_MAX)
 LIFECYCLE = ("run", "tray")          # <home>/<who>.lock: held by a paired booth (`run`) and tray (`running`)
 # Inherited from the environment Shotcast was started in, and removed from it when paired (clean_env),
 # so a paired booth only uses its profile's .env: the AI and voice services' keys and endpoint
@@ -107,8 +111,10 @@ class NotPaired(CloudError):
 
 
 class Refused(NotPaired):
-    """The API turned this PC's pass down (401 on a refresh): the pairing is kept, marked, till it's
-    paired again."""
+    """The API turned this PC's pass down (401 on a refresh, with one of REPAIR_CODES: `code`): the
+    pairing is kept, marked, till it's paired again."""
+
+    code: str | None = None
 
 
 class Damaged(CloudError):
@@ -843,6 +849,11 @@ def _message(r: Any) -> str:
         return f"HTTP {r.status_code}"
     detail = body.get("detail", body) if isinstance(body, dict) else body
     if isinstance(detail, dict):
+        fields = detail.get("fields")
+        if isinstance(fields, list) and fields:   # (what in a body was refused)
+            said = "; ".join(f"{'.'.join(str(p) for p in f.get('loc') or [])}: {f.get('msg')}" for f in fields[:5]
+                             if isinstance(f, dict))
+            return f"{detail.get('message') or detail.get('error')} ({said})"
         return str(detail.get("message") or detail.get("error") or detail)
     if isinstance(detail, list):   # a validation error
         return "; ".join(str(d.get("msg", d)) if isinstance(d, dict) else str(d) for d in detail)
@@ -891,7 +902,9 @@ class Cloud:
         if expect is not None and tuple(binding(rec)) != tuple(expect):
             raise PairingChanged("this PC's Shotcast Cloud pairing isn't the one checked; nothing sent")
         if rec.get("refused"):
-            raise Refused(REPAIR)
+            refused = Refused(REPAIR)
+            refused.code = rec.get("refused_code")
+            raise refused
         self.device = {k: v for k, v in rec.items() if k != "tokens"}
         self.identity = identity(self.device)
         self.bound = binding(rec)   # (the protected binding: TokenStore.read checked the clear part against it)
@@ -927,10 +940,18 @@ class Cloud:
             tok = rec["tokens"]
             if tok["access_token"] != stale and tok["access_exp"] - REFRESH_EARLY_S > self.clock():
                 return tok["access_token"]
+            # The refresh's own id, stored before it's sent: if the answer never gets saved (a lost
+            # connection, a crash), the next try, whenever this PC next runs, sends the same token as
+            # the same attempt, and the API hands back the same new one instead of taking the spent
+            # token for a stolen copy and revoking this PC.
+            if not tok.get("refresh_attempt"):
+                tok["refresh_attempt"] = secrets.token_hex(16)
+                self._save(rec)
             try:
-                got = self._refresh(tok["refresh_token"])
-            except Refused:
+                got = self._refresh(tok["refresh_token"], tok["refresh_attempt"])
+            except Refused as e:
                 rec["refused"] = self.clock()   # kept, marked: `locate` says it needs pairing again
+                rec["refused_code"] = e.code
                 self._save(rec)
                 raise
             rec["tokens"] = {"refresh_token": got["refresh_token"], "access_token": got["access_token"],
@@ -955,14 +976,15 @@ class Cloud:
                     raise CloudError(f"couldn't save this PC's new Shotcast Cloud pass: {e}") from None
                 self.sleep(0.5 * (attempt + 1))
 
-    def _refresh(self, refresh_token: str) -> dict:
+    def _refresh(self, refresh_token: str, attempt_id: str | None = None) -> dict:
         # A lost response is safe to retry, but only within the API's grace for a spent token (a
         # minute, during which it hands back the same new one), so every try fits a shorter window.
         deadline = self.clock() + REFRESH_WINDOW_S
         attempt = 0
         while True:
             try:
-                r = self._send("POST", "/api/devices/refresh", {"refresh_token": refresh_token},
+                r = self._send("POST", "/api/devices/refresh",
+                               {"refresh_token": refresh_token} | ({"attempt": attempt_id} if attempt_id else {}),
                           timeout=min(REFRESH_TIMEOUT_S, max(deadline - self.clock(), 1.0)))
             except Unreachable as e:
                 problem = str(e)
@@ -977,14 +999,21 @@ class Cloud:
                 raise Unreachable(problem)
             self.sleep(wait)
         _too_old(r)
-        if r.status_code == 401:
-            raise Refused(REPAIR)
         try:
-            got = r.json() if r.status_code == 200 else None
+            got = r.json()
         except ValueError:
             got = None
+        # Only the API's own word that this pass is finished marks the pairing as needing pairing
+        # again; any other refusal (a proxy's 401, a code this app doesn't know) keeps it and is
+        # tried again later.
+        if r.status_code == 401 and isinstance(got, dict) and got.get("error") in REPAIR_CODES:
+            refused = Refused(REPAIR)
+            refused.code = got["error"]
+            raise refused
+        if r.status_code != 200:
+            got = None
         if not isinstance(got, dict) or not all(isinstance(got.get(k), str) for k in ("refresh_token", "access_token")):
-            raise CloudError(f"Shotcast Cloud refused to refresh this PC's pass: {_message(r)}")
+            raise Unreachable(f"Shotcast Cloud didn't refresh this PC's pass (tried again later): {_message(r)}")
         return got
 
     def request(self, method: str, path: str, body: Any = None, headers: dict | None = None,
@@ -1064,7 +1093,7 @@ def _pair(store: TokenStore, api: str, name: str | None, http: Any, clock: Calla
     with store.lock():
         if store.path.exists():
             raise CloudError("this PC is already paired; unpair it first")
-    name = (name or socket.gethostname() or "Sim PC").strip()[:200]
+    name = " ".join((name or socket.gethostname() or "Sim PC").split())[:NAME_MAX] or "Sim PC"
     fingerprint = hashlib.sha256(secrets.token_bytes(32)).hexdigest()
     http = _http(api, http)
     r = _send(http, "POST", "/api/devices/pair", {"name": name, "fingerprint": fingerprint})
@@ -1112,9 +1141,9 @@ def _pair(store: TokenStore, api: str, name: str | None, http: Any, clock: Calla
             raise CloudError("the owner turned this PC down")
         if error == "expired_token":
             raise CloudError("the code ran out before it was approved; start again")
-        if r.status_code >= 500 or r.status_code == 429:
-            continue
-        raise CloudError(f"Shotcast Cloud: {_message(r)}")
+        # Anything else (the API busy, a proxy's page, a code this app doesn't know) isn't a no: the
+        # code is still good till it runs out.
+        continue
     raise CloudError("the code ran out before it was approved; start again")
 
 
@@ -1350,12 +1379,15 @@ def _unpair(prof: Profile, st: TokenStore, force: bool) -> None:
                      "Let them upload (cloud upload), or pass --force to unpair and leave them on this PC only.")
         try:
             Cloud(st, expect=prof.bound).revoke()
-        except Refused:
-            if not force:
+        except Refused as e:
+            if e.code == SIGNED_OUT:   # (an earlier unpair got through; its answer never arrived)
+                print("Shotcast Cloud had already removed this PC (an earlier unpair).")
+            elif not force:
                 sys.exit("Not unpaired: Shotcast Cloud no longer accepts this PC, so it can't confirm removing "
                          "it. Remove this PC from the sims on the site, then unpair with --force.")
-            print("Shotcast Cloud no longer accepts this PC, so removing it wasn't confirmed: remove it from "
-                  "the sims on the site.")
+            else:
+                print("Shotcast Cloud no longer accepts this PC, so removing it wasn't confirmed: remove it from "
+                      "the sims on the site.")
         except CloudError as e:
             if not force:
                 sys.exit(f"Not unpaired: {e}. Pass --force to forget the pairing here anyway (then remove this "
