@@ -871,9 +871,7 @@ def test_a_pairing_on_a_machine_with_no_id_of_its_own_still_starts_next_time(api
     assert cloud.locate().home == prof.home
 
 
-def test_a_stale_certificate_file_or_proxy_in_the_environment_doesnt_reach_the_api_client(monkeypatch, tmp_path):
-    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "gone.pem"))
-    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(tmp_path / "gone.pem"))
+def test_the_api_is_reached_through_the_proxy_the_environment_names(monkeypatch):
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.test:3128")
     made = []
 
@@ -882,7 +880,16 @@ def test_a_stale_certificate_file_or_proxy_in_the_environment_doesnt_reach_the_a
         return _CLIENT(*a, **kw)
     monkeypatch.setattr(httpx, "Client", client)
     http = cloud._http(API)
-    assert made[0]["trust_env"] is False and http.trust_env is False and not made[0].get("follow_redirects")
+    assert http.trust_env and made[0].get("trust_env", True) and not made[0]["follow_redirects"]
+    assert any(m is not None for m in http._mounts.values())   # (the proxy is in its routes)
+
+
+def test_a_stale_certificate_file_is_the_network_failing_not_a_crash(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "gone.pem"))
+    try:
+        cloud._http(API)
+    except cloud.Unreachable as e:
+        assert "couldn't reach" in str(e)
 
 
 def test_no_api_client_at_all_is_the_network_failing_and_recovery_still_works(api, monkeypatch, capsys):

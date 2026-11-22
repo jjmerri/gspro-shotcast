@@ -3,8 +3,8 @@ rounds-server.md).
 
 Paired, the booth runs in the pairing's own cloud profile (cloud.locate), whose season file is bound
 to the pairing as it's made (`bind`): every round record in it is that pairing's and goes up,
-and nothing goes up from a file bound to another pairing, or to none. Each record (a round, or a
-practice stretch) goes as a body of its rows once it has settled: finished or abandoned, and
+and nothing goes up from a file bound to another pairing, or to none. Each round goes as a body of
+its rows once it has settled: finished or abandoned, and
 CLOSER_SECONDS past its end, with no league (the PC is a capture device: the cloud decides a round's
 league). A record that changes after it was sent goes up again as the next revision, found by its
 change counter (round_records.gen).
@@ -18,6 +18,11 @@ number) is never overwritten from here: the record is held as a conflict, its sn
 someone to reconcile (`cloud status` counts them). A 409 never counts as sent. A record the cloud
 refuses outright (too big, or not a round body) is parked, and goes again once it changes, or when
 asked (`cloud upload --refused`). Nothing is deleted here: the rounds stay on this PC.
+
+Only rounds go up. A practice stretch (what the booth stored outside any round: shots on a course
+with no round on, and what it said) stays on this PC: it is never sent, never counted as waiting, and
+never holds up an unpair. (The booth can still move a stretch's rows into the round that follows, so
+a stretch isn't settled the way a round is; range sessions may be sent one day, as their own thing.)
 
 The queue (cloud_uploads) is kept in the profile's season.db, made the first time it's used.
 """
@@ -204,12 +209,12 @@ def encode(b: dict[str, Any], revision: int) -> bytes:
 
 
 def _due(db: sqlite3.Connection, now: float, settle: float) -> list[sqlite3.Row]:
-    """Settled records to send (new, changed, or a revision waiting to be acknowledged), oldest first.
+    """Settled rounds to send (new, changed, or a revision waiting to be acknowledged), oldest first.
     Held (conflict) ones aren't, nor refused (parked) ones till the record changes (_unpark)."""
     return db.execute(
         """SELECT r.uuid FROM round_records r
            LEFT JOIN cloud_uploads u ON u.uuid = r.uuid
-           WHERE r.state != 'in_progress' AND COALESCE(r.ended_at, r.started_at, 0) <= ?
+           WHERE r.kind = 'round' AND r.state != 'in_progress' AND COALESCE(r.ended_at, r.started_at, 0) <= ?
              AND (u.uuid IS NULL OR (u.status = 'queued' AND u.next_try <= ?
                                      AND (u.frozen_body IS NOT NULL OR u.acked_gen IS NOT r.gen))
                   OR (u.status = 'parked' AND u.frozen_gen IS NOT r.gen))
@@ -217,37 +222,23 @@ def _due(db: sqlite3.Connection, now: float, settle: float) -> list[sqlite3.Row]
         (now - settle, now)).fetchall()
 
 
-def settle_idle(db: sqlite3.Connection, now: float) -> int:
-    """End the practice stretches left in progress with nothing struck or said for
-    PRACTICE_IDLE_SECONDS, so one that just stops goes up without waiting for the next shot, round or
-    restart. (A practice stretch is what the booth stored outside a round: shots on a course with no
-    round on, and what it said. Shots on the driving range and in GSPro's practice mode are never
-    stored, paired or not, so there is nothing of those to send.) It's what the booth does itself at that next row
-    (round_record.Live._practice: the stretch is over, at its last row), done here once it's due; the
-    booth, finding it ended, starts the next stretch as it would have. One write transaction, the
-    last row read inside it: a stretch that just got a shot isn't ended. Returns how many were."""
-    from .round_record import PRACTICE_IDLE_SECONDS
-
-    ended = 0
-    with _txn(db, "IMMEDIATE"):
-        for (u,) in db.execute("SELECT uuid FROM round_records WHERE kind = 'practice' AND state = 'in_progress'"
-                               " AND assigned = 'live'").fetchall():
-            last = db.execute("SELECT MAX(at) FROM (SELECT MAX(ts) AS at FROM shots WHERE record_uuid = ?1"
-                              " UNION ALL SELECT MAX(ts) FROM lines WHERE record_uuid = ?1)", (u,)).fetchone()[0]
-            if last is None or now - last <= PRACTICE_IDLE_SECONDS:   # (no row yet: the booth's to drop)
-                continue
-            ended += db.execute("UPDATE round_records SET state = 'finished', ended_at = MAX(?, COALESCE(started_at, ?))"
-                                " WHERE uuid = ? AND state = 'in_progress'", (last, last, u)).rowcount
-    return ended
+def _settled(rec: dict[str, Any], now: float, settle: float) -> bool:
+    """Whether a record, as read, is a round that's over and past its closer: what may be sent."""
+    ended = rec.get("ended_at") if rec.get("ended_at") is not None else rec.get("started_at") or 0
+    return rec.get("kind") == "round" and rec.get("state") != "in_progress" and ended <= now - settle
 
 
-def _freeze(db: sqlite3.Connection, uuid: str) -> bool:
+def _freeze(db: sqlite3.Connection, uuid: str, now: float, settle: float) -> bool:
     """Build the record's next revision and keep it until acknowledged. False if there's nothing new
-    to send (it says what was last acknowledged, or the record is gone)."""
+    to send: it says what was last acknowledged, the record is gone, or it isn't a settled round any
+    more (checked in the very read the revision is built from: a round the booth took up again
+    since the queue was looked at, while earlier ones were being sent, isn't sent in progress)."""
     got = body(db, uuid)
     if got is None:
         return False
     b, gen = got
+    if not _settled(b["round"], now, settle):
+        return False
     db.execute("INSERT OR IGNORE INTO cloud_uploads (uuid) VALUES (?)", (uuid,))
     u = db.execute("SELECT * FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()
     content = _content(b)
@@ -423,14 +414,13 @@ def drain(cl: Any, db_path: str, now: float | None = None, settle: float = CLOSE
 
 def _drain(cl: Any, db: sqlite3.Connection, now: float, settle: float) -> Drained:
     out = Drained()
-    settle_idle(db, now)
     for row in _due(db, now, settle):
         uuid = row["uuid"]
         u = db.execute("SELECT frozen_body, status FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()
         if u is not None and u["status"] == "parked" and not _unpark(db, uuid):
             out.unchanged += 1
             continue
-        if (u is None or u["frozen_body"] is None) and not _freeze(db, uuid):
+        if (u is None or u["frozen_body"] is None) and not _freeze(db, uuid, now, settle):
             out.unchanged += 1
             continue
         if not _send(cl, db, uuid, now, out):
@@ -448,13 +438,14 @@ _OUTSTANDING_WORDS = {"in_progress": "in progress", "settling": "settling (just 
 
 
 def _kinds(db: sqlite3.Connection, now: float, settle: float) -> list[tuple[str, str]]:
-    """(record uuid, kind) for every round record, from round_records joined to the queue."""
+    """(record uuid, kind) for every round (not practice stretches: those are never sent), from
+    round_records joined to the queue."""
     out = []
     for r in db.execute(
             """SELECT r.uuid, r.state, COALESCE(r.ended_at, r.started_at, 0) AS ended, r.gen,
                       u.uuid AS queued, u.revision, u.acked_gen, u.frozen_body IS NOT NULL AS frozen, u.status
                FROM round_records r LEFT JOIN cloud_uploads u ON u.uuid = r.uuid
-               ORDER BY r.started_at, r.uuid"""):
+               WHERE r.kind = 'round' ORDER BY r.started_at, r.uuid"""):
         if r["state"] == "in_progress":
             kind = "in_progress"
         elif r["status"] == "conflict":

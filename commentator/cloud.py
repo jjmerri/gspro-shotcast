@@ -810,10 +810,12 @@ def _http(api: str, http: Any = None) -> Any:
 
     from .updater import current_version
 
-    # trust_env off: the pass goes straight to the API, by the system's own certificates, whatever
-    # proxy or certificate file the environment names (a stale SSL_CERT_FILE can't break it either).
+    # The environment's proxy and certificate settings apply, as to any program on the PC: a venue
+    # whose network goes through a proxy reaches Shotcast Cloud through it. (What that lets the PC's
+    # own operator see is their own pass; the API limits what a pass can do.) A client that can't be
+    # made at all (a stale SSL_CERT_FILE, say) is the network failing, not a crash.
     try:
-        return httpx.Client(base_url=api, timeout=30.0, follow_redirects=False, trust_env=False,
+        return httpx.Client(base_url=api, timeout=30.0, follow_redirects=False,
                             headers={"User-Agent": f"Shotcast/{current_version()}"})
     except Exception as e:   # noqa: BLE001 - no client at all (its certificates can't be loaded, say)
         raise Unreachable(f"couldn't reach Shotcast Cloud: {e}") from None

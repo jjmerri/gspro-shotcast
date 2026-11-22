@@ -279,49 +279,40 @@ def test_no_answer_from_the_network_keeps_the_round_queued_to_retry(tmp_path, ap
     assert u in api.rounds and cloud_rounds.behind(cfg.db_path, now=time.time() + LATER) == 0
 
 
-def test_a_practice_stretch_left_idle_is_ended_and_goes_up_without_another_shot(tmp_path, api):
-    from commentator.round_record import PRACTICE_IDLE_SECONDS
-
+def test_practice_stretches_are_never_sent_or_counted_and_dont_hold_up_an_unpair(tmp_path, api, capsys):
     cfg, s, cl = _booth(tmp_path, api)
-    t0 = time.time()
-    _hit(s, "Ann", t0)                      # on the range: a practice stretch, in progress
-    _hit(s, "Ann", t0 + 60)
+    _hit(s, "Ann", 1)                       # shots with no round on: a practice stretch
+    _said(s)
     s.db.commit()
-    [(u, kind, state)] = s.db.execute("SELECT uuid, kind, state FROM round_records").fetchall()
-    assert (kind, state) == ("practice", "in_progress")
-    soon = t0 + 60 + PRACTICE_IDLE_SECONDS - 1
-    assert cloud_rounds.drain(cl, cfg.db_path, now=soon).sent == [] and api.puts == []
-    assert s.db.execute("SELECT state FROM round_records").fetchone()[0] == "in_progress"   # (it may get a shot yet)
-    later = t0 + 60 + PRACTICE_IDLE_SECONDS + 1
-    assert cloud_rounds.drain(cl, cfg.db_path, now=later, settle=0).sent == [u]
-    assert tuple(s.db.execute("SELECT state, ended_at FROM round_records WHERE uuid = ?", (u,)).fetchone()) \
-        == ("finished", t0 + 60)            # (ended at its last row, as the booth ends it)
-    assert [(rid, n, len(b["shots"])) for rid, n, b in api.puts] == [(u, 1, 2)]
-    _hit(s, "Ann", later + 5)               # the booth, still running, finds it ended: a new stretch
-    s.db.commit()
-    rows = s.db.execute("SELECT uuid, state FROM round_records ORDER BY started_at").fetchall()
-    assert [tuple(r) for r in rows] == [(u, "finished"), (rows[1][0], "in_progress")] and rows[1][0] != u
-    assert s.db.execute("SELECT COUNT(*) FROM shots WHERE record_uuid = ?", (u,)).fetchone()[0] == 2
+    done = Store(cfg.db_path)               # (the booth restarted: the stretch is over, as a round is)
+    done.db.close()
+    kinds = [tuple(r) for r in s.db.execute("SELECT kind, state FROM round_records")]
+    assert kinds and set(kinds) == {("practice", "finished")}
+    u = _round(s, 10)
+    assert _drain(cl, cfg).sent == [u] and [rid for rid, _, _ in api.puts] == [u]
+    assert _counts(cfg) == {"sent": 1} and cloud_rounds.behind(cfg.db_path, now=time.time() + LATER) == 0
+    assert cloud_rounds.outstanding(cfg.db_path, now=time.time() + LATER) == []
+    s.db.close()
+    cloud.main(["unpair"])                  # nothing of the round's is left, so it isn't refused
+    assert not cloud.marker().exists()
 
 
-def test_ending_idle_practice_leaves_a_round_being_played_and_a_stretch_that_just_got_a_shot(tmp_path, api):
-    from commentator.round_record import PRACTICE_IDLE_SECONDS
-
+def test_a_round_taken_up_again_while_others_were_being_sent_isnt_sent_in_progress(tmp_path, api):
     cfg, s, cl = _booth(tmp_path, api)
-    t0 = time.time()
-    _hit(s, "Ann", t0)
-    _said(s)                                # (said just now: time.time(), its last row)
-    s.db.commit()
-    db = cloud_rounds.connect(cfg.db_path)
-    try:
-        assert cloud_rounds.settle_idle(db, time.time() + PRACTICE_IDLE_SECONDS - 5) == 0
-        u = s.begin_round("r1", course="Pebble", players={"Ann": None})   # (ends the stretch itself)
-        _hit(s, "Ann", t0 + 10)
-        s.db.commit()
-        assert cloud_rounds.settle_idle(db, t0 + 10 * PRACTICE_IDLE_SECONDS) == 0
-        assert s.db.execute("SELECT state FROM round_records WHERE uuid = ?", (u,)).fetchone()[0] == "in_progress"
-    finally:
-        db.close()
+    first, second = _round(s, 1), _round(s, 100)
+    real = cl.request
+
+    def request(method, path, *a, **kw):    # (as the first goes up, the booth takes the second up again)
+        if first in path:
+            s.db.execute("UPDATE round_records SET state = 'in_progress', ended_at = NULL WHERE uuid = ?", (second,))
+            s.db.commit()
+        return real(method, path, *a, **kw)
+    cl.request = request
+    out = _drain(cl, cfg)
+    assert out.sent == [first] and [rid for rid, _, _ in api.puts] == [first]
+    assert _counts(cfg) == {"sent": 1, "in_progress": 1}
+    s.end_round(second, complete=True)
+    assert _drain(cl, cfg).sent == [second] and api.puts[-1][2]["round"]["state"] == "finished"
 
 
 # ---- review round 6 ---------------------------------------------------------------------------
