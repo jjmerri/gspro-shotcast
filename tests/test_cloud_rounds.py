@@ -588,15 +588,16 @@ def test_a_round_that_has_waited_for_weeks_still_gets_its_next_try(tmp_path, api
     assert 0 < _upload(cfg, u)["next_try"] - (time.time() + LATER) <= cloud_rounds.RETRY_MAX_S
 
 
-@pytest.mark.parametrize("code", ["claimed_slot_removed", "claimed_round_changed"])
-def test_a_change_to_who_played_a_claimed_round_is_kept_here_as_refused(tmp_path, api, capsys, monkeypatch, code):
-    """Once a player has claimed their part on the cloud, the cloud decides who played what: this
-    PC's later correction isn't taken. The round stays on this PC, listed as refused, and the rest go."""
+def test_a_receipt_saying_the_cloud_kept_its_own_assignment_is_a_round_sent(tmp_path, api):
+    """The cloud owns who is who in a round from its first revision: a later one adds and refreshes,
+    and where it says otherwise the cloud keeps its own and says so. That's a revision sent, not one
+    to send again or to hold."""
     cfg, s, cl = _booth(tmp_path, api)
-    a, b = _round(s, 1), _round(s, 100)
-    api.answers = [httpx.Response(422, json={"error": code, "action": "fix", "message": "the round stays as it was"})]
+    u = _round(s, 1)
+    assert _drain(cl, cfg).sent == [u]
+    _change(s, u)
+    api.answers = [httpx.Response(201, json={"status": "stored", "revision": 2, "current_revision": 2,
+                                             "kept": ["slots", "shots"]})]
     out = _drain(cl, cfg)
-    assert out.parked == [a] and out.sent == [b]
-    up = _upload(cfg, a)
-    assert up["status"] == "parked" and "stays as it was" in up["error"]
-    assert _counts(cfg)["parked"] == 1
+    assert out.sent == [u] and out.parked == [] and out.conflicts == []
+    assert _upload(cfg, u)["revision"] == 2 and _counts(cfg) == {"sent": 1}
