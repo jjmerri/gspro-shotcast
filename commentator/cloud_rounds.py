@@ -647,9 +647,11 @@ def _drain(cl: Any, db: sqlite3.Connection, pace: Pace, settle: float) -> Draine
     # ending than the one its bytes were built at, however long ago): those bytes aren't what it is
     # any more, so they're dropped, and it's built again once it's over and quiet. (If the cloud
     # did take those bytes and its answer was lost, the new ones get `round_final`: done either way.)
+    # (Whatever the row's status: a refused round keeps no bytes, and a queue from an earlier build can
+    # have kept some under a status this build doesn't write.)
     db.execute("""UPDATE cloud_uploads SET frozen_revision = NULL, frozen_body = NULL, frozen_gen = NULL,
                          frozen_content = NULL, frozen_ended = NULL
-                  WHERE revision = 0 AND status = 'queued' AND frozen_body IS NOT NULL
+                  WHERE revision = 0 AND frozen_body IS NOT NULL
                     AND uuid IN (SELECT r.uuid FROM round_records r WHERE r.state = 'in_progress'
                                  OR r.ended_at IS NOT cloud_uploads.frozen_ended)""")
     rows = db.execute(_OVER).fetchall()

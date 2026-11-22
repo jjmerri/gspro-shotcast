@@ -10,7 +10,9 @@ screen reads and GSPro aren't involved (tools/simulate.py drives those).
     python tools/fake_round.py --db logs/season.db --teams "Ann=Hammers,Bo=Hammers"   their league teams
     python tools/fake_round.py --db logs/season.db --not-league      a practice round
 
-Prints the round's UUID. Each run is a new round; --seed makes its scores repeatable.
+Prints the round's UUID. Each run is a new round; --seed makes its scores repeatable. (As in the booth:
+a round left --in-progress is continued by the next run with the same course and players, and
+abandoned by a run with others.)
 """
 
 from __future__ import annotations
