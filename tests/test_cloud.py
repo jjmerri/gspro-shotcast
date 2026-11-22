@@ -1168,7 +1168,7 @@ def test_pairing_waits_through_both_of_the_apis_windows_for_a_lost_first_pass(ap
 
 def test_pairing_again_says_that_an_earlier_pairings_unsent_rounds_stay_on_this_pc(api, monkeypatch, capsys):
     prof = _pair_cli(api, monkeypatch)
-    assert "never reached" not in capsys.readouterr().out   # (nothing left behind the first time)
+    assert "earlier pairing" not in capsys.readouterr().out   # (nothing left behind the first time)
     _unsent_round(prof)
     cloud.main(["unpair", "--force"])
     capsys.readouterr()
@@ -1177,8 +1177,8 @@ def test_pairing_again_says_that_an_earlier_pairings_unsent_rounds_stay_on_this_
     again = cloud.locate()
     out = capsys.readouterr().out
     assert again.home != prof.home
-    assert "1 round(s) from an earlier pairing of this PC never reached Shotcast Cloud" in out
-    assert "stay on this PC only" in out
+    assert "1 round(s) from an earlier pairing of this PC weren't confirmed as on Shotcast Cloud" in out
+    assert "stays on this PC only" in out
 
 
 def test_the_upload_command_waits_for_a_round_to_settle_then_sends_it(api, monkeypatch, capsys):
@@ -1195,7 +1195,7 @@ def test_the_upload_command_waits_for_a_round_to_settle_then_sends_it(api, monke
     def nap(s):
         naps.append(s)
         clock[0] += s
-    monkeypatch.setattr(cloud, "time", types.SimpleNamespace(sleep=nap, time=time.time))
+    monkeypatch.setattr(cloud, "time", types.SimpleNamespace(sleep=nap, time=time.time, monotonic=time.monotonic))
     capsys.readouterr()
     cloud.main(["upload"])
     out = capsys.readouterr().out

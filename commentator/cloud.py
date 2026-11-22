@@ -942,6 +942,9 @@ class Cloud:
     def __init__(self, store: TokenStore, http: Any = None, clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep, expect: tuple | None = None) -> None:
         self.store, self.clock, self.sleep = store, clock, sleep
+        # (how long a wait has lasted is counted in elapsed seconds, not by the time of day; a test's
+        # own clock serves for both)
+        self.elapsed = time.monotonic if clock is time.time else clock
         rec = store.read()
         if rec is None:
             raise NotPaired("this PC isn't paired with Shotcast Cloud")
@@ -1022,13 +1025,13 @@ class Cloud:
     def _refresh(self, refresh_token: str) -> dict:
         # A lost response is safe to retry at any time (the API hands back the same new token till it
         # has been used); the window only bounds how long one call keeps its caller waiting.
-        deadline = self.clock() + REFRESH_WINDOW_S
+        deadline = self.elapsed() + REFRESH_WINDOW_S
         attempt = 0
         while True:
             try:
                 r = self._send("POST", "/api/devices/refresh",
                                {"refresh_token": refresh_token},
-                          timeout=min(REFRESH_TIMEOUT_S, max(deadline - self.clock(), 1.0)))
+                          timeout=min(REFRESH_TIMEOUT_S, max(deadline - self.elapsed(), 1.0)))
             except Unreachable as e:
                 problem = str(e)
             else:
@@ -1038,7 +1041,7 @@ class Cloud:
                 problem = f"Shotcast Cloud couldn't refresh this PC's pass: {_message(r)}"
             attempt += 1
             wait = 2.0 * attempt
-            if self.clock() + wait + 1.0 >= deadline:
+            if self.elapsed() + wait + 1.0 >= deadline:
                 raise Unreachable(problem)
             self.sleep(wait)
         _too_old(r)
@@ -1302,7 +1305,6 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("upload", help="Send this PC's finished rounds now")
     s.add_argument("--refused", action="store_true",
                    help="try the rounds Shotcast Cloud refused again too (once what was wrong there is put right)")
-    s.add_argument("--settle", type=float, help=argparse.SUPPRESS)   # (tests: don't wait out the closer)
     s = sub.add_parser("unpair", help="Stop using Shotcast Cloud and remove this PC from its tenant")
     s.add_argument("--force", action="store_true",
                    help="unpair even with rounds not yet on Shotcast Cloud, or if it can't be reached")
@@ -1322,8 +1324,8 @@ def main(argv: list[str] | None = None) -> None:
                   + restart)
             if n := _left_behind(home_for(folder_key(d))):
                 # (a pairing's rounds go up under that pairing only: there's no way to move them to this one)
-                print(f"Note: {n} round(s) from an earlier pairing of this PC never reached Shotcast Cloud. "
-                      "They can't be sent under this pairing: they stay on this PC only.")
+                print(f"Note: {n} round(s) from an earlier pairing of this PC weren't confirmed as on Shotcast "
+                      "Cloud. They can't be sent under this pairing: what didn't arrive stays on this PC only.")
             return
         prof = inspect()   # (damaged, it can still be looked at and unpaired)
         if prof is None:
@@ -1345,8 +1347,7 @@ def main(argv: list[str] | None = None) -> None:
             pace, sent, parked, told = cloud_rounds.Pace(), 0, 0, False
             try:
                 while True:
-                    out = cloud_rounds.drain(cl, str(prof.db), pace,
-                                             **({} if a.settle is None else {"settle": a.settle}))
+                    out = cloud_rounds.drain(cl, str(prof.db), pace, cloud_rounds.CEILING_S)
                     sent, parked = sent + len(out.sent), parked + len(out.parked)
                     if not out.settling or out.waiting:
                         break

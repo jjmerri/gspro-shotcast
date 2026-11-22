@@ -328,15 +328,16 @@ def test_a_refused_round_goes_again_once_it_changes_or_when_asked(tmp_path, api,
 def test_the_command_line_can_send_refused_rounds_again(tmp_path, api, monkeypatch, capsys):
     cfg, s, cl = _booth(tmp_path, api)
     u = _round(s, 1)
+    monkeypatch.setattr(cloud_rounds, "CEILING_S", 0.0)   # (no waiting out the quiet here)
     s.db.close()
     api.answers = [httpx.Response(422, json={"error": "invalid_body", "message": "not a round"})]
     with pytest.raises(SystemExit, match="1 round.*still aren't on Shotcast Cloud") as e:
-        cloud.main(["upload", "--settle", "-100000"])
+        cloud.main(["upload"])
     assert "1 refused" in capsys.readouterr().out and u in str(e.value) and "refused" in str(e.value)
     with pytest.raises(SystemExit, match="still aren't on Shotcast Cloud"):   # (nothing tried this time: it still fails)
-        cloud.main(["upload", "--settle", "-100000"])
+        cloud.main(["upload"])
     assert "Sent 0" in capsys.readouterr().out
-    cloud.main(["upload", "--settle", "-100000", "--refused"])
+    cloud.main(["upload", "--refused"])
     out = capsys.readouterr().out
     assert "Trying 1 refused" in out and "Sent 1" in out and u in api.rounds
 
@@ -618,3 +619,85 @@ def test_only_the_apis_whole_word_that_a_round_is_final_ends_it(tmp_path, api, a
     out = _drain(cl, cfg)
     assert out.sent == [] and out.waiting == 1 and _upload(cfg, u)["frozen_body"] is not None
     assert _drain(cl, cfg).sent == [u] and u in api.rounds
+
+
+# ---- review round 11 (three reviewers) -----------------------------------------------------------
+
+def test_a_round_taken_up_again_before_the_cloud_had_it_is_built_again_when_its_over_again(tmp_path, api):
+    """Bytes built at a round's earlier ending, and never acknowledged, aren't sent once it has
+    been played on: the cloud's one copy is the round as it finally ended."""
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    api.answers = [httpx.Response(502)]
+    assert _drain(cl, cfg).waiting == 1 and _upload(cfg, u)["frozen_body"] is not None
+    s.db.execute("UPDATE round_records SET state = 'in_progress', ended_at = NULL WHERE uuid = ?", (u,))
+    s.db.commit()
+    assert _drain(cl, cfg).sent == [] and _upload(cfg, u)["frozen_body"] is None and len(api.puts) == 1
+    s.db.execute("UPDATE shots SET total_yards = 300.0 WHERE record_uuid = ?", (u,))   # (played on)
+    s.end_round(u, complete=True)
+    assert _drain(cl, cfg).sent == [u] and api.puts[-1][2]["shots"][0]["total_yards"] == 300.0
+
+
+def test_a_round_finished_again_unseen_in_between_waits_out_its_quiet_and_ceiling_anew(tmp_path, api, monkeypatch):
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    pace, clock = _run(monkeypatch)
+    assert cloud_rounds.drain(cl, cfg.db_path, pace).settling == 1
+    clock[0] += cloud_rounds.CEILING_S + 1                  # (the uploader didn't look all this while)
+    s.db.execute("UPDATE round_records SET ended_at = ended_at + 500 WHERE uuid = ?", (u,))   # played on, over again
+    s.db.execute("UPDATE shots SET total_yards = 123.0 WHERE record_uuid = ?", (u,))
+    s.db.commit()
+    assert cloud_rounds.drain(cl, cfg.db_path, pace).settling == 1   # not let go at the old ending's ceiling
+    clock[0] += cloud_rounds.QUIET_S
+    assert cloud_rounds.drain(cl, cfg.db_path, pace).sent == [u]
+
+
+def test_one_round_that_cant_be_read_doesnt_hold_up_the_others(tmp_path, api, monkeypatch):
+    cfg, s, cl = _booth(tmp_path, api)
+    bad, good = _round(s, 1), _round(s, 100)
+    real = cloud_rounds.body
+
+    def body(db, uuid):
+        if uuid == bad:
+            raise ValueError("a row that can't be read")
+        return real(db, uuid)
+    monkeypatch.setattr(cloud_rounds, "body", body)
+    assert _drain(cl, cfg).sent == [good] and cloud_rounds.behind(cfg.db_path) == 1
+    assert cloud_rounds._holes('{"\u00b2": 4, "7": 3, "07": 5}') == {"7": 3}   # (a digit that isn't a number: dropped)
+
+
+def test_a_line_longer_than_the_cloud_takes_is_cut_so_the_round_still_goes(tmp_path, api):
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    s.db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text, record_uuid) VALUES (?, 5, 'segment', 'A', ?, ?)",
+                 (s.session_id, "x" * (cloud_rounds.MAX_TEXT + 500), u))
+    s.db.commit()
+    assert _drain(cl, cfg).sent == [u]
+    assert len(api.puts[0][2]["lines"][-1]["text"]) == cloud_rounds.MAX_TEXT
+
+
+def test_a_refused_round_whose_record_is_gone_isnt_reported(tmp_path, api):
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    api.answers = [httpx.Response(422, json={"error": "invalid_body", "message": "not a round"})]
+    assert _drain(cl, cfg).parked == [u] and len(cloud_rounds.health(cfg.db_path)) == 1
+    s.db.execute("DELETE FROM round_records WHERE uuid = ?", (u,))
+    s.db.commit()
+    assert cloud_rounds.health(cfg.db_path) == []
+
+
+def test_the_upload_command_keeps_waiting_for_a_round_that_changed_as_it_was_built(tmp_path, api, monkeypatch):
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    pace, clock = _run(monkeypatch)
+    assert cloud_rounds.drain(cl, cfg.db_path, pace).settling == 1
+    clock[0] += cloud_rounds.QUIET_S
+    real = cloud_rounds._watch
+
+    def watch(db, pace, rows):   # (the round changes between the look and its bytes being built)
+        real(db, pace, rows)
+        s.db.execute("UPDATE shots SET total_yards = 77.0 WHERE record_uuid = ?", (u,))
+        s.db.commit()
+    monkeypatch.setattr(cloud_rounds, "_watch", watch)
+    out = cloud_rounds.drain(cl, cfg.db_path, pace)
+    assert out.sent == [] and out.settling == 1 and out.unchanged == 0

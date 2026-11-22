@@ -118,6 +118,7 @@ class Pace:
 
     def __init__(self) -> None:
         self.seen: dict[str, float] = {}               # round -> when this run first saw it over
+        self.ended: dict[str, Any] = {}                # round -> the ending that was (its ended_at, as a mark only)
         self.stood: dict[str, tuple[str, float]] = {}  # round -> (what it would send: _signature; since when)
         self.retry: dict[str, float] = {}              # round -> not tried again before
         self.hold: float | None = None                 # nothing at all is sent before (the API's 429)
@@ -125,10 +126,16 @@ class Pace:
     def clock(self) -> float:
         return _monotonic()
 
-    def note(self, uuid: str, sig: str) -> None:
+    def note(self, uuid: str, sig: str, ended: Any = None) -> None:
         """A look at a finished round: one first seen, or that would now send something else,
-        stands from now."""
+        stands from now. `ended`: which ending of the round this is (its ended_at, compared only
+        with itself): a round taken up again and finished again, even unseen in between, is seen
+        anew, ceiling and all."""
         now = self.clock()
+        if uuid in self.seen and self.ended.get(uuid) != ended:
+            del self.seen[uuid]
+            self.stood.pop(uuid, None)
+        self.ended[uuid] = ended
         self.seen.setdefault(uuid, now)
         if uuid not in self.stood or self.stood[uuid][0] != sig:
             self.stood[uuid] = (sig, now)
@@ -151,7 +158,7 @@ class Pace:
     def only(self, uuids: set[str]) -> None:
         """Forget every round but these (the ones over and not sent): one sent, gone, or taken up
         again is seen anew if it comes back."""
-        for kept in (self.seen, self.stood, self.retry):
+        for kept in (self.seen, self.ended, self.stood, self.retry):
             for uuid in set(kept) - uuids:
                 del kept[uuid]
 
@@ -232,6 +239,7 @@ def _without(row: dict[str, Any], *keys: str) -> dict[str, Any]:
 # sent; a round over either size goes without its heaviest optional parts (encode).
 MAX_POINTS = 5_000
 MAX_TAGS = 50
+MAX_TEXT = 4_000                   # a line's text (longer is cut: the scores must still go)
 MAX_BODY = 4 * 1024 * 1024         # compressed
 MAX_INFLATED = 32 * 1024 * 1024    # as JSON
 _SHOT_FLAGS = ("is_putt", "attributed", "is_league", "is_tournament", "mulligan", "shared_ball", "picked")
@@ -271,7 +279,8 @@ def _holes(text: Any) -> dict[str, int] | None:
         return None
     # (a hole's number as it's written, "7": not "07" as well, which would be the same hole twice)
     return {k: v for k, v in data.items()
-            if isinstance(k, str) and k.isdigit() and k == str(int(k)) and isinstance(v, int) and not isinstance(v, bool)}
+            if isinstance(k, str) and k.isascii() and k.isdigit() and k == str(int(k))
+            and isinstance(v, int) and not isinstance(v, bool)}
 
 
 def _list(text: Any, most: int = MAX_POINTS) -> list | None:
@@ -344,7 +353,8 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
         "shot_tracks": [_wire(t, "shot_id", "was", lists=("flight", "roll")) | {"shot_uid": uid_of[t["shot_id"]]}
                         for t in tracks],
         "lines": [_without(ln, "id", "session_id", "record_uuid", "shot_id", "excluded")
-                  | {"shot_uid": uid_of.get(ln["shot_id"])} for ln in lines],
+                  | {"shot_uid": uid_of.get(ln["shot_id"])}
+                  | ({"text": ln["text"][:MAX_TEXT]} if isinstance(ln["text"], str) else {}) for ln in lines],
         "scorecards": [_wire(c, "id", "session_id", "round_uuid", "players", "excluded", flags=_CARD_FLAGS,
                              holes=("scores", "hole_pars"), dates=("date",)) | {"side_id": side_of[c["side"]]}
                        for c in cards if c["side"] in side_of],
@@ -413,8 +423,15 @@ def _watch(db: sqlite3.Connection, pace: Pace, rows: list[sqlite3.Row]) -> None:
     has changed since it was last looked at: what its quiet is measured from (Pace.ready)."""
     pace.only({r["uuid"] for r in rows})
     for r in rows:
-        if not r["frozen"] and (got := body(db, r["uuid"])) is not None:
-            pace.note(r["uuid"], _signature(got[0]))
+        if r["frozen"]:
+            continue
+        try:
+            got = body(db, r["uuid"])
+        except Exception:   # noqa: BLE001 - one round that can't be read mustn't hold up the others
+            log.warning("Shotcast Cloud: round %s can't be read to send", r["uuid"], exc_info=True)
+            continue        # (never noted, so never ready: it shows as behind)
+        if got is not None:
+            pace.note(r["uuid"], _signature(got[0]), got[0]["round"].get("ended_at"))
 
 
 def _freeze(db: sqlite3.Connection, uuid: str, pace: Pace, settle: float) -> bool:
@@ -429,7 +446,7 @@ def _freeze(db: sqlite3.Connection, uuid: str, pace: Pace, settle: float) -> boo
         return False
     b, gen = got
     sig = _signature(b)
-    pace.note(uuid, sig)
+    pace.note(uuid, sig, b["round"].get("ended_at"))
     if b["round"]["kind"] != "round" or b["round"]["state"] == "in_progress" or not pace.ready(uuid, settle):
         return False
     db.execute("INSERT OR IGNORE INTO cloud_uploads (uuid) VALUES (?)", (uuid,))
@@ -539,7 +556,8 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, pace: Pace, out: Drained) 
     error = (answer or {}).get("error")
     final = answer or {}
     if r.status_code == 409 and error == "round_final" and final.get("action") == "fix" \
-            and isinstance(final.get("sha256"), str) and len(final["sha256"]) == 64:
+            and isinstance(final.get("sha256"), str) and len(final["sha256"]) == 64 \
+            and not set(final["sha256"]) - set("0123456789abcdef"):
         # (the API's whole word for it: its code, that it's for good, and the checksum of what it has)
         # The cloud has this round already, as it was first sent, and a round is sent once: there's
         # nothing more to send for it. (What's here differs from what went: the round was changed on
@@ -617,6 +635,13 @@ def drain(cl: Any, db_path: str, pace: Pace | None = None, settle: float = CEILI
 
 def _drain(cl: Any, db: sqlite3.Connection, pace: Pace, settle: float) -> Drained:
     out = Drained()
+    # A round taken up again before the cloud had it: bytes built at its earlier ending aren't what
+    # it is any more, so they're dropped, and it's built again once it's over again. (If the cloud
+    # did take those bytes and its answer was lost, the new ones get `round_final`: done either way.)
+    db.execute("""UPDATE cloud_uploads SET frozen_revision = NULL, frozen_body = NULL, frozen_gen = NULL,
+                         frozen_content = NULL
+                  WHERE revision = 0 AND status = 'queued' AND frozen_body IS NOT NULL
+                    AND uuid IN (SELECT uuid FROM round_records WHERE state = 'in_progress')""")
     rows = db.execute(_OVER).fetchall()
     _watch(db, pace, rows)
     held = pace.held() > 0   # (the API said to wait: the whole queue does, every round's bytes kept)
@@ -639,6 +664,14 @@ def _drain(cl: Any, db: sqlite3.Connection, pace: Pace, settle: float) -> Draine
             out.unchanged += 1
             continue
         if not row["frozen"] and not _freeze(db, uuid, pace, settle):
+            if uuid in pace.seen and not pace.ready(uuid, settle):
+                out.settling += 1   # (it changed as it was built: its quiet starts again)
+            else:
+                out.unchanged += 1
+            continue
+        over = db.execute("SELECT 1 FROM round_records WHERE uuid = ? AND kind = 'round' AND state != 'in_progress'",
+                          (uuid,)).fetchone()
+        if over is None:   # (taken up again, or gone, while others were being sent: not sent as it was)
             out.unchanged += 1
             continue
         if not _send(cl, db, uuid, pace, out):
@@ -708,7 +741,9 @@ def health(db_path: str) -> list[tuple[str, str]]:
     simply aren't going up are `behind`'s."""
     db = connect(db_path)
     try:
-        got = dict(db.execute("SELECT status, COUNT(*) FROM cloud_uploads GROUP BY status").fetchall())
+        # (of the rounds there are: a refused one whose record is gone is nobody's to see to)
+        got = dict(db.execute("SELECT u.status, COUNT(*) FROM cloud_uploads u JOIN round_records r ON r.uuid = u.uuid "
+                              "WHERE r.kind = 'round' GROUP BY u.status").fetchall())
     finally:
         db.close()
     out = []
