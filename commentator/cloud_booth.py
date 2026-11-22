@@ -5,9 +5,10 @@ next start; meanwhile the loop stops for good once the stored pairing isn't the 
 with, and nothing else about the booth changes.
 
 How uploads stand goes to logs/cloud-health.json (`HEALTH`) for the tray: a pairing the API no longer
-accepts, uploads stopped, the API needing a newer Shotcast (426), and what the season file keeps
-(cloud_rounds.health): rounds held as conflicts or refused, and rounds waiting to be tried again after
-failing again and again; each of those turns the tray red. It's rewritten after every try, so it clears once that's resolved.
+accepts, uploads stopped, the API needing a newer Shotcast (426), rounds held as conflicts or refused
+(cloud_rounds.health), and, the one rule for everything else, settled rounds that haven't all been
+on Shotcast Cloud for BEHIND_S (`Uploads._behind`: by its outcome, whatever the cause). Each turns the
+tray red. It's rewritten after every try, so it clears once that's resolved.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +26,7 @@ log = logging.getLogger(__name__)
 
 DRAIN_S = 60.0         # how often the upload loop looks for settled rounds to send
 BLOCKED_S = 900.0      # how long it waits when the cloud refuses every upload from this PC
-FAILS_SHOWN = 3        # failed tries in a row (of a drain, or of one round) before the tray goes red for it
+BEHIND_S = 900.0       # settled rounds not all on Shotcast Cloud for this long: the tray goes red, whatever the cause
 HEALTH = "cloud-health.json"
 
 
@@ -62,7 +64,7 @@ class Uploads:
     def __init__(self, cfg: Any, prof: cloud.Profile) -> None:
         self.cfg, self.bound, self.identity = cfg, prof.bound, cloud.identity(prof.rec)
         self.stopped = False   # the stored pairing isn't the booth's any more: nothing more goes out
-        self.fails = 0
+        self.clear_at = time.time()   # when every settled round was last on Shotcast Cloud (or the booth started)
 
     def _cloud(self) -> cloud.Cloud:
         """This PC's pairing, if it's still the one the booth started with (else PairingChanged)."""
@@ -71,16 +73,38 @@ class Uploads:
             raise cloud.PairingChanged("this PC's Shotcast Cloud pairing changed; restart Shotcast to use it")
         return cl
 
+    def _behind(self) -> list[tuple[str, str]]:
+        """The one rule of upload health, by its outcome and whatever the cause (the network, a busy
+        or failing lock or season file, an answer this PC doesn't understand, a round held or
+        refused): a failure once settled rounds have gone BEHIND_S without all being on Shotcast
+        Cloud. A season file that can't even be read counts as behind."""
+        from . import cloud_rounds
+
+        now = time.time()
+        try:
+            n: int | None = cloud_rounds.behind(self.cfg.db_path)
+        except Exception:   # noqa: BLE001 - not known to be clear
+            log.debug("Couldn't read how uploads stand from %s", self.cfg.db_path, exc_info=True)
+            n = None
+        if n == 0:
+            self.clear_at = now
+            return []
+        if now - self.clear_at <= BEHIND_S:
+            return []
+        return [("fail", f"Shotcast Cloud: {n if n else 'some'} round(s) haven't gone up for "
+                         f"{int((now - self.clear_at) // 60)} minutes (see cloud status)")]
+
     def _health(self, *issues: tuple[str, str]) -> None:
-        """The tray's view: `issues` from this try, then what the season file keeps."""
+        """The tray's view, rewritten after every try: `issues` from this try, what the season file
+        keeps for someone to see to (held, refused), and whether uploads are behind."""
         from . import cloud_rounds
 
         kept: list[tuple[str, str]] = []
         try:
-            kept = cloud_rounds.health(self.cfg.db_path, retries=FAILS_SHOWN)
-        except Exception:   # noqa: BLE001 - a busy file: this try's view only
+            kept = cloud_rounds.health(self.cfg.db_path)
+        except Exception:   # noqa: BLE001 - a busy file: `_behind` shows it if it lasts
             log.debug("Couldn't read upload health from %s", self.cfg.db_path, exc_info=True)
-        set_health(self.cfg.log_dir, list(issues) + kept)
+        set_health(self.cfg.log_dir, list(issues) + kept + self._behind())
 
     async def run(self) -> None:
         from . import cloud_rounds
@@ -94,7 +118,6 @@ class Uploads:
                     log.info("Shotcast Cloud: %s round(s) sent%s%s", len(out.sent),
                              f", {len(out.conflicts)} held as conflicts" if out.conflicts else "",
                              f", {len(out.parked)} refused" if out.parked else "")
-                self.fails = 0
                 self._health()
             except (cloud.NotPaired, cloud.PairingChanged, cloud_rounds.NotThisPairing) as e:
                 # Not paired, paired elsewhere, a pairing file that can't be trusted, a season file
@@ -112,14 +135,10 @@ class Uploads:
                 self._health(("fail", f"Shotcast Cloud: {e}"))
                 wait = BLOCKED_S
             except TimeoutError:
-                pass   # (the command line is uploading)
+                self._health()   # (the command line is uploading; if it lasts, `_behind` shows it)
             except asyncio.CancelledError:
                 raise
             except Exception as e:   # noqa: BLE001 - the network, a refresh refused, a busy file: tried again
                 log.warning("Shotcast Cloud: rounds not sent: %s", e)
-                self._failed(f"rounds aren't going up: {e}")
+                self._health()
             await asyncio.sleep(wait)
-
-    def _failed(self, what: str) -> None:
-        self.fails += 1
-        self._health(*[("fail", f"Shotcast Cloud: {what}")] * (self.fails >= FAILS_SHOWN))

@@ -1209,6 +1209,13 @@ def main(argv: list[str] | None = None) -> None:
                 sys.exit(str(e))
             print(f"Sent {len(out.sent)} round(s); {out.unchanged} unchanged, {out.waiting} to retry, "
                   f"{len(out.conflicts)} held as conflicts, {len(out.parked)} refused")
+            # How the queue stands now, not only what this run did: anything settled that still isn't
+            # on Shotcast Cloud (held or refused before, too) fails the command.
+            left = [(u, what) for u, what in cloud_rounds.outstanding(
+                str(prof.db), **({} if a.settle is None else {"settle": a.settle}))
+                if what not in ("in progress", "settling (just ended)")]
+            if left:
+                sys.exit(f"{len(left)} round(s) still aren't on Shotcast Cloud:\n{_describe(left)}")
         elif a.cmd == "unpair":
             _unpair(prof, st, a.force)
             print("Unpaired: this PC is a self-hosted booth again, with its own data"

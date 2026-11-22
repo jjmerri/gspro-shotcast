@@ -153,32 +153,75 @@ def _clock(monkeypatch):
     """The upload queue's clock (cloud_rounds' time.time), moved by hand."""
     now = [time.time()]
     monkeypatch.setattr(cloud_rounds, "time", types.SimpleNamespace(time=lambda: now[0]))
+    monkeypatch.setattr(cloud_booth, "time", types.SimpleNamespace(time=lambda: now[0]))
     return now
 
 
-def test_uploads_failing_again_and_again_turn_the_tray_red_while_they_wait_and_clear_once_they_go(tmp_path, api,
-                                                                                                 monkeypatch):
+def test_rounds_that_arent_going_up_turn_the_tray_red_whatever_the_cause_and_clear_once_they_go(tmp_path, api,
+                                                                                               monkeypatch):
     import httpx
 
     monkeypatch.setattr(cloud_rounds, "CLOSER_SECONDS", 0.0)
     cfg = paired_cfg(tmp_path, api)
-    u = _round(Store(cfg.db_path), 1)
     now = _clock(monkeypatch)
-    now[0] += 1   # (the round is over)
-    api.answers = [httpx.Response(502)] * cloud_booth.FAILS_SHOWN
     up = cloud_booth.Uploads(cfg, cloud.locate())
-    for _ in range(cloud_booth.FAILS_SHOWN - 1):
-        _loop(cfg, 1, up)
-        now[0] += cloud_rounds.RETRY_MAX_S + 1   # (its retry's time comes)
-    assert _health(cfg) == []   # (a failure or two isn't shown)
+    u = _round(Store(cfg.db_path), 1)
+    now[0] += 1   # (the round is over)
+    api.answers = [httpx.Response(502), httpx.Response(404, json={"detail": "Not Found"})]
     _loop(cfg, 1, up)
+    assert _health(cfg) == []   # (behind, but not for long yet)
+    now[0] += cloud_booth.BEHIND_S - 5
+    _loop(cfg, 1, up)
+    assert _health(cfg) == [] and len(api.puts) == 2
+    now[0] += 10
+    _loop(cfg, 1, up)   # (waiting for its retry: nothing tried, and now it shows)
     [(level, msg)] = _health(cfg)
-    assert level == "fail" and "retrying" in msg
-    _loop(cfg, 1, up)   # (waiting for its retry: nothing tried, and still shown)
-    assert _health(cfg) == [(level, msg)] and len(api.puts) == cloud_booth.FAILS_SHOWN
+    assert level == "fail" and "haven't gone up for 15 minutes" in msg and len(api.puts) == 2
     now[0] += cloud_rounds.RETRY_MAX_S + 1
     _loop(cfg, 1, up)
     assert _health(cfg) == [] and u in api.rounds
+    now[0] += cloud_booth.BEHIND_S + 1   # (all on Shotcast Cloud since: a new round starts the clock again)
+    _loop(cfg, 1, up)
+    assert _health(cfg) == []
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("another upload holds the lock"), OSError("the season file is busy"),
+                                     cloud.CloudError("Shotcast Cloud refused to refresh this PC's pass")])
+def test_drains_that_cant_even_run_turn_the_tray_red_once_rounds_wait_too_long(tmp_path, api, monkeypatch, failure):
+    monkeypatch.setattr(cloud_rounds, "CLOSER_SECONDS", 0.0)
+    cfg = paired_cfg(tmp_path, api)
+    now = _clock(monkeypatch)
+    up = cloud_booth.Uploads(cfg, cloud.locate())
+    _round(Store(cfg.db_path), 1)
+    now[0] += 1
+    real = cloud_rounds.drain
+
+    def broken(*a, **kw):
+        raise failure
+    monkeypatch.setattr(cloud_rounds, "drain", broken)
+    _loop(cfg, 2, up)
+    assert _health(cfg) == []
+    now[0] += cloud_booth.BEHIND_S + 1
+    _loop(cfg, 1, up)
+    [(level, msg)] = _health(cfg)
+    assert level == "fail" and "haven't gone up" in msg
+    monkeypatch.setattr(cloud_rounds, "drain", real)
+    _loop(cfg, 1, up)
+    assert _health(cfg) == []
+
+
+def test_a_season_file_that_cant_be_read_counts_as_behind(tmp_path, api, monkeypatch):
+    cfg = paired_cfg(tmp_path, api)
+    now = _clock(monkeypatch)
+    up = cloud_booth.Uploads(cfg, cloud.locate())
+
+    def broken(*a, **kw):
+        raise OSError("disk")
+    monkeypatch.setattr(cloud_rounds, "behind", broken)
+    assert up._behind() == []
+    now[0] += cloud_booth.BEHIND_S + 1
+    [(level, msg)] = up._behind()
+    assert level == "fail" and "some round(s)" in msg
 
 
 @pytest.mark.parametrize("answer, shown", [
@@ -585,20 +628,6 @@ def test_paired_the_release_self_test_runs_only_against_a_folder_it_is_given(tmp
 
 
 # ---- review round 5 ----------------------------------------------------------------------------
-
-def test_drains_that_keep_failing_outright_turn_the_tray_red(tmp_path, api, monkeypatch):
-    cfg = paired_cfg(tmp_path, api)
-
-    def broken(*a, **kw):
-        raise OSError("the season file is busy")
-    monkeypatch.setattr(cloud_rounds, "drain", broken)
-    up = cloud_booth.Uploads(cfg, cloud.locate())
-    _loop(cfg, cloud_booth.FAILS_SHOWN - 1, up)
-    assert _health(cfg) == []
-    _loop(cfg, 1, up)
-    [(level, msg)] = _health(cfg)
-    assert level == "fail" and "aren't going up" in msg
-
 
 @pytest.mark.parametrize("argv", [["run"], ["tray"]])
 def test_an_unpair_that_finishes_as_shotcast_starts_starts_nothing(tmp_path, api, monkeypatch, argv):

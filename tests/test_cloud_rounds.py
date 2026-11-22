@@ -271,13 +271,12 @@ def test_no_answer_from_the_network_keeps_the_round_queued_to_retry(tmp_path, ap
     _drain(cloud.Cloud(cloud.store(), clock=lambda: api.now, sleep=lambda s: None), cfg)
     row = _upload(cfg, u)
     assert row["status"] == "queued" and row["tries"] == 1 and "couldn't reach" in row["error"]
-    assert cloud_rounds.health(cfg.db_path, retries=2) == []   # (one failed try isn't shown yet)
-    [(level, msg)] = cloud_rounds.health(cfg.db_path, retries=1)
-    assert level == "fail" and "retrying" in msg
+    assert cloud_rounds.behind(cfg.db_path, now=time.time() + LATER) == 1   # (what upload health goes by)
+    assert cloud_rounds.health(cfg.db_path) == []
     mock_http(monkeypatch, api)
     _retry_now(cfg)
     _drain(cl, cfg)
-    assert u in api.rounds and cloud_rounds.health(cfg.db_path) == []
+    assert u in api.rounds and cloud_rounds.behind(cfg.db_path, now=time.time() + LATER) == 0
 
 
 def test_a_practice_stretch_left_idle_is_ended_and_goes_up_without_another_shot(tmp_path, api):
@@ -362,9 +361,11 @@ def test_the_command_line_can_send_refused_rounds_again(tmp_path, api, monkeypat
     u = _round(s, 1)
     s.db.close()
     api.answers = [httpx.Response(422, json={"detail": "not a round"})]
-    cloud.main(["upload", "--settle", "-100000"])
-    assert "1 refused" in capsys.readouterr().out
-    cloud.main(["upload", "--settle", "-100000"])
+    with pytest.raises(SystemExit, match="1 round.*still aren't on Shotcast Cloud") as e:
+        cloud.main(["upload", "--settle", "-100000"])
+    assert "1 refused" in capsys.readouterr().out and u in str(e.value) and "refused" in str(e.value)
+    with pytest.raises(SystemExit, match="still aren't on Shotcast Cloud"):   # (nothing tried this time: it still fails)
+        cloud.main(["upload", "--settle", "-100000"])
     assert "Sent 0" in capsys.readouterr().out
     cloud.main(["upload", "--settle", "-100000", "--refused"])
     out = capsys.readouterr().out

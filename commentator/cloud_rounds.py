@@ -487,17 +487,27 @@ def status(db_path: str, now: float | None = None, settle: float = CLOSER_SECOND
         db.close()
 
 
-def health(db_path: str, now: float | None = None, retries: int = 1) -> list[tuple[str, str]]:
-    """How uploads stand for the tray, from what the season file keeps (so it holds till it's resolved,
-    whether or not a drain just tried): (level, message), each a failure ('fail': the tray goes red),
-    for rounds held as conflicts or refused, and for rounds that failed `retries` times or more and
-    wait to be tried again (through every wait between tries, till they're on Shotcast Cloud)."""
+BEHIND = ("never", "changed", "waiting", "conflict", "parked")   # settled, and not on Shotcast Cloud as it stands
+
+
+def behind(db_path: str, now: float | None = None, settle: float = CLOSER_SECONDS) -> int:
+    """How many settled round records aren't on Shotcast Cloud as they stand here, whatever the reason
+    (never sent, changed, waiting for an answer, held, refused). The one measure of upload health:
+    while it stays above 0 for long, the tray is red (cloud_booth) and `cloud upload` fails."""
     db = connect(db_path)
     try:
-        got = dict(db.execute(
-            """SELECT CASE WHEN status IN ('conflict', 'parked') THEN status
-                           WHEN tries >= ? THEN 'failing' END AS kind, COUNT(*)
-               FROM cloud_uploads GROUP BY kind""", (retries,)).fetchall())
+        return sum(kind in BEHIND for _, kind in _kinds(db, time.time() if now is None else now, settle))
+    finally:
+        db.close()
+
+
+def health(db_path: str) -> list[tuple[str, str]]:
+    """What needs someone, for the tray, from what the season file keeps (so it holds till it's
+    resolved): a failure ('fail') for rounds held as conflicts and for rounds refused. Rounds that
+    simply aren't going up are `behind`'s."""
+    db = connect(db_path)
+    try:
+        got = dict(db.execute("SELECT status, COUNT(*) FROM cloud_uploads GROUP BY status").fetchall())
     finally:
         db.close()
     out = []
@@ -505,9 +515,6 @@ def health(db_path: str, now: float | None = None, retries: int = 1) -> list[tup
         out.append(("fail", f"Shotcast Cloud: {n} round(s) held as conflicts, not sent (see cloud status)"))
     if n := got.get("parked"):
         out.append(("fail", f"Shotcast Cloud: {n} round(s) refused (see cloud status)"))
-    if n := got.get("failing"):
-        out.append(("fail", f"Shotcast Cloud: {n} round(s) aren't going up (the network, or Shotcast Cloud is "
-                            "busy); still retrying (see cloud status)"))
     return out
 
 
