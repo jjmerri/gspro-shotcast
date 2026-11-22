@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS cloud_uploads (
     frozen_body BLOB,                      -- the round's bytes, built once and sent as they are till acknowledged
     frozen_gen INTEGER,
     frozen_content TEXT,
+    frozen_ended REAL,                     -- the round's ended_at those bytes were built at (which ending they're of)
     status TEXT NOT NULL DEFAULT 'queued', -- queued / parked (refused: see error)
     error TEXT,
     tries INTEGER NOT NULL DEFAULT 0       -- failed tries so far (how long the next waits: Pace.retry)
@@ -176,6 +177,7 @@ class NotThisPairing(Exception):
 class Drained:
     sent: list[str] = field(default_factory=list)       # record uuids the cloud has (acknowledged now)
     settling: int = 0                                    # over, and not done yet (still changing, or just seen)
+    unreadable: int = 0                                  # can't be built from the season file (logged; left unsent)
     unchanged: int = 0                                   # nothing to send after all (not a settled round any more)
     parked: list[str] = field(default_factory=list)
     waiting: int = 0                                     # left for a later try (network, server busy, odd answer)
@@ -188,6 +190,8 @@ def connect(db_path: str) -> sqlite3.Connection:
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA synchronous = FULL")
     db.executescript(TABLES)
+    if "frozen_ended" not in {c["name"] for c in db.execute("PRAGMA table_info(cloud_uploads)")}:
+        db.execute("ALTER TABLE cloud_uploads ADD COLUMN frozen_ended REAL")   # (a queue from an earlier build)
     db.execute(PAIRING)
     return db
 
@@ -418,20 +422,24 @@ _OVER = """SELECT r.uuid, u.status, u.frozen_body IS NOT NULL AS frozen, u.froze
            ORDER BY r.started_at, r.uuid"""
 
 
-def _watch(db: sqlite3.Connection, pace: Pace, rows: list[sqlite3.Row]) -> None:
+def _watch(db: sqlite3.Connection, pace: Pace, rows: list[sqlite3.Row]) -> set[str]:
     """Look at each finished round whose bytes aren't built yet, and note whether what it would send
-    has changed since it was last looked at: what its quiet is measured from (Pace.ready)."""
+    has changed since it was last looked at: what its quiet is measured from (Pace.ready). Returns
+    the rounds that can't be built (left unsent, and shown as behind): one of those mustn't hold up
+    the others."""
     pace.only({r["uuid"] for r in rows})
+    bad = set()
     for r in rows:
         if r["frozen"]:
             continue
         try:
             got = body(db, r["uuid"])
-        except Exception:   # noqa: BLE001 - one round that can't be read mustn't hold up the others
+            if got is not None:
+                pace.note(r["uuid"], _signature(got[0]), got[0]["round"].get("ended_at"))
+        except Exception:   # noqa: BLE001 - a damaged row, a value that can't be sent
             log.warning("Shotcast Cloud: round %s can't be read to send", r["uuid"], exc_info=True)
-            continue        # (never noted, so never ready: it shows as behind)
-        if got is not None:
-            pace.note(r["uuid"], _signature(got[0]), got[0]["round"].get("ended_at"))
+            bad.add(r["uuid"])
+    return bad
 
 
 def _freeze(db: sqlite3.Connection, uuid: str, pace: Pace, settle: float) -> bool:
@@ -452,8 +460,8 @@ def _freeze(db: sqlite3.Connection, uuid: str, pace: Pace, settle: float) -> boo
     db.execute("INSERT OR IGNORE INTO cloud_uploads (uuid) VALUES (?)", (uuid,))
     if db.execute("SELECT revision FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()[0]:
         return False
-    db.execute("UPDATE cloud_uploads SET frozen_revision = 1, frozen_body = ?, frozen_gen = ?, frozen_content = ? "
-               "WHERE uuid = ?", (encode(b), gen, sig, uuid))
+    db.execute("UPDATE cloud_uploads SET frozen_revision = 1, frozen_body = ?, frozen_gen = ?, frozen_content = ?, "
+               "frozen_ended = ? WHERE uuid = ?", (encode(b), gen, sig, b["round"].get("ended_at"), uuid))
     return True
 
 
@@ -524,7 +532,7 @@ def _sent(db: sqlite3.Connection, uuid: str, out: Drained) -> None:
     """The cloud has the round: it's never sent again."""
     db.execute("UPDATE cloud_uploads SET revision = 1, acked_gen = frozen_gen, acked_content = frozen_content,"
                " frozen_revision = NULL, frozen_body = NULL, frozen_gen = NULL, frozen_content = NULL,"
-               " status = 'queued', tries = 0, error = NULL WHERE uuid = ?", (uuid,))
+               " frozen_ended = NULL, status = 'queued', tries = 0, error = NULL WHERE uuid = ?", (uuid,))
     out.sent.append(uuid)
 
 
@@ -635,18 +643,23 @@ def drain(cl: Any, db_path: str, pace: Pace | None = None, settle: float = CEILI
 
 def _drain(cl: Any, db: sqlite3.Connection, pace: Pace, settle: float) -> Drained:
     out = Drained()
-    # A round taken up again before the cloud had it: bytes built at its earlier ending aren't what
-    # it is any more, so they're dropped, and it's built again once it's over again. (If the cloud
+    # A round taken up again before the cloud had it (in progress now, or over again with another
+    # ending than the one its bytes were built at, however long ago): those bytes aren't what it is
+    # any more, so they're dropped, and it's built again once it's over and quiet. (If the cloud
     # did take those bytes and its answer was lost, the new ones get `round_final`: done either way.)
     db.execute("""UPDATE cloud_uploads SET frozen_revision = NULL, frozen_body = NULL, frozen_gen = NULL,
-                         frozen_content = NULL
+                         frozen_content = NULL, frozen_ended = NULL
                   WHERE revision = 0 AND status = 'queued' AND frozen_body IS NOT NULL
-                    AND uuid IN (SELECT uuid FROM round_records WHERE state = 'in_progress')""")
+                    AND uuid IN (SELECT r.uuid FROM round_records r WHERE r.state = 'in_progress'
+                                 OR r.ended_at IS NOT cloud_uploads.frozen_ended)""")
     rows = db.execute(_OVER).fetchall()
-    _watch(db, pace, rows)
+    bad = _watch(db, pace, rows)
     held = pace.held() > 0   # (the API said to wait: the whole queue does, every round's bytes kept)
     for row in rows:
         uuid = row["uuid"]
+        if uuid in bad:
+            out.unreadable += 1
+            continue
         if row["status"] == "parked" and uuid in pace.stood and pace.stood[uuid][0] == row["frozen_content"]:
             out.unchanged += 1   # (refused, and it would send the same again)
             continue
@@ -660,18 +673,28 @@ def _drain(cl: Any, db: sqlite3.Connection, pace: Pace, settle: float) -> Draine
             continue
         # A refused round goes again only once what it would send has changed (whatever changed: a
         # row of the round, or something else its body reads).
-        if row["status"] == "parked" and not _unpark(db, uuid):
-            out.unchanged += 1
+        try:
+            if row["status"] == "parked" and not _unpark(db, uuid):
+                out.unchanged += 1
+                continue
+            built = row["frozen"] or _freeze(db, uuid, pace, settle)
+        except Exception:   # noqa: BLE001 - it could be read a moment ago (_watch), and can't now
+            log.warning("Shotcast Cloud: round %s can't be read to send", uuid, exc_info=True)
+            out.unreadable += 1
             continue
-        if not row["frozen"] and not _freeze(db, uuid, pace, settle):
+        if not built:
             if uuid in pace.seen and not pace.ready(uuid, settle):
                 out.settling += 1   # (it changed as it was built: its quiet starts again)
             else:
                 out.unchanged += 1
             continue
-        over = db.execute("SELECT 1 FROM round_records WHERE uuid = ? AND kind = 'round' AND state != 'in_progress'",
-                          (uuid,)).fetchone()
-        if over is None:   # (taken up again, or gone, while others were being sent: not sent as it was)
+        # (taken up again, over again or gone while others were being sent: not sent as it was; the
+        # next drain drops those bytes)
+        over = db.execute(
+            """SELECT 1 FROM round_records r JOIN cloud_uploads u ON u.uuid = r.uuid
+               WHERE r.uuid = ? AND r.kind = 'round' AND r.state != 'in_progress'
+                 AND r.ended_at IS u.frozen_ended""", (uuid,)).fetchone()
+        if over is None:
             out.unchanged += 1
             continue
         if not _send(cl, db, uuid, pace, out):

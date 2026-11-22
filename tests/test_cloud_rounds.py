@@ -125,7 +125,8 @@ def test_after_a_crash_before_the_answer_was_noted_the_same_bytes_are_a_duplicat
     _drain(cl, cfg)
     frozen = _upload(cfg, u)["frozen_body"]
     api.rounds[u] = gzip.decompress(frozen)   # (as the cloud keeps it: the JSON sent)
-    _change(s, u)                             # (and the record has changed here since: the bytes kept are what go)
+    s.db.execute("UPDATE shots SET total_yards = 1.0 WHERE record_uuid = ?", (u,))   # (and it has changed here
+    s.db.commit()                             # since, the same ending still: the bytes kept are what go)
     assert _drain(cl, cfg).sent == [u] and gzip.decompress(frozen) == gzip.compress(b"") or True
     assert _upload(cfg, u)["revision"] == 1 and _upload(cfg, u)["frozen_body"] is None
     assert api.puts[0][2] == api.puts[1][2]
@@ -662,7 +663,13 @@ def test_one_round_that_cant_be_read_doesnt_hold_up_the_others(tmp_path, api, mo
             raise ValueError("a row that can't be read")
         return real(db, uuid)
     monkeypatch.setattr(cloud_rounds, "body", body)
-    assert _drain(cl, cfg).sent == [good] and cloud_rounds.behind(cfg.db_path) == 1
+    out = _drain(cl, cfg)
+    assert out.sent == [good] and out.unreadable == 1 and out.settling == 0   # (so `cloud upload` doesn't wait for it)
+    assert cloud_rounds.behind(cfg.db_path) == 1
+    monkeypatch.setattr(cloud_rounds, "_signature", lambda b: (_ for _ in ()).throw(TypeError("a value that can't be sent")))
+    late = _round(s, 200)
+    out = _drain(cl, cfg)                                   # (failing at any step of the build: the same)
+    assert out.unreadable == 2 and out.sent == [] and late not in api.rounds
     assert cloud_rounds._holes('{"\u00b2": 4, "7": 3, "07": 5}') == {"7": 3}   # (a digit that isn't a number: dropped)
 
 
@@ -695,9 +702,40 @@ def test_the_upload_command_keeps_waiting_for_a_round_that_changed_as_it_was_bui
     real = cloud_rounds._watch
 
     def watch(db, pace, rows):   # (the round changes between the look and its bytes being built)
-        real(db, pace, rows)
+        bad = real(db, pace, rows)
         s.db.execute("UPDATE shots SET total_yards = 77.0 WHERE record_uuid = ?", (u,))
         s.db.commit()
+        return bad
     monkeypatch.setattr(cloud_rounds, "_watch", watch)
     out = cloud_rounds.drain(cl, cfg.db_path, pace)
     assert out.sent == [] and out.settling == 1 and out.unchanged == 0
+
+
+def test_bytes_built_at_an_earlier_ending_arent_sent_however_the_round_came_to_end_again(tmp_path, api):
+    """Taken up again and over again between two looks (a booth that waits 15 minutes after a
+    refusal, say): the round is over at both, and its kept bytes are still the earlier ending's."""
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    api.answers = [httpx.Response(502)]
+    assert _drain(cl, cfg).waiting == 1 and _upload(cfg, u)["frozen_body"] is not None
+    s.db.execute("UPDATE round_records SET ended_at = ended_at + 600 WHERE uuid = ?", (u,))   # played on, over again
+    s.db.execute("UPDATE shots SET total_yards = 300.0 WHERE record_uuid = ?", (u,))
+    s.db.commit()
+    assert _drain(cl, cfg).sent == [u] and len(api.puts) == 2
+    assert api.puts[-1][2]["shots"][0]["total_yards"] == 300.0
+
+
+def test_the_upload_command_doesnt_wait_for_a_round_that_cant_be_read(api, monkeypatch, capsys):
+    from commentator import cloud_rounds
+    from tests.test_cloud import _pair_cli, _unsent_round
+
+    prof = _pair_cli(api, monkeypatch)
+    u = _unsent_round(prof)
+
+    def body(db, uuid):
+        raise ValueError("a row that can't be read")
+    monkeypatch.setattr(cloud_rounds, "body", body)
+    monkeypatch.setattr(cloud.time, "sleep", lambda s: pytest.fail("it waited"))
+    with pytest.raises(SystemExit, match="1 round.*still aren't on Shotcast Cloud") as e:
+        cloud.main(["upload"])
+    assert u in str(e.value)
