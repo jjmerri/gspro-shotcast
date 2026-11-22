@@ -226,7 +226,7 @@ def test_a_season_file_that_cant_be_read_counts_as_behind(tmp_path, api, monkeyp
 
 @pytest.mark.parametrize("answer, shown", [
     ({"status_code": 409, "json": {"error": "revision_conflict", "revision": 1, "sha256": "other"}}, "conflicts"),
-    ({"status_code": 422, "json": {"detail": "not a round"}}, "refused")])
+    ({"status_code": 422, "json": {"error": "invalid_body", "message": "not a round"}}, "refused")])
 def test_a_round_held_or_refused_keeps_the_tray_red_till_it_is_resolved(tmp_path, api, monkeypatch, answer, shown):
     import httpx
 

@@ -27,6 +27,9 @@ class FakeAPI:
         self.access = {"a0"}
         self.n = 0
         self.revoked = False
+        self.signed_out = False
+        self.grace = True                                      # a spent refresh token still gets its successor
+        self.attempts: dict[str, str | None] = {}              # refresh token -> the attempt that used it
         self.tenant, self.sim, self.device = "t1", "Bay 1", "d1"
         self.default: str | None = "lg1"
         self.rounds: dict[str, dict[int, bytes]] = {}          # round -> revision -> body
@@ -49,7 +52,8 @@ class FakeAPI:
             assert req.headers["x-amz-content-sha256"] == hashlib.sha256(req.content).hexdigest()
         if self.minimum:
             return httpx.Response(426, headers={"X-Shotcast-Min-Version": self.minimum},
-                                  json={"detail": {"message": f"update Shotcast to {self.minimum}"}})
+                                  json={"error": "client_too_old", "action": "update",
+                                        "message": f"update Shotcast to {self.minimum}"})
         if path.startswith("/api/rounds/") and req.method == "PUT":
             return self.put(req)
         body = json.loads(req.content) if req.content else None
@@ -65,17 +69,29 @@ class FakeAPI:
             return httpx.Response(200, json=self.tokens("r0"))
         if path == "/api/devices/refresh":
             old = body["refresh_token"]
+            if self.signed_out:
+                return httpx.Response(401, json={"error": "device_signed_out", "action": "repair",
+                                                 "message": "this PC signed out"})
             if self.revoked or old not in self.refresh:
-                return httpx.Response(401, json={"detail": "refresh token not valid"})
+                return httpx.Response(401, json={"error": "refresh_token_invalid", "action": "repair",
+                                                 "message": "refresh token not valid; pair this PC again"})
+            # as koi's refresh: a spent token gets its successor again for the attempt that used it
+            # (or within the grace, `self.grace`); any other reuse revokes the device
             if self.refresh[old] is None:
                 new = f"r{len(self.refresh)}"
                 self.refresh[old], self.refresh[new] = new, None
+                self.attempts[old] = body.get("attempt")
+            elif not self.grace and (body.get("attempt") is None or self.attempts.get(old) != body.get("attempt")):
+                self.revoked = True
+                return httpx.Response(401, json={"error": "refresh_token_invalid", "action": "repair",
+                                                 "message": "refresh token not valid; pair this PC again"})
             return httpx.Response(200, json=self.tokens(self.refresh[old]))
         if req.headers.get("X-Shotcast-Device") not in self.access or self.revoked:
-            return httpx.Response(401, json={"detail": "device access token not valid"})
+            return httpx.Response(401, json={"error": "access_token_invalid", "action": "retry",
+                                             "message": "device access token not valid"})
         if path == "/api/devices/me":
             if req.method == "DELETE":
-                self.revoked = True
+                self.revoked = self.signed_out = True
                 return httpx.Response(204)
             return httpx.Response(200, json={"device_id": self.device, "league_id": self.default,
                                              "tenant_id": self.tenant, "sim_name": self.sim, "name": "PC",
@@ -91,18 +107,21 @@ class FakeAPI:
         self.puts.append((rid, n, json.loads(gzip.decompress(req.content))))
         if self.answers:
             return self.answers.pop(0)
-        # as koi's put_revision: by the sha256 of the stored bytes
+        # as koi's put_revision: by the sha256 of the JSON sent (not of its gzip bytes); `revision` is
+        # the one the answer is about, `current_revision` the round's latest
         revs = self.rounds.setdefault(rid, {})
         top = max(revs, default=0)
+        sent = gzip.decompress(req.content)
         if n > top:
-            revs[n] = req.content
-            return httpx.Response(201, json={"status": "stored", "revision": n, "seq": 1})
+            revs[n] = sent
+            return httpx.Response(201, json={"status": "stored", "revision": n, "current_revision": n})
         if n not in revs:
-            return httpx.Response(200, json={"status": "superseded", "revision": top})
-        if revs[n] == req.content:
-            return httpx.Response(200, json={"status": "duplicate", "revision": top})
-        return httpx.Response(409, json={"error": "revision_conflict", "revision": top,
-                                         "sha256": hashlib.sha256(revs[top]).hexdigest()})
+            return httpx.Response(200, json={"status": "superseded", "revision": n, "current_revision": top})
+        if revs[n] == sent:
+            return httpx.Response(200, json={"status": "duplicate", "revision": n, "current_revision": top})
+        return httpx.Response(409, json={"error": "revision_conflict", "action": "fix", "message": "other content",
+                                         "revision": n, "current_revision": top,
+                                         "sha256": hashlib.sha256(revs[n]).hexdigest()})
 
 
 def mock_http(monkeypatch, *fakes):
@@ -1002,3 +1021,70 @@ def test_with_no_pick_pending_the_profile_keeps_the_self_hosted_gspro_folder(tmp
     monkeypatch.setattr(tray, "pending_installer_gspro_dir", lambda: None)
     prof = _pair_cli(api, monkeypatch)
     assert load_config(prof.config).source.connector_log == Config().source.connector_log
+
+
+@pytest.mark.parametrize("answer", [httpx.Response(401, text="<html>sign in</html>", headers={"content-type": "text/html"}),
+                                    httpx.Response(401, json={"error": "something_new"}),
+                                    httpx.Response(401, json={"detail": "Unauthorized"})])
+def test_only_the_apis_own_word_ends_a_pairing_on_refresh(api, answer):
+    """A 401 that isn't the API saying this pass is finished (a proxy's, a code this app doesn't know)
+    keeps the pairing: tried again later, never marked as needing pairing again."""
+    paired(api)
+    c = cloud.Cloud(cloud.store(), clock=lambda: api.now, sleep=lambda s: None)
+    api.now += 600
+    real = api.__call__
+    api.__class__ = type("Refusing", (FakeAPI,), {
+        "__call__": lambda self, req: answer if req.url.path == "/api/devices/refresh" else real(req)})
+    with pytest.raises(cloud.Unreachable):
+        c.access_token()
+    assert not cloud.store().read().get("refused") and cloud.locate().problem is None
+    api.__class__ = FakeAPI
+    assert c.access_token()   # (and works again once the API answers)
+
+
+def test_a_refresh_whose_new_pass_was_never_saved_is_finished_after_a_restart(api):
+    """The API rotated the token and this PC stopped before saving the new one (a crash, a lost
+    answer). Long after the API's grace for a spent token, the same refresh is sent again as the same
+    attempt, and gets the same new token; without the attempt the API would revoke this PC."""
+    paired(api)
+    st = cloud.store()
+    c = cloud.Cloud(st, clock=lambda: api.now, sleep=lambda s: None)
+    api.now += 600
+    real_save, saves = c._save, []
+
+    def crash_after_the_answer(rec):   # the attempt is saved; the new tokens never are
+        saves.append(rec["tokens"].get("refresh_attempt"))
+        if len(saves) > 1:
+            raise KeyboardInterrupt
+        real_save(rec)
+    c._save = crash_after_the_answer
+    with pytest.raises(KeyboardInterrupt):
+        c.access_token()
+    kept = st.read()["tokens"]
+    assert kept["refresh_token"] == "r0" and kept["refresh_attempt"] == saves[0] and api.refresh["r0"] == "r1"
+    api.grace = False   # (a restart, well past the grace)
+    api.now += 3600
+    again = cloud.Cloud(st, clock=lambda: api.now, sleep=lambda s: None)
+    assert again.access_token() and not api.revoked
+    now = st.read()["tokens"]
+    assert now["refresh_token"] == "r1" and "refresh_attempt" not in now
+    assert api.attempts["r0"] == saves[0]
+
+
+def test_an_unpair_whose_answer_was_lost_is_confirmed_the_next_time(api, monkeypatch, capsys):
+    _pair_cli(api, monkeypatch)
+    api.revoked = api.signed_out = True   # (the first unpair's DELETE got through; its 204 didn't arrive)
+    cloud.main(["unpair"])
+    assert "already removed" in capsys.readouterr().out and cloud.locate() is None
+
+
+def test_pairing_keeps_polling_through_an_answer_it_doesnt_know_and_sends_a_name_the_api_takes(api):
+    api.polls = ["authorization_pending", "something_new"]   # (a code a later API might send: not a no)
+    names = []
+    real = api.__call__
+    api.__class__ = type("Named", (FakeAPI,), {"__call__": lambda self, req: (
+        names.append(json.loads(req.content)["name"]) if req.url.path == "/api/devices/pair" else None, real(req))[1]})
+    rec = cloud.pair(cloud.store(), API, name="  Bay\tone  " + "x" * 100, http=httpx.Client(
+        base_url=API, transport=httpx.MockTransport(api), headers={"User-Agent": "Shotcast/9.9"}),
+        clock=lambda: api.now, sleep=lambda s: None, say=lambda s: None)
+    assert rec["device_id"] == "d1" and names == [("Bay one " + "x" * 100)[:64]]
