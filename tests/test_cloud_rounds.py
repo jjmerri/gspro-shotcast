@@ -447,3 +447,38 @@ def test_a_round_names_its_players_on_their_slots_only(tmp_path, api):
     assert "players" not in b["scorecards"][0] and b["scorecards"][0]["side"] == "Ann & Bo"
     names = json.dumps([b["shots"], b["player_rounds"], b["shot_tracks"]])
     assert "Ann" not in names and "Bo" not in names
+
+
+def test_a_round_goes_up_in_the_clouds_own_types_without_this_pcs_bookkeeping(tmp_path, api):
+    """The cloud's format names each field and its type: flags are true/false, maps and lists are
+    JSON (not text holding JSON), and what only this PC's own pages use isn't sent."""
+    cfg, s, cl = _booth(tmp_path, api)
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None})
+    _hit(s, "Ann", 1)
+    s.end_round(u, complete=True)
+    shot_id, slot = s.db.execute("SELECT id, slot_id FROM shots WHERE record_uuid = ?", (u,)).fetchone()
+    s.db.execute("UPDATE shots SET tags = '[\"long\"]', raw = '{\"k\": 1}', left_out = 1 WHERE id = ?", (shot_id,))
+    s.db.execute("INSERT INTO shot_tracks (shot_id, gspro_shot_id, flight, roll, was) VALUES (?, 'g1', ?, 'not json', ?)",
+                 (shot_id, "[[0, 1, 2], [3, 4, 5]]", '{"total_yards": 1}'))
+    s.db.execute("INSERT INTO rounds (session_id, ended_at, date, side, holes, scores, hole_pars, players, round_uuid)"
+                 " VALUES (?, 9, '2026-01-01', 'Ann', 9, ?, ?, '[\"Ann\"]', ?)",
+                 (s.session_id, '{"1": 4, "2": 5, "x": 3, "3": null}', '{"1": 4}', u))
+    s.db.execute("INSERT INTO player_rounds (session_id, ended_at, player, scores, round_uuid, slot_id)"
+                 " VALUES (?, 9, 'Ann', 'oops', ?, ?)", (s.session_id, u, slot))
+    s.db.execute("INSERT INTO week_results (ended_at, week, team, net, round_id, holes)"
+                 " SELECT 9, 1, 'Ann', -1, id, '{\"1\": -1}' FROM rounds WHERE round_uuid = ?", (u,))
+    s.db.commit()
+    assert _drain(cl, cfg).sent == [u]
+    b = api.puts[0][2]
+    (shot,), (track,), (card,), (mine,), (week,) = (b[k] for k in ("shots", "shot_tracks", "scorecards",
+                                                                    "player_rounds", "week_results"))
+    assert shot["is_putt"] is False and shot["attributed"] is True and shot["mulligan"] is False
+    assert shot["tags"] == ["long"] and not {"raw", "left_out", "excluded", "player", "id"} & set(shot)
+    assert track["flight"] == [[0, 1, 2], [3, 4, 5]] and track["roll"] is None and "was" not in track
+    assert track["shot_uid"] == shot["uid"]
+    assert card["scores"] == {"1": 4, "2": 5} and card["hole_pars"] == {"1": 4}   # (only what's a hole's whole number)
+    assert card["is_league"] in (True, False) and card["complete"] is True and "excluded" not in card
+    assert mine["scores"] is None and mine["slot_id"] == slot and "excluded" not in mine
+    assert week["holes"] == {"1": -1} and "round_id" not in week
+    assert not {"gen", "finishes_gen", "uuid"} & set(b["round"]) and b["edit"]["left_out"] == [shot["uid"]]
+    assert all("excluded" not in ln for ln in b["lines"])
