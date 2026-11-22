@@ -84,6 +84,15 @@ THROTTLE_DEFAULT_S = 300.0   # a 429 with no Retry-After
 THROTTLE_MAX_S = 86400.0     # (the API's longest allowance is a day's)
 
 
+# The API's upload refusals (its docs/dev/device-api.md): REFUSED are for good, as the revision is
+# (`action: fix`); the rest of KNOWN are handled each in its own way in _send.
+REFUSED = frozenset({"not_gzip", "body_too_large", "invalid_body", "round_id_mismatch", "claimed_slot_removed",
+                     "invalid_request"})
+KNOWN = REFUSED | {"unsupported_format", "revision_conflict", "not_bay_writer", "round_owned_elsewhere",
+                   "league_suspended", "round_league_suspended", "rate_limited", "busy", "client_too_old",
+                   "access_token_invalid", "device_not_paired"}
+
+
 class Blocked(Exception):
     """The cloud refuses every upload from this PC for now; the message says why."""
 
@@ -347,8 +356,9 @@ def _freeze(db: sqlite3.Connection, uuid: str, now: float, settle: float) -> boo
 
 def _backoff(db: sqlite3.Connection, uuid: str, now: float, error: str) -> None:
     tries = db.execute("SELECT tries FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()[0]
+    # (the exponent capped, not only the wait: a round that waits for weeks mustn't overflow)
     db.execute("UPDATE cloud_uploads SET tries = tries + 1, next_try = ?, error = ? WHERE uuid = ?",
-               (now + min(RETRY_MAX_S, RETRY_BASE_S * 2 ** tries), error, uuid))
+               (now + min(RETRY_MAX_S, RETRY_BASE_S * 2 ** min(tries, 30)), error, uuid))
 
 
 def _throttle(db: sqlite3.Connection, r: Any, now: float) -> float:
@@ -502,10 +512,14 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained,
         _backoff(db, uuid, now, f"Shotcast Cloud: {_message(r)}")
         out.waiting += 1
         return False
-    if r.status_code in (413, 415, 422) and isinstance(error, str):
-        # The API's own refusals of this body (too big, not gzip, not a round body: koi's rounds.py),
-        # each with its code. Anything else (a 404, a code this app doesn't know, a proxy's page) is
-        # tried again below, keeping the revision, and shows red in the tray while it keeps failing.
+    action = (answer or {}).get("action")
+    if isinstance(error, str) and (error in REFUSED or (error not in KNOWN and action == "fix")):
+        # The API's own word that it will never take this revision as it is (too big, not a round
+        # body, drops a claimed player: koi's rounds.py; or a code this app doesn't know, whose
+        # `action` says so). The round is kept, refused, till it changes or is sent again by hand.
+        # Anything else (a code or action this app doesn't know, an answer without them, a proxy's
+        # page) is tried again below, the revision kept as it is, and shows red in the tray while
+        # it keeps failing.
         _park(db, uuid, f"HTTP {r.status_code}: {_message(r)}")
         out.parked.append(uuid)
         return True
