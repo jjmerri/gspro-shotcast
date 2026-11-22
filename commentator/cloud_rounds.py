@@ -92,23 +92,23 @@ KNOWN = REFUSED | {"unsupported_format", "round_final", "not_bay_writer", "round
                    "access_token_invalid", "device_not_paired"}
 # When a round is done, and so sent. A round goes to Shotcast Cloud once, and nothing that changes
 # here afterwards follows it, so it waits till the booth has stopped adding to it: it has ended, and
-# what would be sent hasn't changed for QUIET_S (no shot or line added, no shot's data changed).
-# "What would be sent" is the body itself, less the two columns that say when a line was spoken
-# (lines.aired_at, aired_seconds: filled as the sign-off airs, up to a minute and a half after the
-# round, for this PC's own highlight cuts): a round goes once it's known what was said, not once
-# it has been said. (The record's own change counter, round_records.gen, can't be used: airing a
-# line moves it.) Measured on a booth's logs (212 shots, 4 rounds): GSPro's round-file data for a shot
-# lands within 20 s of it (median 7), a round is declared over 5 to 14 s after its last shot, and the
-# closer is written about 7 s after that. CEILING_S after its end a round goes whatever is still
-# changing, so one can't be held back for good. What comes later than that stays on this PC (the
-# round file can still give a stroke up to store.FILE_END_DUE_S = 600 s after it: a pick-up on the
-# last hole, say).
+# what would be sent (the body itself) hasn't changed for QUIET_S: no shot or line added, no shot's
+# data changed, no line's air time filled in. So with commentary on it waits for the sign-off to
+# have been spoken (waiting holds nothing up: a player can scan their code before the round is on
+# the cloud); with it off there are no lines, and it goes after the quiet alone. (The body is used,
+# not the record's own change counter, round_records.gen, so that exactly what is sent is what is
+# watched.) Measured on a booth's logs (212 shots, 4 rounds): GSPro's round-file data for a shot lands
+# within 20 s of it (median 7), a round is declared over 5 to 14 s after its last shot, the closer is
+# written about 7 s after that and is still being spoken 24 to 98 s after the round ends. CEILING_S
+# after its end a round goes whatever is still changing, so one can't be held back for good. What
+# comes later than that stays on this PC (the round file can still give a stroke up to
+# store.FILE_END_DUE_S = 600 s after it: a pick-up on the last hole, say).
 QUIET_S = 30.0
 CEILING_S = 180.0
 QUIET = """
 CREATE TABLE IF NOT EXISTS cloud_quiet (       -- a finished, unsent round: what it would send, and since when that has stood
     uuid TEXT PRIMARY KEY,
-    sig TEXT NOT NULL,                         -- a hash of its body, less the lines' air times (_signature)
+    sig TEXT NOT NULL,                         -- a hash of its body (_signature)
     since REAL NOT NULL
 );
 """
@@ -353,10 +353,8 @@ def encode(b: dict[str, Any]) -> bytes:
 
 
 def _signature(b: dict[str, Any]) -> str:
-    """A hash of what a round would send, less when its lines were spoken: what has to stand still for
-    QUIET_S before the round goes."""
-    lines = [_without(ln, "aired_at", "aired_seconds") for ln in b["lines"]]
-    return hashlib.sha256(_json(b | {"lines": lines})).hexdigest()
+    """A hash of what a round would send: what has to stand still for QUIET_S before the round goes."""
+    return _content(b)
 
 
 def _note(db: sqlite3.Connection, uuid: str, sig: str, now: float) -> bool:

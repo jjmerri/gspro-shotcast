@@ -582,9 +582,9 @@ def test_every_player_is_on_a_side_and_a_card_nobody_is_on_isnt_sent(tmp_path, a
 
 
 def test_a_round_goes_once_what_it_would_send_has_stood_still_or_at_the_ceiling(tmp_path, api):
-    """Done means the booth has stopped adding to it: no shot or line added and no shot's data changed
-    for QUIET_S, or CEILING_S have passed since it ended. A line being spoken (its air time filled
-    in) isn't a change: the round goes once it's known what was said."""
+    """Done means the booth has stopped adding to it: nothing it would send has changed for QUIET_S
+    (a shot or line added, a shot's data, a line's air time: so the sign-off has been spoken), or
+    CEILING_S have passed since it ended."""
     cfg, s, cl = _booth(tmp_path, api)
     u = _round(s, 1)
     ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (u,)).fetchone()[0]
@@ -596,11 +596,15 @@ def test_a_round_goes_once_what_it_would_send_has_stood_still_or_at_the_ceiling(
     s.db.commit()
     assert at(8).sent == []                                 # (changed since it was first looked at: quiet from here)
     s.db.execute("UPDATE lines SET aired_at = ?, aired_seconds = 6.0 WHERE record_uuid = ?", (ended + 20, u))
-    s.db.execute("UPDATE round_records SET gen = gen + 1 WHERE uuid = ?", (u,))   # (as airing a line does)
-    s.db.commit()
-    assert at(8 + cloud_rounds.QUIET_S - 1).sent == []
-    assert at(8 + cloud_rounds.QUIET_S).sent == [u]         # the airing didn't start the quiet again
-    assert api.puts[0][2]["lines"][-1]["text"] == "and that's the round"
+    s.db.commit()                                           # ... and spoken
+    assert at(8 + cloud_rounds.QUIET_S).sent == []          # (that's a change too: quiet from when it was seen)
+    assert at(8 + 2 * cloud_rounds.QUIET_S).sent == [u]
+    said = api.puts[0][2]["lines"][-1]
+    assert said["text"] == "and that's the round" and said["aired_seconds"] == 6.0
+    # With no commentary there's nothing to wait for but the quiet itself.
+    q = _round(s, 150)
+    ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (q,)).fetchone()[0]
+    assert at(1).sent == [] and at(1 + cloud_rounds.QUIET_S).sent == [q]
     # A shot's data changing does start it again.
     w = _round(s, 300)
     ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (w,)).fetchone()[0]
