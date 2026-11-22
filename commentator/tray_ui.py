@@ -974,7 +974,7 @@ class SettingsWindow:
                 boto3.DEFAULT_SESSION = None   # Back up now's S3 upload picks up the new keys
             except ImportError:
                 pass
-        if gspro:
+        if gspro and not self.paired:   # (paired: the profile's only; the installer's pick stays the self-hosted one's)
             from .tray import remember_gspro_dir
 
             remember_gspro_dir(gspro)

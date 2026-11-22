@@ -1139,6 +1139,16 @@ def _self_hosted_files(config: str | None) -> tuple[Path | None, list[Path]]:
     return (path if path.is_file() else None), [e for e in dict.fromkeys(envs) if not _in_profile(e)]
 
 
+def check_self_hosted(config: str | Path) -> None:
+    """Unpaired, as Shotcast starts: the self-hosted Shotcast never runs in a cloud profile's home (a
+    prompt left open in one across an unpair, or --home naming one): its season file and keys are a
+    pairing's, kept for it, not the self-hosted booth's to carry on in. CloudError says so."""
+    if _in_profile(Path(config)):
+        raise CloudError(f"{Path(config).resolve().parent} is a Shotcast Cloud profile, kept from when this PC "
+                         "was paired: the self-hosted Shotcast doesn't run in it. Start Shotcast from its own "
+                         "folder (or its Start menu shortcut).")
+
+
 def _in_profile(path: Path) -> bool:
     """Whether a file is in a cloud profile's home (this pairing's, or one kept from an earlier one):
     never the seed of another profile, whose settings and keys would then pass from one pairing to

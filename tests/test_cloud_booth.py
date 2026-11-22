@@ -811,3 +811,39 @@ def test_restarting_the_booth_doesnt_give_a_stuck_queue_more_time_before_the_tra
     _loop(cfg, 1, fresh)
     assert _health(cfg) == []
     assert cloud_booth.Uploads(cfg, cloud.locate()).clear_at == now[0]
+
+
+# ---- review round 9 ----------------------------------------------------------------------------
+
+def test_unpaired_shotcast_never_runs_self_hosted_in_a_cloud_profile_kept_from_a_pairing(tmp_path, api, monkeypatch):
+    from commentator import tray
+
+    home = _self_hosted_home(tmp_path, monkeypatch)
+    prof = paired(api)
+    prof.env.write_text("OPENAI_API_KEY=the-pairings-key\n", encoding="utf-8")
+    cloud.main(["unpair"])
+    ran, told = [], []
+    monkeypatch.setattr(cli, "cmd_run", lambda cfg, args: ran.append(cfg.db_path))
+    monkeypatch.setattr(cli, "cmd_backup", lambda cfg, args: ran.append("backup"))
+    monkeypatch.setattr(cli, "_setup_logging", lambda *a, **kw: ran.append("logging"))
+    monkeypatch.setattr(tray, "Tray", lambda *a, **kw: ran.append("tray"))
+    monkeypatch.setattr(tray, "fatal", told.append)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.chdir(prof.home)            # (a prompt the paired tray opened, left open across the unpair)
+    for argv in (["run"], ["backup"], ["-c", str(prof.config), "run"], ["tray", "--home", str(prof.home)]):
+        with pytest.raises(SystemExit, match="Shotcast Cloud profile"):
+            _run(monkeypatch, *argv)
+    assert ran == [] and len(told) == 1 and "OPENAI_API_KEY" not in os.environ
+    monkeypatch.chdir(home)                 # from its own folder: as before
+    _run(monkeypatch, "run")
+    assert ran == ["logging", "logs/season.db"]
+
+
+def test_paired_settings_leave_the_installers_gspro_pick_to_the_self_hosted_shotcast():
+    import inspect
+
+    from commentator import tray_ui
+
+    src = inspect.getsource(tray_ui.SettingsWindow)
+    at = src.index("remember_gspro_dir(gspro)")
+    assert "not self.paired" in src[src.rindex("if gspro", 0, at):at]

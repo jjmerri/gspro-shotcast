@@ -1201,6 +1201,12 @@ def main() -> None:
         try:
             prof = cloud.locate()
             cloud.check_expected(prof)
+            if prof is None:   # (self-hosted: never in a cloud profile's home, kept from an earlier pairing)
+                from .tray import default_home
+
+                cloud.check_self_hosted(Path(args.home) / "config.yaml" if args.command == "tray" and args.home
+                                        else default_home() / "config.yaml" if args.command == "tray"
+                                        else args.config)
             if prof is not None and args.command == "run":
                 prof = held.enter_context(cloud.running(prof, "run"))
         except TimeoutError:
