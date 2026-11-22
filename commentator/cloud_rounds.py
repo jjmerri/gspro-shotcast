@@ -156,13 +156,57 @@ def _without(row: dict[str, Any], *keys: str) -> dict[str, Any]:
     return {k: v for k, v in row.items() if k not in keys}
 
 
+# The cloud's limit on a track's points (its roundbody.MAX_POINTS): a longer one isn't sent.
+MAX_POINTS = 5_000
+_SHOT_FLAGS = ("is_putt", "attributed", "is_league", "is_tournament", "mulligan", "shared_ball", "picked")
+_CARD_FLAGS = ("is_league", "is_tournament", "complete")
+
+
+def _wire(row: dict[str, Any], *drop: str, flags: tuple[str, ...] = (), holes: tuple[str, ...] = (),
+          lists: tuple[str, ...] = ()) -> dict[str, Any]:
+    """A table's row as the cloud's format has it (its contract/round-body-v1.schema.json): without
+    the `drop` columns, the 0/1 `flags` as true/false, and the columns kept as JSON text as what they
+    hold (`holes`: a hole number -> whole number map; `lists`: a list). What can't be read is sent
+    as not known (null), never as text."""
+    out = _without(row, *drop)
+    for k in flags:
+        if out.get(k) is not None:
+            out[k] = bool(out[k])
+    for k in holes:
+        out[k] = _holes(out.get(k))
+    for k in lists:
+        out[k] = _list(out.get(k))
+    return out
+
+
+def _loads(text: Any) -> Any:
+    try:
+        return json.loads(text) if isinstance(text, str) else None
+    except ValueError:
+        return None
+
+
+def _holes(text: Any) -> dict[str, int] | None:
+    data = _loads(text)
+    if not isinstance(data, dict):
+        return None
+    return {k: v for k, v in data.items() if k.isdigit() and isinstance(v, int) and not isinstance(v, bool)}
+
+
+def _list(text: Any) -> list | None:
+    data = _loads(text)
+    return data if isinstance(data, list) and len(data) <= MAX_POINTS else None
+
+
 def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None:
     """A record's v1 body and the gen it was read at, or None if the record is gone. Local integer ids
     become uids or are dropped. No league: the PC is a capture device (the cloud decides).
 
-    A player is named in one place, their slot (the cloud refuses a body that names one anywhere
-    else: erasing an account there takes the name from its slot). So a shot and a card say whose they
-    are by `slot_id` alone, with no `player`, and a scorecard doesn't list its side's `players`."""
+    A player is named in one place, their slot (erasing an account in the cloud takes the name from
+    its slot). So a shot and a card say whose they are by `slot_id` alone, with no `player`, and a
+    scorecard doesn't list its side's `players`. Not sent either: what only this PC's own pages use
+    (a shot's raw launch-monitor message, what a track replaced, the row-level left-out and
+    excluded marks, which `edit` carries, and the record's change counters)."""
     with _txn(db):   # (one snapshot: a record's rows and its gen read together)
         rec = db.execute("SELECT * FROM round_records WHERE uuid = ?", (uuid,)).fetchone()
         if rec is None:
@@ -191,13 +235,17 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
         "round": _without(rec, "uuid", "session_id", "gen", "finishes_gen")
         | {"id": uuid, "session": dict(session) if session else None, "league_id": None, "league": None},
         "slots": [_without(s, "round_uuid") for s in slots],
-        "shots": [_without(s, "id", "session_id", "record_uuid", "player") | {"is_putt": bool(s["is_putt"])} for s in shots],
-        "shot_tracks": [_without(t, "shot_id") | {"shot_uid": uid_of[t["shot_id"]]} for t in tracks],
-        "lines": [_without(ln, "id", "session_id", "record_uuid", "shot_id") | {"shot_uid": uid_of.get(ln["shot_id"])}
-                  for ln in lines],
-        "scorecards": [_without(c, "id", "session_id", "round_uuid", "players") for c in cards],
-        "player_rounds": [_without(p, "id", "session_id", "round_uuid", "player") for p in players],
-        "week_results": [_without(w, "id", "round_id") for w in weeks],
+        "shots": [_wire(s, "id", "session_id", "record_uuid", "player", "raw", "left_out", "excluded",
+                        flags=_SHOT_FLAGS, lists=("tags",)) for s in shots],
+        "shot_tracks": [_wire(t, "shot_id", "was", lists=("flight", "roll")) | {"shot_uid": uid_of[t["shot_id"]]}
+                        for t in tracks],
+        "lines": [_without(ln, "id", "session_id", "record_uuid", "shot_id", "excluded")
+                  | {"shot_uid": uid_of.get(ln["shot_id"])} for ln in lines],
+        "scorecards": [_wire(c, "id", "session_id", "round_uuid", "players", "excluded", flags=_CARD_FLAGS,
+                             holes=("scores", "hole_pars")) for c in cards],
+        "player_rounds": [_wire(p, "id", "session_id", "round_uuid", "player", "excluded", flags=_CARD_FLAGS,
+                                holes=("scores", "hole_pars")) for p in players],
+        "week_results": [_wire(w, "id", "round_id", holes=("holes",)) for w in weeks],
         "edit": {"excluded": any(c["excluded"] for c in cards), "mark": mark,
                  "left_out": [s["uid"] for s in shots if s["left_out"]]},
     }, rec["gen"]
