@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.161
+
+### Booth
+- Behind-the-scenes groundwork only: nothing changes in how the booth or the stats page works.
+
 ## 0.1.160
 
 ### Stats page
