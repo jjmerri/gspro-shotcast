@@ -63,7 +63,8 @@ DEVICE_HEADER = "X-Shotcast-Device"
 MIN_VERSION_HEADER = "X-Shotcast-Min-Version"
 BODY_HASH = "x-amz-content-sha256"   # CloudFront's signed hop to the API needs every POST/PUT body's hash
 REFRESH_EARLY_S = 60                 # refresh an access token this long before it runs out
-REFRESH_WINDOW_S = 40                # retries of a refresh stay inside the API's 60 s grace for a spent token
+REFRESH_WINDOW_S = 40                # how long one refresh keeps retrying before its caller is told to wait
+COLLECT_S = 600                      # how long after approving a pairing the API still hands out its first pass
 REFRESH_TIMEOUT_S = 10.0
 STORE_VERSION = 3                    # 3: the API, tenant, device and machine are protected with the tokens
 _ENTROPY = b"shotcast-cloud-device"
@@ -815,12 +816,15 @@ class TokenStore:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(body, f, indent=1)
-            # On the disk before it replaces the old one: a refresh's attempt id has to outlive a
-            # power cut that comes after the API has spent the old token (access_token).
+            # Its contents on the disk before it takes the old file's name: after a power cut the
+            # pairing is the old file or the new one, whole, never a part of either. Which of the
+            # two doesn't matter: the API hands the old refresh token the new one again until the
+            # new one has been used, and that's ten minutes off (the next refresh), by when the
+            # rename below has long been on the disk too.
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, self.path)
-        _sync_dir(self.path.parent)
+        _sync_name(self.path)
 
     def delete(self) -> None:
         self.path.unlink(missing_ok=True)
@@ -884,33 +888,38 @@ def _send(http: Any, method: str, path: str, body: Any = None, headers: dict | N
         raise Unreachable(f"couldn't reach Shotcast Cloud: {e}") from None
 
 
-def _sync_dir(folder: Path) -> None:
-    """Make a rename in `folder` durable where the platform lets a folder be synced (not Windows,
-    whose rename is durable once the file's contents are)."""
-    if os.name == "nt":
-        return
-    try:
-        fd = os.open(folder, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    except OSError:
-        pass
-    finally:
-        os.close(fd)
+def _sync_name(path: Path) -> None:
+    """Ask for a rename to `path` to be on the disk now: by syncing its folder where a folder can be
+    opened (not Windows), and the renamed file itself on Windows (which flushes the file's own
+    record). Best effort: nothing depends on it (TokenStore.write), and it isn't checked on Windows."""
+    for target, flags in ((path.parent, os.O_RDONLY),) if os.name != "nt" else ((path, os.O_RDWR),):
+        try:
+            fd = os.open(target, flags)
+        except OSError:
+            continue
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
 
 
 def _tokens(got: Any) -> dict | None:
-    """A token answer, if it's a whole one (every field a pass needs, none empty): else None, and
-    nothing this PC holds is replaced by it."""
+    """A token answer, if it's a whole one: every field this PC stores from it, each as the stored
+    pairing must have it to be read back (_open_marker's own rules: what is written can always be
+    read). Else None, and nothing this PC holds is replaced by it."""
     if not isinstance(got, dict):
         return None
-    texts = ("refresh_token", "access_token", "device_id", "tenant_id", "sim_name")
-    if not all(isinstance(got.get(k), str) and got[k] for k in texts):
+    try:
+        for name in ("refresh_token", "access_token", "device_id", "tenant_id", "sim_name"):
+            _text(got, name)
+        for name in ("league_id", "bay_id"):
+            _text(got, name, optional=True)
+    except _Bad:
         return None
     life = got.get("access_expires_in")
-    if isinstance(life, bool) or not isinstance(life, (int, float)) or life <= 0:
+    if isinstance(life, bool) or not isinstance(life, int) or life <= 0:
         return None
     return got
 
@@ -976,15 +985,12 @@ class Cloud:
             tok = rec["tokens"]
             if tok["access_token"] != stale and tok["access_exp"] - REFRESH_EARLY_S > self.clock():
                 return tok["access_token"]
-            # The refresh's own id, stored before it's sent: if the answer never gets saved (a lost
-            # connection, a crash), the next try, whenever this PC next runs, sends the same token as
-            # the same attempt, and the API hands back the same new one instead of taking the spent
-            # token for a stolen copy and revoking this PC.
-            if not tok.get("refresh_attempt"):
-                tok["refresh_attempt"] = secrets.token_hex(16)
-                self._save(rec)
+            # The API hands a spent refresh token the same new one again until that new one has been
+            # used. So if this answer never gets saved (a lost connection, a crash, a power cut before
+            # the file is on the disk), the token still stored is simply sent again, whenever this PC
+            # next runs: nothing here has to be remembered about a refresh under way.
             try:
-                got = self._refresh(tok["refresh_token"], tok["refresh_attempt"])
+                got = self._refresh(tok["refresh_token"])
             except Refused as e:
                 rec["refused"] = self.clock()   # kept, marked: `locate` says it needs pairing again
                 rec["refused_code"] = e.code
@@ -994,7 +1000,7 @@ class Cloud:
                              "access_exp": self.clock() + got["access_expires_in"]}
             fresh = _fresh(got)
             rec |= fresh
-            self._save(rec)   # before using it (or not): the old refresh token is spent
+            self._save(rec)   # before using it: on the disk before any request is made with the new pass
             if identity(rec) != self.identity:
                 raise PairingChanged("Shotcast Cloud now has this PC as another bay or tenant; stopped")
             self.device |= fresh
@@ -1012,15 +1018,15 @@ class Cloud:
                     raise CloudError(f"couldn't save this PC's new Shotcast Cloud pass: {e}") from None
                 self.sleep(0.5 * (attempt + 1))
 
-    def _refresh(self, refresh_token: str, attempt_id: str | None = None) -> dict:
-        # A lost response is safe to retry, but only within the API's grace for a spent token (a
-        # minute, during which it hands back the same new one), so every try fits a shorter window.
+    def _refresh(self, refresh_token: str) -> dict:
+        # A lost response is safe to retry at any time (the API hands back the same new token till it
+        # has been used); the window only bounds how long one call keeps its caller waiting.
         deadline = self.clock() + REFRESH_WINDOW_S
         attempt = 0
         while True:
             try:
                 r = self._send("POST", "/api/devices/refresh",
-                               {"refresh_token": refresh_token} | ({"attempt": attempt_id} if attempt_id else {}),
+                               {"refresh_token": refresh_token},
                           timeout=min(REFRESH_TIMEOUT_S, max(deadline - self.clock(), 1.0)))
             except Unreachable as e:
                 problem = str(e)
@@ -1145,9 +1151,10 @@ def _pair(store: TokenStore, api: str, name: str | None, http: Any, clock: Calla
         f"and check the code {start['user_code']} and this PC's fingerprint {show_fingerprint(fingerprint)}.\n"
         f"Waiting for approval (the code lasts {start['expires_in'] // 60} minutes)...")
     interval = max(1, int(start["interval"]))
-    # A minute past the code's own time: an approval in its last seconds, whose answer was lost, is
-    # still collected (the API hands the first pass out again while it's unused).
-    deadline = clock() + start["expires_in"] + 60
+    # Past the code's own time by as long as the API still hands out an approved pairing's first pass
+    # (COLLECT_S): an approval in the code's last seconds, or one whose answer was lost, is still
+    # collected. The API's own "turned down" or "ran out" ends it at once.
+    deadline = clock() + start["expires_in"] + COLLECT_S
     while clock() < deadline:
         sleep(interval)
         try:

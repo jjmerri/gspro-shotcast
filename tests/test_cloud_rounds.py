@@ -586,3 +586,17 @@ def test_a_round_that_has_waited_for_weeks_still_gets_its_next_try(tmp_path, api
     api.answers = [httpx.Response(502)]
     assert _drain(cl, cfg).waiting == 1   # (no overflow working out the wait)
     assert 0 < _upload(cfg, u)["next_try"] - (time.time() + LATER) <= cloud_rounds.RETRY_MAX_S
+
+
+@pytest.mark.parametrize("code", ["claimed_slot_removed", "claimed_round_changed"])
+def test_a_change_to_who_played_a_claimed_round_is_kept_here_as_refused(tmp_path, api, capsys, monkeypatch, code):
+    """Once a player has claimed their part on the cloud, the cloud decides who played what: this
+    PC's later correction isn't taken. The round stays on this PC, listed as refused, and the rest go."""
+    cfg, s, cl = _booth(tmp_path, api)
+    a, b = _round(s, 1), _round(s, 100)
+    api.answers = [httpx.Response(422, json={"error": code, "action": "fix", "message": "the round stays as it was"})]
+    out = _drain(cl, cfg)
+    assert out.parked == [a] and out.sent == [b]
+    up = _upload(cfg, a)
+    assert up["status"] == "parked" and "stays as it was" in up["error"]
+    assert _counts(cfg)["parked"] == 1
