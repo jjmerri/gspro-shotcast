@@ -30,7 +30,7 @@ class FakeAPI:
         self.signed_out = False
         self.tenant, self.sim, self.device = "t1", "Bay 1", "d1"
         self.default: str | None = "lg1"
-        self.rounds: dict[str, dict[int, bytes]] = {}          # round -> revision -> body
+        self.rounds: dict[str, bytes] = {}                     # round -> the JSON it was sent as
         self.puts: list[tuple[str, int, dict]] = []
         self.answers: list = []                                # scripted answers for the next PUTs
         self.minimum: str | None = None                        # clientversion's: below it, every call is 426
@@ -98,26 +98,20 @@ class FakeAPI:
         assert req.headers["content-encoding"] == "gzip"
         if req.headers.get("X-Shotcast-Device") not in self.access or self.revoked:
             return httpx.Response(401)
-        parts = req.url.path.split("/")
-        rid, n = parts[3], int(parts[5])
-        self.puts.append((rid, n, json.loads(gzip.decompress(req.content))))
+        rid = req.url.path.split("/")[3]
+        assert req.url.path == f"/api/rounds/{rid}"   # (a round is sent once: no revision in its address)
+        self.puts.append((rid, 1, json.loads(gzip.decompress(req.content))))
         if self.answers:
             return self.answers.pop(0)
-        # as koi's put_revision: by the sha256 of the JSON sent (not of its gzip bytes); `revision` is
-        # the one the answer is about, `current_revision` the round's latest
-        revs = self.rounds.setdefault(rid, {})
-        top = max(revs, default=0)
+        # as koi's put_round: by the sha256 of the JSON sent (not of its gzip bytes)
         sent = gzip.decompress(req.content)
-        if n > top:
-            revs[n] = sent
-            return httpx.Response(201, json={"status": "stored", "revision": n, "current_revision": n})
-        if n not in revs:
-            return httpx.Response(200, json={"status": "superseded", "revision": n, "current_revision": top})
-        if revs[n] == sent:
-            return httpx.Response(200, json={"status": "duplicate", "revision": n, "current_revision": top})
-        return httpx.Response(409, json={"error": "revision_conflict", "action": "fix", "message": "other content",
-                                         "revision": n, "current_revision": top,
-                                         "sha256": hashlib.sha256(revs[n]).hexdigest()})
+        if rid not in self.rounds:
+            self.rounds[rid] = sent
+            return httpx.Response(201, json={"status": "stored"})
+        if self.rounds[rid] == sent:
+            return httpx.Response(200, json={"status": "duplicate"})
+        return httpx.Response(409, json={"error": "round_final", "action": "fix", "message": "already here",
+                                         "sha256": hashlib.sha256(self.rounds[rid]).hexdigest()})
 
 
 def mock_http(monkeypatch, *fakes):
@@ -588,7 +582,7 @@ def test_the_command_line_pairs_reports_and_unpairs_each_taking_effect_at_restar
     assert (prof.home / cloud.FOLDER_FILE).is_file() and prof.db.is_file()   # made at pair time
     cloud.main(["status"])
     out = capsys.readouterr().out
-    assert "sim 'Bay 1'" in out and "0 held as conflicts" in out and str(prof.home) in out
+    assert "sim 'Bay 1'" in out and "0 refused" in out and str(prof.home) in out
     cloud.main(["unpair"])
     assert "Restart Shotcast to apply" in capsys.readouterr().out
     assert cloud.locate() is None and api.revoked and prof.home.is_dir()   # (its data kept)

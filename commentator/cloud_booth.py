@@ -5,7 +5,7 @@ next start; meanwhile the loop stops for good once the stored pairing isn't the 
 with, and nothing else about the booth changes.
 
 How uploads stand goes to logs/cloud-health.json (`HEALTH`) for the tray: a pairing the API no longer
-accepts, uploads stopped, the API needing a newer Shotcast (426), rounds held as conflicts or refused
+accepts, uploads stopped, the API needing a newer Shotcast (426), rounds refused
 (cloud_rounds.health), and, the one rule for everything else, settled rounds that haven't all been
 on Shotcast Cloud for BEHIND_S (`Uploads._behind`: by its outcome, whatever the cause). Each turns the
 tray red. It's rewritten after every try, so it clears once that's resolved.
@@ -24,7 +24,8 @@ from . import cloud
 
 log = logging.getLogger(__name__)
 
-DRAIN_S = 60.0         # how often the upload loop looks for settled rounds to send
+DRAIN_S = 15.0         # how often the upload loop looks for done rounds to send (a look at the season file:
+                       # the API is only called when one is ready). A round goes up to this long after it's done.
 BLOCKED_S = 900.0      # how long it waits when the cloud refuses every upload from this PC
 BEHIND_S = 900.0       # settled rounds not all on Shotcast Cloud for this long: the tray goes red, whatever the cause
 HEALTH = "cloud-health.json"
@@ -124,10 +125,9 @@ class Uploads:
             wait = DRAIN_S
             try:
                 out = await asyncio.to_thread(cloud_rounds.drain, self._cloud(), self.cfg.db_path, None,
-                                              cloud_rounds.CLOSER_SECONDS, 0)
-                if out.sent or out.parked or out.conflicts:
-                    log.info("Shotcast Cloud: %s round(s) sent%s%s", len(out.sent),
-                             f", {len(out.conflicts)} held as conflicts" if out.conflicts else "",
+                                              cloud_rounds.CEILING_S, 0)
+                if out.sent or out.parked:
+                    log.info("Shotcast Cloud: %s round(s) sent%s", len(out.sent),
                              f", {len(out.parked)} refused" if out.parked else "")
                 self._health()
             except (cloud.NotPaired, cloud.PairingChanged, cloud_rounds.NotThisPairing) as e:

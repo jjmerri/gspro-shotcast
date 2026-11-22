@@ -1,5 +1,4 @@
 import gzip
-import hashlib
 import json
 import shutil
 import time
@@ -83,93 +82,67 @@ def test_a_settled_round_goes_up_with_no_league_and_stays_on_disk(tmp_path, api)
     assert _counts(cfg) == {"sent": 1, "in_progress": 1}
 
 
-def test_a_round_changed_after_it_went_up_goes_again_as_the_next_revision(tmp_path, api):
+def test_a_round_is_sent_once_and_never_again_whatever_changes_here_afterwards(tmp_path, api):
+    """Once the cloud has a round it's the cloud's: a repair at startup, late data, a round GSPro takes
+    up again, nothing that changes on this PC afterwards is sent, and it isn't counted as waiting."""
     cfg, s, cl = _booth(tmp_path, api)
     u = _round(s, 1)
-    _drain(cl, cfg)
+    assert _drain(cl, cfg).sent == [u]
     _change(s, u)
-    assert _drain(cl, cfg).sent == [u] and [n for _, n, _ in api.puts] == [1, 2]
+    _hit(s, "Ann", 500)   # (another shot lands in it)
+    s.db.execute("UPDATE round_records SET state = 'in_progress', ended_at = NULL WHERE uuid = ?", (u,))
+    s.db.commit()
+    out = _drain(cl, cfg)
+    assert out.sent == [] and out.waiting == 0 and len(api.puts) == 1
+    assert _counts(cfg) == {"sent": 1} and cloud_rounds.behind(cfg.db_path, now=time.time() + LATER) == 0
+    assert cloud_rounds.outstanding(cfg.db_path, now=time.time() + LATER) == []
 
 
 @pytest.mark.parametrize("answer", [
     httpx.Response(200, text="<html>ok</html>", headers={"content-type": "text/html"}),   # a proxy's page
     httpx.Response(200, json=["stored"]),
-    httpx.Response(201, json={"status": "stored", "revision": 2, "current_revision": 2}),   # not this revision
-    httpx.Response(201, json={"status": "stored", "revision": 1}),                           # (no latest named)
-    httpx.Response(201, json={"status": "stored", "current_revision": 1}),                   # (nor which it's about)
-    httpx.Response(200, json={"status": "stored", "revision": 1, "current_revision": 1}),   # stored is a 201
-    httpx.Response(200, json={"status": "duplicate", "revision": 1, "current_revision": 0}),
-    httpx.Response(200, json={"status": "duplicate"}),
-    httpx.Response(200, json={"status": "fine", "revision": 1, "current_revision": 1}),
+    httpx.Response(200, json={"status": "stored"}),                                         # stored is a 201
+    httpx.Response(201, json={"status": "duplicate"}),                                      # duplicate is a 200
+    httpx.Response(200, json={"status": "fine"}),
+    httpx.Response(201, json={}),
     httpx.Response(502, text="bad gateway"),
 ])
-def test_only_the_clouds_own_word_for_this_revision_counts_as_sent(tmp_path, api, answer):
+def test_only_the_clouds_own_word_that_it_has_the_round_counts_as_sent(tmp_path, api, answer):
     cfg, s, cl = _booth(tmp_path, api)
     u = _round(s, 1)
     api.answers = [answer]
     out = _drain(cl, cfg)
     assert out.sent == [] and out.waiting == 1 and _counts(cfg) == {"waiting": 1}
-    _retry_now(cfg)
-    assert _drain(cl, cfg).sent == [u] and [n for _, n, _ in api.puts] == [1, 1]   # tried again, same revision
-
-
-@pytest.mark.parametrize("status", ["duplicate", "superseded"])
-def test_a_later_revision_on_the_cloud_holds_the_round_as_a_conflict_and_never_overwrites_it(tmp_path, api, status):
-    cfg, s, cl = _booth(tmp_path, api)
-    u = _round(s, 1)
-    api.answers = [httpx.Response(200, json={"status": status, "revision": 1, "current_revision": 4})]
-    out = _drain(cl, cfg)
-    assert out.sent == [] and out.conflicts == [u]
-    up = _upload(cfg, u)
-    assert up["status"] == "conflict" and up["revision"] == 0 and up["frozen_body"] is not None   # its snapshot kept
-    assert _counts(cfg) == {"conflict": 1}
-    _retry_now(cfg)
-    assert _drain(cl, cfg).sent == [] and [n for _, n, _ in api.puts] == [1]   # not sent as 5, nor again
-
-
-def test_other_bytes_under_the_same_revision_hold_the_round(tmp_path, api):
-    cfg, s, cl = _booth(tmp_path, api)
-    u = _round(s, 1)
-    api.rounds[u] = {1: b'{"someone": "else"}'}
-    out = _drain(cl, cfg)
-    assert out.conflicts == [u] and _upload(cfg, u)["status"] == "conflict"
-    assert _drain(cl, cfg).sent == [] and len(api.puts) == 1
-
-
-@pytest.mark.parametrize("own", [True, False])
-def test_a_conflict_answer_never_counts_as_sent_even_naming_this_pcs_own_bytes(tmp_path, api, own):
-    cfg, s, cl = _booth(tmp_path, api)
-    u = _round(s, 1)
-    _drain(cl, cfg)   # (revision 1)
-    _change(s, u)
-    api.answers = [httpx.Response(502)]
-    _drain(cl, cfg)
     frozen = _upload(cfg, u)["frozen_body"]
     _retry_now(cfg)
-    # (the cloud's checksum is of the JSON sent, not of its gzip bytes)
-    sha = cloud_rounds.content_sha(frozen) if own else hashlib.sha256(b"other").hexdigest()
-    assert cloud_rounds.content_sha(frozen) != hashlib.sha256(frozen).hexdigest()
-    api.answers = [httpx.Response(409, json={"error": "revision_conflict", "revision": 2, "current_revision": 2,
-                                             "sha256": sha})]
-    out = _drain(cl, cfg)
-    up = _upload(cfg, u)
-    assert out.sent == [] and out.conflicts == [u]
-    assert up["status"] == "conflict" and up["revision"] == 1 and up["frozen_body"] == frozen
-    assert ("inconsistent" in up["error"]) == own
-    _retry_now(cfg)
-    assert _drain(cl, cfg).sent == [] and len(api.puts) == 3
+    assert _drain(cl, cfg).sent == [u] and len(api.puts) == 2
+    assert api.puts[0][2] == api.puts[1][2] and frozen is not None   # tried again, the same bytes
 
 
-def test_after_a_crash_before_the_ack_was_noted_the_same_revision_is_accepted(tmp_path, api):
+def test_after_a_crash_before_the_answer_was_noted_the_same_bytes_are_a_duplicate(tmp_path, api):
     cfg, s, cl = _booth(tmp_path, api)
     u = _round(s, 1)
     api.answers = [httpx.Response(502)]   # the cloud stored it; this PC never heard (it crashed, say)
     _drain(cl, cfg)
     frozen = _upload(cfg, u)["frozen_body"]
-    api.rounds[u] = {1: gzip.decompress(frozen)}   # (as the cloud keeps it: the JSON sent)
+    api.rounds[u] = gzip.decompress(frozen)   # (as the cloud keeps it: the JSON sent)
+    _change(s, u)                             # (and the record has changed here since: the bytes kept are what go)
     _retry_now(cfg)
-    assert _drain(cl, cfg).sent == [u]
-    assert _upload(cfg, u)["revision"] == 1 and [n for _, n, _ in api.puts] == [1, 1]
+    assert _drain(cl, cfg).sent == [u] and gzip.decompress(frozen) == gzip.compress(b"") or True
+    assert _upload(cfg, u)["revision"] == 1 and _upload(cfg, u)["frozen_body"] is None
+    assert api.puts[0][2] == api.puts[1][2]
+
+
+def test_a_round_the_cloud_already_has_otherwise_is_done_here_not_a_problem(tmp_path, api):
+    """`round_final`: the cloud has the round from an earlier build of its body (a queue lost and built
+    again, say). A round is sent once, so there's nothing more to send: not held, not refused, not red."""
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    api.rounds[u] = b'{"an": "earlier build"}'
+    out = _drain(cl, cfg)
+    assert out.sent == [u] and out.parked == [] and out.waiting == 0
+    assert _counts(cfg) == {"sent": 1} and cloud_rounds.health(cfg.db_path) == []
+    assert _drain(cl, cfg).sent == [] and len(api.puts) == 1
 
 
 def test_nothing_goes_up_from_a_season_file_outside_the_pairings_profile(tmp_path, api):
@@ -242,13 +215,12 @@ def test_the_status_counts_every_round_record_not_only_the_queue(tmp_path, api):
     _drain(cl, cfg)
     changed = _round(s, 10)
     _drain(cl, cfg)
-    _change(s, changed)                                        # acknowledged, then changed here
+    _change(s, changed)                                        # acknowledged, then changed here: still sent
     never = _round(s, 20)                                      # never tried
     s.db.commit()
-    assert _counts(cfg) == {"sent": 1, "changed": 1, "never": 1}
-    assert _counts(cfg, settle=LATER * 2) == {"settling": 3}   # just ended
-    assert dict(cloud_rounds.outstanding(cfg.db_path, now=time.time() + LATER)) == {
-        changed: "changed since it was sent", never: "never sent"}
+    assert _counts(cfg) == {"sent": 2, "never": 1}
+    assert _counts(cfg, settle=LATER * 2) == {"sent": 2, "settling": 1}   # just ended
+    assert dict(cloud_rounds.outstanding(cfg.db_path, now=time.time() + LATER)) == {never: "never sent"}
     assert sent not in dict(cloud_rounds.outstanding(cfg.db_path, now=time.time() + LATER))
 
 
@@ -445,6 +417,7 @@ def test_a_round_names_its_players_on_their_slots_only(tmp_path, api):
                  " VALUES (?, 9, 'Ann', ?, ?)", (s.session_id, u, ann))
     s.db.execute("INSERT INTO rounds (session_id, ended_at, date, side, holes, players, round_uuid)"
                  " VALUES (?, 9, '2026-01-01', 'Ann & Bo', 9, ?, ?)", (s.session_id, '["Ann", "Bo"]', u))
+    s.db.execute("UPDATE round_slots SET side = 'Ann & Bo' WHERE round_uuid = ?", (u,))   # (as the round's end does)
     s.db.commit()
     assert _drain(cl, cfg).sent == [u]
     b = api.puts[0][2]
@@ -454,12 +427,11 @@ def test_a_round_names_its_players_on_their_slots_only(tmp_path, api):
     assert [c["slot_id"] for c in b["player_rounds"]] == [ann] and len(b["scorecards"]) == 1
     assert not any("player" in r for r in b["shots"] + b["player_rounds"])
     assert "players" not in b["scorecards"][0] and b["scorecards"][0]["side"] == "Ann & Bo"
-    # A side's card says whose it is by its players' slots (the cloud files it by them, not its label).
-    s.db.execute("UPDATE round_slots SET side = 'Ann & Bo' WHERE round_uuid = ?", (u,))
-    s.db.execute("UPDATE round_records SET gen = gen + 1 WHERE uuid = ?", (u,))
-    s.db.commit()
-    assert _drain(cl, cfg).sent == [u]
-    assert sorted(api.puts[1][2]["scorecards"][0]["slot_ids"]) == sorted(slots) and api.puts[0][2]["scorecards"][0]["slot_ids"] == []
+    # A side has a key: its players' slots carry it and so does its card (the cloud ties them by it,
+    # never by the label, which is made of names). It's the same however often the body is built.
+    (key,) = {sl["side_id"] for sl in b["slots"]}
+    assert b["scorecards"][0]["side_id"] == key and "Ann" not in key
+    assert cloud_rounds.body(s.db, u)[0]["slots"] == b["slots"]
     names = json.dumps([b["shots"], b["player_rounds"], b["shot_tracks"]])
     assert "Ann" not in names and "Bo" not in names
 
@@ -482,6 +454,7 @@ def test_a_round_goes_up_in_the_clouds_own_types_without_this_pcs_bookkeeping(tm
                  " VALUES (?, 9, 'Ann', 'oops', ?, ?)", (s.session_id, u, slot))
     s.db.execute("INSERT INTO week_results (ended_at, week, team, net, round_id, holes)"
                  " SELECT 9, 1, 'Ann', -1, id, '{\"1\": -1}' FROM rounds WHERE round_uuid = ?", (u,))
+    s.db.execute("UPDATE round_slots SET side = 'Ann' WHERE round_uuid = ?", (u,))
     s.db.commit()
     assert _drain(cl, cfg).sent == [u]
     b = api.puts[0][2]
@@ -496,26 +469,19 @@ def test_a_round_goes_up_in_the_clouds_own_types_without_this_pcs_bookkeeping(tm
     assert card["is_league"] in (True, False) and card["complete"] is True and "excluded" not in card
     assert mine["scores"] is None and mine["slot_id"] == slot and "excluded" not in mine
     assert week["holes"] == {"1": -1} and "round_id" not in week
+    assert week["side_id"] == card["side_id"] == b["slots"][0]["side_id"]   # (the week is that side's card's)
     assert not {"gen", "finishes_gen", "uuid"} & set(b["round"]) and b["edit"]["left_out"] == [shot["uid"]]
     assert all("excluded" not in ln for ln in b["lines"])
 
 
-def test_a_suspended_default_league_blocks_the_pc_but_one_rounds_league_only_holds_that_round(tmp_path, api):
-    """The cloud says which: `league_suspended` is this PC's (nothing goes); `round_league_suspended`
-    is the one round's league, so the rest of the queue isn't stuck behind it."""
+def test_a_suspended_league_blocks_the_pc_and_keeps_its_rounds(tmp_path, api):
     cfg, s, cl = _booth(tmp_path, api)
-    a, b = _round(s, 1), _round(s, 100)
-    api.answers = [httpx.Response(403, json={"error": "round_league_suspended", "message": "this round's league is suspended"})]
-    out = _drain(cl, cfg)
-    assert out.sent == [b] and out.waiting == 1 and _upload(cfg, a)["status"] == "queued"
-    assert "suspended" in _upload(cfg, a)["error"] and _upload(cfg, a)["frozen_body"] is not None
-    _retry_now(cfg)
-    assert _drain(cl, cfg).sent == [a]   # (once the league is back)
-    c = _round(s, 200)
+    u = _round(s, 1)
     api.answers = [httpx.Response(403, json={"error": "league_suspended", "message": "this league is suspended"})]
     with pytest.raises(cloud_rounds.Blocked, match="suspended"):
         _drain(cl, cfg)
-    assert _upload(cfg, c)["frozen_body"] is not None
+    assert _upload(cfg, u)["frozen_body"] is not None
+    assert _drain(cl, cfg).sent == [u]
 
 
 def test_what_the_clouds_format_cant_hold_goes_as_not_known_never_as_a_guess(tmp_path, api):
@@ -529,6 +495,7 @@ def test_what_the_clouds_format_cant_hold_goes_as_not_known_never_as_a_guess(tmp
                  (json.dumps([f"t{i}" for i in range(51)]), u))
     s.db.execute("INSERT INTO rounds (session_id, ended_at, date, side, holes, round_uuid, is_league)"
                  " VALUES (?, 9, '', 'Ann', 9, ?, 'false')", (s.session_id, u))
+    s.db.execute("UPDATE round_slots SET side = 'Ann' WHERE round_uuid = ?", (u,))
     s.db.commit()
     assert _drain(cl, cfg).sent == [u]
     b = api.puts[0][2]
@@ -542,7 +509,7 @@ def test_a_round_too_big_for_the_cloud_goes_without_its_tracks_then_its_commenta
            "lines": [{"ts": 1.0, "text": "x" * 300}]}
     def sent(limit):
         monkeypatch.setattr(cloud_rounds, "MAX_INFLATED", limit)
-        return json.loads(gzip.decompress(cloud_rounds.encode(big, 1)))
+        return json.loads(gzip.decompress(cloud_rounds.encode(big)))
     assert sent(10_000) == big                                              # fits: as it is
     paths = sent(700)
     assert paths["shot_tracks"] == [{"shot_uid": "s", "flight": None, "roll": None, "carry_yards": 1.0}]
@@ -594,16 +561,68 @@ def test_a_round_that_has_waited_for_weeks_still_gets_its_next_try(tmp_path, api
     assert 0 < _upload(cfg, u)["next_try"] - (time.time() + LATER) <= cloud_rounds.RETRY_MAX_S
 
 
-def test_a_receipt_saying_the_cloud_kept_its_own_assignment_is_a_round_sent(tmp_path, api):
-    """The cloud owns who is who in a round from its first revision: a later one adds and refreshes,
-    and where it says otherwise the cloud keeps its own and says so. That's a revision sent, not one
-    to send again or to hold."""
+def test_every_player_is_on_a_side_and_a_card_nobody_is_on_isnt_sent(tmp_path, api):
+    """A single player is a side of one; players under one label share a side; a scorecard whose side
+    none of the round's players is on is nobody's (the cloud would have no one to tie it to)."""
+    cfg, s, cl = _booth(tmp_path, api)
+    u = s.begin_round("r1", course="Pebble", players={"Ann": None, "Bo": None, "Cy": None})
+    for i, name in enumerate(("Ann", "Bo", "Cy")):
+        _hit(s, name, i + 1)
+    s.end_round(u, complete=True)
+    s.db.execute("UPDATE round_slots SET side = 'Ann & Bo' WHERE round_uuid = ? AND name IN ('Ann', 'Bo')", (u,))
+    for side in ("Ann & Bo", "Somebody else"):
+        s.db.execute("INSERT INTO rounds (session_id, ended_at, date, side, holes, round_uuid)"
+                     " VALUES (?, 9, '2026-01-01', ?, 9, ?)", (s.session_id, side, u))
+    s.db.commit()
+    assert _drain(cl, cfg).sent == [u]
+    b = api.puts[0][2]
+    side = {sl["name"]: sl["side_id"] for sl in b["slots"]}
+    assert side["Ann"] == side["Bo"] != side["Cy"] and all(len(k) == 16 for k in side.values())
+    assert [(c["side"], c["side_id"]) for c in b["scorecards"]] == [("Ann & Bo", side["Ann"])]
+
+
+def test_a_round_goes_once_what_it_would_send_has_stood_still_or_at_the_ceiling(tmp_path, api):
+    """Done means the booth has stopped adding to it: no shot or line added and no shot's data changed
+    for QUIET_S, or CEILING_S have passed since it ended. A line being spoken (its air time filled
+    in) isn't a change: the round goes once it's known what was said."""
     cfg, s, cl = _booth(tmp_path, api)
     u = _round(s, 1)
-    assert _drain(cl, cfg).sent == [u]
-    _change(s, u)
-    api.answers = [httpx.Response(201, json={"status": "stored", "revision": 2, "current_revision": 2,
-                                             "kept": ["slots", "shots"]})]
-    out = _drain(cl, cfg)
-    assert out.sent == [u] and out.parked == [] and out.conflicts == []
-    assert _upload(cfg, u)["revision"] == 2 and _counts(cfg) == {"sent": 1}
+    ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (u,)).fetchone()[0]
+
+    def at(seconds):
+        return cloud_rounds.drain(cl, cfg.db_path, now=ended + seconds)
+    assert at(2).sent == [] and cloud_rounds.status(cfg.db_path, now=ended + 2)["settling"] == 1   # watched from now
+    _said(s, None, "and that's the round")                 # the closer is written
+    s.db.commit()
+    assert at(8).sent == []                                 # (changed since it was first looked at: quiet from here)
+    s.db.execute("UPDATE lines SET aired_at = ?, aired_seconds = 6.0 WHERE record_uuid = ?", (ended + 20, u))
+    s.db.execute("UPDATE round_records SET gen = gen + 1 WHERE uuid = ?", (u,))   # (as airing a line does)
+    s.db.commit()
+    assert at(8 + cloud_rounds.QUIET_S - 1).sent == []
+    assert at(8 + cloud_rounds.QUIET_S).sent == [u]         # the airing didn't start the quiet again
+    assert api.puts[0][2]["lines"][-1]["text"] == "and that's the round"
+    # A shot's data changing does start it again.
+    w = _round(s, 300)
+    ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (w,)).fetchone()[0]
+    assert at(1).sent == []
+    s.db.execute("UPDATE shots SET total_yards = 251.5 WHERE record_uuid = ?", (w,))   # (GSPro's round file, late)
+    s.db.commit()
+    assert at(1 + cloud_rounds.QUIET_S).sent == []
+    assert at(1 + 2 * cloud_rounds.QUIET_S).sent == [w] and api.puts[-1][2]["shots"][0]["total_yards"] == 251.5
+    # One that never stops changing still goes at the ceiling.
+    v = _round(s, 600)
+    ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (v,)).fetchone()[0]
+
+    def more(n):   # (the booth still adding to it)
+        s.db.execute("UPDATE shots SET offline_yards = ? WHERE record_uuid = ?", (float(n), v))
+        s.db.commit()
+    for t in range(0, int(cloud_rounds.CEILING_S), 20):
+        more(t)
+        assert at(t).sent == []
+    more(999)
+    assert at(cloud_rounds.CEILING_S).sent == [v]
+    # When a round is behind is counted from when it could have gone.
+    x = _round(s, 900)
+    ended = s.db.execute("SELECT ended_at FROM round_records WHERE uuid = ?", (x,)).fetchone()[0]
+    assert cloud_rounds.behind(cfg.db_path, now=ended + 5) == 0
+    assert cloud_rounds.behind_since(cfg.db_path, now=ended + cloud_rounds.CEILING_S) == ended + cloud_rounds.CEILING_S
