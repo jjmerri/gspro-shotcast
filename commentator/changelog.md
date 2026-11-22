@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.158
+
+### Stats page
+- A team listed twice on a week's leaderboard (a setup mistake) now counts once, on its best posted score, so it can't earn points twice or push other teams down.
+
 ## 0.1.157
 
 ### Stats page
