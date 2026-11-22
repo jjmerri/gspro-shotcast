@@ -693,3 +693,17 @@ def test_a_change_seen_late_in_a_long_batch_starts_its_quiet_then(tmp_path, api,
     assert since == pytest.approx(start + 40)                                        # when it was seen, not the batch's start
     assert cloud_rounds.drain(cl, cfg.db_path, now=start + 40 + cloud_rounds.QUIET_S - 1).sent == []
     assert cloud_rounds.drain(cl, cfg.db_path, now=start + 40 + cloud_rounds.QUIET_S).sent == [b]
+
+
+@pytest.mark.parametrize("answer", [{"error": "round_final"},
+                                    {"error": "round_final", "action": "retry", "sha256": "0" * 64},
+                                    {"error": "round_final", "action": "fix", "sha256": "short"}])
+def test_only_the_apis_whole_word_that_a_round_is_final_ends_it(tmp_path, api, answer):
+    """Half an answer isn't the cloud saying it has the round: the bytes are kept and sent again."""
+    cfg, s, cl = _booth(tmp_path, api)
+    u = _round(s, 1)
+    api.answers = [httpx.Response(409, json=answer)]
+    out = _drain(cl, cfg)
+    assert out.sent == [] and out.waiting == 1 and _upload(cfg, u)["frozen_body"] is not None
+    _retry_now(cfg)
+    assert _drain(cl, cfg).sent == [u] and u in api.rounds
