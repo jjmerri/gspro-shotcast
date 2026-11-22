@@ -508,7 +508,7 @@ class Engine(HudWatchMixin,
         self._skip_opening_preshot = False
         self.history = History.load(cfg.history_file)
         # The league's week results and standings from Squabbit, refreshed with the handicaps at each
-        # round start. None until a fetch works; the history file's standings stand in.
+        # round start and once a finished round is all posted (_reread_board). None until a fetch works; the history file's standings stand in.
         self.board: Board | None = None
         self._league_page_on = False   # keeping the stats page's league.json (_publish_league_page)
         self._league_body: bytes | None = None   # the newest league.json to put up
@@ -518,6 +518,7 @@ class Engine(HudWatchMixin,
         self._recap_tried: tuple | None = None   # the last recap built or tried, (key, digest)
         self._recap_holes: dict[tuple[int, str], tuple[int, dict]] = {}   # (week, team) -> (net, Squabbit's holes)
         self._board_task: asyncio.Task | None = None
+        self._board_again = False   # read Squabbit's leaderboards again once the read out now is done
         # Posting a league round to Squabbit as it's played (squabbit_live.py), once the players say yes:
         # the booth's record of what it wrote (made on the first league round), and this round's state
         # {"round", "status": finding/asking/on/off, "targets", "question", "dirty", "task", "last"}.

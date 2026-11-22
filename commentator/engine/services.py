@@ -169,8 +169,8 @@ class ServicesMixin:
     def _publish_league_page(self) -> None:
         """Put the stats page's Home tab league cards (league.json: every due date's weeks with their
         closest-to-the-pin cards, the season standings) up. Written when they can change: after the
-        round-start Squabbit read, when a league round finishes, and at midnight (a passed deadline
-        makes a week final). Before a Squabbit read this run, the last one up stands. One upload at a
+        round-start Squabbit read and the one after a finished round's posted there, when a league
+        round finishes, and at midnight (a passed deadline makes a week final). Before a Squabbit read this run, the last one up stands. One upload at a
         time, the newest last."""
         board = self._league_board() if self._league_page_on else None
         if board is None:

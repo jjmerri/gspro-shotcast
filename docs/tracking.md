@@ -631,9 +631,10 @@ finished on the sim for a team that hasn't posted it on Squabbit yet, marked * a
 booth keeps each team's finished week net, scored the way Squabbit does, in `week_results`); Squabbit's
 number replaces it once posted, and standings that lean on one say so. With Squabbit on and the
 league's `squabbit_invite` set, the booth writes `league.json` beside `schedule.json` when it can
-change: after the Squabbit read at a round's start, when a league round finishes, and just after midnight
-(from the board already read, so a week whose deadline passed shows final). Squabbit isn't polled in
-between. Without a Squabbit league the booth removes it, and Home shows no league.
+change: after the Squabbit read at a round's start, when a league round finishes, after reading
+Squabbit again once the booth's finished all of a round's posting to Squabbit (so the team's * gives way to
+Squabbit's total), and just after midnight (from the board already read, so a week whose deadline passed
+shows final). Squabbit isn't polled in between. Without a Squabbit league the booth removes it, and Home shows no league.
 
 #### Round videos on the PC
 

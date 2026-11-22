@@ -412,11 +412,17 @@ class SquabbitMixin:
                             "posting it", t.team, why)
                 s["targets"] = [x for x in s["targets"] if x is not t]
                 s["last"] = None
+                s["dirty"] = True   # round again for the cards left, so a finished round's still all in
             if not s["targets"]:
                 s["status"] = "off"
                 if s["ctp_q"] is not None:
                     s["ctp_q"][1].close()
                     s["ctp_q"] = None
+        # The finished round is all in on Squabbit: read the leaderboards again, so the stats page's
+        # league cards have Squabbit's total for the team instead of the sim's count. Once per change.
+        if r.ended and s["last"] is not None and s.get("board_read") != s["last"]:
+            s["board_read"] = s["last"]
+            self._bg(self._reread_board_later())
 
     def _squabbit_ask_ctp(self, s: dict, t, key: str, m) -> None:
         """Queues an on-screen check of a mark the booth isn't sure of: one box at a time."""

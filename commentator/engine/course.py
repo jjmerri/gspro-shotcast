@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from .common import BOARD_WAIT_SECONDS, LAYOUT_WAIT_SECONDS, _own_handicaps, _own_handicaps_from, log
+from .common import BOARD_REREAD_SECONDS, BOARD_WAIT_SECONDS, LAYOUT_WAIT_SECONDS, _own_handicaps, _own_handicaps_from, log
 from ..board import Board
 
 
@@ -151,8 +151,7 @@ class CourseMixin:
             return
         self._squabbit_kick()
         # The week's leaderboards load alongside, in their own task: a slow read never costs the handicaps.
-        if self._board_task is None or self._board_task.done():
-            self._board_task = asyncio.create_task(self._refresh_board())
+        self._reread_board()
         ids = [i for p in players if (i := self.league.player_info.get(p, {}).get("squabbit_id"))]
         if ids:
             try:
@@ -172,6 +171,22 @@ class CourseMixin:
         # handicaps); after that they fill in for the rest of the round.
         await asyncio.wait({self._board_task}, timeout=BOARD_WAIT_SECONDS)
 
+    def _reread_board(self) -> None:
+        """Read Squabbit's leaderboards again (_refresh_board). One read at a time: a call while one's
+        out reads again after it, since that one may have started before what's new went in."""
+        self._board_again = True
+        if self._board_task is None or self._board_task.done():
+            self._board_task = asyncio.create_task(self._board_reads())
+
+    async def _board_reads(self) -> None:
+        while self._board_again:
+            self._board_again = False
+            await self._refresh_board()
+
+    async def _reread_board_later(self) -> None:
+        await asyncio.sleep(BOARD_REREAD_SECONDS)
+        self._reread_board()
+
     async def _refresh_board(self) -> None:
         """Read every league week's Squabbit leaderboard into self.board. Best-effort: on failure the
         last board read (or the history file's standings) stands."""
@@ -184,7 +199,15 @@ class CourseMixin:
                     return [(t, client.leaderboard(t["_id"])) for t in client.tournaments(league["_id"])] \
                         if league else None
 
-            items = await asyncio.wait_for(asyncio.to_thread(fetch), timeout=self.cfg.squabbit.timeout_seconds)
+            # A read that's taken too long is dropped, but this waits out its thread (it can't be stopped)
+            # so a read queued behind it (_board_reads) never runs alongside it.
+            work = asyncio.ensure_future(asyncio.to_thread(fetch))
+            try:
+                items = await asyncio.wait_for(asyncio.shield(work), timeout=self.cfg.squabbit.timeout_seconds)
+            except asyncio.TimeoutError:
+                await asyncio.wait({work})
+                work.cancelled() or work.exception()   # its own failure, if any, is the timeout's now
+                raise
             if items is None:
                 return
             season = self.history.current() or {}

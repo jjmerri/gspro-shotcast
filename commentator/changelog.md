@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.160
+
+### Stats page
+- After the booth posts a finished round to Squabbit, the league cards pick up Squabbit's total within about a minute, so the team's * no longer stays until the next round starts.
+
 ## 0.1.159
 
 ### Stats page

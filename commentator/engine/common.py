@@ -401,6 +401,9 @@ def _names_other_scenery(text: str, allowed_kind: str | None) -> bool:
 
 # How much longer than the handicap fetch the league opener waits for Squabbit's leaderboards.
 BOARD_WAIT_SECONDS = 3.0
+# How long after a finished round's last post to Squabbit the booth reads the leaderboards again, giving
+# Squabbit time to total the team's round.
+BOARD_REREAD_SECONDS = 30.0
 
 
 _RATE_WORDS = ((0.0, "never"), (1 / 10, "one time in ten"), (1 / 5, "one time in five"),
