@@ -540,7 +540,10 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, now: float, out: Drained,
         _sent(db, uuid, out)
         return True
     error = (answer or {}).get("error")
-    if r.status_code == 409 and error == "round_final":
+    final = answer or {}
+    if r.status_code == 409 and error == "round_final" and final.get("action") == "fix" \
+            and isinstance(final.get("sha256"), str) and len(final["sha256"]) == 64:
+        # (the API's whole word for it: its code, that it's for good, and the checksum of what it has)
         # The cloud has this round already, as it was first sent, and a round is sent once: there's
         # nothing more to send for it. (What's here differs from what went: the round was changed on
         # this PC between two builds of its body. It stays as it is in the cloud, where it's changed.)
