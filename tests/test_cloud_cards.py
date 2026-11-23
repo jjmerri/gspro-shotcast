@@ -243,6 +243,117 @@ def test_a_cloud_that_doesnt_answer_about_claims_never_keeps_cards_up(tmp_path, 
     assert shown.down.is_set()
 
 
+def test_the_cards_come_down_for_the_next_group_while_the_cloud_is_still_being_asked(tmp_path, api, monkeypatch):
+    """With the real loops: the cloud's answer about claims is held, the next round starts, and the
+    cards are down before that answer ever comes."""
+    import threading
+
+    monkeypatch.setattr(cloud_cards, "LOOK_S", 0.01)
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+    asking, release = threading.Event(), threading.Event()
+
+    def held(now):
+        if cards.shown is not None:
+            asking.set()
+            release.wait(10)
+
+    cards.ask = held
+
+    async def go():
+        task = asyncio.create_task(cards.run())
+        await asyncio.sleep(0.1)
+        _end(s, _play(s, "r1"))
+        for _ in range(500):
+            if windows and asking.is_set():
+                break
+            await asyncio.sleep(0.01)
+        _play(s, "r2", start=50)
+        for _ in range(500):
+            if windows[0].down.is_set():
+                break
+            await asyncio.sleep(0.01)
+        down = windows[0].down.is_set() and not release.is_set()
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return down
+
+    assert asyncio.run(go())
+
+
+def test_someone_playing_before_the_cloud_answers_gets_no_cards_of_the_last_group(tmp_path, api):
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+    _step(cards, 0)
+    _end(s, _play(s, "r1"))
+    me = cards._wanted
+
+    def slow(now):   # (the next group starts hitting while the cloud is being asked)
+        _hit(s, "Zed", 90)
+        s.db.commit()
+        return me(now)
+
+    cards._wanted = slow
+    _step(cards, 2)
+    assert windows == [] and cards.pending is None
+
+
+def test_a_yes_is_kept_for_the_round_and_an_answer_that_doesnt_say_is_asked_again(tmp_path, api, monkeypatch):
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+    _step(cards, 0)
+    u = _end(s, _play(s, "r1")) or "r1"
+    api.claim_cards = "yes"          # (not a yes or a no)
+    _step(cards, 2)
+    assert windows == [] and cards.pending == (u, 2)
+    api.claim_cards = True
+    real = cloud_cards.cards_for
+    monkeypatch.setattr(cloud_cards, "cards_for", lambda *a: (_ for _ in ()).throw(RuntimeError("database is locked")))
+    with pytest.raises(RuntimeError):
+        cards.look(2 + cloud_cards.ASK_S)
+    monkeypatch.setattr(cloud_cards, "cards_for", real)
+    api.calls.clear()
+    _step(cards, 4 + cloud_cards.ASK_S)
+    assert [w.uuid for w in windows] == [u]
+    assert not [c for c in api.calls if c[2] == "/api/devices/me"]   # the yes wasn't asked for twice
+
+
+def test_a_round_found_over_after_the_file_went_unread_gets_no_cards(tmp_path, api):
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+    _step(cards, 0)
+    _end(s, _play(s, "r1"))
+    _step(cards, cloud_cards.STALE_S + 1)   # (no look could read it in between: it ended nobody knows when)
+    assert windows == [] and cards.pending is None
+
+
+def test_the_claims_asking_ending_takes_the_cards_down_with_it(tmp_path, api, monkeypatch):
+    monkeypatch.setattr(cloud_cards, "LOOK_S", 0.01)
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+
+    def gone(now):
+        if cards.shown is not None:
+            raise cloud.PairingChanged("this PC's Shotcast Cloud pairing changed")
+
+    cards.ask = gone
+
+    async def go():
+        task = asyncio.create_task(cards.run())
+        await asyncio.sleep(0.1)
+        _end(s, _play(s, "r1"))
+        await asyncio.wait_for(task, 10)   # (it ends by itself)
+
+    asyncio.run(go())
+    assert len(windows) == 1 and windows[0].down.is_set()
+
+
 def test_a_booth_that_is_stopping_puts_no_cards_up(tmp_path, api):
     cfg = paired_cfg(tmp_path, api)
     s = Store(cfg.db_path)
@@ -371,6 +482,8 @@ def test_what_the_cloud_says_about_claims_is_only_taken_as_a_tick_and_a_short_na
     cloud_cards.apply(shown, [{"slot_id": "a", "claimed": "yes", "name": "X"},
                               {"slot_id": "b", "claimed": True, "name": "N" * 500}])
     assert [(c.claimed, c.by) for c in shown.cards] == [(False, None), (True, "N" * 40)]
+    cloud_cards.apply(shown, [{"slot_id": "b", "claimed": True, "name": " Mi\ud800ke\x00 R.\n"}])
+    assert shown.cards[1].by == "Mike R."   # (only what can be drawn)
     cloud_cards.apply(shown, [{"slot_id": "b", "claimed": True, "name": 7}])
     assert (shown.cards[1].claimed, shown.cards[1].by) == (True, None)
 

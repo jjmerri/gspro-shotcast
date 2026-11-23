@@ -40,6 +40,7 @@ POLL_S = 5.0        # how often the cloud is asked who has claimed, while cards 
 ASK_S = 60.0        # how long till the cloud is asked again whether this bay shows cards, after no answer
 SHOW_S = 600.0      # the longest the cards stay up
 CLAIMED_S = 15.0    # how long they stay once every player has claimed
+STALE_S = 30.0      # a round found over after the season file went unread this long gets no cards
 MAX_CARDS = 8       # (more players than fit on a screen: the first ones by seat)
 
 
@@ -113,7 +114,8 @@ def apply(shown: Shown, claims: Any) -> None:
                 continue
             card.claimed = c.get("claimed") is True
             name = c.get("name")
-            card.by = name.strip()[:40] if card.claimed and isinstance(name, str) and name.strip() else None
+            name = "".join(ch for ch in name if ch.isprintable()).strip()[:40] if isinstance(name, str) else ""
+            card.by = name if card.claimed and name else None
 
 
 class Cards:
@@ -132,25 +134,26 @@ class Cards:
         self.done: set[str] | None = None         # the rounds that were over at the last look (None: not looked yet)
         self.live: set[str] = set()               # and what was in progress
         self.pending: tuple[str, float] | None = None   # a round that has just ended, and when: its cards aren't up yet
+        self.wanted_for: str | None = None        # the pending round the cloud has said yes for
+        self.looked_at: float | None = None       # the last look that could read the season file
         self.shown: Shown | None = None
         self.lock = threading.Lock()              # guards `shown` being put up and taken down
         self.stopped = threading.Event()          # the booth is stopping: nothing more goes up
 
     def _wanted(self, now: float) -> bool | None:
         """Whether the cloud says this bay shows cards, asked as each round ends (a tenant can become
-        a venue while the booth runs). None: no answer (asked again after ASK_S)."""
+        a venue while the booth runs). None: no answer, or not one that says (asked again after ASK_S)."""
         if self.asked_at is not None and now - self.asked_at < ASK_S:
             return None
         try:
             got = self.cloud_of().me().get("claim_cards")
-        except cloud.PairingChanged:
+        except (cloud.NotPaired, cloud.PairingChanged):
             raise
         except Exception:   # noqa: BLE001 - the network, a refresh refused: asked again later
             log.debug("Shotcast Cloud: couldn't ask whether this bay shows claim cards", exc_info=True)
-            self.asked_at = now
-            return None
-        self.asked_at = None
-        return got is True
+            got = None
+        self.asked_at = None if isinstance(got, bool) else now
+        return got if isinstance(got, bool) else None
 
     def look(self, now: float) -> None:
         """One look at the season file: what has ended, what has started, whether the cards up now
@@ -174,14 +177,17 @@ class Cards:
             self.take_down()   # (what the bay is doing can't be told: no codes stay up meanwhile)
             raise
         started = live - self.live if self.done is not None else set()
-        self.done, self.live = done, live
+        # (A round that ended while the file couldn't be read ended nobody knows when: no cards.)
+        if newest and (self.looked_at is None or now - self.looked_at > STALE_S):
+            newest = None
+        self.done, self.live, self.looked_at = done, live, now
         shown = self.shown
         if shown is not None and (started or newest or playing or self._finished(shown, now)):
             self.take_down()
         if started or playing:
             self.pending = None            # someone is playing again: the round before gets no cards now
         elif newest:
-            self.pending = (newest, now)
+            self.pending, self.wanted_for = (newest, now), None
         if self.pending is not None:
             self._put_up(now)
 
@@ -194,14 +200,24 @@ class Cards:
         if now - since >= SHOW_S:
             self.pending = None
             return
-        wanted = self._wanted(now)
-        if wanted is None:
-            return
-        if not wanted:
-            self.pending = None
-            return
+        if self.wanted_for != uuid:
+            wanted = self._wanted(now)   # (may wait on the network: everything after is checked afresh)
+            if wanted is None:
+                return
+            if not wanted:
+                self.pending = None
+                return
+            self.wanted_for = uuid
         db = cloud_rounds.connect(self.db_path)
         try:
+            # On the connection the codes are read from, now: still this pairing's file, the round
+            # still over, and nobody playing since the look.
+            if self.key is not None and cloud_rounds.bound(db) != self.key:
+                raise cloud_rounds.NotThisPairing(f"{self.db_path} isn't bound to this pairing; no claim cards")
+            done, live, _ = state(db)
+            if uuid not in done or live - self.live:
+                self.pending = None
+                return
             cards = cards_for(db, uuid, self.api)
         finally:
             db.close()
@@ -230,7 +246,7 @@ class Cards:
             if r.status_code != 200:   # (404: the round hasn't been sent yet)
                 return
             apply(shown, r.json())
-        except cloud.PairingChanged:
+        except (cloud.NotPaired, cloud.PairingChanged):
             raise
         except Exception:   # noqa: BLE001 - the network, an answer that isn't JSON: asked again
             log.debug("Shotcast Cloud: couldn't ask who has claimed round %s", shown.uuid, exc_info=True)
@@ -259,14 +275,17 @@ class Cards:
             await asyncio.sleep(seconds)
 
     async def run(self) -> None:
-        asking = asyncio.create_task(self._every(1.0, self.ask), name="cloud-cards-claims")
+        loops = [asyncio.create_task(self._every(LOOK_S, self.look), name="cloud-cards-look"),
+                 asyncio.create_task(self._every(1.0, self.ask), name="cloud-cards-claims")]
         try:
-            await self._every(LOOK_S, self.look)
+            # (Either ends only when the pairing isn't the booth's any more: then both do.)
+            await asyncio.wait(loops, return_when=asyncio.FIRST_COMPLETED)
         finally:
             self.stopped.set()   # (a look still in its thread puts nothing up after this)
             self.take_down()
-            asking.cancel()
-            await asyncio.gather(asking, return_exceptions=True)
+            for t in loops:
+                t.cancel()
+            await asyncio.gather(*loops, return_exceptions=True)
 
 
 # ---- the window
@@ -336,6 +355,10 @@ class Window:
         row = tk.Frame(frame, bg=PANEL)
         row.pack()
         drawn: list[tuple[Any, Any, tuple | None]] = []   # (canvas, the line under it, what it shows)
+
+        def close() -> None:
+            self.shown.closed.set()
+            root.quit()
         for card in cards:
             cell = tk.Frame(row, bg=PANEL)
             cell.pack(side="left", padx=unit)
@@ -348,7 +371,7 @@ class Window:
             drawn.append((canvas, under, None))
         tk.Button(frame, text="Close", bg=NO_GREY, fg=ON_TEXT, activebackground=NO_GREY, activeforeground=ON_TEXT,
                   relief="flat", bd=0, padx=unit * 2, pady=unit // 3, cursor="hand2",
-                  font=("Segoe UI", -unit, "bold"), command=self.shown.closed.set).pack(pady=(unit // 2, 0))
+                  font=("Segoe UI", -unit, "bold"), command=close).pack(pady=(unit // 2, 0))
 
         hidden = False   # (set below, before any code is drawn: whether the window is out of screen capture)
 
@@ -400,41 +423,43 @@ class Window:
         for i, card in enumerate(cards):
             draw(i, card)
         ticks = 0
-        born = _monotonic()
+        until = self.shown.since + SHOW_S + 2 * LOOK_S   # (the booth's own clock: Shown.since is on it)
 
         def tick() -> None:
             nonlocal ticks
-            # (Its own deadline too: it comes down even if the booth's loop has stopped looking.)
-            if self.shown.down.is_set() or self.shown.closed.is_set() or _monotonic() - born >= SHOW_S + 30:
+            try:
+                # (Its own deadline too: it comes down even if the booth's loop has stopped looking.)
+                if self.shown.down.is_set() or self.shown.closed.is_set() or _monotonic() >= until:
+                    root.quit()
+                    return
+                for i, card in enumerate(self.shown.snapshot()):
+                    draw(i, card)
+                ticks += 1
+                if ticks % 2 == 0:   # GSPro taking focus can push it above a plain topmost window
+                    if sys.platform == "win32":
+                        _topmost(root)
+                    else:
+                        root.attributes("-topmost", True)
+                        root.lift()
+                root.after(REDRAW_MS, tick)
+            except Exception:
+                # (Tk goes on after an error in a callback: the codes must not stay up with nothing redrawing.)
+                log.exception("Claim cards window failed; taken down")
                 root.quit()
-                return
-            for i, card in enumerate(self.shown.snapshot()):
-                draw(i, card)
-            ticks += 1
-            if ticks % 2 == 0:   # GSPro taking focus can push it above a plain topmost window
-                if sys.platform == "win32":
-                    _topmost(root)
-                else:
-                    root.attributes("-topmost", True)
-                    root.lift()
-            root.after(REDRAW_MS, tick)
 
         root.after(0, tick)   # (from inside the loop: a quit before the loop runs would be lost)
         root.mainloop()
 
 
 def _out_of_capture(root: Any) -> bool:
-    """Whether Windows is keeping this window out of screen capture (overlay._hide_from_capture asked
-    it to; Windows before 10 2004 can't)."""
+    """Ask Windows to keep this window out of screen capture, and whether it said it would (as
+    overlay._hide_from_capture asks, which doesn't say; Windows before 10 2004 can't)."""
     import ctypes
-    from ctypes import wintypes
 
     from .overlay import _hwnd
 
-    got = wintypes.DWORD(0)
     try:
-        ok = ctypes.windll.user32.GetWindowDisplayAffinity(_hwnd(root), ctypes.byref(got))
+        return bool(ctypes.windll.user32.SetWindowDisplayAffinity(_hwnd(root), 0x11))   # WDA_EXCLUDEFROMCAPTURE
     except Exception:
-        log.debug("Couldn't read the claim cards window's display affinity", exc_info=True)
+        log.debug("Couldn't keep the claim cards window out of screen capture", exc_info=True)
         return False
-    return bool(ok) and got.value == 0x11   # WDA_EXCLUDEFROMCAPTURE
