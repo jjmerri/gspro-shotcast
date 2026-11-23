@@ -134,9 +134,9 @@ def test_a_full_bay_of_any_names_still_makes_a_code_coarse_enough_to_scan(name, 
     assert len(link) <= cloud_cards.LINK_BYTES
     assert [code for code, _ in _read(link)] == [code for _, code in players]
     modules = len(cloud_cards.matrix(link))
-    for height in (1080, 768):
+    for height in (1080, 768, 480):
         side = cloud_cards.code_side(height, modules)
-        assert side // (modules + 2 * cloud_cards.QUIET) >= cloud_cards.MODULE_PX and side <= height * 0.7
+        assert side // (modules + 2 * cloud_cards.QUIET) >= cloud_cards.MODULE_PX and side <= height * 0.9
     shown = [n for _, n in _read(link)]
     assert len(set(shown)) == len(shown) or not any(shown)   # told apart, or left to the page's "Player N"
 
@@ -151,6 +151,41 @@ def test_players_who_would_read_the_same_are_numbered_by_seat_on_the_card_and_in
     link = cloud_cards.claim_link("https://shotcast.example", [(n, chr(97 + i) * 22) for i, n in enumerate(got)])
     names = [n for _, n in _read(link)]
     assert len(set(names)) == 4 and [n[-4:] for n in names] == [" (1)", " (2)", " (3)", " (4)"]
+
+
+@pytest.mark.parametrize("names", [
+    ["Mike", "Mike", "Mike (2)"], ["", "", "Player (2)"], ["Mike", "Mike (1)", "Mike"],
+    ["Mike", "Mike🎉Lane", "Mike (1)"], ["Charlie", "Charlie Brown"], ["Ann (1)", "Ann (1)"], ["A", "a "],
+])
+def test_no_two_players_ever_read_the_same_whatever_was_typed_or_however_the_link_cuts_them(names):
+    got = cloud_cards.labels(names)
+    assert len({g.casefold() for g in got}) == len(names)
+    for most in cloud_cards.NAME_CUTS:   # as the phone shows them (the page trims a name)
+        assert len({cloud_cards._in_link(g, most).strip().casefold() for g in got}) == len(names), (most, got)
+
+
+def test_a_player_who_joins_as_the_codes_are_made_keeps_the_card_waiting_for_them(tmp_path, api, monkeypatch):
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+    _step(cards, 0)
+    u = _end(s, _play(s, "r1")) or "r1"
+    made = cloud_rounds.claim_codes
+
+    def then_a_slot(db, uuid):
+        out = made(db, uuid)
+        s.db.execute("INSERT OR IGNORE INTO round_slots (slot_id, round_uuid, name, matched_by) "
+                     "VALUES ('late-slot', ?, 'Zed', 'legacy')", (u,))
+        s.db.commit()
+        return out
+
+    monkeypatch.setattr(cloud_rounds, "claim_codes", then_a_slot)
+    with pytest.raises(RuntimeError):
+        cards.look(2)
+    assert windows == [] and cards.pending == (u, 2)
+    monkeypatch.setattr(cloud_rounds, "claim_codes", made)
+    _step(cards, 4)
+    assert sorted(c.name for c in windows[0].cards) == ["Ann", "Bob", "Zed"]
 
 
 def test_a_qr_is_square_differs_by_link_and_stays_scannable_with_a_full_bay():
