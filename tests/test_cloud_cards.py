@@ -121,27 +121,36 @@ def test_the_one_link_carries_every_players_name_and_code_after_its_hash():
     assert name == "N" * cloud_cards.NAME_BYTES   # only enough of a name to pick it by
 
 
-@pytest.mark.parametrize("name", ["Александр Иванович", "山田太郎山田太郎山田太郎山田太郎", "😀" * 16, "A" * 40, ""])
-def test_a_full_bay_of_any_names_still_makes_a_link_short_enough_to_scan(name):
+@pytest.mark.parametrize("api", ["https://app.shotcast.example", "https://" + "venue-bookings." * 3 + "shotcast.example"])
+@pytest.mark.parametrize("name", ["Александр Иванович", "山田太郎山田太郎山田太郎山田太郎", "😀" * 16, "A" * 40, "",
+                                  "Christopher Alexander Wilson"])
+def test_a_full_bay_of_any_names_still_makes_a_code_coarse_enough_to_scan(name, api):
     """Names are measured as the link writes them (an accented letter is six characters there, an
-    emoji twelve), and cut further when there are many: every player's code is always in it."""
+    emoji twelve), and cut further when the link would be too long (a long site address, many
+    players): every player's code is always in it, and the code it makes is drawn at four pixels a
+    module or more on a 1080p screen, and on a small one."""
     players = [(label, chr(65 + i) * 22) for i, label in enumerate(cloud_cards.labels([name] * cloud_cards.MAX_PLAYERS))]
-    link = cloud_cards.claim_link("https://app.shotcast.example", players)
+    link = cloud_cards.claim_link(api, players)
     assert len(link) <= cloud_cards.LINK_BYTES
     assert [code for code, _ in _read(link)] == [code for _, code in players]
-    assert len(cloud_cards.matrix(link)) <= 97            # (four pixels a module on a 1080p screen)
+    modules = len(cloud_cards.matrix(link))
+    for height in (1080, 768):
+        side = cloud_cards.code_side(height, modules)
+        assert side // (modules + 2 * cloud_cards.QUIET) >= cloud_cards.MODULE_PX and side <= height * 0.7
     shown = [n for _, n in _read(link)]
     assert len(set(shown)) == len(shown) or not any(shown)   # told apart, or left to the page's "Player N"
 
 
-def test_players_who_would_read_the_same_are_numbered_on_the_card_and_in_the_link():
+def test_players_who_would_read_the_same_are_numbered_by_seat_on_the_card_and_in_the_link():
     assert cloud_cards.labels(["Ann", "Bob"]) == ["Ann", "Bob"]
-    assert cloud_cards.labels(["Mike", "", "Mike", " "]) == ["Mike (1)", "Player (1)", "Mike (2)", "Player (2)"]
-    a, b = "Alexander Christopher Reed", "Alexander Christopher Ross"   # alike in what fits in the link
-    assert cloud_cards.labels([a, b]) == [f"{a} (1)", f"{b} (2)"]
-    link = cloud_cards.claim_link("https://shotcast.example", [(f"{a} (1)", "a" * 22), (f"{b} (2)", "b" * 22)])
-    first, second = (n for _, n in _read(link))
-    assert first != second and first.endswith(" (1)") and second.endswith(" (2)")
+    assert cloud_cards.labels(["Mike", "", "Mike", " "]) == ["Mike (1)", "Player (2)", "Mike (3)", "Player (4)"]
+    # Alike in the little of a name a crowded link has room for, in two pairs: each still its own.
+    four = ["Christopher Alexander " + n for n in ("Wilson East", "Wilson West", "Martin East", "Martin West")]
+    got = cloud_cards.labels(four)
+    assert got == [f"{n} ({i})" for i, n in enumerate(four, 1)]
+    link = cloud_cards.claim_link("https://shotcast.example", [(n, chr(97 + i) * 22) for i, n in enumerate(got)])
+    names = [n for _, n in _read(link)]
+    assert len(set(names)) == 4 and [n[-4:] for n in names] == [" (1)", " (2)", " (3)", " (4)"]
 
 
 def test_a_qr_is_square_differs_by_link_and_stays_scannable_with_a_full_bay():
@@ -447,6 +456,42 @@ def test_a_round_found_over_too_late_for_a_card_still_takes_the_last_one_down(tm
     _end(s, _play(s, "r2", start=50))        # (played and ended while the file went unread)
     _step(cards, 4 + cloud_cards.STALE_S)
     assert shown.down.is_set() and len(windows) == 1
+
+
+def test_a_round_found_over_too_late_also_cancels_a_card_still_waiting_to_go_up(tmp_path, api):
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+    _step(cards, 0)
+    api.minimum = "9.9.9"                    # (the cloud can't be asked: the first round's card waits)
+    first = _end(s, _play(s, "r1")) or "r1"
+    _step(cards, 2)
+    assert cards.pending == (first, 2)
+    _end(s, _play(s, "r2", start=50))        # (another group played and finished while the file went unread)
+    api.minimum = None
+    _step(cards, 4 + cloud_cards.ASK_S)
+    assert windows == [] and cards.pending is None
+
+
+def test_a_late_line_filed_while_the_cloud_is_asked_doesnt_cost_the_round_its_card(tmp_path, api):
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+    _step(cards, 0)
+    u = _end(s, _play(s, "r1")) or "r1"
+    me = cards._wanted
+
+    def slow(now):   # (a practice record with no shot appears meanwhile: nobody played)
+        row = dict(s.db.execute("SELECT * FROM round_records LIMIT 1").fetchone()) | {
+            "uuid": "late", "kind": "practice", "state": "in_progress", "ended_at": None}
+        s.db.execute(f"INSERT INTO round_records ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+                     list(row.values()))
+        s.db.commit()
+        return me(now)
+
+    cards._wanted = slow
+    _step(cards, 2)
+    assert [w.uuid for w in windows] == [u]
 
 
 def test_a_window_that_went_away_by_itself_is_seen_as_down(tmp_path, api):
