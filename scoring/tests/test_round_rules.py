@@ -48,7 +48,35 @@ def test_a_card_missing_a_played_holes_par_is_not_used():
     assert R.strokes("aggregate", [12.0], list(range(10, 19)), [1.0], short) == 6
 
 
+def test_a_card_with_one_ball_takes_every_players_index_and_with_own_balls_the_first():
+    nine = list(range(1, 10))
+    shares = {**CARD, "handicap": {**CARD["handicap"], "allowances": [0.25, 0.20]}}
+    # 4 x 0.25 + 10 x 0.20 = 3, the lowest handicap first whatever the order.
+    assert R.strokes("scramble", [20.0, 8.0], nine, [1.0], shares) == 3
+    assert R.strokes("alternate", [8.0, 20.0], nine, [1.0], shares) == 3
+    assert R.strokes("best_ball", [12.0, 30.0], nine, [1.0], CARD) == 6
+    assert R.strokes("best_ball", [12.0, None], nine, [1.0], CARD) is None
+    empty = {**CARD, "handicap": {**CARD["handicap"], "allowances": []}}
+    assert R.strokes("best_ball", [12.0], nine, [0.75], empty) == 5
+
+
+def test_a_course_handicap_is_a_whole_number_before_the_percentage():
+    usga = {**CARD, "handicap": {**CARD["handicap"], "use_course_handicap": True}}
+    # 3 x 0.5 x 126/113 + (35.5 - 36) = 1.17 -> 1, x 0.5 = 0.5 -> 1 (the percentage first would give 0.59 -> 1 too);
+    # 13 x 0.5 x 126/113 - 0.5 = 6.75 -> 7, x 0.5 = 3.5 -> 4 (the percentage first: 3.37 -> 3).
+    assert R.strokes("best_ball", [13.0], list(range(1, 10)), [0.5], usga) == 4
+
+
+def test_a_plus_handicap_gives_strokes_back():
+    assert R.strokes("aggregate", [-3.0], list(range(1, 10)), [1.0]) == -2      # -1.5 rounds away from zero
+    assert R.strokes("aggregate", [-3.0], list(range(1, 19)), [1.0], CARD) == -3
+    assert R.hole_strokes(-2, [1, 2, 3, 4], {2: 1, 3: 2}) == {2: 0, 3: 0, 1: -1, 4: -1}
+
+
 def test_default_allowances():
+    mine = R.default_allowances("best_ball")
+    mine[0] = 1.0
+    assert R.default_allowances("best_ball") == [0.75]
     assert R.default_allowances("best_ball") == [0.75] and R.default_allowances("scramble") == [0.25, 0.20]
     assert R.default_allowances(None) == R.default_allowances("stableford") == [1.0]
 
@@ -60,6 +88,9 @@ def test_strokes_fall_on_the_hardest_holes_and_ties_and_unindexed_holes_by_the_o
     assert R.hole_strokes(4, [1, 2, 3], {1: 9, 2: 1, 3: 5}) == {2: 2, 3: 1, 1: 1}
     assert R.hole_strokes(-1, [1, 2, 3], {1: 9, 2: 1, 3: 5}) == {2: 0, 3: 0, 1: -1}
     assert R.hole_strokes(0, [1, 2], {1: 2, 2: 1}) == {1: 0, 2: 0}
+    # Some holes indexed: those first, then the rest as played; a tie between indexed holes as played.
+    assert R.hole_strokes(3, [14, 15, 16, 17], {16: 2, 15: 2}) == {15: 1, 16: 1, 14: 1, 17: 0}
+    assert R.hole_strokes(-1, [18, 1], {}) == {18: 0, 1: -1}
 
 
 PAR = {1: 4, 2: 3, 3: 5}
@@ -105,6 +136,12 @@ def test_a_team_missing_a_partner_has_no_net_except_on_one_ball():
 def test_a_one_ball_team_played_as_two_balls_sums_them():
     a, b = side(["Ann"], {1: 4}, 0), side(["Bob"], {1: 5}, 0)
     assert R.team_holes("scramble", [a, b], PAR, HOLES) == {1: 1}
+    assert R.team_holes("alternate", [a, b], PAR, HOLES, members=["Ann", "Bob", "Cy"]) == {1: 1}
+
+
+def test_a_hole_one_side_has_no_entry_for_is_left_out_in_any_format():
+    a, b = side(["Ann"], {1: 4, 2: 3}, 0), side(["Bob"], {1: 5}, 0)
+    assert R.team_holes("aggregate", [a, b], PAR, HOLES) == {1: 1}
 
 
 def test_the_cards_max_hole_score_caps_a_blow_up():
@@ -112,6 +149,11 @@ def test_the_cards_max_hole_score_caps_a_blow_up():
     a = side(["Ann"], {1: 11}, 0)
     assert R.team_holes("aggregate", [a], PAR, HOLES, capped) == {1: 2}
     assert R.team_holes("aggregate", [a], PAR, HOLES) == {1: 7}
+    # A net cap moves with the strokes on the hole: par 4 + 2 + 1 stroke = 7 counts, less the stroke, to par.
+    net = {**CARD, "handicap": {**CARD["handicap"], "max_hole_score": {"amountOverPar": 2, "isGross": False}}}
+    assert R.team_holes("aggregate", [side(["Ann"], {1: 11}, 1, {1: 1})], PAR, HOLES, net) == {1: 2}
+    double = {**CARD, "handicap": {**CARD["handicap"], "max_hole_score": {"doublePar": True, "isGross": True}}}
+    assert R.team_holes("aggregate", [side(["Ann"], {1: 11}, 1, {1: 1})], PAR, HOLES, double) == {1: 3}
 
 
 def test_holes_may_be_keyed_by_the_courses_numbers():
