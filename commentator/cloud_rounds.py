@@ -54,6 +54,7 @@ log = logging.getLogger(__name__)
 FORMAT = 1                 # the body's format (shotcast-cloud's contract/round-body-v1.schema.json)
 RETRY_BASE_S = 30.0
 RETRY_MAX_S = 3600.0
+REFUSED_S = 86400.0        # how long a round the API refused waits for its next try
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS cloud_uploads (
@@ -434,6 +435,8 @@ def _watch(db: sqlite3.Connection, pace: Pace, rows: list[sqlite3.Row]) -> set[s
     pace.only({r["uuid"] for r in rows})
     bad = set()
     for r in rows:
+        if pace.waits(r["uuid"]):
+            continue   # (not sent before its wait is over: looked at again then, as it's built)
         try:
             claim_codes(db, r["uuid"])   # (before its body is first read: the hashes are part of it)
             got = body(db, r["uuid"])
@@ -466,10 +469,14 @@ def _build(db: sqlite3.Connection, uuid: str, pace: Pace, settle: float) -> byte
     return encode(b)
 
 
-def _backoff(db: sqlite3.Connection, uuid: str, pace: Pace, error: str) -> None:
+def _backoff(db: sqlite3.Connection, uuid: str, pace: Pace, error: str, refused: bool = False) -> None:
+    """Not sent: when it's tried again. A failure to reach the cloud waits longer each time, an hour
+    at most. `refused` (the API's own no to this round) waits REFUSED_S: every try is charged to
+    this PC's daily allowance, so rounds it keeps refusing mustn't spend what the others need."""
     tries = db.execute("SELECT tries FROM cloud_uploads WHERE uuid = ?", (uuid,)).fetchone()[0]
     # (the exponent capped, not only the wait: a round that waits for weeks mustn't overflow)
-    pace.retry[uuid] = pace.clock() + min(RETRY_MAX_S, RETRY_BASE_S * 2 ** min(tries, 30))
+    wait = REFUSED_S if refused else min(RETRY_MAX_S, RETRY_BASE_S * 2 ** min(tries, 30))
+    pace.retry[uuid] = pace.clock() + wait
     db.execute("UPDATE cloud_uploads SET tries = tries + 1, error = ? WHERE uuid = ?", (error, uuid))
 
 
@@ -539,14 +546,15 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, built: bytes, pace: Pace, 
         log.warning("Shotcast Cloud: this PC's upload allowance is spent; nothing sent for %ds", int(wait))
         out.waiting += 1
         return False
-    # Anything else isn't the cloud having it: the round is tried again, each time after a longer
-    # wait (an hour at most), and shows as behind in the tray while it keeps failing. A refusal of
-    # this round alone (the API's own JSON error for it: too big, not a body it reads, another
-    # bay's) doesn't hold up the rounds after it; an answer the API didn't write (a proxy's page, a
-    # server error) stops this drain, since the next round would likely get the same.
-    refused = isinstance(error, str) and 400 <= r.status_code < 500
+    # Anything else isn't the cloud having it: the round is tried again later, and shows as behind
+    # in the tray while it keeps failing. A refusal of this round alone (the API's own JSON error
+    # for it: another bay's, too big, not a body it reads) waits a day and doesn't hold up the
+    # rounds after it. Anything else stops this drain, since the next round would likely get the
+    # same: an answer the API didn't write (a proxy's page, a server error), or one it says to try
+    # again (`action: retry`: it is behind this app, or busy).
+    refused = isinstance(error, str) and r.status_code in (409, 413, 422) and answer.get("action") != "retry"
     what = _message(r) if refused else "an answer this PC doesn't understand" if r.status_code in (200, 201) else ""
-    _backoff(db, uuid, pace, f"Shotcast Cloud: HTTP {r.status_code}" + (f": {what}" if what else ""))
+    _backoff(db, uuid, pace, f"Shotcast Cloud: HTTP {r.status_code}" + (f": {what}" if what else ""), refused)
     if refused:
         log.warning("Shotcast Cloud won't take round %s (tried again later): HTTP %s: %s", uuid, r.status_code, what)
     out.waiting += 1
@@ -561,8 +569,7 @@ def drain(cl: Any, db_path: str, pace: Pace | None = None, settle: float = CEILI
           wait: float = 60.0) -> Drained:
     """Send every done round the cloud doesn't have yet. `cl`: a paired cloud.Cloud; `db_path`: the
     season file in its pairing's profile (cloud.locate). `pace`: what this run of the uploader
-    remembers between drains (the same one each time; without one, only what needs no waiting goes:
-    bytes built already, and everything when `settle` is 0). `settle`: the ceiling (shorter only to
+    remembers between drains (the same one each time; without one nothing goes, unless `settle` is 0). `settle`: the ceiling (shorter only to
     test). One drain at a time across processes: waits `wait` seconds for another to finish, then
     TimeoutError. Raises NotThisPairing when the file isn't bound to `cl`'s pairing, Blocked when the
     cloud refuses this PC, NotPaired / PairingChanged when the stored pairing isn't `cl`'s any more."""

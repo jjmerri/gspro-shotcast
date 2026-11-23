@@ -192,8 +192,8 @@ def test_the_upload_stops_when_the_pairing_changes_meanwhile(tmp_path, api):
 
 def test_a_round_the_cloud_refuses_is_tried_again_later_and_doesnt_hold_up_the_next(tmp_path, api, monkeypatch):
     """The API's own refusal of one round (another bay's, too big, not a body it reads, a code this
-    app doesn't know): its error is kept and shown, it waits longer each time, and the rounds after
-    it go meanwhile."""
+    app doesn't know): its error is kept and shown, it waits a day for each next try (every try is
+    charged to this PC's daily allowance), and the rounds after it go meanwhile."""
     cfg, s, cl = _booth(tmp_path, api)
     refused, good = _round(s, 1), _round(s, 100)
     pace, clock = _run(monkeypatch)
@@ -207,11 +207,30 @@ def test_a_round_the_cloud_refuses_is_tried_again_later_and_doesnt_hold_up_the_n
     assert uuid == refused and what.startswith("not sent yet (") and "409" in what and "another bay's" in what
     assert cloud_rounds.behind(cfg.db_path) == 1
     assert look().sent == [] and len(api.puts) == 2              # (not before its wait is over)
-    clock[0] += cloud_rounds.RETRY_BASE_S
+    clock[0] += cloud_rounds.RETRY_MAX_S
+    assert look().sent == [] and len(api.puts) == 2              # (nor after the longest wait of a network failure)
+    clock[0] += cloud_rounds.REFUSED_S
     api.answers = [httpx.Response(422, json={"error": "something_new", "message": "no"})]
     assert look().waiting == 1 and _upload(cfg, refused)["tries"] == 2
-    clock[0] += 2 * cloud_rounds.RETRY_BASE_S                    # (put right on Shotcast Cloud meanwhile)
+    clock[0] += cloud_rounds.REFUSED_S                           # (put right on Shotcast Cloud meanwhile)
     assert look().sent == [refused] and cloud_rounds.outstanding(cfg.db_path) == []
+
+
+@pytest.mark.parametrize("answer", [
+    httpx.Response(422, json={"error": "unsupported_format", "action": "retry", "message": "not yet"}),
+    httpx.Response(503, json={"error": "busy"}),
+    httpx.Response(401, json={"error": "access_token_invalid"}),
+    httpx.Response(404, json={"error": "not_found"}),
+    httpx.Response(422, json={"message": "no code"}),
+])
+def test_an_answer_that_isnt_a_no_to_this_one_round_stops_the_drain_before_the_next(tmp_path, api, answer):
+    """The API behind this app, busy, or answering something that isn't about the round: the next
+    round would get the same, so it isn't sent (each try is charged)."""
+    cfg, s, cl = _booth(tmp_path, api)
+    first, _ = _round(s, 1), _round(s, 100)
+    api.answers = [answer] * 3   # (a 401 is tried once more with a fresh token)
+    out = _drain(cl, cfg)
+    assert out.sent == [] and out.waiting == 1 and {p[0] for p in api.puts} == {first}
 
 
 def test_another_writer_for_the_bay_blocks_every_upload(tmp_path, api):
