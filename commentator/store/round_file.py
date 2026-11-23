@@ -311,7 +311,7 @@ class RoundFileMixin:
 
     def _sync_gimme(self, shot_id: int) -> None:
         """The conceded putt a shot left (record_gimme) follows it when the round file names it or takes
-        the name back: same player, hole and attribution, the stroke after it."""
+        the name back: same player, hole and attribution, the stroke after it. And both shots' slots."""
         p = self.db.execute("SELECT uid, player, hole, shot_number, attributed FROM shots WHERE id = ?",
                             (shot_id,)).fetchone()
         if p is not None and p["uid"] is not None:
@@ -319,6 +319,10 @@ class RoundFileMixin:
                             " WHERE derived_from = ? AND outcome = 'gimme'",
                             (p["player"], p["hole"], None if p["shot_number"] is None else p["shot_number"] + 1,
                              p["attributed"], p["uid"]))
+        # Each goes to its player's slot in its round's record (none, with the name taken back): the
+        # record and the cloud upload say whose a shot is by its slot alone.
+        self.records.reslot([shot_id] + ([r[0] for r in self.db.execute(
+            "SELECT id FROM shots WHERE derived_from = ? AND outcome = 'gimme'", (p["uid"],))] if p and p["uid"] else []))
 
     def _apply_track(self, row: sqlite3.Row, t, named: dict | None = None) -> None:
         def lie(old, new):   # GSPro's lie
