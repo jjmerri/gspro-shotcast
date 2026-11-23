@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
+import re
 import sys
 import threading
 from collections.abc import Callable
@@ -57,10 +58,19 @@ def labels(names: list[str]) -> list[str]:
     """What each player is called on the card and on the phone, in seat order: their name, "Player"
     for none, and their place in the round after any that could read the same as another's however
     much of it the link has room for (two Mikes, two with no name, two long names that start
-    alike): "Mike (1)", "Mike (3)". The number is the seat's, so no two labels are ever the same."""
+    alike): "Mike (1)", "Mike (3)". A number someone typed into a name ("Mike (2)") doesn't count as
+    telling it apart. Should any two still read the same as the phone would show them, at any
+    length the link may cut them to, every player is numbered: no two labels are ever the same."""
     shown = [n.strip() or "Player" for n in names]
-    short = [_fit(n, NAME_CUTS[-1]).casefold() for n in shown]
-    return [f"{name} ({i})" if short.count(cut) > 1 else name for i, (name, cut) in enumerate(zip(shown, short), 1)]
+    short = [_fit(_TYPED_NUMBER.sub("", n).strip() or "Player", NAME_CUTS[-1]).strip().casefold() for n in shown]
+    out = [f"{name} ({i})" if short.count(cut) > 1 else name for i, (name, cut) in enumerate(zip(shown, short), 1)]
+    for most in NAME_CUTS:
+        if len({_in_link(label, most).strip().casefold() for label in out}) < len(out):
+            return [f"{name} ({i})" for i, name in enumerate(shown, 1)]
+    return out
+
+
+_TYPED_NUMBER = re.compile(r"\s*\(\d+\)\s*$")
 
 
 def _fit(name: str, most: int) -> str:
@@ -96,7 +106,7 @@ def claim_link(api: str, players: list[tuple[str, str]]) -> str:
 def code_side(screen_height: int, modules: int) -> int:
     """How many pixels across the QR's square is drawn: a good part of the screen, and more on a
     small one if that's what it takes for MODULE_PX a module (its light border counted)."""
-    return min(max(round(screen_height * 0.36), MODULE_PX * (modules + 2 * QUIET)), round(screen_height * 0.7))
+    return min(max(round(screen_height * 0.36), MODULE_PX * (modules + 2 * QUIET)), round(screen_height * 0.9))
 
 
 def matrix(text: str) -> list[list[bool]]:
@@ -152,7 +162,9 @@ def cards_for(db: Any, uuid: str) -> list[Card]:
     codes = cloud_rounds.claim_codes(db, uuid)
     slots = db.execute("SELECT slot_id, name FROM round_slots WHERE round_uuid = ? ORDER BY seat, slot_id",
                        (uuid,)).fetchall()
-    slots = [s for s in slots if s["slot_id"] in codes][:MAX_PLAYERS]
+    if any(s["slot_id"] not in codes for s in slots):
+        raise RuntimeError("a player joined as the codes were made")   # (tried again at the next look)
+    slots = slots[:MAX_PLAYERS]
     return [Card(s["slot_id"], label, codes[s["slot_id"]])
             for s, label in zip(slots, labels([s["name"] or "" for s in slots]))]
 
