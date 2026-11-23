@@ -34,6 +34,8 @@ class FakeAPI:
         self.puts: list[tuple[str, int, dict]] = []
         self.answers: list = []                                # scripted answers for the next PUTs
         self.minimum: str | None = None                        # clientversion's: below it, every call is 426
+        self.claim_cards = False                               # whether the tenant is a venue (its bays show cards)
+        self.claimed: dict[tuple[str, str], str] = {}          # (round, slot) -> the claimer's short name
 
     def tokens(self, refresh):
         self.n += 1
@@ -91,7 +93,14 @@ class FakeAPI:
                 return httpx.Response(204)
             return httpx.Response(200, json={"device_id": self.device, "league_id": self.default,
                                              "tenant_id": self.tenant, "sim_name": self.sim, "name": "PC",
-                                             "league_active": True})
+                                             "league_active": True, "claim_cards": self.claim_cards})
+        if path.startswith("/api/devices/rounds/") and path.endswith("/claims") and req.method == "GET":
+            rid = path.split("/")[4]
+            if rid not in self.rounds:   # (the bay's own rounds only, once they're here)
+                return httpx.Response(404, json={"error": "not_found", "action": "fix", "message": "no such round"})
+            return httpx.Response(200, json=[
+                {"slot_id": sl["slot_id"], "claimed": (rid, sl["slot_id"]) in self.claimed,
+                 "name": self.claimed.get((rid, sl["slot_id"]))} for sl in json.loads(self.rounds[rid])["slots"]])
         return httpx.Response(404, json={"detail": "Not Found"})
 
     def put(self, req):

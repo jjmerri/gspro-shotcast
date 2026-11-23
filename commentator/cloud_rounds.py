@@ -38,6 +38,7 @@ import gzip
 import hashlib
 import json
 import logging
+import secrets
 import sqlite3
 import time
 from time import monotonic as _monotonic
@@ -68,6 +69,12 @@ CREATE TABLE IF NOT EXISTS cloud_uploads (
     status TEXT NOT NULL DEFAULT 'queued', -- queued / parked (refused: see error)
     error TEXT,
     tries INTEGER NOT NULL DEFAULT 0       -- failed tries so far (how long the next waits: Pace.retry)
+);
+CREATE TABLE IF NOT EXISTS cloud_claim_codes (   -- a player's code to claim a round with (claim_codes)
+    uuid TEXT NOT NULL,                    -- the round record's
+    slot_id TEXT NOT NULL,
+    code TEXT NOT NULL,                    -- made once and kept: the round's body carries its hash
+    PRIMARY KEY (uuid, slot_id)
 );
 """
 PAIRING = """
@@ -231,6 +238,25 @@ def bound(db: sqlite3.Connection) -> tuple | None:
 # Bodies
 
 
+def claim_codes(db: sqlite3.Connection, uuid: str) -> dict[str, str]:
+    """A code for each of a round's players, by slot: what a customer at a venue claims the round with
+    (shotcast-cloud's docs/dev/claims.md; the bay's cards, cloud_cards, show it as a QR). Made here,
+    once, when first asked for, and kept with the round: its body carries each code's hash
+    (`slots[].claim_hash`), and the cloud keeps the first hash it's sent, so a code must never change.
+    Made for every round: a tenant that isn't a venue ignores the hashes. Not inside a transaction of
+    the caller's."""
+    with _txn(db, "IMMEDIATE"):
+        for (slot,) in db.execute("SELECT slot_id FROM round_slots WHERE round_uuid = ?", (uuid,)).fetchall():
+            db.execute("INSERT OR IGNORE INTO cloud_claim_codes (uuid, slot_id, code) VALUES (?, ?, ?)",
+                       (uuid, slot, secrets.token_urlsafe(16)))
+        return {r["slot_id"]: r["code"] for r in
+                db.execute("SELECT slot_id, code FROM cloud_claim_codes WHERE uuid = ?", (uuid,))}
+
+
+def claim_hash(code: str) -> str:
+    return hashlib.sha256(code.encode("ascii")).hexdigest()
+
+
 def _rows(db: sqlite3.Connection, query: str, *args: Any) -> list[dict[str, Any]]:
     return [dict(r) for r in db.execute(query, args)]
 
@@ -333,6 +359,8 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
                           "WHERE r.round_uuid = ? ORDER BY w.id", uuid)
         players = _rows(db, "SELECT * FROM player_rounds WHERE round_uuid = ? ORDER BY id", uuid)
         slots = _rows(db, "SELECT * FROM round_slots WHERE round_uuid = ? ORDER BY seat, slot_id", uuid)
+        codes = {r["slot_id"]: r["code"] for r in
+                 db.execute("SELECT slot_id, code FROM cloud_claim_codes WHERE uuid = ?", (uuid,))}
     keys, side_of = _sides(slots)
     card_side = {c["id"]: c["side"] for c in cards}
     # One card a side: its last (a booth that stopped between writing a round's cards and marking it
@@ -351,7 +379,10 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
         "dataset_id": dataset,
         "round": _without(rec, "uuid", "session_id", "gen", "finishes_gen")
         | {"id": uuid, "session": dict(session) if session else None, "league_id": None, "league": None},
-        "slots": [_without(s, "round_uuid") | {"side_id": key} for s, key in zip(slots, keys)],
+        # (A slot's claim code goes as its hash; made before a finished round is looked at: _watch.)
+        "slots": [_without(s, "round_uuid") | {"side_id": key}
+                  | ({"claim_hash": claim_hash(codes[s["slot_id"]])} if s["slot_id"] in codes else {})
+                  for s, key in zip(slots, keys)],
         "shots": [_wire(s, "id", "session_id", "record_uuid", "player", "raw", "left_out", "excluded",
                         flags=_SHOT_FLAGS, lists=("tags",), most=MAX_TAGS) for s in shots],
         "shot_tracks": [_wire(t, "shot_id", "was", lists=("flight", "roll")) | {"shot_uid": uid_of[t["shot_id"]]}
@@ -433,6 +464,7 @@ def _watch(db: sqlite3.Connection, pace: Pace, rows: list[sqlite3.Row]) -> set[s
         if r["frozen"]:
             continue
         try:
+            claim_codes(db, r["uuid"])   # (before its body is first read: the hashes are part of it)
             got = body(db, r["uuid"])
             if got is not None:
                 pace.note(r["uuid"], _signature(got[0]), got[0]["round"].get("ended_at"))

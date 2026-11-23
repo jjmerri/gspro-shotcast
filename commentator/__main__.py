@@ -241,7 +241,9 @@ async def _run_booth(cfg: Config) -> None:
                      showing=engine.screen.gspro_showing if engine.screen else None).start()
     from .cloud_booth import start as start_uploads
 
-    uploads = start_uploads(cfg)   # paired with Shotcast Cloud: settled rounds go up (unpaired: None)
+    # Paired with Shotcast Cloud: settled rounds go up, and a venue's bay shows claim cards (unpaired: None).
+    uploads = start_uploads(cfg, where=engine.screen.monitor_rect if engine.screen and cfg.screen.follow_window
+                            else None)
     try:
         await engine.run()
     finally:
