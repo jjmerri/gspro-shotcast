@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -46,10 +47,12 @@ def set_health(log_dir: str | Path, issues: list[tuple[str, str]]) -> None:
         log.debug("Couldn't write %s", path, exc_info=True)
 
 
-def start(cfg: Any, prof: cloud.Profile | None = None) -> asyncio.Task | None:
+def start(cfg: Any, prof: cloud.Profile | None = None,
+          where: Callable[[], tuple[int, int, int, int]] | None = None) -> asyncio.Task | None:
     """As the booth runs (not a replay), in the cloud profile it started in (`prof`, else
-    cloud.startup): the upload loop. None otherwise, and when the API no longer accepts the pairing
-    (the tray is told why: rounds are kept in the profile)."""
+    cloud.startup): the upload loop, and beside it a venue bay's claim cards (cloud_cards; `where`
+    gives GSPro's monitor, for where they're drawn). None otherwise, and when the API no longer
+    accepts the pairing (the tray is told why: rounds are kept in the profile)."""
     prof = prof or cloud.startup
     if prof is None or cfg.source.type == "replay":
         return None
@@ -60,7 +63,20 @@ def start(cfg: Any, prof: cloud.Profile | None = None) -> asyncio.Task | None:
     set_health(cfg.log_dir, [])
     log.info("Shotcast Cloud: paired as sim %r; rounds are kept in %s and sent up", prof.rec.get("sim_name"),
              cfg.log_dir)
-    return asyncio.create_task(Uploads(cfg, prof).run(), name="cloud-upload")
+    return asyncio.create_task(_run(Uploads(cfg, prof), prof, where), name="cloud-upload")
+
+
+async def _run(uploads: "Uploads", prof: cloud.Profile, where: Callable[[], tuple[int, int, int, int]] | None) -> None:
+    """The upload loop, with the claim cards' loop for as long as it runs."""
+    from . import cloud_cards
+
+    cards = asyncio.create_task(
+        cloud_cards.Cards(uploads.cfg.db_path, prof.rec["api"], uploads._cloud, where).run(), name="cloud-cards")
+    try:
+        await uploads.run()
+    finally:
+        cards.cancel()
+        await asyncio.gather(cards, return_exceptions=True)
 
 
 class Uploads:
