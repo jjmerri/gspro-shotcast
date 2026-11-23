@@ -15,6 +15,7 @@ import pytest
 from commentator import cloud_cards
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="the booth's window: Windows only")
+_REAL_CHECK = cloud_cards._out_of_capture
 EXCLUSION_SINCE = 19041   # Windows 10 2004: the first that can keep a window out of screen capture
 
 
@@ -86,10 +87,9 @@ def _show(monkeypatch, mode: str):
     taken off again, to see the card in a grab); "refused" (as on a Windows that can't keep it out:
     the app is told no, and the card is let into the grab so what it drew can be seen)."""
     said = []
-    real = cloud_cards._out_of_capture
 
     def checked(root):
-        got = real(root)
+        got = _REAL_CHECK(root)   # (the app's own, not an earlier case's stand-in for it)
         said.append(got)
         if mode != "kept out":
             import ctypes
