@@ -754,3 +754,12 @@ def test_a_round_goes_with_its_courses_card_as_gspros_files_have_it(tmp_path, ap
         "tees": [{"name": "Blue", "rating": 72.1, "slope": 131.0}, {"name": "Red", "rating": None, "slope": None}]}
     assert card[plain] == card[known] | {"folder": None}
     assert card[other] is None   # (a course whose files gave no card)
+    # A course file's odd tees don't cost the round its upload: no more, and no longer, than the cloud takes.
+    s.record_course_tees("Elsewhere", CourseCard(
+        name="Elsewhere", par={1: 4}, index={1: 1}, ratings={f"{i:02d} " + "x" * 60: (70.0, 120.0) for i in range(40)}))
+    long = _round(s, 300)
+    s.db.execute("UPDATE round_records SET course = 'Elsewhere' WHERE uuid = ?", (long,))
+    s.db.commit()
+    assert _drain(cl, cfg).sent == [long]
+    tees = api.puts[-1][2]["course_card"]["tees"]
+    assert len(tees) == 32 and all(len(t["name"]) == 50 for t in tees)
