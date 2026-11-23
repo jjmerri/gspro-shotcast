@@ -1,5 +1,5 @@
-"""A venue bay's claim card (shotcast-cloud's docs/dev/claims.md): as a round ends, one QR code on
-the screen beside the players' names. A customer scans it with their phone, picks which player they
+"""A venue bay's claim card (shotcast-cloud's docs/dev/claims.md): as a round ends, one QR code in
+a corner of the screen. A customer scans it with their phone, picks which player they
 are, and the round is added to their Shotcast account. Only where the cloud says the bay shows it
 (`claim_cards` in its answer about this PC: a venue's bays), and only while the booth runs paired
 (cloud_booth starts it).
@@ -18,7 +18,8 @@ every player has claimed, after SHOW_S, or when the season file can't be read (w
 can't be told). A round that was already over when the booth started gets none: staff can make a
 fresh code on the website.
 
-The window is the booth's own (popup.py's kind): it never takes focus from GSPro and is kept out of
+The window is small and sits at the bottom right, over GSPro's minimap, so the scorecard GSPro
+shows as a round ends stays readable. It is the booth's own (popup.py's kind): it never takes focus from GSPro and is kept out of
 screen capture, so the code isn't in the stream or the booth's own screen reads. It's drawn only
 once Windows confirms that; where it can't, the card says to ask the staff. Every wait is counted in
 elapsed seconds.
@@ -117,9 +118,10 @@ def claim_link(api: str, players: list[tuple[str, str]]) -> str:
 
 
 def code_side(screen_height: int, modules: int) -> int:
-    """How many pixels across the QR's square is drawn: a good part of the screen, and more on a
-    small one if that's what it takes for MODULE_PX a module (its light border counted)."""
-    return min(max(round(screen_height * 0.36), MODULE_PX * (modules + 2 * QUIET)), round(screen_height * 0.9))
+    """How many pixels across the QR's square is drawn: about a fifth of the screen's height (small
+    enough to sit in a corner, clear of GSPro's scorecard), and more if that's what it takes for
+    MODULE_PX a module (its light border counted)."""
+    return min(max(round(screen_height * 0.2), MODULE_PX * (modules + 2 * QUIET)), round(screen_height * 0.9))
 
 
 def matrix(text: str) -> list[list[bool]]:
@@ -438,50 +440,49 @@ class Window:
         except Exception:   # (a link no QR holds: claim_link keeps it far shorter)
             log.exception("Claim card: couldn't make the QR")
             code = None
-        side = code_side(sh, len(code) if code else 0)   # big enough to scan from where the players stand
-        frame = tk.Frame(root, bg=PANEL, highlightthickness=2, highlightbackground=PANEL_EDGE, padx=unit, pady=unit)
+        # A small card: the code, a line saying what it's for and one saying who has claimed. The
+        # players' names are on the phone, where they're picked; the screen is left to GSPro's scorecard.
+        side = code_side(sh, len(code) if code else 0)
+        frame = tk.Frame(root, bg=PANEL, highlightthickness=2, highlightbackground=PANEL_EDGE,
+                         padx=unit // 2, pady=unit // 2)
         frame.pack()
-        canvas = tk.Canvas(frame, width=side, height=side, bg=PANEL, highlightthickness=0)
-        canvas.pack(side="left", padx=(0, unit))
-        right = tk.Frame(frame, bg=PANEL)
-        right.pack(side="left", fill="y")
-        tk.Label(right, text="Keep this round", bg=PANEL, fg=ON_TEXT, anchor="w",
-                 font=("Segoe UI", -round(unit * 1.5), "bold")).pack(fill="x")
-        tk.Label(right, text="Scan the code with your phone's camera, then pick your name.", bg=PANEL, fg=MUTED,
-                 anchor="w", justify="left", wraplength=round(sw * 0.3), font=("Segoe UI", -unit)
-                 ).pack(fill="x", pady=(0, unit // 2))
-        lines: list[tuple[Any, tuple | None]] = []   # (a player's line, what it shows)
 
         def close() -> None:
             self.shown.closed.set()
             root.quit()
-        for card in cards:
-            line = tk.Label(right, text=card.name, bg=PANEL, fg=ON_TEXT, anchor="w", justify="left",
-                            wraplength=round(sw * 0.3), font=("Segoe UI", -round(unit * 1.15)))
-            line.pack(fill="x")
-            lines.append((line, None))
-        tk.Button(right, text="Close", bg=NO_GREY, fg=ON_TEXT, activebackground=NO_GREY, activeforeground=ON_TEXT,
-                  relief="flat", bd=0, padx=unit * 2, pady=unit // 3, cursor="hand2",
-                  font=("Segoe UI", -unit, "bold"), command=close).pack(side="bottom", anchor="w", pady=(unit, 0))
+        head = tk.Frame(frame, bg=PANEL)
+        head.pack(fill="x")
+        tk.Label(head, text="Keep this round", bg=PANEL, fg=ON_TEXT, anchor="w",
+                 font=("Segoe UI", -round(unit * 1.2), "bold")).pack(side="left")
+        tk.Button(head, text="\u2715", bg=NO_GREY, fg=ON_TEXT, activebackground=NO_GREY, activeforeground=ON_TEXT,
+                  relief="flat", bd=0, padx=unit // 2, cursor="hand2", font=("Segoe UI", -unit, "bold"),
+                  command=close).pack(side="right")
+        canvas = tk.Canvas(frame, width=side, height=side, bg=PANEL, highlightthickness=0)
+        canvas.pack(pady=(unit // 3, unit // 3))
+        status = tk.Label(frame, text="", bg=PANEL, fg=MUTED, anchor="w", justify="left", wraplength=side,
+                          font=("Segoe UI", -unit))
+        status.pack(fill="x")
+        said: list[str] = []   # what the status line says now
 
-        def draw(i: int, card: Card) -> None:
-            line, was = lines[i]
-            now = (card.claimed, card.by)
-            if was == now:
-                return
-            lines[i] = (line, now)
-            if card.claimed:
-                line.configure(text=f"\u2713 {card.name}: claimed" + (f" by {card.by}" if card.by else ""),
-                               fg=TICK_GREEN)
+        def draw_status(cards: list[Card]) -> None:
+            got = [c for c in cards if c.claimed]
+            if not got:
+                text, colour = "Scan with your phone's camera, then pick your name.", MUTED
+            elif len(got) == len(cards):
+                text, colour = "\u2713 Everyone has claimed this round.", TICK_GREEN
             else:
-                line.configure(text=card.name, fg=ON_TEXT)
+                text, colour = f"\u2713 {len(got)} of {len(cards)} claimed: " + ", ".join(c.by or c.name for c in got), TICK_GREEN
+            if said != [text]:
+                said[:] = [text]
+                status.configure(text=text, fg=colour)
+                place()
 
         def draw_code(hidden: bool) -> None:
             if not hidden or code is None:
                 # (A code a stream or a screen grab could carry is a code anyone watching could use.)
-                canvas.create_text(side // 2, side // 2, width=side - unit * 2, fill=ON_TEXT, justify="center",
+                canvas.create_text(side // 2, side // 2, width=side - unit, fill=ON_TEXT, justify="center",
                                    text="Ask the staff for a code to keep this round",
-                                   font=("Segoe UI", -round(unit * 1.2), "bold"))
+                                   font=("Segoe UI", -round(unit * 1.1), "bold"))
                 return
             rows = code or []
             canvas.configure(bg=WHITE)
@@ -494,7 +495,7 @@ class Window:
                                                 fill=BLACK, outline="")
 
         def place() -> None:
-            # Bottom right, wholly on the monitor however the lines have grown (a claimed player's is longer).
+            # Bottom right (over GSPro's minimap, beside its scorecard), wholly on the monitor.
             root.update_idletasks()
             w, h = root.winfo_reqwidth(), root.winfo_reqheight()
             root.geometry(f"+{max(left, left + sw - w - round(sw * 0.02))}+{max(top, top + sh - h - round(sh * 0.04))}")
@@ -513,8 +514,7 @@ class Window:
         else:
             hidden = True   # (not a booth: only Windows runs one)
         draw_code(hidden)
-        for i, card in enumerate(cards):
-            draw(i, card)
+        draw_status(cards)
         ticks = 0
         until = self.shown.since + SHOW_S + 2 * LOOK_S   # (the booth's own clock: Shown.since is on it)
 
@@ -525,11 +525,7 @@ class Window:
                 if self.shown.down.is_set() or self.shown.closed.is_set() or _monotonic() >= until:
                     root.quit()
                     return
-                before = [was for _, was in lines]
-                for i, card in enumerate(self.shown.snapshot()):
-                    draw(i, card)
-                if before != [was for _, was in lines]:
-                    place()
+                draw_status(self.shown.snapshot())
                 ticks += 1
                 if ticks % 2 == 0:   # GSPro taking focus can push it above a plain topmost window
                     if sys.platform == "win32":
