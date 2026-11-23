@@ -5,6 +5,7 @@ comes down when told. Elsewhere there's no booth: skipped.
 What's behind the card is the test's own: a plain magenta window under where the card goes, so a
 grab of the card's place is all magenta when the card is kept out of it, whatever else is on the
 desktop."""
+import gc
 import sys
 import threading
 import time
@@ -24,7 +25,9 @@ class Backdrop:
         self.ready, self.stop = threading.Event(), threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
-        assert self.ready.wait(20), "no desktop to draw on"
+        if not self.ready.wait(30):
+            self.close()
+            raise AssertionError("no desktop to draw on")
 
     def _run(self):
         import tkinter as tk
@@ -47,12 +50,17 @@ class Backdrop:
 
         root.after(300, self.ready.set)
         root.after(0, tick)
-        root.mainloop()
-        root.destroy()
+        try:
+            root.mainloop()
+        finally:
+            root.destroy()
+            del root, tick
+            gc.collect()   # the Tk interpreter is freed here, on its own thread
 
     def close(self):
         self.stop.set()
-        self.thread.join(10)
+        self.thread.join(15)
+        assert not self.thread.is_alive()
 
 
 def _shares(rect):
@@ -102,7 +110,9 @@ def _show(monkeypatch, mode: str):
     end = time.monotonic() + 30
     while not said and thread.is_alive() and time.monotonic() < end:
         time.sleep(0.1)
-    assert said and thread.is_alive() and window.rect, "the window never came up"
+    if not (said and thread.is_alive() and window.rect):
+        shown.down.set()   # (whenever it does come up, it comes straight down)
+        raise AssertionError("the window never came up")
     time.sleep(3.0)   # (drawn)
     return shown, window, thread, said
 
@@ -124,9 +134,16 @@ def backdrop():
         b.close()
 
 
-def test_the_card_shows_its_code_which_a_screen_grab_doesnt_see_and_comes_down_when_told(monkeypatch, backdrop):
+def test_the_card_on_a_real_desktop(monkeypatch, backdrop):
+    """One test for all of it, its cases in turn: they use the same corner of the one desktop, and
+    tests run side by side (xdist) would be in each other's grabs."""
+    _no_code_where_windows_cant_keep_it_out_of_capture(monkeypatch)
     if sys.getwindowsversion().build < EXCLUSION_SINCE:
         pytest.skip("this Windows can't keep a window out of screen capture: the card shows no code")
+    _its_code_is_on_the_screen_and_not_in_a_grab(monkeypatch)
+
+
+def _its_code_is_on_the_screen_and_not_in_a_grab(monkeypatch):
     shown, window, thread, said = _show(monkeypatch, "kept out")
     try:
         # (Refused on a Windows that can: every bay would show "ask the staff" in place of the code.)
@@ -153,7 +170,7 @@ def test_the_card_shows_its_code_which_a_screen_grab_doesnt_see_and_comes_down_w
     assert magenta < 0.2 and white > 0.15 and black > 0.10, (magenta, white, black)
 
 
-def test_where_windows_cant_keep_the_card_out_of_capture_no_code_is_drawn(monkeypatch, backdrop):
+def _no_code_where_windows_cant_keep_it_out_of_capture(monkeypatch):
     shown, window, thread, said = _show(monkeypatch, "refused")
     try:
         cloud_cards.apply(shown, [{"slot_id": "1", "claimed": True, "name": "Ann R."}])
