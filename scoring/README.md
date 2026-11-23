@@ -23,6 +23,10 @@ Tests: `python -m pytest scoring/tests` (the app's own `pytest` run collects the
 
 - `shotcast_scoring.handicap`: strokes from handicap indexes by a week card's settings, their
   allocation to holes, the max hole score, and `team_holes` (a team's net to par per hole).
+- `shotcast_scoring.round`: one round put together from those: a side's strokes from its players'
+  indexes (`strokes`), the holes they fall on (`hole_strokes`), and a league team's net per hole from
+  its sides (`team_holes`, `team_net`), with the default allowances. The booth's live round and the
+  server's stored rounds both score with it.
 - `shotcast_scoring.board`: `Board` (week places, points, standings, flights, the stats page's league
   cards) over a `LeagueView` (the app's `League`, or the plain `LeagueData`).
 

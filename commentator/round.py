@@ -12,7 +12,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 
-from shotcast_scoring import handicap as scoring
+from shotcast_scoring import round as scoring
 from shotcast_scoring.handicap import TEAM_BALL
 
 from . import handicap
@@ -42,10 +42,9 @@ _ALIASES = {
     "aggregate": {"aggregate", "teamsum", "sum", "total", "combined", "teamtotal", "teamaggregate"},
     "alternate": {"alternate", "alternateshot", "altshot", "alt", "foursomes"},
 }
-# Allowances as fractions of each player's course handicap. One-ball formats give the team
-# lowest x first + next x second. These match the Shed Sim League's Squabbit settings; the
-# league file can override them under "handicap_allowances".
-DEFAULT_ALLOWANCES = {"aggregate": [1.0], "best_ball": [0.75], "scramble": [0.25, 0.20], "alternate": [0.25, 0.20]}
+# A format's allowances (fractions of each player's course handicap) default to shotcast_scoring.round's,
+# which match the Shed Sim League's Squabbit settings; the league file can override them under
+# "handicap_allowances".
 
 RESULT_NAMES = {-3: "albatross", -2: "eagle", -1: "birdie", 0: "par", 1: "bogey", 2: "double bogey"}
 
@@ -599,35 +598,23 @@ class Round:
         for key, value in custom.items():
             if normalize_format(key) == self.format and isinstance(value, list):
                 return [float(v) for v in value]
-        return DEFAULT_ALLOWANCES.get(self.format or "", [1.0])
+        return scoring.default_allowances(self.format)
 
     def _assign_strokes(self, sides: list[Side]) -> None:
-        """Handicap strokes the way Squabbit gives them (see handicap.py). With the week's Squabbit
-        card: its settings (a USGA course handicap from the tee's slope and rating where the format
-        uses one, the max index) and its allowances. Without it: the index scaled to the holes played
-        (an 18-hole index over 9 holes is half), then the format's allowance.
+        """Handicap strokes the way Squabbit gives them (shotcast_scoring.round.strokes, the rule the
+        server scores with too): by the week's Squabbit card where there is one, else the index scaled
+        to the holes played, then the format's allowance. A side with a handicap missing keeps what it has.
         Practice rounds get no strokes - they're gross-only, and the opener says as much, so leaving
         them None keeps the "receiving N handicap strokes" line from contradicting that."""
         if not self.is_league:
             return
-        card = self.week_card
-        if card:
-            card = {**card, "handicap": {**card["handicap"],
-                                         "allowances": card["handicap"].get("allowances") or self._allowances()}}
         holes = [self.start_hole + seq - 1 for seq in range(1, self.holes + 1)]
-        if card and not all(str(h) in card["par"] for h in holes):
-            card = None
         allow = self._allowances()
         for side in sides:
-            indexes = [self.league.handicap(p) for p in side.players]
-            if not indexes or any(i is None for i in indexes):
-                continue
-            team_ball = self.format in TEAM_BALL
-            if card:
-                side.strokes = handicap.strokes_for(card, indexes if team_ball else indexes[:1], holes, team_ball)
-            else:
-                course = [handicap.course_handicap(i, self.holes) for i in indexes]
-                side.strokes = handicap.side_strokes(course, allow, team_ball)
+            given = scoring.strokes(self.format, [self.league.handicap(p) for p in side.players], holes, allow,
+                                    self.week_card)
+            if given is not None:
+                side.strokes = given
 
     def _apply_week_card(self) -> None:
         """Squabbit's par and stroke index for the week's tee win over GSPro's card: Squabbit scores
@@ -824,11 +811,10 @@ class Round:
         if self.week_card:
             self._apply_week_card()
             self._assign_strokes(self.sides)
-        order = sorted(range(1, self.holes + 1), key=lambda s: (self.index.get(s, 99), s))
         for side in self.sides:
             if side.strokes is None:
                 continue
-            side.hole_strokes = handicap.allocate(side.strokes, order)
+            side.hole_strokes = scoring.hole_strokes(side.strokes, range(1, self.holes + 1), self.index)
 
     def set_log_scores(self, gspro: str, scores: dict[int, int]) -> None:
         """The holes GSPro's log has this player finished, by hole of the round: the whole set, so a hole
@@ -1346,21 +1332,11 @@ class Round:
         sequence (1..holes). None when team_net would be."""
         if self.format is None or not self.is_league:
             return None
-        sides = [s for s in self.sides if (s.team or s.key) == team]
-        if not sides or any(s.strokes is None or (s.strokes and not s.hole_strokes) for s in sides):
-            return None
-        if self.format not in TEAM_BALL:
-            members = set(self.league.team_players.get(team) or [])
-            if members and {p for s in sides for p in s.players} != members:
-                return None
-        seqs = [q for q in range(1, self.holes + 1)
-                if self.par.get(q) and all(self.card_score(s, q) is not None for s in sides)]
-        if not seqs:
-            return None
-        # A one-ball team the round has as several sides (each player's own) sums them, as it always has.
-        fmt = "aggregate" if self.format in TEAM_BALL and len(sides) > 1 else self.format
-        return scoring.team_holes(fmt, [{q: self.card_score(s, q) for q in seqs} for s in sides],
-                                  [s.hole_strokes for s in sides], self.par, self.week_card, seqs)
+        seqs = range(1, self.holes + 1)
+        sides = [scoring.SideCard(s.players, {q: self.card_score(s, q) for q in seqs}, s.strokes, s.hole_strokes)
+                 for s in self.sides if (s.team or s.key) == team]
+        return scoring.team_holes(self.format, sides, self.par, seqs, self.week_card,
+                                  self.league.team_players.get(team))
 
     def team_gross(self, team: str) -> tuple[int, int, list[tuple[Side, int]]] | None:
         """A best-ball team's running GROSS score to par: (team to par, holes counted, each partner's own
