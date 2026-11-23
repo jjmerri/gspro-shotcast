@@ -47,15 +47,54 @@ SHOW_S = 600.0      # the longest the cards stay up
 CLAIMED_S = 15.0    # how long they stay once every player has claimed
 STALE_S = 30.0      # a round found over after the season file went unread this long gets no cards
 MAX_PLAYERS = 12    # (more than that: the first ones by seat. The QR would be too fine to scan.)
-NAME_CHARS = 16     # how much of a player's name goes in the link (the phone only shows it to pick from)
+NAME_BYTES = 24     # how much of a player's name goes in the link, as it's written there (percent-encoded)
+LINK_BYTES = 620    # the longest link a QR is drawn for (about 4 pixels a module on a 1080p screen)
+
+
+def labels(names: list[str]) -> list[str]:
+    """What each player is called on the card and on the phone, in seat order: their name, "Player"
+    for none, and a number after any that would otherwise read the same in the link (two Mikes, two
+    with no name, two long names alike in what fits): "Mike (1)", "Mike (2)"."""
+    shown = [n.strip() or "Player" for n in names]
+    short = [_fit(n, NAME_BYTES) for n in shown]
+    seen: dict[str, int] = {}
+    out = []
+    for name, cut in zip(shown, short):
+        if short.count(cut) > 1:
+            seen[cut] = seen.get(cut, 0) + 1
+            name = f"{name} ({seen[cut]})"
+        out.append(name)
+    return out
+
+
+def _fit(name: str, most: int) -> str:
+    """As much of the name as takes `most` characters of a link once percent-encoded."""
+    while len(quote(name, safe="")) > most:
+        name = name[:-1]
+    return name
+
+
+def _in_link(label: str, most: int) -> str:
+    """A label cut for the link, keeping the number `labels` put after it."""
+    head, sep, tail = label.rpartition(" (")
+    if sep and tail[:-1].isdigit() and tail.endswith(")"):
+        return _fit(head, max(0, most - len(quote(sep + tail, safe="")))) + sep + tail
+    return _fit(label, most)
 
 
 def claim_link(api: str, players: list[tuple[str, str]]) -> str:
-    """What the QR opens: the site's "which player are you?" page, with each player's (name, code)
+    """What the QR opens: the site's "which player are you?" page, with each player's (label, code)
     after the `#` as `<code>=<name>&...`. A browser keeps that part to itself, so the page (the
-    cloud's claim.js) reads it on the phone and links each name to `/claim/<code>`."""
-    return f"{api.rstrip('/')}/claim/#" + "&".join(
-        f"{code}={quote(name[:NAME_CHARS], safe='')}" for name, code in players)
+    cloud's claim.js) reads it on the phone and links each name to `/claim/<code>`. Names are cut,
+    more for more players, so the link stays short enough to scan (LINK_BYTES); with no room for
+    any, the codes go alone and the page calls them "Player 1", "Player 2"."""
+    base = f"{api.rstrip('/')}/claim/#"
+    for most in (NAME_BYTES, 16, 10, 0):
+        link = base + "&".join(f"{code}={quote(_in_link(name, most), safe='')}" if most else f"{code}="
+                               for name, code in players)
+        if len(link) <= LINK_BYTES:
+            break
+    return link
 
 
 def matrix(text: str) -> list[list[bool]]:
@@ -93,13 +132,16 @@ class Shown:
             return [Card(c.slot_id, c.name, c.code, c.claimed, c.by) for c in self.cards]
 
 
-def state(db: Any) -> tuple[set[str], set[str], bool]:
-    """(the rounds that are over, everything in progress, whether a round is in progress), from the
-    season file. In progress counts practice too: someone hitting balls is the next customer."""
-    rows = db.execute("SELECT uuid, kind, state FROM round_records").fetchall()
-    live = {r["uuid"] for r in rows if r["state"] == "in_progress"}
+def state(db: Any) -> tuple[set[str], set[str], bool, set[str]]:
+    """(the rounds that are over, what is being played, whether a round is in progress, every
+    record there is), from the season file. Being played: a round in progress, and practice once a
+    shot has been hit in it (someone hitting balls is the next customer; a practice record with no
+    shot is only where a late line of commentary was filed)."""
+    rows = db.execute("SELECT r.uuid, r.kind, r.state, EXISTS (SELECT 1 FROM shots s WHERE s.record_uuid = r.uuid) "
+                      "AS hit FROM round_records r").fetchall()
+    live = {r["uuid"] for r in rows if r["state"] == "in_progress" and (r["kind"] == "round" or r["hit"])}
     return ({r["uuid"] for r in rows if r["kind"] == "round" and r["state"] != "in_progress"}, live,
-            any(r["kind"] == "round" and r["state"] == "in_progress" for r in rows))
+            any(r["kind"] == "round" and r["state"] == "in_progress" for r in rows), {r["uuid"] for r in rows})
 
 
 def cards_for(db: Any, uuid: str) -> list[Card]:
@@ -107,8 +149,9 @@ def cards_for(db: Any, uuid: str) -> list[Card]:
     codes = cloud_rounds.claim_codes(db, uuid)
     slots = db.execute("SELECT slot_id, name FROM round_slots WHERE round_uuid = ? ORDER BY seat, slot_id",
                        (uuid,)).fetchall()
-    return [Card(s["slot_id"], s["name"] or "Player", codes[s["slot_id"]])
-            for s in slots if s["slot_id"] in codes][:MAX_PLAYERS]
+    slots = [s for s in slots if s["slot_id"] in codes][:MAX_PLAYERS]
+    return [Card(s["slot_id"], label, codes[s["slot_id"]])
+            for s, label in zip(slots, labels([s["name"] or "" for s in slots]))]
 
 
 def apply(shown: Shown, claims: Any) -> None:
@@ -142,7 +185,8 @@ class Cards:
         self.window = window or (lambda shown, where: Window(shown, where).show())
         self.asked_at: float | None = None        # when the cloud was last asked whether this bay shows cards
         self.done: set[str] | None = None         # the rounds that were over at the last look (None: not looked yet)
-        self.live: set[str] = set()               # and what was in progress
+        self.live: set[str] = set()               # and what was being played
+        self.known: set[str] = set()              # and every record there was
         self.pending: tuple[str, float] | None = None   # a round that has just ended, and when: its cards aren't up yet
         self.wanted_for: str | None = None        # the pending round the cloud has said yes for
         self.looked_at: float | None = None       # the last look that could read the season file
@@ -173,7 +217,7 @@ class Cards:
             try:
                 if self.key is not None and cloud_rounds.bound(db) != self.key:
                     raise cloud_rounds.NotThisPairing(f"{self.db_path} isn't bound to this pairing; no claim cards")
-                done, live, playing = state(db)
+                done, live, playing, known = state(db)
                 newest = None
                 if self.done is not None and done - self.done:
                     fresh = sorted(done - self.done)
@@ -187,12 +231,13 @@ class Cards:
             self.take_down()   # (what the bay is doing can't be told: no codes stay up meanwhile)
             raise
         started = live - self.live if self.done is not None else set()
+        ended = bool(newest)
         # (A round that ended while the file couldn't be read ended nobody knows when: no cards.)
         if newest and (self.looked_at is None or now - self.looked_at > STALE_S):
             newest = None
-        self.done, self.live, self.looked_at = done, live, now
+        self.done, self.live, self.known, self.looked_at = done, live, known, now
         shown = self.shown
-        if shown is not None and (started or newest or playing or self._finished(shown, now)):
+        if shown is not None and (started or ended or playing or self._finished(shown, now)):
             self.take_down()
         if started or playing:
             self.pending = None            # someone is playing again: the round before gets no cards now
@@ -224,8 +269,9 @@ class Cards:
             # still over, and nobody playing since the look.
             if self.key is not None and cloud_rounds.bound(db) != self.key:
                 raise cloud_rounds.NotThisPairing(f"{self.db_path} isn't bound to this pairing; no claim cards")
-            done, live, _ = state(db)
-            if uuid not in done or live - self.live:
+            # (Any record that wasn't there at the look: someone played meanwhile, even if they've stopped.)
+            done, live, _, known = state(db)
+            if uuid not in done or live - self.live or known - self.known:
                 self.pending = None
                 return
             cards = cards_for(db, uuid)
@@ -324,6 +370,7 @@ class Window:
         except Exception:
             log.exception("Claim cards window failed")
         finally:
+            self.shown.closed.set()   # (however it went: the booth's loop sees the card isn't up)
             gc.collect()   # the Tk interpreter is freed here, on its own thread
 
     def _loop(self) -> None:
@@ -400,8 +447,13 @@ class Window:
                                    text="Ask the staff for a code to keep this round",
                                    font=("Segoe UI", -round(unit * 1.2), "bold"))
                 return
+            try:
+                rows = matrix(self.shown.url)
+            except Exception:   # (a link no QR holds: claim_link keeps it far shorter)
+                log.exception("Claim card: couldn't make the QR")
+                draw_code(False)
+                return
             canvas.configure(bg=WHITE)
-            rows = matrix(self.shown.url)
             px = max(1, side // (len(rows) + 2 * QUIET))
             off = (side - px * len(rows)) // 2
             for y, cells in enumerate(rows):
@@ -410,9 +462,13 @@ class Window:
                         canvas.create_rectangle(off + x * px, off + y * px, off + (x + 1) * px, off + (y + 1) * px,
                                                 fill=BLACK, outline="")
 
-        root.update_idletasks()
-        w, h = root.winfo_reqwidth(), root.winfo_reqheight()
-        root.geometry(f"+{left + sw - w - round(sw * 0.02)}+{top + sh - h - round(sh * 0.04)}")   # bottom right
+        def place() -> None:
+            # Bottom right, wholly on the monitor however the lines have grown (a claimed player's is longer).
+            root.update_idletasks()
+            w, h = root.winfo_reqwidth(), root.winfo_reqheight()
+            root.geometry(f"+{max(left, left + sw - w - round(sw * 0.02))}+{max(top, top + sh - h - round(sh * 0.04))}")
+
+        place()
         if self.shown.down.is_set():
             return
         # The window goes up without the code, is taken out of screen capture, and only then is it drawn.
@@ -438,8 +494,11 @@ class Window:
                 if self.shown.down.is_set() or self.shown.closed.is_set() or _monotonic() >= until:
                     root.quit()
                     return
+                before = [was for _, was in lines]
                 for i, card in enumerate(self.shown.snapshot()):
                     draw(i, card)
+                if before != [was for _, was in lines]:
+                    place()
                 ticks += 1
                 if ticks % 2 == 0:   # GSPro taking focus can push it above a plain topmost window
                     if sys.platform == "win32":

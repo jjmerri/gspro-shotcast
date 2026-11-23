@@ -775,3 +775,23 @@ def test_kept_bytes_from_an_earlier_builds_queue_are_built_again_not_waited_for_
     db.close()
     out = _drain(cl, cfg)
     assert out.sent == [u] and out.settling == 0 and api.puts[-1][2]["round"]["id"] == u
+
+
+def test_a_player_who_joined_between_the_look_and_the_build_still_goes_with_a_hash(tmp_path, api, monkeypatch):
+    """Codes are made as a finished round is first looked at; a slot that appears after that and
+    before its bytes are built gets its code at the build, so no slot is sent without its hash."""
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    u = _round(s, 1)
+    watch = cloud_rounds._watch
+
+    def late(db, pace, rows):
+        bad = watch(db, pace, rows)
+        s.db.execute("INSERT INTO round_slots (slot_id, round_uuid, name, matched_by) VALUES ('late-slot', ?, 'Zed', 'legacy')", (u,))
+        s.db.commit()
+        return bad
+
+    monkeypatch.setattr(cloud_rounds, "_watch", late)
+    cloud_rounds.drain(cloud.Cloud(cloud.store()), cfg.db_path, settle=0)
+    [(_, _, sent)] = api.puts
+    assert len(sent["slots"]) == 2 and all(len(sl["claim_hash"]) == 64 for sl in sent["slots"])

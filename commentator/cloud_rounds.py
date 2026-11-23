@@ -481,6 +481,7 @@ def _freeze(db: sqlite3.Connection, uuid: str, pace: Pace, settle: float) -> boo
     body that's built: a round the booth took up again since the queue was looked at isn't sent in
     progress, and one that says something else than when it was last looked at starts its quiet
     again, from now, unless the ceiling has passed)."""
+    claim_codes(db, uuid)   # (for a player who joined since it was last looked at: every slot sent has its hash)
     got = body(db, uuid)
     if got is None:
         return False
