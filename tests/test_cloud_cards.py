@@ -153,6 +153,8 @@ def _link_names(names):
 def test_every_seat_is_numbered_so_no_two_players_read_the_same():
     assert cloud_cards.labels(["Mike"]) == ["Mike"] and cloud_cards.labels([""]) == ["Player"]   # alone: no number
     assert cloud_cards.labels(["  Ann   Lee ", "Bob\x07"]) == ["Ann Lee (1)", "Bob (2)"]          # tidied
+    assert cloud_cards.labels(["山田\u3000太郎", "Ann\tLee"]) == ["山田 太郎 (1)", "Ann Lee (2)"]   # any space is a space
+    assert _link_names(["😀😀"] * 12) == [""] * 12   # no room for a name: none, and the page says "Player 3"
     assert cloud_cards.labels(["Mike", "Ann", "Mike", " "]) == ["Mike (1)", "Ann (2)", "Mike (3)", "Player (4)"]
     # Whatever was typed, and however much of a name the link has room for, the number tells them apart.
     for names in (["Mike", "Mike", "Mike (2)"], ["Charlie", "Charlie Brown"], ["Jos\u00e9", "Jose\u0301"],
@@ -193,14 +195,15 @@ def test_a_player_who_joins_as_the_codes_are_made_keeps_the_card_waiting_for_the
     assert windows == [] and cards.pending == (u, 2)
     monkeypatch.setattr(cloud_rounds, "claim_codes", made)
     _step(cards, 4)
-    assert sorted(c.name for c in windows[0].cards) == ["Ann (1)", "Bob (2)", "Zed (3)"]
+    assert sorted(c.name[:3] for c in windows[0].cards) == ["Ann", "Bob", "Zed"]   # (seat order isn't set here)
 
 
 def test_a_qr_is_square_differs_by_link_and_stays_scannable_with_a_full_bay():
     a, b = (cloud_cards.matrix(cloud_cards.claim_link("https://shotcast.example", [("Ann", c * 22)])) for c in "AB")
     assert len(a) >= 21 and all(len(row) == len(a) for row in a) and a != b
-    full = cloud_cards.claim_link("https://app.shotcast.example", [("Bartholomew Longname", "A1b2C3d4E5f6G7h8I9j0Kl")] * 8)
-    assert len(cloud_cards.matrix(full)) <= 81   # (eight players: still four pixels a module on a 1080p screen)
+    full = cloud_cards.claim_link("https://app.shotcast.example", [
+        (label, "A1b2C3d4E5f6G7h8I9j0Kl") for label in cloud_cards.labels(["Bartholomew Longname"] * 8)])
+    assert len(cloud_cards.matrix(full)) <= 89   # (eight players, numbered: within the largest code drawn)
 
 
 # ---- when the cards show -----------------------------------------------------------------------
@@ -573,7 +576,8 @@ def test_a_round_over_before_the_booth_started_gets_no_cards_and_one_that_ends_n
     _end(s, u)
     _step(cards, 4)
     [shown] = windows
-    assert shown.uuid == u and sorted(c.name for c in shown.cards) == ["Ann (1)", "Bob (2)"]
+    assert shown.uuid == u and sorted(c.name[:3] for c in shown.cards) == ["Ann", "Bob"]
+    assert sorted(c.name[3:] for c in shown.cards) == [" (1)", " (2)"]
     db = cloud_rounds.connect(cfg.db_path)
     codes = cloud_rounds.claim_codes(db, u)
     assert sorted(_linked(shown.url)) == sorted((c.name, codes[c.slot_id]) for c in shown.cards)   # one link, both players

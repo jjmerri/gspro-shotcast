@@ -62,7 +62,7 @@ def labels(names: list[str]) -> list[str]:
     for none) and, with more than one player, their seat's number: "Mike (1)", "Ann (2)",
     "Mike (3)". Every seat is numbered so that no two players ever read the same, whatever they
     typed and however much of a name the link has room for."""
-    shown = [" ".join("".join(ch for ch in n if ch.isprintable()).split()) or "Player" for n in names]
+    shown = [" ".join("".join(ch if ch.isprintable() else " " for ch in n).split()) or "Player" for n in names]
     return [f"{name} ({i})" for i, name in enumerate(shown, 1)] if len(shown) > 1 else shown
 
 
@@ -74,7 +74,7 @@ def _in_link(label: str, seat: int | None, most: int) -> str:
     name = label.removesuffix(tail)
     while len(quote(name, safe="")) > most:
         name = name[:-1]
-    return name + tail
+    return name + tail if name else ""   # (no room for any of it: the page says "Player 3")
 
 
 def claim_link(api: str, players: list[tuple[str, str]]) -> str:
@@ -86,7 +86,7 @@ def claim_link(api: str, players: list[tuple[str, str]]) -> str:
     base = f"{api.rstrip('/')}/claim/#"
     seats = range(1, len(players) + 1) if len(players) > 1 else [None]
     for most in (*NAME_CUTS, 0):
-        link = base + "&".join(f"{code}={quote(_in_link(name, seat, most), safe='')}" if most else f"{code}="
+        link = base + "&".join(f"{code}={quote(_in_link(name, seat, most), safe='()')}" if most else f"{code}="
                                for (name, code), seat in zip(players, seats))
         if len(link) <= LINK_BYTES:
             break
