@@ -307,6 +307,22 @@ def _sides(slots: list[dict[str, Any]]) -> tuple[list[str], dict[str, str]]:
     return keys, {group: k for group, k in key.items() if isinstance(group, str)}
 
 
+def _course_card(tees: list[dict[str, Any]], folder: str | None) -> dict[str, Any] | None:
+    """The course's own card as GSPro's course files have it (kept in course_tees as each course is
+    loaded): par and stroke index by hole, each tee's rating and slope. A league's results in the
+    cloud put a player's strokes on the holes by it. `folder`: GSPro's folder for the course when
+    its round file named it (the round was surely played from it); None when the card was found by
+    the course's name alone. None for a course with no card."""
+    if not tees:
+        return None
+    first = tees[0]   # (par and index are the course's: the same on every tee's row)
+    return {
+        "folder": folder,
+        "par": _holes(first["par"]), "index": _holes(first["hole_index"]),
+        "tees": [{"name": t["tee"], "rating": t["rating"], "slope": t["slope"]} for t in tees],
+    }
+
+
 def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None:
     """A record's v1 body and the gen it was read at, or None if the record is gone. Local integer ids
     become uids or are dropped. No league: the PC is a capture device (the cloud decides).
@@ -337,6 +353,8 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
         slots = _rows(db, "SELECT * FROM round_slots WHERE round_uuid = ? ORDER BY seat, slot_id", uuid)
         codes = {r["slot_id"]: r["code"] for r in
                  db.execute("SELECT slot_id, code FROM cloud_claim_codes WHERE uuid = ?", (uuid,))}
+        tees = _rows(db, "SELECT * FROM course_tees WHERE course = ? COLLATE NOCASE ORDER BY tee", rec["course"])
+        folder = db.execute("SELECT folder FROM round_folders WHERE record_uuid = ?", (uuid,)).fetchone()
     keys, side_of = _sides(slots)
     card_side = {c["id"]: c["side"] for c in cards}
     # One card a side: its last (a booth that stopped between writing a round's cards and marking it
@@ -376,6 +394,7 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
                             else {}) for w in weeks],
         "edit": {"excluded": any(c["excluded"] for c in cards), "mark": mark,
                  "left_out": [s["uid"] for s in shots if s["left_out"]]},
+        "course_card": _course_card(tees, folder["folder"] if folder else None),
     }, rec["gen"]
 
 

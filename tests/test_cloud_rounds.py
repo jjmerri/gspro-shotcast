@@ -731,3 +731,26 @@ def test_a_slot_with_no_code_yet_isnt_built_into_the_rounds_bytes(tmp_path, api,
     cloud_rounds.drain(cl, cfg.db_path, settle=0)
     [(_, _, sent)] = api.puts
     assert len(sent["slots"]) == 2 and all(len(sl["claim_hash"]) == 64 for sl in sent["slots"])
+
+
+def test_a_round_goes_with_its_courses_card_as_gspros_files_have_it(tmp_path, api):
+    """Par and stroke index by hole and each tee's rating: what a league's results in the cloud put
+    a player's strokes on the holes by. The folder only when GSPro's round file named it."""
+    from commentator.course_card import CourseCard
+
+    cfg, s, cl = _booth(tmp_path, api)
+    s.record_course_tees("Pebble", CourseCard(
+        name="Pebble Beach", par={1: 4, 2: 5}, index={1: 7, 2: 1},
+        yards={"Blue": {1: 380, 2: 510}, "Red": {1: 300, 2: 420}}, ratings={"Blue": (72.1, 131.0)}))
+    known, plain, other = _round(s, 1), _round(s, 100), s.begin_round("r3", course="Elsewhere", players={"Ann": None})
+    _hit(s, "Ann", 200)
+    s.end_round(other, complete=True)
+    s.db.execute("INSERT INTO round_folders VALUES (?, 'pebble_gsp')", (known,))
+    s.db.commit()
+    assert sorted(_drain(cl, cfg).sent) == sorted([known, plain, other])
+    card = {p[0]: p[2]["course_card"] for p in api.puts}
+    assert card[known] == {
+        "folder": "pebble_gsp", "par": {"1": 4, "2": 5}, "index": {"1": 7, "2": 1},
+        "tees": [{"name": "Blue", "rating": 72.1, "slope": 131.0}, {"name": "Red", "rating": None, "slope": None}]}
+    assert card[plain] == card[known] | {"folder": None}
+    assert card[other] is None   # (a course whose files gave no card)
