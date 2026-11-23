@@ -71,7 +71,8 @@ async def _run(uploads: "Uploads", prof: cloud.Profile, where: Callable[[], tupl
     from . import cloud_cards
 
     cards = asyncio.create_task(
-        cloud_cards.Cards(uploads.cfg.db_path, prof.rec["api"], uploads._cloud, where).run(), name="cloud-cards")
+        cloud_cards.Cards(uploads.cfg.db_path, prof.rec["api"], uploads._cloud, tuple(uploads.identity[:3]),
+                          where).run(), name="cloud-cards")
     try:
         await uploads.run()
     finally:

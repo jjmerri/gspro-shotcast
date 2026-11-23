@@ -242,8 +242,7 @@ async def _run_booth(cfg: Config) -> None:
     from .cloud_booth import start as start_uploads
 
     # Paired with Shotcast Cloud: settled rounds go up, and a venue's bay shows claim cards (unpaired: None).
-    uploads = start_uploads(cfg, where=engine.screen.monitor_rect if engine.screen and cfg.screen.follow_window
-                            else None)
+    uploads = start_uploads(cfg, where=engine.screen.monitor_rect if engine.screen else None)
     try:
         await engine.run()
     finally:
