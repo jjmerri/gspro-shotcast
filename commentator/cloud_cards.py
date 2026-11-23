@@ -19,7 +19,8 @@ can't be told). A round that was already over when the booth started gets none: 
 fresh code on the website.
 
 The window is small and sits at the bottom right, over GSPro's minimap, so the scorecard GSPro
-shows as a round ends stays readable. It is the booth's own (popup.py's kind): it never takes focus from GSPro and is kept out of
+shows as a round ends stays readable; it can be dragged anywhere, and the next round's comes up where
+the last was left. It is the booth's own (popup.py's kind): it never takes focus from GSPro and is kept out of
 screen capture, so the code isn't in the stream or the booth's own screen reads. It's drawn only
 once Windows confirms that; where it can't, the card says to ask the staff. Every wait is counted in
 elapsed seconds.
@@ -50,16 +51,25 @@ SHOW_S = 600.0      # the longest the cards stay up
 CLAIMED_S = 15.0    # how long they stay once every player has claimed
 STALE_S = 30.0      # a round found over after the season file went unread this long gets no cards
 MAX_PLAYERS = 12    # (more than that: the first ones by seat. The QR would be too fine to scan.)
-NAME_BYTES = 24     # how much of a player's name goes in the link, as it's written there (percent-encoded)
-NAME_CUTS = (NAME_BYTES, 16, 10)   # tried in turn, till the link fits; then no names at all
+NAME_BYTES = 36     # how much of a player's name goes in the link, as it's written there (percent-encoded:
+                    # a letter outside English is 6 to 12 there, so this is four Korean syllables, six Cyrillic letters)
+NAME_CUTS = (NAME_BYTES, 24, 16, 10, 6)   # tried in turn, till the link fits; then no names at all
 LINK_BYTES = 550    # the longest link a QR is drawn for: an 89-module code at most
+STATUS_CHARS = 44   # how much of the claimers' names the card's one status line lists
 MODULE_PX = 4       # the finest a QR's modules are drawn (the code is made bigger on a small screen to keep it)
 
 
+# Characters that draw as nothing (and aren't spaces): left out of a name, so two names can't differ by one.
+_UNSEEN = {0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0, *range(0x180B, 0x1810),
+           *range(0xFE00, 0xFE10), *range(0xE0100, 0xE01F0)}
+
+
 def _clean(name: str) -> str:
-    """A name as it's shown: one spelling of each letter, nothing that can't be seen, single spaces."""
-    name = unicodedata.normalize("NFC", name)
-    return " ".join("".join(ch for ch in name if ch.isprintable() and unicodedata.category(ch) != "Cf").split())
+    """A name as it's shown: one spelling of each letter, any kind of space as one plain space,
+    nothing that can't be seen."""
+    name = "".join(" " if ch.isspace() else ch for ch in unicodedata.normalize("NFC", name))
+    return " ".join("".join(ch for ch in name if ch.isprintable() and unicodedata.category(ch) != "Cf"
+                            and ord(ch) not in _UNSEEN).split())
 
 
 def _reads(text: str) -> str:
@@ -95,10 +105,11 @@ def _fit(name: str, most: int) -> str:
 
 
 def _in_link(label: str, most: int) -> str:
-    """A label cut for the link, keeping the number `labels` put after it."""
+    """A label cut for the link: its name to `most`, and the seat number `labels` put after it kept
+    whole (it isn't counted against the name's room: the name is what a player knows themselves by)."""
     head, sep, tail = label.rpartition(" (")
     if sep and tail[:-1].isdigit() and tail.endswith(")"):
-        return _fit(head, max(0, most - len(quote(sep + tail, safe="")))) + sep + tail
+        return _fit(head, most) + sep + tail
     return _fit(label, most)
 
 
@@ -386,12 +397,17 @@ REDRAW_MS = 500
 QUIET = 4   # light modules around a QR code, which a scanner needs
 
 
+_dragged_to: tuple[int, int] | None = None   # where on its monitor someone dragged the card to (till Shotcast restarts)
+
+
 class Window:
     """The cards over GSPro, along the bottom of its monitor. Tk runs on the window's own thread for
     its whole life, as popup.Question's does."""
 
     def __init__(self, shown: Shown, where: Callable[[], tuple[int, int, int, int]] | None = None) -> None:
         self.shown, self.where = shown, where
+        self.code_drawn = False                              # whether the QR was painted (not the staff message)
+        self.rect: tuple[int, int, int, int] | None = None   # where the window is on the desktop (left, top, w, h)
 
     def show(self) -> "Window":
         threading.Thread(target=self._run, name="claim-cards", daemon=True).start()
@@ -452,8 +468,9 @@ class Window:
             root.quit()
         head = tk.Frame(frame, bg=PANEL)
         head.pack(fill="x")
-        tk.Label(head, text="Keep this round", bg=PANEL, fg=ON_TEXT, anchor="w",
-                 font=("Segoe UI", -round(unit * 1.2), "bold")).pack(side="left")
+        title = tk.Label(head, text="Keep this round", bg=PANEL, fg=ON_TEXT, anchor="w",
+                         font=("Segoe UI", -round(unit * 1.2), "bold"))
+        title.pack(side="left")
         tk.Button(head, text="\u2715", bg=NO_GREY, fg=ON_TEXT, activebackground=NO_GREY, activeforeground=ON_TEXT,
                   relief="flat", bd=0, padx=unit // 2, cursor="hand2", font=("Segoe UI", -unit, "bold"),
                   command=close).pack(side="right")
@@ -471,7 +488,14 @@ class Window:
             elif len(got) == len(cards):
                 text, colour = "\u2713 Everyone has claimed this round.", TICK_GREEN
             else:
-                text, colour = f"\u2713 {len(got)} of {len(cards)} claimed: " + ", ".join(c.by or c.name for c in got), TICK_GREEN
+                # (The count, and as many of the names as fit two short lines: the card stays small.)
+                names: list[str] = []
+                for c in got:
+                    if len(", ".join([*names, c.by or c.name])) > STATUS_CHARS:
+                        names.append("\u2026")
+                        break
+                    names.append(c.by or c.name)
+                text, colour = f"\u2713 {len(got)} of {len(cards)} claimed: " + ", ".join(names), TICK_GREEN
             if said != [text]:
                 said[:] = [text]
                 status.configure(text=text, fg=colour)
@@ -485,6 +509,7 @@ class Window:
                                    font=("Segoe UI", -round(unit * 1.1), "bold"))
                 return
             rows = code or []
+            self.code_drawn = True
             canvas.configure(bg=WHITE)
             px = max(1, side // (len(rows) + 2 * QUIET))
             off = (side - px * len(rows)) // 2
@@ -494,11 +519,31 @@ class Window:
                         canvas.create_rectangle(off + x * px, off + y * px, off + (x + 1) * px, off + (y + 1) * px,
                                                 fill=BLACK, outline="")
 
-        def place() -> None:
-            # Bottom right (over GSPro's minimap, beside its scorecard), wholly on the monitor.
+        def place(to: tuple[int, int] | None = None) -> None:
+            # Bottom right (over GSPro's minimap, beside its scorecard) till someone drags it; then
+            # where it was dragged to, this card and the next ones. Always wholly on the monitor.
+            global _dragged_to
             root.update_idletasks()
             w, h = root.winfo_reqwidth(), root.winfo_reqheight()
-            root.geometry(f"+{max(left, left + sw - w - round(sw * 0.02))}+{max(top, top + sh - h - round(sh * 0.04))}")
+            if to is not None:
+                _dragged_to = (to[0] - left, to[1] - top)
+            x, y = (sw - w - round(sw * 0.02), sh - h - round(sh * 0.04)) if _dragged_to is None else _dragged_to
+            x, y = left + max(0, min(x, sw - w)), top + max(0, min(y, sh - h))
+            root.geometry(f"+{x}+{y}")
+            self.rect = (x, y, w, h)
+
+        grip: list[int] = []   # where on the card the mouse took hold of it
+
+        def take(e: Any) -> None:
+            grip[:] = [e.x_root - root.winfo_x(), e.y_root - root.winfo_y()]
+
+        def drag(e: Any) -> None:
+            if grip:
+                place((e.x_root - grip[0], e.y_root - grip[1]))
+        for part in (frame, head, title, canvas, status):   # (anywhere but the close button)
+            part.bind("<ButtonPress-1>", take)
+            part.bind("<B1-Motion>", drag)
+            part.configure(cursor="fleur")
 
         place()
         if self.shown.down.is_set():
