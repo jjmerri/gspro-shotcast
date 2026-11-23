@@ -795,3 +795,29 @@ def test_a_player_who_joined_between_the_look_and_the_build_still_goes_with_a_ha
     cloud_rounds.drain(cloud.Cloud(cloud.store()), cfg.db_path, settle=0)
     [(_, _, sent)] = api.puts
     assert len(sent["slots"]) == 2 and all(len(sl["claim_hash"]) == 64 for sl in sent["slots"])
+
+
+def test_a_slot_with_no_code_yet_isnt_built_into_the_rounds_bytes(tmp_path, api, monkeypatch):
+    """A player who joins in the instant between the codes being made and the body being read: the
+    round isn't built without their hash; the next look makes it and the round goes whole."""
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    u = _round(s, 1)
+    made, calls = cloud_rounds.claim_codes, []
+
+    def then_a_slot(db, uuid):
+        out = made(db, uuid)
+        calls.append(uuid)
+        if len(calls) == 2:   # (the one in the build, after the look's)
+            s.db.execute("INSERT INTO round_slots (slot_id, round_uuid, name, matched_by) "
+                         "VALUES ('late-slot', ?, 'Zed', 'legacy')", (u,))
+            s.db.commit()
+        return out
+
+    monkeypatch.setattr(cloud_rounds, "claim_codes", then_a_slot)
+    cl = cloud.Cloud(cloud.store())
+    cloud_rounds.drain(cl, cfg.db_path, settle=0)
+    assert api.puts == []
+    cloud_rounds.drain(cl, cfg.db_path, settle=0)
+    [(_, _, sent)] = api.puts
+    assert len(sent["slots"]) == 2 and all(len(sl["claim_hash"]) == 64 for sl in sent["slots"])

@@ -486,6 +486,8 @@ def _freeze(db: sqlite3.Connection, uuid: str, pace: Pace, settle: float) -> boo
     if got is None:
         return False
     b, gen = got
+    if any("claim_hash" not in s for s in b["slots"]):
+        return False   # (a player who joined in the instant since the codes were made: built at the next look)
     sig = _signature(b)
     pace.note(uuid, sig, b["round"].get("ended_at"))
     if b["round"]["kind"] != "round" or b["round"]["state"] == "in_progress" or not pace.ready(uuid, settle):

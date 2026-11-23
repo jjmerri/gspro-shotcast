@@ -48,23 +48,19 @@ CLAIMED_S = 15.0    # how long they stay once every player has claimed
 STALE_S = 30.0      # a round found over after the season file went unread this long gets no cards
 MAX_PLAYERS = 12    # (more than that: the first ones by seat. The QR would be too fine to scan.)
 NAME_BYTES = 24     # how much of a player's name goes in the link, as it's written there (percent-encoded)
-LINK_BYTES = 620    # the longest link a QR is drawn for (about 4 pixels a module on a 1080p screen)
+NAME_CUTS = (NAME_BYTES, 16, 10)   # tried in turn, till the link fits; then no names at all
+LINK_BYTES = 550    # the longest link a QR is drawn for: an 89-module code at most
+MODULE_PX = 4       # the finest a QR's modules are drawn (the code is made bigger on a small screen to keep it)
 
 
 def labels(names: list[str]) -> list[str]:
     """What each player is called on the card and on the phone, in seat order: their name, "Player"
-    for none, and a number after any that would otherwise read the same in the link (two Mikes, two
-    with no name, two long names alike in what fits): "Mike (1)", "Mike (2)"."""
+    for none, and their place in the round after any that could read the same as another's however
+    much of it the link has room for (two Mikes, two with no name, two long names that start
+    alike): "Mike (1)", "Mike (3)". The number is the seat's, so no two labels are ever the same."""
     shown = [n.strip() or "Player" for n in names]
-    short = [_fit(n, NAME_BYTES) for n in shown]
-    seen: dict[str, int] = {}
-    out = []
-    for name, cut in zip(shown, short):
-        if short.count(cut) > 1:
-            seen[cut] = seen.get(cut, 0) + 1
-            name = f"{name} ({seen[cut]})"
-        out.append(name)
-    return out
+    short = [_fit(n, NAME_CUTS[-1]).casefold() for n in shown]
+    return [f"{name} ({i})" if short.count(cut) > 1 else name for i, (name, cut) in enumerate(zip(shown, short), 1)]
 
 
 def _fit(name: str, most: int) -> str:
@@ -89,12 +85,18 @@ def claim_link(api: str, players: list[tuple[str, str]]) -> str:
     more for more players, so the link stays short enough to scan (LINK_BYTES); with no room for
     any, the codes go alone and the page calls them "Player 1", "Player 2"."""
     base = f"{api.rstrip('/')}/claim/#"
-    for most in (NAME_BYTES, 16, 10, 0):
+    for most in (*NAME_CUTS, 0):
         link = base + "&".join(f"{code}={quote(_in_link(name, most), safe='')}" if most else f"{code}="
                                for name, code in players)
         if len(link) <= LINK_BYTES:
             break
     return link
+
+
+def code_side(screen_height: int, modules: int) -> int:
+    """How many pixels across the QR's square is drawn: a good part of the screen, and more on a
+    small one if that's what it takes for MODULE_PX a module (its light border counted)."""
+    return min(max(round(screen_height * 0.36), MODULE_PX * (modules + 2 * QUIET)), round(screen_height * 0.7))
 
 
 def matrix(text: str) -> list[list[bool]]:
@@ -134,14 +136,15 @@ class Shown:
 
 def state(db: Any) -> tuple[set[str], set[str], bool, set[str]]:
     """(the rounds that are over, what is being played, whether a round is in progress, every
-    record there is), from the season file. Being played: a round in progress, and practice once a
-    shot has been hit in it (someone hitting balls is the next customer; a practice record with no
-    shot is only where a late line of commentary was filed)."""
+    round, and every practice record with a shot in it), from the season file. Being played: a round
+    in progress, and practice once a shot has been hit in it (someone hitting balls is the next
+    customer; a practice record with no shot is only where a late line of commentary was filed)."""
     rows = db.execute("SELECT r.uuid, r.kind, r.state, EXISTS (SELECT 1 FROM shots s WHERE s.record_uuid = r.uuid) "
                       "AS hit FROM round_records r").fetchall()
     live = {r["uuid"] for r in rows if r["state"] == "in_progress" and (r["kind"] == "round" or r["hit"])}
     return ({r["uuid"] for r in rows if r["kind"] == "round" and r["state"] != "in_progress"}, live,
-            any(r["kind"] == "round" and r["state"] == "in_progress" for r in rows), {r["uuid"] for r in rows})
+            any(r["kind"] == "round" and r["state"] == "in_progress" for r in rows),
+            {r["uuid"] for r in rows if r["kind"] == "round" or r["hit"]})
 
 
 def cards_for(db: Any, uuid: str) -> list[Card]:
@@ -186,7 +189,7 @@ class Cards:
         self.asked_at: float | None = None        # when the cloud was last asked whether this bay shows cards
         self.done: set[str] | None = None         # the rounds that were over at the last look (None: not looked yet)
         self.live: set[str] = set()               # and what was being played
-        self.known: set[str] = set()              # and every record there was
+        self.known: set[str] = set()              # and everything that had been played
         self.pending: tuple[str, float] | None = None   # a round that has just ended, and when: its cards aren't up yet
         self.wanted_for: str | None = None        # the pending round the cloud has said yes for
         self.looked_at: float | None = None       # the last look that could read the season file
@@ -239,9 +242,11 @@ class Cards:
         shown = self.shown
         if shown is not None and (started or ended or playing or self._finished(shown, now)):
             self.take_down()
-        if started or playing:
-            self.pending = None            # someone is playing again: the round before gets no cards now
-        elif newest:
+        if started or playing or ended:
+            # Someone is playing again, or has played since (a round found over, even one too late
+            # for a card of its own): the round before gets no card now.
+            self.pending = None
+        if newest and not (started or playing):
             self.pending, self.wanted_for = (newest, now), None
         if self.pending is not None:
             self._put_up(now)
@@ -269,12 +274,13 @@ class Cards:
             # still over, and nobody playing since the look.
             if self.key is not None and cloud_rounds.bound(db) != self.key:
                 raise cloud_rounds.NotThisPairing(f"{self.db_path} isn't bound to this pairing; no claim cards")
-            # (Any record that wasn't there at the look: someone played meanwhile, even if they've stopped.)
+            cards = cards_for(db, uuid)   # (first: making the codes can wait on the booth's own writes)
+            # Then, last of all: still over, and nobody has played since the look (anything played
+            # that wasn't there then, even if they've stopped).
             done, live, _, known = state(db)
             if uuid not in done or live - self.live or known - self.known:
                 self.pending = None
                 return
-            cards = cards_for(db, uuid)
         finally:
             db.close()
         self.pending = None
@@ -402,7 +408,12 @@ class Window:
         left, top, sw, sh = mon or (0, 0, root.winfo_screenwidth(), root.winfo_screenheight())
         cards = self.shown.snapshot()
         unit = max(12, round(sh * 0.02))
-        side = round(sh * 0.36)   # the QR's side: big enough to scan from where the players stand
+        try:
+            code: list[list[bool]] | None = matrix(self.shown.url)
+        except Exception:   # (a link no QR holds: claim_link keeps it far shorter)
+            log.exception("Claim card: couldn't make the QR")
+            code = None
+        side = code_side(sh, len(code) if code else 0)   # big enough to scan from where the players stand
         frame = tk.Frame(root, bg=PANEL, highlightthickness=2, highlightbackground=PANEL_EDGE, padx=unit, pady=unit)
         frame.pack()
         canvas = tk.Canvas(frame, width=side, height=side, bg=PANEL, highlightthickness=0)
@@ -412,7 +423,7 @@ class Window:
         tk.Label(right, text="Keep this round", bg=PANEL, fg=ON_TEXT, anchor="w",
                  font=("Segoe UI", -round(unit * 1.5), "bold")).pack(fill="x")
         tk.Label(right, text="Scan the code with your phone's camera, then pick your name.", bg=PANEL, fg=MUTED,
-                 anchor="w", justify="left", wraplength=round(sw * 0.22), font=("Segoe UI", -unit)
+                 anchor="w", justify="left", wraplength=round(sw * 0.3), font=("Segoe UI", -unit)
                  ).pack(fill="x", pady=(0, unit // 2))
         lines: list[tuple[Any, tuple | None]] = []   # (a player's line, what it shows)
 
@@ -421,7 +432,7 @@ class Window:
             root.quit()
         for card in cards:
             line = tk.Label(right, text=card.name, bg=PANEL, fg=ON_TEXT, anchor="w", justify="left",
-                            wraplength=round(sw * 0.22), font=("Segoe UI", -round(unit * 1.15)))
+                            wraplength=round(sw * 0.3), font=("Segoe UI", -round(unit * 1.15)))
             line.pack(fill="x")
             lines.append((line, None))
         tk.Button(right, text="Close", bg=NO_GREY, fg=ON_TEXT, activebackground=NO_GREY, activeforeground=ON_TEXT,
@@ -441,18 +452,13 @@ class Window:
                 line.configure(text=card.name, fg=ON_TEXT)
 
         def draw_code(hidden: bool) -> None:
-            if not hidden:
+            if not hidden or code is None:
                 # (A code a stream or a screen grab could carry is a code anyone watching could use.)
                 canvas.create_text(side // 2, side // 2, width=side - unit * 2, fill=ON_TEXT, justify="center",
                                    text="Ask the staff for a code to keep this round",
                                    font=("Segoe UI", -round(unit * 1.2), "bold"))
                 return
-            try:
-                rows = matrix(self.shown.url)
-            except Exception:   # (a link no QR holds: claim_link keeps it far shorter)
-                log.exception("Claim card: couldn't make the QR")
-                draw_code(False)
-                return
+            rows = code or []
             canvas.configure(bg=WHITE)
             px = max(1, side // (len(rows) + 2 * QUIET))
             off = (side - px * len(rows)) // 2
