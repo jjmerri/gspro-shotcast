@@ -154,7 +154,8 @@ def test_every_seat_is_numbered_so_no_two_players_read_the_same():
     assert cloud_cards.labels(["Mike"]) == ["Mike"] and cloud_cards.labels([""]) == ["Player"]   # alone: no number
     assert cloud_cards.labels(["  Ann   Lee ", "Bob\x07"]) == ["Ann Lee (1)", "Bob (2)"]          # tidied
     assert cloud_cards.labels(["山田\u3000太郎", "Ann\tLee"]) == ["山田 太郎 (1)", "Ann Lee (2)"]   # any space is a space
-    assert _link_names(["😀😀"] * 12) == [""] * 12   # no room for a name: none, and the page says "Player 3"
+    # No room for any of a name: nothing, and the page says "Player 3".
+    assert cloud_cards._in_link("김민수 (3)", 3, 6) == "" and cloud_cards._in_link("Mike (3)", 3, 2) == "Mi (3)"
     assert cloud_cards.labels(["Mike", "Ann", "Mike", " "]) == ["Mike (1)", "Ann (2)", "Mike (3)", "Player (4)"]
     # Whatever was typed, and however much of a name the link has room for, the number tells them apart.
     for names in (["Mike", "Mike", "Mike (2)"], ["Charlie", "Charlie Brown"], ["Jos\u00e9", "Jose\u0301"],
