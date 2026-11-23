@@ -8072,3 +8072,26 @@ def test_gspros_round_file_confirming_a_guessed_slot_grades_the_shots_named_righ
     e._file_entries, e._file_version = [_file_ball("Alice", 150.0)], 2
     e._apply_log_corrections()
     assert rec.player == "Alice" and e._fire_rows[1][2] == 0 and 1 in e._outcomes_due
+
+
+def test_reassigning_strokes_keeps_a_side_with_a_handicap_gone_and_overwrites_one_recomputed():
+    from types import SimpleNamespace
+
+    from commentator.round import Side
+
+    known = {"Mike": 12.0, "Dan": 0.0}
+    r = SimpleNamespace(is_league=True, format="best_ball", start_hole=1, holes=9, week_card=None, index={},
+                        league=SimpleNamespace(handicap=known.get), _allowances=lambda: [0.75])
+    mike = Side(key="m", label="Mike", players=["Mike"], gspro=["MikeD"], strokes=2)
+    dan = Side(key="d", label="Dan", players=["Dan"], gspro=["DanD"], strokes=5)
+    gone = Side(key="g", label="Guest", players=["Guest"], gspro=["Guest"], strokes=5)
+    r.sides = [mike, dan, gone]
+    Round._assign_strokes(r, r.sides)
+    assert (mike.strokes, dan.strokes, gone.strokes) == (5, 0, 5)   # 12 x 9/18 x 0.75 = 4.5 -> 5
+    Round._allocate_hole_strokes(r)
+    assert mike.hole_strokes == {q: 1 if q <= 5 else 0 for q in range(1, 10)}
+    assert sum(gone.hole_strokes.values()) == 5 and not any(dan.hole_strokes.values())
+    # A practice round is gross only: nothing is assigned.
+    r.is_league, mike.strokes = False, None
+    Round._assign_strokes(r, r.sides)
+    assert mike.strokes is None

@@ -6,8 +6,13 @@ so a week's result is worked out by one copy of the code.
 
 Holes are whatever the caller keys them by (the app: the hole's place in the round, 1..n; the
 server: the course's hole number), as long as `par`, `index`, each side's scores and its strokes
-agree. Only a week card is always keyed by the course's hole number (as text), so strokes() takes
-those numbers.
+agree and each hole played has a key of its own: a round that plays a hole twice (twice round a
+nine) can't be keyed by the course's numbers. Only a week card is always keyed by the course's hole
+number (as text), so strokes() takes those numbers.
+
+The app counts a round's holes on from its start hole without wrapping (start_hole + n - 1, so a
+round past the 18th has numbers no card has and scores without the card). A caller that wants the
+booth's result for such a round passes the same numbers.
 
 Like handicap.py, nothing here validates: callers pass clean data.
 """
@@ -30,7 +35,7 @@ DEFAULT_ALLOWANCES: dict[str, list[float]] = {
 
 def default_allowances(fmt: str | None) -> list[float]:
     """The format's allowances when the league sets none (an unknown format: the whole handicap)."""
-    return DEFAULT_ALLOWANCES.get(fmt or "", [1.0])
+    return list(DEFAULT_ALLOWANCES.get(fmt or "", [1.0]))
 
 
 def strokes(fmt: str | None, indexes: Sequence[float | None], course_holes: Sequence[int],
@@ -58,9 +63,11 @@ def strokes(fmt: str | None, indexes: Sequence[float | None], course_holes: Sequ
 
 
 def hole_strokes(given: int, holes: Sequence[int], index: Mapping[int, int]) -> dict[int, int]:
-    """The strokes on each of `holes` (in the order played): the hardest first (lowest stroke
-    index), a hole with no index last, ties by the order played. A plus handicap gives them back
-    from the easiest."""
+    """The strokes on each of `holes` (in the order played, each once): the hardest first (lowest
+    stroke index; a hole absent from `index` counts as 99, after any real one), ties by the order
+    played. A plus handicap gives them back from the other end of that order: the easiest first, and
+    among ties the one played last. `index` holds real stroke indexes only: a 0 or other stand-in
+    for "unknown" would sort as given."""
     place = {h: n for n, h in enumerate(holes)}
     return handicap.allocate(given, sorted(holes, key=lambda h: (index.get(h, 99), place[h])))
 
@@ -69,7 +76,7 @@ def hole_strokes(given: int, holes: Sequence[int], index: Mapping[int, int]) -> 
 class SideCard:
     """One side of a round as the team's net needs it: who played it, its gross score per hole (None
     or absent: not scored), its strokes for the round (None: a handicap is missing) and the holes
-    they fall on."""
+    they fall on. The fields can't be rebound; the mappings are the caller's and are read when scored."""
     players: Sequence[str]
     gross: Mapping[int, int | None]
     strokes: int | None

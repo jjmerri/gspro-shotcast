@@ -206,7 +206,9 @@ sources/  ─►  engine/    ─►  facts.py  ─►  prompts.py ─► LLM ─
   and the week's closest to the pin (`Store.week_ctp`).
 - **`scoring/`** (`shotcast_scoring`, its own package): the pure league scoring rules, shared with
   Shotcast Cloud, which installs it from a tag (`...#subdirectory=scoring`). Plain data in and out:
-  no I/O, no app imports, no third-party dependencies. The app ships it in its own install
+  no I/O, no app imports, no third-party dependencies. `round` there puts one round together (a side's
+  strokes, the holes they fall on, a team's net per hole): `commentator/round.py` scores its live round
+  with it. The app ships it in its own install
   (pyproject.toml's package discovery). A rule change needs a version bump and a tag; see
   `scoring/README.md`.
 - **`news.py`** fetches real golf headlines (RSS/Atom) for between-shots banter, because the
