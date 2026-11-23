@@ -696,6 +696,28 @@ def test_a_picked_up_holes_last_stroke_stored_as_holed_is_left_where_it_stopped(
     assert s.db.execute("PRAGMA user_version").fetchone()[0] == FORMAT
 
 
+def test_a_chip_in_finishes_at_0_whatever_the_log_still_has_at_the_next_tee(tmp_path):
+    s = Store(str(tmp_path / "s.db"))
+    db, sid = s.db, s.session_id
+
+    def stroke(player, n, ts, finish, outcome="holed"):
+        return db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, outcome,"
+                          " finish_yards, raw) VALUES (?, ?, ?, 'Bethpage', 'Hole 4, par 5, 447 yards', ?, 0, ?, ?,"
+                          " '{}')", (sid, ts, player, n, outcome, finish)).lastrowid
+
+    # From now on: holing a full shot finishes it at 0, and the next tee's stale reading doesn't move it.
+    db = s.db
+    later = stroke("Corey", 2, T0 + 900, None, None)
+    s.set_shot_result(later, outcome="holed")
+    s.set_shot_result(later, finish_yards=11.3)
+    assert s.db.execute("SELECT finish_yards FROM shots WHERE id = ?", (later,)).fetchone()[0] == 0.0
+    # A hole-out read late off a stroke its player has since played on from isn't one: its finish stands.
+    stale = stroke("Josh", 2, T0 + 1000, 5.0, None)
+    stroke("Josh", 3, T0 + 1030, None, None)
+    s.set_shot_result(stale, outcome="holed")
+    assert tuple(s.db.execute("SELECT outcome, finish_yards FROM shots WHERE id = ?", (stale,)).fetchone()) == (None, 5.0)
+
+
 def test_the_readers_read_the_stored_record_once_every_row_has_one(tmp_path):
     from commentator import stats_web
 

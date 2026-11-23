@@ -27,7 +27,8 @@ class SessionMixin:
                     tr = self._track(i)
                     if tr is not None and tr["finish_yards"] is not None:
                         was = json.loads(tr["was"] or "{}")
-                        self.db.execute("UPDATE shots SET finish_yards = ? WHERE id = ?", (was.get("finish_yards"), i))
+                        self.db.execute("UPDATE shots SET finish_yards = CASE WHEN outcome = 'holed' AND is_putt = 0"
+                                        " THEN 0 ELSE ? END WHERE id = ?", (was.get("finish_yards"), i))   # (a chip-in's stays 0)
                         self.db.execute("UPDATE shot_tracks SET finish_yards = NULL WHERE shot_id = ?", (i,))
             # The conceded putt a stroke left (record_gimme's row, which copied that stroke's format).
             self.db.executemany(

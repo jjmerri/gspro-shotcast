@@ -73,6 +73,11 @@ class FinishesMixin:
                 where, args = f" AND session_id IN ({','.join('?' * len(sessions))})", sorted(sessions)
         rows = self.db.execute(f"SELECT {self._FINISH_COLS} FROM shots WHERE attributed = 1 AND player IS NOT NULL"
                                f" AND player != 'unknown'{where} ORDER BY session_id, player, id", args).fetchall()
+        # An older row's stale hole-out (its player's next stroke, a gimme aside, played on): not in the cup.
+        struck = [r for r in rows if r["outcome"] != "gimme"]
+        played_on = {prev["id"] for prev, nxt in zip(struck, struck[1:])
+                     if (prev["session_id"], prev["player"]) == (nxt["session_id"], nxt["player"])
+                     and self._same_hole_next(prev, nxt)}
         updates = []
         for prev, nxt in zip(rows, rows[1:]):
             if prev["mulligan"] or (prev["session_id"], prev["player"]) != (nxt["session_id"], nxt["player"]):
@@ -82,7 +87,7 @@ class FinishesMixin:
             if (finish := self._finish_from_next(prev, nxt)) is not None:
                 updates.append((finish, prev["id"]))
         updates += [(0.0, r["id"]) for r in rows if not r["is_putt"] and r["outcome"] == "holed"
-                    and r["finish_yards"] is None and not r["mulligan"]]
+                    and r["finish_yards"] is None and not r["mulligan"] and r["id"] not in played_on]
         if updates:
             self.db.executemany("UPDATE shots SET finish_yards = ? WHERE id = ?", updates)
             log.info("Filled %d missing shot finishing distances from the following strokes", len(updates))
@@ -129,6 +134,10 @@ class FinishesMixin:
         h = self.db.execute("SELECT id, is_putt, outcome FROM shots WHERE id = ?", (holed["id"],)).fetchone()
         if h["outcome"] != "holed":
             return
-        self.db.execute("UPDATE shots SET outcome = ? WHERE id = ?", ("missed" if h["is_putt"] else None, h["id"]))
+        # (a full shot's 0 left was the hole-out's: where it stopped is GSPro's round file's, if it has it)
+        tr = self.db.execute("SELECT finish_yards FROM shot_tracks WHERE shot_id = ?", (h["id"],)).fetchone()
+        self.db.execute("UPDATE shots SET outcome = ?, finish_yards = CASE WHEN is_putt = 0 AND finish_yards = 0"
+                        " THEN ? ELSE finish_yards END WHERE id = ?",
+                        ("missed" if h["is_putt"] else None, tr[0] if tr is not None and tr[0] else None, h["id"]))
         log.warning("Shot %s was marked holed but %s hit again on the hole (shot %s): not holed",
                     h["id"], row["player"], nxt["id"])

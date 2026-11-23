@@ -281,7 +281,8 @@ class RepairsMixin:
         if shot_id is None or self._tracked_finish(shot_id):
             return False
         only_unknown = "" if replace else " AND finish_yards IS NULL"
-        cur = self.db.execute(f"UPDATE shots SET finish_yards = ? WHERE id = ?{only_unknown}", (yards, shot_id))
+        cur = self.db.execute(f"UPDATE shots SET finish_yards = ? WHERE id = ? AND outcome IS NOT 'holed'{only_unknown}",
+                              (yards, shot_id))
         self.db.commit()
         return cur.rowcount > 0
 

@@ -4,6 +4,12 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.163
+
+### Stats page
+- A chip-in in a scramble or alternate shot round is now one of the season's moments, for the player who holed it.
+- A chip-in tops the closest chips as holed, rather than counting as far from the hole as it was struck.
+
 ## 0.1.162
 
 ### Booth

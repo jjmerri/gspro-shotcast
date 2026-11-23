@@ -29,15 +29,20 @@ class ShotEditsMixin:
     def set_shot_result(self, shot_id: int | None, *, finish_yards: float | None = None,
                         outcome: str | None = None) -> None:
         """Fill in a shot's finishing distance and holed/conceded outcome, known only once the ball
-        settles (for a putt, after the reaction path resolves it)."""
+        settles (for a putt, after the reaction path resolves it). A full shot holed finished at 0, and
+        no later reading moves it (GSPro's log can still have the ball where it was struck at the next
+        tee: Corey's chip-in at Bethpage stored 11 yards)."""
         if shot_id is None:
             return
         if finish_yards is not None and not self._tracked_finish(shot_id):
-            self.db.execute("UPDATE shots SET finish_yards = ? WHERE id = ?", (finish_yards, shot_id))
+            self.db.execute("UPDATE shots SET finish_yards = ? WHERE id = ? AND outcome IS NOT 'holed'",
+                            (finish_yards, shot_id))
         if outcome is not None:
             self.db.execute("UPDATE shots SET outcome = ? WHERE id = ?", (outcome, shot_id))
             if outcome == "holed":
                 self._unhole_if_played_on(shot_id, later=True)
+                self.db.execute("UPDATE shots SET finish_yards = 0 WHERE id = ? AND is_putt = 0 AND outcome = 'holed'",
+                                (shot_id,))
         self.db.commit()
 
     def set_shot_player(self, shot_id: int | None, player: str, *, attributed: bool, fmt: str | None,
@@ -133,8 +138,9 @@ class ShotEditsMixin:
             tr = self._track(shot_id)
             if tr is None or tr["lie_after"] is None:
                 self.db.execute("UPDATE shots SET lie_after = ? WHERE id = ?", (finish[0], shot_id))
-            if tr is None or tr["finish_yards"] is None:
-                self.db.execute("UPDATE shots SET finish_yards = ? WHERE id = ?", (finish[1], shot_id))
+            # (GSPro's round file's finish, where it set one: a hole-out taken back had put 0 over it)
+            self.db.execute("UPDATE shots SET finish_yards = ? WHERE id = ?",
+                            (finish[1] if tr is None or tr["finish_yards"] is None else tr["finish_yards"], shot_id))
         self.db.commit()
 
     def set_mulligan(self, shot_id: int | None) -> None:

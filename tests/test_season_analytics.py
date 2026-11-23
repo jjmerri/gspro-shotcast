@@ -268,6 +268,23 @@ def test_courses_rank_holes_and_highlights_find_streaks_bounce_backs_and_real_ho
     assert h["blowups"][0]["hole"] == 6 and h["blowups"][0]["over"] == 3
 
 
+def test_a_scramble_chip_in_is_a_moment_for_who_hit_it(db):
+    hole = "Hole 4, par 5, 447 yards"
+    shot(db, "Josh", hole=hole, shot_number=4, club="LW", lie_before="deep rough", to_pin_yards=11.3, fmt="scramble")
+    shot(db, "Corey", hole=hole, shot_number=4, club="LW", lie_before="deep rough", to_pin_yards=11.3,
+         fmt="scramble", outcome="holed", finish_yards=0)
+    # An older row's stale hole-out: Josh played on after it on that hole.
+    shot(db, "Josh", hole="Hole 5, par 4, 405 yards", shot_number=2, club="9I", lie_before="fairway",
+         to_pin_yards=150, fmt="scramble", outcome="holed")
+    shot(db, "Josh", hole="par 4, 405 yards", shot_number=3, club="PT", is_putt=1, lie_before="green",
+         to_pin_yards=3, fmt="scramble", outcome="holed")
+    db.commit()
+    h = A.highlights(db, A.holes_played(db))
+    assert [(m["player"], m["kind"], m["hole"], m["text"]) for m in h["moments"]] == [
+        ("Corey", "holed out", 4, "Holed out from 11 yd (deep rough, LW)")]
+    assert [(x["player"], x["outcome"]) for x in h["chips"]][:1] == [("Corey", "holed")]
+
+
 def test_league_courses_count_a_team_formats_card_once_per_team_and_practice_never(db):
     nine = {h: PARS[str(h)] for h in range(1, 10)}
 

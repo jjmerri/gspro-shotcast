@@ -296,6 +296,8 @@ class RoundFileMixin:
                                 (was["outcome"], shot_id))
             if "is_putt" in was and not was["is_putt"]:   # (a putt only by the file's say: its miss goes too)
                 self.db.execute("UPDATE shots SET outcome = NULL WHERE id = ? AND outcome = 'missed'", (shot_id,))
+            self.db.execute("UPDATE shots SET finish_yards = 0 WHERE id = ? AND outcome = 'holed' AND is_putt = 0",
+                            (shot_id,))   # (a chip-in still holed finished in the cup, whatever it had before)
             if any(c in was for c in self._NAMED):
                 self._sync_gimme(shot_id)
             # (a concession graded meanwhile follows the putt or not put back - a full shot's is its gimme's -
@@ -371,8 +373,10 @@ class RoundFileMixin:
             "UPDATE shots SET start_x = ?, start_y = ?, start_z = ?, lie_before = ?, lie_after = ?,"
             " carry_game_yards = COALESCE(?, carry_game_yards), total_yards = COALESCE(?, total_yards),"
             " total_from_log = CASE WHEN ? IS NULL THEN total_from_log ELSE 2 END,"
-            " finish_yards = COALESCE(?, finish_yards) WHERE id = ?",
-            (*t.start, lie(row["lie_before"], t.lie_before), lie_after, carry, total, total, finish, row["id"]))
+            " finish_yards = CASE WHEN outcome = 'holed' AND ? = 0 THEN 0 ELSE COALESCE(?, finish_yards) END"
+            " WHERE id = ?",   # (a chip-in's is in the cup, whatever the file's rest read: shot_tracks keeps that)
+            (*t.start, lie(row["lie_before"], t.lie_before), lie_after, carry, total, total, int(bool(putt)), finish,
+             row["id"]))
         if named:
             self.db.execute(f"UPDATE shots SET {', '.join(f'{c} = ?' for c in named)} WHERE id = ?",
                             (*named.values(), row["id"]))

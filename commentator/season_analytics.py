@@ -711,18 +711,34 @@ def highlight_rows(db: sqlite3.Connection, holes: list[dict], context: str | Non
                 run = []
         if len(run) >= 2:
             streaks.append({**base, **at(r, run[0]), "holes": run[:], "length": len(run)})
+
+    def holed_out(st, hole: int | None) -> dict:
+        yd = st["to_pin_yards"]
+        return {"player": st["player"], "date": st["date"], "course": st["course"], "hole": hole,
+                "id": st["id"], "ts": st["ts"], "kind": "holed out", "text": f"Holed out from {round(yd) if yd else '?'} yd"
+                f" ({st['lie_before'] or 'off the green'}, {st['club'] or '?'})"}
+
     # Chip-ins: a full shot from off the green (not the tee) that was the hole's last stroke.
     for h in holes:
         last = h["strokes"][-1]
         if h["complete"] and last["outcome"] == "holed" and not last["is_putt"] and not last["left_out"] and last["lie_before"] not in ("tee", "green"):
-            yd = last["to_pin_yards"]
-            moments.append({"player": h["player"], "date": h["date"], "course": h["course"], "hole": h["hole"],
-                            "id": last["id"], "ts": last["ts"], "kind": "holed out", "text": f"Holed out from {round(yd) if yd else '?'} yd"
-                            f" ({last['lie_before'] or 'off the green'}, {last['club'] or '?'})"})
+            moments.append(holed_out(last, h["hole"]))
     base = " AND player IS NOT NULL AND player != 'unknown' AND attributed = 1 AND mulligan = 0 AND left_out = 0" \
            + _ctx(context) + where
     drive = "COALESCE(total_yards, carry_game_yards, carry_raw)"
     j = " FROM shots JOIN sessions ON sessions.id = shots.session_id"
+    # A shared ball's (a scramble's, an alternate shot's) chip-ins, which `holes` leaves out: its holed
+    # full shot from off the green is still the player's who hit it. Not one the player's next stroke
+    # played on from, on that hole (the older rows' stale hole-out; as Store._same_hole_next has it).
+    nxt = "(SELECT {} FROM shots n WHERE n.session_id = shots.session_id AND n.player = shots.player" \
+          " AND n.attributed = 1 AND n.outcome IS NOT 'gimme' AND n.id > shots.id ORDER BY n.id LIMIT 1)"
+    for r in db.execute(f"SELECT shots.id, ts, player, course, hole, shot_number, club, lie_before, to_pin_yards, date,"
+                        f" {nxt.format('n.hole')} AS next_hole, {nxt.format('n.shot_number')} AS next_n{j}"
+                        f" WHERE fmt IN ('scramble', 'alternate') AND outcome = 'holed' AND is_putt = 0"
+                        f" AND COALESCE(lie_before, '') NOT IN ('tee', 'green'){base} ORDER BY ts, shots.id"):
+        a, b = r["shot_number"], r["next_n"]
+        if not (_hole_key(r["next_hole"]) == _hole_key(r["hole"]) and a is not None and b is not None and b > a):
+            moments.append(holed_out(r, _hole_no(r["hole"])))
     tops = {}
     for name, (sql, k) in {
         "drives": (f"SELECT shots.id, ts, player, ROUND({drive}) AS v, course, hole, date{j} WHERE {DRIVE_SQL}"
