@@ -360,8 +360,9 @@ def to_yards(distance: str | None) -> float | None:
 
 def ctp_text(yards: float) -> str:
     """A closest-to-the-pin distance: always feet and inches, however far."""
-    feet, inches = divmod(round(yards * 36), 12)
-    return f"{feet} feet {inches} inches" if inches else f"{feet} feet"
+    from shotcast_scoring import ctp
+
+    return ctp.text(yards)
 
 
 def ctp_feet(distance: str) -> str:
