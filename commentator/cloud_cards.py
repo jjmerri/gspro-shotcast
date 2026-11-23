@@ -59,9 +59,11 @@ STATUS_CHARS = 44   # how much of the claimers' names the card's one status line
 MODULE_PX = 4       # the finest a QR's modules are drawn (the code is made bigger on a small screen to keep it)
 
 
-# Characters that draw as nothing (and aren't spaces): left out of a name, so two names can't differ by one.
-_UNSEEN = {0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0, *range(0x180B, 0x1810),
-           *range(0xFE00, 0xFE10), *range(0xE0100, 0xE01F0)}
+# Characters that draw as a blank (and aren't spaces): left out of a name.
+_BLANK = {0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0}
+# Characters with no shape of their own that can change how the one before is drawn (variation
+# selectors, a joiner): kept in the name as shown, not counted when two names are compared.
+_SHAPERS = {0x034F, 0x17B4, 0x17B5, *range(0x180B, 0x1810), *range(0xFE00, 0xFE10), *range(0xE0100, 0xE01F0)}
 
 
 def _clean(name: str) -> str:
@@ -69,11 +71,12 @@ def _clean(name: str) -> str:
     nothing that can't be seen."""
     name = "".join(" " if ch.isspace() else ch for ch in unicodedata.normalize("NFC", name))
     return " ".join("".join(ch for ch in name if ch.isprintable() and unicodedata.category(ch) != "Cf"
-                            and ord(ch) not in _UNSEEN).split())
+                            and ord(ch) not in _BLANK).split())
 
 
 def _reads(text: str) -> str:
     """What two labels are compared by: how they read, whatever the letters' case or form."""
+    text = "".join(ch for ch in text if ord(ch) not in _SHAPERS)
     return _clean(unicodedata.normalize("NFKC", text)).casefold()
 
 
@@ -89,12 +92,14 @@ def labels(names: list[str]) -> list[str]:
     shown = [_clean(n) or "Player" for n in names]
     doubt = any(_TYPED_NUMBER.search(n) for n in shown)
     for most in (None, *NAME_CUTS):   # (whole, as the card shows them, and at each length the link may cut to)
-        cut = [_reads(n if most is None else _in_link(n, most)) for n in shown]
-        doubt = doubt or len(set(cut)) < len(cut) or not all(cut)
+        # (As the phone will show them: a name cut to nothing is "Player 3" there, by its place.)
+        cut = [_reads(n if most is None else _in_link(n, most)) or f"player {i}" for i, n in enumerate(shown, 1)]
+        doubt = doubt or len(set(cut)) < len(cut)
     return [f"{name} ({i})" for i, name in enumerate(shown, 1)] if doubt and len(shown) > 1 else shown
 
 
-_TYPED_NUMBER = re.compile(r"\(\d+\)\s*$")
+_SEAT = re.compile(r" \(([0-9]{1,2})\)$")          # the seat number `labels` adds, and nothing else
+_TYPED_NUMBER = re.compile(r"\(\s*\d+\s*\)\s*$")  # anything that could be taken for one
 
 
 def _fit(name: str, most: int) -> str:
@@ -107,10 +112,8 @@ def _fit(name: str, most: int) -> str:
 def _in_link(label: str, most: int) -> str:
     """A label cut for the link: its name to `most`, and the seat number `labels` put after it kept
     whole (it isn't counted against the name's room: the name is what a player knows themselves by)."""
-    head, sep, tail = label.rpartition(" (")
-    if sep and tail[:-1].isdigit() and tail.endswith(")"):
-        return _fit(head, most) + sep + tail
-    return _fit(label, most)
+    seat = _SEAT.search(label)
+    return _fit(label[:seat.start()], most) + seat.group(0) if seat else _fit(label, most)
 
 
 def claim_link(api: str, players: list[tuple[str, str]]) -> str:

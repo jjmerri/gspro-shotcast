@@ -141,6 +141,9 @@ def test_a_full_bay_of_any_names_still_makes_a_code_coarse_enough_to_scan(name, 
     assert len(set(shown)) == len(shown) or not any(shown)   # told apart, or left to the page's "Player N"
 
 
+PAGE_NAME = 64   # what shotcast-cloud's claim.js shows of a name (its slice)
+
+
 def _as_read(text):
     """How a label reads to a person on the phone (not the app's own comparison): the page trims
     it, a browser draws runs of space as one and both ways of typing an accent alike, and case
@@ -149,6 +152,8 @@ def _as_read(text):
 
     text = unicodedata.normalize("NFKC", text)
     text = "".join(ch for ch in text if unicodedata.category(ch) not in ("Cf", "Cc", "Zl", "Zp") or ch in "\t\n ")
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn" or unicodedata.combining(ch))   # (shapeless marks)
+    text = "".join(" " if ord(ch) in (0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0) else ch for ch in text)   # (blanks)
     return " ".join(text.split()).casefold()
 
 
@@ -158,6 +163,8 @@ def test_names_stand_as_they_are_unless_any_could_be_mixed_up_and_then_every_sea
     assert cloud_cards.labels(["Mike"]) == ["Mike"] and cloud_cards.labels([""]) == ["Player"]
     # Any kind of space is a space (never dropped: "Ann Lee" isn't "AnnLee"), and then they read alike.
     assert cloud_cards.labels(["Ann\u00a0Lee", "Ann\tLee"]) == ["Ann Lee (1)", "Ann Lee (2)"]
+    # A mark that changes how a letter is drawn stays in the name; it doesn't make two names differ.
+    assert cloud_cards.labels(["\u1820\u180b", "Bob"]) == ["\u1820\u180b", "Bob"]
     assert cloud_cards.labels(["Mike", "Ann", "Mike", " "]) == ["Mike (1)", "Ann (2)", "Mike (3)", "Player (4)"]
     four = ["Christopher Alexander " + n for n in ("Wilson East", "Wilson West", "Martin East", "Martin West")]
     got = cloud_cards.labels(four)
@@ -174,13 +181,16 @@ def test_names_stand_as_they_are_unless_any_could_be_mixed_up_and_then_every_sea
     ["\ufeff", "Player 1"], ["😀", "Player 1"] + [f"Distinct Name {chr(65 + i)}" for i in range(10)],
     ["Alexandra (2)", "Alexander (1)"] + [f"{chr(65 + i)} Somebody Long" for i in range(10)],
     ["(3)", "X", "X"], ["ＭＩＫＥ", "mike"], ["Ann", "Bob (two)"],
-    ["Mike", "Mike\u034f"], ["\u3164", "\u2800"], ["Ann Lee", "Ann\u00a0Lee"],
+    ["A (\u00b2" + "1" * 36 + "2)", "A (\u00b2" + "1" * 36 + "3)"], ["Mike"] * 9 + ["Bartholomew-Maximilian-Featherstonehaugh"],
+    ["김민수", "이서연"], ["Mike", "Mike\u034f"], ["\u3164", "\u2800"], ["Ann Lee", "Ann\u00a0Lee"], ["\u1820", "\u1820\u180b"],
 ])
 def test_no_two_players_ever_read_the_same_whatever_was_typed_or_however_the_link_cuts_them(names):
     got = cloud_cards.labels(names)
     assert len({_as_read(g) for g in got}) == len(names), got
     for most in (*cloud_cards.NAME_CUTS, 0):   # as the phone shows them: the page's own fallback for no name
-        shown = [_as_read(cloud_cards._in_link(g, most) if most else "") or f"player {i}" for i, g in enumerate(got, 1)]
+        # (the page: trimmed, at most PAGE_NAME characters, "Player N" for none)
+        shown = [_as_read((cloud_cards._in_link(g, most) if most else "").strip()[:PAGE_NAME]) or f"player {i}"
+                 for i, g in enumerate(got, 1)]
         assert len(set(shown)) == len(names), (most, got, shown)
 
 
@@ -194,6 +204,10 @@ def test_a_numbered_player_keeps_their_name_in_the_link_whatever_it_is_written_i
     twins = cloud_cards.labels(["김민수", "김민수", "이서연", "박지훈"])
     link = cloud_cards.claim_link("https://app.shotcast.example", [(n, chr(97 + i) * 22) for i, n in enumerate(twins)])
     assert [n for _, n in _read(link)] == ["김민수 (1)", "김민수 (2)", "이서연 (3)", "박지훈 (4)"]
+    assert cloud_cards.labels(["김민수", "이서연", "박지훈"]) == ["김민수", "이서연", "박지훈"]   # (no number needed)
+    long = cloud_cards.labels(["Mike"] * 9 + ["Bartholomew-Maximilian-Featherstonehaugh"])
+    link = cloud_cards.claim_link("https://app.shotcast.example", [(n, chr(97 + i) * 22) for i, n in enumerate(long)])
+    assert _read(link)[-1][1].endswith(" (10)") and len(_read(link)[-1][1]) <= PAGE_NAME   # the page shows it whole
     twelve = cloud_cards.labels(["Mike"] * 12)
     link = cloud_cards.claim_link("https://app.shotcast.example", [(n, chr(97 + i) * 22) for i, n in enumerate(twelve)])
     assert [n for _, n in _read(link)] == [f"Mike ({i})" for i in range(1, 13)]   # a full bay still has names
