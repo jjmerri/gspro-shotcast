@@ -19,6 +19,7 @@ Like handicap.py, nothing here validates: callers pass clean data.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,6 +32,33 @@ from .handicap import TEAM_BALL
 DEFAULT_ALLOWANCES: dict[str, list[float]] = {
     "aggregate": [1.0], "best_ball": [0.75], "scramble": [0.25, 0.20], "alternate": [0.25, 0.20],
 }
+
+
+# What a league may call each format, as letters only ("Alt Shot" and "alt-shot" are "altshot").
+FORMAT_ALIASES: dict[str, frozenset[str]] = {
+    "scramble": frozenset({"scramble", "twopersonscramble", "twomanscramble"}),
+    "best_ball": frozenset({"bestball", "fourball", "betterball"}),
+    "aggregate": frozenset({"aggregate", "teamsum", "sum", "total", "combined", "teamtotal", "teamaggregate"}),
+    "alternate": frozenset({"alternate", "alternateshot", "altshot", "alt", "foursomes"}),
+}
+
+
+def normalize_format(text: object) -> str | None:
+    """The format a league's name for one means ("Team Sum" is "aggregate"), or None when it's
+    empty or not a name the rules know. Case, spaces and punctuation don't matter."""
+    if not text:
+        return None
+    key = re.sub(r"[^a-z]", "", str(text).lower())
+    return next((fmt for fmt, words in FORMAT_ALIASES.items() if key in words), None)
+
+
+def allowances(fmt: str | None, custom: Mapping[Any, Any] | None = None) -> list[float]:
+    """The format's allowances: the league's own (`custom`: {a format's name: [fractions]}, the
+    first entry naming this format whose value is a list), else the default."""
+    for name, value in (custom or {}).items():
+        if normalize_format(name) == fmt and isinstance(value, list):
+            return [float(v) for v in value]
+    return default_allowances(fmt)
 
 
 def default_allowances(fmt: str | None) -> list[float]:

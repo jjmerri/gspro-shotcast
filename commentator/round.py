@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 from shotcast_scoring import round as scoring
 from shotcast_scoring.handicap import TEAM_BALL
+from shotcast_scoring.round import normalize_format
 
 from . import handicap
 from .facts import club_name, ctp_feet, to_yards, wrong_green_yards
@@ -36,24 +37,11 @@ FORMATS = {
 # Alternate shot with one GSPro profile for the team: the HUD can't say which partner hit.
 ALTERNATE_UNNAMED = "GSPro shows the ball under one player's name, so who hit any given shot isn't known."
 FORMAT_NAMES = {"scramble": "scramble", "best_ball": "best ball", "aggregate": "team sum", "alternate": "alternate shot"}
-_ALIASES = {
-    "scramble": {"scramble", "twopersonscramble", "twomanscramble"},
-    "best_ball": {"bestball", "fourball", "betterball"},
-    "aggregate": {"aggregate", "teamsum", "sum", "total", "combined", "teamtotal", "teamaggregate"},
-    "alternate": {"alternate", "alternateshot", "altshot", "alt", "foursomes"},
-}
 # A format's allowances (fractions of each player's course handicap) default to shotcast_scoring.round's,
 # which match the Shed Sim League's Squabbit settings; the league file can override them under
 # "handicap_allowances".
 
 RESULT_NAMES = {-3: "albatross", -2: "eagle", -1: "birdie", 0: "par", 1: "bogey", 2: "double bogey"}
-
-
-def normalize_format(text: str | None) -> str | None:
-    if not text:
-        return None
-    key = re.sub(r"[^a-z]", "", str(text).lower())
-    return next((fmt for fmt, words in _ALIASES.items() if key in words), None)
 
 
 def result_name(diff: int) -> str:
@@ -594,11 +582,7 @@ class Round:
         return sides
 
     def _allowances(self) -> list[float]:
-        custom = (self.league.data.get("handicap_allowances") or {})
-        for key, value in custom.items():
-            if normalize_format(key) == self.format and isinstance(value, list):
-                return [float(v) for v in value]
-        return scoring.default_allowances(self.format)
+        return scoring.allowances(self.format, self.league.data.get("handicap_allowances"))
 
     def _assign_strokes(self, sides: list[Side]) -> None:
         """Handicap strokes the way Squabbit gives them (shotcast_scoring.round.strokes, the rule the

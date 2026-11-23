@@ -165,3 +165,21 @@ def test_holes_may_be_keyed_by_the_courses_numbers():
 def test_a_side_card_is_immutable():
     with pytest.raises(AttributeError):
         side(["Ann"], {}, 0).strokes = 2
+
+
+def test_a_leagues_name_for_a_format():
+    assert R.normalize_format("Team Sum") == R.normalize_format("aggregate") == "aggregate"
+    assert R.normalize_format("Alt Shot") == R.normalize_format("FOURSOMES") == "alternate"
+    assert R.normalize_format("best-ball") == "best_ball" and R.normalize_format("2 Man Scramble") is None
+    assert R.normalize_format("Two-Man Scramble") == "scramble"
+    assert R.normalize_format(None) is R.normalize_format("") is R.normalize_format("stableford") is None
+    assert R.normalize_format(4) is None
+
+
+def test_a_leagues_own_allowances_win_over_the_defaults():
+    custom = {"Best Ball": [0.9], "scramble": "half", "Alt Shot": [1, 0]}
+    assert R.allowances("best_ball", custom) == [0.9]
+    assert R.allowances("scramble", custom) == [0.25, 0.20]        # not a list: the default
+    assert R.allowances("alternate", custom) == [1.0, 0.0]
+    assert R.allowances("aggregate", custom) == R.allowances("aggregate") == R.allowances("aggregate", None) == [1.0]
+    assert R.allowances(None, {"nonsense": [0.5]}) == [0.5]        # as the app has always matched them
