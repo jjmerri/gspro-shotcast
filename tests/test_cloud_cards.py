@@ -141,10 +141,22 @@ def test_a_full_bay_of_any_names_still_makes_a_code_coarse_enough_to_scan(name, 
     assert len(set(shown)) == len(shown) or not any(shown)   # told apart, or left to the page's "Player N"
 
 
-def test_players_who_would_read_the_same_are_numbered_by_seat_on_the_card_and_in_the_link():
+def _as_read(text):
+    """How a label reads to a person on the phone (not the app's own comparison): the page trims
+    it, a browser draws runs of space as one and both ways of typing an accent alike, and case
+    isn't much to go on."""
+    import unicodedata
+
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) not in ("Cf", "Cc", "Zl", "Zp") or ch in "\t\n ")
+    return " ".join(text.split()).casefold()
+
+
+def test_names_stand_as_they_are_unless_any_could_be_mixed_up_and_then_every_seat_is_numbered():
     assert cloud_cards.labels(["Ann", "Bob"]) == ["Ann", "Bob"]
-    assert cloud_cards.labels(["Mike", "", "Mike", " "]) == ["Mike (1)", "Player (2)", "Mike (3)", "Player (4)"]
-    # Alike in the little of a name a crowded link has room for, in two pairs: each still its own.
+    assert cloud_cards.labels(["  Ann   Lee ", "Jos\u0065\u0301"]) == ["Ann Lee", "Jos\u00e9"]   # tidied
+    assert cloud_cards.labels(["Mike"]) == ["Mike"] and cloud_cards.labels([""]) == ["Player"]
+    assert cloud_cards.labels(["Mike", "Ann", "Mike", " "]) == ["Mike (1)", "Ann (2)", "Mike (3)", "Player (4)"]
     four = ["Christopher Alexander " + n for n in ("Wilson East", "Wilson West", "Martin East", "Martin West")]
     got = cloud_cards.labels(four)
     assert got == [f"{n} ({i})" for i, n in enumerate(four, 1)]
@@ -156,12 +168,17 @@ def test_players_who_would_read_the_same_are_numbered_by_seat_on_the_card_and_in
 @pytest.mark.parametrize("names", [
     ["Mike", "Mike", "Mike (2)"], ["", "", "Player (2)"], ["Mike", "Mike (1)", "Mike"],
     ["Mike", "Mike🎉Lane", "Mike (1)"], ["Charlie", "Charlie Brown"], ["Ann (1)", "Ann (1)"], ["A", "a "],
+    ["Mike  Lane", "Mike Lane"], ["Mike\tLane", "Mike Lane"], ["Jos\u00e9", "Jose\u0301"], ["Al\u200b", "Al"],
+    ["\ufeff", "Player 1"], ["😀", "Player 1"] + [f"Distinct Name {chr(65 + i)}" for i in range(10)],
+    ["Alexandra (2)", "Alexander (1)"] + [f"{chr(65 + i)} Somebody Long" for i in range(10)],
+    ["(3)", "X", "X"], ["ＭＩＫＥ", "mike"], ["Ann", "Bob (two)"],
 ])
 def test_no_two_players_ever_read_the_same_whatever_was_typed_or_however_the_link_cuts_them(names):
     got = cloud_cards.labels(names)
-    assert len({g.casefold() for g in got}) == len(names)
-    for most in cloud_cards.NAME_CUTS:   # as the phone shows them (the page trims a name)
-        assert len({cloud_cards._in_link(g, most).strip().casefold() for g in got}) == len(names), (most, got)
+    assert len({_as_read(g) for g in got}) == len(names), got
+    for most in (*cloud_cards.NAME_CUTS, 0):   # as the phone shows them: the page's own fallback for no name
+        shown = [_as_read(cloud_cards._in_link(g, most) if most else "") or f"player {i}" for i, g in enumerate(got, 1)]
+        assert len(set(shown)) == len(names), (most, got, shown)
 
 
 def test_a_player_who_joins_as_the_codes_are_made_keeps_the_card_waiting_for_them(tmp_path, api, monkeypatch):

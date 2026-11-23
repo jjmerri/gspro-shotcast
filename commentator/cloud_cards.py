@@ -31,6 +31,7 @@ import logging
 import re
 import sys
 import threading
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from time import monotonic as _monotonic
@@ -54,23 +55,35 @@ LINK_BYTES = 550    # the longest link a QR is drawn for: an 89-module code at m
 MODULE_PX = 4       # the finest a QR's modules are drawn (the code is made bigger on a small screen to keep it)
 
 
+def _clean(name: str) -> str:
+    """A name as it's shown: one spelling of each letter, nothing that can't be seen, single spaces."""
+    name = unicodedata.normalize("NFC", name)
+    return " ".join("".join(ch for ch in name if ch.isprintable() and unicodedata.category(ch) != "Cf").split())
+
+
+def _reads(text: str) -> str:
+    """What two labels are compared by: how they read, whatever the letters' case or form."""
+    return _clean(unicodedata.normalize("NFKC", text)).casefold()
+
+
 def labels(names: list[str]) -> list[str]:
-    """What each player is called on the card and on the phone, in seat order: their name, "Player"
-    for none, and their place in the round after any that could read the same as another's however
-    much of it the link has room for (two Mikes, two with no name, two long names that start
-    alike): "Mike (1)", "Mike (3)". A number someone typed into a name ("Mike (2)") doesn't count as
-    telling it apart. Should any two still read the same as the phone would show them, at any
-    length the link may cut them to, every player is numbered: no two labels are ever the same."""
-    shown = [n.strip() or "Player" for n in names]
-    short = [_fit(_TYPED_NUMBER.sub("", n).strip() or "Player", NAME_CUTS[-1]).strip().casefold() for n in shown]
-    out = [f"{name} ({i})" if short.count(cut) > 1 else name for i, (name, cut) in enumerate(zip(shown, short), 1)]
-    for most in NAME_CUTS:
-        if len({_in_link(label, most).strip().casefold() for label in out}) < len(out):
-            return [f"{name} ({i})" for i, name in enumerate(shown, 1)]
-    return out
+    """What each player is called on the card and on the phone, in seat order: their name ("Player"
+    for none), tidied (_clean). Either every name stands as it is, or every player carries their
+    seat's number, "Mike (1)", "Ann (2)", "Mike (3)": numbered whenever any two could read alike
+    however much of a name the link has room for (two Mikes, two with no name, long names that
+    start alike, names alike but for case, spacing or how an accent was typed), or when a name
+    would be cut to nothing, or when someone typed a number of their own into one ("Mike (2)":
+    the link's cut keeps an ending like that, so it mustn't be mistaken for a seat). With the
+    seat's number on every one, no two labels are ever the same."""
+    shown = [_clean(n) or "Player" for n in names]
+    doubt = any(_TYPED_NUMBER.search(n) for n in shown)
+    for most in (None, *NAME_CUTS):   # (whole, as the card shows them, and at each length the link may cut to)
+        cut = [_reads(n if most is None else _in_link(n, most)) for n in shown]
+        doubt = doubt or len(set(cut)) < len(cut) or not all(cut)
+    return [f"{name} ({i})" for i, name in enumerate(shown, 1)] if doubt and len(shown) > 1 else shown
 
 
-_TYPED_NUMBER = re.compile(r"\s*\(\d+\)\s*$")
+_TYPED_NUMBER = re.compile(r"\(\d+\)\s*$")
 
 
 def _fit(name: str, most: int) -> str:
