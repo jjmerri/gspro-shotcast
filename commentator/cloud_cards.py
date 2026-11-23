@@ -1,23 +1,27 @@
-"""A venue bay's claim cards (shotcast-cloud's docs/dev/claims.md): as a round ends, a card for each
-player with a QR code. A customer scans theirs with their phone and the round is added to their
-Shotcast account. Only where the cloud says the bay shows them (`claim_cards` in its answer about
-this PC: a venue's bays), and only while the booth runs paired (cloud_booth starts it).
+"""A venue bay's claim card (shotcast-cloud's docs/dev/claims.md): as a round ends, one QR code on
+the screen beside the players' names. A customer scans it with their phone, picks which player they
+are, and the round is added to their Shotcast account. Only where the cloud says the bay shows it
+(`claim_cards` in its answer about this PC: a venue's bays), and only while the booth runs paired
+(cloud_booth starts it).
 
-Each player's code is made on this PC and kept with the round (cloud_rounds.claim_codes); the round's
-upload carries its hash, never the code. The cards go up the moment the round is over, usually
-before the round has been sent: a code scanned early is kept by the cloud until the round arrives.
-While they show, the cloud is asked who has claimed (`GET /api/devices/rounds/{id}/claims`) and a
-claimed card says so, with the claimer's short name ("Mike R.").
+Each player has a code of their own, made on this PC and kept with the round
+(cloud_rounds.claim_codes); the round's upload carries each code's hash, never the code. The one QR
+is a link to the site's "which player are you?" page with every player's name and code after its
+`#` (claim_link): that part of an address stays on the phone, so the names and codes reach the
+cloud only when a player picks theirs. The card goes up the moment the round is over, usually before
+the round has been sent: a code used early is kept by the cloud until the round arrives. While it
+shows, the cloud is asked who has claimed (`GET /api/devices/rounds/{id}/claims`) and a claimed
+player is ticked, with the claimer's short name ("Mike R.").
 
-They come down when someone closes them, when anyone plays again (a round or practice), a while
-after every player has claimed, after SHOW_S, or when the season file can't be read (what the bay
-is doing can't be told). A round that was already over when the booth started gets no
-cards: staff can make a fresh code on the website.
+It comes down when someone closes it, when anyone plays again (a round or practice), a while after
+every player has claimed, after SHOW_S, or when the season file can't be read (what the bay is doing
+can't be told). A round that was already over when the booth started gets none: staff can make a
+fresh code on the website.
 
 The window is the booth's own (popup.py's kind): it never takes focus from GSPro and is kept out of
-screen capture, so the codes aren't in the stream or the booth's own screen reads. The codes are
-drawn only once Windows confirms that; where it can't, the cards say to ask the staff. Every wait is
-counted in elapsed seconds.
+screen capture, so the code isn't in the stream or the booth's own screen reads. It's drawn only
+once Windows confirms that; where it can't, the card says to ask the staff. Every wait is counted in
+elapsed seconds.
 """
 from __future__ import annotations
 
@@ -30,6 +34,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from time import monotonic as _monotonic
 from typing import Any
+from urllib.parse import quote
 
 from . import cloud, cloud_rounds
 
@@ -41,12 +46,16 @@ ASK_S = 60.0        # how long till the cloud is asked again whether this bay sh
 SHOW_S = 600.0      # the longest the cards stay up
 CLAIMED_S = 15.0    # how long they stay once every player has claimed
 STALE_S = 30.0      # a round found over after the season file went unread this long gets no cards
-MAX_CARDS = 8       # (more players than fit on a screen: the first ones by seat)
+MAX_PLAYERS = 12    # (more than that: the first ones by seat. The QR would be too fine to scan.)
+NAME_CHARS = 16     # how much of a player's name goes in the link (the phone only shows it to pick from)
 
 
-def claim_url(api: str, code: str) -> str:
-    """What a card's QR opens: the claim page, on the site the PC is paired with."""
-    return f"{api.rstrip('/')}/claim/{code}"
+def claim_link(api: str, players: list[tuple[str, str]]) -> str:
+    """What the QR opens: the site's "which player are you?" page, with each player's (name, code)
+    after the `#` as `<code>=<name>&...`. A browser keeps that part to itself, so the page (the
+    cloud's claim.js) reads it on the phone and links each name to `/claim/<code>`."""
+    return f"{api.rstrip('/')}/claim/#" + "&".join(
+        f"{code}={quote(name[:NAME_CHARS], safe='')}" for name, code in players)
 
 
 def matrix(text: str) -> list[list[bool]]:
@@ -60,7 +69,7 @@ def matrix(text: str) -> list[list[bool]]:
 class Card:
     slot_id: str
     name: str
-    url: str
+    code: str
     claimed: bool = False
     by: str | None = None    # the claimer's short name, as the cloud gives it
 
@@ -72,6 +81,7 @@ class Shown:
     uuid: str
     cards: list[Card]
     since: float
+    url: str = ""            # what the QR opens (claim_link)
     all_claimed_at: float | None = None
     asked_at: float | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -80,7 +90,7 @@ class Shown:
 
     def snapshot(self) -> list[Card]:
         with self.lock:
-            return [Card(c.slot_id, c.name, c.url, c.claimed, c.by) for c in self.cards]
+            return [Card(c.slot_id, c.name, c.code, c.claimed, c.by) for c in self.cards]
 
 
 def state(db: Any) -> tuple[set[str], set[str], bool]:
@@ -92,13 +102,13 @@ def state(db: Any) -> tuple[set[str], set[str], bool]:
             any(r["kind"] == "round" and r["state"] == "in_progress" for r in rows))
 
 
-def cards_for(db: Any, uuid: str, api: str) -> list[Card]:
+def cards_for(db: Any, uuid: str) -> list[Card]:
     """A card for each of the round's players, in seat order, each with its own code."""
     codes = cloud_rounds.claim_codes(db, uuid)
     slots = db.execute("SELECT slot_id, name FROM round_slots WHERE round_uuid = ? ORDER BY seat, slot_id",
                        (uuid,)).fetchall()
-    return [Card(s["slot_id"], s["name"] or "Player", claim_url(api, codes[s["slot_id"]]))
-            for s in slots if s["slot_id"] in codes][:MAX_CARDS]
+    return [Card(s["slot_id"], s["name"] or "Player", codes[s["slot_id"]])
+            for s in slots if s["slot_id"] in codes][:MAX_PLAYERS]
 
 
 def apply(shown: Shown, claims: Any) -> None:
@@ -218,7 +228,7 @@ class Cards:
             if uuid not in done or live - self.live:
                 self.pending = None
                 return
-            cards = cards_for(db, uuid, self.api)
+            cards = cards_for(db, uuid)
         finally:
             db.close()
         self.pending = None
@@ -227,8 +237,8 @@ class Cards:
         with self.lock:
             if self.stopped.is_set():
                 return
-            self.shown = Shown(uuid, cards, since)
-            log.info("Shotcast Cloud: claim cards up for %s player(s) of round %s", len(cards), uuid)
+            self.shown = Shown(uuid, cards, since, claim_link(self.api, [(c.name, c.code) for c in cards]))
+            log.info("Shotcast Cloud: claim card up for %s player(s) of round %s", len(cards), uuid)
             self.window(self.shown, self.where)
 
     def _finished(self, shown: Shown, now: float) -> bool:
@@ -344,58 +354,54 @@ class Window:
         root.attributes("-topmost", True)
         left, top, sw, sh = mon or (0, 0, root.winfo_screenwidth(), root.winfo_screenheight())
         cards = self.shown.snapshot()
-        unit = max(12, round(sh * 0.018))
-        side = min(round(sh * 0.2), (round(sw * 0.9) - unit * 4) // len(cards) - unit * 2)   # a QR's side
+        unit = max(12, round(sh * 0.02))
+        side = round(sh * 0.36)   # the QR's side: big enough to scan from where the players stand
         frame = tk.Frame(root, bg=PANEL, highlightthickness=2, highlightbackground=PANEL_EDGE, padx=unit, pady=unit)
         frame.pack()
-        tk.Label(frame, text="Keep this round", bg=PANEL, fg=ON_TEXT,
-                 font=("Segoe UI", -round(unit * 1.4), "bold")).pack()
-        tk.Label(frame, text="Scan your code with your phone's camera to add the round to your Shotcast account.",
-                 bg=PANEL, fg=MUTED, font=("Segoe UI", -unit)).pack(pady=(0, unit // 2))
-        row = tk.Frame(frame, bg=PANEL)
-        row.pack()
-        drawn: list[tuple[Any, Any, tuple | None]] = []   # (canvas, the line under it, what it shows)
+        canvas = tk.Canvas(frame, width=side, height=side, bg=PANEL, highlightthickness=0)
+        canvas.pack(side="left", padx=(0, unit))
+        right = tk.Frame(frame, bg=PANEL)
+        right.pack(side="left", fill="y")
+        tk.Label(right, text="Keep this round", bg=PANEL, fg=ON_TEXT, anchor="w",
+                 font=("Segoe UI", -round(unit * 1.5), "bold")).pack(fill="x")
+        tk.Label(right, text="Scan the code with your phone's camera, then pick your name.", bg=PANEL, fg=MUTED,
+                 anchor="w", justify="left", wraplength=round(sw * 0.22), font=("Segoe UI", -unit)
+                 ).pack(fill="x", pady=(0, unit // 2))
+        lines: list[tuple[Any, tuple | None]] = []   # (a player's line, what it shows)
 
         def close() -> None:
             self.shown.closed.set()
             root.quit()
         for card in cards:
-            cell = tk.Frame(row, bg=PANEL)
-            cell.pack(side="left", padx=unit)
-            tk.Label(cell, text=card.name, bg=PANEL, fg=ON_TEXT, font=("Segoe UI", -round(unit * 1.2), "bold"),
-                     wraplength=side).pack()
-            canvas = tk.Canvas(cell, width=side, height=side, bg=WHITE, highlightthickness=0)
-            canvas.pack(pady=unit // 3)
-            under = tk.Label(cell, text="", bg=PANEL, fg=MUTED, font=("Segoe UI", -unit), wraplength=side)
-            under.pack()
-            drawn.append((canvas, under, None))
-        tk.Button(frame, text="Close", bg=NO_GREY, fg=ON_TEXT, activebackground=NO_GREY, activeforeground=ON_TEXT,
+            line = tk.Label(right, text=card.name, bg=PANEL, fg=ON_TEXT, anchor="w", justify="left",
+                            wraplength=round(sw * 0.22), font=("Segoe UI", -round(unit * 1.15)))
+            line.pack(fill="x")
+            lines.append((line, None))
+        tk.Button(right, text="Close", bg=NO_GREY, fg=ON_TEXT, activebackground=NO_GREY, activeforeground=ON_TEXT,
                   relief="flat", bd=0, padx=unit * 2, pady=unit // 3, cursor="hand2",
-                  font=("Segoe UI", -unit, "bold"), command=close).pack(pady=(unit // 2, 0))
-
-        hidden = False   # (set below, before any code is drawn: whether the window is out of screen capture)
+                  font=("Segoe UI", -unit, "bold"), command=close).pack(side="bottom", anchor="w", pady=(unit, 0))
 
         def draw(i: int, card: Card) -> None:
-            canvas, under, was = drawn[i]
+            line, was = lines[i]
             now = (card.claimed, card.by)
             if was == now:
                 return
-            drawn[i] = (canvas, under, now)
-            canvas.delete("all")
+            lines[i] = (line, now)
             if card.claimed:
-                # (No code once it's claimed: it can't be used again.)
-                canvas.configure(bg=PANEL)
-                canvas.create_text(side // 2, side // 2, text="✓", fill=TICK_GREEN,
-                                   font=("Segoe UI", -round(side * 0.6), "bold"))
-                under.configure(text=f"Claimed by {card.by}" if card.by else "Claimed", fg=ON_TEXT)
-                return
+                line.configure(text=f"\u2713 {card.name}: claimed" + (f" by {card.by}" if card.by else ""),
+                               fg=TICK_GREEN)
+            else:
+                line.configure(text=card.name, fg=ON_TEXT)
+
+        def draw_code(hidden: bool) -> None:
             if not hidden:
                 # (A code a stream or a screen grab could carry is a code anyone watching could use.)
-                canvas.configure(bg=PANEL)
-                under.configure(text="Ask the staff for a code to keep this round", fg=ON_TEXT)
+                canvas.create_text(side // 2, side // 2, width=side - unit * 2, fill=ON_TEXT, justify="center",
+                                   text="Ask the staff for a code to keep this round",
+                                   font=("Segoe UI", -round(unit * 1.2), "bold"))
                 return
             canvas.configure(bg=WHITE)
-            rows = matrix(card.url)
+            rows = matrix(self.shown.url)
             px = max(1, side // (len(rows) + 2 * QUIET))
             off = (side - px * len(rows)) // 2
             for y, cells in enumerate(rows):
@@ -403,23 +409,23 @@ class Window:
                     if dark:
                         canvas.create_rectangle(off + x * px, off + y * px, off + (x + 1) * px, off + (y + 1) * px,
                                                 fill=BLACK, outline="")
-            under.configure(text="Scan to claim", fg=MUTED)
 
         root.update_idletasks()
         w, h = root.winfo_reqwidth(), root.winfo_reqheight()
-        root.geometry(f"+{left + (sw - w) // 2}+{top + sh - h - round(sh * 0.04)}")
+        root.geometry(f"+{left + sw - w - round(sw * 0.02)}+{top + sh - h - round(sh * 0.04)}")   # bottom right
         if self.shown.down.is_set():
             return
-        # The window goes up empty, is taken out of screen capture, and only then are the codes drawn.
+        # The window goes up without the code, is taken out of screen capture, and only then is it drawn.
         root.deiconify()
         if sys.platform == "win32":
             root.update_idletasks()
             _no_activate(root)   # (never takes focus; kept out of screen capture)
             hidden = _out_of_capture(root)
             if not hidden:
-                log.warning("Claim cards: this Windows can't keep a window out of screen capture; no codes shown")
+                log.warning("Claim card: this Windows can't keep a window out of screen capture; no code shown")
         else:
             hidden = True   # (not a booth: only Windows runs one)
+        draw_code(hidden)
         for i, card in enumerate(cards):
             draw(i, card)
         ticks = 0
