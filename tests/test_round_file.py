@@ -453,6 +453,7 @@ def _blind(st, speeds, t0=1000.0):
 def test_shots_recorded_blind_are_named_from_the_round_file_by_order_and_ball_speed(tmp_path):
     st = Store(str(tmp_path / "season.db"))
     _blind(st, [151.0, 149.6, 100.2, 8.0])   # Dan's drive, Al's drive, Dan's approach, Dan's putt
+    st.db.execute("UPDATE shots SET record_uuid = 'u1'")
     al = _entry(1, (0, 0), (5, 200), sp=149.8, name="Al", flight=[(0, 0), (4, 180)], land=(4, 180), to_pin=99.0)
     files = [{**DRIVE, "GhostData": {**DRIVE["GhostData"], "sp": 150.9}, "HolePar": 4}, al, APPROACH, PUTT]
     written, pending = st.apply_round_file(round_file.tracks(files), now=1005.0, name_of={"Dan": "Dan Smith"}.get)
@@ -461,11 +462,15 @@ def test_shots_recorded_blind_are_named_from_the_round_file_by_order_and_ball_sp
     assert [tuple(r)[:5] for r in rows] == [("Dan Smith", "Hole 1, par 4", 1, 0, 1), ("Al", "Hole 1", 1, 0, 1),
                                             ("Dan Smith", "Hole 1", 2, 0, 1), ("Dan Smith", "Hole 1", 3, 1, 1)]
     assert rows[3]["finish_yards"] is None   # a putt keeps no finish
+    # Each named shot is on its player's slot in the round's record, as an upload says whose it is.
+    slots = dict(st.db.execute("SELECT name, slot_id FROM round_slots WHERE round_uuid = 'u1'").fetchall())
+    assert [r[0] for r in st.db.execute("SELECT slot_id FROM shots ORDER BY ts")] == [
+        slots["Dan Smith"], slots["Al"], slots["Dan Smith"], slots["Dan Smith"]]
     # Applied again, by name now; a mulligan taking a stroke back gives its shot back its blind read.
     assert st.apply_round_file(round_file.tracks(files), now=1005.0, name_of={"Dan": "Dan Smith"}.get)[1] == []
     st.apply_round_file(round_file.tracks(files[:3]), now=1005.0, gone={PUTT["ShotID"]})
-    assert tuple(st.db.execute("SELECT player, hole, shot_number, attributed FROM shots WHERE ball_speed = 8.0")
-                 .fetchone()) == (None, "Hole 18, par 4, 404 yards", None, 0)
+    assert tuple(st.db.execute("SELECT player, hole, shot_number, attributed, slot_id FROM shots WHERE ball_speed = 8.0")
+                 .fetchone()) == (None, "Hole 18, par 4, 404 yards", None, 0, None)
 
 
 def test_blind_shots_that_dont_line_up_are_left_unnamed(tmp_path):
