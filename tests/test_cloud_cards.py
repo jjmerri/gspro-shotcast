@@ -37,7 +37,14 @@ def _cards(cfg, api):
     """The cards' loop for a paired booth, and the windows it put up."""
     up = cloud_booth.Uploads(cfg, cloud.locate())
     windows = []
-    return cloud_cards.Cards(cfg.db_path, API, up._cloud, window=lambda shown, where: windows.append(shown)), windows
+    return cloud_cards.Cards(cfg.db_path, API, up._cloud, tuple(up.identity[:3]),
+                             window=lambda shown, where: windows.append(shown)), windows
+
+
+def _step(cards, now):
+    """One turn of both of the cards' loops."""
+    cards.look(now)
+    cards.ask(now)
 
 
 def _send(cfg):
@@ -70,17 +77,24 @@ def test_a_players_code_is_made_once_and_its_hash_goes_with_the_round(tmp_path, 
     assert not any(code in json.dumps(api.puts[0][2]) for code in codes.values())   # the code itself never goes
 
 
-def test_a_round_nobody_asked_codes_for_still_goes_with_hashes_and_they_dont_restart_its_quiet(tmp_path, api):
+def test_a_round_nobody_asked_codes_for_still_goes_with_hashes_and_they_dont_restart_its_quiet(tmp_path, api,
+                                                                                                monkeypatch):
     """The uploader makes the codes before it first reads a finished round, so the hashes aren't a
     change it sees later: the round goes at its first quiet, with them."""
     cfg = paired_cfg(tmp_path, api)
     s = Store(cfg.db_path)
     u = _play(s, "r1")
     _end(s, u)
-    pace = cloud_rounds.Pace()
-    cl = cloud.Cloud(cloud.store())
-    cloud_rounds.drain(cl, cfg.db_path, pace, settle=0)
-    assert [p[0] for p in api.puts] == [u] and all("claim_hash" in sl for sl in api.puts[0][2]["slots"])
+    clock = [1000.0]
+    monkeypatch.setattr(cloud_rounds, "_monotonic", lambda: clock[0])
+    pace, cl = cloud_rounds.Pace(), cloud.Cloud(cloud.store())
+    cloud_rounds.drain(cl, cfg.db_path, pace)             # first seen over
+    clock[0] += cloud_rounds.QUIET_S - 1
+    cloud_rounds.drain(cl, cfg.db_path, pace)
+    assert api.puts == []                                 # not quiet long enough yet
+    clock[0] += 1
+    cloud_rounds.drain(cl, cfg.db_path, pace)             # quiet since it was first seen: the codes changed nothing
+    assert [p[0] for p in api.puts] == [u]
     db = cloud_rounds.connect(cfg.db_path)
     assert {sl["claim_hash"] for sl in api.puts[0][2]["slots"]} == {
         cloud_rounds.claim_hash(c) for c in cloud_rounds.claim_codes(db, u).values()}
@@ -95,30 +109,149 @@ def test_a_qr_is_square_and_differs_by_code():
 
 # ---- when the cards show -----------------------------------------------------------------------
 
-def test_a_bay_that_isnt_a_venues_shows_no_cards_and_asks_nothing_more(tmp_path, api):
+def test_a_bay_that_isnt_a_venues_shows_no_cards_and_is_asked_only_as_a_round_ends(tmp_path, api):
     api.claim_cards = False
     cfg = paired_cfg(tmp_path, api)
     s = Store(cfg.db_path)
     cards, windows = _cards(cfg, api)
-    cards.look(0)
+    api.calls.clear()
+    _step(cards, 0)
+    u = _play(s, "r1")
+    _step(cards, 2)
+    assert api.calls == []                      # nothing is asked while nothing has ended
+    _end(s, u)
+    _step(cards, 4)
+    asked = lambda: [c[2] for c in api.calls if c[2] != "/api/devices/refresh"]   # noqa: E731
+    assert asked() == ["/api/devices/me"] and windows == [] and cards.pending is None
+    _step(cards, 500)
+    assert asked() == ["/api/devices/me"]
+    # The tenant becomes a venue while the booth runs: the next round that ends has cards.
+    api.claim_cards = True
+    u2 = _play(s, "r2", start=50)
+    _step(cards, 502)
+    _end(s, u2)
+    _step(cards, 504)
+    assert [w.uuid for w in windows] == [u2]
+
+
+def test_a_round_that_ends_while_the_cloud_cant_be_asked_gets_its_cards_once_it_can(tmp_path, api):
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+    _step(cards, 0)
+    api.minimum = "9.9.9"   # (every call refused)
     u = _play(s, "r1")
     _end(s, u)
-    api.calls.clear()
-    cards.look(2)
-    cards.look(500)
-    assert windows == [] and api.calls == []
-
-
-def test_an_api_that_cant_say_is_asked_again_later_and_shows_nothing_meanwhile(tmp_path, api):
-    cfg = paired_cfg(tmp_path, api)
-    cards, windows = _cards(cfg, api)
-    api.minimum = "9.9.9"   # (every call refused)
-    cards.look(0)
+    _step(cards, 2)
     api.minimum = None
-    cards.look(10)
-    assert cards.wanted is None
-    cards.look(cloud_cards.ASK_S)
-    assert cards.wanted is True and windows == []
+    _step(cards, 10)
+    assert windows == [] and cards.pending == (u, 2)   # asked again only after ASK_S
+    _step(cards, 2 + cloud_cards.ASK_S)
+    [shown] = windows
+    assert shown.uuid == u and shown.since == 2        # (its ten minutes count from when it ended)
+
+
+def test_cards_never_asked_for_in_time_are_dropped(tmp_path, api):
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+    _step(cards, 0)
+    api.minimum = "9.9.9"
+    _end(s, _play(s, "r1"))
+    _step(cards, 2)
+    api.minimum = None
+    _step(cards, 2 + cloud_cards.SHOW_S)
+    assert windows == [] and cards.pending is None
+
+
+def test_a_busy_season_file_as_a_round_ends_doesnt_lose_its_cards(tmp_path, api, monkeypatch):
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+    _step(cards, 0)
+    u = _play(s, "r1")
+    _end(s, u)
+    real = cloud_cards.cards_for
+    monkeypatch.setattr(cloud_cards, "cards_for", lambda *a: (_ for _ in ()).throw(RuntimeError("database is locked")))
+    with pytest.raises(RuntimeError):
+        cards.look(2)
+    assert windows == []
+    monkeypatch.setattr(cloud_cards, "cards_for", real)
+    _step(cards, 4)
+    assert [w.uuid for w in windows] == [u]
+
+
+def test_a_season_file_that_cant_be_read_takes_the_cards_down(tmp_path, api, monkeypatch):
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+    _step(cards, 0)
+    _end(s, _play(s, "r1"))
+    _step(cards, 2)
+    [shown] = windows
+    monkeypatch.setattr(cloud_cards, "state", lambda db: (_ for _ in ()).throw(RuntimeError("disk I/O error")))
+    with pytest.raises(RuntimeError):
+        cards.look(4)
+    assert shown.down.is_set() and cards.shown is None
+
+
+def test_a_season_file_that_isnt_the_pairings_shows_no_codes_and_ends_the_loop(tmp_path, api):
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+    _step(cards, 0)
+    _end(s, _play(s, "r1"))
+    _step(cards, 2)
+    [shown] = windows
+    s.db.execute("UPDATE cloud_pairing SET device_id = 'another'")
+    s.db.commit()
+    _end(s, _play(s, "r2", start=50))
+    asyncio.run(asyncio.wait_for(cards.run(), 5))   # (it ends by itself)
+    assert shown.down.is_set() and len(windows) == 1
+
+
+def test_practice_starting_takes_the_last_groups_cards_down(tmp_path, api):
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+    _step(cards, 0)
+    _end(s, _play(s, "r1"))
+    _step(cards, 2)
+    [shown] = windows
+    _hit(s, "Zed", 90)   # (no round on: a practice stretch)
+    s.db.commit()
+    assert s.db.execute("SELECT count(*) FROM round_records WHERE kind = 'practice' AND state = 'in_progress'"
+                        ).fetchone()[0] == 1
+    _step(cards, 4)
+    assert shown.down.is_set() and cards.shown is None
+
+
+def test_a_cloud_that_doesnt_answer_about_claims_never_keeps_cards_up(tmp_path, api, monkeypatch):
+    """Who has claimed is asked apart from the look at the season file: with that asking failing
+    (or still waiting on the network), the next round starting still takes the cards down."""
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+    _step(cards, 0)
+    _end(s, _play(s, "r1"))
+    _step(cards, 2)
+    [shown] = windows
+    api.minimum = "9.9.9"
+    cards.ask(10)            # (refused: nothing changes, nothing raised)
+    _play(s, "r2", start=50)
+    cards.look(12)           # the look alone, with no answer from the cloud
+    assert shown.down.is_set()
+
+
+def test_a_booth_that_is_stopping_puts_no_cards_up(tmp_path, api):
+    cfg = paired_cfg(tmp_path, api)
+    s = Store(cfg.db_path)
+    cards, windows = _cards(cfg, api)
+    _step(cards, 0)
+    _end(s, _play(s, "r1"))
+    cards.stopped.set()      # (as run() does on its way out, with a look still in its thread)
+    cards.look(2)
+    assert windows == [] and cards.shown is None
 
 
 def test_a_round_over_before_the_booth_started_gets_no_cards_and_one_that_ends_now_does(tmp_path, api):
@@ -126,19 +259,19 @@ def test_a_round_over_before_the_booth_started_gets_no_cards_and_one_that_ends_n
     s = Store(cfg.db_path)
     _end(s, _play(s, "old"))
     cards, windows = _cards(cfg, api)
-    cards.look(0)
+    _step(cards, 0)
     assert windows == []
     u = _play(s, "r1", start=50)
-    cards.look(2)
+    _step(cards, 2)
     assert windows == []                      # in progress: nothing yet
     _end(s, u)
-    cards.look(4)
+    _step(cards, 4)
     [shown] = windows
     assert shown.uuid == u and sorted(c.name for c in shown.cards) == ["Ann", "Bob"]
     db = cloud_rounds.connect(cfg.db_path)
     assert sorted(_code(c.url) for c in shown.cards) == sorted(cloud_rounds.claim_codes(db, u).values())
     db.close()
-    cards.look(6)
+    _step(cards, 6)
     assert len(windows) == 1 and not shown.down.is_set()   # still the same cards
 
 
@@ -146,21 +279,21 @@ def test_the_cards_show_who_has_claimed_once_the_round_is_there(tmp_path, api):
     cfg = paired_cfg(tmp_path, api)
     s = Store(cfg.db_path)
     cards, windows = _cards(cfg, api)
-    cards.look(0)
+    _step(cards, 0)
     u = _play(s, "r1")
     _end(s, u)
-    cards.look(2)
+    _step(cards, 2)
     [shown] = windows
     assert [c.claimed for c in shown.cards] == [False, False]   # (the round isn't there yet: 404, and it waits)
     _send(cfg)
     first = shown.cards[0].slot_id
     api.claimed[(u, first)] = "Ann R."
-    cards.look(3)                                               # (asked every POLL_S, not every look)
+    _step(cards, 3)                                               # (asked every POLL_S, not every look)
     assert [c.claimed for c in shown.cards] == [False, False]
-    cards.look(2 + cloud_cards.POLL_S)
+    _step(cards, 2 + cloud_cards.POLL_S)
     assert [(c.claimed, c.by) for c in shown.snapshot()] == [(True, "Ann R."), (False, None)]
     del api.claimed[(u, first)]                                   # staff undid it: the card goes back
-    cards.look(2 + 2 * cloud_cards.POLL_S)
+    _step(cards, 2 + 2 * cloud_cards.POLL_S)
     assert [(c.claimed, c.by) for c in shown.snapshot()] == [(False, None), (False, None)]
     assert not shown.down.is_set()
     # The sent body's hashes are the shown codes': what's scanned is what the cloud was told.
@@ -172,19 +305,19 @@ def test_the_cards_come_down_a_while_after_everyone_has_claimed(tmp_path, api):
     cfg = paired_cfg(tmp_path, api)
     s = Store(cfg.db_path)
     cards, windows = _cards(cfg, api)
-    cards.look(0)
+    _step(cards, 0)
     u = _play(s, "r1")
     _end(s, u)
-    cards.look(2)
+    _step(cards, 2)
     [shown] = windows
     _send(cfg)
     for c in shown.cards:
         api.claimed[(u, c.slot_id)] = "Someone"
-    cards.look(10)
+    _step(cards, 10)
     assert shown.all_claimed_at == 10 and not shown.down.is_set()
-    cards.look(10 + cloud_cards.CLAIMED_S - 1)
+    _step(cards, 10 + cloud_cards.CLAIMED_S - 1)
     assert not shown.down.is_set()
-    cards.look(10 + cloud_cards.CLAIMED_S)
+    _step(cards, 10 + cloud_cards.CLAIMED_S)
     assert shown.down.is_set() and cards.shown is None
 
 
@@ -193,24 +326,24 @@ def test_the_cards_come_down_when_closed_after_a_while_or_when_a_round_is_played
     cfg = paired_cfg(tmp_path, api)
     s = Store(cfg.db_path)
     cards, windows = _cards(cfg, api)
-    cards.look(0)
+    _step(cards, 0)
     u = _play(s, "r1")
     _end(s, u)
-    cards.look(2)
+    _step(cards, 2)
     [shown] = windows
     at = 4
     if why == "closed":
         shown.closed.set()
     elif why == "too long":
-        cards.look(2 + cloud_cards.SHOW_S - 1)
+        _step(cards, 2 + cloud_cards.SHOW_S - 1)
         assert not shown.down.is_set()
         at = 2 + cloud_cards.SHOW_S
     else:
         _play(s, "r2", start=50)
-    cards.look(at)
+    _step(cards, at)
     assert shown.down.is_set() and cards.shown is None and len(windows) == 1
     api.calls.clear()
-    cards.look(at + 100)
+    _step(cards, at + 100)
     assert not [c for c in api.calls if c[2].endswith("/claims")]   # nothing more is asked about it
 
 
@@ -218,14 +351,14 @@ def test_the_next_rounds_cards_replace_the_last(tmp_path, api):
     cfg = paired_cfg(tmp_path, api)
     s = Store(cfg.db_path)
     cards, windows = _cards(cfg, api)
-    cards.look(0)
+    _step(cards, 0)
     first = _play(s, "r1")
     _end(s, first)
-    cards.look(2)
+    _step(cards, 2)
     second = _play(s, "r2", players=("Cat",), start=50)
-    cards.look(4)
+    _step(cards, 4)
     _end(s, second)
-    cards.look(6)
+    _step(cards, 6)
     assert [w.uuid for w in windows] == [first, second] and windows[0].down.is_set()
     assert [c.name for c in windows[1].cards] == ["Cat"] and not windows[1].down.is_set()
 

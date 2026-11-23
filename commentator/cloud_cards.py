@@ -9,12 +9,14 @@ before the round has been sent: a code scanned early is kept by the cloud until 
 While they show, the cloud is asked who has claimed (`GET /api/devices/rounds/{id}/claims`) and a
 claimed card says so, with the claimer's short name ("Mike R.").
 
-They come down when someone closes them, when a round is in progress again, a while after every
-player has claimed, or after SHOW_S. A round that was already over when the booth started gets no
+They come down when someone closes them, when anyone plays again (a round or practice), a while
+after every player has claimed, after SHOW_S, or when the season file can't be read (what the bay
+is doing can't be told). A round that was already over when the booth started gets no
 cards: staff can make a fresh code on the website.
 
 The window is the booth's own (popup.py's kind): it never takes focus from GSPro and is kept out of
-screen capture, so the codes aren't in the stream or the booth's own screen reads. Every wait is
+screen capture, so the codes aren't in the stream or the booth's own screen reads. The codes are
+drawn only once Windows confirms that; where it can't, the cards say to ask the staff. Every wait is
 counted in elapsed seconds.
 """
 from __future__ import annotations
@@ -80,10 +82,13 @@ class Shown:
             return [Card(c.slot_id, c.name, c.url, c.claimed, c.by) for c in self.cards]
 
 
-def over(db: Any) -> tuple[set[str], bool]:
-    """(the rounds that are over, whether any round is in progress), from the season file."""
-    rows = db.execute("SELECT uuid, state FROM round_records WHERE kind = 'round'").fetchall()
-    return {r["uuid"] for r in rows if r["state"] != "in_progress"}, any(r["state"] == "in_progress" for r in rows)
+def state(db: Any) -> tuple[set[str], set[str], bool]:
+    """(the rounds that are over, everything in progress, whether a round is in progress), from the
+    season file. In progress counts practice too: someone hitting balls is the next customer."""
+    rows = db.execute("SELECT uuid, kind, state FROM round_records").fetchall()
+    live = {r["uuid"] for r in rows if r["state"] == "in_progress"}
+    return ({r["uuid"] for r in rows if r["kind"] == "round" and r["state"] != "in_progress"}, live,
+            any(r["kind"] == "round" and r["state"] == "in_progress" for r in rows))
 
 
 def cards_for(db: Any, uuid: str, api: str) -> list[Card]:
@@ -112,62 +117,112 @@ def apply(shown: Shown, claims: Any) -> None:
 
 
 class Cards:
-    """The booth's loop for the cards. `cloud_of`: this PC's pairing (cloud_booth.Uploads._cloud:
-    it raises once the stored pairing isn't the booth's). `window`: what shows a `Shown` (tests pass
-    their own)."""
+    """The booth's loops for the cards: one looks at the season file (`look`), one asks the cloud who
+    has claimed (`ask`), so a slow answer never keeps a finished group's cards up. `cloud_of`: this
+    PC's pairing (cloud_booth.Uploads._cloud: it raises once the stored pairing isn't the booth's).
+    `key`: the pairing the season file must be bound to (as the uploader checks; None: not checked).
+    `window`: what shows a `Shown` (tests pass their own)."""
 
-    def __init__(self, db_path: str, api: str, cloud_of: Callable[[], Any],
+    def __init__(self, db_path: str, api: str, cloud_of: Callable[[], Any], key: tuple | None = None,
                  where: Callable[[], tuple[int, int, int, int]] | None = None,
                  window: Callable[[Shown, Any], Any] | None = None) -> None:
-        self.db_path, self.api, self.cloud_of, self.where = db_path, api, cloud_of, where
+        self.db_path, self.api, self.cloud_of, self.key, self.where = db_path, api, cloud_of, key, where
         self.window = window or (lambda shown, where: Window(shown, where).show())
-        self.wanted: bool | None = None     # whether the cloud says this bay shows cards (None: not known yet)
-        self.asked_at: float | None = None
-        self.seen: set[str] | None = None   # the rounds that were over at the last look (None: not looked yet)
+        self.asked_at: float | None = None        # when the cloud was last asked whether this bay shows cards
+        self.done: set[str] | None = None         # the rounds that were over at the last look (None: not looked yet)
+        self.live: set[str] = set()               # and what was in progress
+        self.pending: tuple[str, float] | None = None   # a round that has just ended, and when: its cards aren't up yet
         self.shown: Shown | None = None
+        self.lock = threading.Lock()              # guards `shown` being put up and taken down
+        self.stopped = threading.Event()          # the booth is stopping: nothing more goes up
 
-    def _wanted(self, now: float) -> bool:
-        if self.wanted is None and (self.asked_at is None or now - self.asked_at >= ASK_S):
+    def _wanted(self, now: float) -> bool | None:
+        """Whether the cloud says this bay shows cards, asked as each round ends (a tenant can become
+        a venue while the booth runs). None: no answer (asked again after ASK_S)."""
+        if self.asked_at is not None and now - self.asked_at < ASK_S:
+            return None
+        try:
+            got = self.cloud_of().me().get("claim_cards")
+        except cloud.PairingChanged:
+            raise
+        except Exception:   # noqa: BLE001 - the network, a refresh refused: asked again later
+            log.debug("Shotcast Cloud: couldn't ask whether this bay shows claim cards", exc_info=True)
             self.asked_at = now
-            try:
-                self.wanted = self.cloud_of().me().get("claim_cards") is True
-            except cloud.PairingChanged:
-                raise
-            except Exception:   # noqa: BLE001 - the network, a refresh refused: asked again later
-                log.debug("Shotcast Cloud: couldn't ask whether this bay shows claim cards", exc_info=True)
-        return bool(self.wanted)
+            return None
+        self.asked_at = None
+        return got is True
 
     def look(self, now: float) -> None:
-        """One look at the season file and, while cards show, at the cloud."""
-        if not self._wanted(now):
+        """One look at the season file: what has ended, what has started, whether the cards up now
+        should come down. Nothing here waits on the cloud while cards show."""
+        try:
+            db = cloud_rounds.connect(self.db_path)
+            try:
+                if self.key is not None and cloud_rounds.bound(db) != self.key:
+                    raise cloud_rounds.NotThisPairing(f"{self.db_path} isn't bound to this pairing; no claim cards")
+                done, live, playing = state(db)
+                newest = None
+                if self.done is not None and done - self.done:
+                    fresh = sorted(done - self.done)
+                    # (Two at once doesn't happen on a bay; if it did, the one that started last.)
+                    newest = db.execute("SELECT uuid FROM round_records WHERE uuid IN (%s) "
+                                        "ORDER BY started_at DESC, uuid" % ",".join("?" * len(fresh)),
+                                        fresh).fetchone()["uuid"]
+            finally:
+                db.close()
+        except Exception:
+            self.take_down()   # (what the bay is doing can't be told: no codes stay up meanwhile)
+            raise
+        started = live - self.live if self.done is not None else set()
+        self.done, self.live = done, live
+        shown = self.shown
+        if shown is not None and (started or newest or playing or self._finished(shown, now)):
+            self.take_down()
+        if started or playing:
+            self.pending = None            # someone is playing again: the round before gets no cards now
+        elif newest:
+            self.pending = (newest, now)
+        if self.pending is not None:
+            self._put_up(now)
+
+    def _put_up(self, now: float) -> None:
+        """The pending round's cards, once the cloud has said this bay shows them. It stays pending
+        (tried again at the next look) while the cloud can't be asked or the season file is busy,
+        for as long as cards would have shown."""
+        assert self.pending is not None
+        uuid, since = self.pending
+        if now - since >= SHOW_S:
+            self.pending = None
+            return
+        wanted = self._wanted(now)
+        if wanted is None:
+            return
+        if not wanted:
+            self.pending = None
             return
         db = cloud_rounds.connect(self.db_path)
         try:
-            done, playing = over(db)
-            fresh = done - self.seen if self.seen is not None else set()
-            self.seen = done
-            if self.shown is not None and (playing or fresh or self._finished(self.shown, now)):
-                self.take_down()
-            if fresh and not playing:
-                # (Two at once doesn't happen on a bay; if it did, the one that started last.)
-                uuid = db.execute("SELECT uuid FROM round_records WHERE uuid IN (%s) ORDER BY started_at DESC, uuid"
-                                  % ",".join("?" * len(fresh)), sorted(fresh)).fetchone()["uuid"]
-                cards = cards_for(db, uuid, self.api)
-                if cards:
-                    self.shown = Shown(uuid, cards, now)
-                    log.info("Shotcast Cloud: claim cards up for %s player(s) of round %s", len(cards), uuid)
-                    self.window(self.shown, self.where)
+            cards = cards_for(db, uuid, self.api)
         finally:
             db.close()
-        if self.shown is not None:
-            self._ask(self.shown, now)
+        self.pending = None
+        if not cards:
+            return
+        with self.lock:
+            if self.stopped.is_set():
+                return
+            self.shown = Shown(uuid, cards, since)
+            log.info("Shotcast Cloud: claim cards up for %s player(s) of round %s", len(cards), uuid)
+            self.window(self.shown, self.where)
 
     def _finished(self, shown: Shown, now: float) -> bool:
         return (shown.closed.is_set() or now - shown.since >= SHOW_S
                 or (shown.all_claimed_at is not None and now - shown.all_claimed_at >= CLAIMED_S))
 
-    def _ask(self, shown: Shown, now: float) -> None:
-        if shown.asked_at is not None and now - shown.asked_at < POLL_S:
+    def ask(self, now: float) -> None:
+        """Ask the cloud who has claimed, if cards show and it's time to."""
+        shown = self.shown
+        if shown is None or (shown.asked_at is not None and now - shown.asked_at < POLL_S):
             return
         shown.asked_at = now
         try:
@@ -186,24 +241,32 @@ class Cards:
             shown.all_claimed_at = None
 
     def take_down(self) -> None:
-        if self.shown is not None:
-            self.shown.down.set()
-            self.shown = None
+        with self.lock:
+            if self.shown is not None:
+                self.shown.down.set()
+                self.shown = None
+
+    async def _every(self, seconds: float, step: Callable[[float], None]) -> None:
+        while True:
+            try:
+                await asyncio.to_thread(step, _monotonic())
+            except (cloud.NotPaired, cloud.PairingChanged, cloud_rounds.NotThisPairing):
+                return   # (the upload loop says why, in the log and the tray)
+            except asyncio.CancelledError:
+                raise
+            except Exception:   # noqa: BLE001 - a busy season file: looked at again
+                log.debug("Shotcast Cloud: claim cards: %s failed", step.__name__, exc_info=True)
+            await asyncio.sleep(seconds)
 
     async def run(self) -> None:
+        asking = asyncio.create_task(self._every(1.0, self.ask), name="cloud-cards-claims")
         try:
-            while True:
-                try:
-                    await asyncio.to_thread(self.look, _monotonic())
-                except (cloud.NotPaired, cloud.PairingChanged, cloud_rounds.NotThisPairing):
-                    return   # (the upload loop says why, in the log and the tray)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:   # noqa: BLE001 - a busy season file: looked at again
-                    log.debug("Shotcast Cloud: claim cards: look failed", exc_info=True)
-                await asyncio.sleep(LOOK_S)
+            await self._every(LOOK_S, self.look)
         finally:
+            self.stopped.set()   # (a look still in its thread puts nothing up after this)
             self.take_down()
+            asking.cancel()
+            await asyncio.gather(asking, return_exceptions=True)
 
 
 # ---- the window
@@ -237,8 +300,7 @@ class Window:
     def _loop(self) -> None:
         import tkinter as tk
 
-        from .overlay import ON_TEXT, PANEL, PANEL_EDGE, _dpi_aware, _no_activate, _topmost
-        from .popup import MUTED, NO_GREY
+        from .overlay import _dpi_aware
 
         mon = None
         if self.where is not None:
@@ -249,6 +311,15 @@ class Window:
         if sys.platform == "win32":
             _dpi_aware()
         root = tk.Tk()
+        try:
+            self._show(tk, root, mon)
+        finally:
+            root.destroy()
+
+    def _show(self, tk: Any, root: Any, mon: tuple[int, int, int, int] | None) -> None:
+        from .overlay import ON_TEXT, PANEL, PANEL_EDGE, _no_activate, _topmost
+        from .popup import MUTED, NO_GREY
+
         root.withdraw()
         root.overrideredirect(True)
         root.attributes("-topmost", True)
@@ -279,6 +350,8 @@ class Window:
                   relief="flat", bd=0, padx=unit * 2, pady=unit // 3, cursor="hand2",
                   font=("Segoe UI", -unit, "bold"), command=self.shown.closed.set).pack(pady=(unit // 2, 0))
 
+        hidden = False   # (set below, before any code is drawn: whether the window is out of screen capture)
+
         def draw(i: int, card: Card) -> None:
             canvas, under, was = drawn[i]
             now = (card.claimed, card.by)
@@ -293,6 +366,11 @@ class Window:
                                    font=("Segoe UI", -round(side * 0.6), "bold"))
                 under.configure(text=f"Claimed by {card.by}" if card.by else "Claimed", fg=ON_TEXT)
                 return
+            if not hidden:
+                # (A code a stream or a screen grab could carry is a code anyone watching could use.)
+                canvas.configure(bg=PANEL)
+                under.configure(text="Ask the staff for a code to keep this round", fg=ON_TEXT)
+                return
             canvas.configure(bg=WHITE)
             rows = matrix(card.url)
             px = max(1, side // (len(rows) + 2 * QUIET))
@@ -304,20 +382,30 @@ class Window:
                                                 fill=BLACK, outline="")
             under.configure(text="Scan to claim", fg=MUTED)
 
-        for i, card in enumerate(cards):
-            draw(i, card)
         root.update_idletasks()
         w, h = root.winfo_reqwidth(), root.winfo_reqheight()
         root.geometry(f"+{left + (sw - w) // 2}+{top + sh - h - round(sh * 0.04)}")
+        if self.shown.down.is_set():
+            return
+        # The window goes up empty, is taken out of screen capture, and only then are the codes drawn.
         root.deiconify()
         if sys.platform == "win32":
             root.update_idletasks()
             _no_activate(root)   # (never takes focus; kept out of screen capture)
+            hidden = _out_of_capture(root)
+            if not hidden:
+                log.warning("Claim cards: this Windows can't keep a window out of screen capture; no codes shown")
+        else:
+            hidden = True   # (not a booth: only Windows runs one)
+        for i, card in enumerate(cards):
+            draw(i, card)
         ticks = 0
+        born = _monotonic()
 
         def tick() -> None:
             nonlocal ticks
-            if self.shown.down.is_set() or self.shown.closed.is_set():
+            # (Its own deadline too: it comes down even if the booth's loop has stopped looking.)
+            if self.shown.down.is_set() or self.shown.closed.is_set() or _monotonic() - born >= SHOW_S + 30:
                 root.quit()
                 return
             for i, card in enumerate(self.shown.snapshot()):
@@ -331,6 +419,22 @@ class Window:
                     root.lift()
             root.after(REDRAW_MS, tick)
 
-        tick()
+        root.after(0, tick)   # (from inside the loop: a quit before the loop runs would be lost)
         root.mainloop()
-        root.destroy()
+
+
+def _out_of_capture(root: Any) -> bool:
+    """Whether Windows is keeping this window out of screen capture (overlay._hide_from_capture asked
+    it to; Windows before 10 2004 can't)."""
+    import ctypes
+    from ctypes import wintypes
+
+    from .overlay import _hwnd
+
+    got = wintypes.DWORD(0)
+    try:
+        ok = ctypes.windll.user32.GetWindowDisplayAffinity(_hwnd(root), ctypes.byref(got))
+    except Exception:
+        log.debug("Couldn't read the claim cards window's display affinity", exc_info=True)
+        return False
+    return bool(ok) and got.value == 0x11   # WDA_EXCLUDEFROMCAPTURE
