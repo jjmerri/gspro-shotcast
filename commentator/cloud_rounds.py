@@ -245,6 +245,7 @@ def _without(row: dict[str, Any], *keys: str) -> dict[str, Any]:
 # sent; a round over either size goes without its heaviest optional parts (encode).
 MAX_POINTS = 5_000
 MAX_TAGS = 50
+MAX_TEES, MAX_TEE_NAME = 32, 50      # a course card's tees, and a tee's name
 MAX_TEXT = 4_000                   # a line's text (longer is cut: the scores must still go)
 MAX_BODY = 4 * 1024 * 1024         # compressed
 MAX_INFLATED = 32 * 1024 * 1024    # as JSON
@@ -319,7 +320,10 @@ def _course_card(tees: list[dict[str, Any]], folder: str | None) -> dict[str, An
     return {
         "folder": folder,
         "par": _holes(first["par"]), "index": _holes(first["hole_index"]),
-        "tees": [{"name": t["tee"], "rating": t["rating"], "slope": t["slope"]} for t in tees],
+        # (As many, and names as long, as the cloud's format takes: a course file's odd tee mustn't
+        # cost the round its upload.)
+        "tees": [{"name": str(t["tee"])[:MAX_TEE_NAME], "rating": t["rating"], "slope": t["slope"]}
+                 for t in tees[:MAX_TEES]],
     }
 
 
