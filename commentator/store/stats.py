@@ -69,35 +69,31 @@ class StatsMixin:
         picked (its best, so the one that counts), and a shot whose hitter isn't known (one GSPro
         profile for an alternate shot or scramble team) goes to the team, `team_of(player)`, or is
         left out without it. `before_id` leaves out shots recorded after it (the round being played)."""
+        from shotcast_scoring import ctp
+
         from ..league import course_match_score
 
         rows = self.db.execute(
-            """SELECT sh.player, sh.course, sh.hole, sh.finish_yards, sh.attributed, sh.outcome FROM shots sh
+            """SELECT sh.player, sh.course, sh.hole, sh.finish_yards, sh.attributed, sh.outcome, sh.shot_number,
+                      sh.mulligan, sh.is_putt, sh.lie_after FROM shots sh
                JOIN sessions se ON se.id = sh.session_id
-               WHERE sh.is_league = 1 AND sh.excluded = 0 AND sh.mulligan = 0 AND sh.left_out = 0 AND sh.is_putt = 0
-                     AND sh.shot_number = 1
-                     AND ((sh.finish_yards IS NOT NULL AND sh.lie_after = 'green') OR sh.outcome = 'holed')
+               WHERE sh.is_league = 1 AND sh.excluded = 0 AND sh.left_out = 0 AND sh.shot_number = 1
                      AND sh.player IS NOT NULL AND sh.player != 'unknown' AND se.date >= ?
-                     AND (? IS NULL OR sh.id <= ?)""",
+                     AND (? IS NULL OR sh.id <= ?) ORDER BY sh.id""",
             (since, before_id, before_id),
         ).fetchall()
-        best: dict[int, tuple[str, float]] = {}
+        marks = []
         for r in rows:
-            m = re.match(r"Hole (\d+)\b", r["hole"] or "")
-            if not m or int(m.group(1)) not in holes:
+            hole, yards = ctp.hole_number(r["hole"]), ctp.mark(dict(r))
+            if hole is None or yards is None:
                 continue
             if not any(c and (c.lower() == (r["course"] or "").lower() or course_match_score(c, r["course"] or "") >= 0.6)
                        for c in courses):
                 continue
             who = r["player"] if r["attributed"] else (team_of(r["player"]) if team_of else None)
-            if not who:
-                continue
-            hole = int(m.group(1))
-            # (an ace with no logged finish: one GSPro profile's shared ball has no log index)
-            yards = 0.0 if r["outcome"] == "holed" else r["finish_yards"]
-            if hole not in best or yards < best[hole][1]:
-                best[hole] = (who, yards)
-        return best
+            if who:
+                marks.append((hole, who, yards))
+        return ctp.closest(marks, holes)
 
     def players_after(self, after_id: int, record: str | None = None) -> list[str]:
         """The named players on a round's shots (`record`'s; or those recorded after `after_id`)."""
