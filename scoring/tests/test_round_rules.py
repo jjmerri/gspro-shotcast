@@ -183,3 +183,14 @@ def test_a_leagues_own_allowances_win_over_the_defaults():
     assert R.allowances("alternate", custom) == [1.0, 0.0]
     assert R.allowances("aggregate", custom) == R.allowances("aggregate") == R.allowances("aggregate", None) == [1.0]
     assert R.allowances(None, {"nonsense": [0.5]}) == [0.5]        # as the app has always matched them
+    # The first list naming the format wins, even an empty one; one that isn't a list is passed over.
+    assert R.allowances("aggregate", {"sum": "skip", "Team Sum": ["0.4"], "total": [0.8]}) == [0.4]
+    assert R.allowances("scramble", {"scramble": [], "Two Man Scramble": [0.2]}) == []
+    assert R.allowances("scramble", {}) == [0.25, 0.20] and R.allowances("", {"nonsense": [0.5]}) == [1.0]
+    with pytest.raises(ValueError):
+        R.allowances("scramble", {"scramble": ["bad"]})
+
+
+def test_a_format_that_is_not_text_is_read_as_its_text():
+    # As the app's league file has always been read: a caller with untrusted input checks for a string first.
+    assert R.normalize_format(["Alt Shot"]) == "alternate" and R.normalize_format([]) is None

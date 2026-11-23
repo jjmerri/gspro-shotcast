@@ -45,7 +45,11 @@ FORMAT_ALIASES: dict[str, frozenset[str]] = {
 
 def normalize_format(text: object) -> str | None:
     """The format a league's name for one means ("Team Sum" is "aggregate"), or None when it's
-    empty or not a name the rules know. Case, spaces and punctuation don't matter."""
+    empty or not a name the rules know. Case, spaces, digits and punctuation don't matter.
+
+    Anything that isn't text is read as its text (the app's league file has always been read so), so
+    a list holding a name means that name: a caller checking untrusted input makes sure it has a
+    string, of a sensible length, first."""
     if not text:
         return None
     key = re.sub(r"[^a-z]", "", str(text).lower())
@@ -54,7 +58,9 @@ def normalize_format(text: object) -> str | None:
 
 def allowances(fmt: str | None, custom: Mapping[Any, Any] | None = None) -> list[float]:
     """The format's allowances: the league's own (`custom`: {a format's name: [fractions]}, the
-    first entry naming this format whose value is a list), else the default."""
+    first entry naming this format whose value is a list, even an empty one), else the default.
+    The list's numbers are taken as float() takes them and not checked: a caller with untrusted
+    input checks them first."""
     for name, value in (custom or {}).items():
         if normalize_format(name) == fmt and isinstance(value, list):
             return [float(v) for v in value]

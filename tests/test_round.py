@@ -8095,3 +8095,14 @@ def test_reassigning_strokes_keeps_a_side_with_a_handicap_gone_and_overwrites_on
     r.is_league, mike.strokes = False, None
     Round._assign_strokes(r, r.sides)
     assert mike.strokes is None
+
+
+def test_a_leagues_own_allowances_reach_the_rounds_strokes():
+    from types import SimpleNamespace
+
+    r = SimpleNamespace(format="best_ball", league=SimpleNamespace(data={"handicap_allowances": {"Best Ball": [0.9]}}))
+    assert Round._allowances(r) == [0.9]
+    r.league.data = {}
+    assert Round._allowances(r) == [0.75]
+    r.league.data = {"handicap_allowances": None}
+    assert Round._allowances(r) == [0.75]
