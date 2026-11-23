@@ -9,7 +9,7 @@ closest.
 Nothing goes in over a person's entry. The booth signs in as the league organiser, so Squabbit
 can't say who wrote what; the booth remembers what it wrote (in `path`) and treats anything else on
 the team's card as someone's. A card with any such entry isn't offered, and one turning up
-mid-round stops the posting. Each post reads the whole card and writes it in one go, only if
+mid-round stops the posting. A blank isn't an entry: a booth score blanked on Squabbit goes back in. Each post reads the whole card and writes it in one go, only if
 none of it changed since the read, so an entry made in between is never overwritten either.
 """
 
@@ -159,10 +159,12 @@ class LiveSync:
         return found
 
     def _foreign(self, rid: str, doc: dict[str, Any]) -> list[str]:
+        """Scores on the round the booth didn't write. A blank isn't an entry (Squabbit's app can save
+        a stale card's empty hole over the booth's score): the booth's next post fills it again."""
         mine = self.state["scores"].get(rid, {})
         theirs = doc.get("holeScoresV2") or {}
-        return ([f"round {rid} hole {h}: {v}" for h, v in sorted(theirs.items()) if mine.get(str(h)) != v]
-                + [f"round {rid} hole {h}: cleared" for h in sorted(mine) if h not in theirs])
+        return [f"round {rid} hole {h}: {v}" for h, v in sorted(theirs.items())
+                if v is not None and mine.get(str(h)) != v]
 
     # ---- writing ----------------------------------------------------------------------------
 
@@ -188,7 +190,8 @@ class LiveSync:
             new_scores: dict[str, dict[str, int]] = {}
             for uid, rid in target.rounds.items():
                 doc, at = docs[rid]
-                values, new = self._score_values(target, uid, doc, scores.get(uid) or {})
+                values, new = self._score_values(target, uid, doc, scores.get(uid) or {},
+                                                 self.state["scores"].get(rid, {}))
                 if values:
                     updates.append((f"rounds/{rid}", values, at))
                     new_scores[rid] = new
@@ -219,13 +222,18 @@ class LiveSync:
         raise Busy(f"week {target.week}'s card for {target.team} kept changing")
 
     @staticmethod
-    def _score_values(target: Target, uid: str, doc: dict[str, Any],
-                      by_seq: dict[int, int | None]) -> tuple[dict[tuple[str, ...], Any], dict[str, int | None]]:
+    def _score_values(target: Target, uid: str, doc: dict[str, Any], by_seq: dict[int, int | None],
+                      mine: dict[str, int] | None = None) -> tuple[dict[tuple[str, ...], Any], dict[str, int | None]]:
+        """The round's fields to set for these holes. `mine` is what the booth posted on it before: a
+        score of its own found blank goes back in (a restarted booth's round may not have the hole
+        again yet), and taking one back still counts when it's blank already."""
         from .squabbit import DELETE
 
+        mine = mine or {}
         have = {str(k): v for k, v in (doc.get("holeScoresV2") or {}).items()}
-        new = {str(target.hole(seq)): v for seq, v in by_seq.items()
-               if 1 <= seq <= target.num_holes and have.get(str(target.hole(seq))) != v}
+        wanted = {str(target.hole(seq)): v for seq, v in by_seq.items() if 1 <= seq <= target.num_holes}
+        wanted = {**{h: v for h, v in mine.items() if have.get(h) is None}, **wanted}
+        new = {h: v for h, v in wanted.items() if have.get(h) != v or (v is None and h in mine)}
         if not new:
             return {}, {}
         merged = {h: v for h, v in {**have, **new}.items() if v is not None}

@@ -741,9 +741,30 @@ def test_a_reopened_hole_is_taken_back_and_the_round_unfinished(tmp_path):
     assert live.others(c, t) == []
     # A restarted booth still knows which holes are its own to take back.
     assert LiveSync(tmp_path / "s.json").posted(t) == {"a": {1, 2}}
-    # A booth score someone cleared on Squabbit is their call: the booth stops rather than put it back.
-    del c.docs["rounds/Ra"]["holeScoresV2"]["11"]
-    assert live.others(c, t) == ["round Ra hole 11: cleared"]
+
+def test_a_blank_over_the_booths_score_isnt_an_entry_and_the_score_goes_back(tmp_path):
+    live, c, t = LiveSync(tmp_path / "s.json"), _client(), _target()
+    live.push(c, t, {"a": {1: 5, 2: 4}, "b": {1: 5, 2: 4}}, {})
+    # Squabbit's app saved a stale card: hole 11 blanked on one round, gone from the other.
+    c.docs["rounds/Ra"]["holeScoresV2"]["11"] = None
+    c.docs["rounds/Ra"]["score"] = 5
+    del c.docs["rounds/Rb"]["holeScoresV2"]["11"]
+    assert live.others(c, t) == []
+    assert live.push(c, t, {"a": {1: 5, 2: 4, 3: 3}, "b": {1: 5, 2: 4, 3: 3}}, {}) == ["a 11:4 12:3", "b 11:4 12:3"]
+    for rid in ("Ra", "Rb"):
+        doc = c.docs[f"rounds/{rid}"]
+        assert doc["holeScoresV2"] == {"10": 5, "11": 4, "12": 3} and doc["score"] == 12 and doc["finishedDate"]
+    # A restarted booth whose round doesn't have hole 10 again yet still puts its blanked score back.
+    c.docs["rounds/Ra"]["holeScoresV2"]["10"] = None
+    live = LiveSync(tmp_path / "s.json")
+    assert live.push(c, t, {"a": {2: 4, 3: 3}}, {}) == ["a 10:5"]
+    assert c.docs["rounds/Ra"]["holeScoresV2"]["10"] == 5 and c.docs["rounds/Ra"]["score"] == 12
+    # A hole GSPro reopened, found blank already: still the booth's to take back, and the round unfinished.
+    c.docs["rounds/Ra"]["holeScoresV2"]["12"] = None
+    assert live.push(c, t, {"a": {1: 5, 2: 4, 3: None}}, {}) == ["a 12:-"]
+    ra = c.docs["rounds/Ra"]
+    assert "12" not in ra["holeScoresV2"] and ra["score"] == 9 and ra["finishedDate"] is None
+    assert live.posted(t)["a"] == {1, 2}
 
 
 def test_a_card_that_keeps_changing_is_a_failed_post_not_a_quiet_one(tmp_path):

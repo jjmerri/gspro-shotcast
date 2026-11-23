@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.162
+
+### Booth
+- Updating Squabbit as you play no longer stops when a hole the booth posted shows up blank on Squabbit (as a phone with the card open can leave it); the booth puts the score back and carries on.
+
 ## 0.1.161
 
 ### Booth
