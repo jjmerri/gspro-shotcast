@@ -53,9 +53,13 @@ def _send(cfg):
     return out
 
 
-def _code(url):
-    assert url.startswith(f"{API}/claim/")
-    return url.rsplit("/", 1)[1]
+def _linked(url):
+    """The (name, code) pairs a QR's link carries after its `#`, as the site's page reads them."""
+    from urllib.parse import parse_qsl
+
+    page, _, rest = url.partition("#")
+    assert page == f"{API}/claim/"
+    return [(name, code) for code, name in parse_qsl(rest, strict_parsing=True)]
 
 
 # ---- the codes ---------------------------------------------------------------------------------
@@ -101,10 +105,21 @@ def test_a_round_nobody_asked_codes_for_still_goes_with_hashes_and_they_dont_res
     db.close()
 
 
-def test_a_qr_is_square_and_differs_by_code():
-    a, b = (cloud_cards.matrix(cloud_cards.claim_url("https://shotcast.example", c * 22)) for c in "AB")
+def test_the_one_link_carries_every_players_name_and_code_after_its_hash():
+    link = cloud_cards.claim_link("https://shotcast.example/", [("Ann", "a" * 22), ("Bo & Co=1 #2/é", "b" * 22)])
+    assert link.startswith("https://shotcast.example/claim/#") and link.count("#") == 1
+    from urllib.parse import parse_qsl
+
+    assert parse_qsl(link.split("#")[1], strict_parsing=True) == [("a" * 22, "Ann"), ("b" * 22, "Bo & Co=1 #2/é")]
+    long = cloud_cards.claim_link("https://shotcast.example", [("N" * 200, "c" * 22)])
+    assert long.endswith("=" + "N" * cloud_cards.NAME_CHARS)   # only enough of a name to pick it by
+
+
+def test_a_qr_is_square_differs_by_link_and_stays_scannable_with_a_full_bay():
+    a, b = (cloud_cards.matrix(cloud_cards.claim_link("https://shotcast.example", [("Ann", c * 22)])) for c in "AB")
     assert len(a) >= 21 and all(len(row) == len(a) for row in a) and a != b
-    assert cloud_cards.claim_url("https://shotcast.example/", "x") == "https://shotcast.example/claim/x"
+    full = cloud_cards.claim_link("https://app.shotcast.example", [("Bartholomew Longname", "A1b2C3d4E5f6G7h8I9j0Kl")] * 8)
+    assert len(cloud_cards.matrix(full)) <= 81   # (eight players: still four pixels a module on a 1080p screen)
 
 
 # ---- when the cards show -----------------------------------------------------------------------
@@ -380,7 +395,9 @@ def test_a_round_over_before_the_booth_started_gets_no_cards_and_one_that_ends_n
     [shown] = windows
     assert shown.uuid == u and sorted(c.name for c in shown.cards) == ["Ann", "Bob"]
     db = cloud_rounds.connect(cfg.db_path)
-    assert sorted(_code(c.url) for c in shown.cards) == sorted(cloud_rounds.claim_codes(db, u).values())
+    codes = cloud_rounds.claim_codes(db, u)
+    assert sorted(_linked(shown.url)) == sorted((c.name, codes[c.slot_id]) for c in shown.cards)   # one link, both players
+    assert sorted(c.code for c in shown.cards) == sorted(codes.values())
     db.close()
     _step(cards, 6)
     assert len(windows) == 1 and not shown.down.is_set()   # still the same cards
@@ -409,7 +426,7 @@ def test_the_cards_show_who_has_claimed_once_the_round_is_there(tmp_path, api):
     assert not shown.down.is_set()
     # The sent body's hashes are the shown codes': what's scanned is what the cloud was told.
     assert {sl["claim_hash"] for sl in api.puts[0][2]["slots"]} == {
-        cloud_rounds.claim_hash(_code(c.url)) for c in shown.cards}
+        cloud_rounds.claim_hash(code) for _, code in _linked(shown.url)}
 
 
 def test_the_cards_come_down_a_while_after_everyone_has_claimed(tmp_path, api):
