@@ -60,5 +60,6 @@ asyncio_mode = "auto"
 testpaths = ["tests", "scoring/tests"]
 pythonpath = ["scoring/src", "."]   # this checkout's scoring package, whatever the venv maps
 # In parallel, one worker per core (-n0 runs serially: quicker for one test); tests.cloud_isolation
-# keeps every test away from this PC's own Shotcast Cloud pairing.
-addopts = "-n auto -p tests.cloud_isolation"
+# keeps every test away from this PC's own Shotcast Cloud pairing; tests.shard adds --shard I/N (CI's
+# Windows run is split with it).
+addopts = "-n auto -p tests.cloud_isolation -p tests.shard"
