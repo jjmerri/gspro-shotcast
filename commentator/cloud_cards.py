@@ -30,10 +30,8 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
-import re
 import sys
 import threading
-import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from time import monotonic as _monotonic
@@ -59,61 +57,24 @@ STATUS_CHARS = 44   # how much of the claimers' names the card's one status line
 MODULE_PX = 4       # the finest a QR's modules are drawn (the code is made bigger on a small screen to keep it)
 
 
-# Characters that draw as a blank (and aren't spaces): left out of a name.
-_BLANK = {0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0}
-# Characters with no shape of their own that can change how the one before is drawn (variation
-# selectors, a joiner): kept in the name as shown, not counted when two names are compared.
-_SHAPERS = {0x034F, 0x17B4, 0x17B5, *range(0x180B, 0x1810), *range(0xFE00, 0xFE10), *range(0xE0100, 0xE01F0)}
-
-
-def _clean(name: str) -> str:
-    """A name as it's shown: one spelling of each letter, any kind of space as one plain space,
-    nothing that can't be seen."""
-    name = "".join(" " if ch.isspace() else ch for ch in unicodedata.normalize("NFC", name))
-    return " ".join("".join(ch for ch in name if ch.isprintable() and unicodedata.category(ch) != "Cf"
-                            and ord(ch) not in _BLANK).split())
-
-
-def _reads(text: str) -> str:
-    """What two labels are compared by: how they read, whatever the letters' case or form."""
-    text = "".join(ch for ch in text if ord(ch) not in _SHAPERS)
-    return _clean(unicodedata.normalize("NFKC", text)).casefold()
-
-
 def labels(names: list[str]) -> list[str]:
     """What each player is called on the card and on the phone, in seat order: their name ("Player"
-    for none), tidied (_clean). Either every name stands as it is, or every player carries their
-    seat's number, "Mike (1)", "Ann (2)", "Mike (3)": numbered whenever any two could read alike
-    however much of a name the link has room for (two Mikes, two with no name, long names that
-    start alike, names alike but for case, spacing or how an accent was typed), or when a name
-    would be cut to nothing, or when someone typed a number of their own into one ("Mike (2)":
-    the link's cut keeps an ending like that, so it mustn't be mistaken for a seat). With the
-    seat's number on every one, no two labels are ever the same."""
-    shown = [_clean(n) or "Player" for n in names]
-    doubt = any(_TYPED_NUMBER.search(n) for n in shown)
-    for most in (None, *NAME_CUTS):   # (whole, as the card shows them, and at each length the link may cut to)
-        # (As the phone will show them: a name cut to nothing is "Player 3" there, by its place.)
-        cut = [_reads(n if most is None else _in_link(n, most)) or f"player {i}" for i, n in enumerate(shown, 1)]
-        doubt = doubt or len(set(cut)) < len(cut)
-    return [f"{name} ({i})" for i, name in enumerate(shown, 1)] if doubt and len(shown) > 1 else shown
+    for none) and, with more than one player, their seat's number: "Mike (1)", "Ann (2)",
+    "Mike (3)". Every seat is numbered so that no two players ever read the same, whatever they
+    typed and however much of a name the link has room for."""
+    shown = [" ".join("".join(ch for ch in n if ch.isprintable()).split()) or "Player" for n in names]
+    return [f"{name} ({i})" for i, name in enumerate(shown, 1)] if len(shown) > 1 else shown
 
 
-_SEAT = re.compile(r" \(([0-9]{1,2})\)$")          # the seat number `labels` adds, and nothing else
-_TYPED_NUMBER = re.compile(r"\(\s*\d+\s*\)\s*$")  # anything that could be taken for one
-
-
-def _fit(name: str, most: int) -> str:
-    """As much of the name as takes `most` characters of a link once percent-encoded."""
+def _in_link(label: str, seat: int | None, most: int) -> str:
+    """A label cut for the link: as much of its name as takes `most` characters once
+    percent-encoded, and the seat number after it whole (it isn't counted against the name's room:
+    the name is what a player knows themselves by)."""
+    tail = f" ({seat})" if seat and label.endswith(f" ({seat})") else ""
+    name = label.removesuffix(tail)
     while len(quote(name, safe="")) > most:
         name = name[:-1]
-    return name
-
-
-def _in_link(label: str, most: int) -> str:
-    """A label cut for the link: its name to `most`, and the seat number `labels` put after it kept
-    whole (it isn't counted against the name's room: the name is what a player knows themselves by)."""
-    seat = _SEAT.search(label)
-    return _fit(label[:seat.start()], most) + seat.group(0) if seat else _fit(label, most)
+    return name + tail
 
 
 def claim_link(api: str, players: list[tuple[str, str]]) -> str:
@@ -123,9 +84,10 @@ def claim_link(api: str, players: list[tuple[str, str]]) -> str:
     more for more players, so the link stays short enough to scan (LINK_BYTES); with no room for
     any, the codes go alone and the page calls them "Player 1", "Player 2"."""
     base = f"{api.rstrip('/')}/claim/#"
+    seats = range(1, len(players) + 1) if len(players) > 1 else [None]
     for most in (*NAME_CUTS, 0):
-        link = base + "&".join(f"{code}={quote(_in_link(name, most), safe='')}" if most else f"{code}="
-                               for name, code in players)
+        link = base + "&".join(f"{code}={quote(_in_link(name, seat, most), safe='')}" if most else f"{code}="
+                               for (name, code), seat in zip(players, seats))
         if len(link) <= LINK_BYTES:
             break
     return link
