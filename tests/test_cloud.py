@@ -591,7 +591,7 @@ def test_the_command_line_pairs_reports_and_unpairs_each_taking_effect_at_restar
     assert (prof.home / cloud.FOLDER_FILE).is_file() and prof.db.is_file()   # made at pair time
     cloud.main(["status"])
     out = capsys.readouterr().out
-    assert "sim 'Bay 1'" in out and "0 refused" in out and str(prof.home) in out
+    assert "sim 'Bay 1'" in out and "0 not sent yet" in out and str(prof.home) in out
     cloud.main(["unpair"])
     assert "Restart Shotcast to apply" in capsys.readouterr().out
     assert cloud.locate() is None and api.revoked and prof.home.is_dir()   # (its data kept)

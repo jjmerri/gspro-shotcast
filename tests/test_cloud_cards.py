@@ -49,7 +49,7 @@ def _step(cards, now):
 
 def _send(cfg):
     out = cloud_rounds.drain(cloud.Cloud(cloud.store()), cfg.db_path, settle=0)
-    assert not out.parked
+    assert not out.waiting
     return out
 
 

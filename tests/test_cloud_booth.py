@@ -223,27 +223,6 @@ def test_a_season_file_that_cant_be_read_counts_as_behind(tmp_path, api, monkeyp
     assert level == "fail" and "some round(s)" in msg
 
 
-@pytest.mark.parametrize("answer, shown", [
-    ({"status_code": 422, "json": {"error": "invalid_body", "message": "not a round"}}, "refused")])
-def test_a_round_refused_keeps_the_tray_red_till_it_is_resolved(tmp_path, api, monkeypatch, answer, shown):
-    import httpx
-
-    monkeypatch.setattr(cloud_rounds, "CEILING_S", 0.0)
-    cfg = paired_cfg(tmp_path, api)
-    u = _round(Store(cfg.db_path), 1)
-    api.answers = [httpx.Response(**answer)]
-    up = cloud_booth.Uploads(cfg, cloud.locate())
-    for _ in range(3):   # (the drains after it send nothing, and it's still shown)
-        _loop(cfg, 1, up)
-        [(level, msg)] = _health(cfg)
-        assert level == "fail" and shown in msg
-    db = cloud_rounds.connect(cfg.db_path)
-    db.execute("DELETE FROM cloud_uploads WHERE uuid = ?", (u,))   # (reconciled)
-    db.close()
-    _loop(cfg, 1, up)
-    assert _health(cfg) == [] and u in api.rounds
-
-
 # ---- the command line --------------------------------------------------------------------------
 
 def _self_hosted_home(tmp_path, monkeypatch):
@@ -792,7 +771,7 @@ def test_a_self_hosted_env_put_in_the_profile_gives_the_paired_booth_only_its_ai
 
 def test_a_booth_that_restarts_counts_how_long_rounds_have_waited_afresh(tmp_path, api, monkeypatch):
     """How long uploads have been behind is counted while the booth runs, not from the time of day:
-    after a restart a queue that's stuck shows again BEHIND_S later (rounds refused show at once)."""
+    after a restart a queue that's stuck shows again BEHIND_S later."""
     import httpx
 
     monkeypatch.setattr(cloud_rounds, "CEILING_S", 0.0)

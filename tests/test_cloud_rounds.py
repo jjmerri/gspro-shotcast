@@ -1,4 +1,3 @@
-import gzip
 import shutil
 import time
 
@@ -109,38 +108,38 @@ def test_a_round_is_sent_once_and_never_again_whatever_changes_here_afterwards(t
 ])
 def test_only_the_clouds_own_word_that_it_has_the_round_counts_as_sent(tmp_path, api, answer):
     cfg, s, cl = _booth(tmp_path, api)
-    u = _round(s, 1)
+    u, after = _round(s, 1), _round(s, 100)
     api.answers = [answer]
     out = _drain(cl, cfg)
-    assert out.sent == [] and out.waiting == 1 and _counts(cfg) == {"waiting": 1}
-    frozen = _upload(cfg, u)["frozen_body"]
-    assert _drain(cl, cfg).sent == [u] and len(api.puts) == 2
-    assert api.puts[0][2] == api.puts[1][2] and frozen is not None   # tried again, the same bytes
+    # Not an answer the API wrote: nothing more is tried this time (the next round would get the same).
+    assert out.sent == [] and out.waiting == 1 and len(api.puts) == 1 and _counts(cfg) == {"never": 2}
+    assert _upload(cfg, u)["tries"] == 1 and _upload(cfg, u)["error"]
+    assert _drain(cl, cfg).sent == [u, after]
 
 
-def test_after_a_crash_before_the_answer_was_noted_the_same_bytes_are_a_duplicate(tmp_path, api):
+def test_after_a_crash_before_the_answer_was_noted_the_round_is_sent_again_and_the_cloud_says_it_has_it(tmp_path, api):
+    """The cloud stored it and this PC never heard. Sent again as it is, it's a `duplicate`; changed
+    here meanwhile, it's `round_final` (the cloud keeps what it first got): done either way."""
     cfg, s, cl = _booth(tmp_path, api)
-    u = _round(s, 1)
-    api.answers = [httpx.Response(502)]   # the cloud stored it; this PC never heard (it crashed, say)
+    same, changed = _round(s, 1), _round(s, 100)
+    api.answers = [httpx.Response(502)]
     _drain(cl, cfg)
-    frozen = _upload(cfg, u)["frozen_body"]
-    api.rounds[u] = gzip.decompress(frozen)   # (as the cloud keeps it: the JSON sent)
-    s.db.execute("UPDATE shots SET total_yards = 1.0 WHERE record_uuid = ?", (u,))   # (and it has changed here
-    s.db.commit()                             # since, the same ending still: the bytes kept are what go)
-    assert _drain(cl, cfg).sent == [u] and gzip.decompress(frozen) == gzip.compress(b"") or True
-    assert _upload(cfg, u)["revision"] == 1 and _upload(cfg, u)["frozen_body"] is None
-    assert api.puts[0][2] == api.puts[1][2]
+    api.answers = [httpx.Response(200, json={"status": "duplicate"}),
+                   httpx.Response(409, json={"error": "round_final", "action": "fix", "sha256": "0" * 64})]
+    assert _drain(cl, cfg).sent == [same, changed]
+    assert _upload(cfg, same)["revision"] == _upload(cfg, changed)["revision"] == 1
+    assert _drain(cl, cfg).sent == [] and len(api.puts) == 3 and cloud_rounds.behind(cfg.db_path) == 0
 
 
 def test_a_round_the_cloud_already_has_otherwise_is_done_here_not_a_problem(tmp_path, api):
     """`round_final`: the cloud has the round from an earlier build of its body (a queue lost and built
-    again, say). A round is sent once, so there's nothing more to send: not held, not refused, not red."""
+    again, say). A round is sent once, so there's nothing more to send: not waiting, not red."""
     cfg, s, cl = _booth(tmp_path, api)
     u = _round(s, 1)
     api.rounds[u] = b'{"an": "earlier build"}'
     out = _drain(cl, cfg)
-    assert out.sent == [u] and out.parked == [] and out.waiting == 0
-    assert _counts(cfg) == {"sent": 1} and cloud_rounds.health(cfg.db_path) == []
+    assert out.sent == [u] and out.waiting == 0
+    assert _counts(cfg) == {"sent": 1} and cloud_rounds.behind(cfg.db_path) == 0
     assert _drain(cl, cfg).sent == [] and len(api.puts) == 1
 
 
@@ -191,11 +190,28 @@ def test_the_upload_stops_when_the_pairing_changes_meanwhile(tmp_path, api):
     assert api.puts == []
 
 
-def test_a_round_the_cloud_gives_to_another_bay_is_parked(tmp_path, api):
+def test_a_round_the_cloud_refuses_is_tried_again_later_and_doesnt_hold_up_the_next(tmp_path, api, monkeypatch):
+    """The API's own refusal of one round (another bay's, too big, not a body it reads, a code this
+    app doesn't know): its error is kept and shown, it waits longer each time, and the rounds after
+    it go meanwhile."""
     cfg, s, cl = _booth(tmp_path, api)
-    u = _round(s, 1)
-    api.answers = [httpx.Response(409, json={"error": "round_owned_elsewhere"})]
-    assert _drain(cl, cfg).parked == [u] and _counts(cfg) == {"parked": 1}
+    refused, good = _round(s, 1), _round(s, 100)
+    pace, clock = _run(monkeypatch)
+
+    def look():
+        return cloud_rounds.drain(cl, cfg.db_path, pace, settle=0)
+    api.answers = [httpx.Response(409, json={"error": "round_owned_elsewhere", "message": "another bay's"})]
+    out = look()
+    assert out.sent == [good] and out.waiting == 1 and _counts(cfg) == {"sent": 1, "never": 1}
+    [(uuid, what)] = cloud_rounds.outstanding(cfg.db_path)
+    assert uuid == refused and what.startswith("not sent yet (") and "409" in what and "another bay's" in what
+    assert cloud_rounds.behind(cfg.db_path) == 1
+    assert look().sent == [] and len(api.puts) == 2              # (not before its wait is over)
+    clock[0] += cloud_rounds.RETRY_BASE_S
+    api.answers = [httpx.Response(422, json={"error": "something_new", "message": "no"})]
+    assert look().waiting == 1 and _upload(cfg, refused)["tries"] == 2
+    clock[0] += 2 * cloud_rounds.RETRY_BASE_S                    # (put right on Shotcast Cloud meanwhile)
+    assert look().sent == [refused] and cloud_rounds.outstanding(cfg.db_path) == []
 
 
 def test_another_writer_for_the_bay_blocks_every_upload(tmp_path, api):
@@ -204,7 +220,7 @@ def test_another_writer_for_the_bay_blocks_every_upload(tmp_path, api):
     api.answers = [httpx.Response(409, json={"error": "not_bay_writer"})]
     with pytest.raises(cloud_rounds.Blocked):
         _drain(cl, cfg)
-    assert _drain(cl, cfg).sent   # (the frozen revision kept and sent once allowed)
+    assert _drain(cl, cfg).sent   # (sent once allowed)
 
 
 def test_the_status_counts_every_round_record_not_only_the_queue(tmp_path, api):
@@ -246,9 +262,8 @@ def test_no_answer_from_the_network_keeps_the_round_queued_to_retry(tmp_path, ap
     mock_http(monkeypatch, type("Down", (), {"host": api.host, "__call__": staticmethod(down)})())
     _drain(cloud.Cloud(cloud.store(), clock=lambda: api.now, sleep=lambda s: None), cfg)
     row = _upload(cfg, u)
-    assert row["status"] == "queued" and row["tries"] == 1 and "couldn't reach" in row["error"]
+    assert row["revision"] == 0 and row["tries"] == 1 and "couldn't reach" in row["error"]
     assert cloud_rounds.behind(cfg.db_path) == 1   # (what upload health goes by)
-    assert cloud_rounds.health(cfg.db_path) == []
     mock_http(monkeypatch, api)
     _drain(cl, cfg)
     assert u in api.rounds and cloud_rounds.behind(cfg.db_path) == 0
@@ -295,38 +310,20 @@ def test_a_round_taken_up_again_while_others_were_being_sent_isnt_sent_in_progre
 # ---- review round 6 ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("answer", [httpx.Response(404, json={"detail": "Not Found"}),
-                                    httpx.Response(409, json={"error": "something_new"}),
                                     httpx.Response(422, json={"error": 7}),                    # (no code: not the API's own)
                                     httpx.Response(422, json={"detail": "not a round"}),
-                                    httpx.Response(403, json={"error": "something_new"}),
-                                    httpx.Response(400, json={"detail": "bad request"})])
+                                    httpx.Response(400, json={"detail": "bad request"}),
+                                    httpx.Response(503, json={"error": "busy"})])
 def test_an_answer_that_isnt_the_apis_own_refusal_of_the_round_is_tried_again(tmp_path, api, answer):
     cfg, s, cl = _booth(tmp_path, api)
     u = _round(s, 1)
     api.answers = [answer]
     out = _drain(cl, cfg)
-    assert out.parked == [] and out.waiting == 1 and _upload(cfg, u)["status"] == "queued"
+    assert out.sent == [] and out.waiting == 1 and _upload(cfg, u)["tries"] == 1
     assert _drain(cl, cfg).sent == [u] and _counts(cfg) == {"sent": 1}
 
 
-def test_a_refused_round_goes_again_once_it_changes_or_when_asked(tmp_path, api, capsys):
-    cfg, s, cl = _booth(tmp_path, api)
-    u = _round(s, 1)
-    api.answers = [httpx.Response(422, json={"error": "invalid_body", "message": "not a round"})]
-    assert _drain(cl, cfg).parked == [u] and _counts(cfg) == {"parked": 1}
-    assert _drain(cl, cfg).sent == [] and len(api.puts) == 1     # refused as it stands: not sent again
-    s.db.execute("UPDATE round_records SET gen = gen + 1 WHERE uuid = ?", (u,))   # (touched: it says the same)
-    s.db.commit()
-    assert _drain(cl, cfg).sent == [] and len(api.puts) == 1 and _counts(cfg) == {"parked": 1}
-    api.answers = [httpx.Response(422, json={"error": "invalid_body", "message": "not a round"})]
-    _change(s, u)                                                # corrected here: it goes again
-    assert _drain(cl, cfg).parked == [u] and len(api.puts) == 2  # (refused again: parked again)
-    assert cloud_rounds.requeue(cfg.db_path) == 1                # put right on Shotcast Cloud: asked to go again
-    assert _drain(cl, cfg).sent == [u] and _counts(cfg) == {"sent": 1} and api.puts[-1][1] == 1
-    assert cloud_rounds.requeue(cfg.db_path) == 0
-
-
-def test_the_command_line_can_send_refused_rounds_again(tmp_path, api, monkeypatch, capsys):
+def test_the_upload_command_fails_while_a_round_is_refused_and_says_why(tmp_path, api, monkeypatch, capsys):
     cfg, s, cl = _booth(tmp_path, api)
     u = _round(s, 1)
     monkeypatch.setattr(cloud_rounds, "CEILING_S", 0.0)   # (no waiting out the quiet here)
@@ -334,13 +331,9 @@ def test_the_command_line_can_send_refused_rounds_again(tmp_path, api, monkeypat
     api.answers = [httpx.Response(422, json={"error": "invalid_body", "message": "not a round"})]
     with pytest.raises(SystemExit, match="1 round.*still aren't on Shotcast Cloud") as e:
         cloud.main(["upload"])
-    assert "1 refused" in capsys.readouterr().out and u in str(e.value) and "refused" in str(e.value)
-    with pytest.raises(SystemExit, match="still aren't on Shotcast Cloud"):   # (nothing tried this time: it still fails)
-        cloud.main(["upload"])
-    assert "Sent 0" in capsys.readouterr().out
-    cloud.main(["upload", "--refused"])
-    out = capsys.readouterr().out
-    assert "Trying 1 refused" in out and "Sent 1" in out and u in api.rounds
+    assert "Sent 0 round(s); 1 to retry" in capsys.readouterr().out and u in str(e.value) and "not a round" in str(e.value)
+    cloud.main(["upload"])                                # (put right on Shotcast Cloud: another run sends it)
+    assert "Sent 1" in capsys.readouterr().out and u in api.rounds
 
 
 # ---- review round 8 ---------------------------------------------------------------------------
@@ -358,7 +351,6 @@ def test_a_429_holds_the_whole_queue_for_as_long_as_the_api_said(tmp_path, api, 
     clock[0] += 599
     out = look()                                                 # the other round waits too: the limit is the PC's
     assert out.sent == [] and out.waiting == 2 and len(api.puts) == 1
-    assert _upload(cfg, a)["frozen_body"] is not None            # (its bytes are kept as built)
     clock[0] += 2
     out = look()
     assert out.sent == [a, b] and len(api.puts) == 3
@@ -429,7 +421,7 @@ def test_the_time_of_day_has_no_part_in_when_a_round_goes(tmp_path, api, monkeyp
 
 def test_another_run_counts_afresh(tmp_path, api, monkeypatch):
     """Nothing about the waits is kept on disk: a booth that restarts watches a finished round for
-    its quiet again, and tries one that had failed at once."""
+    its quiet again, and holds no retry over."""
     cfg, s, cl = _booth(tmp_path, api)
     u = _round(s, 1)
     pace, clock = _run(monkeypatch)
@@ -442,26 +434,10 @@ def test_another_run_counts_afresh(tmp_path, api, monkeypatch):
     api.answers = [httpx.Response(502)]
     assert cloud_rounds.drain(cl, cfg.db_path, again).waiting == 1
     assert cloud_rounds.drain(cl, cfg.db_path, again).sent == []          # (waiting for its retry)
-    assert cloud_rounds.drain(cl, cfg.db_path, cloud_rounds.Pace()).sent == [u]   # (restarted: its kept bytes go at once)
-
-
-@pytest.mark.parametrize(("answer", "kept"), [
-    ({"error": "something_new", "action": "retry", "message": "later"}, True),    # a code from a later API: by its action
-    ({"error": "something_new", "action": "fix", "message": "never"}, False),
-    ({"error": "something_new", "action": "dance", "message": "?"}, True),        # nor the action known: kept
-    ({"error": "temporary"}, True),                                                # no action at all: kept
-    ({"error": "invalid_body", "message": "not a round"}, False),                  # the API's own, for good
-])
-def test_a_refusal_this_app_doesnt_know_is_acted_on_by_what_the_api_says_to_do(tmp_path, api, answer, kept):
-    """Only the API's word that a revision will never be taken refuses it; anything this app can't
-    read that way keeps the revision, as it is, to send again."""
-    cfg, s, cl = _booth(tmp_path, api)
-    u = _round(s, 1)
-    api.answers = [httpx.Response(422, json=answer)]
-    out = _drain(cl, cfg)
-    up = _upload(cfg, u)
-    assert (up["status"], up["frozen_body"] is not None) == (("queued", True) if kept else ("parked", False))
-    assert (out.waiting, out.parked) == ((1, []) if kept else (0, [u]))
+    restarted = cloud_rounds.Pace()                     # (restarted again: no retry held over, its quiet anew)
+    assert cloud_rounds.drain(cl, cfg.db_path, restarted).settling == 1
+    clock[0] += cloud_rounds.QUIET_S
+    assert cloud_rounds.drain(cl, cfg.db_path, restarted).sent == [u]
 
 
 def test_a_round_that_has_waited_for_weeks_still_gets_its_next_try(tmp_path, api, monkeypatch):
@@ -573,18 +549,6 @@ def test_a_side_whose_card_was_written_twice_sends_its_last(tmp_path, api):
     assert [c["gross"] for c in api.puts[0][2]["scorecards"]] == [41]
 
 
-def test_a_refused_round_goes_again_when_what_it_would_send_changes_whatever_changed(tmp_path, api):
-    """Not only a row of the round (which moves its change counter): its session's date, say."""
-    cfg, s, cl = _booth(tmp_path, api)
-    u = _round(s, 1)
-    api.answers = [httpx.Response(422, json={"error": "invalid_body", "action": "fix", "message": "its date"})]
-    assert _drain(cl, cfg).parked == [u]
-    assert _drain(cl, cfg).sent == [] and len(api.puts) == 1
-    s.db.execute("UPDATE sessions SET date = '2026-02-02'")
-    s.db.commit()
-    assert _drain(cl, cfg).sent == [u] and api.puts[1][2]["round"]["session"]["date"] == "2026-02-02"
-
-
 def test_a_change_seen_late_in_a_long_batch_starts_its_quiet_then(tmp_path, api, monkeypatch):
     cfg, s, cl = _booth(tmp_path, api)
     a, b = _round(s, 1), _round(s, 100)
@@ -609,48 +573,35 @@ def test_a_change_seen_late_in_a_long_batch_starts_its_quiet_then(tmp_path, api,
     assert cloud_rounds.drain(cl, cfg.db_path, pace).sent == [b]
 
 
-@pytest.mark.parametrize("answer", [{"error": "round_final"},
-                                    {"error": "round_final", "action": "retry", "sha256": "0" * 64},
-                                    {"error": "round_final", "action": "fix", "sha256": "short"}])
-def test_only_the_apis_whole_word_that_a_round_is_final_ends_it(tmp_path, api, answer):
-    """Half an answer isn't the cloud saying it has the round: the bytes are kept and sent again."""
-    cfg, s, cl = _booth(tmp_path, api)
-    u = _round(s, 1)
-    api.answers = [httpx.Response(409, json=answer)]
-    out = _drain(cl, cfg)
-    assert out.sent == [] and out.waiting == 1 and _upload(cfg, u)["frozen_body"] is not None
-    assert _drain(cl, cfg).sent == [u] and u in api.rounds
-
-
 # ---- review round 11 (three reviewers) -----------------------------------------------------------
 
-def test_a_round_taken_up_again_before_the_cloud_had_it_is_built_again_when_its_over_again(tmp_path, api):
-    """Bytes built at a round's earlier ending, and never acknowledged, aren't sent once it has
-    been played on: the cloud's one copy is the round as it finally ended."""
+def test_a_round_taken_up_again_before_the_cloud_had_it_goes_as_it_finally_ended(tmp_path, api):
+    """Nothing is kept of a try that failed: played on and over again, the round is built as it is."""
     cfg, s, cl = _booth(tmp_path, api)
     u = _round(s, 1)
     api.answers = [httpx.Response(502)]
-    assert _drain(cl, cfg).waiting == 1 and _upload(cfg, u)["frozen_body"] is not None
+    assert _drain(cl, cfg).waiting == 1
     s.db.execute("UPDATE round_records SET state = 'in_progress', ended_at = NULL WHERE uuid = ?", (u,))
     s.db.commit()
-    assert _drain(cl, cfg).sent == [] and _upload(cfg, u)["frozen_body"] is None and len(api.puts) == 1
+    assert _drain(cl, cfg).sent == [] and len(api.puts) == 1
     s.db.execute("UPDATE shots SET total_yards = 300.0 WHERE record_uuid = ?", (u,))   # (played on)
     s.end_round(u, complete=True)
     assert _drain(cl, cfg).sent == [u] and api.puts[-1][2]["shots"][0]["total_yards"] == 300.0
 
 
-def test_a_round_finished_again_unseen_in_between_waits_out_its_quiet_and_ceiling_anew(tmp_path, api, monkeypatch):
+def test_a_round_that_changes_while_it_waits_starts_its_quiet_again(tmp_path, api, monkeypatch):
     cfg, s, cl = _booth(tmp_path, api)
     u = _round(s, 1)
     pace, clock = _run(monkeypatch)
     assert cloud_rounds.drain(cl, cfg.db_path, pace).settling == 1
-    clock[0] += cloud_rounds.CEILING_S + 1                  # (the uploader didn't look all this while)
-    s.db.execute("UPDATE round_records SET ended_at = ended_at + 500 WHERE uuid = ?", (u,))   # played on, over again
+    clock[0] += cloud_rounds.QUIET_S - 1
     s.db.execute("UPDATE shots SET total_yards = 123.0 WHERE record_uuid = ?", (u,))
     s.db.commit()
-    assert cloud_rounds.drain(cl, cfg.db_path, pace).settling == 1   # not let go at the old ending's ceiling
-    clock[0] += cloud_rounds.QUIET_S
-    assert cloud_rounds.drain(cl, cfg.db_path, pace).sent == [u]
+    assert cloud_rounds.drain(cl, cfg.db_path, pace).settling == 1
+    clock[0] += cloud_rounds.QUIET_S - 1
+    assert cloud_rounds.drain(cl, cfg.db_path, pace).settling == 1
+    clock[0] += 1
+    assert cloud_rounds.drain(cl, cfg.db_path, pace).sent == [u] and api.puts[-1][2]["shots"][0]["total_yards"] == 123.0
 
 
 def test_one_round_that_cant_be_read_doesnt_hold_up_the_others(tmp_path, api, monkeypatch):
@@ -664,12 +615,12 @@ def test_one_round_that_cant_be_read_doesnt_hold_up_the_others(tmp_path, api, mo
         return real(db, uuid)
     monkeypatch.setattr(cloud_rounds, "body", body)
     out = _drain(cl, cfg)
-    assert out.sent == [good] and out.unreadable == 1 and out.settling == 0   # (so `cloud upload` doesn't wait for it)
+    assert out.sent == [good] and out.settling == 0 and out.waiting == 0   # (so `cloud upload` doesn't wait for it)
     assert cloud_rounds.behind(cfg.db_path) == 1
     monkeypatch.setattr(cloud_rounds, "_signature", lambda b: (_ for _ in ()).throw(TypeError("a value that can't be sent")))
     late = _round(s, 200)
     out = _drain(cl, cfg)                                   # (failing at any step of the build: the same)
-    assert out.unreadable == 2 and out.sent == [] and late not in api.rounds
+    assert out.sent == [] and out.settling == 0 and late not in api.rounds and cloud_rounds.behind(cfg.db_path) == 2
     assert cloud_rounds._holes('{"\u00b2": 4, "7": 3, "07": 5}') == {"7": 3}   # (a digit that isn't a number: dropped)
 
 
@@ -681,16 +632,6 @@ def test_a_line_longer_than_the_cloud_takes_is_cut_so_the_round_still_goes(tmp_p
     s.db.commit()
     assert _drain(cl, cfg).sent == [u]
     assert len(api.puts[0][2]["lines"][-1]["text"]) == cloud_rounds.MAX_TEXT
-
-
-def test_a_refused_round_whose_record_is_gone_isnt_reported(tmp_path, api):
-    cfg, s, cl = _booth(tmp_path, api)
-    u = _round(s, 1)
-    api.answers = [httpx.Response(422, json={"error": "invalid_body", "message": "not a round"})]
-    assert _drain(cl, cfg).parked == [u] and len(cloud_rounds.health(cfg.db_path)) == 1
-    s.db.execute("DELETE FROM round_records WHERE uuid = ?", (u,))
-    s.db.commit()
-    assert cloud_rounds.health(cfg.db_path) == []
 
 
 def test_the_upload_command_keeps_waiting_for_a_round_that_changed_as_it_was_built(tmp_path, api, monkeypatch):
@@ -708,21 +649,7 @@ def test_the_upload_command_keeps_waiting_for_a_round_that_changed_as_it_was_bui
         return bad
     monkeypatch.setattr(cloud_rounds, "_watch", watch)
     out = cloud_rounds.drain(cl, cfg.db_path, pace)
-    assert out.sent == [] and out.settling == 1 and out.unchanged == 0
-
-
-def test_bytes_built_at_an_earlier_ending_arent_sent_however_the_round_came_to_end_again(tmp_path, api):
-    """Taken up again and over again between two looks (a booth that waits 15 minutes after a
-    refusal, say): the round is over at both, and its kept bytes are still the earlier ending's."""
-    cfg, s, cl = _booth(tmp_path, api)
-    u = _round(s, 1)
-    api.answers = [httpx.Response(502)]
-    assert _drain(cl, cfg).waiting == 1 and _upload(cfg, u)["frozen_body"] is not None
-    s.db.execute("UPDATE round_records SET ended_at = ended_at + 600 WHERE uuid = ?", (u,))   # played on, over again
-    s.db.execute("UPDATE shots SET total_yards = 300.0 WHERE record_uuid = ?", (u,))
-    s.db.commit()
-    assert _drain(cl, cfg).sent == [u] and len(api.puts) == 2
-    assert api.puts[-1][2]["shots"][0]["total_yards"] == 300.0
+    assert out.sent == [] and out.settling == 1
 
 
 def test_the_upload_command_doesnt_wait_for_a_round_that_cant_be_read(api, monkeypatch, capsys):
@@ -739,42 +666,6 @@ def test_the_upload_command_doesnt_wait_for_a_round_that_cant_be_read(api, monke
     with pytest.raises(SystemExit, match="1 round.*still aren't on Shotcast Cloud") as e:
         cloud.main(["upload"])
     assert u in str(e.value)
-
-
-def test_a_round_over_again_while_others_were_being_sent_is_waited_for(tmp_path, api):
-    """Its kept bytes aren't sent, and it counts as settling (so `cloud upload` looks again)."""
-    cfg, s, cl = _booth(tmp_path, api)
-    a, b = _round(s, 1), _round(s, 100)
-    pace = cloud_rounds.Pace()
-    api.answers = [httpx.Response(502), httpx.Response(502)]
-    _drain(cl, cfg, pace=pace)
-    _drain(cl, cfg, pace=pace)                              # (the first waits for its retry: both rounds' bytes are kept now)
-    assert _upload(cfg, a)["frozen_body"] is not None and _upload(cfg, b)["frozen_body"] is not None
-    real = cl.request
-
-    def meanwhile(method, path, *args, **kw):               # (as the first is sent, the second is played on and ends again)
-        s.db.execute("UPDATE round_records SET ended_at = ended_at + 600 WHERE uuid = ?", (b,))
-        s.db.commit()
-        return real(method, path, *args, **kw)
-    cl.request = meanwhile
-    out = _drain(cl, cfg)
-    assert out.sent == [a] and out.settling == 1 and out.unchanged == 0 and b not in api.rounds
-    cl.request = real
-    assert _drain(cl, cfg).sent == [b]
-
-
-def test_kept_bytes_from_an_earlier_builds_queue_are_built_again_not_waited_for_forever(tmp_path, api):
-    """A row an earlier build left (a status this build doesn't write, bytes kept, no ending
-    recorded): its bytes are dropped whatever its status, so the round is built and sent, and
-    `cloud upload` isn't left counting it as settling for good."""
-    cfg, s, cl = _booth(tmp_path, api)
-    u = _round(s, 1)
-    db = cloud_rounds.connect(cfg.db_path)
-    db.execute("INSERT INTO cloud_uploads (uuid, status, frozen_revision, frozen_body) VALUES (?, 'conflict', 2, ?)",
-               (u, gzip.compress(b"{}")))
-    db.close()
-    out = _drain(cl, cfg)
-    assert out.sent == [u] and out.settling == 0 and api.puts[-1][2]["round"]["id"] == u
 
 
 def test_a_player_who_joined_between_the_look_and_the_build_still_goes_with_a_hash(tmp_path, api, monkeypatch):

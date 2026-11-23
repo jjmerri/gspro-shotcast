@@ -5,9 +5,9 @@ next start; meanwhile the loop stops for good once the stored pairing isn't the 
 with, and nothing else about the booth changes.
 
 How uploads stand goes to logs/cloud-health.json (`HEALTH`) for the tray: a pairing the API no longer
-accepts, uploads stopped, the API needing a newer Shotcast (426), rounds refused
-(cloud_rounds.health), and, the one rule for everything else, finished rounds that haven't all been
-on Shotcast Cloud for BEHIND_S (`Uploads._behind`: by its outcome, whatever the cause). Each turns the
+accepts, uploads stopped, the API needing a newer Shotcast (426), and, the one rule for everything
+else (a round the API refuses too), finished rounds that haven't all been on Shotcast Cloud for
+BEHIND_S (`Uploads._behind`: by its outcome, whatever the cause). Each turns the
 tray red. It's rewritten after every try, so it clears once that's resolved.
 
 Every wait here is counted in elapsed seconds while the booth runs (cloud_rounds.Pace), never by the
@@ -88,8 +88,7 @@ class Uploads:
 
         self.pace = cloud_rounds.Pace()   # what this run remembers between drains, and its clock
         # When every finished round was last on Shotcast Cloud, on that clock: counted from the
-        # booth's start (a queue that was stuck before a restart shows again BEHIND_S after it;
-        # rounds refused show at once, from the season file).
+        # booth's start (a queue that was stuck before a restart shows again BEHIND_S after it).
         self.clear_at = self.pace.clock()
 
     def _cloud(self) -> cloud.Cloud:
@@ -101,8 +100,8 @@ class Uploads:
 
     def _behind(self) -> list[tuple[str, str]]:
         """The one rule of upload health, by its outcome and whatever the cause (the network, a busy
-        or failing lock or season file, an answer this PC doesn't understand, a round held or
-        refused): a failure once finished rounds have gone BEHIND_S without all being on Shotcast
+        or failing lock or season file, an answer this PC doesn't understand, a round the API
+        refuses): a failure once finished rounds have gone BEHIND_S without all being on Shotcast
         Cloud. A season file that can't even be read counts as behind."""
         from . import cloud_rounds
 
@@ -121,16 +120,9 @@ class Uploads:
                          f"{int((now - self.clear_at) // 60)} minutes (see cloud status)")]
 
     def _health(self, *issues: tuple[str, str]) -> None:
-        """The tray's view, rewritten after every try: `issues` from this try, what the season file
-        keeps for someone to see to (held, refused), and whether uploads are behind."""
-        from . import cloud_rounds
-
-        kept: list[tuple[str, str]] = []
-        try:
-            kept = cloud_rounds.health(self.cfg.db_path)
-        except Exception:   # noqa: BLE001 - a busy file: `_behind` shows it if it lasts
-            log.debug("Couldn't read upload health from %s", self.cfg.db_path, exc_info=True)
-        set_health(self.cfg.log_dir, list(issues) + kept + self._behind())
+        """The tray's view, rewritten after every try: `issues` from this try, and whether uploads
+        are behind."""
+        set_health(self.cfg.log_dir, list(issues) + self._behind())
 
     async def run(self) -> None:
         from . import cloud_rounds
@@ -140,9 +132,8 @@ class Uploads:
             try:
                 out = await asyncio.to_thread(cloud_rounds.drain, self._cloud(), self.cfg.db_path, self.pace,
                                               cloud_rounds.CEILING_S, 0)
-                if out.sent or out.parked:
-                    log.info("Shotcast Cloud: %s round(s) sent%s", len(out.sent),
-                             f", {len(out.parked)} refused" if out.parked else "")
+                if out.sent:
+                    log.info("Shotcast Cloud: %s round(s) sent", len(out.sent))
                 self._health()
             except (cloud.NotPaired, cloud.PairingChanged, cloud_rounds.NotThisPairing) as e:
                 # Not paired, paired elsewhere, a pairing file that can't be trusted, a season file
