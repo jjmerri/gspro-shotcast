@@ -2,7 +2,6 @@
 
 Part of Store (commentator/store/core.py), which is these parts together."""
 import json
-import re
 import sqlite3
 from typing import Any, Callable
 
