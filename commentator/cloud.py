@@ -1302,9 +1302,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--config", help="the self-hosted config.yaml to start the profile's settings from "
                                     "(default: this folder's, else the Windows app's)")
     sub.add_parser("status", help="Which tenant and sim this PC is, and how its rounds stand")
-    s = sub.add_parser("upload", help="Send this PC's finished rounds now")
-    s.add_argument("--refused", action="store_true",
-                   help="try the rounds Shotcast Cloud refused again too (once what was wrong there is put right)")
+    sub.add_parser("upload", help="Send this PC's finished rounds now")
     s = sub.add_parser("unpair", help="Stop using Shotcast Cloud and remove this PC from its tenant")
     s.add_argument("--force", action="store_true",
                    help="unpair even with rounds not yet on Shotcast Cloud, or if it can't be reached")
@@ -1340,15 +1338,13 @@ def main(argv: list[str] | None = None) -> None:
             if prof.problem:
                 sys.exit(f"Nothing sent: {prof.problem}")
             cl = Cloud(st, expect=prof.bound)
-            if a.refused and (n := cloud_rounds.requeue(str(prof.db))):
-                print(f"Trying {n} refused round(s) again")
             # A round goes once what it would send has stood still for a while (cloud_rounds.QUIET_S),
             # as this run has watched it: so it looks again till none is left settling.
-            pace, sent, parked, told = cloud_rounds.Pace(), 0, 0, False
+            pace, sent, told = cloud_rounds.Pace(), 0, False
             try:
                 while True:
                     out = cloud_rounds.drain(cl, str(prof.db), pace, cloud_rounds.CEILING_S)
-                    sent, parked = sent + len(out.sent), parked + len(out.parked)
+                    sent += len(out.sent)
                     if not out.settling or out.waiting:
                         break
                     if not told:
@@ -1358,9 +1354,9 @@ def main(argv: list[str] | None = None) -> None:
                     time.sleep(UPLOAD_LOOK_S)
             except (cloud_rounds.Blocked, cloud_rounds.NotThisPairing, TimeoutError) as e:
                 sys.exit(str(e))
-            print(f"Sent {sent} round(s); {out.waiting} to retry, {parked} refused")
+            print(f"Sent {sent} round(s); {out.waiting} to retry")
             # How the queue stands now, not only what this run did: any finished round that still
-            # isn't on Shotcast Cloud (held or refused before, too) fails the command.
+            # isn't on Shotcast Cloud (one that failed before, too) fails the command.
             left = [(u, what) for u, what in cloud_rounds.outstanding(str(prof.db)) if what != "in progress"]
             if left:
                 sys.exit(f"{len(left)} round(s) still aren't on Shotcast Cloud:\n{_describe(left)}")
@@ -1428,7 +1424,7 @@ def _status(prof: Profile) -> None:
             return
         print("Rounds: " + ", ".join(f"{q[k]} {what}" for k, what in cloud_rounds.STATUS_WORDS))
         for uuid, what in left:
-            if what == "refused":
+            if "(" in what:   # (its last try failed: why)
                 print(f"  {uuid}: {what}")
 
 
