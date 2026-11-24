@@ -784,20 +784,22 @@ def test_a_round_goes_with_each_holes_layout_as_its_replay_is_drawn(tmp_path, ap
     assert sent[elsewhere] == []
 
 
-def test_after_a_round_goes_each_holes_minimap_goes_once_unless_a_larger_one_is_grabbed(tmp_path, api):
-    """The picture the cloud draws a hole's replay over: GSPro's minimap from the tee, with the ball and pin on it."""
+def _jpeg(w, h, green=110):
     import io
 
     from PIL import Image
 
-    def jpeg(w, h, green=110):
-        b = io.BytesIO()
-        Image.new("RGB", (w, h), (50, green, 60)).save(b, "JPEG")
-        return b.getvalue()
+    b = io.BytesIO()
+    Image.new("RGB", (w, h), (50, green, 60)).save(b, "JPEG")
+    return b.getvalue()
 
+
+def test_after_a_round_goes_each_holes_minimap_goes_if_the_cloud_wants_it(tmp_path, api):
+    """The picture the cloud draws a hole's replay over: GSPro's minimap from the tee, with the ball
+    and pin on it. The cloud says which it wants: none of the hole yet, or a larger one."""
     cfg, s, cl = _booth(tmp_path, api)
-    s.record_hole_image("Pebble", 1, jpeg(36, 72), (0.5, 0.9), (0.5, 0.1))
-    s.record_hole_image("Pebble", 2, jpeg(36, 72), (0.5, 0.9), (0.5, 0.1))   # (a hole the round didn't play: not sent)
+    s.record_hole_image("Pebble", 1, _jpeg(36, 72), (0.5, 0.9), (0.5, 0.1))
+    s.record_hole_image("Pebble", 2, _jpeg(36, 72), (0.5, 0.9), (0.5, 0.1))   # (a hole the round didn't play: not sent)
     first = _round(s, 1)
     _drain(cl, cfg)
     [pic] = api.pictures
@@ -806,15 +808,55 @@ def test_after_a_round_goes_each_holes_minimap_goes_once_unless_a_larger_one_is_
     _round(s, 500)
     _drain(cl, cfg)
     assert len(api.pictures) == 1   # (the cloud has it: not again)
-    s.record_hole_image("Pebble", 1, jpeg(72, 144), (0.5, 0.9), (0.5, 0.1), replace=True)
+    s.record_hole_image("Pebble", 1, _jpeg(36, 72, green=140), (0.5, 0.9), (0.5, 0.1), replace=True)
+    _round(s, 700)
+    _drain(cl, cfg)
+    assert len(api.pictures) == 1   # (a new grab no sharper: the cloud keeps its own)
+    s.record_hole_image("Pebble", 1, _jpeg(72, 144), (0.5, 0.9), (0.5, 0.1), replace=True)
     _round(s, 900)
     _drain(cl, cfg)
     assert len(api.pictures) == 2   # (a sharper one goes)
-    # A new grab of the same size goes too (the one sent may have been removed in the cloud as wrong).
-    s.record_hole_image("Pebble", 1, jpeg(72, 144, green=140), (0.5, 0.9), (0.5, 0.1), replace=True)
-    _round(s, 1300)
+    assert not any(t == "cloud_hole_pictures" for (t,) in s.db.execute("SELECT name FROM sqlite_master"))
+
+
+def test_a_picture_an_admin_removed_is_dropped_here_and_the_hole_grabbed_afresh(tmp_path, api):
+    cfg, s, cl = _booth(tmp_path, api)
+    s.record_hole_image("Pebble", 1, _jpeg(36, 72), (0.5, 0.9), (0.5, 0.1))
+    _round(s, 1)
     _drain(cl, cfg)
-    assert len(api.pictures) == 3
+    assert len(api.pictures) == 1
+    api.remove_picture("Pebble", 1)            # (wrong: an admin's ✕ on the site)
+    _round(s, 500)
+    _drain(cl, cfg)
+    assert len(api.pictures) == 1              # (not sent back)
+    assert not s.has_hole_image("Pebble", 1)   # (so the booth grabs it at the next tee there)
+    s.record_hole_image("Pebble", 1, _jpeg(36, 72, green=140), (0.5, 0.9), (0.5, 0.1))
+    _round(s, 900)
+    _drain(cl, cfg)
+    assert len(api.pictures) == 2 and api.kept[("pebble", 1)][1] == 36 * 72   # (the fresh grab, whatever its size)
+
+
+def test_a_removed_picture_sent_anyway_is_dropped_too(tmp_path, api):
+    """A cloud that removed it between the check and the send says so in its answer."""
+    cfg, s, cl = _booth(tmp_path, api)
+    s.record_hole_image("Pebble", 1, _jpeg(36, 72), (0.5, 0.9), (0.5, 0.1))
+    _round(s, 1)
+    _drain(cl, cfg)
+    api.remove_picture("Pebble", 1)
+    # (the check answers as if nothing were removed yet)
+    api.hook = lambda req: httpx.Response(200, json={"send": [1], "drop": []}) if req.url.path.endswith("/check") else None
+    _round(s, 500)
+    _drain(cl, cfg)
+    assert len(api.pictures) == 2 and not s.has_hole_image("Pebble", 1)
+
+
+def test_a_cloud_that_doesnt_answer_the_check_holds_up_nothing(tmp_path, api):
+    cfg, s, cl = _booth(tmp_path, api)
+    s.record_hole_image("Pebble", 1, _jpeg(36, 72), (0.5, 0.9), (0.5, 0.1))
+    api.hook = lambda req: httpx.Response(502, text="<html>") if req.url.path.endswith("/check") else None
+    first = _round(s, 1)
+    _drain(cl, cfg)
+    assert first in {p[0] for p in api.puts} and api.pictures == [] and s.has_hole_image("Pebble", 1)
 
 
 def test_a_quit_round_doesnt_take_the_next_rounds_pin(tmp_path, api):
