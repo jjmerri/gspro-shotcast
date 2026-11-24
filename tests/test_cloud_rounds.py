@@ -809,3 +809,15 @@ def test_after_a_round_goes_each_holes_minimap_goes_once_unless_a_larger_one_is_
     _round(s, 900)
     _drain(cl, cfg)
     assert len(api.pictures) == 2   # (a sharper one goes)
+
+
+def test_a_quit_round_doesnt_take_the_next_rounds_pin(tmp_path, api):
+    """As the booth's own replay picks a layout: from any of the round's sessions, and none logged
+    after the next round on the course began."""
+    cfg, s, cl = _booth(tmp_path, api)
+    quit_early = _round(s, 1)
+    _round(s, 50)                                   # (played again: its layout is logged at its end)
+    s.record_hole_layout("Pebble", [{"played": True, "par": 4, "pin": [9.0, 0.0, 390.0], "tee": [0.0, 0.0, 0.0]}], ts=60.0)
+    _drain(cl, cfg)
+    sent = {p[0]: p[2]["hole_layouts"] for p in api.puts}
+    assert sent[quit_early][0]["pin"] is None       # (the later round's pin isn't this one's)
