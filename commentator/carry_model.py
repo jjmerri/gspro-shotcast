@@ -22,32 +22,33 @@ CLEAN_LIES = ("tee", "fairway")
 NO_PENALTY = ("tee", "fairway", "concrete", "cart path")
 
 # Lie penalty by launch-monitor carry in yards, as (carry, factor) points to interpolate between.
-# Measured on the league's own GSPro (340 shots with both carry tiles and a known landing height,
-# each course's own carry level taken out): sand keeps ~0.74 at 30 yards up to ~0.90 at 155, so
-# greenside bunkers play much shorter than fairway ones; rough keeps ~0.91 and deep rough ~0.72 at
-# every distance. GSPro slows a ball off dirt, leaves and pine straw exactly as it does off rough, and
-# off semi rough by only ~1.5% of its speed, so those start from rough and from 0.98. Shots on each
-# course keep refining these per carry band.
+# Measured on the league's own GSPro (shots with both carry tiles and a known landing height, each
+# course's own carry level taken out): sand keeps ~0.74 at 30 yards up to ~0.90 at 155, so greenside
+# bunkers play much shorter than fairway ones. Rough and deep rough are the typical full swing's
+# (launched 20 degrees or more): rough keeps ~0.93 and deep rough ~0.69 at every distance. GSPro
+# slows a ball off dirt, leaves and pine straw as it does off rough (pine straw measured ~0.92), and
+# off semi rough by only ~1.5% of its speed (measured ~0.98). Shots on each course keep refining
+# these per carry band.
 DEFAULT_CURVES: dict[str, list[tuple[float, float]]] = {
     "sand": [(29, 0.74), (55, 0.79), (109, 0.87), (155, 0.90)],
-    "deep rough": [(0, 0.72)],
-    "rough": [(0, 0.91)],
-    "pine straw": [(0, 0.91)],
-    "dirt": [(0, 0.91)],
-    "leaves": [(0, 0.91)],
+    "deep rough": [(0, 0.69)],
+    "rough": [(0, 0.93)],
+    "pine straw": [(0, 0.93)],
+    "dirt": [(0, 0.93)],
+    "leaves": [(0, 0.93)],
     "semi rough": [(0, 0.98)],
 }
 
-# GSPro also takes ball speed off by the launch monitor's launch angle, out of rough-like lies only:
-# a low launch loses more (about 5% out of rough below ~10 degrees; out of deep rough ~40% at 0
-# degrees, easing off to ~6% by 35). The measured curves above come from typical full swings, so a
-# default is scaled by how this launch fares against LAUNCH_REFERENCE, and never raised above it.
-# Approximate shapes, as (launch degrees, share of ball speed kept).
+# Out of rough-like lies GSPro also takes more ball speed off a low launch (the launch monitor's
+# launch angle), and a slower low ball loses far more carry than speed: the share of the default's
+# carry kept by launch degrees, measured on the league's shots (480 from rough, 330 from deep rough).
+# Rough keeps ~0.83 of it at 5 degrees; deep rough ~0.3 at 0 and ~0.68 at 10. At or above
+# LAUNCH_REFERENCE the default applies unchanged.
 LAUNCH_REFERENCE = 20.0
-_ROUGH_LAUNCH = [(5, 0.95), (15, 1.0)]
+_ROUGH_LAUNCH = [(5, 0.83), (10, 0.94), (15, 1.0)]
 LAUNCH_CURVES: dict[str, list[tuple[float, float]]] = {
     "rough": _ROUGH_LAUNCH, "pine straw": _ROUGH_LAUNCH, "dirt": _ROUGH_LAUNCH, "leaves": _ROUGH_LAUNCH,
-    "deep rough": [(0, 0.60), (10, 0.80), (20, 0.90), (35, 0.94)],
+    "deep rough": [(0, 0.30), (10, 0.68), (15, 0.86), (20, 1.0)],
 }
 
 MIN_SAMPLES = 3

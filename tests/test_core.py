@@ -1770,14 +1770,14 @@ def test_carry_model_penalties_depend_on_the_shot():
 
     m = CarryModel()
     assert m.factor("fairway", 150) == 1.0 and m.factor(None, 150) == 1.0
-    assert m.factor("concrete", 150) == 1.0 and m.factor("pine straw", 150) == 0.91
+    assert m.factor("concrete", 150) == 1.0 and m.factor("pine straw", 150) == 0.93
     for raw in (150, 155, 160):
         m.observe("concrete", raw, raw * 0.8)  # never learned away from no penalty
     assert m.factor("concrete", 155) == 1.0
     # Same Sand surface, very different penalty: a greenside splash vs a full fairway-bunker shot.
     assert m.factor("sand", 13) == 0.74 and m.factor("sand", 160) == 0.90
     assert 0.78 < m.factor("sand", 50) < 0.79  # greenside bunkers play shorter than fairway ones
-    assert m.factor("deep rough", 100) == m.factor("deep rough", 170) == 0.72
+    assert m.factor("deep rough", 100) == m.factor("deep rough", 170) == 0.69
     assert CarryModel({"rough": 0.9}).factor("rough", 150) == 0.9  # config override
 
 
@@ -1786,18 +1786,21 @@ def test_carry_model_defaults_cover_rough_like_lies_and_a_low_launch():
 
     m = CarryModel()
     # GSPro treats dirt and leaves like rough, and semi rough as a light rough.
-    assert m.penalty("dirt", 150) == m.penalty("leaves", 150) == m.penalty("rough", 150) == 0.91
+    assert m.penalty("dirt", 150) == m.penalty("leaves", 150) == m.penalty("rough", 150) == 0.93
     assert m.penalty("semi rough", 150) == 0.98
     # A low launch out of rough-like lies keeps less; a typical or high one keeps the measured default.
-    assert m.penalty("rough", 150, 20) == m.penalty("rough", 150, 40) == 0.91
-    assert 0.86 < m.penalty("rough", 150, 3) < 0.87
-    assert 0.47 < m.penalty("deep rough", 120, 0) < 0.49
-    assert m.penalty("deep rough", 120, 30) == 0.72
+    assert m.penalty("rough", 150, 20) == m.penalty("rough", 150, 40) == 0.93
+    assert 0.77 < m.penalty("rough", 150, 3) < 0.78
+    assert 0.87 < m.penalty("rough", 150, 10) < 0.88
+    assert 0.20 < m.penalty("deep rough", 120, 0) < 0.21
+    assert m.penalty("deep rough", 120, 30) == 0.69
     assert m.penalty("semi rough", 150, 0) == 0.98 and m.penalty("sand", 150, 0) == m.penalty("sand", 150)
     # A launch band learned from shots, or a configured flat factor, isn't scaled again.
     for raw in (150, 155, 160):
         m.observe("deep rough", raw, raw * 0.6, vla=5)
+        m.observe("deep rough", raw, raw * 0.7, vla=25)
     assert 0.59 < m.penalty("deep rough", 155, 5) < 0.61
+    assert 0.69 < m.penalty("deep rough", 155, 25) < 0.71
     assert CarryModel({"deep rough": 0.7}).penalty("deep rough", 150, 0) == 0.7
 
 
@@ -1813,7 +1816,7 @@ def test_carry_model_learns_course_baseline_and_lie_bands():
     for raw in (150, 155, 160):
         m.observe("rough", raw, raw * 0.9 * m.baseline("Hill Top"), "Hill Top", vla=18)
     assert 0.89 < m.penalty("rough", 155, 18) < 0.91
-    assert m.penalty("rough", 250, 25) == 0.91  # other bands keep the default until they have data
+    assert m.penalty("rough", 250, 25) == 0.93  # other bands keep the default until they have data
     assert 0.94 < m.factor("rough", 155, "Hill Top", 18) < 0.97
     m.observe("rough", 150, 20, "Hill Top")  # mis-read tile ignored
     assert 0.89 < m.penalty("rough", 155, 18) < 0.91
@@ -4186,7 +4189,7 @@ def test_the_booth_knows_when_the_green_was_never_the_target(tmp_path):
     assert "tree" in engine._off_flag("Mike", "fairway", "150 yards", stymie=True)
     [fact] = engine._reach_facts("Mike", "fairway", "150 yards", (0, -67), "fairway")
     assert "never the plan" in fact
-    # From deep rough (0.72 of the carry) 230 out is beyond a 275-yard reach; 150 is well inside it.
+    # From deep rough (0.69 of the carry) 230 out is beyond a 275-yard reach; 150 is well inside it.
     assert "out of Mike's reach" in engine._reach_facts("Mike", "deep rough", "230 yards", None, "fairway")[0]
     assert "within Mike's reach even so" in engine._reach_facts("Mike", "deep rough", "150 yards", None, "rough")[0]
     assert engine._reach_facts("Mike", "deep rough", "150 yards", None, "green") == []
