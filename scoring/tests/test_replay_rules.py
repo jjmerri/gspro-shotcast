@@ -9,7 +9,7 @@ from shotcast_scoring import replay
 
 def shot(id, n, start, **over):
     row = {"id": id, "ts": 1000.0 + id, "player": "Pat", "course": "Links", "hole": "Hole 1, par 4",
-           "shot_number": n, "club": "DR" if n == 1 else "7I", "is_putt": 0, "lie_before": "tee" if n == 1 else "fairway",
+           "shot_number": n, "club": "DR" if n == 1 else "7I", "is_putt": 0, "lie_before": "tee" if n == 1 else "fairway", "lie_after": None,
            "to_pin_yards": None, "total_yards": None, "offline_yards": None, "outcome": None, "mulligan": 0,
            "shared_ball": 0, "fmt": "stroke", "tags": "[]", "start_x": start and start[0], "start_z": start and start[1],
            "aim_map_x": None, "aim_map_y": None, "hazard_x": None, "hazard_z": None, "start_direction": None,
@@ -51,3 +51,13 @@ def test_a_tracked_shot_is_drawn_as_the_ball_went():
     assert lost["lost"] and lost["end"] == (80, 150)
     assert replay.track({"flight": [], "roll": [], "flight_s": None, "land_x": None, "land_y": None, "land_z": None,
                          "end_x": None, "end_y": None, "end_z": None, "start_x": 0, "start_y": 0, "start_z": 0}) == {}
+
+
+def test_a_scramble_holes_ball_is_found_from_plain_mappings():
+    """Partners' balls share a spot after the tee shot; the team's ball runs on from the one it played."""
+    rows = [shot(1, 1, None, player="Pat", fmt="scramble"), shot(2, 1, None, player="Kim", fmt="scramble"),
+            shot(3, 2, (5.0, 250.0), player="Pat", fmt="scramble"), shot(4, 2, (5.0, 250.0), player="Kim", fmt="scramble"),
+            shot(5, 3, (1.0, 378.0), player="Pat", fmt="scramble", is_putt=1, outcome="holed")]
+    teams = replay._scramble_teams(rows)
+    rp = replay._replay(rows, 1, [LAYOUT], {1}, teams=teams)
+    assert {p["name"] for p in rp["players"]} == {"Pat", "Kim"}
