@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from .common import (
-    CARRY_SNAPSHOT, CLUB_COLS, FORMAT, HAZARD_COLS, INDEXES, POSITION_COLS, SCHEMA, SeasonCopyFailed, _club_values,
+    CLUB_COLS, DROP_CARRY_TRIGGERS, FORMAT, HAZARD_COLS, INDEXES, POSITION_COLS, SCHEMA, SeasonCopyFailed, _club_values,
     log, planner_counts_stale,
 )
 from ..models import Shot
@@ -67,7 +67,10 @@ class Store(ShotsMixin,
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         self._migrate()
-        self.db.executescript(CARRY_SNAPSHOT)   # (after _migrate: it reads shots.uid)
+        self.db.executescript(DROP_CARRY_TRIGGERS)
+        if self.db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'carry_snapshot'").fetchone():
+            self.db.execute("DELETE FROM carry_snapshot")
+            self.db.commit()
         self._backfill_finishes()
         self._locate_hole_images()
         from ..round_record import Live

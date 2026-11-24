@@ -141,10 +141,10 @@ class RoundStartMixin:
         self._fir_streak.clear()
         self._last_hud_shot.clear()
         self._pending_finish.clear()
-        for trail in self._carry_trail.values():   # no next stroke now: near-pin shots still teach
+        for trail in self._carry_trail.values():   # no next stroke now: near-pin shots are still checked
             for _, key, elev, pin, args, _scramble in trail:
                 if args:
-                    self._learn_carry(key, elev, pin, args)
+                    self._check_carry(key, elev, pin, args)
         self._carry_trail.clear()
         self._last_row.clear()
         self._mulligans_called.clear()

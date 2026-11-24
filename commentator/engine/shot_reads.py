@@ -32,21 +32,21 @@ class ShotReadsMixin:
         said._on_air = told
 
     def _trail_carry(self, player: str | None, entry: tuple) -> None:
-        """Add a stroke to the player's trail in shot order, and teach the carry model from every full
+        """Add a stroke to the player's trail in shot order, and check against the carry model every full
         shot that now has its next stroke from the same ball; the rest only get the near-pin rule."""
         trail = self._carry_trail.setdefault(player or "unknown", [])
         bisect.insort(trail, list(entry), key=lambda e: e[0])
-        # Every shot whose next stroke is in now learns from it. Strokes stay a while after (learned or
+        # Every shot whose next stroke is in is now checked with it. Strokes stay a while after (checked or
         # not) as a slower handler for the stroke before may still need them; a shot whose next stroke
         # never shows (a mulligan, a penalty, an unread stroke number) gets the fallback once it ages out.
         for e, nxt in zip(trail, trail[1:]):
             if e[4] and self._next_stroke(e[1], nxt[1]):
-                self._learn_carry(*e[1:4], e[4], *(nxt[1:3] if self._own_ball_next(e[5], nxt[5]) else ()))
+                self._check_carry(*e[1:4], e[4], *(nxt[1:3] if self._own_ball_next(e[5], nxt[5]) else ()))
                 e[4] = None
         while len(trail) > self.CARRY_TRAIL:
             _, key, elev, pin, args, _other = trail.pop(0)
             if args:
-                self._learn_carry(key, elev, pin, args)
+                self._check_carry(key, elev, pin, args)
 
     CARRY_TRAIL = 4
 
@@ -66,18 +66,19 @@ class ShotReadsMixin:
         return next_key is not None and key[0] == next_key[0] and key[1] == next_key[1] \
             and key[2] is not None and next_key[2] == key[2] + 1
 
-    def _learn_carry(self, key: tuple, elevation: float | None, pin_yards: float | None, args: tuple,
+    def _check_carry(self, key: tuple, elevation: float | None, pin_yards: float | None, args: tuple,
                      next_key: tuple | None = None, next_elevation: float | None = None) -> None:
-        """Teach the carry model one shot, its CARRY (game) put level with where it was hit. The next
-        stroke (same round and hole, one shot on) says how high the ball came to rest; without it,
-        only a shot that landed near the pin can be leveled (see correct_for_elevation)."""
+        """Log one shot whose CARRY (game), put level with where it was hit, is well off the carry
+        model's prediction (CarryModel.check). The next stroke (same round and hole, one shot on) says
+        how high the ball came to rest; without it, only a shot that landed near the pin can be leveled
+        (see correct_for_elevation)."""
         lie, carry, game, course, vla, base = args
         rest_rise = None
         if elevation is not None and next_elevation is not None and self._next_stroke(key, next_key):
             rest_rise = elevation - next_elevation
-        level = correct_for_elevation(game, elevation, pin_yards, carry, rest_rise)
-        if level is not None:
-            self.carry.observe(lie, carry, level, course, vla, base)
+        level = correct_for_elevation(game, elevation, pin_yards, rest_rise)
+        if level is not None and (line := self.carry.check(lie, carry, level, course, vla, base)):
+            log.info("Round %s, %s, shot %s: %s", *key, line)
 
     @staticmethod
     def _idx_snap(snap: tuple, idx: int) -> dict:

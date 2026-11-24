@@ -617,10 +617,8 @@ class CommentaryConfig(BaseModel):
     # whole pre-shot plan (settle + Haiku vision call) has to finish before the swing, or the
     # instant pre-written flight line can't play. A phantom setup from a flickered read is cheap.
     preshot_settle_seconds: float = 1.0
-    # Flat starting penalty for a lie (GSPro carry / launch monitor carry), replacing the
-    # built-in curves until the season database has enough shots from that lie to learn it.
-    lie_carry_factors: dict[str, float] = Field(default_factory=dict)
-    # Course name as GSPro shows it -> altitude in feet, for a course with no shots yet.
+    # Course name as GSPro shows it -> altitude in feet, for the carry projection (beats the course
+    # file's and GSPro's own).
     course_altitude_ft: dict[str, float] = Field(default_factory=dict)
     # A course played at least this high (feet) gets the thin air as a talking point on drives.
     altitude_fact_min_ft: float = 3000.0

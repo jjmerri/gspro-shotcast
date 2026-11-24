@@ -482,19 +482,7 @@ class ShotMixin:
             self._keep_report_frame("no-player", shot=before.shot_number, hud_text=hud.player_text)
         carry_idx = None if unnamed else self._gspro_idx(player)
         dropped = None if carry_idx is None else impact_snap[7].get(carry_idx, 0)
-        learn = None
-        fire0 = self.gspro.fire_of(fires0, impact)
-        # GSPro's carry ends where the ball first met something: wood well short of the full carry stood up.
-        wood_tree = self.gspro.tree_wood(fire0, carry_game, carry_flat or self._raw_yards(shot))
-        tree_hits = len(self.gspro.fire_info(fire0).get("leaves") or ()) + wood_tree
-        if carry_game and tree_hits:
-            log.info("%s hit a tree %s time(s) in flight: its carry isn't learned from", tag, tree_hits)
-        elif carry_game:
-            learn_base, learn_carry = ("gspro", carry_flat) if carry_flat else ("lm", self._raw_yards(shot))
-            learn = (before.lie, learn_carry, carry_game, self.current_course, shot.vla, learn_base)
-        self._trail_carry(player, (my_seq, (shot_round.id if shot_round else None, shot_hole, before.shot_number),
-                                   before.elevation_yards, to_yards(before.to_pin), learn,
-                                   (shared or unnamed, dropped)))
+        check_course, check_vla = self.current_course, shot.vla   # (as struck: not a later round's)
         if flight_task:
             try:
                 await flight_task  # bounded by the flight deadline; keeps the call ahead of the reaction
@@ -649,6 +637,20 @@ class ShotMixin:
                     shot = replace(shot, club=deck_club(deck_from, screen_before.shot_number, before.lie))
             before = replace(before, shot_number=screen_before.shot_number, gspro_shot=screen_before.gspro_shot)
             hud = replace(hud, shot_number=screen_before.shot_number)
+        # Queued once the lie and stroke number it was played from are settled (GSPro's file, or not).
+        check = None
+        fire0 = self.gspro.fire_of(fires0, impact)
+        # GSPro's carry ends where the ball first met something: wood well short of the full carry stood up.
+        wood_tree = self.gspro.tree_wood(fire0, carry_game, carry_flat or self._raw_yards(shot))
+        tree_hits = len(self.gspro.fire_info(fire0).get("leaves") or ()) + wood_tree
+        if carry_game and tree_hits:
+            log.info("%s hit a tree %s time(s) in flight: its carry isn't checked", tag, tree_hits)
+        elif carry_game:
+            check_base, check_carry = ("gspro", carry_flat) if carry_flat else ("lm", self._raw_yards(shot))
+            check = (before.lie, check_carry, carry_game, check_course, check_vla, check_base)
+        self._trail_carry(player, (my_seq, (shot_round.id if shot_round else None, shot_hole, before.shot_number),
+                                   before.elevation_yards, to_yards(before.to_pin), check,
+                                   (shared or unnamed, dropped)))
         if screen_club is not None and file_ours:   # (a hole-out copy may have come in since)
             file_track = self._file_track_of(player, None, impact, file_track.shot_id) or file_track
 

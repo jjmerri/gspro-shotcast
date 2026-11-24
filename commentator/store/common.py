@@ -233,49 +233,17 @@ CREATE INDEX IF NOT EXISTS shots_player ON shots(player);
 CREATE INDEX IF NOT EXISTS shots_lie ON shots(lie_before);
 """
 
-# The carry model learned from the shots before `before_ts` (Store.carry_model), so a start doesn't go
-# over every shot of every season again. Any write to a shot it learned from, or to a session's shots it
-# covers (a stroke's next one says where it came to rest), deletes it, from any connection.
-CARRY_SNAPSHOT_VERSION = 1   # bump when carry_pairs or CarryModel.observe learn differently
-# What carry_pairs reads, so a write to any other column (a round's record, the map, a putt's outcome)
-# leaves the snapshot be.
-_CARRY_COLUMNS = ("id, session_id, player, hole, shot_number, is_putt, mulligan, fmt, lie_before, carry_raw, units, "
-                  "carry_raw_tile_yards, carry_game_yards, elevation_yards, to_pin, course, launch_angle, "
-                  "finish_yards, ts, attributed, shared_ball, left_out, tree_hits, excluded")
-
-
-def _carry_covered(ts: str, sid: str) -> str:
-    t = "(SELECT before_ts FROM carry_snapshot)"
-    return f"({ts} < {t} OR EXISTS (SELECT 1 FROM shots c WHERE c.session_id = {sid} AND c.ts < {t}))"
-
-
-_ANY_SNAPSHOT = "EXISTS (SELECT 1 FROM carry_snapshot)"
-_DROP_SNAPSHOT = "BEGIN DELETE FROM carry_snapshot; END;"
-CARRY_SNAPSHOT = f"""
-CREATE TABLE IF NOT EXISTS carry_snapshot (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    key TEXT NOT NULL,                           -- CARRY_SNAPSHOT_VERSION and the configured altitudes
-    before_ts REAL NOT NULL,
-    state TEXT NOT NULL                          -- CarryModel.state(), JSON
-);
-CREATE TRIGGER IF NOT EXISTS shots_carry_insert AFTER INSERT ON shots
-WHEN {_ANY_SNAPSHOT} AND {_carry_covered("NEW.ts", "NEW.session_id")} {_DROP_SNAPSHOT}
-CREATE TRIGGER IF NOT EXISTS shots_carry_delete AFTER DELETE ON shots
-WHEN {_ANY_SNAPSHOT} AND {_carry_covered("OLD.ts", "OLD.session_id")} {_DROP_SNAPSHOT}
-CREATE TRIGGER IF NOT EXISTS shots_carry_update AFTER UPDATE OF {_CARRY_COLUMNS} ON shots
-WHEN {_ANY_SNAPSHOT} AND ({_carry_covered("OLD.ts", "OLD.session_id")} OR {_carry_covered("NEW.ts", "NEW.session_id")})
-{_DROP_SNAPSHOT}
-CREATE TRIGGER IF NOT EXISTS shots_carry_renumber AFTER UPDATE ON shots   -- (SET rowid = isn't an UPDATE OF id)
-WHEN {_ANY_SNAPSHOT} AND NEW.id IS NOT OLD.id
-     AND ({_carry_covered("OLD.ts", "OLD.session_id")} OR {_carry_covered("NEW.ts", "NEW.session_id")})
-{_DROP_SNAPSHOT}
-CREATE TRIGGER IF NOT EXISTS shots_carry_replace BEFORE INSERT ON shots
-WHEN {_ANY_SNAPSHOT} AND EXISTS (SELECT 1 FROM shots s WHERE (s.id = NEW.id OR s.uid = NEW.uid)
-                                 AND {_carry_covered("s.ts", "s.session_id")}) {_DROP_SNAPSHOT}
-CREATE TRIGGER IF NOT EXISTS shots_carry_replace_by BEFORE UPDATE ON shots
-WHEN {_ANY_SNAPSHOT} AND (NEW.id IS NOT OLD.id OR NEW.uid IS NOT OLD.uid)
-     AND EXISTS (SELECT 1 FROM shots s WHERE ((NEW.id IS NOT OLD.id AND s.id = NEW.id) OR (NEW.uid IS NOT OLD.uid AND s.uid = NEW.uid))
-                 AND {_carry_covered("s.ts", "s.session_id")}) {_DROP_SNAPSHOT}
+# The carry model once learned from past shots, and kept what it had learned in carry_snapshot (with
+# triggers that emptied it when a shot changed). It no longer learns: a season file loses the triggers,
+# and the table is emptied but kept, as an older version opening the file meanwhile makes the triggers
+# again (they'd fail every shot write with no table), and rebuilds from an empty one.
+DROP_CARRY_TRIGGERS = """
+DROP TRIGGER IF EXISTS shots_carry_insert;
+DROP TRIGGER IF EXISTS shots_carry_delete;
+DROP TRIGGER IF EXISTS shots_carry_update;
+DROP TRIGGER IF EXISTS shots_carry_renumber;
+DROP TRIGGER IF EXISTS shots_carry_replace;
+DROP TRIGGER IF EXISTS shots_carry_replace_by;
 """
 
 # Made by _migrate once their columns are sure to exist: name -> table(columns).

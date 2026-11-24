@@ -27,10 +27,11 @@
    how this shot compared. Without that, the booth is told not to call a shot short or long at all.
 2. **Impact.** No model call. Code projects carry against the pin and the drift from start line
    and spin axis. The launch monitor's carry is first scaled to what GSPro will allow: a course
-   baseline (altitude and conditions, learned from tee and fairway shots) times a per-lie
-   penalty (learned per lie, carry band, and launch band from your own shots). Pin elevation
-   from the player-box arrow adjusts the distance it plays; wind is ignored. Keep GSPro's
-   CARRY (raw) and CARRY (game) tiles visible so the model keeps learning. The code then picks
+   baseline (the course's altitude) times a per-lie penalty by carry and launch angle (built
+   in, from GSPro's code and the league's shots). Pin elevation from the player-box arrow
+   adjusts the distance it plays; wind is ignored. Keep GSPro's CARRY (raw) and CARRY (game)
+   tiles visible: a shot whose carry comes out more than 5% off the prediction is logged as a
+   `carry check`, to compare with GSPro's code. The code then picks
    the matching flight branch and speaks it, cutting off anything still playing. A ball headed
    for water gets the in-flight tease the instant the log shows it is wet.
 3. **Landing.** The screen isn't followed. GSPro writes each stroke to its round file
@@ -48,7 +49,7 @@
    `material TVGwood`) is taken as a tree trunk or branch, rising or falling, unless the ball met it at ground
    level: GSPro's carry (which ends at that first contact) at least 70% of the full carry, about where
    it would have landed anyway, is a bridge, steps or a wall. Leaves on the same shot, or no carry read,
-   keep it a tree. Its shortened carry isn't learned from (`shots.tree_hits`).
+   keep it a tree. Its shortened carry isn't checked against the carry model (`shots.tree_hits`).
    GSPro logs foliage hits at launch, each with its time into the flight, so a hit that cost at least
    15% of the ball's speed is also called in flight, timed to the moment the ball reaches the
    branches (a stock line, no model call). That call replaces the planned flight line. A trunk isn't

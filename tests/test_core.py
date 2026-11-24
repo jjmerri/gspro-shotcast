@@ -1771,14 +1771,10 @@ def test_carry_model_penalties_depend_on_the_shot():
     m = CarryModel()
     assert m.factor("fairway", 150) == 1.0 and m.factor(None, 150) == 1.0
     assert m.factor("concrete", 150) == 1.0 and m.factor("pine straw", 150) == 0.93
-    for raw in (150, 155, 160):
-        m.observe("concrete", raw, raw * 0.8)  # never learned away from no penalty
-    assert m.factor("concrete", 155) == 1.0
     # Same Sand surface, very different penalty: a greenside splash vs a full fairway-bunker shot.
     assert m.factor("sand", 13) == 0.74 and m.factor("sand", 160) == 0.90
     assert 0.78 < m.factor("sand", 50) < 0.79  # greenside bunkers play shorter than fairway ones
     assert m.factor("deep rough", 100) == m.factor("deep rough", 170) == 0.69
-    assert CarryModel({"rough": 0.9}).factor("rough", 150) == 0.9  # config override
 
 
 def test_carry_model_defaults_cover_rough_like_lies_and_a_low_launch():
@@ -1795,95 +1791,39 @@ def test_carry_model_defaults_cover_rough_like_lies_and_a_low_launch():
     assert 0.20 < m.penalty("deep rough", 120, 0) < 0.21
     assert m.penalty("deep rough", 120, 30) == 0.69
     assert m.penalty("semi rough", 150, 0) == 0.98 and m.penalty("sand", 150, 0) == m.penalty("sand", 150)
-    # A launch band learned from shots, or a configured flat factor, isn't scaled again.
-    for raw in (150, 155, 160):
-        m.observe("deep rough", raw, raw * 0.6, vla=5)
-        m.observe("deep rough", raw, raw * 0.7, vla=25)
-    assert 0.59 < m.penalty("deep rough", 155, 5) < 0.61
-    assert 0.69 < m.penalty("deep rough", 155, 25) < 0.71
-    assert CarryModel({"deep rough": 0.7}).penalty("deep rough", 150, 0) == 0.7
 
 
-def test_carry_model_learns_course_baseline_and_lie_bands():
+def test_carry_model_checks_a_shot_against_its_prediction():
     from commentator.carry_model import CarryModel
 
     m = CarryModel(course_altitude_ft={"Denver CC": 5000})
-    assert m.baseline("Denver CC") == 1.1  # rule-of-thumb seed until shots arrive
-    for raw, gspro in ((250, 265), (160, 170), (200, 212)):  # clean lies at a course playing ~6% long
-        m.observe("fairway", raw, gspro, "Hill Top")
-    assert 1.05 < m.baseline("Hill Top") < 1.07
-    # Rough on that course: GSPro carries 0.9 x 1.06; the learned penalty is the 0.9 part.
-    for raw in (150, 155, 160):
-        m.observe("rough", raw, raw * 0.9 * m.baseline("Hill Top"), "Hill Top", vla=18)
-    assert 0.89 < m.penalty("rough", 155, 18) < 0.91
-    assert m.penalty("rough", 250, 25) == 0.93  # other bands keep the default until they have data
-    assert 0.94 < m.factor("rough", 155, "Hill Top", 18) < 0.97
-    m.observe("rough", 150, 20, "Hill Top")  # mis-read tile ignored
-    assert 0.89 < m.penalty("rough", 155, 18) < 0.91
-    rebuilt = CarryModel(history=[("rough", r, r * 0.8, None, 18) for r in (150, 155, 160)])
-    assert 0.79 < rebuilt.penalty("rough", 155, 18) < 0.81  # last week's shots carry over
+    assert m.baseline("Denver CC") == 1.1 and m.baseline("Hill Top") == 1.0
+    # Within 5% of the prediction (150 x 1.1 x 0.93 = 153.5 out of Denver's rough): nothing to say.
+    assert m.check("rough", 150, 158, "Denver CC", 25, "gspro") is None
+    line = m.check("rough", 150, 120, "Denver CC", 25, "gspro")
+    assert "carried 120 yd level from rough, predicted 153 yd (150 yd GSPro raw x 1.023), -22% off" in line
+    assert "[launch 25.0 deg, course Denver CC]" in line
+    assert "+11% off" in m.check("fairway", 200, 222)   # a clean lie checks the course's altitude alone
+    assert m.check("rough", 5, 1) is None and m.check("rough", 150, None) is None
+    assert m.check("tee", 100, 105) is None and m.check("tee", 100, 95) is None   # 5% off exactly
+    assert CarryModel({"Deep": -50000}).check("tee", 100, 100, "Deep") is None   # no prediction
 
 
-def test_carry_is_leveled_by_where_the_ball_came_to_rest(tmp_path):
-    from commentator.store import Store
-
-    st = Store(str(tmp_path / "season.db"))
-
-    def hit(hole, n, carry, game, to_pin, elev, finish=None, fmt=None, shared=False):
-        sid = st.record_shot(player="Mike", hole=hole, shot=Shot(club="7I", carry=carry),
-                             before=Hud(lie="fairway", shot_number=n, to_pin=to_pin, elevation_yards=elev),
-                             after=Hud(), tags=[], carry_game_yards=game, total_yards=None, offline_yards=None,
-                             fmt=fmt, shared_ball=shared)
-        if finish is not None:
-            st.set_shot_result(sid, finish_yards=finish)
-
-    # A drive 300 out, pin 4 yards up: it rested 6 yards below the tee (pin 10 above the next ball),
-    # so its 240 game carry played like 234 on level ground.
-    hit("Hole 1", 1, 240.0, 240.0, "300 yards", 4.0)
-    hit("Hole 1", 2, 60.0, 60.0, "60 yards", 10.0)
-    hit("Hole 2", 1, 240.0, 230.0, "400 yards", 2.0)   # no next stroke and far from the pin: unknown
-    hit("Hole 3", 1, 150.0, 146.0, "150 yards", 3.0, finish=0.0)   # holed: rested at the pin
-    games = [(round(c), round(g)) for _, c, g, *_ in st.carry_pairs()]
-    assert games == [(240, 234), (60, 70), (150, 149)]
-    # A shot left out of the stats doesn't train the model, but still says where the drive rested.
-    st.set_left_out(2, True)
-    assert [(round(c), round(g)) for _, c, g, *_ in st.carry_pairs()] == [(240, 234), (150, 149)]
-    st.set_left_out(2, False)
-    # Nor does a ball knocked down by a tree: its short carry isn't the lie's or the elevation's doing.
-    st.db.execute("UPDATE shots SET tree_hits = 1 WHERE id = 4")
-    assert [(round(c), round(g)) for _, c, g, *_ in st.carry_pairs()] == [(240, 234), (60, 70)]
-    st.db.execute("UPDATE shots SET tree_hits = NULL WHERE id = 4")
-
-    # A later round's second shot on hole 2 says nothing about where this round's tee shot rested.
-    hit("Hole 2", 2, 60.0, 60.0, "60 yards", 10.0)
-    hit("Hole 4", 1, 240.0, 240.0, "400 yards", 4.0, fmt="scramble")   # the next ball may be a partner's
-    hit("Hole 4", 2, 60.0, 60.0, "60 yards", 10.0, fmt="scramble")
-    hit("Hole 5", 1, 240.0, 240.0, "400 yards", 4.0)   # a shamble, only known once GSPro copied a ball
-    hit("Hole 5", 2, 60.0, 60.0, "60 yards", 10.0, shared=True)
-    hit("Hole 6", 1, 240.0, 240.0, "400 yards", 4.0, finish=60.0, fmt="scramble")   # the team's pick:
-    hit("Hole 6", 2, 60.0, 60.0, "60 yards", 10.0, fmt="scramble")                   # the next is this ball
-    assert [(round(c), round(g)) for _, c, g, *_ in st.carry_pairs()][3:] == [(60, 70)] * 3 + [(240, 234), (60, 70)]
-
-    # Rows are written as shot handlers finish: the approach can be stored before the drive.
-    st2 = Store(str(tmp_path / "late.db"))
-    for n, ts, game, pin, elev in ((2, 2.0, 80.0, "80 yards", 10.0), (1, 1.0, 240.0, "400 yards", 4.0),
-                                   (3, 3.0, None, "5 yards", 2.0)):
-        st2.record_shot(player="Mike", hole="Hole 1", shot=Shot(club="7I", carry=game or 1.0, timestamp=ts),
-                        before=Hud(lie="fairway", shot_number=n, to_pin=pin, elevation_yards=elev),
-                        after=Hud(), tags=[], carry_game_yards=game, total_yards=None, offline_yards=None)
-    assert [(round(c), round(g)) for _, c, g, *_ in st2.carry_pairs()] == [(240, 234), (80, 88)]
-
-
-def test_a_live_shot_learns_its_landing_height_from_the_next_stroke():
+def test_a_live_shot_is_checked_with_its_landing_height_from_the_next_stroke():
     from types import SimpleNamespace
 
     seen = []
-    eng = SimpleNamespace(carry=SimpleNamespace(observe=lambda *a: seen.append(a[2])), _next_stroke=Engine._next_stroke)
+    eng = SimpleNamespace(carry=SimpleNamespace(check=lambda *a: seen.append(a[2])), _next_stroke=Engine._next_stroke)
     shot = ("fairway", 240.0, 240.0, "Wynn", 12.0, "gspro")
-    Engine._learn_carry(eng, (1, "Hole 1", 1), 4.0, 320.0, shot, next_key=(1, "Hole 1", 2), next_elevation=10.0)
-    Engine._learn_carry(eng, (1, "Hole 1", 1), 4.0, 320.0, shot, next_key=(1, "Hole 1", 3), next_elevation=10.0)
-    Engine._learn_carry(eng, (1, "Hole 1", 1), 4.0, 320.0, shot)
-    assert seen == [234.0]   # a penalty or round end in between: the landing is unknown, so nothing learned
+    Engine._check_carry(eng, (1, "Hole 1", 1), 4.0, 320.0, shot, next_key=(1, "Hole 1", 2), next_elevation=10.0)
+    Engine._check_carry(eng, (1, "Hole 1", 1), 4.0, 320.0, shot, next_key=(1, "Hole 1", 3), next_elevation=10.0)
+    Engine._check_carry(eng, (1, "Hole 1", 1), 4.0, 320.0, shot)
+    assert seen == [234.0]   # a penalty or round end in between: the landing is unknown, so nothing checked
+    seen.clear()
+    short = ("deep rough", 100.0, 69.0, "Wynn", 12.0, "gspro")   # came down 51 yards short of a pin up the hill
+    Engine._check_carry(eng, (1, "Hole 2", 2), 10.0, 120.0, short)
+    Engine._check_carry(eng, (1, "Hole 2", 2), 10.0, 120.0, short[:2] + (110.0,) + short[3:])   # by the pin
+    assert seen == [120.0]
 
 
 def test_carry_waits_for_the_next_stroke_even_when_shot_handlers_finish_out_of_order():
@@ -1891,7 +1831,7 @@ def test_carry_waits_for_the_next_stroke_even_when_shot_handlers_finish_out_of_o
 
     OWN = (False, 0)   # not a shared-ball format; no balls dropped
     seen = []
-    eng = SimpleNamespace(_carry_trail={}, _learn_carry=lambda *a: seen.append(a), CARRY_TRAIL=Engine.CARRY_TRAIL,
+    eng = SimpleNamespace(_carry_trail={}, _check_carry=lambda *a: seen.append(a), CARRY_TRAIL=Engine.CARRY_TRAIL,
                           _next_stroke=Engine._next_stroke,
                           _own_ball_next=Engine._own_ball_next)
     shot = ("fairway", 240.0, 240.0, "Wynn", 12.0, "gspro")
@@ -2002,6 +1942,23 @@ def test_store_counts_the_season_again_for_the_planner_once_it_has_outgrown_the_
         assert db.execute("SELECT MAX(CAST(stat AS INTEGER)) FROM sqlite_stat1 WHERE tbl = 'lines'").fetchone()[0] == 13500
 
 
+def test_an_old_season_file_drops_the_carry_snapshot(tmp_path):
+    import sqlite3
+
+    from commentator.store import Store
+
+    path = str(tmp_path / "season.db")
+    Store(path).close()
+    with sqlite3.connect(path) as db:   # what a file from when the carry model learned has
+        db.execute("CREATE TABLE carry_snapshot (id INTEGER PRIMARY KEY, key TEXT, before_ts REAL, state TEXT)")
+        db.execute("INSERT INTO carry_snapshot VALUES (1, 'k', 0, '{}')")
+        db.execute("CREATE TRIGGER shots_carry_insert AFTER INSERT ON shots BEGIN DELETE FROM carry_snapshot; END")
+    Store(path).close()
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT type FROM sqlite_master WHERE name LIKE '%carry%'").fetchall() == [("table",)]
+        assert db.execute("SELECT COUNT(*) FROM carry_snapshot").fetchone()[0] == 0   # an older version rebuilds
+
+
 def test_store_keeps_the_season(tmp_path):
     from commentator.models import Line
     from commentator.store import Store
@@ -2022,7 +1979,6 @@ def test_store_keeps_the_season(tmp_path):
     stats = week2.season_stats("Mike")
     assert stats["longest_drive"] == 280.0 and stats["nights"] == 1   # total distance, not carry
     assert week2.season_longest_drive() == ("Mike", 280.0)
-    assert ("rough", 160.0, 152.0, None, None, "lm") in week2.carry_pairs()
     board = week2.leaderboard()[0]
     assert board["player"] == "Mike" and board["fairway_pct"] == 100
     # Today's league drives, anyone's (the record above is before today): not a practice one.

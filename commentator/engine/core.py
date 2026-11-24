@@ -14,6 +14,7 @@ from .common import BoothCall, HoleWatch, PendingOpening, PreparedChat, Prepared
 from .. import round_file
 from ..alerts import Alerts
 from ..board import Board
+from ..carry_model import CarryModel
 from ..chat import ChatMessage, ChatTable, cursor_at
 from ..config import Config
 from ..flight_pick import FlightPlan
@@ -340,7 +341,7 @@ class Engine(HudWatchMixin,
         self._season_phrases: set[tuple[str, ...]] = set()
         for text in self.store.spoken_lines(since=time.time() - self.PHRASE_MEMORY_DAYS * 86400):
             self._season_phrases |= ngrams(text, 6)
-        self.carry = self.store.carry_model(cfg.commentary.lie_carry_factors, cfg.commentary.course_altitude_ft)
+        self.carry = CarryModel(cfg.commentary.course_altitude_ft)
         self.current_course: str | None = None
         self._hole_snaps: set[tuple[str, int]] = set()   # (course, hole) minimaps kept this session
         # GSPro reports each player's handedness with their shots; slope talk depends on it.
@@ -422,9 +423,9 @@ class Engine(HudWatchMixin,
         self._last_row: dict[int, tuple] = {}
         # Each player's latest strokes, in shot order, so a full shot can wait for the next stroke to say
         # how high it came to rest (that stroke's pin elevation, as the pin doesn't move) before it
-        # teaches the carry model. Shot handlers can finish out of order, so entries are kept sorted by
-        # shot sequence: player -> [[seq, (round, hole, shot number), elevation, to pin, observe args
-        # (None once learned, or for a putt), (shared-ball format?, balls dropped so far)]].
+        # it's checked against the carry model. Shot handlers can finish out of order, so entries are kept
+        # sorted by shot sequence: player -> [[seq, (round, hole, shot number), elevation, to pin, check
+        # args (None once checked, or for a putt), (shared-ball format?, balls dropped so far)]].
         self._carry_trail: dict[str, list] = {}
         # Per player, a commentator's call (commentator key, predicted make?, hole at commit) on that
         # player's current putt, committed only when the pre-shot line airs and graded against the

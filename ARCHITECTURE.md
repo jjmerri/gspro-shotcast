@@ -115,8 +115,10 @@ sources/  ─►  engine/    ─►  facts.py  ─►  prompts.py ─► LLM ─
   of the screen; the HUD defaults carry the aspect they were measured at (16:10) and the edge their
   panel is pinned to, and `Region.to_pixels` rescales them for other screen shapes, because GSPro
   sizes its HUD to the screen width. The ON AIR badge (`overlay.badge_geometry`) does the same.
-- **`carry_model.py`** learns how far GSPro actually lets a shot carry relative to the launch
-  monitor: a course baseline and a per-lie penalty, learned from your own shots.
+- **`carry_model.py`** how far GSPro actually lets a shot carry relative to the launch monitor: a
+  course baseline from its altitude and a per-lie penalty by carry and launch angle (from GSPro's code
+  and the league's shots). Nothing is learned in play; a shot well off the prediction is logged as a
+  `carry check`.
 - **`carry_estimate.py`** GSPro's no-penalty carry from the ball numbers, for the mid-flight call
   when the monitor sends no carry (springbok's connector). Gradient-boosted trees trained by
   `tools/train_carry_estimate.py` on the league's shots, shipped as `carry_estimate.json`; normal
@@ -129,7 +131,7 @@ sources/  ─►  engine/    ─►  facts.py  ─►  prompts.py ─► LLM ─
 - **`round.py`** a league round: who is in it, the format, handicaps, hole scores, and the
   derived numbers (net, fairways, GIR, putts, penalties). Opener/closer trigger logic.
 - **`store/`** the SQLite season history (`season.db`): records every shot and line, serves
-  season bests, rebuilds the per-lie carry factors at startup, backs `stats`. In-memory for
+  season bests, backs `stats`. In-memory for
   replays/evals so fake shots never persist. One class, `Store`, written as one part per job and put
   together in `core.py`, as the engine is:
   - `core.py` opening the season file, sessions, round records and migrations
@@ -138,7 +140,7 @@ sources/  ─►  engine/    ─►  facts.py  ─►  prompts.py ─► LLM ─
   - `finishes.py` where a shot finished: filled from the next shot, and backfilled
   - `shot_edits.py` changing a recorded shot: its result, player, round class, hole, position and track
   - `round_file.py` applying GSPro's round file to the recorded shots
-  - `session.py` what the booth notes as it goes: the format, gimmes, the lines spoken, and the carry model
+  - `session.py` what the booth notes as it goes: the format, gimmes, the lines spoken
   - `stats.py` reads for the booth's facts: drives, closest to the pin, proximity, putting and scoring
   - `repairs.py` repairs to rows an older version or a missed read left wrong, and finishes filled later
   - `memory.py` what the booth remembers saying: form mentions, asides, news and predictions

@@ -40,7 +40,7 @@ Only 1, 2, 3, 5, 11 and 18 have been seen in a real file (the 2026-11-18 rounds 
 `tests/fixtures/round_files/`).
 Known gap (accepted): the fallbacks don't name dirt or leaves (`hud.parse_lie` and
 `gspro_log.MATERIAL_TO_LIE` have no word for them), so a shot from either that only a fallback reads
-gets no lie penalty in its carry projection, though `carry_model` now starts both at rough's factor.
+gets no lie penalty in its carry projection, though `carry_model` gives both rough's factor.
 Rare (a team ball or drop on bare ground or leaves) and only a spoken projection; mapping the words
 would change every other use of those reads, so it waits until such a shot turns up.
 
@@ -104,16 +104,27 @@ holing ball for each teammate (`gspro_files.holed_copies`). It can't say when ea
 that GSPro writes every teammate's ball before the pick screen shows. A ball missing when the screen
 goes down gets no finish. On 3.59 (no `LaunchExt`), the tie relies on `_file_pins` only.
 
-## Learn lie carry by launch without losing the full-swing value
+## Check every shot's carry against the carry model
 
-`carry_model`'s defaults take a low launch into account (`LAUNCH_CURVES`, measured from the league's
-shots: deep rough keeps ~0.2 of the carry at 0 degrees), but learning doesn't fully: `observe` drops
-any ratio under 0.3 as a mis-read, so out of deep rough most shots launched below ~3 degrees (which
-typically keep ~0.2) are dropped and the under-12-degree band learns high. Letting them in isn't enough on its own: every
-shot also feeds its carry band's launch-blind average, which `penalty` falls back to for a launch
-band with no data and `_reach` uses for a full swing, so a few low shots would pull those down too.
-Known gap (accepted): rare (8 of 330 league deep-rough shots launched under 3 degrees) and only a spoken
-projection. The fix is a design change: learn the carry-band average from full swings only (12
-degrees and up) and scale it by `_launch_share` for a launch band with no data, with the mis-read
-floor taken from that unlearned prediction (flat overrides and the course baseline included), and
-bump `CARRY_SNAPSHOT_VERSION`.
+Each full shot's carry, put level with where it was hit, is compared with `carry_model`'s prediction,
+and one more than 5% off is logged as a `carry check` (`ShotReadsMixin._check_carry`), to compare with
+GSPro's code. Known gap (accepted): some shots are never checked. The check is queued when the shot
+handler has settled the stroke's lie, so classic GSPro's tiles read at the next setup
+(`_apply_late_tiles`) aren't in it; the trail is flushed only at the next round's start, so the last
+round's near-pin shots go unchecked if the booth closes first; and that flush also takes a round's
+opening drive adopted at its start (`_adopt_opening_shots`) before its second stroke can level it.
+Only a diagnostic log is missed; check from the late reads if too few shots get one.
+Also accepted, all as a diagnostic only:
+- The landing height comes from where the ball came to rest (the next stroke's pin elevation), not
+  where it landed, so a ball that rolled well up or down a slope can be logged as off when it wasn't.
+  The round file's touchdown point (`Track.land`) could level it instead.
+- Shots under 10 yards (chips) aren't checked: the carry tiles' whole yards are more than 5% of that.
+- An older version of the app opening the season file at the same moment as this one can keep a
+  `carry_snapshot` the triggers no longer invalidate; only that older version reads it, and only its
+  commentary's carry projection would be off, till its next start after a shot edit.
+- The check is queued partway through the shot handler, and some of what it uses is corrected after
+  that: its course is the HUD's at impact (a cut-short course name misses the altitude set under the
+  full one: a false log line), and its hole label is the one before GSPro's file corrects a late
+  banner's hole (`_file_hole_check`), so that drive is never paired with its next stroke. Queuing it
+  from the shot's final record instead would fix both.
+- A guest renamed mid-round splits their trail: the stroke before the rename gets the near-pin rule only.

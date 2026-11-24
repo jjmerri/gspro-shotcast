@@ -194,10 +194,10 @@ commentary:
   preshot: true
   preshot_rate: 0.6              # share of shots that get a setup line
   preshot_settle_seconds: 1.5
-  # Carry prediction: penalties per lie are learned from your shots (keep GSPro's CARRY (raw)
-  # and CARRY (game) tiles visible). Override a lie's starting penalty, or seed a course's
-  # altitude before it has shots, if you need to:
-  # lie_carry_factors: {pine straw: 0.97}
+  # Carry prediction: each lie's penalty is built in (from GSPro's code and the league's shots),
+  # and a course's altitude comes from GSPro. A shot well off the prediction is logged as a
+  # "carry check" (keep GSPro's CARRY (raw) and CARRY (game) tiles visible). Set an altitude if
+  # GSPro's is wrong:
   # course_altitude_ft: {"Example Links": 5200}
   # altitude_fact_min_ft: 3000   # drives at a course this high (ft) can mention the thin air
   big_moment_threshold: 0.9      # shots this interesting get a three- or four-line exchange

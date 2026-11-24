@@ -7994,13 +7994,17 @@ async def test_a_file_lie_is_recorded_over_the_screens_which_it_keeps_to_go_back
     e._round_watch, e._refresh_round_file = type("W", (), {"written": 0.0})(), refreshed
     e._file_track_of = lambda *a, **k: track
     e._file_ours = lambda *a, **k: True
+    queued = []
+    e._trail_carry = lambda player, entry: queued.append(entry)
     hud = _tee("Kroll", shot=2)
+    hud.tiles = {"carry (game)": "140 yds"}
     hud.lie = "fairway"
     await e.handle_shot(ShotEvent(shot=Shot(club="7I", carry=150.0, ball_speed=120.0), hud_hint=hud,
                                   impact_hud_hint=hud))
     # GSPro's sand is the shot's; the stored row has the screen's until the stroke's pin puts GSPro's on,
     # so a pin taken back leaves the fairway.
     assert e.state.shots[-1].lie_before == "sand"
+    assert [q[4][0] for q in queued] == ["sand"]   # its carry checked from GSPro's lie, not the screen's
     assert e.store.db.execute("SELECT lie_before FROM shots").fetchone()[0] == "fairway"
     assert e._file_pins.get("s2") == e.state.shots[-1].shot_id
 
@@ -8024,12 +8028,16 @@ async def test_a_setup_lie_gspros_file_gave_goes_back_to_the_screens_with_a_reje
     e._round_watch, e._refresh_round_file = type("W", (), {"written": 0.0})(), refreshed
     e._file_track_of = lambda *a, **k: track
     e._file_ours = lambda *a, **k: checks.append(1) or len(checks) == 1
+    queued = []
+    e._trail_carry = lambda player, entry: queued.append(entry)
     hud = _tee("Kroll", shot=2)
+    hud.tiles = {"carry (game)": "140 yds"}
     hud.to_pin, hud.lie = "150 yards", "sand"
     e._setup_lies[_setup_key(hud)], e._setup_screen_lies[_setup_key(hud)] = "sand", "fairway"
     await e.handle_shot(ShotEvent(shot=Shot(club="7I", carry=150.0, ball_speed=120.0), hud_hint=hud,
                                   impact_hud_hint=hud))
     assert len(checks) == 2 and e.state.shots[-1].lie_before == "fairway"
+    assert [q[4][0] for q in queued] == ["fairway"]   # its carry checked from the lie it ended up with
     assert e.store.db.execute("SELECT lie_before FROM shots").fetchone()[0] == "fairway"
 
 

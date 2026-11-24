@@ -386,14 +386,8 @@ new reads through the booth's writes, the page's, rollbacks, replaced rows and a
 - The other reads (hole, team and broadcast stats, `season_rounds`, `team_course_history`,
   `hole_scoring`, `prediction_record`, `recent_form_mentions`, `today_longest_drive`) take under 11 ms
   at 10 years; `side_rounds` 47 ms, read once a round.
-- The carry model starts from what it had learned before today (`Store.carry_model`, the
-  `carry_snapshot` table) and learns only today's shots on top, so it comes out exactly as a replay of
-  every shot would (the model is an order-dependent average, so a window would change it). Triggers on
-  `shots`, kept in season.db so every connection and process fires them, delete the snapshot when a
-  write touches a shot it learned from or a shot in one of its sessions (a stroke's next one says where
-  it came to rest); an edit to a column it doesn't read leaves it be. At 10 years a start took 15.5 s
-  here; now 0.5 s, or about 8 s at the first start and the next start after such an edit. A shot write costs
-  about 12 µs more.
+- The carry model reads nothing at start: it no longer learns from past shots (it once replayed
+  every shot, 15.5 s at 10 years, then kept a `carry_snapshot`, which a season file now empties and stops keeping up).
 - The phrases the booth won't repeat come from the last year's lines (`Engine.PHRASE_MEMORY_DAYS`),
   not every line ever: at 10 years (345k lines) reading them and their phrases took about 14 s at each
   start (timed under tracemalloc), 1.6 s for one year's.
