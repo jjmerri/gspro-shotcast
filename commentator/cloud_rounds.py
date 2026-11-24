@@ -618,7 +618,8 @@ def send_pictures(cl: Any, db: sqlite3.Connection, uuid: str) -> int:
     def drop(hole: int) -> None:
         # An admin removed it as wrong: grab the hole afresh (the booth keeps one a hole, and grabs
         # a hole that has none).
-        db.execute("DELETE FROM hole_images WHERE id = ?", (held[hole]["row"]["id"],))
+        row = held[hole]["row"]   # (that picture only: not one grabbed since, which can reuse its id)
+        db.execute("DELETE FROM hole_images WHERE id = ? AND image = ?", (row["id"], row["image"]))
         db.commit()
         log.info("Shotcast Cloud: %s hole %s's picture was removed in the cloud; it's grabbed again next time",
                  course, hole)

@@ -194,10 +194,11 @@ class HudWatchMixin:
         course, hole = r.course or self.current_course, self.hole_number
         if self.screen is None or not course or not hole or (course, hole) in self._hole_snaps:
             return
-        if self.store.has_hole_image(course, hole):   # one map per hole serves every round there
-            self._hole_snaps.add((course, hole))
+        # One map per hole serves every round there. Asked at each tee, not remembered: Shotcast Cloud
+        # can have the one kept removed (cloud_rounds.send_pictures deletes it), and then it's grabbed again.
+        if self.store.has_hole_image(course, hole):
             return
-        self._hole_snaps.add((course, hole))
+        self._hole_snaps.add((course, hole))   # (a grab under way, or one that failed: not again this session)
 
         def grab():
             self.screen.detect_mirror()
@@ -209,8 +210,8 @@ class HudWatchMixin:
             if self.store.record_hole_image(course, hole, image, ball, pin) is not None:
                 log.info("Kept the minimap of %s hole %s for the replay (ball and pin %s)", course, hole,
                          "found" if pin else "not found")
+            self._hole_snaps.discard((course, hole))   # (kept, or the pin missed: the next tee shot asks again)
             if pin is None:
-                self._hole_snaps.discard((course, hole))   # try again at the next player's tee shot
                 self._keep_report_frame("minimap-miss", ball_found=ball is not None)
 
         task = asyncio.create_task(snap())
