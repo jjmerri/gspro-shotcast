@@ -4,6 +4,13 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.164
+
+### Booth
+- The mid-flight call now judges a course's altitude shot by shot, as GSPro flies the ball: a high iron gains more up high than a low-spin drive, and a low punch can even come up shorter.
+- Shots off dirt, leaves, pine straw and semi rough now come up short in the mid-flight call as they do in GSPro, and a low launch out of the rough loses more.
+- A launch monitor that sends GSPro no carry now gets a mid-flight call on big hooks, slices and thin shots too, with GSPro's carry worked out to within about a yard.
+
 ## 0.1.163
 
 ### Stats page
