@@ -871,3 +871,23 @@ def test_a_quit_round_doesnt_take_the_next_rounds_pin(tmp_path, api):
     _drain(cl, cfg)
     sent = {p[0]: p[2]["hole_layouts"] for p in api.puts}
     assert sent[quit_early][0]["pin"] is None       # (the later round's pin isn't this one's)
+
+
+def test_a_round_too_big_goes_without_its_heaviest_optional_parts_the_tees_yards_last(monkeypatch):
+    import gzip
+    import json
+
+    from commentator import cloud_rounds
+
+    yards = {str(h): 300 + h for h in range(1, 19)}
+    b = {"round": {"id": "r1"}, "shot_tracks": [], "lines": [],
+         "course_card": {"par": {"1": 4}, "tees": [{"name": f"T{i}", "rating": 70.0, "slope": 120.0, "yards": yards}
+                                                   for i in range(30)]}}
+    whole = len(cloud_rounds._json(b))
+    without = len(cloud_rounds._json(b | {"course_card": {**b["course_card"], "tees": [
+        {k: v for k, v in t.items() if k != "yards"} for t in b["course_card"]["tees"]]}}))
+    monkeypatch.setattr(cloud_rounds, "MAX_INFLATED", (whole + without) // 2)
+    sent = json.loads(gzip.decompress(cloud_rounds.encode(b)))
+    assert sent["course_card"]["tees"][0] == {"name": "T0", "rating": 70.0, "slope": 120.0}
+    monkeypatch.setattr(cloud_rounds, "MAX_INFLATED", whole)
+    assert json.loads(gzip.decompress(cloud_rounds.encode(b)))["course_card"]["tees"][0]["yards"] == yards
