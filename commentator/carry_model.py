@@ -5,7 +5,8 @@ learned while playing: each shot is checked against the prediction instead, and 
 logged, see CarryModel.check):
 
 - Course baseline: altitude (a global GSPro setting or the designer's course elevation) changes
-  every shot on a course. GSPro's flight library takes it, so it's a rule of thumb here.
+  every shot on a course, by how thin air flies that shot (ball_flight: a high, spinning iron gains
+  more than a low-spin drive, a low launch can even lose). Without the ball numbers, ~2% per 1,000 ft.
 - Lie penalty, relative to that baseline: GSPro doesn't use a flat percentage. It works the
   penalty out from ball speed and launch angle (low, slow shots suffer most), so it's a curve per
   lie by carry, scaled by launch angle.
@@ -17,6 +18,8 @@ penalty and the landing elevation. So the penalty is game / raw, predicted from 
 Like the launch monitor's carry, CARRY (raw) leaves out altitude too (both read ~1.00 of each other
 on every course), so the course baseline carries it for either base.
 """
+
+from . import ball_flight
 
 # Surfaces with no lie penalty.
 NO_PENALTY = ("tee", "fairway", "concrete", "cart path")
@@ -95,12 +98,17 @@ class CarryModel:
         GSPro's log add the courses played)."""
         self.altitude = dict(course_altitude_ft or {})   # a copy: those added in play aren't config
 
-    def baseline(self, course: str | None, base: str = "lm") -> float:
-        # About 2% more carry per 1,000 ft, for either base: GSPro's CARRY (raw) leaves altitude out
-        # like the launch monitor does (both read ~1.00 at Wynn, 2,080 ft, where the game carry ran
-        # ~3.7% long). A rule of thumb, not a published GSPro figure. `base` is "gspro" (the CARRY
-        # (raw) tile) or "lm" (launch monitor); both take it the same way.
-        return 1 + 0.02 * self.altitude.get(course or "", 0) / 1000
+    def baseline(self, course: str | None, base: str = "lm", shot=None) -> float:
+        """The course altitude's factor on `shot`'s carry (a models.Shot, for its ball numbers), the
+        same for either base: GSPro's CARRY (raw) leaves altitude out like the launch monitor does
+        (both read ~1.00 at Wynn, 2,080 ft, where the game carry ran ~3.7% long). `base` is "gspro"
+        (the CARRY (raw) tile) or "lm" (launch monitor). Without the ball numbers (or for a ball
+        launched at or below level), a flat ~2% per 1,000 ft."""
+        altitude = self.altitude.get(course or "", 0)
+        if shot is not None and (f := ball_flight.altitude_factor(
+                shot.ball_speed, shot.vla, shot.total_spin, shot.spin_axis, altitude)):
+            return f
+        return 1 + 0.02 * altitude / 1000
 
     def penalty(self, lie: str | None, carry: float, vla: float | None = None) -> float:
         if not lie or lie in NO_PENALTY:
@@ -110,19 +118,20 @@ class CarryModel:
         return 1.0  # lies with no measured penalty (stone, structure...): a check logs one that's off
 
     def factor(
-        self, lie: str | None, carry: float = 0, course: str | None = None, vla: float | None = None, base: str = "lm"
+        self, lie: str | None, carry: float = 0, course: str | None = None, vla: float | None = None, base: str = "lm",
+        shot=None,
     ) -> float:
-        return self.baseline(course, base) * self.penalty(lie, carry, vla)
+        return self.baseline(course, base, shot) * self.penalty(lie, carry, vla)
 
     def check(
         self, lie: str | None, base_carry: float | None, game_carry: float | None,
-        course: str | None = None, vla: float | None = None, base: str = "lm",
+        course: str | None = None, vla: float | None = None, base: str = "lm", shot=None,
     ) -> str | None:
         """A log line when GSPro's carry (put level with where the ball was hit) is more than
         CHECK_TOLERANCE off the prediction from `base_carry`, else None."""
         if not base_carry or game_carry is None or base_carry < 10:
             return None
-        factor = self.factor(lie, base_carry, course, vla, base)
+        factor = self.factor(lie, base_carry, course, vla, base, shot)
         predicted = base_carry * factor
         if not predicted > 0 or abs(game_carry - predicted) <= predicted * CHECK_TOLERANCE + 1e-9:
             return None   # (no prediction: an altitude far below sea level)

@@ -239,7 +239,8 @@ class ShotMixin:
         if c.in_flight and not banter and not landed_already and not shot.is_putt \
                 and flight_carry >= c.min_flight_carry and plan and time.monotonic() - self._plan_made_at < 180 and not self._tree_hit_logged(fires0, impact, shot):
             carry0 = estimated or self._raw_yards(shot)
-            factor0 = self.carry.factor(plan.lie, carry0, self.current_course, shot.vla, "gspro" if estimated else "lm")
+            factor0 = self.carry.factor(plan.lie, carry0, self.current_course, shot.vla, "gspro" if estimated else "lm",
+                                       shot)
             picked = pick_line(plan, replace(shot, carry=carry0, units="Yards"), plan.to_pin, factor0, plan.elevation_yards,
                                self.gspro.aim_of(fires0, impact))
             # The sim logs the splash only when the ball ARRIVES at the water, so a mid-flight check is
@@ -317,7 +318,7 @@ class ShotMixin:
         else:
             base, base_carry, source = "lm", self._raw_yards(shot), "launch monitor"
         projected = replace(shot, carry=base_carry, units="Yards")
-        factor = self.carry.factor(before.lie, base_carry, self.current_course, shot.vla, base)
+        factor = self.carry.factor(before.lie, base_carry, self.current_course, shot.vla, base, shot)
         if use_screen:
             log.info("%s impact HUD (read %.2fs): %r shot %s, %s to pin, lie %s, club %s, elevation %s; "
                      "carry %.1f yd from %s x %.3f for the lie", tag, self.screen.last_read_seconds if self.screen else 0,

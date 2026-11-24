@@ -101,7 +101,7 @@ class ShotReadsMixin:
                 and self._carry_next(rec, next_rec):
             rest_rise = elevation - next_elevation
         level = correct_for_elevation(game, elevation, pin_yards, rest_rise)
-        if level is not None and (line := self.carry.check(rec.lie_before, carry, level, course, vla, base)):
+        if level is not None and (line := self.carry.check(rec.lie_before, carry, level, course, vla, base, rec.shot)):
             log.info("Round %s, %s, shot %s: %s", rec.round_id, rec.hole, rec.shot_number, line)
 
     @staticmethod
