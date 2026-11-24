@@ -1770,7 +1770,7 @@ def test_carry_model_penalties_depend_on_the_shot():
 
     m = CarryModel()
     assert m.factor("fairway", 150) == 1.0 and m.factor(None, 150) == 1.0
-    assert m.factor("concrete", 150) == 1.0 and m.factor("pine straw", 150) == 0.97
+    assert m.factor("concrete", 150) == 1.0 and m.factor("pine straw", 150) == 0.91
     for raw in (150, 155, 160):
         m.observe("concrete", raw, raw * 0.8)  # never learned away from no penalty
     assert m.factor("concrete", 155) == 1.0
@@ -1779,6 +1779,26 @@ def test_carry_model_penalties_depend_on_the_shot():
     assert 0.78 < m.factor("sand", 50) < 0.79  # greenside bunkers play shorter than fairway ones
     assert m.factor("deep rough", 100) == m.factor("deep rough", 170) == 0.72
     assert CarryModel({"rough": 0.9}).factor("rough", 150) == 0.9  # config override
+
+
+def test_carry_model_defaults_cover_rough_like_lies_and_a_low_launch():
+    from commentator.carry_model import CarryModel
+
+    m = CarryModel()
+    # GSPro treats dirt and leaves like rough, and semi rough as a light rough.
+    assert m.penalty("dirt", 150) == m.penalty("leaves", 150) == m.penalty("rough", 150) == 0.91
+    assert m.penalty("semi rough", 150) == 0.98
+    # A low launch out of rough-like lies keeps less; a typical or high one keeps the measured default.
+    assert m.penalty("rough", 150, 20) == m.penalty("rough", 150, 40) == 0.91
+    assert 0.86 < m.penalty("rough", 150, 3) < 0.87
+    assert 0.47 < m.penalty("deep rough", 120, 0) < 0.49
+    assert m.penalty("deep rough", 120, 30) == 0.72
+    assert m.penalty("semi rough", 150, 0) == 0.98 and m.penalty("sand", 150, 0) == m.penalty("sand", 150)
+    # A launch band learned from shots, or a configured flat factor, isn't scaled again.
+    for raw in (150, 155, 160):
+        m.observe("deep rough", raw, raw * 0.6, vla=5)
+    assert 0.59 < m.penalty("deep rough", 155, 5) < 0.61
+    assert CarryModel({"deep rough": 0.7}).penalty("deep rough", 150, 0) == 0.7
 
 
 def test_carry_model_learns_course_baseline_and_lie_bands():
@@ -1793,7 +1813,7 @@ def test_carry_model_learns_course_baseline_and_lie_bands():
     for raw in (150, 155, 160):
         m.observe("rough", raw, raw * 0.9 * m.baseline("Hill Top"), "Hill Top", vla=18)
     assert 0.89 < m.penalty("rough", 155, 18) < 0.91
-    assert m.penalty("rough", 250, 10) == 0.91  # other bands keep the default until they have data
+    assert m.penalty("rough", 250, 25) == 0.91  # other bands keep the default until they have data
     assert 0.94 < m.factor("rough", 155, "Hill Top", 18) < 0.97
     m.observe("rough", 150, 20, "Hill Top")  # mis-read tile ignored
     assert 0.89 < m.penalty("rough", 155, 18) < 0.91

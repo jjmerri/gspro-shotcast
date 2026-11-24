@@ -25,13 +25,29 @@ NO_PENALTY = ("tee", "fairway", "concrete", "cart path")
 # Measured on the league's own GSPro (340 shots with both carry tiles and a known landing height,
 # each course's own carry level taken out): sand keeps ~0.74 at 30 yards up to ~0.90 at 155, so
 # greenside bunkers play much shorter than fairway ones; rough keeps ~0.91 and deep rough ~0.72 at
-# every distance. Pine straw is a starting guess (too few shots yet). Shots on each course keep
-# refining these per carry band.
+# every distance. GSPro slows a ball off dirt, leaves and pine straw exactly as it does off rough, and
+# off semi rough by only ~1.5% of its speed, so those start from rough and from 0.98. Shots on each
+# course keep refining these per carry band.
 DEFAULT_CURVES: dict[str, list[tuple[float, float]]] = {
     "sand": [(29, 0.74), (55, 0.79), (109, 0.87), (155, 0.90)],
     "deep rough": [(0, 0.72)],
     "rough": [(0, 0.91)],
-    "pine straw": [(0, 0.97)],
+    "pine straw": [(0, 0.91)],
+    "dirt": [(0, 0.91)],
+    "leaves": [(0, 0.91)],
+    "semi rough": [(0, 0.98)],
+}
+
+# GSPro also takes ball speed off by the launch monitor's launch angle, out of rough-like lies only:
+# a low launch loses more (about 5% out of rough below ~10 degrees; out of deep rough ~40% at 0
+# degrees, easing off to ~6% by 35). The measured curves above come from typical full swings, so a
+# default is scaled by how this launch fares against LAUNCH_REFERENCE, and never raised above it.
+# Approximate shapes, as (launch degrees, share of ball speed kept).
+LAUNCH_REFERENCE = 20.0
+_ROUGH_LAUNCH = [(5, 0.95), (15, 1.0)]
+LAUNCH_CURVES: dict[str, list[tuple[float, float]]] = {
+    "rough": _ROUGH_LAUNCH, "pine straw": _ROUGH_LAUNCH, "dirt": _ROUGH_LAUNCH, "leaves": _ROUGH_LAUNCH,
+    "deep rough": [(0, 0.60), (10, 0.80), (20, 0.90), (35, 0.94)],
 }
 
 MIN_SAMPLES = 3
@@ -48,6 +64,13 @@ def _interpolate(points: list[tuple[float, float]], x: float) -> float:
         if x <= x1:
             return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
     return points[-1][1]
+
+
+def _launch_share(lie: str, vla: float | None) -> float:
+    curve = LAUNCH_CURVES.get(lie)
+    if not curve or vla is None:
+        return 1.0
+    return min(1.0, _interpolate(curve, vla) / _interpolate(curve, LAUNCH_REFERENCE))
 
 
 def _band(value: float | None, edges: tuple[float, ...]) -> int | None:
@@ -137,8 +160,8 @@ class CarryModel:
         if lie in self.flat_defaults:
             return self.flat_defaults[lie]
         if lie in DEFAULT_CURVES:
-            return _interpolate(DEFAULT_CURVES[lie], carry)
-        return 1.0  # lies we have no data for (pine straw, cart path...) until shots teach us
+            return _interpolate(DEFAULT_CURVES[lie], carry) * _launch_share(lie, vla)
+        return 1.0  # lies we have no data for (stone, structure...) until shots teach us
 
     def factor(
         self, lie: str | None, carry: float = 0, course: str | None = None, vla: float | None = None, base: str = "lm"

@@ -38,6 +38,11 @@ no surface under the ball) fall back to the screen. Codes 6 (earth), 7 (dropzone
 leaves have pre-written result lines (`flight_pick._LIE_REACTION`), a drop zone is left to the model.
 Only 1, 2, 3, 5, 11 and 18 have been seen in a real file (the 2026-11-18 rounds in
 `tests/fixtures/round_files/`).
+Known gap (accepted): the fallbacks don't name dirt or leaves (`hud.parse_lie` and
+`gspro_log.MATERIAL_TO_LIE` have no word for them), so a shot from either that only a fallback reads
+gets no lie penalty in its carry projection, though `carry_model` now starts both at rough's factor.
+Rare (a team ball or drop on bare ground or leaves) and only a spoken projection; mapping the words
+would change every other use of those reads, so it waits until such a shot turns up.
 
 **Needs verification:** which setups still take the screen's lie. Every off-the-tee setup now logs its
 lie source (`Setup lie ... from GSPro's round file (the screen agreed | the screen read ...)`, `... from
