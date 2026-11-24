@@ -2,10 +2,15 @@
 miss, recovery. Shared by the booth's stats page (commentator/season_analytics.py reads its season
 file and hands the rows here) and Shotcast Cloud (which works them out from a round's stored body).
 
-A stroke is a mapping with the booth's `shots` columns: player, session_id, course, hole (its label,
+A stroke is a mapping with the booth's `shots` columns: id, player, session_id, course, hole (its label,
 "Hole 3, par 4, 380 yards"), shot_number, lie_before, is_putt, to_pin_yards, outcome, gimme_yards,
 finish_yards, left_out, is_league, date; a swing for gapping: id, club, carry, game, total_yards,
 ball_speed, club_speed, launch_angle, total_spin, spin_axis, start_direction, handed, lie_before.
+
+These trust their input as the booth's season file gives it. A caller with untrusted numbers bounds
+them first: yardages and gimme radii to what a course has, shot numbers to a hole's, a swing's carry
+positive and its speeds positive when given (gapping_from's quantiles need a swing left), and hole
+labels short. handicap_index's caller does the same for cards and tees (see there).
 """
 
 import bisect

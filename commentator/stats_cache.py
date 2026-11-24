@@ -41,14 +41,17 @@ def path_for(db_path: str | Path) -> Path:
 
 
 def code_stamp() -> str:
-    """A hash of the app's code: results worked out by other code aren't reused."""
+    """A hash of the app's code and the scoring package's (its rules: strokes gained, the index,
+    replays): results worked out by other code aren't reused."""
     global _code
     if _code is None:
+        import shotcast_scoring
+
         h = hashlib.sha256()
-        package = Path(__file__).parent
-        for p in sorted(package.rglob("*.py")):
-            h.update(p.relative_to(package).as_posix().encode())
-            h.update(p.read_bytes())
+        for package in (Path(__file__).parent, Path(shotcast_scoring.__file__).parent):
+            for p in sorted(package.rglob("*.py")):
+                h.update(f"{package.name}/{p.relative_to(package).as_posix()}".encode())
+                h.update(p.read_bytes())
         _code = h.hexdigest()
     return _code
 
