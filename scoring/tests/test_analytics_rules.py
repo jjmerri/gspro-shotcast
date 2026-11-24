@@ -65,5 +65,6 @@ def test_a_handicap_index_from_plain_cards():
     cards = [("Ann", "Links", f"2026-11-{d:02}", {h: 5 for h in range(1, 19)}, {h: 4 for h in range(1, 19)}, tee, 0)
              for d in range(1, 5)]
     ann = H._index_of(cards)["Ann"]
-    assert ann["rounds"] == 4 and ann["index"] == pytest.approx(H.index_from([h["differential"] for h in ann["history"]]))
+    # (four differentials of 18.1: the lowest one, less 1.0)
+    assert ann["rounds"] == 4 and ann["index"] == 17.1
     assert ann["history"][0]["differential"] == round((90 - 70.0) * 113 / 125, 1)

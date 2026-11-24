@@ -5,6 +5,12 @@ with Shotcast Cloud, which reads them from rounds' stored bodies).
 A tee is a mapping {tee, rating, slope, yards: {hole: yards}, par: {hole: par}, index: {hole: stroke
 index}}; a card is (player, course, date, scores {hole: strokes}, pars {hole: par}, tee or None,
 mulligans).
+
+These trust their input as the booth gives it. A caller with untrusted cards checks them first:
+`_differential` hands out the course handicap one stroke at a time (handicap.allocate), so a wild
+rating, slope, score or index makes it loop for as long as the number is large. Hole numbers as ints
+1-18, 9 or more holes in both scores and pars, scores and pars in a golf range, a tee's rating and
+slope in the WHS ranges (slope 55-155), and no empty distance list for pick_tee.
 """
 
 from __future__ import annotations
