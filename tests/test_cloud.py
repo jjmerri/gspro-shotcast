@@ -1,5 +1,7 @@
+import base64
 import gzip
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -32,10 +34,21 @@ class FakeAPI:
         self.default: str | None = "lg1"
         self.rounds: dict[str, bytes] = {}                     # round -> the JSON it was sent as
         self.puts: list[tuple[str, int, dict]] = []
+        self.pictures: list[dict] = []
+        # The cloud's hole pictures as holepictures.py keeps them: (course, hole) -> (sha256, area); and
+        # the (course, hole, sha256) an admin removed.
+        self.kept: dict[tuple[str, int], tuple[str, int]] = {}
+        self.removed: set[tuple[str, int, str]] = set()
+        self.hook = None                                       # a test's own answer to a request, before these
         self.answers: list = []                                # scripted answers for the next PUTs
         self.minimum: str | None = None                        # clientversion's: below it, every call is 426
         self.claim_cards = False                               # whether the tenant is a venue (its bays show cards)
         self.claimed: dict[tuple[str, str], str] = {}          # (round, slot) -> the claimer's short name
+
+    def remove_picture(self, course: str, hole: int) -> None:
+        """An admin removes a hole's picture on the site."""
+        digest, _ = self.kept.pop((course.casefold(), hole))
+        self.removed.add((course.casefold(), hole, digest))
 
     def tokens(self, refresh):
         self.n += 1
@@ -50,12 +63,39 @@ class FakeAPI:
         assert req.headers["user-agent"].startswith("Shotcast/")
         if req.method != "GET":   # CloudFront's signed hop needs every body's hash
             assert req.headers["x-amz-content-sha256"] == hashlib.sha256(req.content).hexdigest()
+        if self.hook is not None and (hooked := self.hook(req)) is not None:
+            return hooked
         if self.minimum:
             return httpx.Response(426, headers={"X-Shotcast-Min-Version": self.minimum},
                                   json={"error": "client_too_old", "action": "update",
                                         "message": f"update Shotcast to {self.minimum}"})
         if path.startswith("/api/rounds/") and req.method == "PUT":
             return self.put(req)
+        if path == "/api/devices/hole-pictures" and req.method == "PUT":
+            pic = json.loads(req.content)
+            self.pictures.append(pic)
+            data = base64.b64decode(pic["jpeg"])
+            key, digest = (pic["course"].casefold(), pic["hole"]), hashlib.sha256(data).hexdigest()
+            if (*key, digest) in self.removed:
+                return httpx.Response(200, json={"kept": False, "removed": True})
+            from PIL import Image
+
+            w, h = Image.open(io.BytesIO(data)).size
+            if key in self.kept and self.kept[key][1] >= w * h:
+                return httpx.Response(200, json={"kept": False, "removed": False})
+            self.kept[key] = (digest, w * h)
+            return httpx.Response(200, json={"kept": True, "removed": False})
+        if path == "/api/devices/hole-pictures/check":
+            asked = json.loads(req.content)
+            send, drop = [], []
+            for p in asked["holes"]:
+                key = (asked["course"].casefold(), p["hole"])
+                if (*key, p["sha256"]) in self.removed:
+                    drop.append(p["hole"])
+                elif key not in self.kept or (self.kept[key][0] != p["sha256"]
+                                              and self.kept[key][1] < p["width"] * p["height"]):
+                    send.append(p["hole"])
+            return httpx.Response(200, json={"send": send, "drop": drop})
         body = json.loads(req.content) if req.content else None
         if path == "/api/devices/pair":
             assert body["name"] and len(body["fingerprint"]) == 64

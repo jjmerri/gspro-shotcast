@@ -34,8 +34,10 @@ A run that starts counts afresh: a round waits out its quiet again, and a retry 
 """
 from __future__ import annotations
 
+import base64
 import gzip
 import hashlib
+import io
 import json
 import logging
 import secrets
@@ -47,6 +49,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from shotcast_scoring import replay
 
 
 log = logging.getLogger(__name__)
@@ -310,7 +314,7 @@ def _sides(slots: list[dict[str, Any]]) -> tuple[list[str], dict[str, str]]:
 
 def _course_card(tees: list[dict[str, Any]], folder: str | None) -> dict[str, Any] | None:
     """The course's own card as GSPro's course files have it (kept in course_tees as each course is
-    loaded): par and stroke index by hole, each tee's rating and slope. A league's results in the
+    loaded): par and stroke index by hole, each tee's rating, slope and yards by hole. A league's results in the
     cloud put a player's strokes on the holes by it. `folder`: GSPro's folder for the course when
     its round file named it (the round was surely played from it); None when the card was found by
     the course's name alone. None for a course with no card."""
@@ -322,7 +326,10 @@ def _course_card(tees: list[dict[str, Any]], folder: str | None) -> dict[str, An
         "par": _holes(first["par"]), "index": _holes(first["hole_index"]),
         # (As many, and names as long, as the cloud's format takes: a course file's odd tee mustn't
         # cost the round its upload.)
-        "tees": [{"name": str(t["tee"])[:MAX_TEE_NAME], "rating": t["rating"], "slope": t["slope"]}
+        "tees": [{"name": str(t["tee"])[:MAX_TEE_NAME], "rating": t["rating"], "slope": t["slope"],
+                  # each hole's length from it: the cloud picks the tee a round was played from by them,
+                  # as the booth's handicap index does (a yardage the cloud's format can't hold is left out)
+                  "yards": {h: y for h, y in (_holes(t.get("yards")) or {}).items() if 0 < y <= 1000}}
                  for t in tees[:MAX_TEES]],
     }
 
@@ -359,6 +366,12 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
                  db.execute("SELECT slot_id, code FROM cloud_claim_codes WHERE uuid = ?", (uuid,))}
         tees = _rows(db, "SELECT * FROM course_tees WHERE course = ? COLLATE NOCASE ORDER BY tee", rec["course"])
         folder = db.execute("SELECT folder FROM round_folders WHERE record_uuid = ?", (uuid,)).fetchone()
+        layouts = _rows(db, "SELECT * FROM hole_layouts WHERE course IN (SELECT DISTINCT course FROM shots"
+                            " WHERE record_uuid = ?) COLLATE NOCASE ORDER BY id", uuid)
+        # (The next round's first shot in the same sessions: a layout logged after it is that round's.)
+        until = db.execute("SELECT MIN(ts) FROM shots WHERE session_id IN (SELECT session_id FROM shots WHERE"
+                           " record_uuid = ?) AND ts > (SELECT MAX(ts) FROM shots WHERE record_uuid = ?)"
+                           " AND record_uuid IS NOT ?", (uuid, uuid, uuid)).fetchone()[0]
     keys, side_of = _sides(slots)
     card_side = {c["id"]: c["side"] for c in cards}
     # One card a side: its last (a booth that stopped between writing a round's cards and marking it
@@ -399,7 +412,36 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
         "edit": {"excluded": any(c["excluded"] for c in cards), "mark": mark,
                  "left_out": [s["uid"] for s in shots if s["left_out"]]},
         "course_card": _course_card(tees, folder["folder"] if folder else None),
+        "hole_layouts": _hole_layouts(layouts, shots, until),
     }, rec["gen"]
+
+
+def _point(x: Any, z: Any) -> list[float] | None:
+    return [x, z] if isinstance(x, (int, float)) and isinstance(z, (int, float)) else None
+
+
+def _hole_layouts(layouts: list[dict[str, Any]], shots: list[dict[str, Any]],
+                  until: float | None = None) -> list[dict[str, Any]]:
+    """Each hole the round played, as its replay is drawn (shotcast_scoring.replay._layout_for, as
+    the booth's own page picks them): the tee (this round's, else the course's latest), this round's
+    pin (none for a round quit before GSPro logged it: the cloud estimates it as the booth does), the
+    course designer's aim point, par and tee box. World metres, x and z (the map from above)."""
+    holes: dict[int, list[dict[str, Any]]] = {}
+    for s in shots:
+        if (m := replay._HOLE.match(s.get("hole") or "")) is not None:
+            holes.setdefault(int(m.group(1)), []).append(s)
+    sessions = {s["session_id"] for s in shots}   # (all the round's: a booth restarted mid-round starts another)
+    out = []
+    for hole, rows in sorted(holes.items()):
+        this, any_ = replay._layout_for(layouts, rows[0]["course"], hole, sessions, rows[0]["ts"], rows[-1]["ts"], until)
+        lo = this or any_
+        if lo is None:
+            continue
+        out.append({"hole": hole, "par": lo["par"], "tee_box": ((this or {}).get("tee_box") or None) and this["tee_box"][:MAX_TEE_NAME],
+                    "tee": _point(any_["tee_x"], any_["tee_z"]) if any_ else None,
+                    "pin": _point(this["pin_x"], this["pin_z"]) if this else None,
+                    "waypoint": _point(lo["wp_x"], lo["wp_z"])})
+    return out
 
 
 def _json(obj: Any) -> bytes:
@@ -411,13 +453,16 @@ def encode(b: dict[str, Any]) -> bytes:
 
     A round too big for the cloud (MAX_BODY compressed, MAX_INFLATED as JSON) goes without its
     heaviest optional parts, in the order the cloud's API gives, till it fits: the tracks' flight and
-    roll paths, then the tracks, then the commentary. The scores, cards and shots always go; one
+    roll paths, then the tracks, then the commentary, then the tees' yards. The scores, cards and shots always go; one
     still too big is sent whole, and the cloud says so (413)."""
     out = dict(b)
     lighter = (
         lambda: out.update(shot_tracks=[t | {"flight": None, "roll": None} for t in out["shot_tracks"]]),
         lambda: out.update(shot_tracks=[]),
         lambda: out.update(lines=[]),
+        # (the tees' yards: the cloud then picks a round's tee by its length, as with no layout)
+        lambda: out.update(course_card=out["course_card"] and {
+            **out["course_card"], "tees": [{k: v for k, v in t.items() if k != "yards"} for t in out["course_card"]["tees"]]}),
     )
     whole = None
     for drop in (None, *lighter):
@@ -533,6 +578,89 @@ def _sent(db: sqlite3.Connection, uuid: str, out: Drained) -> None:
     out.sent.append(uuid)
 
 
+def send_pictures(cl: Any, db: sqlite3.Connection, uuid: str) -> int:
+    """The minimap of each hole the round played (hole_images, grabbed at the tee) that the cloud
+    wants: what it draws the hole's replay over. The cloud decides (`check`): it wants a hole it has
+    no picture of, or a smaller one; and it says which pictures an admin removed, whose copy here is
+    deleted so the booth grabs the hole afresh the next time it's played (and that one goes). Nothing
+    of what was sent is kept here. Never stops a drain: what doesn't go is asked about again after
+    the next round there. Returns how many went."""
+    from PIL import Image
+
+    rec = db.execute("SELECT course FROM round_records WHERE uuid = ?", (uuid,)).fetchone()
+    if rec is None or not rec["course"]:
+        return 0
+    course = rec["course"]
+    holes = {int(m.group(1)) for (h,) in db.execute("SELECT DISTINCT hole FROM shots WHERE record_uuid = ?", (uuid,))
+             if (m := replay._HOLE.match(h or ""))}
+    sessions = {s for (s,) in db.execute("SELECT DISTINCT session_id FROM shots WHERE record_uuid = ?", (uuid,))}
+    held: dict[int, dict[str, Any]] = {}
+    for hole in sorted(h for h in holes if h <= 200):
+        im = db.execute("SELECT id, image, ball_x, ball_y, pin_x, pin_y, session_id FROM hole_images WHERE course = ?"
+                        " COLLATE NOCASE AND hole = ? AND ball_x IS NOT NULL AND pin_x IS NOT NULL ORDER BY id DESC"
+                        " LIMIT 1", (course, hole)).fetchone()
+        if im is None:
+            continue
+        try:
+            w, h = Image.open(io.BytesIO(im["image"])).size
+        except Exception:   # noqa: BLE001 - not a picture after all: nothing to send
+            continue
+        held[hole] = {"row": im, "sha256": hashlib.sha256(im["image"]).hexdigest(), "width": w, "height": h}
+    if not held:
+        return 0
+    try:
+        r = cl.request("POST", "/api/devices/hole-pictures/check", body={
+            "course": course,
+            "holes": [{"hole": n, "sha256": p["sha256"], "width": p["width"], "height": p["height"]}
+                      for n, p in held.items()]})
+        answer = r.json() if r.status_code == 200 else None
+    except Exception as e:   # noqa: BLE001 - the network: next time
+        log.info("Shotcast Cloud: hole pictures not checked (%s)", e)
+        return 0
+    if not isinstance(answer, dict):
+        log.info("Shotcast Cloud: hole pictures not checked (%s)", r.status_code)
+        return 0
+
+    def drop(hole: int) -> None:
+        # An admin removed it as wrong: grab the hole afresh (the booth keeps one a hole, and grabs
+        # a hole that has none).
+        row = held[hole]["row"]   # (that picture only: not one grabbed since, which can reuse its id)
+        db.execute("DELETE FROM hole_images WHERE id = ? AND image = ?", (row["id"], row["image"]))
+        db.commit()
+        log.info("Shotcast Cloud: %s hole %s's picture was removed in the cloud; it's grabbed again next time",
+                 course, hole)
+
+    for hole in answer.get("drop") or []:
+        if hole in held:
+            drop(hole)
+    sent = 0
+    for hole in answer.get("send") or []:
+        if hole not in held:
+            continue
+        im = held[hole]["row"]
+        try:
+            r = cl.request("PUT", "/api/devices/hole-pictures", body={
+                "course": course, "hole": hole, "jpeg": base64.b64encode(im["image"]).decode(),
+                "ball": [im["ball_x"], im["ball_y"]], "pin": [im["pin_x"], im["pin_y"]],
+                # (taken in this round, or in an earlier one at the course: the cloud says which)
+                "round_id": uuid if im["session_id"] in sessions else None})
+        except Exception as e:   # noqa: BLE001 - the network: next time
+            log.info("Shotcast Cloud: hole %s's picture not sent (%s)", hole, e)
+            return sent
+        if r.status_code == 429:
+            return sent
+        if r.status_code == 200:
+            sent += 1
+            try:
+                if r.json().get("removed") is True:
+                    drop(hole)
+            except ValueError:
+                pass
+        else:
+            log.info("Shotcast Cloud: hole %s's picture refused (%s)", hole, r.status_code)
+    return sent
+
+
 def _send(cl: Any, db: sqlite3.Connection, uuid: str, built: bytes, pace: Pace, out: Drained) -> bool:
     """Send a round's bytes and act on the answer. False to stop draining for now."""
     from .cloud import CloudError, Unreachable, _message
@@ -557,6 +685,10 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, built: bytes, pace: Pace, 
     # (it changed on this PC between two tries: a round is sent once, and stays as it first went).
     if (r.status_code, status) in ((201, "stored"), (200, "duplicate")) or (r.status_code, error) == (409, "round_final"):
         _sent(db, uuid, out)
+        try:
+            send_pictures(cl, db, uuid)
+        except sqlite3.Error as e:   # (a locked file: the pictures go after the next round there)
+            log.info("Shotcast Cloud: the round's hole pictures weren't sent (%s)", e)
         return True
     if r.status_code == 409 and error == "not_bay_writer":
         raise Blocked("another PC now writes this bay's rounds on Shotcast Cloud: pair this PC again to send its rounds")

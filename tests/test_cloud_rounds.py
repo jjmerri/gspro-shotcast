@@ -741,7 +741,7 @@ def test_a_round_goes_with_its_courses_card_as_gspros_files_have_it(tmp_path, ap
     cfg, s, cl = _booth(tmp_path, api)
     s.record_course_tees("Pebble", CourseCard(
         name="Pebble Beach", par={1: 4, 2: 5}, index={1: 7, 2: 1},
-        yards={"Blue": {1: 380, 2: 510}, "Red": {1: 300, 2: 420}}, ratings={"Blue": (72.1, 131.0)}))
+        yards={"Blue": {1: 380, 2: 510}, "Red": {1: 300, 2: 4200}}, ratings={"Blue": (72.1, 131.0)}))
     known, plain, other = _round(s, 1), _round(s, 100), s.begin_round("r3", course="Elsewhere", players={"Ann": None})
     _hit(s, "Ann", 200)
     s.end_round(other, complete=True)
@@ -751,7 +751,9 @@ def test_a_round_goes_with_its_courses_card_as_gspros_files_have_it(tmp_path, ap
     card = {p[0]: p[2]["course_card"] for p in api.puts}
     assert card[known] == {
         "folder": "pebble_gsp", "par": {"1": 4, "2": 5}, "index": {"1": 7, "2": 1},
-        "tees": [{"name": "Blue", "rating": 72.1, "slope": 131.0}, {"name": "Red", "rating": None, "slope": None}]}
+        "tees": [{"name": "Blue", "rating": 72.1, "slope": 131.0, "yards": {"1": 380, "2": 510}},
+                 # (a yardage the cloud's format can't hold is left out, not the round)
+                 {"name": "Red", "rating": None, "slope": None, "yards": {"1": 300}}]}
     assert card[plain] == card[known] | {"folder": None}
     assert card[other] is None   # (a course whose files gave no card)
     # A course file's odd tees don't cost the round its upload: no more, and no longer, than the cloud takes.
@@ -763,3 +765,129 @@ def test_a_round_goes_with_its_courses_card_as_gspros_files_have_it(tmp_path, ap
     assert _drain(cl, cfg).sent == [long]
     tees = api.puts[-1][2]["course_card"]["tees"]
     assert len(tees) == 32 and all(len(t["name"]) == 50 for t in tees)
+
+
+def test_a_round_goes_with_each_holes_layout_as_its_replay_is_drawn(tmp_path, api):
+    """The tee, this round's pin, the designer's aim point and par of each hole played: what the cloud
+    draws the hole's replay on (shotcast_scoring.replay). A round quit before GSPro logged the layout
+    still has the course's tee from an earlier round, and no pin (the cloud estimates it)."""
+    cfg, s, cl = _booth(tmp_path, api)
+    first = _round(s, 1)
+    hole = {"played": True, "par": 4, "tee": [0.0, 1.0, 0.0], "pin": [3.0, 2.0, 380.0], "waypoint": [1.0, 1.0, 250.0]}
+    s.record_hole_layout("Pebble", [hole], ts=60.0)
+    quit_early = _round(s, 100_000)   # (far beyond the first round's layout: no pin of its own)
+    elsewhere = s.begin_round("r9", course="Nowhere", players={"Ann": None})
+    _hit(s, "Ann", 200_000, course="Nowhere")
+    s.end_round(elsewhere, complete=True)
+    _drain(cl, cfg)
+    sent = {p[0]: p[2]["hole_layouts"] for p in api.puts}
+    assert sent[first] == [{"hole": 1, "par": 4, "tee_box": None, "tee": [0.0, 0.0], "pin": [3.0, 380.0], "waypoint": [1.0, 250.0]}]
+    assert sent[quit_early] == [{"hole": 1, "par": 4, "tee_box": None, "tee": [0.0, 0.0], "pin": None, "waypoint": [1.0, 250.0]}]
+    assert sent[elsewhere] == []
+
+
+def _jpeg(w, h, green=110):
+    import io
+
+    from PIL import Image
+
+    b = io.BytesIO()
+    Image.new("RGB", (w, h), (50, green, 60)).save(b, "JPEG")
+    return b.getvalue()
+
+
+def test_after_a_round_goes_each_holes_minimap_goes_if_the_cloud_wants_it(tmp_path, api):
+    """The picture the cloud draws a hole's replay over: GSPro's minimap from the tee, with the ball
+    and pin on it. The cloud says which it wants: none of the hole yet, or a larger one."""
+    cfg, s, cl = _booth(tmp_path, api)
+    s.record_hole_image("Pebble", 1, _jpeg(36, 72), (0.5, 0.9), (0.5, 0.1))
+    s.record_hole_image("Pebble", 2, _jpeg(36, 72), (0.5, 0.9), (0.5, 0.1))   # (a hole the round didn't play: not sent)
+    first = _round(s, 1)
+    _drain(cl, cfg)
+    [pic] = api.pictures
+    # (grabbed before this round's session began? here the same session: this round's)
+    assert (pic["course"], pic["hole"], pic["ball"], pic["pin"], pic["round_id"]) == ("Pebble", 1, [0.5, 0.9], [0.5, 0.1], first)
+    _round(s, 500)
+    _drain(cl, cfg)
+    assert len(api.pictures) == 1   # (the cloud has it: not again)
+    s.record_hole_image("Pebble", 1, _jpeg(36, 72, green=140), (0.5, 0.9), (0.5, 0.1), replace=True)
+    _round(s, 700)
+    _drain(cl, cfg)
+    assert len(api.pictures) == 1   # (a new grab no sharper: the cloud keeps its own)
+    s.record_hole_image("Pebble", 1, _jpeg(72, 144), (0.5, 0.9), (0.5, 0.1), replace=True)
+    _round(s, 900)
+    _drain(cl, cfg)
+    assert len(api.pictures) == 2   # (a sharper one goes)
+    assert not any(t == "cloud_hole_pictures" for (t,) in s.db.execute("SELECT name FROM sqlite_master"))
+
+
+def test_a_picture_an_admin_removed_is_dropped_here_and_the_hole_grabbed_afresh(tmp_path, api):
+    cfg, s, cl = _booth(tmp_path, api)
+    s.record_hole_image("Pebble", 1, _jpeg(36, 72), (0.5, 0.9), (0.5, 0.1))
+    _round(s, 1)
+    _drain(cl, cfg)
+    assert len(api.pictures) == 1
+    api.remove_picture("Pebble", 1)            # (wrong: an admin's ✕ on the site)
+    _round(s, 500)
+    _drain(cl, cfg)
+    assert len(api.pictures) == 1              # (not sent back)
+    assert not s.has_hole_image("Pebble", 1)   # (so the booth grabs it at the next tee there)
+    s.record_hole_image("Pebble", 1, _jpeg(36, 72, green=140), (0.5, 0.9), (0.5, 0.1))
+    _round(s, 900)
+    _drain(cl, cfg)
+    assert len(api.pictures) == 2 and api.kept[("pebble", 1)][1] == 36 * 72   # (the fresh grab, whatever its size)
+
+
+def test_a_removed_picture_sent_anyway_is_dropped_too(tmp_path, api):
+    """A cloud that removed it between the check and the send says so in its answer."""
+    cfg, s, cl = _booth(tmp_path, api)
+    s.record_hole_image("Pebble", 1, _jpeg(36, 72), (0.5, 0.9), (0.5, 0.1))
+    _round(s, 1)
+    _drain(cl, cfg)
+    api.remove_picture("Pebble", 1)
+    # (the check answers as if nothing were removed yet)
+    api.hook = lambda req: httpx.Response(200, json={"send": [1], "drop": []}) if req.url.path.endswith("/check") else None
+    _round(s, 500)
+    _drain(cl, cfg)
+    assert len(api.pictures) == 2 and not s.has_hole_image("Pebble", 1)
+
+
+def test_a_cloud_that_doesnt_answer_the_check_holds_up_nothing(tmp_path, api):
+    cfg, s, cl = _booth(tmp_path, api)
+    s.record_hole_image("Pebble", 1, _jpeg(36, 72), (0.5, 0.9), (0.5, 0.1))
+    api.hook = lambda req: httpx.Response(502, text="<html>") if req.url.path.endswith("/check") else None
+    first = _round(s, 1)
+    _drain(cl, cfg)
+    assert first in {p[0] for p in api.puts} and api.pictures == [] and s.has_hole_image("Pebble", 1)
+
+
+def test_a_quit_round_doesnt_take_the_next_rounds_pin(tmp_path, api):
+    """As the booth's own replay picks a layout: from any of the round's sessions, and none logged
+    after the next round on the course began."""
+    cfg, s, cl = _booth(tmp_path, api)
+    quit_early = _round(s, 1)
+    _round(s, 50)                                   # (played again: its layout is logged at its end)
+    s.record_hole_layout("Pebble", [{"played": True, "par": 4, "pin": [9.0, 0.0, 390.0], "tee": [0.0, 0.0, 0.0]}], ts=60.0)
+    _drain(cl, cfg)
+    sent = {p[0]: p[2]["hole_layouts"] for p in api.puts}
+    assert sent[quit_early][0]["pin"] is None       # (the later round's pin isn't this one's)
+
+
+def test_a_round_too_big_goes_without_its_heaviest_optional_parts_the_tees_yards_last(monkeypatch):
+    import gzip
+    import json
+
+    from commentator import cloud_rounds
+
+    yards = {str(h): 300 + h for h in range(1, 19)}
+    b = {"round": {"id": "r1"}, "shot_tracks": [], "lines": [],
+         "course_card": {"par": {"1": 4}, "tees": [{"name": f"T{i}", "rating": 70.0, "slope": 120.0, "yards": yards}
+                                                   for i in range(30)]}}
+    whole = len(cloud_rounds._json(b))
+    without = len(cloud_rounds._json(b | {"course_card": {**b["course_card"], "tees": [
+        {k: v for k, v in t.items() if k != "yards"} for t in b["course_card"]["tees"]]}}))
+    monkeypatch.setattr(cloud_rounds, "MAX_INFLATED", (whole + without) // 2)
+    sent = json.loads(gzip.decompress(cloud_rounds.encode(b)))
+    assert sent["course_card"]["tees"][0] == {"name": "T0", "rating": 70.0, "slope": 120.0}
+    monkeypatch.setattr(cloud_rounds, "MAX_INFLATED", whole)
+    assert json.loads(gzip.decompress(cloud_rounds.encode(b)))["course_card"]["tees"][0]["yards"] == yards

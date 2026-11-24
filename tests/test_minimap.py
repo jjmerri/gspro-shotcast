@@ -956,6 +956,33 @@ async def test_a_minimap_without_a_pin_leaves_the_screen_for_a_problem_report(tm
     assert meta["course"] == "Pebble" and meta["hole"] == 3 and meta["monitor"] == 1
 
 
+async def test_a_holes_map_removed_while_the_booth_runs_is_grabbed_at_its_next_tee(tmp_path):
+    """Shotcast Cloud can have a hole's map removed (cloud_rounds.send_pictures deletes this PC's copy):
+    the running booth grabs the hole again the next time it's played, without a restart."""
+    import io
+
+    engine, _ = _engine(tmp_path)
+    grabs = []
+
+    def grab(region=None):
+        grabs.append(1)
+        return Image.new("RGB", (460, 836), (80, 105, 40))
+
+    engine.screen = SimpleNamespace(detect_mirror=lambda: None, region=lambda name: None, monitor=1, grab=grab)
+    engine.round = SimpleNamespace(ended=False, course="Pebble")
+    engine.hole_number = 3
+    b = io.BytesIO()
+    Image.new("RGB", (36, 72)).save(b, "JPEG")
+    engine.store.record_hole_image("Pebble", 3, b.getvalue(), (0.5, 0.9), (0.5, 0.1))
+    engine._snap_hole(Hud())
+    assert grabs == []   # (it has one)
+    engine.store.db.execute("DELETE FROM hole_images WHERE hole = 3")   # (the cloud's removal reaches the PC)
+    engine._snap_hole(Hud())
+    for _ in range(20):
+        await asyncio.sleep(0.02)
+    assert grabs   # (grabbed afresh; its report frame may grab the screen too)
+
+
 async def test_an_impact_read_that_came_up_wrong_leaves_its_boxes_for_a_problem_report(tmp_path):
     # Jarod, Apple Valley: the impact read was the flight's backdrop ('诚', '5'): no shot number, no pin.
     # The boxes it was read from are kept, not just the screen grabbed after (the HUD gone by then).
