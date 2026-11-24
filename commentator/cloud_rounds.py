@@ -314,7 +314,7 @@ def _sides(slots: list[dict[str, Any]]) -> tuple[list[str], dict[str, str]]:
 
 def _course_card(tees: list[dict[str, Any]], folder: str | None) -> dict[str, Any] | None:
     """The course's own card as GSPro's course files have it (kept in course_tees as each course is
-    loaded): par and stroke index by hole, each tee's rating and slope. A league's results in the
+    loaded): par and stroke index by hole, each tee's rating, slope and yards by hole. A league's results in the
     cloud put a player's strokes on the holes by it. `folder`: GSPro's folder for the course when
     its round file named it (the round was surely played from it); None when the card was found by
     the course's name alone. None for a course with no card."""
@@ -326,7 +326,10 @@ def _course_card(tees: list[dict[str, Any]], folder: str | None) -> dict[str, An
         "par": _holes(first["par"]), "index": _holes(first["hole_index"]),
         # (As many, and names as long, as the cloud's format takes: a course file's odd tee mustn't
         # cost the round its upload.)
-        "tees": [{"name": str(t["tee"])[:MAX_TEE_NAME], "rating": t["rating"], "slope": t["slope"]}
+        "tees": [{"name": str(t["tee"])[:MAX_TEE_NAME], "rating": t["rating"], "slope": t["slope"],
+                  # each hole's length from it: the cloud picks the tee a round was played from by them,
+                  # as the booth's handicap index does (a yardage the cloud's format can't hold is left out)
+                  "yards": {h: y for h, y in (_holes(t.get("yards")) or {}).items() if 0 < y <= 1000}}
                  for t in tees[:MAX_TEES]],
     }
 
