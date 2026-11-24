@@ -453,13 +453,16 @@ def encode(b: dict[str, Any]) -> bytes:
 
     A round too big for the cloud (MAX_BODY compressed, MAX_INFLATED as JSON) goes without its
     heaviest optional parts, in the order the cloud's API gives, till it fits: the tracks' flight and
-    roll paths, then the tracks, then the commentary. The scores, cards and shots always go; one
+    roll paths, then the tracks, then the commentary, then the tees' yards. The scores, cards and shots always go; one
     still too big is sent whole, and the cloud says so (413)."""
     out = dict(b)
     lighter = (
         lambda: out.update(shot_tracks=[t | {"flight": None, "roll": None} for t in out["shot_tracks"]]),
         lambda: out.update(shot_tracks=[]),
         lambda: out.update(lines=[]),
+        # (the tees' yards: the cloud then picks a round's tee by its length, as with no layout)
+        lambda: out.update(course_card=out["course_card"] and {
+            **out["course_card"], "tees": [{k: v for k, v in t.items() if k != "yards"} for t in out["course_card"]["tees"]]}),
     )
     whole = None
     for drop in (None, *lighter):
