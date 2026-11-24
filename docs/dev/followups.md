@@ -135,3 +135,44 @@ lie, hole and stroke, tiles read at the next setup) counts. Known gaps, accepted
   log line, on an occasional shot; nothing stored or said changes. (Repeated review findings of this
   kind: the check reads carries from several late sources; one source of truth for a shot's carries
   would fix them together.)
+
+## Course folder from GSPro's course file load line
+
+The course folder comes from GSPro's `Loading Course file <Courses>/<folder>/<file>` line, logged on
+every course load (menu, Play, online, tournaments), falling back to `Selected Course:` and then to the
+card found by course name. Known gap, accepted:
+- Naming a round's tee boxes (`course_layout.name_tee_boxes`) still finds the course file by name, as
+  `hole_layouts` rows carry no round link: with two builds of one course installed whose boxes differ,
+  a round's tee label can be missing or the other build's. (Rare: two builds of a course; a label only.)
+- A tile clicked and backed out of logs its course file line too. Should a load then reach a course
+  with no file line of its own (none seen: every GSPro load path logs one, tournaments included), the
+  clicked folder stands as the round's, as `Selected Course:` did before; a mismatched folder only stops
+  GSPro's round file correcting that round. Checking the folder's course name against the `Loading course`
+  display name would catch it.
+- A round quit early on a GSPro that writes no round file keeps no folder (`round_folders` is filled
+  from the round file), so its hole replays take the tee and pin of the build found by name: with two
+  builds of the course installed, possibly the other's. (Rare; replay drawing only. Storing the loaded
+  folder at round start would fix it.)
+- A file line is read as a folder only when the file is named for its folder, as GSPro names every course
+  file (so a line cut off mid-path names none). A line GSPro never finishes, or a release that names the
+  file otherwise, leaves the folder to `Selected Course:` and the course name.
+- A saved log excerpt can keep the Windows profile name from a course file line cut off mid-path
+  (accepted: it stays in the developer's fixture files).
+- The follower decodes each read on its own, so a character split between two reads (an accented course
+  folder written across a poll) is garbled and the line names no folder: the fallbacks take over.
+  Buffering the unfinished line as bytes would fix it, for every line.
+
+GSPro's `GSPro Version:` line, logged once as it starts, now ends a round the last session was in, as a
+switch to the other log already did: a restart writing the same log afresh no longer carries a joined
+round's scores into the next round on the same course. A round ended by a restart (either way: a crash,
+say) is closed as incomplete, never made the week's league round by the quit-after-the-week's-holes rule:
+the crash, not the team, ended it. (Before, a log switch mid-round could make it one.) Known gap, accepted:
+two round ends between the booth's checks of the log (a second apart), such as a restart and then the range
+entered and left within that second, leave only the later end's scores and reason for the open round. Known gap, accepted: a restart while the booth
+isn't reading (asleep) whose new log has already outgrown the old one's read position is read from that
+position, so its start (version line, course load) is missed (as before this change).
+- A booth restarted mid-round that sees GSPro restart too, before it has rejoined the round, has no
+  round to close: the stored round left in progress can be continued by the same players' next round
+  on the same course, as before this change. (Two restarts in a row; an admin can split the round.)
+- A saved log excerpt whose last End Round is a range exit after a GSPro restart finds no course round
+  in that session and falls back to the log's tail, which can span both sessions (fixture tool only).

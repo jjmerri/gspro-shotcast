@@ -196,6 +196,26 @@ def test_follower_reads_only_appended_bytes_and_resets_on_truncation(tmp_path):
     assert f.state.strokes_before(1) == 2 and f.state.current_hole == 0
 
 
+def test_a_gspro_restart_after_the_booth_joined_its_round_starts_the_next_round_clean(tmp_path):
+    p = tmp_path / "Player.log"
+    p.write_text("Loading Course file C:/Courses/a_gsp/a_gsp.gkd\nLoading course A\n * Shot Fired! *\n"
+                 "ActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 0\n"
+                 "SGT Sync()\n" + "x" * 500 + "\n")   # a tournament round
+    f = GsproLogFollower(str(p))
+    f._prime()
+    assert f.state.course == "a_gsp" and f.state.sgt
+    p.write_text("GSPro Version: 4.1.9\nSelected Course: a_gsp\n"
+                 "Loading Course file C:/Courses/a_gsp/a_gsp.gkd\n")   # GSPro restarted, writing the log afresh
+    for ev in parse_events(f._read_new()):
+        f.state.apply(ev)
+    assert not f.state.sgt and f.state.round_ends == 1 and f.state.end_by_restart
+
+
+def test_a_course_files_path_holding_another_line_separator_is_one_line():
+    events = parse_events("Loading Course file C:/Users/Jane Doe/Jane Doe.lib\u2028 x/Courses/riviera/riviera.gkd\n")
+    assert [(e.kind, e.course) for e in events] == [("course_file", "riviera")]
+
+
 def test_hit_water_sets_and_clears_the_wet_flag():
     # The splash is logged (Hit_water, and "| material water |" on the bounce line) the instant the
     # ball goes in, before the penalty score bump. It drives the booth's instant water reaction.
@@ -361,6 +381,24 @@ def test_a_course_loaded_without_being_selected_is_still_a_course():
     assert s.mode == "range" and not s.own_range
 
 
+def test_the_course_folder_is_the_loaded_course_files():
+    s = GsproState()
+    york = "Loading Course file C:\\GSproV1\\Courses/yorkgc_gsp/yorkgc_gsp.gkd\n"
+    for ev in parse_events("Selected Course: yorkgc_gsp\n" + york + york + "Loading course York Golf Club\n"):
+        s.apply(ev)
+    assert (s.mode, s.course, s.course_display, s.course_entries) == ("course", "yorkgc_gsp", "York Golf Club", 1)
+    # A tournament logs no `Selected Course:`, and its folder as the course list spells it.
+    for ev in parse_events("End Round Button Click\nLoading Course file C:\\GSproV1\\Courses/Riviera_GSP/Riviera_GSP.gsprou6\n"
+                           "Loading course Riviera\n"):
+        s.apply(ev)
+    assert (s.mode, s.course, s.course_display, s.course_entries) == ("course", "riviera_gsp", "Riviera", 2)
+    # Another course loaded than the one last selected: the loaded one's, and its mismatch.
+    for ev in parse_events("End Round Button Click\nSelected Course: a_gsp\nLoading Course file C:/Courses/b_gsp/b_gsp.gkd\n"
+                           "Course File Mismatch Detected!\nLoading course Wentworth by the Sea\n"):
+        s.apply(ev)
+    assert (s.course, s.course_display, s.mismatched_folders) == ("b_gsp", "Wentworth by the Sea", {"b_gsp"})
+
+
 def test_follower_learns_from_the_backlog_that_gspro_is_on_the_range(tmp_path):
     path = tmp_path / "output_log.txt"
     path.write_text("Selected Course: riviera_gsp\nEnd Round Button Click\nGSPro Multi Range\nRangeLevelLoaded()\n")
@@ -376,6 +414,7 @@ def test_follower_learns_from_the_backlog_whether_play_has_begun(tmp_path):
     f = GsproLogFollower(str(path))
     f._prime()
     assert f.state.mode == "course" and f.state.shots_since_course == 0   # still on the opening tee
+    assert f.state.course is None   # a selection only, maybe backed out of: not the round's folder
     path.write_text("Selected Course: riviera_gsp\n"
                     " * ------- Shot Fired! ------- *\nActivePlayer: 0  currentHole: 9  strokes: 1  Previous Score: 0\n"
                     " * ------- Shot Fired! ------- *\nActivePlayer: 0  currentHole: 11  strokes: 1  Previous Score: 0\n")
@@ -389,6 +428,45 @@ def test_follower_learns_from_the_backlog_whether_play_has_begun(tmp_path):
     f = GsproLogFollower(str(path))
     f._prime()
     assert f.state.mode == "menu" and f.state.shots_since_course == 0
+
+
+def test_a_booth_started_mid_round_takes_the_folder_gspro_loaded_it_from(tmp_path):
+    path = tmp_path / "output_log.txt"
+    path.write_text("Selected Course: a_gsp\nLoading Course file C:/Courses/a_gsp/a_gsp.gkd\n"
+                    "Loading Course file C:/Courses/riviera_gsp/riviera_gsp.gkd\nLoading course Riviera\n"
+                    " * ------- Shot Fired! ------- *\nActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 0\n")
+    f = GsproLogFollower(str(path))
+    f._prime()
+    assert (f.state.mode, f.state.course, f.state.course_loaded) == ("course", "riviera_gsp", True)
+    assert f.state.course_display == "Riviera"   # (what a misread HUD gives way to)
+    path.write_text("Selected Course: a_gsp\nLoading Course file C:/Courses/a_gsp\nLoading course A\n"
+                    " * ------- Shot Fired! ------- *\nActivePlayer: 0  currentHole: 0  strokes: 1  Previous Score: 0\n")
+    f = GsproLogFollower(str(path))
+    f._prime()   # (a file line naming no folder: the folder isn't known, but the course's name is)
+    assert (f.state.course, f.state.course_display) == (None, "A")
+
+
+def test_a_booth_started_as_gspro_writes_a_course_file_line_reads_it_whole(tmp_path):
+    path = tmp_path / "output_log.txt"
+    path.write_text("Selected Course: a_gsp\nLoading Course file C:/Courses/a_gsp/a_gsp.gkd\n"
+                    "Loading Course file D:/Profiles/Jane Doe/Jane Doe")   # cut off: GSPro is mid-line
+    f = GsproLogFollower(str(path))
+    f._prime()
+    assert f.state.course != "jane doe"
+    with open(path, "a") as out:
+        out.write(".Courses/riviera_gsp/riviera_gsp.gkd\nLoading course Riviera\n")
+    for ev in parse_events(f._read_new()):
+        f.state.apply(ev)
+    assert (f.state.course, f.state.course_display) == ("riviera_gsp", "Riviera")
+
+
+def test_a_course_files_path_is_only_its_folder_whatever_words_it_holds():
+    from commentator.fixtures import check_log
+
+    events = parse_events("Loading Course file D:/Shot Fired Sims/Leaves/Courses/york_gsp/york_gsp.gkd\n"
+                          "Loading Course file D:/Jane Leaves/Courses\n")
+    assert [(e.kind, e.course) for e in events] == [("course_file", "york_gsp")]
+    assert not any("Jane" in p for p in check_log("Loading Course file D:/Jane Leaves/Courses\n"))
 
 
 def test_the_log_followed_is_the_one_gspro_wrote_last(tmp_path, monkeypatch):
@@ -1244,3 +1322,48 @@ def test_a_4x_launch_line_is_kept_on_its_shot_and_the_score_line_credits_it():
     info = s.fire_info(s.fires)
     assert info["launch"] == {"sp": 132.69, "el": 14.22, "az": 4.76, "ts": 2774.93, "sa": 4.05}
     assert info["player"] == 1 and info["putting"] is False and not s.unparsed
+
+
+def test_a_rounds_log_excerpt_starts_at_its_courses_selection_or_load():
+    from commentator.fixtures import last_round
+
+    load = "Loading Course file C:/Courses/x_gsp/x_gsp.gkd"
+    text = "\n".join(["Selected Course: old_gsp", "End Round Button Click", "Selected Course: x_gsp", load, "a",
+                      load, "Round Is Complete", "End Round Button Click"])
+    assert last_round(text)[0] == "Selected Course: x_gsp"
+    text = "\n".join(["Selected Course: old_gsp", "End Round Button Click", load, "a", "End Round Button Click"])
+    assert last_round(text)[0] == load   # a tournament: no selection logged
+    other = "Loading Course file C:/Courses/y_gsp/y_gsp.gkd"
+    text = "\n".join(["Selected Course: y_gsp", other, "Selected Course: x_gsp", load, "a", "End Round Button Click"])
+    assert last_round(text)[0] == "Selected Course: x_gsp"   # not the course clicked and backed out of
+
+
+def test_a_saved_log_excerpt_is_the_last_rounds_gspro_session_only():
+    from commentator.fixtures import check_log, excerpt
+
+    load = "Loading Course file C:/Courses/a_gsp/a_gsp.gkd"
+    text = "\n".join(["GSPro Version: 3.1.6.20", "Selected Course: a_gsp", load, "SGT Sync()",   # GSPro crashed
+                      "GSPro Version: 4.1.9", "Selected Course: a_gsp", load, "End Round Button Click", ""])
+    out = excerpt(text)
+    assert out.startswith("GSPro Version: 4.1.9\n") and "3.1.6" not in out and "SGT" not in out
+    assert "Version" not in excerpt(text.split("GSPro Version: 4.1.9\n")[1] + "GSPro Version: 4.2\n")   # a later one's
+    # A library path holding another line separator is one line, as GSPro's log has it.
+    tour = "GSPro Version: 4.1.9\nLoading Course file D:/Library\u2028West/Courses/riviera/riviera.gkd\nEnd Round Button Click\n"
+    assert "riviera/riviera.gkd" in excerpt(tour)
+    assert not any("'course'" in p for p in check_log(tour))
+
+
+def test_a_saved_log_excerpt_keeps_only_the_course_files_folder_and_name():
+    from commentator.fixtures import check_log, excerpt
+
+    line = "Loading Course file C:\\Users\\Jane Doe\\GSPro\\Courses/Riviera_GSP/Riviera_GSP.gsprou6"
+    out = excerpt(line + "\nEnd Round Button Click\n")
+    assert "Jane" not in out and "Doe" not in out
+    assert "Doe" not in excerpt("  " + line + "\nEnd Round Button Click\n")   # indented
+    for cut in ("C:\\Users\\Jane Doe\\GSPro", "D:\\Profiles\\Jane Doe\\GSPro"):   # a log cut off mid-path
+        assert "Doe" not in excerpt(f"Loading Course file {cut}")
+        assert [e for e in parse_events(f"Loading Course file {cut}") if e.kind == "course_file"] == []
+    assert "Loading Course file C:/GSPro/Courses/Riviera_GSP/Riviera_GSP.gsprou6" in out
+    assert [e.course for e in parse_events(out) if e.kind == "course_file"] == ["riviera_gsp"]
+    # A tournament's load stands for the selection every fixture round has.
+    assert not any("'course'" in p for p in check_log(line + "\nEnd Round Button Click\n"))

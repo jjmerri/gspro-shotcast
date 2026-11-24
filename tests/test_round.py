@@ -1071,6 +1071,32 @@ def test_course_card_from_coursedetails_and_matches_by_name_not_folder(tmp_path)
     assert card.ratings == {"Black": (76.9, 145), "White": (70.5, 129)}
 
 
+def test_two_builds_of_a_course_take_the_card_of_the_one_gspro_loaded(tmp_path):
+    from commentator import course_card
+
+    course_card._index_cache.clear()
+    for name in ("links_v1_gsp", "links_v2_gsp"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "coursedetails.txt").write_text(DETAILS, encoding="utf-8")
+    for loaded in ("links_v1_gsp", "links_v2_gsp"):
+        path, unsure = course_card.locate(tmp_path, "Test Links", loaded)
+        assert path.name == loaded and unsure   # (still unsure: the folder may be the last course's)
+        assert course_card.identify(tmp_path, "Test Links", loaded) == loaded   # (a past week's name is it)
+    # A past week's course isn't this round's longer-named one just because this round loaded that.
+    (tmp_path / "links_east_gsp").mkdir()
+    (tmp_path / "links_east_gsp" / "coursedetails.txt").write_text(DETAILS.replace("Test Links", "Test Links East"),
+                                                                     encoding="utf-8")
+    course_card._index_cache.clear()
+    assert course_card.identify(tmp_path, "Test Links", "links_east_gsp") in ("links_v1_gsp", "links_v2_gsp")
+    (tmp_path / "links_v3_gsp").mkdir()   # a build whose name differs only by punctuation is the course
+    (tmp_path / "links_v3_gsp" / "coursedetails.txt").write_text(DETAILS.replace("Test Links", "Test Links!"),
+                                                                  encoding="utf-8")
+    course_card._index_cache.clear()
+    assert course_card.identify(tmp_path, "Test Links", "links_v3_gsp") == "links_v3_gsp"
+    assert course_card.identify(tmp_path, "Test Links 4", "links_v1_gsp") is None   # (another course's number)
+    course_card._index_cache.clear()
+
+
 def test_course_card_merges_the_details_ratings_into_the_csv_card(tmp_path):
     from commentator import course_card
 
@@ -3997,7 +4023,14 @@ async def test_range_with_a_round_open_ends_it_quietly(tmp_path):
     e.gspro.mode = "range"
     e._check_log_round()
     (ev,) = _queued(e)
-    assert ev.abandoned and ev.reason == "GSPro went to the range"
+    assert ev.abandoned and ev.reason == "GSPro went to the range" and not ev.restart
+    # GSPro restarted and went on to the range before the booth looked: a restart all the same.
+    e, r = await _log_round(tmp_path / "restart")
+    e.gspro.end_round(restart=True)
+    e.gspro.mode = "range"
+    e._check_log_round()
+    (ev,) = _queued(e)
+    assert ev.abandoned and ev.restart
 
 
 async def test_skipping_hole_one_means_a_back_nine_until_the_log_names_the_start(tmp_path):
@@ -4928,7 +4961,8 @@ async def test_a_quit_after_a_full_nine_signs_off_on_the_holes_played(tmp_path):
     assert signed == [9]
 
 
-async def test_a_wrong_holes_practice_quit_after_the_weeks_nine_is_the_league_round(tmp_path):
+@pytest.mark.parametrize("restart", [False, True])
+async def test_a_wrong_holes_practice_quit_after_the_weeks_nine_is_the_league_round(tmp_path, restart):
     # League week 1, 2026-11-07: set up for 18 (the week is the front 9), so practice; quit after 9.
     from commentator.models import RoundEndEvent
     e = _engine(tmp_path)
@@ -4954,6 +4988,11 @@ async def test_a_wrong_holes_practice_quit_after_the_weeks_nine_is_the_league_ro
     async def fake_sign_off(rr, stats):
         signed.append(rr.is_league)
     e._sign_off = fake_sign_off
+    if restart:   # GSPro crashed on the 10th tee instead: not the team's quit, so it stays practice
+        await e.handle_round_end(RoundEndEvent(reason="GSPro restarted", abandoned=True, restart=True))
+        assert not r.is_league
+        assert e.store.db.execute("SELECT MAX(is_league) FROM rounds").fetchone()[0] in (0, None)
+        return
     await e.handle_round_end(RoundEndEvent(reason="quit early in GSPro", abandoned=True))
     assert r.is_league and r.holes == 9 and r.schedule["week"] == 4 and signed == [True]
     rows = e.store.db.execute("SELECT is_league, complete, holes, team IS NOT NULL FROM rounds").fetchall()

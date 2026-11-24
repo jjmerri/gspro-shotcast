@@ -219,7 +219,8 @@ class RoundEndMixin:
             # nine or more counts as a round in the season totals, scored per nine. A quit that far in
             # earns a sign-off over the holes actually played; a shorter one is left alone.
             self._wrap_branches = None
-            if self._league_after_quit(r):
+            # (a restart isn't a quit: the crash, not the team, ended it after the week's holes)
+            if not event.restart and self._league_after_quit(r):
                 stats = self._record_round_stats(r, event.reason)
             else:
                 stats = self._record_round_stats(r, event.reason, complete=False)

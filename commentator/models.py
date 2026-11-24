@@ -178,6 +178,7 @@ class ScorecardEvent:
 class RoundEndEvent:
     reason: str
     abandoned: bool = False   # quit before the last hole: no closer, no round stats recorded
+    restart: bool = False     # GSPro restarted mid-round (a crash, say): never a quit after the week's holes
 
 
 @dataclass

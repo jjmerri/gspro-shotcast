@@ -32,7 +32,7 @@ from PIL import Image
 
 from .config import DEFAULT_REGIONS, Region
 from .hud import Hud
-from .sources.gspro_log import parse_events
+from .sources.gspro_log import _course_file_folder, parse_events
 
 ROOT = Path("tests/fixtures")
 # The HUD regions read for a shot. Not `others` (other players' names) or the minimap (course art).
@@ -175,23 +175,64 @@ def redact_text(line: str, names: list[str] = ()) -> str:
     return line
 
 
+def _course_mark(line: str) -> str | None:
+    """The course folder a `Selected Course:` or `Loading Course file` line names, else None."""
+    line = line.strip()   # (as parse_events reads it)
+    if line.startswith("Selected Course:"):
+        return line.split(":", 1)[1].strip().lower() or None
+    return _course_file_folder(line) if line.startswith("Loading Course file ") else None
+
+
+def _course_file_line(line: str) -> str:
+    """A `Loading Course file` line with only its course folder and file kept: the course library's path
+    can be under a Windows profile, whose name `_USER_PATH` cuts at a space."""
+    if not line.strip().startswith("Loading Course file "):
+        return line
+    if _course_file_folder(line.strip()) is None:
+        return "Loading Course file (path cut short)"   # (what's left of it can be the profile's name)
+    parts = [p for p in re.split(r"[\\/]", line.strip()[len("Loading Course file "):]) if p]
+    return f"Loading Course file C:/GSPro/Courses/{'/'.join(parts[-2:])}"
+
+
+def _lines(text: str) -> list[str]:
+    return [ln.rstrip("\r") for ln in text.split("\n")]   # (as parse_events splits: a path can hold U+2028)
+
+
+def _round_span(lines: list[str]) -> tuple[int, int] | None:
+    """The first and last line of the log's last round (from its course load to its end), else None."""
+    ends = ("Round Is Complete", "End Round Button Click")
+    end = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].startswith(ends)), None)
+    if end is None:
+        return None
+    # Its course's selection or load (a tournament logs no selection): the last before its end, and the
+    # round's earlier ones with no round's end between (not another course's, clicked and backed out of
+    # first), all in its GSPro session (a restart's round is over, its End Round never logged).
+    start = folder = None
+    for i in range(end, -1, -1):
+        if lines[i].startswith("GSPro Version:") or start is not None and lines[i].startswith(ends):
+            break
+        if mark := _course_mark(lines[i]):
+            if folder is not None and mark != folder:
+                break
+            start, folder = i, mark
+    return (start, end) if start is not None else None
+
+
 def last_round(text: str) -> list[str]:
     """The lines of the log's last round (from its course load to its end), else the log's tail."""
-    lines = text.splitlines()
-    end = next((i for i in range(len(lines) - 1, -1, -1)
-                if lines[i].startswith(("Round Is Complete", "End Round Button Click"))), None)
-    if end is not None:
-        start = next((i for i in range(end, -1, -1) if lines[i].startswith("Selected Course:")), None)
-        if start is not None:
-            return lines[start:end + 1]
-    return lines[-20000:]
+    lines = _lines(text)
+    span = _round_span(lines)
+    return lines[span[0]:span[1] + 1] if span else lines[-20000:]
 
 
 def excerpt(text: str, names: list[str] = ()) -> str:
-    """The last round's lines the parser uses (the version line first), redacted."""
-    keep = [ln for ln in text.splitlines() if ln.startswith("GSPro Version:")][:1]
-    keep += [ln for ln in last_round(text) if parse_events(ln)]
-    return "\n".join(redact_text(ln, names) for ln in keep) + "\n"
+    """The last round's lines the parser uses (its GSPro session's version line first), redacted."""
+    lines = _lines(text)
+    span = _round_span(lines)
+    # The round's session's version (unknown if not captured), else the log's first.
+    keep = [ln for ln in (reversed(lines[:span[0]]) if span else lines) if ln.startswith("GSPro Version:")][:1]
+    keep += [ln for ln in (lines[span[0]:span[1] + 1] if span else lines[-20000:]) if parse_events(ln)]
+    return "\n".join(redact_text(_course_file_line(ln), names) for ln in keep) + "\n"
 
 
 def events_json(text: str) -> list[dict]:
@@ -216,6 +257,8 @@ def _kinds(kinds) -> set[str]:
     out = set(kinds)
     if "sound_material" in out:   # GSPro 3.59 names the landing only on the bounce's sound line
         out.add("material")
+    if "course_file" in out:   # a tournament or online round logs its course's load but no selection
+        out.add("course")
     return out
 
 

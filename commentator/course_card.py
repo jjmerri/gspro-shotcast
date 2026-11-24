@@ -119,9 +119,9 @@ SURE_MATCH = 0.85
 def find(courses_dirs: str | Path | list, course_name: str | None, folder: str | None = None) -> Path | None:
     """The folder of the GSPro course whose name best matches `course_name`, or None. Names can
     match equally ("Alpine Valley" is in "Swiss Alpine Valley" and in "Alpine Valley - Meadows &
-    Sugar Creek"): `folder`, the course folder GSPro's log says was selected, breaks that tie, then
-    the closer spelling. It never beats a better match: it may still be the last course's, logged
-    before this one was picked."""
+    Sugar Creek"): `folder`, the course folder GSPro's log says was loaded, breaks that tie (and picks
+    between two builds of one course), then the closer spelling. It never beats a better match: it may
+    still be the last course's, logged before this one was picked."""
     return _find(courses_dirs, course_name, folder)[0]
 
 
@@ -146,7 +146,14 @@ def _find(courses_dirs, course_name: str | None, folder: str | None = None) -> t
         index, shared = _indexes(base)
         for name, path in index.items():
             if name in shared:
-                scores.append((course_match_score(name, course_name), None))   # the folder it hides
+                # Two builds of the course: the folder GSPro loaded, when it's one, else the one indexed.
+                loaded = next((d for d in base.iterdir() if d.is_dir() and d.name.lower() == folder.lower()
+                               and _canonical_name(d) == name), None) if folder else None
+                if loaded is not None and loaded != path:
+                    scores.append((course_match_score(name, course_name), path))
+                    path = loaded
+                else:
+                    scores.append((course_match_score(name, course_name), None))   # the folder it hides
             k = (course_match_score(name, course_name), bool(folder) and path.name.lower() == folder.lower(),
                  difflib.SequenceMatcher(None, name.lower(), course_name.lower()).ratio())
             scores.append((k[0], path))
@@ -160,17 +167,22 @@ def _find(courses_dirs, course_name: str | None, folder: str | None = None) -> t
                   or any(score == key[0] and path != best for score, path in scores))
 
 
-def identify(courses_dirs: str | Path | list, course_name: str | None) -> str | None:
+def identify(courses_dirs: str | Path | list, course_name: str | None, folder: str | None = None) -> str | None:
     """The folder of the installed GSPro course that is `course_name` itself, give or take case and
     punctuation, or None. Unlike find(), never a near miss: "Swiss Alpine Valley", when it isn't
-    installed, isn't "Alpine Valley - Meadows & Sugar Creek"."""
+    installed, isn't "Alpine Valley - Meadows & Sugar Creek". `folder`, the one GSPro loaded, only picks
+    between two builds of that course: it may be another course's."""
     path = find(courses_dirs, course_name)
     if path is None:
         return None
-    name = next((n for d in ([courses_dirs] if isinstance(courses_dirs, (str, Path)) else courses_dirs)
-                 if Path(d).is_dir() for n, p in _index(Path(d)).items() if p == path), "")
-    same = difflib.SequenceMatcher(None, plain_name(name), plain_name(course_name)).ratio() >= 0.9
-    return path.name if same else None
+    name = _canonical_name(path) or ""
+    if (difflib.SequenceMatcher(None, plain_name(name), plain_name(course_name)).ratio() < 0.9
+            or set(re.findall(r"\d+", plain_name(name))) != set(re.findall(r"\d+", plain_name(course_name)))):
+        return None   # (nor another number: Pinehurst No. 2 isn't No. 4)
+    if folder and (built := find(courses_dirs, course_name, folder)) is not None \
+            and plain_name(_canonical_name(built) or "") == plain_name(name):
+        path = built
+    return path.name
 
 
 def plain_name(name: str) -> str:
