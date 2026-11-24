@@ -32,6 +32,7 @@ class FakeAPI:
         self.default: str | None = "lg1"
         self.rounds: dict[str, bytes] = {}                     # round -> the JSON it was sent as
         self.puts: list[tuple[str, int, dict]] = []
+        self.pictures: list[dict] = []
         self.answers: list = []                                # scripted answers for the next PUTs
         self.minimum: str | None = None                        # clientversion's: below it, every call is 426
         self.claim_cards = False                               # whether the tenant is a venue (its bays show cards)
@@ -56,6 +57,9 @@ class FakeAPI:
                                         "message": f"update Shotcast to {self.minimum}"})
         if path.startswith("/api/rounds/") and req.method == "PUT":
             return self.put(req)
+        if path == "/api/devices/hole-pictures" and req.method == "PUT":
+            self.pictures.append(json.loads(req.content))
+            return httpx.Response(200, json={"kept": True})
         body = json.loads(req.content) if req.content else None
         if path == "/api/devices/pair":
             assert body["name"] and len(body["fingerprint"]) == 64
