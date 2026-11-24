@@ -782,3 +782,30 @@ def test_a_round_goes_with_each_holes_layout_as_its_replay_is_drawn(tmp_path, ap
     assert sent[first] == [{"hole": 1, "par": 4, "tee_box": None, "tee": [0.0, 0.0], "pin": [3.0, 380.0], "waypoint": [1.0, 250.0]}]
     assert sent[quit_early] == [{"hole": 1, "par": 4, "tee_box": None, "tee": [0.0, 0.0], "pin": None, "waypoint": [1.0, 250.0]}]
     assert sent[elsewhere] == []
+
+
+def test_after_a_round_goes_each_holes_minimap_goes_once_unless_a_larger_one_is_grabbed(tmp_path, api):
+    """The picture the cloud draws a hole's replay over: GSPro's minimap from the tee, with the ball and pin on it."""
+    import io
+
+    from PIL import Image
+
+    def jpeg(w, h):
+        b = io.BytesIO()
+        Image.new("RGB", (w, h), (50, 110, 60)).save(b, "JPEG")
+        return b.getvalue()
+
+    cfg, s, cl = _booth(tmp_path, api)
+    s.record_hole_image("Pebble", 1, jpeg(36, 72), (0.5, 0.9), (0.5, 0.1))
+    s.record_hole_image("Pebble", 2, jpeg(36, 72), (0.5, 0.9), (0.5, 0.1))   # (a hole the round didn't play: not sent)
+    first = _round(s, 1)
+    _drain(cl, cfg)
+    [pic] = api.pictures
+    assert (pic["course"], pic["hole"], pic["ball"], pic["pin"], pic["round_id"]) == ("Pebble", 1, [0.5, 0.9], [0.5, 0.1], first)
+    _round(s, 500)
+    _drain(cl, cfg)
+    assert len(api.pictures) == 1   # (the cloud has it: not again)
+    s.record_hole_image("Pebble", 1, jpeg(72, 144), (0.5, 0.9), (0.5, 0.1), replace=True)
+    _round(s, 900)
+    _drain(cl, cfg)
+    assert len(api.pictures) == 2   # (a sharper one goes)

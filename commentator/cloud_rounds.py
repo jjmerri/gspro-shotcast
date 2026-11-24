@@ -34,8 +34,10 @@ A run that starts counts afresh: a round waits out its quiet again, and a retry 
 """
 from __future__ import annotations
 
+import base64
 import gzip
 import hashlib
+import io
 import json
 import logging
 import secrets
@@ -64,6 +66,12 @@ CREATE TABLE IF NOT EXISTS cloud_uploads (
     revision INTEGER NOT NULL DEFAULT 0,   -- 1 once the cloud has the round (a round is sent once), else 0
     error TEXT,                            -- why the last try didn't end with the cloud having it
     tries INTEGER NOT NULL DEFAULT 0       -- failed tries so far (how long the next waits: Pace.retry)
+);
+CREATE TABLE IF NOT EXISTS cloud_hole_pictures (  -- the largest minimap of each hole the cloud has taken
+    course TEXT NOT NULL COLLATE NOCASE,
+    hole INTEGER NOT NULL,
+    area INTEGER NOT NULL,                 -- its width x height, in pixels
+    PRIMARY KEY (course, hole)
 );
 CREATE TABLE IF NOT EXISTS cloud_claim_codes (   -- a player's code to claim a round with (claim_codes)
     uuid TEXT NOT NULL,                    -- the round record's
@@ -564,6 +572,51 @@ def _sent(db: sqlite3.Connection, uuid: str, out: Drained) -> None:
     out.sent.append(uuid)
 
 
+def send_pictures(cl: Any, db: sqlite3.Connection, uuid: str) -> int:
+    """The minimap of each hole the round played (hole_images, grabbed at the tee) that the cloud
+    hasn't a picture of at least this size: what the cloud draws the hole's replay over. Never stops a
+    drain: a picture that doesn't go is tried again after the next round there. Returns how many went."""
+    from PIL import Image
+
+    rec = db.execute("SELECT course FROM round_records WHERE uuid = ?", (uuid,)).fetchone()
+    if rec is None or not rec["course"]:
+        return 0
+    holes = {int(m.group(1)) for (h,) in db.execute("SELECT DISTINCT hole FROM shots WHERE record_uuid = ?", (uuid,))
+             if (m := replay._HOLE.match(h or ""))}
+    sent = 0
+    for hole in sorted(holes):
+        im = db.execute("SELECT image, ball_x, ball_y, pin_x, pin_y FROM hole_images WHERE course = ? COLLATE NOCASE"
+                        " AND hole = ? AND ball_x IS NOT NULL AND pin_x IS NOT NULL ORDER BY id DESC LIMIT 1",
+                        (rec["course"], hole)).fetchone()
+        if im is None:
+            continue
+        try:
+            w, h = Image.open(io.BytesIO(im["image"])).size
+        except Exception:   # noqa: BLE001 - not a picture after all: nothing to send
+            continue
+        had = db.execute("SELECT area FROM cloud_hole_pictures WHERE course = ? AND hole = ?",
+                         (rec["course"], hole)).fetchone()
+        if had is not None and had[0] >= w * h:
+            continue
+        try:
+            r = cl.request("PUT", "/api/devices/hole-pictures", body={
+                "course": rec["course"], "hole": hole, "jpeg": base64.b64encode(im["image"]).decode(),
+                "ball": [im["ball_x"], im["ball_y"]], "pin": [im["pin_x"], im["pin_y"]], "round_id": uuid})
+        except Exception as e:   # noqa: BLE001 - the network: next time
+            log.info("Shotcast Cloud: hole %s's picture not sent (%s)", hole, e)
+            return sent
+        if r.status_code == 429:
+            return sent
+        if r.status_code == 200:
+            db.execute("INSERT INTO cloud_hole_pictures VALUES (?, ?, ?) ON CONFLICT (course, hole) DO UPDATE"
+                       " SET area = excluded.area", (rec["course"], hole, w * h))
+            db.commit()
+            sent += 1
+        else:
+            log.info("Shotcast Cloud: hole %s's picture refused (%s)", hole, r.status_code)
+    return sent
+
+
 def _send(cl: Any, db: sqlite3.Connection, uuid: str, built: bytes, pace: Pace, out: Drained) -> bool:
     """Send a round's bytes and act on the answer. False to stop draining for now."""
     from .cloud import CloudError, Unreachable, _message
@@ -588,6 +641,7 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, built: bytes, pace: Pace, 
     # (it changed on this PC between two tries: a round is sent once, and stays as it first went).
     if (r.status_code, status) in ((201, "stored"), (200, "duplicate")) or (r.status_code, error) == (409, "round_final"):
         _sent(db, uuid, out)
+        send_pictures(cl, db, uuid)
         return True
     if r.status_code == 409 and error == "not_bay_writer":
         raise Blocked("another PC now writes this bay's rounds on Shotcast Cloud: pair this PC again to send its rounds")
