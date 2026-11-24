@@ -17,6 +17,7 @@ from typing import Any
 
 from . import stats_cache
 from .round_record import reuse
+from shotcast_scoring.analytics import exact_add, exact_merge  # noqa: F401 (the shared copy)
 
 CONTEXTS = ("league", "tournament", "practice")
 
@@ -89,28 +90,6 @@ def record_sessions(db: sqlite3.Connection) -> dict[str, list[int]]:
         gens = {uuid: str(gen) for uuid, gen in db.execute("SELECT uuid, gen FROM main.round_records")}
         return stats_cache.per_key(db, "record_sessions", gens, compute, tally=False)
     return reuse(db, ("record_sessions",), run)
-
-
-def exact_add(partials: list[float], x: float) -> None:
-    """Add `x` to a sum kept exactly, as floats that don't overlap (as math.fsum keeps it): however
-    the sum is split up and put back together (exact_merge), math.fsum(partials) is the same, the
-    true sum correctly rounded."""
-    i = 0
-    for y in partials:
-        if abs(x) < abs(y):
-            x, y = y, x
-        hi = x + y
-        lo = y - (hi - x)
-        if lo:
-            partials[i] = lo
-            i += 1
-        x = hi
-    partials[i:] = [x]
-
-
-def exact_merge(into: list[float], part: Iterable[float]) -> None:
-    for x in part:
-        exact_add(into, x)
 
 
 class Nights:
