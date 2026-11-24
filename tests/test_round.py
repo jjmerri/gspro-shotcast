@@ -3416,11 +3416,23 @@ def test_a_round_started_after_a_drive_off_its_courses_range_takes_the_drive(tmp
         (e.store.session_id,)).lastrowid   # as recorded with no round: practice
     e._fire_rows[fire] = (drive.shot_id, drive, None, None)
     e._row_source[fire] = "screen"
+    practice = ShotRecord("Mike", Shot(carry=150.0), "Hole 9, par 5, 540 yards", Hud(), [], shot_number=3)
+    args = ("lm", 250.0, "Wynn", 12.0)   # the course the HUD read before the round started
+    e._carry_trail["Mike"] = [[1, practice, 4.0, 300.0, args, (False, 0)], [2, drive, 4.0, 400.0, args, (False, 0)]]
+    e._carry_trail["Gone"] = [[0, ShotRecord("Gone", Shot(carry=150.0), "Hole 2", Hud(), []), 4.0, 300.0, None, (False, 0)]]
     r = Round(league=e.league, gspro_players=["Mike", "Josh"], course="York Golf Club", scheduled_format=None)
     r.par[1], r.slot_names = 4, ["Mike", "Josh"]
     assert r.is_league
     e._start_round(r)
     assert (drive.round_id, drive.hole_seq) == (r.id, 1) and fire in e._owners_due
+    assert [x[1] for x in e._carry_trail["Mike"]] == [drive] and "Gone" not in e._carry_trail
+    checked = []   # its carry check waits for its second stroke, and is the round's course's
+    e.carry.check = lambda *a: checked.append(a[3])
+    drive.carry_game = 250.0
+    second = ShotRecord("Mike", Shot(carry=150.0), drive.hole, Hud(), [], round_id=r.id, hole_seq=1, shot_number=2)
+    drive.shot_number = 1
+    e._trail_carry("Mike", (3, second, 10.0, 150.0, None, (False, 0)))
+    assert checked == ["York Golf Club"]
     assert (drive.hole, drive.par) == ("Hole 1, par 4", 4) and r.shot_floor == drive.shot_id - 1
     assert tuple(e.store.db.execute("SELECT is_league, hole, course FROM shots WHERE id = ?",
                                     (drive.shot_id,)).fetchone()) == (1, "Hole 1, par 4", "York Golf Club")
@@ -8004,7 +8016,7 @@ async def test_a_file_lie_is_recorded_over_the_screens_which_it_keeps_to_go_back
     # GSPro's sand is the shot's; the stored row has the screen's until the stroke's pin puts GSPro's on,
     # so a pin taken back leaves the fairway.
     assert e.state.shots[-1].lie_before == "sand"
-    assert [q[4][0] for q in queued] == ["sand"]   # its carry checked from GSPro's lie, not the screen's
+    assert [q[1] for q in queued] == [e.state.shots[-1]] and queued[0][4]   # checked from its record (GSPro's sand)
     assert e.store.db.execute("SELECT lie_before FROM shots").fetchone()[0] == "fairway"
     assert e._file_pins.get("s2") == e.state.shots[-1].shot_id
 
@@ -8037,7 +8049,7 @@ async def test_a_setup_lie_gspros_file_gave_goes_back_to_the_screens_with_a_reje
     await e.handle_shot(ShotEvent(shot=Shot(club="7I", carry=150.0, ball_speed=120.0), hud_hint=hud,
                                   impact_hud_hint=hud))
     assert len(checks) == 2 and e.state.shots[-1].lie_before == "fairway"
-    assert [q[4][0] for q in queued] == ["fairway"]   # its carry checked from the lie it ended up with
+    assert [q[1] for q in queued] == [e.state.shots[-1]] and queued[0][4]   # checked from its record, as it ends up
     assert e.store.db.execute("SELECT lie_before FROM shots").fetchone()[0] == "fairway"
 
 

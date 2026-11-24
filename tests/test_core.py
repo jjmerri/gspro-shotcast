@@ -1809,21 +1809,64 @@ def test_carry_model_checks_a_shot_against_its_prediction():
     assert CarryModel({"Deep": -50000}).check("tee", 100, 100, "Deep") is None   # no prediction
 
 
+def _rec(round_id, hole_seq, n, lie="fairway", game=240.0):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(player="Mike", round_id=round_id, hole_seq=hole_seq, hole=f"Hole {hole_seq}",
+                           shot_number=n, lie_before=lie, carry_game=game, shot=SimpleNamespace(is_putt=False))
+
+
 def test_a_live_shot_is_checked_with_its_landing_height_from_the_next_stroke():
     from types import SimpleNamespace
 
     seen = []
-    eng = SimpleNamespace(carry=SimpleNamespace(check=lambda *a: seen.append(a[2])), _next_stroke=Engine._next_stroke)
-    shot = ("fairway", 240.0, 240.0, "Wynn", 12.0, "gspro")
-    Engine._check_carry(eng, (1, "Hole 1", 1), 4.0, 320.0, shot, next_key=(1, "Hole 1", 2), next_elevation=10.0)
-    Engine._check_carry(eng, (1, "Hole 1", 1), 4.0, 320.0, shot, next_key=(1, "Hole 1", 3), next_elevation=10.0)
-    Engine._check_carry(eng, (1, "Hole 1", 1), 4.0, 320.0, shot)
+    eng = SimpleNamespace(carry=SimpleNamespace(check=lambda *a: seen.append(a[2])), _next_stroke=Engine._next_stroke,
+                          _carry_key=Engine._carry_key, round=None)
+    eng._carry_next = lambda *a: Engine._carry_next(eng, *a)
+    shot = ("gspro", 240.0, "Wynn", 12.0)
+    Engine._check_carry(eng, _rec(1, 1, 1), 4.0, 320.0, shot, next_rec=_rec(1, 1, 2), next_elevation=10.0)
+    Engine._check_carry(eng, _rec(1, 1, 1), 4.0, 320.0, shot, next_rec=_rec(1, 1, 3), next_elevation=10.0)
+    Engine._check_carry(eng, _rec(1, 1, 1), 4.0, 320.0, shot)
+    Engine._check_carry(eng, _rec(1, 1, 1, game=None), 4.0, 320.0, shot, next_rec=_rec(1, 1, 2), next_elevation=10.0)
+    josh = _rec(1, 1, 2)
+    josh.player = "Josh"   # GSPro's round file has the next stroke as another player's
+    Engine._check_carry(eng, _rec(1, 1, 1), 4.0, 320.0, shot, next_rec=josh, next_elevation=10.0)
     assert seen == [234.0]   # a penalty or round end in between: the landing is unknown, so nothing checked
     seen.clear()
-    short = ("deep rough", 100.0, 69.0, "Wynn", 12.0, "gspro")   # came down 51 yards short of a pin up the hill
-    Engine._check_carry(eng, (1, "Hole 2", 2), 10.0, 120.0, short)
-    Engine._check_carry(eng, (1, "Hole 2", 2), 10.0, 120.0, short[:2] + (110.0,) + short[3:])   # by the pin
+    short = ("gspro", 100.0, "Wynn", 12.0)   # 69 yards from deep rough: 51 short of a pin up the hill
+    Engine._check_carry(eng, _rec(1, 2, 2, "deep rough", 69.0), 10.0, 120.0, short)
+    Engine._check_carry(eng, _rec(1, 2, 2, "deep rough", 110.0), 10.0, 120.0, short)   # by the pin
     assert seen == [120.0]
+
+
+def test_a_carry_check_reads_what_was_corrected_on_the_shots_record_since():
+    from types import SimpleNamespace
+
+    seen = []
+    eng = SimpleNamespace(_carry_trail={}, CARRY_TRAIL=Engine.CARRY_TRAIL, _carry_key=Engine._carry_key,
+                          _next_stroke=Engine._next_stroke, _own_ball_next=Engine._own_ball_next, round=None,
+                          carry=SimpleNamespace(check=lambda *a: seen.append(a[:4])))
+    eng._check_carry = lambda *a, **k: Engine._check_carry(eng, *a, **k)
+    eng._carry_next = lambda *a: Engine._carry_next(eng, *a)
+    drive = _rec(1, 3, 1, "fairway", None)   # its tiles hidden in flight
+    Engine._trail_carry(eng, "Mike", (1, drive, 4.0, 300.0, ("lm", 100.0, "Wynn", 12.0), (False, 0)))
+    # GSPro's round file has it on hole 4 from deep rough; its carry is read at the next setup.
+    drive.hole_seq, drive.hole, drive.lie_before, drive.carry_game = 4, "Hole 4", "deep rough", 69.0
+    Engine._trail_carry(eng, "Mike", (2, _rec(1, 4, 2), 10.0, 60.0, None, (False, 0)))
+    assert seen == [("deep rough", 100.0, 63.0, "Wynn")]   # leveled by its next stroke on hole 4
+    seen.clear()
+    # GSPro's CARRY (raw), read at the next setup, is the baseline over the launch monitor's.
+    drive = _rec(1, 5, 1)
+    Engine._trail_carry(eng, "Mike", (3, drive, 4.0, 300.0, ("lm", 0.0, "Wynn", 12.0), (False, 0)))
+    Engine._carry_raw_late(eng, drive, 250.0)
+    Engine._trail_carry(eng, "Mike", (4, _rec(1, 5, 2), 4.0, 60.0, None, (False, 0)))
+    assert seen == [("fairway", 250.0, 240.0, "Wynn")]
+    seen.clear()
+    chip = _rec(1, 6, 2, "fringe", 19.0)
+    Engine._trail_carry(eng, "Mike", (5, chip, 4.0, 20.0, ("gspro", 14.0, "Wynn", 3.0), (False, 0)))
+    chip.shot.is_putt = True   # GSPro's round file calls it a putt
+    Engine._trail_carry(eng, "Mike", (6, _rec(1, 6, 3), 4.0, 1.0, None, (False, 0)))
+    assert seen == []
 
 
 def test_carry_waits_for_the_next_stroke_even_when_shot_handlers_finish_out_of_order():
@@ -1831,42 +1874,46 @@ def test_carry_waits_for_the_next_stroke_even_when_shot_handlers_finish_out_of_o
 
     OWN = (False, 0)   # not a shared-ball format; no balls dropped
     seen = []
-    eng = SimpleNamespace(_carry_trail={}, _check_carry=lambda *a: seen.append(a), CARRY_TRAIL=Engine.CARRY_TRAIL,
-                          _next_stroke=Engine._next_stroke,
-                          _own_ball_next=Engine._own_ball_next)
-    shot = ("fairway", 240.0, 240.0, "Wynn", 12.0, "gspro")
-    Engine._trail_carry(eng, "Mike", (2, (1, "Hole 1", 2), 10.0, 60.0, None, OWN))
+    K = Engine._carry_key
+
+    def check(rec, elev, pin, args, nxt=None, next_elev=None):
+        seen.append((K(rec), elev, pin, args) + ((K(nxt), next_elev) if nxt is not None else ()))
+    eng = SimpleNamespace(_carry_trail={}, _check_carry=check, CARRY_TRAIL=Engine.CARRY_TRAIL, _carry_key=K,
+                          _next_stroke=Engine._next_stroke, _own_ball_next=Engine._own_ball_next)
+    eng._carry_next = lambda *a: Engine._carry_next(eng, *a)
+    shot = ("gspro", 240.0, "Wynn", 12.0)
+    Engine._trail_carry(eng, "Mike", (2, _rec(1, 1, 2), 10.0, 60.0, None, OWN))
     assert not seen
-    Engine._trail_carry(eng, "Mike", (1, (1, "Hole 1", 1), 4.0, 300.0, shot, OWN))
-    assert seen == [((1, "Hole 1", 1), 4.0, 300.0, shot, (1, "Hole 1", 2), 10.0)]
+    Engine._trail_carry(eng, "Mike", (1, _rec(1, 1, 1), 4.0, 300.0, shot, OWN))
+    assert seen == [((1, 1, 1), 4.0, 300.0, shot, (1, 1, 2), 10.0)]
     seen.clear()
-    Engine._trail_carry(eng, "Mike", (5, (1, "Hole 1", 1), 4.0, 300.0, shot, OWN))   # a replay, out of order:
-    Engine._trail_carry(eng, "Mike", (7, (1, "Hole 1", 3), 2.0, 20.0, None, OWN))    # 3 before 2
+    Engine._trail_carry(eng, "Mike", (5, _rec(1, 1, 1), 4.0, 300.0, shot, OWN))   # a replay, out of order:
+    Engine._trail_carry(eng, "Mike", (7, _rec(1, 1, 3), 2.0, 20.0, None, OWN))    # 3 before 2
     assert not seen
-    Engine._trail_carry(eng, "Mike", (6, (1, "Hole 1", 2), 10.0, 60.0, None, OWN))
-    assert seen == [((1, "Hole 1", 1), 4.0, 300.0, shot, (1, "Hole 1", 2), 10.0)]
+    Engine._trail_carry(eng, "Mike", (6, _rec(1, 1, 2), 10.0, 60.0, None, OWN))
+    assert seen == [((1, 1, 1), 4.0, 300.0, shot, (1, 1, 2), 10.0)]
     seen.clear()
-    Engine._trail_carry(eng, None, (3, (1, "Hole 2", 1), 4.0, 300.0, shot, (True, None)))   # unnamed
-    Engine._trail_carry(eng, None, (4, (1, "Hole 2", 2), 10.0, 60.0, None, (True, None)))
-    assert seen == [((1, "Hole 2", 1), 4.0, 300.0, shot)]   # maybe another ball: near-pin rule only
+    Engine._trail_carry(eng, None, (3, _rec(1, 2, 1), 4.0, 300.0, shot, (True, None)))   # unnamed
+    Engine._trail_carry(eng, None, (4, _rec(1, 2, 2), 10.0, 60.0, None, (True, None)))
+    assert seen == [((1, 2, 1), 4.0, 300.0, shot)]   # maybe another ball: near-pin rule only
     seen.clear()
-    Engine._trail_carry(eng, "Mike", (8, (1, "Hole 3", 1), 4.0, 300.0, shot, OWN))
-    Engine._trail_carry(eng, "Mike", (9, (1, "Hole 3", 2), 10.0, 60.0, None, (True, 1)))   # scramble shows late:
-    assert seen == [((1, "Hole 3", 1), 4.0, 300.0, shot)]                                 # a partner's ball
+    Engine._trail_carry(eng, "Mike", (8, _rec(1, 3, 1), 4.0, 300.0, shot, OWN))
+    Engine._trail_carry(eng, "Mike", (9, _rec(1, 3, 2), 10.0, 60.0, None, (True, 1)))   # scramble shows late:
+    assert seen == [((1, 3, 1), 4.0, 300.0, shot)]                                 # a partner's ball
     seen.clear()
-    Engine._trail_carry(eng, "Mike", (31, (1, "Hole 6", 1), 4.0, 300.0, shot, (False, None)))   # no GSPro index
-    Engine._trail_carry(eng, "Mike", (32, (1, "Hole 6", 2), 10.0, 60.0, None, (False, None)))
-    assert seen[-1] == ((1, "Hole 6", 1), 4.0, 300.0, shot, (1, "Hole 6", 2), 10.0)
+    Engine._trail_carry(eng, "Mike", (31, _rec(1, 6, 1), 4.0, 300.0, shot, (False, None)))   # no GSPro index
+    Engine._trail_carry(eng, "Mike", (32, _rec(1, 6, 2), 10.0, 60.0, None, (False, None)))
+    assert seen[-1] == ((1, 6, 1), 4.0, 300.0, shot, (1, 6, 2), 10.0)
     seen.clear()
-    Engine._trail_carry(eng, "Mike", (21, (1, "Hole 5", 1), 4.0, 300.0, shot, (True, 1)))
-    Engine._trail_carry(eng, "Mike", (22, (1, "Hole 5", 2), 10.0, 60.0, None, (True, 1)))   # Mike's was picked
-    assert seen == [((1, "Hole 5", 1), 4.0, 300.0, shot, (1, "Hole 5", 2), 10.0)]
+    Engine._trail_carry(eng, "Mike", (21, _rec(1, 5, 1), 4.0, 300.0, shot, (True, 1)))
+    Engine._trail_carry(eng, "Mike", (22, _rec(1, 5, 2), 10.0, 60.0, None, (True, 1)))   # Mike's was picked
+    assert seen == [((1, 5, 1), 4.0, 300.0, shot, (1, 5, 2), 10.0)]
     seen.clear()
     eng._carry_trail.clear()
-    Engine._trail_carry(eng, "Mike", (12, (2, "Hole 1", 2), 10.0, 60.0, shot, OWN))   # 2, 3, then 1
-    Engine._trail_carry(eng, "Mike", (13, (2, "Hole 1", 3), 2.0, 20.0, None, OWN))
-    Engine._trail_carry(eng, "Mike", (11, (2, "Hole 1", 1), 4.0, 300.0, shot, OWN))
-    assert [a[4:] for a in seen] == [((2, "Hole 1", 3), 2.0), ((2, "Hole 1", 2), 10.0)]
+    Engine._trail_carry(eng, "Mike", (12, _rec(2, 1, 2), 10.0, 60.0, shot, OWN))   # 2, 3, then 1
+    Engine._trail_carry(eng, "Mike", (13, _rec(2, 1, 3), 2.0, 20.0, None, OWN))
+    Engine._trail_carry(eng, "Mike", (11, _rec(2, 1, 1), 4.0, 300.0, shot, OWN))
+    assert [a[4:] for a in seen] == [((2, 1, 3), 2.0), ((2, 1, 2), 10.0)]
 
 
 def _backdate(store, date="2000-01-01"):
@@ -7500,6 +7547,9 @@ def test_late_tiles_on_a_file_owned_shot_still_count_as_read_for_health(tmp_path
     e._late_tiles[5] = {k: str(float(v) + 1) for k, v in late.items()}
     e._apply_late_tiles(5)
     assert hc.tiles_missing["carry (game)"] == 1
+    e._tiles_due[6] = (sid, rec, None, "yards", hc, set())
+    e._late_tiles[6] = {"carry (raw)": "207.0"}
+    assert e._apply_late_tiles(6) == 207.0   # the CARRY (raw) for the shot's carry check
 
 
 def test_a_blind_shot_named_from_gspros_round_file_goes_back_whole_when_the_match_is_taken_back(tmp_path):

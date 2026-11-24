@@ -141,11 +141,16 @@ class RoundStartMixin:
         self._fir_streak.clear()
         self._last_hud_shot.clear()
         self._pending_finish.clear()
-        for trail in self._carry_trail.values():   # no next stroke now: near-pin shots are still checked
-            for _, key, elev, pin, args, _scramble in trail:
-                if args:
-                    self._check_carry(key, elev, pin, args)
-        self._carry_trail.clear()
+        # No next stroke now for the shots before it (near-pin ones are still checked); its own opening
+        # shots, adopted above, wait for theirs.
+        for player, trail in list(self._carry_trail.items()):
+            for _, rec, elev, pin, args, _ball in trail:
+                if args and rec.round_id != r.id:
+                    self._check_carry(rec, elev, pin, args)
+            if not (trail := [e for e in trail if e[1].round_id == r.id]):
+                del self._carry_trail[player]
+            else:
+                self._carry_trail[player] = trail
         self._last_row.clear()
         self._mulligans_called.clear()
         self._finish_seq.clear()

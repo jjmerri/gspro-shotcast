@@ -108,13 +108,12 @@ goes down gets no finish. On 3.59 (no `LaunchExt`), the tie relies on `_file_pin
 
 Each full shot's carry, put level with where it was hit, is compared with `carry_model`'s prediction,
 and one more than 5% off is logged as a `carry check` (`ShotReadsMixin._check_carry`), to compare with
-GSPro's code. Known gap (accepted): some shots are never checked. The check is queued when the shot
-handler has settled the stroke's lie, so classic GSPro's tiles read at the next setup
-(`_apply_late_tiles`) aren't in it; the trail is flushed only at the next round's start, so the last
-round's near-pin shots go unchecked if the booth closes first; and that flush also takes a round's
-opening drive adopted at its start (`_adopt_opening_shots`) before its second stroke can level it.
-Only a diagnostic log is missed; check from the late reads if too few shots get one.
-Also accepted, all as a diagnostic only:
+GSPro's code. The shot's record joins its player's trail once recorded, and the check reads the record
+when it's made (once the next stroke is in), so what's corrected on it in between (GSPro's round file's
+lie, hole and stroke, tiles read at the next setup) counts. Known gaps, accepted as a diagnostic only:
+- The trail is flushed only at the next round's start, so the last round's near-pin shots go
+  unchecked if the booth closes first.
+- A correction made after the next stroke is in comes too late for the check.
 - The landing height comes from where the ball came to rest (the next stroke's pin elevation), not
   where it landed, so a ball that rolled well up or down a slope can be logged as off when it wasn't.
   The round file's touchdown point (`Track.land`) could level it instead.
@@ -122,9 +121,17 @@ Also accepted, all as a diagnostic only:
 - An older version of the app opening the season file at the same moment as this one can keep a
   `carry_snapshot` the triggers no longer invalidate; only that older version reads it, and only its
   commentary's carry projection would be off, till its next start after a shot edit.
-- The check is queued partway through the shot handler, and some of what it uses is corrected after
-  that: its course is the HUD's at impact (a cut-short course name misses the altitude set under the
-  full one: a false log line), and its hole label is the one before GSPro's file corrects a late
-  banner's hole (`_file_hole_check`), so that drive is never paired with its next stroke. Queuing it
-  from the shot's final record instead would fix both.
 - A guest renamed mid-round splits their trail: the stroke before the rename gets the near-pin rule only.
+- A stroke filed under the wrong player and later given back by GSPro's round file stays in the trail
+  it was first put in, between that player's two strokes: the stroke before it gets the near-pin rule
+  only. (Rare: a misnamed stroke in a group; the check is a log line, so nothing is lost.)
+- The game carry is the record's: a carry GSPro's round file matches after the shot was handled
+  (stored, but not put back on the record) isn't seen, and a screen read the file overrides in the
+  store can still be what's checked.
+- The baseline is chosen when the shot is handled, with only a late CARRY (raw) tile upgrading it: a
+  fresh raw carry read at impact but not at rest, with the game carry read late, is checked against
+  the launch monitor's (no check at all on a monitor that sends no carry), and a shot first called a
+  putt by the round file isn't checked even if that's taken back. Each costs a check, or gives a false
+  log line, on an occasional shot; nothing stored or said changes. (Repeated review findings of this
+  kind: the check reads carries from several late sources; one source of truth for a shot's carries
+  would fix them together.)

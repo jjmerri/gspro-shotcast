@@ -482,7 +482,7 @@ class ShotMixin:
             self._keep_report_frame("no-player", shot=before.shot_number, hud_text=hud.player_text)
         carry_idx = None if unnamed else self._gspro_idx(player)
         dropped = None if carry_idx is None else impact_snap[7].get(carry_idx, 0)
-        check_course, check_vla = self.current_course, shot.vla   # (as struck: not a later round's)
+        check_vla = shot.vla   # (the monitor's, before any club's fields are filtered)
         if flight_task:
             try:
                 await flight_task  # bounded by the flight deadline; keeps the call ahead of the reaction
@@ -637,20 +637,10 @@ class ShotMixin:
                     shot = replace(shot, club=deck_club(deck_from, screen_before.shot_number, before.lie))
             before = replace(before, shot_number=screen_before.shot_number, gspro_shot=screen_before.gspro_shot)
             hud = replace(hud, shot_number=screen_before.shot_number)
-        # Queued once the lie and stroke number it was played from are settled (GSPro's file, or not).
-        check = None
         fire0 = self.gspro.fire_of(fires0, impact)
         # GSPro's carry ends where the ball first met something: wood well short of the full carry stood up.
         wood_tree = self.gspro.tree_wood(fire0, carry_game, carry_flat or self._raw_yards(shot))
         tree_hits = len(self.gspro.fire_info(fire0).get("leaves") or ()) + wood_tree
-        if carry_game and tree_hits:
-            log.info("%s hit a tree %s time(s) in flight: its carry isn't checked", tag, tree_hits)
-        elif carry_game:
-            check_base, check_carry = ("gspro", carry_flat) if carry_flat else ("lm", self._raw_yards(shot))
-            check = (before.lie, check_carry, carry_game, check_course, check_vla, check_base)
-        self._trail_carry(player, (my_seq, (shot_round.id if shot_round else None, shot_hole, before.shot_number),
-                                   before.elevation_yards, to_yards(before.to_pin), check,
-                                   (shared or unnamed, dropped)))
         if screen_club is not None and file_ours:   # (a hole-out copy may have come in since)
             file_track = self._file_track_of(player, None, impact, file_track.shot_id) or file_track
 
@@ -799,13 +789,24 @@ class ShotMixin:
                 shot_hole, shot_par = moved[0], moved[1] or shot_par
                 if moved[2] and moved[2] != before.shot_number:
                     before = replace(before, shot_number=moved[2])
+        # The carry check reads the shot's record (its lie, hole, stroke and game carry) when it's made, so
+        # what GSPro's round file or a late read corrects on it since counts.
+        check = None
+        if tree_hits and not shot.is_putt:
+            log.info("%s hit a tree %s time(s) in flight: its carry isn't checked", tag, tree_hits)
+        elif not shot.is_putt:
+            check = (("gspro", carry_flat) if carry_flat else ("lm", self._raw_yards(shot))) + (shot_course, check_vla)
         if self._log_truth and fire is not None and shot_id is not None:
             self._bg(self._note_rest(shot_id, fire, impact))
         if ocr and not shot.is_putt and shot_id is not None:
             self._tiles_due[my_seq] = (shot_id, rec, shown_before, unit, hc, missed)
             while len(self._tiles_due) > 4:
                 del self._tiles_due[next(iter(self._tiles_due))]
-            self._apply_late_tiles(my_seq)
+            if (late_raw := self._apply_late_tiles(my_seq)) and check and check[0] == "lm":
+                check = ("gspro", late_raw) + check[2:]
+        # Into the trail after its buffered tiles, so a next stroke already in checks it with them.
+        self._trail_carry(player, (my_seq, rec, before.elevation_yards, to_yards(before.to_pin), check,
+                                   (shared or unnamed, dropped)))
         for m in self._live_mirrors():
             m.shot()   # a stream with no shots on it isn't kept
         # Not gated on the screen seeing touchdown: the finish comes from GSPro's log at the next shot,

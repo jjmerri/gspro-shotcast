@@ -208,13 +208,13 @@ class ResultsMixin:
             log.info("Shot %s finished on the %s (the HUD read %s)", shot_id, kept, rec.hud.lie)
             rec.hud = replace(rec.hud, lie=kept)
 
-    def _apply_late_tiles(self, seq: int) -> None:
+    def _apply_late_tiles(self, seq: int) -> float | None:
         """A shot's tiles read at the next setup (GSPro hid them while the ball was followed), once both
         the read and the shot's record are in. No swing came between the shot and the read, so GSPro's
         tiles are this shot's; unless they're exactly the shot before's, when this one's never came up.
-        (The launch monitor's carry is no check: GSPro's can be well off it.)"""
+        (The launch monitor's carry is no check: GSPro's can be well off it.) Returns the CARRY (raw) kept."""
         if seq not in self._tiles_due or seq not in self._late_tiles:
-            return
+            return None
         (shot_id, rec, before, unit, hc, missed), tiles = self._tiles_due.pop(seq), self._late_tiles.pop(seq)
         game, raw, total, offline = values = _tile_values(tiles, unit)
         # Only the fields both reads have.
@@ -222,7 +222,7 @@ class ResultsMixin:
         if both and all(a == b for a, b in both):
             log.info("[shot %s] tiles at the next setup (carry %s, total %s) are the shot before's: not kept",
                      seq, game, total)
-            return
+            return None
         self._shown_tiles = values
         # GSPro's round file's carry and total, live, stand: the screen adds only what the file hadn't.
         file_carry, file_total = self._file_shot_ids.pop(shot_id, (False, False))
@@ -235,6 +235,8 @@ class ResultsMixin:
                                   total_yards=None if file_total else total, offline_yards=offline)
         if not file_carry:
             rec.carry_game = game if game is not None else rec.carry_game   # for the hole recap
+        if raw:
+            self._carry_raw_late(rec, raw)   # (a shot still being registered takes it from the return)
         rec.hud = replace(rec.hud, tiles={**rec.hud.tiles, **tiles})
         log.info("[shot %s] tiles read at the next setup (hidden in flight): carry %s, total %s, offline %s",
                  seq, game, total, offline)
@@ -245,6 +247,7 @@ class ResultsMixin:
                     hc.tiles_missing[t] -= 1
             if hc.full_shots >= 3 and set(self.cfg.health.required_tiles) <= hc.tiles_seen:
                 self.health.clear("round.tiles_absent", "tiles read")
+        return raw
 
     def _fill_log_totals(self) -> None:
         """Totals from GSPro's logged positions for shots whose TOTAL LENGTH tile wasn't read."""

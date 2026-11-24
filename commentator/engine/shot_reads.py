@@ -40,15 +40,23 @@ class ShotReadsMixin:
         # not) as a slower handler for the stroke before may still need them; a shot whose next stroke
         # never shows (a mulligan, a penalty, an unread stroke number) gets the fallback once it ages out.
         for e, nxt in zip(trail, trail[1:]):
-            if e[4] and self._next_stroke(e[1], nxt[1]):
+            if e[4] and self._carry_next(e[1], nxt[1]):
                 self._check_carry(*e[1:4], e[4], *(nxt[1:3] if self._own_ball_next(e[5], nxt[5]) else ()))
                 e[4] = None
         while len(trail) > self.CARRY_TRAIL:
-            _, key, elev, pin, args, _other = trail.pop(0)
+            _, rec, elev, pin, args, _other = trail.pop(0)
             if args:
-                self._check_carry(key, elev, pin, args)
+                self._check_carry(rec, elev, pin, args)
 
     CARRY_TRAIL = 4
+
+    def _carry_raw_late(self, rec, raw: float) -> None:
+        """GSPro's CARRY (raw) for a shot, read at the next setup: its unchecked carry check's baseline
+        from here on, over the launch monitor's."""
+        for trail in self._carry_trail.values():
+            for e in trail:
+                if e[1] is rec and e[4] and e[4][0] == "lm":
+                    e[4] = ("gspro", raw) + tuple(e[4][2:])
 
     @staticmethod
     def _own_ball_next(ball: tuple, next_ball: tuple) -> bool:
@@ -61,24 +69,40 @@ class ShotReadsMixin:
         return ball[1] is not None and ball[1] == next_ball[1]
 
     @staticmethod
+    def _carry_key(rec) -> tuple:
+        """A recorded shot's (round, hole, stroke number) as it stands now: the round's hole number, which
+        a banner's relabel leaves alone, or, for practice, the hole's label."""
+        return rec.round_id, rec.hole if rec.round_id is None else rec.hole_seq, rec.shot_number
+
+    def _carry_next(self, rec, next_rec) -> bool:
+        """`next_rec` is the same player's stroke right after `rec`, as both records stand now (a stroke
+        GSPro's round file has since given another player isn't)."""
+        return rec.player == next_rec.player and self._next_stroke(self._carry_key(rec), self._carry_key(next_rec))
+
+    @staticmethod
     def _next_stroke(key: tuple, next_key: tuple | None) -> bool:
         """`next_key` (round, hole, shot number) is the stroke right after `key`'s."""
         return next_key is not None and key[0] == next_key[0] and key[1] == next_key[1] \
             and key[2] is not None and next_key[2] == key[2] + 1
 
-    def _check_carry(self, key: tuple, elevation: float | None, pin_yards: float | None, args: tuple,
-                     next_key: tuple | None = None, next_elevation: float | None = None) -> None:
+    def _check_carry(self, rec, elevation: float | None, pin_yards: float | None, args: tuple,
+                     next_rec=None, next_elevation: float | None = None) -> None:
         """Log one shot whose CARRY (game), put level with where it was hit, is well off the carry
-        model's prediction (CarryModel.check). The next stroke (same round and hole, one shot on) says
-        how high the ball came to rest; without it, only a shot that landed near the pin can be leveled
-        (see correct_for_elevation)."""
-        lie, carry, game, course, vla, base = args
-        rest_rise = None
-        if elevation is not None and next_elevation is not None and self._next_stroke(key, next_key):
+        model's prediction (CarryModel.check). Its lie and game carry are its record's now. The next
+        stroke (same round and hole, one shot on) says how high the ball came to rest; without it, only a
+        shot that landed near the pin can be leveled (see correct_for_elevation)."""
+        base, carry, course, vla = args
+        game, rest_rise = rec.carry_game, None
+        if game is None or rec.shot.is_putt:   # (GSPro's round file may since have called it a putt)
+            return
+        if (r := self.round) is not None and rec.round_id == r.id and r.course:
+            course = r.course   # (a drive struck before its round started, since adopted: the round's)
+        if elevation is not None and next_elevation is not None and next_rec is not None \
+                and self._carry_next(rec, next_rec):
             rest_rise = elevation - next_elevation
         level = correct_for_elevation(game, elevation, pin_yards, rest_rise)
-        if level is not None and (line := self.carry.check(lie, carry, level, course, vla, base)):
-            log.info("Round %s, %s, shot %s: %s", *key, line)
+        if level is not None and (line := self.carry.check(rec.lie_before, carry, level, course, vla, base)):
+            log.info("Round %s, %s, shot %s: %s", rec.round_id, rec.hole, rec.shot_number, line)
 
     @staticmethod
     def _idx_snap(snap: tuple, idx: int) -> dict:
