@@ -48,6 +48,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from shotcast_scoring import replay
+
 
 log = logging.getLogger(__name__)
 
@@ -359,6 +361,7 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
                  db.execute("SELECT slot_id, code FROM cloud_claim_codes WHERE uuid = ?", (uuid,))}
         tees = _rows(db, "SELECT * FROM course_tees WHERE course = ? COLLATE NOCASE ORDER BY tee", rec["course"])
         folder = db.execute("SELECT folder FROM round_folders WHERE record_uuid = ?", (uuid,)).fetchone()
+        layouts = _rows(db, "SELECT * FROM hole_layouts WHERE course = ? COLLATE NOCASE ORDER BY id", rec["course"])
     keys, side_of = _sides(slots)
     card_side = {c["id"]: c["side"] for c in cards}
     # One card a side: its last (a booth that stopped between writing a round's cards and marking it
@@ -399,7 +402,35 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
         "edit": {"excluded": any(c["excluded"] for c in cards), "mark": mark,
                  "left_out": [s["uid"] for s in shots if s["left_out"]]},
         "course_card": _course_card(tees, folder["folder"] if folder else None),
+        "hole_layouts": _hole_layouts(layouts, shots),
     }, rec["gen"]
+
+
+def _point(x: Any, z: Any) -> list[float] | None:
+    return [x, z] if isinstance(x, (int, float)) and isinstance(z, (int, float)) else None
+
+
+def _hole_layouts(layouts: list[dict[str, Any]], shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each hole the round played, as its replay is drawn (shotcast_scoring.replay._layout_for, as
+    the booth's own page picks them): the tee (this round's, else the course's latest), this round's
+    pin (none for a round quit before GSPro logged it: the cloud estimates it as the booth does), the
+    course designer's aim point, par and tee box. World metres, x and z (the map from above)."""
+    holes: dict[int, list[dict[str, Any]]] = {}
+    for s in shots:
+        if (m := replay._HOLE.match(s.get("hole") or "")) is not None:
+            holes.setdefault(int(m.group(1)), []).append(s)
+    out = []
+    for hole, rows in sorted(holes.items()):
+        sessions = {r["session_id"] for r in rows}
+        this, any_ = replay._layout_for(layouts, rows[0]["course"], hole, sessions, rows[0]["ts"], rows[-1]["ts"])
+        lo = this or any_
+        if lo is None:
+            continue
+        out.append({"hole": hole, "par": lo["par"], "tee_box": (this or {}).get("tee_box"),
+                    "tee": _point(any_["tee_x"], any_["tee_z"]) if any_ else None,
+                    "pin": _point(this["pin_x"], this["pin_z"]) if this else None,
+                    "waypoint": _point(lo["wp_x"], lo["wp_z"])})
+    return out
 
 
 def _json(obj: Any) -> bytes:
