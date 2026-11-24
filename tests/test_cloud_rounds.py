@@ -763,3 +763,22 @@ def test_a_round_goes_with_its_courses_card_as_gspros_files_have_it(tmp_path, ap
     assert _drain(cl, cfg).sent == [long]
     tees = api.puts[-1][2]["course_card"]["tees"]
     assert len(tees) == 32 and all(len(t["name"]) == 50 for t in tees)
+
+
+def test_a_round_goes_with_each_holes_layout_as_its_replay_is_drawn(tmp_path, api):
+    """The tee, this round's pin, the designer's aim point and par of each hole played: what the cloud
+    draws the hole's replay on (shotcast_scoring.replay). A round quit before GSPro logged the layout
+    still has the course's tee from an earlier round, and no pin (the cloud estimates it)."""
+    cfg, s, cl = _booth(tmp_path, api)
+    first = _round(s, 1)
+    hole = {"played": True, "par": 4, "tee": [0.0, 1.0, 0.0], "pin": [3.0, 2.0, 380.0], "waypoint": [1.0, 1.0, 250.0]}
+    s.record_hole_layout("Pebble", [hole], ts=60.0)
+    quit_early = _round(s, 100_000)   # (far beyond the first round's layout: no pin of its own)
+    elsewhere = s.begin_round("r9", course="Nowhere", players={"Ann": None})
+    _hit(s, "Ann", 200_000, course="Nowhere")
+    s.end_round(elsewhere, complete=True)
+    _drain(cl, cfg)
+    sent = {p[0]: p[2]["hole_layouts"] for p in api.puts}
+    assert sent[first] == [{"hole": 1, "par": 4, "tee_box": None, "tee": [0.0, 0.0], "pin": [3.0, 380.0], "waypoint": [1.0, 250.0]}]
+    assert sent[quit_early] == [{"hole": 1, "par": 4, "tee_box": None, "tee": [0.0, 0.0], "pin": None, "waypoint": [1.0, 250.0]}]
+    assert sent[elsewhere] == []
