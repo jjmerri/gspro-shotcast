@@ -371,17 +371,8 @@ def _layout_holes(line: str) -> list[dict] | None:
             for h in data if isinstance(h, dict)]
 
 
-AIM_MAP_SPAN = 677.0    # minimap units from the ball (y ~ -338) to the pin (y ~ +339)
-AIM_MAP_BALL_Y = -338.0
-
-
-def aim_offset(map_x: float, map_y: float, to_pin_m: float) -> tuple[float, float]:
-    """A minimap aim click as metres (along the ball-to-pin line, right of it), given the distance to
-    the pin then. GSPro scales the map to fit ball and pin whatever the distance, so one map unit is
-    to_pin / 677 metres. Measured on full shots; a long hole whose map stops short of the green, and the
-    putting view, are unverified."""
-    scale = to_pin_m / AIM_MAP_SPAN
-    return (map_y - AIM_MAP_BALL_Y) * scale, map_x * scale
+# A minimap aim click as metres: the shared copy (hole replays are drawn in the cloud too).
+from shotcast_scoring.replay import AIM_MAP_BALL_Y, AIM_MAP_SPAN, aim_offset  # noqa: E402,F401
 
 
 @dataclass
