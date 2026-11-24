@@ -741,7 +741,7 @@ def test_a_round_goes_with_its_courses_card_as_gspros_files_have_it(tmp_path, ap
     cfg, s, cl = _booth(tmp_path, api)
     s.record_course_tees("Pebble", CourseCard(
         name="Pebble Beach", par={1: 4, 2: 5}, index={1: 7, 2: 1},
-        yards={"Blue": {1: 380, 2: 510}, "Red": {1: 300, 2: 420}}, ratings={"Blue": (72.1, 131.0)}))
+        yards={"Blue": {1: 380, 2: 510}, "Red": {1: 300, 2: 4200}}, ratings={"Blue": (72.1, 131.0)}))
     known, plain, other = _round(s, 1), _round(s, 100), s.begin_round("r3", course="Elsewhere", players={"Ann": None})
     _hit(s, "Ann", 200)
     s.end_round(other, complete=True)
@@ -751,7 +751,9 @@ def test_a_round_goes_with_its_courses_card_as_gspros_files_have_it(tmp_path, ap
     card = {p[0]: p[2]["course_card"] for p in api.puts}
     assert card[known] == {
         "folder": "pebble_gsp", "par": {"1": 4, "2": 5}, "index": {"1": 7, "2": 1},
-        "tees": [{"name": "Blue", "rating": 72.1, "slope": 131.0}, {"name": "Red", "rating": None, "slope": None}]}
+        "tees": [{"name": "Blue", "rating": 72.1, "slope": 131.0, "yards": {"1": 380, "2": 510}},
+                 # (a yardage the cloud's format can't hold is left out, not the round)
+                 {"name": "Red", "rating": None, "slope": None, "yards": {"1": 300}}]}
     assert card[plain] == card[known] | {"folder": None}
     assert card[other] is None   # (a course whose files gave no card)
     # A course file's odd tees don't cost the round its upload: no more, and no longer, than the cloud takes.
