@@ -67,13 +67,6 @@ CREATE TABLE IF NOT EXISTS cloud_uploads (
     error TEXT,                            -- why the last try didn't end with the cloud having it
     tries INTEGER NOT NULL DEFAULT 0       -- failed tries so far (how long the next waits: Pace.retry)
 );
-CREATE TABLE IF NOT EXISTS cloud_hole_pictures (  -- the minimap of each hole last sent to the cloud
-    course TEXT NOT NULL COLLATE NOCASE,
-    hole INTEGER NOT NULL,
-    area INTEGER NOT NULL,                 -- its width x height, in pixels
-    sha256 TEXT,                           -- the picture's own (one an admin removed isn't sent again)
-    PRIMARY KEY (course, hole)
-);
 CREATE TABLE IF NOT EXISTS cloud_claim_codes (   -- a player's code to claim a round with (claim_codes)
     uuid TEXT NOT NULL,                    -- the round record's
     slot_id TEXT NOT NULL,
@@ -581,36 +574,66 @@ def _sent(db: sqlite3.Connection, uuid: str, out: Drained) -> None:
 
 def send_pictures(cl: Any, db: sqlite3.Connection, uuid: str) -> int:
     """The minimap of each hole the round played (hole_images, grabbed at the tee) that the cloud
-    hasn't a picture of at least this size: what the cloud draws the hole's replay over. Never stops a
-    drain: a picture that doesn't go is tried again after the next round there. Returns how many went."""
+    wants: what it draws the hole's replay over. The cloud decides (`check`): it wants a hole it has
+    no picture of, or a smaller one; and it says which pictures an admin removed, whose copy here is
+    deleted so the booth grabs the hole afresh the next time it's played (and that one goes). Nothing
+    of what was sent is kept here. Never stops a drain: what doesn't go is asked about again after
+    the next round there. Returns how many went."""
     from PIL import Image
 
     rec = db.execute("SELECT course FROM round_records WHERE uuid = ?", (uuid,)).fetchone()
     if rec is None or not rec["course"]:
         return 0
+    course = rec["course"]
     holes = {int(m.group(1)) for (h,) in db.execute("SELECT DISTINCT hole FROM shots WHERE record_uuid = ?", (uuid,))
              if (m := replay._HOLE.match(h or ""))}
     sessions = {s for (s,) in db.execute("SELECT DISTINCT session_id FROM shots WHERE record_uuid = ?", (uuid,))}
-    sent = 0
-    for hole in sorted(holes):
-        im = db.execute("SELECT image, ball_x, ball_y, pin_x, pin_y, session_id FROM hole_images WHERE course = ? COLLATE NOCASE"
-                        " AND hole = ? AND ball_x IS NOT NULL AND pin_x IS NOT NULL ORDER BY id DESC LIMIT 1",
-                        (rec["course"], hole)).fetchone()
+    held: dict[int, dict[str, Any]] = {}
+    for hole in sorted(h for h in holes if h <= 200):
+        im = db.execute("SELECT id, image, ball_x, ball_y, pin_x, pin_y, session_id FROM hole_images WHERE course = ?"
+                        " COLLATE NOCASE AND hole = ? AND ball_x IS NOT NULL AND pin_x IS NOT NULL ORDER BY id DESC"
+                        " LIMIT 1", (course, hole)).fetchone()
         if im is None:
             continue
         try:
             w, h = Image.open(io.BytesIO(im["image"])).size
         except Exception:   # noqa: BLE001 - not a picture after all: nothing to send
             continue
-        digest = hashlib.sha256(im["image"]).hexdigest()
-        had = db.execute("SELECT area, sha256 FROM cloud_hole_pictures WHERE course = ? AND hole = ?",
-                         (rec["course"], hole)).fetchone()
-        # Not this picture again (the cloud has it, or an admin removed it), nor a smaller one than was sent.
-        if had is not None and (had[1] == digest or had[0] > w * h):
+        held[hole] = {"row": im, "sha256": hashlib.sha256(im["image"]).hexdigest(), "width": w, "height": h}
+    if not held:
+        return 0
+    try:
+        r = cl.request("POST", "/api/devices/hole-pictures/check", body={
+            "course": course,
+            "holes": [{"hole": n, "sha256": p["sha256"], "width": p["width"], "height": p["height"]}
+                      for n, p in held.items()]})
+        answer = r.json() if r.status_code == 200 else None
+    except Exception as e:   # noqa: BLE001 - the network: next time
+        log.info("Shotcast Cloud: hole pictures not checked (%s)", e)
+        return 0
+    if not isinstance(answer, dict):
+        log.info("Shotcast Cloud: hole pictures not checked (%s)", r.status_code)
+        return 0
+
+    def drop(hole: int) -> None:
+        # An admin removed it as wrong: grab the hole afresh (the booth keeps one a hole, and grabs
+        # a hole that has none).
+        db.execute("DELETE FROM hole_images WHERE id = ?", (held[hole]["row"]["id"],))
+        db.commit()
+        log.info("Shotcast Cloud: %s hole %s's picture was removed in the cloud; it's grabbed again next time",
+                 course, hole)
+
+    for hole in answer.get("drop") or []:
+        if hole in held:
+            drop(hole)
+    sent = 0
+    for hole in answer.get("send") or []:
+        if hole not in held:
             continue
+        im = held[hole]["row"]
         try:
             r = cl.request("PUT", "/api/devices/hole-pictures", body={
-                "course": rec["course"], "hole": hole, "jpeg": base64.b64encode(im["image"]).decode(),
+                "course": course, "hole": hole, "jpeg": base64.b64encode(im["image"]).decode(),
                 "ball": [im["ball_x"], im["ball_y"]], "pin": [im["pin_x"], im["pin_y"]],
                 # (taken in this round, or in an earlier one at the course: the cloud says which)
                 "round_id": uuid if im["session_id"] in sessions else None})
@@ -620,10 +643,12 @@ def send_pictures(cl: Any, db: sqlite3.Connection, uuid: str) -> int:
         if r.status_code == 429:
             return sent
         if r.status_code == 200:
-            db.execute("INSERT INTO cloud_hole_pictures VALUES (?, ?, ?, ?) ON CONFLICT (course, hole) DO UPDATE"
-                       " SET area = excluded.area, sha256 = excluded.sha256", (rec["course"], hole, w * h, digest))
-            db.commit()
             sent += 1
+            try:
+                if r.json().get("removed") is True:
+                    drop(hole)
+            except ValueError:
+                pass
         else:
             log.info("Shotcast Cloud: hole %s's picture refused (%s)", hole, r.status_code)
     return sent
