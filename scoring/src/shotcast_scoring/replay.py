@@ -3,7 +3,7 @@ need no database, shared by the app (commentator/hole_replay.py, which reads its
 in full what a replay is) and Shotcast Cloud, so both draw a hole the same way.
 
 A shot is a mapping with the app's shots columns (id, player, course, hole, shot_number, club, is_putt,
-lie_before, to_pin_yards, total_yards, offline_yards, outcome, mulligan, shared_ball, fmt, tags (JSON
+lie_before, lie_after, to_pin_yards, total_yards, offline_yards, outcome, mulligan, shared_ball, fmt, tags (JSON
 text), start_x, start_z, aim_map_x, aim_map_y, hazard_x, hazard_z, start_direction, spin_axis, handed,
 picked, carry, ts); a layout, hole_layouts' (course, hole, session_id, ts, tee_x, tee_z, pin_x, pin_z,
 wp_x, wp_z, par); a track, `track`'s answer.
