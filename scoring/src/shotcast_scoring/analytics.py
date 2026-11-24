@@ -130,7 +130,9 @@ def strokes_gained(holes: list[dict], usual_gimme_ft: float | None = None) -> li
     conceded tap-in is a stroke from a known spot (expected 1.0 in the usual circle, `usual_gimme_ft`;
     see _gimme_end), so it's 0 gained and only ends the stroke before it. Only finished holes count, so
     the strokes and the holes they're divided by match (a hole left unfinished is often the messy one,
-    and its stroke numbers can skip)."""
+    and its stroke numbers can skip).
+    `gimme_r`: the radius (yards) of the gimme circle a stroke stopped in, when known; so the cloud can
+    keep a round's strokes gained before a league's usual circle is known (usual_gain)."""
     out = []
     # A gimme's radius is copied from the stroke that left it, which can be the one without (a session's
     # opening tee shot): then the radius the rest of that session's strokes logged.
@@ -148,9 +150,12 @@ def strokes_gained(holes: list[dict], usual_gimme_ft: float | None = None) -> li
             start = expected(st["lie_before"] or ("green" if st["is_putt"] else None), st["to_pin_yards"])
             if start is None:
                 continue
+            gimme_r = None
             if i + 1 < len(s):
                 nxt = s[i + 1]
                 radius = nxt["gimme_yards"] if nxt["gimme_yards"] is not None else session_radius.get(h["session_id"])
+                if nxt["outcome"] == "gimme":
+                    gimme_r = radius
                 end = _gimme_end(radius, usual_gimme_ft) if nxt["outcome"] == "gimme" else expected(
                     nxt["lie_before"] or ("green" if nxt["is_putt"] else None), nxt["to_pin_yards"])
                 if end is None:
@@ -160,8 +165,16 @@ def strokes_gained(holes: list[dict], usual_gimme_ft: float | None = None) -> li
             else:
                 end, penalty = 0.0, 0
             out.append({"player": h["player"], "session_id": h["session_id"], "date": h["date"],
-                        "category": _category(st, h["par"]), "sg": start - end - 1 - penalty, "shot_id": st["id"]})
+                        "category": _category(st, h["par"]), "sg": start - end - 1 - penalty, "shot_id": st["id"],
+                        "gimme_r": gimme_r})
     return out
+
+
+def usual_gain(gimme_r: float | None, usual_ft: float | None) -> float:
+    """What a stroke into a gimme circle of `gimme_r` yards gains once the usual circle is known: the
+    stroke's strokes gained with `usual_ft` is its strokes gained with none (strokes_gained(holes)),
+    plus this. 0 when either is unknown (see _gimme_end)."""
+    return 1.0 - _gimme_end(gimme_r, usual_ft)
 
 
 def sg_summary(holes: list[dict], usual_gimme_ft: float | None = None,
