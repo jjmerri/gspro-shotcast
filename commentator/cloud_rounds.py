@@ -369,7 +369,12 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
                  db.execute("SELECT slot_id, code FROM cloud_claim_codes WHERE uuid = ?", (uuid,))}
         tees = _rows(db, "SELECT * FROM course_tees WHERE course = ? COLLATE NOCASE ORDER BY tee", rec["course"])
         folder = db.execute("SELECT folder FROM round_folders WHERE record_uuid = ?", (uuid,)).fetchone()
-        layouts = _rows(db, "SELECT * FROM hole_layouts WHERE course = ? COLLATE NOCASE ORDER BY id", rec["course"])
+        layouts = _rows(db, "SELECT * FROM hole_layouts WHERE course IN (SELECT DISTINCT course FROM shots"
+                            " WHERE record_uuid = ?) COLLATE NOCASE ORDER BY id", uuid)
+        # (The next round's first shot in the same sessions: a layout logged after it is that round's.)
+        until = db.execute("SELECT MIN(ts) FROM shots WHERE session_id IN (SELECT session_id FROM shots WHERE"
+                           " record_uuid = ?) AND ts > (SELECT MAX(ts) FROM shots WHERE record_uuid = ?)"
+                           " AND record_uuid IS NOT ?", (uuid, uuid, uuid)).fetchone()[0]
     keys, side_of = _sides(slots)
     card_side = {c["id"]: c["side"] for c in cards}
     # One card a side: its last (a booth that stopped between writing a round's cards and marking it
@@ -410,7 +415,7 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
         "edit": {"excluded": any(c["excluded"] for c in cards), "mark": mark,
                  "left_out": [s["uid"] for s in shots if s["left_out"]]},
         "course_card": _course_card(tees, folder["folder"] if folder else None),
-        "hole_layouts": _hole_layouts(layouts, shots),
+        "hole_layouts": _hole_layouts(layouts, shots, until),
     }, rec["gen"]
 
 
@@ -418,7 +423,8 @@ def _point(x: Any, z: Any) -> list[float] | None:
     return [x, z] if isinstance(x, (int, float)) and isinstance(z, (int, float)) else None
 
 
-def _hole_layouts(layouts: list[dict[str, Any]], shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _hole_layouts(layouts: list[dict[str, Any]], shots: list[dict[str, Any]],
+                  until: float | None = None) -> list[dict[str, Any]]:
     """Each hole the round played, as its replay is drawn (shotcast_scoring.replay._layout_for, as
     the booth's own page picks them): the tee (this round's, else the course's latest), this round's
     pin (none for a round quit before GSPro logged it: the cloud estimates it as the booth does), the
@@ -427,14 +433,14 @@ def _hole_layouts(layouts: list[dict[str, Any]], shots: list[dict[str, Any]]) ->
     for s in shots:
         if (m := replay._HOLE.match(s.get("hole") or "")) is not None:
             holes.setdefault(int(m.group(1)), []).append(s)
+    sessions = {s["session_id"] for s in shots}   # (all the round's: a booth restarted mid-round starts another)
     out = []
     for hole, rows in sorted(holes.items()):
-        sessions = {r["session_id"] for r in rows}
-        this, any_ = replay._layout_for(layouts, rows[0]["course"], hole, sessions, rows[0]["ts"], rows[-1]["ts"])
+        this, any_ = replay._layout_for(layouts, rows[0]["course"], hole, sessions, rows[0]["ts"], rows[-1]["ts"], until)
         lo = this or any_
         if lo is None:
             continue
-        out.append({"hole": hole, "par": lo["par"], "tee_box": (this or {}).get("tee_box"),
+        out.append({"hole": hole, "par": lo["par"], "tee_box": ((this or {}).get("tee_box") or None) and this["tee_box"][:MAX_TEE_NAME],
                     "tee": _point(any_["tee_x"], any_["tee_z"]) if any_ else None,
                     "pin": _point(this["pin_x"], this["pin_z"]) if this else None,
                     "waypoint": _point(lo["wp_x"], lo["wp_z"])})
