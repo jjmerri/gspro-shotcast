@@ -120,9 +120,10 @@ sources/  ─►  engine/    ─►  facts.py  ─►  prompts.py ─► LLM ─
   and the league's shots). Nothing is learned in play; a shot well off the prediction is logged as a
   `carry check`.
 - **`carry_estimate.py`** GSPro's no-penalty carry from the ball numbers, for the mid-flight call
-  when the monitor sends no carry (springbok's connector). Gradient-boosted trees trained by
-  `tools/train_carry_estimate.py` on the league's shots, shipped as `carry_estimate.json`; normal
-  full swings only. Never stored as a measured carry.
+  when the monitor sends no carry (springbok's connector), flown by `ball_flight.py`; none for a
+  launch under 2 degrees. Never stored as a measured carry.
+- **`ball_flight.py`** GSPro's ball flight (its air and step, our own drag and lift curves fitted
+  to its output): a shot's carry from its ball numbers, and how a course's altitude changes it.
 - **`course_card.py`** reads a GSPro course's static card (par, stroke index, yardages,
   altitude) from its `.unity3d.csv` / `coursedetails.txt`, and, with commentary on, the GSPro
   listing's notes from `coursedetails.txt` and the course file (`.GKD`): the description and style

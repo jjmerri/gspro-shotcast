@@ -1562,8 +1562,8 @@ async def test_a_shot_delivered_after_the_ball_landed_gets_no_flight_call(tmp_pa
     assert engine.flight_latencies == []
 
 
-@pytest.mark.parametrize("launch, calls", [(None, 4), (3.0, 0)])
-async def test_a_monitor_that_sends_no_carry_gets_flight_calls_on_normal_swings_only(tmp_path, launch, calls):
+@pytest.mark.parametrize("launch, calls", [(None, 4), (1.5, 0)])
+async def test_a_monitor_that_sends_no_carry_gets_flight_calls_unless_launched_near_flat(tmp_path, launch, calls):
     import dataclasses
     from commentator.models import ShotEvent
 
@@ -1814,19 +1814,21 @@ def test_course_altitude_flies_each_shot_by_its_ball_numbers():
     from commentator.carry_model import CarryModel
 
     m = CarryModel(course_altitude_ft={"Denver CC": 5000, "Sea": 0})
-    drive, iron = Shot(ball_speed=150, vla=11, total_spin=2700), Shot(ball_speed=120, vla=16, total_spin=7000)
-    low = Shot(ball_speed=110, vla=3, total_spin=5000)   # kept up by its spin: thin air lifts it less
+    drive, iron = Shot(ball_speed=150, vla=11, total_spin=2700, spin_axis=0), Shot(ball_speed=120, vla=16, total_spin=7000, spin_axis=0)
+    low = Shot(ball_speed=110, vla=3, total_spin=5000, spin_axis=0)   # kept up by its spin: thin air lifts it less
     assert 1.04 < m.baseline("Denver CC", shot=drive) < 1.06 < 1.08 < m.baseline("Denver CC", shot=iron) < 1.10
     assert m.baseline("Denver CC", shot=low) < 0.95
     assert m.baseline("Sea", shot=iron) == 1.0
     # Without usable ball numbers (none, or launched below level): the flat 2% per 1,000 ft.
     assert m.baseline("Denver CC", shot=Shot()) == m.baseline("Denver CC", shot=replace(drive, vla=-2)) == 1.1
+    assert m.baseline("Denver CC", shot=replace(drive, spin_axis=None)) == 1.1
     assert m.factor("tee", 200, "Denver CC", 11, "lm", drive) == m.baseline("Denver CC", shot=drive)
     assert "x 1.086" in m.check("fairway", 166, 150, "Denver CC", 16, "gspro", iron)
     assert 240 < ball_flight.carry_yards(150, 11, 2700) < 252
     no_spin = [ball_flight.altitude_factor(150, 12, 0, axis, 5000) for axis in (0, 90)]
     assert no_spin[0] == no_spin[1]   # no spin, no lift: its axis means nothing
-    assert ball_flight.altitude_factor(145, 0.04, 2800, 0, 5000) < 0.6   # barely launched, still flown
+    assert ball_flight.altitude_factor(145, 0.04, 2800, 0, 5000) < 0.6
+    assert ball_flight.altitude_factor(145, 12, -1, 0, 5000) is None is ball_flight.altitude_factor(145, 12, 2800, float("nan"), 5000)   # barely launched, still flown
 
 
 def _rec(round_id, hole_seq, n, lie="fairway", game=240.0):

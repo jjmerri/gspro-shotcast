@@ -54,7 +54,7 @@ where = [".", "scoring/src"]
 include = ["commentator*", "shotcast_scoring*"]
 
 [tool.setuptools.package-data]
-commentator = ["*.html", "*.md", "*.ps1", "carry_estimate.json", "stats_vendor/*/*", "stats_app/*", "stats_app/icons/*"]
+commentator = ["*.html", "*.md", "*.ps1", "stats_vendor/*/*", "stats_app/*", "stats_app/icons/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

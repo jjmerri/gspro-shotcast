@@ -123,10 +123,11 @@ def altitude_factor(speed_mph: float | None, launch_deg: float | None, spin_rpm:
     without the ball numbers or for a ball that never gets up."""
     if not altitude_ft:
         return 1.0
-    if speed_mph is None or launch_deg is None or spin_rpm is None:
+    ball = (speed_mph, launch_deg, spin_rpm, spin_axis_deg, altitude_ft)
+    if any(v is None or not math.isfinite(v) for v in ball) or spin_rpm < 0:
         return None
     # (A replayed shot is the cache's; the axis's side doesn't change how far it carries.)
-    return _factor(speed_mph, launch_deg, spin_rpm, abs(spin_axis_deg or 0.0), altitude_ft)
+    return _factor(speed_mph, launch_deg, spin_rpm, abs(spin_axis_deg), altitude_ft)
 
 
 @lru_cache(maxsize=512)
