@@ -790,9 +790,9 @@ def test_after_a_round_goes_each_holes_minimap_goes_once_unless_a_larger_one_is_
 
     from PIL import Image
 
-    def jpeg(w, h):
+    def jpeg(w, h, green=110):
         b = io.BytesIO()
-        Image.new("RGB", (w, h), (50, 110, 60)).save(b, "JPEG")
+        Image.new("RGB", (w, h), (50, green, 60)).save(b, "JPEG")
         return b.getvalue()
 
     cfg, s, cl = _booth(tmp_path, api)
@@ -801,6 +801,7 @@ def test_after_a_round_goes_each_holes_minimap_goes_once_unless_a_larger_one_is_
     first = _round(s, 1)
     _drain(cl, cfg)
     [pic] = api.pictures
+    # (grabbed before this round's session began? here the same session: this round's)
     assert (pic["course"], pic["hole"], pic["ball"], pic["pin"], pic["round_id"]) == ("Pebble", 1, [0.5, 0.9], [0.5, 0.1], first)
     _round(s, 500)
     _drain(cl, cfg)
@@ -809,6 +810,11 @@ def test_after_a_round_goes_each_holes_minimap_goes_once_unless_a_larger_one_is_
     _round(s, 900)
     _drain(cl, cfg)
     assert len(api.pictures) == 2   # (a sharper one goes)
+    # A new grab of the same size goes too (the one sent may have been removed in the cloud as wrong).
+    s.record_hole_image("Pebble", 1, jpeg(72, 144, green=140), (0.5, 0.9), (0.5, 0.1), replace=True)
+    _round(s, 1300)
+    _drain(cl, cfg)
+    assert len(api.pictures) == 3
 
 
 def test_a_quit_round_doesnt_take_the_next_rounds_pin(tmp_path, api):
