@@ -204,16 +204,34 @@ def _reworded(line: str) -> bool:
     return any(k in line for k in _MARKERS) and not line.startswith("LeavesCollider ")
 
 
+def _course_file_folder(line: str) -> str | None:
+    """The course folder of a `Loading Course file <Courses>/<folder>/<folder>.<ext>` line, lowercased as
+    `Selected Course:` logs it (a tournament's comes as the course list spells it), else None. GSPro names
+    the file for its folder: a line cut off mid-path (a log read as it's written) names no folder, rather
+    than a part of the path, which can be a Windows profile's name."""
+    parts = [p for p in re.split(r"[\\/]", line[len("Loading Course file "):].strip()) if p]
+    if len(parts) < 2:
+        return None
+    stem, dot, ext = parts[-1].rpartition(".")
+    return parts[-2].lower() if dot and ext and stem.lower() == parts[-2].lower() else None
+
+
 def parse_events(text: str) -> list[LogEvent]:
     """Every meaningful game-state line in order; Unity noise is dropped. A malformed line is skipped,
     never fatal: the tailer applies these continuously and one bad line can't be allowed to stop it."""
     out: list[LogEvent] = []
-    for raw in text.splitlines():
+    for raw in text.split("\n"):   # (only GSPro's line ends: a path can hold any other separator)
         line = raw.strip()
         if not line or line.startswith("(Filename"):
             continue
         try:
-            if m := _STATE.search(line):
+            if line.startswith("Loading Course file "):
+                # Every course load logs the course file's path, in the course's folder: tournaments, online
+                # rooms and a course straight from the multi range log no `Selected Course:`. (First: the
+                # path can hold any words; a line with no folder is passed over.)
+                if folder := _course_file_folder(line):
+                    out.append(LogEvent("course_file", course=folder))
+            elif m := _STATE.search(line):
                 strokes = int(m.group(3))
                 out.append(LogEvent("state", player=int(m.group(1)), hole=int(m.group(2)),
                                      score=max(0, int(m.group(4)) + strokes), strokes=strokes))
@@ -389,7 +407,8 @@ class GsproState:
     # Course folders GSPro found another course's files in ("Course File Mismatch Detected!" as it loaded
     # them): no CourseKey in its round file is theirs.
     mismatched_folders: set = field(default_factory=set)
-    selected_folder: str | None = None   # the last `Selected Course:` (the folder a mismatch is of)
+    selected_folder: str | None = None   # the last course folder selected or loaded (the one a mismatch is of)
+    course_loaded: bool = False   # `course` is from this course's own load (a file line), not a selection
     # The range on now is the selected course's own ("Go to Range" at setup: its "Practice" load comes
     # with the course still selected, and no multi-range marker), so its Tee Off is onto that course.
     own_range: bool = False
@@ -401,6 +420,7 @@ class GsproState:
     # (a round or the range was just left), or None (not seen yet).
     mode: str | None = None
     round_ends: int = 0               # "End Round Button Click"s seen (a finished or abandoned round)
+    end_by_restart: bool = False      # the last of them was GSPro starting again, not an End Round
     sgt: bool = False                 # this round is being played on the Simulator Golf Tour (an SGT Sync logged)
     # How GSPro took the last shot from its launch monitor (its LM Type's connectType: Uneekor,
     # FlightScope, Foresight, OpenAPI for a third-party connector, ...); None until a shot logs it.
@@ -568,6 +588,13 @@ class GsproState:
                 self.menu_hole = self.current_hole
         elif ev.kind == "version":
             self.version = ev.display
+            # Logged once, as GSPro starts: a round the last session was in is over (its End Round never
+            # logged), even if this one goes back to the same course. (A restart can write the same log
+            # afresh, which only its shrinking, not a switch of log, shows.)
+            if self.mode == "course":
+                self.end_round(restart=True)
+            elif self.mode == "range":
+                self.mode = "menu"
         elif ev.kind == "unparsed":
             self.unparsed = (self.unparsed + [ev.display])[-5:]
             self._wrong_hole_next = False   # its own score line, perhaps, reworded
@@ -589,6 +616,11 @@ class GsproState:
             if ev.course != self.course:
                 self._reset_round()         # a real course change is a new round; forget the old one
             self._on_course(ev.course, None)   # the display name waits for this course's load
+        elif ev.kind == "course_file":
+            self.selected_folder = ev.course   # (a mismatch is logged after the load's file)
+            if self.mode != "course" or ev.course != self.course:
+                self.enter_course(ev.course, None)   # the display name waits for this course's load
+            self.course_loaded = True
         elif ev.kind == "course_mismatch":
             if self.selected_folder:
                 self.mismatched_folders.add(self.selected_folder.lower())
@@ -803,13 +835,14 @@ class GsproState:
 
     def enter_course(self, course: str | None, display: str | None) -> None:
         """On a course from the range or the menus without a `Selected Course:` line: a course's load
-        logged on its own, or (leaving a course's own range for its first tee, which GSPro doesn't log)
+        logged on its own (its course file's folder, when that's logged), or (leaving a course's own range for its first tee, which GSPro doesn't log)
         a tee seen on screen. Anything played before, the range included, isn't this round's."""
         self._reset_round()
         self._on_course(course, display)
 
     def _on_course(self, course: str | None, display: str | None) -> None:
         self.course, self.course_display = course, display
+        self.course_loaded = False
         self.course_entries += 1
         self.last_sgt = False   # the ended round's: a new course is a new round
         self.altitude_ft = None
@@ -817,10 +850,11 @@ class GsproState:
         self.shots_since_course, self.first_hole, self.starts_late = 0, None, False
         self.live_shots_since_course = 0
 
-    def end_round(self) -> None:
-        """The round is over (End Round, or GSPro restarted as the other version mid-round)."""
+    def end_round(self, restart: bool = False) -> None:
+        """The round is over (End Round, or GSPro restarted mid-round: `restart`)."""
         self.mode = "menu"
         self.round_ends += 1
+        self.end_by_restart = restart
         self._finish_picked()
         self.last_hole_scores = dict(self.hole_scores)   # for the booth to settle the round with
         self.last_penalties, self.last_players_seen = dict(self._penalties), self.players_seen | self.primed_seen
@@ -1284,7 +1318,7 @@ class GsproLogFollower:
         never logged), even if the new one goes back to the same course."""
         self._switched = False
         if self.state.mode == "course":
-            self.state.end_round()
+            self.state.end_round(restart=True)
         elif self.state.mode == "range":
             self.state.mode = "menu"
 
@@ -1319,19 +1353,28 @@ class GsproLogFollower:
         self.path = live_log(self.configured)
         try:
             with open(self.path, "rb") as f:
-                text = f.read().decode("utf-8", "replace")
-                self._offset = f.tell()
+                raw = f.read()
         except OSError:
             self._offset = 0
             self.primed = True
             return
+        # Only whole lines: one GSPro is still writing is read whole when the follower takes it up.
+        self._offset = raw.rfind(b"\n") + 1
+        text = raw[:self._offset].decode("utf-8", "replace")
         past = GsproState(quiet=True)
         for ev in parse_events(text):
             past.apply(ev)
         s = self.state
         s.mode, s.shots_since_course, s.first_hole = past.mode, past.shots_since_course, past.first_hole
         s.starts_late, s.own_range, s.sgt = past.starts_late, past.own_range, past.sgt
-        s.course = past.course if past.own_range else s.course   # the course its Tee Off goes to
+        # The course its Tee Off goes to, or the one a round being joined loaded (not just a selection: one
+        # backed out of can stand until another course's load says otherwise).
+        s.course = past.course if past.own_range or past.mode == "course" and past.course_loaded else s.course
+        s.course_loaded = past.course_loaded and s.course == past.course
+        if past.mode == "course":
+            # The loaded course's name, which a misread HUD gives way to (a course entry clears it, so it's
+            # this course's, whether or not its folder is known).
+            s.course_display = past.course_display
         s.hole_scores = dict(past.hole_scores)   # holes already finished in a round being joined
         s._score.update({k: past._score[k] for k in {*past.hole_scores, *past._picked} if k in past._score})   # so they can reopen
         s._picked = set(past._picked)   # picked-up holes: finished, though not yet in hole_scores

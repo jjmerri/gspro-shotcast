@@ -325,7 +325,9 @@ class RoundDetectMixin:
             self._round_end_queued = True
             log.info("Round %s: GSPro is on the range; ending the round and cutting the booth off", r.id)
             self.speech.interrupt()
-            self._events.put_nowait(RoundEndEvent(reason="GSPro went to the range", abandoned=True))
+            # (a GSPro restart that's gone on to the range is still a restart, not a quit)
+            restart = g.end_by_restart and g.round_ends != self._log_round_ends
+            self._events.put_nowait(RoundEndEvent(reason="GSPro went to the range", abandoned=True, restart=restart))
         if g.player_menus != self._log_menus:
             self._log_menus = g.player_menus
             if live and not self._round_end_queued:
@@ -364,6 +366,9 @@ class RoundDetectMixin:
                 self._round_end_queued = True
                 if r.log_complete:
                     self._events.put_nowait(RoundEndEvent(reason="GSPro round finished"))
+                elif g.end_by_restart:
+                    log.info("Round %s: GSPro restarted before it was complete", r.id)
+                    self._events.put_nowait(RoundEndEvent(reason="GSPro restarted", abandoned=True, restart=True))
                 else:
                     log.info("Round %s: GSPro's round was ended before it was complete (quit early)", r.id)
                     self._events.put_nowait(RoundEndEvent(reason="quit early in GSPro", abandoned=True))

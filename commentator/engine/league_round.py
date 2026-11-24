@@ -300,7 +300,7 @@ class LeagueRoundMixin:
         # by exact name: a near one would turn "Swiss Alpine Valley" into "Alpine Valley".
         alias = {plain(e["course"]): self._card_name(e) for e in self.league.data.get("schedule") or []
                  if e.get("course") and e.get("gspro_course")}
-        return lambda name: (course_card.identify(dirs, alias.get(plain(name), name)) or "").lower() == mine.lower()
+        return lambda name: (course_card.identify(dirs, alias.get(plain(name), name), mine) or "").lower() == mine.lower()
 
     def _tee_course(self, hud: Hud) -> str | None:
         """The course a round starting at this tee is on. The HUD's read is the short name players

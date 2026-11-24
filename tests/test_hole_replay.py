@@ -626,6 +626,34 @@ def test_a_pin_gspro_logged_for_the_hole_is_used_over_the_course_files(tmp_path)
     assert hole_replays(st.db)[(1, 1)]["pin"] == [0, 300]
 
 
+def test_a_round_quit_early_takes_its_tee_from_the_build_of_the_course_gspro_loaded(tmp_path):
+    import shutil
+
+    from commentator import course_card
+    from commentator.course_layout import fill_missing
+    path, st = _season(tmp_path)
+    st.db.execute("UPDATE shots SET to_pin_yards = ?, start_x = 50, start_z = 100 WHERE shot_number = 1",
+                  (round(2 * math.hypot(60, 150) * M_TO_YD, 1),))
+    st.db.execute("UPDATE shots SET start_x = 10, start_z = 200 WHERE shot_number = 2")
+    st.db.execute("UPDATE shots SET start_x = 2, start_z = 295 WHERE shot_number = 3")
+    st.db.execute("UPDATE shots SET record_uuid = 'u1'")
+    st.db.commit()
+    _course_file(tmp_path)
+    v2 = tmp_path / "Courses" / "test_v2_gsp"   # another build of Test Links, its White box called Blue
+    shutil.copytree(tmp_path / "Courses" / "test_gsp", v2)
+    gkd = v2 / "test_gsp.GKD"
+    gkd.write_text(gkd.read_text().replace('"White"', '"Blue"'))
+    course_card._index_cache.clear()
+    for folder, box in (("test_v2_gsp", "Blue"), ("test_gsp", "White")):
+        st.db.execute("DELETE FROM hole_layouts")
+        st.db.execute("DELETE FROM round_folders")
+        st.db.execute("INSERT INTO round_folders (record_uuid, folder) VALUES ('u1', ?)", (folder,))
+        st.db.commit()
+        assert fill_missing(st.db, [str(tmp_path / "Courses")]) == 1
+        assert st.db.execute("SELECT tee_box FROM hole_layouts").fetchone()[0] == box
+    course_card._index_cache.clear()
+
+
 def _course_file(tmp_path):
     """Test Links' course file: hole 1's Black tee at (0, -40), White at (0, 0), a dogleg aim point and
     two days' pins."""

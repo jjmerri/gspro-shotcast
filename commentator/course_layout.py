@@ -167,7 +167,7 @@ def fill_missing(db: sqlite3.Connection, courses_dirs, since: float | None = Non
     round_of = stats_web.shot_rounds(db)
     rounds: dict[int, list[sqlite3.Row]] = {}
     for r in db.execute("SELECT id, session_id, ts, course, hole, shot_number, start_x, start_z, to_pin_yards,"
-                        " mulligan FROM shots ORDER BY id"):
+                        " mulligan, record_uuid FROM shots ORDER BY id"):
         if r["id"] in round_of and _HOLE.match(r["hole"] or ""):
             rounds.setdefault(round_of[r["id"]], []).append(r)
     spans = {n: ({r["session_id"] for r in rows}, rows[0]["ts"], rows[-1]["ts"]) for n, rows in rounds.items()}
@@ -176,7 +176,11 @@ def fill_missing(db: sqlite3.Connection, courses_dirs, since: float | None = Non
         logged = db.execute("SELECT session_id, ts, x, y, z FROM logged_pins").fetchall()
     except sqlite3.OperationalError:
         logged = []
-    geometry: dict[str, dict | None] = {}
+    try:
+        folders = dict(db.execute("SELECT record_uuid, folder FROM round_folders").fetchall())
+    except sqlite3.OperationalError:
+        folders = {}
+    geometry: dict[tuple, dict | None] = {}
     filled = 0
     for n, rows in rounds.items():
         ses, first, last = spans[n]
@@ -199,9 +203,11 @@ def fill_missing(db: sqlite3.Connection, courses_dirs, since: float | None = Non
                         default=hr[0]["ts"] - 1800)
             if pins and (p := logged_pin(pins, hr, after)) is not None:
                 known[h] = p
-        key = (course or "").casefold()
+        # (the build GSPro loaded, when the round kept its folder: two can share a name)
+        loaded = next((folders[u] for u in dict.fromkeys(r["record_uuid"] for r in rows) if u in folders), None)
+        key = ((course or "").casefold(), (loaded or "").lower())
         if key not in geometry:
-            folder = course_card.find(courses_dirs, course)
+            folder = course_card.find(courses_dirs, course, loaded)
             geometry[key] = load(folder) if folder else None
         if not geometry[key] and not known:
             continue
