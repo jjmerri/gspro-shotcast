@@ -308,7 +308,7 @@ def volume_disk_number(raw: bytes) -> int | None:
     """The first disk a volume is on, from IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS' VOLUME_DISK_EXTENTS (a
     DWORD count, padded to 8, then 24-byte DISK_EXTENTs, each starting with its DWORD disk number);
     None when there's none or it's cut short."""
-    if len(raw) < 12 or int.from_bytes(raw[0:4], "little") < 1:
+    if len(raw) < 32 or int.from_bytes(raw[0:4], "little") < 1:   # (a whole first DISK_EXTENT)
         return None
     return int.from_bytes(raw[8:12], "little")
 
@@ -320,9 +320,11 @@ def storage_serial(raw: bytes) -> str:
     if len(raw) < 28:
         return ""
     size = int.from_bytes(raw[4:8], "little")
-    data = raw[:size] if 28 <= size <= len(raw) else raw
+    if size < 36:   # (a descriptor says it holds at least its fixed fields)
+        return ""
+    data = raw[:size]   # (or what came back, if that's less)
     at = int.from_bytes(raw[24:28], "little")
-    if at < 28 or at >= len(data):
+    if at < 36 or at >= len(data):   # (past the fixed fields, BusType and RawPropertiesLength)
         return ""
     end = data.find(b"\0", at)
     if end < 0:
@@ -367,8 +369,10 @@ def _system_disk_hardware_serial() -> str:
     drive = (os.environ.get("SystemDrive") or "C:").rstrip("\\")
     extents = ask(f"\\\\.\\{drive}", 0x00560000, None, 1024)   # (IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS)
     disk = volume_disk_number(extents) if extents else None
+    if disk is None:   # (no guess: disk 0 may not be the one Windows is on)
+        return ""
     # (StorageDeviceProperty, PropertyStandardQuery: a STORAGE_PROPERTY_QUERY of 12 bytes, all 0)
-    got = ask(f"\\\\.\\PhysicalDrive{disk if disk is not None else 0}", 0x002D1400, bytes(12), 4096)
+    got = ask(f"\\\\.\\PhysicalDrive{disk}", 0x002D1400, bytes(12), 4096)
     return storage_serial(got) if got else ""
 
 
@@ -393,7 +397,8 @@ def fingerprint() -> str:
     disks report the same serial, or PCs where none of the hardware ids can be read. Some boards give
     every unit the same placeholder UUID; the disk's own serial still tells those apart. A reader that
     fails now and then gives another fingerprint for that pairing, which only means the site doesn't
-    see it's the PC that was on another bay (it never wrongly signs one out). The pairing page shows the
+    see it's the PC that was on another bay (a read failing alone doesn't sign another PC out; clones
+    whose reads all fail, or all read the same, still can, as above). The pairing page shows the
     fingerprint (its first 8 hex digits) for the owner to compare with the PC's, and the site should say
     which PC an approval replaces."""
     parts: list[str] = []
