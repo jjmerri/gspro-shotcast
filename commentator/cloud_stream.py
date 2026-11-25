@@ -28,15 +28,19 @@ cloud is asked again OFF_S later (a fresh stream from then on, if OBS is still o
 ends it for the rest of OBS's session (the month's streaming is used up) and says so in the tray
 (cloud_booth.stream_issues), cleared once a stream starts again. The network, or any other answer,
 is tried again after a wait that grows to MAX_WAIT_S (said once in the log, then only in its debug
-lines). Losing the pairing, or an app too old for the API, stops the thread till Shotcast restarts;
+lines); so is storage failing a PUT, the wait reset only once a batch has gone up. Losing the pairing, or an app too old for the API, stops the thread till Shotcast restarts;
 the cloud ends a stream that's stopped hearing from its PC by itself (after minutes), and one it's
 ended (`stream_ended`, or `no_stream`) is followed by a fresh one.
 
 When it stops, what's been put but not confirmed is confirmed (for up to GIVE_UP_S, through the
-network or the cloud's own trouble) before /end, as is what was put before a refusal stopped it. A
+network or the cloud's own trouble) before /end, as is what was put before a refusal stopped it; a
+new stream isn't started meanwhile (the cloud ends the bay's other stream on a start, and with it any
+confirmations still to come). Once OBS's playlist ends, what's left is sent (for up to GIVE_UP_S,
+waiting as above), then the stream ends. A
 segment whose file isn't the one seen (OBS started again and reused its name) is given up, never sent
 as this stream's. The booth's live.json says on air while OBS's stream is (refused or not, started
-on the cloud or not), and off once it stops or this thread does, for the tray and its updater. Only
+on the cloud or not), and off once it stops or this thread does (however it stops), for the tray
+and its updater. Only
 the files this stream read, and the playlist it last read, are deleted from OBS's folder afterwards.
 
 Left as they are: a booth restarted mid-stream starts another stream, so the few segments still in
@@ -119,6 +123,7 @@ class CloudStream:
         self.lost: set[int] = set()        # given up, the cloud not told yet
         self.stored: dict[int, float] = {}  # put to their links, the cloud not told yet: seq -> when first put
         self.high = -1                     # the highest seq seen so far
+        self.over = 0.0                    # OBS's playlist ended (when): what's left goes, then it ends
         self.halted: str | None = None     # this stream isn't sent: "refused" (asked again at off_until) or "allowance"
         self.off_until = 0.0               # streaming refused: no stream asked for before this
         # Streams to end: {id, first, stored, lost}, their confirmations said, then /end, till answered.
@@ -298,7 +303,6 @@ class CloudStream:
             if r.status_code != 200 or not isinstance(got.get("links"), list):
                 self._trouble(f"no upload links (HTTP {r.status_code} {err or ''})")
                 return
-            self._fine()
             self.issues([])
             by_seq = dict(zip((i["seq"] for i in items), batch))
             for link in got["links"]:
@@ -316,8 +320,12 @@ class CloudStream:
                     self.queued.pop(seq, None)
                 else:
                     failed = f"HTTP {code}"
-        self._tell()
-        if failed is not None:   # storage failing: not asked for fresh links every second
+        if failed is None:
+            if items:
+                self._fine()   # (a batch up: the wait starts again from nothing)
+            self._tell()
+        else:   # storage failing: the wait grows, not asked for fresh links every second
+            self._tell(fine=False)
             self._trouble(f"segments not uploaded ({failed})")
 
     def _give_up(self, seq: int) -> None:
@@ -348,8 +356,9 @@ class CloudStream:
             self.done.add(s)
         return None
 
-    def _tell(self) -> None:
-        """Say which segments are up (and which are given up)."""
+    def _tell(self, fine: bool = True) -> None:
+        """Say which segments are up (and which are given up). `fine`: an answer resets the wait
+        (not when storage has just failed: that wait goes on growing)."""
         from .cloud import CloudError, NotPaired, PairingChanged, TooOld
 
         if not (self.stored or self.lost) or self.stream_id is None:
@@ -362,7 +371,8 @@ class CloudStream:
             self._trouble(f"segments not confirmed ({e})")
             return
         if res is None:
-            self._fine()
+            if fine:
+                self._fine()
             return
         status, err, got = res
         if status == 403 and err == "allowance_used":
@@ -420,10 +430,32 @@ class CloudStream:
                 log.warning("Live stream: Shotcast Cloud didn't answer ending stream %s; left to it", e["id"])
         self.ending = left
 
+    def _confirming(self) -> bool:
+        """A stopped stream still has segments to confirm (within GIVE_UP_S): no new stream started
+        till they are, since the cloud ends the bay's other stream on a start."""
+        now = self.clock()
+        return any((e["stored"] or e["lost"]) and now - e["first"] < GIVE_UP_S for e in self.ending)
+
+    def _push(self) -> None:
+        """The stream started on the cloud if it isn't, and what's queued sent: unless waiting."""
+        if self.clock() < self.wait_until or self.halted:
+            return
+        if self.stream_id is None and (self._confirming() or not self._start()):
+            return
+        if not self.halted:
+            self._send()
+
     # -- one pass
     def step(self) -> None:
         if self.ending:
             self._end_streams()
+        if self.over:
+            # OBS's playlist has ended: what's left goes (waiting as ever), then the stream ends.
+            if self.queued and not self.halted and self.clock() - self.over < GIVE_UP_S:
+                self._push()
+            if not (self.queued and not self.halted) or self.clock() - self.over >= GIVE_UP_S:
+                self._end()
+            return
         pl = self.folder / self.playlist
         try:
             st = pl.stat()
@@ -484,14 +516,11 @@ class CloudStream:
             self.seq, self.seen_mtime = seq, mtime
         else:
             ended = False
-        if now >= self.wait_until:
-            if not self.halted and self.stream_id is None:
-                if not self._start():
-                    return
-            if not self.halted:
-                self._send()
+        self._push()
         if ended:
-            self._end()
+            self.over = now
+            if not (self.queued and not self.halted):
+                self._end()
 
     def _end(self, clean: bool = True) -> None:
         """The stream's stopped: what's left of it goes (its last segment is finished now), then the
@@ -500,7 +529,8 @@ class CloudStream:
             return
         if not self.halted and self.stream_id is not None:
             for _ in range(4):   # (a few passes: each sends up to MAX_PER_ASK)
-                if not self.queued or self.stream_id is None:   # (or the cloud ended it meanwhile)
+                # (or the cloud ended it meanwhile, or it's waiting: what's left is given up)
+                if not self.queued or self.stream_id is None or self.clock() < self.wait_until:
                     break
                 self._send()
             for seq_ in list(self.queued):
@@ -514,6 +544,7 @@ class CloudStream:
         seen = self.stamps
         self.session, self.stream_id, self.seq, self.seen_mtime = None, None, -1, 0.0
         self.queued, self.stored, self.lost, self.stamps, self.halted = {}, {}, set(), {}, None
+        self.over = 0.0
         self._status(False)
         if clean and all(p.session is None for p in self.peers):
             # Only what this stream read (and unchanged since): never anything else in the folder.
@@ -546,23 +577,26 @@ class CloudStream:
     def run(self, interval: float = 1.0) -> None:
         from .cloud import NotPaired, PairingChanged, TooOld
 
-        while not self._stop.wait(interval):
-            try:
-                self.step()
-            except (NotPaired, PairingChanged, TooOld) as e:
-                log.warning("Live stream: nothing more goes to Shotcast Cloud till Shotcast restarts: %s", e)
-                self._status(False)   # (nothing on air: an update that cures it isn't held back)
-                return
+        try:
+            while not self._stop.wait(interval):
+                try:
+                    self.step()
+                except (NotPaired, PairingChanged, TooOld) as e:
+                    log.warning("Live stream: nothing more goes to Shotcast Cloud till Shotcast restarts: %s", e)
+                    self.session = None   # (the idle watch and the folder's other readers see it's over)
+                    return
+                except Exception:
+                    log.exception("Live stream to Shotcast Cloud failed (trying again)")
+                    self._stop.wait(5)
+            try:   # here, not in close(): only this thread touches the stream
+                if self.session:
+                    self._end(clean=False)
+                elif self.ending:
+                    self._end_streams()
             except Exception:
-                log.exception("Live stream to Shotcast Cloud failed (trying again)")
-                self._stop.wait(5)
-        try:   # here, not in close(): only this thread touches the stream
-            if self.session:
-                self._end(clean=False)
-            elif self.ending:
-                self._end_streams()
-        except Exception:
-            log.exception("Live stream: going off air on Shotcast Cloud failed")
+                log.exception("Live stream: going off air on Shotcast Cloud failed")
+        finally:   # however the thread stops: nothing on air (an update that cures it isn't held back)
+            self._status(False)
 
     def close(self) -> None:
         self._stop.set()
