@@ -796,13 +796,14 @@ class Tray:
 
     def _console_env(self, env: dict | None = None) -> dict | None:
         """A console's environment: `env` (None: this process's, as it is). Paired with Shotcast Cloud,
-        without the profile's AI and voice keys this tray loaded: the window can stay open past an
+        without the profile's AI and voice keys and OBS's password this tray loaded: the window can stay open past an
         unpair, and a Shotcast started in it loads the keys of whatever it then runs as for itself."""
         if getattr(self, "cloud", None) is None:
             return env
-        from .cloud import ENV_KEYS
+        from .cloud import ENV_KEYS, LOCAL_ENV_KEYS
 
-        return {k: v for k, v in (os.environ if env is None else env).items() if k not in ENV_KEYS}
+        return {k: v for k, v in (os.environ if env is None else env).items()
+                if k not in ENV_KEYS and k not in LOCAL_ENV_KEYS}
 
     def screen_check(self, *_) -> None:
         subprocess.Popen(["cmd", "/k", python_exe(), "-m", "commentator", "screen-check", "--delay", "8"],
@@ -1101,8 +1102,10 @@ class Tray:
     def quit(self, *_) -> None:
         self._stop.set()
         self.booth.stop()
-        if self.cfg.live.enabled and (self.cfg.publish.bucket or self.cfg.live.local_keep_days):
-            # Stopping the booth ends it outright, so it never got to take the stream off air.
+        if self.cfg.live.enabled and (self.cfg.publish.bucket or self.cfg.live.local_keep_days
+                                      or self.cloud is not None):
+            # Stopping the booth ends it outright, so it never got to take the stream off air: OBS's
+            # output is stopped here (paired, the cloud ends a stream it stops hearing from).
             from .live_stream import off_air
 
             try:
@@ -1164,13 +1167,13 @@ class Tray:
             item(lambda _: "Turn the AI booth off" if self._commentary_on() else "Turn the AI booth on",
                  safe(self.toggle_commentary)),
             item(lambda _: "Stop the live stream" if self.live_now() else "Start the live stream",
-                 safe(self.toggle_live), visible=lambda _: self.cfg.live.enabled),
+                 safe(self.toggle_live), visible=lambda _: self.cfg.live.enabled and self.cloud is None),
             item("Set up the live stream...", safe(self.setup_live),
                  visible=lambda _: not self.cfg.live.enabled and self.cloud is None),   # (none paired)
             item("Settings...", safe(self.settings)),
             item("More", pystray.Menu(
                 item("Set up the live stream again (OBS)...", safe(self.setup_live),
-                     visible=lambda _: self.cfg.live.enabled),
+                     visible=lambda _: self.cfg.live.enabled and self.cloud is None),
                 item("Open the Shotcast folder", safe(self.open_folder)),
                 item("Open the recordings folder", safe(self.open_recordings),
                      visible=lambda _: self.cfg.live.enabled and bool(self.cfg.live.local_keep_days)),

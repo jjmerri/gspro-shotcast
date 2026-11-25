@@ -603,11 +603,14 @@ when a stream stops.
 
 **Paired with Shotcast Cloud** (not released yet), the stream goes to the cloud instead, never to a
 bucket, and nothing of it is kept on the PC: with `live.enabled: true` in the profile's own
-config.yaml (and OBS's password in its `.env`), the booth sends each finished file to Shotcast Cloud
-as OBS moves on to the next (`commentator/cloud_stream.py`), and the cloud writes the playlists and
-shows the stream on the Live tab of each of the account's leagues. An account without streaming is
-left alone (asked again every 10 minutes); one whose month of streaming is used up stops sending
-and says so in the tray. Starting and stopping OBS's output works as below.
+config.yaml (and OBS's password in its `.env`), the booth sends each file to Shotcast Cloud as OBS
+lists it (`commentator/cloud_stream.py`), and the cloud writes the playlists and shows the stream on
+the Live tab of each of the account's leagues. An account without streaming (or with its leagues
+suspended) isn't sent to, and is asked again 10 minutes later, a fresh stream from then if OBS is
+still on; one whose month of streaming is used up stops sending for the rest of OBS's session and
+says so in the tray (the warning goes once a stream starts again). The booth starts and stops OBS's
+output with rounds as below; the tray's own start/stop and OBS setup items aren't offered paired.
+Quitting from the tray stops OBS's output, and the cloud ends a stream it stops hearing from.
 
 The booth starts OBS's output when GSPro's round setup screen comes up with a course on it (so the
 opening tee shot is on it, however quickly it's hit), or when a round starts, and stops it 30 seconds after the sign-off

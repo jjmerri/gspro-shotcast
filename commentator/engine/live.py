@@ -103,7 +103,8 @@ class LiveMixin:
                 raise cloud.PairingChanged("this PC's Shotcast Cloud pairing changed; restart Shotcast to use it")
             return cl
         return CloudStream(self.cfg.live.dir, cloud_of, playlist=self.cfg.live.playlist,
-                           issues=cloud_booth.set_stream_issues)
+                           issues=cloud_booth.set_stream_issues,
+                           status_file=Path(self.cfg.log_dir) / "live.json")
 
     def _live_round_start(self) -> None:
         self._live_last_shot, self._live_resume_on_shot = time.monotonic(), False
