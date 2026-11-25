@@ -499,13 +499,15 @@ def test_quit_from_the_menu_asks_first():
 
 
 def test_quit_paired_with_the_live_stream_on_stops_obs_too(monkeypatch):
+    import threading
     from types import SimpleNamespace
 
     stopped = []
     monkeypatch.setattr("commentator.live_stream.off_air", lambda cfg: stopped.append(cfg))
     cfg = SimpleNamespace(live=SimpleNamespace(enabled=True, local_keep_days=0), publish=SimpleNamespace(bucket=None))
     app = SimpleNamespace(cfg=cfg, cloud=object(), booth=SimpleNamespace(stop=lambda: None),
-                          _stop=SimpleNamespace(set=lambda: None), icon=None)
+                          _stop=threading.Event(), _quit_done=threading.Event(), _quit_lock=threading.Lock(),
+                          icon=None)
     tray.Tray.quit(app)
     assert stopped == [cfg]            # paired: OBS's output stopped (the cloud ends the stream)
     stopped.clear()
@@ -524,3 +526,39 @@ def test_a_paired_console_gets_neither_the_ai_keys_nor_obss_password():
     assert tray.Tray._console_env(app, env) == {"PATH": "x"}
     app.cloud = None
     assert tray.Tray._console_env(app, env) == env
+
+
+def test_a_quit_the_icon_misses_still_ends_the_tray(monkeypatch):
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    class Exited(Exception):
+        pass
+
+    exits, stops, booth_stops = [], [], []
+
+    def exit_now(why):
+        exits.append(why)
+        if "again" in why:
+            raise Exited   # (as os._exit doesn't return)
+
+    monkeypatch.setattr(tray, "_exit_now", exit_now)
+    monkeypatch.setattr(tray, "QUIT_GRACE_S", 0.05)
+    cfg = SimpleNamespace(live=SimpleNamespace(enabled=False))
+    app = SimpleNamespace(cfg=cfg, cloud=None, booth=SimpleNamespace(stop=lambda: booth_stops.append(1)),
+                          _stop=threading.Event(), _quit_done=threading.Event(), _quit_lock=threading.Lock(),
+                          icon=SimpleNamespace(stop=lambda: stops.append(1)))
+    app._stop.set()                        # a Quit still stopping things: another leaves it to finish
+    tray.Tray.quit(app)
+    assert not exits and not stops and not booth_stops
+    app._stop.clear()
+    tray.Tray.quit(app)
+    assert stops == [1] and not exits
+    deadline = time.monotonic() + 5
+    while not exits and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(exits) == 1                 # the icon's loop never ended: out anyway, after the grace
+    with pytest.raises(Exited):
+        tray.Tray.quit(app)                # Quit again (pystray's stop() acts only once): out at once
+    assert stops == [1] and booth_stops == [1]

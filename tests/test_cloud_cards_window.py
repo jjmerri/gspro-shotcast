@@ -33,7 +33,7 @@ class Backdrop:
     def _run(self):
         import tkinter as tk
 
-        from commentator.overlay import _dpi_aware
+        from commentator.overlay import _dpi_aware, _end_loop
 
         _dpi_aware()   # (as the card's window is: both in the screen's own pixels)
         root = tk.Tk()
@@ -45,7 +45,7 @@ class Backdrop:
 
         def tick():
             if self.stop.is_set():
-                root.quit()
+                _end_loop(root)   # (not root.quit(): that can end the card's loop instead)
             else:
                 root.after(100, tick)
 
@@ -54,7 +54,7 @@ class Backdrop:
         try:
             root.mainloop()
         finally:
-            root.destroy()
+            _end_loop(root)
             del root, tick
             gc.collect()   # the Tk interpreter is freed here, on its own thread
 

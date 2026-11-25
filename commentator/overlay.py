@@ -304,6 +304,16 @@ def _hwnd(root) -> int:
     return ctypes.windll.user32.GetParent(root.winfo_id()) or root.winfo_id()
 
 
+def _end_loop(root) -> None:
+    """End the calling thread's Tk loop by destroying its root (its mainloop runs while the thread has
+    a main window). Never root.quit(): _tkinter's quit flag is one for the whole process, so whichever
+    thread's loop looks first ends, often the ON AIR badge's instead (a box then stayed up for good)."""
+    try:
+        root.destroy()
+    except Exception:   # (already destroyed)
+        pass
+
+
 def _dpi_aware() -> None:
     """Work in real pixels. Under display scaling (e.g. 150%) a DPI-unaware Tk reports the scaled-down
     screen size while screen capture later makes the process DPI-aware and the window is placed in real

@@ -390,7 +390,7 @@ class Window:
     def _loop(self) -> None:
         import tkinter as tk
 
-        from .overlay import _dpi_aware
+        from .overlay import _dpi_aware, _end_loop
 
         mon = None
         if self.where is not None:
@@ -404,10 +404,10 @@ class Window:
         try:
             self._show(tk, root, mon)
         finally:
-            root.destroy()
+            _end_loop(root)
 
     def _show(self, tk: Any, root: Any, mon: tuple[int, int, int, int] | None) -> None:
-        from .overlay import ON_TEXT, PANEL, PANEL_EDGE, _no_activate, _topmost
+        from .overlay import ON_TEXT, PANEL, PANEL_EDGE, _end_loop, _no_activate, _topmost
         from .popup import MUTED, NO_GREY
 
         root.withdraw()
@@ -430,7 +430,7 @@ class Window:
 
         def close() -> None:
             self.shown.closed.set()
-            root.quit()
+            _end_loop(root)
         head = tk.Frame(frame, bg=PANEL)
         head.pack(fill="x")
         title = tk.Label(head, text="Keep this round", bg=PANEL, fg=ON_TEXT, anchor="w",
@@ -533,7 +533,7 @@ class Window:
             try:
                 # (Its own deadline too: it comes down even if the booth's loop has stopped looking.)
                 if self.shown.down.is_set() or self.shown.closed.is_set() or _monotonic() >= until:
-                    root.quit()
+                    _end_loop(root)
                     return
                 draw_status(self.shown.snapshot())
                 ticks += 1
@@ -547,9 +547,9 @@ class Window:
             except Exception:
                 # (Tk goes on after an error in a callback: the codes must not stay up with nothing redrawing.)
                 log.exception("Claim cards window failed; taken down")
-                root.quit()
+                _end_loop(root)
 
-        root.after(0, tick)   # (from inside the loop: a quit before the loop runs would be lost)
+        root.after(0, tick)
         root.mainloop()
 
 

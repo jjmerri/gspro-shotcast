@@ -12,7 +12,7 @@ import sys
 import threading
 from collections.abc import Callable
 
-from .overlay import ON_TEXT, PANEL, PANEL_EDGE, TOPMOST_EVERY_MS, _dpi_aware, _no_activate, _topmost
+from .overlay import ON_TEXT, PANEL, PANEL_EDGE, TOPMOST_EVERY_MS, _dpi_aware, _end_loop, _no_activate, _topmost
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ class Question:
             if (got := self._result(yes, field)) is _INVALID:
                 return
             done["answered"] = True
-            root.quit()
+            _end_loop(root)
             self._give_back()
             try:
                 self.on_answer(got)
@@ -105,7 +105,7 @@ class Question:
         def tick() -> None:
             if self._closing.is_set():
                 done["answered"] = True
-                root.quit()
+                _end_loop(root)
                 return
             # GSPro taking focus (or going fullscreen) can push it above a plain topmost window.
             if sys.platform == "win32":
@@ -118,7 +118,7 @@ class Question:
         tick()
         log.info("Asking on screen: %s", self.title)
         root.mainloop()
-        root.destroy()
+        _end_loop(root)
 
     # A plain question has no field: its answer is yes or no.
     def _field(self, tk, root, frame, unit):

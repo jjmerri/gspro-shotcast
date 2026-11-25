@@ -41,6 +41,7 @@ UPDATE_EVERY_S = 6 * 3600
 IDLE_INSTALL_S = 30 * 60   # a downloaded update installs by itself once GSPro's been closed (or unplayed) this long
 GSPRO_CHECK_S = 60         # how often the tray looks for GSPro running
 INSTALL_WARN_S = 60        # with GSPro open, the countdown (with Postpone) before an update installs
+QUIT_GRACE_S = 15          # a Quit that hasn't ended the tray by then exits outright
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
 
@@ -531,6 +532,8 @@ class Tray:
         self.icon = None
         self.ui = None
         self._stop = threading.Event()
+        self._quit_done = threading.Event()   # a Quit got as far as stopping the icon
+        self._quit_lock = threading.Lock()
         self._live_setup = threading.Lock()
         self.publisher = AutoPublisher(self._publish_command, home, PUBLISH_AFTER_EDIT_S)
 
@@ -1100,20 +1103,41 @@ class Tray:
         self.quit()
 
     def quit(self, *_) -> None:
-        self._stop.set()
-        self.booth.stop()
-        if self.cfg.live.enabled and (self.cfg.publish.bucket or self.cfg.live.local_keep_days
-                                      or self.cloud is not None):
-            # Stopping the booth ends it outright, so it never got to take the stream off air: OBS's
-            # output is stopped here (paired, the cloud ends a stream it stops hearing from).
-            from .live_stream import off_air
-
+        with self._quit_lock:
+            again = self._stop.is_set()
+            self._stop.set()
+        if again and self.icon is not None:
+            if self._quit_done.is_set():
+                # Quit again after one that left the icon's loop running (pystray's stop() acts once).
+                _exit_now("Quit again with the tray still up: exiting")
+            return   # (the first is still stopping things)
+        try:
             try:
-                off_air(self.cfg)
+                self.booth.stop()
             except Exception:
-                log.exception("Taking the live stream off air failed")
-        if self.icon is not None:
-            self.icon.stop()
+                log.exception("Stopping the booth failed")
+            if self.cfg.live.enabled and (self.cfg.publish.bucket or self.cfg.live.local_keep_days
+                                          or self.cloud is not None):
+                # Stopping the booth ends it outright, so it never got to take the stream off air: OBS's
+                # output is stopped here (paired, the cloud ends a stream it stops hearing from).
+                from .live_stream import off_air
+
+                try:
+                    off_air(self.cfg)
+                except Exception:
+                    log.exception("Taking the live stream off air failed")
+        finally:
+            try:
+                if self.icon is not None:
+                    try:
+                        self.icon.stop()
+                    finally:
+                        # Its loop has been seen to go on after this: the tray stayed up with no booth,
+                        # holding the one-copy lock, so starting Shotcast again did nothing.
+                        threading.Thread(target=_exit_after, args=(QUIT_GRACE_S,), name="quit-watchdog",
+                                         daemon=True).start()
+            finally:
+                self._quit_done.set()
 
     def notify(self, text: str) -> None:
         """A Windows notification, for things nobody asked about (they may not show: Focus assist, or
@@ -1330,6 +1354,17 @@ class Tray:
             self._after_update()
 
         self.icon.run(setup)
+
+
+def _exit_now(why: str) -> None:
+    log.warning("%s", why)
+    logging.shutdown()
+    os._exit(0)
+
+
+def _exit_after(seconds: float) -> None:
+    time.sleep(seconds)
+    _exit_now(f"Quit: the tray was still up {seconds:g} s later; exiting")
 
 
 def _logo(size: int):
