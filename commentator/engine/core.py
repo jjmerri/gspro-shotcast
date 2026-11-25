@@ -330,6 +330,7 @@ class Engine(HudWatchMixin,
         # The live stream on the stats page: OBS's output, mirrored to the bucket (live_stream.py).
         self.live_mirror = None
         self.live_local = None   # the stream kept on the PC (live_stream.Mirror with a LocalRecorder)
+        self.live_cloud = None   # paired: the stream sent to Shotcast Cloud (cloud_stream.CloudStream)
         self._live_stop_task: asyncio.Task | None = None
         self._obs_lock = threading.Lock()
         self._live_last_shot = time.monotonic()

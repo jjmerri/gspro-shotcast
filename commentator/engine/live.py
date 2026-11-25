@@ -14,10 +14,19 @@ class LiveMixin:
 
     def _live_on(self) -> bool:
         lv = self.cfg.live
-        return lv.enabled and bool(self.cfg.publish.bucket or lv.local_keep_days) and self.cfg.source.type != "replay"
+        return lv.enabled and bool(self.cfg.publish.bucket or lv.local_keep_days or self._live_cloud_profile()) \
+            and self.cfg.source.type != "replay"
+
+    @staticmethod
+    def _live_cloud_profile():
+        """Paired with Shotcast Cloud (a pairing it still accepts): the stream goes there (cloud_stream)."""
+        from .. import cloud
+
+        prof = cloud.startup
+        return prof if prof is not None and not prof.problem else None
 
     def _live_mirrors(self) -> list:
-        return [m for m in (self.live_mirror, self.live_local) if m is not None]
+        return [m for m in (self.live_mirror, self.live_local, self.live_cloud) if m is not None]
 
     def _obs(self):
         from ..live_stream import Obs
@@ -59,6 +68,11 @@ class LiveMixin:
                                                       status_file=status, keep_days=lv.keep_days)
             except Exception:
                 log.exception("The live stream can't upload")
+        if prof := self._live_cloud_profile():
+            try:
+                self.live_cloud = self._cloud_stream(prof)
+            except Exception:
+                log.exception("The live stream can't go to Shotcast Cloud")
         try:
             if lv.local_keep_days:
                 # Its own pass over OBS's folder, so the bucket (the internet down, its start-up tidy
@@ -74,6 +88,22 @@ class LiveMixin:
             log.exception("The live stream's mirror didn't start")
             return
         asyncio.get_running_loop().create_task(self._live_idle_watch(), name="live-idle")
+
+    def _cloud_stream(self, prof):
+        """The stream's copy for Shotcast Cloud, sent with this booth's pairing (and only while the
+        stored pairing is still that one)."""
+        from .. import cloud, cloud_booth
+        from ..cloud_stream import CloudStream
+
+        identity = cloud.identity(prof.rec)
+
+        def cloud_of() -> cloud.Cloud:
+            cl = cloud.Cloud(cloud.store(), expect=prof.bound)
+            if cl.identity != identity:
+                raise cloud.PairingChanged("this PC's Shotcast Cloud pairing changed; restart Shotcast to use it")
+            return cl
+        return CloudStream(self.cfg.live.dir, cloud_of, playlist=self.cfg.live.playlist,
+                           issues=cloud_booth.set_stream_issues)
 
     def _live_round_start(self) -> None:
         self._live_last_shot, self._live_resume_on_shot = time.monotonic(), False
@@ -158,7 +188,7 @@ class LiveMixin:
         while True:
             await asyncio.sleep(every)
             idle = self.cfg.live.idle_minutes * 60
-            m = self.live_local or self.live_mirror   # the PC's copy: the bucket's can lag (or be stuck)
+            m = self.live_local or self.live_mirror or self.live_cloud   # the PC's copy: the bucket's can lag (or be stuck)
             session = m.session if m is not None else None
             if not idle or session is None or session == self._live_idle_session:
                 continue

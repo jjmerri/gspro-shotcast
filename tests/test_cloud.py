@@ -461,7 +461,7 @@ def test_the_paired_config_is_built_from_the_allow_list_and_works_in_the_profile
 
     prof = paired(api)
     cfg = base_cfg(tmp_path)   # (a profile config.yaml someone filled in by hand)
-    cfg.live.enabled, cfg.live.local_keep_days, cfg.live.local_dir = True, 9, "my-recordings"
+    cfg.live.enabled, cfg.live.local_keep_days, cfg.live.local_dir = False, 9, "my-recordings"
     cfg.chat.enabled, cfg.chat.table, cfg.chat.alerts = True, "site-table", True
     cfg.booking.enabled, cfg.notify.provider = True, "ntfy"
     cfg.report.upload_url = "https://drop.self-hosted.test"

@@ -752,7 +752,8 @@ def test_paired_commentary_uses_only_the_profiles_anthropic_key(api, monkeypatch
         sys.modules.pop("commentator.llm.anthropic_client", None)
 
 
-def test_a_self_hosted_env_put_in_the_profile_gives_the_paired_booth_only_its_ai_keys(tmp_path, api, monkeypatch):
+def test_a_self_hosted_env_put_in_the_profile_gives_the_paired_booth_only_its_ai_keys_and_obss(tmp_path, api,
+                                                                                                monkeypatch):
     _self_hosted_home(tmp_path, monkeypatch)
     prof = paired(api)
     prof.env.write_text("OPENAI_API_KEY=profile-key\nAWS_ACCESS_KEY_ID=AKIA\nSQUABBIT_PASSWORD=p\n"
@@ -763,8 +764,9 @@ def test_a_self_hosted_env_put_in_the_profile_gives_the_paired_booth_only_its_ai
                                         "OBS_WEBSOCKET_PASSWORD")}))
     monkeypatch.setattr(cli, "_setup_logging", lambda *a, **kw: None)
     _run(monkeypatch, "run")
+    # (OBS's password: the PC's own OBS, for the live stream to Shotcast Cloud)
     assert seen == [{"OPENAI_API_KEY": "profile-key", "AWS_ACCESS_KEY_ID": None, "SQUABBIT_PASSWORD": None,
-                     "OBS_WEBSOCKET_PASSWORD": None}]
+                     "OBS_WEBSOCKET_PASSWORD": "o"}]
 
 
 # ---- review round 8 ----------------------------------------------------------------------------
