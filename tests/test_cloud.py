@@ -1250,3 +1250,68 @@ def test_the_upload_command_waits_for_a_round_to_settle_then_sends_it(api, monke
     out = capsys.readouterr().out
     assert "Waiting for 1 round(s) to settle" in out and "Sent 1 round(s)" in out and u in api.rounds
     assert sum(naps) == cloud_rounds.QUIET_S and set(naps) == {cloud.UPLOAD_LOOK_S}
+
+
+def _sent_fingerprints(api):
+    sent = []
+
+    def hook(req):
+        if req.url.path == "/api/devices/pair":
+            sent.append(json.loads(req.content)["fingerprint"])
+        return None
+    api.hook = hook
+    return sent
+
+
+def test_this_install_pairs_with_the_same_fingerprint_every_time(api):
+    sent = _sent_fingerprints(api)
+    store = cloud.store()
+    pair(store, api)
+    salt = (cloud.root() / cloud.FINGERPRINT_SALT).read_text()
+    store.path.unlink()   # (unpaired: the salt stays)
+    api.polls = []
+    pair(store, api)
+    assert len(sent) == 2 and sent[0] == sent[1] == cloud.fingerprint() and len(sent[0]) == 64
+    assert (cloud.root() / cloud.FINGERPRINT_SALT).read_text() == salt and len(salt) == 64
+    assert salt not in sent[0]
+    (cloud.root() / cloud.FINGERPRINT_SALT).unlink()   # (another install: another fingerprint)
+    assert cloud.fingerprint() != sent[0]
+
+
+def test_on_windows_the_machines_ids_go_into_the_fingerprint_and_never_out(api, monkeypatch, caplog):
+    import logging
+
+    ids = {"guid": "11111111-2222-3333-4444-555555555555", "hw": "{aaaa-bbbb}", "disk": "0badf00d"}
+    monkeypatch.setattr(cloud, "_ON_WINDOWS", False)
+    alone = cloud.fingerprint()
+    monkeypatch.setattr(cloud, "_ON_WINDOWS", True)
+    monkeypatch.setattr(cloud, "_WINDOWS_READERS", (lambda: ids["guid"], lambda: ids["hw"], lambda: ids["disk"]))
+    full = cloud.fingerprint()
+    assert full != alone and cloud.fingerprint() == full   # (the hardware counts; still the same each time)
+    ids["disk"] = "feedface"   # (another disk: another PC as far as the site can tell)
+    assert cloud.fingerprint() != full
+    ids["disk"] = "0badf00d"
+
+    def broken():
+        raise OSError("no such key")
+    monkeypatch.setattr(cloud, "_WINDOWS_READERS", (lambda: ids["guid"], broken, lambda: ids["disk"]))
+    partial = cloud.fingerprint()   # (one that can't be read: the rest still make one)
+    assert len(partial) == 64 and partial not in (full, alone)
+
+    monkeypatch.setattr(cloud, "_WINDOWS_READERS", (lambda: ids["guid"], lambda: ids["hw"], lambda: ids["disk"]))
+    sent, said = _sent_fingerprints(api), []
+    caplog.set_level(logging.DEBUG)
+    cloud.pair(cloud.store(), API, "Sim PC", clock=lambda: api.now, sleep=lambda s: None, say=said.append)
+    assert sent == [full]
+    shown = "\n".join(said) + caplog.text + cloud.store().path.read_text()
+    for raw in ids.values():
+        assert raw not in shown
+    assert cloud.show_fingerprint(full) in "\n".join(said)
+
+
+def test_a_damaged_salt_is_made_again():
+    first = cloud.fingerprint()
+    (cloud.root() / cloud.FINGERPRINT_SALT).write_text("not a salt")
+    again = cloud.fingerprint()   # (pairing still works: the site sees a PC it hasn't seen)
+    assert again != first and cloud.fingerprint() == again
+    assert len((cloud.root() / cloud.FINGERPRINT_SALT).read_text()) == 64

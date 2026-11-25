@@ -56,6 +56,7 @@ log = logging.getLogger(__name__)
 
 TEST_ROOT: Path | None = None        # (tests only: tests/cloud_isolation.py) where the marker and profiles are
 INSTALL_ID = "install-id"            # in root(): this install's own id, for a machine with none (machine_id)
+FINGERPRINT_SALT = "fingerprint-salt" # in root(): this install's own salt for the fingerprint it pairs with
 EXPECT_ENV = "SHOTCAST_CLOUD_EXPECT" # set by the tray for the booth it starts: the pairing the tray started in
 MARKER = "device.json"               # in root(): this PC's pairing, with its tokens
 FOLDER_FILE = "pairing.json"         # in a profile's home: the folder_key it was made for
@@ -211,21 +212,73 @@ def _install_id() -> str:
     """This install's own id, for a machine whose operating system gives none: made once, at random,
     and kept in root() (this machine's own disk), one process at a time. Never a value that could
     differ from one start to the next (a network card's address, say): that strands a sound pairing."""
+    return _kept_hex(INSTALL_ID, 16)
+
+
+def _kept_hex(name: str, size: int, *, renew_bad: bool = False) -> str:
+    """root()/name: `size` random bytes as hex, made once and kept, one process at a time. One that
+    isn't valid is refused, or made again with `renew_bad`."""
     from .locks import file_lock
 
-    path = root() / INSTALL_ID
+    path = root() / name
     try:
         with file_lock(path.with_name(path.name + ".lock"), 30.0, "another process has held"):
             try:
                 got = path.read_text(encoding="utf-8").strip()
             except FileNotFoundError:
-                got = secrets.token_hex(16)
+                got = ""
+            if not got or (renew_bad and not re.fullmatch(rf"[0-9a-f]{{{2 * size}}}", got)):
+                got = secrets.token_hex(size)
                 _write_new(path, got, 0o600)
     except (OSError, TimeoutError) as e:
         raise CloudError(f"this computer can't be told from another ({path}: {e})") from None
-    if not re.fullmatch(r"[0-9a-f]{32}", got):
+    if not re.fullmatch(rf"[0-9a-f]{{{2 * size}}}", got):
         raise CloudError(f"this computer can't be told from another ({path} isn't valid)")
     return got
+
+
+_ON_WINDOWS = sys.platform == "win32"
+
+
+def _hardware_id() -> str:
+    """Windows' id for the machine's hardware (from its SMBIOS, kept in the registry); '' if none."""
+    import winreg
+
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\SystemInformation", 0,
+                        winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
+        return str(winreg.QueryValueEx(k, "ComputerHardwareId")[0])
+
+
+def _system_disk_serial() -> str:
+    """The serial number of the volume Windows is on; '' if none."""
+    import ctypes
+
+    drive = (os.environ.get("SystemDrive") or "C:") + "\\"
+    serial = ctypes.c_uint32(0)
+    ok = ctypes.windll.kernel32.GetVolumeInformationW(  # type: ignore[attr-defined]
+        ctypes.c_wchar_p(drive), None, 0, ctypes.byref(serial), None, None, None, 0)
+    return f"{serial.value:08x}" if ok else ""
+
+
+# What a Windows PC's fingerprint is made from, besides the install's salt: none starts a process (no
+# window can flash up on the sim's screen), and none is ever logged or sent as it is.
+_WINDOWS_READERS: tuple[Callable[[], str], ...] = (_platform_id, _hardware_id, _system_disk_serial)
+
+
+def fingerprint() -> str:
+    """The fingerprint this PC pairs with (shown to the owner, who checks it against the site's): the
+    same every time this install pairs, so the site knows it's the same PC when it's paired to another
+    bay (it then leaves the one it was on). SHA-256 of this install's salt (made once in root()) and,
+    on Windows, its MachineGuid, its hardware id and its system volume's serial, each read as far as
+    it can be; elsewhere (development) the salt alone. The ids themselves never leave the PC."""
+    parts = [_kept_hex(FINGERPRINT_SALT, 32, renew_bad=True)]   # (a damaged one: just another fingerprint)
+    if _ON_WINDOWS:
+        for read in _WINDOWS_READERS:
+            try:
+                parts.append(str(read() or "").strip())
+            except Exception:   # noqa: BLE001 - one that can't be read: the others (and the salt) still tell
+                parts.append("")
+    return hashlib.sha256("\0".join(["shotcast-fingerprint", *parts]).encode()).hexdigest()
 
 
 def machine_id() -> str:
@@ -1150,9 +1203,9 @@ def _pair(store: TokenStore, api: str, name: str | None, http: Any, clock: Calla
         if store.path.exists():
             raise CloudError("this PC is already paired; unpair it first")
     name = " ".join((name or socket.gethostname() or "Sim PC").split())[:NAME_MAX] or "Sim PC"
-    fingerprint = hashlib.sha256(secrets.token_bytes(32)).hexdigest()
+    mine = fingerprint()
     http = _http(api, http)
-    r = _send(http, "POST", "/api/devices/pair", {"name": name, "fingerprint": fingerprint})
+    r = _send(http, "POST", "/api/devices/pair", {"name": name, "fingerprint": mine})
     _too_old(r)
     if r.status_code != 201:
         wait = r.headers.get("Retry-After")
@@ -1161,7 +1214,7 @@ def _pair(store: TokenStore, api: str, name: str | None, http: Any, clock: Calla
     start = r.json()
     say(f"On a phone or computer signed in to Shotcast Cloud as the owner, open\n"
         f"  {start['verification_uri_complete']}\n"
-        f"and check the code {start['user_code']} and this PC's fingerprint {show_fingerprint(fingerprint)}.\n"
+        f"and check the code {start['user_code']} and this PC's fingerprint {show_fingerprint(mine)}.\n"
         f"Waiting for approval (the code lasts {start['expires_in'] // 60} minutes)...")
     interval = max(1, int(start["interval"]))
     # Past the code's own time by both of the API's windows (COLLECT_S each): an approved pairing can
@@ -1183,7 +1236,7 @@ def _pair(store: TokenStore, api: str, name: str | None, http: Any, clock: Calla
             if got is None:   # (not the API's whole answer: a proxy's page, say; ask again)
                 continue
             rec = {"api": api, "device_id": got["device_id"], **_fresh(got), "name": name,
-                   "fingerprint": fingerprint,
+                   "fingerprint": mine,
                    "paired_at": time.time(),
                    "tokens": {"refresh_token": got["refresh_token"], "access_token": got["access_token"],
                               "access_exp": clock() + got["access_expires_in"]}}
