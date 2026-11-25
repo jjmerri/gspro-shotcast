@@ -4,6 +4,14 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.165
+
+### Booth
+- A ball into the trees is now called at the height GSPro actually flew it, so a bush, low branches and high up in a tree are told apart far more reliably off the tee.
+- The mid-flight call now reads how far left or right the ball will finish from the shot itself, as GSPro flies it, whether or not the launch monitor sends offline.
+- The mid-flight call is now timed to the ball's flight: it can start any time up to just before the ball comes down, and is skipped rather than said after it lands.
+- Courses are recognised more reliably, including tournaments and courses with the same name.
+
 ## 0.1.164
 
 ### Booth
