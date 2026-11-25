@@ -5,7 +5,8 @@ import asyncio
 import re
 import time
 
-from .common import TREE_CALL_PENALTY, TREE_CALL_WATCH_SECONDS, log
+from .common import FLIGHT_LINE_LEAD_SECONDS, TREE_CALL_PENALTY, TREE_CALL_WATCH_SECONDS, log
+from .. import ball_flight
 from ..facts import flight_facts
 from ..flight import point_at
 from ..hud import Hud
@@ -16,6 +17,17 @@ from ..tree_calls import TREE_CALLS_BY_LANGUAGE
 
 class InFlightMixin:
     """Calls while the ball is in the air, and the change to the next hole."""
+
+    def _flight_line_deadline(self, shot: Shot, impact: float, lie: str | None, carry: float) -> float:
+        """When (monotonic) a mid-flight line must have started playing: FLIGHT_LINE_LEAD_SECONDS before
+        the ball comes down by GSPro's flight (level ground, at the course's altitude, shortened like
+        the carry for the lie it was hit from), or tts.flight_audio_deadline_seconds after impact for
+        a shot that can't be flown (no spin reading, a launch under ball_flight.MIN_LAUNCH)."""
+        f = ball_flight.flight(shot.ball_speed, shot.vla, shot.total_spin, shot.spin_axis,
+                               self.carry.altitude.get(self.current_course or "", 0))
+        if f is None:
+            return impact + self.cfg.tts.flight_audio_deadline_seconds
+        return impact + f.hang_s * self.carry.penalty(lie, carry, shot.vla) - FLIGHT_LINE_LEAD_SECONDS
 
     def _tree_hit_logged(self, fires0: int, impact: float, shot: Shot) -> tuple[float, tuple] | None:
         """The tree hit worth a flight call that GSPro's log already has for this shot: when it
@@ -73,7 +85,10 @@ class InFlightMixin:
         self, shot, before: Hud, player: str | None, image: bytes | None, impact: float, factor: float,
         seq: int | None = None, fires0: int | None = None, stymie: bool = False,
     ) -> None:
-        deadline = self.cfg.commentary.flight_deadline_seconds
+        # The line's voice takes the configured gap between the two deadlines to be ready.
+        audio_deadline = self._flight_line_deadline(shot, impact, before.lie, shot.carry or 0)
+        gap = max(0.0, self.cfg.tts.flight_audio_deadline_seconds - self.cfg.commentary.flight_deadline_seconds)
+        deadline = audio_deadline - gap - impact
         images = [image] if image and self.flight_llm.cfg.vision else []
         who, team = self._who(player)
         long_tee = (before.lie or "").lower() == "tee" and (self.current_par or 0) >= 4
@@ -84,13 +99,17 @@ class InFlightMixin:
             recent_lines=self.state.recent_lines,
             speaker=self.speakers[0], has_image=bool(images), off_flag=self._off_flag(player, before.lie, before.to_pin, before.elevation_yards, aim, stymie),
         )
-        budget = max(deadline - (time.monotonic() - impact), 0.1)
+        budget = deadline - (time.monotonic() - impact)
+        if budget <= 0:   # a short flight, or a slow impact read: the ball's (nearly) down already
+            self.stats["flight_late"] += 1
+            log.info("Flight call skipped: its %.1fs deadline had passed", deadline)
+            return
         try:
             lines = await asyncio.wait_for(
                 self._generate("flight", self.flight_llm, user, images), timeout=budget)
         except asyncio.TimeoutError:
             self.stats["flight_late"] += 1
-            log.info("Flight call missed the %.1fs deadline (%.1fs of it left when the call went out)",
+            log.info("Flight call missed its %.1fs deadline (%.1fs of it left when the call went out)",
                      deadline, budget)
             return
         elapsed = time.monotonic() - impact
@@ -104,7 +123,7 @@ class InFlightMixin:
             return
         line = Line(speaker=self.speakers[0], text=good[0].text)
         self.state.record_lines([line])
-        self.speech.say([line], interrupt=True, deadline=impact + self.cfg.tts.flight_audio_deadline_seconds)
+        self.speech.say([line], interrupt=True, deadline=audio_deadline)
         self._write_transcript([line], "flight", impact_seq=seq)
 
     async def handle_hole_change(self, event: HoleChangeEvent) -> None:

@@ -1831,6 +1831,72 @@ def test_course_altitude_flies_each_shot_by_its_ball_numbers():
     assert ball_flight.altitude_factor(145, 12, -1, 0, 5000) is None is ball_flight.altitude_factor(145, 12, 2800, float("nan"), 5000)   # barely launched, still flown
 
 
+
+def test_the_flight_gives_its_hang_time_curve_and_height_on_the_way():
+    from commentator import ball_flight
+    from commentator.flight import point_at
+
+    fade = ball_flight.flight(150, 11, 2700, 5)
+    assert fade.carry_yd == pytest.approx(ball_flight.carry_yards(150, 11, 2700, 5))
+    assert 6 < fade.hang_s < 7 and fade.lateral_yd > 5
+    assert ball_flight.flight(150, 11, 2700, -5).lateral_yd == pytest.approx(-fade.lateral_yd)
+    height, out, landed = fade.at(fade.hang_s / 2)
+    assert height > 50 and 0 < out < fade.carry_yd and not landed
+    assert fade.at(fade.hang_s + 1) == (0.0, fade.carry_yd, True)
+    # A tree hit's height comes from it; with no spin axis to fly it, from the rough model
+    p = point_at(150, 11, 2700, 5, 200, 2.0)
+    assert (p.height_ft, p.out_yd) == pytest.approx(fade.at(2.0)[:2])
+    assert point_at(150, 11, 2700, None, 200, 2.0).height_ft != pytest.approx(p.height_ft)
+    assert ball_flight.flight(150, ball_flight.MIN_LAUNCH - 0.5, 2700, 0) is None   # GSPro flies those differently
+    assert ball_flight.flight(150, 11, None, 0) is None is ball_flight.flight(150, 11, -1, 0)
+
+
+def test_the_projection_lands_the_ball_off_its_line_where_gspros_flight_does():
+    import math
+    from commentator import ball_flight
+    from commentator.flight_pick import START_LINE_SHARE, project
+
+    fade = Shot(club="7I", carry=160, hla=0, ball_speed=120, vla=16, total_spin=7000, spin_axis=8)
+    f = ball_flight.flight(120, 16, 7000, 8)
+    p = project(fade, None, [])
+    assert p.start == 0 and p.curve == pytest.approx(f.lateral_yd) and p.curve > 5
+    assert project(fade, None, [], 0.9).curve == pytest.approx(0.9 * f.lateral_yd)   # shortened by the lie
+    assert project(replace(fade, hla=3), None, []).start == pytest.approx(f.out_yd * math.sin(math.radians(3)))
+    # Without a spin reading it can't be flown: the fitted share of the start line
+    assert project(replace(fade, hla=3, total_spin=None), None, []).start == \
+        pytest.approx(START_LINE_SHARE * 160 * math.sin(math.radians(3)))
+
+
+def test_a_flight_line_must_start_a_second_before_the_ball_comes_down(tmp_path):
+    from commentator import ball_flight
+    from commentator.engine.common import FLIGHT_LINE_LEAD_SECONDS
+
+    cfg = Config(log_dir=str(tmp_path))
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=None,
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=None, screen=None)
+    drive = Shot(ball_speed=150, vla=11, total_spin=2700, spin_axis=0)
+    hang = ball_flight.flight(150, 11, 2700, 0).hang_s
+    assert engine._flight_line_deadline(drive, 100.0, "tee", 245) == pytest.approx(100 + hang - FLIGHT_LINE_LEAD_SECONDS)
+    # Deep rough comes down sooner, like it carries shorter; up high the course's altitude flies it
+    deep = engine.carry.penalty("deep rough", 245, 11)
+    assert engine._flight_line_deadline(drive, 100.0, "deep rough", 245) == pytest.approx(100 + hang * deep - FLIGHT_LINE_LEAD_SECONDS)
+    engine.carry.altitude["Denver CC"], engine.current_course = 5000, "Denver CC"
+    high = ball_flight.flight(150, 11, 2700, 0, 5000).hang_s
+    assert high != pytest.approx(hang)
+    assert engine._flight_line_deadline(drive, 100.0, "tee", 245) == pytest.approx(100 + high - FLIGHT_LINE_LEAD_SECONDS)
+    # A shot that can't be flown: the configured deadline
+    assert engine._flight_line_deadline(replace(drive, total_spin=None), 100.0, "tee", 245) == \
+        100 + cfg.tts.flight_audio_deadline_seconds
+    # A low one out of deep rough is down before a written line could start: no call goes out
+    asked = []
+    async def generate(*a):
+        asked.append(a)
+        return []
+    engine._generate = generate
+    chunk = Shot(ball_speed=130, vla=3, total_spin=2000, spin_axis=0, carry=126)
+    asyncio.run(engine._in_flight(chunk, Hud(lie="deep rough"), None, None, time.monotonic(), 1.0))
+    assert asked == [] and engine.stats["flight_late"] == 1
+
 def _rec(round_id, hole_seq, n, lie="fairway", game=240.0):
     from types import SimpleNamespace
 
@@ -3785,8 +3851,13 @@ async def test_prepared_flight_audio_plays_immediately(tmp_path):
     assert asyncio.get_running_loop().time() - started < 0.1  # no synthesis wait at impact
     while not speech.is_idle():
         await asyncio.sleep(0.01)
+    speech.say_prepared(Line("pbp", "Too late."), Audio(samples="Too late.", sample_rate=1),
+                        deadline=time.monotonic() - 0.1)   # the ball's already down
+    while not speech.is_idle():
+        await asyncio.sleep(0.01)
     task.cancel()
     assert "A long setup line still going." not in played  # cut off by the call
+    assert "Too late." not in played
 
 
 class _SetupScreen:

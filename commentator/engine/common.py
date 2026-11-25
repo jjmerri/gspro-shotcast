@@ -325,6 +325,11 @@ TREE_CALL_WATCH_SECONDS = 3.0
 # A shot the feed delivers this long after impact (GSPro 3.59's saved shot, written once the ball
 # stops) gets no mid-flight call: the ball is down. A held GSPconnect-skipped shot is ~1.5 s late.
 FLIGHT_CALL_LATE_SECONDS = 3.0
+# A mid-flight line must start at least this long before the ball's modelled touchdown (Engine.
+# _flight_line_deadline): its first words come while the ball's still up, and an uphill landing, which
+# comes sooner than the level-ground flight's, is covered (from the tee the touchdown is within 0.1 s
+# of GSPro's for 95% of shots given the landing height, which isn't known at impact).
+FLIGHT_LINE_LEAD_SECONDS = 1.0
 # How long after impact, outside a round, GSPro's log gets to say it played a shot (its "Shot Fired"
 # comes within about half a second): one it never logs was hit while GSPro couldn't take it.
 BANTER_WAIT_SECONDS = 40.0   # the most a routine shot's call waits for an aside on air to finish

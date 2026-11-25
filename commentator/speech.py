@@ -575,12 +575,13 @@ class SpeechQueue:
             log.info("TTS gave up preparing: %s", line.text)
         return audio
 
-    def say_prepared(self, line: Line, audio: Audio | None) -> None:
-        """Cuts off whatever is playing and plays already-voiced audio straight away."""
+    def say_prepared(self, line: Line, audio: Audio | None, deadline: float | None = None) -> None:
+        """Cuts off whatever is playing and plays already-voiced audio straight away, unless it
+        can't start by `deadline` (a time.monotonic())."""
         if self.muted:
             return
         self.interrupt()
-        self._audio_q.put_nowait((self._generation, line, audio, None, None, None))
+        self._audio_q.put_nowait((self._generation, line, audio, deadline, None, None))
         self._pending += 1
 
     def say_prepared_sequence(self, items: list[tuple[Line, Audio | None]], banter: bool = False,

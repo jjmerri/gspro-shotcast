@@ -1,15 +1,21 @@
-"""A rough ball-flight model: where a shot was (height and distance out) some seconds into its flight.
+"""Where a shot was (height and distance out) some seconds into its flight.
 
 Used to say what a ball hit when GSPro's log reports it went into foliage: GSPro logs only the time of
-the hit ("Leaves hitTime"), never the object, so the height there tells a tree from a bush. Drag and
-lift with a spin-dependent lift coefficient, integrated in the vertical plane of the shot; the drag is
-then scaled so the flight carries what the launch monitor said it would. Level ground is assumed, so
+the hit ("Leaves hitTime"), never the object, so the height there tells a tree from a bush. GSPro's
+own flight (ball_flight.py) where the ball numbers allow: from the tee, within ~3 ft of GSPro's height
+for 95% of moments under 60 ft (in the right <10 / 10-20 / 20+ ft band 98% of the time; a lie's
+penalty, which flies the ball lower, makes both models worse off other lies). Otherwise (no spin
+reading, a launch under ball_flight.MIN_LAUNCH) a rough model: drag and lift with a spin-dependent
+lift coefficient in the vertical plane of the shot, the drag scaled so it carries what the launch
+monitor said (15 ft out at the 95th percentile, 88% in the right band). Level ground is assumed, so
 the height is above the ball's starting point, not the ground under the hit.
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+
+from . import ball_flight
 
 _MASS = 0.04593          # kg
 _RADIUS = 0.02134        # m
@@ -63,6 +69,9 @@ def point_at(ball_mph: float | None, launch_deg: float | None, spin_rpm: float |
     """Where the ball was `t` seconds after launch, or None without the launch numbers to model it."""
     if not ball_mph or ball_mph <= 0 or launch_deg is None or t < 0:
         return None
+    if f := ball_flight.flight(ball_mph, launch_deg, spin_rpm, spin_axis):
+        height_ft, out_yd, landed = f.at(t)
+        return FlightPoint(height_ft=height_ft, out_yd=out_yd, landed=landed)
     speed = ball_mph * _MPH
     backspin = max(0.0, (spin_rpm or 0.0) * math.cos(math.radians(spin_axis or 0.0)))
     scale = 1.0

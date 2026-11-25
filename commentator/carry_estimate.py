@@ -17,7 +17,7 @@ import math
 
 from . import ball_flight
 
-MIN_LAUNCH = 2.0
+MIN_LAUNCH = ball_flight.MIN_LAUNCH
 
 
 def estimate(shot) -> float | None:
