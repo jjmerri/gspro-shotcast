@@ -1284,24 +1284,29 @@ def test_on_windows_the_machines_ids_go_into_the_fingerprint_and_never_out(api, 
     import logging
 
     ids = {"guid": "11111111-2222-3333-4444-555555555555", "hw": "00112233445566778899aabbccddeeff",
-           "disk": "0badf00d"}
+           "disk": "0badf00d", "serial": "WD-WX12A3456789"}
     monkeypatch.setattr(cloud, "_ON_WINDOWS", False)
     alone = cloud.fingerprint()
     monkeypatch.setattr(cloud, "_ON_WINDOWS", True)
-    monkeypatch.setattr(cloud, "_WINDOWS_READERS", (lambda: ids["guid"], lambda: ids["hw"], lambda: ids["disk"]))
+    readers = (lambda: ids["guid"], lambda: ids["hw"], lambda: ids["disk"], lambda: ids["serial"])
+    monkeypatch.setattr(cloud, "_WINDOWS_READERS", readers)
     full = cloud.fingerprint()
     assert full != alone and cloud.fingerprint() == full   # (the hardware counts; still the same each time)
     ids["disk"] = "feedface"   # (another disk: another PC as far as the site can tell)
     assert cloud.fingerprint() != full
     ids["disk"] = "0badf00d"
+    ids["serial"] = "WD-OTHER"   # (another physical disk, the same image and board: another PC too)
+    assert cloud.fingerprint() != full
+    ids["serial"] = "WD-WX12A3456789"
 
     def broken():
         raise OSError("no such key")
-    monkeypatch.setattr(cloud, "_WINDOWS_READERS", (lambda: ids["guid"], broken, lambda: ids["disk"]))
+    monkeypatch.setattr(cloud, "_WINDOWS_READERS", (lambda: ids["guid"], broken, lambda: ids["disk"],
+                                                    lambda: ids["serial"]))
     partial = cloud.fingerprint()   # (one that can't be read: the rest still make one)
     assert len(partial) == 64 and partial not in (full, alone)
 
-    monkeypatch.setattr(cloud, "_WINDOWS_READERS", (lambda: ids["guid"], lambda: ids["hw"], lambda: ids["disk"]))
+    monkeypatch.setattr(cloud, "_WINDOWS_READERS", readers)
     bodies, said = [], []
 
     def hook(req):
@@ -1318,35 +1323,20 @@ def test_on_windows_the_machines_ids_go_into_the_fingerprint_and_never_out(api, 
     assert cloud.show_fingerprint(full) in "\n".join(said)
 
 
-def test_the_salt_is_made_again_on_another_machine_but_not_when_a_reader_fails(monkeypatch):
-    ids = {"guid": "guid-1", "uuid": "aa" * 16, "disk": "0badf00d"}
+def test_the_salt_is_kept_whatever_the_machine_and_the_machines_ids_tell_clones_apart(monkeypatch):
+    ids = {"guid": "guid-1", "uuid": "03000200040005000006000700080009", "disk": "0badf00d", "serial": "S1"}
     monkeypatch.setattr(cloud, "_ON_WINDOWS", True)
-    monkeypatch.setattr(cloud, "_WINDOWS_READERS", (lambda: ids["guid"], lambda: ids["uuid"], lambda: ids["disk"]))
+    monkeypatch.setattr(cloud, "_WINDOWS_READERS", tuple((lambda k=k: ids[k]) for k in ids))
     first = cloud.fingerprint()
     salt = (cloud.root() / cloud.FINGERPRINT_SALT).read_text()
-    assert cloud.fingerprint() == first and (cloud.root() / cloud.FINGERPRINT_MACHINE).is_file()
-    ids["disk"] = "feedface"   # (another volume serial alone: the same machine, the same salt)
-    cloud.fingerprint()
-    assert (cloud.root() / cloud.FINGERPRINT_SALT).read_text() == salt
-    ids["uuid"] = ""   # (a reader that gives nothing: can't tell, so the salt is kept)
-    cloud.fingerprint()
-    assert (cloud.root() / cloud.FINGERPRINT_SALT).read_text() == salt
-    ids["uuid"] = "bb" * 16   # (the disk imaged onto another board: a salt of its own)
+    # A clone of this disk image on a board with the same placeholder UUID, the same MachineGuid and the
+    # same volume serial: its own disk's serial still makes it another PC, with the same salt.
+    ids["serial"] = "S2"
     clone = cloud.fingerprint()
-    assert (cloud.root() / cloud.FINGERPRINT_SALT).read_text() != salt and clone != first
-    assert cloud.fingerprint() == clone   # (and kept there)
-    ids["uuid"] = "aa" * 16   # (the image back on the first board: yet another salt, never the old one)
-    assert cloud.fingerprint() not in (first, clone)
-
-
-def test_a_salt_from_before_the_machine_was_kept_is_kept_and_the_machine_recorded(monkeypatch):
-    cloud.root().mkdir(parents=True, exist_ok=True)
-    (cloud.root() / cloud.FINGERPRINT_SALT).write_text("cd" * 32)
-    monkeypatch.setattr(cloud, "_ON_WINDOWS", True)
-    monkeypatch.setattr(cloud, "_WINDOWS_READERS", (lambda: "guid", lambda: "aa" * 16, lambda: "disk"))
-    cloud.fingerprint()
-    assert (cloud.root() / cloud.FINGERPRINT_SALT).read_text() == "cd" * 32
-    assert len((cloud.root() / cloud.FINGERPRINT_MACHINE).read_text()) == 64
+    assert clone != first and (cloud.root() / cloud.FINGERPRINT_SALT).read_text() == salt
+    ids["serial"] = "S1"
+    assert cloud.fingerprint() == first   # (the same PC again: the same fingerprint)
+    assert not (cloud.root() / "fingerprint-machine").exists()   # (nothing kept about the machine)
 
 
 def _smbios(*structures: bytes) -> bytes:
@@ -1372,10 +1362,38 @@ def test_the_smbios_system_uuid_is_found_in_the_firmware_table():
         assert cloud.smbios_uuid(_smbios(_structure(1, bytes(4) + unset + bytes(5)))) == ""
     assert cloud.smbios_uuid(_smbios(_structure(1, bytes(4) + uuid[:4]))) == ""   # (type 1 too short)
     whole = _smbios(bios, system)
-    for cut in (3, 9, 12, 20, 30, len(whole) - 20):
-        assert cloud.smbios_uuid(whole[:cut]) in ("", uuid.hex())   # (cut short: never an error)
+    for cut in range(len(whole)):
+        assert cloud.smbios_uuid(whole[:cut]) == ""   # (shorter than its header says: never an error, nothing read)
+    # A type 1 whose strings aren't ended inside the table its header declares: refused.
+    formatted = system[:system.index(b"Maker")]
+    assert cloud.smbios_uuid(_smbios(formatted)) == ""
+    assert cloud.smbios_uuid(_smbios(formatted + b"Maker\0Model\0")) == ""
     assert cloud.smbios_uuid(whole[:8] + whole[8:8 + len(bios) - 1]) == ""
     assert cloud.smbios_uuid(b"") == "" and cloud.smbios_uuid(_smbios(bytes([1, 2]))) == ""
+
+
+def _descriptor(serial: bytes | None, *, at: int | None = None, size: int | None = None) -> bytes:
+    head = bytearray(40)
+    tail = (serial + b"\0") if serial is not None else b""
+    offset = at if at is not None else (40 if serial is not None else 0)
+    total = 40 + len(tail)
+    head[4:8] = (size if size is not None else total).to_bytes(4, "little")
+    head[24:28] = offset.to_bytes(4, "little")
+    return bytes(head) + tail
+
+
+def test_the_system_disks_own_serial_is_read_from_its_storage_descriptor():
+    assert cloud.storage_serial(_descriptor(b"  WD-WX12A3456789 ")) == "WD-WX12A3456789"
+    assert cloud.storage_serial(_descriptor(None)) == ""                            # (offset 0: none)
+    assert cloud.storage_serial(_descriptor(b"S1", at=4000)) == ""                  # (outside the descriptor)
+    assert cloud.storage_serial(_descriptor(b"S1", at=8)) == ""                     # (inside the header)
+    assert cloud.storage_serial(_descriptor(b"    ")) == ""                         # (blanks only)
+    assert cloud.storage_serial(_descriptor(b"S1")[:-1]) == ""                      # (not ended: cut short)
+    assert cloud.storage_serial(_descriptor(b"S1", size=41)) == ""                  # (past the size it says)
+    assert cloud.storage_serial(b"") == "" and cloud.storage_serial(bytes(27)) == ""
+    extents = (1).to_bytes(4, "little") + bytes(4) + (3).to_bytes(4, "little") + bytes(20)
+    assert cloud.volume_disk_number(extents) == 3
+    assert cloud.volume_disk_number(bytes(32)) is None and cloud.volume_disk_number(extents[:11]) is None
 
 
 def test_a_damaged_salt_is_made_again():

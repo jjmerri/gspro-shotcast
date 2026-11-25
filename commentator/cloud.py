@@ -57,7 +57,6 @@ log = logging.getLogger(__name__)
 TEST_ROOT: Path | None = None        # (tests only: tests/cloud_isolation.py) where the marker and profiles are
 INSTALL_ID = "install-id"            # in root(): this install's own id, for a machine with none (machine_id)
 FINGERPRINT_SALT = "fingerprint-salt" # in root(): this install's own salt for the fingerprint it pairs with
-FINGERPRINT_MACHINE = "fingerprint-machine"  # in root(): a hash of the machine the salt was made on (fingerprint)
 EXPECT_ENV = "SHOTCAST_CLOUD_EXPECT" # set by the tray for the booth it starts: the pairing the tray started in
 MARKER = "device.json"               # in root(): this PC's pairing, with its tokens
 FOLDER_FILE = "pairing.json"         # in a profile's home: the folder_key it was made for
@@ -245,58 +244,34 @@ def _kept_hex(name: str, size: int, *, renew_bad: bool = False) -> str:
     return got
 
 
-def _salt(machine: str | None) -> str:
-    """This install's fingerprint salt (root()/FINGERPRINT_SALT, 32 random bytes as hex), made once and
-    kept across unpairing and pairing again. `machine`: a hash of the machine it's on now (None when
-    that can't be told), kept beside it (FINGERPRINT_MACHINE). When the machine it was kept for was
-    another one, the salt is made again: a disk imaged after a pairing attempt and put onto other
-    hardware pairs as a PC of its own, not as the one it was copied from. A damaged salt is made again
-    too (the site just sees a PC it hasn't seen). One process at a time."""
-    from .locks import file_lock
-
-    path, seen = root() / FINGERPRINT_SALT, root() / FINGERPRINT_MACHINE
-    try:
-        with file_lock(path.with_name(path.name + ".lock"), 30.0, "another process has held"):
-            got, was = _read_kept(path), _read_kept(seen)
-            moved = machine is not None and was is not None and re.fullmatch(r"[0-9a-f]{64}", was) \
-                and was != machine
-            if got is None or moved or not re.fullmatch(r"[0-9a-f]{64}", got):
-                got = secrets.token_hex(32)
-                _write_new(path, got, 0o600)
-            if machine is not None and was != machine:
-                _write_new(seen, machine, 0o600)
-    except (OSError, TimeoutError) as e:
-        raise CloudError(f"this computer can't be told from another ({path}: {e})") from None
-    return got
-
-
 _ON_WINDOWS = sys.platform == "win32"
 
 
 def smbios_uuid(raw: bytes) -> str:
     """The system UUID (SMBIOS type 1, 16 bytes at offset 8, as hex) in a raw SMBIOS table as Windows'
-    GetSystemFirmwareTable('RSMB') gives it (an 8-byte header, then the structures); '' when there's
-    none, it's all 0x00 or all 0xFF (the "not set" values), or the table is cut short. Each structure
-    is a formatted area (its type, its length, ...) then its strings, ended by two NULs."""
+    GetSystemFirmwareTable('RSMB') gives it (an 8-byte header with the table's length, then the
+    structures); '' when there's none, it's all 0x00 or all 0xFF (the "not set" values), or the table
+    is cut short (shorter than its header says, or a structure not ended inside it). Each structure is
+    a formatted area (its type, its length, ...) then its strings, ended by two NULs."""
     if len(raw) < 8:
         return ""
     size = int.from_bytes(raw[4:8], "little")
     table = raw[8:8 + size]
+    if len(table) < size:
+        return ""
     i = 0
     while i + 4 <= len(table):
         kind, length = table[i], table[i + 1]
-        if length < 4 or i + length > len(table):
+        if length < 4 or i + length > len(table) or kind == 127:   # (127: the end of the table)
+            return ""
+        end = table.find(b"\0\0", i + length)
+        if end < 0:
             return ""
         if kind == 1:
             if length < 0x19:
                 return ""
             got = table[i + 8:i + 24]
             return "" if got in (bytes(16), b"\xff" * 16) else got.hex()
-        if kind == 127:   # (end of table)
-            return ""
-        end = table.find(b"\0\0", i + length)
-        if end < 0:
-            return ""
         i = end + 2
     return ""
 
@@ -319,7 +294,7 @@ def _smbios_uuid() -> str:
 
 
 def _system_disk_serial() -> str:
-    """The serial number of the volume Windows is on; '' if none."""
+    """The serial number of the volume Windows is on (set when it's formatted); '' if none."""
     import ctypes
 
     drive = (os.environ.get("SystemDrive") or "C:") + "\\"
@@ -329,26 +304,98 @@ def _system_disk_serial() -> str:
     return f"{serial.value:08x}" if ok else ""
 
 
+def volume_disk_number(raw: bytes) -> int | None:
+    """The first disk a volume is on, from IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS' VOLUME_DISK_EXTENTS (a
+    DWORD count, padded to 8, then 24-byte DISK_EXTENTs, each starting with its DWORD disk number);
+    None when there's none or it's cut short."""
+    if len(raw) < 12 or int.from_bytes(raw[0:4], "little") < 1:
+        return None
+    return int.from_bytes(raw[8:12], "little")
+
+
+def storage_serial(raw: bytes) -> str:
+    """A disk's own serial number from IOCTL_STORAGE_QUERY_PROPERTY's STORAGE_DEVICE_DESCRIPTOR (its
+    SerialNumberOffset, a DWORD at 24, points at a NUL-ended string in the descriptor); '' when there's
+    none (offset 0), it's outside the descriptor, not ended inside it, or only blanks."""
+    if len(raw) < 28:
+        return ""
+    size = int.from_bytes(raw[4:8], "little")
+    data = raw[:size] if 28 <= size <= len(raw) else raw
+    at = int.from_bytes(raw[24:28], "little")
+    if at < 28 or at >= len(data):
+        return ""
+    end = data.find(b"\0", at)
+    if end < 0:
+        return ""
+    return data[at:end].decode("ascii", "replace").strip()
+
+
+def _system_disk_hardware_serial() -> str:
+    """The serial number the disk Windows is on reports itself (its maker's, the same whatever is
+    written on it, so a disk image copied onto another disk doesn't carry it); '' if none. Opened with
+    no access rights (enough to ask, no administrator needed), and no process started."""
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    create = k32.CreateFileW
+    create.restype = wintypes.HANDLE
+    create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                       wintypes.DWORD, wintypes.HANDLE]
+    ioctl = k32.DeviceIoControl
+    ioctl.restype = wintypes.BOOL
+    ioctl.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.LPVOID,
+                      wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+    close = k32.CloseHandle
+    close.argtypes = [wintypes.HANDLE]
+    invalid = ctypes.c_void_p(-1).value
+    share, open_existing = 0x1 | 0x2, 3   # (FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING)
+
+    def ask(path: str, code: int, query: bytes | None, room: int) -> bytes | None:
+        handle = create(path, 0, share, None, open_existing, 0, None)
+        if not handle or handle == invalid:
+            return None
+        try:
+            out = ctypes.create_string_buffer(room)
+            got = wintypes.DWORD(0)
+            inp = ctypes.create_string_buffer(query, len(query)) if query else None
+            ok = ioctl(handle, code, inp, len(query) if query else 0, out, room, ctypes.byref(got), None)
+            return out.raw[:got.value] if ok and 0 < got.value <= room else None
+        finally:
+            close(handle)
+
+    drive = (os.environ.get("SystemDrive") or "C:").rstrip("\\")
+    extents = ask(f"\\\\.\\{drive}", 0x00560000, None, 1024)   # (IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS)
+    disk = volume_disk_number(extents) if extents else None
+    # (StorageDeviceProperty, PropertyStandardQuery: a STORAGE_PROPERTY_QUERY of 12 bytes, all 0)
+    got = ask(f"\\\\.\\PhysicalDrive{disk if disk is not None else 0}", 0x002D1400, bytes(12), 4096)
+    return storage_serial(got) if got else ""
+
+
 # What a Windows PC's fingerprint is made from, besides the install's salt: its MachineGuid, its board's
-# SMBIOS system UUID (the two that tell this machine; machine_parts) and its system volume's serial.
-# None starts a process (no window can flash up on the sim's screen), and none is ever logged or sent
-# as it is.
-_WINDOWS_READERS: tuple[Callable[[], str], ...] = (_platform_id, _smbios_uuid, _system_disk_serial)
-MACHINE_PARTS = 2   # (the first readers: this machine, for the salt's FINGERPRINT_MACHINE)
+# SMBIOS system UUID, its system volume's serial and its system disk's own serial number. None starts a
+# process (no window can flash up on the sim's screen), and none is ever logged or sent as it is.
+_WINDOWS_READERS: tuple[Callable[[], str], ...] = (_platform_id, _smbios_uuid, _system_disk_serial,
+                                                    _system_disk_hardware_serial)
 
 
 def fingerprint() -> str:
     """The fingerprint this PC pairs with (shown to the owner, who checks it against the site's): the
     same every time this install pairs, so the site knows it's the same PC when it's paired to another
-    bay (it then leaves the one it was on). SHA-256 of this install's salt (_salt: made once in root(),
-    made again when the disk turns up on another machine) and, on Windows, its MachineGuid, its
-    board's SMBIOS system UUID and its system volume's serial, each read as far as it can be; elsewhere
+    bay (it then leaves the one it was on). SHA-256 of this install's salt (made once in root(), kept
+    across unpairing and pairing again; a damaged one is made again, so the site just sees a PC it
+    hasn't seen) and, on Windows, its MachineGuid, its board's SMBIOS system UUID, its system volume's
+    serial and its system disk's own serial number, each read as far as it can be; elsewhere
     (development) the salt alone. The ids themselves never leave the PC.
 
-    What can still match: copies of one disk image on machines that also share a MachineGuid and an
-    SMBIOS UUID (cloned virtual machines, which copy both), imaged after a pairing attempt. Real PCs'
-    boards each have their own UUID. The pairing page shows the fingerprint (its first 8 hex digits)
-    for the owner to compare with the PC's, and the site says which PC an approval replaces."""
+    What can still match: copies of one disk image, made after a pairing attempt (so they carry its
+    salt), on machines where every one of those reads the same: cloned virtual machines whose virtual
+    disks report the same serial, or PCs where none of the hardware ids can be read. Some boards give
+    every unit the same placeholder UUID; the disk's own serial still tells those apart. A reader that
+    fails now and then gives another fingerprint for that pairing, which only means the site doesn't
+    see it's the PC that was on another bay (it never wrongly signs one out). The pairing page shows the
+    fingerprint (its first 8 hex digits) for the owner to compare with the PC's, and the site should say
+    which PC an approval replaces."""
     parts: list[str] = []
     if _ON_WINDOWS:
         for read in _WINDOWS_READERS:
@@ -356,10 +403,8 @@ def fingerprint() -> str:
                 parts.append(str(read() or "").strip())
             except Exception:   # noqa: BLE001 - one that can't be read: the others (and the salt) still tell
                 parts.append("")
-    known = parts[:MACHINE_PARTS]
-    machine = (hashlib.sha256("\0".join(["shotcast-fingerprint-machine", *known]).encode()).hexdigest()
-               if len(known) == MACHINE_PARTS and all(known) else None)
-    return hashlib.sha256("\0".join(["shotcast-fingerprint", _salt(machine), *parts]).encode()).hexdigest()
+    salt = _kept_hex(FINGERPRINT_SALT, 32, renew_bad=True)
+    return hashlib.sha256("\0".join(["shotcast-fingerprint", salt, *parts]).encode()).hexdigest()
 
 
 def machine_id() -> str:
