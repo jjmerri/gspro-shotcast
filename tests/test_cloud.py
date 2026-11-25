@@ -1391,9 +1391,11 @@ def test_the_system_disks_own_serial_is_read_from_its_storage_descriptor():
     assert cloud.storage_serial(_descriptor(b"S1")[:-1]) == ""                      # (not ended: cut short)
     assert cloud.storage_serial(_descriptor(b"S1", size=41)) == ""                  # (past the size it says)
     assert cloud.storage_serial(b"") == "" and cloud.storage_serial(bytes(27)) == ""
+    assert cloud.storage_serial(_descriptor(b"S1", at=30)) == ""                    # (BusType and on: not a serial)
+    assert cloud.storage_serial(_descriptor(b"S1", size=0)) == ""                   # (a size too small to be one)
     extents = (1).to_bytes(4, "little") + bytes(4) + (3).to_bytes(4, "little") + bytes(20)
     assert cloud.volume_disk_number(extents) == 3
-    assert cloud.volume_disk_number(bytes(32)) is None and cloud.volume_disk_number(extents[:11]) is None
+    assert cloud.volume_disk_number(bytes(32)) is None and cloud.volume_disk_number(extents[:31]) is None
 
 
 def test_a_damaged_salt_is_made_again():
