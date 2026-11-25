@@ -44,6 +44,91 @@ class RepairsMixin:
                 self.db.execute("DELETE FROM round_slots WHERE round_uuid = ?", (p,))
                 self.db.execute("DELETE FROM round_records WHERE uuid = ?", (p,))
 
+    def refresh_round_stats(self, uuid: str | None) -> int:
+        """A recorded round's FIR, GIR, scrambling, sand, putts, penalties and longest drive, worked out
+        again from its shots as the store has them now (GSPro's round file corrects the screen's reads,
+        after the round's rows may have been written): its rows that come out different are updated, all
+        or none of them. A round the store can't place every stroke of is left as it is
+        (stored_stats.recompute). How many rows changed; not committed."""
+        from ..stored_stats import PLAYER_COLUMNS, SIDE_COLUMNS, player_values, recompute, side_values
+        if not uuid:
+            return 0
+        changed = 0
+        # The write lock before the shots are read: a correction another connection makes meanwhile
+        # waits, and notes the round again after this (else the stats would be the shots from before it).
+        if not self.db.in_transaction:
+            self.db.execute("BEGIN IMMEDIATE")   # (else the savepoint's release would commit it)
+        self.db.execute("SAVEPOINT round_stats")
+        try:
+            if (got := recompute(self.db, uuid)) is None:
+                got = ({}, {})
+            for table, cols, stats, values in (("rounds", SIDE_COLUMNS, got[0], side_values),
+                                               ("player_rounds", PLAYER_COLUMNS, got[1], player_values)):
+                for row_id, st in stats.items():
+                    new = values(st)
+                    old = self.db.execute(f"SELECT {', '.join(cols)} FROM {table} WHERE id = ?", (row_id,)).fetchone()
+                    if old is None or tuple(old) == new:
+                        continue
+                    self.db.execute(f"UPDATE {table} SET {', '.join(f'{c} = ?' for c in cols)} WHERE id = ?",
+                                    (*new, row_id))
+                    changed += 1
+        except BaseException:
+            self.db.execute("ROLLBACK TO round_stats")
+            self.db.execute("RELEASE round_stats")
+            raise
+        self.db.execute("RELEASE round_stats")
+        return changed
+
+    def _note_round_stats_due(self) -> None:
+        """Each round record whose shots are written, deleted or changed (by any connection: the booth,
+        the stats page, a backfill) is noted in round_stats_due, for refresh_changed_round_stats."""
+        self.db.execute("CREATE TABLE IF NOT EXISTS round_stats_due (uuid TEXT PRIMARY KEY)")
+        for event, rows in (("INSERT", ("NEW",)), ("UPDATE", ("NEW", "OLD")), ("DELETE", ("OLD",))):
+            notes = " ".join(f"INSERT OR IGNORE INTO round_stats_due SELECT {r}.record_uuid"
+                             f" WHERE {r}.record_uuid IS NOT NULL;" for r in rows)
+            self.db.execute(f"CREATE TRIGGER IF NOT EXISTS shots_{event.lower()}_stats_due AFTER {event} ON shots"
+                            f" BEGIN {notes} END")
+
+    def refresh_changed_round_stats(self) -> int:
+        """refresh_round_stats for each round whose shots have changed since this was last done (GSPro's
+        round file correcting a rest, or taking a match back), committed. A round that can't be worked
+        out again is left as recorded. The database busy (the stats page writing), the rest are left
+        noted for the next time. How many rows changed."""
+        changed = 0
+        for (uuid,) in self.db.execute("SELECT uuid FROM round_stats_due").fetchall():
+            try:
+                changed += self.refresh_round_stats(uuid)
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e) or "busy" in str(e):
+                    if self.db.in_transaction:
+                        self.db.rollback()
+                    log.warning("Round stats left to work out again later: %s", e)
+                    return changed
+                log.exception("Couldn't work round %s's stats out again: left as recorded", uuid)
+            except Exception:
+                log.exception("Couldn't work round %s's stats out again: left as recorded", uuid)
+            # (in the refresh's own transaction, its write lock still held, its changes rolled back to its
+            # savepoint if it failed: a correction made meanwhile waited, and notes the round again after)
+            self.db.execute("DELETE FROM round_stats_due WHERE uuid = ?", (uuid,))
+            self.db.commit()
+        return changed
+
+    def _repair_round_stats(self) -> None:
+        """Rounds recorded before their stats read the store's lies and drives (the screen's, which GSPro's
+        round file corrects: a drive read in the rough that stopped in the fairway was a fairway missed)."""
+        uuids = [u for (u,) in self.db.execute(
+            "SELECT round_uuid FROM rounds WHERE round_uuid IS NOT NULL UNION "
+            "SELECT round_uuid FROM player_rounds WHERE round_uuid IS NOT NULL").fetchall()]
+        changed = 0
+        if not self.db.in_transaction:
+            self.db.execute("BEGIN IMMEDIATE")   # (the database busy fails the open, as any migration)
+        for u in uuids:
+            try:
+                changed += self.refresh_round_stats(u)
+            except Exception:
+                log.exception("Couldn't work round %s's stats out again: left as recorded", u)
+        log.info("Round stats from the stored shots: %d row(s) of %d round(s) corrected", changed, len(uuids))
+
     PICKED_UP_OFF_PIN_M = 1.0   # a holed ball's end this far from its round's pin was never in (a logged
                                 # pin can sit a few tenths off the cup GSPro drops the ball into)
     PIN_AFTER_ROUND_S = 300     # how long after its round's end the hole's pin may be logged

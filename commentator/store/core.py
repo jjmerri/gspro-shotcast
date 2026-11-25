@@ -73,6 +73,11 @@ class Store(ShotsMixin,
             self.db.commit()
         self._backfill_finishes()
         self._locate_hole_images()
+        try:   # (shots another connection changed: a backfill, the stats page, a booth stopped before it could)
+            self.refresh_changed_round_stats()
+        except sqlite3.Error:
+            self.db.rollback()
+            log.exception("Couldn't work the changed rounds' stats out again")
         from ..round_record import Live
         self.records = Live(self.db)   # which round or practice stretch each new row is in
         from ..booth_history import History
@@ -248,6 +253,11 @@ class Store(ShotsMixin,
         if self.db.execute("PRAGMA user_version").fetchone()[0] == 7:
             self._repair_picked_up_holes()
             self.db.execute("PRAGMA user_version = 8")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] == 8:
+            self._repair_round_stats()
+            self.db.execute("PRAGMA user_version = 9")
+        # (with the repair, in its transaction: a correction committed after it is noted)
+        self._note_round_stats_due()
         if planner_counts_stale(self.db):   # (last: after the rows the migrations add)
             self.db.execute("ANALYZE")
         self.db.commit()

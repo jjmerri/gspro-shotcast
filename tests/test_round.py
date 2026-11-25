@@ -449,6 +449,21 @@ def test_conceded_chip_from_off_the_green_is_a_gir_miss():
     assert st.gir == (0, 1)        # green reached only at shot 3, past regulation -> a miss
 
 
+def test_an_approach_read_on_the_green_then_chipped_from_off_it_is_a_gir_miss():
+    # The approach's rest was read "green", but the next stroke was played from the rough: it wasn't on
+    # the green after all (a misread). A chip to a conceded tap-in for par is a scramble, not a GIR.
+    r = Round(league=LEAGUE, gspro_players=["MikeD", "Sarah"], course="Wynn", scheduled_format="best ball", holes=1)
+    card = Scorecard(holes=list(range(1, 19)), par={1: 4}, index={1: 5},
+                     scores={"MIKED": {1: 4}, "SARAH": {1: 5}, "SCORECARD": {}})
+    shots = [rec("Mike", 1, 4, 1, "tee", "fairway", "DR"), rec("Mike", 1, 4, 2, "fairway", "green", "9I"),
+             rec("Mike", 1, 4, 3, "rough", "green", "SW")]
+    for i, s in enumerate(shots):
+        s.round_id, s.shot.timestamp = r.id, float(i)
+    r.apply_scorecard(card)
+    st = r.side_stats(r.side_for("Mike"), shots)
+    assert st.gir == (0, 1) and st.scramble == (1, 1)
+
+
 def test_missed_green_saved_with_a_fringe_putt_is_a_scramble():
     # PGA scrambling: every missed green is a chance, whatever the next stroke. Approach to the fringe,
     # putter from there (not a putt: it's off the green), one putt for par -> a scramble made.

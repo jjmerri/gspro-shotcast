@@ -135,8 +135,9 @@ What's recorded, and from where:
 | `hole_layouts` | hole of a completed round | Each played hole's tee, pin (as set that round) and GSPro's aim waypoint, in world metres, from the hole list GSPro logs when a round is complete; a round quit early logs none, so its holes are filled from the course's GKD file (see Rounds below) |
 | `hole_images` | course and hole | GSPro's minimap off the tee (JPEG, title bar trimmed), with where the ball and pin sit on it: the background of every replay of the hole. Kept at the first tee setup on a hole that has none yet, on or off air, once the round has started (an opening tee is snapped as the round starts, under its course and start hole) |
 | `course_tees` | course and tee | Each tee's course rating, slope and par from the course's `coursedetails.txt`, kept whenever a course loads; used for the handicap index |
-| `rounds` | side per round (a player, or the team in a one-ball format) | Course, format, holes, gross, net to par, hole-by-hole scores and pars, fairways, greens in regulation, scrambling, sand saves, putts, penalties, longest drive (total distance); complete or quit early |
+| `rounds` | side per round (a player, or the team in a one-ball format) | Course, format, holes, gross, net to par, hole-by-hole scores and pars, fairways, greens in regulation, scrambling, sand saves, putts, penalties, longest drive (total distance); complete or quit early. The stats are worked out again from the round's `shots` when they change after it's recorded (GSPro's round file correcting where a ball came to rest); a round whose strokes can't all be placed on their holes keeps the stats it was recorded with |
 | `player_rounds` | player per round | The same per-player stats and scores, for team formats where the side is the team |
+| `round_stats_due` | round whose shots changed | Noted by triggers on `shots`; the booth works the round's stats out again and clears it |
 | `lines` | spoken line | Every line the booth said, tied to its shot |
 | `predictions` | commentator call | The booth's make/miss putt calls and whether they were right |
 | `sessions` | night | When the booth ran |

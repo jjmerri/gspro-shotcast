@@ -990,9 +990,12 @@ class Round:
                 # so check the regulation shot's settled finish lie: a non-putt that stopped on the
                 # green by the regulation stroke (<= par - 2) hit it; otherwise it's a miss (up-and-down
                 # from off the green, or the green reached late). The lie decides, not the club: a putter
-                # from the fringe that finished on the green reached it too.
-                reached = any(_finished_on_green(r) for r in recs
-                              if r.shot_number and r.shot_number <= par - 2 and r.picked is not False)
+                # from the fringe that finished on the green reached it too. No stroke was played from the
+                # green, so one that stayed there is the last: a stroke after it (in a scramble, any
+                # partner's) was played from off the green, and the ball wasn't on it after all (a misread).
+                reached = any(_finished_on_green(r) for i, r in enumerate(recs)
+                              if r.shot_number and r.shot_number <= par - 2 and r.picked is not False
+                              and all(x.shot_number == r.shot_number for x in recs[i + 1:]))
                 hole_gir = reached
                 gir_tries += 1
                 gir += reached

@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import pytest
@@ -786,3 +787,331 @@ def test_frozen_reuses_answers_until_its_outermost_scope_ends():
             assert ask() == 3
         assert ask() == 3                                # the inner scope kept the outer's answers
     assert ask() == 4
+
+
+def test_round_stats_recorded_from_the_screens_reads_are_worked_out_again_from_the_stored_shots(tmp_path):
+    path = str(tmp_path / "s.db")
+    s = Store(path)
+    db, sid = s.db, s.session_id
+
+    def round_(uuid, hole_text, fir_hit, drive_text=None, card_scores="'{\"1\": 4}'"):
+        db.execute("INSERT INTO round_records (uuid, kind, session_id, started_at, ended_at, state, assigned)"
+                   " VALUES (?, 'round', ?, ?, ?, 'finished', 'live')", (uuid, sid, T0, T0 + 600))
+        # Ann's drive the screen read in the rough, GSPro's round file has in the fairway; on in two, two putts.
+        for n, (lie_before, lie_after, to_pin, putt) in enumerate(
+                (("tee", "fairway", "400 yards", 0), ("fairway", "green", "150 yards", 0),
+                 ("green", "green", "20 feet", 1), ("green", None, "3 feet", 1)), 1):
+            db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, lie_before,"
+                       " lie_after, to_pin, outcome, total_yards, raw, record_uuid) VALUES (?, ?, 'Ann', 'Pebble',"
+                       " ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)",
+                       (sid, T0 + n, drive_text if n == 1 and drive_text else hole_text, n, putt, lie_before, lie_after, to_pin,
+                        "holed" if n == 4 else None, 250.0 if n == 1 else None, uuid))
+        side = db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, format, holes, complete,"
+                          " players, scores, hole_pars, round_uuid, fir_hit, fir_tries, gir_hit, gir_tries,"
+                          " scramble_hit, scramble_tries, sand_hit, sand_tries, putts, putt_holes, penalties,"
+                          " longest_drive) VALUES (?, ?, '2025-01-01', 'Pebble', 'Ann', 'stroke', 1, 1, '[\"Ann\"]',"
+                          " '{\"1\": 4}', '{\"1\": 4}', ?, ?, 1, 1, 1, 0, 0, 0, 0, 2, 1, 0, 250.0)",
+                          (sid, T0 + 600, uuid, fir_hit)).lastrowid
+        card = db.execute("INSERT INTO player_rounds (session_id, ended_at, player, course, fmt, scores, hole_pars,"
+                          " round_uuid, fir_hit, fir_tries, gir_hit, gir_tries, scramble_hit, scramble_tries,"
+                          " sand_hit, sand_tries, putts, putt_holes) VALUES (?, ?, 'Ann', 'Pebble', 'stroke',"
+                          f" {card_scores}, '{{\"1\": 4}}', ?, ?, 1, 1, 1, 0, 0, 0, 0, 2, 1)",
+                          (sid, T0 + 600, uuid, fir_hit)).lastrowid
+        return side, card
+
+    wrong = round_("r", "Hole 1, par 4, 400 yards", 0)
+    right = round_("ok", "Hole 1, par 4, 400 yards", 1)
+    unplaced = round_("misread", "par 4, 400 yards", 0)   # (no hole number read: which hole isn't known)
+    # The drive read on a hole the card hasn't, before the strokes on its own: a misread, not a hole
+    # left unfinished at the end. And an older card with no scores kept: its own stats can't be told.
+    lost = round_("lost", "Hole 1, par 4, 400 yards", 0, drive_text="Hole 2, par 4, 400 yards")
+    unscored = round_("unscored", "Hole 1, par 4, 400 yards", 0, card_scores="NULL")
+    db.execute("PRAGMA user_version = 8")
+    db.commit()
+    s.close()
+    s = Store(path, new_session=False)
+
+    def fir(rows):
+        return [tuple(s.db.execute(f"SELECT fir_hit, fir_tries, gir_hit, putts FROM {t} WHERE id = ?", (i,)).fetchone())
+                for t, i in zip(("rounds", "player_rounds"), rows)]
+    assert fir(wrong) == fir(right) == [(1, 1, 1, 2), (1, 1, 1, 2)]
+    assert fir(unplaced) == fir(lost) == [(0, 1, 1, 2), (0, 1, 1, 2)]
+    assert fir(unscored) == [(1, 1, 1, 2), (0, 1, 1, 2)]
+    assert s.db.execute("PRAGMA user_version").fetchone()[0] == FORMAT
+    assert s.refresh_round_stats("r") == s.refresh_round_stats("ok") == 0
+
+
+def test_a_hole_picked_up_after_a_full_shot_isnt_worked_out_again_as_putts(tmp_path):
+    # Four strokes into the trees, then picked up: GSPro scores it 8, and nobody putted.
+    from commentator.stored_stats import recompute
+
+    s = Store(str(tmp_path / "s.db"))
+    db, sid = s.db, s.session_id
+    for n in (1, 2, 3, 4):
+        db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, lie_before,"
+                   " lie_after, to_pin, raw, record_uuid) VALUES (?, ?, 'Ann', 'Pebble', 'Hole 1, par 4, 400 yards',"
+                   " ?, 0, ?, ?, '100 yards', '{}', 'r')",
+                   (sid, T0 + n, n, "tee" if n == 1 else "rough", "green" if n == 4 else "rough"))
+    db.execute("INSERT INTO player_rounds (session_id, ended_at, player, course, fmt, scores, hole_pars, round_uuid)"
+               " VALUES (?, ?, 'Ann', 'Pebble', 'stroke', '{\"1\": 8}', '{\"1\": 4}', 'r')", (sid, T0 + 600))
+    (st,) = recompute(db, "r")[1].values()
+    assert st.putts == 0 and st.putt_holes == 0 and st.penalties == 0
+
+
+def _stored_hole(s, uuid, strokes, score, labels=None):
+    """Ann's strokes (lie before, lie after, putt) on par-4 holes, as the store keeps them, and her card."""
+    db, sid = s.db, s.session_id
+    ids = []
+    for i, (hole, before, after, putt) in enumerate(strokes):
+        n = 1 + sum(1 for h, *_ in strokes[:i] if h == hole)
+        ids.append(db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt,"
+                              " lie_before, lie_after, to_pin, raw, record_uuid) VALUES (?, ?, 'Ann', 'Pebble', ?,"
+                              " ?, ?, ?, ?, '100 yards', '{}', ?)",
+                              (sid, T0 + i, (labels or {}).get(i, f"Hole {hole}, par 4, 400 yards"), n, int(putt),
+                               before, after, uuid)).lastrowid)
+    db.execute("INSERT INTO player_rounds (session_id, ended_at, player, course, fmt, scores, hole_pars, round_uuid)"
+               " VALUES (?, ?, 'Ann', 'Pebble', 'stroke', ?, ?, ?)",
+               (sid, T0 + 600, json.dumps(score), json.dumps({h: 4 for h in score}), uuid))
+    return ids
+
+
+def test_a_full_shot_that_left_a_tap_in_is_on_in_regulation_with_its_conceded_putt(tmp_path):
+    from commentator.stored_stats import recompute
+
+    s = Store(str(tmp_path / "s.db"))
+    # A birdie: the approach stopped on the fringe inside the gimme circle, its tap-in conceded.
+    ids = _stored_hole(s, "r", [(1, "tee", "fairway", False), (1, "fairway", "fringe", False)], {1: 3})
+    uid = s.db.execute("SELECT uid FROM shots WHERE id = ?", (ids[-1],)).fetchone()[0]
+    s.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, outcome, raw,"
+                 " record_uuid, derived_from) VALUES (?, ?, 'Ann', 'Pebble', 'Hole 1, par 4, 400 yards', 3, 1,"
+                 " 'gimme', '{}', 'r', ?)", (s.session_id, T0 + 5, uid))
+    (st,) = recompute(s.db, "r")[1].values()
+    assert st.gir == (1, 1) and st.putts == 1
+    # A gimme from before the store linked it: the stroke before it is its parent.
+    _stored_hole(s, "old", [(1, "tee", "fairway", False), (1, "fairway", "fringe", False)], {1: 3})
+    s.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, outcome, raw,"
+                 " record_uuid) VALUES (?, ?, 'Ann', 'Pebble', 'Hole 1, par 4, 400 yards', 3, 1, 'gimme', '{}',"
+                 " 'old')", (s.session_id, T0 + 5))
+    (st,) = recompute(s.db, "old")[1].values()
+    assert st.gir == (1, 1) and st.putts == 1
+    # One whose stroke before it isn't stored: which shot it conceded can't be told.
+    _stored_hole(s, "lost", [(1, "tee", "fairway", False), (1, "fairway", "fringe", False)], {1: 3})
+    s.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, outcome, raw,"
+                 " record_uuid) VALUES (?, ?, 'Ann', 'Pebble', 'Hole 1, par 4, 400 yards', NULL, 1, 'gimme', '{}',"
+                 " 'lost')", (s.session_id, T0 + 5))
+    assert recompute(s.db, "lost") is None
+    # A linked one whose parent the round doesn't have: the same.
+    _stored_hole(s, "gone", [(1, "tee", "fairway", False), (1, "fairway", "fringe", False)], {1: 3})
+    s.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, outcome, raw,"
+                 " record_uuid, derived_from) VALUES (?, ?, 'Ann', 'Pebble', 'Hole 1, par 4, 400 yards', 3, 1,"
+                 " 'gimme', '{}', 'gone', 'no-such-shot')", (s.session_id, T0 + 5))
+    assert recompute(s.db, "gone") is None
+
+
+def test_a_row_with_a_hole_whose_par_isnt_kept_is_left_as_stored(tmp_path):
+    from commentator.stored_stats import recompute
+
+    s = Store(str(tmp_path / "s.db"))
+    _stored_hole(s, "r", [(1, "tee", "fairway", False), (1, "fairway", "green", False), (1, "green", None, True)],
+                 {1: 3}, labels={0: "Hole 1", 1: "Hole 1", 2: "Hole 1"})
+    s.db.execute("UPDATE player_rounds SET hole_pars = NULL")
+    assert recompute(s.db, "r") == ({}, {})
+    # Another player's shot on it says its par: the hole is scored with it.
+    s.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, lie_before,"
+                 " lie_after, raw, record_uuid) VALUES (?, ?, 'Ben', 'Pebble', 'Hole 1, par 4, 400 yards', 1, 0,"
+                 " 'tee', 'fairway', '{}', 'r')", (s.session_id, T0 + 9))
+    (st,) = recompute(s.db, "r")[1].values()
+    assert st.fir == (1, 1) and st.gir == (1, 1) and st.putts == 1
+
+
+def test_a_gimme_noted_after_the_next_tee_shot_doesnt_stop_a_round_quit_early_being_worked_out(tmp_path):
+    from commentator.stored_stats import recompute
+
+    s = Store(str(tmp_path / "s.db"))
+    ids = _stored_hole(s, "r", [(1, "tee", "fairway", False), (1, "fairway", "fringe", False),
+                                (2, "tee", "fairway", False)], {1: 3})
+    s.db.execute("UPDATE player_rounds SET complete = 0")
+    uid = s.db.execute("SELECT uid FROM shots WHERE id = ?", (ids[1],)).fetchone()[0]
+    s.db.execute("INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, outcome, raw,"
+                 " record_uuid, derived_from) VALUES (?, ?, 'Ann', 'Pebble', 'Hole 1, par 4, 400 yards', 3, 1,"
+                 " 'gimme', '{}', 'r', ?)", (s.session_id, T0 + 5, uid))
+    (st,) = recompute(s.db, "r")[1].values()
+    assert st.fir == (1, 1) and st.putts == 1
+
+
+def test_a_stroke_past_its_holes_score_is_a_misread_hole_and_the_round_is_left_as_stored(tmp_path):
+    from commentator.stored_stats import recompute
+
+    s = Store(str(tmp_path / "s.db"))
+    holes = [(1, "tee", "fairway", False), (1, "fairway", "green", False), (1, "green", None, True)] \
+        + [(2, "tee", "rough", False), (2, "rough", "rough", False), (2, "rough", "green", False),
+           (2, "green", "green", True), (2, "green", None, True)]
+    _stored_hole(s, "r", holes, {1: 3, 2: 5}, labels={7: "Hole 1, par 4, 400 yards"})   # hole 2's 5th, read as 1's
+    assert recompute(s.db, "r") is None
+    _stored_hole(s, "ok", holes, {1: 3, 2: 5})
+    assert recompute(s.db, "ok") is not None
+
+
+def test_a_round_quit_early_leaves_only_a_hole_begun_after_the_rest_off_its_card(tmp_path):
+    from commentator.stored_stats import recompute
+
+    s = Store(str(tmp_path / "s.db"))
+    # Quit on hole 2 after its drive: that's the unfinished hole. A chip-in read on "Hole 9" isn't.
+    _stored_hole(s, "quit", [(1, "tee", "fairway", False), (1, "fairway", "green", False), (1, "green", None, True),
+                             (1, "green", None, True), (2, "tee", "rough", False)], {1: 4})
+    _stored_hole(s, "misread", [(1, "tee", "fairway", False), (1, "fairway", "fringe", False),
+                                (1, "fringe", None, False)], {1: 3}, labels={2: "Hole 9, par 4, 400 yards"})
+    s.db.execute("UPDATE player_rounds SET complete = 0")
+    # A mulligan with no hole read doesn't count anywhere, so it doesn't stop the rest being placed.
+    s.db.execute("INSERT INTO shots (session_id, ts, player, course, shot_number, is_putt, mulligan, raw, record_uuid)"
+                 " VALUES (?, ?, 'Ann', 'Pebble', 1, 0, 1, '{}', 'quit')", (s.session_id, T0 - 5))
+    assert recompute(s.db, "quit") is not None
+    assert recompute(s.db, "misread") is None
+
+
+def test_a_round_whose_shots_another_connection_changed_is_worked_out_again_when_the_booth_opens(tmp_path):
+    path = str(tmp_path / "s.db")
+    s = Store(path)
+    ids = _stored_hole(s, "r", [(1, "tee", "rough", False), (1, "rough", "green", False), (1, "green", None, True),
+                                (1, "green", None, True)], {1: 4})
+    s.db.execute("UPDATE player_rounds SET fir_hit = 0, fir_tries = 1")
+    s.db.commit()
+    s.close()
+    other = sqlite3.connect(path)   # (a backfill, or the stats page)
+    other.execute("UPDATE shots SET lie_after = 'fairway' WHERE id = ?", (ids[0],))
+    other.execute("UPDATE shots SET lie_before = 'fairway' WHERE id = ?", (ids[1],))
+    other.commit()
+    other.close()
+    s = Store(path, new_session=False)
+    assert tuple(s.db.execute("SELECT fir_hit, fir_tries FROM player_rounds").fetchone()) == (1, 1)
+    assert s.db.execute("SELECT COUNT(*) FROM round_stats_due").fetchone()[0] == 0
+
+
+def test_a_round_noted_while_the_database_is_busy_stays_noted_for_the_next_time(tmp_path):
+    path = str(tmp_path / "s.db")
+    s = Store(path)
+    _stored_hole(s, "r", [(1, "tee", "rough", False), (1, "rough", "green", False), (1, "green", None, True)], {1: 3})
+    s.db.execute("INSERT OR IGNORE INTO round_stats_due VALUES ('r')")
+    s.db.commit()
+    s.db.execute("PRAGMA busy_timeout = 0")
+    other = sqlite3.connect(path)   # (the stats page, writing)
+    other.execute("BEGIN IMMEDIATE")
+    assert s.refresh_changed_round_stats() == 0
+    other.rollback()
+    other.close()
+    assert not s.db.in_transaction
+    assert [tuple(r) for r in s.db.execute("SELECT uuid FROM round_stats_due")] == [("r",)]
+
+
+def test_a_player_renamed_mid_round_keeps_the_strokes_under_their_old_name(tmp_path):
+    from commentator.stored_stats import recompute
+
+    s = Store(str(tmp_path / "s.db"))
+    ids = _stored_hole(s, "r", [(1, "tee", "fairway", False), (1, "fairway", "green", False),
+                                (1, "green", None, True)], {1: 3})
+    s.db.execute("UPDATE shots SET slot_id = 'ann'")
+    s.db.execute("UPDATE player_rounds SET slot_id = 'ann'")
+    s.db.execute("UPDATE shots SET player = 'ann' WHERE id = ?", (ids[0],))   # (her name, read before a restart)
+    (st,) = recompute(s.db, "r")[1].values()
+    assert st.fir == (1, 1) and st.gir == (1, 1) and st.putts == 1
+
+
+def test_a_stroke_on_a_scored_hole_thats_nobodys_leaves_the_round_as_stored(tmp_path):
+    from commentator.stored_stats import recompute
+
+    s = Store(str(tmp_path / "s.db"))
+    ids = _stored_hole(s, "r", [(1, "tee", "rough", False), (1, "rough", "fairway", False),
+                                (1, "fairway", "green", False), (1, "green", None, True)], {1: 4})
+    s.db.execute("UPDATE shots SET player = NULL WHERE id = ?", (ids[1],))   # (its match taken back)
+    assert recompute(s.db, "r") is None
+
+
+def test_a_drive_the_stats_page_left_out_isnt_the_longest(tmp_path):
+    from commentator.stored_stats import recompute
+
+    s = Store(str(tmp_path / "s.db"))
+    ids = _stored_hole(s, "r", [(1, "tee", "fairway", False), (1, "fairway", "green", False),
+                                (1, "green", None, True)], {1: 3})
+    s.db.execute("UPDATE shots SET club = 'DR', total_yards = 310 WHERE id = ?", (ids[0],))
+    s.db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, format, holes, players, scores, hole_pars,"
+                 " round_uuid) VALUES (?, ?, '2026-11-01', 'Pebble', 'Ann', 'stroke', 1, '[\"Ann\"]', '{\"1\": 3}',"
+                 " '{\"1\": 4}', 'r')", (s.session_id, T0 + 600))
+    (st,) = recompute(s.db, "r")[0].values()
+    assert st.longest_drive == 310
+    s.db.execute("UPDATE shots SET left_out = 1 WHERE id = ?", (ids[0],))
+    (st,) = recompute(s.db, "r")[0].values()
+    assert st.longest_drive is None
+
+
+def test_a_stroke_taken_back_off_its_player_and_hole_leaves_the_round_as_stored(tmp_path):
+    from commentator.stored_stats import recompute
+
+    s = Store(str(tmp_path / "s.db"))
+    ids = _stored_hole(s, "r", [(1, "tee", "fairway", False), (1, "fairway", "green", False),
+                                (1, "green", None, True), (1, "green", None, True)], {1: 4})
+    s.db.execute("UPDATE shots SET player = NULL, hole = NULL WHERE id = ?", (ids[2],))
+    assert recompute(s.db, "r") is None
+
+
+def test_a_hole_missing_its_first_stroke_leaves_its_row_as_stored(tmp_path):
+    from commentator.stored_stats import recompute
+
+    s = Store(str(tmp_path / "s.db"))
+    ids = _stored_hole(s, "r", [(1, "tee", "fairway", False), (1, "fairway", "green", False),
+                                (1, "green", None, True)], {1: 3})
+    s.db.execute("UPDATE shots SET record_uuid = NULL WHERE id = ?", (ids[0],))
+    assert recompute(s.db, "r") == ({}, {})
+
+
+def test_a_hole_missing_a_putt_isnt_a_penalty_and_its_row_is_left_as_stored(tmp_path):
+    from commentator.stored_stats import recompute
+
+    s = Store(str(tmp_path / "s.db"))
+    ids = _stored_hole(s, "r", [(1, "tee", "fairway", False), (1, "fairway", "green", False),
+                                (1, "green", "green", True), (1, "green", None, True)], {1: 4})
+    s.db.execute("UPDATE shots SET record_uuid = NULL WHERE id = ?", (ids[2],))
+    assert recompute(s.db, "r") == ({}, {})
+    # Nor is one missing the approach that put it there.
+    ids = _stored_hole(s, "a", [(1, "tee", "fairway", False), (1, "fairway", "green", False),
+                                (1, "green", "green", True), (1, "green", None, True)], {1: 4})
+    s.db.execute("UPDATE shots SET record_uuid = NULL WHERE id = ?", (ids[1],))
+    assert recompute(s.db, "a") == ({}, {})
+
+
+def test_a_scramble_player_missing_their_own_drive_is_left_as_stored(tmp_path):
+    from commentator.stored_stats import recompute
+
+    s = Store(str(tmp_path / "s.db"))
+    db, sid = s.db, s.session_id
+    ids = {}
+    for i, (who, n, before, after, putt) in enumerate([("Ann", 1, "tee", "fairway", 0), ("Ben", 1, "tee", "rough", 0),
+                                                       ("Ann", 2, "fairway", "green", 0), ("Ben", 2, "fairway", "green", 0),
+                                                       ("Ann", 3, "green", None, 1)]):
+        ids[who, n] = db.execute(
+            "INSERT INTO shots (session_id, ts, player, course, hole, shot_number, is_putt, lie_before, lie_after,"
+            " to_pin, raw, record_uuid) VALUES (?, ?, ?, 'Pebble', 'Hole 1, par 4, 400 yards', ?, ?, ?, ?,"
+            " '100 yards', '{}', 'r')", (sid, T0 + i, who, n, putt, before, after)).lastrowid
+    db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, format, holes, players, scores,"
+               " hole_pars, round_uuid) VALUES (?, ?, '2026-11-01', 'Pebble', 'AB', 'scramble', 1,"
+               " '[\"Ann\", \"Ben\"]', '{\"1\": 3}', '{\"1\": 4}', 'r')", (sid, T0 + 600))
+    for who in ("Ann", "Ben"):
+        db.execute("INSERT INTO player_rounds (session_id, ended_at, player, course, fmt, scores, hole_pars,"
+                   " round_uuid) VALUES (?, ?, ?, 'Pebble', 'scramble', '{\"1\": 3}', '{\"1\": 4}', 'r')",
+                   (sid, T0 + 600, who))
+    assert len(recompute(db, "r")[1]) == 2 and len(recompute(db, "r")[0]) == 1
+    db.execute("UPDATE shots SET record_uuid = NULL WHERE id = ?", (ids["Ann", 1],))
+    got = recompute(db, "r")
+    assert got is not None and [s.fir for s in got[1].values()] == [(0, 1)]   # (Ben's)
+    assert got[0] == {}   # (the team's longest drive may have been hers)
+    db.execute("UPDATE shots SET record_uuid = NULL WHERE player = 'Ann'")   # (none of hers at all)
+    assert recompute(db, "r")[0] == {}
+
+
+def test_a_hole_with_a_stroke_whose_number_wasnt_read_leaves_its_row_as_stored(tmp_path):
+    from commentator.stored_stats import recompute
+
+    s = Store(str(tmp_path / "s.db"))
+    ids = _stored_hole(s, "r", [(1, "tee", "fairway", False), (1, "fairway", "green", False),
+                                (1, "green", None, True)], {1: 3})
+    s.db.execute("UPDATE shots SET shot_number = NULL, outcome = 'holed' WHERE id = ?", (ids[2],))
+    assert recompute(s.db, "r") == ({}, {})

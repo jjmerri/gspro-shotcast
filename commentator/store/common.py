@@ -376,10 +376,11 @@ def planner_counts_stale(db: sqlite3.Connection, grown: float = 2.0, least: int 
 
 
 # The season file's format (PRAGMA user_version) once upgraded: 6 is round_record.migrate's, 7 the
-# stranded openers' repair (_repair_stranded_openers), 8 the picked-up holes' (_repair_picked_up_holes).
+# stranded openers' repair (_repair_stranded_openers), 8 the picked-up holes' (_repair_picked_up_holes),
+# 9 the round stats' from the stored shots (_repair_round_stats).
 # Raise it with any change to the file an older release would trip over: a file older than this is copied
 # before it's upgraded (backup.before_upgrade).
-FORMAT = 8
+FORMAT = 9
 
 
 class SeasonCopyFailed(RuntimeError):

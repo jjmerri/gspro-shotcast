@@ -398,10 +398,23 @@ class RoundFileMixin:
                 self._sync_file_clubs()
             except sqlite3.Error as e:
                 log.debug("Couldn't read the names GSPro's round file gave: %s", e)
+            # (a stroke written, a match taken back, a shot refiled: any can correct a recorded round)
+            self._refresh_recorded_stats()
             try:
                 self._learn_file_slots()
             except Exception:
                 log.exception("Couldn't place the players in GSPro's slots from its round file")
+
+    def _refresh_recorded_stats(self) -> None:
+        """Rounds whose stats were recorded at their end, that GSPro's round file has corrected a shot of
+        since (a rest it had read wrong, or a match it took back): their rows are worked out again from
+        the store's shots."""
+        try:
+            if n := self.store.refresh_changed_round_stats():
+                log.info("Recorded round stats corrected from GSPro's round file: %d row(s)", n)
+        except Exception:
+            self.store.db.rollback()
+            log.exception("Couldn't correct the recorded rounds' stats from GSPro's round file")
 
     def _sync_file_names(self) -> None:
         """The live round's shots the booth recorded blind take the player, hole and stroke number the store

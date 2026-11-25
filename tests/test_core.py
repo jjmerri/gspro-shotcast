@@ -7758,6 +7758,43 @@ def test_where_gspros_round_file_has_a_drive_rest_is_the_rounds_fairway_and_driv
     assert r.side_stats(side, e.state.shots).longest_drive != 283.0
 
 
+def test_a_drive_gspros_round_file_corrects_after_the_round_is_recorded_corrects_its_stored_fairways(tmp_path):
+    # The round ended with the drive read in the rough; the file has it in the fairway only afterwards.
+    from commentator.round import Round
+    from commentator.hud import Scorecard
+
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Paul"], course="X", scheduled_format=None, holes=1, is_league=False)
+    r.apply_scorecard(Scorecard(holes=[1], par={1: 4}, index={1: 1}, scores={"PAUL": {1: 4}, "SCORECARD": {}}))
+    e.round = r
+    e.store.begin_round(r.uuid, course="X", players={"Paul": None})
+    drive = None
+    for n, (before, after, to_pin, putt) in enumerate((("tee", "rough", "400 yards", False),
+                                                       ("rough", "green", "150 yards", False),
+                                                       ("green", "green", "20 feet", True),
+                                                       ("green", None, "3 feet", True)), 1):
+        shot = Shot(ball_speed=150, club="PT" if putt else "DR")
+        sid = e.store.record_shot(player="Paul", hole="Hole 1, par 4, 400 yards", shot=shot,
+                                  before=Hud(lie=before, shot_number=n, to_pin=to_pin), after=Hud(lie=after), tags=[],
+                                  carry_game_yards=None, total_yards=None, offline_yards=None, record=r.uuid,
+                                  outcome="holed" if n == 4 else None)
+        rec = ShotRecord("Paul", shot, "Hole 1", Hud(lie=after, to_pin=to_pin), [], round_id=r.id, hole_seq=1,
+                         par=4, lie_before=before, shot_number=n, to_pin_before=to_pin)
+        rec.shot_id = sid
+        e.state.record_shot(rec)
+        drive = drive or sid
+    e._record_round_stats(r, "test")
+    r.ended = True
+    fir = "SELECT fir_hit, fir_tries FROM {} WHERE round_uuid = ?"
+    assert [tuple(e.store.db.execute(fir.format(t), (r.uuid,)).fetchone()) for t in ("rounds", "player_rounds")] \
+        == [(0, 1), (0, 1)]
+    e.store.db.execute("UPDATE shots SET lie_after = 'fairway' WHERE id = ?", (drive,))
+    e.store.db.execute("UPDATE shots SET lie_before = 'fairway' WHERE shot_number = 2")
+    e._refresh_recorded_stats()
+    assert [tuple(e.store.db.execute(fir.format(t), (r.uuid,)).fetchone()) for t in ("rounds", "player_rounds")] \
+        == [(1, 1), (1, 1)]
+
+
 def test_a_pick_ball_a_finish_was_known_for_keeps_it_through_a_late_penalty_and_a_near_cup_ball_isnt_holed(tmp_path):
     from commentator.round import Round
     from commentator.sources.gspro_log import M_TO_YD
