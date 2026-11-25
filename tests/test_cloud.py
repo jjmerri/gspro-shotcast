@@ -627,6 +627,7 @@ def test_an_api_that_needs_a_newer_shotcast_says_which(api):
 
 def test_the_command_line_pairs_reports_and_unpairs_each_taking_effect_at_restart(api, monkeypatch, capsys):
     prof = _pair_cli(api, monkeypatch)
+    salt = (cloud.root() / cloud.FINGERPRINT_SALT).read_text()
     assert "(sim 'Bay 1')" in capsys.readouterr().out
     assert (prof.home / cloud.FOLDER_FILE).is_file() and prof.db.is_file()   # made at pair time
     cloud.main(["status"])
@@ -635,6 +636,7 @@ def test_the_command_line_pairs_reports_and_unpairs_each_taking_effect_at_restar
     cloud.main(["unpair"])
     assert "Restart Shotcast to apply" in capsys.readouterr().out
     assert cloud.locate() is None and api.revoked and prof.home.is_dir()   # (its data kept)
+    assert (cloud.root() / cloud.FINGERPRINT_SALT).read_text() == salt   # (and its fingerprint's salt)
     with pytest.raises(SystemExit, match="isn't paired"):
         cloud.main(["status"])
 
@@ -1281,7 +1283,8 @@ def test_this_install_pairs_with_the_same_fingerprint_every_time(api):
 def test_on_windows_the_machines_ids_go_into_the_fingerprint_and_never_out(api, monkeypatch, caplog):
     import logging
 
-    ids = {"guid": "11111111-2222-3333-4444-555555555555", "hw": "{aaaa-bbbb}", "disk": "0badf00d"}
+    ids = {"guid": "11111111-2222-3333-4444-555555555555", "hw": "00112233445566778899aabbccddeeff",
+           "disk": "0badf00d"}
     monkeypatch.setattr(cloud, "_ON_WINDOWS", False)
     alone = cloud.fingerprint()
     monkeypatch.setattr(cloud, "_ON_WINDOWS", True)
@@ -1299,19 +1302,96 @@ def test_on_windows_the_machines_ids_go_into_the_fingerprint_and_never_out(api, 
     assert len(partial) == 64 and partial not in (full, alone)
 
     monkeypatch.setattr(cloud, "_WINDOWS_READERS", (lambda: ids["guid"], lambda: ids["hw"], lambda: ids["disk"]))
-    sent, said = _sent_fingerprints(api), []
+    bodies, said = [], []
+
+    def hook(req):
+        if req.url.path == "/api/devices/pair":
+            bodies.append(req.content.decode())
+        return None
+    api.hook = hook
     caplog.set_level(logging.DEBUG)
     cloud.pair(cloud.store(), API, "Sim PC", clock=lambda: api.now, sleep=lambda s: None, say=said.append)
-    assert sent == [full]
-    shown = "\n".join(said) + caplog.text + cloud.store().path.read_text()
-    for raw in ids.values():
+    assert [json.loads(b)["fingerprint"] for b in bodies] == [full]
+    shown = "\n".join(said) + caplog.text + cloud.store().path.read_text() + "".join(bodies)
+    for raw in [*ids.values(), *(v.replace("-", "") for v in ids.values())]:
         assert raw not in shown
     assert cloud.show_fingerprint(full) in "\n".join(said)
 
 
-def test_a_damaged_salt_is_made_again():
+def test_the_salt_is_made_again_on_another_machine_but_not_when_a_reader_fails(monkeypatch):
+    ids = {"guid": "guid-1", "uuid": "aa" * 16, "disk": "0badf00d"}
+    monkeypatch.setattr(cloud, "_ON_WINDOWS", True)
+    monkeypatch.setattr(cloud, "_WINDOWS_READERS", (lambda: ids["guid"], lambda: ids["uuid"], lambda: ids["disk"]))
     first = cloud.fingerprint()
-    (cloud.root() / cloud.FINGERPRINT_SALT).write_text("not a salt")
-    again = cloud.fingerprint()   # (pairing still works: the site sees a PC it hasn't seen)
-    assert again != first and cloud.fingerprint() == again
-    assert len((cloud.root() / cloud.FINGERPRINT_SALT).read_text()) == 64
+    salt = (cloud.root() / cloud.FINGERPRINT_SALT).read_text()
+    assert cloud.fingerprint() == first and (cloud.root() / cloud.FINGERPRINT_MACHINE).is_file()
+    ids["disk"] = "feedface"   # (another volume serial alone: the same machine, the same salt)
+    cloud.fingerprint()
+    assert (cloud.root() / cloud.FINGERPRINT_SALT).read_text() == salt
+    ids["uuid"] = ""   # (a reader that gives nothing: can't tell, so the salt is kept)
+    cloud.fingerprint()
+    assert (cloud.root() / cloud.FINGERPRINT_SALT).read_text() == salt
+    ids["uuid"] = "bb" * 16   # (the disk imaged onto another board: a salt of its own)
+    clone = cloud.fingerprint()
+    assert (cloud.root() / cloud.FINGERPRINT_SALT).read_text() != salt and clone != first
+    assert cloud.fingerprint() == clone   # (and kept there)
+    ids["uuid"] = "aa" * 16   # (the image back on the first board: yet another salt, never the old one)
+    assert cloud.fingerprint() not in (first, clone)
+
+
+def test_a_salt_from_before_the_machine_was_kept_is_kept_and_the_machine_recorded(monkeypatch):
+    cloud.root().mkdir(parents=True, exist_ok=True)
+    (cloud.root() / cloud.FINGERPRINT_SALT).write_text("cd" * 32)
+    monkeypatch.setattr(cloud, "_ON_WINDOWS", True)
+    monkeypatch.setattr(cloud, "_WINDOWS_READERS", (lambda: "guid", lambda: "aa" * 16, lambda: "disk"))
+    cloud.fingerprint()
+    assert (cloud.root() / cloud.FINGERPRINT_SALT).read_text() == "cd" * 32
+    assert len((cloud.root() / cloud.FINGERPRINT_MACHINE).read_text()) == 64
+
+
+def _smbios(*structures: bytes) -> bytes:
+    table = b"".join(structures)
+    return bytes([0, 3, 4, 0]) + len(table).to_bytes(4, "little") + table
+
+
+def _structure(kind: int, formatted: bytes, *strings: bytes) -> bytes:
+    body = bytes([kind, 4 + len(formatted)]) + b"\x00\x00" + formatted
+    return body + (b"".join(s + b"\0" for s in strings) + b"\0" if strings else b"\0\0")
+
+
+def test_the_smbios_system_uuid_is_found_in_the_firmware_table():
+    uuid = bytes(range(16))
+    bios = _structure(0, bytes(14), b"Vendor", b"1.0")
+    system = _structure(1, bytes(4) + uuid + bytes(5), b"Maker", b"Model")
+    end = _structure(127, b"")
+    assert cloud.smbios_uuid(_smbios(bios, system, end)) == uuid.hex()
+    assert cloud.smbios_uuid(_smbios(system)) == uuid.hex()
+    assert cloud.smbios_uuid(_smbios(bios, end)) == ""                          # (no type 1)
+    assert cloud.smbios_uuid(_smbios(bios, end, system)) == ""                  # (after the end)
+    for unset in (bytes(16), b"\xff" * 16):
+        assert cloud.smbios_uuid(_smbios(_structure(1, bytes(4) + unset + bytes(5)))) == ""
+    assert cloud.smbios_uuid(_smbios(_structure(1, bytes(4) + uuid[:4]))) == ""   # (type 1 too short)
+    whole = _smbios(bios, system)
+    for cut in (3, 9, 12, 20, 30, len(whole) - 20):
+        assert cloud.smbios_uuid(whole[:cut]) in ("", uuid.hex())   # (cut short: never an error)
+    assert cloud.smbios_uuid(whole[:8] + whole[8:8 + len(bios) - 1]) == ""
+    assert cloud.smbios_uuid(b"") == "" and cloud.smbios_uuid(_smbios(bytes([1, 2]))) == ""
+
+
+def test_a_damaged_salt_is_made_again():
+    seen = {cloud.fingerprint()}
+    for damage in (b"not a salt", b"", b"\xff\xfe\x00 garbage \x80"):
+        (cloud.root() / cloud.FINGERPRINT_SALT).write_bytes(damage)
+        again = cloud.fingerprint()   # (pairing still works: the site sees a PC it hasn't seen)
+        assert again not in seen and cloud.fingerprint() == again
+        assert len((cloud.root() / cloud.FINGERPRINT_SALT).read_text()) == 64
+        seen.add(again)
+
+
+def test_an_install_id_thats_there_but_empty_or_not_text_is_refused(monkeypatch):
+    monkeypatch.setattr(cloud, "_platform_id", lambda: "")
+    cloud.machine_id()
+    for damage in (b"", b"  \n", b"\xff\xfe"):
+        (cloud.root() / cloud.INSTALL_ID).write_bytes(damage)
+        with pytest.raises(cloud.CloudError, match="can't be told"):
+            cloud.machine_id()
