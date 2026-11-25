@@ -2,6 +2,8 @@
 import gzip
 import json
 import math
+import os
+import time
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
@@ -499,6 +501,9 @@ def test_the_round_file_watch_reads_a_write_once_and_again_after_one_caught_half
     assert not w.poll() and w.entries is None   # no file: a GSPro that writes none
     path = tmp_path / "currentRound.dat"
     path.write_text(json.dumps([DRIVE]))
+    # (written after the watch began: a file's time comes from a coarser clock than time.time(), and the
+    # first read of a file written before the watch counts nothing in it as new)
+    os.utime(path, (time.time() + 1, time.time() + 1))
     assert w.poll(now=10.0) and w.version == 1 and not w.poll(now=11.0)   # unchanged: not parsed again
     path.write_text(json.dumps([DRIVE, APPROACH])[:-20])   # GSPro mid-write
     assert not w.poll(now=12.0) and len(w.entries) == 1
