@@ -4,6 +4,13 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.166
+
+### Stats page
+- Fairways, greens, sand saves and longest drive now follow GSPro's own record of where each shot finished, so a drive the screen read in the rough but GSPro had in the fairway counts as a fairway hit.
+- A green in regulation is no longer counted when the ball rolled off the green and the next shot was played from off it.
+- Past rounds' stats are rechecked against their shots once after this update, correcting any that were off.
+
 ## 0.1.165
 
 ### Booth
