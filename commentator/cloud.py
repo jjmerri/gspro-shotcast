@@ -57,6 +57,7 @@ log = logging.getLogger(__name__)
 TEST_ROOT: Path | None = None        # (tests only: tests/cloud_isolation.py) where the marker and profiles are
 INSTALL_ID = "install-id"            # in root(): this install's own id, for a machine with none (machine_id)
 FINGERPRINT_SALT = "fingerprint-salt" # in root(): this install's own salt for the fingerprint it pairs with
+FINGERPRINT_MACHINE = "fingerprint-machine"  # in root(): a hash of the machine the salt was made on (fingerprint)
 EXPECT_ENV = "SHOTCAST_CLOUD_EXPECT" # set by the tray for the booth it starts: the pairing the tray started in
 MARKER = "device.json"               # in root(): this PC's pairing, with its tokens
 FOLDER_FILE = "pairing.json"         # in a profile's home: the folder_key it was made for
@@ -215,19 +216,26 @@ def _install_id() -> str:
     return _kept_hex(INSTALL_ID, 16)
 
 
+def _read_kept(path: Path) -> str | None:
+    """A kept hex file's text, stripped; None when there's no file. Read as bytes, so a damaged one
+    (any bytes at all) is text that fails the hex check, never an error here."""
+    try:
+        return path.read_bytes().decode("ascii", "replace").strip()
+    except FileNotFoundError:
+        return None
+
+
 def _kept_hex(name: str, size: int, *, renew_bad: bool = False) -> str:
-    """root()/name: `size` random bytes as hex, made once and kept, one process at a time. One that
-    isn't valid is refused, or made again with `renew_bad`."""
+    """root()/name: `size` random bytes as hex, made once (when there's no file) and kept, one process
+    at a time. One that's there but isn't valid (empty, too, or not text) is refused, or made again
+    with `renew_bad`."""
     from .locks import file_lock
 
     path = root() / name
     try:
         with file_lock(path.with_name(path.name + ".lock"), 30.0, "another process has held"):
-            try:
-                got = path.read_text(encoding="utf-8").strip()
-            except FileNotFoundError:
-                got = ""
-            if not got or (renew_bad and not re.fullmatch(rf"[0-9a-f]{{{2 * size}}}", got)):
+            got = _read_kept(path)
+            if got is None or (renew_bad and not re.fullmatch(rf"[0-9a-f]{{{2 * size}}}", got)):
                 got = secrets.token_hex(size)
                 _write_new(path, got, 0o600)
     except (OSError, TimeoutError) as e:
@@ -237,16 +245,77 @@ def _kept_hex(name: str, size: int, *, renew_bad: bool = False) -> str:
     return got
 
 
+def _salt(machine: str | None) -> str:
+    """This install's fingerprint salt (root()/FINGERPRINT_SALT, 32 random bytes as hex), made once and
+    kept across unpairing and pairing again. `machine`: a hash of the machine it's on now (None when
+    that can't be told), kept beside it (FINGERPRINT_MACHINE). When the machine it was kept for was
+    another one, the salt is made again: a disk imaged after a pairing attempt and put onto other
+    hardware pairs as a PC of its own, not as the one it was copied from. A damaged salt is made again
+    too (the site just sees a PC it hasn't seen). One process at a time."""
+    from .locks import file_lock
+
+    path, seen = root() / FINGERPRINT_SALT, root() / FINGERPRINT_MACHINE
+    try:
+        with file_lock(path.with_name(path.name + ".lock"), 30.0, "another process has held"):
+            got, was = _read_kept(path), _read_kept(seen)
+            moved = machine is not None and was is not None and re.fullmatch(r"[0-9a-f]{64}", was) \
+                and was != machine
+            if got is None or moved or not re.fullmatch(r"[0-9a-f]{64}", got):
+                got = secrets.token_hex(32)
+                _write_new(path, got, 0o600)
+            if machine is not None and was != machine:
+                _write_new(seen, machine, 0o600)
+    except (OSError, TimeoutError) as e:
+        raise CloudError(f"this computer can't be told from another ({path}: {e})") from None
+    return got
+
+
 _ON_WINDOWS = sys.platform == "win32"
 
 
-def _hardware_id() -> str:
-    """Windows' id for the machine's hardware (from its SMBIOS, kept in the registry); '' if none."""
-    import winreg
+def smbios_uuid(raw: bytes) -> str:
+    """The system UUID (SMBIOS type 1, 16 bytes at offset 8, as hex) in a raw SMBIOS table as Windows'
+    GetSystemFirmwareTable('RSMB') gives it (an 8-byte header, then the structures); '' when there's
+    none, it's all 0x00 or all 0xFF (the "not set" values), or the table is cut short. Each structure
+    is a formatted area (its type, its length, ...) then its strings, ended by two NULs."""
+    if len(raw) < 8:
+        return ""
+    size = int.from_bytes(raw[4:8], "little")
+    table = raw[8:8 + size]
+    i = 0
+    while i + 4 <= len(table):
+        kind, length = table[i], table[i + 1]
+        if length < 4 or i + length > len(table):
+            return ""
+        if kind == 1:
+            if length < 0x19:
+                return ""
+            got = table[i + 8:i + 24]
+            return "" if got in (bytes(16), b"\xff" * 16) else got.hex()
+        if kind == 127:   # (end of table)
+            return ""
+        end = table.find(b"\0\0", i + length)
+        if end < 0:
+            return ""
+        i = end + 2
+    return ""
 
-    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\SystemInformation", 0,
-                        winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
-        return str(winreg.QueryValueEx(k, "ComputerHardwareId")[0])
+
+def _smbios_uuid() -> str:
+    """This board's own system UUID, from the firmware's SMBIOS table (GetSystemFirmwareTable, no
+    process started); '' if there's none."""
+    import ctypes
+
+    rsmb = int.from_bytes(b"RSMB", "big")
+    get = ctypes.windll.kernel32.GetSystemFirmwareTable  # type: ignore[attr-defined]
+    get.restype = ctypes.c_uint
+    get.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+    size = get(rsmb, 0, None, 0)
+    if not size or size > 1 << 20:
+        return ""
+    buf = ctypes.create_string_buffer(size)
+    got = get(rsmb, 0, buf, size)
+    return smbios_uuid(buf.raw[:got]) if 0 < got <= size else ""
 
 
 def _system_disk_serial() -> str:
@@ -260,25 +329,37 @@ def _system_disk_serial() -> str:
     return f"{serial.value:08x}" if ok else ""
 
 
-# What a Windows PC's fingerprint is made from, besides the install's salt: none starts a process (no
-# window can flash up on the sim's screen), and none is ever logged or sent as it is.
-_WINDOWS_READERS: tuple[Callable[[], str], ...] = (_platform_id, _hardware_id, _system_disk_serial)
+# What a Windows PC's fingerprint is made from, besides the install's salt: its MachineGuid, its board's
+# SMBIOS system UUID (the two that tell this machine; machine_parts) and its system volume's serial.
+# None starts a process (no window can flash up on the sim's screen), and none is ever logged or sent
+# as it is.
+_WINDOWS_READERS: tuple[Callable[[], str], ...] = (_platform_id, _smbios_uuid, _system_disk_serial)
+MACHINE_PARTS = 2   # (the first readers: this machine, for the salt's FINGERPRINT_MACHINE)
 
 
 def fingerprint() -> str:
     """The fingerprint this PC pairs with (shown to the owner, who checks it against the site's): the
     same every time this install pairs, so the site knows it's the same PC when it's paired to another
-    bay (it then leaves the one it was on). SHA-256 of this install's salt (made once in root()) and,
-    on Windows, its MachineGuid, its hardware id and its system volume's serial, each read as far as
-    it can be; elsewhere (development) the salt alone. The ids themselves never leave the PC."""
-    parts = [_kept_hex(FINGERPRINT_SALT, 32, renew_bad=True)]   # (a damaged one: just another fingerprint)
+    bay (it then leaves the one it was on). SHA-256 of this install's salt (_salt: made once in root(),
+    made again when the disk turns up on another machine) and, on Windows, its MachineGuid, its
+    board's SMBIOS system UUID and its system volume's serial, each read as far as it can be; elsewhere
+    (development) the salt alone. The ids themselves never leave the PC.
+
+    What can still match: copies of one disk image on machines that also share a MachineGuid and an
+    SMBIOS UUID (cloned virtual machines, which copy both), imaged after a pairing attempt. Real PCs'
+    boards each have their own UUID. The pairing page shows the fingerprint (its first 8 hex digits)
+    for the owner to compare with the PC's, and the site says which PC an approval replaces."""
+    parts: list[str] = []
     if _ON_WINDOWS:
         for read in _WINDOWS_READERS:
             try:
                 parts.append(str(read() or "").strip())
             except Exception:   # noqa: BLE001 - one that can't be read: the others (and the salt) still tell
                 parts.append("")
-    return hashlib.sha256("\0".join(["shotcast-fingerprint", *parts]).encode()).hexdigest()
+    known = parts[:MACHINE_PARTS]
+    machine = (hashlib.sha256("\0".join(["shotcast-fingerprint-machine", *known]).encode()).hexdigest()
+               if len(known) == MACHINE_PARTS and all(known) else None)
+    return hashlib.sha256("\0".join(["shotcast-fingerprint", _salt(machine), *parts]).encode()).hexdigest()
 
 
 def machine_id() -> str:
