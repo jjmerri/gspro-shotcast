@@ -496,3 +496,31 @@ def test_quit_from_the_menu_asks_first():
     app.ui.ok = False   # no window to ask in: quits all the same
     tray.Tray.quit_asked(app)
     assert quits == [1, 1]
+
+
+def test_quit_paired_with_the_live_stream_on_stops_obs_too(monkeypatch):
+    from types import SimpleNamespace
+
+    stopped = []
+    monkeypatch.setattr("commentator.live_stream.off_air", lambda cfg: stopped.append(cfg))
+    cfg = SimpleNamespace(live=SimpleNamespace(enabled=True, local_keep_days=0), publish=SimpleNamespace(bucket=None))
+    app = SimpleNamespace(cfg=cfg, cloud=object(), booth=SimpleNamespace(stop=lambda: None),
+                          _stop=SimpleNamespace(set=lambda: None), icon=None)
+    tray.Tray.quit(app)
+    assert stopped == [cfg]            # paired: OBS's output stopped (the cloud ends the stream)
+    stopped.clear()
+    app.cloud = None
+    tray.Tray.quit(app)
+    assert stopped == []               # self-hosted with nothing uploaded or kept: as before
+
+
+def test_a_paired_console_gets_neither_the_ai_keys_nor_obss_password():
+    from types import SimpleNamespace
+
+    from commentator.cloud import ENV_KEYS
+
+    env = {"PATH": "x", ENV_KEYS[0]: "k", "OBS_WEBSOCKET_PASSWORD": "pw"}
+    app = SimpleNamespace(cloud=object())
+    assert tray.Tray._console_env(app, env) == {"PATH": "x"}
+    app.cloud = None
+    assert tray.Tray._console_env(app, env) == env

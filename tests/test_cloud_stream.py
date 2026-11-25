@@ -74,14 +74,14 @@ def test_finished_segments_go_up_in_order_with_their_seconds_and_the_stream_ends
     _playlist(tmp_path, 5, ["stream5.ts", "stream6.ts"], mtime=now[0])
     s.step()
     assert api.calls[0] == ("/api/streams", {"session": s.session})
-    assert api.uploaded == {5: b"stream5.ts"}   # the newest is still being written
+    assert api.uploaded == {5: b"stream5.ts", 6: b"stream6.ts"}   # (OBS lists a segment once it's whole)
     [ask] = _asks(api, "/segments")
-    assert ask == {"segments": [{"seq": 5, "size": 10, "sha256": hashlib.sha256(b"stream5.ts").hexdigest(),
-                                 "seconds": 6.0}]}
+    assert ask["segments"][0] == {"seq": 5, "size": 10, "sha256": hashlib.sha256(b"stream5.ts").hexdigest(),
+                                  "seconds": 6.0}
     now[0] += 1
     _playlist(tmp_path, 6, ["stream6.ts", "stream7.ts"], mtime=now[0])   # 5 has left the playlist
     s.step()
-    assert api.uploaded == {5: b"stream5.ts", 6: b"stream6.ts"} and api.stored == [5, 6]
+    assert set(api.uploaded) == {5, 6, 7} and api.stored == [5, 6, 7]
     now[0] += 1
     _playlist(tmp_path, 6, ["stream6.ts", "stream7.ts"], ended=True, mtime=now[0])
     s.step()
@@ -97,7 +97,7 @@ def test_a_backlog_goes_a_few_at_a_time(tmp_path):
     assert [len(a["segments"]) for a in _asks(api, "/segments")] == [8]
     s.step()   # (the playlist unchanged: the queue goes on)
     s.step()
-    assert [len(a["segments"]) for a in _asks(api, "/segments")] == [8, 8, 3] and api.stored == list(range(19))
+    assert [len(a["segments"]) for a in _asks(api, "/segments")] == [8, 8, 4] and api.stored == list(range(20))
 
 
 def test_a_segment_that_cant_go_up_is_given_up_as_lost_not_held_up_behind(tmp_path):
@@ -109,9 +109,9 @@ def test_a_segment_that_cant_go_up_is_given_up_as_lost_not_held_up_behind(tmp_pa
     (tmp_path / "a2.ts").mkdir()
     api.put_fails = 1                                                 # a0's upload fails once
     s.step()
-    assert api.lost == [1, 2] and api.stored == []
+    assert api.lost == [1, 2] and api.stored == [3]
     s.step()
-    assert api.stored == [0]
+    assert api.stored == [3, 0]
     # A segment the network keeps from going: given up once it's waited GIVE_UP_S.
     now[0] += 1
     _playlist(tmp_path, 3, ["a3.ts", "a4.ts"], mtime=now[0])
@@ -120,7 +120,7 @@ def test_a_segment_that_cant_go_up_is_given_up_as_lost_not_held_up_behind(tmp_pa
     now[0] += GIVE_UP_S + 1
     api.unreachable = 0
     s.step()
-    assert 3 in api.lost and 3 not in api.uploaded
+    assert 4 in api.lost and 4 not in api.uploaded
 
 
 def test_seconds_come_from_each_segments_extinf(tmp_path):
@@ -131,7 +131,7 @@ def test_seconds_come_from_each_segments_extinf(tmp_path):
     (tmp_path / "stream.m3u8").write_text("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:4.004,\nb0.ts\n"
                                           "#EXTINF:3.5,\nb1.ts\n#EXTINF:4,\nb2.ts\n")
     s.step()
-    assert [x["seconds"] for x in _asks(api, "/segments")[0]["segments"]] == [4.004, 3.5]
+    assert [x["seconds"] for x in _asks(api, "/segments")[0]["segments"]] == [4.004, 3.5, 4.0]
 
 
 def test_segments_the_cloud_asks_again_are_said_again(tmp_path):
@@ -141,9 +141,9 @@ def test_segments_the_cloud_asks_again_are_said_again(tmp_path):
                                     "seqs": [1]})]
     _playlist(tmp_path, 0, ["c0.ts", "c1.ts", "c2.ts"], mtime=now[0])
     s.step()
-    assert s.stored == {1} and s.done == {0}
+    assert set(s.stored) == {1} and s.done == {0, 2}
     s.step()
-    assert api.stored == [1] and s.stored == set()
+    assert api.stored == [1] and s.stored == {}
 
 
 def test_a_used_up_allowance_stops_the_stream_and_tells_the_tray(tmp_path):
@@ -206,9 +206,12 @@ def test_a_start_with_no_answer_is_asked_again_with_the_same_session(tmp_path):
     _playlist(tmp_path, 0, ["g0.ts", "g1.ts"], mtime=now[0])
     s.step()
     assert s.stream_id is None and s.session
+    s.step()   # (straight after: it waits first)
+    assert [p for p, _ in api.calls] == ["/api/streams"]
+    now[0] += 3
     s.step()
     assert [b for p, b in api.calls if p == "/api/streams"] == [{"session": s.session}] * 2
-    assert api.stored == [0] and len(api.streams) == 1
+    assert api.stored == [0, 1] and len(api.streams) == 1
 
 
 def test_an_end_with_no_answer_is_asked_again(tmp_path):
@@ -220,6 +223,9 @@ def test_an_end_with_no_answer_is_asked_again(tmp_path):
     now[0] += 30
     s.step()
     assert s.session is None and api.ended == [] and s.ending
+    s.step()   # (a moment later: it waits before asking again)
+    assert api.ended == []
+    now[0] += 3
     s.step()
     assert api.ended == ["st-0"] and not s.ending
 
@@ -290,3 +296,163 @@ def test_the_paired_booth_keeps_the_profiles_live_stream_for_the_cloud_and_nothi
         assert not booth.live.enabled and not booth.live.with_rounds and not booth.live.launch_obs
     finally:
         mp.undo()
+
+
+def test_a_put_whose_answer_was_lost_is_up_and_confirmed_not_given_up(tmp_path):
+    api, now = FakeStreams(), [1000.0]
+    s = _sink(tmp_path, api, now)
+    put = api.put
+    def committed_then_dropped(url, headers, data):   # the bytes went up; the 2xx never came back
+        put(url, headers, data)
+        raise OSError("connection reset")
+    s.put = committed_then_dropped
+    _playlist(tmp_path, 0, ["k0.ts"], mtime=now[0])
+    s.step()
+    assert api.uploaded and not api.stored
+    s.put = lambda url, headers, data: 412   # asked again: the link's If-None-Match finds it there
+    now[0] += 1
+    s.step()
+    assert api.stored == [0] and api.lost == []
+
+
+def test_a_segment_the_cloud_keeps_saying_isnt_there_is_given_up(tmp_path):
+    api, now = FakeStreams(), [1000.0]
+    s = _sink(tmp_path, api, now)
+    api.refuse["/stored"] = [(409, {"error": "not_stored", "message": "no", "action": "retry", "seqs": [0]})] * 3
+    _playlist(tmp_path, 0, ["m0.ts"], mtime=now[0])
+    s.step()
+    s.step()
+    assert set(s.stored) == {0} and not s.lost
+    now[0] += GIVE_UP_S + 1
+    _playlist(tmp_path, 0, ["m0.ts"], mtime=now[0])   # (OBS still on)
+    s.step()                     # still not there, past GIVE_UP_S: given up
+    assert s.stored == {} and s.lost == {0}
+    s.step()
+    assert api.lost == [0]
+
+
+def test_whats_up_but_unconfirmed_is_confirmed_before_the_stream_ends(tmp_path):
+    api, now = FakeStreams(), [1000.0]
+    s = _sink(tmp_path, api, now)
+    api.refuse["/stored"] = [(503, {"message": "busy"})] * 2
+    _playlist(tmp_path, 0, ["n0.ts", "n1.ts"], ended=True, mtime=now[0])
+    s.step()   # up, but /stored unanswered (twice: in the pass and at the end)
+    assert api.ended == [] and s.ending and s.ending[0]["stored"]
+    now[0] += 5
+    s.step()
+    assert api.stored == [0, 1] and api.ended == ["st-0"] and not s.ending
+    assert [p.rsplit("/", 1)[1] for p, _ in api.calls][-2:] == ["stored", "end"]
+
+
+def test_refused_mid_stream_it_ends_on_the_cloud_and_is_asked_again_later_with_obs_still_on(tmp_path):
+    api, now = FakeStreams(), [1000.0]
+    s = _sink(tmp_path, api, now)
+    _playlist(tmp_path, 0, ["p0.ts"], mtime=now[0])
+    s.step()
+    first = s.session
+    api.refuse["/segments"] = [(403, {"error": "league_suspended", "message": "no", "action": "fix"})]
+    now[0] += 1
+    _playlist(tmp_path, 0, ["p0.ts", "p1.ts"], mtime=now[0])
+    s.step()
+    assert s.halted == "refused" and api.ended == ["st-0"] and not s.queued
+    for i in range(2, 5):        # OBS goes on: nothing queued or asked for meanwhile
+        now[0] += 4
+        _playlist(tmp_path, 0, [f"p{j}.ts" for j in range(i + 1)], mtime=now[0])
+        s.step()
+        assert not s.queued
+    assert len(_asks(api, "/segments")) == 2
+    now[0] = 1001 + OFF_S + 1
+    _playlist(tmp_path, 0, [f"p{j}.ts" for j in range(6)], mtime=now[0])
+    s.step()                     # asked again: a fresh stream, from the newest segment on
+    assert s.session != first and s.stream_id == "st-1" and api.uploaded.keys() >= {5}
+    assert 2 not in api.uploaded
+
+
+def test_losing_the_pairing_or_an_old_app_stops_it(tmp_path):
+    for err in (cloud.NotPaired("unpaired"), cloud.TooOld("9.9")):
+        api, now = FakeStreams(), [1000.0]
+        def gone(*a, **k):
+            raise err
+        api.request = gone
+        s = _sink(tmp_path, api, now)
+        _playlist(tmp_path, 0, ["q0.ts"], mtime=now[0])
+        with pytest.raises(type(err)):
+            s.step()
+
+
+def test_no_answer_waits_longer_each_time_and_says_so_once(tmp_path, caplog):
+    caplog.set_level("INFO", logger="commentator.cloud_stream")
+    api, now = FakeStreams(), [1000.0]
+    s = _sink(tmp_path, api, now)
+    api.unreachable = 1000
+    _playlist(tmp_path, 0, ["r0.ts"], mtime=now[0])
+    for _ in range(200):         # 200 seconds of passes, the network down
+        s.step()
+        now[0] += 1
+        _playlist(tmp_path, 0, ["r0.ts"], mtime=now[0])
+    asked = len(api.calls)
+    assert asked < 12            # 2, 4, 8, ... 60 s apart, not every second
+    assert sum("trying again" in r.message for r in caplog.records if r.levelname == "INFO") == 1
+
+
+def test_the_used_up_warning_goes_once_a_stream_starts_again(tmp_path):
+    api, now, said = FakeStreams(), [1000.0], []
+    s = _sink(tmp_path, api, now, issues=said.append)
+    api.refuse["/segments"] = [(403, {"error": "allowance_used", "message": "used up", "action": "fix"})]
+    _playlist(tmp_path, 0, ["u0.ts"], mtime=now[0])
+    s.step()
+    assert said[-1] and said[-1][0][0] == "warn" and api.ended == ["st-0"]   # (ended on the cloud too)
+    now[0] += 30
+    s.step()                     # OBS stopped
+    now[0] += 1
+    _playlist(tmp_path, 0, ["v0.ts"], mtime=now[0])
+    s.step()                     # the next stream starts: the warning's gone
+    assert said[-1] == []
+
+
+def test_live_json_says_on_air_for_the_tray(tmp_path):
+    api, now = FakeStreams(), [1000.0]
+    status = tmp_path / "logs" / "live.json"
+    status.parent.mkdir()
+    s = _sink(tmp_path / "obs", api, now, status_file=status)
+    (tmp_path / "obs").mkdir()
+    _playlist(tmp_path / "obs", 0, ["w0.ts"], mtime=now[0])
+    s.step()
+    assert json.loads(status.read_text())["live"] is True
+    now[0] += 30
+    s.step()
+    assert json.loads(status.read_text()) == {"live": False}
+
+
+def test_only_this_streams_files_are_deleted_after_it(tmp_path):
+    api, now = FakeStreams(), [1000.0]
+    s = _sink(tmp_path, api, now)
+    old = tmp_path / "match-night.mp4"
+    old.write_bytes(b"a recording")
+    import os
+    os.utime(old, (now[0] - 5000, now[0] - 5000))
+    other = tmp_path / "x9.ts"
+    other.write_bytes(b"another stream's")
+    os.utime(other, (now[0] - 5000, now[0] - 5000))
+    _playlist(tmp_path, 0, ["y0.ts", "y1.ts"], ended=True, mtime=now[0])
+    s.step()
+    assert api.ended == ["st-0"]
+    assert old.exists() and other.exists()
+    assert not (tmp_path / "y0.ts").exists() and not (tmp_path / "stream.m3u8").exists()
+
+
+def test_a_stream_the_cloud_ended_while_the_network_was_down_is_followed_by_a_fresh_one(tmp_path):
+    api, now = FakeStreams(), [1000.0]
+    s = _sink(tmp_path, api, now)
+    _playlist(tmp_path, 0, ["z0.ts"], mtime=now[0])
+    s.step()
+    first = s.session
+    api.refuse["/segments"] = [(409, {"error": "stream_ended", "message": "ended", "action": "fix"})]
+    now[0] += 1
+    _playlist(tmp_path, 0, ["z0.ts", "z1.ts"], mtime=now[0])
+    s.step()
+    assert s.stream_id is None and s.session != first and s.queued
+    now[0] += 1
+    _playlist(tmp_path, 0, ["z0.ts", "z1.ts"], mtime=now[0])
+    s.step()
+    assert s.stream_id == "st-1" and 1 in api.uploaded
