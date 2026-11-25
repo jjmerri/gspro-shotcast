@@ -115,7 +115,8 @@ tts:
   # hedge_after_seconds: 2.5          # stream: false only; send a second request if the first hasn't answered
   # prepare_deadline_seconds: 12      # lines voiced ahead (setup branches, wraps, closer) give up after
   # live_deadline_seconds: 5          # a line voiced on demand must be ready within this
-  # flight_audio_deadline_seconds: 4  # a mid-flight call must start within this of impact
+  # flight_audio_deadline_seconds: 4  # a mid-flight call must start within this of impact (a shot that
+  #                                   # can't be flown; otherwise a second before its modelled touchdown)
 
 source:
   type: connector_log     # GSPconnect's debug log; falls back to gspro_log if it isn't there
@@ -189,7 +190,8 @@ commentary:
   segments_on_hole_change: true
   max_speech_backlog: 4
   in_flight: true
-  flight_deadline_seconds: 3.0   # drop a mid-flight line that can't start by then
+  flight_deadline_seconds: 3.0   # drop a mid-flight line not written by then (a shot that can't be flown;
+                                 # otherwise this much ahead of the audio deadline as that one is)
   min_flight_carry: 50           # no mid-flight call on chips and putts
   preshot: true
   preshot_rate: 0.6              # share of shots that get a setup line

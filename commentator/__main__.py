@@ -731,7 +731,8 @@ async def cmd_eval(cfg: Config, args) -> None:
           f"still bad after retry (silenced): {totals['dropped_after_retry']}")
     if flight_times or totals["flight_late"]:
         print(f"in-flight calls: {len(flight_times)} on time (slowest {max(flight_times, default=0):.1f}s), "
-              f"{totals['flight_late']} missed the {cfg.commentary.flight_deadline_seconds:.1f}s deadline")
+              f"{totals['flight_late']} missed their deadline (the ball's hang time, else "
+              f"{cfg.commentary.flight_deadline_seconds:.1f}s)")
     for text, problems in rejections:
         print(f"  REJECTED {text!r}: {'; '.join(problems)}")
 

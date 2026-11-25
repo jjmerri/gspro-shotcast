@@ -1,14 +1,16 @@
 """Picks a pre-written mid-flight line from launch data, with no model call at impact.
 
 The pre-shot call has already seen the hole and written one line per outcome; this only
-has to decide which outcome the launch numbers point to. The projection is rough (no
-physics, no wind), so it only calls a miss or trouble when the numbers are clear-cut.
+has to decide which outcome the launch numbers point to. The projection's line comes from GSPro's
+own flight (ball_flight.py), its length from the launch monitor's carry; with no wind, no roll and
+the lie's penalty estimated, it only calls a miss or trouble when the numbers are clear-cut.
 """
 
 import math
 import re
 from dataclasses import dataclass, field
 
+from . import ball_flight
 from .facts import to_yards
 from .models import Shot
 
@@ -175,11 +177,13 @@ EDGE_SHORT_YARDS = 20
 EDGE_LONG_YARDS = 30
 EDGE_SLACK_YARDS = 5
 
-# Where the ball ends up sideways: a share of the start line plus a curve from the sidespin (total spin
-# x the sine of the spin axis, so a high-spin wedge bends more than a driver at the same axis). Fitted
-# to 953 full shots' finishes in GSPro (the next shot's logged start, off the line to the pin or, from
-# a tee, to the hole's aim point): the ball finishes much straighter than its raw numbers say. The old
-# 1.0 start line and 1.75e-4 curve missed by a median 9.3 yards on held-out rounds; these by 4.3.
+# Where the ball ends up sideways: where GSPro's flight lands it off the line the player aimed
+# (ball_flight), scaled with the carry for the lie and altitude. On 667 shots' finishes in GSPro (13
+# rounds), a median 2.0 yards off from the tee (left / right / on line called right 93% of the time)
+# and 1.5 from the fairway; rough and sand, where the lie's penalty is estimated, as the fit below.
+# Without the ball numbers (or under ball_flight.MIN_LAUNCH): a share of the start line plus a curve
+# from the sidespin (total spin x the sine of the spin axis), fitted to 953 full shots' finishes, a
+# median 11.5 yards off from the tee and 3.0 from the fairway on the same 667.
 START_LINE_SHARE = 0.58
 CURVE_PER_RPM = 5.1e-5
 CURVE_RPM_GUESS = 2450   # a shot with no spin reading: a driver's
@@ -195,6 +199,15 @@ FLAG_WORDS = re.compile(r"\b(flag|flagstick|pin|stick|green|hole|cup)\b", re.I)
 
 def _curve_yards(carry: float, spin: float, axis: float) -> float:
     return carry * (spin or CURVE_RPM_GUESS) * math.sin(math.radians(axis)) * CURVE_PER_RPM
+
+
+def _drift(shot: Shot, carry: float, carry_factor: float) -> tuple[float, float]:
+    """(start, curve): yards off the aimed line at the landing (+ right) from the start line alone,
+    and how far the spin bends it from there."""
+    turn = math.radians(shot.hla or 0)
+    if f := ball_flight.flight(shot.ball_speed, shot.vla, shot.total_spin, shot.spin_axis):
+        return (f.out_yd * carry_factor * math.sin(turn), f.lateral_yd * carry_factor * math.cos(turn))
+    return (START_LINE_SHARE * carry * math.sin(turn), _curve_yards(carry, shot.total_spin or 0, shot.spin_axis or 0))
 
 
 def aim_turn(aim: tuple[float, float] | None) -> float | None:
@@ -275,8 +288,7 @@ def project(
         return None
     carry = shot.carry if (shot.units or "yards").lower().startswith("y") else shot.carry * 1.0936
     carry *= carry_factor
-    start = START_LINE_SHARE * carry * math.sin(math.radians(shot.hla or 0))
-    curve = _curve_yards(carry, shot.total_spin or 0, shot.spin_axis or 0)
+    start, curve = _drift(shot, carry, carry_factor)
     pin = to_yards(to_pin)
     if aimed_short(aim, pin):
         pin = None   # a layup or a way out: the spot clicked is the target, and short of the pin is the plan

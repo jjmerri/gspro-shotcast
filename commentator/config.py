@@ -380,7 +380,9 @@ class TTSConfig(BaseModel):
     # A line voiced on demand must be ready within this long of its turn to be voiced, or it's dropped.
     live_deadline_seconds: float = 5.0
     # A mid-flight call must start playing within this long of impact, while the ball is still in the
-    # air; one voiced on demand that can't be ready by then is dropped.
+    # air; one voiced on demand that can't be ready by then is dropped. Only for a shot that can't be
+    # flown (no spin reading, a launch under 2 degrees): otherwise the call must start a second before
+    # the ball's modelled touchdown (Engine._flight_line_deadline).
     flight_audio_deadline_seconds: float = 4.0
 
     @field_validator("fallback")
@@ -605,8 +607,10 @@ class CommentaryConfig(BaseModel):
     # Such a long putt can still be rolling when hole_result_window_seconds runs out, so its result
     # is watched this long instead, letting the pre-written line play the moment it stops.
     lag_result_window_seconds: float = 8.0
-    # A mid-flight line that can't start speaking this soon after impact is dropped: the ball
-    # has usually landed by then, and "needs legs" after it lands sounds broken.
+    # A mid-flight line that isn't written this soon after impact is dropped: the ball has usually
+    # landed by then, and "needs legs" after it lands sounds broken. For a shot that can't be flown;
+    # otherwise the line must be written as far ahead of its audio deadline (the ball's modelled
+    # touchdown, less a second) as this is of tts.flight_audio_deadline_seconds.
     flight_deadline_seconds: float = 3.0
     # Skip mid-flight calls for chips and putts; they're on the ground too fast.
     min_flight_carry: float = 50.0

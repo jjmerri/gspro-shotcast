@@ -13,7 +13,9 @@ CARRY (raw), and the altitude factor within 0.75 yd for 95% of shots even at 10,
 2%-per-1,000-ft rule was 3 yd out at 1,000 ft, 35 yd at 10,000 ft).
 """
 
+import bisect
 import math
+from dataclasses import dataclass
 from functools import lru_cache
 
 G = 32.174                 # ft/s^2
@@ -31,6 +33,9 @@ FINE_SECONDS = 0.1
 SPIN_DECAY_STEP = 0.99992  # GSPro decays spin twice: by this every 0.01 s and by e^(-t / SPIN_DECAY_SECONDS)
 SPIN_DECAY_SECONDS = 20.21
 SCALE_HEIGHT_M = 8434.6    # air pressure falls by e^(-altitude / this)
+# Under this launch GSPro's carry runs up to 40 yd past its own flight's (it adjusts such a launch
+# before flying it), so flight() leaves those balls alone.
+MIN_LAUNCH = 2.0
 
 # Coefficients as C[i][j] * ln(spin ratio)^i * (speed mph / 100)^j, fitted over spin ratios 0.03-1.5.
 # Outside that range the ratio is clamped, except that lift fades to nothing below it (no spin, no lift).
@@ -63,10 +68,11 @@ def _poly(c: tuple, x: float, u: float) -> float:
     return sum((((r[3] * u + r[2]) * u + r[1]) * u + r[0]) * x ** i for i, r in enumerate(c))
 
 
-def carry_yards(speed_mph: float, launch_deg: float, spin_rpm: float, spin_axis_deg: float = 0.0,
-                altitude_ft: float = 0.0) -> float | None:
-    """The carry in yards (ground level with the start, no lie), or None for a ball that never gets
-    up (no speed, launched at or below level)."""
+def _fly(speed_mph: float, launch_deg: float, spin_rpm: float, spin_axis_deg: float, altitude_ft: float,
+         track: list | None = None) -> tuple[float, float, float] | None:
+    """(seconds, downrange ft, lateral ft (+ right of the start line)) at touchdown, level
+    with the start, or None for a ball that never gets up. `track` gets (seconds, x, y, z) in feet at
+    the start, at every step in the air and at the touchdown."""
     if not speed_mph > 0 or not launch_deg > 0:
         return None
     rho = air_density(altitude_ft)
@@ -92,6 +98,8 @@ def carry_yards(speed_mph: float, launch_deg: float, spin_rpm: float, spin_axis_
                 -G - (d * vy - lift * vx * c_a),
                 -d * vz - lift * vx * s_a)
 
+    if track is not None:
+        track.append((0.0, 0.0, 0.0, 0.0))
     t = 0.0
     while t < 24:
         h = FINE_DT if t < FINE_SECONDS - 1e-9 else DT
@@ -113,8 +121,64 @@ def carry_yards(speed_mph: float, launch_deg: float, spin_rpm: float, spin_axis_
             if py <= 0:   # down within GSPro's first step: never got up
                 return None
             f = py / (py - y)   # where between the steps it crossed the ground
-            return math.hypot(px + (x - px) * f, pz + (z - pz) * f) / 3
+            down = (t - h + h * f, px + (x - px) * f, pz + (z - pz) * f)
+            if track is not None:
+                track.append((down[0], down[1], 0.0, down[2]))
+            return down
+        if track is not None:
+            track.append((t, x, y, z))
     return None
+
+
+def carry_yards(speed_mph: float, launch_deg: float, spin_rpm: float, spin_axis_deg: float = 0.0,
+                altitude_ft: float = 0.0) -> float | None:
+    """The carry in yards (ground level with the start, no lie), or None for a ball that never gets
+    up (no speed, launched at or below level)."""
+    down = _fly(speed_mph, launch_deg, spin_rpm, spin_axis_deg, altitude_ft)
+    return None if down is None else math.hypot(down[1], down[2]) / 3
+
+
+@dataclass(frozen=True)
+class Flight:
+    """A shot's flight down to level with where it was hit, along its start line (the launch
+    monitor's horizontal launch angle is the caller's to add)."""
+    hang_s: float        # seconds in the air
+    carry_yd: float
+    out_yd: float        # along the start line at touchdown
+    lateral_yd: float    # off the start line at touchdown, + right: the curve from the spin axis
+    track: tuple         # (seconds, out yd, height ft, lateral yd), from the strike to the touchdown
+
+    def at(self, t: float) -> tuple[float, float, bool]:
+        """(height ft above the start, yards out along the ground, landed) `t` seconds in; past the
+        touchdown, the touchdown point and landed."""
+        if t >= self.hang_s:
+            return 0.0, self.carry_yd, True
+        i = max(1, bisect.bisect_right(self.track, t, key=lambda p: p[0]))
+        (t0, x0, y0, z0), (t1, x1, y1, z1) = self.track[i - 1], self.track[i]
+        f = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+        return y0 + (y1 - y0) * f, math.hypot(x0 + (x1 - x0) * f, z0 + (z1 - z0) * f), False
+
+
+def flight(speed_mph: float | None, launch_deg: float | None, spin_rpm: float | None,
+           spin_axis_deg: float | None = 0.0, altitude_ft: float = 0.0) -> Flight | None:
+    """The shot's whole flight (level ground, no lie), or None without the ball numbers, for a ball
+    launched under MIN_LAUNCH degrees (GSPro flies those differently) or one that never gets up.
+    Against GSPro's own flights from the tee: hang time within 0.1 s, the curve within ~1 yd and the
+    height within ~3 ft for 95% of shots (a lie's penalty shortens all of them)."""
+    ball = (speed_mph, launch_deg, spin_rpm, spin_axis_deg, altitude_ft)
+    if any(v is None or not math.isfinite(v) for v in ball) or spin_rpm < 0 or launch_deg < MIN_LAUNCH:
+        return None
+    return _flight(speed_mph, launch_deg, spin_rpm, spin_axis_deg, altitude_ft)
+
+
+@lru_cache(maxsize=64)
+def _flight(speed: float, launch: float, spin: float, axis: float, altitude: float) -> Flight | None:
+    track: list = []
+    down = _fly(speed, launch, spin, axis, altitude, track)
+    if down is None:
+        return None
+    return Flight(hang_s=down[0], carry_yd=math.hypot(down[1], down[2]) / 3, out_yd=down[1] / 3,
+                  lateral_yd=down[2] / 3, track=tuple((t, x / 3, y, z / 3) for t, x, y, z in track))
 
 
 def altitude_factor(speed_mph: float | None, launch_deg: float | None, spin_rpm: float | None,

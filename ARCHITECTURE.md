@@ -123,7 +123,9 @@ sources/  ─►  engine/    ─►  facts.py  ─►  prompts.py ─► LLM ─
   when the monitor sends no carry (springbok's connector), flown by `ball_flight.py`; none for a
   launch under 2 degrees. Never stored as a measured carry.
 - **`ball_flight.py`** GSPro's ball flight (its air and step, our own drag and lift curves fitted
-  to its output): a shot's carry from its ball numbers, and how a course's altitude changes it.
+  to its output): a shot's carry from its ball numbers, how a course's altitude changes it, and its
+  whole flight (hang time, the curve off its start line, the height on the way) for the mid-flight
+  call's deadline, the projection's drift (`flight_pick.py`) and a tree hit's height (`flight.py`).
 - **`course_card.py`** reads a GSPro course's static card (par, stroke index, yardages,
   altitude) from its `.unity3d.csv` / `coursedetails.txt`, and, with commentary on, the GSPro
   listing's notes from `coursedetails.txt` and the course file (`.GKD`): the description and style

@@ -25,8 +25,8 @@
    against the player's own game: once a player has 5 drives (tee shots with 250+ yards to the pin)
    or 5 full swings with a club in the season, the setup and the reaction get their usual length and
    how this shot compared. Without that, the booth is told not to call a shot short or long at all.
-2. **Impact.** No model call. Code projects carry against the pin and the drift from start line
-   and spin axis. The launch monitor's carry is first scaled to what GSPro will allow: a course
+2. **Impact.** No model call. Code projects carry against the pin and the drift off the aimed
+   line, where GSPro's flight (`ball_flight.py`) lands the ball from its start line and spin axis. The launch monitor's carry is first scaled to what GSPro will allow: a course
    baseline (the course's altitude) times a per-lie penalty by carry and launch angle (built
    in, from GSPro's code and the league's shots). Pin elevation from the player-box arrow
    adjusts the distance it plays; wind is ignored. Keep GSPro's CARRY (raw) and CARRY (game)
@@ -43,7 +43,7 @@
    off the tiles at the next setup.
    A ball that GSPro's log says hit foliage in flight (`Leaves hitTime`) gets a reaction fact. GSPro
    doesn't say whether it was a tree or a bush, so `flight.py` models the height at the first hit from
-   the launch numbers: under 10 ft is a bush or low branches, 10-20 ft a big bush or a tree's low
+   the launch numbers (GSPro's flight, `ball_flight.py`, where they're all there): under 10 ft is a bush or low branches, 10-20 ft a big bush or a tree's low
    branches, 20-30 ft the branches of a tree, higher is high up in a tree, and a hit after the modelled
    landing is the ball running into the trees as it came down. A first bounce off wood (the bounce line's
    `material TVGwood`) is taken as a tree trunk or branch, rising or falling, unless the ball met it at ground
@@ -73,7 +73,9 @@ still written ahead, so there's no model wait. `tts.prevoice: true` voices every
 result call at setup, and every wrap branch, so they play with no voicing wait, but
 most of that audio is never played (about 80% of the voice bill). A local voice (Kokoro) always
 voices ahead, since it's free and slow on CPU. Every line has a deadline (a flight call
-must start within `tts.flight_audio_deadline_seconds` of impact, any other on-demand line within
+must start a second before the ball's modelled touchdown, its hang time by GSPro's flight
+shortened for the lie, or within `tts.flight_audio_deadline_seconds` of impact for a shot that can't
+be flown; any other on-demand line within
 `tts.live_deadline_seconds`); one that misses it is dropped, along with the replies to it, never
 played late.
 

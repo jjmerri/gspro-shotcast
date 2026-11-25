@@ -233,7 +233,7 @@ class ShotMixin:
                 and not landed_already:
             tree_call = asyncio.create_task(self._tree_flight_call(fires0, impact, shot, my_seq, tag))
             tree_call.add_done_callback(lambda t: t.cancelled() or t.exception())
-        flight_played = False
+        flight_played = flight_too_late = False
         plan = shot_plan = self.plan  # shot_plan survives the one-swing nulling below, for the reaction
         shot_plan_made_at = self._plan_made_at  # snapshot: the next player's pre-shot can rebind the live one
         if c.in_flight and not banter and not landed_already and not shot.is_putt \
@@ -248,15 +248,20 @@ class ShotMixin:
             # flight line). The reliable water call is the splash reaction, fired once the ball lands.
             if plan.lines.get("water") and self._shot_wet(plan.player, since=impact):
                 picked = ("water", plan.lines["water"])  # already confirmed wet: tease the water
-            if picked:
+            line_deadline = self._flight_line_deadline(shot, impact, plan.lie, carry0)
+            if picked and time.monotonic() >= line_deadline:
+                self.stats["flight_late"] += 1
+                log.info("%s mid-flight call (%s) from the plan dropped: the ball's down", tag, picked[0])
+                flight_too_late = True
+            elif picked:
                 outcome, text = picked
                 self.stats["flight_planned"] += 1
                 line = Line(speaker=self.speakers[0], text=text)
                 self.state.record_lines([line])
                 if outcome in plan.audio:
-                    self.speech.say_prepared(line, plan.audio[outcome])
+                    self.speech.say_prepared(line, plan.audio[outcome], deadline=line_deadline)
                 else:
-                    self.speech.say([line], interrupt=True, deadline=impact + self.cfg.tts.flight_audio_deadline_seconds)
+                    self.speech.say([line], interrupt=True, deadline=line_deadline)
                 self._write_transcript([line], "flight", impact_seq=my_seq)
                 self.flight_latencies.append(time.monotonic() - impact)
                 log.info("%s mid-flight call (%s) from the plan, audio %s, %.2fs after detection "
@@ -330,7 +335,7 @@ class ShotMixin:
         flight_task = None
         plan, self.plan = self.plan, None  # a plan is good for one swing
         # Only the fallback here now: the fresh-plan line already played above, before this read.
-        if not flight_played and not banter and not landed_already and c.in_flight and not shot.is_putt and flight_carry >= c.min_flight_carry:
+        if not flight_played and not flight_too_late and not banter and not landed_already and c.in_flight and not shot.is_putt and flight_carry >= c.min_flight_carry:
             fresh = plan and time.monotonic() - self._plan_made_at < 180 and plan.player in (None, player)
             aim = self.gspro.aim_of(fires0, impact)
             picked = pick_line(plan, projected, before.to_pin, factor, before.elevation_yards, aim) if fresh else None
@@ -346,6 +351,10 @@ class ShotMixin:
                          proj.outcome, "ready" if fresh else ("stale" if plan else "none"))
             if self._tree_called == my_seq or self._tree_hit_logged(fires0, impact, shot):
                 pass   # a tree hit is called (or about to be): the plan's line and a fresh one no longer fit
+            elif picked and self._shot_seq == my_seq and \
+                    time.monotonic() >= (line_deadline := self._flight_line_deadline(shot, impact, before.lie, base_carry)):
+                self.stats["flight_late"] += 1
+                log.info("%s mid-flight call (%s) from the plan dropped: the ball's down", tag, picked[0])
             elif picked and self._shot_seq == my_seq:   # not if another ball was struck during the impact read
                 outcome, text = picked
                 self.stats["flight_planned"] += 1
@@ -354,9 +363,9 @@ class ShotMixin:
                 line = Line(speaker=self.speakers[0], text=text)
                 self.state.record_lines([line])
                 if outcome in plan.audio:
-                    self.speech.say_prepared(line, plan.audio[outcome])
+                    self.speech.say_prepared(line, plan.audio[outcome], deadline=line_deadline)
                 else:
-                    self.speech.say([line], interrupt=True, deadline=impact + self.cfg.tts.flight_audio_deadline_seconds)
+                    self.speech.say([line], interrupt=True, deadline=line_deadline)
                 self._write_transcript([line], "flight", impact_seq=my_seq)
                 self.flight_latencies.append(time.monotonic() - impact)
             elif self._shot_seq == my_seq:
