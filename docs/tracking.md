@@ -610,7 +610,8 @@ suspended) isn't sent to, and is asked again 10 minutes later, a fresh stream fr
 still on; one whose month of streaming is used up stops sending for the rest of OBS's session and
 says so in the tray (the warning goes once a stream starts again). The booth starts and stops OBS's
 output with rounds as below; the tray's own start/stop and OBS setup items aren't offered paired.
-Quitting from the tray stops OBS's output, and the cloud ends a stream it stops hearing from.
+Quitting from the tray stops OBS's output, and the cloud ends a stream it stops hearing from. The tray
+(and its updater) counts the booth on air while OBS's output is on, whether or not the cloud is taking it.
 
 The booth starts OBS's output when GSPro's round setup screen comes up with a course on it (so the
 opening tee shot is on it, however quickly it's hit), or when a round starts, and stops it 30 seconds after the sign-off

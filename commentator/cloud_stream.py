@@ -32,9 +32,17 @@ lines). Losing the pairing, or an app too old for the API, stops the thread till
 the cloud ends a stream that's stopped hearing from its PC by itself (after minutes), and one it's
 ended (`stream_ended`, or `no_stream`) is followed by a fresh one.
 
-When it stops, what's been put but not confirmed is confirmed (for up to GIVE_UP_S) before /end. The
-booth's live.json says it's on air while OBS's stream is, for the tray. Only the files this stream
-read are deleted from OBS's folder afterwards.
+When it stops, what's been put but not confirmed is confirmed (for up to GIVE_UP_S, through the
+network or the cloud's own trouble) before /end, as is what was put before a refusal stopped it. A
+segment whose file isn't the one seen (OBS started again and reused its name) is given up, never sent
+as this stream's. The booth's live.json says on air while OBS's stream is (refused or not, started
+on the cloud or not), and off once it stops or this thread does, for the tray and its updater. Only
+the files this stream read, and the playlist it last read, are deleted from OBS's folder afterwards.
+
+Left as they are: a booth restarted mid-stream starts another stream, so the few segments still in
+OBS's playlist (about 20 s) go up, and are charged, again; a stream whose /end keeps failing holds the
+next start behind the same wait; segments listed in the moment between the last pass and the booth
+closing aren't sent.
 """
 from __future__ import annotations
 
@@ -104,7 +112,7 @@ class CloudStream:
         self.stream_id: str | None = None   # the cloud's id for it, once started
         self.seq = -1                # the playlist's media sequence last read
         self.seen_mtime = 0.0
-        self.newest_ns = 0
+        self.playlist_ns = 0               # the playlist's mtime (ns) as last read
         self.stamps: dict[str, int] = {}   # this stream's segments seen: file name -> its mtime (ns)
         self.queued: dict[int, dict] = {}  # finished, not yet up: seq -> {name, seconds, first}
         self.done: set[int] = set()        # up or given up
@@ -187,6 +195,8 @@ class CloudStream:
         if r.status_code == 403 and err in REFUSED:
             self._refused(got, err)
             return False
+        if self._ended_by_cloud(err):   # (resumed, but the cloud ended it meanwhile: a fresh one next)
+            return False
         self._trouble(f"not started (HTTP {r.status_code} {err or ''})")
         return False
 
@@ -195,8 +205,9 @@ class CloudStream:
         nothing more queued for it."""
         self.halted = why
         self.queued.clear()
-        if self.stream_id is not None:
-            self.ending.append({"id": self.stream_id, "first": self.clock(), "stored": {}, "lost": set()})
+        if self.stream_id is not None:   # (what was put before it is still confirmed, then /end)
+            self.ending.append({"id": self.stream_id, "first": self.clock(), "stored": dict(self.stored),
+                                "lost": set(self.lost)})
             self.stream_id = None
             self.stored, self.lost = {}, set()
             self._end_streams()
@@ -235,13 +246,19 @@ class CloudStream:
             if now - q["first"] > GIVE_UP_S:
                 log.info("Live stream: segment %s not sent in %.0fs; given up", seq, GIVE_UP_S)
                 self._give_up(seq)
-        batch, items = [], []
+        batch, items, failed = [], [], None
         for seq in sorted(self.queued)[:MAX_PER_ASK]:
             q = self.queued[seq]
+            if self._stamp(q["name"]) != q["ns"]:
+                self._give_up(seq)   # OBS deleted it already, or started again and reused its name
+                continue
             try:
                 data = (self.folder / q["name"]).read_bytes()
             except OSError:
-                self._give_up(seq)   # OBS deleted it already
+                self._give_up(seq)
+                continue
+            if self._stamp(q["name"]) != q["ns"]:   # (rewritten while it was read)
+                self._give_up(seq)
                 continue
             if not data or len(data) > MAX_SEGMENT_BYTES or not 0.1 <= q["seconds"] <= MAX_SEGMENT_SECONDS:
                 log.info("Live stream: segment %s can't go to Shotcast Cloud (%s bytes, %ss); given up",
@@ -290,14 +307,18 @@ class CloudStream:
                     continue
                 try:
                     code = self.put(link["url"], dict(link.get("headers") or {}), by_seq[seq])
-                except Exception as e:   # noqa: BLE001 - the network: the next pass asks again
-                    log.debug("Live stream: segment %s not uploaded (%s)", seq, e)
+                except Exception as e:   # noqa: BLE001 - the network: asked again after a wait
+                    failed = str(e)
                     continue
                 # 412: the link's If-None-Match found the object there, its first PUT's answer lost.
                 if 200 <= code < 300 or code == 412:
                     self.stored.setdefault(seq, self.clock())
                     self.queued.pop(seq, None)
+                else:
+                    failed = f"HTTP {code}"
         self._tell()
+        if failed is not None:   # storage failing: not asked for fresh links every second
+            self._trouble(f"segments not uploaded ({failed})")
 
     def _give_up(self, seq: int) -> None:
         self.queued.pop(seq, None)
@@ -370,8 +391,13 @@ class CloudStream:
                     self._trouble(f"stream {e['id']}'s last segments not confirmed ({err})")
                     left.append(e)
                     continue
-                if res is not None:   # (not taken now: ended without them)
-                    e["stored"], e["lost"] = {}, set()
+                if res is not None:
+                    status = res[0]
+                    if status >= 500 or status in (408, 429):   # the cloud's own trouble: asked again
+                        self._trouble(f"stream {e['id']}'s last segments not confirmed (HTTP {status})")
+                        left.append(e)
+                        continue
+                    e["stored"], e["lost"] = {}, set()   # (refused: ended without them)
                 if e["stored"] or e["lost"]:
                     left.append(e)
                     continue
@@ -414,8 +440,6 @@ class CloudStream:
             return
         if self.session is None and now - mtime > self.stale:
             return   # left over from an earlier stream
-        if self.session is None and now < self.off_until:
-            return   # streaming refused a moment ago: not asked again yet
         if retry:
             # Refused a while ago and OBS still on: asked again, a fresh stream from here on.
             from .live_stream import _session_name
@@ -443,9 +467,11 @@ class CloudStream:
 
                 self.session, self.since = _session_name(now), now
                 self.stamps, self.queued, self.done, self.lost, self.stored = {}, {}, set(), set(), {}
-                self.high, self.halted, self.stream_id = -1, None, None
+                self.high, self.stream_id = -1, None
+                # Streaming refused a moment ago: on air here all the same, the cloud asked at off_until.
+                self.halted = "refused" if now < self.off_until else None
                 self._status(True)
-            self.newest_ns = max(self.newest_ns, mtime_ns, *stamps.values())
+            self.playlist_ns = mtime_ns
             self.stamps.update(stamps)
             durations = segment_durations(raw)
             for i, name in enumerate(segments):
@@ -453,7 +479,7 @@ class CloudStream:
                 if n > self.high:
                     if not self.halted:
                         self.queued[n] = {"name": name, "seconds": durations.get(name, DEFAULT_SECONDS),
-                                          "first": now}
+                                          "first": now, "ns": stamps[name]}
                     self.high = n
             self.seq, self.seen_mtime = seq, mtime
         else:
@@ -472,22 +498,9 @@ class CloudStream:
         cloud is told; OBS's folder is emptied once every copy reading it is done."""
         if self.session is None:
             return
-        try:
-            raw = (self.folder / self.playlist).read_text(encoding="utf-8", errors="replace")
-            parsed = parse_playlist(raw)
-        except OSError:
-            parsed = None
-        if parsed is not None and not self.halted and self.stream_id is not None:
-            seq, segments, _ = parsed
-            durations = segment_durations(raw)
-            now = self.clock()
-            for i, name in enumerate(segments):
-                n = seq + i
-                if n > self.high and self.stamps.get(name) == self._stamp(name):
-                    self.queued[n] = {"name": name, "seconds": durations.get(name, DEFAULT_SECONDS), "first": now}
-                    self.high = n
+        if not self.halted and self.stream_id is not None:
             for _ in range(4):   # (a few passes: each sends up to MAX_PER_ASK)
-                if not self.queued:
+                if not self.queued or self.stream_id is None:   # (or the cloud ended it meanwhile)
                     break
                 self._send()
             for seq_ in list(self.queued):
@@ -497,7 +510,7 @@ class CloudStream:
             self.ending.append({"id": self.stream_id, "first": self.clock(), "stored": dict(self.stored),
                                 "lost": set(self.lost)})
             self._end_streams()
-        newest, self.newest_ns = self.newest_ns, 0
+        read, self.playlist_ns = self.playlist_ns, 0
         seen = self.stamps
         self.session, self.stream_id, self.seq, self.seen_mtime = None, None, -1, 0.0
         self.queued, self.stored, self.lost, self.stamps, self.halted = {}, {}, set(), {}, None
@@ -512,7 +525,7 @@ class CloudStream:
                     pass   # OBS still holds it: the next stream overwrites it
             pl = self.folder / self.playlist
             try:
-                if pl.stat().st_mtime_ns <= newest:
+                if pl.stat().st_mtime_ns == read:   # (not one OBS has written since)
                     pl.unlink()
             except OSError:
                 pass
@@ -526,6 +539,7 @@ class CloudStream:
     # -- the thread
     def start(self, interval: float = 1.0) -> None:
         self.folder.mkdir(parents=True, exist_ok=True)
+        self._status(False)   # (a booth killed on air left it saying so)
         self._thread = threading.Thread(target=self.run, args=(interval,), name="live-cloud", daemon=True)
         self._thread.start()
 
@@ -537,6 +551,7 @@ class CloudStream:
                 self.step()
             except (NotPaired, PairingChanged, TooOld) as e:
                 log.warning("Live stream: nothing more goes to Shotcast Cloud till Shotcast restarts: %s", e)
+                self._status(False)   # (nothing on air: an update that cures it isn't held back)
                 return
             except Exception:
                 log.exception("Live stream to Shotcast Cloud failed (trying again)")
