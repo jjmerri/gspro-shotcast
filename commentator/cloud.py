@@ -81,6 +81,9 @@ CARRIED = ("personas", "llm", "tts", "source", "screen", "commentary", "news", "
 # The .env keys a profile gets at pair time: the AI and voice services' (the booth still calls them
 # from the PC). Nothing else (AWS, ntfy, Squabbit, SuperSaaS, OBS, TypeSafe) is copied.
 ENV_KEYS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_TTS_API_KEY", "AZURE_SPEECH_KEY")
+# Also read from a profile's .env (never seeded into it, nor offered in the paired tray's settings): the
+# PC's own OBS's WebSocket password, for the live stream to Shotcast Cloud (cloud_stream), set there by hand.
+LOCAL_ENV_KEYS = ("OBS_WEBSOCKET_PASSWORD",)
 FIX = ("To repair it: `python -m commentator.cloud unpair --force`, then pair this PC again "
        "(`python -m commentator.cloud pair --api https://...`).")
 REPAIR = ("Shotcast Cloud no longer accepts this PC: remove it from the sims on the site, then "
@@ -555,14 +558,14 @@ def running(prof: Profile, who: str, wait: float = 30.0):
 
 
 def load_profile_env(path: Path) -> list[str]:
-    """Paired: set the profile .env's AI and voice keys (ENV_KEYS) in this process, and nothing else
-    that's in the file (a self-hosted .env copied over it, say: its AWS and other service keys stay
-    out). Returns the names set."""
+    """Paired: set the profile .env's AI and voice keys (ENV_KEYS) and OBS's password (LOCAL_ENV_KEYS) in
+    this process, and nothing else that's in the file (a self-hosted .env copied over it, say: its AWS
+    and other service keys stay out). Returns the names set."""
     from .report import env_pairs
 
     names, left = [], []
     for k, v in env_pairs(path):
-        if k in ENV_KEYS:
+        if k in ENV_KEYS or k in LOCAL_ENV_KEYS:
             os.environ[k] = v
             names.append(k)
         else:
@@ -667,8 +670,10 @@ def booth_config(cfg: Any, prof: Profile | None) -> Any:
     """The config a process runs with: `cfg` itself unpaired (prof None). Paired, one built from
     scratch: the profile config's CARRIED settings, every other one its default, working in the
     profile's home with no league (every round practice), and the self-hosted booth's jobs off: the
-    stats page, publishing, the league page and recaps, S3 backups, the live stream and recordings,
-    the site table's chat and alerts, Squabbit, bookings and phone pushes."""
+    stats page, publishing, the league page and recaps, S3 backups, the live stream's bucket and the
+    recordings kept on the PC, the site table's chat and alerts, Squabbit, bookings and phone pushes.
+    The live stream itself (OBS, its folder and when it's on air) is the profile config's own `live`
+    settings: on there, it goes to Shotcast Cloud (cloud_stream), never to a bucket; off by default."""
     if prof is None:
         return cfg
     src = cfg.model_copy(deep=True)
@@ -681,7 +686,11 @@ def booth_config(cfg: Any, prof: Profile | None) -> Any:
     out.league_file = None
     out.publish.enabled, out.publish.bucket, out.publish.recaps = False, None, False
     out.backup.s3, out.backup.dir = False, None                       # (local copies, in the profile)
-    out.live.enabled, out.live.with_rounds, out.live.launch_obs, out.live.local_keep_days = False, False, False, 0
+    if src.live.enabled:   # (streamed to Shotcast Cloud: nothing kept on the PC, no bucket)
+        out.live = src.live
+        out.live.keep_days, out.live.local_keep_days = 0, 0
+    else:
+        out.live.enabled, out.live.with_rounds, out.live.launch_obs, out.live.local_keep_days = False, False, False, 0
     out.chat.enabled, out.chat.table, out.chat.alerts = False, None, False
     out.squabbit.enabled = out.booking.enabled = False
     out.notify.provider = "none"

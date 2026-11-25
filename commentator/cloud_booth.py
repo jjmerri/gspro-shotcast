@@ -33,6 +33,15 @@ BLOCKED_S = 900.0      # how long it waits when the cloud refuses every upload f
 BEHIND_S = 900.0       # finished rounds not all on Shotcast Cloud for this long: the tray goes red, whatever the cause
 HEALTH = "cloud-health.json"
 
+# The live stream's word for the tray (cloud_stream.CloudStream: the month's streaming used up), shown
+# with how uploads stand each time they're written. Set from the stream's thread; read here.
+stream_issues: list[tuple[str, str]] = []
+
+
+def set_stream_issues(issues: list[tuple[str, str]]) -> None:
+    global stream_issues
+    stream_issues = list(issues)
+
 
 def set_health(log_dir: str | Path, issues: list[tuple[str, str]]) -> None:
     """The tray's view of uploads: (level, message) pairs, level 'fail' or 'warn'; [] clears it."""
@@ -122,7 +131,7 @@ class Uploads:
     def _health(self, *issues: tuple[str, str]) -> None:
         """The tray's view, rewritten after every try: `issues` from this try, and whether uploads
         are behind."""
-        set_health(self.cfg.log_dir, list(issues) + self._behind())
+        set_health(self.cfg.log_dir, list(issues) + self._behind() + stream_issues)
 
     async def run(self) -> None:
         from . import cloud_rounds
