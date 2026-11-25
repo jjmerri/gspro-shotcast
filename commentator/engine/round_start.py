@@ -360,6 +360,12 @@ class RoundStartMixin:
         if not first_tee:
             return
         if r.is_league:
+            # An individual league's round takes any league player who still has the week to play (the
+            # setup screen unread, the tee showed them one at a time).
+            if (match and r.format is None and self.league.individual and match not in r.roster.values()
+                    and self._classify_round([*(p or g for g, p in r.roster.items()), match], r.course)[1] is None):
+                self._add_to_round(r, raw, match)
+                return
             # The lineup was a scheduled league match; someone else in it makes it practice, which
             # can't be redone mid-hole. The setup screen (always read) is what classifies it right.
             log.info("First-tee setup for %r, not in league round %s: not added", raw, r.id)

@@ -798,7 +798,7 @@ def cmd_stats_web(cfg: Config, args) -> None:
     # A fixed folder, so a window closed without cleanup doesn't leave a copy behind each time.
     serve(path, port=args.port, open_browser=not args.no_browser,
           names={key: persona.name for key, persona in cfg.personas.items()},
-          site=Path(cfg.log_dir) / "stats-web-site", brand=cfg.publish.brand,
+          site=Path(cfg.log_dir) / "stats-web-site", brand={**cfg.publish.brand, "league_file": cfg.league_file},
           videos=lambda: (local_video.folder(cfg.live), cfg.live.local_keep_days))
 
 
@@ -848,7 +848,7 @@ def cmd_publish(cfg: Config, args) -> None:
     names = {key: persona.name for key, persona in cfg.personas.items()}
     if args.build_only:
         with stats_site.site_lock(site):   # (the data files are shared between builds of the site)
-            version = stats_site.build(path, site, names, **cfg.publish.brand)
+            version = stats_site.build(path, site, names, **cfg.publish.brand, league_file=cfg.league_file)
         print(f"Built {version} in {site}")
         return
     if not cfg.publish.bucket:
@@ -856,7 +856,7 @@ def cmd_publish(cfg: Config, args) -> None:
     try:
         with stats_site.site_lock(site):
             version = stats_site.publish(path, site, cfg.publish.bucket, cfg.publish.prefix, cfg.publish.region,
-                                         names, **cfg.publish.brand)
+                                         names, **cfg.publish.brand, league_file=cfg.league_file)
     except ImportError:
         sys.exit('Publishing needs boto3: pip install -e ".[publish]"')
     print(f"Published {version} to s3://{cfg.publish.bucket}/{cfg.publish.prefix}")

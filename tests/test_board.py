@@ -494,3 +494,17 @@ def test_a_promoted_alternate_round_backfills_tee_finishes_from_the_partners_str
                                        to_pin_before=pin, shot_id=shot_id))
     e._alternate_tee_finishes(r)
     assert e.store.week_ctp(["Test Links"], [12], "2026-01-01") == {12: ("Mike", 3.0)}
+
+
+def test_an_individual_league_s_week_net_is_each_player_s_own():
+    league = League({"teams": [{"name": "M", "players": [{"name": "Mike", "handicap": 9.0}]},
+                               {"name": "S", "players": [{"name": "Sarah", "handicap": 0.0}]}],
+                     "schedule": [{"week": 1, "course": "Test Links", "format": "stroke play"}]})
+    r = Round(league=league, gspro_players=["Mike", "Sarah"], course="Test Links", scheduled_format="stroke play",
+              holes=9, start_hole=1, schedule=league.schedule[0])
+    r.apply_scorecard(Scorecard(holes=list(range(1, 10)), par=dict.fromkeys(range(1, 10), 4),
+                                index={h: 2 * h - 1 for h in range(1, 10)},
+                                scores={"Mike": dict.fromkeys(range(1, 10), 5), "Sarah": dict.fromkeys(range(1, 10), 4)}))
+    mike = r.team_net("M")
+    assert mike is not None and mike[1] == 9 and mike[0] < 9   # his strokes come off his own 9 over
+    assert r.team_net("S") == (0, 9)

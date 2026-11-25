@@ -56,7 +56,9 @@ class LeagueRoundMixin:
         a None reason means it's a league round on that entry; a string reason means practice (still
         commentated, just without league framing). A league round needs a scheduled course that's still
         in date, the right number of balls for the format (two, or one for alternate shot), those
-        balls to be one registered team, and (when the setup screen was read) the week's nines. `round_week` in config forces a week when the course can't be
+        balls to be one registered team, and (when the setup screen was read) the week's nines. In an
+        individual league (League.individual) with no format, any number of league players instead
+        (_classify_individual). `round_week` in config forces a week when the course can't be
         read, bypassing only the course and date gates. Works the same for the tee's ball count and the
         setup screen's slots, since a player sets up exactly the balls they'll play (one for alternate).
         `holes` (start, count) stands in for the setup screen's; () leaves the holes unchecked."""
@@ -84,6 +86,8 @@ class LeagueRoundMixin:
             if end and str(end) < today:
                 return {}, f"week {entry.get('week')} ({entry.get('course')}) was due by {end}"
         fmt = normalize_format(c.round_format or entry.get("format"))
+        if fmt is None and self.league.individual:
+            return self._classify_individual(names, course, entry, forced, setup_holes)
         # Alternate shot: one GSPro profile for the team, or both partners in GSPro's alternate shot mode.
         expected = (1, 2) if fmt == "alternate" else (2,)
         if len(names) not in expected:
@@ -100,10 +104,40 @@ class LeagueRoundMixin:
         if not forced and team:
             # A team posts one round per week: once it has a full league round on every week scheduled
             # on this course, another round here is practice.
-            weeks = [e for e in self.league.data.get("schedule") or [] if self._course_matches(e, course)]
-            played = [c for c in self.store.league_round_courses(team) if self._course_matches(entry, c)]
-            if weeks and len(played) >= len(weeks):
-                return {}, f"{team} already played week {entry.get('week')}'s league round on {entry.get('course')}"
+            if bad := self._week_played(team, course, entry):
+                return {}, bad
+        return entry, None
+
+    def _week_played(self, team: str, course: str | None, entry: dict) -> str | None:
+        """Why `team` has no league round left on `course`: it has a full one on every week scheduled
+        there. None when it has."""
+        weeks = [e for e in self.league.data.get("schedule") or [] if self._course_matches(e, course)]
+        played = [c for c in self.store.league_round_courses(team) if self._course_matches(entry, c)]
+        if weeks and len(played) >= len(weeks):
+            return f"{team} already played week {entry.get('week')}'s league round on {entry.get('course')}"
+        return None
+
+    def _classify_individual(self, names: list[str], course: str | None, entry: dict, forced: dict | None,
+                             setup_holes: tuple[int, int] | tuple[()] | None) -> tuple[dict, str | None]:
+        """_classify_round's rest in an individual stroke play league (every team one player, no format):
+        any number of balls, each a different league player, each still with a round to play this week."""
+        if not names:
+            return {}, "no balls on the tee"
+        if self._setup_mode_read and self._setup_format in (*TEAM_BALL, "shamble"):
+            return {}, f"a stroke play week, but GSPro's game mode is {FORMAT_NAMES.get(self._setup_format, 'a shared ball')}"
+        players = []
+        for n in names:
+            if not (player := self.league.match_player(n)):
+                return {}, f"{n!r} isn't a league player"
+            if player in players:
+                return {}, f"{player} is on the tee twice"
+            players.append(player)
+        if not forced and setup_holes and (bad := self._wrong_holes(entry, *setup_holes)):
+            return {}, bad
+        if not forced:
+            for player in players:
+                if bad := self._week_played(self.league.player_team[player], course, entry):
+                    return {}, bad
         return entry, None
 
     def _unread_holes(self) -> tuple[int, int] | None:

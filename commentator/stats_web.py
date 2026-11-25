@@ -48,7 +48,65 @@ _HOLE = re.compile(r"Hole (\d+)\b")
 EXCLUDED, DELETED = 1, 2   # the `excluded` column: out of the stats but listed locally / deleted for good
 
 
-def connect(path: str | Path) -> sqlite3.Connection:
+def _sql_text(s: str) -> str:
+    return "'" + s.replace("'", "''") + "'"
+
+
+def _case(col: str, names: dict[str, str], default: str | None = None) -> str:
+    """`col` with each stored name in `names` shown as its value instead (else `default`, else as is)."""
+    if not names:
+        return default or col
+    return (f"CASE {col} " + " ".join(f"WHEN {_sql_text(a)} THEN {_sql_text(b)}" for a, b in names.items())
+            + f" ELSE {default or col} END")
+
+
+# Tables (besides shots, rounds and player_rounds) whose course is a round's: the hole replays and the
+# tee lengths find a round's course in them by its name.
+_COURSE_TABLES = ("hole_layouts", "hole_images", "course_tees", "tee_lengths")
+
+
+def _shown_sql(col: str, table: str, shown: dict[str, dict[str, str]]) -> str:
+    """The view's expression for `table`.`col` under league_names' `shown` (just `col` when unchanged)."""
+    players = shown.get("player") or {}
+    if col == "course":
+        return _case(col, shown.get("course") or {})
+    if (table, col) in (("shots", "player"), ("player_rounds", "player"), ("rounds", "side")):
+        return _case(col, players)
+    if (table, col) == ("rounds", "players") and players:
+        return (f"CASE WHEN json_valid(players) THEN (SELECT json_group_array({_case('value', players)}) FROM "
+                "(SELECT value FROM json_each(players) ORDER BY key)) ELSE players END")
+    if (table, col) == ("rounds", "team") and (teams := shown.get("team")):
+        return f"COALESCE(team, {_case('side', teams, default='NULL')})"
+    return col
+
+
+def league_names(db: sqlite3.Connection, league: Any) -> dict[str, dict[str, str]]:
+    """How the league file names what the database has under other names, by kind: "course" (a
+    course's name as stored -> the schedule's, League.course_shown), "player" (a GSPro name or alias
+    stored for a player since on the roster -> their roster name, as the booth would match them now)
+    and "team" (a round's side stored with no team -> the team its player is on now)."""
+    def column(table: str, col: str) -> set[str]:
+        if col not in {r[1] for r in db.execute(f"PRAGMA main.table_info({table})")}:
+            return set()
+        return {v for (v,) in db.execute(f"SELECT DISTINCT {col} FROM main.{table} WHERE {col} IS NOT NULL")
+                if isinstance(v, str)}
+
+    courses = set().union(*(column(t, "course") for t in ("shots", "rounds", "player_rounds", *_COURSE_TABLES)))
+    course = {c: s for c in sorted(courses) if (s := league.course_shown(c)) and s != c}
+    stored = column("shots", "player") | column("player_rounds", "player") | column("rounds", "side")
+    if "players" in {r[1] for r in db.execute("PRAGMA main.table_info(rounds)")}:
+        stored |= {v for (v,) in db.execute("SELECT DISTINCT j.value FROM main.rounds, json_each(main.rounds.players) j"
+                                            " WHERE json_valid(main.rounds.players)") if isinstance(v, str)}
+    player = {p: r for p in sorted(stored) if (r := league.exact_player(p)) and r != p}
+    team = {}
+    if "team" in {r[1] for r in db.execute("PRAGMA main.table_info(rounds)")}:
+        for (side,) in db.execute("SELECT DISTINCT side FROM main.rounds WHERE team IS NULL AND side IS NOT NULL"):
+            if (t := league.player_team.get(league.exact_player(side) or "")):
+                team[side] = t
+    return {"course": course, "player": player, "team": team}
+
+
+def connect(path: str | Path, league: Any = None) -> sqlite3.Connection:
     """A read-only snapshot of the database, for building the page: the file as it was when it was
     opened, however long the build reads it, while the booth goes on writing. In WAL mode (Store sets it)
     that's one read transaction on the file, held till it's closed; otherwise reading the file that long
@@ -57,7 +115,9 @@ def connect(path: str | Path) -> sqlite3.Connection:
     the stats or deleted (set_round_excluded, delete_round), with their shots and what the booth said,
     are left out: temp views shadow the tables, which also fill in columns an older database is missing
     (a shot left out of the stats or excluded: none are; the player's hand: unknown). The tables
-    themselves stay reachable as main.<table>."""
+    themselves stay reachable as main.<table>. With `league` (a League), the views also show the
+    league's names (league_names): a round's course by the schedule's name for it, and a player by
+    their roster name, as the league file has them now."""
     from contextlib import closing
 
     # read-write (made query_only below): a read-only connection can't read a WAL file no other
@@ -69,22 +129,35 @@ def connect(path: str | Path) -> sqlite3.Connection:
             db = sqlite3.connect(":memory:")
             src.backup(db)
     db.row_factory = sqlite3.Row
-    for table, missing in (("shots", (("left_out", "0"), ("handed", "NULL"), ("excluded", "0"), ("is_tournament", "0"))),
-                           ("rounds", (("excluded", "0"), ("is_tournament", "0"))),
-                           ("player_rounds", (("excluded", "0"), ("is_tournament", "0"))),
-                           ("lines", (("excluded", "0"),))):
-        have = {r[1] for r in db.execute(f"PRAGMA main.table_info({table})")}
-        if not have:
-            continue
-        extra = "".join(f", {v} AS {c}" for c, v in missing if c not in have)
-        where = " WHERE excluded = 0" if "excluded" in have else ""
-        db.execute(f"CREATE TEMP VIEW {table} AS SELECT *{extra} FROM main.{table}{where}")
     if wal:
         # Reads the file through the OS's cache, mapped, not a page at a time: as quick as a copy in memory,
         # and nothing of its own to hold. (Pages past the first GB are read the usual way.)
         db.execute("PRAGMA mmap_size = 1073741824")
         db.execute("BEGIN")
-        db.execute("SELECT 1 FROM main.sqlite_master LIMIT 1").fetchall()   # the snapshot starts at a read
+        db.execute("SELECT 1 FROM main.sqlite_master LIMIT 1").fetchall()   # the snapshot starts at a read,
+        # before league_names reads the names in it
+    shown = league_names(db, league) if league is not None else {}
+    db.execute("CREATE TEMP TABLE site_names (kind TEXT, stored TEXT, shown TEXT)")
+    db.executemany("INSERT INTO site_names VALUES (?, ?, ?)",
+                   sorted((k, a, b) for k, m in shown.items() for a, b in m.items()))
+    if not wal:
+        db.commit()   # (the copy in memory: nothing else writes it)
+    for table, missing in (("shots", (("left_out", "0"), ("handed", "NULL"), ("excluded", "0"), ("is_tournament", "0"))),
+                           ("rounds", (("excluded", "0"), ("is_tournament", "0"))),
+                           ("player_rounds", (("excluded", "0"), ("is_tournament", "0"))),
+                           ("lines", (("excluded", "0"),)),
+                           *((t, ()) for t in _COURSE_TABLES)):
+        cols = [r[1] for r in db.execute(f"PRAGMA main.table_info({table})")]
+        if not cols:
+            continue
+        have = set(cols)
+        extra = "".join(f", {v} AS {c}" for c, v in missing if c not in have)
+        where = " WHERE excluded = 0" if "excluded" in have else ""
+        named = {c: e for c in cols if (e := _shown_sql(c, table, shown)) != c}
+        if not extra and not where and not named:
+            continue
+        picked = ", ".join(f"{named[c]} AS {c}" if c in named else c for c in cols) if named else "*"
+        db.execute(f"CREATE TEMP VIEW {table} AS SELECT {picked}{extra} FROM main.{table}{where}")
     db.execute("PRAGMA query_only = ON")   # a slip can't change the snapshot either
     return db
 
@@ -1263,8 +1336,8 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
     """Serve the stats page on localhost only (port 0 picks a free one), the same static site that
     `publish` uploads (stats_site.py), built into `site` (a temp folder by default) and rebuilt when
     the database changes. `names` maps persona keys to on-air names; `brand` is build()'s site_name,
-    more_tab and season_start, or a function returning them, asked on each request so a change in
-    Settings rebuilds the page. `videos()`: where the round videos kept on the PC are (local_video.py; None if they
+    more_tab, season_start and league_file, or a function returning them, asked on each request so a change in
+    Settings (or in the league file) rebuilds the page. `videos()`: where the round videos kept on the PC are (local_video.py; None if they
     aren't) and for how many days, asked on each request so a change in Settings counts at once. They're
     served as the bucket's live/ (recordings.json, s/<session>/full.m3u8), so the Watch buttons play them.
     `on_change()` is called after an edit from the page is saved (the tray publishes the site a while
@@ -1285,7 +1358,8 @@ def make_server(db_path: str | Path, port: int = 8765, names: dict[str, str] | N
     def refresh() -> None:
         with lock:
             options = (brand() if callable(brand) else brand) or {}
-            key = (file_stamp(db_path), sorted(options.items()))
+            key = (file_stamp(db_path), sorted(options.items()),
+                   file_stamp(lf) if (lf := options.get("league_file")) else None)   # (its names)
             if built["key"] != key:
                 stats_site.build(db_path, site, names, local=True, **options)
                 built["key"] = key

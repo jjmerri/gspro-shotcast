@@ -411,6 +411,12 @@ def record_shots(db: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     have_ex = {t: "excluded" in {r[1] for r in db.execute(f"PRAGMA main.table_info({t})")} for t in ("shots", "rounds")}
     s_ex = "excluded" if have_ex["shots"] else "0"
     r_ex = "excluded" if have_ex["rounds"] else "0"
+    # The league's names the views show (stats_web.connect), so a digest's course and players match
+    # theirs. (The cache's stamp covers them.)
+    try:
+        shown = {(k, a): b for k, a, b in db.execute("SELECT kind, stored, shown FROM temp.site_names")}
+    except sqlite3.OperationalError:
+        shown = {}
 
     def digest(rows: list, shots: list) -> dict[str, Any] | None:
         if not rows:
@@ -423,6 +429,7 @@ def record_shots(db: sqlite3.Connection) -> dict[str, dict[str, Any]]:
         sessions, hole_sessions, courses, players = set(), set(), set(), set()
         holes, gimme_ft = out["holes"], out["gimme_ft"]
         for sid, ts, ses, course, hole, outcome, gimme, player in shots:
+            course, player = shown.get(("course", course), course), shown.get(("player", player), player)
             out["first"] = ts if out["first"] is None else min(out["first"], ts)
             if outcome == "gimme":
                 out["gimmes_out"].append([sid, ts, ses])

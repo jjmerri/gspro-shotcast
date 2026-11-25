@@ -411,12 +411,13 @@ def test_a_theme_colours_the_page_and_without_one_it_is_as_shipped(tmp_path, mon
         stats_site.page(theme={"accent": "red;}"})
 
     # The booth's publish carries it to the page it uploads.
-    cfg = SimpleNamespace(publish=p.model_copy(update={"bucket": "b"}), personas={}, db_path="s.db", log_dir=str(tmp_path))
+    cfg = SimpleNamespace(publish=p.model_copy(update={"bucket": "b"}), personas={}, db_path="s.db", log_dir=str(tmp_path),
+                          league_file=None)
     cmd = stats_site.publish_command(cfg)
     assert json.loads(cmd[cmd.index("--theme") + 1]) == theme
     assert "--theme" not in stats_site.publish_command(SimpleNamespace(**{**vars(cfg), "publish": PublishConfig(bucket="b")}))
     seen = {}
-    monkeypatch.setattr(stats_site, "publish", lambda *a, theme=None: seen.setdefault("theme", theme) and "v1")
+    monkeypatch.setattr(stats_site, "publish", lambda *a, theme=None, league_file=None: seen.setdefault("theme", theme) and "v1")
     stats_site.main(cmd[3:])
     assert seen["theme"] == theme
 

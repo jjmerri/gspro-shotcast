@@ -15,7 +15,7 @@ to know (a file with just `league_name` and `storylines` is fine too). Fields th
 | `teams[].name`, `teams[].aliases` | Team names, and other spellings to match |
 | `teams[].nickname` | What the booth calls the team, if set |
 | `teams[].players[].name` | The roster (required) |
-| `players[].gspro_name`, `players[].aliases` | Matching the name GSPro shows to a roster player. Shots are saved under the roster name from then on; rounds already recorded keep the name they were saved under |
+| `players[].gspro_name`, `players[].aliases` | Matching the name GSPro shows to a roster player. Shots are saved under the roster name from then on. The stats page shows rounds recorded under an alias by the roster name too |
 | `players[].nickname` | What the booth calls the player on air (`"Ozzy"` for Mike Osborne: introduced as Mike "Ozzy" Osborne, then Ozzy). Stats, Squabbit and popups keep the roster name |
 | `nicknames` | The same for guests, keyed by their GSPro name (`{"David": "Dave"}`) |
 | `players[].handicap` | 18-hole index, for net scores |
@@ -37,9 +37,10 @@ give the week both names: the league's as `course`, GSPro's exactly as its cours
 {"week": 2, "course": "Whistling Straits", "gspro_course": "DPC Lake Michigan", "end_date": "2026-11-30"}
 ```
 
-The stats page lists a round under the name it started with: the league's when the booth saw
-GSPro's setup screen, GSPro's when it first picked the round up at the tee. So one course can show
-under both names there.
+The stats page shows a course on the schedule by the league's name (`course`), whichever name its
+rounds were recorded under, including GSPro's short form of a name with a " - " in it ("Rumbling
+Bald on Lake Lure" for "Rumbling Bald on Lake Lure - Apple Valley"). A course two weeks name
+differently keeps the name it was recorded under.
 
 A minimal league file, one two-player team and one week:
 
@@ -55,7 +56,10 @@ A minimal league file, one two-player team and one week:
 ```
 
 A night counts as a league round only when the players are one registered team and tonight's
-course matches an open `schedule` entry; otherwise it's practice. Players not on the roster
+course matches an open `schedule` entry; otherwise it's practice. In an individual league (every
+team one player) with a stroke play week (or no `format`), any group of roster players on the tee
+counts, each posting their own round; a guest in the group, or a player who already posted that
+week's round, makes it practice. Players not on the roster
 (guests, or everyone when there's no league file) are called by their GSPro name (or its `nicknames` entry), and the early
 opener over the course load includes them. `import-league` builds this file from one specific
 spreadsheet layout (Schedule, Teams, Results and Standings sheets); most leagues will write the

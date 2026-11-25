@@ -262,12 +262,39 @@ class League:
     def week_entry(self, week: int) -> dict[str, Any] | None:
         return next((e for e in self.data.get("schedule") or [] if e.get("week") == week), None)
 
+    @property
+    def individual(self) -> bool:
+        """Every team is one player: an individual league, where each ball on the tee plays for itself."""
+        teams = list(self.team_players.values())
+        return bool(teams) and all(len(players) == 1 for players in teams)
+
+    def course_shown(self, course: str | None) -> str | None:
+        """The league's name (a schedule week's `course`) for a course GSPro named `course`: a week's
+        `course` or `gspro_course` by name, or the part of either before a " - " (GSPro shows "Rumbling
+        Bald on Lake Lure - Apple Valley" as "Rumbling Bald on Lake Lure" too). None when no week is on
+        it, or weeks on it name it differently."""
+        if not course:
+            return None
+        if not (plain := _plain(course)):
+            return None
+        shown = set()
+        for e in self.schedule:
+            name = str(e.get("course") or "").strip()
+            for n in (e.get("course"), e.get("gspro_course")):
+                if name and n and plain in {_plain(str(n)), _plain(re.split(r"\s+[-–—]\s+", str(n))[0])}:
+                    shown.add(name)
+        return shown.pop() if len(shown) == 1 else None
+
     def prompt_text(self) -> str:
         # The whole season's schedule is noise to the booth; tonight's entry reaches it with the round.
         notes = {k: v for k, v in self.data.items() if k not in ("schedule", "pronunciations")}
         if not notes:
             return "(none)"
         return yaml.safe_dump(notes, sort_keys=False, allow_unicode=True)
+
+
+def _plain(name: str) -> str:
+    return " ".join(re.findall(r"[^\W_]+", name.casefold()))
 
 
 def cards_path(league_file: str | Path | None) -> Path:

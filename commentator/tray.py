@@ -1249,7 +1249,7 @@ class Tray:
         def videos():   # self.cfg as Settings last saved it
             return local_video.folder(self.cfg.live, self.home), self.cfg.live.local_keep_days
         def brand():
-            return self.cfg.publish.brand
+            return {**self.cfg.publish.brand, "league_file": self.cfg.league_file}
         publisher = self.publisher
         def video_deleted(rec):   # the bucket's copy, if streams are kept there, goes too
             if self.cfg.publish.bucket and self.cfg.live.keep_days:

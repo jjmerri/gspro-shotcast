@@ -8180,3 +8180,26 @@ def test_a_leagues_own_allowances_reach_the_rounds_strokes():
     assert Round._allowances(r) == [0.75]
     r.league.data = {"handicap_allowances": None}
     assert Round._allowances(r) == [0.75]
+
+
+def test_an_individual_league_round_is_any_group_of_league_players(tmp_path):
+    from commentator.league import League
+
+    league = League({"teams": [{"name": n, "players": [{"name": n}]} for n in ("Ann", "Bob", "Cy")],
+                     "schedule": [{"week": 1, "course": "Pebble Beach", "format": "stroke play"}]})
+    assert league.individual and not LEAGUE.individual
+    e = _engine_with(tmp_path, league)
+    entry, practice = e._classify_round(["Ann", "Bob", "Cy"], "Pebble Beach")
+    assert practice is None and entry["week"] == 1
+    assert e._classify_round(["Ann"], "Pebble Beach")[1] is None
+    _, practice = e._classify_round(["Ann", "Guesty"], "Pebble Beach")
+    assert practice and "Guesty" in practice
+    _, practice = e._classify_round(["Ann", "Ann"], "Pebble Beach")
+    assert practice and "twice" in practice
+    e._setup_format, e._setup_mode_read = "scramble", True
+    _, practice = e._classify_round(["Ann", "Bob"], "Pebble Beach")
+    assert practice and "scramble" in practice.lower()
+    e._setup_format, e._setup_mode_read = None, False
+    e.store.league_round_courses = lambda team: ["Pebble Beach"] if team == "Bob" else []
+    _, practice = e._classify_round(["Ann", "Bob"], "Pebble Beach")
+    assert practice and "Bob already played" in practice

@@ -1321,12 +1321,14 @@ class Round:
     def team_holes(self, team: str) -> dict[int, int] | None:
         """team_net hole by hole: each counted hole's team net to par, keyed by the round's hole
         sequence (1..holes). None when team_net would be."""
-        if self.format is None or not self.is_league:
+        # (an individual league's stroke play: each one-player team is its player's own net)
+        fmt = self.format or ("aggregate" if self.league.individual else None)
+        if fmt is None or not self.is_league:
             return None
         seqs = range(1, self.holes + 1)
         sides = [scoring.SideCard(s.players, {q: self.card_score(s, q) for q in seqs}, s.strokes, s.hole_strokes)
                  for s in self.sides if (s.team or s.key) == team]
-        return scoring.team_holes(self.format, sides, self.par, seqs, self.week_card,
+        return scoring.team_holes(fmt, sides, self.par, seqs, self.week_card,
                                   self.league.team_players.get(team))
 
     def team_gross(self, team: str) -> tuple[int, int, list[tuple[Side, int]]] | None:

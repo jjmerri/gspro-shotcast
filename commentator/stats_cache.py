@@ -59,7 +59,14 @@ def code_stamp() -> str:
 def _stamp(db: sqlite3.Connection) -> str:
     version = db.execute("PRAGMA main.user_version").fetchone()[0]
     dataset = db.execute("SELECT dataset_id FROM main.meta").fetchone()[0]
-    return f"{code_stamp()}:{version}:{dataset}"
+    stamp = f"{code_stamp()}:{version}:{dataset}"
+    try:   # the league's names the views show (stats_web.connect): results under other names aren't reused
+        names = db.execute("SELECT kind, stored, shown FROM temp.site_names ORDER BY 1, 2, 3").fetchall()
+    except sqlite3.OperationalError:
+        names = []
+    if names:
+        stamp += ":" + hashlib.sha256(repr([tuple(r) for r in names]).encode()).hexdigest()
+    return stamp
 
 
 def _key(key: Hashable) -> str:

@@ -4,6 +4,14 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.167
+
+### Stats page
+- Courses on the league schedule now show by the league's name, and players by their roster name, including rounds played before the league file named them.
+
+### Booth
+- Individual stroke play leagues: any group of league players on the tee now plays a league round, each for themselves.
+
 ## 0.1.166
 
 ### Stats page

@@ -494,7 +494,7 @@ def gc_paused():
 def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = None,
           records: dict[int, dict] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB,
           local: bool = False, season_start: str | None = None, reels: dict[int, dict] | None = None,
-          news: bool = True, theme: dict[str, str] | None = None) -> str:
+          news: bool = True, theme: dict[str, str] | None = None, league_file: str | Path | None = None) -> str:
     """Build (or refresh) the site in `site` from the season database; returns the new version. With
     `records`, it's filled with every shot holding a record (id -> the record), for record_clips; with
     `reels`, with every round's highlight moments (round -> its reel), for highlights.sync.
@@ -502,14 +502,24 @@ def build(db_path: str | Path, site: str | Path, names: dict[str, str] | None = 
     on the PC (stats_web.make_server), which also lists the rounds excluded from the stats.
     `season_start`: publish.season_start (MM-DD), for the records' This season range. `news`: False
     leaves out the page's What's new card (the demo, whose visitors aren't following the releases).
-    `theme`: publish.theme's colours (ThemeConfig.colors())."""
+    `theme`: publish.theme's colours (ThemeConfig.colors()). `league_file`: the league file, whose
+    names for the courses and players the page shows (stats_web.league_names); one that won't load is
+    skipped, the page going by the names as stored."""
     records = {} if records is None else records
+    league = None
+    if league_file:
+        from .league import League
+
+        try:
+            league = League.load(league_file)
+        except Exception as e:
+            print(f"League file not read, the stats go by the names as stored: {e}")
     db_path, site = Path(db_path), Path(site)
     version = new_version()
     vdir = site / "v" / version
     vdir.mkdir(parents=True, exist_ok=True)
     details: dict[int, dict[str, Any]] = {}
-    with gc_paused(), closing(stats_web.connect(db_path)) as src, frozen(src), stats_cache.opened(src, db_path):
+    with gc_paused(), closing(stats_web.connect(db_path, league)) as src, frozen(src), stats_cache.opened(src, db_path):
         for name, context in CONTEXTS.items():
             body: dict[str, Any] = stats_web.summary(src, context, names, local, season_start)
             if not news:
@@ -640,14 +650,16 @@ def _list(client: Any, bucket: str, prefix: str) -> set[str]:
 
 def publish(db_path: str | Path, site: str | Path, bucket: str, prefix: str = "", region: str | None = None,
             names: dict[str, str] | None = None, site_name: str = SITE_NAME, more_tab: str = MORE_TAB,
-            season_start: str | None = None, theme: dict[str, str] | None = None) -> str:
+            season_start: str | None = None, theme: dict[str, str] | None = None,
+            league_file: str | Path | None = None) -> str:
     """Build the site from the database and upload it, then keep the record shots' clips and the
     rounds' highlight reels up to date (record_clips.py, highlights.py). Returns the published version."""
     from . import backend
 
     records: dict[int, dict] = {}
     reels: dict[int, dict] = {}
-    build(db_path, site, names, records, site_name, more_tab, season_start=season_start, reels=reels, theme=theme)
+    build(db_path, site, names, records, site_name, more_tab, season_start=season_start, reels=reels, theme=theme,
+          league_file=league_file)
     client = backend.s3(region)
     version = upload(site, bucket, prefix, client)
     try:
@@ -682,7 +694,8 @@ def publish_command(cfg: Any) -> list[str] | None:
             "--names", json.dumps(names), "--site-name", p.site_name, "--more-tab", p.more_tab] \
         + (["--region", p.region] if p.region else []) \
         + (["--season-start", p.season_start] if p.season_start else []) \
-        + (["--theme", json.dumps(theme)] if (theme := p.theme.colors()) else [])
+        + (["--theme", json.dumps(theme)] if (theme := p.theme.colors()) else []) \
+        + (["--league", str(cfg.league_file)] if cfg.league_file else [])
 
 
 @contextmanager
@@ -730,10 +743,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--more-tab", default=MORE_TAB)
     p.add_argument("--season-start", help="the league's season start, MM-DD")
     p.add_argument("--theme", default="{}", help="publish.theme's colours, as JSON")
+    p.add_argument("--league", help="the league file, for its names for the courses and players")
     a = p.parse_args(argv)
     with site_lock(a.site):
         version = publish(a.db, a.site, a.bucket, a.prefix, a.region, json.loads(a.names), a.site_name,
-                          a.more_tab, a.season_start, theme=json.loads(a.theme))
+                          a.more_tab, a.season_start, theme=json.loads(a.theme), league_file=a.league)
     print(f"Published {version} to s3://{a.bucket}/{a.prefix}")
 
 

@@ -1645,3 +1645,36 @@ const out = {};
     assert got["transcript"] == [[1], ["data/new.db undefined", "data/old.db undefined"]]
     assert got["moved"] == [["data/next.db:0"], "v2", ["data/new.db 500", "data/next.db 500"]]
     assert got["legacy"] == [{"file": "v/v0/stats.db"}]
+
+
+def test_the_page_shows_the_league_file_s_names_for_courses_and_players(tmp_path):
+    from commentator import stats_cache
+    from commentator.league import League
+
+    path, db = _db(tmp_path)
+    nine = {h: PARS[str(h)] for h in range(1, 10)}
+    _player_round(db, "Winks", nine)
+    _shot(db, "Winks", club="DR", shot_number=1, lie_before="tee", total_yards=250, course="Pebble")
+    db.execute("INSERT INTO rounds (session_id, ended_at, date, course, side, players, team, holes, is_league,"
+               " is_tournament, complete, excluded) VALUES (1, 0, '2026-11-01', 'Pebble', 'Winks',"
+               " '[\"Winks\", \"O''Neil\"]', NULL, 9, 0, 0, 1, 0)")
+    db.execute("INSERT INTO hole_layouts (course, hole) VALUES ('Pebble', 1)")
+    db.commit()
+    league = League({"teams": [{"name": "Winker", "players": [{"name": "Lucas Winker", "aliases": ["Winks"]}]},
+                               {"name": "O'Neil", "players": [{"name": "Pat O'Neil", "aliases": ["O'Neil"]}]}],
+                     "schedule": [{"week": 1, "course": "Pebble Beach Golf Links", "gspro_course": "Pebble - Spring"}]})
+    with stats_web.connect(path, league) as ro:
+        assert stats_web.player(ro, "Lucas Winker")["rounds"] == 1
+        assert ro.execute("SELECT DISTINCT course FROM shots").fetchone()[0] == "Pebble Beach Golf Links"
+        r = ro.execute("SELECT course, side, team, players FROM rounds").fetchone()
+        assert tuple(r) == ("Pebble Beach Golf Links", "Lucas Winker", "Winker", '["Lucas Winker","Pat O\'Neil"]')
+        assert ro.execute("SELECT course FROM hole_layouts").fetchone()[0] == "Pebble Beach Golf Links"
+        assert ro.execute("SELECT player FROM main.shots").fetchone()[0] == "Winks"   # the file is untouched
+        named = stats_cache._stamp(ro)
+    with stats_web.connect(path) as ro:
+        assert stats_web.player(ro, "Winks")["rounds"] == 1
+        assert stats_cache._stamp(ro) != named   # results under the other names aren't reused
+    # Weeks naming one course differently: neither name is the course's.
+    two = League({"schedule": [{"week": 1, "course": "A", "gspro_course": "Pebble"},
+                               {"week": 2, "course": "B", "gspro_course": "Pebble"}]})
+    assert two.course_shown("Pebble") is None and two.course_shown("A") == "A"
