@@ -458,10 +458,11 @@ class RoundFileMixin:
         return before
 
     def _sync_file_clubs(self) -> None:
-        """The live round's shots take the club (and putt or not) and the lie played from the store has for
-        them: GSPro's round file can correct one after the shot was recorded, or take its correction back,
-        and the round's stats (its longest drive) are worked out from these. A shot it makes a putt is
-        graded as one (a miss the log showed, which a full shot isn't given)."""
+        """The live round's shots take the club (and putt or not), the lie played from, the lie it came to
+        rest in and GSPro's total the store has for them: GSPro's round file can correct one after the shot
+        was recorded, or take its correction back, and the round's stats (fairways, greens, its longest
+        drive) are worked out from these. A shot it makes a putt is graded as one (a miss the log showed,
+        which a full shot isn't given)."""
         r = self.round
         if r is None:
             return
@@ -491,6 +492,27 @@ class RoundFileMixin:
                     self._resettle.add(f)
             if lie != x.lie_before:
                 x.lie_before = lie
+        self._sync_rests(recs=recs)
+
+    def _sync_rests(self, r=None, recs: dict[int, ShotRecord] | None = None) -> None:
+        """Round `r`'s shots (the live round's; `recs` by shot id, when given) take where the store has
+        them at rest and how far they went (its total, else GSPro's carry), as the season stats read
+        them: GSPro's round file, pick cards, late tiles and the log's positions correct these after the
+        shot. Run before the round's stats are worked out. For the stats only: the HUD's read stays what
+        the booth called (a finish correction goes by it), and may hold the file's values the store has
+        since taken back."""
+        if recs is None:
+            r = r or self.round
+            recs = {} if r is None else {x.shot_id: x for x in self.state.shots
+                                         if x.round_id == r.id and x.shot_id is not None}
+        if not recs:
+            return
+        ids = list(recs)
+        for i, rest, drive in self.store.db.execute(
+                "SELECT id, lie_after, COALESCE(total_yards, carry_game_yards)"
+                f" FROM shots WHERE id IN ({', '.join('?' * len(ids))})",
+                ids).fetchall():
+            recs[i].rest_lie, recs[i].drive_yards, recs[i].synced = rest, drive, True
 
     def _unslot(self, shot_id: int) -> None:
         """A shot GSPro's round file named is no longer that player's: the log slot taken when the log

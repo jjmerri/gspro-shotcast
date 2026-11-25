@@ -104,6 +104,7 @@ class RoundEndMixin:
                 log.info("Round %s quit before a hole was finished: nothing to record", r.id)
                 self.store.end_round(r.uuid, complete=False)
                 return {}
+        self._sync_rests(r)
         stats = {s.key: r.side_stats(s, self.state.shots) for s in r.sides}
         # A finished round can still hold a side that didn't play all of it (joined late, or left
         # early): that side is stored as part-played, so a seven-hole card isn't a season round.
@@ -266,6 +267,7 @@ class RoundEndMixin:
         # isn't a season best when the first beat it), leaving out only this round's own rows.
         season = {s.key: self.store.season_rounds(s.key, "league" if r.is_league else "practice",
                                                   skip_rows=r.stored_rows) for s in r.sides}
+        self._sync_rests(r)
         facts = (r.closing_facts(self.state.shots, season, week_ctp=self._closer_week_ctp(r))
                  + self._league_facts(r, closing=True))
         if not self.cfg.commentary.closer:

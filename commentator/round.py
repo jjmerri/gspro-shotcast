@@ -1017,7 +1017,7 @@ class Round:
             # the green (a putt was struck, or the last shot finished there).
             putt_recs = [r for r in recs if r.lie_before == "green" or (r.shot.is_putt and r.lie_before is None)]
             last = max((r for r in recs if r.shot_number), key=lambda r: r.shot_number, default=None)
-            on_green = bool(putt_recs) or any(r.shot.is_putt for r in recs) or (last is not None and (last.hud.lie or "").lower() == "green")
+            on_green = bool(putt_recs) or any(r.shot.is_putt for r in recs) or (last is not None and _finished_on_green(last))
             conceded = score - numbers[-1] if score is not None and numbers and score > numbers[-1] \
                 and not picked else 0
             putts = len(putt_recs) + (conceded if on_green else 0)
@@ -1080,10 +1080,10 @@ class Round:
                     stats.pars[seq] = par
             if not recs or not par:
                 continue
-            tee = [r for r in recs if r.shot_number == 1 and r.hud.lie]
+            tee = [r for r in recs if r.shot_number == 1 and _rest_lie(r)]
             if par >= 4 and tee:
                 fir_tries += 1
-                fir += any(r.hud.lie == "fairway" for r in tee)
+                fir += any(_rest_lie(r) == "fairway" for r in tee)
             elif par >= 4 and self.player_format(player) not in TEAM_BALL \
                     and (hit := _own_tee_ball_fairway(recs)) is not None:
                 fir_tries += 1
@@ -1103,7 +1103,11 @@ class Round:
                 # No green-putt record because the approach finished inside the gimme and the tap-in was
                 # conceded. One stroke short of the card = a single conceded putt, so the last recorded
                 # shot is the one that reached the green: a GIR if it was at or before regulation.
-                hole_gir = bool(numbers) and score == numbers[-1] + 1 and numbers[-1] <= par - 2
+                # (Or its corrected lie has it on the green: no stroke was played from the green, so
+                # only the last one can have stayed there, when every stroke's number says which that is.)
+                hole_gir = bool(numbers) and numbers[-1] <= par - 2 and (score == numbers[-1] + 1 or (
+                    all(r.shot_number for r in recs)
+                    and any(_finished_on_green(r) for r in recs if r.shot_number == numbers[-1])))
                 gir_tries += 1
                 gir += hole_gir
             # Scrambling as the PGA Tour counts it (see side_stats): every missed green is a chance.
@@ -1126,7 +1130,7 @@ class Round:
             # the green (a putt was struck, or the last shot finished there).
             putt_recs = [r for r in recs if r.lie_before == "green" or (r.shot.is_putt and r.lie_before is None)]
             last = max((r for r in recs if r.shot_number), key=lambda r: r.shot_number, default=None)
-            on_green = bool(putt_recs) or any(r.shot.is_putt for r in recs) or (last is not None and (last.hud.lie or "").lower() == "green")
+            on_green = bool(putt_recs) or any(r.shot.is_putt for r in recs) or (last is not None and _finished_on_green(last))
             conceded = score - numbers[-1] if score is not None and numbers and score > numbers[-1] \
                 and not picked else 0
             putts = len(putt_recs) + (conceded if on_green else 0)
@@ -1650,12 +1654,16 @@ def _fairway_hit(recs: list, scramble: bool) -> bool | None:
     plays its second stroke from the ball it picked, so that stroke's lie is where the picked tee ball
     rested (even when the screen moved to the partner before reading it). That beats the tee reads: a
     partner's drive in the fairway doesn't count when the team played the other one from the rough.
-    Without it, the tee reads count only when they agree."""
-    tee = [r.hud.lie for r in recs if r.shot_number == 1 and r.hud.lie]
+    Without it, the picked drive's rest counts, else the tee reads only when they agree."""
+    tee = [lie for r in recs if r.shot_number == 1 and (lie := _rest_lie(r))]
     if scramble:
         picked = [r.lie_before for r in recs if r.shot_number == 2 and r.lie_before not in (None, "tee")]
         if picked:
             return "fairway" in picked
+        chosen = [lie for r in recs if r.shot_number == 1 and r.picked is True and (lie := _rest_lie(r))]
+        if chosen:
+            return "fairway" in chosen
+        tee = [lie for r in recs if r.shot_number == 1 and r.picked is not False and (lie := _rest_lie(r))]
         if tee and len({lie == "fairway" for lie in tee}) > 1:
             return None
     if tee:
@@ -1679,7 +1687,10 @@ def _own_tee_ball_fairway(recs: list) -> bool | None:
 
 
 def _drive_yards(rec) -> float | None:
-    """How far a drive went: GSPro's total (carry and roll) where its tile was read, else the carry."""
+    """How far a drive went: as the store has it (GSPro's round file over the tiles; its total, else
+    carry), else, before that's synced, the total tile as read, else the carry."""
+    if getattr(rec, "synced", False):
+        return rec.drive_yards if rec.drive_yards is not None else _monitor_carry(rec)
     value = re.search(r"\d+(?:\.\d+)?", rec.hud.tiles.get("total length", "") if rec.hud else "")
     if value:
         metric = (rec.hud.to_pin or "").endswith("metres")
@@ -1712,10 +1723,18 @@ def _green_reached_at(recs: list) -> int | None:
     return min(on, default=None)
 
 
+def _rest_lie(rec) -> str | None:
+    """Where a shot came to rest for the round's stats: the store's lie (GSPro's round file corrects the
+    screen's), else the HUD's read."""
+    if getattr(rec, "synced", False):
+        return rec.rest_lie
+    return getattr(rec, "rest_lie", None) or (rec.hud.lie if rec.hud else None)
+
+
 def _finished_on_green(rec) -> bool:
     """The shot stopped on the green: the HUD read it there, or GSPro conceded the next putt (the ball
     was inside the gimme circle), which the HUD can miss after a putter from the fringe."""
-    return (rec.hud.lie or "").lower() == "green" or getattr(rec, "outcome", None) == "conceded"
+    return (_rest_lie(rec) or "").lower() == "green" or getattr(rec, "outcome", None) == "conceded"
 
 
 def _sand_save(recs: list, score: int | None) -> bool | None:
@@ -1747,6 +1766,11 @@ def _carry_yards(rec) -> float | None:
     metric = (rec.hud.to_pin or "").endswith("metres") if rec.hud else False
     if value:
         return float(value.group(0)) * (1.0936 if metric else 1)
+    return _monitor_carry(rec)
+
+
+def _monitor_carry(rec) -> float | None:
+    """The launch monitor's carry, in yards."""
     if rec.shot.carry:
         return rec.shot.carry * (1 if (rec.shot.units or "yards").lower().startswith("y") else 1.0936)
     return None

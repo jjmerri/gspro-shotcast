@@ -449,6 +449,7 @@ class FactsMixin:
         recs = sorted((x for x in self.state.shots if x.round_id == r.id and not x.mulligan
                        and x.hole_seq in done and (x.player in side.players or x.player in side.gspro)),
                       key=lambda x: x.shot.timestamp or 0)
+        self._sync_rests(r)
         stats = r.side_stats(side, recs)
         name = side.players[0] if len(side.players) == 1 else None   # season numbers only for one player
 

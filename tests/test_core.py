@@ -7726,6 +7726,38 @@ def test_a_club_gspros_round_file_corrects_after_the_live_follow_is_the_rounds_r
     assert rec.shot.club is None
 
 
+def test_where_gspros_round_file_has_a_drive_rest_is_the_rounds_fairway_and_drive(tmp_path):
+    # The screen read the drive in the rough at 250; GSPro's round file has it in the fairway at 283:
+    # the round's fairways and longest drive go by the file, not the screen.
+    from commentator.round import Round
+
+    e = _mini_engine(tmp_path)
+    r = Round(league=e.league, gspro_players=["Paul"], course="X", scheduled_format=None, holes=9, is_league=False)
+    e.round = r
+    sid, rec = _row(e, r, 7, 1, "tee", hole=0, seq=1)
+    rec.shot_id, rec.hud = sid, Hud(lie="rough", tiles={"total length": "250.0"})
+    rec.to_pin_before = "400 yards"
+    _, second = _row(e, r, 8, 2, "fairway", hole=0, seq=1)
+    second.hud = Hud(lie="green")
+    assert r.player_stats("Paul", e.state.shots).fir == (0, 1)
+    e.store.db.execute("UPDATE shots SET lie_after = 'fairway', total_yards = 283.0, total_from_log = 2 WHERE id = ?",
+                       (sid,))
+    e._sync_file_clubs()
+    side = r.sides[0]
+    assert r.player_stats("Paul", e.state.shots).fir == (1, 1)
+    assert r.side_stats(side, e.state.shots).longest_drive == 283.0
+    assert rec.hud.lie == "rough"   # what the booth called stays, for its finish corrections
+    # Followed live, the HUD is the file's own read; a penalty since takes it back in the store, and the
+    # HUD's copy of it doesn't count: the ball has no rest, and the penalty stroke makes the next one 3rd.
+    rec.hud = Hud(lie="fairway", tiles={"total length": "283.0"})
+    e.store.db.execute("UPDATE shots SET lie_after = NULL, total_yards = NULL, total_from_log = 0 WHERE id = ?",
+                       (sid,))
+    second.shot_number = 3
+    e._sync_file_clubs()
+    assert r.player_stats("Paul", e.state.shots).fir == (0, 1)
+    assert r.side_stats(side, e.state.shots).longest_drive != 283.0
+
+
 def test_a_pick_ball_a_finish_was_known_for_keeps_it_through_a_late_penalty_and_a_near_cup_ball_isnt_holed(tmp_path):
     from commentator.round import Round
     from commentator.sources.gspro_log import M_TO_YD

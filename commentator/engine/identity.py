@@ -634,6 +634,7 @@ class IdentityMixin:
                                              gimme_id=self._gimme_ids.pop(shot_id, None))
                 if before and before[2]:
                     rec.hud = replace(rec.hud, lie=before[3])
+                rec.rest_lie = self.store.finish_of(shot_id)[0]
                 self._conceded_ids.discard(shot_id)
         rec.outcome = None
 

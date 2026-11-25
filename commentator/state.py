@@ -35,6 +35,11 @@ class ShotRecord:
     impact_seq: int | None = None   # the booth's count of strokes at impact: ties a mid-flight call to this one
     impact_at: float | None = None   # when it was struck (monotonic)
     log_hole: int | None = None   # the course hole GSPro's log put it on: its score line's, else the impact's
+    # The store's lie at rest and drive length (GSPro's round file over the screen's reads), for the round's
+    # stats; once `synced`, they stand even when empty (a correction taken back, a penalty: no resting lie).
+    drive_yards: float | None = None
+    rest_lie: str | None = None
+    synced: bool = False
 
 
 class RecentLines(deque):

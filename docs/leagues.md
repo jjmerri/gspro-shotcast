@@ -15,15 +15,44 @@ to know (a file with just `league_name` and `storylines` is fine too). Fields th
 | `teams[].name`, `teams[].aliases` | Team names, and other spellings to match |
 | `teams[].nickname` | What the booth calls the team, if set |
 | `teams[].players[].name` | The roster (required) |
-| `players[].gspro_name`, `players[].aliases` | Matching the name GSPro shows to a roster player |
+| `players[].gspro_name`, `players[].aliases` | Matching the name GSPro shows to a roster player. Shots are saved under the roster name from then on; rounds already recorded keep the name they were saved under |
 | `players[].nickname` | What the booth calls the player on air (`"Ozzy"` for Mike Osborne: introduced as Mike "Ozzy" Osborne, then Ozzy). Stats, Squabbit and popups keep the roster name |
 | `nicknames` | The same for guests, keyed by their GSPro name (`{"David": "Dave"}`) |
 | `players[].handicap` | 18-hole index, for net scores |
 | `pronunciations` | Respellings for the voice only (`{"Szabo": "Sah-bo"}`); plurals and possessives follow, and the transcript keeps the real spelling. Spell them for the booth's language |
 | `handicap_allowances` | Per-format allowance override (`{"scramble": [0.35, 0.15], ...}`) |
-| `schedule[]` | Per week: `week`, `course`, `format`, `end_date` (deadline), `date` (fallback match), `holes`/`hole_count`/`start_hole`, `tees`, `ctp_holes`, and `gspro_course` when GSPro's course name differs |
-| `ctp_prize`, `week_winner_prize` | Prize amounts the booth can mention |
+| `schedule[]` | Per week: `week`, `course`, `format`, `end_date` (deadline), `date` (fallback match), `holes`/`hole_count`/`start_hole`, `tees`, `ctp_holes`, and `gspro_course` when GSPro's course name differs (see below) |
+| `total_weeks` | "League week 2 of 12" |
+| `ctp_prize` | The closest-to-the-pin prize the booth can mention (`week_winner_prize` and the like are context, as above) |
 | `squabbit_invite`, `players[].squabbit_id` | Only with `squabbit.enabled: true` (live handicaps) |
+
+Context fields (standings, `rank`/`points`, rules, storylines) are read as written, so keep them
+current or leave them out: a stale "week 4" there is what the booth will say.
+
+**A course under another name.** When the league calls a course something other than GSPro does,
+give the week both names: the league's as `course`, GSPro's exactly as its course list shows it as
+`gspro_course`. The booth matches the round to the week by either name and says the league's:
+
+```json
+{"week": 2, "course": "Whistling Straits", "gspro_course": "DPC Lake Michigan", "end_date": "2026-11-30"}
+```
+
+The stats page lists a round under the name it started with: the league's when the booth saw
+GSPro's setup screen, GSPro's when it first picked the round up at the tee. So one course can show
+under both names there.
+
+A minimal league file, one two-player team and one week:
+
+```json
+{
+  "league_name": "Thursday Sim League",
+  "teams": [{"name": "Team 1", "players": [
+    {"name": "Jane Smith", "gspro_name": "JSmith", "handicap": 8.2},
+    {"name": "Bob Jones", "gspro_name": "BobJ", "handicap": 14.0, "nickname": "Jonesy"}]}],
+  "schedule": [{"week": 1, "course": "Whistling Straits", "gspro_course": "DPC Lake Michigan",
+                "format": "best ball", "end_date": "2026-11-30"}]
+}
+```
 
 A night counts as a league round only when the players are one registered team and tonight's
 course matches an open `schedule` entry; otherwise it's practice. Players not on the roster

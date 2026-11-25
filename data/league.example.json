@@ -21,12 +21,7 @@
     "Stimp: 10",
     "Mulligan: Yes"
   ],
-  "week": 4,
   "total_weeks": 12,
-  "tonight": {
-    "course": "Example Links",
-    "matchup": "Divot Diggers vs. Grip It & Rip It"
-  },
   "teams": [
     {
       "name": "Divot Diggers",
@@ -81,7 +76,8 @@
         },
         {
           "name": "Luis",
-          "handicap": 11.7
+          "handicap": 11.7,
+          "nickname": "Lefty"
         }
       ]
     }
@@ -91,6 +87,12 @@
     "Tony has promised to buy the first round if he misses a fairway on the opening hole.",
     "Sarah has not three-putted in three weeks."
   ],
+  "nicknames": {
+    "BobbyJ": "Bobby"
+  },
+  "pronunciations": {
+    "Luis": "loo-EES"
+  },
   "handicap_allowances": {
     "best ball": [
       0.85

@@ -207,6 +207,7 @@ class ResultsMixin:
                 and (rec.hud.lie or "").lower() != kept.lower():
             log.info("Shot %s finished on the %s (the HUD read %s)", shot_id, kept, rec.hud.lie)
             rec.hud = replace(rec.hud, lie=kept)
+            rec.rest_lie = kept
 
     def _apply_late_tiles(self, seq: int) -> float | None:
         """A shot's tiles read at the next setup (GSPro hid them while the ball was followed), once both
@@ -424,7 +425,9 @@ class ResultsMixin:
                 self._gimme_ids[shot_id] = gimme
             log.info("%s conceded putt recorded", tag)
             if not putt:
-                self.store.set_lie_after(shot_id, "green")
+                kept = self.store.set_lie_after(shot_id, "green")
+                if rec is not None:
+                    rec.rest_lie = kept   # (GSPro's round file's lie, where it set one)
                 if rec is not None and rec.hud.lie != "green":
                     rec.hud = replace(rec.hud, lie="green")
         return True
