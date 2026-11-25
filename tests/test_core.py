@@ -2524,6 +2524,10 @@ async def test_gspros_round_file_tells_a_holed_putt_from_one_conceded_inside_the
     putt = dict(_round_entry(2, 8.0, sid="p", end=(5, 300), surfaces=(5, 5), to_pin=0.5), HoleResult=0)
     gimme = dict(putt, ShotID="g", HoleResult=7)
     path.write_text(json.dumps([putt, gimme]))
+    # Written after the watch began, as GSPro's would be: a file's time comes from a coarser clock than
+    # time.time(), so one written a moment after the watch can read as written before it, and the first
+    # read of such a file counts nothing in it as struck since.
+    os.utime(path, (time.time() + 1, time.time() + 1))
     t = await e._file_hole_end("Dan Smith", 8.1, 0.0, 1)
     assert t is not None and not t.in_cup
     made = _round_entry(2, 8.0, sid="p", end=(5, 300), surfaces=(5, 5), to_pin=0.0, holed=True)
