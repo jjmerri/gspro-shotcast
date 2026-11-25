@@ -25,6 +25,8 @@ class FakeStreams:
         self.calls, self.streams, self.uploaded, self.stored, self.lost, self.ended = [], {}, {}, [], [], []
         self.refuse: dict[str, list] = {}    # path suffix -> [(status, body)] given before answering
         self.unreachable = 0                 # requests that get no answer at all
+        self.answer_lost = 0                 # requests done, their answer lost on the way back
+        self.closed: set[str] = set()        # ended by another stream's start (the bay's one open stream)
         self.put_fails = 0
 
     def request(self, method, path, body=None, **kw):
@@ -32,12 +34,23 @@ class FakeStreams:
         if self.unreachable:
             self.unreachable -= 1
             raise cloud.Unreachable("couldn't reach Shotcast Cloud: down")
+        answer = self._answer(path, body)
+        if self.answer_lost:
+            self.answer_lost -= 1
+            raise cloud.Unreachable("couldn't reach Shotcast Cloud: answer lost")
+        return answer
+
+    def _answer(self, path, body):
         for suffix, queue in self.refuse.items():
             if path.endswith(suffix) and queue:
                 return Answer(*queue.pop(0))
         if path == "/api/streams":
+            if body["session"] not in self.streams:   # a new stream ends the bay's other one, as koi does
+                self.closed |= set(self.streams.values()) - set(self.ended)
             sid = self.streams.setdefault(body["session"], f"st-{len(self.streams)}")
             return Answer(200, {"id": sid})
+        if path.split("/")[3] in self.closed and not path.endswith("/end"):
+            return Answer(409, {"error": "stream_ended", "message": "ended", "action": "fix"})
         if path.endswith("/segments"):
             return Answer(200, {"links": [{"seq": s["seq"], "url": f"https://bucket.test/{s['seq']}",
                                            "headers": {"x-amz-checksum-sha256": s["sha256"]}, "expires_in": 300}
@@ -337,15 +350,17 @@ def test_a_segment_the_cloud_keeps_saying_isnt_there_is_given_up(tmp_path):
 def test_whats_up_but_unconfirmed_is_confirmed_before_the_stream_ends(tmp_path):
     api, now = FakeStreams(), [1000.0]
     s = _sink(tmp_path, api, now)
-    api.refuse["/stored"] = [(503, {"message": "busy"})] * 3
+    api.refuse["/stored"] = [(503, {"message": "busy"})] * 4
     _playlist(tmp_path, 0, ["n0.ts", "n1.ts"], ended=True, mtime=now[0])
-    s.step()   # up, but /stored unanswered (in the pass and at the end)
+    s.step()   # up, but /stored unanswered (in the pass and at the end): waits 2, then 4 s
     assert api.ended == [] and s.ending and s.ending[0]["stored"]
-    for _ in range(2):           # still 503 when it's asked again after the stream ended: kept, not dropped
-        now[0] += 5
+    for step in (5, 9):          # still 503 when asked again after the stream ended (waits 8, 16 s): kept
+        asked = len(_asks(api, "/stored"))
+        now[0] += step
         s.step()
+        assert len(_asks(api, "/stored")) == asked + 1
         assert api.ended == [] and s.ending[0]["stored"]
-    now[0] += 10
+    now[0] += 17
     s.step()
     assert api.stored == [0, 1] and api.ended == ["st-0"] and not s.ending
     assert [p.rsplit("/", 1)[1] for p, _ in api.calls][-2:] == ["stored", "end"]
@@ -378,10 +393,11 @@ def test_refused_mid_stream_it_ends_on_the_cloud_and_is_asked_again_later_with_o
 def test_a_resumed_start_on_a_stream_the_cloud_ended_starts_a_fresh_one(tmp_path):
     api, now = FakeStreams(), [1000.0]
     s = _sink(tmp_path, api, now)
-    api.unreachable = 1          # the start's answer lost (the cloud made it)
+    api.answer_lost = 1          # the start's answer lost (the cloud made it)
     _playlist(tmp_path, 0, ["s0.ts"], mtime=now[0])
     s.step()
     first = s.session
+    assert api.streams == {first: "st-0"} and s.stream_id is None
     api.refuse["/api/streams"] = [(409, {"error": "stream_ended", "message": "ended", "action": "fix"})]
     now[0] += 3
     _playlist(tmp_path, 0, ["s0.ts", "s1.ts"], mtime=now[0])
@@ -390,8 +406,9 @@ def test_a_resumed_start_on_a_stream_the_cloud_ended_starts_a_fresh_one(tmp_path
     now[0] += 1
     _playlist(tmp_path, 0, ["s0.ts", "s1.ts"], mtime=now[0])
     s.step()
-    assert s.stream_id is not None and [b["session"] for p, b in api.calls if p == "/api/streams"][-1] == s.session
-    assert api.uploaded
+    starts = [b["session"] for p, b in api.calls if p == "/api/streams"]
+    assert starts == [first, first, s.session] and s.session != first   # resumed once, then a fresh one
+    assert s.stream_id == "st-1" and api.uploaded
 
 
 def test_uploaded_before_a_refusal_is_still_confirmed_before_the_end(tmp_path):
@@ -551,3 +568,90 @@ def test_a_stream_the_cloud_ended_while_the_network_was_down_is_followed_by_a_fr
     _playlist(tmp_path, 0, ["z0.ts", "z1.ts"], mtime=now[0])
     s.step()
     assert s.stream_id == "st-1" and 1 in api.uploaded
+
+
+def test_storage_failing_waits_longer_each_time_and_says_so_once(tmp_path, caplog):
+    caplog.set_level("INFO", logger="commentator.cloud_stream")
+    api, now = FakeStreams(), [1000.0]
+    s = _sink(tmp_path, api, now)
+    api.put_fails = 10**6        # the API answers, storage refuses every PUT
+    for i in range(200):         # 200 seconds of passes, a new segment each
+        _playlist(tmp_path, max(0, i - 4), [f"f{j}.ts" for j in range(max(0, i - 4), i + 1)], mtime=now[0])
+        s.step()
+        now[0] += 1
+    assert len(_asks(api, "/segments")) < 12   # 2, 4, 8, ... 60 s apart, not every 2 s
+    assert sum("not uploaded" in r.message for r in caplog.records if r.levelname == "INFO") == 1
+
+
+def test_a_failing_put_at_the_end_is_waited_for_not_given_up_at_once(tmp_path):
+    api, now = FakeStreams(), [1000.0]
+    s = _sink(tmp_path, api, now)
+    api.put_fails = 1
+    _playlist(tmp_path, 0, ["e0.ts"], ended=True, mtime=now[0])
+    s.step()                     # the PUT fails: waiting, the stream not ended yet
+    assert api.uploaded == {} and api.ended == [] and s.session
+    now[0] += 3
+    s.step()                     # sent after the wait, then ended
+    assert api.uploaded == {0: b"e0.ts"} and api.stored == [0] and api.ended == ["st-0"] and s.session is None
+
+
+def test_a_new_stream_waits_for_the_last_ones_confirmations(tmp_path):
+    api, now = FakeStreams(), [1000.0]
+    s = _sink(tmp_path, api, now)
+    _playlist(tmp_path, 5, ["g5.ts", "g6.ts"], mtime=now[0])
+    api.refuse["/stored"] = [(409, {"error": "not_stored", "message": "not there", "seqs": [5, 6]})] * 3
+    s.step()                     # up, the cloud not seeing them yet
+    now[0] += 1
+    _playlist(tmp_path, 0, ["h0.ts"], mtime=now[0])   # OBS started again
+    s.step()                     # the old stream's confirmations still to come: no new stream yet
+    assert [b["session"] for p, b in api.calls if p == "/api/streams"] == [api.calls[0][1]["session"]]
+    now[0] += 1
+    s.step()                     # confirmed and ended; then the new stream
+    assert api.stored[:2] == [5, 6] and api.ended == ["st-0"]
+    paths = [p for p, _ in api.calls]
+    assert paths.index("/api/streams/st-0/end") < len(paths) - 1 - paths[::-1].index("/api/streams")
+    assert s.stream_id == "st-1" and api.uploaded[0] == b"h0.ts"
+
+
+def test_shutting_down_mid_stream_leaves_live_json_off_whatever_the_cloud_says(tmp_path):
+    api, now = FakeStreams(), [1000.0]
+    status = tmp_path / "live.json"
+    (tmp_path / "obs").mkdir()
+    s = _sink(tmp_path / "obs", api, now, status_file=status)
+    api.refuse["/stored"] = [(503, {"message": "busy"})]
+    _playlist(tmp_path / "obs", 0, ["k0.ts"], mtime=now[0])
+    s.step()
+    assert json.loads(status.read_text())["live"] is True and s.stored
+    def too_old(*a, **k):
+        raise cloud.TooOld("9.9")
+    api.request = too_old        # the shutdown's confirmation and /end refused: this app's too old
+    s._stop.set()
+    s.run(interval=0.01)
+    assert json.loads(status.read_text()) == {"live": False}
+
+
+def test_the_thread_stopping_on_the_pairing_lets_the_session_go(tmp_path):
+    api, now = FakeStreams(), [1000.0]
+    s = _sink(tmp_path, api, now)
+    _playlist(tmp_path, 0, ["m0.ts"], mtime=now[0])
+    s.step()
+    def gone(*a, **k):
+        raise cloud.NotPaired("unpaired")
+    api.request = gone
+    now[0] += 1
+    _playlist(tmp_path, 0, ["m0.ts", "m1.ts"], mtime=now[0])
+    s.run(interval=0.01)         # returns once the client raises
+    assert s.session is None
+
+
+def test_a_playlist_obs_rewrote_after_it_was_read_is_left(tmp_path):
+    import os
+    api, now = FakeStreams(), [1000.0]
+    s = _sink(tmp_path, api, now)
+    _playlist(tmp_path, 0, ["i0.ts"], mtime=now[0])
+    s.step()
+    pl = tmp_path / "stream.m3u8"
+    st = pl.stat()
+    os.utime(pl, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))   # OBS wrote it again since
+    s._end()
+    assert pl.exists() and not (tmp_path / "i0.ts").exists()
