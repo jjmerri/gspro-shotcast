@@ -64,3 +64,45 @@ def test_no_stream_no_chat_a_new_stream_its_own_and_a_failed_read_raises():
     with pytest.raises(RuntimeError):
         chat.since(cursor_at(0))
     assert message_id(1.5, 255) == "0000000001500-0000000000ff"
+
+
+def test_messages_whose_times_run_against_their_order_are_read_once_in_order():
+    cloud = FakeCloud()
+    chat = CloudChat(_stream(cloud))
+    # (two posts at once: the later row stamped a few ms earlier)
+    cloud.messages = [_msg(10, "2026-09-21T19:00:00.020Z", text="B"), _msg(11, "2026-09-21T19:00:00.005Z", text="A")]
+    got = chat.since(cursor_at(0))
+    assert [m.text for m in got] == ["B", "A"] and got[0].id < got[1].id
+    assert chat.since(got[-1].id) == []   # (the booth's cursor past both: neither again)
+
+
+def test_a_messages_age_is_on_the_clouds_clock_and_names_are_tidied():
+    cloud = FakeCloud()
+    get = cloud.request
+
+    def dated(method, path, **kw):
+        r = get(method, path, **kw)
+        r.headers = {"date": "Mon, 21 Sep 2026 19:00:30 GMT"}
+        return r
+    cloud.request = dated
+    cloud.messages = [_msg(1, "2026-09-21T19:00:00Z", name="  Kim\n  Roster " + "x" * 60)]
+    [m] = CloudChat(_stream(cloud)).since(cursor_at(0))
+    assert m.age == 30.0
+    assert m.name == ("Kim Roster " + "x" * 60)[:40]
+
+
+def test_a_paired_booths_chat_model_that_cant_be_built_turns_the_chat_off_not_the_booth(monkeypatch):
+    from commentator import cloud
+    from commentator import __main__ as main
+    from commentator.config import Config
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    cfg = Config()
+    cfg.chat.enabled = True
+    monkeypatch.setattr(cloud, "startup", SimpleNamespace(problem=None, rec={}, bound=()))
+    assert main._chat_llm(cfg) is None and cfg.chat.enabled is False
+    # Unpaired, as before: the owner turned the chat on, and its model is required.
+    cfg.chat.enabled = True
+    monkeypatch.setattr(cloud, "startup", None)
+    with pytest.raises(Exception):
+        main._chat_llm(cfg)
