@@ -4,9 +4,11 @@ The app keeps its own copy for now; the two are kept the same (its parity test).
 
 A shot is a mapping with the app's shots columns (id, player, hole, shot_number, ts, is_putt,
 lie_before, lie_after, to_pin_yards, finish_yards, total_yards, offline_yards, gimme_yards, outcome,
-hazard_x, fmt, picked, mulligan, left_out, shared_ball, tags (JSON text), rest_ts, session_id); missing
-ones take DEFAULTS. `player` is whatever names the player (the app's name; the cloud's slot), and goes
-into a moment's words as it is.
+hazard_x, fmt, picked, mulligan, left_out, shared_ball, tags, rest_ts, session_id); missing ones take
+DEFAULTS, except id, player, hole and ts, and session_id for `talk`. `tags` is JSON text, as the app
+keeps it (a list, as a round body carries it, reads as no tags: dump it first). `id`s are unique.
+`player` is whatever names the player (the app's name; the cloud's slot), and goes into a moment's
+words as it is.
 
 Where a clip ends depends on the stream's timing (when a swing shows, when a line is heard), and a
 reel's length budget is spent on its clips, so the timing (`Timing`; `APP`, the app's measured
@@ -18,6 +20,7 @@ import bisect
 import json
 import re
 from dataclasses import dataclass
+from typing import Literal
 
 from shotcast_scoring import excitement as I
 
@@ -260,7 +263,7 @@ def _bests(shots: list[dict], before: dict[str, dict]) -> tuple[set[int], dict[i
 
 
 def talk(rows: list, shots: list[dict], ts_of: dict | None = None, timing: Timing = APP,
-         unaired: str = "drop") -> tuple:
+         unaired: Literal["drop", "estimate"] = "drop") -> tuple:
     """The booth's lines placed in time, for `pick`'s clips (the app's highlights._talk, from its rows):
     (session -> every line's (started, done, the time of the shot it's about: its call, a reaction or
     flight line, or None); session -> its swings' times; session -> its gimmes' times), in logged time.
