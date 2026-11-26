@@ -28,6 +28,11 @@ Tests: `python -m pytest scoring/tests` (the app's own `pytest` run collects the
   its sides (`team_holes`, `team_net`), with a league's names for the formats (`normalize_format`) and its
   allowances (`allowances`, the defaults when it sets none). The booth's live round and the
   server's stored rounds both score with it.
+- `shotcast_scoring.excitement`, `shotcast_scoring.highlights`: a round's highlight moments, picked
+  as the app's reels pick them (`pick`, `finish`, the booth's lines placed in time by `talk`), with the
+  stream's timing a parameter (`Timing`; `APP`, the app's). The app's `highlights.py` and `interest.py`
+  keep their own copies for now; `tests/test_highlights_parity.py` runs the app's highlights tests
+  against both, so they stay the same.
 - `shotcast_scoring.board`: `Board` (week places, points, standings, flights, the stats page's league
   cards) over a `LeagueView` (the app's `League`, or the plain `LeagueData`).
 
