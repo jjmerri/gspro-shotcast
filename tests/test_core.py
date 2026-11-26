@@ -8004,16 +8004,45 @@ async def test_a_shots_hit_and_rest_go_to_the_live_streams_by_the_pcs_clock(tmp_
     played = []
     engine.live_cloud = SimpleNamespace(shot=lambda: None, played=lambda hit, rest: played.append((hit, rest)))
     hit = time.monotonic() - 9.0
-
-    async def at_rest(*a, **kw):   # GSPro's round file had it at rest 2 s ago
-        return Hud(), True, None, {"file": time.monotonic() - 2.0}
-    monkeypatch.setattr(engine, "_wait_for_file", at_rest)
     engine._capture_impact(ev := ShotEvent(shot=Shot()))
     ev = dataclasses.replace(ev, shot=Shot(ball_speed=120.0, vla=14.0, carry=180.0), impact_at=hit)
+    wall = time.time() - time.monotonic()   # (taken before the call: its run time isn't in the check)
+    rested = []
+
+    async def at_rest(*a, **kw):   # GSPro's round file had it at rest 2 s after it was asked
+        rested.append(time.monotonic() - 2.0)
+        return Hud(), True, None, {"file": rested[-1]}
+    monkeypatch.setattr(engine, "_wait_for_file", at_rest)
     await engine.handle_shot(ev)
     [(at, rest)] = played
-    assert abs(at - (time.time() - 9.0)) < 0.5 and abs(rest - (time.time() - 2.0)) < 0.5
+    assert abs(at - (hit + wall)) < 0.05 and abs(rest - (rested[0] + wall)) < 0.05
     # A replay's shot (its resting read with it, its times not now): neither.
     played.clear()
     await engine.handle_shot(dataclasses.replace(ev, hud_hint=Hud()))
     assert played == [(None, None)]
+
+
+async def test_a_shot_its_round_file_had_no_rest_for_gets_its_rest_from_gspros_log(tmp_path, monkeypatch):
+    # (a putt, or GSPro's classic look: the round file isn't waited on, the log says when it stopped)
+    from types import SimpleNamespace
+    cfg = Config(log_dir=str(tmp_path))
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=ReplaySource("data/flight_test.jsonl"),
+                    live_llm=None, segment_llm=None, speech=None, rng=random.Random(0))
+    played = []
+    engine.live_cloud = SimpleNamespace(played=lambda hit, rest: played.append((hit, rest)))
+    impact = time.monotonic() - 5.0
+    info: dict = {}
+    monkeypatch.setattr(engine.gspro, "fire_info", lambda n: info if n == 7 else {})
+    waiting = asyncio.create_task(engine._live_rest(7, impact, wait=2.0))
+    await asyncio.sleep(0.3)
+    assert played == []                        # (not in the log yet: waited for)
+    info["rest_at"] = time.monotonic() - 1.0
+    wall = time.time() - time.monotonic()
+    await waiting
+    [(hit, rest)] = played
+    assert hit is None and abs(rest - (info["rest_at"] + wall)) < 0.05
+    played.clear()
+    await engine._live_rest(8, impact, wait=0.3)   # never logged: nothing
+    info["rest_at"] = impact - 1.0
+    await engine._live_rest(7, impact, wait=0.3)   # an earlier shot's: nothing
+    assert played == []

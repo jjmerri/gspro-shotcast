@@ -380,7 +380,7 @@ class CloudStream:
             except CloudError as e:
                 log.debug("Live stream: marks not sent (%s); tried again", e)
                 return
-            if r.status_code >= 500:
+            if r.status_code >= 500 or r.status_code in (408, 429):
                 return
             if r.status_code != 200:
                 err, _ = _error(r)
@@ -506,8 +506,8 @@ class CloudStream:
             return
         if not self.halted:
             self._send()
-        if not self.halted and self.stream_id is not None:
-            self._send_marks()
+        if not self.halted and self.stream_id is not None and self.clock() >= self.wait_until:
+            self._send_marks()   # (not while the network's waited for: a hung one isn't timed out twice)
 
     # -- one pass
     def step(self) -> None:
