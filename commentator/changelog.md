@@ -4,6 +4,12 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.168
+
+### Booth
+- A question the booth puts on screen (like whether to update Squabbit) now always goes away once it's answered; one could stay up for good, ignoring clicks, and stop the ON AIR badge.
+- Quitting Shotcast from its tray icon now always closes it; it could stay running with the booth stopped, so starting Shotcast again did nothing.
+
 ## 0.1.167
 
 ### Stats page
