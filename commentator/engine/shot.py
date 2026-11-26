@@ -818,13 +818,16 @@ class ShotMixin:
         self._trail_carry(player, (my_seq, rec, before.elevation_yards, to_yards(before.to_pin), check,
                                    (shared or unnamed, dropped)))
         # Its moments for Shotcast Cloud's stream (a screen cycling between bays switches at a shot's
-        # end): hit at impact, at rest when GSPro's round file had it (a replay's shot: neither, its
-        # time isn't now), on the PC's clock as the stream's segments are.
+        # end): hit at impact, at rest when GSPro's round file had it, else when its log does (a putt,
+        # GSPro's classic look: waited for in the background); a replay's shot: neither, its time isn't
+        # now. On the PC's clock, as the stream's segments are.
         hit = rest = None
         if event.hud_hint is None:
             to_wall = time.time() - time.monotonic()
             hit = impact + to_wall
             rest = file_timing["file"] + to_wall if "file" in file_timing else None   # (set once it's had)
+            if rest is None and fire is not None and self.live_cloud is not None:
+                self._bg(self._live_rest(fire, impact))
         for m in self._live_mirrors():
             m.shot()   # a stream with no shots on it isn't kept
             m.played(hit, rest)

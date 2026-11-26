@@ -72,6 +72,16 @@ class RoundStartMixin:
         if at is not None and at >= impact:
             self.store.set_shot_rest(shot_id, time.time() - (time.monotonic() - at))
 
+    async def _live_rest(self, fire: int, impact: float, wait: float = REST_WAIT_SECONDS) -> None:
+        """When GSPro's log has this shot's ball stop, for Shotcast Cloud's stream marks (a shot whose
+        round file gave no rest: a putt, GSPro's classic look)."""
+        deadline = time.monotonic() + wait
+        while "rest_at" not in self.gspro.fire_info(fire) and time.monotonic() < deadline:
+            await asyncio.sleep(0.25)
+        at = self.gspro.fire_info(fire).get("rest_at")
+        if at is not None and at >= impact and self.live_cloud is not None:
+            self.live_cloud.played(None, time.time() - (time.monotonic() - at))
+
     def _bg(self, coro) -> None:
         """Run a coroutine detached, keeping a reference so it isn't GC'd and swallowing its result."""
         task = asyncio.create_task(coro)

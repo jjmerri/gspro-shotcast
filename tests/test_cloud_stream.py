@@ -707,6 +707,23 @@ def test_marks_unanswered_are_sent_again_and_refused_ones_stop_for_that_stream(t
     _playlist(tmp_path, 5, ["stream5.ts", "stream6.ts", "stream7.ts"], mtime=now[0])
     s.step()
     assert [m["kind"] for m in api.marks] == ["shot", "rest"] and s._marks == []
+    # The network down, or throttled (429): kept, and sent again.
+    s.played(now[0] - 1, None)
+    api.refuse["/marks"] = [(429, {})]
+    now[0] += 1
+    _playlist(tmp_path, 5, ["stream5.ts", "stream6.ts", "stream7.ts"], mtime=now[0])
+    s.step()
+    assert len(s._marks) == 1
+    sent = len(api.calls)
+    api.unreachable = 1   # (the next request: the marks', no segment being new)
+    now[0] += 1
+    _playlist(tmp_path, 5, ["stream5.ts", "stream6.ts", "stream7.ts"], mtime=now[0])
+    s.step()
+    assert len(api.calls) == sent + 1 and len(s._marks) == 1
+    now[0] += 1
+    _playlist(tmp_path, 5, ["stream5.ts", "stream6.ts", "stream7.ts"], mtime=now[0])   # (OBS's next write)
+    s.step()
+    assert len(api.marks) == 3 and s._marks == []
     # A cloud without marks (404), or a stream with all it can hold (409): none more on this stream,
     # and the segments go on.
     api.refuse["/marks"] = [(409, {"error": "too_many_marks", "message": "full", "action": "fix"})]
@@ -718,4 +735,36 @@ def test_marks_unanswered_are_sent_again_and_refused_ones_stop_for_that_stream(t
     now[0] += 1
     _playlist(tmp_path, 5, ["stream5.ts", "stream6.ts", "stream7.ts", "stream8.ts", "stream9.ts"], mtime=now[0])
     s.step()
-    assert len(api.marks) == 2 and len(_asks(api, "/marks")) == 3 and 9 in api.uploaded
+    assert len(api.marks) == 3 and 9 in api.uploaded and s.marks_off == s.stream_id
+    assert [b for p, b in api.calls if p.endswith("/marks")][-1]["marks"][0]["at"].endswith("+00:00")
+
+
+def test_a_cloud_without_marks_takes_none_and_the_segments_go_on(tmp_path):
+    api, now = FakeStreams(), [1764633600.0]
+    s = _sink(tmp_path, api, now)
+    api.refuse["/marks"] = [(404, {"detail": "Not Found"})]
+    s.played(now[0] - 2, now[0] - 1)
+    _playlist(tmp_path, 5, ["stream5.ts"], mtime=now[0])
+    s.step()
+    assert s.marks_off == s.stream_id and api.uploaded == {5: b"stream5.ts"}
+    s.played(now[0], None)
+    now[0] += 1
+    _playlist(tmp_path, 5, ["stream5.ts", "stream6.ts"], mtime=now[0])
+    s.step()
+    assert len(_asks(api, "/marks")) == 1 and 6 in api.uploaded
+
+
+def test_no_marks_are_sent_while_the_network_is_waited_for(tmp_path):
+    api, now = FakeStreams(), [1764633600.0]
+    s = _sink(tmp_path, api, now)
+    _playlist(tmp_path, 5, ["stream5.ts"], mtime=now[0])
+    s.step()
+    s.played(now[0] - 1, None)
+    api.unreachable = 1   # (the segment's ask: a wait starts)
+    now[0] += 1
+    _playlist(tmp_path, 5, ["stream5.ts", "stream6.ts"], mtime=now[0])
+    s.step()
+    assert _asks(api, "/marks") == [] and len(s._marks) == 1
+    now[0] = s.wait_until
+    s.step()
+    assert len(api.marks) == 1
