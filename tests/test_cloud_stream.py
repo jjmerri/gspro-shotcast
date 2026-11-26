@@ -1,6 +1,7 @@
 """The live stream to Shotcast Cloud (cloud_stream.CloudStream) against a fake of the API's stream routes."""
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -28,6 +29,7 @@ class FakeStreams:
         self.answer_lost = 0                 # requests done, their answer lost on the way back
         self.closed: set[str] = set()        # ended by another stream's start (the bay's one open stream)
         self.put_fails = 0
+        self.marks: list[dict] = []
 
     def request(self, method, path, body=None, **kw):
         self.calls.append((path, json.loads(json.dumps(body))))
@@ -62,6 +64,9 @@ class FakeStreams:
         if path.endswith("/end"):
             self.ended.append(path.split("/")[3])
             return Answer(200, {"id": path.split("/")[3]})
+        if path.endswith("/marks"):
+            self.marks += body["marks"]
+            return Answer(200, {"id": path.split("/")[3]})
         raise AssertionError(path)
 
     def put(self, url, headers, data):
@@ -85,12 +90,13 @@ def test_finished_segments_go_up_in_order_with_their_seconds_and_the_stream_ends
     api, now = FakeStreams(), [1000.0]
     s = _sink(tmp_path, api, now)
     _playlist(tmp_path, 5, ["stream5.ts", "stream6.ts"], mtime=now[0])
+    os.utime(tmp_path / "stream5.ts", (1764633606.25, 1764633606.25))   # (OBS's write of it: its end)
     s.step()
     assert api.calls[0] == ("/api/streams", {"session": s.session})
     assert api.uploaded == {5: b"stream5.ts", 6: b"stream6.ts"}   # (OBS lists a segment once it's whole)
     [ask] = _asks(api, "/segments")
     assert ask["segments"][0] == {"seq": 5, "size": 10, "sha256": hashlib.sha256(b"stream5.ts").hexdigest(),
-                                  "seconds": 6.0}
+                                  "seconds": 6.0, "recorded_at": "2025-12-02T00:00:00.250+00:00"}   # (its end less its seconds)
     now[0] += 1
     _playlist(tmp_path, 6, ["stream6.ts", "stream7.ts"], mtime=now[0])   # 5 has left the playlist
     s.step()
@@ -655,3 +661,61 @@ def test_a_playlist_obs_rewrote_after_it_was_read_is_left(tmp_path):
     os.utime(pl, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))   # OBS wrote it again since
     s._end()
     assert pl.exists() and not (tmp_path / "i0.ts").exists()
+
+
+def test_a_pc_clock_out_of_the_apis_range_sends_no_recording_time(tmp_path):
+    api, now = FakeStreams(), [1000.0]
+    s = _sink(tmp_path, api, now)
+    _playlist(tmp_path, 5, ["stream5.ts"], mtime=now[0])
+    os.utime(tmp_path / "stream5.ts", (1000.0, 1000.0))   # (1970)
+    s.step()
+    [ask] = _asks(api, "/segments")
+    assert "recorded_at" not in ask["segments"][0] and api.uploaded == {5: b"stream5.ts"}
+
+
+def test_shots_played_go_as_the_streams_marks_on_the_next_pass(tmp_path):
+    api, now = FakeStreams(), [1764633600.0]
+    s = _sink(tmp_path, api, now)
+    s.played(now[0] - 300, None)        # (long before any stream: dropped, not sent to the next)
+    s.played(now[0] - 9.5, now[0] - 2)  # hit, then at rest
+    s.played(now[0] - 1, None)          # (its rest not known: the hit alone)
+    _playlist(tmp_path, 5, ["stream5.ts"], mtime=now[0])
+    s.step()
+    assert api.marks == [
+        {"kind": "shot", "at": "2025-12-01T23:59:50.500+00:00"},
+        {"kind": "rest", "at": "2025-12-01T23:59:58.000+00:00"},
+        {"kind": "shot", "at": "2025-12-01T23:59:59.000+00:00"},
+    ]
+    now[0] += 1
+    _playlist(tmp_path, 5, ["stream5.ts", "stream6.ts"], mtime=now[0])
+    s.step()
+    assert len(_asks(api, "/marks")) == 1   # (nothing new: nothing asked)
+
+
+def test_marks_unanswered_are_sent_again_and_refused_ones_stop_for_that_stream(tmp_path):
+    api, now = FakeStreams(), [1764633600.0]
+    s = _sink(tmp_path, api, now)
+    _playlist(tmp_path, 5, ["stream5.ts"], mtime=now[0])
+    s.step()
+    api.refuse["/marks"] = [(503, {})]
+    s.played(now[0] - 3, now[0] - 1)
+    now[0] += 1
+    _playlist(tmp_path, 5, ["stream5.ts", "stream6.ts"], mtime=now[0])
+    s.step()
+    assert api.marks == [] and len(s._marks) == 2   # (kept)
+    now[0] += 1
+    _playlist(tmp_path, 5, ["stream5.ts", "stream6.ts", "stream7.ts"], mtime=now[0])
+    s.step()
+    assert [m["kind"] for m in api.marks] == ["shot", "rest"] and s._marks == []
+    # A cloud without marks (404), or a stream with all it can hold (409): none more on this stream,
+    # and the segments go on.
+    api.refuse["/marks"] = [(409, {"error": "too_many_marks", "message": "full", "action": "fix"})]
+    s.played(now[0] - 1, None)
+    now[0] += 1
+    _playlist(tmp_path, 5, ["stream5.ts", "stream6.ts", "stream7.ts", "stream8.ts"], mtime=now[0])
+    s.step()
+    s.played(now[0], None)
+    now[0] += 1
+    _playlist(tmp_path, 5, ["stream5.ts", "stream6.ts", "stream7.ts", "stream8.ts", "stream9.ts"], mtime=now[0])
+    s.step()
+    assert len(api.marks) == 2 and len(_asks(api, "/marks")) == 3 and 9 in api.uploaded

@@ -9,10 +9,15 @@ when it stops changing or ends, a new one when OBS starts its numbering again) a
 
     POST /api/streams {session}               when a stream is first seen (again with the same session
                                               to resume it after a failed answer): its id
-    POST /api/streams/{id}/segments           a finished segment's size, SHA-256 and seconds (from its
-                                              #EXTINF), up to MAX_PER_ASK at a time: an upload link each
+    POST /api/streams/{id}/segments           a finished segment's size, SHA-256, seconds (from its
+                                              #EXTINF) and recorded_at (its file's time less its
+                                              seconds), up to MAX_PER_ASK at a time: an upload link each
     PUT <link>                                exactly those bytes, with the link's headers
     POST /api/streams/{id}/stored {seqs}      those are up ({"lost": [...]} for one given up)
+    POST /api/streams/{id}/marks {marks}      each shot played: "shot" at its impact, "rest" when its
+                                              ball came to rest (played()), by the PC's clock as
+                                              recorded_at is, so a screen cycling between bays
+                                              switches at a shot's end
     POST /api/streams/{id}/end                when it stops; asked again till it's answered
 
 Every segment in the playlist is finished: OBS's HLS muxer lists one only once it's written (its
@@ -57,6 +62,7 @@ import threading
 import time
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +79,17 @@ OFF_S = 600.0                # streaming refused for the account (not in its pla
 END_TRIES_S = 600.0          # how long an unanswered /end is asked again
 MAX_WAIT_S = 60.0            # the longest wait between tries after the network or an unknown answer
 REFUSED = ("not_in_plan", "league_suspended")
+MAX_MARKS_PER_CALL = 16      # the API's
+MARK_KEEP_S = 120.0          # a mark not sent this long after its moment is dropped (no stream took it)
+# The API takes recording times and marks between 2000 and 2100: a PC clock outside that sends none.
+EARLIEST, LATEST = 946684800.0, 4102444800.0
+
+
+def _when(t: float) -> str | None:
+    """A time by this PC's clock (seconds since the epoch) as the API takes it, or None out of range."""
+    if not EARLIEST <= t < LATEST:
+        return None
+    return datetime.fromtimestamp(t, UTC).isoformat(timespec="milliseconds")
 
 
 def _error(r: Any) -> tuple[str | None, dict]:
@@ -131,6 +148,9 @@ class CloudStream:
         self.wait_until = 0.0              # the network or an unknown answer: nothing asked before this
         self._wait = 0.0
         self._noisy = False
+        self._marks: list[tuple[str, float]] = []   # (kind, when) played, not yet sent
+        self._marks_lock = threading.Lock()
+        self.marks_off: str | None = None   # the stream the cloud takes no more marks on
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -140,6 +160,13 @@ class CloudStream:
 
     def shot(self) -> None:
         pass
+
+    def played(self, hit: float | None, rest: float | None) -> None:
+        """A shot played: when it was hit and when its ball came to rest (None: not known), by this
+        PC's clock. Sent as the stream's marks on the next pass. Called from any thread."""
+        with self._marks_lock:
+            self._marks += [(kind, at) for kind, at in (("shot", hit), ("rest", rest)) if at is not None]
+            del self._marks[:-4 * MAX_MARKS_PER_CALL]
 
     def league(self, deadline: str | None) -> None:
         pass
@@ -271,8 +298,12 @@ class CloudStream:
                 self._give_up(seq)
                 continue
             batch.append(data)
-            items.append({"seq": seq, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
-                          "seconds": round(q["seconds"], 3)})
+            item = {"seq": seq, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                    "seconds": round(q["seconds"], 3)}
+            # (OBS writes a segment as it records it: its file's time is its end)
+            if (recorded := _when(q["ns"] / 1e9 - q["seconds"])) is not None:
+                item["recorded_at"] = recorded
+            items.append(item)
         if items:
             try:
                 r = self._post(f"/api/streams/{self.stream_id}/segments", {"segments": items})
@@ -327,6 +358,37 @@ class CloudStream:
         else:   # storage failing: the wait grows, not asked for fresh links every second
             self._tell(fine=False)
             self._trouble(f"segments not uploaded ({failed})")
+
+    def _send_marks(self) -> None:
+        """The shots played since the last pass, as this stream's marks. Unanswered, they're tried
+        again on the next pass, for up to MARK_KEEP_S; refused (a cloud without marks, too many on the
+        stream, the stream gone), dropped: segments matter, marks are a nicety, never a trouble."""
+        from .cloud import CloudError, NotPaired, PairingChanged, TooOld
+
+        sid, now = self.stream_id, self.clock()
+        with self._marks_lock:
+            self._marks = [m for m in self._marks if now - m[1] < MARK_KEEP_S]
+            batch = self._marks[:MAX_MARKS_PER_CALL]
+            if sid == self.marks_off:
+                self._marks, batch = [], []
+        marks = [{"kind": kind, "at": at} for kind, t in batch if (at := _when(t)) is not None]
+        if marks:
+            try:
+                r = self._post(f"/api/streams/{sid}/marks", {"marks": marks})
+            except (NotPaired, PairingChanged, TooOld):
+                raise
+            except CloudError as e:
+                log.debug("Live stream: marks not sent (%s); tried again", e)
+                return
+            if r.status_code >= 500:
+                return
+            if r.status_code != 200:
+                err, _ = _error(r)
+                log.info("Live stream: Shotcast Cloud took no marks (HTTP %s %s); none more on this stream",
+                         r.status_code, err or "")
+                self.marks_off = sid
+        with self._marks_lock:
+            self._marks = [m for m in self._marks if m not in batch]
 
     def _give_up(self, seq: int) -> None:
         self.queued.pop(seq, None)
@@ -444,6 +506,8 @@ class CloudStream:
             return
         if not self.halted:
             self._send()
+        if not self.halted and self.stream_id is not None:
+            self._send_marks()
 
     # -- one pass
     def step(self) -> None:

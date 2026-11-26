@@ -817,8 +817,17 @@ class ShotMixin:
         # Into the trail after its buffered tiles, so a next stroke already in checks it with them.
         self._trail_carry(player, (my_seq, rec, before.elevation_yards, to_yards(before.to_pin), check,
                                    (shared or unnamed, dropped)))
+        # Its moments for Shotcast Cloud's stream (a screen cycling between bays switches at a shot's
+        # end): hit at impact, at rest when GSPro's round file had it (a replay's shot: neither, its
+        # time isn't now), on the PC's clock as the stream's segments are.
+        hit = rest = None
+        if event.hud_hint is None:
+            to_wall = time.time() - time.monotonic()
+            hit = impact + to_wall
+            rest = file_timing["file"] + to_wall if "file" in file_timing else None   # (set once it's had)
         for m in self._live_mirrors():
             m.shot()   # a stream with no shots on it isn't kept
+            m.played(hit, rest)
         # Not gated on the screen seeing touchdown: the finish comes from GSPro's log at the next shot,
         # and a water or OB ball is caught there by its penalty. (Gating on it lost half the finishes.)
         if in_order and not shot.is_putt and not alternate:
