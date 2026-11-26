@@ -857,7 +857,8 @@ def booth_config(cfg: Any, prof: Profile | None) -> Any:
     stats page, publishing, the league page and recaps, S3 backups, the live stream's bucket and the
     recordings kept on the PC, the site table's chat and alerts, Squabbit, bookings and phone pushes.
     The live stream itself (OBS, its folder and when it's on air) is the profile config's own `live`
-    settings: on there, it goes to Shotcast Cloud (cloud_stream), never to a bucket; off by default."""
+    settings: on there, it goes to Shotcast Cloud (cloud_stream), never to a bucket; off by default.
+    With it on, the booth reads and answers the cloud's chat (cloud_chat), at the chat's defaults."""
     if prof is None:
         return cfg
     src = cfg.model_copy(deep=True)
@@ -875,7 +876,8 @@ def booth_config(cfg: Any, prof: Profile | None) -> Any:
         out.live.keep_days, out.live.local_keep_days = 0, 0
     else:
         out.live.enabled, out.live.with_rounds, out.live.launch_obs, out.live.local_keep_days = False, False, False, 0
-    out.chat.enabled, out.chat.table, out.chat.alerts = False, None, False
+    # The chat is the cloud's (its members', on the Live tab), while the stream goes there; no table, no alerts.
+    out.chat.enabled, out.chat.table, out.chat.alerts = bool(src.live.enabled), None, False
     out.squabbit.enabled = out.booking.enabled = False
     out.notify.provider = "none"
     return out

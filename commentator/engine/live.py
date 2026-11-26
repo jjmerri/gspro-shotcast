@@ -73,6 +73,12 @@ class LiveMixin:
                 self.live_cloud = self._cloud_stream(prof)
             except Exception:
                 log.exception("The live stream can't go to Shotcast Cloud")
+            # Its members' chat on the Live tab, which the booth reads and answers as the page's.
+            if self.live_cloud is not None and self.chat is None and self.cfg.chat.enabled:
+                from ..cloud_chat import CloudChat
+
+                self.chat = CloudChat(self.live_cloud)
+                asyncio.get_running_loop().create_task(self._chat_loop(), name="chat")
         try:
             if lv.local_keep_days:
                 # Its own pass over OBS's folder, so the bucket (the internet down, its start-up tidy

@@ -294,6 +294,7 @@ async def test_a_paired_booth_streams_to_shotcast_cloud_and_an_unpaired_one_as_b
     eng._start_live()
     assert started == [eng.live_cloud] and eng.live_cloud in eng._live_mirrors()
     assert eng.live_cloud.folder == tmp_path.__class__(eng.cfg.live.dir)
+    assert eng.chat is None   # (chat off in this config: none read)
 
     monkeypatch.setattr(cloud, "startup", SimpleNamespace(problem="refused", rec={}, bound=()))
     assert not eng._live_on()           # a pairing the cloud no longer accepts: nothing goes
@@ -313,9 +314,12 @@ def test_the_paired_booth_keeps_the_profiles_live_stream_for_the_cloud_and_nothi
         booth = cloud.booth_config(cfg, prof)
         assert booth.live.enabled and booth.live.obs_port == 4460
         assert booth.live.local_keep_days == 0 and booth.live.keep_days == 0 and booth.publish.bucket is None
+        # Its chat is the cloud's: on, with no table and no alerts.
+        assert booth.chat.enabled and booth.chat.table is None and not booth.chat.alerts
         cfg.live.enabled = False
         booth = cloud.booth_config(cfg, prof)
         assert not booth.live.enabled and not booth.live.with_rounds and not booth.live.launch_obs
+        assert not booth.chat.enabled
     finally:
         mp.undo()
 
@@ -768,3 +772,29 @@ def test_no_marks_are_sent_while_the_network_is_waited_for(tmp_path):
     now[0] = s.wait_until
     s.step()
     assert len(api.marks) == 1
+
+
+async def test_a_paired_booth_streaming_to_the_cloud_reads_its_chat(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from commentator.cloud_chat import CloudChat
+    from tests.test_round import _engine as make
+
+    loops = []
+    monkeypatch.setattr(CloudStream, "start", lambda self, *a: None)
+    monkeypatch.setattr("commentator.live_stream.launch_obs", lambda *a: False)
+    eng = make(tmp_path)
+
+    async def chat_loop():
+        loops.append(1)
+    eng._chat_loop = chat_loop
+    eng.cfg.source.type = "connector_log"
+    eng.cfg.live.enabled, eng.cfg.live.launch_obs, eng.cfg.live.local_keep_days = True, False, 0
+    eng.cfg.publish.bucket, eng.cfg.chat.enabled = None, True
+    monkeypatch.setattr(cloud, "startup", SimpleNamespace(
+        problem=None, rec={"api": "https://api.test", "tenant_id": "t", "device_id": "d"}, bound=("https://api.test",)))
+    eng._start_live()
+    assert isinstance(eng.chat, CloudChat) and eng.chat.stream is eng.live_cloud
+    import asyncio
+    await asyncio.sleep(0)
+    assert loops == [1]
