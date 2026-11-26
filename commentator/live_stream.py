@@ -378,6 +378,9 @@ class Mirror:
         end, length = seg
         return end - length + min(offset, length)
 
+    def played(self, hit: float | None, rest: float | None) -> None:
+        """A shot's moments, for Shotcast Cloud's stream (cloud_stream.CloudStream.played): not kept here."""
+
     def shot(self) -> None:
         """A shot was played: the stream it's on is kept (one with no shots, a round that never got
         going, isn't). Called from any thread."""

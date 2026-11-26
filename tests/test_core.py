@@ -7990,3 +7990,30 @@ def test_a_full_shots_concession_after_gspros_round_file_made_it_a_putt_is_store
     e._sync_file_clubs()
     e._record_result(sid, "conceded", "[t]", putt=False, rec=rec)   # the full shot's watch, started before
     assert e.store.db.execute("SELECT outcome FROM shots WHERE id = ?", (sid,)).fetchone()[0] == "conceded"
+
+
+async def test_a_shots_hit_and_rest_go_to_the_live_streams_by_the_pcs_clock(tmp_path, monkeypatch):
+    # (Shotcast Cloud's stream marks them, for screens that cycle between bays at a shot's end)
+    import dataclasses
+    from types import SimpleNamespace
+    from commentator.models import Shot, ShotEvent
+    cfg = Config(log_dir=str(tmp_path))
+    engine = Engine(cfg=cfg, league=League.load("data/league.example.json"), source=ReplaySource("data/flight_test.jsonl"),
+                    live_llm=FakeLLM(cfg.llm.live), segment_llm=None, speech=SpeechQueue(cfg, ConsoleTTS()),
+                    rng=random.Random(0))
+    played = []
+    engine.live_cloud = SimpleNamespace(shot=lambda: None, played=lambda hit, rest: played.append((hit, rest)))
+    hit = time.monotonic() - 9.0
+
+    async def at_rest(*a, **kw):   # GSPro's round file had it at rest 2 s ago
+        return Hud(), True, None, {"file": time.monotonic() - 2.0}
+    monkeypatch.setattr(engine, "_wait_for_file", at_rest)
+    engine._capture_impact(ev := ShotEvent(shot=Shot()))
+    ev = dataclasses.replace(ev, shot=Shot(ball_speed=120.0, vla=14.0, carry=180.0), impact_at=hit)
+    await engine.handle_shot(ev)
+    [(at, rest)] = played
+    assert abs(at - (time.time() - 9.0)) < 0.5 and abs(rest - (time.time() - 2.0)) < 0.5
+    # A replay's shot (its resting read with it, its times not now): neither.
+    played.clear()
+    await engine.handle_shot(dataclasses.replace(ev, hud_hint=Hud()))
+    assert played == [(None, None)]
