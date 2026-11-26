@@ -118,7 +118,7 @@ def _build_live_engine(cfg: Config):
         # Only built when it's its own model and some aside needs it: else it's the closer's client,
         # and an unused model's missing key can't take the booth offline.
         news_llm=build_llm(cfg.llm.news) if cfg.llm.news and cfg.asides_on else None,
-        chat_llm=build_llm(cfg.llm.chat) if cfg.chat.enabled else None,
+        chat_llm=_chat_llm(cfg),
         speech=SpeechQueue(cfg, build_tts(cfg.tts)),
         screen=Screen(cfg.screen) if needs_screen else None,
         await_preshot=cfg.source.type == "replay",
@@ -126,6 +126,24 @@ def _build_live_engine(cfg: Config):
         store=_store(cfg) if cfg.source.type != "replay" else None,
         health=_health(cfg),
     )
+
+
+def _chat_llm(cfg: Config):
+    """The chat's model, when the chat's on. A paired booth's chat (the cloud's, on with its stream,
+    not something its owner turned on) is built only if it can be: a missing key turns the chat off
+    rather than taking the booth's commentary offline. Unpaired, as before."""
+    if not cfg.chat.enabled:
+        return None
+    from . import cloud
+
+    if cloud.startup is None or cloud.startup.problem or cfg.chat.table:
+        return build_llm(cfg.llm.chat)
+    try:
+        return build_llm(cfg.llm.chat)
+    except Exception as e:
+        logging.getLogger("commentator").warning("The live chat is off: its model (llm.chat) can't be set up: %s", e)
+        cfg.chat.enabled = False
+        return None
 
 
 def _store(cfg: Config):

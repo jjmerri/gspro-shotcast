@@ -19,6 +19,18 @@ log = logging.getLogger(__name__)
 PAGE = 50          # the cloud's page of messages
 MAX_PAGES = 10     # read this many at most at a time
 KEEP = 500         # messages remembered (the booth looks back minutes, not hours)
+NAME_MAX = 40      # a name as the booth reads it (the cloud's are the account's roster names)
+
+
+def _server_time(r: Any) -> float | None:
+    """The cloud's clock when it answered (its Date header): a message's age on its own clock, as
+    the table's are on AWS's."""
+    from email.utils import parsedate_to_datetime
+
+    try:
+        return parsedate_to_datetime(r.headers["date"]).timestamp()
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
 
 
 def message_id(at: float, n: int) -> str:
@@ -42,6 +54,7 @@ class CloudChat:
         self.stream = stream
         self._sid: str | None = None
         self._last = 0
+        self._ms = 0   # the newest message's time in its id: never going back, so ids sort as they came
         self._seen: list[ChatMessage] = []
         self._lock = threading.Lock()
 
@@ -55,10 +68,15 @@ class CloudChat:
             if r.status_code != 200:
                 raise RuntimeError(f"Shotcast Cloud's chat answered {r.status_code}")
             rows = (r.json() or {}).get("messages") or []
+            now = _server_time(r)
             for row in rows:
                 try:
                     n, at = int(row["id"]), datetime.fromisoformat(str(row["at"]).replace("Z", "+00:00")).timestamp()
-                    self._seen.append(ChatMessage(message_id(at, n), str(row["name"]), str(row["text"]), at))
+                    # (two posts' times can run against their order by a few ms: the id keeps their order)
+                    self._ms = max(self._ms, int(at * 1000))
+                    name = " ".join(str(row["name"]).split())[:NAME_MAX] or "A member"
+                    age = None if now is None else max(0.0, now - at)
+                    self._seen.append(ChatMessage(message_id(self._ms / 1000, n), name, str(row["text"]), at, age))
                     self._last = max(self._last, n)
                 except (KeyError, TypeError, ValueError):
                     log.debug("Chat: skipped a malformed cloud message %r", row)
@@ -74,7 +92,7 @@ class CloudChat:
             return []
         with self._lock:
             if sid != self._sid:   # (a new stream: its own chat)
-                self._sid, self._last, self._seen = sid, 0, []
+                self._sid, self._last, self._ms, self._seen = sid, 0, 0, []
             self._read(sid)
             return [m for m in self._seen if m.id > after][-limit:]
 
