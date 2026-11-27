@@ -62,6 +62,7 @@ class SquabbitMixin:
                 s["ctp_q"][1].close()
             if s.get("league_q") is not None:
                 s["league_q"].close()
+                self._settle_declines(s, practice=False)
             s["status"] = "off"
             self._sq = s = None
         if not r or r.ended or r.is_tournament or not self._squabbit_live_on():
@@ -184,7 +185,7 @@ class SquabbitMixin:
             s["status"] = "off"
             return
         targets = []
-        declined = False
+        declined = []
         for t, others in found:
             if others:
                 log.info("Squabbit live: %s's week %s card already has entries the booth didn't make (%s); "
@@ -192,7 +193,8 @@ class SquabbitMixin:
             elif live.answer(t) is not False:
                 targets.append(t)
             else:
-                declined = True
+                declined.append(t)
+        s["declined"] = declined
         if s is not self._sq or r.ended or not targets:
             s["status"] = "off"
             if declined and not targets:
@@ -225,12 +227,17 @@ class SquabbitMixin:
         if s is not self._sq or s["status"] != "asking":
             return
         s["question"] = None
-        for t in s["targets"]:
-            self._sq_live.set_answer(t, yes)
+        if yes:
+            for t in s["targets"]:
+                self._sq_live.set_answer(t, yes)
+        else:
+            self._sq_live.decline(s["targets"])
         s["status"] = "on" if yes else "off"
         log.info("Squabbit live: %s", "yes, posting the round as it's played" if yes else "no thanks")
         if not yes:
             self._ask_league(self.round, s)
+            if s.get("league_q") is None:   # no league question to come: the no thanks stands
+                self._settle_declines(s, practice=False)
         if yes:
             r = self.round
             if r is not None and r.id == s["round"] and r.ended:
@@ -264,6 +271,7 @@ class SquabbitMixin:
         if s is not self._sq or s.get("league_q") is None:
             return
         s["league_q"] = None
+        self._settle_declines(s, practice=not yes)
         r = self.round
         if yes or r is None or r.id != s["round"] or r.ended or not r.is_league:
             log.info("Round %s: %s", s["round"], "a league round, the players say" if yes else
@@ -279,6 +287,16 @@ class SquabbitMixin:
         log.info("Round %s: not a league round, the players say: practice from here (%d shots so far "
                  "marked); format %s", r.id, n, FORMAT_NAMES.get(r.format or "", "not set"))
         self._bg(self._restamp_practice_landed(r))
+
+    def _settle_declines(self, s: dict, practice: bool) -> None:
+        """The round's no thanks, settled as league or practice (LiveSync.settle_declines)."""
+        if self._sq_live is None:
+            return
+        try:
+            self._sq_live.settle_declines([*s.get("targets", []), *s.get("declined", [])], practice)
+        except Exception:
+            log.warning("Squabbit live: couldn't save the no thanks as %s",
+                        "practice" if practice else "league", exc_info=True)
 
     def _restamp_practice(self, r: Round) -> int:
         """A round made practice: its shots so far filed under the format it is now (mark_practice).
@@ -475,6 +493,7 @@ class SquabbitMixin:
         if s.get("league_q") is not None:
             s["league_q"].close()
             s["league_q"] = None
+            self._settle_declines(s, practice=False)
             log.info("Round %s ended before anyone said whether it's league; left as league", r.id)
         if s["status"] == "asking":
             if s["question"] is not None:

@@ -85,6 +85,38 @@ class LiveSync:
             self.state["answers"][target.scorecard_id] = yes
             self._save()
 
+    def decline(self, targets: list[Target]) -> None:
+        """No thanks for these cards. A card that had said yes is marked, so settle_declines can give
+        its yes back (across a booth restart too)."""
+        with self._lock:
+            had_yes = self.state.setdefault("declined_yes", [])
+            for t in targets:
+                if self.state["answers"].get(t.scorecard_id) is True and t.scorecard_id not in had_yes:
+                    had_yes.append(t.scorecard_id)
+                self.state["answers"][t.scorecard_id] = False
+            self._save()
+
+    def settle_declines(self, targets: list[Target], practice: bool) -> None:
+        """Whether the round these cards said no thanks in was league. If it was practice, they ask
+        again next time (or go back to the yes they had before it); if league, the no stands. Saved
+        once, so a failed write still leaves them all settled in memory."""
+        with self._lock:
+            answers, had_yes = self.state["answers"], self.state.setdefault("declined_yes", [])
+            changed = False
+            for t in targets:
+                sid = t.scorecard_id
+                if practice and answers.get(sid) is False:
+                    if sid in had_yes:
+                        answers[sid] = True
+                    else:
+                        del answers[sid]
+                    changed = True
+                if sid in had_yes:
+                    had_yes.remove(sid)
+                    changed = True
+            if changed:
+                self._save()
+
     @staticmethod
     def ctp_key(target: Target, seq: int, uid: str, shot: int | None = None) -> str:
         """A mark's answer: per tee shot when it's known (a re-hit after a mulligan is asked again)."""
