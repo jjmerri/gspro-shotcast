@@ -4,6 +4,11 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
+## 0.1.169
+
+### Booth
+- Saying no to Squabbit and then calling the round practice no longer stops the Squabbit question for your real league round: it's asked again when you start it.
+
 ## 0.1.168
 
 ### Booth

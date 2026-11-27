@@ -610,21 +610,90 @@ def test_turning_squabbit_down_asks_if_its_a_league_round_and_no_makes_it_practi
         assert league_of == {before: 1, shot: 0}
         assert fake.commits == []
 
-        # The round started again: Squabbit's no thanks is remembered, so only the league question is up.
+        # The no thanks was for practice, so it's forgotten: the real round started next asks about
+        # Squabbit again (Bethpage 11-27: Paul and Travis's league round after a practice start).
         e._sq = None
         again, _ = _league_round("Best Ball")
         again.league = e.league
         e.round = again
         e._squabbit_kick()
         await until(3)
-        assert asked[2].title == "Is this a league round?" and len(asked) == 3
-        e._squabbit_round_end(again)                  # nobody answered before it ended: the box comes down
-        assert asked[2].closed
-        asked[2].on_answer(False)                     # (a click as it closed) changes nothing
+        assert asked[2].title == "Update Squabbit as you play?" and len(asked) == 3
+        asked[2].on_answer(False)                     # no thanks, and it is league: the no is kept
+        await until(4)
+        asked[3].on_answer(True)
         await asyncio.sleep(0.05)
-        assert again.is_league and again.schedule
+        assert again.is_league
+
+        # Started once more: the no thanks is remembered, so only the league question is up.
+        e._sq = None
+        third, _ = _league_round("Best Ball")
+        third.league = e.league
+        e.round = third
+        e._squabbit_kick()
+        await until(5)
+        assert asked[4].title == "Is this a league round?" and len(asked) == 5
+        e._squabbit_round_end(third)                  # nobody answered before it ended: the box comes down
+        assert asked[4].closed
+        asked[4].on_answer(False)                     # (a click as it closed) changes nothing
+        await asyncio.sleep(0.05)
+        assert third.is_league and third.schedule
+
+        # Only the league question up, and it's practice: that clears the no thanks too.
+        e._sq = None
+        fourth, _ = _league_round("Best Ball")
+        fourth.league = e.league
+        e.round = fourth
+        e._squabbit_kick()
+        await until(6)
+        assert asked[5].title == "Is this a league round?"
+        asked[5].on_answer(False)
+        await asyncio.sleep(0.05)
+        assert not fourth.is_league and e._sq_live.state["answers"] == {}
 
     asyncio.run(go())
+
+
+def test_practice_after_no_thanks_keeps_an_earlier_yes_on_the_other_card(tmp_path):
+    # Two cards asked together: A had said yes before, B never answered. No thanks, then the booth
+    # restarts, then practice: B asks again next time, A goes back to its yes.
+    path = tmp_path / "squabbit_live.json"
+    e = _engine(tmp_path, League(LEAGUE_DATA))
+    e._sq_live = live = LiveSync(path)
+    a, b = _target(scorecard_id="A"), _target(scorecard_id="B", team="Kings")
+    live.set_answer(a, True)
+    e.round = None
+    e._ask_league = lambda r, s: s.update(league_q=SimpleNamespace(close=lambda: None))
+    e._sq = s = {"round": 1, "status": "asking", "targets": [a, b], "question": None, "league_q": None}
+    e._squabbit_answer(s, False)
+    assert live.state["answers"] == {"A": False, "B": False}
+    e._sq_live = LiveSync(path)
+    e._sq = s = {"round": 2, "targets": [], "declined": [a, b], "league_q": object()}
+    e._league_answer(s, False)
+    assert LiveSync(path).state["answers"] == {"A": True}
+
+    # No thanks and it is league: both no's stand, and A's old yes isn't given back by a later practice.
+    e._sq = s = {"round": 3, "status": "asking", "targets": [a, b], "question": None, "league_q": None}
+    e._squabbit_answer(s, False)
+    e._league_answer(s, True)
+    assert LiveSync(path).state["answers"] == {"A": False, "B": False}
+    e._sq = s = {"round": 4, "targets": [], "declined": [a, b], "league_q": object()}
+    e._league_answer(s, False)
+    assert LiveSync(path).state["answers"] == {}
+
+    # The league question still up when the round ends: league, so A's old yes is dropped too.
+    e._sq_live.set_answer(a, True)
+    e._sq = s = {"round": 5, "status": "asking", "targets": [a], "question": None, "league_q": None}
+    e._squabbit_answer(s, False)
+    e._squabbit_round_end(SimpleNamespace(id=5))
+    assert LiveSync(path).state["declined_yes"] == []
+
+    # No league question to come (not a league round): the no thanks stands, with no yes to give back.
+    e._sq_live.set_answer(a, True)
+    del e._ask_league
+    e._sq = s = {"round": 6, "status": "asking", "targets": [a], "question": None, "league_q": None}
+    e._squabbit_answer(s, False)
+    assert LiveSync(path).state["answers"] == {"A": False} and LiveSync(path).state["declined_yes"] == []
 
 
 def test_a_round_set_up_for_18_in_a_league_booking_is_asked_on_the_weeks_first_hole(tmp_path, monkeypatch):
