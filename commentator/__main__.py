@@ -135,6 +135,7 @@ def _chat_llm(cfg: Config):
     if not cfg.chat.enabled:
         return None
     from . import cloud
+    from .llm import build_llm
 
     if cloud.startup is None or cloud.startup.problem or cfg.chat.table:
         return build_llm(cfg.llm.chat)

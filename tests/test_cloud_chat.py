@@ -106,3 +106,8 @@ def test_a_paired_booths_chat_model_that_cant_be_built_turns_the_chat_off_not_th
     monkeypatch.setattr(cloud, "startup", None)
     with pytest.raises(Exception):
         main._chat_llm(cfg)
+    # With its key, it's built, paired or not (0.1.169 named build_llm without importing it: no commentary).
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    assert main._chat_llm(cfg) is not None
+    monkeypatch.setattr(cloud, "startup", SimpleNamespace(problem=None, rec={}, bound=()))
+    assert main._chat_llm(cfg) is not None and cfg.chat.enabled is True
