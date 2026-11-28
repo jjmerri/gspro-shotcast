@@ -1,6 +1,8 @@
 """A round's highlight moments: the parts of the app's highlight reels (commentator/highlights.py) that
 need no database or bucket, shared with Shotcast Cloud so both pick a round's moments the same way.
-The app keeps its own copy for now; the two are kept the same (its parity test).
+The app keeps its own copy of the picking for now; the two are kept the same (its parity test).
+`turn_shot` (the shot a league week's lead turned on, for its recap) has one copy, here: the app
+imports it.
 
 A shot is a mapping with the app's shots columns (id, player, hole, shot_number, ts, is_putt,
 lie_before, lie_after, to_pin_yards, finish_yards, total_yards, offline_yards, gimme_yards, outcome,
