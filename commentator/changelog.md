@@ -4,7 +4,7 @@
 page: each release's heading is the version it ships in, newest first. "Stats page" items show on the
 stats page and in the app; "Booth" items only in the app. Plain words, one line each, for the players. -->
 
-## 0.1.170
+## 0.1.171
 
 ### Booth
 - Commentary is back: 0.1.169's booth started recording only, with no commentary.
