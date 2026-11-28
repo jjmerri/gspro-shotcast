@@ -750,7 +750,7 @@ def test_a_round_goes_with_its_courses_card_as_gspros_files_have_it(tmp_path, ap
     assert sorted(_drain(cl, cfg).sent) == sorted([known, plain, other])
     card = {p[0]: p[2]["course_card"] for p in api.puts}
     assert card[known] == {
-        "folder": "pebble_gsp", "par": {"1": 4, "2": 5}, "index": {"1": 7, "2": 1},
+        "folder": "pebble_gsp", "par": {"1": 4, "2": 5}, "index": {"1": 7, "2": 1}, "lengths": [],
         "tees": [{"name": "Blue", "rating": 72.1, "slope": 131.0, "yards": {"1": 380, "2": 510}},
                  # (a yardage the cloud's format can't hold is left out, not the round)
                  {"name": "Red", "rating": None, "slope": None, "yards": {"1": 300}}]}
@@ -765,6 +765,33 @@ def test_a_round_goes_with_its_courses_card_as_gspros_files_have_it(tmp_path, ap
     assert _drain(cl, cfg).sent == [long]
     tees = api.puts[-1][2]["course_card"]["tees"]
     assert len(tees) == 32 and all(len(t["name"]) == 50 for t in tees)
+
+
+def test_a_round_goes_with_each_tee_boxs_course_length_from_gspros_course_file(tmp_path, api):
+    """Each tee box's whole-course length and its holes, as the course file (GKD) gives them
+    (tee_lengths): what the cloud's round page shows beside the tee played, as this PC's stats page
+    does. Only what the cloud's format holds goes: not the row saying a file had none, nor a length
+    or hole count out of its bounds; and a course with lengths but no rated tee still has a card."""
+    from commentator.course_card import CourseCard
+
+    cfg, s, cl = _booth(tmp_path, api)
+    s.record_course_tees("Pebble", CourseCard(
+        name="Pebble Beach", par={1: 4, 2: 5}, index={1: 7, 2: 1}, ratings={"Blue": (72.1, 131.0)},
+        lengths={"Blue": (6115, 18), "Par3": (1210, 9), "x" * 60: (6000, 18), "Huge": (200_000, 18), "None": (0, 18)}))
+    known = _round(s, 1)
+    assert _drain(cl, cfg).sent == [known]
+    card = api.puts[-1][2]["course_card"]
+    assert card["lengths"] == [{"tee": "Blue", "yards": 6115, "holes": 18}, {"tee": "Par3", "yards": 1210, "holes": 9},
+                               {"tee": "x" * 50, "yards": 6000, "holes": 18}]
+    assert card["tees"] == [{"name": "Blue", "rating": 72.1, "slope": 131.0, "yards": {}}]
+    # Lengths alone: a card of them, with no par, index or tees.
+    s.record_course_tees("Spyglass", CourseCard(name="Spyglass", par={}, index={}, lengths={"Red": (5200, 18)}))
+    other = s.begin_round("r9", course="Spyglass", players={"Ann": None})
+    _hit(s, "Ann", 500)
+    s.end_round(other, complete=True)
+    assert _drain(cl, cfg).sent == [other]
+    assert api.puts[-1][2]["course_card"] == {"folder": None, "par": None, "index": None, "tees": [],
+                                              "lengths": [{"tee": "Red", "yards": 5200, "holes": 18}]}
 
 
 def test_a_round_goes_with_each_holes_layout_as_its_replay_is_drawn(tmp_path, api):

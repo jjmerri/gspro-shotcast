@@ -250,6 +250,7 @@ def _without(row: dict[str, Any], *keys: str) -> dict[str, Any]:
 MAX_POINTS = 5_000
 MAX_TAGS = 50
 MAX_TEES, MAX_TEE_NAME = 32, 50      # a course card's tees, and a tee's name
+MAX_COURSE_YARDS, MAX_COURSE_HOLES = 100_000, 200   # a tee box's whole-course length, and its holes
 MAX_TEXT = 4_000                   # a line's text (longer is cut: the scores must still go)
 MAX_BODY = 4 * 1024 * 1024         # compressed
 MAX_INFLATED = 32 * 1024 * 1024    # as JSON
@@ -312,18 +313,26 @@ def _sides(slots: list[dict[str, Any]]) -> tuple[list[str], dict[str, str]]:
     return keys, {group: k for group, k in key.items() if isinstance(group, str)}
 
 
-def _course_card(tees: list[dict[str, Any]], folder: str | None) -> dict[str, Any] | None:
+def _course_card(tees: list[dict[str, Any]], folder: str | None,
+                 lengths: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
     """The course's own card as GSPro's course files have it (kept in course_tees as each course is
     loaded): par and stroke index by hole, each tee's rating, slope and yards by hole. A league's results in the
     cloud put a player's strokes on the holes by it. `folder`: GSPro's folder for the course when
     its round file named it (the round was surely played from it); None when the card was found by
-    the course's name alone. None for a course with no card."""
-    if not tees:
+    the course's name alone. `lengths`: the course's tee_lengths rows, each tee box's whole-course
+    length from its course file (GKD), which the round page shows beside the tee played, as this
+    PC's stats page does. None for a course with no card and no lengths."""
+    # (a box's length as the cloud's format holds it; '' is the row saying the file had none)
+    boxes = [{"tee": str(t["tee"])[:MAX_TEE_NAME], "yards": t["yards"], "holes": t["holes"]} for t in lengths or []
+             if t["tee"] and all(isinstance(t[k], int) and not isinstance(t[k], bool) for k in ("yards", "holes"))
+             and 0 < t["yards"] <= MAX_COURSE_YARDS and 0 < t["holes"] <= MAX_COURSE_HOLES][:MAX_TEES]
+    if not tees and not boxes:
         return None
-    first = tees[0]   # (par and index are the course's: the same on every tee's row)
+    first = tees[0] if tees else {"par": None, "hole_index": None}   # (par and index: the same on every tee's row)
     return {
         "folder": folder,
         "par": _holes(first["par"]), "index": _holes(first["hole_index"]),
+        "lengths": boxes,
         # (As many, and names as long, as the cloud's format takes: a course file's odd tee mustn't
         # cost the round its upload.)
         "tees": [{"name": str(t["tee"])[:MAX_TEE_NAME], "rating": t["rating"], "slope": t["slope"],
@@ -365,6 +374,8 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
         codes = {r["slot_id"]: r["code"] for r in
                  db.execute("SELECT slot_id, code FROM cloud_claim_codes WHERE uuid = ?", (uuid,))}
         tees = _rows(db, "SELECT * FROM course_tees WHERE course = ? COLLATE NOCASE ORDER BY tee", rec["course"])
+        lengths = _rows(db, "SELECT tee, yards, holes FROM tee_lengths WHERE course = ? COLLATE NOCASE ORDER BY tee",
+                        rec["course"])
         folder = db.execute("SELECT folder FROM round_folders WHERE record_uuid = ?", (uuid,)).fetchone()
         layouts = _rows(db, "SELECT * FROM hole_layouts WHERE course IN (SELECT DISTINCT course FROM shots"
                             " WHERE record_uuid = ?) COLLATE NOCASE ORDER BY id", uuid)
@@ -411,7 +422,7 @@ def body(db: sqlite3.Connection, uuid: str) -> tuple[dict[str, Any], int] | None
                             else {}) for w in weeks],
         "edit": {"excluded": any(c["excluded"] for c in cards), "mark": mark,
                  "left_out": [s["uid"] for s in shots if s["left_out"]]},
-        "course_card": _course_card(tees, folder["folder"] if folder else None),
+        "course_card": _course_card(tees, folder["folder"] if folder else None, lengths),
         "hole_layouts": _hole_layouts(layouts, shots, until),
     }, rec["gen"]
 
