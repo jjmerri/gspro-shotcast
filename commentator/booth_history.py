@@ -27,8 +27,9 @@ _TODAY = "session_id IN (SELECT id FROM main.sessions WHERE date = (SELECT date 
 
 
 @cache
-def _sql() -> tuple[str, str]:
-    """The reads: a player's rows with what each read checks of them, and every drive."""
+def _sql(table: str = "main.shots") -> tuple[str, str]:
+    """The reads: a player's rows (in `table`: a paired booth's past is a view, History.past_shots)
+    with what each read checks of them, and every drive."""
     from .store import _DRIVE as DRIVE, DRIVE_SQL, UNKNOWN_CLUB_DRIVE_SQL
     rows = f"""SELECT id, session_id, ts, course, hole, club, to_pin_yards, finish_yards, total_yards, start_direction,
     CASE WHEN is_league = 1 THEN 'league' WHEN is_league = 0 THEN 'practice' ELSE '' END,
@@ -47,7 +48,7 @@ def _sql() -> tuple[str, str]:
         AND lie_before IN ('tee', 'fairway'),
     is_putt = 0 AND start_direction IS NOT NULL,
     club IS NOT NULL AND club NOT IN ('PT')
-FROM main.shots WHERE player = ? AND {_OK} AND """
+FROM {table} WHERE player = ? AND {_OK} AND """
     drives = f"""SELECT id, player, {DRIVE},
     CASE WHEN is_league = 1 THEN 'league' WHEN is_league = 0 THEN 'practice' ELSE '' END
 FROM main.shots WHERE {DRIVE_SQL} AND player IS NOT NULL AND player != 'unknown' AND {_OK} AND NOT """ + _TODAY
@@ -222,6 +223,11 @@ class History:
         self.db = db
         self.session = session
         db.executescript(_TRIGGERS)
+        # Where a player's nights before today are read: the season file's shots, or a paired booth's
+        # view of them and its history file's (Store.attach_history), whose changes (a new answer from
+        # the cloud, written by another connection) its data_version tells.
+        self.past_shots = "main.shots"
+        self.attached: str | None = None
         self.stamp: tuple | None = None
         self.past: dict[str, Rows] = {}
         self.drives: dict[str, tuple] | None = None
@@ -233,6 +239,8 @@ class History:
         last, past, shots = self.db.execute(
             "SELECT (SELECT MAX(id) FROM main.sessions), past, shots FROM temp.booth_history_writes").fetchone()
         stamp = (self.db.execute("PRAGMA data_version").fetchone()[0], past, sid)
+        if self.attached:
+            stamp += (self.db.execute(f"PRAGMA {self.attached}.data_version").fetchone()[0],)
         if sid is None or sid != last:   # (the triggers take the newest session's day as today)
             stamp += (shots,)
         if stamp != self.stamp:
@@ -242,7 +250,7 @@ class History:
     def _parts(self, player: str, today: bool = True) -> list[Rows]:
         sid = self._fresh()
         if player not in self.past:
-            self.past[player] = Rows(self.db.execute(_sql()[0] + "NOT " + _TODAY, (player, sid)))
+            self.past[player] = Rows(self.db.execute(_sql(self.past_shots)[0] + "NOT " + _TODAY, (player, sid)))
         if not today:
             return [self.past[player]]
         stamp = tuple(self.db.execute("SELECT shots FROM temp.booth_history_writes").fetchone())

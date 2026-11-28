@@ -597,6 +597,7 @@ class RoundStartMixin:
         names = [n for n in [raw or first] + [o.name for o in hud.others] if n]
         course = self._tee_course(hud)
         names, slots = self._with_setup_players(names, course)
+        self._ask_history(names, now=True)   # (paired: a name the setup screen didn't have)
         await self._bookings_ready()
         entry, practice = self._classify_round(names, course)
         is_league = practice is None
@@ -668,6 +669,7 @@ class RoundStartMixin:
             log.info("An opener already aired over the load for %s; the tee read %s (a subset) - not "
                      "airing a second", sorted(aired_players), sorted(tee_players))
             return
+        await self._history_ready(names)
         user, facts_text = self._opener_io(r, first)
         await self._speak("opener", self.opener_llm, user, facts_text, [], mode="round",
                           max_words=self.cfg.commentary.opener_max_words)
@@ -679,6 +681,7 @@ class RoundStartMixin:
         names = [n for n in [raw or self.league.match_player(hud.player_text)] + [o.name for o in hud.others] if n]
         course = self._tee_course(hud)
         names, slots = self._with_setup_players(names, course)
+        self._ask_history(names, now=True)
         await self._bookings_ready()
         entry, practice = self._classify_round(names, course)
         is_league = practice is None

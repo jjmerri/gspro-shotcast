@@ -92,6 +92,16 @@ class Store(ShotsMixin,
         ).lastrowid
         self.db.commit()
 
+    def attach_history(self, path: str) -> None:
+        """A paired booth's history from Shotcast Cloud (cloud_history): its file attached, and the booth's
+        past (the side's and player's earlier rounds, booth_history's nights before today) read through
+        views of it and of this file's own rows. Never called self-hosted: every read is this file's."""
+        from .. import cloud_history
+
+        views = cloud_history.attach(self.db, path)
+        self.past_rounds, self.past_player_rounds = views["rounds"], views["player_rounds"]
+        self.history.past_shots, self.history.attached = views["shots"], cloud_history.SCHEMA
+
     def begin_round(self, uuid: str, *, course: str | None, players: dict[str, str | None],
                     seats: list[str] | None = None, since_id: int | None = None) -> str:
         """A round starting: its record (see round_record.Live.begin). Returns its UUID: a round a

@@ -123,12 +123,42 @@ class CourseMixin:
 
     def _set_own_handicaps(self, compute: Callable[..., dict], *args: Any) -> None:
         try:
-            self.league.own_indexes = compute(*args)
+            self.league.own_indexes = compute(*args) | self._cloud_indexes
         except Exception as e:
             log.warning("Own handicap indexes failed (%s)", e)
             return
         if self.league.own_indexes:
             log.info("Own handicap indexes: %s", ", ".join(f"{p} {i}" for p, i in sorted(self.league.own_indexes.items())))
+
+    def _start_cloud_history(self) -> None:
+        """Paired with Shotcast Cloud: the players' histories from the cloud (cloud_history), read with
+        the season file's own rows. Self-hosted, nothing. If the history file can't be opened the booth
+        goes on with the season file alone."""
+        from .. import cloud_history
+
+        try:
+            self._history_asks = cloud_history.start(self.cfg, self.store, self._cloud_index)
+        except Exception as e:
+            log.warning("Shotcast Cloud: the players' histories can't be used (%s); the booth goes on "
+                        "with this PC's rounds", e)
+
+    def _cloud_index(self, player: str, index: float | None) -> None:
+        """A player's handicap index from their history's answer: the cloud's, from every round of theirs
+        it counts (the history file has no course layouts to work one out from), over our own."""
+        if index is None:
+            self._cloud_indexes.pop(player, None)
+            return
+        self._cloud_indexes[player] = self.league.own_indexes[player] = float(index)
+
+    def _ask_history(self, names: list[str], now: bool = False) -> None:
+        """Paired: ask the cloud for these players' histories (cloud_history.Asks.want)."""
+        if self._history_asks is not None:
+            self._history_asks.want([self.league.match_player(n) or n.strip() for n in names if n], now=now)
+
+    async def _history_ready(self, names: list[str]) -> None:
+        """Paired: wait, a moment at most, for these players' histories to be in (Asks.ready)."""
+        if self._history_asks is not None:
+            await self._history_asks.ready([self.league.match_player(n) or n.strip() for n in names if n])
 
     def _round_players(self, names: list[str]) -> list[str]:
         """Roster players in this round: every player on a team that has a GSPro name here.

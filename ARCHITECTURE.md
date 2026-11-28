@@ -149,6 +149,11 @@ sources/  ─►  engine/    ─►  facts.py  ─►  prompts.py ─► LLM ─
   - `repairs.py` repairs to rows an older version or a missed read left wrong, and finishes filled later
   - `memory.py` what the booth remembers saying: form mentions, asides, news and predictions
   - `rounds.py` rounds, week results, and each player's and team's season
+
+  Paired with Shotcast Cloud, the booth also attaches a history file (`history.db`, beside the season
+  file; `cloud_history.py`) holding what the cloud answered for each player set up, and the reads of
+  a player's or side's earlier rounds (`rounds.py`'s, `booth_history.py`'s nights before today) go
+  through temp views of both files (`Store.attach_history`). Self-hosted, nothing is attached.
 - **`stats_web.py`** / **`stats_web.html`** / **`season_analytics.py`** the `stats-web` viewer: a
   localhost-only server that opens `season.db` read-only (its own connection;
   `Store` would insert a session row) and a single-page UI. `season_analytics.py` holds the
