@@ -101,7 +101,8 @@ sources/  ─►  engine/    ─►  facts.py  ─►  prompts.py ─► LLM ─
   setup when the distance is in feet; bounded by `putt_read.timeout_seconds`. The HUD's measured
   rise or fall (from 3 inches, spoken in inches and feet) replaces the grid's uphill/downhill.
 - **`grounding.py`** the checker. Rejects any line whose numbers are not in the facts, that
-  claims where an airborne ball lands, or that names a course feature without a screenshot.
+  claims where an airborne ball lands, or that names a course feature without a screenshot. Its
+  checks of a line against its facts are `shotcast_scoring.grounding`'s (shared with Shotcast Cloud).
 - **`interest.py`** scores how notable a shot is and whether to comment at all.
 
 ### Shot and game state
@@ -213,7 +214,9 @@ sources/  ─►  engine/    ─►  facts.py  ─►  prompts.py ─► LLM ─
   Shotcast Cloud, which installs it from a tag (`...#subdirectory=scoring`). Plain data in and out:
   no I/O, no app imports, no third-party dependencies. `round` there puts one round together (a side's
   strokes, the holes they fall on, a team's net per hole): `commentator/round.py` scores its live round
-  with it. The app ships it in its own install
+  with it. `recap` there is the league week's recap with no bucket or model (its facts, the week as
+  one tournament, the clips, the request for the lines): `commentator/recap.py` imports it. The app
+  ships it in its own install
   (pyproject.toml's package discovery). A rule change needs a version bump and a tag; see
   `scoring/README.md`.
 - **`news.py`** fetches real golf headlines (RSS/Atom) for between-shots banter, because the

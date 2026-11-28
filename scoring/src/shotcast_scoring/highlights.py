@@ -1,6 +1,8 @@
 """A round's highlight moments: the parts of the app's highlight reels (commentator/highlights.py) that
 need no database or bucket, shared with Shotcast Cloud so both pick a round's moments the same way.
-The app keeps its own copy for now; the two are kept the same (its parity test).
+The app keeps its own copy of the picking for now; the two are kept the same (its parity test).
+`turn_shot` (the shot a league week's lead turned on, for its recap) has one copy, here: the app
+imports it.
 
 A shot is a mapping with the app's shots columns (id, player, hole, shot_number, ts, is_putt,
 lie_before, lie_after, to_pin_yards, finish_yards, total_yards, offline_yards, gimme_yards, outcome,
@@ -480,6 +482,72 @@ def finish(shots: list[dict], talk: tuple | None = None, timing: Timing = APP) -
         what = f"{s['player']} rolls it up for a gimme on {number}{end}"
     return {"shot": s, "level": OK_LEVEL, "what": what, "bad": False, "hole": number,
             **_post(POST_PUTT if s["is_putt"] else POST_SHOT, s, s, talk, timing)}
+
+
+LONG_PUTT_FEET = 10.0     # a putt holed from this far is worth showing where a lead turned (a tap-in isn't)
+TURN_POST = 20.0          # seconds of stream after a turn's shot, for the booth to catch up over
+
+
+def turn_shot(shots: list[dict], hole: int, want: str, timing: Timing = APP) -> dict | None:
+    """A team's shot on `hole` that a league week's lead turned on, for its recap (`shots`: its round's,
+    in order, only its players'): `miss`, the one that cost it (a penalty, else the last putt missed,
+    else the last shot short of holing; any player's, as every one's might have counted); `made`, the
+    longest putt holed or a hole-out (None for a tap-in, so a teammate's after doesn't hide it); `setup`,
+    a full shot its player then one-putted, the closest (None unless inside OK_GREEN_FEET). Shaped as
+    a reel's moments (the app's rounds()), its window from TURN_POST: a recap cuts it on its own."""
+    shots = [{**DEFAULTS, **s} for s in shots]
+    on = [s for s in shots if not s["mulligan"] and not s["left_out"] and s["player"] and s["player"] != "unknown"
+          and _hole(s["hole"]) == hole]
+    struck = [s for s in on if s["outcome"] != "gimme" and s["picked"] != 0]   # (not a scramble ball left)
+    if not struck:
+        return None
+    where = f" on {hole}"
+    shot, level, bad = None, 6, False
+    if want == "miss":
+        wet = {i for h in _holes(on) for i in _penalties(h)}
+        misses = [s for s in struck if s["outcome"] != "holed"]
+        putts = [s for s in misses if s["is_putt"]]
+        if pen := [s for s in misses if s["id"] in wet]:
+            shot, level, what = pen[-1], 7, f"{pen[-1]['player']} finds a penalty area{where}"
+        elif putts:
+            shot = putts[-1]
+            what = f"{shot['player']} misses from {max(1, round((shot['to_pin_yards'] or 0) * 3))} ft{where}"
+        elif misses:
+            shot = misses[-1]
+            start, left = shot["to_pin_yards"], shot["finish_yards"]
+            what = (f"{shot['player']} sprays one {round(abs(shot['offline_yards']))} yd off line{where}"
+                    if (shot["offline_yards"] is not None and abs(shot["offline_yards"]) >= OFFLINE_MISS_YARDS) else
+                    f"{shot['player']} leaves it {round(left * 3)} ft away from {round(start)} yd{where}" if start and left
+                    else f"{shot['player']}'s shot{where}")
+        bad = True
+    elif want == "made":
+        holed = sorted((s for s in struck if s["outcome"] == "holed"),   # a hole-out, else the longest putt, last
+                       key=lambda s: (not s["is_putt"], (s["to_pin_yards"] or 0) if s["is_putt"] else 0))
+        if holed and holed[-1]["is_putt"] and (holed[-1]["to_pin_yards"] or 0) * 3 >= LONG_PUTT_FEET:
+            shot, level = holed[-1], 7
+            what = f"{shot['player']} holes a {round(shot['to_pin_yards'] * 3)} ft putt{where}"
+        elif holed and not holed[-1]["is_putt"]:
+            shot, level = holed[-1], 9
+            what = (f"Hole in one! {shot['player']}{where}" if shot["shot_number"] == 1 else
+                    f"{shot['player']} holes out from {round(shot['to_pin_yards'] or 0)} yd{where}")
+    elif want == "setup":
+        # A full shot its player's next stroke holed (or was given): what left the birdie putt.
+        team_ball = (on[0]["fmt"] or "") in NOT_PUTT_COUNTED or bool(on[0]["shared_ball"])
+
+        def one_putt(a: dict) -> bool:
+            after = [b for b in on if b["shot_number"] == (a["shot_number"] or 0) + 1 and b["picked"] != 0
+                     and (team_ball or b["player"] == a["player"])]
+            return any(b["outcome"] in ("holed", "gimme") for b in after)
+        full = [s for s in struck if not s["is_putt"] and s["finish_yards"] is not None and one_putt(s)]
+        close = min(full, key=lambda s: s["finish_yards"]) if full else None
+        if close is not None and close["finish_yards"] * 3 <= OK_GREEN_FEET:
+            shot = close
+            what = f"{shot['player']} hits it to {max(1, round(shot['finish_yards'] * 3))} ft"
+            what += f" from {round(shot['to_pin_yards'])} yd{where}" if shot["to_pin_yards"] else where
+    if shot is None:
+        return None
+    return {"id": shot["id"], "ts": shot["ts"], "player": shot["player"], "hole": hole, "what": what, "bad": bad,
+            "level": level, **_post(TURN_POST, shot, shot, None, timing)}
 
 
 def entry(m: dict) -> dict:

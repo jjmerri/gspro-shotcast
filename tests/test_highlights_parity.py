@@ -97,3 +97,8 @@ def test_the_shared_talk_places_lines_as_the_apps_does_at_every_window():
     db.executemany("INSERT INTO lines (session_id, shot_id, ts, kind, text, aired_at, aired_seconds) VALUES (?,?,?,?,?,?,?)", lines)
     rows = db.execute("SELECT session_id, shot_id, ts, kind, text, aired_at, aired_seconds FROM lines ORDER BY ts, id").fetchall()
     assert S.talk(rows, shots) == H._talk(db, shots)
+
+
+def test_the_shared_timings_swing_is_the_apps_streams():
+    from commentator.live_stream import SHOT_SHOWS
+    assert S.Timing().shot_shows == S.APP.shot_shows == SHOT_SHOWS   # (turn_shot and finish time a clip by it)

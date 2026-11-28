@@ -1,7 +1,8 @@
 # shotcast-scoring
 
 The league scoring rules Shotcast uses: handicap strokes per side and per hole, a team's net to par
-hole by hole under its format, and a league's week places, points, flights and season standings.
+hole by hole under its format, and a league's week places, points, flights and season standings;
+hole replays, highlight moments, and a league week's recap.
 
 It's shared: the Shotcast app (this repo's `commentator`) and the Shotcast Cloud server both score
 with it, so there's one copy of the rules. The app ships it inside its own install (pyproject.toml's
@@ -33,6 +34,14 @@ Tests: `python -m pytest scoring/tests` (the app's own `pytest` run collects the
   stream's timing a parameter (`Timing`; `APP`, the app's). The app's `highlights.py` and `interest.py`
   keep their own copies for now; `tests/test_highlights_parity.py` runs the app's highlights tests
   against both, so they stay the same.
+- `shotcast_scoring.recap`: a league week's recap, as the app's recap tells it: the week's facts off a
+  `Board` (`week_facts`), the week as one tournament hole by hole (`race`, `standing`, `board`), the
+  clips it plays (`choose`), the shots its lead turned on (`turn_moments`, with
+  `shotcast_scoring.highlights.turn_shot`), and the request for the booth's lines and their reading
+  (`prompt`, `schema`, `script`). `shotcast_scoring.grounding`: the checks a line is held to against
+  its facts (`check_line`, `meta_talk`, `bare_acknowledgement`). The app imports both (its
+  `recap.py` and `grounding.py` keep only what needs a bucket, a database or the live booth), so
+  there's one copy.
 - `shotcast_scoring.board`: `Board` (week places, points, standings, flights, the stats page's league
   cards) over a `LeagueView` (the app's `League`, or the plain `LeagueData`).
 
