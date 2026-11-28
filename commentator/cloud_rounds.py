@@ -18,11 +18,14 @@ had these bytes' content already) or `round_final` (409: it has the round as it 
 Anything else is tried again, each time after a longer wait (an hour at most): a proxy's page or a
 server error ends that look at the queue; the API's own refusal of one round (too big, not a round
 body, another bay's) is kept as the round's error and shown (`cloud status`), and the rounds after
-it go meanwhile. Nothing is deleted here: the rounds stay on this PC.
+it go meanwhile. Nothing is deleted here: a sent round's rows stay on this PC till a later day's
+booth start, when cloud_history.forget drops them (its record and its row here stay, so it's never
+thought unsent).
 
 Only rounds go up. A practice stretch (what the booth stored outside any round: shots on a course
 with no round on, and what it said) stays on this PC: it is never sent, never counted as waiting, and
-never holds up an unpair. (The booth can still move a stretch's rows into the round that follows, so
+never holds up an unpair. (Its shots are dropped once it's cloud_history.PRACTICE_DAYS old: the cloud
+never has them.) (The booth can still move a stretch's rows into the round that follows, so
 a stretch isn't settled the way a round is; range sessions may be sent one day, as their own thing.)
 
 The queue (cloud_uploads) is kept in the profile's season.db, made the first time it's used.

@@ -15,7 +15,7 @@ from datetime import date, timedelta
 import httpx
 import pytest
 
-from commentator import cloud, cloud_history
+from commentator import cloud, cloud_history, cloud_rounds
 from commentator.store import Store
 from tests.test_cloud import FakeAPI, mock_http, paired_cfg
 
@@ -737,3 +737,244 @@ async def test_8_a_call_with_no_answer_in_its_time_is_given_up(tmp_path, monkeyp
     calls.go.set()
     assert not asks.calls and "Ann" not in asks.answered
     assert any("no answer in" in r.getMessage() for r in caplog.records)
+
+
+# ---- step 3: the season file stops keeping what the cloud gives back -------------------------------------
+
+def _paired(tmp_path, monkeypatch):
+    """A paired booth's config, its profile (as Shotcast started in it) and the fake cloud."""
+    api = FakeAPI()
+    mock_http(monkeypatch, api)
+    cfg = paired_cfg(tmp_path, api)
+    prof = cloud.locate()
+    monkeypatch.setattr(cloud, "startup", prof)
+    return cfg, prof, api
+
+
+def _session(db, day):
+    return db.execute("INSERT INTO sessions (started_at, date) VALUES (?, ?)",
+                      (time.mktime(date.fromisoformat(day).timetuple()), day)).lastrowid
+
+
+def _record(db, uuid, kind, session, state="finished", revision=None, error=None):
+    db.execute("INSERT INTO round_records (uuid, kind, session_id, course, started_at, ended_at, state, assigned)"
+               " VALUES (?, ?, ?, 'c1', 1.0, 2.0, ?, 'live')", (uuid, kind, session, state))
+    db.execute("INSERT INTO round_slots (slot_id, round_uuid, name, matched_by) VALUES (?, ?, 'Ann', 'booth')",
+               (f"{uuid}-slot", uuid))
+    if revision is not None:
+        db.execute("INSERT INTO cloud_uploads (uuid, revision, error) VALUES (?, ?, ?)", (uuid, revision, error))
+
+
+def _round_on(db, rnd, ago, uuid, **record):
+    """A round of Ann's `ago` days ago (its own session), with its record, a line on its first shot, a
+    shot track and a week's result."""
+    day = _day(ago)
+    session = _session(db, day)
+    play(db, rnd, day, uuid, "Ann", ["Ann"], n_shots=4, session=session)
+    _record(db, uuid, "round", session, **record)
+    shot = db.execute("SELECT MIN(id) FROM shots WHERE record_uuid = ?", (uuid,)).fetchone()[0]
+    db.execute("INSERT INTO lines (session_id, shot_id, ts, kind, speaker, text, record_uuid)"
+               " VALUES (?, ?, 1.0, 'shot', 'pbp', ?, ?)", (session, shot, f"said of {uuid}", uuid))
+    db.execute("INSERT INTO shot_tracks (shot_id, gspro_shot_id) VALUES (?, ?)", (shot, f"g-{uuid}"))
+    side = db.execute("SELECT id FROM rounds WHERE round_uuid = ?", (uuid,)).fetchone()[0]
+    db.execute("INSERT INTO week_results (ended_at, week, team, net, round_id) VALUES (1.0, 1, 'Ann', 0, ?)", (side,))
+    return session
+
+
+def _practice_on(db, ago, uuid):
+    session = _session(db, _day(ago))
+    _record(db, uuid, "practice", session)
+    for k in range(3):
+        db.execute("INSERT INTO shots (session_id, ts, player, is_putt, club, record_uuid, uid, is_league)"
+                   " VALUES (?, ?, 'Ann', 0, 'DR', ?, ?, 0)", (session, 10.0 + k, uuid, f"{uuid}-{k}"))
+    db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text, record_uuid) VALUES (?, 1.0, 'segment', 'pbp',"
+               " ?, ?)", (session, f"said in {uuid}", uuid))
+
+
+def _memory(db, session):
+    """The booth's memory and the course caches, in a session whose rounds go."""
+    db.execute("INSERT INTO form_mentions (session_id, ts, player, topic) VALUES (?, 1.0, 'Ann', 'putting')", (session,))
+    db.execute("INSERT INTO asides (session_id, ts, kind, topic, text) VALUES (?, 1.0, 'trivia', 'c1', 'x')", (session,))
+    db.execute("INSERT INTO news_heard (session_id, ts, player, title) VALUES (?, 1.0, 'Ann', 'story')", (session,))
+    db.execute("INSERT INTO predictions (session_id, ts, commentator, kind, predicted) VALUES (?, 1.0, 'a', 'putt', 'make')",
+               (session,))
+    db.execute("INSERT INTO hole_layouts (session_id, ts, course, hole, par) VALUES (?, 1.0, 'c1', 1, 4)", (session,))
+    db.execute("INSERT INTO hole_images (session_id, ts, course, hole, image, ball_x, pin_x) VALUES (?, 1.0, 'c1', 1,"
+               " x'00', 0.5, 0.5)", (session,))
+    db.execute("INSERT INTO course_tees (course, tee, rating, slope) VALUES ('c1', 'Blue', 71.2, 128)")
+    db.execute("INSERT INTO tee_lengths (course, tee, yards, holes) VALUES ('c1', 'Blue', 6800, 18)")
+
+
+_KEPT_TABLES = ("sessions", "lines", "round_records", "round_slots", "cloud_uploads", "form_mentions", "asides",
+                "news_heard", "predictions", "hole_layouts", "hole_images", "course_tees", "tee_lengths")
+
+
+def _count(db, table, where="1"):
+    return db.execute(f"SELECT COUNT(*) FROM main.{table} WHERE {where}").fetchone()[0]
+
+
+def _has(db, uuid):
+    return {t: _count(db, t, f"{c} = '{uuid}'") for t, c in (("shots", "record_uuid"), ("rounds", "round_uuid"),
+                                                              ("player_rounds", "round_uuid"))}
+
+
+def _answered(cfg, name="Ann"):
+    """The cloud has answered for a player in the last month (the account has the booth's history)."""
+    s = Store(cfg.db_path, new_session=False)
+    s.attach_history(str(cloud_history.path_for(cfg.db_path)))
+    cloud_history.load(cloud_history.path_for(cfg.db_path), name, answer())
+    s.close()
+
+
+def _season_to_forget(cfg):
+    """A paired season of every kind of record, before today; returns the session of the round that goes."""
+    rnd = random.Random(5)
+    s = Store(cfg.db_path, new_session=False)
+    db = s.db
+    gone = _round_on(db, rnd, 3, "sent", revision=1)
+    _round_on(db, rnd, 4, "final", revision=1)                       # (409 round_final: revision 1 as well)
+    _round_on(db, rnd, 3, "unsent")                                  # never tried
+    _round_on(db, rnd, 5, "refused", revision=0, error="HTTP 413")   # the API's no
+    # Sent, then taken up again (GSPro's join after it was let go), last played an hour ago, yesterday
+    # by the booth's date: in progress, it's a booth's to go on with.
+    _round_on(db, rnd, 1, "open", state="in_progress", revision=1)
+    db.execute("UPDATE shots SET ts = ? WHERE record_uuid = 'open'", (time.time() - 3600,))
+    # Sent, its record yesterday's, and a booth that went on with it past midnight wrote a shot today.
+    _round_on(db, rnd, 1, "midnight", revision=1)
+    today = _session(db, TODAY.isoformat())
+    db.execute("UPDATE shots SET session_id = ? WHERE id = (SELECT MAX(id) FROM shots WHERE record_uuid = 'midnight')",
+               (today,))
+    _round_on(db, rnd, 0, "today", revision=1)                       # sent, played today
+    _practice_on(db, cloud_history.PRACTICE_DAYS - 1, "young")
+    _practice_on(db, cloud_history.PRACTICE_DAYS + 1, "old")
+    _memory(db, gone)
+    db.commit()
+    s.close()
+    return gone
+
+
+def test_a_paired_booths_start_drops_the_rounds_the_cloud_has_from_earlier_days(tmp_path, monkeypatch):
+    cfg, prof, _ = _paired(tmp_path, monkeypatch)
+    gone = _season_to_forget(cfg)
+    _answered(cfg)
+    s = Store(cfg.db_path)
+    before = {t: _count(s.db, t) for t in _KEPT_TABLES}
+    lines = sorted(r[0] for r in s.db.execute("SELECT text FROM lines"))
+    assert cloud_history.start(cfg, s, lambda n, i: None) is not None
+    for u in ("sent", "final", "old"):
+        assert set(_has(s.db, u).values()) == {0}, u
+    for u in ("unsent", "refused", "open", "midnight", "today"):
+        assert all(_has(s.db, u).values()), u
+    assert _has(s.db, "young")["shots"] == 3
+    assert _count(s.db, "shot_tracks") == 5 and _count(s.db, "week_results") == 5
+    # Kept: the lines (on no shot, where theirs went), every session and the memory in them, the course
+    # caches, and the records with their slots and upload marks.
+    assert {t: _count(s.db, t) for t in _KEPT_TABLES} == before
+    assert sorted(r[0] for r in s.db.execute("SELECT text FROM lines")) == lines
+    assert s.db.execute("SELECT shot_id FROM lines WHERE record_uuid = 'sent'").fetchone()[0] is None
+    assert s.db.execute("SELECT shot_id FROM lines WHERE record_uuid = 'unsent'").fetchone()[0] is not None
+    assert _count(s.db, "form_mentions", f"session_id = {gone}") == 1
+    assert s.recent_form_mentions("Ann") == ["putting"] and s.news_heard(["Ann"]) == {"story"}
+    assert "said of sent" in s.spoken_lines()
+    # (nothing noted for working out again: no kept shot's neighbours went, and no round's stats)
+    assert _count(s.db, "finish_recheck") == 0 and _count(s.db, "round_stats_due") == 0
+    # A second start drops nothing more.
+    assert cloud_history.forget(s.db, prof, TODAY.isoformat()) == (0, 0)
+
+
+def test_after_the_drop_and_a_reopen_nothing_is_regrouped_repaired_or_sent_again(tmp_path, monkeypatch):
+    from tests.test_cloud_rounds import _drain, _round
+
+    cfg, prof, api = _paired(tmp_path, monkeypatch)
+    cl = cloud.Cloud(cloud.store(), clock=lambda: api.now, sleep=lambda s: None)
+    s = Store(cfg.db_path)
+    stored, final, failed = _round(s, 1), _round(s, 100), _round(s, 200)
+    api.answers = [httpx.Response(201, json={"status": "stored"}),
+                   httpx.Response(409, json={"error": "round_final", "action": "fix", "sha256": "0" * 64}),
+                   httpx.Response(502)]
+    assert _drain(cl, cfg).sent == [stored, final]
+    s.db.execute("UPDATE sessions SET date = ?", (_day(1),))   # (all of it yesterday)
+    s.db.commit()
+    s.close()
+    _answered(cfg)
+    s = Store(cfg.db_path)
+    assert cloud_history.start(cfg, s, lambda n, i: None) is not None
+    assert not any(_has(s.db, stored).values()) and not any(_has(s.db, final).values())
+    assert _has(s.db, failed)["shots"] == 1
+    records = s.db.execute("SELECT uuid, gen, state FROM round_records ORDER BY uuid").fetchall()
+    s.close()
+    s = Store(cfg.db_path)   # (migrate, reconcile, the repairs and the finishes at a start)
+    assert s.db.execute("SELECT uuid, gen, state FROM round_records ORDER BY uuid").fetchall() == records
+    assert not any(_has(s.db, stored).values()) and _count(s.db, "round_slots", f"round_uuid = '{stored}'") == 1
+    puts = len(api.puts)
+    assert _drain(cl, cfg).sent == [failed] and [p[0] for p in api.puts[puts:]] == [failed]
+    assert cloud_rounds.status(cfg.db_path)["sent"] == 3 and cloud_rounds.behind(cfg.db_path) == 0
+
+
+def test_the_booths_history_reads_the_same_once_the_cloud_has_the_rounds_and_the_pc_doesnt(tmp_path, monkeypatch):
+    cfg, prof, _ = _paired(tmp_path, monkeypatch)
+    rnd = random.Random(11)
+    s = Store(cfg.db_path, new_session=False)
+    for ago, uuid, side, players in [(3, "r1", "Ann", ["Ann"]), (5, "r2", "Ann & Bo", ["Ann", "Bo"]),
+                                     (9, "r3", "Ann", ["Ann"]), (20, "r4", "Ann & Bo", ["Ann", "Bo"])]:
+        session = _session(s.db, _day(ago))
+        play(s.db, rnd, _day(ago), uuid, side, players, session=session)
+        _record(s.db, uuid, "round", session, revision=1)
+    s.db.commit()
+    hist = cloud_history.path_for(cfg.db_path)
+    s.attach_history(str(hist))
+    for name in ("Ann", "Bo"):
+        cloud_history.load(hist, name, answer_from(s.db, name))
+    want = reads(s, "Ann", ["Ann", "Ann & Bo"]), reads(s, "Bo", ["Ann & Bo"])
+    s.close()
+    s = Store(cfg.db_path)
+    cloud_history.start(cfg, s, lambda n, i: None)
+    assert _count(s.db, "shots") == _count(s.db, "rounds") == _count(s.db, "player_rounds") == 0
+    assert (reads(s, "Ann", ["Ann", "Ann & Bo"]), reads(s, "Bo", ["Ann & Bo"])) == want
+    assert want[0][("season_rounds", "Ann", None)]["rounds"] == 2 and want[0][("season_stats", None)]["nights"] == 4
+
+
+def _untouched(cfg):
+    s = Store(cfg.db_path, new_session=False)
+    try:
+        return {t: _count(s.db, t) for t in ("shots", "rounds", "player_rounds", "shot_tracks", "lines")}
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("how", ["self-hosted", "unpaired", "replay", "refused", "never answered",
+                                 "answered long ago", "another file", "bound elsewhere"])
+def test_nothing_is_dropped_but_from_a_paired_profiles_own_bound_file_the_cloud_answers_for(tmp_path, monkeypatch, how):
+    import dataclasses
+    import shutil
+
+    cfg, prof, _ = _paired(tmp_path, monkeypatch)
+    _season_to_forget(cfg)
+    if how != "never answered":
+        _answered(cfg)
+    if how == "answered long ago":
+        db = sqlite3.connect(cloud_history.path_for(cfg.db_path))
+        db.execute("UPDATE asked SET at = at - ? * 86400 - 60", (cloud_history.AGE_DAYS,))
+        db.commit()
+        db.close()
+    if how in ("self-hosted", "another file"):   # (a self-hosted booth's file, a copy of the profile's)
+        (tmp_path / "own").mkdir()
+        shutil.copy(cfg.db_path, tmp_path / "own" / "season.db")
+        shutil.copy(cloud_history.path_for(cfg.db_path), tmp_path / "own" / "history.db")
+        cfg.db_path = str(tmp_path / "own" / "season.db")
+    if how in ("self-hosted", "unpaired"):
+        monkeypatch.setattr(cloud, "startup", None)
+    if how == "replay":
+        cfg.source.type = "replay"
+    if how == "refused":
+        monkeypatch.setattr(cloud, "startup", dataclasses.replace(prof, problem=cloud.REPAIR))
+    if how == "bound elsewhere":
+        db = sqlite3.connect(cfg.db_path)
+        db.execute("UPDATE cloud_pairing SET device_id = 'd2'")
+        db.commit()
+        db.close()
+    before = _untouched(cfg)
+    s = Store(cfg.db_path)
+    cloud_history.start(cfg, s, lambda n, i: None)
+    s.close()
+    assert _untouched(cfg) == before and before["shots"] > 0
