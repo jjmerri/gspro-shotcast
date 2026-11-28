@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS cloud_uploads (
     revision INTEGER NOT NULL DEFAULT 0,   -- 1 once the cloud has the round (a round is sent once), else 0
     error TEXT,                            -- why the last try didn't end with the cloud having it
     tries INTEGER NOT NULL DEFAULT 0,      -- failed tries so far (how long the next waits: Pace.retry)
-    sent_rows TEXT                         -- its rows as the body sent was read from them (`rows_of`)
+    sent_rows TEXT                         -- its rows as the body sent was read from them (`rows_of`); NULL
+                                           -- when the cloud kept an earlier build (round_final): not known
 );
 CREATE TABLE IF NOT EXISTS cloud_claim_codes (   -- a player's code to claim a round with (claim_codes)
     uuid TEXT NOT NULL,                    -- the round record's
@@ -714,6 +715,8 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, built: bytes, pace: Pace, 
     # (it changed on this PC between two tries: a round is sent once, and stays as it first went).
     if (r.status_code, status) in ((201, "stored"), (200, "duplicate")) or (r.status_code, error) == (409, "round_final"):
         _sent(db, uuid, out)
+        if error == "round_final":   # (it holds an earlier build, not these rows: cloud_history.forget keeps it)
+            db.execute("UPDATE cloud_uploads SET sent_rows = NULL WHERE uuid = ?", (uuid,))
         try:
             send_pictures(cl, db, uuid)
         except sqlite3.Error as e:   # (a locked file: the pictures go after the next round there)

@@ -391,6 +391,7 @@ _GONE = f"""SELECT r.uuid, r.kind, u.sent_rows FROM main.round_records AS r
             LEFT JOIN main.cloud_uploads AS u ON u.uuid = r.uuid
             WHERE r.state != 'in_progress'
             AND ((r.kind = 'round' AND u.revision = 1 AND {_DAYS} < :today
+                  AND EXISTS (SELECT 1 FROM {SCHEMA}.held AS h WHERE h.round_uuid = r.uuid)
                   AND NOT EXISTS (SELECT 1 FROM temp.history_shots WHERE record_uuid = r.uuid AND id > 0)
                   AND NOT EXISTS (SELECT 1 FROM temp.history_rounds WHERE round_uuid = r.uuid AND id > 0)
                   AND NOT EXISTS (SELECT 1 FROM temp.history_player_rounds WHERE round_uuid = r.uuid AND id > 0))
@@ -436,7 +437,8 @@ def forget(db: sqlite3.Connection, prof: Any, today: str) -> tuple[int, int]:
     db.execute("BEGIN IMMEDIATE")
     try:
         # (a round with rows written since it was sent, taken up again and played on, has holes the
-        # cloud never got: kept; so is one sent before its rows were noted, which can't be told)
+        # cloud never got: kept; so is one whose rows as the cloud has them can't be told: sent before
+        # they were noted, or a round_final, the cloud keeping an earlier build)
         gone = [(uuid, kind) for uuid, kind, sent in db.execute(_GONE, {"today": today, "practice": practice})
                 if kind == "practice" or sent == cloud_rounds.rows_of(db, uuid)]
         # (a deleted shot notes its session for the finishes to be worked out again, and its round for

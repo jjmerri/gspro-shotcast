@@ -850,7 +850,8 @@ def _season_to_forget(cfg):
     s = Store(cfg.db_path, new_session=False)
     db = s.db
     at = {"sent": _round_on(db, rnd, 3, "sent", revision=1)}
-    _round_on(db, rnd, 4, "final", revision=1)                       # (409 round_final: revision 1 as well)
+    _round_on(db, rnd, 4, "final", revision=1)                       # (409 round_final: revision 1, rows not known)
+    db.execute("UPDATE cloud_uploads SET sent_rows = NULL WHERE uuid = 'final'")
     _round_on(db, rnd, 3, "unsent")                                  # never tried
     _round_on(db, rnd, 5, "refused", revision=0, error="HTTP 413")   # the API's no
     _round_on(db, rnd, 3, "unheld", revision=1)                      # the cloud's answer doesn't give it back
@@ -882,7 +883,7 @@ def _season_to_forget(cfg):
     return at
 
 
-KEPT = ("unsent", "refused", "unheld", "walkin", "team", "before", "open", "played on", "late shot", "late line",
+KEPT = ("final", "unsent", "refused", "unheld", "walkin", "team", "before", "open", "played on", "late shot", "late line",
         "late side", "late card", "today")
 
 
@@ -896,7 +897,7 @@ def test_a_paired_booths_start_drops_the_rounds_the_history_file_holds_from_earl
     before = {t: _count(s.db, t) for t in _KEPT_TABLES}
     lines = sorted(r[0] for r in s.db.execute("SELECT text FROM lines"))
     assert cloud_history.start(cfg, s, lambda n, i: None) is not None
-    for u in ("sent", "final", "old"):
+    for u in ("sent", "old"):
         assert set(_has(s.db, u).values()) == {0}, u
     for u in KEPT:
         assert all(_has(s.db, u).values()), u
@@ -956,6 +957,12 @@ def test_after_the_drop_and_a_reopen_nothing_is_regrouped_repaired_or_sent_again
     cl = cloud.Cloud(cloud.store(), clock=lambda: api.now, sleep=lambda s: None)
     s = Store(cfg.db_path)
     stored, final, failed, again = _round(s, 1), _round(s, 100), _round(s, 200), _round(s, 300)
+    # `final`: the cloud stored it and its answer was lost (api.rounds), then it was taken up again and
+    # played on; sent again, it's round_final, the cloud keeping the earlier build without that hole.
+    api.rounds[final] = b'{"an": "earlier build"}'
+    s.begin_round(final, course="Pebble", players={"Ann": None})
+    _hit(s, "Ann", 150)
+    s.end_round(final, complete=True)
     api.answers = [httpx.Response(201, json={"status": "stored"}),
                    httpx.Response(409, json={"error": "round_final", "action": "fix", "sha256": "0" * 64}),
                    httpx.Response(502)]
@@ -972,8 +979,9 @@ def test_after_the_drop_and_a_reopen_nothing_is_regrouped_repaired_or_sent_again
     _answered(cfg, {"Ann": hold})
     s = Store(cfg.db_path)
     assert cloud_history.start(cfg, s, lambda n, i: None) is not None
-    assert not any(_has(s.db, stored).values()) and not any(_has(s.db, final).values())
+    assert not any(_has(s.db, stored).values())
     assert _has(s.db, failed)["shots"] == 1 and _has(s.db, again)["shots"] == 2   # (not held; played on)
+    assert _has(s.db, final)["shots"] == 2   # (round_final: what the cloud kept can't be told)
     records = s.db.execute("SELECT uuid, gen, state FROM round_records ORDER BY uuid").fetchall()
     s.close()
     s = Store(cfg.db_path)   # (migrate, reconcile, the repairs and the finishes at a start)
@@ -1130,3 +1138,15 @@ def test_a_round_held_without_its_card_or_its_side_here_is_kept(tmp_path, monkey
     cloud_history.start(cfg, s, lambda n, i: None)
     assert not any(_has(s.db, "whole").values())
     assert all(_has(s.db, "nocard").values()) and all(_has(s.db, "noside").values())
+
+
+def test_self_hosted_the_courses_played_are_the_shots_alone(tmp_path):
+    from tests.test_round_record import _hit
+
+    s = Store(str(tmp_path / "season.db"))
+    _hit(s, "Ann", 1.0, course="Pebble")
+    s.begin_round("quit", course="Riviera", players={"Ann": None})   # (quit before a stroke)
+    s.end_round("quit", complete=False)
+    assert s.courses_played() == ["Pebble"]
+    s.attach_history(str(tmp_path / "history.db"))   # (paired: the records' too)
+    assert s.courses_played() == ["Pebble", "Riviera"]
