@@ -142,6 +142,11 @@ class CourseMixin:
 
         try:
             self._history_asks = cloud_history.start(self.cfg, self.store, self._history_loaded)
+            # (the kept answers' indexes, till tonight's calls bring theirs: a player whose rounds the
+            # season file no longer has would otherwise have none if a call fails)
+            if self.store.history.attached:
+                self._cloud_indexes.update(cloud_history.indexes(self.store.db))
+                self.league.own_indexes.update(self._cloud_indexes)
         except Exception as e:
             log.warning("Shotcast Cloud: the players' histories can't be used (%s); the booth goes on "
                         "with this PC's rounds", e)

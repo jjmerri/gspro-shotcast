@@ -9,7 +9,8 @@ older Shotcast never sees one.
 
 The booth reads its past from both (`attach`): the history file's rows, and the season file's own
 whose round the history file doesn't hold for that player (practice stretches, rounds not sent or
-not counted yet, and everything when a call failed). Every loaded row is practice (`is_league` 0):
+not counted yet, rounds the cloud doesn't give back, and everything when a call failed: the season
+file drops only rounds the history file already holds, below). Every loaded row is practice (`is_league` 0):
 a paired booth has no league, so its opener asks for the practice slice.
 
 Asked at the setup screen's names (`DEBOUNCE_S` after they settle) and again at the tee for a name
@@ -20,20 +21,32 @@ answer; a name not asked for in `AGE_DAYS` has its answer dropped. Self-hosted (
 of this runs: nothing is attached and every read is of the season file.
 
 And the PC stops keeping what the cloud gives back (`forget`, as the booth starts): the shots, cards
-and side rows of each round the cloud has from an earlier day, and of each practice stretch (which the
-cloud never has) once it's PRACTICE_DAYS old. The lines (the phrase memory), the sessions, the booth's
-memory tables, the course caches and the round records with their upload marks stay. Only in a paired
-profile's own season file, bound to its pairing, while the API accepts it and the cloud answers for
-its players; a self-hosted file, a replay, or a refused pairing loses nothing. The profile's local
-backups keep what they had, ageing out on their own schedule.
+and side rows of each round the cloud has from an earlier day, with no rows added since it was sent,
+that the history file already holds for every one of its players (so the booth reads nothing
+different without them); and of each practice stretch (which the cloud never has) once it's
+PRACTICE_DAYS old. The lines (the phrase memory), the sessions, the booth's memory tables, the course
+caches (logged pins included: a session's, not a round's) and the round records with their upload
+marks stay. Only in a paired profile's own season file, bound to its pairing, while the API accepts
+it and the cloud answers for its players; a self-hosted file, a replay, or a refused pairing loses
+nothing. Each answer's handicap index is kept with it (`indexes`), the booth's from its start. The
+profile's local backups keep what they had, ageing out on their own schedule.
 
 Accepted, as it stands:
 - a round the cloud withholds (deleted, hidden, its player erased) is still read from this PC's own
-  season file while it's there: the day it was played (the PC keeps it till its day is over);
-- what came after a round was sent (a closer written late, a stroke GSPro's round file gave after the
-  uploader's ceiling) goes with it the next day: the cloud's copy is the round;
-- an account whose booth add-on lapses keeps dropping rounds for up to AGE_DAYS, till its last
-  answer ages out: those rounds' history comes back if the add-on does;
+  season file while it's there; once the history file held it and it went, it's gone with the next
+  answer that leaves it out, as the cloud means;
+- a round the cloud doesn't give back (a venue's walk-ins, a name it resolves to nobody, past its
+  bounds) is never dropped: the season file keeps it for good;
+- what changed in a sent round's rows without adding one (a stroke's values GSPro's round file
+  corrected after the uploader's ceiling, a startup repair of a card's stats) goes with it: the
+  cloud's copy is the round. Shot tracks go with their shots (the body sent them). A late closer is
+  a line: kept;
+- a dropped round's history lives in the history file: a name not asked for in AGE_DAYS has its
+  answer dropped, and its rounds come back with the next answer (none while the calls fail);
+- an account whose booth add-on lapses keeps its answers for up to AGE_DAYS, then reads only what
+  the season file still has: its dropped rounds come back if the add-on does;
+- the first drop on a big profile runs as the booth starts, synchronously, in one transaction:
+  seconds, once; each start after looks only at the rounds still here;
 - a team's row reached by an alias keeps the spelling the answer had for the other teammates;
 - a side's row two teammates' answers hold is refreshed when either of them is asked again;
 - `nights` counts sessions: a day this PC restarted the booth counts twice, as it does locally,
@@ -98,7 +111,8 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.held (
 );
 CREATE TABLE IF NOT EXISTS {SCHEMA}.asked (     -- when each name's answer last came (attach drops the old)
     player TEXT PRIMARY KEY,
-    at REAL NOT NULL
+    at REAL NOT NULL,
+    idx REAL                                     -- the answer's handicap index (`indexes`)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS {SCHEMA}.shots_player_uid ON shots(player, uid);
 CREATE INDEX IF NOT EXISTS {SCHEMA}.player_rounds_player ON player_rounds(player, round_uuid);
@@ -145,6 +159,8 @@ def attach(db: sqlite3.Connection, path: str | Path) -> dict[str, str]:
     if "side_id" not in {r[1] for r in db.execute(f"PRAGMA {SCHEMA}.table_info(rounds)")}:
         db.execute(f"ALTER TABLE {SCHEMA}.rounds ADD COLUMN side_id TEXT")
     db.executescript(EXTRA)
+    if "idx" not in {r[1] for r in db.execute(f"PRAGMA {SCHEMA}.table_info(asked)")}:
+        db.execute(f"ALTER TABLE {SCHEMA}.asked ADD COLUMN idx REAL")   # (a file made before it was kept)
     _age(db)
     # The season file's own rows the history file has the cloud's of are left out: the cloud's are
     # what counts (a shot it left out, a round it re-marked). A shot of a round the history file holds
@@ -188,6 +204,12 @@ def _age(db: sqlite3.Connection) -> None:
         db.execute(f"DELETE FROM {SCHEMA}.{t} WHERE {gone}", (since,))
     db.execute(f"DELETE FROM {SCHEMA}.rounds WHERE NOT EXISTS (SELECT 1 FROM {SCHEMA}.held AS h"
                f" WHERE h.round_uuid = rounds.round_uuid AND h.side_id = rounds.side_id)")
+
+
+def indexes(db: sqlite3.Connection) -> dict[str, float]:
+    """The handicap index each kept answer gave (attached): the booth's own for those players from its
+    start, so a call that fails tonight still leaves a player whose rounds are no longer here theirs."""
+    return {p: i for p, i in db.execute(f"SELECT player, idx FROM {SCHEMA}.asked WHERE idx IS NOT NULL")}
 
 
 # ---- an answer into the history file (a thread's own connection) -------------------------------------
@@ -280,7 +302,7 @@ def load(path: str | Path, name: str, got: Any) -> float | None:
         with con:
             con.execute("BEGIN IMMEDIATE")
             _replace(con, name, rounds, shots)
-            con.execute("INSERT OR REPLACE INTO asked (player, at) VALUES (?, ?)", (name, time.time()))
+            con.execute("INSERT OR REPLACE INTO asked (player, at, idx) VALUES (?, ?, ?)", (name, time.time(), index))
     finally:
         con.close()
     return index
@@ -360,11 +382,18 @@ _DAYS = """(SELECT MAX(s.date) FROM main.sessions AS s WHERE s.id = r.session_id
             OR s.id IN (SELECT session_id FROM main.rounds WHERE round_uuid = r.uuid)
             OR s.id IN (SELECT session_id FROM main.player_rounds WHERE round_uuid = r.uuid))"""
 # What goes: a round the cloud has (the uploader's own "sent", round_final included) whose days are
-# over, and a practice stretch (never sent) older than PRACTICE_DAYS; neither in progress, and only
-# one that still has rows here.
-_GONE = f"""SELECT r.uuid, r.kind FROM main.round_records AS r LEFT JOIN main.cloud_uploads AS u ON u.uuid = r.uuid
+# over and that the booth already reads from the history file alone (none of its rows is read through
+# the views: every one of its players' answers holds it, with their cards and their sides'), so dropping
+# it changes nothing the booth says; and a practice stretch (never sent) older than PRACTICE_DAYS.
+# Neither in progress, and only one that still has rows here. (A round also needs its rows as sent:
+# `forget` compares them.)
+_GONE = f"""SELECT r.uuid, r.kind, u.sent_rows FROM main.round_records AS r
+            LEFT JOIN main.cloud_uploads AS u ON u.uuid = r.uuid
             WHERE r.state != 'in_progress'
-            AND ((r.kind = 'round' AND u.revision = 1 AND {_DAYS} < :today)
+            AND ((r.kind = 'round' AND u.revision = 1 AND {_DAYS} < :today
+                  AND NOT EXISTS (SELECT 1 FROM temp.history_shots WHERE record_uuid = r.uuid AND id > 0)
+                  AND NOT EXISTS (SELECT 1 FROM temp.history_rounds WHERE round_uuid = r.uuid AND id > 0)
+                  AND NOT EXISTS (SELECT 1 FROM temp.history_player_rounds WHERE round_uuid = r.uuid AND id > 0))
                  OR (r.kind = 'practice' AND {_DAYS} < :practice))
             AND (EXISTS (SELECT 1 FROM main.shots WHERE record_uuid = r.uuid)
                  OR EXISTS (SELECT 1 FROM main.rounds WHERE round_uuid = r.uuid)
@@ -378,14 +407,16 @@ _DROP = ("UPDATE main.lines SET shot_id = NULL WHERE shot_id IN (SELECT id FROM 
          "DELETE FROM main.week_results WHERE round_id IN (SELECT id FROM main.rounds WHERE round_uuid = ?)",
          "DELETE FROM main.rounds WHERE round_uuid = ?",
          "DELETE FROM main.player_rounds WHERE round_uuid = ?",
-         "DELETE FROM main.round_stats_due WHERE uuid = ?")
+         "DELETE FROM main.round_stats_due WHERE uuid = ?",
+         "DELETE FROM main.round_folders WHERE record_uuid = ?")
 
 
 def forget(db: sqlite3.Connection, prof: Any, today: str) -> tuple[int, int]:
     """At a paired booth's start, with the history file attached (`attach`): the season file's rows of each
-    round the cloud has and whose day is over (before `today`, the booth's session date), and of each
-    practice stretch older than PRACTICE_DAYS, deleted: their shots and shot tracks, cards and side rows.
-    Kept: the record itself, its slots and its cloud_uploads row (so a round gone from here is never
+    round the cloud has whose day is over (before `today`, the booth's session date), whose rows are as
+    they were sent, and that the history file holds for each of its players (_GONE), and of each practice
+    stretch older than PRACTICE_DAYS, deleted: their shots and shot tracks, cards and side rows, and the
+    round's GSPro course folder. Kept: the record itself, its slots and its cloud_uploads row (so a round gone from here is never
     thought unsent, and the lines still have their record), the lines (the phrase memory), every session,
     the booth's memory tables, the course caches and every other record's rows. Nothing at all unless the
     file is this pairing's profile's own season file, bound to it, and the cloud has answered for a
@@ -397,13 +428,17 @@ def forget(db: sqlite3.Connection, prof: Any, today: str) -> tuple[int, int]:
     tables = {r[0] for r in db.execute("SELECT name FROM main.sqlite_master WHERE type = 'table'")}
     if (not main or Path(main).resolve() != Path(prof.db).resolve() or "cloud_uploads" not in tables
             or "cloud_pairing" not in tables or cloud_rounds.bound(db) != tuple(prof.bound)
+            or "sent_rows" not in {r[1] for r in db.execute("PRAGMA main.table_info(cloud_uploads)")}
             or not db.execute(f"SELECT 1 FROM {SCHEMA}.asked LIMIT 1").fetchone()):
         return 0, 0
     practice = (date.fromisoformat(today) - timedelta(days=PRACTICE_DAYS)).isoformat()
     db.commit()
     db.execute("BEGIN IMMEDIATE")
     try:
-        gone = db.execute(_GONE, {"today": today, "practice": practice}).fetchall()
+        # (a round with rows written since it was sent, taken up again and played on, has holes the
+        # cloud never got: kept; so is one sent before its rows were noted, which can't be told)
+        gone = [(uuid, kind) for uuid, kind, sent in db.execute(_GONE, {"today": today, "practice": practice})
+                if kind == "practice" or sent == cloud_rounds.rows_of(db, uuid)]
         # (a deleted shot notes its session for the finishes to be worked out again, and its round for
         # its stats: neither is, as no kept row changed; a kept shot's next stroke would now be another's)
         noted = [s for (s,) in db.execute("SELECT session_id FROM main.finish_recheck")]

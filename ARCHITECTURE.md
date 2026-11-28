@@ -155,7 +155,8 @@ sources/  ─►  engine/    ─►  facts.py  ─►  prompts.py ─► LLM ─
   a player's or side's earlier rounds (`rounds.py`'s, `booth_history.py`'s nights before today) go
   through temp views of both files (`Store.attach_history`). Self-hosted, nothing is attached.
   As a paired booth starts, the season file drops the rows of the rounds the cloud has from earlier
-  days, and of practice stretches over 30 days old, which the cloud never has (`cloud_history.forget`):
+  days that the history file already holds for every player (unchanged since sent), and of practice
+  stretches over 30 days old, which the cloud never has (`cloud_history.forget`):
   the lines, sessions, memory tables, course caches and round records stay. Local backups keep what they had.
 - **`stats_web.py`** / **`stats_web.html`** / **`season_analytics.py`** the `stats-web` viewer: a
   localhost-only server that opens `season.db` read-only (its own connection;

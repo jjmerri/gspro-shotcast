@@ -756,28 +756,32 @@ def _session(db, day):
                       (time.mktime(date.fromisoformat(day).timetuple()), day)).lastrowid
 
 
-def _record(db, uuid, kind, session, state="finished", revision=None, error=None):
+def _record(db, uuid, kind, session, state="finished", revision=None, error=None, names=("Ann",)):
     db.execute("INSERT INTO round_records (uuid, kind, session_id, course, started_at, ended_at, state, assigned)"
                " VALUES (?, ?, ?, 'c1', 1.0, 2.0, ?, 'live')", (uuid, kind, session, state))
-    db.execute("INSERT INTO round_slots (slot_id, round_uuid, name, matched_by) VALUES (?, ?, 'Ann', 'booth')",
-               (f"{uuid}-slot", uuid))
-    if revision is not None:
-        db.execute("INSERT INTO cloud_uploads (uuid, revision, error) VALUES (?, ?, ?)", (uuid, revision, error))
+    for n in names:
+        db.execute("INSERT INTO round_slots (slot_id, round_uuid, name, matched_by) VALUES (?, ?, ?, 'booth')",
+                   (f"{uuid}-{n}", uuid, n))
+    if revision is not None:   # (sent: its rows as they were sent)
+        db.execute("INSERT INTO cloud_uploads (uuid, revision, error, sent_rows) VALUES (?, ?, ?, ?)",
+                   (uuid, revision, error, cloud_rounds.rows_of(db, uuid) if revision else None))
 
 
-def _round_on(db, rnd, ago, uuid, **record):
-    """A round of Ann's `ago` days ago (its own session), with its record, a line on its first shot, a
-    shot track and a week's result."""
+def _round_on(db, rnd, ago, uuid, side="Ann", players=("Ann",), **record):
+    """A round `ago` days ago (its own session), with its record, a line on its first shot, a shot track
+    and a week's result."""
     day = _day(ago)
     session = _session(db, day)
-    play(db, rnd, day, uuid, "Ann", ["Ann"], n_shots=4, session=session)
-    _record(db, uuid, "round", session, **record)
+    play(db, rnd, day, uuid, side, list(players), n_shots=4, session=session)
+    _record(db, uuid, "round", session, names=players, **record)
     shot = db.execute("SELECT MIN(id) FROM shots WHERE record_uuid = ?", (uuid,)).fetchone()[0]
     db.execute("INSERT INTO lines (session_id, shot_id, ts, kind, speaker, text, record_uuid)"
                " VALUES (?, ?, 1.0, 'shot', 'pbp', ?, ?)", (session, shot, f"said of {uuid}", uuid))
     db.execute("INSERT INTO shot_tracks (shot_id, gspro_shot_id) VALUES (?, ?)", (shot, f"g-{uuid}"))
-    side = db.execute("SELECT id FROM rounds WHERE round_uuid = ?", (uuid,)).fetchone()[0]
-    db.execute("INSERT INTO week_results (ended_at, week, team, net, round_id) VALUES (1.0, 1, 'Ann', 0, ?)", (side,))
+    side_row = db.execute("SELECT id FROM rounds WHERE round_uuid = ?", (uuid,)).fetchone()[0]
+    db.execute("INSERT INTO week_results (ended_at, week, team, net, round_id) VALUES (1.0, 1, ?, 0, ?)",
+               (side, side_row))
+    db.execute("INSERT INTO round_folders VALUES (?, 'c1_gsp')", (uuid,))
     return session
 
 
@@ -789,6 +793,7 @@ def _practice_on(db, ago, uuid):
                    " VALUES (?, ?, 'Ann', 0, 'DR', ?, ?, 0)", (session, 10.0 + k, uuid, f"{uuid}-{k}"))
     db.execute("INSERT INTO lines (session_id, ts, kind, speaker, text, record_uuid) VALUES (?, 1.0, 'segment', 'pbp',"
                " ?, ?)", (session, f"said in {uuid}", uuid))
+    return session
 
 
 def _memory(db, session):
@@ -799,6 +804,7 @@ def _memory(db, session):
     db.execute("INSERT INTO predictions (session_id, ts, commentator, kind, predicted) VALUES (?, 1.0, 'a', 'putt', 'make')",
                (session,))
     db.execute("INSERT INTO hole_layouts (session_id, ts, course, hole, par) VALUES (?, 1.0, 'c1', 1, 4)", (session,))
+    db.execute("INSERT INTO logged_pins (session_id, ts, x, y, z) VALUES (?, 1.0, 1, 2, 3)", (session,))
     db.execute("INSERT INTO hole_images (session_id, ts, course, hole, image, ball_x, pin_x) VALUES (?, 1.0, 'c1', 1,"
                " x'00', 0.5, 0.5)", (session,))
     db.execute("INSERT INTO course_tees (course, tee, rating, slope) VALUES ('c1', 'Blue', 71.2, 128)")
@@ -806,7 +812,7 @@ def _memory(db, session):
 
 
 _KEPT_TABLES = ("sessions", "lines", "round_records", "round_slots", "cloud_uploads", "form_mentions", "asides",
-                "news_heard", "predictions", "hole_layouts", "hole_images", "course_tees", "tee_lengths")
+                "news_heard", "predictions", "hole_layouts", "logged_pins", "hole_images", "course_tees", "tee_lengths")
 
 
 def _count(db, table, where="1"):
@@ -818,97 +824,216 @@ def _has(db, uuid):
                                                               ("player_rounds", "round_uuid"))}
 
 
-def _answered(cfg, name="Ann"):
-    """The cloud has answered for a player in the last month (the account has the booth's history)."""
+def _leaving_out(a, ids):
+    """An answer without these rounds (and their shots)."""
+    rounds, shots = rows(a)
+    keep = [i for i, r in enumerate(rounds) if r["id"] not in ids]
+    at = {old: new for new, old in enumerate(keep)}
+    return answer([rounds[i] for i in keep], [s | {"round": at[s["round"]]} for s in shots if s["round"] in at],
+                  a["index"])
+
+
+def _answered(cfg, answers):
+    """The cloud's answers, as the booth's calls loaded them before this start: {name: answer, or the
+    season file's rounds of that name less these round ids}."""
     s = Store(cfg.db_path, new_session=False)
-    s.attach_history(str(cloud_history.path_for(cfg.db_path)))
-    cloud_history.load(cloud_history.path_for(cfg.db_path), name, answer())
+    hist = cloud_history.path_for(cfg.db_path)
+    s.attach_history(str(hist))
+    for name, got in answers.items():
+        cloud_history.load(hist, name, got if isinstance(got, dict) else _leaving_out(answer_from(s.db, name), got))
     s.close()
 
 
 def _season_to_forget(cfg):
-    """A paired season of every kind of record, before today; returns the session of the round that goes."""
+    """A paired season of every kind of record, before today; returns {name: session}."""
     rnd = random.Random(5)
     s = Store(cfg.db_path, new_session=False)
     db = s.db
-    gone = _round_on(db, rnd, 3, "sent", revision=1)
+    at = {"sent": _round_on(db, rnd, 3, "sent", revision=1)}
     _round_on(db, rnd, 4, "final", revision=1)                       # (409 round_final: revision 1 as well)
     _round_on(db, rnd, 3, "unsent")                                  # never tried
     _round_on(db, rnd, 5, "refused", revision=0, error="HTTP 413")   # the API's no
+    _round_on(db, rnd, 3, "unheld", revision=1)                      # the cloud's answer doesn't give it back
+    _round_on(db, rnd, 3, "walkin", "Wally", ("Wally",), revision=1)   # a venue's walk-in: answered with nothing
+    _round_on(db, rnd, 3, "team", "Ann & Bo", ("Ann", "Bo"), revision=1)   # Bo not asked yet
+    _round_on(db, rnd, 3, "before", revision=1)                      # sent before its rows were noted
+    db.execute("UPDATE cloud_uploads SET sent_rows = NULL WHERE uuid = 'before'")
     # Sent, then taken up again (GSPro's join after it was let go), last played an hour ago, yesterday
     # by the booth's date: in progress, it's a booth's to go on with.
     _round_on(db, rnd, 1, "open", state="in_progress", revision=1)
     db.execute("UPDATE shots SET ts = ? WHERE record_uuid = 'open'", (time.time() - 3600,))
-    # Sent, its record yesterday's, and a booth that went on with it past midnight wrote a shot today.
-    _round_on(db, rnd, 1, "midnight", revision=1)
+    _round_on(db, rnd, 2, "played on", revision=1)                   # finished again since: a shot more
+    db.execute("INSERT INTO shots (session_id, ts, player, is_putt, record_uuid, uid) SELECT session_id, ts + 1,"
+               " player, 1, record_uuid, 'more' FROM shots WHERE record_uuid = 'played on' LIMIT 1")
+    # Sent, its record yesterday's, with a row a booth that went on past midnight wrote today: a shot,
+    # a line, a side row or a card.
     today = _session(db, TODAY.isoformat())
-    db.execute("UPDATE shots SET session_id = ? WHERE id = (SELECT MAX(id) FROM shots WHERE record_uuid = 'midnight')",
-               (today,))
+    for uuid, table, col in (("late shot", "shots", "record_uuid"), ("late line", "lines", "record_uuid"),
+                             ("late side", "rounds", "round_uuid"), ("late card", "player_rounds", "round_uuid")):
+        _round_on(db, rnd, 1, uuid, revision=1)
+        db.execute(f"UPDATE {table} SET session_id = ? WHERE id = (SELECT MAX(id) FROM {table} WHERE {col} = ?)",
+                   (today, uuid))
     _round_on(db, rnd, 0, "today", revision=1)                       # sent, played today
-    _practice_on(db, cloud_history.PRACTICE_DAYS - 1, "young")
+    at["young"] = _practice_on(db, cloud_history.PRACTICE_DAYS - 1, "young")
     _practice_on(db, cloud_history.PRACTICE_DAYS + 1, "old")
-    _memory(db, gone)
+    _memory(db, at["sent"])
     db.commit()
     s.close()
-    return gone
+    return at
 
 
-def test_a_paired_booths_start_drops_the_rounds_the_cloud_has_from_earlier_days(tmp_path, monkeypatch):
+KEPT = ("unsent", "refused", "unheld", "walkin", "team", "before", "open", "played on", "late shot", "late line",
+        "late side", "late card", "today")
+
+
+def test_a_paired_booths_start_drops_the_rounds_the_history_file_holds_from_earlier_days(tmp_path, monkeypatch):
     cfg, prof, _ = _paired(tmp_path, monkeypatch)
-    gone = _season_to_forget(cfg)
-    _answered(cfg)
+    at = _season_to_forget(cfg)
+    _answered(cfg, {"Ann": {"unheld"}, "Wally": answer()})
     s = Store(cfg.db_path)
+    s.db.execute("INSERT INTO finish_recheck VALUES (?)", (at["young"],))   # (noted before: kept)
+    s.db.commit()
     before = {t: _count(s.db, t) for t in _KEPT_TABLES}
     lines = sorted(r[0] for r in s.db.execute("SELECT text FROM lines"))
     assert cloud_history.start(cfg, s, lambda n, i: None) is not None
     for u in ("sent", "final", "old"):
         assert set(_has(s.db, u).values()) == {0}, u
-    for u in ("unsent", "refused", "open", "midnight", "today"):
+    for u in KEPT:
         assert all(_has(s.db, u).values()), u
     assert _has(s.db, "young")["shots"] == 3
-    assert _count(s.db, "shot_tracks") == 5 and _count(s.db, "week_results") == 5
+    assert _count(s.db, "shot_tracks") == _count(s.db, "week_results") == len(KEPT)
+    assert {r[0] for r in s.db.execute("SELECT record_uuid FROM round_folders")} == set(KEPT)
     # Kept: the lines (on no shot, where theirs went), every session and the memory in them, the course
     # caches, and the records with their slots and upload marks.
     assert {t: _count(s.db, t) for t in _KEPT_TABLES} == before
     assert sorted(r[0] for r in s.db.execute("SELECT text FROM lines")) == lines
     assert s.db.execute("SELECT shot_id FROM lines WHERE record_uuid = 'sent'").fetchone()[0] is None
     assert s.db.execute("SELECT shot_id FROM lines WHERE record_uuid = 'unsent'").fetchone()[0] is not None
-    assert _count(s.db, "form_mentions", f"session_id = {gone}") == 1
+    assert _count(s.db, "form_mentions", f"session_id = {at['sent']}") == 1
     assert s.recent_form_mentions("Ann") == ["putting"] and s.news_heard(["Ann"]) == {"story"}
     assert "said of sent" in s.spoken_lines()
-    # (nothing noted for working out again: no kept shot's neighbours went, and no round's stats)
-    assert _count(s.db, "finish_recheck") == 0 and _count(s.db, "round_stats_due") == 0
+    # (nothing noted for working out again but what was noted before)
+    assert [r[0] for r in s.db.execute("SELECT session_id FROM finish_recheck")] == [at["young"]]
+    assert _count(s.db, "round_stats_due") == 0
     # A second start drops nothing more.
     assert cloud_history.forget(s.db, prof, TODAY.isoformat()) == (0, 0)
 
 
+def test_a_drop_that_fails_part_way_keeps_everything(tmp_path, monkeypatch, caplog):
+    cfg, prof, _ = _paired(tmp_path, monkeypatch)
+    _season_to_forget(cfg)
+    _answered(cfg, {"Ann": set()})
+    monkeypatch.setattr(cloud_history, "_DROP", cloud_history._DROP + ("DELETE FROM main.no_such_table WHERE ? = 1",))
+    s = Store(cfg.db_path)
+    every = ("shots", "rounds", "player_rounds", "shot_tracks", "week_results", "round_folders", "lines")
+    before = {t: _count(s.db, t) for t in every}, s.db.execute("SELECT shot_id FROM lines ORDER BY id").fetchall()
+    with caplog.at_level(logging.WARNING, logger="commentator.cloud_history"):
+        assert cloud_history.start(cfg, s, lambda n, i: None) is not None
+    assert ({t: _count(s.db, t) for t in every}, s.db.execute("SELECT shot_id FROM lines ORDER BY id").fetchall()) == before
+    assert any("kept for now" in r.getMessage() for r in caplog.records) and not s.db.in_transaction
+
+
+def _holding(db, player, uuids):
+    """The cloud's answer holding these rounds of `player`'s (by their shots: the uploader's test rounds
+    have no cards)."""
+    rounds, shots = [], []
+    for uuid in uuids:
+        day = db.execute("SELECT s.date FROM round_records r JOIN sessions s ON s.id = r.session_id WHERE r.uuid = ?",
+                         (uuid,)).fetchone()[0]
+        for sh in db.execute("SELECT * FROM shots WHERE record_uuid = ? AND player = ?", (uuid, player)):
+            shots.append({"round": len(rounds), **{k: (bool(sh[k]) if k in ("is_putt", "mulligan", "attributed")
+                                                       else sh[k]) for k in SHOT_COLUMNS}})
+        rounds.append({"id": uuid, "day": day, "side": {"side": player, "holes": 9, "side_id": player,
+                                                        "players": [player]}})
+    return answer(rounds, shots)
+
+
 def test_after_the_drop_and_a_reopen_nothing_is_regrouped_repaired_or_sent_again(tmp_path, monkeypatch):
     from tests.test_cloud_rounds import _drain, _round
+    from tests.test_round_record import _hit
 
     cfg, prof, api = _paired(tmp_path, monkeypatch)
     cl = cloud.Cloud(cloud.store(), clock=lambda: api.now, sleep=lambda s: None)
     s = Store(cfg.db_path)
-    stored, final, failed = _round(s, 1), _round(s, 100), _round(s, 200)
+    stored, final, failed, again = _round(s, 1), _round(s, 100), _round(s, 200), _round(s, 300)
     api.answers = [httpx.Response(201, json={"status": "stored"}),
                    httpx.Response(409, json={"error": "round_final", "action": "fix", "sha256": "0" * 64}),
                    httpx.Response(502)]
     assert _drain(cl, cfg).sent == [stored, final]
+    assert _drain(cl, cfg).sent == [failed, again]
+    # Taken up again (GSPro's join after it was let go) and played on: its later hole never went.
+    s.begin_round(again, course="Pebble", players={"Ann": None})
+    _hit(s, "Ann", 400)
+    s.end_round(again, complete=True)
     s.db.execute("UPDATE sessions SET date = ?", (_day(1),))   # (all of it yesterday)
     s.db.commit()
+    hold = _holding(s.db, "Ann", [stored, final, again])
     s.close()
-    _answered(cfg)
+    _answered(cfg, {"Ann": hold})
     s = Store(cfg.db_path)
     assert cloud_history.start(cfg, s, lambda n, i: None) is not None
     assert not any(_has(s.db, stored).values()) and not any(_has(s.db, final).values())
-    assert _has(s.db, failed)["shots"] == 1
+    assert _has(s.db, failed)["shots"] == 1 and _has(s.db, again)["shots"] == 2   # (not held; played on)
     records = s.db.execute("SELECT uuid, gen, state FROM round_records ORDER BY uuid").fetchall()
     s.close()
     s = Store(cfg.db_path)   # (migrate, reconcile, the repairs and the finishes at a start)
     assert s.db.execute("SELECT uuid, gen, state FROM round_records ORDER BY uuid").fetchall() == records
     assert not any(_has(s.db, stored).values()) and _count(s.db, "round_slots", f"round_uuid = '{stored}'") == 1
     puts = len(api.puts)
-    assert _drain(cl, cfg).sent == [failed] and [p[0] for p in api.puts[puts:]] == [failed]
-    assert cloud_rounds.status(cfg.db_path)["sent"] == 3 and cloud_rounds.behind(cfg.db_path) == 0
+    assert _drain(cl, cfg).sent == [] and len(api.puts) == puts
+    assert cloud_rounds.status(cfg.db_path)["sent"] == 4 and cloud_rounds.behind(cfg.db_path) == 0
+
+
+def test_a_new_shot_after_a_drop_takes_a_used_id_and_no_old_line_and_the_course_is_still_played(tmp_path, monkeypatch):
+    from tests.test_round_record import _hit
+
+    cfg, prof, _ = _paired(tmp_path, monkeypatch)
+    s = Store(cfg.db_path, new_session=False)
+    _round_on(s.db, random.Random(2), 2, "sent", revision=1)
+    ids = {r[0] for r in s.db.execute("SELECT id FROM shots")}
+    s.db.commit()
+    s.close()
+    _answered(cfg, {"Ann": set()})
+    s = Store(cfg.db_path)
+    cloud_history.start(cfg, s, lambda n, i: None)
+    assert _count(s.db, "shots") == 0
+    new = _hit(s, "Ann", time.time())
+    assert new in ids and _count(s.db, "lines", f"shot_id = {new}") == 0
+    s.db.execute("DELETE FROM shots")
+    assert "c1" in s.courses_played()   # (from its record: no shot is on it now)
+
+
+def test_the_kept_answers_indexes_are_the_booths_from_its_start(tmp_path, monkeypatch):
+    from tests.test_round import _engine
+
+    e = _engine(tmp_path)
+    hist = tmp_path / "history.db"
+    e.store.attach_history(str(hist))
+    cloud_history.load(hist, "Ann", _one("Ann", index=12.5))
+    cloud_history.load(hist, "Bo", _one("Bo"))
+    assert cloud_history.indexes(e.store.db) == {"Ann": 12.5}
+    monkeypatch.setattr(cloud, "startup", object())
+    monkeypatch.setattr(cloud_history, "start", lambda cfg, store, cb: store.attach_history(str(hist)))
+    e2 = _engine(tmp_path / "b")
+    e2._start_cloud_history()   # (the calls not answered yet: none tonight)
+    assert e2.league.own_indexes.get("Ann") == 12.5
+    e2._set_own_handicaps(lambda: {"Ann": 20.0, "Bo": 11.0})
+    assert e2.league.own_indexes == {"Ann": 12.5, "Bo": 11.0}
+
+
+def test_a_history_file_made_before_the_index_was_kept_gains_it(tmp_path):
+    path = tmp_path / "season.db"
+    s = paired_store(path)
+    hist = cloud_history.path_for(str(path))
+    cloud_history.load(hist, "Ann", _one("Ann", index=3.0))
+    s.close()
+    old = sqlite3.connect(hist)
+    old.executescript("CREATE TABLE a2 AS SELECT player, at FROM asked; DROP TABLE asked; ALTER TABLE a2 RENAME TO asked;")
+    old.close()
+    s = paired_store(path)
+    assert cloud_history.indexes(s.db) == {} and s.season_rounds("Ann")["rounds"] == 1
+    cloud_history.load(hist, "Ann", _one("Ann", index=4.0))
+    assert cloud_history.indexes(s.db) == {"Ann": 4.0}
 
 
 def test_the_booths_history_reads_the_same_once_the_cloud_has_the_rounds_and_the_pc_doesnt(tmp_path, monkeypatch):
@@ -919,7 +1044,7 @@ def test_the_booths_history_reads_the_same_once_the_cloud_has_the_rounds_and_the
                                      (9, "r3", "Ann", ["Ann"]), (20, "r4", "Ann & Bo", ["Ann", "Bo"])]:
         session = _session(s.db, _day(ago))
         play(s.db, rnd, _day(ago), uuid, side, players, session=session)
-        _record(s.db, uuid, "round", session, revision=1)
+        _record(s.db, uuid, "round", session, revision=1, names=players)
     s.db.commit()
     hist = cloud_history.path_for(cfg.db_path)
     s.attach_history(str(hist))
@@ -943,7 +1068,7 @@ def _untouched(cfg):
 
 
 @pytest.mark.parametrize("how", ["self-hosted", "unpaired", "replay", "refused", "never answered",
-                                 "answered long ago", "another file", "bound elsewhere"])
+                                 "answered long ago", "another file", "bound elsewhere", "no marks kept"])
 def test_nothing_is_dropped_but_from_a_paired_profiles_own_bound_file_the_cloud_answers_for(tmp_path, monkeypatch, how):
     import dataclasses
     import shutil
@@ -951,7 +1076,7 @@ def test_nothing_is_dropped_but_from_a_paired_profiles_own_bound_file_the_cloud_
     cfg, prof, _ = _paired(tmp_path, monkeypatch)
     _season_to_forget(cfg)
     if how != "never answered":
-        _answered(cfg)
+        _answered(cfg, {"Ann": set()})
     if how == "answered long ago":
         db = sqlite3.connect(cloud_history.path_for(cfg.db_path))
         db.execute("UPDATE asked SET at = at - ? * 86400 - 60", (cloud_history.AGE_DAYS,))
@@ -968,13 +1093,40 @@ def test_nothing_is_dropped_but_from_a_paired_profiles_own_bound_file_the_cloud_
         cfg.source.type = "replay"
     if how == "refused":
         monkeypatch.setattr(cloud, "startup", dataclasses.replace(prof, problem=cloud.REPAIR))
+    db = sqlite3.connect(cfg.db_path)
     if how == "bound elsewhere":
-        db = sqlite3.connect(cfg.db_path)
         db.execute("UPDATE cloud_pairing SET device_id = 'd2'")
-        db.commit()
-        db.close()
+    if how == "no marks kept":   # (an older Shotcast's queue)
+        db.executescript("CREATE TABLE u2 AS SELECT uuid, revision, error, tries FROM cloud_uploads;"
+                         " DROP TABLE cloud_uploads; ALTER TABLE u2 RENAME TO cloud_uploads;")
+    db.commit()
+    db.close()
     before = _untouched(cfg)
     s = Store(cfg.db_path)
     cloud_history.start(cfg, s, lambda n, i: None)
     s.close()
     assert _untouched(cfg) == before and before["shots"] > 0
+
+
+def test_a_round_held_without_its_card_or_its_side_here_is_kept(tmp_path, monkeypatch):
+    """The answer holds the round, but not this PC's card of the player (the slot had none in the cloud)
+    or its side's row (one the history file can't keep): the booth still reads those here, so the round
+    stays."""
+    cfg, prof, _ = _paired(tmp_path, monkeypatch)
+    s = Store(cfg.db_path, new_session=False)
+    rnd = random.Random(4)
+    for ago, uuid in ((2, "whole"), (3, "nocard"), (4, "noside")):
+        _round_on(s.db, rnd, ago, uuid, revision=1)
+    s.db.commit()
+    rounds, shots = rows(answer_from(s.db, "Ann"))
+    for r in rounds:
+        if r["id"] == "nocard":
+            r["player"] = dict.fromkeys(r["player"])
+        if r["id"] == "noside":
+            r["side"] |= {"holes": None, "holes_played": None}
+    s.close()
+    _answered(cfg, {"Ann": answer(rounds, shots)})
+    s = Store(cfg.db_path)
+    cloud_history.start(cfg, s, lambda n, i: None)
+    assert not any(_has(s.db, "whole").values())
+    assert all(_has(s.db, "nocard").values()) and all(_has(s.db, "noside").values())
