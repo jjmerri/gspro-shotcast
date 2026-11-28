@@ -132,33 +132,51 @@ class CourseMixin:
 
     def _start_cloud_history(self) -> None:
         """Paired with Shotcast Cloud: the players' histories from the cloud (cloud_history), read with
-        the season file's own rows. Self-hosted, nothing. If the history file can't be opened the booth
-        goes on with the season file alone."""
+        the season file's own rows. Self-hosted or replaying, nothing. If the history file can't be
+        opened the booth goes on with the season file alone."""
+        from .. import cloud
+
+        if cloud.startup is None or self.cfg.source.type == "replay":
+            return
         from .. import cloud_history
 
         try:
-            self._history_asks = cloud_history.start(self.cfg, self.store, self._cloud_index)
+            self._history_asks = cloud_history.start(self.cfg, self.store, self._history_loaded)
         except Exception as e:
             log.warning("Shotcast Cloud: the players' histories can't be used (%s); the booth goes on "
                         "with this PC's rounds", e)
 
-    def _cloud_index(self, player: str, index: float | None) -> None:
-        """A player's handicap index from their history's answer: the cloud's, from every round of theirs
-        it counts (the history file has no course layouts to work one out from), over our own."""
-        if index is None:
-            self._cloud_indexes.pop(player, None)
-            return
-        self._cloud_indexes[player] = self.league.own_indexes[player] = float(index)
+    def _history_loaded(self, player: str, index: float | None) -> None:
+        """A player's history is in: the round's recall reads it afresh, and its handicap index (the
+        cloud's, from every round of theirs it counts: the history file has no course layouts to work
+        one out from) is the booth's own for them; none, and ours stands again at the next working out."""
+        self._recall.get("rows", {}).clear()   # (read once a round: engine/facts.py)
+        if index is not None:
+            self._cloud_indexes[player] = self.league.own_indexes[player] = float(index)
+        elif self._cloud_indexes.pop(player, None) is not None:
+            self.league.own_indexes.pop(player, None)
 
     def _ask_history(self, names: list[str], now: bool = False) -> None:
-        """Paired: ask the cloud for these players' histories (cloud_history.Asks.want)."""
+        """Paired: ask the cloud for these players' histories (cloud_history.Asks.want). Never stops a
+        round from starting."""
         if self._history_asks is not None:
-            self._history_asks.want([self.league.match_player(n) or n.strip() for n in names if n], now=now)
+            try:
+                self._history_asks.want([self.league.match_player(n) or n.strip() for n in names if n], now=now)
+            except Exception:
+                self._history_trouble()
 
     async def _history_ready(self, names: list[str]) -> None:
         """Paired: wait, a moment at most, for these players' histories to be in (Asks.ready)."""
         if self._history_asks is not None:
-            await self._history_asks.ready([self.league.match_player(n) or n.strip() for n in names if n])
+            try:
+                await self._history_asks.ready([self.league.match_player(n) or n.strip() for n in names if n])
+            except Exception:
+                self._history_trouble()
+
+    def _history_trouble(self) -> None:
+        if not self._history_failed:
+            self._history_failed = True
+            log.exception("Shotcast Cloud: asking for the players' histories failed; the round goes on")
 
     def _round_players(self, names: list[str]) -> list[str]:
         """Roster players in this round: every player on a team that has a GSPro name here.

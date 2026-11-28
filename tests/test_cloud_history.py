@@ -284,6 +284,8 @@ def test_a_team_round_from_two_teammates_answers_is_held_once(tmp_path):
     lambda a: a["rounds"]["day"].__setitem__(0, "yesterday"),   # not a date
     lambda a: a["rounds"]["side"]["scores"].__setitem__(0, {"1": [4]}) or a["shots"]["club"].__setitem__(0, {"x": 1}),
     lambda a: a.__setitem__("v", 2),                            # a format this app doesn't read
+    lambda a: a.__setitem__("index", float("nan")),             # (review 147, 7) not a number
+    lambda a: a.__setitem__("index", float("inf")),
 ])
 def test_a_bad_answer_is_dropped_whole_and_what_was_there_is_kept(tmp_path, bad):
     s = paired_store(tmp_path / "season.db")
@@ -523,11 +525,14 @@ def test_the_answers_index_is_the_booths_own_index_for_that_player(tmp_path):
 
     e = _engine(tmp_path)
     e._set_own_handicaps(lambda: {"Ann": 20.0, "Bo": 11.0})
-    e._cloud_index("Ann", 12.5)
+    e._history_loaded("Ann", 12.5)
     assert e.league.own_indexes == {"Ann": 12.5, "Bo": 11.0}
     e._set_own_handicaps(lambda: {"Ann": 20.0, "Bo": 11.0})   # (worked out again after a round)
     assert e.league.own_indexes == {"Ann": 12.5, "Bo": 11.0}
-    e._cloud_index("Ann", None)
+    e._history_loaded("Ann", None)   # (no index now: the cloud's goes, ours stands at the next working out)
+    assert e.league.own_indexes == {"Bo": 11.0}
+    e._history_loaded("Bo", None)   # (none of the cloud's for Bo: ours is kept)
+    assert e.league.own_indexes == {"Bo": 11.0}
     e._set_own_handicaps(lambda: {"Ann": 20.0})
     assert e.league.own_indexes == {"Ann": 20.0}
 
@@ -540,7 +545,7 @@ async def test_the_opener_off_the_setup_screen_talks_from_the_loaded_history(tmp
     e = _engine(tmp_path)
     e.store = paired_store(tmp_path / "season.db")
     e._history_asks = cloud_history.Asks(cloud_history.path_for(str(tmp_path / "season.db")), lambda: None,
-                                         lambda: TODAY.isoformat(), e._cloud_index)
+                                         lambda: TODAY.isoformat(), e._history_loaded)
     seen = []
     io = e._opener_io
     monkeypatch.setattr(e, "_opener_io", lambda r, **kw: seen.append(e.store.season_rounds("Walker")["rounds"]) or io(r, **kw))
@@ -598,3 +603,137 @@ def test_a_history_file_made_in_an_older_shape_is_emptied_and_asked_for_again(tm
     assert s.season_rounds("Ann")["rounds"] == 0 and s.season_stats("Ann", None)["shots"] == 0
     cloud_history.load(hist, "Ann", _one("Ann"))
     assert s.season_rounds("Ann")["rounds"] == 1
+
+
+# ---- review pass 147 -----------------------------------------------------------------------------------
+
+def _solo(name, rid="r1", day=2):
+    return {"id": rid, "day": _day(day), "player": {"course": "c1", "ended_at": 5.0},
+            "side": {"side": name, "holes": 9, "gross": 40, "par": 36, "ended_at": 5.0, "date": _day(day),
+                     "side_id": "s1", "players": [name], "complete": True}}
+
+
+def test_1_a_solo_side_asked_again_under_another_spelling_is_tonights_name(tmp_path):
+    s = paired_store(tmp_path / "season.db")
+    path = cloud_history.path_for(str(tmp_path / "season.db"))
+    cloud_history.load(path, "pat", answer([_solo("pat")]))
+    cloud_history.load(path, "Pat", answer([_solo("Pat Smith")]))   # (the roster's full name, say)
+    assert s.season_rounds("Pat")["rounds"] == 1 and len(s.side_rounds("Pat")) == 1
+    assert [tuple(r) for r in s.db.execute("SELECT side, players FROM hist.rounds")] == [("Pat", '["Pat"]')]
+
+
+async def test_2_a_call_dropped_before_it_started_is_asked_again(tmp_path, monkeypatch):
+    calls = Calls(monkeypatch, {"Ann": _one("Ann"), "Bo": _one("Bo")})
+    s, asks = _asks(tmp_path)
+    asks.want(["Ann"], now=True)
+    asks.want(["Bo"], now=True)    # (Ann's call cancelled before its first step)
+    await asks.ready(["Bo"])
+    await asyncio.sleep(0)
+    asks.want(["Ann"], now=True)
+    await asks.ready(["Ann"])
+    assert ("Ann", TODAY.isoformat()) in calls.asked and s.season_rounds("Ann")["rounds"] == 1
+
+
+def test_3_an_answer_landing_mid_round_is_read_by_the_rounds_recall(tmp_path):
+    from tests.test_round import _engine
+
+    e = _engine(tmp_path)
+    e._recall = {"round": 7, "rows": {"Ann": []}, "holes": {}, "moment": {}, "moment_told": {"x"}}
+    e._history_loaded("Ann", None)
+    assert e._recall["rows"] == {} and e._recall["moment_told"] == {"x"}   # (what was told stays told)
+    e._recall = {"round": None}
+    e._history_loaded("Ann", None)   # (no round yet: nothing kept)
+
+
+def test_4_a_round_held_without_a_card_keeps_this_pcs_cards(tmp_path):
+    path = str(tmp_path / "season.db")
+    season(path, random.Random(5), [(2, "r1", "Ann", ["Ann"])])
+    s = paired_store(path)
+    want = s.season_rounds("Ann"), s.player_broadcast_stats("Ann")
+    cloud_history.load(cloud_history.path_for(path), "Ann", answer(
+        [{"id": "r1", "day": _day(2), "side": {"side_id": "s1", "players": ["Ann"]}}]))   # (no cards, no shots)
+    assert s.db.execute("SELECT COUNT(*) FROM hist.held").fetchone()[0] == 1
+    assert (s.season_rounds("Ann"), s.player_broadcast_stats("Ann")) == want
+    assert s.season_stats("Ann", None)["shots"] == 0   # (the round's shots are the cloud's: none)
+
+
+def test_5_a_shot_moved_here_into_a_round_not_sent_counts_once(tmp_path):
+    path = str(tmp_path / "season.db")
+    season(path, random.Random(6), [(2, "r2", "Ann", ["Ann"])])   # (r2: not sent yet)
+    s = paired_store(path)
+    uid = s.db.execute("SELECT uid FROM shots WHERE record_uuid = 'r2' AND mulligan = 0 AND left_out = 0"
+                       " LIMIT 1").fetchone()[0]
+    before = s.season_stats("Ann", None)["shots"]
+    # The cloud has it in the practice stretch it was hit in (sent as a round before it moved here).
+    cloud_history.load(cloud_history.path_for(path), "Ann", answer(
+        [_solo("Ann", rid="stretch", day=2)], [{"round": 0, "uid": uid, "ts": 1.0, "is_putt": False}]))
+    assert s.season_stats("Ann", None)["shots"] == before
+
+
+def test_6_a_name_not_asked_for_in_a_month_is_dropped(tmp_path):
+    path = tmp_path / "season.db"
+    s = paired_store(path)
+    hist = cloud_history.path_for(str(path))
+    cloud_history.load(hist, "Ann", _one("Ann"))
+    cloud_history.load(hist, "Bo", _one("Bo"))
+    s.db.close()
+    old = sqlite3.connect(hist)
+    old.execute("UPDATE asked SET at = ? WHERE player = 'Ann'", (time.time() - 31 * 86400,))
+    old.commit()
+    old.close()
+    s = paired_store(path)
+    assert s.season_rounds("Ann")["rounds"] == 0 and s.season_rounds("Bo")["rounds"] == 1
+    assert {r[0] for r in s.db.execute("SELECT player FROM hist.held UNION SELECT player FROM hist.asked")} == {"Bo"}
+    assert s.db.execute("SELECT COUNT(*) FROM hist.rounds").fetchone()[0] == 1
+
+
+async def test_7_asking_never_breaks_a_round_start_and_self_hosted_never_loads_the_module(tmp_path, caplog):
+    import sys
+
+    from tests.test_round import _engine
+
+    e = _engine(tmp_path)
+
+    class Broken:
+        def want(self, names, now=False):
+            raise sqlite3.OperationalError("database is locked")
+
+        async def ready(self, names):
+            raise sqlite3.OperationalError("database is locked")
+
+    e._history_asks = Broken()
+    with caplog.at_level(logging.ERROR, logger="commentator.engine"):
+        for _ in range(2):
+            e._ask_history(["Ann"], now=True)
+            await e._history_ready(["Ann"])
+    assert len([r for r in caplog.records if "histories failed" in r.getMessage()]) == 1
+    e2 = _engine(tmp_path / "b")
+    sys.modules.pop("commentator.cloud_history", None)
+    e2._start_cloud_history()   # (self-hosted)
+    assert "commentator.cloud_history" not in sys.modules and e2._history_asks is None
+
+
+async def test_8_a_slow_answer_still_lands_after_the_openers_wait_on_a_daemon_thread(tmp_path, monkeypatch):
+    monkeypatch.setattr(cloud_history, "BOUND_S", 0.2)
+    calls = Calls(monkeypatch, {"Ann": _one("Ann")}, wait=True)
+    s, asks = _asks(tmp_path)
+    asks.want(["Ann"], now=True)
+    await asks.ready(["Ann"])   # (the opener goes on)
+    assert s.season_rounds("Ann")["rounds"] == 0
+    assert all(t.daemon for t in threading.enumerate() if t.name == "cloud-history")
+    assert any(t.name == "cloud-history" for t in threading.enumerate())
+    threading.Timer(0.3, calls.go.set).start()
+    await asyncio.wait(set(asks.calls.values()), timeout=5)
+    assert s.season_rounds("Ann")["rounds"] == 1
+
+
+async def test_8_a_call_with_no_answer_in_its_time_is_given_up(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(cloud_history, "CALL_S", 0.2)
+    calls = Calls(monkeypatch, {"Ann": _one("Ann")}, wait=True)
+    s, asks = _asks(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="commentator.cloud_history"):
+        asks.want(["Ann"], now=True)
+        await asyncio.wait(set(asks.calls.values()), timeout=5)
+    calls.go.set()
+    assert not asks.calls and "Ann" not in asks.answered
+    assert any("no answer in" in r.getMessage() for r in caplog.records)

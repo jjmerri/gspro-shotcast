@@ -14,16 +14,27 @@ a paired booth has no league, so its opener asks for the practice slice.
 
 Asked at the setup screen's names (`DEBOUNCE_S` after they settle) and again at the tee for a name
 the setup didn't have (`Asks`): at most `AT_ONCE` calls at once, a call for a name no longer set up
-dropped, each bounded at `BOUND_S`; the opener composed off the setup screen waits for its players'
-calls up to that bound, then talks from what it has. A failed call keeps the last answer. Self-hosted
-(or replaying), none of this runs: nothing is attached and every read is of the season file.
+dropped, each given `CALL_S` (a cold server's answer still lands for the round); the opener waits
+for its players' calls `BOUND_S` at most, then talks from what it has. A failed call keeps the last
+answer; a name not asked for in `AGE_DAYS` has its answer dropped. Self-hosted (or replaying), none
+of this runs: nothing is attached and every read is of the season file.
+
+Accepted, as it stands:
+- a round the cloud withholds (deleted, hidden, its player erased) is still read from this PC's own
+  season file, if it's there, until the PC stops keeping rounds the cloud has (step 3);
+- a team's row reached by an alias keeps the spelling the answer had for the other teammates;
+- a side's row two teammates' answers hold is refreshed when either of them is asked again;
+- `nights` counts sessions: a day this PC restarted the booth counts twice, as it does locally,
+  while the cloud's rounds of a day are one.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import math
 import re
+import threading
 import sqlite3
 import time
 from collections.abc import Callable
@@ -37,7 +48,9 @@ FILE = "history.db"        # beside the season file, in the cloud profile's logs
 SCHEMA = "hist"            # the season file's connection's name for it
 PATH = "/api/devices/history"
 FORMAT = 1                 # the answer's `v`: another is ignored
-BOUND_S = 2.5              # a call's longest, and the opener's longest wait for its players' calls
+BOUND_S = 2.5              # the opener's longest wait for its players' calls
+CALL_S = 10.0              # a call's longest, a token refresh included: a slow answer still lands for the round
+AGE_DAYS = 30              # a name not asked for this long: its answer is dropped
 DEBOUNCE_S = 1.0           # the setup screen's names stand this long before they're asked for
 AT_ONCE = 2
 PLAYER = "Player"          # a venue's word for a teammate the answer doesn't name (the cloud's erasure.PLAYER)
@@ -70,8 +83,12 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.held (
     side_id TEXT NOT NULL,                       -- the player's side in it (cloud_rounds._sides)
     PRIMARY KEY (player, round_uuid)
 );
+CREATE TABLE IF NOT EXISTS {SCHEMA}.asked (     -- when each name's answer last came (attach drops the old)
+    player TEXT PRIMARY KEY,
+    at REAL NOT NULL
+);
 CREATE UNIQUE INDEX IF NOT EXISTS {SCHEMA}.shots_player_uid ON shots(player, uid);
-CREATE INDEX IF NOT EXISTS {SCHEMA}.player_rounds_player ON player_rounds(player);
+CREATE INDEX IF NOT EXISTS {SCHEMA}.player_rounds_player ON player_rounds(player, round_uuid);
 CREATE UNIQUE INDEX IF NOT EXISTS {SCHEMA}.rounds_side_id ON rounds(round_uuid, side_id);
 CREATE INDEX IF NOT EXISTS {SCHEMA}.rounds_side ON rounds(side);
 """
@@ -107,7 +124,7 @@ def attach(db: sqlite3.Connection, path: str | Path) -> dict[str, str]:
         # Made by an older Shotcast, before a column the season file has now: it holds only what the
         # cloud said, which is asked for again.
         log.info("History file made in an older shape: emptied, and asked for again")
-        for t in (*TABLES, "held"):
+        for t in (*TABLES, "held", "asked"):
             db.execute(f"DROP TABLE IF EXISTS {SCHEMA}.{t}")
     for t in TABLES:
         (sql,) = db.execute("SELECT sql FROM main.sqlite_master WHERE type = 'table' AND name = ?", (t,)).fetchone()
@@ -115,19 +132,26 @@ def attach(db: sqlite3.Connection, path: str | Path) -> dict[str, str]:
     if "side_id" not in {r[1] for r in db.execute(f"PRAGMA {SCHEMA}.table_info(rounds)")}:
         db.execute(f"ALTER TABLE {SCHEMA}.rounds ADD COLUMN side_id TEXT")
     db.executescript(EXTRA)
-    # The season file's own rows of a round the history file holds for that player are left out: the
-    # cloud's are what counts (a shot it left out, a round it re-marked). A side's row is left out when
-    # one of its players' answers holds the round (the cloud's row for that side stands in for it).
-    mine = {"shots": "h.round_uuid = m.record_uuid AND h.player = m.player",
-            "player_rounds": "h.round_uuid = m.round_uuid AND h.player = m.player",
-            "rounds": "h.round_uuid = m.round_uuid AND (h.player = m.side OR h.player IN "
-                      "(SELECT value FROM json_each(m.players)))"}
+    _age(db)
+    # The season file's own rows the history file has the cloud's of are left out: the cloud's are
+    # what counts (a shot it left out, a round it re-marked). A shot of a round the history file holds
+    # for that player, or the same shot (moved here into a round not sent yet); a player's card the
+    # history file has for that round; a side's card when one of its players' answers holds the
+    # round with a card for their side (the cloud's row for that side stands in for it).
+    mine = {"shots": f"EXISTS (SELECT 1 FROM {SCHEMA}.held AS h WHERE h.round_uuid = m.record_uuid"
+                     f" AND h.player = m.player) OR EXISTS (SELECT 1 FROM {SCHEMA}.shots AS c"
+                     " WHERE c.player = m.player AND c.uid = m.uid)",
+            "player_rounds": f"EXISTS (SELECT 1 FROM {SCHEMA}.player_rounds AS c WHERE c.player = m.player"
+                             " AND c.round_uuid = m.round_uuid)",
+            "rounds": f"EXISTS (SELECT 1 FROM {SCHEMA}.held AS h JOIN {SCHEMA}.rounds AS c"
+                      " ON c.round_uuid = h.round_uuid AND c.side_id = h.side_id WHERE h.round_uuid = m.round_uuid"
+                      " AND (h.player = m.side OR h.player IN (SELECT value FROM json_each(m.players))))"}
     # A night is a session: a cloud round's shots go in this PC's session of that day, if it has one
     # (a practice stretch here before it), so that day is one night, as it is when both are local.
     nights = (f"{SCHEMA}.shots AS c LEFT JOIN {SCHEMA}.sessions AS cs ON cs.id = c.session_id LEFT JOIN"
               " (SELECT date, MIN(id) AS id FROM main.sessions GROUP BY date) AS ms ON ms.date = cs.date")
     views = {}
-    for t, held in mine.items():
+    for t, theirs_too in mine.items():
         cols = ", ".join(shapes[t])
         theirs = f"SELECT {cols} FROM {SCHEMA}.{t}"
         if t == "shots":
@@ -137,9 +161,20 @@ def attach(db: sqlite3.Connection, path: str | Path) -> dict[str, str]:
         db.execute(f"DROP VIEW IF EXISTS {views[t]}")
         db.execute(f"""CREATE TEMP VIEW history_{t} ({cols}) AS {theirs}
                        UNION ALL SELECT {cols} FROM main.{t} AS m
-                       WHERE NOT EXISTS (SELECT 1 FROM {SCHEMA}.held AS h WHERE {held})""")
+                       WHERE NOT ({theirs_too})""")
     db.commit()
     return views
+
+
+def _age(db: sqlite3.Connection) -> None:
+    """Drop the answers of names not asked for in AGE_DAYS (a player gone, an erased person's): the
+    cloud's word on them is that old."""
+    since = time.time() - AGE_DAYS * 86400
+    gone = f"player NOT IN (SELECT player FROM {SCHEMA}.asked WHERE at >= ?)"
+    for t in ("held", "shots", "player_rounds", "asked"):
+        db.execute(f"DELETE FROM {SCHEMA}.{t} WHERE {gone}", (since,))
+    db.execute(f"DELETE FROM {SCHEMA}.rounds WHERE NOT EXISTS (SELECT 1 FROM {SCHEMA}.held AS h"
+               f" WHERE h.round_uuid = rounds.round_uuid AND h.side_id = rounds.side_id)")
 
 
 # ---- an answer into the history file (a thread's own connection) -------------------------------------
@@ -188,7 +223,8 @@ def check(got: Any) -> tuple[list[dict], list[dict], float | None]:
                for s in shots):
         raise Bad("a shot's round isn't one of the answer's")
     index = got.get("index")
-    if index is not None and (isinstance(index, bool) or not isinstance(index, (int, float))):
+    if index is not None and (isinstance(index, bool) or not isinstance(index, (int, float))
+                              or not math.isfinite(index)):
         raise Bad("the index isn't a number")
     return out, shots, index
 
@@ -231,6 +267,7 @@ def load(path: str | Path, name: str, got: Any) -> float | None:
         with con:
             con.execute("BEGIN IMMEDIATE")
             _replace(con, name, rounds, shots)
+            con.execute("INSERT OR REPLACE INTO asked (player, at) VALUES (?, ?)", (name, time.time()))
     finally:
         con.close()
     return index
@@ -275,9 +312,10 @@ def _replace(con: sqlite3.Connection, name: str, rounds: list[dict], shots: list
         have = con.execute("SELECT players FROM rounds WHERE round_uuid = ? AND side_id = ?", (r["id"], side_id)).fetchone()
         if have is not None:   # (a teammate's answer has the side already: the same card, with them named)
             held = json.loads(have[0]) if have[0] else players
-            if len(held) == len(players):
-                con.execute("UPDATE rounds SET players = ? WHERE round_uuid = ? AND side_id = ?",
-                            (json.dumps(_renamed(held, seat, name)), r["id"], side_id))
+            if len(held) == len(players):   # (and a side of one is theirs, under tonight's name)
+                con.execute("UPDATE rounds SET players = ?, side = CASE WHEN ? = 1 THEN ? ELSE side END"
+                            " WHERE round_uuid = ? AND side_id = ?",
+                            (json.dumps(_renamed(held, seat, name)), len(held), name, r["id"], side_id))
             continue
         label = name if len(players) == 1 else side["side"]
         holes = next((h for h in (side["holes"], side["holes_played"]) if isinstance(h, int)), None)
@@ -306,7 +344,7 @@ def fetch(cl: Any, name: str, before: str) -> Any:
     429, cloud.CloudError for any other refusal, and cloud.Unreachable for the network."""
     from .cloud import CloudError, _message
 
-    r = cl.request("POST", PATH, {"name": name, "before": before}, timeout=BOUND_S)
+    r = cl.request("POST", PATH, {"name": name, "before": before}, timeout=CALL_S)
     if r.status_code == 429:
         try:
             wait = float(r.headers.get("Retry-After", ""))
@@ -319,6 +357,30 @@ def fetch(cl: Any, name: str, before: str) -> Any:
         return r.json()
     except ValueError:
         raise CloudError("Shotcast Cloud's history answer isn't JSON") from None
+
+
+def _daemon(work: Callable[[], Any]) -> asyncio.Future:
+    """`work` in a daemon thread (as the engine's own handicaps are worked out), so a booth quitting
+    doesn't wait on a call under way. A future of its result on the running loop."""
+    loop = asyncio.get_running_loop()
+    done: asyncio.Future = loop.create_future()
+
+    def settle(ok: bool, value: Any) -> None:
+        if not done.done():
+            done.set_result(value) if ok else done.set_exception(value)
+
+    def run() -> None:
+        try:
+            out = (True, work())
+        except BaseException as e:   # noqa: BLE001 - handed to the waiting call
+            out = (False, e)
+        try:
+            loop.call_soon_threadsafe(settle, *out)
+        except RuntimeError:   # the loop has closed: the booth has quit
+            pass
+
+    threading.Thread(target=run, name="cloud-history", daemon=True).start()
+    return done
 
 
 class Asks:
@@ -360,14 +422,17 @@ class Asks:
     async def _later(self) -> None:
         await asyncio.sleep(DEBOUNCE_S)
         self.timer = None
-        self._ask()
+        try:
+            self._ask()
+        except Exception as e:   # noqa: BLE001 - the season file busy (the session's date), say
+            self._say(type(e).__name__, f"Shotcast Cloud: histories not asked for: {e}")
 
     def _ask(self) -> None:
         if self.stopped or time.monotonic() < self.hold:
             return
         before = self.day()
         for n in self.wanted:
-            if self.answered.get(n) != before and n not in self.calls:
+            if self.answered.get(n) != before and (n not in self.calls or self.calls[n].done()):
                 self.calls[n] = asyncio.get_running_loop().create_task(self._call(n, before), name="history-call")
 
     async def ready(self, names: list[str]) -> None:
@@ -393,10 +458,13 @@ class Asks:
                     return
                 self.flying.add(name)
                 try:
-                    got = await asyncio.to_thread(lambda: fetch(self.cloud(), name, before))
+                    try:
+                        got = await asyncio.wait_for(_daemon(lambda: fetch(self.cloud(), name, before)), CALL_S)
+                    except asyncio.TimeoutError:
+                        raise cloud.Unreachable(f"no answer in {CALL_S:.0f}s") from None
                     if name not in self.wanted:   # (set up no more: its answer is dropped)
                         return
-                    index = await asyncio.to_thread(load, self.path, name, got)
+                    index = await _daemon(lambda: load(self.path, name, got))
                 finally:
                     self.flying.discard(name)
             self.answered[name] = before

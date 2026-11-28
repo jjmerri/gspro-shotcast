@@ -162,6 +162,7 @@ class Engine(HudWatchMixin,
         # self-hosted), and the handicap index each answer gave, over our own.
         self._history_asks = None
         self._cloud_indexes: dict[str, float] = {}
+        self._history_failed = False   # (said once)
         self.source = source
         if hasattr(source, "on_impact"):
             source.on_impact = self._capture_impact
