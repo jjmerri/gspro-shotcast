@@ -18,11 +18,14 @@ had these bytes' content already) or `round_final` (409: it has the round as it 
 Anything else is tried again, each time after a longer wait (an hour at most): a proxy's page or a
 server error ends that look at the queue; the API's own refusal of one round (too big, not a round
 body, another bay's) is kept as the round's error and shown (`cloud status`), and the rounds after
-it go meanwhile. Nothing is deleted here: the rounds stay on this PC.
+it go meanwhile. Nothing is deleted here: a sent round's rows stay on this PC till a later day's
+booth start, when cloud_history.forget drops them if they're as sent (`sent_rows`) and the booth's
+history file holds them (its record and its row here stay, so it's never thought unsent).
 
 Only rounds go up. A practice stretch (what the booth stored outside any round: shots on a course
 with no round on, and what it said) stays on this PC: it is never sent, never counted as waiting, and
-never holds up an unpair. (The booth can still move a stretch's rows into the round that follows, so
+never holds up an unpair. (Its shots are dropped once it's cloud_history.PRACTICE_DAYS old: the cloud
+never has them.) (The booth can still move a stretch's rows into the round that follows, so
 a stretch isn't settled the way a round is; range sessions may be sent one day, as their own thing.)
 
 The queue (cloud_uploads) is kept in the profile's season.db, made the first time it's used.
@@ -65,7 +68,9 @@ CREATE TABLE IF NOT EXISTS cloud_uploads (
     uuid TEXT PRIMARY KEY,                 -- the round record's
     revision INTEGER NOT NULL DEFAULT 0,   -- 1 once the cloud has the round (a round is sent once), else 0
     error TEXT,                            -- why the last try didn't end with the cloud having it
-    tries INTEGER NOT NULL DEFAULT 0       -- failed tries so far (how long the next waits: Pace.retry)
+    tries INTEGER NOT NULL DEFAULT 0,      -- failed tries so far (how long the next waits: Pace.retry)
+    sent_rows TEXT                         -- its rows as the body sent was read from them (`rows_of`); NULL
+                                           -- when the cloud kept an earlier build (round_final): not known
 );
 CREATE TABLE IF NOT EXISTS cloud_claim_codes (   -- a player's code to claim a round with (claim_codes)
     uuid TEXT NOT NULL,                    -- the round record's
@@ -179,8 +184,20 @@ def connect(db_path: str) -> sqlite3.Connection:
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA synchronous = FULL")
     db.executescript(TABLES)
+    if "sent_rows" not in {r[1] for r in db.execute("PRAGMA table_info(cloud_uploads)")}:
+        db.execute("ALTER TABLE cloud_uploads ADD COLUMN sent_rows TEXT")   # (made before this was kept)
     db.execute(PAIRING)
     return db
+
+
+def rows_of(db: sqlite3.Connection, uuid: str) -> str:
+    """How many shots, side rows and cards a round record has, and the newest of each: what tells a round
+    that gained rows since it was sent (taken up again and played on, its cards written again) from one
+    that's as the cloud has it (cloud_history.forget drops only that). An edit to a row's values doesn't
+    move it: a startup repair of a card's stats is still the round the cloud has."""
+    return json.dumps([list(db.execute(f"SELECT COUNT(*), MAX(id) FROM main.{t} WHERE {c} = ?", (uuid,)).fetchone())
+                       for t, c in (("shots", "record_uuid"), ("rounds", "round_uuid"),
+                                    ("player_rounds", "round_uuid"))])
 
 
 @contextmanager
@@ -535,6 +552,7 @@ def _build(db: sqlite3.Connection, uuid: str, pace: Pace, settle: float) -> byte
     it says something else than when it was last looked at (its quiet starts again, from now, unless
     the ceiling has passed)."""
     claim_codes(db, uuid)   # (for a player who joined since it was last looked at: every slot sent has its hash)
+    rows = rows_of(db, uuid)   # (before the body is read: a row written in between is one the marker hasn't)
     got = body(db, uuid)
     if got is None:
         return None
@@ -545,6 +563,7 @@ def _build(db: sqlite3.Connection, uuid: str, pace: Pace, settle: float) -> byte
     if b["round"]["kind"] != "round" or b["round"]["state"] == "in_progress" or not pace.ready(uuid, settle):
         return None
     db.execute("INSERT OR IGNORE INTO cloud_uploads (uuid) VALUES (?)", (uuid,))
+    db.execute("UPDATE cloud_uploads SET sent_rows = ? WHERE uuid = ?", (rows, uuid))   # (the last build is the one sent)
     return encode(b)
 
 
@@ -696,6 +715,8 @@ def _send(cl: Any, db: sqlite3.Connection, uuid: str, built: bytes, pace: Pace, 
     # (it changed on this PC between two tries: a round is sent once, and stays as it first went).
     if (r.status_code, status) in ((201, "stored"), (200, "duplicate")) or (r.status_code, error) == (409, "round_final"):
         _sent(db, uuid, out)
+        if error == "round_final":   # (it holds an earlier build, not these rows: cloud_history.forget keeps it)
+            db.execute("UPDATE cloud_uploads SET sent_rows = NULL WHERE uuid = ?", (uuid,))
         try:
             send_pictures(cl, db, uuid)
         except sqlite3.Error as e:   # (a locked file: the pictures go after the next round there)

@@ -336,9 +336,15 @@ class ShotEditsMixin:
             f"SELECT id, course FROM shots WHERE id IN ({', '.join('?' * len(ids))})", ids)}
 
     def courses_played(self) -> list[str]:
-        """Every course with a shot stored: one index step each (course_fits ignores case), not a scan
-        of every shot."""
-        return [r[0] for r in self.db.execute(
-            "WITH RECURSIVE c(x) AS (SELECT (SELECT min(course COLLATE NOCASE) FROM shots) UNION ALL"
-            " SELECT (SELECT min(course COLLATE NOCASE) FROM shots WHERE course COLLATE NOCASE > c.x)"
+        """Every course with a shot stored (one index step each, not a scan of every shot), and, paired,
+        every round record's: a paired booth drops the shots of rounds the cloud has (cloud_history.forget),
+        and their courses are still ones played (course_fits ignores case). Self-hosted, the shots' alone."""
+        shots = [r[0] for r in self.db.execute(
+            "WITH RECURSIVE c(x) AS (SELECT (SELECT min(course COLLATE NOCASE) FROM main.shots) UNION ALL"
+            " SELECT (SELECT min(course COLLATE NOCASE) FROM main.shots WHERE course COLLATE NOCASE > c.x)"
             " FROM c WHERE c.x IS NOT NULL) SELECT x FROM c WHERE x IS NOT NULL")]
+        if not self.history.attached:
+            return shots
+        seen = {c.casefold() for c in shots}
+        records = [r[0] for r in self.db.execute("SELECT DISTINCT course FROM main.round_records WHERE course IS NOT NULL")]
+        return shots + list({c.casefold(): c for c in records if c.casefold() not in seen}.values())
