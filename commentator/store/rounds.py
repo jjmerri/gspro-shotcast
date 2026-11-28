@@ -11,6 +11,12 @@ from .common import _COUNTS_AS_ROUND, _GROSS_PER_NINE, _NET_PER_NINE, _ctx_sql
 class RoundsMixin:
     """Rounds, week results, and each player's and team's season."""
 
+    # Where the reads of a side's or player's earlier rounds look: the season file's own tables, or a
+    # paired booth's views of them and its history file's (Store.attach_history). The league's reads
+    # (week results, a team's league courses, hole_scoring) stay on the season file.
+    past_rounds = "rounds"
+    past_player_rounds = "player_rounds"
+
     def record_round(self, *, course, fmt, side, team, holes, stats, strokes, net_to_par, hole_number,
                      hole_pars=None, is_league: bool = True, complete: bool = True, players: list[str] | None = None,
                      is_tournament: bool = False, first_nine: tuple[int, int | None] | None = None,
@@ -151,7 +157,7 @@ class RoundsMixin:
                        SUM(CASE WHEN {indiv} THEN sand_tries ELSE 0 END) AS sand_tries,
                        SUM(CASE WHEN {indiv} THEN putts ELSE 0 END) AS putts,
                        SUM(CASE WHEN {indiv} THEN putt_holes ELSE 0 END) AS putt_holes
-                FROM player_rounds WHERE player = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))""" + _ctx_sql(context),
+                FROM {self.past_player_rounds} WHERE player = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?))""" + _ctx_sql(context),
             (player, self.session_id),
         ).fetchone()
         return {k: r[k] for k in r.keys()}
@@ -164,7 +170,7 @@ class RoundsMixin:
         hole-score stats, uses individual-ball rounds only (a scramble score isn't one player's).
         Returns raw counts/sums so the caller gates on sample size."""
         rows = self.db.execute(
-            """SELECT scores, hole_pars FROM player_rounds
+            f"""SELECT scores, hole_pars FROM {self.past_player_rounds}
                WHERE player = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND hole_pars IS NOT NULL
                      AND (fmt IS NULL OR fmt NOT IN ('scramble', 'alternate'))""" + _ctx_sql(context),
             (player, self.session_id),
@@ -226,7 +232,7 @@ class RoundsMixin:
                       AVG(1.0 * putts / NULLIF(putt_holes, 0)) AS putts_per_hole,
                       AVG(1.0 * fir_hit / NULLIF(fir_tries, 0)) AS fir_rate,
                       AVG(1.0 * gir_hit / NULLIF(gir_tries, 0)) AS gir_rate
-               FROM rounds WHERE side = ? AND {earlier} AND gross IS NOT NULL
+               FROM {self.past_rounds} WHERE side = ? AND {earlier} AND gross IS NOT NULL
                      AND {_COUNTS_AS_ROUND}""" + _ctx_sql(context),
             args,
         ).fetchone()
@@ -242,7 +248,7 @@ class RoundsMixin:
                       SUM(fir_hit) AS fir_hit, SUM(fir_tries) AS fir_tries,
                       SUM(scramble_hit) AS scr_hit, SUM(scramble_tries) AS scr_tries,
                       SUM(sand_hit) AS sand_hit, SUM(sand_tries) AS sand_tries
-               FROM rounds WHERE side = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND gross IS NOT NULL""" + _ctx_sql(context),
+               FROM {self.past_rounds} WHERE side = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND gross IS NOT NULL""" + _ctx_sql(context),
             (side, self.session_id),
         ).fetchone()
         return {k: r[k] for k in r.keys()}
@@ -255,7 +261,7 @@ class RoundsMixin:
             f"""SELECT id, ended_at, date, course, holes, COALESCE(holes_played, holes) AS played, complete,
                       gross, par, putts, putt_holes, fir_hit, fir_tries, gir_hit, gir_tries, penalties,
                       scores, hole_pars, is_league, {_GROSS_PER_NINE} AS to_par9
-               FROM rounds WHERE side = ? AND gross IS NOT NULL AND {_COUNTS_AS_ROUND}""" + _ctx_sql(None)
+               FROM {self.past_rounds} WHERE side = ? AND gross IS NOT NULL AND {_COUNTS_AS_ROUND}""" + _ctx_sql(None)
             + " ORDER BY ended_at DESC, id DESC", (side,)).fetchall()
         return [{k: r[k] for k in r.keys()} for r in rows]
 
@@ -263,9 +269,9 @@ class RoundsMixin:
         """The rounds `player` played as part of a team (a side of more than them), newest first, with the
         same counting rule as side_rounds: so a solo player's record on a course knows they've been there."""
         rows = self.db.execute(
-            f"""SELECT id, ended_at, date, course, format, side FROM rounds
+            f"""SELECT id, ended_at, date, course, format, side FROM {self.past_rounds}
                WHERE side != ? AND players IS NOT NULL AND gross IS NOT NULL AND {_COUNTS_AS_ROUND}
-                     AND EXISTS (SELECT 1 FROM json_each(rounds.players) WHERE value = ?)"""
+                     AND EXISTS (SELECT 1 FROM json_each({self.past_rounds}.players) WHERE value = ?)"""
             + _ctx_sql(None) + " ORDER BY ended_at DESC, id DESC", (player, player)).fetchall()
         return [{k: r[k] for k in r.keys()} for r in rows]
 
@@ -276,7 +282,7 @@ class RoundsMixin:
             return {"rounds": 0}
         r = self.db.execute(
             f"""SELECT COUNT(*) AS rounds, AVG({_NET_PER_NINE}) AS avg_net_to_par, MIN({_NET_PER_NINE}) AS best_net_to_par
-               FROM rounds WHERE side = ? AND course = ? COLLATE NOCASE AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND {_NET_PER_NINE} IS NOT NULL
+               FROM {self.past_rounds} WHERE side = ? AND course = ? COLLATE NOCASE AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND {_NET_PER_NINE} IS NOT NULL
                      AND {_COUNTS_AS_ROUND}"""
             + _ctx_sql(context),
             (side, course, self.session_id),
@@ -289,7 +295,7 @@ class RoundsMixin:
         type (par 3/4/5), bounce-back rate (birdie-or-better right after a bogey-or-worse), and scoring
         to par over the last three holes. Returns raw counts/sums so the caller gates on sample size."""
         rows = self.db.execute(
-            """SELECT holes, scores, hole_pars FROM rounds
+            f"""SELECT holes, scores, hole_pars FROM {self.past_rounds}
                WHERE side = ? AND session_id NOT IN (SELECT id FROM sessions WHERE date = (SELECT date FROM sessions WHERE id = ?)) AND hole_pars IS NOT NULL AND gross IS NOT NULL"""
             + _ctx_sql(context),
             (side, self.session_id),

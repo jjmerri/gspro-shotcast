@@ -158,6 +158,11 @@ class Engine(HudWatchMixin,
         self._own_handicaps_task: asyncio.Task | None = None   # (_refresh_own_handicaps)
         self._own_handicaps_wanted = False
         self._own_handicaps_inline = 0   # counts inline workings out, so an older thread's result is dropped
+        # Paired with Shotcast Cloud: the players' histories asked for (cloud_history.Asks; None
+        # self-hosted), and the handicap index each answer gave, over our own.
+        self._history_asks = None
+        self._cloud_indexes: dict[str, float] = {}
+        self._history_failed = False   # (said once)
         self.source = source
         if hasattr(source, "on_impact"):
             source.on_impact = self._capture_impact
@@ -601,6 +606,7 @@ class Engine(HudWatchMixin,
         if self.screen and self.cfg.screen.ocr:
             asyncio.create_task(self._warm_ocr())
         self._fill_course_layouts()
+        self._start_cloud_history()
         self._refresh_own_handicaps(backfill=True)
         if self.news is not None:
             asyncio.create_task(self._news_loop(), name="news")

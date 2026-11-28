@@ -305,6 +305,7 @@ class SetupWatchMixin:
                 if accept:
                     roster, roster_course = names, play_course
                     slot_order = positional
+                    self._ask_history(names)   # (paired: their histories from the cloud, once the names stand)
                     self._last_setup_roster = (list(names), list(positional))
                     if probed and players_tab:
                         self._keep_fixture_frame("setup_players", slot_frame)
@@ -635,6 +636,7 @@ class SetupWatchMixin:
         # opening hole is still unknown until the tee, so _opener_io leaves the hole out too.
         first = None if r.format == "alternate" else (
             (self.league.match_player(names[0]) or names[0]) if names else None)
+        await self._history_ready(names)   # (paired: the players' histories, a moment at most)
         user, facts_text = self._opener_io(r, first=first, preround=True)
         lines = await self._compose("opener", self.opener_llm, user, facts_text, [], mode="round",
                                     system=self._system_league if is_league else self._system_practice,

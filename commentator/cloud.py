@@ -10,9 +10,11 @@ from the command line, and a pairing (or unpairing) takes effect when Shotcast n
 
 Paired, the PC is a capture device (shotcast-cloud's docs/dev/thin-pc.md): it records rounds and sends
 them up (cloud_rounds), with no league of its own (every round is practice here; the cloud decides
-the rest). It runs as a separate Shotcast, a cloud profile: the pairing marker (`marker`, with the
-tokens) is the machine's, at a fixed place that no config points to (`root`), and pairing makes the
-profile's own Shotcast home beside it (`home_for`): its config.yaml, .env, season file and logs.
+the rest). As players set up, the booth asks the cloud for their histories (cloud_history), kept in a
+file of their own beside the season file and read with it. It runs as a separate Shotcast, a cloud
+profile: the pairing marker (`marker`, with the tokens) is the machine's, at a fixed place that no
+config points to (`root`), and pairing makes the profile's own Shotcast home beside it (`home_for`):
+its config.yaml, .env, season file and logs.
 Everything (the booth, the tray, the command line) looks for the marker first, as it starts
 (`locate`): with none, it's the self-hosted Shotcast, exactly as before; with one, it runs from the
 profile's home and never opens the self-hosted config.yaml or .env, nor uses the service keys it was
@@ -1259,12 +1261,15 @@ class Cloud:
         return got
 
     def request(self, method: str, path: str, body: Any = None, headers: dict | None = None,
-                params: dict | None = None, raw: bytes | None = None) -> Any:
+                params: dict | None = None, raw: bytes | None = None, timeout: float | None = None) -> Any:
+        """`timeout`: each send's (the client's 30 s otherwise), not a refresh's."""
         token = self.access_token()
-        r = self._send(method, path, body, {**(headers or {}), DEVICE_HEADER: token}, params, raw=raw)
+        r = self._send(method, path, body, {**(headers or {}), DEVICE_HEADER: token}, params, raw=raw,
+                       timeout=timeout)
         if r.status_code == 401:   # revoked meanwhile, or the clock is off: refresh once and retry
             token = self.access_token(stale=token)
-            r = self._send(method, path, body, {**(headers or {}), DEVICE_HEADER: token}, params, raw=raw)
+            r = self._send(method, path, body, {**(headers or {}), DEVICE_HEADER: token}, params, raw=raw,
+                           timeout=timeout)
         _too_old(r)
         return r
 
