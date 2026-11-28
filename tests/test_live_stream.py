@@ -234,6 +234,15 @@ def test_mirror_puts_the_week_board_up_for_its_stream_only_when_it_changes(tmp_p
     assert json.loads(s3.objects["live/week.json"][0]) == {"session": m.session, "week": None}
 
 
+async def _until(ok, timeout=5.0):
+    """Waits for an OBS call made on a worker thread (slow CI runners take longer than a fixed sleep)."""
+    loop = asyncio.get_running_loop()
+    end = loop.time() + timeout
+    while not ok() and loop.time() < end:
+        await asyncio.sleep(0.01)
+    assert ok()
+
+
 async def test_off_air_keeps_the_stream_and_idle_stops_it_till_a_shot(tmp_path, monkeypatch):
     from tests.test_round import _engine as make
 
@@ -259,8 +268,7 @@ async def test_off_air_keeps_the_stream_and_idle_stops_it_till_a_shot(tmp_path, 
     monkeypatch.setattr(eng, "_round_on", lambda: round_on[0])
 
     eng._live_round_start()
-    await asyncio.sleep(0.05)
-    assert calls == ["start"]
+    await _until(lambda: calls == ["start"])
     eng.set_commentary(False)                                        # the booth off air mid-round
     await asyncio.sleep(0.05)
     assert calls == ["start"]                                        # the stream carries on
@@ -278,11 +286,11 @@ async def test_off_air_keeps_the_stream_and_idle_stops_it_till_a_shot(tmp_path, 
     await asyncio.sleep(0.05)
     assert calls == []                                               # 19 minutes since the last shot
     eng._live_last_shot -= 2 * 60
+    await _until(lambda: calls == ["stop"])
     await asyncio.sleep(0.05)
     assert calls == ["stop"]                                         # once, not every pass
     eng._live_shot()                                                 # play goes on
-    await asyncio.sleep(0.05)
-    assert calls == ["stop", "start"]
+    await _until(lambda: calls == ["stop", "start"])
     eng._live_shot()
     await asyncio.sleep(0.05)
     assert calls == ["stop", "start"]
@@ -294,6 +302,7 @@ async def test_off_air_keeps_the_stream_and_idle_stops_it_till_a_shot(tmp_path, 
     await asyncio.sleep(0.05)
     assert calls == []
     now[0] += 20 * 60
+    await _until(lambda: calls == ["stop"])
     await asyncio.sleep(0.05)
     assert calls == ["stop"]
     eng._live_shot()                                                 # no round: a shot doesn't restart it
